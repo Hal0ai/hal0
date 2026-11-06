@@ -717,6 +717,8 @@ def _flm_shadow_role_args(env: dict[str, str]) -> list[str]:
         args += ["--embed", "1"]
     if env.get("HAL0_FLM_LOAD_ASR") == "1":
         args += ["--asr", "1"]
+    if env.get("HAL0_FLM_DECISION"):
+        args += ["--decision", env["HAL0_FLM_DECISION"]]
     return args
 
 
@@ -803,6 +805,7 @@ class FLMProvider(Provider):
             "HAL0_FLM_LOAD_ASR": load_asr,
             "HAL0_FLM_LOAD_EMBED": load_embed,
             "HAL0_FLM_LOAD_CHAT": load_chat,
+            "HAL0_FLM_DECISION": str(npu_table.get("decision") or ""),
         }
 
     def start_cmd(self, env: dict[str, str]) -> list[str]:

@@ -61,6 +61,8 @@ from hal0.dispatcher._capability_resolve import (
     resolve_by_capability,
     select_slot_by_type,
 )
+from hal0.dispatcher.admission import REGISTRY as _ADMISSION_REGISTRY
+from hal0.dispatcher.admission import AdmissionTimeout
 from hal0.dispatcher.lane_pin import (
     lane_slot_pin,
     rank_slot_name,
@@ -348,6 +350,21 @@ class DispatcherPoolExhausted(DispatchError):
     status = 503
 
 
+class AdmissionQueueTimeout(DispatchError):
+    """A request waited too long in a slot's serial admission queue.
+
+    Slots with ``[slot].max_inflight`` set (hal0.dispatcher.admission) serve
+    one request at a time (FastFlowLM's NPU constraint); a request that
+    doesn't get a turn within ``[dispatcher].admission_wait_timeout_s`` gets
+    this instead of hanging forever behind a busy or stuck backend. Carries
+    ``retry_after_s`` in ``details`` so the error middleware sets
+    ``Retry-After``, same convention as :class:`DispatcherPoolExhausted`.
+    """
+
+    code = "dispatch.admission_timeout"
+    status = 503
+
+
 class SlotLoading(DispatchError):
     """The target slot is mid-swap — model is starting/loading/unloading.
 
@@ -465,7 +482,16 @@ class UpstreamCall:
     read_timeout_s: float | None = None
     """Per-request non-streaming read timeout from the route layer (#3347), or
     ``None`` for the dispatcher default. Only ever lengthens
-    ``[dispatcher].direct_read_timeout_s`` (see :meth:`Dispatcher._forward_direct`)."""
+    ``[dispatcher].direct_read_timeout_s`` (see :meth:`Dispatcher._forward_direct`).
+    Admission queue wait (hal0.dispatcher.admission) happens before this
+    clock starts, so it is never counted against it."""
+
+    priority: int = 1
+    """Admission priority (hal0.dispatcher.admission.PRIORITY_*).
+
+    Only consulted for slots with ``[slot].max_inflight`` set; ignored
+    otherwise. ``PRIORITY_DECISION`` (0) for ``POST /v1/systemone``,
+    ``PRIORITY_DEFAULT`` (1, the dataclass default) for everything else."""
 
 
 # ── Hook protocols (cross-subtree stubs) ──────────────────────────────────────
@@ -550,6 +576,7 @@ class Dispatcher:
         single_flight: SingleFlightGroup | None = None,
         http_client: httpx.AsyncClient | None = None,
         slot_manager: SlotManager | None = None,
+        admission_wait_timeout_s: float = 1800.0,
     ) -> None:
         self._upstreams = upstream_registry or UpstreamRegistry()
         self._models = model_registry
@@ -578,6 +605,10 @@ class Dispatcher:
         # SERVING → READY around each /v1 request (task #10 SERVING).
         # Optional so unit tests that only exercise dispatch() can omit it.
         self._slot_manager: SlotManager | None = slot_manager
+        # hal0.dispatcher.admission — only slots with [slot].max_inflight
+        # configured ever enter the queue; everything else is unaffected.
+        self._admission_wait_timeout_s: float = admission_wait_timeout_s
+        self._admission = _ADMISSION_REGISTRY
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
@@ -1082,34 +1113,93 @@ class Dispatcher:
             if enter_dispatch is not None:
                 enter_dispatch(effective_slot)
             try:
-                if call.slot_name:
-                    # B1: backend-aware lazy-load. On a cold miss we
-                    # kick SlotManager.load(slot_name) FIRST so the slot's
-                    # declared device/profile drives the load, then gate on
-                    # readiness.
-                    await self._ensure_slot_loaded_backend_aware(call)
-                    # Swap-window gate: refuse to forward if the slot is
-                    # loading. Without this, requests hit a dead port (502) or a
-                    # still-loading llama-server (raw 503 with no Retry-After).
-                    self._check_slot_ready_for_dispatch(call)
+                async with self._admission_for(effective_slot, call.priority):
+                    if call.slot_name:
+                        # B1: backend-aware lazy-load. On a cold miss we
+                        # kick SlotManager.load(slot_name) FIRST so the slot's
+                        # declared device/profile drives the load, then gate on
+                        # readiness.
+                        await self._ensure_slot_loaded_backend_aware(call)
+                        # Swap-window gate: refuse to forward if the slot is
+                        # loading. Without this, requests hit a dead port (502) or a
+                        # still-loading llama-server (raw 503 with no Retry-After).
+                        self._check_slot_ready_for_dispatch(call)
+                        return await self._forward_with_serving(call)
+                    # Container-slot readiness gate (#656): container slots register
+                    # as kind="remote" upstreams so slot_name is empty above and the
+                    # slot-kind gate never fires.  We probe the container directly
+                    # (systemctl is-active + /health) before forwarding so the
+                    # client gets a structured slot.loading 503 with Retry-After
+                    # instead of a raw 502 ConnectError when the container is down
+                    # or starting.
+                    await self._check_container_slot_ready(call)
+                    # Mirror the slot_name branch: wrap the forward in the serving
+                    # context so the slot transitions READY → SERVING → READY and
+                    # last_used_at is bumped around every request (#746).
                     return await self._forward_with_serving(call)
-                # Container-slot readiness gate (#656): container slots register
-                # as kind="remote" upstreams so slot_name is empty above and the
-                # slot-kind gate never fires.  We probe the container directly
-                # (systemctl is-active + /health) before forwarding so the
-                # client gets a structured slot.loading 503 with Retry-After
-                # instead of a raw 502 ConnectError when the container is down
-                # or starting.
-                await self._check_container_slot_ready(call)
-                # Mirror the slot_name branch: wrap the forward in the serving
-                # context so the slot transitions READY → SERVING → READY and
-                # last_used_at is bumped around every request (#746).
-                return await self._forward_with_serving(call)
+            except AdmissionTimeout as exc:
+                raise AdmissionQueueTimeout(
+                    str(exc),
+                    details={
+                        "retry_after_s": 5.0,
+                        "slot": exc.slot_name,
+                        "queue_depth": exc.queue_depth,
+                        "waited_s": exc.waited_s,
+                    },
+                ) from exc
             finally:
                 if exit_dispatch is not None:
                     exit_dispatch(effective_slot)
         self._release_demand_lease()  # not a slot upstream: nothing to hold the GPU for
         return await self._forward_plain(call)
+
+    def _admission_for(self, slot_name: str, priority: int):
+        """Admission context manager for ``slot_name`` (no-op if unconfigured).
+
+        Reads ``max_inflight`` from ``self._slot_manager``'s cached slot
+        config via a best-effort sync lookup (``get_config_sync`` if present,
+        else an already-populated config cache); if neither is available we
+        fall back to configuring nothing, which the registry treats as "no
+        cap" (unchanged behavior) rather than guessing.
+        """
+        max_inflight = self._slot_max_inflight(slot_name)
+        self._admission.configure(slot_name, max_inflight)
+        return self._admission.acquire(slot_name, priority, self._admission_wait_timeout_s)
+
+    def _slot_max_inflight(self, slot_name: str) -> int | None:
+        """Best-effort sync lookup of ``[slot].max_inflight`` for ``slot_name``.
+
+        ``forward()`` is on the hot path and can't await a config read here
+        without restructuring the dispatch flow further than this change
+        warrants, so this only consults config already cached in-process
+        (e.g. ``SlotManager``'s resolved config cache, when one exists). A
+        slot whose config hasn't been read yet is treated as uncapped for
+        this request — it gets capped on the next request once the config
+        is cached, same as any other config-cache warm-up gap elsewhere in
+        this module.
+        """
+        if self._slot_manager is None or not slot_name:
+            return None
+        effective = getattr(self._slot_manager, "effective_max_inflight", None)
+        if callable(effective):
+            try:
+                cap = effective(slot_name)
+                return cap if isinstance(cap, int) else None
+            except Exception:  # defensive: never let a cap lookup break forwarding
+                return None
+        getter = getattr(self._slot_manager, "cached_slot_config", None)
+        if getter is None:
+            return None
+        try:
+            cfg = getter(slot_name)
+        except Exception:  # defensive: never let a status lookup break forwarding
+            return None
+        if not cfg:
+            return None
+        value = (
+            cfg.get("max_inflight") if isinstance(cfg, dict) else getattr(cfg, "max_inflight", None)
+        )
+        return int(value) if value else None
 
     async def _make_room_for_llm(self, call: UpstreamCall) -> None:
         """Let an llm-group request end an idle image mode before the guard.

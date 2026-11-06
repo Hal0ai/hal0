@@ -386,6 +386,13 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
     },
+    # ADR-0056 serial admission: the Router takes the wait bound as a
+    # constructor arg at create_app time (/v1/systemone reads the live value,
+    # but the chat path does not), so it lands on the next hal0-api restart.
+    "dispatcher.admission_wait_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [memory] — HindsightProvider constructor arg, built once at boot.
     "memory.unified_bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "memory.bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
