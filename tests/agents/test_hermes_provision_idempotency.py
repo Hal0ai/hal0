@@ -176,7 +176,7 @@ def test_config_yaml_contains_mcp_servers(target: tuple[Path, Path]) -> None:
 
 
 def test_config_yaml_contains_role_slot_blocks(target: tuple[Path, Path]) -> None:
-    """delegation ← agent slot; auxiliary compaction group ← utility slot."""
+    """Fresh shared mode sends auxiliary work to the main agent slot."""
     yaml = pytest.importorskip("yaml")
     _install(target)
     cfg = yaml.safe_load(_config(target))
@@ -184,7 +184,7 @@ def test_config_yaml_contains_role_slot_blocks(target: tuple[Path, Path]) -> Non
     assert cfg["delegation"]["provider"] == "custom"
     assert cfg["delegation"]["base_url"] == "http://127.0.0.1:8080/v1"
     for task in ("compression", "title_generation"):
-        assert cfg["auxiliary"][task]["model"] == "qwen3-utility-test"
+        assert cfg["auxiliary"][task]["model"] == ""
         assert cfg["auxiliary"][task]["provider"] == "custom"
     assert cfg["auxiliary"]["vision"]["provider"] == "custom"
     # No global model.context_length override; no custom_providers block.

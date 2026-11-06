@@ -1,0 +1,59 @@
+{
+  "project_id": "4ff23671-7c90-483e-a995-823602371820",
+  "project_title": "Hal0",
+  "project_description": "Software development for Hal0, the open-source home AI inference platform. Primary repository: https://github.com/Hal0ai/hal0; organization: https://github.com/Hal0ai. Scope: product roadmap, API and slot lifecycle, dashboard, installer, runner images, documentation, testing, and releases across the attached repositories. Homelab operations, Proxmox inventory, and host capacity planning belong to the separate Homelab project. Treat the primary repository roadmap and current GitHub issues/PRs as inputs; verify current state before proposing new implementation work.",
+  "resources": [
+    {
+      "id": "2dc1b1e2-6b00-4317-b515-85b96f45c12d",
+      "resource_type": "github_repo",
+      "resource_ref": {
+        "url": "https://github.com/Hal0ai/hal0"
+      }
+    },
+    {
+      "id": "b790a080-4487-47a6-b3e1-0e2e88b13381",
+      "resource_type": "github_repo",
+      "resource_ref": {
+        "url": "https://github.com/Hal0ai/hal0-web"
+      }
+    },
+    {
+      "id": "6dfd27e0-efc8-47f8-9491-286714e1edd2",
+      "resource_type": "github_repo",
+      "resource_ref": {
+        "url": "https://github.com/Hal0ai/hal0-runner-images"
+      }
+    },
+    {
+      "id": "b191659c-54ef-4843-a9f2-595c6081e61b",
+      "resource_type": "github_repo",
+      "resource_ref": {
+        "url": "https://github.com/Hal0ai/hal0-discourse-theme"
+      }
+    },
+    {
+      "id": "0571d168-0849-493b-afe7-b52cd8ddb1c9",
+      "resource_type": "local_directory",
+      "resource_ref": {
+        "label": "hal0",
+        "daemon_id": "01a199ed-b8e8-75b3-8500-e648a8d8208f",
+        "local_path": "/home/mint/projects/hal0",
+        "execution_mode": "worktree"
+      }
+    },
+    {
+      "id": "c502bbb0-2676-4b53-9e32-7fd492328402",
+      "resource_type": "github_repo",
+      "resource_ref": {
+        "url": "https://github.com/Hal0ai/hal0-profiles"
+      }
+    },
+    {
+      "id": "0fe0ea82-678c-4f30-8f0d-3085f68a7203",
+      "resource_type": "github_repo",
+      "resource_ref": {
+        "url": "https://github.com/Hal0ai/Hal0_ROCmFPX"
+      }
+    }
+  ]
+}
