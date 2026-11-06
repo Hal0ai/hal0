@@ -276,7 +276,7 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   `http://<host>:8188` stays refused from other machines until the engine
   restarts. To keep the editor fenced to the box, set
   `[network].comfyui_listen = "loopback"` in `/etc/hal0/hal0.toml` before the
-  restart. See [Reaching the editor](/docs/guides/generate-images#reaching-the-editor).
+  restart. See [Reaching the editor](/docs/guides/image-workflows-troubleshooting#reaching-the-editor).
 - **The GPU's controls are in the dock.** Hold, keep, unpin and stop image
   mode live in the dock's GPU segment and **gpu** tab on every page; the
   Engine tab keeps Restart engine and Logs, and the Slots page's Activity
@@ -284,11 +284,11 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   [The dock](/docs/guides/dashboard-and-settings#the-dock).
 - **ComfyUI and custom nodes run as `hal0`.** Restart `img` to apply.
   Its mounted data directories must be writable by `hal0`; `/opt/venv` and
-  `/opt/ComfyUI` otherwise remain read-only to it. Nodes that install
-  dependencies at startup fail even if the slot is ready. Ship dependencies
-  in a derived runner image; `hal0 doctor all` names failed nodes from the
-  current start. See [ComfyUI custom-node dependencies](/docs/guides/manage-runner-images#comfyui-custom-node-dependencies)
-  for image selection and data-directory permissions.
+  `/opt/ComfyUI` otherwise remain read-only to it. On 1.7.1, nodes
+  that install dependencies at startup fail even if the slot is ready; 1.8.0
+  gives them a writable Python environment. `hal0 doctor all` names failed
+  nodes from the current start. See [ComfyUI custom-node dependencies](/docs/guides/manage-runner-images#comfyui-custom-node-dependencies)
+  for the environment, image selection and data-directory permissions.
 
 ## Upgrading to 1.7.0
 
