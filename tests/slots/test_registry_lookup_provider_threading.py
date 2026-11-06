@@ -150,12 +150,12 @@ def test_scan_keeps_same_basename_siblings_distinct(
     nested = tmp_path / "npu"
     nested.mkdir()
     (tmp_path / "trio.py").write_text(
-        "async def top_lookup(host, model_id):\n"
+        "async def lookup(host, model_id):\n"
         "    await host._resolve_model_info(model_id, provider=host.effective_provider)\n",
         encoding="utf-8",
     )
     (nested / "trio.py").write_text(
-        "async def nested_lookup(host, model_id):\n"
+        "async def lookup(host, model_id):\n"
         "    await host._resolve_model_info(model_id, provider=host.effective_provider)\n",
         encoding="utf-8",
     )
@@ -164,7 +164,7 @@ def test_scan_keeps_same_basename_siblings_distinct(
 
     found = {(name, func) for name, func, _, _ in _scan()}
 
-    assert found == {("trio.py", "top_lookup"), ("npu/trio.py", "nested_lookup")}
+    assert found == {("trio.py", "lookup"), ("npu/trio.py", "lookup")}
 
 
 def _provider_value(call: ast.Call) -> ast.expr | None:
