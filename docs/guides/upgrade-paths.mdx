@@ -1,0 +1,238 @@
+---
+title: "Upgrade paths between releases"
+description: "What each hal0 upgrade hop changes and what an operator has to do by hand — the step-by-step path from an old box to the current release."
+sidebar:
+  order: 111
+---
+
+`hal0 update` moves a box one release at a time. Some hops need a step by
+hand; this page lists them, oldest release first. The update command itself,
+the channels, the rollback and the component converges live in [Update and roll
+back](/docs/guides/update-and-rollback/).
+
+## Upgrading to 1.3.0
+
+The config schema version is unchanged and nothing needs a manual migration
+pass, but a few things are worth doing or checking. The full list is in the
+`1.3.0` Migrations and Breaking sections of `CHANGELOG.md`.
+
+- **Refresh the PATH link once, when coming from 1.2.0 or earlier.** 1.3.0's
+  updater re-asserts `/usr/local/bin/hal0` on every activation, but the
+  activation that installs 1.3.0 still runs the outgoing version's code. If
+  `hal0 --version` keeps reporting the old version while the dashboard and API
+  report 1.3.0, run:
+
+  ```sh
+  sudo hal0 doctor wrappers --fix
+  ```
+
+  It re-installs the sudo wrappers, their sudoers drop-ins and the
+  `/usr/local/bin/hal0` (+ `hal0-agent`) links from the active tree. Without
+  `--fix` it only reports which tree it would refresh from. A later
+  `hal0 update` also fixes the link. The links are only refreshed from the
+  installed venv: run the command as `sudo /usr/lib/hal0/venv/bin/hal0 doctor
+  wrappers --fix` if another `hal0` is first on your `PATH`; from any other
+  venv it skips the links and exits 1.
+- **Reprovision Hermes before using OAuth-connected skills.** The agent's
+  half of the OAuth connect flow lives in its persona file, which `hal0 update`
+  does not rewrite. On an already-provisioned box run
+  `hal0 agent reprovision hermes`. Each shipped OAuth provider also has an
+  empty `client_id`, so configure the provider's own app credentials before
+  connecting an account.
+- **Off-box admin calls may now need a credential.** On a box with an admin key
+  configured and `hal0-api` bound past loopback, mutating (ADMIN-class) routes
+  answer `401 auth.required` to off-box callers even with `require_auth` off.
+  See [Authentication](/docs/operate/auth/).
+- **Check a pinned `img` slot.** A ComfyUI slot's `image_pin` is now honoured,
+  so an `img` slot carrying a pin that never took effect can start a different
+  container image. Check `/etc/hal0/slots/img.toml` before upgrading and clear
+  `image_pin` if you want the resolver default.
+- **Pull before enabling a capability.** `POST /api/capabilities/{slot}/{child}`
+  with `enabled: true` for a model whose weights are not on disk now returns
+  `409 capability.model_not_downloaded`. Pull first
+  (`POST /api/models/{id}/pull`), or stage the selection with
+  `enabled: false`.
+- **Hard-refresh an open dashboard tab** if layout saves start failing:
+  `PUT /api/user/dashboard-layout` now accepts only the v3 body and answers an
+  older cached bundle with `422 layout.invalid`.
+- **Rolling back to 1.2.0 after writing an MCP server record.** 1.3.0 writes
+  installed-server records in a new shape (a `[tools]` policy table, with the
+  old tool count moved to `tools_count`), and 1.2.0 cannot validate it: the
+  server disappears from `hal0 mcp list` and a direct read answers
+  `400 mcp.record_malformed`. A record is rewritten whenever 1.3.0 saves it —
+  installing a server, or changing its config, enabled flag, tool policy
+  (`hal0 mcp allow`/`gate`/`block`) or exposure (`hal0 mcp expose`) — never on
+  load, so a box that upgrades and rolls back without touching MCP servers is
+  unaffected.
+- **Skipping 1.2.0 from 1.1.0** still applies 1.2.0's automatic
+  `profiles.toml` migration, and the migrated file does not parse on 1.1.0.
+  Back up `/etc/hal0/profiles.toml` first if you may downgrade.
+
+## Upgrading to 1.6.0
+
+The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is needed on a box that had Hermes before 1.6.0 (the Open WebUI repair below); expect the following. The full list is in the Breaking section of the `## [1.6.0]` entry in `CHANGELOG.md`.
+
+- **Hermes moves from 0.19.0 to v0.22.4 (`4d043038`) and from Python 3.12 to a uv-managed Python 3.14.** The update builds a release next to the live one under `/var/lib/hal0/hermes/releases/`, checks it, then switches. `/var/lib/hal0/venvs/hermes` becomes a symlink to `current/venv`. The build needs the network; an offline host refuses it and stays on 0.19.0. `/etc/hal0/hermes-python.env` is rewritten to the 3.14 interpreter and the old value is discarded with a `hermes-python-discarded` warning. A box already on v0.22.2 rebuilds onto v0.22.4 at its next `hal0 update`.
+- **Expect a short Hermes outage** while the agent and gateway restart on the new release.
+- **The gateway unit is regenerated and linger is enabled for `hal0` automatically.** Run `sudo hal0 agent install hermes` only if the update says it could not.
+- **Hermes cannot be moved back to v0.22.2 once v0.22.4 is live.** v0.22.3 and later write gateway runtime state into Hermes's `state.db` that v0.22.2 cannot run over, so `hal0 update component hermes --target d923a5eb487a17c0a68801bba9ef0f56c81040a8` is refused as a downgrade. v0.22.2 stays in hal0's vetted refs for the automatic flip-back after a failed activation.
+- **Session history is kept** (`sessions.auto_prune: false`) and the persona prompt is written to `agent.system_prompt` before the new Hermes first starts.
+- **Open WebUI gets the default Hermes profile after one repair.** If the default profile is missing from the picker on a box that had Hermes installed before 1.6.0, run `sudo hal0 agent reprovision hermes --repair` once; `hal0 doctor` flags this on the `hermes-api` row. See [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
+- **The agent chat proxy is removed.** `/api/agents/{id}/events`, `/submit` and `/session/*` return 404.
+- **Key rotation now ends open sockets and streams** (WebSocket close code `4401`, SSE `event: revoked`).
+
+## Upgrading to 1.8.0
+
+- **The upgrade floor is still 1.5.0.** `hal0 update` on a 1.3.x or 1.4.x box
+  stops before it downloads anything and prints the installer command that
+  steps the box through 1.5.0; run that, then update again. See
+  [Upgrading from an older release](#upgrading-from-an-older-release).
+- **Fix any slot file that still carries tuning keys.** `hal0 update` lists
+  each such file and exits 2, `hal0 doctor profiles` fails on it, and the slot
+  refuses to start with `slot.unconverted` (422) until the keys move to a
+  profile. Delete the keys from the slot file, put their values on a profile
+  (`hal0 profile create`), name it with `profile = "<name>"`, and confirm with
+  `hal0 config validate`. Nothing rewrites the file for you, and
+  `hal0 profile migrate` is removed.
+- **An existing install stays as it is.** The rootless podman box is an opt-in
+  for a fresh install (`install.sh --box`). `hal0 update` never moves a
+  bare-metal or LXC install into a box, and `--box` refuses to run over an
+  existing install. There is no converter yet; see
+  [Install in a rootless podman box](/docs/getting-started/box/).
+- **Approval decisions need a signed-in session or root.** A script that
+  approved or denied with the admin key must sign in first
+  (`POST /api/auth/login`) or use `sudo hal0 agent approvals approve|deny <id>`
+  on the box; a bare API key gets `403 auth.forbidden`.
+- **Re-pin Pi with `sudo hal0 update component pi`.** `hal0 agent upgrade` is
+  gone and exits 2. A plain `hal0 update` never re-pins Pi; `hal0 update
+  status` now shows a Pi row. See [Component updates](/docs/guides/update-and-rollback#component-updates).
+- **The Operator Board needs a running Hermes.** `/api/board/*` proxies the
+  Hermes kanban. Cards in a box's old hal0 board migrate into the Hermes
+  board at the first board request, or export to
+  `board-legacy-export-<timestamp>.json` in the hal0 state directory when
+  Hermes is not installed. Remove `HERMES_SESSION_TOKEN` from
+  `/etc/hal0/api.env`; `hal0 doctor` warns while it is set.
+- **Schema migration 015 writes a backup first.** It irreversibly drops the
+  retired model tuning. When any of it holds a value, hal0 writes
+  `/var/lib/hal0/backups/hal0-pre-015-<timestamp>.db` (mode 0600) before it
+  runs, and holds the migration if that write fails, in which case the model
+  list answers `500 system.internal` until the backup succeeds. Rolling back
+  to 1.7.x still works.
+- **The memory engine moves to Hindsight 1.1.0.** The upgrade stops the old
+  engine and copies `.pg0` to `.pg0.pre-1.0.0`, which needs 1.5 times its size
+  free; it restores both if 1.1.0 does not come up. New memory writes from
+  Hermes profiles and the brain are shared by default; older notes stay
+  private.
+
+## Upgrading to 1.7.1
+
+- **The upgrade floor is 1.5.0.** `hal0 update` on a 1.3.x or 1.4.x box
+  stops before it downloads anything and prints the installer command that
+  steps the box through 1.5.0; run that, then update again. See
+  [Upgrading from an older release](#upgrading-from-an-older-release).
+- **Run `hal0 slot restart img` once for the LAN editor.** The running
+  ComfyUI container keeps the loopback bind it started with, so
+  `http://<host>:8188` stays refused from other machines until the engine
+  restarts. To keep the editor fenced to the box, set
+  `[network].comfyui_listen = "loopback"` in `/etc/hal0/hal0.toml` before the
+  restart. See [Reaching the editor](/docs/guides/image-workflows-troubleshooting#reaching-the-editor).
+- **The GPU's controls are in the dock.** Hold, keep, unpin and stop image
+  mode live in the dock's GPU segment and **gpu** tab on every page; the
+  Engine tab keeps Restart engine and Logs, and the Slots page's Activity
+  sidebar became the dock's **events** tab. See
+  [The dock](/docs/guides/dashboard-and-settings#the-dock).
+- **ComfyUI and custom nodes run as `hal0`.** Restart `img` to apply.
+  Its mounted data directories must be writable by `hal0`; `/opt/venv` and
+  `/opt/ComfyUI` otherwise remain read-only to it. On 1.7.1, nodes
+  that install dependencies at startup fail even if the slot is ready; 1.8.0
+  gives them a writable Python environment. `hal0 doctor all` names failed
+  nodes from the current start. See [ComfyUI custom-node dependencies](/docs/guides/manage-runner-images#comfyui-custom-node-dependencies)
+  for the environment, image selection and data-directory permissions.
+
+## Upgrading to 1.7.0
+
+- **Run `hal0 slot restart img` once after the update.** ComfyUI loads its
+  GPU gate node (`hal0_gpu_gate`) when the `img` container starts, and
+  `hal0 update` does not restart slots. Until you restart it, the running
+  container keeps the gate from the release before, which lets a prompt
+  through when `hal0-api` is unreachable and after its own 120 seconds, and
+  such a prompt can render next to the LLM slots. See
+  [ComfyUI's editor and the GPU gate](/docs/guides/image-mode-and-gpu-gate#comfyuis-editor-and-the-gpu-gate).
+- **With auth enforcement on, the same restart gives the gate its
+  credential.** The new gate authenticates with a token of its own, which hal0
+  mounts into the container when `img` starts. Until you run `hal0 slot
+  restart img`, the 1.6.x gate the container still runs cannot authenticate
+  on a box with `hal0 auth require on` (or a specific `HAL0_BIND_HOST` and an
+  admin key). hal0 refuses its status request, and the 1.6.x gate then lets
+  the prompt through without a GPU switch, so every editor prompt can render
+  next to the LLM slots. See
+  [ComfyUI's GPU gate credential](/docs/operate/auth#comfyuis-gpu-gate-credential).
+- **Image models come from the image catalog.** `hal0 comfyui models list`
+  shows each catalog model's install state, the GB it still has to download
+  and the pick recommended for this box, and
+  `hal0 comfyui models install <id>` installs one. `hal0 comfyui
+  orchestrate-models` and the image ids in `hal0 model pull` are gone, and the
+  GGUF image models `SD-Turbo-GGUF` and `Flux-2-Klein-9B-GGUF` cannot be
+  installed again. See [Generate images](/docs/guides/generate-images).
+- **Image mode no longer holds after the last render.** The update removes
+  `[image].idle_restore_minutes` from slot files; the GPU returns to the LLM
+  slots about ten seconds after the last render. Pin image mode to hold it for
+  ComfyUI's editor. See
+  [Image mode and the GPU gate](/docs/guides/image-mode-and-gpu-gate).
+- **Toggle the Discovery card once** on the Services page if the box announced
+  services on an earlier version. That removes ComfyUI's old mDNS
+  announcement, which hal0 no longer writes and does not delete by itself.
+
+## Upgrading from an older release
+
+Upgrades start at **1.5.0** in the releases after 1.7.0 (1.4.0 from 1.6.0
+through 1.7.0; 1.3.0 before that). Every release manifest declares the window
+it upgrades from (`upgrade_from: ">=1.5.0"`), and both upgrade paths enforce
+it:
+
+- `hal0 update` on an older box stops before it downloads anything, with
+  `system.update_upgrade_path_unsupported` and both versions named.
+- Re-running the installer over an older install stops before it changes
+  anything.
+
+A nightly counts as a prerelease of its base version, so a `1.5.0` nightly is
+below the floor and a `1.6.0` nightly is inside it.
+
+From a 1.3.x or 1.4.x box, step through 1.5.0 with its installer, which
+upgrades in place and keeps `/etc/hal0` and `/var/lib/hal0`, then update
+again. This is the command the installer prints when it refuses a box below
+the floor:
+
+```sh
+curl -fsSL https://hal0.dev/install.sh \
+  | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.5.0/stable.json bash
+hal0 update -y
+```
+
+`hal0 update --target` cannot make this hop. It is an exact pin against the
+manifest the channel serves now, so once the channel has moved past a release,
+`--target` with that release's version fails with `UpdateManifestInvalid`
+before it downloads anything.
+
+From 1.2.x or older, step through 1.3.0 the same way first, then follow the
+1.3.x path:
+
+```sh
+curl -fsSL https://hal0.dev/install.sh \
+  | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.3.0/stable.json bash
+curl -fsSL https://hal0.dev/install.sh \
+  | sudo env HAL0_RELEASES_URL=https://github.com/hal0ai/hal0/releases/download/v1.5.0/stable.json bash
+hal0 update -y
+```
+
+Read "Upgrading to 1.3.0" above before you start from 1.2.x.
+
+Or reinstall from scratch: `sudo bash installer/uninstall.sh --purge` deletes
+`/etc/hal0` and `/var/lib/hal0`, models included, and the normal one-liner
+then installs the current release.
+
+
+## Related
+
+- [Update and roll back](/docs/guides/update-and-rollback) — `hal0 update`
+  itself: channels, the atomic swap, the rollback and the component converges.
