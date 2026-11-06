@@ -3,7 +3,8 @@ import {
   fmtAge,
   installCommandFor,
   laneHealthTone,
-  normalizeLlmOpStats,
+  llmCallsByOperation,
+  llmOpStatsPath,
   oldestPendingAge,
   operationsByStatus,
   operationStatusCounts,
@@ -65,26 +66,56 @@ describe('laneHealthTone', () => {
   })
 })
 
-describe('normalizeLlmOpStats', () => {
-  it('normalizes an array shape', () => {
-    const raw = { by_operation: [{ operation: 'recall', count: 3 }, { operation: 'refresh', count: 10 }] }
-    expect(normalizeLlmOpStats(raw)).toEqual([
-      { operation: 'refresh', count: 10 },
-      { operation: 'recall', count: 3 },
+describe('llmOpStatsPath', () => {
+  it('targets the bank-scoped upstream route with split_by=operation', () => {
+    expect(llmOpStatsPath('shared')).toBe(
+      'v1/default/banks/shared/llm-requests/stats?split_by=operation',
+    )
+  })
+
+  it('encodes the bank id', () => {
+    expect(llmOpStatsPath('team a/b')).toBe(
+      'v1/default/banks/team%20a%2Fb/llm-requests/stats?split_by=operation',
+    )
+  })
+})
+
+describe('llmCallsByOperation', () => {
+  it('sums the per-bucket series into one row per operation, calls desc', () => {
+    const raw = {
+      bank_id: 'shared',
+      period: '7d',
+      trunc: 'day',
+      start: '2026-11-01T00:00:00',
+      buckets: [
+        { time: '2026-11-01T00:00:00', series: { retain: { calls: 2, tokens: 30 }, reflect: { calls: 1, tokens: 5 } } },
+        { time: '2026-11-02T00:00:00', series: { retain: { calls: 3, tokens: 40 } } },
+      ],
+      retention_days: 7,
+    }
+    expect(llmCallsByOperation(raw)).toEqual([
+      { operation: 'retain', calls: 5 },
+      { operation: 'reflect', calls: 1 },
     ])
   })
 
-  it('normalizes an object-map shape with nested counts', () => {
-    const raw = { recall: 2, refresh: { count: 7 } }
-    expect(normalizeLlmOpStats(raw)).toEqual([
-      { operation: 'refresh', count: 7 },
-      { operation: 'recall', count: 2 },
+  it('breaks ties by operation name so the row order is stable', () => {
+    const raw = { buckets: [{ series: { reflect: { calls: 2 }, retain: { calls: 2 } } }] }
+    expect(llmCallsByOperation(raw)).toEqual([
+      { operation: 'reflect', calls: 2 },
+      { operation: 'retain', calls: 2 },
     ])
+  })
+
+  it('returns no rows when the engine sent no series (split_by not honoured)', () => {
+    expect(llmCallsByOperation({ buckets: [{ time: 'x', series: null, total: 3 }] })).toEqual([])
   })
 
   it('handles garbage input', () => {
-    expect(normalizeLlmOpStats(null)).toEqual([])
-    expect(normalizeLlmOpStats(42)).toEqual([])
+    expect(llmCallsByOperation(null)).toEqual([])
+    expect(llmCallsByOperation(42)).toEqual([])
+    expect(llmCallsByOperation({})).toEqual([])
+    expect(llmCallsByOperation({ buckets: 'nope' })).toEqual([])
   })
 })
 
