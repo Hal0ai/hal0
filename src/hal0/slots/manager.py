@@ -62,6 +62,7 @@ from hal0.slots.config_write import (
     check_npu_exclusivity,
     check_runner_family,
     guard_and_normalize_tune,
+    guard_and_normalize_xdna,
     guard_slot_write_payload,
     reconcile_and_guard_slot_config,
     reconcile_slot_updates,
@@ -3452,6 +3453,8 @@ class SlotManager:
         # Same [tune] validation, guard and normalization as the update path.
         if "tune" in cfg_dict:
             guard_and_normalize_tune(cfg_dict, {"tune": cfg_dict["tune"]})
+        if "xdna" in cfg_dict:
+            guard_and_normalize_xdna(cfg_dict, {"xdna": cfg_dict["xdna"]})
         await self._check_npu_exclusivity(slot_name, cfg_dict)
         # SC-4, first-of-type: the create modal no longer asks "make this the
         # default?" — the FIRST slot of a type silently becomes that type's
