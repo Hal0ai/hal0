@@ -36,6 +36,7 @@ from hal0.registry.pull import (
     pull_job_file,
     run_pull,
     sweep_orphaned_partials,
+    worker_process_is_alive,
 )
 from hal0.registry.store import ModelRegistry
 
@@ -724,6 +725,68 @@ async def test_run_pull_persists_failed_snapshot_on_error(tmp_hal0_home: str) ->
     assert snapshot.exists()
     persisted = json.loads(snapshot.read_text(encoding="utf-8"))
     assert persisted["state"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_run_pull_persists_live_progress_and_worker_identity(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direct installer-style run_pull writes running byte progress durably."""
+    first_chunk_written = asyncio.Event()
+    continue_download = asyncio.Event()
+    body = _payload(1024 * 1024)
+
+    class PausedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield body[: 512 * 1024]
+            first_chunk_written.set()
+            await continue_download.wait()
+            yield body[512 * 1024 :]
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Length": str(len(body))},
+            stream=PausedStream(),
+        )
+
+    monkeypatch.setattr("hal0.registry.pull._SSE_MIN_INTERVAL_S", 0.0)
+    job = make_job("install-live")
+    registry = ModelRegistry()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    task = asyncio.create_task(
+        run_pull(
+            job,
+            hf_repo="Hal0ai/install-live-GGUF",
+            hf_file="install-live.gguf",
+            registry=registry,
+            client=client,
+        )
+    )
+    snapshot = pull_job_file("install-live")
+    try:
+        await asyncio.wait_for(first_chunk_written.wait(), timeout=2)
+        deadline = asyncio.get_running_loop().time() + 2
+        while True:
+            persisted = json.loads(snapshot.read_text(encoding="utf-8"))
+            if persisted.get("bytes_downloaded", 0) > 0:
+                break
+            assert asyncio.get_running_loop().time() < deadline, (
+                f"progress was not persisted: {persisted}"
+            )
+            await asyncio.sleep(0.01)
+        assert persisted["state"] == "running"
+        assert persisted["worker_pid"] == os.getpid()
+        assert isinstance(persisted.get("worker_start_token"), str)
+        assert persisted["worker_start_token"]
+        assert worker_process_is_alive(persisted)
+        assert persisted["bytes_downloaded"] > 0
+    finally:
+        continue_download.set()
+        await task
+        await client.aclose()
+
+    assert job.state == "completed"
 
 
 # ── MR-4: disk-space preflight before streaming ──────────────────────────────

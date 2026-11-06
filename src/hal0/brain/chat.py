@@ -661,6 +661,10 @@ _ADMIN_TOOL_EXCLUDES: frozenset[str] = frozenset(
         "memory_operation_retry",
         "memory_tags_list",
         "memory_bank_stats",
+        "memory_kb_tree",
+        "memory_kb_read",
+        "memory_documents_list",
+        "memory_documents_get",
         "memory_bank_consolidate",
     }
 )

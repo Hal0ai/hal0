@@ -1,4 +1,4 @@
-"""Tests for Phase C5 — rerank + utility seed TOMLs and reranker defaults."""
+"""Tests for shipped rerank and memory slot TOMLs and reranker defaults."""
 
 import tomllib
 from collections import Counter
@@ -35,23 +35,18 @@ def test_seed_rerank_toml_validates() -> None:
     assert slot.model.default == ""
 
 
-def test_seed_utility_toml_validates() -> None:
-    raw = tomllib.loads((_SEEDED_SLOTS_DIR / "utility.toml").read_text(encoding="utf-8"))
+def test_seed_memory_toml_validates() -> None:
+    raw = tomllib.loads((_SEEDED_SLOTS_DIR / "memory.toml").read_text(encoding="utf-8"))
     slot = SlotConfig.model_validate(raw)
     assert slot.runtime == "container"
-    # ADR-0029: the utility workload seed (64K window) — no longer `chat`
-    # plus a slot-side context ceiling.
-    assert slot.profile == "utility"
+    assert slot.profile == "memory"
     assert slot.device == "gpu-rocm"  # #1888
-    # 8090: 8081 was reclaimed as the `agent` seed's canonical primary port
-    # (ADR-0023 LLM anchor); utility moved off it on new installs.
-    assert slot.port == 8090
-    # Clean seed (WS-E, #1107): the ghost id `gemma-4-12b-it` pin is gone — the
-    # slot boots grey (no crash-loop, no surprise download). The 64K window is
-    # the profile's ctx_size, applied once the operator assigns a model.
+    assert slot.port == 8091
+    assert slot.pinned is False
     assert slot.model.default == ""
     assert set(type(slot.model).model_fields) == {"default"}
-    assert SEED_PROFILES["utility"]["ctx_size"] == 65536
+    assert SEED_PROFILES["memory"]["ctx_size"] == 32768
+    assert SEED_PROFILES["memory"]["enable_thinking"] is False
 
 
 def test_rerank_defaults_are_hindsight_era() -> None:
@@ -90,7 +85,7 @@ def test_seed_slot_ports_are_mutually_unique() -> None:
     """No two shipped seed slot TOMLs may bind the same port.
 
     Deconfliction today is enforced only by hand-written comments in the TOMLs
-    (agent 8081, rerank 8086, tts 8085, flm 8088, brain 8089, utility 8090,
+    (agent 8081, rerank 8086, tts 8085, flm 8088, brain 8089, memory 8091,
     qwen3tts 8095, img 8188, coder 8082, embed 8083). A future seed addition (or an edit reusing a port)
     that collides two shipped slots would otherwise ship silently and crash-loop
     the second container on a fresh box. The glob includes the opt-in qwen3tts
