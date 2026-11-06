@@ -11,7 +11,7 @@
 // (header, bank switcher, tab nav, console link) and routing.
 
 import React, { useState } from 'react'
-import { useMemoryEngineQuery } from '@/api/hooks/useMemoryWorkspace'
+import { useMemoryEngineQuery, useMemoryWorkspaceAgents } from '@/api/hooks/useMemoryWorkspace'
 import { AgentsTab } from './AgentsTab'
 import { DirectivesTab } from './DirectivesTab'
 import { KnowledgeBaseTab } from './KnowledgeBaseTab'
@@ -43,6 +43,21 @@ export function hindsightConsoleUrl(hostname: string): string {
   return `http://${hostname}:${HINDSIGHT_CONSOLE_DEFAULT_PORT}`
 }
 
+/**
+ * Resolve the console link from the `/api/memory/agents` payload.
+ *
+ * - `console_url` present and a string -> use it (config-driven, [memory.console]).
+ * - `console_url` present and null -> console disabled, hide the link (returns null).
+ * - `console_url` absent (older backend, pre-dates this field) -> fixed-port fallback.
+ */
+export function resolveConsoleUrl(
+  consoleUrlField: string | null | undefined,
+  hostname: string,
+): string | null {
+  if (consoleUrlField === undefined) return hindsightConsoleUrl(hostname)
+  return consoleUrlField
+}
+
 interface BankSummary {
   bank_id: string
   name?: string
@@ -60,7 +75,11 @@ export const MemoryWorkspaceView: React.FC<{ param?: string | null }> = ({ param
   const banks = bankList.data?.banks || []
   const [bank, setBank] = useState<string | null>(null)
   const effectiveBank = bank || banks[0]?.bank_id || 'shared'
-  const consoleUrl = hindsightConsoleUrl(typeof window !== 'undefined' ? window.location.hostname : 'localhost')
+  const agents = useMemoryWorkspaceAgents()
+  const consoleUrl = resolveConsoleUrl(
+    agents.data?.console_url,
+    typeof window !== 'undefined' ? window.location.hostname : 'localhost',
+  )
 
   const goTab = (t: Tab) => {
     window.location.hash = `#memworkspace/${t}`
@@ -85,9 +104,11 @@ export const MemoryWorkspaceView: React.FC<{ param?: string | null }> = ({ param
             <option key={b.bank_id} value={b.bank_id}>{b.bank_id}</option>
           ))}
         </select>
-        <a className="btn ghost sm" href={consoleUrl} target="_blank" rel="noreferrer" data-testid="memws-console-link">
-          Open console ↗
-        </a>
+        {consoleUrl && (
+          <a className="btn ghost sm" href={consoleUrl} target="_blank" rel="noreferrer" data-testid="memws-console-link">
+            Open console ↗
+          </a>
+        )}
       </div>
       <div className="memws-tabs" role="tablist">
         {TABS.map((t) => (

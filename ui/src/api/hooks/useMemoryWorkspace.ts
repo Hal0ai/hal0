@@ -58,6 +58,10 @@ export interface MemoryAgentsInstall {
 export interface MemoryAgents {
   banks: string[]
   install: MemoryAgentsInstall
+  /** Hindsight Control Plane console URL from [memory.console]; null when
+   * disabled. Absent entirely on older backends that predate this field —
+   * callers should fall back to the fixed-port default in that case. */
+  console_url?: string | null
 }
 
 export function useMemoryWorkspaceAgents() {
