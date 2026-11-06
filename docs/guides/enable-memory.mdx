@@ -304,6 +304,36 @@ loudly if it's missing rather than guessing. It never deletes the source
 banks; that's always a separate, explicit `hal0 memory bank delete <bank>
 --confirm <bank>`.
 
+## Move the platform memory to a named bank
+
+By default hal0's platform memory (the `shared` namespace) lives in the
+Hindsight bank `shared`. `[memory] bank` in `hal0.toml` names a different bank
+(for example `Hal0::Platform`). The namespaces callers use do not change, only
+the engine bank behind `shared`. To move an existing install:
+
+```sh
+hal0 memory migrate platform --target Hal0::Platform            # dry run: the plan
+hal0 memory migrate platform --target Hal0::Platform --apply    # clone + fold + verify
+```
+
+The command clones `shared` into the new bank with the engine's clone call
+(no LLM, so no consolidation queue), folds a leftover `agents` bank
+(identity cards tagged `agent-identity`) into it, and exits 1 if the new bank
+holds fewer facts than the sources. Then set the key and restart:
+
+```toml
+[memory]
+bank = "Hal0::Platform"
+```
+
+```sh
+sudo systemctl restart hal0-api
+```
+
+Run the migration first: a box that sets `bank` before cloning starts with an
+empty memory. The old `shared` and `agents` banks stay untouched until you
+delete them with `hal0 memory bank delete`. See ADR-0052.
+
 <Aside type="caution">
 This is a bank-consolidation tool (private banks → one unified bank), not
 a Cognee migration path — there is no CLI command for migrating a

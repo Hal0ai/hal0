@@ -306,24 +306,47 @@ for m in models:
 ' "$1"
 }
 
-# Assigned model of an existing slot (empty if the slot is absent or is a
-# model-less grey seed). `hal0 slot list --json` emits the raw /api/slots
-# array (slot_commands.py::slot_list).
+# Resolve the FLM slot's configured model from the slot listing. A clean seed
+# has no binding; in that case use an installed tag from the existing FLM
+# catalog (GET /api/slots/flm/models), which owns the installed-model fact.
 remote_slot_model() {
-    ssh_exec "${REMOTE_HAL0_BIN} slot list --json 2>/dev/null" 2>/dev/null \
-        | python3 -c '
+    local slots model
+    slots="$(ssh_exec "${REMOTE_HAL0_BIN} slot list --json 2>/dev/null")" || return 1
+    model="$(printf '%s\n' "${slots}" | python3 -c '
 import json, sys
 
 name = sys.argv[1]
 try:
     slots = json.load(sys.stdin)
 except Exception:
-    raise SystemExit(0)
+    raise SystemExit(1)
 for s in slots if isinstance(slots, list) else []:
     if s.get("name") == name:
-        print(s.get("model") or s.get("model_id") or "")
+        print(s.get("model_default") or s.get("model_id") or "")
         break
-' "$1"
+else:
+    raise SystemExit(1)
+' "$1")" || return 1
+    if [[ -n "${model}" ]]; then
+        printf '%s\n' "${model}"
+        return 0
+    fi
+    ssh_exec "set +u; [ -r /etc/hal0/api.env ] && . /etc/hal0/api.env; set -u; \
+        curl -fsS -m 30 ${REMOTE_HAL0_API}/api/slots/flm/models \
+        \${HAL0_ADMIN_KEY:+-H \"Authorization: Bearer \$HAL0_ADMIN_KEY\"}" \
+        | python3 -c '
+import json, sys
+try:
+    payload = json.load(sys.stdin)
+    if payload.get("probe_ok") is not True:
+        raise SystemExit(1)
+    models = payload["models"]
+    print(next((m["model"] for m in models
+                if isinstance(m, dict) and m.get("installed") and m.get("model")
+                and "chat" in (m.get("capabilities") or [])), ""))
+except (ValueError, KeyError, TypeError):
+    raise SystemExit(1)
+'
 }
 
 # Lifecycle state of an existing slot (empty if absent or unparsable). The
@@ -424,14 +447,12 @@ else
     # v0.1 hardware token (slot_commands.py::SlotHardware), so this row
     # exercises the SEEDED flm slot (installer/etc-hal0/slots/flm.toml,
     # device=npu). The seed ships model-less (grey tile, #1369); a box
-    # with no FLM model assigned skips rather than fails. The model the
-    # listing reports can be the slot's sticky last-run `model_id` while
-    # `[model].default` is still empty, in which case a bare `slot load`
-    # refuses with "no default model" — so the load names the model it
-    # found and the row tests the NPU, not the seed's default.
-    FLM_MODEL="$(remote_slot_model flm || true)"
-    if [[ -z "${FLM_MODEL}" ]]; then
-        add_row "flm" "skip" "$(since_ms "${start}")" "seeded flm slot absent or model-less (grey seed, #1369) — assign an FLM model to it first"
+    # with no installed FLM model skips with an explicit warning. Once the
+    # lane has an installed model, the row must load it or fail.
+    if ! FLM_MODEL="$(remote_slot_model flm)"; then
+        add_row "flm" "fail" "$(since_ms "${start}")" "cannot resolve seeded flm slot or FLM catalog; NPU lane was not tested"
+    elif [[ -z "${FLM_MODEL}" ]]; then
+        add_row "flm" "skip" "$(since_ms "${start}")" "NPU lane NOT TESTED: no installed chat-capable FLM model in /api/slots/flm/models; install one before release validation"
     else
         LOADED_SEEDED_SLOTS+=("flm")
         if remote_slot_load flm -m "${FLM_MODEL}"; then

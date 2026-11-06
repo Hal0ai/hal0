@@ -920,14 +920,10 @@ def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
 def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
     """Auto-resume pulls that were mid-flight when a prior process died.
 
-    A persisted pull-job snapshot in a non-terminal state (``queued`` or
-    ``running``) means the process that owned it never reached a terminal
-    state — either a pre-#1225 build that got SIGKILLed by systemd
-    mid-download, or a genuine crash. ``run_pull`` only durably persists a
-    snapshot at pull START (``queued``) and again at a TERMINAL state
-    (``completed``/``failed``/``cancelled``) — there is no mid-flight
-    "running" flush — so ``queued`` left on disk is the normal footprint
-    of an interrupted download, not just a job that never started.
+    A non-terminal snapshot is resumed only when its recorded worker process
+    is no longer alive. This preserves recovery after a crash while avoiding
+    a second downloader when hal0-api starts alongside a CLI or installer
+    process that still owns the persisted pull.
 
     The download's own resume sidecar (hal0.registry.pull's Range-request
     support) means picking the pull back up is just calling ``run_pull``
@@ -948,7 +944,12 @@ def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
     """
     from pathlib import Path
 
-    from hal0.registry.pull import list_persisted_jobs, make_job, persist_pull_job
+    from hal0.registry.pull import (
+        list_persisted_jobs,
+        make_job,
+        persist_pull_job,
+        worker_process_is_alive,
+    )
 
     registry = app.state.model_registry
     jobs: dict[str, Any] = app.state.model_pull_jobs
@@ -956,6 +957,8 @@ def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
 
     for snapshot in list_persisted_jobs():
         if snapshot.get("state") not in ("queued", "running"):
+            continue
+        if worker_process_is_alive(snapshot):
             continue
         model_id = snapshot.get("model_id")
         if not isinstance(model_id, str) or not model_id or model_id in jobs:
@@ -1366,6 +1369,7 @@ async def _boot_slot_manager(app: FastAPI, ctx: BootState) -> None:
         port_authority=ctx.port_authority,
         preload_evict_enabled=ctx.hal0_config.slots.preload_evict_enabled,
         preload_evict_headroom_mb=ctx.hal0_config.slots.preload_evict_headroom_mb,
+        fabric_clock_guard=ctx.hal0_config.slots.fabric_clock_guard,
     )
 
 

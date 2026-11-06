@@ -140,6 +140,18 @@ def bank_to_namespace(bank: str) -> str:
     return bank.replace("__", ":", 1)
 
 
+def _bank_namespace(bank: str, platform_bank: str = _SHARED) -> str:
+    """Namespace a Hindsight bank id answers for on the wire.
+
+    The platform bank ([memory] bank, ADR-0052) is the ``shared`` namespace
+    whatever it is called; every other bank id goes through
+    :func:`bank_to_namespace`'s inverse spelling.
+    """
+    if bank == platform_bank:
+        return _SHARED
+    return bank.replace("__", ":")
+
+
 class Hal0Reranker:
     """Async reranker over hal0-api's OpenAI surface (Cohere-style ``/v1/rerankings``).
 
@@ -547,8 +559,13 @@ class HindsightProvider(MemoryProvider):
         graph_enabled: bool = False,
         extraction_slot: str = "memory",
         unified_bank: bool = False,
+        bank: str = _SHARED,
     ) -> None:
         self._client = client
+        # Engine bank id behind the logical ``shared`` namespace ([memory] bank,
+        # ADR-0052). The namespace grammar is untouched; only this mapping
+        # moves. ``private:<agent>`` / ``agents`` banks keep their own names.
+        self._platform_bank = bank or _SHARED
         self._client_id = client_id
         self._reranker = reranker
         # Unified-bank mode ([memory] unified_bank): collapse every namespace
@@ -590,6 +607,21 @@ class HindsightProvider(MemoryProvider):
         # Auto-retry bookkeeping (#1792) — see the constants above.
         self._auto_retry_last_at: float | None = None
         self._auto_retry_sweeps_done = 0
+
+    @property
+    def platform_bank(self) -> str:
+        """Engine bank id that backs the ``shared`` namespace ([memory] bank)."""
+        return self._platform_bank
+
+    def _bank_of(self, namespace: str) -> str:
+        """Hindsight bank id for a resolved namespace.
+
+        ``shared`` is the platform bank; every other namespace keeps the
+        :func:`namespace_to_bank` spelling (``private:x`` -> ``private__x``).
+        """
+        if namespace == _SHARED:
+            return self._platform_bank
+        return namespace_to_bank(namespace)
 
     @property
     def hindsight_client(self) -> Any:
@@ -925,7 +957,7 @@ class HindsightProvider(MemoryProvider):
         ):
             return dict(self._write_health)
 
-        bank = namespace_to_bank(self._write_namespace(_SHARED, None))
+        bank = self._bank_of(self._write_namespace(_SHARED, None))
         counts = await self._sample_operations(bank)
         stall: str | None = None
         if counts is not None:
@@ -1287,7 +1319,7 @@ class HindsightProvider(MemoryProvider):
             dataset if isinstance(dataset, str) and dataset.startswith(_PROJECT) else None
         )
         ns = self._write_namespace(dataset, client_id)
-        bank = namespace_to_bank(ns)
+        bank = self._bank_of(ns)
 
         meta = dict(metadata or {})
         if source:
@@ -1535,7 +1567,7 @@ class HindsightProvider(MemoryProvider):
         cursor forever. Tracking each visible item's raw offset directly
         keeps the walk exact regardless of what the ACL withheld.
         """
-        banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
+        banks = [self._bank_of(ns) for ns in self._allowed_namespaces(dataset, client_id)]
         start_bank, offset = _decode_cursor(cursor, banks)
         if start_bank is None:
             return {"items": [], "next_cursor": None}
@@ -1578,7 +1610,9 @@ class HindsightProvider(MemoryProvider):
                 # must not surface other agents' private items or out-of-scope
                 # project items. No-op in pre-unified multi-bank mode. Applied
                 # BEFORE the page cut so the page fills with visible rows.
-                candidates = [self._list_fact_to_item(fact, bank) for fact in raw]
+                candidates = [
+                    self._list_fact_to_item(fact, bank, self._platform_bank) for fact in raw
+                ]
                 visible = self._filter_visible(candidates, client_id, dataset)
                 if private_only:
                     visible = [
@@ -1608,7 +1642,9 @@ class HindsightProvider(MemoryProvider):
         return {"items": items[:limit], "next_cursor": next_cursor}
 
     @staticmethod
-    def _list_fact_to_item(fact: dict[str, Any], bank: str) -> dict[str, Any]:
+    def _list_fact_to_item(
+        fact: dict[str, Any], bank: str, platform_bank: str = _SHARED
+    ) -> dict[str, Any]:
         """Map a Hindsight /memories/list item to the MemoryItem wire shape.
 
         ``id`` is the **document_id**, matching :meth:`_fact_to_item` (recall)
@@ -1626,7 +1662,7 @@ class HindsightProvider(MemoryProvider):
             "id": document_id or fact_id,
             "text": fact.get("text", ""),
             "timestamp": fact.get("mentioned_at") or fact.get("date") or _now(),
-            "dataset": bank.replace("__", ":"),
+            "dataset": _bank_namespace(bank, platform_bank),
             "tags": list(fact.get("tags") or []),
             "source": None,
             "metadata": {"fact_id": fact_id} if fact_id and fact_id != document_id else {},
@@ -1809,7 +1845,7 @@ class HindsightProvider(MemoryProvider):
         # unaddressable scope, NOT an unset one, and must sweep no banks
         # (#1451 — ``dataset or _SHARED`` here is what turned an approved
         # foreign-bank delete into a shared-bank delete).
-        banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
+        banks = [self._bank_of(ns) for ns in self._allowed_namespaces(dataset, client_id)]
         if not banks:
             return {"deleted": 0}
         if self._unified_bank:
@@ -1891,7 +1927,7 @@ class HindsightProvider(MemoryProvider):
         """
         import asyncio
 
-        banks = [namespace_to_bank(ns) for ns in self._allowed_namespaces(dataset, client_id)]
+        banks = [self._bank_of(ns) for ns in self._allowed_namespaces(dataset, client_id)]
         if not banks:
             return RecallResults([])
         effective_types = list(types) if types else list(_DEFAULT_RECALL_TYPES)
@@ -1921,7 +1957,9 @@ class HindsightProvider(MemoryProvider):
             if min_scores is not None:
                 kwargs["min_scores"] = min_scores
             resp = await self._call("recall", **kwargs)
-            items = [self._fact_to_item(f, bank) for f in resp.get("results", [])]
+            items = [
+                self._fact_to_item(f, bank, self._platform_bank) for f in resp.get("results", [])
+            ]
             return (
                 items,
                 resp.get("entities") or {},
@@ -2053,7 +2091,11 @@ class HindsightProvider(MemoryProvider):
                 continue
             if str(raw.get("id") or key) not in referenced_source_ids:
                 continue
-            if not self._filter_visible([self._fact_to_item(raw, _SHARED)], client_id, dataset):
+            if not self._filter_visible(
+                [self._fact_to_item(raw, self._platform_bank, self._platform_bank)],
+                client_id,
+                dataset,
+            ):
                 continue
             visible_source_facts[str(key)] = raw
             fact_ids.update(_values(raw.get("id") or key))
@@ -2148,7 +2190,7 @@ class HindsightProvider(MemoryProvider):
         include: dict[str, Any] | None = None,
         response_schema: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "reflect",
             bank_id=bank,
@@ -2221,7 +2263,7 @@ class HindsightProvider(MemoryProvider):
         the memory lives in (default ``shared``, ACL-checked the same way
         ``add`` resolves its write namespace).
         """
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         await self._ensure_memory_visible(bank, memory_id, client_id, dataset)
         return await self._call(
             "update_memory",
@@ -2241,7 +2283,7 @@ class HindsightProvider(MemoryProvider):
         self, memory_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         """Revision history for one memory unit (curation audit trail)."""
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         await self._ensure_memory_visible(bank, memory_id, client_id, dataset)
         return await self._call("memory_history", bank_id=bank, memory_id=memory_id)
 
@@ -2266,7 +2308,7 @@ class HindsightProvider(MemoryProvider):
         limit: int | None = None,
         offset: int | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "list_mental_models",
             bank_id=bank,
@@ -2280,7 +2322,7 @@ class HindsightProvider(MemoryProvider):
     async def get_mental_model(
         self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("get_mental_model", bank_id=bank, mental_model_id=mental_model_id)
 
     async def create_mental_model(
@@ -2295,7 +2337,7 @@ class HindsightProvider(MemoryProvider):
         max_tokens: int = 2048,
         trigger: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "create_mental_model",
             bank_id=bank,
@@ -2319,7 +2361,7 @@ class HindsightProvider(MemoryProvider):
         tags: list[str] | None = None,
         trigger: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "update_mental_model",
             bank_id=bank,
@@ -2334,7 +2376,7 @@ class HindsightProvider(MemoryProvider):
     async def delete_mental_model(
         self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "delete_mental_model", bank_id=bank, mental_model_id=mental_model_id
         )
@@ -2342,7 +2384,7 @@ class HindsightProvider(MemoryProvider):
     async def refresh_mental_model(
         self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "refresh_mental_model", bank_id=bank, mental_model_id=mental_model_id
         )
@@ -2362,7 +2404,7 @@ class HindsightProvider(MemoryProvider):
         limit: int | None = None,
         offset: int | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "list_directives",
             bank_id=bank,
@@ -2376,7 +2418,7 @@ class HindsightProvider(MemoryProvider):
     async def get_directive(
         self, directive_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("get_directive", bank_id=bank, directive_id=directive_id)
 
     async def create_directive(
@@ -2390,7 +2432,7 @@ class HindsightProvider(MemoryProvider):
         is_active: bool = True,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "create_directive",
             bank_id=bank,
@@ -2413,7 +2455,7 @@ class HindsightProvider(MemoryProvider):
         is_active: bool | None = None,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "update_directive",
             bank_id=bank,
@@ -2428,7 +2470,7 @@ class HindsightProvider(MemoryProvider):
     async def delete_directive(
         self, directive_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("delete_directive", bank_id=bank, directive_id=directive_id)
 
     # ── async operations (so retain/refresh/consolidate are pollable) ───
@@ -2444,7 +2486,7 @@ class HindsightProvider(MemoryProvider):
         offset: int | None = None,
         exclude_parents: bool | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "list_operations",
             bank_id=bank,
@@ -2463,7 +2505,7 @@ class HindsightProvider(MemoryProvider):
         client_id: str | None = None,
         include_payload: bool | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         op = await self._call(
             "get_operation",
             bank_id=bank,
@@ -2481,13 +2523,13 @@ class HindsightProvider(MemoryProvider):
     async def cancel_operation(
         self, operation_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("cancel_operation", bank_id=bank, operation_id=operation_id)
 
     async def retry_operation(
         self, operation_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("retry_operation", bank_id=bank, operation_id=operation_id)
 
     # ── tags / bank stats / consolidation ────────────────────────────────
@@ -2502,7 +2544,7 @@ class HindsightProvider(MemoryProvider):
         limit: int | None = None,
         offset: int | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "list_tags", bank_id=bank, q=q, source=source, limit=limit, offset=offset
         )
@@ -2514,13 +2556,13 @@ class HindsightProvider(MemoryProvider):
         client_id: str | None = None,
         refresh: bool | None = None,
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("bank_stats", bank_id=bank, refresh=refresh)
 
     async def consolidate(  # type: ignore[override]  — real implementation, ABC default is a stub
         self, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
-        bank = namespace_to_bank(self._write_namespace(dataset, client_id))
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("consolidate", bank_id=bank)
 
     # ── Runtime toggles ────────────────────────────────────────────────
@@ -2547,7 +2589,9 @@ class HindsightProvider(MemoryProvider):
     # ── helpers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _fact_to_item(fact: dict[str, Any], bank: str) -> dict[str, Any]:
+    def _fact_to_item(
+        fact: dict[str, Any], bank: str, platform_bank: str = _SHARED
+    ) -> dict[str, Any]:
         """Map a Hindsight RecallResult to the MemoryItem wire shape.
 
         ``score`` carries the engine's native ``scores.final`` (RecallScores,
@@ -2569,7 +2613,7 @@ class HindsightProvider(MemoryProvider):
             "chunk_id": fact.get("chunk_id"),
             "text": fact.get("text", ""),
             "timestamp": fact.get("mentioned_at") or _now(),
-            "dataset": bank.replace("__", ":"),
+            "dataset": _bank_namespace(bank, platform_bank),
             "tags": list(fact.get("tags") or []),
             "source": (fact.get("metadata") or {}).get("source"),
             "metadata": _decode_metadata(fact.get("metadata") or {}),
@@ -2665,7 +2709,7 @@ class HindsightProvider(MemoryProvider):
                     "id": doc.get("id"),
                     "text": text,
                     "timestamp": doc.get("created_at") or _now(),
-                    "dataset": bank.replace("__", ":"),
+                    "dataset": _bank_namespace(bank, self._platform_bank),
                     "tags": list(doc.get("tags") or []),
                     "source": "raw_document",
                     "metadata": {"kind": "document", "document_id": doc.get("id")},

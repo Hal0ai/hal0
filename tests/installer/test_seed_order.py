@@ -24,7 +24,7 @@ def test_seed_copy_loop_runs_before_hal0_setup_auto() -> None:
     text = _INSTALL_SH.read_text(encoding="utf-8")
 
     seed_loop_marker = (
-        "for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do"
+        "for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do"
     )
     setup_call_marker = '"${HAL0_BIN}" setup "${_setup_args[@]}"'
 
@@ -49,7 +49,7 @@ def test_seed_device_derivation_runs_after_copy_loop_and_before_setup() -> None:
     text = _INSTALL_SH.read_text(encoding="utf-8")
 
     seed_loop_marker = (
-        "for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do"
+        "for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do"
     )
     derive_marker = "-m hal0.install.static_seeds"
     setup_call_marker = '"${HAL0_BIN}" setup "${_setup_args[@]}"'
