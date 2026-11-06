@@ -27,9 +27,10 @@ export interface MemoryLaneLlm {
 
 export interface MemoryLaneBank {
   bank_id: string
-  pending: number
-  processing: number
-  oldest_pending_age_s: number | null
+  pending?: number
+  processing?: number
+  oldest_pending_age_s?: number | null
+  error?: string
 }
 
 export interface MemoryLanes {
