@@ -11,14 +11,57 @@ const DECISION_TOGGLE_KEYS = [
   'mental_model_delta_use_decision_model',
 ] as const
 
+const MISSION_FIELDS = [
+  { key: 'retain_mission', label: 'Retain mission' },
+  { key: 'reflect_mission', label: 'Reflect mission' },
+  { key: 'observations_mission', label: 'Observations mission' },
+] as const
+
+/**
+ * Hindsight bank config field for default observation scopes. The platform
+ * config PATCH passthrough treats this as an opaque `updates` key, same as
+ * `retain_mission`/`reflect_mission` — see
+ * src/hal0/memory/spec/templates/shared.json (`default_observation_scopes`:
+ * a list of tag-scope entries, each entry a list of tags ANDed together,
+ * entries ORed; or a bare string shorthand like `"shared"`). NOTE: the task
+ * that requested this named the field `observation_scopes`, but that name
+ * is only used for Hindsight *request*-level scoping (retain/consolidate
+ * calls); the persisted per-bank config key is `default_observation_scopes`
+ * per the platform's own templates and tests — used here, flagged as an
+ * open question rather than guessed silently.
+ */
+const OBSERVATION_SCOPES_KEY = 'default_observation_scopes'
+
+/** Normalize the bank config's `default_observation_scopes` into rows of
+ * comma-joined tags for the editable-list UI. Accepts the list-of-lists
+ * shape, a bare string shorthand (one row), or absence (empty list). */
+export function scopesToRows(value: unknown): string[] {
+  if (value == null) return []
+  if (typeof value === 'string') return [value]
+  if (Array.isArray(value)) {
+    return value.map((entry) => (Array.isArray(entry) ? entry.join(', ') : String(entry)))
+  }
+  return []
+}
+
+/** Inverse of scopesToRows: comma-joined tag rows -> list-of-lists, dropping
+ * blank rows/tags. Empty overall -> empty list (not omitted / not null). */
+export function rowsToScopes(rows: string[]): string[][] {
+  return rows
+    .map((row) => row.split(',').map((t) => t.trim()).filter(Boolean))
+    .filter((tags) => tags.length > 0)
+}
+
 export const ModelsTab: React.FC<{ bank: string }> = ({ bank }) => {
   const models = useMemoryModels()
   const lanes = useMemoryLanes()
   const config = useMemoryEngineQuery<{ updates?: Record<string, boolean>; [k: string]: unknown }>(
     `v1/default/banks/${encodeURIComponent(bank)}/config`,
   )
-  const patchConfig = useMemoryEngineMutation<{ updates: Record<string, boolean> }>('patch', 'config')
+  const patchConfig = useMemoryEngineMutation<{ updates: Record<string, unknown> }>('patch', 'config')
   const [toastErr, setToastErr] = React.useState<string | null>(null)
+  const [missionDrafts, setMissionDrafts] = React.useState<Record<string, string>>({})
+  const [scopeRows, setScopeRows] = React.useState<string[] | null>(null)
 
   if (models.isError) return <EngineError error={models.error} what="models" onRetry={() => models.refetch()} />
 
@@ -32,6 +75,32 @@ export const ModelsTab: React.FC<{ bank: string }> = ({ bank }) => {
     patchConfig.mutate(
       { sub: `v1/default/banks/${bank}/config`, body: { updates: { [key]: checked } } },
       { onError: (e) => setToastErr((e as Error)?.message || `Failed to update ${key}`) },
+    )
+  }
+
+  const missionValue = (key: string) => missionDrafts[key] ?? (typeof cfg[key] === 'string' ? (cfg[key] as string) : '')
+  const saveMission = (key: string) => {
+    const value = missionValue(key)
+    patchConfig.mutate(
+      { sub: `v1/default/banks/${bank}/config`, body: { updates: { [key]: value } } },
+      {
+        onSuccess: () => setMissionDrafts((d) => { const n = { ...d }; delete n[key]; return n }),
+        onError: (e) => setToastErr((e as Error)?.message || `Failed to update ${key}`),
+      },
+    )
+  }
+
+  const effectiveScopeRows = scopeRows ?? scopesToRows(cfg[OBSERVATION_SCOPES_KEY])
+  const saveScopes = () => {
+    patchConfig.mutate(
+      {
+        sub: `v1/default/banks/${bank}/config`,
+        body: { updates: { [OBSERVATION_SCOPES_KEY]: rowsToScopes(effectiveScopeRows) } },
+      },
+      {
+        onSuccess: () => setScopeRows(null),
+        onError: (e) => setToastErr((e as Error)?.message || 'Failed to update observation scopes'),
+      },
     )
   }
 
@@ -84,6 +153,89 @@ export const ModelsTab: React.FC<{ bank: string }> = ({ bank }) => {
               </li>
             ))}
           </ul>
+        )}
+      </Card>
+      <Card title={`Bank missions — ${bank}`} testId="memws-missions-card">
+        {config.isError ? (
+          <EngineError error={config.error} what="bank config" onRetry={() => config.refetch()} />
+        ) : (
+          <div className="memws-missions">
+            {MISSION_FIELDS.map(({ key, label }) => (
+              <div key={key} className="memws-mission-field">
+                <label htmlFor={`memws-mission-${key}`}>{label}</label>
+                <textarea
+                  id={`memws-mission-${key}`}
+                  data-testid={`memws-mission-${key}`}
+                  rows={3}
+                  value={missionValue(key)}
+                  disabled={patchConfig.isPending}
+                  onChange={(e) => setMissionDrafts((d) => ({ ...d, [key]: e.target.value }))}
+                />
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  data-testid={`memws-mission-save-${key}`}
+                  disabled={patchConfig.isPending}
+                  onClick={() => saveMission(key)}
+                >
+                  Save
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+      <Card title={`Observation scopes — ${bank}`} testId="memws-observation-scopes-card">
+        {config.isError ? (
+          <EngineError error={config.error} what="bank config" onRetry={() => config.refetch()} />
+        ) : (
+          <div className="memws-scopes">
+            <ul className="memws-scopes-list">
+              {effectiveScopeRows.map((row, i) => (
+                <li key={i}>
+                  <input
+                    type="text"
+                    data-testid={`memws-scope-row-${i}`}
+                    value={row}
+                    placeholder="topic:x, topic:y"
+                    disabled={patchConfig.isPending}
+                    onChange={(e) => {
+                      const next = [...effectiveScopeRows]
+                      next[i] = e.target.value
+                      setScopeRows(next)
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    data-testid={`memws-scope-remove-${i}`}
+                    disabled={patchConfig.isPending}
+                    onClick={() => setScopeRows(effectiveScopeRows.filter((_, j) => j !== i))}
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              className="btn ghost sm"
+              data-testid="memws-scope-add"
+              disabled={patchConfig.isPending}
+              onClick={() => setScopeRows([...effectiveScopeRows, ''])}
+            >
+              Add scope
+            </button>
+            <button
+              type="button"
+              className="btn primary sm"
+              data-testid="memws-scope-save"
+              disabled={patchConfig.isPending}
+              onClick={saveScopes}
+            >
+              Save scopes
+            </button>
+          </div>
         )}
       </Card>
     </div>

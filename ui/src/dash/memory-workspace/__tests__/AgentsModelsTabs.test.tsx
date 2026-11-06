@@ -41,6 +41,12 @@ async function mount(node: React.ReactElement) {
   return { host, root, qc }
 }
 
+function setValue(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set
+  setter?.call(el, value)
+  el.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
 describe('AgentsTab', () => {
   beforeEach(() => {
     vi.mocked(client.apiGet).mockReset()
@@ -126,6 +132,77 @@ describe('ModelsTab', () => {
     expect(client.apiPatch).toHaveBeenCalledWith(
       expect.stringContaining('/api/memory/engine/v1/default/banks/shared/config'),
       { updates: { recall_decision_model_prune: true } },
+    )
+  })
+
+  it('renders mission fields from bank config and saves edits via the same PATCH', async () => {
+    vi.mocked(client.apiGet).mockImplementation(async (url: string) => {
+      if (url.includes('/models')) return { embeddings: {}, reranker: {}, decision: { reachable: false } }
+      if (url.includes('/lanes')) return { decision: {}, llm: {}, banks: [], npu: null }
+      if (url.includes('/config')) return { retain_mission: 'extract carefully', reflect_mission: 'be terse' }
+      return {}
+    })
+    vi.mocked(client.apiPatch).mockResolvedValue({})
+    const { host } = await mount(React.createElement(ModelsTab, { bank: 'shared' }))
+    const retainField = host.querySelector<HTMLTextAreaElement>('[data-testid="memws-mission-retain_mission"]')
+    expect(retainField?.value).toBe('extract carefully')
+
+    await act(async () => {
+      setValue(retainField!, 'extract more carefully')
+    })
+    const saveBtn = host.querySelector<HTMLButtonElement>('[data-testid="memws-mission-save-retain_mission"]')!
+    await act(async () => {
+      saveBtn.click()
+    })
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+    }
+    expect(client.apiPatch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/memory/engine/v1/default/banks/shared/config'),
+      { updates: { retain_mission: 'extract more carefully' } },
+    )
+  })
+
+  it('renders and edits default_observation_scopes as a tag-scope list', async () => {
+    vi.mocked(client.apiGet).mockImplementation(async (url: string) => {
+      if (url.includes('/models')) return { embeddings: {}, reranker: {}, decision: { reachable: false } }
+      if (url.includes('/lanes')) return { decision: {}, llm: {}, banks: [], npu: null }
+      if (url.includes('/config')) return { default_observation_scopes: [['project:*'], ['topic:x', 'topic:y']] }
+      return {}
+    })
+    vi.mocked(client.apiPatch).mockResolvedValue({})
+    const { host } = await mount(React.createElement(ModelsTab, { bank: 'shared' }))
+    const row0 = host.querySelector<HTMLInputElement>('[data-testid="memws-scope-row-0"]')
+    const row1 = host.querySelector<HTMLInputElement>('[data-testid="memws-scope-row-1"]')
+    expect(row0?.value).toBe('project:*')
+    expect(row1?.value).toBe('topic:x, topic:y')
+
+    const addBtn = host.querySelector<HTMLButtonElement>('[data-testid="memws-scope-add"]')!
+    await act(async () => {
+      addBtn.click()
+    })
+    const row2 = host.querySelector<HTMLInputElement>('[data-testid="memws-scope-row-2"]')!
+    await act(async () => {
+      setValue(row2, 'agent:*')
+    })
+    const saveBtn = host.querySelector<HTMLButtonElement>('[data-testid="memws-scope-save"]')!
+    await act(async () => {
+      saveBtn.click()
+    })
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      })
+    }
+    expect(client.apiPatch).toHaveBeenCalledWith(
+      expect.stringContaining('/api/memory/engine/v1/default/banks/shared/config'),
+      {
+        updates: {
+          default_observation_scopes: [['project:*'], ['topic:x', 'topic:y'], ['agent:*']],
+        },
+      },
     )
   })
 })
