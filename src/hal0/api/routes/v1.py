@@ -32,6 +32,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+import httpx
 import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
@@ -1892,6 +1893,108 @@ async def _maybe_run_omni_loop(request: Request, body: dict[str, Any]) -> Respon
 @router.post("/completions")
 async def completions(request: Request, dispatcher: DispatcherDep) -> Response:
     return await _dispatch_and_forward(request, dispatcher)
+
+
+@router.post("/systemone")
+async def systemone(request: Request) -> Response:
+    """Hindsight's "System One" decision gate — fast, cheap, frequent calls.
+
+    Historically this bypassed the hal0 router entirely: clients hit the
+    FLM/decision slot's port directly, so the request never counted as
+    slot activity and ``idle_timeout_s`` unloaded the slot mid-use. This
+    route gives it an actual home:
+
+    1. If any configured slot sets ``[npu].decision`` (EXPERIMENTAL,
+       usually unset), forward there with priority 0 (admission jumps
+       ahead of queued chat — see ``hal0.dispatcher.admission``), lazy-load
+       it like chat does, and stamp slot activity so the idle timer resets.
+    2. Otherwise (the default), proxy straight to the CPU hs-decide
+       System One server configured under ``[memory.decision]``.
+
+    Either way the client gets exactly what it would have gotten hitting
+    the backend directly — same body in, same body/status out.
+    """
+    body = await _read_json_body(request)
+    cfg = getattr(request.app.state, "hal0_config", None)
+    decision_cfg = getattr(getattr(cfg, "memory", None), "decision", None)
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+
+    slot_name = await _find_decision_slot(slot_manager, body.get("model"))
+    if slot_name is not None:
+        return await _forward_to_decision_slot(request, slot_manager, slot_name, body)
+
+    base_url = getattr(decision_cfg, "base_url", "http://127.0.0.1:9178")
+    default_model = getattr(decision_cfg, "model", "hs-decide-1-flash")
+    timeout_s = getattr(decision_cfg, "timeout_s", 30.0)
+    if not body.get("model"):
+        body = {**body, "model": default_model}
+    return await _proxy_to_decision_server(base_url, timeout_s, body)
+
+
+async def _find_decision_slot(slot_manager: Any, requested_model: Any) -> str | None:
+    """Return the first slot whose ``[npu].decision`` tag is set, if any.
+
+    EXPERIMENTAL opt-in path (course correction: decision calls default to
+    the CPU hs-decide server, NOT an FLM slot). When more than one slot
+    configures a decision tag, prefer the one whose tag matches the
+    requested ``model`` (``d3:*``); fall back to the first configured one.
+    """
+    if slot_manager is None:
+        return None
+    try:
+        configs = await slot_manager.iter_configs()
+    except Exception:  # defensive — a config read failure must not 500 /v1/systemone
+        return None
+    candidates = [c for c in configs if (c.get("npu") or {}).get("decision")]
+    if not candidates:
+        return None
+    if requested_model:
+        for c in candidates:
+            if c["npu"]["decision"] == requested_model:
+                return c.get("name")
+    return candidates[0].get("name")
+
+
+async def _forward_to_decision_slot(
+    request: Request,
+    slot_manager: Any,
+    slot_name: str,
+    body: dict[str, Any],
+) -> Response:
+    """Lazy-load ``slot_name``, forward with decision priority, stamp activity."""
+    from hal0.dispatcher.admission import PRIORITY_DECISION, REGISTRY as admission_registry
+
+    await slot_manager.load(slot_name)
+    cfg = await slot_manager.get_config(slot_name)
+    port = cfg.get("port")
+    _stamp_slot_last_used(request.app.state, slot_name)
+    admission_registry.configure(slot_name, cfg.get("max_inflight"))
+    timeout_s = getattr(
+        getattr(getattr(request.app.state, "hal0_config", None), "memory", None),
+        "decision",
+        None,
+    )
+    read_timeout_s = getattr(timeout_s, "timeout_s", 30.0)
+    async with admission_registry.acquire(slot_name, PRIORITY_DECISION, timeout_s=1800.0):
+        resp = await _proxy_to_decision_server(f"http://127.0.0.1:{port}", read_timeout_s, body)
+    _touch_npu_shadow_count(request, slot_name)
+    return resp
+
+
+async def _proxy_to_decision_server(base_url: str, timeout_s: float, body: dict[str, Any]) -> Response:
+    """Raw proxy of a /v1/systemone call — same shape in, same shape out."""
+    url = base_url.rstrip("/") + "/v1/systemone"
+    async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=timeout_s)) as client:
+        try:
+            upstream_resp = await client.post(url, json=body)
+        except httpx.HTTPError as exc:
+            from hal0.dispatcher.router import UpstreamUnavailable
+
+            raise UpstreamUnavailable(
+                f"upstream decision server {url} did not respond: {exc}",
+                details={"url": url},
+            ) from exc
+    return _wrap_npu_trio_response(upstream_resp)
 
 
 @router.post("/embeddings")
