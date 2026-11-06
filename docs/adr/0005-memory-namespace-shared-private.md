@@ -3,7 +3,9 @@
 ## Status
 
 **ACCEPTED (operator decision, 2026-08-31).** Shipped together with the
-server-side bank consolidation performed the same night.
+server-side bank consolidation performed the same night. The engine bank
+that backs `shared` is now configurable; see ADR-0052, which supersedes the
+bank layout here and leaves the namespace grammar as written.
 
 ## Context
 

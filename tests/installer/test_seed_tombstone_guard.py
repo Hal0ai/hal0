@@ -69,7 +69,7 @@ def test_every_curated_seed_name_can_be_tombstoned(tmp_path: Path) -> None:
         "flm",
         "tts",
         "rerank",
-        "utility",
+        "memory",
         "img",
         "agent",
         "brain",
@@ -121,7 +121,7 @@ def test_the_seed_loop_checks_tombstones_before_copying() -> None:
     assert "slot_seed_tombstoned" in text
     tombstone_check_pos = text.index('if slot_seed_tombstoned "${seed_slot}"; then')
     loop_pos = text.index(
-        "for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do"
+        "for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do"
     )
     cp_pos = text.index('cp "${SLOT_SRC}" "${SLOT_TOML}"')
     assert loop_pos < tombstone_check_pos < cp_pos

@@ -68,6 +68,24 @@ hal0 memory migrate unify --source BANK [--source BANK ...] [--target shared]
 `--source` is repeatable and required. `--target` defaults to `"shared"`. Defaults to
 dry-run unless `--apply` is given. `--on-conflict` defaults to `skip`.
 
+### `memory migrate platform`
+
+```sh
+hal0 memory migrate platform [--target BANK] [--source shared] [--agents-bank agents]
+                             [--apply|--dry-run] [--skip-clone] [--skip-bank-config] [--json]
+```
+
+Moves the platform memory into the bank named by `[memory] bank` (ADR-0052).
+`--target` defaults to that config value. The command clones `--source`
+(default `shared`) into `--target` with the engine's clone call, folds the
+retired `--agents-bank` (default `agents`, skipped when it does not exist) into
+the same target, and then compares fact counts, exiting 1 if the target is
+short. It is a dry run unless `--apply` is given, never modifies or deletes the
+source banks, and never edits `hal0.toml`. The target must not exist yet; use
+`--skip-clone` to fold and verify a target that already holds the clone.
+`--skip-bank-config` leaves the source's config overrides, directives and
+webhooks behind. `--apply` needs the engine's export and import APIs enabled.
+
 ## `hal0 runner-images` — manage the runner-image catalogue
 
 Talks to the runner-image store/sync/pull/rm service layer directly (not

@@ -420,3 +420,60 @@ async def test_forward_streaming_500_body_read_is_size_capped() -> None:
         assert received == body[: len(received)]
     finally:
         await dispatcher.aclose()
+
+
+# ── per-request read timeout (memory engine's llm_timeout_s) — #3347 ─────────
+
+
+async def _read_timeout_seen(call: UpstreamCall, *, default_s: float = 300.0) -> float:
+    """Forward ``call`` and return the read timeout httpx applied to the request."""
+    seen: list[float | None] = []
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen.append(req.extensions["timeout"]["read"])
+        return httpx.Response(200, json={})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        timeout=httpx.Timeout(5.0, read=default_s),
+    )
+    dispatcher = Dispatcher(http_client=client, direct_read_timeout_s=default_s)
+    try:
+        await dispatcher.forward(call)
+    finally:
+        await dispatcher.aclose()
+    assert len(seen) == 1 and seen[0] is not None
+    return seen[0]
+
+
+@pytest.mark.asyncio
+async def test_forward_honours_a_longer_per_request_read_timeout() -> None:
+    call = _call(body=b"{}")
+    call.read_timeout_s = 900.0
+    assert await _read_timeout_seen(call) == 900.0
+
+
+@pytest.mark.asyncio
+async def test_forward_never_shortens_the_default_read_timeout() -> None:
+    call = _call(body=b"{}")
+    call.read_timeout_s = 60.0
+    assert await _read_timeout_seen(call) == 300.0
+
+
+@pytest.mark.asyncio
+async def test_forward_without_an_override_uses_the_client_default() -> None:
+    assert await _read_timeout_seen(_call(body=b"{}")) == 300.0
+
+
+@pytest.mark.asyncio
+async def test_forward_timeout_error_names_the_overridden_deadline() -> None:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(_read_timeout_handler))
+    dispatcher = Dispatcher(http_client=client)
+    call = _call()
+    call.read_timeout_s = 900.0
+    try:
+        with pytest.raises(UpstreamTimeout) as ei:
+            await dispatcher.forward(call)
+        assert ei.value.details["timeout_s"] == 900.0
+    finally:
+        await dispatcher.aclose()
