@@ -163,12 +163,17 @@ class NpuConfig(BaseModel):
         default=None,
         pattern=r"^d3:[A-Za-z0-9_.-]+$",
         description=(
-            "Decision-model tag (FLM's small side model for POST /v1/systemone, "
-            "e.g. 'd3:lite'). Must match 'd3:<name>'. When set, FLMProvider "
+            "EXPERIMENTAL / optional. Decision-model tag (FLM's small side "
+            "model, e.g. 'd3:lite') for a slot that wants to serve decision "
+            "calls itself. Must match 'd3:<name>'. When set, FLMProvider "
             "appends 'flm serve ... --decision <tag>' and exports "
             "HAL0_FLM_DECISION so the container/native argv builder renders "
             "it (shared tail in _flm_shadow_role_args). FLM reserves ~1.8GB "
-            "extra NPU memory when enabled. Absent means decision support is off."
+            "extra NPU memory when enabled. Most deployments do NOT set "
+            "this: Hindsight decision calls (POST /v1/systemone) are served "
+            "by the CPU hs-decide System One server configured under "
+            "[memory.decision] by default, not by an FLM slot. Absent means "
+            "this slot has no decision model."
         ),
     )
     # NOTE: FLM has no per-role model selection — ``--asr`` / ``--embed`` are
