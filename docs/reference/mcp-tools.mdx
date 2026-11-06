@@ -204,7 +204,7 @@ the slot's current name; an unknown id returns `404 slot.not_found`.
 | `mcp_client_list` | `GET /api/mcp/clients` |
 | `mcp_catalog` | `GET /api/mcp/catalog` |
 | `profile_generate` | `POST /api/profiles/generate` |
-| `memory_search`, `memory_list`, `memory_recall`, `memory_reflect`, `memory_history`, `memory_mental_model_list`, `memory_mental_model_get`, `memory_directive_list`, `memory_directive_get`, `memory_operation_list`, `memory_operation_get`, `memory_tags_list`, `memory_bank_stats` | delegate to `hal0-memory` — see below |
+| `memory_search`, `memory_list`, `memory_recall`, `memory_reflect`, `memory_history`, `memory_mental_model_list`, `memory_mental_model_get`, `memory_directive_list`, `memory_directive_get`, `memory_operation_list`, `memory_operation_get`, `memory_tags_list`, `memory_bank_stats`, `memory_kb_tree`, `memory_kb_read`, `memory_documents_list`, `memory_documents_get` | delegate to `hal0-memory` — see below |
 
 ### Autonomous — write (no approval; reversible, low blast radius)
 
@@ -299,7 +299,7 @@ policy.
 Unlike `hal0-admin`, each tool here registers with a real typed signature, so
 `tools/list` returns real per-field schemas, not an opaque `args` blob.
 
-hal0-memory registers 26 tools total. Gating tier is classified the same way as
+hal0-memory registers 30 tools total. Gating tier is classified the same way as
 the admin tools above — via `AUTONOMOUS_READ_TOOLS` / `AUTONOMOUS_WRITE_TOOLS`
 / `GATED_TOOLS` in `hal0.mcp.admin` (the standalone mount additionally
 hard-gates its two delete tools through its own local list, checked first —
@@ -322,6 +322,10 @@ same verdict, belt and braces).
 | `memory_operation_get` | `id` | one async operation's status — the poll target for `memory_add`'s `operation_id`, `memory_mental_model_refresh`, `memory_bank_consolidate`. A completed retain reports its extraction yield: `facts_extracted`, plus `nothing_learned` and a `notice` when zero facts made it into memory. A zero-yield retain of an already-extracted document instead carries `document_fact_count` and a "content was already known" `notice` |
 | `memory_tags_list` | none | tags in use in a bank, with usage counts |
 | `memory_bank_stats` | none | node/link/observation/operation counts for a bank |
+| `memory_kb_tree` | none | a bank's knowledge-base page tree (pages Hindsight synthesizes from the bank) |
+| `memory_kb_read` | `page_id` | one knowledge-base page's content |
+| `memory_documents_list` | none | a bank's retained documents; filter with `q`, `tags`, `tags_match`, page with `limit`/`offset` |
+| `memory_documents_get` | `document_id` | one retained document |
 
 **Autonomous — write** (reversible, low blast radius)
 

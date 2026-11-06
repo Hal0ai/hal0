@@ -186,6 +186,34 @@ def test_delete_slot_then_release_frees_port(tmp_path: Path) -> None:
     assert auth.is_free(port, include_listeners=False) is True
 
 
+# ── hermetic listeners (#3465) ───────────────────────────────────────────────
+
+
+def test_allocation_ignores_ambient_host_listeners(tmp_path: Path) -> None:
+    """A real socket bound on the host must not change what the pool grants.
+
+    ``PortAuthority`` counts live LISTEN sockets in the pool as claims — right
+    on a real box, wrong for a unit test, where the answer would depend on
+    whatever the dev/CI machine happens to be listening on (#3465). The
+    suite-wide fixture in ``tests/conftest.py`` blinds that scan, so a port
+    that IS bound on the host is still granted here. The port is an ephemeral
+    one this test binds itself, so the test needs no particular host port to
+    be free.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as bound:
+        bound.bind(("127.0.0.1", 0))
+        bound.listen(1)
+        host_port = bound.getsockname()[1]
+
+        ident, auth = _stores(tmp_path, pool=(host_port, host_port))
+        sid = _slot(ident, "a")
+        # include_listeners defaults to True: this is the path that used to
+        # skip the bound port and hand out the next one instead.
+        assert auth.acquire(sid, preferred=host_port) == host_port
+
+
 # ── exhaustion ────────────────────────────────────────────────────────────────
 
 

@@ -538,6 +538,20 @@ function useNavItems() {
       ...(memoryEnabled ? [{ id: "memory", label: "Memory" }] : []),
       { id: "mcp", label: "MCP" },
     ] },
+    // Memory workspace (#memworkspace): the Hindsight 1.2 showcase — bank
+    // switcher + Overview/KB/Mental models/Directives/Operations/Agents/
+    // Models tabs. Separate route from the legacy #memory tab above (which
+    // stays as the v2 overview/bank-workspace shell); gated the same way.
+    ...(memoryEnabled ? [{ id: "memworkspace", label: "Memory", icon: Icons.memory, children: [
+      { id: "memworkspace/overview", label: "Overview",
+        match: (route, param) => route === "memworkspace" && (!param || param === "overview") },
+      { id: "memworkspace/kb", label: "Knowledge base" },
+      { id: "memworkspace/mental-models", label: "Mental models" },
+      { id: "memworkspace/directives", label: "Directives" },
+      { id: "memworkspace/operations", label: "Operations" },
+      { id: "memworkspace/agents", label: "Agents" },
+      { id: "memworkspace/models", label: "Models" },
+    ] }] : []),
     // Services (#services): dedicated companion-service management page
     // (status + lifecycle + mDNS). The sidebar-bottom ServiceLinks zone
     // stays as the quick external-launch shortcuts; this is the manager.

@@ -43,6 +43,11 @@ class RoleSlotCandidate(BaseModel):
     capabilities: tuple[str, ...] = ()
     device_class: str | None = None
     role_hint: str | None = None
+    #: The slot's routable NAME. ``hal0/<name>`` resolves by slot name
+    #: (normalize.resolver._slot_matches_name), so a lane id built from
+    #: ``label`` can name a slot that does not exist. ``label`` is a
+    #: mutable display label and may differ.
+    name: str | None = None
 
 
 class RoleSlotEntry(BaseModel):
@@ -55,6 +60,9 @@ class RoleSlotEntry(BaseModel):
     ready: bool
     capabilities: tuple[str, ...]
     basis: str
+    #: The slot's routable NAME (see RoleSlotCandidate.name). None when
+    #: the role has no slot behind it.
+    name: str | None = None
 
 
 class RoleSlotMap(BaseModel):
@@ -100,7 +108,14 @@ def candidate_from_slot_mapping(slot: Mapping[str, Any]) -> RoleSlotCandidate:
         label=_string(
             slot.get("label") or slot.get("name") or slot.get("alias") or slot.get("slug")
         ),
-        model=_string(slot.get("model_id") or slot.get("model") or slot.get("default_model")),
+        name=_string(
+            slot.get("name") or slot.get("label") or slot.get("alias") or slot.get("slug")
+        ),
+        model=_string(
+            slot.get("model_default")
+            if "model_default" in slot
+            else slot.get("model_id") or slot.get("model") or slot.get("default_model")
+        ),
         ready=ready,
         capabilities=tuple(sorted(capabilities)),
         device_class=device_class.lower() if device_class else None,
@@ -150,6 +165,7 @@ def _entry(
             ready=False,
             capabilities=(),
             basis=basis,
+            name=None,
         )
     return RoleSlotEntry(
         role=role,
@@ -159,18 +175,28 @@ def _entry(
         ready=candidate.ready,
         capabilities=candidate.capabilities,
         basis=basis,
+        name=candidate.name,
     )
 
 
-def resolve_role_slots(agent_id: str, slots: Sequence[RoleSlotCandidate]) -> RoleSlotMap:
+def resolve_role_slots(
+    agent_id: str,
+    slots: Sequence[RoleSlotCandidate],
+    *,
+    auxiliary_slot: str | None = "utility",
+    npu_fallback: bool = True,
+) -> RoleSlotMap:
     """Return the complete deterministic role map for an agent."""
     normalized = tuple(slots)
     main = _main_candidate(normalized)
-    utility = next(
+    auxiliary = next(
         (
             slot
             for slot in normalized
-            if _matches(slot, "utility") and slot.ready and slot.model and _llm_capable(slot)
+            if auxiliary_slot is not None
+            and _matches(slot, auxiliary_slot)
+            and slot.model
+            and _llm_capable(slot)
         ),
         None,
     )
@@ -187,9 +213,9 @@ def resolve_role_slots(agent_id: str, slots: Sequence[RoleSlotCandidate]) -> Rol
     for role in ROLE_ORDER:
         if role in {"main", "vision"}:
             entries.append(_entry(role, main, basis="main"))
-        elif role in _UTILITY_ROLES and utility is not None:
-            entries.append(_entry(role, utility, basis="utility"))
-        elif role in _UTILITY_ROLES and npu is not None:
+        elif role in _UTILITY_ROLES and auxiliary is not None:
+            entries.append(_entry(role, auxiliary, basis=auxiliary_slot or "main"))
+        elif role in _UTILITY_ROLES and npu_fallback and npu is not None:
             entries.append(_entry(role, npu, basis="npu_virtual", model="hal0/npu"))
         else:
             entries.append(_entry(role, main, basis="main_fallback"))

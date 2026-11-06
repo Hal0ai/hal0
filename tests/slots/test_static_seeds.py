@@ -23,7 +23,7 @@ EXPECTED_10 = frozenset(
         "flm",
         "tts",
         "rerank",
-        "utility",
+        "memory",
         "img",
         "agent",
         "brain",
