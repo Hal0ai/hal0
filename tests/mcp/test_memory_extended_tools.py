@@ -105,6 +105,22 @@ class _FakeWrapper:
         self._record("list_tags", **kwargs)
         return {"items": [], "total": 0}
 
+    async def knowledge_base_tree(self, **kwargs: Any) -> dict[str, Any]:
+        self._record("knowledge_base_tree", **kwargs)
+        return {"nodes": [{"id": "f1", "name": "Showcase"}]}
+
+    async def knowledge_base_page(self, page_id: str, **kwargs: Any) -> dict[str, Any]:
+        self._record("knowledge_base_page", page_id=page_id, **kwargs)
+        return {"id": page_id, "content": "hello"}
+
+    async def list_documents(self, **kwargs: Any) -> dict[str, Any]:
+        self._record("list_documents", **kwargs)
+        return {"items": [], "total": 0}
+
+    async def get_document(self, document_id: str, **kwargs: Any) -> dict[str, Any]:
+        self._record("get_document", document_id=document_id, **kwargs)
+        return {"id": document_id, "original_text": "hi"}
+
     async def bank_stats(self, **kwargs: Any) -> dict[str, Any]:
         self._record("bank_stats", **kwargs)
         return {"bank_id": "shared"}
@@ -381,6 +397,37 @@ async def test_tags_list_happy_path(wrapper: _FakeWrapper, dispatcher: Any) -> N
     out = await dispatcher("memory_tags_list", {})
     assert out["status"] == "ok"
     assert wrapper._last("list_tags")["dataset"] == "shared"
+
+
+@pytest.mark.asyncio
+async def test_kb_tree_happy_path(wrapper: _FakeWrapper, dispatcher: Any) -> None:
+    out = await dispatcher("memory_kb_tree", {})
+    assert out["status"] == "ok"
+    assert out["nodes"][0]["id"] == "f1"
+    assert wrapper._last("knowledge_base_tree")["dataset"] == "shared"
+
+
+@pytest.mark.asyncio
+async def test_kb_read_happy_path(wrapper: _FakeWrapper, dispatcher: Any) -> None:
+    out = await dispatcher("memory_kb_read", {"page_id": "p1"})
+    assert out["status"] == "ok"
+    assert out["content"] == "hello"
+    assert wrapper._last("knowledge_base_page")["page_id"] == "p1"
+
+
+@pytest.mark.asyncio
+async def test_documents_list_happy_path(wrapper: _FakeWrapper, dispatcher: Any) -> None:
+    out = await dispatcher("memory_documents_list", {})
+    assert out["status"] == "ok"
+    assert wrapper._last("list_documents")["dataset"] == "shared"
+
+
+@pytest.mark.asyncio
+async def test_documents_get_happy_path(wrapper: _FakeWrapper, dispatcher: Any) -> None:
+    out = await dispatcher("memory_documents_get", {"document_id": "d1"})
+    assert out["status"] == "ok"
+    assert out["original_text"] == "hi"
+    assert wrapper._last("get_document")["document_id"] == "d1"
 
 
 @pytest.mark.asyncio

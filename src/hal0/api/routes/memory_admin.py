@@ -1102,6 +1102,37 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/mental-models/{model_id}/history",
         "/v1/default/banks/{bank_id}/mental-models/{model_id}/history",
     ),
+    # knowledge base (folders/pages tree, per-page read/refresh — #showcase)
+    (
+        "GET",
+        "/banks/{bank_id}/knowledge-base/tree",
+        "/v1/default/banks/{bank_id}/knowledge-base/tree",
+    ),
+    (
+        "POST",
+        "/banks/{bank_id}/knowledge-base/folders",
+        "/v1/default/banks/{bank_id}/knowledge-base/folders",
+    ),
+    (
+        "POST",
+        "/banks/{bank_id}/knowledge-base/pages",
+        "/v1/default/banks/{bank_id}/knowledge-base/pages",
+    ),
+    (
+        "GET",
+        "/banks/{bank_id}/knowledge-base/pages/{page_id}",
+        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}",
+    ),
+    (
+        "PATCH",
+        "/banks/{bank_id}/knowledge-base/pages/{page_id}",
+        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}",
+    ),
+    (
+        "POST",
+        "/banks/{bank_id}/knowledge-base/pages/{page_id}/refresh",
+        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}/refresh",
+    ),
     # directives
     ("GET", "/banks/{bank_id}/directives", "/v1/default/banks/{bank_id}/directives"),
     ("POST", "/banks/{bank_id}/directives", "/v1/default/banks/{bank_id}/directives"),

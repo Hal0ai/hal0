@@ -461,6 +461,12 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         "memory_operation_get",
         "memory_tags_list",
         "memory_bank_stats",
+        # Hindsight 1.2 showcase: knowledge-base pages + documents (read-only
+        # per hal0.mcp.memory ToolAnnotations).
+        "memory_kb_tree",
+        "memory_kb_read",
+        "memory_documents_list",
+        "memory_documents_get",
         # Services
         "service_list",
         "service_health",
@@ -3381,6 +3387,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "memory_operation_retry": "Re-queue a failed operation.",
     "memory_tags_list": "List tags in use in a bank, with usage counts.",
     "memory_bank_stats": "Node/link/observation/operation counts for a bank (read-only).",
+    "memory_kb_tree": "Knowledge-base page tree for a bank (read-only).",
+    "memory_kb_read": "Read one knowledge-base page (read-only).",
+    "memory_documents_list": "List a bank's retained documents (read-only).",
+    "memory_documents_get": "Get one retained document (read-only).",
     "memory_bank_consolidate": (
         "Trigger the engine's world/experience -> observation consolidation pass "
         "early. Returns {operation_id}; not destructive (source facts are kept)."
