@@ -4,7 +4,8 @@ import { useMemoryEngineQuery, useMemoryLanes } from '@/api/hooks/useMemoryWorks
 import {
   fmtAge,
   laneHealthTone,
-  normalizeLlmOpStats,
+  llmCallsByOperation,
+  llmOpStatsPath,
   oldestPendingAge,
   sortBanksByPressure,
   totalQueueDepth,
@@ -15,7 +16,7 @@ import { Card, EngineError } from './shared'
 export const OverviewTab: React.FC<{ bank: string }> = ({ bank }) => {
   const lanes = useMemoryLanes()
   const stats = useMemoryEngineQuery<Record<string, unknown>>(`v1/default/banks/${encodeURIComponent(bank)}/stats`)
-  const llmStats = useMemoryEngineQuery<unknown>('v1/default/llm-requests/stats')
+  const llmStats = useMemoryEngineQuery<unknown>(llmOpStatsPath(bank))
 
   const banks: LaneBankRow[] = useMemo(
     () =>
@@ -29,7 +30,7 @@ export const OverviewTab: React.FC<{ bank: string }> = ({ bank }) => {
       ),
     [lanes.data],
   )
-  const llmOps = useMemo(() => normalizeLlmOpStats(llmStats.data), [llmStats.data])
+  const llmOps = useMemo(() => llmCallsByOperation(llmStats.data), [llmStats.data])
 
   if (lanes.isError) return <EngineError error={lanes.error} what="lanes" onRetry={() => lanes.refetch()} />
 
@@ -95,15 +96,22 @@ export const OverviewTab: React.FC<{ bank: string }> = ({ bank }) => {
           <pre className="mono small memws-pre">{JSON.stringify(stats.data ?? {}, null, 2)}</pre>
         )}
       </Card>
-      <Card title="LLM requests by operation">
+      <Card title="LLM requests by operation" testId="memws-llm-ops-card">
         {llmStats.isError ? (
           <EngineError error={llmStats.error} what="llm stats" onRetry={() => llmStats.refetch()} />
+        ) : llmOps.length === 0 ? (
+          <div className="mono small" data-testid="memws-llm-ops-empty">
+            no LLM requests recorded for this bank
+          </div>
         ) : (
           <table className="tbl mono small">
-            <thead><tr><th>operation</th><th>count</th></tr></thead>
+            <thead><tr><th>operation</th><th>calls</th></tr></thead>
             <tbody>
               {llmOps.map((o) => (
-                <tr key={o.operation}><td>{o.operation}</td><td>{o.count}</td></tr>
+                <tr key={o.operation} data-testid={`memws-llm-op-row-${o.operation}`}>
+                  <td>{o.operation}</td>
+                  <td>{o.calls}</td>
+                </tr>
               ))}
             </tbody>
           </table>

@@ -8,6 +8,12 @@ export interface LaneBankRow {
   oldest_pending_age_s: number | null
 }
 
+/** Narrow an unknown value to a plain object map (null for anything else). */
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+}
+
 /** Sort banks by queue pressure: pending desc, then oldest-pending age desc. Stable for ties (bank_id asc). */
 export function sortBanksByPressure(banks: LaneBankRow[]): LaneBankRow[] {
   return [...banks].sort((a, b) => {
@@ -50,31 +56,52 @@ export function laneHealthTone(health: string | undefined): 'ok' | 'warn' | 'bad
   return 'unknown'
 }
 
-export interface LlmOpStat {
-  operation?: string
-  count?: number
-  [key: string]: unknown
+export interface LlmOpCallsRow {
+  operation: string
+  calls: number
 }
 
-/** Normalize an llm-requests/stats payload (whose exact shape varies by op) into sorted {operation,count} rows, desc by count. */
-export function normalizeLlmOpStats(raw: unknown): { operation: string; count: number }[] {
-  if (!raw || typeof raw !== 'object') return []
-  const obj = raw as Record<string, unknown>
-  const byOp = (obj.by_operation ?? obj.operations ?? obj) as unknown
-  const rows: { operation: string; count: number }[] = []
-  if (Array.isArray(byOp)) {
-    for (const r of byOp as LlmOpStat[]) {
-      if (r && typeof r.operation === 'string') rows.push({ operation: r.operation, count: Number(r.count) || 0 })
-    }
-  } else if (byOp && typeof byOp === 'object') {
-    for (const [k, v] of Object.entries(byOp as Record<string, unknown>)) {
-      const count = typeof v === 'number' ? v : typeof v === 'object' && v && 'count' in (v as object)
-        ? Number((v as { count?: unknown }).count) || 0
-        : NaN
-      if (!Number.isNaN(count)) rows.push({ operation: k, count })
+/**
+ * Upstream path for the LLM request stats the Overview card renders.
+ *
+ * Hindsight 1.2.0 (the pinned engine, `HINDSIGHT_API_PIN` in
+ * `src/hal0/memory/engine_upgrade.py`) exposes llm-request stats only on the
+ * bank-scoped route `/v1/default/banks/{bank_id}/llm-requests/stats` — there
+ * is no non-bank `/v1/default/llm-requests/stats`. The engine passthrough
+ * admits `v1/default/banks/**` and forwards query params verbatim, so
+ * `split_by=operation` (the only split the engine honours besides `model`)
+ * is what makes each bucket carry a per-operation `series`.
+ */
+export function llmOpStatsPath(bank: string): string {
+  return `v1/default/banks/${encodeURIComponent(bank)}/llm-requests/stats?split_by=operation`
+}
+
+/**
+ * Project an llm-requests/stats payload into one row per operation.
+ *
+ * The engine answers with time buckets
+ * (`{bank_id, period, trunc, start, buckets[], retention_days}`); each
+ * bucket's `series` maps an operation name to that bucket's `{calls, tokens}`
+ * sums, and is only present when the request asked to split by operation.
+ * Per-operation totals are therefore the sum of `series[*].calls` over the
+ * buckets. Rows are ordered by calls desc, then operation name asc.
+ */
+export function llmCallsByOperation(raw: unknown): LlmOpCallsRow[] {
+  const buckets = asRecord(raw)?.buckets
+  if (!Array.isArray(buckets)) return []
+  const totals = new Map<string, number>()
+  for (const bucket of buckets) {
+    const series = asRecord(asRecord(bucket)?.series)
+    if (!series) continue
+    for (const [operation, sums] of Object.entries(series)) {
+      const calls = asRecord(sums)?.calls
+      if (typeof calls !== 'number' || !Number.isFinite(calls)) continue
+      totals.set(operation, (totals.get(operation) ?? 0) + calls)
     }
   }
-  return rows.sort((a, b) => b.count - a.count)
+  return [...totals.entries()]
+    .map(([operation, calls]) => ({ operation, calls }))
+    .sort((a, b) => b.calls - a.calls || a.operation.localeCompare(b.operation))
 }
 
 /** A knowledge-base page is stale when the backend says so, or (fallback) its content is older than its source_query's trigger would imply — here we only trust the explicit flag. */

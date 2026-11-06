@@ -102,6 +102,43 @@ def test_engine_version_and_health_passthrough(client: TestClient, recorder: _Re
     assert client.get("/api/memory/engine/health").json() == {"status": "ok"}
 
 
+def test_engine_bank_llm_request_stats_passthrough(client: TestClient, recorder: _Recorder) -> None:
+    """The dashboard's "LLM requests by operation" card reads the bank-scoped
+    stats route (#3494). Hindsight 1.2.0 exposes llm-request stats only under
+    /v1/default/banks/{bank_id}/, and only fills each bucket's per-operation
+    `series` when the request asks to split by operation — so the path must
+    survive the allowlist AND the split_by query param must be forwarded."""
+    recorder.respond(
+        "GET",
+        "/v1/default/banks/shared/llm-requests/stats",
+        200,
+        {
+            "bank_id": "shared",
+            "period": "7d",
+            "trunc": "day",
+            "start": "2026-11-01T00:00:00",
+            "buckets": [
+                {
+                    "time": "2026-11-01T00:00:00",
+                    "statuses": {"success": 2},
+                    "total": 2,
+                    "tokens": {"input": 0, "output": 0, "cached": 0, "thoughts": None, "total": 0},
+                    "series": {"retain": {"calls": 2, "tokens": 30}},
+                }
+            ],
+            "retention_days": 7,
+        },
+    )
+    r = client.get(
+        "/api/memory/engine/v1/default/banks/shared/llm-requests/stats?split_by=operation"
+    )
+    assert r.status_code == 200
+    assert r.json()["buckets"][0]["series"]["retain"]["calls"] == 2
+    upstream = recorder.requests[-1]
+    assert upstream["path"] == "/v1/default/banks/shared/llm-requests/stats"
+    assert upstream["params"] == {"split_by": "operation"}
+
+
 def test_engine_post_body_forwarded(client: TestClient, recorder: _Recorder) -> None:
     recorder.respond("POST", "/v1/default/banks/shared/reflect", 200, {"ok": True})
     r = client.post("/api/memory/engine/v1/default/banks/shared/reflect", json={"q": "x"})
