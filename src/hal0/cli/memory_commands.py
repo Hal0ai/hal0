@@ -43,10 +43,14 @@ from hal0.cli._shared import (
     die,
 )
 from hal0.cli.memory_bank_commands import app as bank_app
+from hal0.cli.memory_directive_commands import app as directive_app
+from hal0.cli.memory_kb_commands import app as kb_app
 from hal0.cli.memory_migrate_commands import app as migrate_app
 from hal0.cli.memory_mm_commands import app as mm_app
+from hal0.cli.memory_models_agents_commands import agents_app, models_app
 from hal0.cli.memory_ops_commands import app as ops_app
 from hal0.cli.memory_recall_commands import recall_cmd
+from hal0.cli.memory_spec_commands import app as spec_app
 
 app = typer.Typer(help="Manage hal0 memory (Hindsight engine).")
 console = Console()
@@ -63,6 +67,11 @@ app.add_typer(graph_app, name="graph")
 app.add_typer(bank_app, name="bank")
 app.add_typer(ops_app, name="ops")
 app.add_typer(mm_app, name="mm")
+app.add_typer(spec_app, name="spec")
+app.add_typer(kb_app, name="kb")
+app.add_typer(directive_app, name="directive")
+app.add_typer(models_app, name="models")
+app.add_typer(agents_app, name="agents")
 app.command("recall")(recall_cmd)
 
 #: ``PUT /api/memory/graph`` can restart hindsight-api (daemon-reload + restart,
