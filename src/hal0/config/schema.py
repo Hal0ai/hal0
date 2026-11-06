@@ -159,6 +159,18 @@ class NpuConfig(BaseModel):
         default=True,
         description="Enable chat (LLM) modality on the FLM slot. Default ON.",
     )
+    decision: str | None = Field(
+        default=None,
+        pattern=r"^d3:[A-Za-z0-9_.-]+$",
+        description=(
+            "Decision-model tag (FLM's small side model for POST /v1/systemone, "
+            "e.g. 'd3:lite'). Must match 'd3:<name>'. When set, FLMProvider "
+            "appends 'flm serve ... --decision <tag>' and exports "
+            "HAL0_FLM_DECISION so the container/native argv builder renders "
+            "it (shared tail in _flm_shadow_role_args). FLM reserves ~1.8GB "
+            "extra NPU memory when enabled. Absent means decision support is off."
+        ),
+    )
     # NOTE: FLM has no per-role model selection — ``--asr`` / ``--embed`` are
     # boolean flags that load FLM's single bundled whisper + embed-gemma. There
     # is deliberately no asr_model/embed_model here; the chat model is the
@@ -605,6 +617,22 @@ class SlotConfig(BaseModel):
             "are separate paths, exempted by `pinned`, not by this value. "
             "The ComfyUI img-group slot is never unloaded by idle, pressure "
             "or pre-load eviction, whatever this value says."
+        ),
+    )
+    max_inflight: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-slot admission cap on concurrent forwarded requests "
+            "(hal0.dispatcher.admission). When set, the dispatcher serializes "
+            "requests to this slot through a priority admission queue instead "
+            "of forwarding them all straight through — needed for backends "
+            "that execute one request at a time internally (e.g. FastFlowLM's "
+            "NPU: 'the NPU runs one request at a time'), so a hidden upstream "
+            "queue no longer eats into [dispatcher].direct_read_timeout_s. "
+            "POST /v1/systemone (priority 0, decision) always jumps ahead of "
+            "everything else (priority 1); FIFO within a priority class. "
+            "None preserves today's unlimited-concurrency behavior for a slot."
         ),
     )
     pinned: bool = Field(
@@ -2037,6 +2065,19 @@ class DispatcherConfig(BaseModel):
         default=4,
         ge=1,
         description="Max concurrent upstream parallel prefetches.",
+    )
+    admission_wait_timeout_s: float = Field(
+        default=1800.0,
+        ge=1.0,
+        le=86400.0,
+        description=(
+            "Max seconds a request may wait in a slot's admission queue "
+            "(hal0.dispatcher.admission; only applies to slots with "
+            "max_inflight set) before the dispatcher gives up and returns "
+            "503 with Retry-After, rather than forwarding. The read-timeout "
+            "clock for the forward itself starts only after admission, so "
+            "this bound is independent of [dispatcher].direct_read_timeout_s."
+        ),
     )
 
 
