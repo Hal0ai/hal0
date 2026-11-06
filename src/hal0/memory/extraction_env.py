@@ -66,7 +66,13 @@ from hal0.agents.anchor_window import (
 from hal0.system.seam import SystemCtlSeam
 
 if TYPE_CHECKING:  # pragma: no cover
-    from hal0.config.schema import MemoryGraphConfig
+    from hal0.config.schema import (
+        MemoryDecisionConfig,
+        MemoryGraphConfig,
+        MemoryLaneOpConfig,
+        MemoryLanesConfig,
+        MemoryModelsConfig,
+    )
 
 log = structlog.get_logger(__name__)
 
@@ -227,6 +233,123 @@ _DROP_IN_TEMPLATE = (
     "Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS={retry_backoff_s}\n"
     "Environment=HINDSIGHT_API_RETAIN_WALL_TIMEOUT={wall_timeout_s}\n"
 )
+
+
+#: Second, additive drop-in for the Hindsight 1.2 showcase config
+#: ([memory.models]/[memory.decision]/[memory.lanes]) — kept separate from
+#: ``extraction-model.conf`` (which owns the hal0/memory alias + #1834
+#: extraction limits and is rewritten by the `hal0 memory graph` path) so the
+#: two renderers stay independently testable and a graph-only PUT never
+#: clobbers the showcase lanes, or vice versa. systemd merges all `.conf`
+#: files in the `.d` dir, last-Environment-line-wins on duplicate keys, so the
+#: load order between the two is irrelevant: they never set the same key.
+SHOWCASE_DROP_IN_PATH = DROP_IN_DIR / "showcase-lanes.conf"
+
+#: Op name -> HINDSIGHT_API_<PREFIX>_LLM_* env prefix.
+_LANE_OP_ENV_PREFIX = {
+    "retain": "RETAIN",
+    "consolidation": "CONSOLIDATION",
+    "reflect": "REFLECT",
+    "mental_model_refresh": "MENTAL_MODEL_REFRESH",
+}
+
+
+def render_showcase_env(
+    *,
+    models: MemoryModelsConfig,
+    decision: MemoryDecisionConfig,
+    lanes: MemoryLanesConfig,
+) -> str:
+    """Render the Hindsight 1.2 showcase env block (PLAN.md section 2).
+
+    Single source for the global LLM concurrency cap
+    (``HINDSIGHT_API_LLM_MAX_CONCURRENT``) plus any per-op override — this is
+    the H0-98 fix: before this renderer existed, hal0 only ever wrote the
+    retain-specific cap (see :data:`_DROP_IN_TEMPLATE`), so consolidation /
+    reflect / mental-model-refresh calls queued behind the memory slot's own
+    concurrency with no cap of their own, and an operator had to hand-maintain
+    ``zz-h0-98-llm-global-cap.conf`` to work around it. That hand drop-in
+    should be deleted once this one is installed.
+
+    ``decision.provider == "off"`` omits the decision-model env entirely so
+    hindsight-api falls back to its configured LLM/reranker path.
+    """
+    lines: list[str] = [
+        "# Managed by hal0 ([memory.models]/[memory.decision]/[memory.lanes] in",
+        "# hal0.toml, Hindsight 1.2 showcase — see PLAN.md section 2). Do not edit",
+        "# by hand; this file is fully rewritten on every apply. Retires any",
+        "# hand-maintained zz-h0-98-llm-global-cap.conf drop-in.",
+        "[Service]",
+        f"Environment=HINDSIGHT_API_EMBEDDINGS_PROVIDER={models.embeddings_provider}",
+        f"Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL={models.embeddings_model}",
+        f"Environment=HINDSIGHT_API_RERANKER_PROVIDER={models.reranker_provider}",
+        f"Environment=HINDSIGHT_API_RERANKER_LOCAL_MODEL={models.reranker_model}",
+        "Environment=HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING="
+        + ("true" if models.reranker_bucket_batching else "false"),
+    ]
+
+    if decision.enabled and decision.provider != "off":
+        base_url = (
+            f"http://127.0.0.1:{decision.port}"
+            if decision.provider == "local"
+            else "https://api.hindsight.ai"
+        )
+        lines += [
+            "Environment=HINDSIGHT_API_DECISION_MODEL_PROVIDER=hindsight",
+            f"Environment=HINDSIGHT_API_DECISION_MODEL_BASE_URL={base_url}",
+            f"Environment=HINDSIGHT_API_DECISION_MODEL_MODEL={decision.model}",
+            f"Environment=HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT={decision.max_concurrent}",
+            "Environment=HINDSIGHT_API_DECISION_MODEL_MAX_REQUEST_TOKENS="
+            f"{decision.max_request_tokens}",
+            # hindsight-api requires a non-empty key even for a local,
+            # unauthenticated base URL (verified on CT143 — see
+            # zz-showcase-1.2.conf): omitting it raises a startup ValueError.
+            "Environment=HINDSIGHT_API_DECISION_MODEL_API_KEY=hal0-local-noauth",
+        ]
+
+    lines += [
+        f"Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT={lanes.llm_max_concurrent}",
+        f"Environment=HINDSIGHT_API_LLM_REASONING_EFFORT={lanes.reasoning_effort}",
+        "Environment=HINDSIGHT_API_LLM_STRICT_SCHEMA="
+        + ("true" if lanes.strict_schema else "false"),
+    ]
+
+    for op, prefix in _LANE_OP_ENV_PREFIX.items():
+        op_cfg: MemoryLaneOpConfig = getattr(lanes, op)
+        max_concurrent = (
+            op_cfg.max_concurrent if op_cfg.max_concurrent is not None else lanes.llm_max_concurrent
+        )
+        lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MAX_CONCURRENT={max_concurrent}")
+        if op_cfg.virtual_model is not None:
+            lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MODEL={op_cfg.virtual_model}")
+        if op_cfg.timeout_s is not None:
+            lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_TIMEOUT={op_cfg.timeout_s}")
+        if op_cfg.reasoning_effort is not None:
+            lines.append(
+                f"Environment=HINDSIGHT_API_{prefix}_LLM_REASONING_EFFORT={op_cfg.reasoning_effort}"
+            )
+        if op_cfg.strict_schema is not None:
+            lines.append(
+                f"Environment=HINDSIGHT_API_{prefix}_LLM_STRICT_SCHEMA="
+                + ("true" if op_cfg.strict_schema else "false")
+            )
+
+    return "\n".join(lines) + "\n"
+
+
+def showcase_drop_in_matches(
+    *,
+    models: MemoryModelsConfig,
+    decision: MemoryDecisionConfig,
+    lanes: MemoryLanesConfig,
+) -> bool:
+    """True when the on-disk showcase drop-in already matches the config."""
+    try:
+        return SHOWCASE_DROP_IN_PATH.read_text(encoding="utf-8") == render_showcase_env(
+            models=models, decision=decision, lanes=lanes
+        )
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def _detail(exc: BaseException) -> str:
