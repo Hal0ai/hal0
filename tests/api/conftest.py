@@ -53,20 +53,6 @@ def isolated_app_client(tmp_hal0_home: str) -> Iterator[tuple[FastAPI, TestClien
         yield app, c
 
 
-@pytest.fixture(autouse=True)
-def _hermetic_port_listeners(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Blind the port registry to the HOST's real sockets.
-
-    hal0.ports counts live listeners as claims (correct on a real box —
-    auto-assign must not hand out a port something is bound to), but unit
-    tests asserting exact auto-assigned ports would otherwise depend on
-    whatever happens to be listening on the dev/CI machine.
-    """
-    from hal0 import ports as _ports
-
-    monkeypatch.setattr(_ports, "_listener_claims", lambda start, end: [])
-
-
 _Usage = namedtuple("_Usage", "total used free")
 
 

@@ -8,8 +8,9 @@ sidebar:
 import { Aside } from '@astrojs/starlight/components';
 
 This is the second half of the config schema reference. The first half,
-[Config schema](/docs/reference/config-schema/), covers the file layout, `hal0.toml`
-and `slots/<name>.toml`. Everything here follows the same conventions: TOML files are
+[Config schema](/docs/reference/config-schema/), covers the file layout and
+`hal0.toml`; the per-slot files are in
+[Config schema: slot files](/docs/reference/config-schema-slots/). Everything here follows the same conventions: TOML files are
 validated with Pydantic models in `hal0.config.schema`, `hardware.json` and
 `manifest.json` are JSON, and all writes are atomic.
 
