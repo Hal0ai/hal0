@@ -114,6 +114,7 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     memory_admin as memory_admin_routes,
+    memory_lanes as memory_lanes_routes,
 )
 from hal0.api.routes import (
     meta as meta_routes,
@@ -3084,6 +3085,13 @@ def create_app() -> FastAPI:
     # so the engine-agnostic provider routes above stay engine-agnostic.
     app.include_router(
         memory_admin_routes.router,
+        prefix="/api/memory",
+        tags=["memory"],
+    )
+    # Memory showcase surface — allowlisted raw engine passthrough, lanes
+    # status board, coding-agent install helper, models summary.
+    app.include_router(
+        memory_lanes_routes.router,
         prefix="/api/memory",
         tags=["memory"],
     )
