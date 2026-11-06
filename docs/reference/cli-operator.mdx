@@ -57,6 +57,36 @@ This page covers `memory` and the remaining sub-apps, the slot lifecycle timeout
 | `mm refresh <bank> <model_id>` | `bank`, `model_id` | `--json` |
 | `mm history <bank> <model_id>` | `bank`, `model_id` | `--json` |
 
+### `memory directive` (bank directives)
+
+| Command | Args | Flags |
+|---|---|---|
+| `memory directive list <bank>` | `bank` | `--json` |
+| `memory directive add <bank> <text>` | `bank`, `text` | `--json` |
+| `memory directive rm <bank> <directive_id>` | `bank`, `directive_id` | `--json` |
+
+Directives are standing rules the engine applies when it extracts, consolidates and reflects for a bank.
+
+### `memory kb` (knowledge-base pages)
+
+| Command | Args | Flags |
+|---|---|---|
+| `memory kb tree <bank>` | `bank` | `--json` |
+| `memory kb show <bank> <page_id>` | `bank`, `page_id` | `--json` |
+| `memory kb refresh <bank> <page_id>` | `bank`, `page_id` | `--json` |
+
+Knowledge-base pages are documents Hindsight 1.2 synthesizes from a bank's memories. `refresh` queues a rebuild of one page.
+
+### `memory models`, `memory agents`, `memory spec`
+
+| Command | Args | Flags |
+|---|---|---|
+| `memory models show` | — | `--json` |
+| `memory agents install <harness>` | `harness` (e.g. `claude-code`, `cursor`, `codex`) | `--dry-run`, `--json` |
+| `memory spec apply` | — | `--dry-run`, `--bank BANK`, `--api URL` (default `http://127.0.0.1:9177`), `--json` |
+
+`memory models show` lists the embeddings, reranker and decision models from `[memory.models]` and `[memory.decision]`. `memory agents install` wires a coding-agent harness to `hal0-memory`; `--dry-run` prints the installer command and config merge without running or writing anything. `memory spec apply` applies the packaged bank spec (templates, `config_extra`, knowledge-base pages) through Hindsight's `/import`. It is idempotent, and `--dry-run` posts with `dry_run=true`.
+
 ### `memory migrate unify`
 
 ```sh
@@ -67,6 +97,24 @@ hal0 memory migrate unify --source BANK [--source BANK ...] [--target shared]
 
 `--source` is repeatable and required. `--target` defaults to `"shared"`. Defaults to
 dry-run unless `--apply` is given. `--on-conflict` defaults to `skip`.
+
+### `memory migrate platform`
+
+```sh
+hal0 memory migrate platform [--target BANK] [--source shared] [--agents-bank agents]
+                             [--apply|--dry-run] [--skip-clone] [--skip-bank-config] [--json]
+```
+
+Moves the platform memory into the bank named by `[memory] bank` (ADR-0052).
+`--target` defaults to that config value. The command clones `--source`
+(default `shared`) into `--target` with the engine's clone call, folds the
+retired `--agents-bank` (default `agents`, skipped when it does not exist) into
+the same target, and then compares fact counts, exiting 1 if the target is
+short. It is a dry run unless `--apply` is given, never modifies or deletes the
+source banks, and never edits `hal0.toml`. The target must not exist yet; use
+`--skip-clone` to fold and verify a target that already holds the clone.
+`--skip-bank-config` leaves the source's config overrides, directives and
+webhooks behind. `--apply` needs the engine's export and import APIs enabled.
 
 ## `hal0 runner-images` — manage the runner-image catalogue
 

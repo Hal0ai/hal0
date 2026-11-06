@@ -62,12 +62,12 @@ def test_surfaced_tool_schemas_equals_local_plus_admin_minus_excludes() -> None:
     # is the assertion that actually catches a newly-introduced clash).
     assert local_names.isdisjoint(admin_catalog - bc._ADMIN_TOOL_EXCLUDES)
 
-    # #2658: of the 26 memory_* tools the brain surfaces exactly the
+    # #2658: of the 30 memory_* tools the brain surfaces exactly the
     # persona-approved trio, scoped to its own namespace. The predicate is an
-    # allow-set over the memory_ prefix, so a 27th hal0.mcp.memory tool stays
+    # allow-set over the memory_ prefix, so a 31st hal0.mcp.memory tool stays
     # out with zero chat.py changes.
     memory_tools = {t for t in admin_catalog if t.startswith("memory_")}
-    assert len(memory_tools) == 26
+    assert len(memory_tools) == 30
     trio = {"memory_add", "memory_search", "memory_list"}
     assert {t for t in memory_tools if not bc._is_admin_tool_excluded(t)} == trio
     assert surfaced_names & memory_tools == trio

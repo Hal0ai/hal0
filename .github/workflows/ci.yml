@@ -44,7 +44,16 @@ jobs:
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          FILES="$(git diff --name-only "${BASE}" "${HEAD}")"
+          # Classify from the MERGE BASE, not from base.sha. base.sha is the tip
+          # of the base branch at event time and is NOT an ancestor of the PR
+          # head, so a two-dot diff also lists every file the base changed
+          # after the branch point — a backend-only PR was classified as a UI
+          # change and the γ shards ran on it (#3469). The merge base is the
+          # diff the PR actually introduces; fetch-depth: 0 above guarantees
+          # it is available locally.
+          MERGE_BASE="$(git merge-base "${BASE}" "${HEAD}" || echo "${BASE}")"
+          echo "merge base: ${MERGE_BASE}"
+          FILES="$(git diff --name-only "${MERGE_BASE}" "${HEAD}")"
           echo "changed files:"; printf '  %s\n' ${FILES:-"(none)"}
           # Paths that cannot affect the Python package or its tests.
           LIGHT='^(ui/|docs/|screenshots/|\.github/ISSUE_TEMPLATE/|\.github/PULL_REQUEST_TEMPLATE\.md$|[^/]+\.md$|[^/]+\.mdx$|LICENSE$|CODEOWNERS$)'

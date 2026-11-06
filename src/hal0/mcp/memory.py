@@ -1083,6 +1083,72 @@ async def _memory_operation_retry(
     return dict(result) if isinstance(result, dict) else {"result": result}
 
 
+# ── Knowledge base / documents (#showcase) ───────────────────────────────
+
+
+async def _memory_kb_tree(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_kb_tree(dataset?) → the bank's knowledge-base folder/page tree."""
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.knowledge_base_tree(dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"nodes": result}
+
+
+async def _memory_kb_read(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_kb_read(page_id, dataset?) → one knowledge-base page's content
+    and metadata."""
+    page_id = _optional_id(args, "page_id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.knowledge_base_page(page_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"page": result}
+
+
+async def _memory_documents_list(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_documents_list(dataset?, q?, tags?, tags_match?, limit?, offset?)
+    → a bounded page of raw retained documents (id + metadata, not full text)."""
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    q = _optional(args, "q", str)
+    tags_raw = args.get("tags")
+    tags = list(tags_raw) if isinstance(tags_raw, list) else None
+    tags_match = _optional(args, "tags_match", str)
+    limit = _optional_int(args, "limit")
+    offset = _optional_int(args, "offset")
+    result = await wrapper.list_documents(
+        dataset=dataset,
+        client_id=client_id,
+        q=q,
+        tags=tags,
+        tags_match=tags_match,
+        limit=limit,
+        offset=offset,
+    )
+    return dict(result) if isinstance(result, dict) else {"items": result}
+
+
+async def _memory_documents_get(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_documents_get(document_id, dataset?) → one document's full
+    ``original_text`` and metadata."""
+    document_id = _optional_id(args, "document_id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.get_document(document_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"document": result}
+
+
 # ── Tags / bank stats ────────────────────────────────────────────────────
 
 
@@ -1160,6 +1226,10 @@ _MEMORY_HANDLERS = {
     "memory_tags_list": _memory_tags_list,
     "memory_bank_stats": _memory_bank_stats,
     "memory_bank_consolidate": _memory_bank_consolidate,
+    "memory_kb_tree": _memory_kb_tree,
+    "memory_kb_read": _memory_kb_read,
+    "memory_documents_list": _memory_documents_list,
+    "memory_documents_get": _memory_documents_get,
 }
 
 
@@ -1432,6 +1502,18 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
     ),
     "memory_tags_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_kb_tree": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_kb_read": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_documents_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_documents_get": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "memory_bank_stats": ToolAnnotations(
@@ -2201,6 +2283,77 @@ def _memory_tool_definitions() -> dict[str, Tool]:
             ctx,
             "memory_tags_list",
             _merged(args, dataset=dataset, q=q, source=source, limit=limit, offset=offset),
+        )
+
+    @server.tool(
+        name="memory_kb_tree",
+        description="Show a bank's knowledge-base folder/page tree.",
+        annotations=_ANNOTATIONS["memory_kb_tree"],
+    )
+    async def memory_kb_tree(
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        return await _dispatch(ctx, "memory_kb_tree", _merged(args, dataset=dataset))
+
+    @server.tool(
+        name="memory_kb_read",
+        description="Read one knowledge-base page's content and metadata.",
+        annotations=_ANNOTATIONS["memory_kb_read"],
+    )
+    async def memory_kb_read(
+        page_id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        return await _dispatch(
+            ctx, "memory_kb_read", _merged(args, page_id=page_id, dataset=dataset)
+        )
+
+    @server.tool(
+        name="memory_documents_list",
+        description="List raw retained documents in a bank (id + metadata, not full text).",
+        annotations=_ANNOTATIONS["memory_documents_list"],
+    )
+    async def memory_documents_list(
+        dataset: str | None = None,
+        q: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        return await _dispatch(
+            ctx,
+            "memory_documents_list",
+            _merged(
+                args,
+                dataset=dataset,
+                q=q,
+                tags=tags,
+                tags_match=tags_match,
+                limit=limit,
+                offset=offset,
+            ),
+        )
+
+    @server.tool(
+        name="memory_documents_get",
+        description="Get one document's full retained text and metadata.",
+        annotations=_ANNOTATIONS["memory_documents_get"],
+    )
+    async def memory_documents_get(
+        document_id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        return await _dispatch(
+            ctx, "memory_documents_get", _merged(args, document_id=document_id, dataset=dataset)
         )
 
     @server.tool(

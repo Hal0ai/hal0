@@ -2,7 +2,7 @@
 // with stream / severity / source / slot / search filters. The ticker on the collapsed dock draws
 // the same rows (`EventRow`), without the stripe or the detail.
 
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { activityExportUrl } from '@/api/hooks/useActivity'
 import { DOCK_FILTERS_DEFAULT, actorLabel, exportFilters, filterEvents, sourceGroups } from './dock-pure'
 import { _srcHue, _shortTs, highlightFoot } from '../chrome.jsx'
@@ -73,7 +73,7 @@ function ChipGroup({ testid, label, items, value, onPick }) {
   )
 }
 
-export function EventsPane({ events, filters, onFilters, slotNames = [], disconnected = false }) {
+export const EventsPane = memo(function EventsPane({ events, filters, onFilters, slotNames = [], disconnected = false }) {
   const [openIds, setOpenIds] = useState(() => new Set())
   const filtered = filterEvents(events, filters)
   const set = (patch) => onFilters({ ...filters, ...patch })
@@ -142,4 +142,4 @@ export function EventsPane({ events, filters, onFilters, slotNames = [], disconn
       </div>
     </div>
   )
-}
+})

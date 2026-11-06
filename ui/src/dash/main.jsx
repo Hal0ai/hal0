@@ -30,6 +30,7 @@ import { captureUiException } from '@/sentry'
 // Benchmarks page (#benchmarks): a real ES module, imported directly rather
 // than read off a `window.BenchmarksView` global.
 import Benchmarks from './Benchmarks'
+import MemoryWorkspaceView from './memory-workspace/MemoryWorkspaceView'
 import { Dock } from './dock/Dock.jsx'
 import { GpuGateBlockedBanner } from './dock/GpuGateBlockedBanner.jsx'
 import { slotsSub } from './slots-route'
@@ -60,7 +61,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "slots", "models", "logs", "agent", "memory", "settings", "mcp", "board", "services", "benchmarks"];
+const ROUTES = ["dashboard", "slots", "models", "logs", "agent", "memory", "memworkspace", "settings", "mcp", "board", "services", "benchmarks"];
 function parseRoute() {
   const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
@@ -318,6 +319,8 @@ function App() {
       // queue over /api/benchmarks/* (hal0.bench store).
       case "benchmarks":
         return <Benchmarks param={param} />;
+      case "memworkspace":
+        return <MemoryWorkspaceView param={param} />;
       case "settings": return <SettingsShell param={param} />;
       default:         return <div className="view">Not found.</div>;
     }

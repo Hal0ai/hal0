@@ -190,12 +190,12 @@ _DEFAULT_OPENWEBUI_ENV: dict[str, str] = {
     "OPENAI_API_BASE_URLS": "http://host.docker.internal:8080/v1",
     "WEBUI_AUTH": "False",
     "WEBUI_NAME": "hal0",
-    # Title/tag/query helper calls go to the always-on utility slot, not the chat
+    # New installs send title/tag/query helper calls through the agent alias.
     # model. Plain X-OpenWebUI-User-* headers (never the JWT form, so
     # FORWARD_USER_INFO_HEADER_JWT_SECRET is deliberately not written) let hal0
     # tag memory writes per user. OWUI's own memory store stays off: hal0's
     # shared memory is reached over MCP instead.
-    "TASK_MODEL_EXTERNAL": "utility",
+    "TASK_MODEL_EXTERNAL": "hal0/agent",
     "ENABLE_FORWARD_USER_INFO_HEADERS": "True",
     "ENABLE_MEMORIES": "False",
 }

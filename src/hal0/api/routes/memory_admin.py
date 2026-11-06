@@ -1102,6 +1102,37 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/mental-models/{model_id}/history",
         "/v1/default/banks/{bank_id}/mental-models/{model_id}/history",
     ),
+    # knowledge base (folders/pages tree, per-page read/refresh — #showcase)
+    (
+        "GET",
+        "/banks/{bank_id}/knowledge-base/tree",
+        "/v1/default/banks/{bank_id}/knowledge-base/tree",
+    ),
+    (
+        "POST",
+        "/banks/{bank_id}/knowledge-base/folders",
+        "/v1/default/banks/{bank_id}/knowledge-base/folders",
+    ),
+    (
+        "POST",
+        "/banks/{bank_id}/knowledge-base/pages",
+        "/v1/default/banks/{bank_id}/knowledge-base/pages",
+    ),
+    (
+        "GET",
+        "/banks/{bank_id}/knowledge-base/pages/{page_id}",
+        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}",
+    ),
+    (
+        "PATCH",
+        "/banks/{bank_id}/knowledge-base/pages/{page_id}",
+        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}",
+    ),
+    (
+        "POST",
+        "/banks/{bank_id}/knowledge-base/pages/{page_id}/refresh",
+        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}/refresh",
+    ),
     # directives
     ("GET", "/banks/{bank_id}/directives", "/v1/default/banks/{bank_id}/directives"),
     ("POST", "/banks/{bank_id}/directives", "/v1/default/banks/{bank_id}/directives"),
@@ -1141,6 +1172,12 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
     # bank templates
     ("GET", "/banks/{bank_id}/export", "/v1/default/banks/{bank_id}/export"),
     ("POST", "/banks/{bank_id}/import", "/v1/default/banks/{bank_id}/import"),
+    # POST .../clone?target_bank_id=<new> — async, additive copy of a bank into
+    # a bank that must not exist yet (engine runs export+import in-process, no
+    # LLM). ``hal0 memory migrate platform`` (ADR-0052) is the caller. Not
+    # destructive, so no DESTRUCTIVE_MEMORY_ROUTES entry; the /api/memory
+    # prefix already classifies it ADMIN.
+    ("POST", "/banks/{bank_id}/clone", "/v1/default/banks/{bank_id}/clone"),
 )
 
 _BODY_METHODS = {"POST", "PUT", "PATCH"}

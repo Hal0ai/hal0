@@ -49,6 +49,18 @@ def test_seed_static_slots_skips_existing(tmp_path: Path) -> None:
     assert "port = 1234" in (dest / "agent.toml").read_text(encoding="utf-8")
 
 
+def test_existing_utility_survives_memory_seed_closer(tmp_path: Path) -> None:
+    installer_root = _fake_installer_root(tmp_path)
+    dest = tmp_path / "slots"
+    dest.mkdir()
+    utility = dest / "utility.toml"
+    utility.write_text('name = "utility"\nport = 8090\n', encoding="utf-8")
+    seeded = seed_static_slots(installer_root=installer_root, slots_dir=dest)
+    assert "memory" in seeded
+    assert "utility" not in seeded
+    assert utility.read_text(encoding="utf-8") == 'name = "utility"\nport = 8090\n'
+
+
 def test_seed_static_slots_idempotent_second_run_noop(tmp_path: Path) -> None:
     installer_root = _fake_installer_root(tmp_path)
     dest = tmp_path / "slots"
@@ -141,8 +153,8 @@ _HERMES_MIN_CONTEXT = HERMES_MINIMUM_CONTEXT_LENGTH
 
 #: Seeds the bundled Hermes agent can be pointed at: ``hal0/agent`` (which falls
 #: back to ``brain`` while the agent slot is model-less), ``hal0/brain``, and
-#: ``hal0/utility`` — the three chat surfaces an operator is told to try.
-_HERMES_REACHABLE_SEEDS = ("agent", "brain", "utility")
+#: The memory profile has a deliberately smaller window and is not an anchor.
+_HERMES_REACHABLE_SEEDS = ("agent", "brain")
 
 _SEED_SRC_DIR = Path(__file__).resolve().parents[2] / "installer" / "etc-hal0" / "slots"
 
@@ -167,7 +179,7 @@ def test_shipped_seed_carries_no_tuning_key_and_names_a_seed_profile(slot_name: 
     [
         ("agent", "agent"),
         ("coder", "coding"),
-        ("utility", "utility"),
+        ("memory", "memory"),
         ("brain", "brain"),
         ("embed", "embedding"),
         ("rerank", "reranking"),

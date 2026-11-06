@@ -124,6 +124,7 @@ def test_registry_declares_three_apply_classes() -> None:
         ("dispatcher.direct_read_timeout_s", "service-restart", [SERVICE_HAL0_API]),
         # [memory] — HindsightProvider constructor arg, built once at boot.
         ("memory.unified_bank", "service-restart", [SERVICE_HAL0_API]),
+        ("memory.bank", "service-restart", [SERVICE_HAL0_API]),
         # [realtime] — read live off app.state.hal0_config.realtime on
         # every WS connect; the settings PUT refreshes app.state in place.
         ("realtime.enabled", "immediate", []),
