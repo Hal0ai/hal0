@@ -667,6 +667,11 @@ def persist_pull_job(job: PullJob) -> None:
     """
     path = pull_job_file(job.model_id)
     try:
+        snapshot = job.as_dict()
+        snapshot["worker_pid"] = os.getpid()
+        token = worker_start_token(os.getpid())
+        if token is not None:
+            snapshot["worker_start_token"] = token
         # model-pull-jobs/ is declared 2775; a bare mkdir under the daemon's
         # UMask=0022 births 2755 and re-drifts the audit after every pull (#1896).
         ensure_shared_dir(path.parent)
@@ -674,7 +679,7 @@ def persist_pull_job(job: PullJob) -> None:
         tmp_path: Path | None = Path(tmp_str)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(job.as_dict(), f)
+                json.dump(snapshot, f)
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp_path, path)
@@ -686,6 +691,29 @@ def persist_pull_job(job: PullJob) -> None:
                     tmp_path.unlink(missing_ok=True)
     except OSError as exc:
         log.warning("model.pull_job_persist_failed model_id=%s error=%s", job.model_id, exc)
+
+
+def worker_start_token(pid: int) -> str | None:
+    """Return Linux process start ticks, which distinguish a reused PID."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    except OSError:
+        return None
+    # comm (field 2) may contain spaces or parentheses. Split after its final
+    # closing parenthesis; starttime is field 22, index 19 from field 3 onward.
+    fields = stat.rsplit(")", 1)[-1].split()
+    return fields[19] if len(fields) > 19 else None
+
+
+def worker_process_is_alive(snapshot: dict[str, Any]) -> bool:
+    """Whether a persisted pull's exact worker process is still alive."""
+    pid = snapshot.get("worker_pid")
+    token = snapshot.get("worker_start_token")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if not isinstance(token, str) or not token:
+        return False
+    return worker_start_token(pid) == token
 
 
 def sweep_pull_jobs(max_age_days: int = 14) -> int:
@@ -1115,6 +1143,7 @@ async def _download_one(
                         if (now - last_emit) >= _SSE_MIN_INTERVAL_S:
                             last_emit = now
                             job._signal()
+                            persist_pull_job(job)
             break
 
         # Stream complete — verify against the HF-advertised hash (WS-12)
@@ -1419,6 +1448,7 @@ async def run_pull(
     sidecar_recs = [PullFile(hf_filename=name, kind="sidecar") for name in extra_files]
     job.files.extend(sidecar_recs)
     job._signal()
+    persist_pull_job(job)
 
     base_headers: dict[str, str] = {"User-Agent": "hal0/installer"}
     if hf_token:
@@ -2254,6 +2284,7 @@ async def _run_pull_fileset(
     job.started_at = time.time()
     job.files = [PullFile(hf_filename=f.rel, kind=f.role) for f in fileset.files]
     job._signal()
+    persist_pull_job(job)
 
     base_headers: dict[str, str] = {"User-Agent": "hal0/installer"}
     if hf_token:
@@ -2422,6 +2453,7 @@ async def run_flm_pull(
     job.state = "running"
     job.started_at = time.time()
     job._signal()
+    persist_pull_job(job)
 
     # Setup awaits run inside the try so a cancellation or error here reaches
     # the same handlers as one during the download, and the job never stays
@@ -2534,6 +2566,7 @@ async def run_flm_pull(
                     job.bytes_total = current
                 last_emit = now
                 job._signal()
+                persist_pull_job(job)
 
         while True:
             if job.cancel_requested:

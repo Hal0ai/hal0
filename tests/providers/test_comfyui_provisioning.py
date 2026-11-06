@@ -76,8 +76,20 @@ def test_provision_creates_every_mounted_dir(data_root: Path) -> None:
     provision_data_root()
     for sub in comfyui_paths.SUBDIRS.values():
         assert (data_root / "models" / sub).is_dir()
-    for sub in ("output", "input", "user", "custom_nodes", "workflows", "home"):
+    for sub in ("output", "input", "user", "custom_nodes", "workflows", "home", "python", "web"):
         assert (data_root / sub).is_dir()
+
+
+def test_provision_syncs_the_python_env_script(data_root: Path) -> None:
+    """The script the start command runs, replaced when an update changes it (#3132)."""
+    shipped = importlib.resources.files("hal0.comfyui.assets").joinpath("hal0_python_env.py")
+    provision_data_root()
+    dest = comfyui_paths.python_env_dir() / "hal0_python_env.py"
+    assert dest.read_bytes() == shipped.read_bytes()
+    dest.write_bytes(b"# stale\n")
+    comfyui_provider._reset_provision_memo()
+    provision_data_root()
+    assert dest.read_bytes() == shipped.read_bytes()
 
 
 def test_provision_writes_yaml_when_absent(data_root: Path) -> None:
@@ -203,7 +215,7 @@ def test_provision_is_idempotent(data_root: Path) -> None:
     provision_data_root()
     second = {p: p.read_bytes() for p in data_root.rglob("*") if p.is_file()}
     assert first == second
-    assert len(first) == 2  # the model-paths file and the GPU-gate node
+    assert len(first) == 3  # the model-paths file, the GPU-gate node, the Python env script
 
 
 def _deny_writes_in(monkeypatch: pytest.MonkeyPatch, *directories: Path) -> None:
@@ -288,7 +300,8 @@ def test_provision_node_sync_runs_once_per_process(
 
     monkeypatch.setattr("hal0.providers.comfyui.os.replace", _spy)
     provision_data_root()
-    assert writes == [str(comfyui_paths.custom_nodes_dir() / _NODE)]
+    script = comfyui_paths.python_env_dir() / "hal0_python_env.py"
+    assert writes == [str(comfyui_paths.custom_nodes_dir() / _NODE), str(script)]
 
     # Second render: nothing is rewritten, even though both files now differ.
     node = comfyui_paths.custom_nodes_dir() / _NODE
@@ -296,7 +309,7 @@ def test_provision_node_sync_runs_once_per_process(
     node.write_bytes(b"# edited after the first render\n")
     yaml_path.write_text("")
     provision_data_root()
-    assert writes == [str(node)]
+    assert writes == [str(node), str(script)]
     assert node.read_bytes() == b"# edited after the first render\n"
     assert yaml_path.read_text() == ""
 
@@ -379,9 +392,11 @@ def test_node_written_atomically(data_root: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr("hal0.providers.comfyui.os.replace", _spy)
     provision_data_root()
     dest = comfyui_paths.custom_nodes_dir() / _NODE
-    assert len(calls) == 1
-    src, dst = calls[0]
-    assert dst == dest
+    assert [dst for _, dst in calls] == [
+        dest,
+        comfyui_paths.python_env_dir() / "hal0_python_env.py",
+    ]
+    src = calls[0][0]
     assert src != dest
     assert src.parent == dest.parent  # same filesystem, so the rename is atomic
     assert dest.read_bytes() == _asset_bytes()

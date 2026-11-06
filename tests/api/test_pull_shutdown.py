@@ -18,6 +18,7 @@ are covered separately in ``tests/registry/test_pull.py``.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -166,14 +167,9 @@ def test_pull_stream_closes_promptly_once_shutdown_flag_is_set(
 
 
 def test_startup_auto_resumes_interrupted_pull(tmp_hal0_home: str) -> None:
-    """A pull-job snapshot left non-terminal by a killed prior process (its
-    on-disk state is "queued" — run_pull only durably persists at pull START
-    and at a TERMINAL state, so a crash mid-download never gets to flush
-    "running") is automatically resumed on the next hal0-api startup rather
-    than requiring the operator to notice and re-POST.
-    """
+    """A non-terminal snapshot with a dead worker is resumed on API startup."""
     from hal0.registry.model import Model
-    from hal0.registry.pull import make_job, persist_pull_job
+    from hal0.registry.pull import make_job, persist_pull_job, pull_job_file
     from hal0.registry.store import ModelRegistry
 
     registry = ModelRegistry()
@@ -188,6 +184,11 @@ def test_startup_auto_resumes_interrupted_pull(tmp_hal0_home: str) -> None:
     )
     stuck_job = make_job("user.Interrupted")
     persist_pull_job(stuck_job)  # writes state="queued" — the pre-crash snapshot
+    snapshot_path = pull_job_file(stuck_job.model_id)
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["worker_pid"] = 2_000_000_000
+    snapshot["worker_start_token"] = "dead-worker"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
 
     calls: list[dict[str, Any]] = []
 
@@ -215,12 +216,46 @@ def test_startup_auto_resumes_interrupted_pull(tmp_hal0_home: str) -> None:
     assert calls == [{"hf_repo": "org/interrupted-GGUF", "hf_file": "interrupted.gguf"}]
 
 
+def test_startup_does_not_resume_pull_with_live_external_worker(tmp_hal0_home: str) -> None:
+    """Startup recovery must not race a CLI/installer worker using same staging files."""
+    from hal0.registry.model import Model
+    from hal0.registry.pull import make_job, persist_pull_job
+    from hal0.registry.store import ModelRegistry
+
+    registry = ModelRegistry()
+    registry.add(
+        Model(
+            id="user.ExternalWorker",
+            name="user.ExternalWorker",
+            path=tmp_hal0_home + "/not-installed-yet.gguf",
+            hf_repo="org/external-worker-GGUF",
+            hf_filename="external-worker.gguf",
+        )
+    )
+    persist_pull_job(make_job("user.ExternalWorker"))
+    calls: list[dict[str, Any]] = []
+
+    async def fake_run_pull(job: PullJob, **kw: Any) -> None:
+        calls.append(kw)
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(pull_jobs_module, "run_pull", fake_run_pull)
+    try:
+        app = create_app()
+        with TestClient(app):
+            assert "user.ExternalWorker" not in app.state.model_pull_jobs
+    finally:
+        mp.undo()
+
+    assert calls == [], "startup must leave the live external worker alone"
+
+
 def test_startup_does_not_auto_resume_a_completed_pull(tmp_hal0_home: str) -> None:
     """A stale non-terminal snapshot for a model whose bytes already landed
     on disk (the terminal persist can itself fail-soft) must not trigger a
     wasteful re-pull."""
     from hal0.registry.model import Model
-    from hal0.registry.pull import make_job, persist_pull_job
+    from hal0.registry.pull import make_job, persist_pull_job, pull_job_file
     from hal0.registry.store import ModelRegistry
 
     installed = tmp_hal0_home + "/already-installed.gguf"
@@ -239,6 +274,11 @@ def test_startup_does_not_auto_resume_a_completed_pull(tmp_hal0_home: str) -> No
     )
     stuck_job = make_job("user.AlreadyDone")
     persist_pull_job(stuck_job)
+    snapshot_path = pull_job_file(stuck_job.model_id)
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["worker_pid"] = 2_000_000_000
+    snapshot["worker_start_token"] = "dead-worker"
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
 
     calls: list[dict[str, Any]] = []
 

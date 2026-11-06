@@ -94,6 +94,25 @@ def test_each_captured_failure_form(
     assert da.check_img_custom_nodes().status == "warn"
 
 
+def test_a_python_environment_that_could_not_be_prepared_is_named(
+    slots: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every node install then hits the read-only image again, with nothing else to say so."""
+    (slots / "img.toml").write_text('[slot]\nname = "img"\n')
+    line = "comfyui.python_env_failed root=/opt/hal0-python err=PermissionError: denied\n"
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv, 0, "a" * 32 if argv[0] == "systemctl" else line + CLEAN, ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+    row = da.check_img_custom_nodes()
+    assert row.status == "warn"
+    assert "PermissionError: denied" in row.detail
+    assert "manage-runner-images#comfyui-custom-node-dependencies" in row.detail
+
+
 @pytest.mark.parametrize("failure", ["missing", "denied", "timeout", "no-start", "empty", "hint"])
 def test_unavailable_evidence_is_honest(
     slots: Path, monkeypatch: pytest.MonkeyPatch, failure: str
