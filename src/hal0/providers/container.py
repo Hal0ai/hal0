@@ -90,7 +90,7 @@ from hal0.providers._gpu import (
     resolve_npu_group_ids,
     runtime_lane_for_provider,
 )
-from hal0.providers.base import HealthCheck, Provider, RuntimeLaunchPlan
+from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
 from hal0.providers.podman_mutate import PullLineParser
 from hal0.providers.speculation import effective_speculation
 from hal0.runners import (
@@ -1219,6 +1219,7 @@ def _llama_launch_plan(
     slot_reasoning: Sequence[str] = (),
     runner_key: str | None = None,
     ulimits: list[str] | None = None,
+    extra_mounts: list[Mount] | None = None,
 ) -> RuntimeLaunchPlan:
     """Build the GPU/llama-server :class:`RuntimeLaunchPlan`.
 
@@ -1274,7 +1275,8 @@ def _llama_launch_plan(
         # [server].env → docker run --env (e.g. HSA_OVERRIDE_GFX_VERSION) so
         # operators can tune the runtime without forking the image.
         env=dict(env) if env else {},
-        mounts=[model_store_module.mount_for(root, read_only=True) for root in model_stores],
+        mounts=[model_store_module.mount_for(root, read_only=True) for root in model_stores]
+        + list(extra_mounts or []),
         devices=list(devices),
         group_add=list(group_ids),
         security_opt=["apparmor=unconfined", "seccomp=unconfined"],
@@ -2019,6 +2021,7 @@ class ContainerProvider(Provider):
         runner = _effective_runner(slot_cfg, profile)
         runner_key = getattr(runner, "key", None)
         ulimits: list[str] = []
+        extra_mounts: list[Mount] = []
         if runner_key == "xdna":
             # XDNA2 NPU: same accel-node + memlock treatment flm uses for its
             # toolbox container (see hal0.providers.flm.container_spec) —
@@ -2033,13 +2036,27 @@ class ContainerProvider(Provider):
         server_env = scalars["server_env"] or {}
         merged_env = {**vis_env, **server_env}
         if runner_key == "xdna":
-            from hal0.runners.knobs import xdna_env_defaults
+            from hal0.runners.knobs import screen_xdna_env, xdna_env_defaults
 
             # Defaults first, then whatever's already resolved (visibility +
             # [server].env, which includes any operator GGML_XDNA_*/pmode/
             # host_xrt knob tokens) — an explicit key always wins over the
             # default per the XDNA knob-set contract.
             merged_env = {**xdna_env_defaults(), **merged_env}
+
+            # [xdna] table (84b3b186's pattern): env overrides screened the
+            # same way as [server].env, host_xrt RO-bind-mounted identical-
+            # path with HAL0_XDNA_HOST_XRT pointing the entrypoint at it.
+            xdna_table = slot_cfg.get("xdna") if isinstance(slot_cfg, Mapping) else None
+            if isinstance(xdna_table, Mapping):
+                xdna_env = xdna_table.get("env")
+                if isinstance(xdna_env, Mapping):
+                    screen_xdna_env(xdna_env)
+                    merged_env = {**merged_env, **xdna_env}
+                host_xrt = xdna_table.get("host_xrt")
+                if isinstance(host_xrt, str) and host_xrt:
+                    extra_mounts.append(model_store_module.mount_for(host_xrt, read_only=True))
+                    merged_env["HAL0_XDNA_HOST_XRT"] = host_xrt
 
         plan = _llama_launch_plan(
             image=scalars["image"],
@@ -2067,6 +2084,7 @@ class ContainerProvider(Provider):
             env=merged_env or None,
             runner_key=runner_key,
             ulimits=ulimits,
+            extra_mounts=extra_mounts,
         )
         return plan
 
