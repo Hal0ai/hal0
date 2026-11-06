@@ -45,6 +45,15 @@ MEMORY_REQUEST_ATTR = "hal0_memory_request"
 #: "upstream". The dispatcher refuses to fall through when it is set.
 UPSTREAM_ONLY_ATTR = "hal0_upstream_only"
 
+#: Attribute carrying a per-request non-streaming read timeout (seconds). The
+#: memory engine states its own call budget (``[memory.graph].llm_timeout_s``,
+#: sent to Hindsight as ``HINDSIGHT_API_LLM_TIMEOUT``) but Hindsight sends
+#: non-streaming requests, so the dispatcher's ``direct_read_timeout_s`` cut the
+#: call first and Hindsight retried it (#3347). The route layer records the
+#: engine's budget here for ``hal0/memory`` requests; the dispatcher honours it
+#: when it is longer than its own default and never when it is shorter.
+READ_TIMEOUT_ATTR = "hal0_read_timeout_s"
+
 #: The cheap-helper slot (ADR-0023). Keyed on the slot NAME, as the reaper's
 #: pinned set is (:data:`hal0.slots.reaper._PINNED_BY_DEFAULT`): ADR-0023 fixes
 #: the name, and a role/label lookup would need a config read on the dispatch
@@ -54,11 +63,14 @@ UTILITY_SLOT_NAME = "utility"
 __all__ = [
     "LANE_PIN_ATTR",
     "MEMORY_REQUEST_ATTR",
+    "READ_TIMEOUT_ATTR",
     "UPSTREAM_ONLY_ATTR",
     "lane_slot_pin",
     "preferred_slot",
     "rank_slot_name",
+    "read_timeout_override",
     "set_lane_pin",
+    "set_read_timeout",
     "set_upstream_only",
     "upstream_only_model",
 ]
@@ -103,6 +115,26 @@ def upstream_only_model(request: Any) -> str:
     except Exception:
         return ""
     return value if isinstance(value, str) else ""
+
+
+def set_read_timeout(request: Any, timeout_s: float) -> None:
+    """Ask the dispatcher for a non-streaming read timeout of ``timeout_s`` seconds
+    (see :data:`READ_TIMEOUT_ATTR`). Never raises on a request stand-in."""
+    if not timeout_s or timeout_s <= 0:
+        return
+    with contextlib.suppress(Exception):
+        setattr(request.state, READ_TIMEOUT_ATTR, float(timeout_s))
+
+
+def read_timeout_override(request: Any) -> float | None:
+    """The per-request read timeout recorded on ``request``, or ``None``."""
+    try:
+        value = getattr(request.state, READ_TIMEOUT_ATTR, None)
+    except Exception:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if value > 0 else None
 
 
 def _in_flight(slot_manager: Any, slot_name: str) -> int:

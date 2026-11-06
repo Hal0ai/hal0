@@ -61,7 +61,12 @@ from hal0.dispatcher._capability_resolve import (
     resolve_by_capability,
     select_slot_by_type,
 )
-from hal0.dispatcher.lane_pin import lane_slot_pin, rank_slot_name, upstream_only_model
+from hal0.dispatcher.lane_pin import (
+    lane_slot_pin,
+    rank_slot_name,
+    read_timeout_override,
+    upstream_only_model,
+)
 from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
 from hal0.forwarded_headers import forwardable_request_headers
@@ -457,6 +462,11 @@ class UpstreamCall:
     latency_ms: float = 0.0
     """Time spent in routing logic (not including the upstream round-trip)."""
 
+    read_timeout_s: float | None = None
+    """Per-request non-streaming read timeout from the route layer (#3347), or
+    ``None`` for the dispatcher default. Only ever lengthens
+    ``[dispatcher].direct_read_timeout_s`` (see :meth:`Dispatcher._forward_direct`)."""
+
 
 # ── Hook protocols (cross-subtree stubs) ──────────────────────────────────────
 #
@@ -664,6 +674,7 @@ class Dispatcher:
             # to its slot/model instead of writing a null-attributed row.
             exc.upstream_call = call  # type: ignore[attr-defined]
             raise
+        call.read_timeout_s = read_timeout_override(request)
         return call
 
     def _pinned_owner(self, model_id: str) -> Upstream | None:
@@ -1460,12 +1471,24 @@ class Dispatcher:
         client: httpx.AsyncClient,
         call: UpstreamCall,
     ) -> Response:
+        # #3347: a caller that states a longer budget than the dispatcher default
+        # (the memory engine's llm_timeout_s) gets it; a shorter one never
+        # shrinks the default.
+        extra: dict[str, Any] = {}
+        if call.read_timeout_s and call.read_timeout_s > self._direct_read_timeout_s:
+            extra["timeout"] = httpx.Timeout(
+                connect=5.0,
+                read=call.read_timeout_s,
+                write=10.0,
+                pool=_DISPATCHER_POOL_TIMEOUT_S,
+            )
         try:
             resp = await client.request(
                 call.method,
                 call.target_url,
                 content=call.body or None,
                 headers=call.headers,
+                **extra,
             )
         except _DEAD_PORT_TRANSPORT_ERRORS as exc:
             self._guard_dead_port_image_mode(call)

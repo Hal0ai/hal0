@@ -1,0 +1,29 @@
+# Holds the AMD GPU fabric clock (fclk) at its top DPM level at boot and after
+# every resume, for hal0 running NPU (XDNA2) and GPU (gfx1151) slots on the
+# same Strix Halo box: without the hold, a fclk DPM change mid-flight can hang
+# the machine or corrupt NPU results (upstream ROCm/TheRock#8709).
+#
+# Install (as root, on the PROXMOX HOST — hal0's guest container can only
+# READ these sysfs files, never write them), from this directory:
+#   install -m 755 hal0-fabric-clock /usr/local/sbin/
+#   install -m 644 hal0-fabric-clock.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now hal0-fabric-clock.service
+#
+# Check: hal0-fabric-clock status (and `hal0 doctor all` inside the guest,
+# which reads the same sysfs files read-only).
+# Undo: systemctl disable --now hal0-fabric-clock.service, then
+#   hal0-fabric-clock release (or reboot).
+#
+# The unit runs once at boot and once after each resume (suspend/hibernate can
+# hand the clock back to the driver); it holds nothing open in between, so it
+# shows `inactive (dead)` between runs — that is expected, not a failure.
+[Unit]
+Description=hal0: hold the AMD GPU fabric clock at its top level (NPU + GPU together)
+After=systemd-modules-load.service suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hal0-fabric-clock hold
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
