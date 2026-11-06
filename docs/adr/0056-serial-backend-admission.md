@@ -47,9 +47,14 @@ alternative, not the default path.
 ## Decision
 
 1. **Per-slot admission scheduler** (`src/hal0/dispatcher/admission.py`).
-   A slot that sets `[slot].max_inflight` (default: unset = unlimited,
-   unchanged behavior; FLM/NPU slots are expected to set it to 1) gets a
-   priority FIFO ticket queue in front of the forward. A request acquires a
+   Each slot gets an effective cap (`SlotManager.effective_max_inflight`):
+   an explicit `[slot].max_inflight` wins (`0` = uncapped); unset defaults
+   to **1 for FastFlowLM slots** (`profile`/`provider` = `flm`), because FLM
+   runs one request at a time on the NPU across all its models, and stays
+   unlimited (unchanged behavior) for every other slot. The cap resolves
+   from the slot TOML on a config-cache miss, so a cold slot is capped from
+   its first request. A capped slot gets a priority FIFO ticket queue in
+   front of the forward. A request acquires a
    ticket before `Dispatcher.forward()` does any I/O and releases it on
    completion, error, client disconnect, or stream close. The read-timeout
    clock starts only once the ticket is granted, so queue wait is no longer
@@ -76,9 +81,9 @@ alternative, not the default path.
 
 ## Consequences
 
-- Slots without `max_inflight` see zero behavior change — the admission
-  acquire is a no-op context manager for them.
-- FLM-backed slots with `max_inflight = 1` serialize at the hal0 layer
+- Non-FLM slots without `max_inflight` see zero behavior change — the
+  admission acquire is a no-op context manager for them.
+- FLM-backed slots (capped at 1 by default) serialize at the hal0 layer
   instead of inside FLM, so hal0's own timeout accounting reflects actual
   compute time, not hidden queue time.
 - `/v1/systemone` clients get consistent idle-timer behavior and a single

@@ -1969,20 +1969,29 @@ async def _forward_to_decision_slot(
     cfg = await slot_manager.get_config(slot_name)
     port = cfg.get("port")
     _stamp_slot_last_used(request.app.state, slot_name)
-    admission_registry.configure(slot_name, cfg.get("max_inflight"))
+    cap_fn = getattr(slot_manager, "effective_max_inflight", None)
+    cap = cap_fn(slot_name) if callable(cap_fn) else cfg.get("max_inflight")
+    admission_registry.configure(slot_name, cap if isinstance(cap, int) else None)
     timeout_s = getattr(
         getattr(getattr(request.app.state, "hal0_config", None), "memory", None),
         "decision",
         None,
     )
     read_timeout_s = getattr(timeout_s, "timeout_s", 30.0)
-    async with admission_registry.acquire(slot_name, PRIORITY_DECISION, timeout_s=1800.0):
+    wait_s = getattr(
+        getattr(getattr(request.app.state, "hal0_config", None), "dispatcher", None),
+        "admission_wait_timeout_s",
+        1800.0,
+    )
+    async with admission_registry.acquire(slot_name, PRIORITY_DECISION, timeout_s=float(wait_s)):
         resp = await _proxy_to_decision_server(f"http://127.0.0.1:{port}", read_timeout_s, body)
     _touch_npu_shadow_count(request, slot_name)
     return resp
 
 
-async def _proxy_to_decision_server(base_url: str, timeout_s: float, body: dict[str, Any]) -> Response:
+async def _proxy_to_decision_server(
+    base_url: str, timeout_s: float, body: dict[str, Any]
+) -> Response:
     """Raw proxy of a /v1/systemone call — same shape in, same shape out."""
     url = base_url.rstrip("/") + "/v1/systemone"
     async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=timeout_s)) as client:

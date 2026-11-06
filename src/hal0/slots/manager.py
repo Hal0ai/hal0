@@ -4364,15 +4364,54 @@ class SlotManager:
         than reading the TOML — callers must treat a miss as "unknown,
         assume unconfigured" and not as "config says no limit".
         """
-        try:
+        with contextlib.suppress(Exception):
             slot_name = self._resolve_alias(slot_name)
-        except Exception:
-            pass
         cache_id = self._key(slot_name)
         cached = self._cfg_cache.get(cache_id)
         if cached is None:
             return None
         return copy.deepcopy(cached[2])
+
+    def effective_max_inflight(self, slot_name: str) -> int | None:
+        """Sync admission cap for ``slot_name`` (ADR-0056).
+
+        Explicit ``[slot].max_inflight`` wins (``0`` = uncapped). Unset on a
+        FastFlowLM slot defaults to ``1``: FLM executes one request at a time
+        on the NPU across all of its models, so letting requests queue inside
+        FLM only hides the wait from the dispatcher's read timeout. Any other
+        slot stays uncapped. On a config-cache miss the TOML is read
+        synchronously (a few hundred bytes) so a cold slot is capped from its
+        very first request rather than after warm-up.
+        """
+        cfg: dict[str, Any] | None = None
+        try:
+            name = self._resolve_alias(slot_name)
+        except Exception:
+            name = slot_name
+        cached = self._cfg_cache.get(self._key(name))
+        if cached is not None:
+            cfg = cached[2]
+        else:
+            try:
+                import tomllib
+
+                path = self._config_file_for(name)
+                if path.exists():
+                    with path.open("rb") as fh:
+                        cfg = tomllib.load(fh)
+            except Exception:  # never let a cap lookup break forwarding
+                cfg = None
+        if not cfg:
+            return None
+        value = cfg.get("max_inflight")
+        if value is not None:
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                return None
+            return n if n > 0 else None
+        kind = str(cfg.get("provider") or cfg.get("profile") or "").lower()
+        return 1 if kind == "flm" or kind.startswith("flm-") else None
 
     # ── private helpers ──────────────────────────────────────────────────────
 

@@ -1180,6 +1180,13 @@ class Dispatcher:
         """
         if self._slot_manager is None or not slot_name:
             return None
+        effective = getattr(self._slot_manager, "effective_max_inflight", None)
+        if callable(effective):
+            try:
+                cap = effective(slot_name)
+                return cap if isinstance(cap, int) else None
+            except Exception:  # defensive: never let a cap lookup break forwarding
+                return None
         getter = getattr(self._slot_manager, "cached_slot_config", None)
         if getter is None:
             return None
@@ -1189,7 +1196,9 @@ class Dispatcher:
             return None
         if not cfg:
             return None
-        value = cfg.get("max_inflight") if isinstance(cfg, dict) else getattr(cfg, "max_inflight", None)
+        value = (
+            cfg.get("max_inflight") if isinstance(cfg, dict) else getattr(cfg, "max_inflight", None)
+        )
         return int(value) if value else None
 
     async def _make_room_for_llm(self, call: UpstreamCall) -> None:
