@@ -1,4 +1,4 @@
-# ADR-0056: ggml-xdna is an optional NPU runner, kernels baked at image build
+# ADR-0057: ggml-xdna is an optional NPU runner, kernels baked at image build
 
 ## Status
 

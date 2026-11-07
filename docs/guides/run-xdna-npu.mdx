@@ -17,7 +17,7 @@ just one built against open MLIR-AIE kernels for the NPU. The runner key is
 `xdna` (title **NPU (ggml-xdna)**), tier **optional**: it is never returned
 automatically for an NPU slot, so a box that never creates an `xdna` slot
 never pulls the image. The design is recorded in
-[ADR-0056](/docs/adr/0056-ggml-xdna-optional-npu-runner/).
+[ADR-0057](/docs/adr/0057-ggml-xdna-optional-npu-runner/).
 
 It is open where FLM is closed: any GGUF can be pointed at it, not just a
 model from FLM's curated list. The tradeoff is that only one model geometry
@@ -141,7 +141,7 @@ contended, rather than just "another NPU slot happens to exist."
 
 ## See also
 
-- [ADR-0056](/docs/adr/0056-ggml-xdna-optional-npu-runner/) — the full
+- [ADR-0057](/docs/adr/0057-ggml-xdna-optional-npu-runner/) — the full
   decision record: why this is optional-tier, baked-kernel, warn-not-refuse.
 - [Strix Halo](/docs/concepts/strix-halo/) — the shared-memory and
   fabric-clock story this hardware also lives inside.
