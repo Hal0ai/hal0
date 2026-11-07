@@ -11,6 +11,13 @@ updates:
     groups:
       python-minor-patch:
         update-types: [minor, patch]
+    ignore:
+      # Deferred majors — each needs code changes, tracked in #2316.
+      # Keep these here, not as `@dependabot ignore` PR comments: a comment
+      # ignore is server-side state bound to this ecosystem block and is lost
+      # when the block is renamed (see #3213 pip -> uv).
+      - dependency-name: "mcp"
+        versions: [">=2"]
 
   - package-ecosystem: npm
     directory: /ui
@@ -30,6 +37,16 @@ updates:
         # its own (#2849 bumped react without react-dom), so exclude the react
         # packages here explicitly.
         exclude-patterns: [react, react-dom, "@types/react", "@types/react-dom"]
+    ignore:
+      # Deferred majors — each needs code changes, tracked in #2316.
+      # vite 8 and @vitejs/plugin-react 6 land together (the plugin needs
+      # Vite 7+). Keep these here, not as `@dependabot ignore` PR comments: a
+      # comment ignore is server-side state bound to this ecosystem block and
+      # is lost when the block is renamed (see #3213 pip -> uv).
+      - dependency-name: "vite"
+        versions: [">=8"]
+      - dependency-name: "@vitejs/plugin-react"
+        versions: [">=6"]
 
   - package-ecosystem: github-actions
     directory: /
