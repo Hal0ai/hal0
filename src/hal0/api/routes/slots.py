@@ -1058,9 +1058,9 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
             all_configs = await sm.iter_configs()
         except Exception:
             all_configs = []
-        x_extra = xdna_enrichment(all_configs, getattr(request.app.state, "model_registry", None)).get(
-            name
-        )
+        x_extra = xdna_enrichment(
+            all_configs, getattr(request.app.state, "model_registry", None)
+        ).get(name)
         if x_extra:
             for k, v in x_extra.items():
                 out.setdefault(k, v)

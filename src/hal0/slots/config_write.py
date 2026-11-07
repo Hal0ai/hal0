@@ -746,7 +746,7 @@ def guard_and_normalize_xdna(merged: dict[str, Any], updates: dict[str, Any]) ->
         slot_name = merged.get("name") or (merged.get("slot") or {}).get("name") or "?"
         raise BadRequest(
             f"slot {slot_name!r} is not an xdna slot (binary={binary!r}); "
-            "the [xdna] table only applies to a slot with binary=\"xdna\"",
+            'the [xdna] table only applies to a slot with binary="xdna"',
             code="slot.xdna_not_supported",
             details={"slot": slot_name, "binary": binary},
         )
@@ -758,7 +758,9 @@ def guard_and_normalize_xdna(merged: dict[str, Any], updates: dict[str, Any]) ->
 
     env = xdna_update.get("env")
     if env is not None and not isinstance(env, dict):
-        raise BadRequest("xdna.env must be an object of env-var overrides", code="validation.xdna_invalid")
+        raise BadRequest(
+            "xdna.env must be an object of env-var overrides", code="validation.xdna_invalid"
+        )
     if env:
         for key in env:
             if not str(key).startswith("GGML_XDNA_"):
@@ -773,7 +775,9 @@ def guard_and_normalize_xdna(merged: dict[str, Any], updates: dict[str, Any]) ->
     host_xrt = xdna_update.get("host_xrt")
     if host_xrt is not None:
         if not isinstance(host_xrt, str) or not host_xrt:
-            raise BadRequest("xdna.host_xrt must be a non-empty string path", code="validation.xdna_invalid")
+            raise BadRequest(
+                "xdna.host_xrt must be a non-empty string path", code="validation.xdna_invalid"
+            )
         if not Path(host_xrt).is_absolute():
             raise BadRequest(
                 f"xdna.host_xrt must be an absolute path; got {host_xrt!r}",
