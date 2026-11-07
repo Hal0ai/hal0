@@ -142,42 +142,66 @@ Resolution order, from `hal0.providers.container._resolve_image_ref`:
 
 Slots on a non-llama runtime (ComfyUI, FLM, Kokoro, Moonshine, Qwen3-TTS,
 halogen) follow the same order, keyed by their runtime's runner key (`comfyui`,
-`flm`, `kokoro`, `moonshine`, `qwen3tts`, `halogen`) rather than a `binary`: `image_pin`
-(top-level or `[slot]`-nested), then `[slots].default_images[<key>]`, then the
-env override or pin. The `img` (ComfyUI) slot also honors an older plain
-`image` string between `image_pin` and the launch-image override — see
-[Generate images](/docs/guides/generate-images). The image pull, slot status,
-drift check and load-time GPU preflight all resolve the same ref the slot
-launches, including for a slot with no profile or `image_pin` (for example a
-bare `type = "tts"` slot that falls back to Kokoro).
+`flm`, `kokoro`, `moonshine`, `qwen3tts`, `halogen`) rather than a `binary`:
+`image_pin` (top-level or `[slot]`-nested), then
+`[slots].default_images[<key>]`, then the env override or pin. The `img`
+(ComfyUI) slot follows the same order. Its retired bare `image` key is rejected
+by the slot loader; rename it to `image_pin` to keep a custom image — see
+[Image workflows and troubleshooting](/docs/guides/image-workflows-troubleshooting#which-container-image-the-img-slot-runs).
+The image pull, slot status, drift check and load-time GPU preflight all resolve
+the same ref the slot launches, including for a slot with no profile or
+`image_pin` (for example a bare `type = "tts"` slot that falls back to Kokoro).
 
 ## ComfyUI custom-node dependencies
 
-Since 1.7.1, the `img` container runs ComfyUI and its custom nodes as the
-`hal0` account. The image's `/opt/venv` and `/opt/ComfyUI` are read-only to
-that account, apart from the mounted data directories. A node that runs
-`pip install` at startup or writes into the image (for example,
-`/opt/ComfyUI/web`) can fail while the slot still reports ready.
+The `img` container runs ComfyUI and its custom nodes as the `hal0` account,
+and the image's `/opt/venv` and `/opt/ComfyUI` are read-only to it. Since 1.8.0
+ComfyUI runs from a writable Python environment layered over the image's, so a
+node that runs `pip install` at startup works again. Packages land under
+`<data root>/python/<python version>`, keep across restarts and image updates,
+and need network access the first time. A node can also create
+`/opt/ComfyUI/web`, which is mounted from `<data root>/web`.
 
-Ship the node's dependencies and any required image files in a **derived
-ComfyUI runner image**, installed at image build time. Select that image
-with the slot's `image_pin` or the `comfyui` launch-image override described
-above, then restart `img`.
+The image's `torch`, `torchvision` and `torchaudio` stay pinned. A node that
+insists on another version of them fails to install and the renders keep
+working. Any other package a node upgrades takes precedence over the image's
+copy. If an upgrade breaks ComfyUI, delete `<data root>/python/<python version>`
+and restart `img`: the environment is rebuilt empty and nodes install again.
+
+ComfyUI-Manager needs one setting. With `use_uv = True` in
+`<data root>/user/__manager/config.ini` it logs `Neither python -m pip nor uv are
+available`, because it skips pip and the image has no `uv`. Set `use_uv = False`
+and restart `img`.
+
+To avoid installing at startup, ship the node's dependencies in a **derived
+ComfyUI runner image**, installed at image build time. Select that image with
+the slot's `image_pin` or the `comfyui` launch-image override described above,
+then restart `img`.
 
 Run `hal0 doctor all` to see custom-node `IMPORT FAILED`, `PRESTARTUP FAILED`
 and `Cannot import … module for custom nodes` warnings from the current
-container start. The row names the failed nodes; after fixing the image,
-restart `img` and run doctor again. An unavailable journal is reported as
-not checked.
+container start, and whether the environment could be prepared. If it could not,
+ComfyUI still starts on the image's Python and nodes cannot install anything. The
+row names the failed nodes; after fixing the cause, restart `img` and run doctor
+again. An unavailable journal is reported as not checked.
 
 The mounted data directories must still be writable by `hal0`. If the
 ComfyUI data root (`/var/lib/hal0/models/comfyui` by default) was created
-under another account or on a share, make its `output`, `input`, `user`
-and `custom_nodes` directories writable first, as root:
-`chgrp -R <hal0 group> <dir> && chmod -R g+ws <dir>`. A data root hal0
-created is already `hal0:hal0 2775`. Otherwise `SaveImage` can fail with
-`Permission denied`; the API journal logs `comfyui.data_dir_not_writable`
-with the command.
+under another account or on a share, make its `output`, `input`, `user`,
+`custom_nodes`, `home`, `python` and `web` directories writable first. As
+root, repair the directory the journal names with:
+
+```sh
+chgrp -R <hal0 group> <dir> &&
+find <dir> -type d -exec chmod g+rwsx {} + &&
+find <dir> -type f -exec chmod g+rw {} +
+```
+
+The directory rule grants the `hal0` group read, write and search permissions
+and keeps directories setgid; the file rule grants group read and write
+without adding execute bits. A data root hal0 created is already `hal0:hal0
+2775`. Otherwise `SaveImage` can fail with `Permission denied`; the API journal
+logs `comfyui.data_dir_not_writable`.
 
 ## The Runner Images page
 

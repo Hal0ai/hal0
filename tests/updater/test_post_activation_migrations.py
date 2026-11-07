@@ -28,6 +28,8 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
         "hermes_venv": [],
         "converge_components": [],
         "extraction_dropin": [],
+        "showcase_dropin": [],
+        "hindsight_restart": [],
     }
 
     def _runner_system(*, dry_run=False, job_id=None, honour_restore_marker=False):
@@ -85,6 +87,16 @@ def _stub_every_pass(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[Any]]:
 
     monkeypatch.setattr(
         "hal0.memory.extraction_env.reconcile_extraction_dropin", _extraction_dropin
+    )
+
+    def _showcase_dropin(**kwargs):
+        calls["showcase_dropin"].append(kwargs)
+        return {"status": "converged"}
+
+    monkeypatch.setattr("hal0.memory.extraction_env.reconcile_showcase_dropin", _showcase_dropin)
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reload_and_restart_hindsight",
+        lambda: calls["hindsight_restart"].append(True),
     )
     return calls
 
@@ -161,6 +173,9 @@ def test_runs_every_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
     assert _stub_every_pass["image_keys"] == ["j1"]
     assert _stub_every_pass["hermes_venv"] == [("j1", True)]
     assert _stub_every_pass["extraction_dropin"] == [True]
+    # #3492: the showcase drop-in is written without its own restart …
+    assert _stub_every_pass["showcase_dropin"] == [{"restart": False}]
+    assert _stub_every_pass["hindsight_restart"] == []
     assert _stub_every_pass["converge_components"] == [
         {
             "job_id": "j1",
@@ -170,6 +185,30 @@ def test_runs_every_pass(_stub_every_pass: dict[str, list[Any]]) -> None:
             "hermes_install": True,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("extraction", "restarts"),
+    [("converged", 1), ("applied", 0)],
+)
+def test_a_rewritten_showcase_dropin_costs_one_engine_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_every_pass: dict[str, list[Any]],
+    extraction: str,
+    restarts: int,
+) -> None:
+    """#3492: when the showcase drop-in changed, hindsight-api restarts once —
+    by the extraction reconcile if it also rewrote its drop-in, else here."""
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reconcile_showcase_dropin",
+        lambda **_k: {"status": "applied"},
+    )
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reconcile_extraction_dropin",
+        lambda **_k: {"status": extraction},
+    )
+    run_post_activation_migrations(job_id="j1")
+    assert len(_stub_every_pass["hindsight_restart"]) == restarts
 
 
 def test_skip_catalogue_sync_omits_only_that_pass(_stub_every_pass: dict[str, list[Any]]) -> None:

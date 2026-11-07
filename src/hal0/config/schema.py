@@ -159,6 +159,23 @@ class NpuConfig(BaseModel):
         default=True,
         description="Enable chat (LLM) modality on the FLM slot. Default ON.",
     )
+    decision: str | None = Field(
+        default=None,
+        pattern=r"^d3:[A-Za-z0-9_.-]+$",
+        description=(
+            "EXPERIMENTAL / optional. Decision-model tag (FLM's small side "
+            "model, e.g. 'd3:lite') for a slot that wants to serve decision "
+            "calls itself. Must match 'd3:<name>'. When set, FLMProvider "
+            "appends 'flm serve ... --decision <tag>' and exports "
+            "HAL0_FLM_DECISION so the container/native argv builder renders "
+            "it (shared tail in _flm_shadow_role_args). FLM reserves ~1.8GB "
+            "extra NPU memory when enabled. Most deployments do NOT set "
+            "this: Hindsight decision calls (POST /v1/systemone) are served "
+            "by the CPU hs-decide System One server configured under "
+            "[memory.decision] by default, not by an FLM slot. Absent means "
+            "this slot has no decision model."
+        ),
+    )
     # NOTE: FLM has no per-role model selection — ``--asr`` / ``--embed`` are
     # boolean flags that load FLM's single bundled whisper + embed-gemma. There
     # is deliberately no asr_model/embed_model here; the chat model is the
@@ -605,6 +622,22 @@ class SlotConfig(BaseModel):
             "are separate paths, exempted by `pinned`, not by this value. "
             "The ComfyUI img-group slot is never unloaded by idle, pressure "
             "or pre-load eviction, whatever this value says."
+        ),
+    )
+    max_inflight: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-slot admission cap on concurrent forwarded requests "
+            "(hal0.dispatcher.admission). When set, the dispatcher serializes "
+            "requests to this slot through a priority admission queue instead "
+            "of forwarding them all straight through — needed for backends "
+            "that execute one request at a time internally (e.g. FastFlowLM's "
+            "NPU: 'the NPU runs one request at a time'), so a hidden upstream "
+            "queue no longer eats into [dispatcher].direct_read_timeout_s. "
+            "POST /v1/systemone (priority 0, decision) always jumps ahead of "
+            "everything else (priority 1); FIFO within a priority class. "
+            "None preserves today's unlimited-concurrency behavior for a slot."
         ),
     )
     pinned: bool = Field(
@@ -1802,6 +1835,23 @@ class SlotsConfig(BaseModel):
             "capture."
         ),
     )
+    fabric_clock_guard: str = Field(
+        default="refuse",
+        description=(
+            "Policy when an NPU slot (device=npu, the `flm` recipe) would load "
+            "alongside a GPU slot (vulkan/rocm/hip) that is up or loading, or "
+            "vice versa, while the Proxmox host's AMD GPU fabric clock is not "
+            "held at its top DPM level (hal0.slots.fabric_clock_guard; "
+            "ROCm/TheRock#8709 — a fclk DPM change mid-flight can hang the box "
+            "or corrupt NPU results on Strix Halo). `refuse` (default) blocks "
+            "the load with the host-side fix in the error; `warn` logs and "
+            "stores the warning on the slot like the GTT-leak check but still "
+            "loads; `off` skips the check entirely. An unreadable fabric-clock "
+            "state (expected inside hal0's own container — the sysfs write is "
+            "host-only, but the read should still work) always warns, never "
+            "refuses. Overridable per-process with HAL0_FABRIC_CLOCK_GUARD."
+        ),
+    )
     publish_host: str = Field(
         default="127.0.0.1",
         description=(
@@ -1919,6 +1969,17 @@ class SlotsConfig(BaseModel):
             )
         return host
 
+    @field_validator("fabric_clock_guard")
+    @classmethod
+    def _fabric_clock_guard_known(cls, v: str) -> str:
+        policy = str(v).strip().lower()
+        if policy not in ("refuse", "warn", "off"):
+            raise ValueError(
+                f"[slots].fabric_clock_guard {v!r} is not supported "
+                "(use 'refuse', 'warn', or 'off')"
+            )
+        return policy
+
     @field_validator("network_mode")
     @classmethod
     def _network_mode_known(cls, v: str) -> str:
@@ -2009,6 +2070,19 @@ class DispatcherConfig(BaseModel):
         default=4,
         ge=1,
         description="Max concurrent upstream parallel prefetches.",
+    )
+    admission_wait_timeout_s: float = Field(
+        default=1800.0,
+        ge=1.0,
+        le=86400.0,
+        description=(
+            "Max seconds a request may wait in a slot's admission queue "
+            "(hal0.dispatcher.admission; only applies to slots with "
+            "max_inflight set) before the dispatcher gives up and returns "
+            "503 with Retry-After, rather than forwarding. The read-timeout "
+            "clock for the forward itself starts only after admission, so "
+            "this bound is independent of [dispatcher].direct_read_timeout_s."
+        ),
     )
 
 
@@ -2116,7 +2190,11 @@ class MemoryGraphConfig(BaseModel):
             "extraction slot; the daemon restarts to pick it up. It also sets "
             "the retain wall limit (HINDSIGHT_API_RETAIN_WALL_TIMEOUT, which "
             "hal0 derives, see extraction_llm_retries): the wall limit is "
-            "always above llm_timeout_s x (extraction_llm_retries + 1)."
+            "always above llm_timeout_s x (extraction_llm_retries + 1). "
+            "Hindsight sends these calls non-streaming through hal0's /v1, so "
+            "hal0 also uses this value as the read timeout for hal0/memory "
+            "requests when it is longer than [dispatcher].direct_read_timeout_s; "
+            "a shorter value never lowers that setting."
         ),
     )
     # Extraction limits (#1834). The extraction slot is a shared inference
@@ -2135,8 +2213,11 @@ class MemoryGraphConfig(BaseModel):
             "extraction target (HINDSIGHT_API_LLM_MAX_CONCURRENT and "
             "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT). This also bounds consolidation, "
             "reflect and mental-model refresh. 1 serialises them; raise it "
-            "only for a slot that genuinely serves parallel requests. Applied via "
-            "the hindsight-api drop-in; the daemon restarts to pick it up."
+            "only for a slot that genuinely serves parallel requests. hal0 holds "
+            "the rendered value to the extraction slot's --parallel (calls beyond "
+            "it queue inside llama-server and time out), keeps this setting as "
+            "you wrote it, and warns on save and in graph status when it clamps. "
+            "Applied via the hindsight-api drop-in; the daemon restarts to pick it up."
         ),
     )
     extraction_max_tokens: int = Field(
@@ -2652,13 +2733,286 @@ class MemoryPriorityConfig(BaseModel):
     )
 
 
+#: #3492: value shapes the ``hal0-systemctl`` showcase allow-list accepts
+#: (installer/wrappers/hal0-systemctl, ``validate_dropin_directive showcase``).
+#: Checked here too so a value the root side would refuse is rejected at save
+#: time instead of leaving the drop-in stale behind a saved ``hal0.toml``.
+_SHOWCASE_PROVIDER_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+_SHOWCASE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}$")
+_SHOWCASE_VIRTUAL_MODEL_RE = re.compile(r"^hal0/[A-Za-z0-9_.-]{1,64}$")
+_SHOWCASE_EFFORT_RE = re.compile(r"^[a-z]{1,16}$")
+
+
+def _showcase_shape(v: str, pattern: re.Pattern[str], what: str) -> str:
+    if not pattern.fullmatch(v) or ".." in v:
+        raise ValueError(f"{what} {v!r} must match {pattern.pattern} (no '..')")
+    return v
+
+
+class MemoryModelsConfig(BaseModel):
+    """[memory.models] section of hal0.toml — Hindsight 1.2 embed/rerank models.
+
+    hindsight-api 1.2.0 ships its own first-party local embedding/reranker
+    models (``hs-embed-1`` / ``hs-rerank-1``, both CPU, in-process). Defaults
+    here match the verified showcase env (``zz-showcase-1.2.conf``): local
+    CPU models, no external gateway hop. Rendered into
+    ``HINDSIGHT_API_EMBEDDINGS_*`` / ``HINDSIGHT_API_RERANKER_*`` env by the
+    installer/extraction_env drop-in renderer.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    embeddings_provider: str = Field(
+        default="local",
+        description="HINDSIGHT_API_EMBEDDINGS_PROVIDER — 'local' runs in-process on CPU.",
+    )
+    embeddings_model: str = Field(
+        default="hindsight-ai/hs-embed-1",
+        description="HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL.",
+    )
+    reranker_provider: str = Field(
+        default="local",
+        description="HINDSIGHT_API_RERANKER_PROVIDER — 'local' runs in-process on CPU.",
+    )
+    reranker_model: str = Field(
+        default="hindsight-ai/hs-rerank-1",
+        description="HINDSIGHT_API_RERANKER_LOCAL_MODEL.",
+    )
+    reranker_bucket_batching: bool = Field(
+        default=True,
+        description="HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING.",
+    )
+
+    @field_validator("embeddings_provider", "reranker_provider")
+    @classmethod
+    def _showcase_provider(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_PROVIDER_RE, "provider")
+
+    @field_validator("embeddings_model", "reranker_model")
+    @classmethod
+    def _showcase_model(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_MODEL_RE, "model id")
+
+
+class MemoryDecisionConfig(BaseModel):
+    """[memory.decision] section of hal0.toml — the Hindsight 1.2 decision model.
+
+    The decision model (``hs-decide-1-flash``) replaces many of Hindsight's
+    LLM calls (recall rank/prune/dedup, consolidation judgments, reflect
+    sufficiency, page delta gating) with a single cheap forward pass. hal0
+    runs it locally as the ``hal0-hs-decide`` CPU System One service
+    (src/hal0/memory/decision_server.py) on ``port``; ``provider = "hindsight"``
+    with ``base_url = http://127.0.0.1:<port>`` is the verified-working local
+    shape (hindsight-api still requires a non-empty, if placeholder, API key
+    even for a local base URL — see ``zz-showcase-1.2.conf``).
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether the decision model lane is enabled at all.",
+    )
+    provider: str = Field(
+        default="local",
+        description=(
+            "'local' (hal0-managed hal0-hs-decide service), 'hindsight-cloud' "
+            "(hosted decision model), or 'off' (engine falls back to its LLM "
+            "lane for decision-gated operations)."
+        ),
+    )
+    model: str = Field(
+        default="hs-decide-1-flash",
+        description="HINDSIGHT_API_DECISION_MODEL_MODEL.",
+    )
+    threads: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description="CPU thread count for the local hal0-hs-decide server.",
+    )
+    max_concurrent: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        description="HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT.",
+    )
+    max_request_tokens: int = Field(
+        default=4096,
+        ge=256,
+        le=32768,
+        description=(
+            "HINDSIGHT_API_DECISION_MODEL_MAX_REQUEST_TOKENS — CPU latency "
+            "budget cap; measured ~25s @ 8.5k tokens on shared CPU."
+        ),
+    )
+    timeout_s: int = Field(
+        default=60,
+        ge=5,
+        le=600,
+        description="HTTP timeout (seconds) for decision-model calls.",
+    )
+    port: int = Field(
+        default=9178,
+        ge=1,
+        le=65535,
+        description="Port the local hal0-hs-decide service binds.",
+    )
+    base_url: str | None = Field(
+        default=None,
+        description=(
+            "Override for where hal0 proxies POST /v1/systemone. Unset means "
+            "http://127.0.0.1:<port> (the local hal0-hs-decide service)."
+        ),
+    )
+
+    def resolved_base_url(self) -> str:
+        """The System One server URL: ``base_url`` if set, else the local port."""
+        return (self.base_url or f"http://127.0.0.1:{self.port}").rstrip("/")
+
+    @field_validator("model")
+    @classmethod
+    def _decision_model_shape(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_MODEL_RE, "decision model id")
+
+    @field_validator("provider")
+    @classmethod
+    def _decision_provider_known(cls, v: str) -> str:
+        allowed = {"local", "hindsight-cloud", "off"}
+        if v not in allowed:
+            raise ValueError(
+                f"memory.decision.provider must be one of {sorted(allowed)}, got {v!r}"
+            )
+        return v
+
+
+class MemoryLaneOpConfig(BaseModel):
+    """Per-operation LLM lane override under ``[memory.lanes.<op>]``.
+
+    One of ``retain``, ``consolidation``, ``reflect``, ``mental_model_refresh``.
+    Any field left unset falls back to the lane's global default
+    (:class:`MemoryLanesConfig`).
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    max_concurrent: int | None = Field(
+        default=None,
+        ge=1,
+        le=32,
+        description=(
+            "HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT. Unset falls back to "
+            "[memory.lanes].llm_max_concurrent."
+        ),
+    )
+    virtual_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional per-op hal0 virtual model override (e.g. 'hal0/utility' "
+            "for a burst lane) instead of the shared 'hal0/memory' alias."
+        ),
+    )
+    timeout_s: int | None = Field(
+        default=None, ge=30, le=3600, description="Per-op LLM timeout override."
+    )
+    reasoning_effort: str | None = Field(
+        default=None,
+        description="Per-op HINDSIGHT_API_{OP}_LLM_REASONING_EFFORT override.",
+    )
+    strict_schema: bool | None = Field(
+        default=None,
+        description="Per-op HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA override.",
+    )
+
+    @field_validator("virtual_model")
+    @classmethod
+    def _op_virtual_model_shape(cls, v: str | None) -> str | None:
+        return (
+            None if v is None else _showcase_shape(v, _SHOWCASE_VIRTUAL_MODEL_RE, "virtual_model")
+        )
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _op_effort_shape(cls, v: str | None) -> str | None:
+        return None if v is None else _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
+
+
+class MemoryLanesConfig(BaseModel):
+    """[memory.lanes] section of hal0.toml — global + per-op LLM concurrency lanes.
+
+    Fixes H0-98: hindsight-api caps ALL LLM calls process-wide via
+    ``HINDSIGHT_API_LLM_MAX_CONCURRENT`` (engine default 32), but hal0 only
+    ever rendered the retain-bucket variant, so consolidation / reflect /
+    mental-model-refresh calls queued behind the memory slot's own
+    concurrency and could outlast the dispatcher's read timeout. This
+    section is the single hal0-rendered source for the global cap AND every
+    per-op override, retiring the hand-maintained
+    ``zz-h0-98-llm-global-cap.conf`` drop-in.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    llm_max_concurrent: int = Field(
+        default=1,
+        ge=1,
+        le=32,
+        description=(
+            "HINDSIGHT_API_LLM_MAX_CONCURRENT — the GLOBAL cap across every "
+            "hindsight-api LLM call (retain, consolidation, reflect, "
+            "mental-model-refresh together), independent of any per-op cap."
+        ),
+    )
+    timeout_s: int = Field(default=600, ge=30, le=3600, description="HINDSIGHT_API_LLM_TIMEOUT.")
+    reasoning_effort: str = Field(default="none", description="HINDSIGHT_API_LLM_REASONING_EFFORT.")
+    strict_schema: bool = Field(default=False, description="HINDSIGHT_API_LLM_STRICT_SCHEMA.")
+    retain: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    consolidation: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    reflect: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    mental_model_refresh: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _effort_shape(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
+
+
+class MemoryConsoleConfig(BaseModel):
+    """[memory.console] section of hal0.toml — the Hindsight Control Plane.
+
+    Optional power-user UI (``@vectorize-io/hindsight-control-plane`` on
+    node, verified as ``hal0-memory-console.service`` on CT143). Gated off
+    by default: node may not be present on a given box, in which case the
+    installer must skip install with a clear doctor warning rather than
+    failing the run.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    enabled: bool = Field(
+        default=False,
+        description="Install/run the Hindsight Control Plane service.",
+    )
+    port: int = Field(
+        default=9999,
+        ge=1,
+        le=65535,
+        description="Port the Hindsight Control Plane binds; changing it moves the console link.",
+    )
+    bind: str = Field(
+        default="127.0.0.1",
+        description="Bind address — kept loopback by default; proxy through hal0-api.",
+    )
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
-    Container for the per-subsystem memory tunables. Today carries
-    ``[memory.graph]``, ``[memory.embedding]`` and ``[memory.priority]``.
-    Future memory features (retention, prune-policy, archival) land under a
-    single namespace rather than scattering top-level tables.
+    Container for the per-subsystem memory tunables. Carries
+    ``[memory.graph]``, ``[memory.embedding]``, ``[memory.priority]``,
+    ``[memory.models]``, ``[memory.decision]``, ``[memory.lanes]`` and
+    ``[memory.console]`` (Hindsight 1.2 showcase additions). Future memory
+    features (retention, prune-policy, archival) land under this single
+    namespace rather than scattering top-level tables.
     """
 
     model_config = {"populate_by_name": True, "extra": "allow"}
@@ -2676,6 +3030,19 @@ class MemoryConfig(BaseModel):
     graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
     priority: MemoryPriorityConfig = Field(default_factory=MemoryPriorityConfig)
     embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
+    models: MemoryModelsConfig = Field(default_factory=MemoryModelsConfig)
+    decision: MemoryDecisionConfig = Field(default_factory=MemoryDecisionConfig)
+    lanes: MemoryLanesConfig = Field(default_factory=MemoryLanesConfig)
+    console: MemoryConsoleConfig = Field(default_factory=MemoryConsoleConfig)
+    public_url: str | None = Field(
+        default=None,
+        description=(
+            "The URL coding agents should reach the Hindsight engine at, e.g. "
+            "through a reverse proxy. Used by the GET /api/memory/agents "
+            "install one-liner in place of guessing <request host>:9177 when "
+            "set."
+        ),
+    )
     unified_bank: bool = Field(
         default=True,
         description=(
@@ -2686,6 +3053,19 @@ class MemoryConfig(BaseModel):
             "'agent:<id>' tag), and recall is single-bank (no cross-bank "
             "fan-out). Set false to restore the pre-unified multi-bank model "
             "(private:<agent> / project:<id> banks + fan-out recall)."
+        ),
+    )
+    bank: str = Field(
+        default="shared",
+        description=(
+            "Name of the Hindsight bank that holds the platform's memory — the "
+            "engine bank behind the 'shared' namespace (ADR-0052). The namespace "
+            "grammar ('shared' | 'private:<agent>') is unchanged; only the bank "
+            "id the provider talks to differs. The default 'shared' leaves "
+            "existing installs untouched. Changing it points hal0-api at a "
+            "different bank, so run 'hal0 memory migrate platform' first to "
+            "clone the existing bank's data into the new name, then restart "
+            "hal0-api."
         ),
     )
     # HAL0-SUNSET: v2.0.0 — 'cognee' engine literal retired here. It is no
@@ -2706,6 +3086,27 @@ class MemoryConfig(BaseModel):
             "still carrying it must be updated to 'hindsight'."
         ),
     )
+
+    @field_validator("bank")
+    @classmethod
+    def _bank_is_addressable(cls, v: str) -> str:
+        # Same grammar as hal0.api.routes.memory_admin._BANK_RE: the bank id
+        # travels in /api/memory/banks/{bank_id} paths, so anything that route
+        # would refuse is refused here at config load instead of at first use.
+        s = str(v or "").strip()
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}", s):
+            raise ValueError(
+                f"memory.bank {v!r} must start with a letter or digit and use only "
+                "letters, digits, '.', '_', ':' and '-' (max 128 chars)"
+            )
+        # ``private__<agent>`` is the per-agent bank family and ``agents`` the
+        # retired identity-card bank (ADR-0005); a platform bank named like
+        # either would alias them.
+        if s.startswith("private__") or s == "agents":
+            raise ValueError(
+                f"memory.bank {v!r} collides with a reserved bank name ('private__*' and 'agents')"
+            )
+        return s
 
     @field_validator("engine")
     @classmethod

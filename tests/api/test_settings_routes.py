@@ -309,3 +309,50 @@ def test_put_settings_still_accepts_other_memory_keys(isolated_client: TestClien
         "/api/settings", json={"memory": {"embedding": {"rerank_enabled": False}}}
     )
     assert r.status_code == 200, r.text
+
+
+# ── #3492: memory.models/decision/lanes reach hindsight-api on save ─────────
+
+
+def _spy_showcase(monkeypatch) -> list[dict]:
+    import hal0.memory.extraction_env as ee
+
+    seen: list[dict] = []
+
+    def _apply(**kw):
+        seen.append(kw)
+        return {"written": True, "restarted": True, "error": None}
+
+    monkeypatch.setattr(ee, "apply_showcase_dropin", _apply)
+    return seen
+
+
+def test_put_settings_applies_a_changed_lane_to_the_engine(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    seen = _spy_showcase(monkeypatch)
+
+    r = isolated_client.put(
+        "/api/settings", json={"memory": {"lanes": {"retain": {"max_concurrent": 3}}}}
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.json()["_hal0"]["showcase_dropin"] == {
+        "written": True,
+        "restarted": True,
+        "error": None,
+    }
+    assert len(seen) == 1
+    assert seen[0]["lanes"].retain.max_concurrent == 3
+
+
+def test_put_settings_leaves_the_engine_alone_for_unrelated_keys(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    seen = _spy_showcase(monkeypatch)
+
+    r = isolated_client.put("/api/settings", json={"telemetry": {"enabled": True}})
+
+    assert r.status_code == 200, r.text
+    assert "showcase_dropin" not in r.json()["_hal0"]
+    assert seen == []

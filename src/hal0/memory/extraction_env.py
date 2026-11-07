@@ -58,11 +58,21 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from hal0.agents.anchor_window import SLOTS_DIR, AnchorWindow, resolve_anchor_window
-from hal0.system.seam import SystemCtlSeam
+from hal0.agents.anchor_window import (
+    SLOTS_DIR,
+    AnchorWindow,
+    resolve_anchor_window,
+)
+from hal0.system.seam import SeamTimeout, SystemCtlSeam
 
 if TYPE_CHECKING:  # pragma: no cover
-    from hal0.config.schema import MemoryGraphConfig
+    from hal0.config.schema import (
+        MemoryDecisionConfig,
+        MemoryGraphConfig,
+        MemoryLaneOpConfig,
+        MemoryLanesConfig,
+        MemoryModelsConfig,
+    )
 
 log = structlog.get_logger(__name__)
 
@@ -125,6 +135,10 @@ class ExtractionLimits:
       consolidation, reflect and mental-model refresh. The slot ``--parallel``
       clamp applies to both rendered values. 1 serialises them, so a long
       reflect or consolidation can delay retains until completion or timeout.
+      The configured value remains in ``hal0.toml``; the rendered value is held
+      to the extraction slot's ``--parallel`` by :func:`effective_limits`
+      (#3347), because calls queued inside llama-server still spend their
+      read timeout.
     * ``max_tokens`` -> ``HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS``: per-call
       completion cap. Hindsight refuses every retain into a bank whose chunk
       size is not strictly below it: the schema floor (3072) clears the engine
@@ -219,6 +233,140 @@ _DROP_IN_TEMPLATE = (
     "Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS={retry_backoff_s}\n"
     "Environment=HINDSIGHT_API_RETAIN_WALL_TIMEOUT={wall_timeout_s}\n"
 )
+
+
+#: Second, additive drop-in for the Hindsight 1.2 showcase config
+#: ([memory.models]/[memory.decision]/[memory.lanes]) — kept separate from
+#: ``extraction-model.conf`` (which owns the hal0/memory alias + #1834
+#: extraction limits and is rewritten by the `hal0 memory graph` path) so the
+#: two renderers stay independently testable and a graph-only PUT never
+#: clobbers the showcase lanes, or vice versa. systemd merges all `.conf`
+#: files in the `.d` dir, last-Environment-line-wins on duplicate keys, so the
+#: load order between the two is irrelevant: they never set the same key.
+SHOWCASE_DROP_IN_PATH = DROP_IN_DIR / "showcase-lanes.conf"
+
+#: Op name -> HINDSIGHT_API_<PREFIX>_LLM_* env prefix.
+_LANE_OP_ENV_PREFIX = {
+    "retain": "RETAIN",
+    "consolidation": "CONSOLIDATION",
+    "reflect": "REFLECT",
+    "mental_model_refresh": "MENTAL_MODEL_REFRESH",
+}
+
+
+def render_showcase_env(
+    *,
+    models: MemoryModelsConfig,
+    decision: MemoryDecisionConfig,
+    lanes: MemoryLanesConfig,
+    ceiling: int | None = None,
+) -> str:
+    """Render the Hindsight 1.2 showcase env block (PLAN.md section 2).
+
+    ``ceiling`` (#3492) is the extraction drop-in's effective concurrency —
+    ``[memory.graph]`` held to the memory slot's ``--parallel``
+    (:func:`effective_limits`). This drop-in sorts after
+    ``extraction-model.conf``, so its ``HINDSIGHT_API_LLM_MAX_CONCURRENT`` and
+    per-op caps are the values the engine runs with; holding the global cap
+    and every op that still routes to the memory slot (no ``virtual_model``)
+    to the ceiling keeps the slot clamp intact. An op routed elsewhere keeps
+    its own cap. ``None`` renders the configured values unclamped.
+
+    Single source for the global LLM concurrency cap
+    (``HINDSIGHT_API_LLM_MAX_CONCURRENT``) plus any per-op override — this is
+    the H0-98 fix: before this renderer existed, hal0 only ever wrote the
+    retain-specific cap (see :data:`_DROP_IN_TEMPLATE`), so consolidation /
+    reflect / mental-model-refresh calls queued behind the memory slot's own
+    concurrency with no cap of their own, and an operator had to hand-maintain
+    ``zz-h0-98-llm-global-cap.conf`` to work around it. That hand drop-in
+    should be deleted once this one is installed.
+
+    ``decision.provider == "off"`` omits the decision-model env entirely so
+    hindsight-api falls back to its configured LLM/reranker path.
+    """
+    lines: list[str] = [
+        "# Managed by hal0 ([memory.models]/[memory.decision]/[memory.lanes] in",
+        "# hal0.toml, Hindsight 1.2 showcase — see PLAN.md section 2). Do not edit",
+        "# by hand; this file is fully rewritten on every apply. Retires any",
+        "# hand-maintained zz-h0-98-llm-global-cap.conf drop-in.",
+        "[Service]",
+        f"Environment=HINDSIGHT_API_EMBEDDINGS_PROVIDER={models.embeddings_provider}",
+        f"Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL={models.embeddings_model}",
+        f"Environment=HINDSIGHT_API_RERANKER_PROVIDER={models.reranker_provider}",
+        f"Environment=HINDSIGHT_API_RERANKER_LOCAL_MODEL={models.reranker_model}",
+        "Environment=HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING="
+        + ("true" if models.reranker_bucket_batching else "false"),
+    ]
+
+    if decision.enabled and decision.provider != "off":
+        base_url = (
+            f"http://127.0.0.1:{decision.port}"
+            if decision.provider == "local"
+            else "https://api.hindsight.ai"
+        )
+        lines += [
+            "Environment=HINDSIGHT_API_DECISION_MODEL_PROVIDER=hindsight",
+            f"Environment=HINDSIGHT_API_DECISION_MODEL_BASE_URL={base_url}",
+            f"Environment=HINDSIGHT_API_DECISION_MODEL_MODEL={decision.model}",
+            f"Environment=HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT={decision.max_concurrent}",
+            "Environment=HINDSIGHT_API_DECISION_MODEL_MAX_REQUEST_TOKENS="
+            f"{decision.max_request_tokens}",
+            # hindsight-api requires a non-empty key even for a local,
+            # unauthenticated base URL (verified on CT143 — see
+            # zz-showcase-1.2.conf): omitting it raises a startup ValueError.
+            "Environment=HINDSIGHT_API_DECISION_MODEL_API_KEY=hal0-local-noauth",
+        ]
+
+    def _held(value: int) -> int:
+        return value if ceiling is None else min(value, ceiling)
+
+    global_cap = _held(lanes.llm_max_concurrent)
+    lines += [
+        f"Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT={global_cap}",
+        f"Environment=HINDSIGHT_API_LLM_REASONING_EFFORT={lanes.reasoning_effort}",
+        "Environment=HINDSIGHT_API_LLM_STRICT_SCHEMA="
+        + ("true" if lanes.strict_schema else "false"),
+    ]
+
+    for op, prefix in _LANE_OP_ENV_PREFIX.items():
+        op_cfg: MemoryLaneOpConfig = getattr(lanes, op)
+        max_concurrent = (
+            op_cfg.max_concurrent if op_cfg.max_concurrent is not None else lanes.llm_max_concurrent
+        )
+        if op_cfg.virtual_model is None:
+            max_concurrent = _held(max_concurrent)
+        lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MAX_CONCURRENT={max_concurrent}")
+        if op_cfg.virtual_model is not None:
+            lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MODEL={op_cfg.virtual_model}")
+        if op_cfg.timeout_s is not None:
+            lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_TIMEOUT={op_cfg.timeout_s}")
+        if op_cfg.reasoning_effort is not None:
+            lines.append(
+                f"Environment=HINDSIGHT_API_{prefix}_LLM_REASONING_EFFORT={op_cfg.reasoning_effort}"
+            )
+        if op_cfg.strict_schema is not None:
+            lines.append(
+                f"Environment=HINDSIGHT_API_{prefix}_LLM_STRICT_SCHEMA="
+                + ("true" if op_cfg.strict_schema else "false")
+            )
+
+    return "\n".join(lines) + "\n"
+
+
+def showcase_drop_in_matches(
+    *,
+    models: MemoryModelsConfig,
+    decision: MemoryDecisionConfig,
+    lanes: MemoryLanesConfig,
+    ceiling: int | None = None,
+) -> bool:
+    """True when the on-disk showcase drop-in already matches the config."""
+    try:
+        return SHOWCASE_DROP_IN_PATH.read_text(encoding="utf-8") == render_showcase_env(
+            models=models, decision=decision, lanes=lanes, ceiling=ceiling
+        )
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 def _detail(exc: BaseException) -> str:
@@ -545,6 +693,96 @@ def memory_engine_target(graph: MemoryGraphConfig) -> tuple[str, str]:
     return ("slot", extraction_model_name(graph.extraction_slot))
 
 
+def clamp_to_parallel(limits: ExtractionLimits, parallel: int | None) -> ExtractionLimits:
+    """``limits`` with ``max_concurrent`` held to the slot's ``--parallel`` (#3347).
+
+    Calls beyond the slot's sequences queue inside llama-server, and that wait
+    counts against the caller's read timeout, so a larger value only converts
+    capacity the slot does not have into 504s. ``parallel`` of ``None`` (no
+    explicit ``--parallel``, an upstream target, an unreadable slot) leaves the
+    configured value alone: hal0 has no number to hold it to.
+    """
+    if parallel is None or parallel < 1 or limits.max_concurrent <= parallel:
+        return limits
+    return replace(limits, max_concurrent=parallel)
+
+
+def _extraction_slot_config(name: str, slots_dir: Path) -> dict[str, Any] | None:
+    """The extraction slot's on-disk config, flattened; ``None`` when unreadable.
+
+    The slot is resolved through the ONE bilingual authority,
+    :func:`hal0.slots.layout.resolve_slot_stem`, so an id-keyed layout
+    (``slots/<id>.toml`` with the display name in the body) resolves too. A
+    name-keyed-only read found nothing there and left the concurrency clamp
+    silently unapplied (#3473).
+
+    Read unvalidated on purpose: this feeds a status route and the update
+    reconcile, both of which must degrade, never raise, on a slot file the
+    typed loader would reject.
+    """
+    from hal0.config.loader import _flatten_slot_toml, _read_toml
+    from hal0.slots.layout import resolve_slot_stem
+
+    try:
+        stem = resolve_slot_stem(slots_dir, name)
+        if stem is None:
+            return None
+        raw = _read_toml(Path(slots_dir) / f"{stem}.toml")
+        return _flatten_slot_toml(raw, slot_name=name)
+    except Exception:
+        log.debug("hal0.memory.extraction_slot_unreadable", slot=name)
+        return None
+
+
+def extraction_slot_parallel(
+    graph: MemoryGraphConfig, *, slots_dir: Path = SLOTS_DIR
+) -> int | None:
+    """The ``--parallel`` the extraction slot launches with, or ``None`` when unknown.
+
+    ``None`` for an upstream target (no local slot is in play), a slot whose TOML
+    cannot be read, and a slot that sets no explicit ``--parallel``. Never raises:
+    this feeds a status route and the update reconcile.
+    """
+    kind, _target = memory_engine_target(graph)
+    if kind != "slot":
+        return None
+    raw = _extraction_slot_config(graph.extraction_slot, slots_dir)
+    if raw is None:
+        return None
+    from hal0.providers.container import slot_parallel_sequences
+
+    try:
+        return slot_parallel_sequences(raw)
+    except Exception:
+        log.debug("hal0.memory.extraction_parallel_unresolved", slot=graph.extraction_slot)
+        return None
+
+
+def effective_limits(graph: MemoryGraphConfig, *, slots_dir: Path = SLOTS_DIR) -> ExtractionLimits:
+    """The limits the drop-in is rendered from: ``[memory.graph]`` held to the slot (#3347).
+
+    The one answer for the graph PUT, the update reconcile and the status
+    route, so the file they write and compare against cannot disagree.
+    """
+    return clamp_to_parallel(
+        ExtractionLimits.from_config(graph), extraction_slot_parallel(graph, slots_dir=slots_dir)
+    )
+
+
+def concurrency_clamp_warning(graph: MemoryGraphConfig, parallel: int | None) -> str | None:
+    """Operator-facing sentence when ``extraction_max_concurrent`` exceeds the slot, else ``None``."""
+    configured = graph.extraction_max_concurrent
+    if parallel is None or configured <= parallel:
+        return None
+    return (
+        f"[memory.graph].extraction_max_concurrent = {configured} is above extraction slot "
+        f"{graph.extraction_slot!r}'s --parallel {parallel}; hal0 renders {parallel} into "
+        "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT so extra calls do not queue inside "
+        "llama-server and time out. Lower extraction_max_concurrent, or raise the slot's "
+        "--parallel, to make the two agree."
+    )
+
+
 def apply_extraction_slot(
     slot: str,
     *,
@@ -649,13 +887,135 @@ def reconcile_extraction_dropin(
         graph = load_hal0_config().memory.graph
     except Exception as exc:
         return {"status": "skipped", "reason": f"hal0.toml unreadable: {_detail(exc)}"}
-    limits = ExtractionLimits.from_config(graph)
+    limits = effective_limits(graph)
     if drop_in_matches(graph.llm_timeout_s, limits=limits):
         return {"status": "converged"}
     result = apply_extraction_slot(
         graph.extraction_slot,
         timeout_s=graph.llm_timeout_s,
         limits=limits,
+        restart=restart,
+        seam=seam,
+    )
+    return {"status": "failed" if result.get("error") else "applied", **result}
+
+
+def showcase_ceiling(graph: MemoryGraphConfig | None) -> int | None:
+    """The concurrency ceiling the showcase drop-in is held to (#3492).
+
+    The extraction drop-in's effective ``max_concurrent`` — the one answer for
+    the settings PUT, the graph PUT and the update reconcile. ``None`` (render
+    unclamped) only when no graph config is supplied.
+    """
+    if graph is None:
+        return None
+    return effective_limits(graph).max_concurrent
+
+
+def reload_and_restart_hindsight(*, seam: SystemCtlSeam | None = None) -> dict[str, Any]:
+    """``daemon-reload`` then ``restart hindsight-api``, in that order. Never raises.
+
+    A drop-in is read only at unit load: restarting without the reload would
+    bring the engine back on the old environment. Returns
+    ``{"daemon_reloaded", "restarted", "error"}``.
+    """
+    seam = seam if seam is not None else SystemCtlSeam()
+    result: dict[str, Any] = {"daemon_reloaded": False, "restarted": False, "error": None}
+    for step, args in (
+        ("daemon_reloaded", ("systemctl", "daemon-reload")),
+        ("restarted", ("systemctl", "restart", SERVICE)),
+    ):
+        try:
+            seam.systemctl(*args, check=True, timeout=_SYSTEMCTL_TIMEOUT_S)
+            result[step] = True
+        except (OSError, subprocess.SubprocessError, SeamTimeout) as exc:
+            result["error"] = f"{' '.join(args)} failed: {_detail(exc)}"
+            log.warning("hal0.memory.hindsight_reload_restart_failed", step=step, error=str(exc))
+            return result
+    return result
+
+
+def apply_showcase_dropin(
+    *,
+    models: MemoryModelsConfig,
+    decision: MemoryDecisionConfig,
+    lanes: MemoryLanesConfig,
+    graph: MemoryGraphConfig | None = None,
+    restart: bool = True,
+    seam: SystemCtlSeam | None = None,
+) -> dict[str, Any]:
+    """Write the showcase drop-in and (best-effort) restart hindsight-api (#3492).
+
+    The :func:`apply_extraction_slot` shape for ``[memory.models]`` /
+    ``[memory.decision]`` / ``[memory.lanes]``: render with
+    :func:`render_showcase_env` (held to :func:`showcase_ceiling` of
+    ``graph``), write through the privileged ``write-hindsight-showcase-dropin``
+    seam verb (allow-listed root-side), then :func:`reload_and_restart_hindsight`
+    — the engine reads these env vars only at start. Never raises; returns
+    ``{"drop_in", "written", "daemon_reloaded", "restarted", "error"}``.
+    Blocking: event-loop callers must hop a thread.
+    """
+    seam = seam if seam is not None else SystemCtlSeam()
+    result: dict[str, Any] = {
+        "drop_in": str(SHOWCASE_DROP_IN_PATH),
+        "written": False,
+        "daemon_reloaded": False,
+        "restarted": False,
+        "error": None,
+    }
+    try:
+        body = render_showcase_env(
+            models=models, decision=decision, lanes=lanes, ceiling=showcase_ceiling(graph)
+        )
+        seam.write_hindsight_showcase_dropin(
+            body, path=SHOWCASE_DROP_IN_PATH, timeout=_SYSTEMCTL_TIMEOUT_S
+        )
+        result["written"] = True
+    except (OSError, subprocess.SubprocessError, SeamTimeout) as exc:
+        result["error"] = (
+            f"could not write {SHOWCASE_DROP_IN_PATH}: {_detail(exc)}{_stale_wrapper_hint(exc)}"
+        )
+        log.warning("hal0.memory.showcase_dropin_write_failed", error=str(exc))
+        return result
+
+    if not restart:
+        return result
+
+    result.update(reload_and_restart_hindsight(seam=seam))
+    if result["error"] is None:
+        log.info("hal0.memory.showcase_dropin_applied")
+    return result
+
+
+def reconcile_showcase_dropin(
+    *, restart: bool = True, seam: SystemCtlSeam | None = None
+) -> dict[str, Any]:
+    """Re-render the showcase drop-in when it no longer matches ``hal0.toml``.
+
+    Like :func:`reconcile_extraction_dropin`, acts only on a box whose engine
+    is installed (the extraction drop-in exists); there it also *creates* the
+    showcase drop-in on first run, which is how an existing box picks up the
+    1.2 models/decision/lanes env after an update. Never raises. Returns
+    ``{"status": "skipped"|"converged"|"applied"|"failed", ...}``.
+    """
+    if not DROP_IN_PATH.exists():
+        return {"status": "skipped", "reason": "no memory engine on this box"}
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        mem = load_hal0_config().memory
+        ceiling = showcase_ceiling(mem.graph)
+    except Exception as exc:
+        return {"status": "skipped", "reason": f"hal0.toml unreadable: {_detail(exc)}"}
+    if showcase_drop_in_matches(
+        models=mem.models, decision=mem.decision, lanes=mem.lanes, ceiling=ceiling
+    ):
+        return {"status": "converged"}
+    result = apply_showcase_dropin(
+        models=mem.models,
+        decision=mem.decision,
+        lanes=mem.lanes,
+        graph=mem.graph,
         restart=restart,
         seam=seam,
     )
@@ -1228,6 +1588,7 @@ __all__ = [
     "ExtractionThroughput",
     "ExtractionWindow",
     "apply_extraction_slot",
+    "apply_showcase_dropin",
     "drop_in_matches",
     "extraction_floor",
     "extraction_model_name",
@@ -1235,6 +1596,9 @@ __all__ = [
     "parse_busy_requests",
     "parse_throughput_metrics",
     "reconcile_extraction_dropin",
+    "reconcile_showcase_dropin",
+    "reload_and_restart_hindsight",
     "render_drop_in",
     "resolve_extraction_window",
+    "showcase_ceiling",
 ]

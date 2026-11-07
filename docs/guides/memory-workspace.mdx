@@ -1,16 +1,26 @@
 ---
 title: Browse the Bank workspace
-description: The hal0 dashboard's memory v2 UI — the Overview tab's bank table and growth chart, and the Bank workspace's fact list, filters, curation, and graph views.
+description: The hal0 dashboard's two Memory surfaces — the memory v2 fact view (the Overview tab's bank table and growth chart, and the Bank workspace's fact list, filters, curation, and graph views), and the memory workspace's bank switcher with its seven tabs.
 sidebar:
   order: 51
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-Once [memory is enabled](/docs/guides/enable-memory), the dashboard's Memory
-view (`#memory`, reachable from the sidebar) gives you two tabs: **Overview**
-and **Bank**. This guide covers both — for what memory *is* (namespaces,
-fact types, directives, mental models), see [Memory](/docs/concepts/memory).
+Once [memory is enabled](/docs/guides/enable-memory), the dashboard carries
+**two** Memory surfaces, and they are different pages:
+
+- **Agents ▸ Memory** (`#memory`) — the v2 *fact view*: an **Overview** tab
+  and a **Bank** tab. The first half of this guide covers it — the
+  Overview's bank table and growth chart, and the Bank workspace's fact
+  list, filters, curation and graph views.
+- **Memory** (`#memworkspace`) — the memory *workspace*: a top-level sidebar
+  entry with a bank switcher and seven tabs (Overview, Knowledge base,
+  Mental models, Directives, Operations, Agents, Models). The second half of
+  this guide covers it.
+
+For what memory *is* (namespaces, fact types, directives, mental models),
+see [Memory](/docs/concepts/memory).
 
 <Aside type="note">
 Every card here fails soft with a "Memory engine unreachable" message and a
@@ -18,7 +28,178 @@ Retry button rather than rendering an empty state, so a Hindsight outage
 never looks like an empty bank.
 </Aside>
 
-## Overview tab
+## Which "Memory" is which?
+
+Both sidebar entries are labelled **Memory**, so the label alone does not
+tell them apart — renaming them is tracked in
+[issue #3496](https://github.com/Hal0ai/hal0/issues/3496). Until that lands,
+use position and shape:
+
+| Sidebar row | Route | Surface |
+| --- | --- | --- |
+| **Memory** — top level, with an icon, expanding to seven sub-entries | `#memworkspace` | The memory **workspace** (second half of this guide). |
+| **Memory** — nested under **Agents** | `#memory` | The v2 **fact view** (first half of this guide). |
+
+The workspace's own page header also reads "Memory"; the fact view renders
+no heading of its own, because it sits inside the Agents page shell. The
+unambiguous tell is the sub-entries: **Overview, Knowledge base, Mental
+models, Directives, Operations, Agents, Models** belong to the workspace, and
+only the workspace has them.
+
+## The memory workspace (`#memworkspace`)
+
+The workspace is its own top-level route. Its URL hash carries the tab —
+`#memworkspace/overview`, `#memworkspace/kb`, `#memworkspace/mental-models`,
+`#memworkspace/directives`, `#memworkspace/operations`,
+`#memworkspace/agents`, `#memworkspace/models` — and a bare `#memworkspace`
+opens the Overview tab.
+
+### Bank switcher and console link
+
+The header carries two controls:
+
+- **Bank switcher** — a dropdown listing every bank the engine knows about.
+  The selected bank scopes every tab except Agents: knowledge-base pages,
+  mental models, directives, operations, the bank stats and the bank config
+  all read and write the selected bank. With no explicit choice the first
+  bank in the list is used, falling back to `shared`. The list refreshes
+  every 15 seconds, so a bank created elsewhere (the fact view's
+  **+ New bank** form) turns up without a reload. The selection is page
+  state rather than a URL parameter, so it is not part of a shared link and
+  a fresh load starts again on the first bank.
+- **Open console ↗** — a link to the Hindsight Control Plane console. It is
+  shown only when the console is enabled in `[memory.console]`; otherwise the
+  button is absent. Its URL is built from the console host and
+  `[memory.console].port` (default `9999`). The console is optional — hal0
+  works without it.
+
+### Overview tab
+
+A status board for the engine rather than a fact view. Five cards, plus a
+sixth on boxes that report NPU occupancy:
+
+- **Decision server** — a health badge for the decision-model lane (`ok`,
+  `warn`, `bad` or `unknown`), the device it runs on, how many requests it
+  has served and how long it has been busy.
+- **LLM lane** — the virtual model hal0 resolves for memory calls
+  (`hal0/memory`) and the lane's `max_concurrent` cap.
+- **NPU lane** — the raw NPU occupancy payload; only present when the box
+  reports one.
+- **Queue by bank** — the total in-flight operations across every bank, the
+  age of the oldest pending operation, and a per-bank table (pending,
+  processing, oldest) ordered by pressure: most pending first, then the
+  oldest backlog. A bank whose queue could not be read is listed with its
+  error rather than dropped silently.
+- **Bank stats — `<bank>`** — the selected bank's raw stats payload.
+- **LLM requests by operation** — how many LLM requests each memory
+  operation (retain, consolidation, reflect, …) has made, busiest first.
+
+The lane and queue figures refresh every 10 seconds.
+
+### Knowledge base tab
+
+The knowledge base is the bank as a document tree — folders and pages the
+engine keeps up to date.
+
+- **Pages** — the bank's folder/page tree. Folders are listed with a
+  trailing `/`; pages are buttons.
+- **Page detail** — the page's content, its last-refreshed timestamp, a
+  **stale** badge when the engine flags the page as out of date, and a
+  **Refresh** button that queues an async refresh of that page.
+- **Edit definition** — opens a form for the page's *definition* rather
+  than its content: **source query** (what the page is rebuilt from),
+  **tags** (comma-separated) and **trigger** (when the page refreshes).
+  **Save** writes the change, **Cancel** discards it.
+
+CLI equivalent: `hal0 memory kb tree <bank>`, `hal0 memory kb show <bank>
+<page_id>` and `hal0 memory kb refresh <bank> <page_id>`.
+
+### Mental models tab
+
+The bank's standing questions and the answers the engine has distilled for
+them.
+
+- **Mental models** — the bank's models. One carries a **stale** badge when
+  the engine flags it.
+- **Model detail** — its source query, trigger, last-refreshed time and
+  content, plus a **Refresh** button that asks the engine to rebuild it.
+- **History** — how many history entries the model has.
+
+CLI equivalent: `hal0 memory mm list <bank>`, `hal0 memory mm refresh <bank>
+<model_id>` and `hal0 memory mm history <bank> <model_id>`.
+
+### Directives tab
+
+The bank's standing rules — short instructions the engine applies.
+
+A table of name, priority, active flag and tags, with **Edit** and
+**Delete** per row, plus a **+ New directive** button that opens the same
+form: name, content, priority (a number), an **Active** checkbox and
+comma-separated tags. **Save** creates or updates the directive, **Cancel**
+closes the form.
+
+CLI equivalent: `hal0 memory directive list <bank>`, `hal0 memory directive
+add <bank> <text>` and `hal0 memory directive rm <bank> <directive_id>`.
+
+### Operations tab
+
+The bank's asynchronous work — retains, consolidations, model refreshes — as
+a table of operation id, type, status and creation time.
+
+- Filter chips across the top: **all**, **pending**, **processing**,
+  **completed** and **failed**, each with a count.
+- The table lists up to 100 operations and refreshes every 10 seconds.
+- A failed row gets a **Retry** button that re-queues that operation.
+
+CLI equivalent: `hal0 memory ops list` (`--bank <bank>` to scope, `--failed`
+to filter) and `hal0 memory ops retry` (`--bank <bank> --id
+<operation_id>`, or `--all-failed`).
+
+### Agents tab
+
+How coding agents (Claude Code, Codex, opencode, Pi, cursor-cli,
+copilot-cli, qwen-code) attach their own memory to the same engine.
+
+- **Coding-agent banks** — the banks whose id starts with `coding-agent::`.
+  Clicking one switches the workspace to that bank and returns to the
+  Overview tab.
+- **Install command** — a one-liner per harness: pick a harness chip and
+  the command is filled in with that harness name. **Copy** puts it on the
+  clipboard. The command runs the upstream `hindsight-coding-agents`
+  installer against this box's engine URL.
+
+`hal0 memory agents install <harness>` runs the same installer and merges
+the showcase defaults into `~/.hindsight/coding-agent.json`; `--dry-run`
+prints what it would do without running or writing anything.
+
+### Models tab
+
+Which models the memory subsystem uses, and the per-bank switches that
+change how it behaves.
+
+- **Embeddings**, **Reranker** and **Decision model** cards — the provider
+  and model behind each. The decision card also shows a **reachable** /
+  **unreachable** badge from a live probe of the decision server.
+- **NPU lane** — again only when the box reports NPU occupancy.
+- **Decision-model toggles — `<bank>`** — five switches for the selected
+  bank: `recall_decision_model_prune`, `recall_decision_model_dedup`,
+  `consolidation_use_decision_model`, `reflect_use_decision_model` and
+  `mental_model_delta_use_decision_model`.
+- **Bank missions — `<bank>`** — the bank's three standing personas:
+  **Retain** (what to learn), **Reflect** (how to answer) and
+  **Observations** (what to derive). Each is edited in place and saved on
+  its own.
+- **Observation scopes — `<bank>`** — the default tag scopes for derived
+  observations. Each row is a set of tags that must *all* match
+  (`topic:x, topic:y`); the rows are ORed with each other. **Add scope**
+  adds a row, **Remove** drops one, **Save scopes** writes the list. The
+  persisted key is `default_observation_scopes` in the bank's config.
+
+CLI equivalent: `hal0 memory models show`, and
+`hal0 memory bank profile set <bank> --retain-mission "…" --reflect-mission
+"…" --observations-mission "…"` for the missions.
+
+## Fact view — Overview tab
 
 The landing view. A bank picker at the top drives a **Retained** growth
 chart — a stacked bar of world/experience/observation counts per day, with
@@ -41,11 +222,13 @@ operation completed. Below it:
 
 A **+ New bank** button/form sits below the table. The form accepts a bank id that starts with a letter or digit and continues with letters, digits, `.`, `_`, `:` or `-`, up to 128 characters in all.
 
-## Bank tab
+## Fact view — Bank tab
 
 Selecting (or exploring into) a bank opens the **Bank workspace** — a bank
 identity bar on top, a filterable fact list or graph view on the left, and
-either a filter panel or a fact inspector on the right.
+either a filter panel or a fact inspector on the right. This is the fact
+view's own bank surface; it is a different thing from the `#memworkspace`
+page described above.
 
 ### The bank bar
 
@@ -192,10 +375,14 @@ operator-editable." Delete still applies to any fact type.
 
 ## Deep links
 
-The Bank workspace's URL hash carries state: `#memory/bank?bank=<id>&fact=<id>`
-(or `#agent/memory/bank?...` if you got here from the Agent tab — both
-forms are honoured). Sharing a link with both params opens straight to
-that bank with that fact selected in the inspector.
+The fact view's Bank workspace carries its state in the URL hash:
+`#memory/bank?bank=<id>&fact=<id>` (or `#agent/memory/bank?...` if you got
+here from the Agent tab — both forms are honoured). Sharing a link with both
+params opens straight to that bank with that fact selected in the inspector.
+
+The memory workspace's hash carries the tab only —
+`#memworkspace/kb`, `#memworkspace/models`, and so on. The selected bank is
+page state, so it is not part of a shared link.
 
 ## Related
 
@@ -203,3 +390,7 @@ that bank with that fact selected in the inspector.
   mental models, reranking, and graph extraction.
 - [Enable memory](/docs/guides/enable-memory) — turn memory on, and the CLI
   equivalents of the engine/graph/reranker settings.
+- [`hal0 memory` CLI](/docs/reference/cli-operator#hal0-memory--manage-hal0-memory-hindsight-engine)
+  — the command-line equivalents of the workspace's tabs: `memory kb`,
+  `memory mm`, `memory directive`, `memory ops`, `memory models`,
+  `memory agents` and `memory bank profile set`.

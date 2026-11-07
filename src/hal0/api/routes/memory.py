@@ -422,6 +422,14 @@ async def graph_status(request: Request) -> dict[str, Any]:
         status["mode"] = "shared"
     status["llm_timeout_s"] = graph_cfg.llm_timeout_s
     status["extraction_limits"] = ExtractionLimits.from_config(graph_cfg).as_dict()
+    # #3347: the extraction slot's --parallel and the limits actually rendered
+    # into the drop-in (max_concurrent held to it), so a clamp is visible.
+    slot_parallel = await asyncio.to_thread(_ee.extraction_slot_parallel, graph_cfg)
+    status["extraction_slot_parallel"] = slot_parallel
+    status["effective_extraction_limits"] = _ee.clamp_to_parallel(
+        ExtractionLimits.from_config(graph_cfg), slot_parallel
+    ).as_dict()
+    status["concurrency_warning"] = _ee.concurrency_clamp_warning(graph_cfg, slot_parallel)
     status["throughput"] = _cached_throughput(request, status.get("extraction_slot"), graph_cfg)
     # #2919: what hal0/memory resolves to, and what else it could — the picker.
     status["extraction_model"] = graph_cfg.extraction_model
@@ -786,7 +794,10 @@ async def retry_failed_extractions(request: Request) -> dict[str, Any]:
 
 
 async def _propagate_shielded(
-    slot: str, timeout_s: int, limits: ExtractionLimits | None = None
+    slot: str,
+    timeout_s: int,
+    limits: ExtractionLimits | None = None,
+    memory: Any = None,
 ) -> dict[str, Any]:
     """Propagate an extraction-slot/timeout/limits change, safe against cancellation.
 
@@ -811,11 +822,32 @@ async def _propagate_shielded(
     early either — an unshielded ``await task`` there would exit and
     release the lock exactly like the bug this function exists to close.
     """
-    from hal0.memory.extraction_env import apply_extraction_slot
-
-    task = asyncio.ensure_future(
-        asyncio.to_thread(apply_extraction_slot, slot, timeout_s=timeout_s, limits=limits)
+    from hal0.memory.extraction_env import (
+        SHOWCASE_DROP_IN_PATH,
+        apply_extraction_slot,
+        apply_showcase_dropin,
     )
+
+    def _apply() -> dict[str, Any]:
+        # #3492: the showcase drop-in's concurrency caps are held to the
+        # extraction limit and win over it (later drop-in), so a graph change
+        # re-renders it too — written without its own restart; the extraction
+        # apply below does the one reload + restart for both.
+        showcase = None
+        if memory is not None and SHOWCASE_DROP_IN_PATH.exists():
+            showcase = apply_showcase_dropin(
+                models=memory.models,
+                decision=memory.decision,
+                lanes=memory.lanes,
+                graph=memory.graph,
+                restart=False,
+            )
+        result = apply_extraction_slot(slot, timeout_s=timeout_s, limits=limits)
+        if showcase is not None:
+            result["showcase_dropin"] = showcase
+        return result
+
+    task = asyncio.ensure_future(asyncio.to_thread(_apply))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
@@ -883,6 +915,12 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
         new_limits = ExtractionLimits.from_config(new_cfg)
         limits_changed = new_limits != ExtractionLimits.from_config(cfg.memory.graph)
+        # #3347: hal0.toml keeps what the operator asked for; the drop-in gets
+        # it held to the extraction slot's --parallel. Slot changes can move the
+        # clamp without touching a limit, which the drift check below catches.
+        slot_parallel = await asyncio.to_thread(_ee.extraction_slot_parallel, new_cfg)
+        render_limits = _ee.clamp_to_parallel(new_limits, slot_parallel)
+        clamp_warning = _ee.concurrency_clamp_warning(new_cfg, slot_parallel)
 
         # Validate an EXPLICIT slot change against the live slot set —
         # reject an unknown / non-llm slot with the valid options so the
@@ -929,7 +967,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         if not needs_propagation:
             from hal0.memory.extraction_env import drop_in_matches
 
-            needs_propagation = not drop_in_matches(new_cfg.llm_timeout_s, limits=new_limits)
+            needs_propagation = not drop_in_matches(new_cfg.llm_timeout_s, limits=render_limits)
 
         # Flip the live wrapper's reported state BEFORE persisting.
         try:
@@ -969,7 +1007,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             # cancellation (see _propagate_shielded) so this lock's critical
             # section can't be exited early while the worker is still live.
             propagation = await _propagate_shielded(
-                new_cfg.extraction_slot, new_cfg.llm_timeout_s, new_limits
+                new_cfg.extraction_slot, new_cfg.llm_timeout_s, render_limits, cfg.memory
             )
 
         out = new_cfg.model_dump(mode="json")
@@ -981,6 +1019,17 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         out["target"] = {"kind": target_kind, "model": _target_model, "alias": MEMORY_ALIAS}
         if propagation is not None:
             out["propagation"] = propagation
+
+    if slot_changed or model_changed:
+        # Hermes writes auxiliary targets at provision time. Reuse its tracked
+        # repair path when the configured target changes; an absent Hermes is
+        # normal on boxes that do not bundle it.
+        try:
+            from hal0.api.agents.repair import reprovision_hermes_auxiliary
+
+            await reprovision_hermes_auxiliary(request)
+        except Exception as exc:
+            log.warning("memory.hermes_aux_reprovision_unavailable", error=str(exc))
 
     # Extraction dispatches to hal0/<extraction_slot> whether or not the
     # reporting gate is on, so a slot change measures regardless of it.
@@ -1005,6 +1054,8 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         out["throughput"] = throughput
         if throughput["verdict"] == "too_slow":
             out["warnings"] = [throughput["message"]]
+    if clamp_warning:
+        out["warnings"] = [*out.get("warnings", []), clamp_warning]
     # #3215: warn when the cap does not clear a bank's retain chunk size. Outside
     # the config lock for the same reason as the probe; a down engine skips it.
     audit = await _audit_retain_chunks(request, new_cfg.extraction_max_tokens)
@@ -1431,7 +1482,8 @@ async def memory_list(
     private-mode case to the private bucket alone, unlike ``/search``.)
 
     ``?bank=`` is a convenience alias for the dashboard's Hindsight bank
-    browser: a bank id (``private__hermes``) is translated to the matching
+    browser: a bank id (``private__hermes``, or the platform bank's own name)
+    is translated to the matching
     dataset namespace (``private:hermes``) when no explicit ``?dataset=`` is
     given. If both are supplied and conflict, the explicit ``dataset`` wins.
 
@@ -1447,7 +1499,13 @@ async def memory_list(
     agent's.
     """
     if bank is not None:
-        bank_dataset = bank_to_namespace(bank)
+        # The platform bank ([memory] bank, ADR-0052) answers for ``shared``
+        # whatever the operator named it; any other bank id keeps the
+        # ``private__<agent>`` -> ``private:<agent>`` spelling.
+        platform_bank = getattr(
+            getattr(request.app.state, "memory_provider", None), "platform_bank", "shared"
+        )
+        bank_dataset = "shared" if bank == platform_bank else bank_to_namespace(bank)
         if dataset is None:
             dataset = bank_dataset
         elif dataset != bank_dataset:

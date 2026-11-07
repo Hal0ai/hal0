@@ -247,6 +247,28 @@ def _no_static_slot_seed(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _hermetic_port_listeners(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Blind the port registry to the HOST's real sockets, suite-wide.
+
+    ``hal0.ports`` counts live LISTEN sockets inside the port pool as
+    claims — correct on a real box, where auto-assign must not hand out a
+    port something is bound to. In a unit test it makes the result depend on
+    whatever the dev/CI box happens to be listening on: with 8081 bound, a
+    slot asking for 8081 is granted 8082 instead, and the test fails on the
+    ambient network rather than on the slot code it means to exercise.
+
+    This fixture is the single owner of that blindness for the whole suite
+    (it used to live separately in ``tests/api/conftest.py`` and
+    ``tests/golden_paths/conftest.py``, which is why ``tests/slots`` kept
+    depending on the host's free ports — #3465). A test that WANTS the
+    listener behaviour overrides ``hal0.ports._listener_claims`` itself.
+    """
+    from hal0 import ports as _ports
+
+    monkeypatch.setattr(_ports, "_listener_claims", lambda start, end: [])
+
+
+@pytest.fixture(autouse=True)
 def _no_boot_openwebui_reconcile(monkeypatch: pytest.MonkeyPatch) -> None:
     """Silence the lifespan's Open WebUI bridge-client mint and env render.
 

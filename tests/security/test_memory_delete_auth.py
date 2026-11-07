@@ -60,8 +60,14 @@ _PATH_ARGS = {
 }
 
 
+#: The engine passthrough's catch-all segment. Filled with the one shape its
+#: DELETE allowlist admits (a single directive) so a request that clears the
+#: auth gate reaches the handler rather than a 403 from the path narrowing.
+_ENGINE_PATH = "v1/default/banks/shared/directives/dir-1"
+
+
 def _url(path: str) -> str:
-    return path.format(**_PATH_ARGS)
+    return path.replace("{path:path}", _ENGINE_PATH).format(**_PATH_ARGS)
 
 
 # ── 1. the constant tracks the live surface ──────────────────────────────────
