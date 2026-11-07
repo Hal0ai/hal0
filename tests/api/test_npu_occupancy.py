@@ -314,6 +314,18 @@ def test_occupancy_subslot_activity_independent(client: TestClient, monkeypatch)
 # ── xdna/flm coexistence (xdna-runner plan §4) ────────────────────────────────
 
 
+def test_occupancy_flm_companions_are_not_a_second_tenant(client: TestClient, monkeypatch):
+    """The flm anchor plus its live -stt/-embed companion rows are one FLM
+    process, not several tenants: no shared_warning, single_tenant stays true."""
+    _wire_ready_anchor(client, monkeypatch, npu={"asr": True, "embed": True})
+
+    body = client.get("/api/npu/occupancy").json()
+    names = {s["name"] for s in body["slots"]}
+    assert {"npu", "npu-stt", "npu-embed"} <= names
+    assert body["shared_warning"] is None
+    assert body["single_tenant"] is True
+
+
 def test_occupancy_single_npu_slot_has_no_shared_warning(client: TestClient, monkeypatch):
     monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
     monkeypatch.setattr(npu_columns, "cached_aie_columns", AsyncMock(return_value=None))

@@ -230,6 +230,9 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             await flm_served_models_async()
 
     slots_out: list[dict[str, Any]] = []
+    # Real NPU tenants (one per process). The synthesized -stt/-embed rows
+    # ride on their FLM anchor's process and are never counted here.
+    tenant_names: list[str] = []
     columns_available = False
     cols_used = 0
     any_serving = False
@@ -243,6 +246,8 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         mapped_state = _map_slot_state(raw_state)
         if mapped_state == "serving":
             any_serving = True
+        if mapped_state in _LOADED_VIEW_STATES:
+            tenant_names.append(s.name)
 
         meta = getattr(s, "metadata", None) or {}
         provider = str(meta.get("provider") or "").lower()
@@ -378,15 +383,12 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
     # ownership never arbitrates npu/cpu devices), but time-slicing throughput
     # is a real cost the operator should see. Surface it as a warning on the
     # occupancy payload (and the activation log) rather than silently.
-    loaded_names = [s["name"] for s in slots_out if s["state"] in _LOADED_VIEW_STATES]
     npu_shared_warning: str | None = None
-    if len(loaded_names) > 1:
-        npu_shared_warning = (
-            f"NPU shared with slot {loaded_names[0]!r}; throughput is time-sliced"
-        )
+    if len(tenant_names) > 1:
+        npu_shared_warning = f"NPU shared with slot {tenant_names[0]!r}; throughput is time-sliced"
         log.warning(
             "npu.shared_occupancy",
-            slots=loaded_names,
+            slots=tenant_names,
         )
 
     return {
@@ -398,7 +400,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         "cols_total": _NPU_COLS,
         "cols_used": cols_used,
         "serving": any_serving,
-        "single_tenant": len(loaded_names) <= 1,
+        "single_tenant": len(tenant_names) <= 1,
         "columns_available": columns_available,
         "slots": slots_out,
         "shared_warning": npu_shared_warning,
