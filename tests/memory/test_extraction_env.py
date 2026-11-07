@@ -10,6 +10,7 @@ best-effort (returns a status dict rather than raising) so an unprivileged hal0
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,10 +20,15 @@ from hal0.memory.extraction_env import (
     EXTRACTION_FLOOR_ENV,
     EXTRACTION_MIN_CONTEXT_TOKENS,
     MEMORY_ALIAS,
+    ExtractionLimits,
     apply_extraction_slot,
+    clamp_to_parallel,
+    concurrency_clamp_warning,
     drop_in_matches,
+    effective_limits,
     extraction_floor,
     extraction_model_name,
+    extraction_slot_parallel,
     memory_engine_target,
     render_drop_in,
     resolve_extraction_window,
@@ -1096,3 +1102,345 @@ def test_reconcile_reports_a_failed_write_without_raising(monkeypatch, tmp_path:
 
     assert result["status"] == "failed"
     assert result["error"]
+
+
+# ── extraction concurrency is held to the slot's --parallel (#3347) ──────────
+
+
+def _graph(**kw):
+    from hal0.config.schema import MemoryGraphConfig
+
+    return MemoryGraphConfig(**kw)
+
+
+def _write_slot(tmp_path: Path, name: str = "memory") -> Path:
+    slots = tmp_path / "slots"
+    slots.mkdir(exist_ok=True)
+    (slots / f"{name}.toml").write_text('name = "memory"\nport = 8092\n', encoding="utf-8")
+    return slots
+
+
+def _write_id_keyed_slot(tmp_path: Path, stem: str = "7") -> Path:
+    """An id-keyed slot file: the stem is the id, the display name is in the body."""
+    slots = tmp_path / "slots"
+    slots.mkdir(exist_ok=True)
+    (slots / f"{stem}.toml").write_text('name = "memory"\nport = 8092\n', encoding="utf-8")
+    return slots
+
+
+@pytest.mark.parametrize(
+    ("configured", "parallel", "rendered"),
+    [(8, 2, 2), (2, 2, 2), (1, 2, 1), (8, None, 8), (4, 0, 4)],
+)
+def test_clamp_to_parallel_holds_concurrency_to_the_slot(configured, parallel, rendered):
+    base = ExtractionLimits(max_concurrent=configured)
+    out = clamp_to_parallel(base, parallel)
+    assert out.max_concurrent == rendered
+    # Nothing else about the limits moves.
+    assert replace(out, max_concurrent=configured) == base
+
+
+def test_effective_limits_reads_the_extraction_slots_parallel(monkeypatch, tmp_path: Path):
+    slots = _write_slot(tmp_path)
+    seen: list[dict] = []
+
+    def _parallel(raw):
+        seen.append(raw)
+        return 2
+
+    monkeypatch.setattr("hal0.providers.container.slot_parallel_sequences", _parallel)
+    graph = _graph(extraction_slot="memory", extraction_max_concurrent=8)
+    assert extraction_slot_parallel(graph, slots_dir=slots) == 2
+    assert effective_limits(graph, slots_dir=slots).max_concurrent == 2
+    assert seen and seen[0]["port"] == 8092
+    # The recorded config is untouched: hal0.toml keeps what the operator asked for.
+    assert graph.extraction_max_concurrent == 8
+
+
+def test_effective_limits_reads_the_parallel_on_an_id_keyed_layout(monkeypatch, tmp_path: Path):
+    """#3473: the clamp must resolve the slot through the layout authority.
+
+    On an id-keyed box the extraction slot lives at ``slots/<id>.toml`` and its
+    display name is in the file body, so a name-keyed-only read found nothing
+    and the clamp silently did not apply.
+    """
+    slots = _write_id_keyed_slot(tmp_path)
+    seen: list[dict] = []
+
+    def _parallel(raw):
+        seen.append(raw)
+        return 2
+
+    monkeypatch.setattr("hal0.providers.container.slot_parallel_sequences", _parallel)
+    graph = _graph(extraction_slot="memory", extraction_max_concurrent=8)
+    assert extraction_slot_parallel(graph, slots_dir=slots) == 2
+    assert effective_limits(graph, slots_dir=slots).max_concurrent == 2
+    assert seen and seen[0]["port"] == 8092
+
+
+def test_effective_limits_leaves_concurrency_alone_when_the_slot_is_unknown(tmp_path: Path):
+    graph = _graph(extraction_slot="memory", extraction_max_concurrent=8)
+    # No slot TOML on disk.
+    assert extraction_slot_parallel(graph, slots_dir=tmp_path) is None
+    assert effective_limits(graph, slots_dir=tmp_path).max_concurrent == 8
+
+
+def test_an_upstream_target_is_never_clamped(monkeypatch, tmp_path: Path):
+    slots = _write_slot(tmp_path)
+    monkeypatch.setattr("hal0.providers.container.slot_parallel_sequences", lambda raw: 1)
+    graph = _graph(
+        extraction_slot="memory", extraction_model="MiniMax-M2.5", extraction_max_concurrent=8
+    )
+    assert extraction_slot_parallel(graph, slots_dir=slots) is None
+    assert effective_limits(graph, slots_dir=slots).max_concurrent == 8
+
+
+def test_unresolvable_slot_never_raises(monkeypatch, tmp_path: Path):
+    slots = _write_slot(tmp_path)
+
+    def _boom(_raw):
+        raise RuntimeError("profile exploded")
+
+    monkeypatch.setattr("hal0.providers.container.slot_parallel_sequences", _boom)
+    assert extraction_slot_parallel(_graph(extraction_slot="memory"), slots_dir=slots) is None
+
+
+def test_concurrency_warning_names_the_numbers_only_when_it_clamps():
+    graph = _graph(extraction_slot="memory", extraction_max_concurrent=8)
+    msg = concurrency_clamp_warning(graph, 2)
+    assert msg is not None
+    assert "extraction_max_concurrent = 8" in msg
+    assert "'memory'" in msg and "--parallel 2" in msg
+    assert concurrency_clamp_warning(graph, 8) is None
+    assert concurrency_clamp_warning(graph, 16) is None
+    assert concurrency_clamp_warning(graph, None) is None
+
+
+def test_clamped_limits_render_into_the_drop_in():
+    out = render_drop_in(300, limits=clamp_to_parallel(ExtractionLimits(max_concurrent=8), 2))
+    assert "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=2\n" in out
+
+
+def test_reconcile_compares_against_the_clamped_limits(monkeypatch, tmp_path: Path):
+    """The update reconcile must not rewrite a clamped drop-in back to the raw
+    ``extraction_max_concurrent`` (and restart the engine) on every update."""
+    from hal0.memory import extraction_env as ee
+
+    graph = _graph(extraction_slot="memory", extraction_max_concurrent=8)
+    clamped = clamp_to_parallel(ExtractionLimits.from_config(graph), 2)
+    drop_in = tmp_path / "extraction-model.conf"
+    drop_in.write_text(render_drop_in(graph.llm_timeout_s, limits=clamped), encoding="utf-8")
+
+    monkeypatch.setattr(ee, "DROP_IN_PATH", drop_in)
+    monkeypatch.setattr(ee, "extraction_slot_parallel", lambda g, **_k: 2)
+    monkeypatch.setattr(
+        "hal0.config.loader.load_hal0_config",
+        lambda *a, **k: type("C", (), {"memory": type("M", (), {"graph": graph})()})(),
+    )
+    assert ee.reconcile_extraction_dropin()["status"] == "converged"
+
+
+# ── showcase drop-in apply / reconcile (#3492) ───────────────────────────────
+
+
+def _redirect_showcase(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
+    import hal0.memory.extraction_env as ee
+
+    extraction = _redirect_drop_in(monkeypatch, tmp_path)
+    showcase = extraction.parent / "showcase-lanes.conf"
+    monkeypatch.setattr(ee, "SHOWCASE_DROP_IN_PATH", showcase)
+    return extraction, showcase
+
+
+def _showcase_cfg():
+    from hal0.config.schema import MemoryDecisionConfig, MemoryLanesConfig, MemoryModelsConfig
+
+    return {
+        "models": MemoryModelsConfig(),
+        "decision": MemoryDecisionConfig(provider="local"),
+        "lanes": MemoryLanesConfig(),
+    }
+
+
+def test_apply_showcase_writes_through_the_seam_verb_then_restarts():
+    """The unprivileged path: body on stdin to the dedicated verb (never a
+    path argument), then daemon-reload + restart — in that order."""
+    from hal0.memory.extraction_env import apply_showcase_dropin, render_showcase_env
+
+    calls, run = _seam_recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), seam=seam)
+
+    assert result["error"] is None
+    assert result["written"] and result["daemon_reloaded"] and result["restarted"]
+    argvs = [c[0] for c in calls]
+    assert argvs[0][-1] == "write-hindsight-showcase-dropin"
+    assert SEAM_BIN in argvs[0]
+    assert calls[0][1] == render_showcase_env(**_showcase_cfg())
+    assert argvs[1][-1] == "daemon-reload"
+    assert argvs[2][-2:] == ["svc-restart", "hindsight"]
+
+
+def test_apply_showcase_reports_a_refused_write_and_skips_the_restart():
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    calls, run = _seam_recorder(rc=64, stderr="drop-in rejected: nope")
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), seam=seam)
+
+    assert result["written"] is False and result["restarted"] is False
+    assert "drop-in rejected" in result["error"]
+    assert len(calls) == 1
+
+
+def test_apply_showcase_without_restart_only_writes(monkeypatch, tmp_path: Path):
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), restart=False, seam=seam)
+
+    assert result["written"] and not result["restarted"]
+    assert "\n[Service]\n" in showcase.read_text()
+
+
+def test_showcase_reconcile_skips_a_box_without_the_engine(monkeypatch, tmp_path: Path):
+    from hal0.memory.extraction_env import reconcile_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    assert reconcile_showcase_dropin(seam=seam)["status"] == "skipped"
+    assert not showcase.exists()
+
+
+def test_showcase_reconcile_creates_then_converges(monkeypatch, tmp_path: Path):
+    """An updated box with the engine but no showcase drop-in gets one (and a
+    restart); the next pass is a no-op that touches nothing privileged."""
+    from hal0.memory.extraction_env import reconcile_showcase_dropin
+
+    extraction, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    _write_graph_config(monkeypatch, tmp_path)
+    extraction.parent.mkdir(parents=True)
+    extraction.write_text(render_drop_in(300))
+    calls, run = _seam_recorder()
+
+    result = reconcile_showcase_dropin(seam=SystemCtlSeam(run=run, is_hal0_user=lambda: False))
+
+    assert result["status"] == "applied"
+    assert "HINDSIGHT_API_EMBEDDINGS_" in showcase.read_text()
+    assert ["systemctl", "restart", "hindsight-api.service"] in [c[0] for c in calls]
+    quiet = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+    assert reconcile_showcase_dropin(seam=quiet) == {"status": "converged"}
+
+
+def test_showcase_caps_are_held_to_the_extraction_ceiling():
+    """#3492 review: showcase-lanes.conf sorts after extraction-model.conf, so
+    its caps are the ones the engine runs with — they must not undo the slot
+    --parallel clamp. Ops routed off the memory slot keep their own cap."""
+    from hal0.config.schema import (
+        MemoryDecisionConfig,
+        MemoryLaneOpConfig,
+        MemoryLanesConfig,
+        MemoryModelsConfig,
+    )
+    from hal0.memory.extraction_env import render_showcase_env
+
+    lanes = MemoryLanesConfig(
+        llm_max_concurrent=4,
+        retain=MemoryLaneOpConfig(max_concurrent=6),
+        reflect=MemoryLaneOpConfig(max_concurrent=5, virtual_model="hal0/primary"),
+    )
+    body = render_showcase_env(
+        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=lanes, ceiling=1
+    )
+    env = dict(
+        line.removeprefix("Environment=").split("=", 1)
+        for line in body.splitlines()
+        if line.startswith("Environment=")
+    )
+    assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT"] == "5"
+
+
+def test_effective_concurrency_across_both_dropins_keeps_the_slot_clamp():
+    """Merge the two drop-ins the way systemd does (lexical order, later
+    assignment wins) and check every shared name lands at or under the clamp."""
+    from hal0.config.schema import (
+        MemoryDecisionConfig,
+        MemoryLaneOpConfig,
+        MemoryLanesConfig,
+        MemoryModelsConfig,
+    )
+    from hal0.memory.extraction_env import ExtractionLimits, render_showcase_env
+
+    clamped = ExtractionLimits(max_concurrent=1)
+    extraction = render_drop_in(300, limits=clamped)
+    showcase = render_showcase_env(
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(),
+        lanes=MemoryLanesConfig(llm_max_concurrent=8, retain=MemoryLaneOpConfig(max_concurrent=8)),
+        ceiling=clamped.max_concurrent,
+    )
+
+    def _env(body: str) -> dict[str, str]:
+        return dict(
+            line.removeprefix("Environment=").split("=", 1)
+            for line in body.splitlines()
+            if line.startswith("Environment=")
+        )
+
+    first, last = _env(extraction), _env(showcase)
+    effective = {**first, **last}  # extraction-model.conf < showcase-lanes.conf
+    shared = set(first) & set(last)
+    assert shared, "the two drop-ins are expected to share the concurrency names"
+    for name in shared:
+        if name.endswith("_MAX_CONCURRENT"):
+            assert int(effective[name]) <= clamped.max_concurrent, name
+
+
+def test_reload_and_restart_reloads_first_and_reports_a_seam_timeout():
+    from hal0.memory.extraction_env import reload_and_restart_hindsight
+    from hal0.system.seam import SeamTimeout
+
+    calls, run = _seam_recorder()
+    ok = reload_and_restart_hindsight(seam=SystemCtlSeam(run=run, is_hal0_user=lambda: False))
+    assert ok == {"daemon_reloaded": True, "restarted": True, "error": None}
+    assert [c[0] for c in calls] == [
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "restart", "hindsight-api.service"],
+    ]
+
+    class _Seam:
+        def systemctl(self, *args, **kwargs):
+            if "restart" in args:
+                raise SeamTimeout(list(args), 30, "activating")
+
+    out = reload_and_restart_hindsight(seam=_Seam())  # type: ignore[arg-type]
+    assert out["daemon_reloaded"] is True and out["restarted"] is False
+    assert "did not return within 30s" in out["error"]
+
+
+@pytest.mark.parametrize(
+    ("section", "body"),
+    [
+        ("lanes", {"reasoning_effort": "x-high"}),
+        ("lanes", {"retain": {"virtual_model": "gpt-4o"}}),
+        ("lanes", {"retain": {"reasoning_effort": "High"}}),
+        ("models", {"embeddings_model": "../../etc/passwd"}),
+        ("models", {"reranker_provider": "Local Thing"}),
+        ("decision", {"model": "a b"}),
+    ],
+)
+def test_schema_refuses_values_the_showcase_wrapper_would(section, body):
+    from pydantic import ValidationError
+
+    from hal0.config.schema import MemoryConfig
+
+    with pytest.raises(ValidationError):
+        MemoryConfig.model_validate({section: body})

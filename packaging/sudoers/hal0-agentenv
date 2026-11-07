@@ -4,7 +4,8 @@
 # When hal0-api runs as the `hal0` system user, it cannot write the per-agent
 # env/seed files that the hardened model pins root:root:
 #   * /var/lib/hal0/secrets/agents/<agent>.env  (0600 root:root secrets vault)
-#   * /etc/hal0/agents/<agent>.env              (0644 root:root driver env)
+#   * /etc/hal0/agents/<agent>.env              (0600 root:root driver env; it can
+#                                                carry HAL0_MCP_TOKEN, a live secret)
 #   * /etc/hal0/agents/<agent>.toml             (0644 root:root manager seed / MCP allow-list)
 # It delegates exactly those writes to /usr/lib/hal0/bin/hal0-agentenv, which is
 # the entire privileged surface: the helper validates the agent name, builds the

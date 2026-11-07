@@ -63,6 +63,27 @@ generator and has no Docker equivalent, so Docker is unsupported — the old
 Docker fallback has been removed.
 </Aside>
 
+## Who owns a port
+
+A slot's port is not a free-for-all number. The **port authority** is the
+only writer of port ownership: it hands out the ports, records each grant as
+a `port_claim` row in `/var/lib/hal0/hal0.db`, and refuses a second live
+claim on a port it has already given away.
+
+At boot, hal0 reconciles those claims against the slots that actually exist:
+
+- A slot whose configuration file is gone — it was deleted, or another slot
+  replaced it — **releases its claim**. The port becomes grantable again, so
+  the live slot configured on that port claims it instead of being refused at
+  every boot.
+- Slots that share one port **by design** keep sharing it. The
+  [NPU trio](#the-npu-trio) — chat, speech-to-text and embedding in one
+  container on one NPU column — is three slots on one port, so a shared port
+  is not a conflict and is not logged as one.
+
+A real clash — two live slots configured on the same port — is still logged
+as `slot.port_seed_conflict` in `journalctl -u hal0-api`.
+
 ## Who owns what: slot, model, profile
 
 A launch is described by three objects, and every setting has exactly one

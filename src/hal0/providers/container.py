@@ -1567,6 +1567,35 @@ def slot_effective_context(
     return profile_context(profile, model_info)
 
 
+def slot_parallel_sequences(slot_cfg: Mapping[str, Any]) -> int | None:
+    """The ``--parallel`` sequence count a llama-server slot launches with, or ``None``.
+
+    Read from the same resolved argv the launch path builds
+    (:func:`_resolve_slot_argv`), so it follows the profile and the slot's own
+    override exactly. ``None`` when the slot does not launch llama-server, cannot
+    resolve, or sets no explicit positive count: llama-server then picks its own
+    (``-np auto``) and hal0 has no number to compare against.
+    """
+    resolved = _resolve_slot_argv(dict(slot_cfg))
+    if resolved is None:
+        return None
+    argv = resolved[1].argv
+    for i, tok in enumerate(argv):
+        value: str | None = None
+        if tok in ("--parallel", "-np"):
+            value = argv[i + 1] if i + 1 < len(argv) else None
+        elif tok.startswith("--parallel="):
+            value = tok.split("=", 1)[1]
+        if value is None:
+            continue
+        try:
+            count = int(value)
+        except ValueError:
+            return None
+        return count if count > 0 else None
+    return None
+
+
 def _served_by_anchor_cfg(name: str) -> dict[str, Any] | None:
     """The flattened config of the slot named ``name`` when it is an anchor
     (serves itself), else ``None``."""
@@ -3282,6 +3311,7 @@ __all__ = [
     "resolved_argv_detail_for_slot",
     "resolved_command_for_slot",
     "runner_family_mismatch",
+    "slot_parallel_sequences",
     "tune_effective_for_slot",
 ]
 
