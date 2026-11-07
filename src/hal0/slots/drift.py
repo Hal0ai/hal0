@@ -29,6 +29,7 @@ from collections.abc import Mapping
 from typing import Any, Protocol
 
 from hal0.slots._cfg_helpers import _model_default
+from hal0.slots.config_write import _cfg_effective_provider
 from hal0.slots.npu.trio import is_npu_trio_shadow
 
 # Config-drift comparison keys. Spelling no longer needs to match the launch
@@ -65,7 +66,9 @@ class DriftHost(Protocol):
 
     async def _is_active(self, slot_name: str) -> bool: ...
     async def _maybe_load_config(self, slot_name: str) -> dict[str, Any] | None: ...
-    async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]: ...
+    async def _resolve_model_info(
+        self, model_id: str | None, *, provider: str | None = None
+    ) -> dict[str, Any]: ...
     def _resolve_servable_model(self, model_id: str, cfg: Any) -> str: ...
 
 
@@ -198,7 +201,9 @@ async def compute_config_drift(
             # Status must never fail because a fallback heuristic raised — fall
             # back to the raw id and let the comparison proceed as before.
             model_default = _model_default(cfg)
-    model_info = await host._resolve_model_info(model_default)
+    model_info = await host._resolve_model_info(
+        model_default, provider=_cfg_effective_provider(cfg)
+    )
     from hal0.providers.container import container_provider
 
     provider = container_provider()

@@ -112,6 +112,9 @@ COMPANION_SERVICE_UNITS: dict[str, str] = {
 #: — exactly the ``write-gateway-dropin`` shape.
 HINDSIGHT_DROPIN_DIR = Path("/etc/systemd/system/hindsight-api.service.d")
 HINDSIGHT_DROPIN_PATH = HINDSIGHT_DROPIN_DIR / "extraction-model.conf"
+#: #3492: the Hindsight 1.2 showcase drop-in ([memory.models]/[memory.decision]
+#: /[memory.lanes]); ``write-hindsight-showcase-dropin`` owns the path root-side.
+HINDSIGHT_SHOWCASE_DROPIN_PATH = HINDSIGHT_DROPIN_DIR / "showcase-lanes.conf"
 
 
 class Hal0SeamMissing(RuntimeError):
@@ -496,6 +499,35 @@ class SystemCtlSeam:
             return
         self._run(
             self._seam_argv("write-hindsight-dropin"),
+            input=body,
+            text=True,
+            check=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+
+    def write_hindsight_showcase_dropin(
+        self,
+        body: str,
+        *,
+        path: Path = HINDSIGHT_SHOWCASE_DROPIN_PATH,
+        timeout: float | None = None,
+    ) -> None:
+        """Write the hindsight-api showcase drop-in (#3492).
+
+        Same posture as :meth:`write_hindsight_dropin`: the seam verb takes only
+        the body on stdin and owns the path; ``path`` is honoured only on the
+        direct (root / dev / CI) branch. Atomic (temp + rename). ``timeout``
+        bounds the seam child — API-thread callers must pass one.
+        """
+        if not self._is_hal0_user():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".conf.tmp")
+            tmp.write_text(body, encoding="utf-8")
+            tmp.replace(path)
+            return
+        self._run(
+            self._seam_argv("write-hindsight-showcase-dropin"),
             input=body,
             text=True,
             check=True,

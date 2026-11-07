@@ -30,7 +30,9 @@ class _Host:
     async def _maybe_load_config(self, slot_name: str) -> dict[str, Any] | None:
         return self.cfg
 
-    async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]:
+    async def _resolve_model_info(
+        self, model_id: str | None, *, provider: str | None = None
+    ) -> dict[str, Any]:
         return self.info
 
     def _resolve_servable_model(self, model_id: str, cfg: Any) -> str:

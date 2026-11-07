@@ -19,6 +19,51 @@ from rich.console import Console
 from hal0.cli import doctor_all as da
 from hal0.cli.doctor_verify import Check
 
+
+def test_openwebui_task_model_warns_for_removed_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = tmp_path / "openwebui.env"
+    env.write_text("TASK_MODEL_EXTERNAL=utility\n", encoding="utf-8")
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "warn"
+    assert "utility" in row.detail
+    env.write_text("TASK_MODEL_EXTERNAL=hal0/agent\n", encoding="utf-8")
+    assert da.check_openwebui_task_model(slots).status == "pass"
+
+
+def test_openwebui_task_model_ignores_an_upstream_model_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # TASK_MODEL_EXTERNAL may legitimately hold an upstream model id, not a
+    # slot name. The row only warns about a slot reference.
+    env = tmp_path / "openwebui.env"
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+
+    env.write_text("TASK_MODEL_EXTERNAL=qwen3:30b-a3b\n", encoding="utf-8")
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "pass"
+
+    env.write_text("TASK_MODEL_EXTERNAL=bge-base-en-v1.5-q4_k_m\n", encoding="utf-8")
+    assert da.check_openwebui_task_model(slots).status == "pass"
+
+
+def test_openwebui_task_model_warns_for_a_missing_hal0_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = tmp_path / "openwebui.env"
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+
+    env.write_text("TASK_MODEL_EXTERNAL=hal0/utility\n", encoding="utf-8")
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "warn"
+    assert "hal0/utility" in row.detail
+
+
 # ── check_auth_posture ────────────────────────────────────────────────────────
 
 
@@ -1574,6 +1619,14 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(
         da,
+        "check_fabric_clock",
+        lambda slots=None, **_kw: Check(
+            "fabric_clock", "NPU/GPU fabric-clock guard", "pass", "stubbed"
+        ),
+    )
+
+    monkeypatch.setattr(
+        da,
         "check_img_custom_nodes",
         lambda: Check("img-custom-nodes", "Image custom nodes", "pass", "stubbed"),
     )
@@ -1594,7 +1647,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-44:] == [
+    assert keys[-46:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1609,6 +1662,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "secret-modes",
         "hardware_freshness",
         "gtt_leak",
+        "fabric_clock",
         "seed_context_envelope",
         "agent-uid",
         "api-journal",
@@ -1626,6 +1680,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "bridge-store",
         "agent-bridge",
         "openwebui_mcp",
+        "openwebui-task-model",
         "hermes_generation",
         "hermes_command_approvals",
         "hermes_delegation_slot",
@@ -1911,14 +1966,17 @@ def test_api_journal_warns_when_process_lacks_the_group() -> None:
     assert "systemd-journal" in check.detail
 
 
-def test_api_journal_passes_for_a_root_api() -> None:
-    assert _journal(ids=(0, {0})).status == "pass"
+def test_api_journal_warns_for_an_unexpected_root_api() -> None:
+    check = _journal(ids=(0, {0}))
+    assert check.status == "warn"
+    assert "root" in check.detail
+    assert "hal0-api" in check.detail
 
 
-def test_api_journal_passes_for_a_root_api_on_a_host_without_the_group() -> None:
-    """Root reads the journal without systemd-journal, so a missing group is
-    not a problem for a root-run API: probe the process first."""
-    assert _journal(ids=(0, {0}), gid=None).status == "pass"
+def test_api_journal_warns_when_host_has_no_journal_group_for_hal0_api() -> None:
+    check = _journal(gid=None)
+    assert check.status == "warn"
+    assert "systemd-journal" in check.detail
 
 
 def test_api_journal_warns_when_host_has_no_journal_group() -> None:
@@ -3395,3 +3453,88 @@ def test_box_default_providers_read_real_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("HAL0_PORT", "9001")
     c = da.check_box_boundary(in_box=lambda: True, publish_hosts=lambda: {})
     assert c.status == "warn" and "9001" in c.detail
+
+
+# ── check_fabric_clock ───────────────────────────────────────────────────────
+
+
+def _fclk_sysfs(root: Path, *, perf: str, marked_index: int | None) -> str:
+    device = root / "class" / "drm" / "card1" / "device"
+    device.mkdir(parents=True)
+    levels = [
+        "0: 400Mhz",
+        "1: 800Mhz",
+        "2: 1200Mhz",
+        "3: 1600Mhz",
+        "4: 1800Mhz",
+        "5: 1900Mhz",
+        "6: 1950Mhz",
+        "7: 2000Mhz",
+    ]
+    if marked_index is not None:
+        levels[marked_index] += " *"
+    (device / "pp_dpm_fclk").write_text("\n".join(levels) + "\n")
+    (device / "power_dpm_force_performance_level").write_text(perf)
+    return str(root)
+
+
+def test_fabric_clock_passes_without_slot_list() -> None:
+    c = da.check_fabric_clock(None)
+    assert c.status == "pass" and "unavailable" in c.detail
+
+
+def test_fabric_clock_passes_with_no_npu_gpu_pairing() -> None:
+    slots = [{"name": "chat", "state": "ready", "backend": "vulkan"}]
+    c = da.check_fabric_clock(slots)
+    assert c.status == "pass" and "no NPU+GPU" in c.detail
+
+
+def test_fabric_clock_passes_when_held(tmp_path: Path) -> None:
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {"name": "chat", "state": "ready", "backend": "vulkan"},
+    ]
+    c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="manual", marked_index=7))
+    assert c.status == "pass" and "held" in c.detail
+
+
+def test_fabric_clock_warns_when_npu_and_gpu_configured_and_unheld(tmp_path: Path) -> None:
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {"name": "chat", "state": "idle", "backend": "vulkan"},
+    ]
+    c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="auto", marked_index=0))
+    assert c.status == "warn"
+    assert "flm" in c.detail and "chat" in c.detail
+    assert "hal0-fabric-clock hold" in c.detail
+
+
+def test_fabric_clock_passes_unreadable_when_sysfs_absent(tmp_path: Path) -> None:
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {"name": "chat", "state": "ready", "backend": "vulkan"},
+    ]
+    c = da.check_fabric_clock(slots, sys_root=str(tmp_path / "no-such-sys"))
+    assert c.status == "pass"
+    assert "unreadable" in c.detail
+
+
+def test_fabric_clock_ignores_synthetic_hal0_composite(tmp_path: Path) -> None:
+    """review P2-5: the API always folds in a synthetic composite row named
+    ``hal0`` (backend='vulkan' from slot_view synthesis). Counting it as a
+    real, individually-configured GPU slot turned every box with an NPU
+    slot and NO real GPU slot configured into a false WARN naming ``hal0``
+    — exclude ``_synthetic`` rows so only genuine per-slot configs pair.
+    """
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {
+            "name": "hal0",
+            "state": "serving",
+            "backend": "vulkan",
+            "_synthetic": True,
+        },
+    ]
+    c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="auto", marked_index=0))
+    assert c.status == "pass", c.detail
+    assert "hal0" not in c.detail

@@ -341,11 +341,16 @@ function MemoryGraphPanel() {
             </select>
           ) : (
             <input value={target.replace(/^slot:/, "")} disabled={!st}
-              onChange={e => setTarget(e.target.value ? `slot:${e.target.value}` : "")} placeholder="slot name (e.g. utility)"
+              onChange={e => setTarget(e.target.value ? `slot:${e.target.value}` : "")} placeholder="slot name (e.g. memory)"
               className="mono" style={{..._advInputStyle, width: 200}} />
           )
         }
       />
+      {target === "slot:memory" && (
+        <div className="s-row" style={{fontSize: 11, color: "var(--fg-3)"}}>
+          Recommended memory model: lfm2.5-2.6b (about 2.87 GB Q8_0). Bind it to the memory slot explicitly; it is never assigned automatically.
+        </div>
+      )}
       <ThroughputNote status={st} />
       <SRow
         k="Engine running"
