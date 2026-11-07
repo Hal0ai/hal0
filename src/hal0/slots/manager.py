@@ -4381,8 +4381,9 @@ class SlotManager:
         Explicit ``[slot].max_inflight`` wins (``0`` = uncapped). Unset on a
         FastFlowLM slot defaults to ``1``: FLM executes one request at a time
         on the NPU across all of its models, so letting requests queue inside
-        FLM only hides the wait from the dispatcher's read timeout. Any other
-        slot stays uncapped. On a config-cache miss the TOML is read
+        FLM only hides the wait from the dispatcher's read timeout. The xdna
+        runner (``binary = "xdna"``, fixed ``-np 1``) defaults to ``1`` for
+        the same reason. Any other slot stays uncapped. On a config-cache miss the TOML is read
         synchronously (a few hundred bytes) so a cold slot is capped from its
         very first request rather than after warm-up.
         """
@@ -4414,7 +4415,12 @@ class SlotManager:
                 return None
             return n if n > 0 else None
         kind = str(cfg.get("provider") or cfg.get("profile") or "").lower()
-        return 1 if kind == "flm" or kind.startswith("flm-") else None
+        if kind == "flm" or kind.startswith("flm-"):
+            return 1
+        # The ggml-xdna runner (ADR-0057) launches llama-server with a fixed
+        # ``-np 1``: another serial backend, so it gets the same default cap.
+        binary = str(cfg.get("binary") or (cfg.get("slot") or {}).get("binary") or "").lower()
+        return 1 if binary == "xdna" else None
 
     # ── private helpers ──────────────────────────────────────────────────────
 
