@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -245,6 +246,61 @@ _DROP_IN_TEMPLATE = (
 #: load order between the two is irrelevant: they never set the same key.
 SHOWCASE_DROP_IN_PATH = DROP_IN_DIR / "showcase-lanes.conf"
 
+#: The local decision-model unit (``installer/systemd/hal0-hs-decide.service``).
+#: The installer does not lay it down yet, so its presence is what says the
+#: ``provider = "local"`` decision lane can answer at all (#3519).
+DECISION_UNIT_PATH = Path("/etc/systemd/system/hal0-hs-decide.service")
+
+#: Base URL of the hosted decision model (``provider = "hindsight-cloud"``).
+HINDSIGHT_CLOUD_DECISION_URL = "https://api.hindsight.ai"
+
+#: The decision base URLs the root-side ``write-hindsight-showcase-dropin``
+#: allow-list accepts (``installer/wrappers/hal0-systemctl``): a loopback port
+#: or the hosted API. Anything else would get the whole drop-in refused.
+_ENGINE_DECISION_URL_RE = re.compile(r"^http://127\.0\.0\.1:[0-9]{1,5}$")
+
+
+def decision_url_renderable(url: str) -> bool:
+    """True when the showcase drop-in can carry ``url`` as the decision base URL."""
+    return bool(_ENGINE_DECISION_URL_RE.match(url)) or url == HINDSIGHT_CLOUD_DECISION_URL
+
+
+def decision_unit_installed(path: Path | None = None) -> bool:
+    """True when the ``hal0-hs-decide`` unit file is installed on this box."""
+    try:
+        return (path if path is not None else DECISION_UNIT_PATH).is_file()
+    except OSError:
+        return False
+
+
+def decision_engine_base_url(
+    decision: MemoryDecisionConfig, *, unit_installed: bool | None = None
+) -> str | None:
+    """Where hindsight-api should send decision calls, or ``None`` for no decision model.
+
+    * disabled, or ``provider = "off"`` -> ``None``;
+    * an explicit ``base_url`` -> that URL, as configured, when the drop-in
+      allow-list accepts it (:func:`decision_url_renderable`); a URL it would
+      refuse renders no decision env rather than failing the whole write;
+    * ``provider = "local"`` -> ``http://127.0.0.1:<port>`` only when the
+      ``hal0-hs-decide`` unit is installed (``unit_installed``, probed from
+      :data:`DECISION_UNIT_PATH` when ``None``). Pointing the engine at a port
+      nothing serves makes every decision call fail, retry, and fall back to
+      the LLM lane (#3519); with no decision env the engine takes that LLM
+      path directly;
+    * ``provider = "hindsight-cloud"`` -> :data:`HINDSIGHT_CLOUD_DECISION_URL`.
+    """
+    if not decision.enabled or decision.provider == "off":
+        return None
+    if decision.base_url:
+        url = decision.base_url.rstrip("/")
+        return url if decision_url_renderable(url) else None
+    if decision.provider == "local":
+        installed = decision_unit_installed() if unit_installed is None else unit_installed
+        return f"http://127.0.0.1:{decision.port}" if installed else None
+    return HINDSIGHT_CLOUD_DECISION_URL
+
+
 #: Op name -> HINDSIGHT_API_<PREFIX>_LLM_* env prefix.
 _LANE_OP_ENV_PREFIX = {
     "retain": "RETAIN",
@@ -260,6 +316,7 @@ def render_showcase_env(
     decision: MemoryDecisionConfig,
     lanes: MemoryLanesConfig,
     ceiling: int | None = None,
+    decision_unit_installed: bool | None = None,
 ) -> str:
     """Render the Hindsight 1.2 showcase env block (PLAN.md section 2).
 
@@ -281,8 +338,12 @@ def render_showcase_env(
     ``zz-h0-98-llm-global-cap.conf`` to work around it. That hand drop-in
     should be deleted once this one is installed.
 
-    ``decision.provider == "off"`` omits the decision-model env entirely so
-    hindsight-api falls back to its configured LLM/reranker path.
+    The decision-model env is rendered only when
+    :func:`decision_engine_base_url` names a server: ``provider == "off"``,
+    a disabled lane, or a ``"local"`` lane whose ``hal0-hs-decide`` unit is
+    not installed (``decision_unit_installed``, probed when ``None``) omit it
+    entirely so hindsight-api falls back to its configured LLM/reranker path
+    (#3519).
     """
     lines: list[str] = [
         "# Managed by hal0 ([memory.models]/[memory.decision]/[memory.lanes] in",
@@ -298,12 +359,8 @@ def render_showcase_env(
         + ("true" if models.reranker_bucket_batching else "false"),
     ]
 
-    if decision.enabled and decision.provider != "off":
-        base_url = (
-            f"http://127.0.0.1:{decision.port}"
-            if decision.provider == "local"
-            else "https://api.hindsight.ai"
-        )
+    base_url = decision_engine_base_url(decision, unit_installed=decision_unit_installed)
+    if base_url is not None:
         lines += [
             "Environment=HINDSIGHT_API_DECISION_MODEL_PROVIDER=hindsight",
             f"Environment=HINDSIGHT_API_DECISION_MODEL_BASE_URL={base_url}",

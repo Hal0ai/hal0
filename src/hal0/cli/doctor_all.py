@@ -3470,6 +3470,116 @@ def check_memory_retain_chunk(
     )
 
 
+def _decision_config() -> tuple[Any, bool]:
+    """``[memory.decision]`` from hal0.toml, else the shipped default.
+
+    Returns ``(config, read_ok)``. hal0.toml is ``0600``, so for anyone but the
+    service user and root the read fails; the row then judges the shipped
+    default (enabled, ``provider = "local"``) and says so.
+    """
+    from hal0.config.loader import ConfigError, load_hal0_config
+    from hal0.config.schema import MemoryDecisionConfig
+
+    try:
+        return load_hal0_config().memory.decision, True
+    except (ConfigError, OSError):
+        return MemoryDecisionConfig(), False
+
+
+def _decision_health_ok(url: str) -> bool:
+    """GET ``<url>/health`` on the decision server; True on a 2xx."""
+    import httpx
+
+    from hal0.service_identity import is_loopback_url
+
+    try:
+        resp = httpx.get(
+            f"{url}/health",
+            timeout=httpx.Timeout(5.0, connect=2.0),
+            trust_env=not is_loopback_url(url),
+        )
+    except httpx.HTTPError:
+        return False
+    return resp.is_success
+
+
+def check_memory_decision_lane(
+    *,
+    memory: dict[str, Any] | None,
+    decision: Any = None,
+    unit_installed: bool | None = None,
+    probe: Callable[[str], bool] | None = None,
+) -> Check:
+    """An enabled ``[memory.decision]`` lane must have a server that answers (#3519).
+
+    The showcase drop-in points hindsight-api at the decision server only
+    when one can answer (``extraction_env.decision_engine_base_url``); this
+    row says which way that went. ``provider = "local"`` needs the
+    ``hal0-hs-decide`` unit, which the installer does not lay down yet: an
+    enabled lane without it WARNs, because the engine then runs with no
+    decision model and every decision-gated call costs an LLM call. A
+    configured server that does not answer ``/health`` WARNs too. The hosted
+    API (``hindsight-cloud``) is not probed. Advisory only: the engine still
+    works, just more expensively.
+    """
+    from hal0.memory.extraction_env import (
+        HINDSIGHT_CLOUD_DECISION_URL,
+        decision_engine_base_url,
+        decision_unit_installed,
+    )
+
+    name, title = "memory_decision_lane", "Memory decision lane"
+    if memory is not None and (
+        memory.get("engine") in (None, "") or not memory.get("enabled", True)
+    ):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    read_ok = True
+    if decision is None:
+        decision, read_ok = _decision_config()
+    note = "" if read_ok else " (hal0.toml unreadable as this user; judged the shipped default)"
+    if not decision.enabled or decision.provider == "off":
+        return Check(name, title, _PASS, f"decision lane off — the engine uses its LLM lane{note}")
+    installed = decision_unit_installed() if unit_installed is None else unit_installed
+    url = decision_engine_base_url(decision, unit_installed=installed)
+    if url is None and decision.base_url:
+        return Check(
+            name,
+            title,
+            _WARN,
+            f"[memory.decision].base_url {decision.base_url} is not a loopback "
+            "http://127.0.0.1:<port> URL, which is all the engine drop-in accepts, so "
+            "hindsight-api runs without a decision model and decision-gated calls go to "
+            "the LLM lane — point base_url at a loopback port or unset it",
+        )
+    if url is None:
+        return Check(
+            name,
+            title,
+            _WARN,
+            "decision lane is enabled (provider local) but the hal0-hs-decide service is "
+            "not installed, so hindsight-api runs without a decision model and "
+            "decision-gated calls go to the LLM lane — install hal0-hs-decide "
+            "(packaging/hindsight-decision/README.md) and re-save the memory settings, or "
+            f'set [memory.decision].provider = "off"{note}',
+        )
+    if url == HINDSIGHT_CLOUD_DECISION_URL:
+        return Check(name, title, _PASS, f"hosted decision model at {url} (not probed){note}")
+    if (probe or _decision_health_ok)(url):
+        return Check(name, title, _PASS, f"decision server at {url} answers /health{note}")
+    hint = (
+        "check `systemctl status hal0-hs-decide` and its journal"
+        if not decision.base_url
+        else "check the server behind [memory.decision].base_url"
+    )
+    return Check(
+        name,
+        title,
+        _WARN,
+        f"decision server at {url} did not answer /health, so decision calls fail and "
+        f"fall back to the LLM lane — {hint}{note}",
+    )
+
+
 def check_hermes_gateway_unit(
     *,
     home: Path | None = None,
@@ -3730,6 +3840,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_memory_engine_version(memory=payloads["memory"]),
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
         check_memory_retain_chunk(memory=payloads["memory"], base=base),
+        check_memory_decision_lane(memory=payloads["memory"]),
     ]
     return verify_rows + extra_rows
 
@@ -3821,6 +3932,7 @@ __all__ = [
     "check_hermes_model_choice",
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
+    "check_memory_decision_lane",
     "check_memory_engine_version",
     "check_memory_extraction_throughput",
     "check_memory_retain_chunk",
