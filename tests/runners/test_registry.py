@@ -53,15 +53,7 @@ def test_every_runner_shape_is_sane(key: str) -> None:
     runner = RUNNER_IMAGES[key]
     assert isinstance(runner, Runner)
     assert runner.key == key
-    if key == "xdna":
-        # Not published yet (manifest.json tag: null); the runner-images
-        # recipe lands separately. ``.image`` raises until it does.
-        from hal0.runners.pins import RunnerPinsError
-
-        with pytest.raises(RunnerPinsError):
-            _ = runner.image
-    else:
-        assert runner.image  # resolves through the pin table
+    assert runner.image  # resolves through the pin table
     assert runner.runtime_family in _REAL_FAMILIES
     assert runner.device_class in _REAL_DEVICE_CLASSES
     assert isinstance(runner.supports, RunnerSupports)
