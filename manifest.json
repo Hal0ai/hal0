@@ -62,9 +62,9 @@
     },
     "xdna": {
       "image": "ghcr.io/hal0ai/hal0-runner-xdna",
-      "tag": null,
-      "digest": null,
-      "lanes_gated": []
+      "tag": "72f6dfa-rf1a3931",
+      "digest": "sha256:408ebc1616be325808cbfb70f141fbdd68e02dff9d681b367f2f122de5d8d08c",
+      "lanes_gated": ["npu"]
     }
   }
 }
