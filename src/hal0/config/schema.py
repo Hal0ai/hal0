@@ -182,6 +182,40 @@ class NpuConfig(BaseModel):
     # ``flm serve`` positional tag ([model].default) and is the only choice.
 
 
+class XdnaConfig(BaseModel):
+    """[xdna] table in a slot TOML — xdna (ggml-xdna NPU runner) knobs.
+
+    Only meaningful on a slot whose ``binary == "xdna"``; the write guard
+    (``hal0.slots.config_write``) refuses this table on any other slot.
+    All three fields are optional — an absent ``[xdna]`` table is the
+    all-defaults xdna slot.
+
+      - ``pmode``: one of :data:`hal0.runners.knobs.XDNA_PMODES`, validated
+        by :func:`hal0.runners.knobs.validate_xdna_pmode` at write time.
+      - ``env``: ``GGML_XDNA_*`` overrides (plus the one allowed
+        non-``GGML_XDNA_`` extra), screened by
+        :func:`hal0.runners.knobs.screen_xdna_env` at write time.
+      - ``host_xrt``: absolute host path to an XRT install, RO bind-mounted
+        into the container as ``HAL0_XDNA_HOST_XRT`` (write guard rejects a
+        relative path).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    pmode: str | None = Field(
+        default=None,
+        description="xrt-smi power mode token; see hal0.runners.knobs.XDNA_PMODES.",
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="GGML_XDNA_* env overrides (hal0.runners.knobs.XDNA_ENV_DOCS).",
+    )
+    host_xrt: str | None = Field(
+        default=None,
+        description="Absolute host XRT install path, RO bind-mounted into the container.",
+    )
+
+
 class ImageGenConfig(BaseModel):
     """[image] table in a slot TOML — persisted image-gen settings (#599).
 
@@ -689,6 +723,15 @@ class SlotConfig(BaseModel):
         description=(
             "[npu] table — FLM trio modality toggles (asr, embed). "
             "Absent on non-NPU slots. See NpuConfig."
+        ),
+    )
+
+    xdna: XdnaConfig | None = Field(
+        default=None,
+        description=(
+            "[xdna] table — pmode/env/host_xrt knobs for the xdna (ggml-xdna "
+            "NPU) runner. Absent on non-xdna slots; the write guard refuses "
+            "this table on any slot whose binary is not 'xdna'. See XdnaConfig."
         ),
     )
 
@@ -2801,7 +2844,11 @@ class MemoryDecisionConfig(BaseModel):
     LLM calls (recall rank/prune/dedup, consolidation judgments, reflect
     sufficiency, page delta gating) with a single cheap forward pass. hal0
     runs it locally as the ``hal0-hs-decide`` CPU System One service
-    (src/hal0/memory/decision_server.py) on ``port``; ``provider = "hindsight"``
+    (packaging/hindsight-decision/hs_decide_serve.py, unit
+    installer/systemd/hal0-hs-decide.service) on ``port``. The showcase
+    drop-in points hindsight-api at it only while that unit is installed
+    (#3519, ``hal0.memory.extraction_env.decision_engine_base_url``);
+    ``provider = "hindsight"``
     with ``base_url = http://127.0.0.1:<port>`` is the verified-working local
     shape (hindsight-api still requires a non-empty, if placeholder, API key
     even for a local base URL — see ``zz-showcase-1.2.conf``).

@@ -1139,6 +1139,61 @@ def gpu_visibility_env(device: str | None, gpu_index: int | None) -> dict[str, s
     return {}
 
 
+# ── NPU (XDNA) device nodes ──────────────────────────────────────────────────
+# Strix Halo defaults, kept as the LAST link of the fallback chain below.
+# Shared by every NPU-backed provider (flm, the xdna llama-server runner) so
+# the accel-node discovery and render-GID resolution can never drift between
+# them.
+_DEFAULT_NPU_ACCEL_NODE = "/dev/accel/accel0"
+_DEFAULT_NPU_RENDER_NODE = "/dev/dri/renderD128"
+
+
+def resolve_npu_device_paths() -> list[str]:
+    """Device nodes to pass through to an NPU-backed container (flm, xdna).
+
+    Fallback chain (documented per the hardware-generalization wave):
+
+      1. hardware.json ``npu.accel_path`` / ``npu.render_path`` — the actual
+         nodes ``hal0 config hardware --refresh`` detected on this host (a
+         second accel device or a non-renderD128 iGPU node lands here);
+      2. the Strix Halo constants ``/dev/accel/accel0`` +
+         ``/dev/dri/renderD128`` — today's behaviour, used when the snapshot
+         is missing, pre-wave (fields absent/empty), or unreadable.
+
+    Raw-JSON read (no pydantic) so spec builds stay cheap and never raise.
+    """
+    accel = ""
+    render = ""
+    try:
+        from hal0.config import paths as _paths
+
+        raw = json.loads(_paths.hardware_json().read_text())
+        npu = raw.get("npu") or {}
+        if isinstance(npu, dict):
+            accel = str(npu.get("accel_path") or "")
+            render = str(npu.get("render_path") or "")
+    except Exception:
+        pass
+    return [accel or _DEFAULT_NPU_ACCEL_NODE, render or _DEFAULT_NPU_RENDER_NODE]
+
+
+def resolve_npu_group_ids() -> list[str]:
+    """``video``/``render`` host GIDs an NPU container needs for device access.
+
+    Mirrors :func:`resolve_gpu_group_ids`'s numeric-GID treatment (the
+    toolbox images' ``/etc/group`` has no ``render``/``video`` entries).
+    Missing groups are skipped rather than raising — the slot still
+    launches; a permission failure surfaces via the health probe instead.
+    """
+    import grp
+
+    gids: list[str] = []
+    for name in ("render", "video"):
+        with contextlib.suppress(KeyError, OSError):
+            gids.append(str(grp.getgrnam(name).gr_gid))
+    return gids
+
+
 __all__ = [
     "default_image_serves_vulkan_lane",
     "effective_runner_image",
@@ -1149,5 +1204,7 @@ __all__ = [
     "render_node_present",
     "resolve_gpu_device_paths",
     "resolve_gpu_group_ids",
+    "resolve_npu_device_paths",
+    "resolve_npu_group_ids",
     "vulkan_lane_serves",
 ]

@@ -143,7 +143,7 @@ def test_prefers_soc_gpu_from_kfd_topology(tmp_path: Path) -> None:
 # ── predicates ───────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("backend", ["flm", "xdna2"])
+@pytest.mark.parametrize("backend", ["flm", "xdna2", "npu", "xdna"])
 def test_slot_uses_npu_true_for_npu_backends(backend: str) -> None:
     assert slot_uses_npu({"backend": backend})
 
@@ -155,6 +155,8 @@ def test_slot_uses_gpu_true_for_gpu_backends(backend: str) -> None:
 
 def test_slot_uses_gpu_false_for_npu_backend() -> None:
     assert not slot_uses_gpu({"backend": "flm"})
+    # The xdna runner (ADR-0057) reports backend "npu" with no device_class.
+    assert not slot_uses_gpu({"backend": "npu"})
 
 
 def test_slot_uses_gpu_false_for_cuda_backend() -> None:

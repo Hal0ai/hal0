@@ -32,11 +32,13 @@ def _build_gguf(
     kvs: list[tuple[str, int, bytes]],
     tensor_count: int = 0,
     tensor_names: list[str] | None = None,
+    tensor_types: dict[str, int] | None = None,
 ) -> bytes:
     """Assemble a GGUF header with the given KV list.
 
     Tensor info is written only when ``tensor_names`` is given (each tensor
-    is a 1-D f32 stub); data sections are always omitted.
+    is a 1-D stub, f32 unless overridden in ``tensor_types``); data sections
+    are always omitted.
     """
     if tensor_names is not None:
         tensor_count = len(tensor_names)
@@ -48,8 +50,9 @@ def _build_gguf(
     for key, vtype, vbytes in kvs:
         out += _enc_kv(key, vtype, vbytes)
     for name in tensor_names or []:
+        ttype = (tensor_types or {}).get(name, 0)
         out += _enc_str(name) + struct.pack("<I", 1) + struct.pack("<Q", 8)
-        out += struct.pack("<I", 0) + struct.pack("<Q", 0)
+        out += struct.pack("<I", ttype) + struct.pack("<Q", 0)
     return bytes(out)
 
 
@@ -71,6 +74,7 @@ def write_gguf(
     strings: dict[str, str] | None = None,
     int_arrays: dict[str, list[int]] | None = None,
     tensor_names: list[str] | None = None,
+    tensor_types: dict[str, int] | None = None,
 ) -> Path:
     """Write a header-only GGUF for ``arch`` with the given typed keys."""
     kvs: list[tuple[str, int, bytes]] = [
@@ -79,5 +83,5 @@ def write_gguf(
     kvs += [(k, _GGUF_TYPE_UINT32, _u32(v)) for k, v in (uints or {}).items()]
     kvs += [(k, _GGUF_TYPE_STRING, _enc_str(v)) for k, v in (strings or {}).items()]
     kvs += [(k, _GGUF_TYPE_ARRAY, _i32_array(v)) for k, v in (int_arrays or {}).items()]
-    path.write_bytes(_build_gguf(3, kvs, tensor_names=tensor_names))
+    path.write_bytes(_build_gguf(3, kvs, tensor_names=tensor_names, tensor_types=tensor_types))
     return path

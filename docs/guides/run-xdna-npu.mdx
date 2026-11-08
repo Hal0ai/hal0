@@ -1,0 +1,151 @@
+---
+title: Run GGUF models on the NPU with ggml-xdna
+description: Serve a GGUF model on the AMD XDNA2 NPU through Tether's ggml-xdna llama.cpp fork — host requirements, the fused-vs-per-op model fit, the Qwen3.5 requant, env knobs, and coexistence with FLM.
+sidebar:
+  order: 18
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+## What it is
+
+**xdna** runs a plain GGUF checkpoint on the AMD XDNA2 NPU through Tether's
+`ggml-xdna` fork of llama.cpp (`github.com/tetherto/qvac-fabric-llm.cpp`,
+backend `ggml/src/ggml-xdna/`) instead of the closed FLM model list. It is a
+llama.cpp binary — same `runtime_family` as hal0's other llama.cpp runners —
+just one built against open MLIR-AIE kernels for the NPU. The runner key is
+`xdna` (title **NPU (ggml-xdna)**), tier **optional**: it is never returned
+automatically for an NPU slot, so a box that never creates an `xdna` slot
+never pulls the image. The design is recorded in
+[ADR-0057](/docs/adr/0057-ggml-xdna-optional-npu-runner/).
+
+It is open where FLM is closed: any GGUF can be pointed at it, not just a
+model from FLM's curated list. The tradeoff is that only one model geometry
+gets the fast fused decode path today — everything else still runs, just
+through a slower per-operator path (see [Model fit](#model-fit-fused-vs-per-op)
+below).
+
+## Host requirements
+
+| Requirement | Detail |
+|---|---|
+| NPU | AMD XDNA2 (Ryzen AI, e.g. Strix Halo). Device node `/dev/accel/accel0`. |
+| Driver | In-tree `amdxdna` kernel driver. |
+| Firmware | NPU firmware >= 1.1.2.65. |
+| Runtime | XRT 2.25.0 (the lemonade-team PPA's `libxrt2`/`libxrt-npu2` packages, or built from source). |
+| Kernel params | `iommu=pt amd_iommu=on`. |
+| Memory | Memlock unlimited (`--ulimit memlock=-1:-1` on the container). |
+| Fabric clock | Held at a high DPM level; see [Strix Halo](/docs/concepts/strix-halo/) and the same host-side guard [ADR-0054](/docs/adr/0054-gpu-fabric-clock-guard/) ships for the GPU side. |
+| Power mode | `xrt-smi configure --pmode turbo` run on the host. Turbo measured about +15% prefill and +20% decode over the default pmode. This is a host-side XRT setting; hal0's container cannot set it for you. |
+
+Kernels are **baked into the runner image** at build time
+(`-DGGML_XDNA_BUILD_KERNELS=ON`, pinned to `mlir_aie==1.4.3` and
+`llvm-aie==22.0.0.2026090701+3e93bf7b`), not compiled on your host. A newer
+`llvm-aie` is known to overflow the fused kernel's program memory, so the
+pin is a correctness constraint, not a version floor you can safely raise
+yourself.
+
+<Aside type="note" title="Rootless is fine">
+The spike that proved this runner out ran rootless against `/dev/accel/accel0`
+with no special privilege beyond device access.
+</Aside>
+
+## Model fit: fused vs per-op
+
+Every GGUF loads on `xdna`. What differs is whether the SSM block runs as
+one fused NPU kernel (fast) or falls back to per-operator dispatch
+(correct, slower). hal0 computes this from the model's own GGUF metadata —
+nothing to configure — and reports it as the model's `xdna_path`:
+
+- **`fused`** requires all three: `general.architecture == "qwen35"`,
+  `embedding_length == 1024`, and the `blk.0.ssm_out.weight` tensor
+  requantized to **Q5_K**. Today that is exactly one model family and size:
+  Qwen3.5-0.8B's GDN geometry.
+- **`per-op`** is everything else. It still runs correctly on the NPU, just
+  without the single fused decode kernel.
+
+### Getting the fused path
+
+Start from a Qwen3.5-0.8B checkpoint (BF16 or already quantized) and
+requantize `ssm_out` to Q5_K explicitly — a stock `Q4_K_M` quant alone does
+not land on Q5_K for that tensor:
+
+```bash
+llama-quantize --tensor-type ssm_out=q5_K <model-bf16.gguf> <model-out.gguf> Q4_K_M
+```
+
+Reference numbers for `Qwen3.5-0.8B-Q4_K_M-so5` (the fused path, `GLU_A=0`,
+pmode turbo, idle NPU): **pp512 ~1330 t/s, tg128 ~44 t/s**.
+
+## `GGML_XDNA_*` env knobs
+
+The runner image sets one mandatory default you should not override:
+
+| Variable | Default | Why |
+|---|---|---|
+| `GGML_XDNA_PGEMM_GLU_A` | `0` | **Correctness, not a tune.** The fork's own default (`1`) fuses the SwiGLU-to-down-projection kernel path, which corrupts prefill logits — the model answers, just wrong, with no error or crash. hal0 overrides it in the image's entrypoint environment, ahead of any profile flag, so it cannot be flipped back on by accident. |
+| `OMP_WAIT_POLICY` | `PASSIVE` | Ships alongside `GLU_A=0` as part of the baked image default. |
+
+Every other `GGML_XDNA_*` variable documented in the fork's README is a
+genuine performance tune, left to profile flags. hal0's own env-knob sweep
+on this hardware found the fork's remaining defaults already optimal:
+explicitly setting `-t 8` or `TOKEN=0` measured **worse** than leaving them
+alone, so there is nothing else to tune out of the box.
+
+## Slot config: the `[xdna]` table
+
+An xdna slot's TOML may carry an optional `[xdna]` table. The write guard
+(`hal0 slot edit`, `PUT /api/slots/{name}/config`) refuses it on any slot
+whose runner is not `xdna`.
+
+```toml
+[xdna]
+pmode = "turbo"                 # one of GET /api/runners/xdna/knobs → pmodes
+host_xrt = "/opt/xilinx/xrt"    # optional; absolute path only
+[xdna.env]
+GGML_XDNA_ARENA_MB = "512"      # GGML_XDNA_* keys from the allow-list only
+```
+
+| Key | Effect |
+|---|---|
+| `pmode` | Validated against the pmode list and **displayed** on the slot. It is *not* applied by the container: `xrt-smi configure --pmode` is a host-level setting outside the container's namespace, so until a host agent exists you set it on the host yourself. |
+| `env` | Merged into the container environment after the image defaults. Keys outside the `GGML_XDNA_*` allow-list are rejected with a 400 naming the key; `GGML_XDNA_PGEMM_GLU_A` stays pinned by the image. |
+| `host_xrt` | Bind-mounted read-only into the container and exported as `HAL0_XDNA_HOST_XRT`, for running a host XRT build instead of the image's. |
+
+## What the API reports
+
+Slot payloads (`GET /api/slots`, `GET /api/slots/{name}`) for `runner == "xdna"`
+carry four extra keys (absent on every other runner):
+
+- `xdna_path` — `"fused"` / `"per-op"` / `null` (no readable model).
+- `xdna_reason` — why that path was chosen, e.g. the tensor type that forces per-op.
+- `pmode` — the configured `[xdna].pmode`, or `null`.
+- `npu_shared_with` — names of the other NPU holders (the FLM anchor, other xdna slots).
+
+`GET /api/npu/occupancy` tags each holder with `engine: "flm" | "xdna"` and
+reports `single_tenant: false` when more than one holder exists.
+`GET /api/stats/hardware` adds `npu_pmode` and `npu_fclk` (from `xrt-smi
+examine` and the active `pp_dpm_fclk` line) — `null` when unreadable, never
+guessed. `GET /api/runners/xdna/knobs` returns the pmode list and the env
+allow-list with defaults and docs, so the dashboard renders nothing hardcoded.
+
+## Coexistence with FLM
+
+`xdna` and FLM (hal0's default NPU lane, ADR-0003) share one physical NPU.
+Running both is allowed: the spike measured close to zero performance
+impact from an idle FLM slot holding a hardware context while `xdna` runs a
+request. hal0 **warns** rather than refuses when both are up — the same
+warn-not-block shape as the GTT-leak and fabric-clock guards elsewhere —
+and surfaces NPU occupancy so you can see when the hardware is actually
+contended, rather than just "another NPU slot happens to exist."
+
+## See also
+
+- [ADR-0057](/docs/adr/0057-ggml-xdna-optional-npu-runner/) — the full
+  decision record: why this is optional-tier, baked-kernel, warn-not-refuse.
+- [Strix Halo](/docs/concepts/strix-halo/) — the shared-memory and
+  fabric-clock story this hardware also lives inside.
+- [Manage runner images](/docs/guides/manage-runner-images/) — the pin
+  table and how an image is chosen.
+- [Run Flash-Next on halogen](/docs/guides/run-flash-next-on-halogen/) — the
+  other optional, non-default runner, for comparison.

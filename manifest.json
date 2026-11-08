@@ -59,6 +59,12 @@
       "tag": "0.18.22",
       "digest": "sha256:273714ccb64dabb7fac0418ee1b6dd83eb57d2fd44cf286eb68a7c694a27c203",
       "lanes_gated": []
+    },
+    "xdna": {
+      "image": "ghcr.io/hal0ai/hal0-runner-xdna",
+      "tag": "72f6dfa-rf1a3931",
+      "digest": "sha256:408ebc1616be325808cbfb70f141fbdd68e02dff9d681b367f2f122de5d8d08c",
+      "lanes_gated": ["npu"]
     }
   }
 }

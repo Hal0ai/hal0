@@ -1656,12 +1656,16 @@ def test_concurrency_warning_names_both_rendered_keys():
     assert "HINDSIGHT_API_LLM_MAX_CONCURRENT and HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT" in msg
 
 
-def test_engine_env_report_never_carries_a_credential(tmp_path: Path):
+def test_engine_env_report_never_carries_a_credential(tmp_path: Path, monkeypatch):
     """An operator drop-in with a real decision-model key must not leak into
     the report (it feeds status routes and doctor)."""
     from hal0.config.schema import MemoryDecisionConfig
     from hal0.memory import extraction_env as ee
 
+    # A local decision lane renders only when hal0-hs-decide is installed (#3519).
+    unit = tmp_path / "hal0-hs-decide.service"
+    unit.write_text("[Unit]\n")
+    monkeypatch.setattr(ee, "DECISION_UNIT_PATH", unit)
     paths = _report_paths(tmp_path)
     mem = _memory_cfg()
     mem.decision = MemoryDecisionConfig(enabled=True, provider="local")

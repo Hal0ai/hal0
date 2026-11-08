@@ -8,6 +8,7 @@
     "ghcr.io/hal0ai/hal0-runner-moonshine:20251121-re14329d@sha256:341b64a5c60496c57407a75077a746ff40bbc2eedbc8ddba1e661094d6818766",
     "ghcr.io/hal0ai/hal0-runner-qwen3tts:0.1.1-re14329d@sha256:81a914c9622fe35d11d8c0d2f81eee5a882faaad1556ac42a8db6856ad225698",
     "ghcr.io/hal0ai/hal0-runner-standard:b11840-rba99f5d@sha256:d1f7216c2c62d3c19990f488a4df838a555f6fa6c4dac556cf7a166ea855efcd",
+    "ghcr.io/hal0ai/hal0-runner-xdna:72f6dfa-rf1a3931@sha256:408ebc1616be325808cbfb70f141fbdd68e02dff9d681b367f2f122de5d8d08c",
     "ghcr.io/peonist-ai/halogen-flash-server:0.18.22@sha256:273714ccb64dabb7fac0418ee1b6dd83eb57d2fd44cf286eb68a7c694a27c203"
   ],
   "source": "manifest.json"
