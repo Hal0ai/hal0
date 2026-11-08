@@ -44,6 +44,7 @@ def test_registry_has_every_expected_key() -> None:
         "qwen3tts",
         "cuda",
         "halogen",
+        "xdna",
     }
 
 
@@ -215,7 +216,7 @@ def test_tiers_are_the_operator_decided_sets() -> None:
         assert runner.tier in RUNNER_TIERS, f"{key}: unknown tier {runner.tier!r}"
         by_tier[runner.tier].add(key)
     assert by_tier["default"] == {"standard", "cpu", "flm", "kokoro", "moonshine", "comfyui"}
-    assert by_tier["optional"] == {"qwen3tts", "cuda", "halogen"}
+    assert by_tier["optional"] == {"qwen3tts", "cuda", "halogen", "xdna"}
 
 
 def test_at_most_one_default_per_family_and_device_class() -> None:

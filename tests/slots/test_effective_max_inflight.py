@@ -58,3 +58,15 @@ def test_missing_or_broken_config_is_uncapped(tmp_path: Path) -> None:
     m = _mgr(tmp_path, {"bad": "this is = = not toml"})
     assert m.effective_max_inflight("bad") is None
     assert m.effective_max_inflight("nope") is None
+
+
+def test_xdna_runner_defaults_to_one(tmp_path: Path) -> None:
+    """ADR-0057: the xdna runner launches llama-server with ``-np 1``, so it is
+    a serial backend exactly like FLM and gets the same default cap."""
+    m = _mgr(tmp_path, {"npu2": 'name="npu2"\nbinary="xdna"\ndevice="npu"\n'})
+    assert m.effective_max_inflight("npu2") == 1
+
+
+def test_xdna_explicit_value_still_wins(tmp_path: Path) -> None:
+    m = _mgr(tmp_path, {"npu2": 'binary="xdna"\nmax_inflight=0\n'})
+    assert m.effective_max_inflight("npu2") is None

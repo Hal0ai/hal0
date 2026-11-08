@@ -30,7 +30,7 @@ import re
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from hal0.errors import UnprocessableEntity
 
@@ -376,6 +376,143 @@ def knob_value(carried: Mapping[str, str], env: str) -> str:
     if value is not None and _range_problem(knob, value) is None:
         return value
     return "" if knob.default is None else knob.default
+
+
+# ── XDNA (AMD NPU llama-server runner) knob set ───────────────────────────────
+#
+# Every ``GGML_XDNA_*`` variable the ggml-xdna backend reads, one-line-
+# documented, copied from the backend README's variable table (the allow-list
+# this module screens against). Unknown ``GGML_XDNA_*`` names are refused —
+# this is the single source of truth for "a name the backend actually reads".
+XDNA_ENV_DOCS: dict[str, str] = {
+    "GGML_XDNA_W4": "comma-separated weight tensors kept at 4-bit for the decode GEMV (empty = all 8-bit)",
+    "GGML_XDNA_HEAD": "1 runs the decode vocabulary projection on the array instead of the host",
+    "GGML_XDNA_HEAD_EXACT_ROWS": "vocabulary rows the decode head keeps at 8-bit when GGML_XDNA_HEAD=1",
+    "GGML_XDNA_TOKEN": "how a token's queued runs go to the device (1 joined, t>1 batched, 0 per-command)",
+    "GGML_XDNA_SPIN_US": "microseconds to poll for completion before blocking (-1 = poll to completion)",
+    "GGML_XDNA_GLUE_THREADS": "host threads for decode-sized host-side glue ops",
+    "GGML_XDNA_GLUE_THREADS_BIG": "host threads for host-side glue ops on chunks of 32+ tokens",
+    "GGML_XDNA_HOST_DECODE_THREADS": "host threads for per-op decode of layers outside the fused path",
+    "GGML_XDNA_HOST_DECODE_PIN": "pin host decode threads one per core (OpenMP builds)",
+    "GGML_XDNA_ARENA_MB": "size in MiB of each device-buffer arena chunk",
+    "GGML_XDNA_CONV": "1 runs the standalone prefill SSM_CONV on the array instead of the host",
+    "GGML_XDNA_GDN_CONV": "1 computes the prefill GDN conv input on the array instead of the host",
+    "GGML_XDNA_KERNEL_DIR": "directory to search for kernel artifacts before the built-in locations",
+    "GGML_XDNA_FUSED_LAYER": "0 disables the fused decode recurrent layer (per-op path runs instead)",
+    "GGML_XDNA_GEMV_GROUP": "decode projections outside the fused layer, run on the array",
+    "GGML_XDNA_GEMV_PROMOTE": "merge a decode GEMV group of mixed weight formats into one dispatch",
+    "GGML_XDNA_QUEUE": "queue the fused layers (each one is waited for)",
+    "GGML_XDNA_ATTN": "run decode attention on the array",
+    "GGML_XDNA_ATTN_LAYER": "fuse a whole attention layer's q/k/v projections into one dispatch",
+    "GGML_XDNA_ATTN_TAIL": "fuse an attention layer's tail (output proj, residual, norm, FFN)",
+    "GGML_XDNA_GLUE": "run the host-side glue ops inside an NPU chunk instead of splitting the graph",
+    "GGML_XDNA_HOST_BO": "backend host buffer type (plain CPU buffers)",
+    "GGML_XDNA_PGEMM": "run the prefill GEMM on the array",
+    "GGML_XDNA_INT8": "use the native int8 prefill GEMM",
+    "GGML_XDNA_PGEMM_ADD": "fold the residual ADD into the norm's pass",
+    "GGML_XDNA_PGEMM_NORM_A": "write the RMS norm directly into the next GEMM's A operand",
+    "GGML_XDNA_PGEMM_GATED_A": "write a recurrent layer's gated output into the output projection's A",
+    "GGML_XDNA_PGEMM_GATE_A": "write the attention gate into the output projection's A",
+    "GGML_XDNA_PGEMM_GLU": "compute SwiGLU from the gate/up GEMMs on the array",
+    "GGML_XDNA_PGEMM_GLU_A": "write SwiGLU directly into the down projection's A operand",
+    "GGML_XDNA_GDN_MM": "run the prefill gated delta rule on the array",
+    "GGML_XDNA_GDN_IN": "feed the prefill GDN's conv input/norms/state copy straight into the array",
+    "GGML_XDNA_FA_MM": "run the prefill attention (FLASH_ATTN_EXT) on the array",
+    "GGML_XDNA_PROF": "1: print a per-section time table at exit; 2: also list host-run ops once",
+    "GGML_XDNA_PROF_TRACE": "with GGML_XDNA_PROF=1, write per-section timings to this file",
+    "GGML_XDNA_GATED_FMT": "activation layout the gated/fused decode path expects (model-build dependent)",
+}
+
+#: Extra, non ``GGML_XDNA_*`` env var the xdna knob set allows: OpenMP's wait
+#: policy. ``PASSIVE`` (the hal0 default) yields host cores between dispatches
+#: instead of spinning them, which matters when the NPU is shared (coexistence
+#: with an flm slot).
+_XDNA_EXTRA_ENV = frozenset({"OMP_WAIT_POLICY"})
+
+#: Env defaults hal0 applies for every xdna slot unless the operator's own
+#: ``[server].env`` / tune knob overrides them.
+XDNA_ENV_DEFAULTS: dict[str, str] = {
+    "GGML_XDNA_PGEMM_GLU_A": "0",
+    "OMP_WAIT_POLICY": "PASSIVE",
+}
+
+#: Valid ``pmode`` values (AMD ``xrt-smi configure --pmode``). hal0 only
+#: validates and surfaces this — see :func:`xdna_env_defaults`'s module
+#: docstring note below; the container cannot apply it itself.
+XDNA_PMODES: tuple[str, ...] = ("default", "turbo", "balanced", "powersaver", "performance")
+
+
+def xdna_env_defaults() -> dict[str, str]:
+    """hal0's default ``GGML_XDNA_*``/``OMP_WAIT_POLICY`` env for an xdna slot."""
+    return dict(XDNA_ENV_DEFAULTS)
+
+
+#: Doc string for the optional ``[xdna].host_xrt`` slot-config key (84b3b186's
+#: pattern: an absolute host path RO-bind-mounted into the container, with
+#: ``HAL0_XDNA_HOST_XRT`` set to the same path so the entrypoint prefers it
+#: over the image's baked XRT).
+XDNA_HOST_XRT_DOC = (
+    "Absolute host path to an XRT install, RO bind-mounted into the "
+    "container as HAL0_XDNA_HOST_XRT; unset uses the image's baked XRT."
+)
+
+
+def xdna_knob_schema() -> dict[str, Any]:
+    """The xdna runner's dashboard knob schema (``GET /api/runners/xdna/knobs``).
+
+    ``{"pmodes": [...], "env": [{"name", "default", "doc"}, ...], "host_xrt":
+    {"doc": ...}}`` — built straight off :data:`XDNA_PMODES`,
+    :data:`XDNA_ENV_DOCS` and :data:`XDNA_ENV_DEFAULTS` so the dashboard never
+    hardcodes the knob set.
+    """
+    return {
+        "pmodes": list(XDNA_PMODES),
+        "env": [
+            {"name": name, "default": XDNA_ENV_DEFAULTS.get(name), "doc": doc}
+            for name, doc in sorted(XDNA_ENV_DOCS.items())
+        ],
+        "host_xrt": {"doc": XDNA_HOST_XRT_DOC},
+    }
+
+
+def screen_xdna_env(env: Mapping[str, str] | None) -> None:
+    """Refuse an xdna slot's env dict naming an unknown ``GGML_XDNA_*`` key.
+
+    Any ``GGML_XDNA_*`` name not in :data:`XDNA_ENV_DOCS` is rejected —
+    that is the allow-list this screen enforces (ADR-0028 / the xdna-runner
+    plan: the backend's documented variable list is the whole knob surface,
+    nothing invented). ``OMP_WAIT_POLICY`` and any non-``GGML_XDNA_``-
+    prefixed key pass through unexamined.
+    """
+    if not env:
+        return
+    for name in env:
+        if name.startswith("GGML_XDNA_") and name not in XDNA_ENV_DOCS:
+            raise UnprocessableEntity(
+                f"{name} is not a GGML_XDNA_* variable hal0's xdna runner knows about",
+                code="runners.xdna_env_unknown",
+                details={"flag": name, "allowed": sorted(XDNA_ENV_DOCS)},
+            )
+
+
+def validate_xdna_pmode(pmode: str | None) -> str | None:
+    """Refuse a ``pmode`` outside :data:`XDNA_PMODES`; ``None`` passes through.
+
+    Validation + status-surfacing only: the container cannot change the
+    host's NPU power mode (xrt-smi talks to the NPU root device, not
+    anything namespaced into the container). TODO(xdna-runner): once a host
+    agent applies this, call ``xrt-smi configure --pmode <value>`` there and
+    stop treating pmode as display-only.
+    """
+    if pmode is None:
+        return None
+    if pmode not in XDNA_PMODES:
+        raise UnprocessableEntity(
+            f"pmode must be one of {', '.join(XDNA_PMODES)}; got {_echo(pmode)!r}",
+            code="runners.xdna_pmode_invalid",
+            details={"value": pmode, "allowed": list(XDNA_PMODES)},
+        )
+    return pmode
 
 
 def screen_halogen_flags(flags: str | None) -> None:

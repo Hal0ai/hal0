@@ -706,6 +706,104 @@ def _tune_updates_for_profile_switch(
     return {**updates, "tune": carried} if carried else updates
 
 
+def guard_and_normalize_xdna(merged: dict[str, Any], updates: dict[str, Any]) -> None:
+    """Validate, guard and normalize an ``xdna`` write on the projected config.
+
+    Mirrors :func:`guard_and_normalize_tune`'s shape for the ``[xdna]`` table.
+    Does nothing unless *updates* carries an ``xdna`` key. ``xdna: null``
+    drops the table from *merged*. Otherwise:
+
+      - refuses ``[xdna]`` on a slot whose (post-write) ``binary`` is not
+        ``"xdna"`` (``slot.xdna_not_supported``);
+      - ``pmode`` is validated via
+        :func:`hal0.runners.knobs.validate_xdna_pmode` (400 naming the
+        allowed list);
+      - ``env`` is screened via :func:`hal0.runners.knobs.screen_xdna_env`
+        (400 naming the bad key);
+      - ``host_xrt`` must be an absolute path (400 otherwise).
+
+    On success, ``merged["xdna"]`` is replaced with the typed model dump
+    (``exclude_none``) so what lands on disk is the coerced value.
+
+    Raises:
+        hal0.errors.BadRequest: any of the above checks fails.
+    """
+    if "xdna" not in updates:
+        return
+    xdna_update = updates["xdna"]
+    if xdna_update is None:
+        merged.pop("xdna", None)
+        return
+    from hal0.errors import BadRequest
+
+    if not isinstance(xdna_update, dict):
+        raise BadRequest(
+            "xdna must be an object of {pmode, env, host_xrt} (or null to clear it)",
+            code="validation.xdna_invalid",
+        )
+    binary = merged.get("binary") or (merged.get("slot") or {}).get("binary")
+    if binary != "xdna":
+        slot_name = merged.get("name") or (merged.get("slot") or {}).get("name") or "?"
+        raise BadRequest(
+            f"slot {slot_name!r} is not an xdna slot (binary={binary!r}); "
+            'the [xdna] table only applies to a slot with binary="xdna"',
+            code="slot.xdna_not_supported",
+            details={"slot": slot_name, "binary": binary},
+        )
+
+    from hal0.runners.knobs import screen_xdna_env, validate_xdna_pmode
+
+    pmode = xdna_update.get("pmode")
+    validate_xdna_pmode(pmode)
+
+    env = xdna_update.get("env")
+    if env is not None and not isinstance(env, dict):
+        raise BadRequest(
+            "xdna.env must be an object of env-var overrides", code="validation.xdna_invalid"
+        )
+    if env:
+        for key in env:
+            if not str(key).startswith("GGML_XDNA_"):
+                raise BadRequest(
+                    f"xdna.env key {key!r} is not a GGML_XDNA_* variable; "
+                    "[xdna].env only accepts GGML_XDNA_* overrides",
+                    code="validation.xdna_env_invalid",
+                    details={"key": key},
+                )
+    screen_xdna_env(env)
+
+    host_xrt = xdna_update.get("host_xrt")
+    if host_xrt is not None:
+        if not isinstance(host_xrt, str) or not host_xrt:
+            raise BadRequest(
+                "xdna.host_xrt must be a non-empty string path", code="validation.xdna_invalid"
+            )
+        if not Path(host_xrt).is_absolute():
+            raise BadRequest(
+                f"xdna.host_xrt must be an absolute path; got {host_xrt!r}",
+                code="validation.xdna_invalid",
+                details={"value": host_xrt},
+            )
+
+    from pydantic import ValidationError
+
+    from hal0.config.schema import XdnaConfig
+
+    try:
+        normalized = XdnaConfig.model_validate(xdna_update).model_dump(exclude_none=True)
+    except ValidationError as exc:
+        raise BadRequest(
+            "invalid xdna override: "
+            + "; ".join(f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in exc.errors()),
+            code="validation.xdna_invalid",
+            details={"errors": [{"loc": list(e["loc"]), "msg": e["msg"]} for e in exc.errors()]},
+        ) from exc
+    if normalized:
+        merged["xdna"] = normalized
+    else:
+        merged.pop("xdna", None)
+
+
 def reconcile_and_guard_slot_config(
     slot_name: str,
     base: dict[str, Any],
@@ -738,6 +836,7 @@ def reconcile_and_guard_slot_config(
     merged = reconcile_slot_updates(base, updates)
     check_runner_family(merged, set(updates.keys()))
     guard_and_normalize_tune(merged, _tune_updates_for_profile_switch(merged, updates))
+    guard_and_normalize_xdna(merged, updates)
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
     # Only the keys this apply actually carries drive the SC-4 guard — an
     # unrelated stack field must not be blocked by a stale duplicate-default
@@ -763,6 +862,7 @@ __all__ = [
     "check_npu_exclusivity",
     "check_runner_family",
     "guard_and_normalize_tune",
+    "guard_and_normalize_xdna",
     "guard_slot_write_payload",
     "model_is_flm",
     "reconcile_and_guard_slot_config",

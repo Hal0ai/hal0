@@ -64,7 +64,20 @@ const toast = (msg, kind = 'info') =>
   typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
 
 const round1 = (n) => Math.round((n || 0) * 10) / 10
-const isNpuSlot = (s) => s.device_class === 'npu' || devKind(s.device) === 'npu'
+// Trio-eligible NPU slot — device_class npu, but excludes the xdna
+// (ggml-xdna llama-server) runner: xdna slots share the NPU but are never
+// FLM trio members (no modality roles, never the anchor, never a shadow).
+// They get their own XdnaSlotCard in the occupancy card's RIGHT region.
+const isNpuSlot = (s) =>
+  (s.device_class === 'npu' || devKind(s.device) === 'npu') &&
+  String(s.runner || '').toLowerCase() !== 'xdna'
+
+// xdna (ggml-xdna llama-server) slots — share the NPU with the FLM trio but
+// are never trio members (see isNpuSlot above). Each gets its own
+// XdnaSlotCard in the RIGHT region and its own grid holder.
+const isXdnaSlot = (s) =>
+  (s.device_class === 'npu' || devKind(s.device) === 'npu') &&
+  String(s.runner || '').toLowerCase() === 'xdna'
 
 // owner hues — assigned by slot index so each resident FLM reads as its own
 // owner. Three cohesive accents (deep-indigo → teal → sage); single-tenant NPU
@@ -171,7 +184,7 @@ function Gauge({ pct, label, sub, size = 184 }) {
 // ═══ AIE TILE GRID — the shared spatial primitive (4 rows × 8 columns) ══
 // `owners` is a length-8 array: owner descriptor per column (or null = free).
 // `available` false → degraded (probe couldn't read columns); grid greys.
-function AieGrid({ owners, available, act = 0, size = 30, cgap = 6, rgap = 5, showHeaders = true, showParts = true }) {
+function AieGrid({ owners, available, act = 0, size = 30, cgap = 6, rgap = 5, showHeaders = true, showParts = true, shared = false }) {
   const cols = Array.from({ length: NPU_COLS }, (_, c) => c)
   const rows = Array.from({ length: NPU_ROWS }, (_, r) => r)
   // partition runs — collapse consecutive columns with the same owner
@@ -186,8 +199,10 @@ function AieGrid({ owners, available, act = 0, size = 30, cgap = 6, rgap = 5, sh
   }
   return (
     <div
-      className={'aie' + (available ? '' : ' degraded')}
+      className={'aie' + (available ? '' : ' degraded') + (shared ? ' shared' : '')}
       style={{ '--aie-w': size + 'px', '--aie-cgap': cgap + 'px', '--aie-rgap': rgap + 'px' }}
+      data-testid="aie-grid"
+      data-shared={shared ? 'true' : 'false'}
     >
       {showHeaders && (
         <div className="aie-colhdr">
@@ -424,6 +439,92 @@ function ComboSlot({ slot, occ, owners, hue, handlers, act = 0, anchorNpu, model
   )
 }
 
+// ═══ xdna slot card (right rail) ═══════════════════════════════════════
+// A ggml-xdna llama-server slot: plain GGUF runner sharing the NPU array,
+// never a trio member. status dot · name · model picker (GGUF only) ·
+// tok/s · ttft · GB · fit chip (fused/per-op) · pmode chip · shared-with
+// warning line · SlotControls strip.
+function XdnaSlotCard({ slot, hue, handlers, models }) {
+  const ind = slotIndicatorFromPhase(slot)
+  const running = ['serving', 'ready', 'idle', 'loaded', 'warming', 'stale'].includes(ind.cls)
+  const dotCls = ind.cls === 'serving' ? 'serving' : ind.cls === 'error' ? 'error' : running ? 'running' : 'offline'
+  const m = slot.metrics || {}
+  const tps = typeof m.toks === 'number' && m.toks > 0 ? Math.round(m.toks) : null
+  const ttft = typeof m.ttft === 'number' && m.ttft > 0 ? Math.round(m.ttft) : null
+  const gb = typeof m.mem === 'number' ? round1(m.mem) : null
+  const rows = compatibleModels(models, { type: 'llm', slot })
+  const raw = String(slot.modelDefault || slot.model_id || slot.model || '')
+  const row = rows.find((r) => r.id === raw || (Array.isArray(r.aliases) && r.aliases.includes(raw)))
+  const cur = row ? row.id : raw
+  const options = modelPickerOptions({ s: { ...slot, model: raw }, opts: rows, cur, has: !!row, allSlots: [], verdictFor: null })
+  const path = slot.xdna_path || null // 'fused' | 'per-op' | null
+  const reason = slot.xdna_reason || null
+  const sharedWith = Array.isArray(slot.npu_shared_with) ? slot.npu_shared_with : []
+  return (
+    <div className={'cslot xdna-slot' + (running ? ' running' : ' dim')} style={{ '--slot-hue': hue.hue, '--slot-fg': hue.fg }}>
+      <div className="cslot-top">
+        <span className={'ldot ' + dotCls} />
+        <span className="nm">{slot.name}</span>
+        <span className="grow" />
+        <span className="cslot-mx">
+          <span className="tps">
+            {tps ?? '—'}
+            <span className="u">t/s</span>
+          </span>
+          <span className="sep">·</span>
+          <span className={'m' + (ttft ? '' : ' muted')}>{ttft ? ttft + 'ms' : '—'}</span>
+          <span className="sep">·</span>
+          <span className={'m' + (gb != null ? '' : ' muted')}>
+            {gb != null ? gb : '—'}
+            <span className="u">GB</span>
+          </span>
+        </span>
+      </div>
+      <div className="cslot-model">
+        <span className="model-picker-cell" onClick={(e) => e.stopPropagation()}>
+          <RichSelect
+            className="model-picker"
+            value={cur}
+            options={options}
+            disabled={handlers.xdnaBusy}
+            aria-label={`Model for ${slot.name}`}
+            data-testid={`xdna-model-${slot.name}`}
+            onChange={(id) => id && id !== cur && handlers.onXdnaModel(slot, id)}
+          />
+        </span>
+      </div>
+      <div className="cslot-foot xdna-chips">
+        {path ? (
+          <span className={'chip xdna-fit ' + path} title={reason || undefined} data-testid={`xdna-fit-${slot.name}`}>
+            {path}
+          </span>
+        ) : (
+          <span className="chip muted" data-testid={`xdna-fit-${slot.name}`}>—</span>
+        )}
+        <span className={'chip xdna-pmode' + (slot.pmode ? '' : ' muted')} data-testid={`xdna-pmode-${slot.name}`}>
+          {slot.pmode || '—'}
+        </span>
+        <span className="grow" />
+      </div>
+      {sharedWith.length > 0 && (
+        <div className="xdna-shared-warn" data-testid={`xdna-shared-${slot.name}`}>
+          shared with {sharedWith.join(', ')}
+        </div>
+      )}
+      <div className="cslot-ctrl">
+        <SlotControls
+          phase={slotCtrlPhase(slot)}
+          onStart={() => handlers.onStart(slot)}
+          onStop={() => handlers.onStop(slot)}
+          onRestart={() => handlers.onRestart(slot)}
+          onLogs={() => handlers.onLogs(slot)}
+          onEdit={() => handlers.onEdit(slot)}
+        />
+      </div>
+    </div>
+  )
+}
+
 // ═══ the card ══════════════════════════════════════════════════════════
 export function NpuOccupancyCard({ slots }) {
   const occQuery = useNpuOccupancy()
@@ -439,6 +540,7 @@ export function NpuOccupancyCard({ slots }) {
   // must still own the pills, the config query and the header controls;
   // keyed on the name, every pill click silently no-op'd on such boxes.
   const npuSlots = (slots || []).filter(isNpuSlot)
+  const xdnaSlots = (slots || []).filter(isXdnaSlot)
   const anchorSlot =
     npuSlots.find((s) => !isNpuShadowSlot(s) && s.type === 'llm') ||
     npuSlots.find((s) => !isNpuShadowSlot(s))
@@ -446,7 +548,7 @@ export function NpuOccupancyCard({ slots }) {
   // (which invalidates ['slot-config',anchor]) refreshes the card toggles in
   // lockstep — the old one-shot fetch went stale after every drawer change.
   const anchorCfgQuery = useSlotConfig(anchorSlot?.name)
-  if (npuSlots.length === 0) return null
+  if (npuSlots.length === 0 && xdnaSlots.length === 0) return null
 
   const anchorNpu = anchorCfgQuery.data?.npu || anchorSlot?.npu || {}
 
@@ -481,7 +583,8 @@ export function NpuOccupancyCard({ slots }) {
   // non-shadow slots own grid columns, so the grid always reads as the primary
   // FLM slot. Shadow cards keep their own accent via ComboSlot's `hue` prop.
   const owners = Array(NPU_COLS).fill(null)
-  npuSlots.forEach((s, idx) => {
+  const allHolders = [...npuSlots, ...xdnaSlots]
+  allHolders.forEach((s, idx) => {
     if (isNpuShadowSlot(s)) return
     const o = occByName[s.name]
     const cols = o?.cols || []
@@ -492,6 +595,13 @@ export function NpuOccupancyCard({ slots }) {
       if (c >= 0 && c < NPU_COLS) owners[c] = ownerObj
     })
   })
+  // "shared · time-sliced": more than one distinct holder is actually
+  // claiming columns right now (e.g. an xdna slot resident alongside the FLM
+  // anchor, npu_shared_with on either side). Drives a hatched/interleaved
+  // grid treatment, never a per-tile load claim — the hatch says "shared",
+  // not "which tile is whose instant".
+  const distinctHolders = new Set(owners.filter(Boolean).map((o) => o.name))
+  const sharedHolders = distinctHolders.size > 1 || xdnaSlots.some((s) => (s.npu_shared_with || []).length > 0)
 
   // Per-capability activity takeover. The NPU is single-tenant — chat, STT
   // and embed all ride the one FLM process — so "which capability is hitting
@@ -593,13 +703,35 @@ export function NpuOccupancyCard({ slots }) {
     },
     onModality: applyModality,
     onModel: applyModel,
+    onXdnaModel: (slot, id) => {
+      if (!slot || !id || editMut.isPending || restartMut.isPending) return
+      editMut.mutate(
+        { name: slot.name, body: { model: { default: id } } },
+        {
+          onSuccess: () => {
+            toast(`${slot.name} model updated — restarting`, 'info')
+            restartMut.mutate(slot.name, {
+              onError: (err) => toast(`${slot.name} restart failed — ${err?.message || 'see logs'}`, 'warn'),
+            })
+          },
+          onError: (err) => toast(err?.message || 'model change failed', 'warn'),
+        }
+      )
+    },
     anchorName: anchorSlot?.name,
     modalityBusy: editMut.isPending || restartMut.isPending,
+    xdnaBusy: editMut.isPending || restartMut.isPending,
   }
 
   const dutySub = colsAvailable
     ? `${colsUsed}/${colsTotal} columns`
     : 'column probe unavailable'
+
+  // pmode/fclk — optional xdna-side hardware readouts (/api/stats/hardware
+  // npu_pmode / npu_fclk). '—' when the backend hasn't reported one (older
+  // hal0, or no xdna slot resident): never fabricated.
+  const npuPmode = hw.data?.npu_pmode ?? null
+  const npuFclk = typeof hw.data?.npu_fclk === 'number' ? hw.data.npu_fclk : null
 
   // slots-live count = slots the occupancy probe reports as actually
   // holding columns (a slot with an empty cols[] is resident but not live).
@@ -650,10 +782,26 @@ export function NpuOccupancyCard({ slots }) {
                   <div className="sl">throughput</div>
                 </div>
               </div>
+              <div className="combo-pills" data-testid="npu-engine-pills">
+                <span className="chip npu-engine-pill" title="FLM engine version">
+                  FLM {hw.data?.flm_version || '—'}
+                </span>
+                <span className="chip npu-engine-pill" title="ggml-xdna runner version">
+                  ggml-xdna {hw.data?.xdna_version || '—'}
+                </span>
+                <span className={'chip npu-pmode-pill' + (npuPmode ? '' : ' muted')} data-testid="npu-pmode-pill">
+                  pmode {npuPmode || '—'}
+                </span>
+                <span className={'chip npu-fclk-pill' + (npuFclk != null ? '' : ' muted')} data-testid="npu-fclk-pill">
+                  fclk {npuFclk != null ? `${npuFclk} MHz` : '—'}
+                </span>
+              </div>
             </div>
             <div className="combo-grid">
-              <AieGrid owners={owners} available={colsAvailable} act={act} size={30} cgap={6} rgap={5} />
-              <div className="aie-foot">allocated columns — not per-tile utilisation</div>
+              <AieGrid owners={owners} available={colsAvailable} act={act} size={30} cgap={6} rgap={5} shared={sharedHolders} />
+              <div className="aie-foot">
+                {sharedHolders ? 'shared · time-sliced — allocated columns, not per-tile utilisation' : 'allocated columns — not per-tile utilisation'}
+              </div>
             </div>
             <div className="combo-slots">
               {npuSlots.map((s, idx) => (
@@ -666,6 +814,15 @@ export function NpuOccupancyCard({ slots }) {
                   handlers={handlers}
                   act={act}
                   anchorNpu={anchorNpu}
+                  models={modelsQuery.data}
+                />
+              ))}
+              {xdnaSlots.map((s, idx) => (
+                <XdnaSlotCard
+                  key={s.name}
+                  slot={s}
+                  hue={HUES[(npuSlots.length + idx) % HUES.length]}
+                  handlers={handlers}
                   models={modelsQuery.data}
                 />
               ))}

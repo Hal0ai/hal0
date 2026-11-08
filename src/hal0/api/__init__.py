@@ -140,6 +140,9 @@ from hal0.api.routes import (
     runner_images as runner_images_routes,
 )
 from hal0.api.routes import (
+    runners as runners_routes,
+)
+from hal0.api.routes import (
     secrets as secrets_routes,
 )
 from hal0.api.routes import (
@@ -3019,6 +3022,7 @@ def create_app() -> FastAPI:
     app.include_router(
         runner_images_routes.router, prefix="/api/runner-images", tags=["runner-images"]
     )
+    app.include_router(runners_routes.router, prefix="/api/runners", tags=["runners"])
     # Issue #311: HuggingFace Hub discovery (search proxy). Sits next
     # to the models surface so the dashboard's "Search HF" button has a
     # backend to call; the inspect endpoint already lives under

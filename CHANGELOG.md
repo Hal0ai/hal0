@@ -30,6 +30,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **`xdna`: an optional NPU runner for plain GGUF models on the AMD XDNA2 NPU, alongside FLM.** Tether's `ggml-xdna` llama.cpp fork (open MLIR-AIE kernels, baked into the runner image at build time against pinned `mlir_aie==1.4.3`/`llvm-aie==22.0.0.2026090701+3e93bf7b`) runs any GGUF the operator points at it, instead of FLM's curated model list. `xdna_model_fit` (`src/hal0/slots/model_fit.py`) reads the model's own GGUF metadata and classifies it `fused` (one single-kernel NPU decode path; today only a Qwen3.5-0.8B checkpoint requantized with `llama-quantize --tensor-type ssm_out=q5_K`) or `per-op` (correct, slower, everything else) — nothing is refused for lacking the fused path. The image ships `GGML_XDNA_PGEMM_GLU_A=0` as a mandatory default ahead of profile flags: the fork's own `=1` default silently corrupts prefill logits. Coexistence with `flm` on the shared NPU is warn, not refuse. Tier `optional`, never returned automatically for an NPU slot. See [Run GGUF models on the NPU with ggml-xdna](docs/guides/run-xdna-npu.mdx) and [ADR-0057](docs/adr/0057-ggml-xdna-optional-npu-runner.md).
+
 ### Fixed
 
 - **An exclusive bench window no longer measures beside a slot with a queued start job when systemd colours its output.** The window's queued-job guard parsed `systemctl list-jobs` and compared the unit-name cell against the bare unit name. systemd colours that cell, so a colour-mangled cell never matched, the row was skipped, and the guard answered "no job queued" — a fail-open answer that let the window run next to a slot systemd was about to bring back up. The guard now strips the colour escapes before it parses, and treats a row it still cannot read as an unanswerable probe (which aborts the window) rather than as "no job queued". (#3445)
