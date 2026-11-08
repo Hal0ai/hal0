@@ -1642,12 +1642,17 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "check_migration_015",
         lambda **_kw: Check("migration-015", "Model-tuning migration (015)", "pass", "stubbed"),
     )
+    monkeypatch.setattr(
+        da,
+        "check_memory_decision_lane",
+        lambda **_kw: Check("memory_decision_lane", "Memory decision lane", "pass", "stubbed"),
+    )
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-46:] == [
+    assert keys[-47:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1694,6 +1699,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "memory_engine_version",
         "memory_extraction_throughput",
         "memory_retain_chunk",
+        "memory_decision_lane",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
@@ -3090,6 +3096,126 @@ def test_retain_chunk_skips_without_a_live_engine() -> None:
         {"enabled": True, "engine": "hindsight", "reachable": False},
     ):
         assert da.check_memory_retain_chunk(memory=memory, fetch=_never).status == "pass"
+
+
+# ── memory decision lane (#3519, advisory) ──────────────────────────────────
+
+
+def _no_probe(_url: str) -> bool:  # pragma: no cover — a call here is the bug
+    raise AssertionError("no /health probe expected")
+
+
+def test_decision_lane_warns_when_local_unit_is_not_installed() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(),
+        unit_installed=False,
+        probe=_no_probe,
+    )
+    assert check.key == "memory_decision_lane"
+    assert check.status == "warn"
+    assert "hal0-hs-decide" in check.detail and 'provider = "off"' in check.detail
+
+
+def test_decision_lane_passes_when_the_local_server_answers() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    probed: list[str] = []
+
+    def _probe(url: str) -> bool:
+        probed.append(url)
+        return True
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY, decision=MemoryDecisionConfig(), unit_installed=True, probe=_probe
+    )
+    assert check.status == "pass"
+    assert probed == ["http://127.0.0.1:9178"]
+
+
+def test_decision_lane_warns_when_the_installed_server_is_down() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(),
+        unit_installed=True,
+        probe=lambda _u: False,
+    )
+    assert check.status == "warn"
+    assert "did not answer /health" in check.detail
+    assert "systemctl status hal0-hs-decide" in check.detail
+
+
+def test_decision_lane_probes_an_explicit_base_url_without_the_unit() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    probed: list[str] = []
+
+    def _probe(url: str) -> bool:
+        probed.append(url)
+        return False
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(base_url="http://127.0.0.1:9999/"),
+        unit_installed=False,
+        probe=_probe,
+    )
+    assert probed == ["http://127.0.0.1:9999"]
+    assert check.status == "warn" and "base_url" in check.detail
+
+
+def test_decision_lane_warns_on_a_base_url_the_drop_in_cannot_carry() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(base_url="http://decide.example:9178"),
+        unit_installed=True,
+        probe=_no_probe,
+    )
+    assert check.status == "warn" and "loopback" in check.detail
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [{"enabled": False}, {"provider": "off"}],
+    ids=["disabled", "provider-off"],
+)
+def test_decision_lane_off_passes_without_probing(cfg) -> None:  # type: ignore[no-untyped-def]
+    from hal0.config.schema import MemoryDecisionConfig
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(**cfg),
+        unit_installed=False,
+        probe=_no_probe,
+    )
+    assert check.status == "pass" and "off" in check.detail
+
+
+def test_decision_lane_cloud_is_not_probed() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(provider="hindsight-cloud"),
+        unit_installed=False,
+        probe=_no_probe,
+    )
+    assert check.status == "pass" and "not probed" in check.detail
+
+
+def test_decision_lane_skips_when_memory_is_disabled() -> None:
+    check = da.check_memory_decision_lane(
+        memory={"enabled": False, "engine": "hindsight"},
+        unit_installed=False,
+        probe=_no_probe,
+    )
+    assert check.status == "pass" and "memory disabled" in check.detail
 
 
 # ── check_stale_hermes_session_token ───────────────────────────────────────────

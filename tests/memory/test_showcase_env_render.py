@@ -8,7 +8,10 @@ from hal0.memory.extraction_env import render_showcase_env
 
 def test_render_showcase_env_defaults_set_global_and_every_op_cap() -> None:
     out = render_showcase_env(
-        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=MemoryLanesConfig()
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(),
+        lanes=MemoryLanesConfig(),
+        decision_unit_installed=True,
     )
     assert "Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT=1" in out
     for prefix in ("RETAIN", "CONSOLIDATION", "REFLECT", "MENTAL_MODEL_REFRESH"):
@@ -51,3 +54,74 @@ def test_render_showcase_env_is_deterministic() -> None:
         models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=MemoryLanesConfig()
     )
     assert render_showcase_env(**args) == render_showcase_env(**args)
+
+
+# ── #3519: render the decision env only when the decision lane can answer ──
+
+
+def test_render_showcase_env_local_without_the_unit_omits_decision_env() -> None:
+    out = render_showcase_env(
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(provider="local"),
+        lanes=MemoryLanesConfig(),
+        decision_unit_installed=False,
+    )
+    assert "DECISION_MODEL" not in out
+    # The rest of the showcase env is unaffected.
+    assert "Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT=1" in out
+
+
+def test_render_showcase_env_probes_the_unit_path_by_default(tmp_path, monkeypatch) -> None:
+    import hal0.memory.extraction_env as ee
+
+    unit = tmp_path / "hal0-hs-decide.service"
+    monkeypatch.setattr(ee, "DECISION_UNIT_PATH", unit)
+    args = dict(
+        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=MemoryLanesConfig()
+    )
+    assert "DECISION_MODEL" not in render_showcase_env(**args)
+    unit.write_text("[Unit]\n")
+    assert (
+        "Environment=HINDSIGHT_API_DECISION_MODEL_BASE_URL=http://127.0.0.1:9178"
+        in render_showcase_env(**args)
+    )
+
+
+def test_render_showcase_env_explicit_loopback_base_url_renders_as_configured() -> None:
+    out = render_showcase_env(
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(base_url="http://127.0.0.1:9300/"),
+        lanes=MemoryLanesConfig(),
+        decision_unit_installed=False,
+    )
+    assert "Environment=HINDSIGHT_API_DECISION_MODEL_BASE_URL=http://127.0.0.1:9300" in out
+
+
+def test_render_showcase_env_base_url_the_allow_list_refuses_is_omitted() -> None:
+    out = render_showcase_env(
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(base_url="http://decide.example:9178"),
+        lanes=MemoryLanesConfig(),
+        decision_unit_installed=True,
+    )
+    assert "DECISION_MODEL" not in out
+
+
+def test_render_showcase_env_cloud_does_not_need_the_unit() -> None:
+    out = render_showcase_env(
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(provider="hindsight-cloud"),
+        lanes=MemoryLanesConfig(),
+        decision_unit_installed=False,
+    )
+    assert "Environment=HINDSIGHT_API_DECISION_MODEL_BASE_URL=https://api.hindsight.ai" in out
+
+
+def test_render_showcase_env_disabled_ignores_the_unit() -> None:
+    out = render_showcase_env(
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(enabled=False),
+        lanes=MemoryLanesConfig(),
+        decision_unit_installed=True,
+    )
+    assert "DECISION_MODEL" not in out

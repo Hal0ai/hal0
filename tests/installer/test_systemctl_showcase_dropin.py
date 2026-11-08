@@ -54,6 +54,8 @@ def _body(**over) -> str:
         models=over.get("models", MemoryModelsConfig()),
         decision=over.get("decision", MemoryDecisionConfig()),
         lanes=over.get("lanes", MemoryLanesConfig()),
+        # Render the decision lane so the allow-list sees its keys (#3519).
+        decision_unit_installed=True,
     )
 
 

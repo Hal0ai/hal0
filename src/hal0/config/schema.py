@@ -2801,7 +2801,11 @@ class MemoryDecisionConfig(BaseModel):
     LLM calls (recall rank/prune/dedup, consolidation judgments, reflect
     sufficiency, page delta gating) with a single cheap forward pass. hal0
     runs it locally as the ``hal0-hs-decide`` CPU System One service
-    (src/hal0/memory/decision_server.py) on ``port``; ``provider = "hindsight"``
+    (packaging/hindsight-decision/hs_decide_serve.py, unit
+    installer/systemd/hal0-hs-decide.service) on ``port``. The showcase
+    drop-in points hindsight-api at it only while that unit is installed
+    (#3519, ``hal0.memory.extraction_env.decision_engine_base_url``);
+    ``provider = "hindsight"``
     with ``base_url = http://127.0.0.1:<port>`` is the verified-working local
     shape (hindsight-api still requires a non-empty, if placeholder, API key
     even for a local base URL — see ``zz-showcase-1.2.conf``).
