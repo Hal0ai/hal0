@@ -115,6 +115,9 @@ HINDSIGHT_DROPIN_PATH = HINDSIGHT_DROPIN_DIR / "extraction-model.conf"
 #: #3492: the Hindsight 1.2 showcase drop-in ([memory.models]/[memory.decision]
 #: /[memory.lanes]); ``write-hindsight-showcase-dropin`` owns the path root-side.
 HINDSIGHT_SHOWCASE_DROPIN_PATH = HINDSIGHT_DROPIN_DIR / "showcase-lanes.conf"
+#: #3520: the hand-maintained H0-98 drop-in the showcase one replaces. It sorts
+#: later and would win, so installing the showcase drop-in removes it.
+HINDSIGHT_LEGACY_CAP_DROPIN_NAME = "zz-h0-98-llm-global-cap.conf"
 
 
 class Hal0SeamMissing(RuntimeError):
@@ -519,12 +522,18 @@ class SystemCtlSeam:
         the body on stdin and owns the path; ``path`` is honoured only on the
         direct (root / dev / CI) branch. Atomic (temp + rename). ``timeout``
         bounds the seam child — API-thread callers must pass one.
+
+        #3520: both branches also remove the hand-maintained
+        :data:`HINDSIGHT_LEGACY_CAP_DROPIN_NAME` beside the drop-in (the seam
+        verb does it root-side, for its literal path only), so its later-sorting
+        ``HINDSIGHT_API_LLM_MAX_CONCURRENT`` stops overriding hal0's.
         """
         if not self._is_hal0_user():
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".conf.tmp")
             tmp.write_text(body, encoding="utf-8")
             tmp.replace(path)
+            (path.parent / HINDSIGHT_LEGACY_CAP_DROPIN_NAME).unlink(missing_ok=True)
             return
         self._run(
             self._seam_argv("write-hindsight-showcase-dropin"),
@@ -663,6 +672,7 @@ __all__ = [
     "COMPANION_SERVICE_UNITS",
     "HINDSIGHT_DROPIN_DIR",
     "HINDSIGHT_DROPIN_PATH",
+    "HINDSIGHT_LEGACY_CAP_DROPIN_NAME",
     "SEAM_BIN",
     "Hal0SeamMissing",
     "SeamTimeout",
