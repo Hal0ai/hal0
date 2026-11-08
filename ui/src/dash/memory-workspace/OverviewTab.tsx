@@ -56,7 +56,14 @@ export const OverviewTab: React.FC<{ bank: string }> = ({ bank }) => {
       </Card>
       <Card title="LLM lane">
         <div className="mono small">model: {llm?.model ?? '—'}</div>
-        <div className="mono small">max concurrent: {llm?.max_concurrent ?? '—'}</div>
+        <div className="mono small">
+          max concurrent: {llm?.effective?.max_concurrent ?? llm?.max_concurrent ?? '—'}
+        </div>
+        {llm?.warning ? (
+          <div className="mono small" role="alert" data-testid="memws-llm-env-drift">
+            {llm.warning}
+          </div>
+        ) : null}
       </Card>
       {npu ? (
         <Card title="NPU lane" testId="memws-npu-card">

@@ -3376,6 +3376,43 @@ def check_memory_engine_version(*, memory: dict[str, Any] | None) -> Check:
     )
 
 
+def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
+    """hindsight-api must run with the ``HINDSIGHT_API_*`` values hal0 renders (#3520).
+
+    hal0's two drop-ins are not the whole story: systemd applies every
+    ``.conf`` in ``hindsight-api.service.d`` in lexical order, so a
+    later-sorting operator drop-in (the hand-maintained
+    ``zz-h0-98-llm-global-cap.conf`` above all) silently beats them, and a
+    rendered change that was never reloaded leaves the old values live.
+    Compares the unit's merged ``Environment=`` with what hal0 renders
+    (:func:`hal0.memory.extraction_env.engine_env_report`). Advisory
+    (``warn``): the engine still runs, just not on hal0's numbers.
+
+    ``report`` is the injection point for tests; by default the report is
+    built from this box's ``hal0.toml`` and ``systemctl show``.
+    """
+    name, title = "memory_engine_env", "Memory engine env"
+    if report is None:
+        from hal0.config.loader import load_hal0_config
+        from hal0.memory.extraction_env import engine_env_report
+
+        try:
+            memory = load_hal0_config().memory
+        except Exception as exc:
+            return Check(name, title, _WARN, f"hal0.toml unreadable — check skipped: {exc}")
+        report = engine_env_report(memory)
+    from hal0.memory.extraction_env import engine_env_warning
+
+    if not report.get("installed"):
+        return Check(name, title, _PASS, "memory engine drop-in not installed — nothing to check")
+    warning = engine_env_warning(report)
+    if warning:
+        return Check(name, title, _WARN, warning)
+    if not report.get("checked"):
+        return Check(name, title, _WARN, "could not read the hindsight-api unit environment")
+    return Check(name, title, _PASS, "hindsight-api runs with the values hal0 renders")
+
+
 #: ``POST /api/memory/graph/throughput`` may run the 30 s probe (#2353).
 THROUGHPUT_PROBE_TIMEOUT_S: float = 45.0
 
@@ -3838,6 +3875,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hal0_linger(),
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),
+        check_memory_engine_env(),
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
         check_memory_retain_chunk(memory=payloads["memory"], base=base),
         check_memory_decision_lane(memory=payloads["memory"]),
@@ -3933,6 +3971,7 @@ __all__ = [
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
     "check_memory_decision_lane",
+    "check_memory_engine_env",
     "check_memory_engine_version",
     "check_memory_extraction_throughput",
     "check_memory_retain_chunk",

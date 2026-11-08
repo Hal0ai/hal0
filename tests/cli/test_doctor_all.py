@@ -1648,11 +1648,18 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         lambda **_kw: Check("memory_decision_lane", "Memory decision lane", "pass", "stubbed"),
     )
 
+    # Engine-env row (#3520) reads hal0.toml + systemctl show otherwise.
+    monkeypatch.setattr(
+        da,
+        "check_memory_engine_env",
+        lambda **_kw: Check("memory_engine_env", "Memory engine env", "pass", "stubbed"),
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-47:] == [
+    assert keys[-48:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1697,6 +1704,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hal0_linger",
         "hindsight_llm_auth",
         "memory_engine_version",
+        "memory_engine_env",
         "memory_extraction_throughput",
         "memory_retain_chunk",
         "memory_decision_lane",
@@ -3664,3 +3672,48 @@ def test_fabric_clock_ignores_synthetic_hal0_composite(tmp_path: Path) -> None:
     c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="auto", marked_index=0))
     assert c.status == "pass", c.detail
     assert "hal0" not in c.detail
+
+
+# ── memory engine env (#3520 / #3388) ────────────────────────────────────────
+
+
+def test_memory_engine_env_passes_when_engine_not_installed() -> None:
+    check = da.check_memory_engine_env(report={"installed": False})
+    assert check.status == "pass"
+
+
+def test_memory_engine_env_passes_when_unit_matches() -> None:
+    report = {"installed": True, "checked": True, "drift": [], "legacy_drop_in": None}
+    assert da.check_memory_engine_env(report=report).status == "pass"
+
+
+def test_memory_engine_env_warns_on_drift_with_the_numbers() -> None:
+    report = {
+        "installed": True,
+        "checked": True,
+        "drift": [
+            {"key": "HINDSIGHT_API_LLM_MAX_CONCURRENT", "expected": "1", "effective": "2"},
+        ],
+        "legacy_drop_in": None,
+    }
+    check = da.check_memory_engine_env(report=report)
+    assert check.status == "warn"
+    assert "HINDSIGHT_API_LLM_MAX_CONCURRENT=2" in check.detail
+    assert "hal0 renders 1" in check.detail
+
+
+def test_memory_engine_env_warns_on_leftover_legacy_drop_in() -> None:
+    report = {
+        "installed": True,
+        "checked": True,
+        "drift": [],
+        "legacy_drop_in": "/x/zz-h0-98-llm-global-cap.conf",
+    }
+    check = da.check_memory_engine_env(report=report)
+    assert check.status == "warn"
+    assert "zz-h0-98-llm-global-cap.conf" in check.detail
+
+
+def test_memory_engine_env_warns_when_unit_env_unreadable() -> None:
+    report = {"installed": True, "checked": False, "drift": [], "legacy_drop_in": None}
+    assert da.check_memory_engine_env(report=report).status == "warn"

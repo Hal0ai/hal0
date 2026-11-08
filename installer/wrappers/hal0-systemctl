@@ -137,6 +137,13 @@ HINDSIGHT_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/extraction-model.conf"
 # same posture: LITERAL path, body on stdin, allow-listed per line. Sorts after
 # extraction-model.conf, so its HINDSIGHT_API_LLM_MAX_CONCURRENT wins.
 HINDSIGHT_SHOWCASE_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/showcase-lanes.conf"
+# #3520: the hand-maintained H0-98 workaround the showcase drop-in replaces. It
+# sorts AFTER showcase-lanes.conf, so while it exists its LLM_MAX_CONCURRENT
+# beats hal0's. write-hindsight-showcase-dropin removes it — this one LITERAL
+# path only, never a glob, never a caller-supplied name. `rm -f` on a symlink
+# unlinks the link itself (the directory is root-owned 0755, so only root can
+# have placed anything there), never its target.
+HINDSIGHT_LEGACY_CAP_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/zz-h0-98-llm-global-cap.conf"
 
 die() { echo "hal0-systemctl: $1" >&2; exit 64; }
 
@@ -823,6 +830,10 @@ case "$cmd" in
     # #3492: literal fixed path, allow-listed body (validate_dropin_body
     # showcase), validated reconstruction written atomically — the
     # write-hindsight-dropin shape exactly.
+    #
+    # #3520: once the showcase drop-in is in place, retire the hand-maintained
+    # H0-98 drop-in it replaces (literal path, takes no argument). Only after a
+    # successful mv, so a rejected or failed write leaves the box as it was.
     validate_dropin_body showcase
     install -d -m 0755 -o root -g root "$HINDSIGHT_DROPIN_DIR"
     umask 022
@@ -833,6 +844,7 @@ case "$cmd" in
     chmod 0644 "$tmp"
     mv -f "$tmp" "$HINDSIGHT_SHOWCASE_DROPIN_FILE"
     trap - EXIT
+    rm -f -- "$HINDSIGHT_LEGACY_CAP_DROPIN_FILE"
     ;;
 
   check-dropin)               # check-dropin <gateway|hindsight|showcase>   (body on stdin)

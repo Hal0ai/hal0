@@ -148,3 +148,22 @@ def test_write_arm_validates_and_writes_the_reconstruction() -> None:
     assert '"$HINDSIGHT_SHOWCASE_DROPIN_FILE"' in arm
     assert "DROPIN_BODY" in arm
     assert "cat > " not in arm
+
+
+def test_write_arm_retires_only_the_literal_legacy_cap_drop_in() -> None:
+    """#3520: the showcase write removes the hand-maintained H0-98 drop-in,
+    which sorts later and would otherwise win. The path is a literal in the
+    same root-owned directory (no glob, no caller-supplied name), and the
+    removal runs only after the new drop-in is in place."""
+    text = WRAPPER.read_text()
+    assert (
+        'HINDSIGHT_LEGACY_CAP_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/zz-h0-98-llm-global-cap.conf"'
+        in text
+    )
+    arm = text.split("  write-hindsight-showcase-dropin)", 1)[1].split("\n    ;;", 1)[0]
+    rm_line = 'rm -f -- "$HINDSIGHT_LEGACY_CAP_DROPIN_FILE"'
+    assert rm_line in arm
+    assert arm.index('mv -f "$tmp" "$HINDSIGHT_SHOWCASE_DROPIN_FILE"') < arm.index(rm_line)
+    # No other arm deletes it, and the arm takes no positional argument.
+    assert text.count("$HINDSIGHT_LEGACY_CAP_DROPIN_FILE") == 1
+    assert "$1" not in arm and "${1" not in arm
