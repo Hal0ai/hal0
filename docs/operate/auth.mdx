@@ -25,11 +25,12 @@ even with enforcement off — see the ADMIN routes on a LAN-bound box section be
 enforcement off by default is a deliberate v1.0 decision: an earlier
 auto-on-when-non-loopback design locked operators out of a dashboard that
 shipped no login UI. hal0 still doesn't terminate TLS or manage a user
-directory — for that, put a reverse proxy in front (see the TLS still
-needs a proxy section below). And if you installed the OpenWebUI
+directory — for that, put a reverse proxy in front (see [TLS still needs a
+proxy](/docs/operate/tls-and-open-webui#tls-still-needs-a-proxy)). And if
+you installed the OpenWebUI
 companion there is a **second** listener — a full chat UI on `:3001` that
-this auth model does not cover at all; see the second listener section
-below (OpenWebUI on `:3001`).
+this auth model does not cover at all; see [The second listener: OpenWebUI on
+:3001](/docs/operate/tls-and-open-webui#the-second-listener-openwebui-on-3001).
 </Aside>
 
 ## Tiers and credential resolution

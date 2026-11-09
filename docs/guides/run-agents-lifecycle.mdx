@@ -64,7 +64,9 @@ and is checked before anything switches. Activating it stops the agent and
 the gateway (only the ones that were running), moves the `current` link,
 runs `hermes config migrate` from the new release, starts the units again
 and re-checks them. If that re-check fails, hal0 switches back to the
-previous release and restores `config.yaml` by itself. A failed flip-back is reported as `activation_failed`. The plugin trees hal0 mirrors into `$HERMES_HOME/plugins/` are re-synced on `hal0 update` and on a repair whose build fails, so a stale plugin manifest does not survive an update.
+previous release and restores `config.yaml` by itself. A failed activation is
+reported as `activation_failed`, and a flip-back that fails too says so in the
+same message. The plugin trees hal0 mirrors into `$HERMES_HOME/plugins/` are re-synced on `hal0 update` and on a repair whose build fails, so a stale plugin manifest does not survive an update.
 
 `hal0 update component hermes --target` takes only a full commit sha listed in
 hal0's vetted refs. A version string such as `0.15.3` or an `==X.Y.Z` spec is
@@ -72,7 +74,7 @@ refused. The override persists across `hal0 update` until you run
 `hal0 update component hermes --clear-override`, and `hal0 update status` shows
 the row as overridden while it is set. If a later hal0 release no longer lists
 that commit as vetted, `hal0 update` refuses to keep or rebuild it and names
-`--clear-override`. The command also refuses a vetted commit older than the live release: once v0.22.4 is live, `--target d923a5eb487a17c0a68801bba9ef0f56c81040a8` (v0.22.2) fails as a downgrade, because v0.22.3 and later write gateway runtime state into Hermes's `state.db` that v0.22.2 cannot run over. The automatic flip-back after a failed activation is not affected.
+`--clear-override`. The command also refuses a vetted commit older than the live release, as long as the live release is itself one of hal0's vetted refs: once v0.22.4 is live, `--target d923a5eb487a17c0a68801bba9ef0f56c81040a8` (v0.22.2) fails as a downgrade, because v0.22.3 and later write gateway runtime state into Hermes's `state.db` that v0.22.2 cannot run over. The automatic flip-back after a failed activation is not affected.
 
 To watch each phase as it runs, or to re-run provisioning without the
 network, use the flags below. With `--offline` it never
@@ -148,10 +150,13 @@ uses — and commands like `hermes mcp list` would falsely report
 "No MCP servers configured" on a healthy install. hal0's `hermes`
 wrapper prevents that: run as root, it re-executes as the `hal0`
 service user (via the run-as-hal0 guard), so you see the same config
-the running agent uses. If the guard can't drop privileges, the
-wrapper points `HOME` at the service home instead and prints which
+the running agent uses. If the guard is installed but cannot drop
+privileges — no `runuser`, `setpriv` or `sudo` on the box — the wrapper
+refuses to run as root and exits. On a box where the guard is not installed
+at all (a dev or partial install), or where the `hal0` service user does not
+exist, the wrapper points `HOME` at the service home instead and prints which
 `~/.hermes` tree it resolved on stderr. `HAL0_ALLOW_ROOT=1` opts out
-for deliberate root debugging — the wrapper then leaves root's
+of the guard for deliberate root debugging — the wrapper then leaves root's
 environment alone but still names the tree it is reading. The
 euid-aware fix inside the hermes CLI itself is an upstream
 (NousResearch/hermes-agent) matter; the wrapper is hal0's seam.

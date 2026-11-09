@@ -55,6 +55,12 @@ http:
 <TabItem label="nginx">
 
 ```nginx
+# The map belongs in nginx's http{} block, alongside the server{} block.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 server {
     listen 443 ssl;
     server_name hal0.example.com;
@@ -64,8 +70,21 @@ server {
 
     location / {
         proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+
+        # hal0 serves WebSocket routes (/v1/realtime, the Operator Board's
+        # /api/board/events) and Open WebUI's chat is a WebSocket client, so
+        # the upgrade handshake has to reach hal0.
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
         proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # Overwrite, never append. hal0 reads the *leftmost* X-Forwarded-For
+        # entry as the caller's address once trust_forwarded_for is on, so an
+        # appended client-supplied value would let a caller pick its own
+        # login rate-limit bucket.
+        proxy_set_header X-Forwarded-For $remote_addr;
     }
 }
 ```
@@ -74,9 +93,14 @@ server {
 </Tabs>
 
 If your proxy forwards `X-Forwarded-For`, set `HAL0_TRUST_FORWARDED_FOR=true`
-(see [Rate limiting](/docs/operate/auth#rate-limiting)) once you've confirmed the proxy itself
-strips any client-supplied value — otherwise treat hal0's own admin-key auth
-as the access control and skip proxy-level basic auth entirely.
+(see [Rate limiting](/docs/operate/auth#rate-limiting)) once you've confirmed
+the proxy itself **overwrites** any client-supplied value rather than
+appending to it — hal0 reads the leftmost entry as the caller's address, so
+an appended client-supplied value would let a caller pick its own login
+rate-limit bucket. The nginx example above overwrites it; if you put another
+proxy in front, make the outermost hop the one that overwrites. Otherwise
+treat hal0's own admin-key auth as the access control and skip proxy-level
+basic auth entirely.
 
 ### Allow the public URL
 

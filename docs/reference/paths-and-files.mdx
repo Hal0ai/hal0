@@ -187,7 +187,7 @@ atomic-write temp files above.
 
 | Marker | Used by |
 |---|---|
-| `.hal0-managed` | Stamped into a claimed `HERMES_HOME`/agent data dir the moment hal0 takes ownership of it (`hal0.agents.hermes_provision`). It persists for the life of the install: `hal0 agent uninstall` `rmtree`s an agent home only when this marker is present, refusing to touch a directory (e.g. a user's pre-existing `~/.hermes`) that lacks it — see `_safe_to_remove_data_dir` at `src/hal0/agents/manager.py:521` (called from `manager.py:480`). |
+| `.hal0-managed` | Stamped into a claimed `HERMES_HOME` the moment hal0 takes ownership of it (`hal0.agents.hermes_provision`). It persists for the life of the install: `hal0 agent uninstall` `rmtree`s a converged agent home only when this marker is present, refusing to touch a directory (e.g. a user's pre-existing `~/.hermes`) that lacks it. Legacy per-agent data dirs are hal0's own and are removed either way — see `_safe_to_remove_data_dir` at `src/hal0/agents/manager.py:521` (called from `manager.py:480`). |
 | `.hal0-build-stamp` | Content hash of the `ui/` source tree, written under the served UI dist dir (`${UI_DIST}/.hal0-build-stamp`) right after a successful `npm run build` (`installer/install.sh:1469`). Persists across installs — the installer diffs it against the current tree hash on the next run and skips the rebuild only on an exact match. |
 
 ## Portable export envelope formats
