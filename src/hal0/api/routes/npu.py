@@ -24,6 +24,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Request
 
 from hal0.dispatcher.npu_swap_status import (
@@ -31,6 +32,8 @@ from hal0.dispatcher.npu_swap_status import (
     fetch_npu_swap_status,
 )
 from hal0.slots.naming import slot_container_name, slot_token_for
+
+log = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -227,6 +230,9 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             await flm_served_models_async()
 
     slots_out: list[dict[str, Any]] = []
+    # Real NPU tenants (one per process). The synthesized -stt/-embed rows
+    # ride on their FLM anchor's process and are never counted here.
+    tenant_names: list[str] = []
     columns_available = False
     cols_used = 0
     any_serving = False
@@ -240,6 +246,13 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         mapped_state = _map_slot_state(raw_state)
         if mapped_state == "serving":
             any_serving = True
+        if mapped_state in _LOADED_VIEW_STATES:
+            tenant_names.append(s.name)
+
+        meta = getattr(s, "metadata", None) or {}
+        provider = str(meta.get("provider") or "").lower()
+        backend = str(getattr(s, "backend", None) or meta.get("backend") or "").lower()
+        engine = "xdna" if (provider != "flm" and backend == "npu") else "flm"
 
         tag = _model_tag(getattr(s, "model_id", None))
         gb = _flm_footprint_gb(tag)
@@ -267,6 +280,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                 "name": s.name,
                 "model": tag,
                 "state": mapped_state,
+                "engine": engine,
                 "cols": cols,
                 "gb": gb,
                 "active": mapped_state == "serving"
@@ -303,6 +317,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                     "name": s.name + "-stt",
                     "model": "whisper-v3:turbo",
                     "state": mapped_state if stt_live else "off",
+                    "engine": "flm",
                     "cols": list(range(_NPU_COLS)) if stt_live else [],
                     "gb": None,
                     "active": stt_live and stt_age is not None and stt_age <= _ACTIVE_WINDOW_S,
@@ -317,6 +332,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                     "name": s.name + "-embed",
                     "model": "embedding-gemma",
                     "state": mapped_state if embed_live else "off",
+                    "engine": "flm",
                     "cols": list(range(_NPU_COLS)) if embed_live else [],
                     "gb": None,
                     "active": embed_live
@@ -361,6 +377,20 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             used.update(slot_view["cols"])
         cols_used = min(len(used), _NPU_COLS)
 
+    # Coexistence (xdna-runner plan): an xdna (llama-server/npu backend) slot
+    # and the flm trio each independently hold the one physical NPU — hal0
+    # never blocks either from loading alongside the other (spec-hw-slot-
+    # ownership never arbitrates npu/cpu devices), but time-slicing throughput
+    # is a real cost the operator should see. Surface it as a warning on the
+    # occupancy payload (and the activation log) rather than silently.
+    npu_shared_warning: str | None = None
+    if len(tenant_names) > 1:
+        npu_shared_warning = f"NPU shared with slot {tenant_names[0]!r}; throughput is time-sliced"
+        log.warning(
+            "npu.shared_occupancy",
+            slots=tenant_names,
+        )
+
     return {
         "present": True,
         "rows": _NPU_ROWS,
@@ -370,9 +400,10 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         "cols_total": _NPU_COLS,
         "cols_used": cols_used,
         "serving": any_serving,
-        "single_tenant": True,
+        "single_tenant": len(tenant_names) <= 1,
         "columns_available": columns_available,
         "slots": slots_out,
+        "shared_warning": npu_shared_warning,
     }
 
 

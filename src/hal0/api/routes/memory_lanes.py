@@ -17,6 +17,7 @@ Four endpoints backing the memory-showcase UI branch:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -229,6 +230,42 @@ def _age_s(created_at: Any, now: float) -> float | None:
         return None
 
 
+def _engine_env_report(memory_cfg: Any) -> dict[str, Any]:
+    """The unit-env comparison (seam for tests; blocking — call off the loop)."""
+    from hal0.memory.extraction_env import engine_env_report
+
+    return engine_env_report(memory_cfg)
+
+
+def _int_or_none(value: str | None) -> int | None:
+    try:
+        return int(value) if value not in (None, "") else None
+    except ValueError:
+        return None
+
+
+def _effective_llm(env: dict[str, str]) -> dict[str, Any]:
+    """The lane values hindsight-api's unit actually carries (``None`` = unset)."""
+    from hal0.memory.extraction_env import LANE_OP_ENV_PREFIX
+
+    global_timeout = _int_or_none(env.get("HINDSIGHT_API_LLM_TIMEOUT"))
+    per_op: dict[str, Any] = {}
+    for op, prefix in LANE_OP_ENV_PREFIX.items():
+        per_op[op] = {
+            "max_concurrent": _int_or_none(env.get(f"HINDSIGHT_API_{prefix}_LLM_MAX_CONCURRENT")),
+            "model": env.get(f"HINDSIGHT_API_{prefix}_LLM_MODEL")
+            or env.get("HINDSIGHT_API_LLM_MODEL"),
+            "timeout": _int_or_none(env.get(f"HINDSIGHT_API_{prefix}_LLM_TIMEOUT"))
+            or global_timeout,
+        }
+    return {
+        "model": env.get("HINDSIGHT_API_LLM_MODEL"),
+        "max_concurrent": _int_or_none(env.get("HINDSIGHT_API_LLM_MAX_CONCURRENT")),
+        "timeout": global_timeout,
+        "per_op": per_op,
+    }
+
+
 @router.get("/lanes")
 async def get_lanes(request: Request) -> dict[str, Any]:
     cfg = load_hal0_config()
@@ -237,7 +274,12 @@ async def get_lanes(request: Request) -> dict[str, Any]:
 
     decision = await _decision_health(decision_cfg)
 
-    llm = {
+    # ``model`` / ``max_concurrent`` / ``timeout`` / ``per_op`` stay the
+    # configured values (existing clients read them). #3520: ``effective`` is what the
+    # hindsight-api unit really carries — a later-sorting drop-in can override
+    # hal0's — and ``drift`` lists every managed key where the two disagree.
+    # ``effective`` is ``None`` when the unit env cannot be read.
+    llm: dict[str, Any] = {
         "model": "hal0/memory",
         "max_concurrent": lanes_cfg.llm_max_concurrent,
         "timeout": lanes_cfg.timeout_s,
@@ -247,7 +289,22 @@ async def get_lanes(request: Request) -> dict[str, Any]:
             "reflect": _lane_op(lanes_cfg.reflect, lanes_cfg),
             "mental_model_refresh": _lane_op(lanes_cfg.mental_model_refresh, lanes_cfg),
         },
+        "effective": None,
+        "drift": [],
+        "legacy_drop_in": None,
+        "warning": None,
     }
+    try:
+        from hal0.memory.extraction_env import engine_env_warning
+
+        report = await asyncio.to_thread(_engine_env_report, cfg.memory)
+        if report.get("checked"):
+            llm["effective"] = _effective_llm(report.get("effective") or {})
+        llm["drift"] = report.get("drift") or []
+        llm["legacy_drop_in"] = report.get("legacy_drop_in")
+        llm["warning"] = engine_env_warning(report)
+    except Exception as exc:  # status board: degrade, never 500
+        log.debug("memory lanes: engine env report failed: %s", exc)
 
     banks: list[dict[str, Any]] = []
     provider = getattr(request.app.state, "memory_provider", None)

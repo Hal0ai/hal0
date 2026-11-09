@@ -18,6 +18,7 @@ from hal0.registry.gguf_header import (
     _GGUF_TYPE_UINT32,
     read_gguf_header,
     read_gguf_header_bytes,
+    read_gguf_tensor_type_by_name,
 )
 from tests.registry.gguf_fixtures import _build_gguf, _enc_kv, _enc_str, _i32_array, _u32
 
@@ -272,3 +273,28 @@ def test_read_gguf_header_bytes_require_complete_rejects_cut_kv_block(tmp_path: 
     assert read_gguf_header_bytes(payload[:-6], require_complete=True) is None
     assert read_gguf_header_bytes(payload[:-6]) is not None  # lenient default unchanged
     assert read_gguf_header_bytes(payload, require_complete=True)["llama.block_count"] == 4
+
+
+class TestReadGgufTensorTypeByName:
+    def test_finds_the_named_tensor_type(self, tmp_path: Path) -> None:
+        from tests.registry.gguf_fixtures import write_gguf
+
+        path = write_gguf(
+            tmp_path / "m.gguf",
+            "qwen35",
+            tensor_names=["blk.0.ffn_down.weight", "blk.0.ssm_out.weight"],
+            tensor_types={"blk.0.ssm_out.weight": 13},
+        )
+        assert read_gguf_tensor_type_by_name(path, "blk.0.ssm_out.weight") == 13
+        assert read_gguf_tensor_type_by_name(path, "blk.0.ffn_down.weight") == 0
+
+    def test_missing_tensor_name_is_none(self, tmp_path: Path) -> None:
+        from tests.registry.gguf_fixtures import write_gguf
+
+        path = write_gguf(tmp_path / "m.gguf", "qwen35", tensor_names=["foo.weight"])
+        assert read_gguf_tensor_type_by_name(path, "nope") is None
+
+    def test_not_a_gguf_is_none(self, tmp_path: Path) -> None:
+        path = tmp_path / "m.gguf"
+        path.write_bytes(b"x" * 64)
+        assert read_gguf_tensor_type_by_name(path, "anything") is None

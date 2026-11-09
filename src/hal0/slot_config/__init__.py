@@ -407,7 +407,7 @@ def reject_unknown_slot_keys(payload: dict[str, Any]) -> None:
             details={
                 "unknown_keys": unknown,
                 "hint": "check spelling against the SlotConfig schema "
-                "(known sub-tables: [model], [server], [npu], [image], [tune])",
+                "(known sub-tables: [model], [server], [npu], [image], [tune], [xdna])",
             },
             code="validation.unknown_keys",
         )

@@ -1238,3 +1238,444 @@ def test_reconcile_compares_against_the_clamped_limits(monkeypatch, tmp_path: Pa
         lambda *a, **k: type("C", (), {"memory": type("M", (), {"graph": graph})()})(),
     )
     assert ee.reconcile_extraction_dropin()["status"] == "converged"
+
+
+# ── showcase drop-in apply / reconcile (#3492) ───────────────────────────────
+
+
+def _redirect_showcase(monkeypatch, tmp_path: Path) -> tuple[Path, Path]:
+    import hal0.memory.extraction_env as ee
+
+    extraction = _redirect_drop_in(monkeypatch, tmp_path)
+    showcase = extraction.parent / "showcase-lanes.conf"
+    monkeypatch.setattr(ee, "SHOWCASE_DROP_IN_PATH", showcase)
+    monkeypatch.setattr(
+        ee, "LEGACY_LLM_CAP_DROP_IN_PATH", extraction.parent / "zz-h0-98-llm-global-cap.conf"
+    )
+    return extraction, showcase
+
+
+def _showcase_cfg():
+    from hal0.config.schema import MemoryDecisionConfig, MemoryLanesConfig, MemoryModelsConfig
+
+    return {
+        "models": MemoryModelsConfig(),
+        "decision": MemoryDecisionConfig(provider="local"),
+        "lanes": MemoryLanesConfig(),
+    }
+
+
+def test_apply_showcase_writes_through_the_seam_verb_then_restarts():
+    """The unprivileged path: body on stdin to the dedicated verb (never a
+    path argument), then daemon-reload + restart — in that order."""
+    from hal0.memory.extraction_env import apply_showcase_dropin, render_showcase_env
+
+    calls, run = _seam_recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), seam=seam)
+
+    assert result["error"] is None
+    assert result["written"] and result["daemon_reloaded"] and result["restarted"]
+    argvs = [c[0] for c in calls]
+    assert argvs[0][-1] == "write-hindsight-showcase-dropin"
+    assert SEAM_BIN in argvs[0]
+    assert calls[0][1] == render_showcase_env(**_showcase_cfg())
+    assert argvs[1][-1] == "daemon-reload"
+    assert argvs[2][-2:] == ["svc-restart", "hindsight"]
+
+
+def test_apply_showcase_reports_a_refused_write_and_skips_the_restart():
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    calls, run = _seam_recorder(rc=64, stderr="drop-in rejected: nope")
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), seam=seam)
+
+    assert result["written"] is False and result["restarted"] is False
+    assert "drop-in rejected" in result["error"]
+    assert len(calls) == 1
+
+
+def test_apply_showcase_without_restart_only_writes(monkeypatch, tmp_path: Path):
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), restart=False, seam=seam)
+
+    assert result["written"] and not result["restarted"]
+    assert "\n[Service]\n" in showcase.read_text()
+
+
+def test_showcase_reconcile_skips_a_box_without_the_engine(monkeypatch, tmp_path: Path):
+    from hal0.memory.extraction_env import reconcile_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    assert reconcile_showcase_dropin(seam=seam)["status"] == "skipped"
+    assert not showcase.exists()
+
+
+def test_showcase_reconcile_creates_then_converges(monkeypatch, tmp_path: Path):
+    """An updated box with the engine but no showcase drop-in gets one (and a
+    restart); the next pass is a no-op that touches nothing privileged."""
+    from hal0.memory.extraction_env import reconcile_showcase_dropin
+
+    extraction, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    _write_graph_config(monkeypatch, tmp_path)
+    extraction.parent.mkdir(parents=True)
+    extraction.write_text(render_drop_in(300))
+    calls, run = _seam_recorder()
+
+    result = reconcile_showcase_dropin(seam=SystemCtlSeam(run=run, is_hal0_user=lambda: False))
+
+    assert result["status"] == "applied"
+    assert "HINDSIGHT_API_EMBEDDINGS_" in showcase.read_text()
+    assert ["systemctl", "restart", "hindsight-api.service"] in [c[0] for c in calls]
+    quiet = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+    assert reconcile_showcase_dropin(seam=quiet) == {"status": "converged"}
+
+
+def test_showcase_caps_are_held_to_the_extraction_ceiling():
+    """#3492 review: showcase-lanes.conf sorts after extraction-model.conf, so
+    its caps are the ones the engine runs with — they must not undo the slot
+    --parallel clamp. Ops routed off the memory slot keep their own cap."""
+    from hal0.config.schema import (
+        MemoryDecisionConfig,
+        MemoryLaneOpConfig,
+        MemoryLanesConfig,
+        MemoryModelsConfig,
+    )
+    from hal0.memory.extraction_env import render_showcase_env
+
+    lanes = MemoryLanesConfig(
+        llm_max_concurrent=4,
+        retain=MemoryLaneOpConfig(max_concurrent=6),
+        reflect=MemoryLaneOpConfig(max_concurrent=5, virtual_model="hal0/primary"),
+    )
+    body = render_showcase_env(
+        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=lanes, ceiling=1
+    )
+    env = dict(
+        line.removeprefix("Environment=").split("=", 1)
+        for line in body.splitlines()
+        if line.startswith("Environment=")
+    )
+    assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT"] == "5"
+
+
+def test_effective_concurrency_across_both_dropins_keeps_the_slot_clamp():
+    """Merge the two drop-ins the way systemd does (lexical order, later
+    assignment wins) and check every shared name lands at or under the clamp."""
+    from hal0.config.schema import (
+        MemoryDecisionConfig,
+        MemoryLaneOpConfig,
+        MemoryLanesConfig,
+        MemoryModelsConfig,
+    )
+    from hal0.memory.extraction_env import ExtractionLimits, render_showcase_env
+
+    clamped = ExtractionLimits(max_concurrent=1)
+    extraction = render_drop_in(300, limits=clamped)
+    showcase = render_showcase_env(
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(),
+        lanes=MemoryLanesConfig(llm_max_concurrent=8, retain=MemoryLaneOpConfig(max_concurrent=8)),
+        ceiling=clamped.max_concurrent,
+    )
+
+    def _env(body: str) -> dict[str, str]:
+        return dict(
+            line.removeprefix("Environment=").split("=", 1)
+            for line in body.splitlines()
+            if line.startswith("Environment=")
+        )
+
+    first, last = _env(extraction), _env(showcase)
+    effective = {**first, **last}  # extraction-model.conf < showcase-lanes.conf
+    shared = set(first) & set(last)
+    assert shared, "the two drop-ins are expected to share the concurrency names"
+    for name in shared:
+        if name.endswith("_MAX_CONCURRENT"):
+            assert int(effective[name]) <= clamped.max_concurrent, name
+
+
+def test_reload_and_restart_reloads_first_and_reports_a_seam_timeout():
+    from hal0.memory.extraction_env import reload_and_restart_hindsight
+    from hal0.system.seam import SeamTimeout
+
+    calls, run = _seam_recorder()
+    ok = reload_and_restart_hindsight(seam=SystemCtlSeam(run=run, is_hal0_user=lambda: False))
+    assert ok == {"daemon_reloaded": True, "restarted": True, "error": None}
+    assert [c[0] for c in calls] == [
+        ["systemctl", "daemon-reload"],
+        ["systemctl", "restart", "hindsight-api.service"],
+    ]
+
+    class _Seam:
+        def systemctl(self, *args, **kwargs):
+            if "restart" in args:
+                raise SeamTimeout(list(args), 30, "activating")
+
+    out = reload_and_restart_hindsight(seam=_Seam())  # type: ignore[arg-type]
+    assert out["daemon_reloaded"] is True and out["restarted"] is False
+    assert "did not return within 30s" in out["error"]
+
+
+@pytest.mark.parametrize(
+    ("section", "body"),
+    [
+        ("lanes", {"reasoning_effort": "x-high"}),
+        ("lanes", {"retain": {"virtual_model": "gpt-4o"}}),
+        ("lanes", {"retain": {"reasoning_effort": "High"}}),
+        ("models", {"embeddings_model": "../../etc/passwd"}),
+        ("models", {"reranker_provider": "Local Thing"}),
+        ("decision", {"model": "a b"}),
+    ],
+)
+def test_schema_refuses_values_the_showcase_wrapper_would(section, body):
+    from pydantic import ValidationError
+
+    from hal0.config.schema import MemoryConfig
+
+    with pytest.raises(ValidationError):
+        MemoryConfig.model_validate({section: body})
+
+
+# ── legacy H0-98 drop-in retirement + effective unit env (#3520 / #3388) ─────
+
+
+def test_showcase_direct_write_removes_the_legacy_cap_drop_in(monkeypatch, tmp_path: Path):
+    """#3520: installing the showcase drop-in deletes the hand-maintained
+    zz-h0-98 file beside it (it sorts later and would win) — and nothing else."""
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    showcase.parent.mkdir(parents=True)
+    legacy = showcase.parent / "zz-h0-98-llm-global-cap.conf"
+    legacy.write_text("[Service]\nEnvironment=HINDSIGHT_API_LLM_MAX_CONCURRENT=2\n")
+    other = showcase.parent / "zz-operator.conf"
+    other.write_text("[Service]\n")
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), restart=False, seam=seam)
+
+    assert result["written"] and result["legacy_drop_in_present"] is False
+    assert not legacy.exists()
+    assert other.exists()
+
+
+def test_showcase_reconcile_applies_while_the_legacy_drop_in_exists(monkeypatch, tmp_path: Path):
+    """A byte-identical showcase file is NOT converged while the legacy file
+    still overrides it: only the privileged write removes it."""
+    from hal0.memory import extraction_env as ee
+
+    extraction, _showcase = _redirect_showcase(monkeypatch, tmp_path)
+    _write_graph_config(monkeypatch, tmp_path)
+    extraction.parent.mkdir(parents=True)
+    extraction.write_text(render_drop_in(300))
+    quiet = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+    assert ee.reconcile_showcase_dropin(restart=False, seam=quiet)["status"] == "applied"
+    assert ee.reconcile_showcase_dropin(restart=False, seam=quiet) == {"status": "converged"}
+
+    legacy = ee.LEGACY_LLM_CAP_DROP_IN_PATH
+    legacy.write_text("[Service]\nEnvironment=HINDSIGHT_API_LLM_MAX_CONCURRENT=2\n")
+    result = ee.reconcile_showcase_dropin(restart=False, seam=quiet)
+
+    assert result["status"] == "applied"
+    assert not legacy.exists()
+    assert ee.reconcile_showcase_dropin(restart=False, seam=quiet) == {"status": "converged"}
+
+
+def test_drop_in_matches_compares_the_unit_env_when_given(monkeypatch, tmp_path: Path):
+    """#3388: a later-sorting drop-in overriding a managed key is drift even
+    though hal0's own file is byte-for-byte right."""
+    from hal0.memory import extraction_env as ee
+
+    drop_in = _redirect_drop_in(monkeypatch, tmp_path)
+    monkeypatch.setattr(ee, "SHOWCASE_DROP_IN_PATH", drop_in.parent / "showcase-lanes.conf")
+    drop_in.parent.mkdir(parents=True)
+    body = render_drop_in(300)
+    drop_in.write_text(body)
+    unit = ee._env_from_body(body)
+
+    assert ee.drop_in_matches(300)  # file only, as before
+    assert ee.drop_in_matches(300, unit_env=unit)
+    assert ee.drop_in_matches(300, unit_env={})  # systemd absent: cannot refute
+    assert not ee.drop_in_matches(300, unit_env={**unit, "HINDSIGHT_API_LLM_TIMEOUT": "3600"})
+
+
+def test_drop_in_matches_ignores_keys_the_showcase_drop_in_owns(monkeypatch, tmp_path: Path):
+    """The showcase drop-in legitimately overrides the concurrency caps; that
+    is not extraction drift."""
+    from hal0.memory import extraction_env as ee
+
+    drop_in, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    drop_in.parent.mkdir(parents=True)
+    body = render_drop_in(300)
+    drop_in.write_text(body)
+    showcase.write_text(ee.render_showcase_env(**_showcase_cfg(), ceiling=1))
+    unit = {**ee._env_from_body(body), **ee._env_from_body(showcase.read_text())}
+    unit["HINDSIGHT_API_LLM_MAX_CONCURRENT"] = "7"
+
+    assert ee.drop_in_matches(300, unit_env=unit)
+
+
+def test_showcase_drop_in_matches_compares_the_unit_env(monkeypatch, tmp_path: Path):
+    from hal0.memory import extraction_env as ee
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    showcase.parent.mkdir(parents=True)
+    body = ee.render_showcase_env(**_showcase_cfg())
+    showcase.write_text(body)
+    unit = ee._env_from_body(body)
+
+    assert ee.showcase_drop_in_matches(**_showcase_cfg(), unit_env=unit)
+    assert not ee.showcase_drop_in_matches(
+        **_showcase_cfg(), unit_env={**unit, "HINDSIGHT_API_LLM_MAX_CONCURRENT": "2"}
+    )
+
+
+def _memory_cfg():
+    from hal0.config.schema import MemoryConfig
+
+    return MemoryConfig()
+
+
+def test_expected_engine_env_merges_in_systemd_order(tmp_path: Path):
+    """showcase-lanes.conf sorts after extraction-model.conf, so a key both set
+    carries the showcase value."""
+    from hal0.memory import extraction_env as ee
+
+    mem = _memory_cfg()
+    mem.graph.extraction_max_concurrent = 4
+    mem.lanes.llm_max_concurrent = 1
+    env = ee.expected_engine_env(mem, slots_dir=tmp_path)
+
+    assert env["HINDSIGHT_API_LLM_TIMEOUT"] == str(mem.graph.llm_timeout_s)
+    assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "1"
+    only_extraction = ee.expected_engine_env(mem, include_showcase=False, slots_dir=tmp_path)
+    assert only_extraction["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "4"
+    assert "HINDSIGHT_API_EMBEDDINGS_PROVIDER" not in only_extraction
+
+
+def _report_paths(tmp_path: Path) -> dict[str, Path]:
+    d = tmp_path / "hindsight-api.service.d"
+    d.mkdir(parents=True, exist_ok=True)
+    return {
+        "drop_in_path": d / "extraction-model.conf",
+        "showcase_path": d / "showcase-lanes.conf",
+        "legacy_path": d / "zz-h0-98-llm-global-cap.conf",
+    }
+
+
+def test_engine_env_report_not_installed(tmp_path: Path):
+    from hal0.memory import extraction_env as ee
+
+    report = ee.engine_env_report(
+        _memory_cfg(), show_unit_env=_forbidden, slots_dir=tmp_path, **_report_paths(tmp_path)
+    )
+    assert report["installed"] is False and report["checked"] is False
+    assert report["drift"] == []
+
+
+def test_engine_env_report_flags_the_h0_98_override(tmp_path: Path):
+    """The live #3520 shape: hal0 renders a global cap of 1, the leftover
+    zz-h0-98 drop-in makes the unit carry 2 — reported as drift, with the
+    legacy file named."""
+    from hal0.memory import extraction_env as ee
+
+    paths = _report_paths(tmp_path)
+    mem = _memory_cfg()
+    paths["drop_in_path"].write_text("x")
+    paths["showcase_path"].write_text("x")
+    paths["legacy_path"].write_text("x")
+    expected = ee.expected_engine_env(mem, slots_dir=tmp_path)
+    unit = {**expected, "HINDSIGHT_API_LLM_MAX_CONCURRENT": "2", "PATH": "/usr/bin"}
+
+    report = ee.engine_env_report(mem, show_unit_env=lambda: unit, slots_dir=tmp_path, **paths)
+
+    assert report["checked"] is True
+    assert report["drift"] == [
+        {
+            "key": "HINDSIGHT_API_LLM_MAX_CONCURRENT",
+            "expected": expected["HINDSIGHT_API_LLM_MAX_CONCURRENT"],
+            "effective": "2",
+        }
+    ]
+    assert report["legacy_drop_in"] == str(paths["legacy_path"])
+    assert "PATH" not in report["effective"]  # only managed keys leave the function
+    warning = ee.engine_env_warning(report)
+    assert warning is not None
+    assert "zz-h0-98-llm-global-cap.conf" in warning
+    assert "HINDSIGHT_API_LLM_MAX_CONCURRENT=2" in warning
+
+
+def test_engine_env_report_clean_and_unreadable(tmp_path: Path):
+    from hal0.memory import extraction_env as ee
+
+    paths = _report_paths(tmp_path)
+    mem = _memory_cfg()
+    paths["drop_in_path"].write_text("x")
+    expected = ee.expected_engine_env(mem, include_showcase=False, slots_dir=tmp_path)
+
+    clean = ee.engine_env_report(mem, unit_env=expected, slots_dir=tmp_path, **paths)
+    assert clean["checked"] and clean["drift"] == []
+    assert ee.engine_env_warning(clean) is None
+
+    unreadable = ee.engine_env_report(mem, unit_env={}, slots_dir=tmp_path, **paths)
+    assert unreadable["checked"] is False and unreadable["drift"] == []
+
+
+def test_engine_env_report_never_raises(tmp_path: Path):
+    from hal0.memory import extraction_env as ee
+
+    paths = _report_paths(tmp_path)
+    paths["drop_in_path"].write_text("x")
+
+    def _boom():
+        raise RuntimeError("systemd exploded")
+
+    report = ee.engine_env_report(_memory_cfg(), show_unit_env=_boom, slots_dir=tmp_path, **paths)
+    assert report["installed"] is True and report["checked"] is False
+
+
+def test_concurrency_warning_names_both_rendered_keys():
+    """#3472: hal0 renders the clamp into both concurrency keys."""
+    msg = concurrency_clamp_warning(
+        _graph(extraction_slot="memory", extraction_max_concurrent=8), 2
+    )
+    assert msg is not None
+    assert "HINDSIGHT_API_LLM_MAX_CONCURRENT and HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT" in msg
+
+
+def test_engine_env_report_never_carries_a_credential(tmp_path: Path, monkeypatch):
+    """An operator drop-in with a real decision-model key must not leak into
+    the report (it feeds status routes and doctor)."""
+    from hal0.config.schema import MemoryDecisionConfig
+    from hal0.memory import extraction_env as ee
+
+    # A local decision lane renders only when hal0-hs-decide is installed (#3519).
+    unit = tmp_path / "hal0-hs-decide.service"
+    unit.write_text("[Unit]\n")
+    monkeypatch.setattr(ee, "DECISION_UNIT_PATH", unit)
+    paths = _report_paths(tmp_path)
+    mem = _memory_cfg()
+    mem.decision = MemoryDecisionConfig(enabled=True, provider="local")
+    paths["drop_in_path"].write_text("x")
+    paths["showcase_path"].write_text("x")
+    expected = ee.expected_engine_env(mem, slots_dir=tmp_path)
+    assert "HINDSIGHT_API_DECISION_MODEL_API_KEY" in expected
+    unit = {**expected, "HINDSIGHT_API_DECISION_MODEL_API_KEY": "sk-real-secret"}
+
+    report = ee.engine_env_report(mem, unit_env=unit, slots_dir=tmp_path, **paths)
+
+    assert "sk-real-secret" not in repr(report)
+    assert report["drift"] == []

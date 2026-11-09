@@ -292,6 +292,16 @@ RULES: tuple[_Rule, ...] = (
     _Rule(
         "runner images sync/pull mutations", _prefix("/api/runner-images"), AuthClass.ADMIN, None
     ),
+    # xdna runner knob schema (ADR-0057): a static description of the
+    # GGML_XDNA_* env set, pmode values and host_xrt doc string, read off
+    # hal0.runners.knobs. No box state, no mutation; the dashboard needs it
+    # to render the slot drawer, same as the runner-images listing above.
+    _Rule(
+        "xdna runner knob schema (GET)",
+        _exact("/api/runners/xdna/knobs"),
+        AuthClass.CLIENT,
+        _GET,
+    ),
     _Rule("slots list (GET, exact)", _exact("/api/slots"), AuthClass.CLIENT, _GET),
     _Rule("slots (everything else)", _prefix("/api/slots"), AuthClass.ADMIN, None),
     _Rule("hf search (GET)", _prefix("/api/hf"), AuthClass.CLIENT, _GET),

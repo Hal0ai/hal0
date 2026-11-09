@@ -19,10 +19,30 @@ export interface MemoryLaneDecision {
   busy_s: number
 }
 
+/** One managed HINDSIGHT_API_* key whose unit value differs from what hal0 renders. */
+export interface MemoryLaneEnvDrift {
+  key: string
+  expected: string
+  effective: string | null
+}
+
 export interface MemoryLaneLlm {
+  /** Configured values (hal0.toml). */
   model: string
   max_concurrent: number
+  timeout?: number
   per_op: Record<string, unknown>
+  /** What the hindsight-api unit actually carries; null when unreadable.
+   * Absent on older backends. */
+  effective?: {
+    model: string | null
+    max_concurrent: number | null
+    timeout: number | null
+    per_op: Record<string, unknown>
+  } | null
+  drift?: MemoryLaneEnvDrift[]
+  legacy_drop_in?: string | null
+  warning?: string | null
 }
 
 export interface MemoryLaneBank {

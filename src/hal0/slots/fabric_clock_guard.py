@@ -27,9 +27,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-#: Slot backend tokens that mean "this slot runs on the NPU" (XDNA2 via the
-#: ``flm`` recipe today; ``xdna2`` reserved for a future dedicated backend).
-_NPU_BACKENDS = frozenset({"flm", "xdna2"})
+#: Slot backend tokens that mean "this slot runs on the NPU": the ``flm``
+#: recipe, the ggml-xdna runner (ADR-0057; its Runner entry reports backend
+#: ``npu`` and the slot listing does not always carry ``device_class``), and
+#: ``xdna2``/``xdna`` as spellings of the same hardware. The fclk hazard is a
+#: property of any NPU workload, not of one engine.
+_NPU_BACKENDS = frozenset({"flm", "npu", "xdna", "xdna2"})
 
 #: Slot backend tokens that mean "this slot runs on the GPU" (gfx1151 iGPU).
 _GPU_BACKENDS = frozenset({"vulkan", "rocm", "hip"})
@@ -247,7 +250,7 @@ def _backend_tokens(slot: Any) -> tuple[str, str]:
 
 
 def slot_uses_npu(slot: Any) -> bool:
-    """True when ``slot`` runs on the NPU (the ``flm`` recipe or an ``xdna2`` backend)."""
+    """True when ``slot`` runs on the NPU (FLM or the ggml-xdna runner)."""
     backend, device_class = _backend_tokens(slot)
     return backend in _NPU_BACKENDS or device_class == "npu"
 

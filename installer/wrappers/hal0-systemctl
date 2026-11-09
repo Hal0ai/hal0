@@ -132,6 +132,18 @@ GATEWAY_DROPIN_FILE="${GATEWAY_DROPIN_DIR}/10-hal0-secrets.conf"
 # the caller supplies only the body on stdin, never the path.
 HINDSIGHT_DROPIN_DIR="/etc/systemd/system/hindsight-api.service.d"
 HINDSIGHT_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/extraction-model.conf"
+# #3492: the Hindsight 1.2 showcase drop-in ([memory.models] / [memory.decision]
+# / [memory.lanes] -> extraction_env.render_showcase_env). Same directory,
+# same posture: LITERAL path, body on stdin, allow-listed per line. Sorts after
+# extraction-model.conf, so its HINDSIGHT_API_LLM_MAX_CONCURRENT wins.
+HINDSIGHT_SHOWCASE_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/showcase-lanes.conf"
+# #3520: the hand-maintained H0-98 workaround the showcase drop-in replaces. It
+# sorts AFTER showcase-lanes.conf, so while it exists its LLM_MAX_CONCURRENT
+# beats hal0's. write-hindsight-showcase-dropin removes it — this one LITERAL
+# path only, never a glob, never a caller-supplied name. `rm -f` on a symlink
+# unlinks the link itself (the directory is root-owned 0755, so only root can
+# have placed anything there), never its target.
+HINDSIGHT_LEGACY_CAP_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/zz-h0-98-llm-global-cap.conf"
 
 die() { echo "hal0-systemctl: $1" >&2; exit 64; }
 
@@ -224,6 +236,59 @@ validate_dropin_directive() {  # args: kind, "Key=Value" line
         *) die "drop-in rejected: environment name not allowed here: $ename" ;;
       esac
       ;;
+    showcase)
+      # #3492: Environment= only, closed NAME list, each value charset-pinned
+      # and whitespace-free (so no second NAME=VALUE can ride along). Model
+      # ids are HF-style repo ids; the decision base URL is either loopback or
+      # Hindsight's hosted API; the API key is the fixed local placeholder.
+      [[ "$key" == "Environment" ]] || die "drop-in rejected: directive not allowed here: $key"
+      [[ "$value" == *=* ]] || die "drop-in rejected: Environment= needs NAME=VALUE: $value"
+      ename="${value%%=*}"
+      evalue="${value#*=}"
+      case "$ename" in
+        HINDSIGHT_API_EMBEDDINGS_PROVIDER|HINDSIGHT_API_RERANKER_PROVIDER)
+          [[ "$evalue" =~ ^[a-z0-9_-]{1,32}$ ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL|HINDSIGHT_API_RERANKER_LOCAL_MODEL|\
+        HINDSIGHT_API_DECISION_MODEL_MODEL)
+          [[ "$evalue" =~ ^[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}$ && "$evalue" != *".."* ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING|HINDSIGHT_API_LLM_STRICT_SCHEMA|\
+        HINDSIGHT_API_RETAIN_LLM_STRICT_SCHEMA|HINDSIGHT_API_CONSOLIDATION_LLM_STRICT_SCHEMA|\
+        HINDSIGHT_API_REFLECT_LLM_STRICT_SCHEMA|HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_STRICT_SCHEMA)
+          [[ "$evalue" =~ ^(true|false)$ ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        HINDSIGHT_API_DECISION_MODEL_PROVIDER)
+          [[ "$evalue" == "hindsight" ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        HINDSIGHT_API_DECISION_MODEL_BASE_URL)
+          [[ "$evalue" =~ ^http://127\.0\.0\.1:[0-9]{1,5}$ || "$evalue" == "https://api.hindsight.ai" ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        HINDSIGHT_API_DECISION_MODEL_API_KEY)
+          [[ "$evalue" == "hal0-local-noauth" ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT|HINDSIGHT_API_DECISION_MODEL_MAX_REQUEST_TOKENS|\
+        HINDSIGHT_API_LLM_MAX_CONCURRENT|\
+        HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT|HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT|\
+        HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT|HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT|\
+        HINDSIGHT_API_RETAIN_LLM_TIMEOUT|HINDSIGHT_API_CONSOLIDATION_LLM_TIMEOUT|\
+        HINDSIGHT_API_REFLECT_LLM_TIMEOUT|HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_TIMEOUT)
+          [[ "$evalue" =~ ^[0-9]{1,9}$ ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        HINDSIGHT_API_LLM_REASONING_EFFORT|HINDSIGHT_API_RETAIN_LLM_REASONING_EFFORT|\
+        HINDSIGHT_API_CONSOLIDATION_LLM_REASONING_EFFORT|HINDSIGHT_API_REFLECT_LLM_REASONING_EFFORT|\
+        HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_REASONING_EFFORT)
+          # free-form in the schema (Hindsight passes it to the provider):
+          # pin the charset, not the vocabulary.
+          [[ "$evalue" =~ ^[a-z]{1,16}$ ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        HINDSIGHT_API_RETAIN_LLM_MODEL|HINDSIGHT_API_CONSOLIDATION_LLM_MODEL|\
+        HINDSIGHT_API_REFLECT_LLM_MODEL|HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MODEL)
+          [[ "$evalue" =~ ^hal0/[A-Za-z0-9_.-]{1,64}$ ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        *) die "drop-in rejected: environment name not allowed here: $ename" ;;
+      esac
+      ;;
     gateway)
       # #437: the gateway drop-in only points systemd at the hal0 secrets
       # vault. The value is confined to that directory (an EnvironmentFile
@@ -245,7 +310,7 @@ validate_dropin_body() {  # arg: kind (gateway|hindsight); body on stdin
   local -a lines=()
 
   case "$kind" in
-    gateway|hindsight) ;;
+    gateway|hindsight|showcase) ;;
     *) die "unknown drop-in kind: $kind" ;;
   esac
 
@@ -761,7 +826,28 @@ case "$cmd" in
     trap - EXIT
     ;;
 
-  check-dropin)               # check-dropin <gateway|hindsight>   (body on stdin)
+  write-hindsight-showcase-dropin)   # write the hindsight-api showcase drop-in (body on stdin)
+    # #3492: literal fixed path, allow-listed body (validate_dropin_body
+    # showcase), validated reconstruction written atomically — the
+    # write-hindsight-dropin shape exactly.
+    #
+    # #3520: once the showcase drop-in is in place, retire the hand-maintained
+    # H0-98 drop-in it replaces (literal path, takes no argument). Only after a
+    # successful mv, so a rejected or failed write leaves the box as it was.
+    validate_dropin_body showcase
+    install -d -m 0755 -o root -g root "$HINDSIGHT_DROPIN_DIR"
+    umask 022
+    tmp="$(mktemp "${HINDSIGHT_SHOWCASE_DROPIN_FILE}.XXXXXX")"
+    trap 'rm -f "$tmp"' EXIT
+    printf '%s' "$DROPIN_BODY" > "$tmp"
+    chown root:root "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$HINDSIGHT_SHOWCASE_DROPIN_FILE"
+    trap - EXIT
+    rm -f -- "$HINDSIGHT_LEGACY_CAP_DROPIN_FILE"
+    ;;
+
+  check-dropin)               # check-dropin <gateway|hindsight|showcase>   (body on stdin)
     # Side-effect-free dry run of the #1716 allow-list: validates the body and
     # echoes back exactly what a write would persist, or dies 64 with the
     # reason. Writes nothing, touches no unit, reloads nothing — it exists so
@@ -940,7 +1026,8 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   remove-quadlet <slot-id>         rm -f ${QUADLET_DIR}/${UNIT_PREFIX}<id>.container
   write-gateway-dropin             write ${GATEWAY_DROPIN_FILE} (body on stdin)
   write-hindsight-dropin           write ${HINDSIGHT_DROPIN_FILE} (body on stdin)
-  check-dropin <gateway|hindsight> validate a drop-in body (stdin) without writing it
+  write-hindsight-showcase-dropin  write ${HINDSIGHT_SHOWCASE_DROPIN_FILE} (body on stdin)
+  check-dropin <gateway|hindsight|showcase>  validate a drop-in body (stdin) without writing it
   check-quadlet [<slot-id>]        validate a .container body (stdin) without writing it
   prune-dnat <port> <handle>       delete ONE stale (dead-target) netavark DNAT rule
   check-dnat <port> <handle>       say whether that rule is prunable, without deleting it

@@ -48,6 +48,7 @@ from hal0.slot_view import (
     resolve_tune_effective,
     serialize_slot,
     synthesize_upstream_entries,
+    xdna_enrichment,
 )
 from hal0.slots import flm_catalog as _flm_catalog
 from hal0.slots import image_pull as _image_pull
@@ -1052,6 +1053,16 @@ async def get_slot(name: str, request: Request) -> dict[str, object]:
         extra = enrichment.get(name)
         if extra:
             for k, v in extra.items():
+                out.setdefault(k, v)
+        try:
+            all_configs = await sm.iter_configs()
+        except Exception:
+            all_configs = []
+        x_extra = xdna_enrichment(
+            all_configs, getattr(request.app.state, "model_registry", None)
+        ).get(name)
+        if x_extra:
+            for k, v in x_extra.items():
                 out.setdefault(k, v)
         c_enrichment = await _container_state_enrichment(request)
         c_extra = c_enrichment.get(name)

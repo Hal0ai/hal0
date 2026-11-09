@@ -236,6 +236,79 @@ def test_lanes_basic_shape(client: TestClient, recorder: _Recorder) -> None:
     assert body["llm"]["per_op"]["reflect"]["max_concurrent"] >= 1
 
 
+def test_lanes_reports_effective_unit_values_and_drift(
+    client: TestClient, recorder: _Recorder, monkeypatch
+) -> None:
+    """#3520: configured values stay where they were (backward compatible);
+    ``effective`` carries what the hindsight-api unit really runs with and
+    ``drift`` names each managed key where the two disagree."""
+    from hal0.api.routes import memory_lanes as mod
+
+    report = {
+        "installed": True,
+        "checked": True,
+        "drift": [{"key": "HINDSIGHT_API_LLM_MAX_CONCURRENT", "expected": "1", "effective": "2"}],
+        "legacy_drop_in": "/etc/systemd/system/hindsight-api.service.d/zz-h0-98-llm-global-cap.conf",
+        "effective": {
+            "HINDSIGHT_API_LLM_MODEL": "hal0/memory",
+            "HINDSIGHT_API_LLM_MAX_CONCURRENT": "2",
+            "HINDSIGHT_API_LLM_TIMEOUT": "3600",
+            "HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT": "1",
+            "HINDSIGHT_API_REFLECT_LLM_TIMEOUT": "900",
+        },
+    }
+    monkeypatch.setattr(mod, "_engine_env_report", lambda _mem: report)
+    r = client.get("/api/memory/lanes")
+    assert r.status_code == 200
+    llm = r.json()["llm"]
+    assert isinstance(llm["max_concurrent"], int)  # configured, unchanged shape
+    assert "timeout" in llm and "per_op" in llm
+    eff = llm["effective"]
+    assert eff["max_concurrent"] == 2
+    assert eff["timeout"] == 3600
+    assert eff["model"] == "hal0/memory"
+    assert eff["per_op"]["reflect"] == {"max_concurrent": 1, "model": "hal0/memory", "timeout": 900}
+    assert eff["per_op"]["retain"]["timeout"] == 3600  # falls back to the global
+    assert llm["drift"] == report["drift"]
+    assert llm["legacy_drop_in"].endswith("zz-h0-98-llm-global-cap.conf")
+    assert "HINDSIGHT_API_LLM_MAX_CONCURRENT=2" in llm["warning"]
+
+
+def test_lanes_effective_is_null_when_unit_env_unreadable(
+    client: TestClient, recorder: _Recorder, monkeypatch
+) -> None:
+    from hal0.api.routes import memory_lanes as mod
+
+    monkeypatch.setattr(
+        mod,
+        "_engine_env_report",
+        lambda _mem: {
+            "installed": True,
+            "checked": False,
+            "drift": [],
+            "legacy_drop_in": None,
+            "effective": {},
+        },
+    )
+    llm = client.get("/api/memory/lanes").json()["llm"]
+    assert llm["effective"] is None
+    assert llm["drift"] == [] and llm["warning"] is None
+
+
+def test_lanes_survive_an_engine_env_failure(
+    client: TestClient, recorder: _Recorder, monkeypatch
+) -> None:
+    from hal0.api.routes import memory_lanes as mod
+
+    def _boom(_mem):
+        raise RuntimeError("systemd exploded")
+
+    monkeypatch.setattr(mod, "_engine_env_report", _boom)
+    r = client.get("/api/memory/lanes")
+    assert r.status_code == 200
+    assert r.json()["llm"]["effective"] is None
+
+
 def test_lanes_bank_operations_error_included(client: TestClient, recorder: _Recorder) -> None:
     recorder.respond("GET", "/v1/default/banks", 200, {"banks": [{"bank_id": "broken"}]})
     recorder.respond("GET", "/v1/default/banks/broken/operations", 500, {"detail": "boom"})

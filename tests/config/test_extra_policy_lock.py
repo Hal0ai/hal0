@@ -82,6 +82,9 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "MemoryConsoleConfig": "ignore",
     # Leaf tunables / entries with no legitimate unknown key -> forbid
     "NpuConfig": "forbid",
+    # [xdna] table (ggml-xdna NPU runner): pmode/env/host_xrt only; the
+    # write guard screens env keys, so a typo'd top-level key must not pass
+    "XdnaConfig": "forbid",
     "ImageGenConfig": "forbid",
     "ProviderEntry": "forbid",
     "ProfileConfig": "forbid",

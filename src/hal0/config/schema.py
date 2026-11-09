@@ -182,6 +182,40 @@ class NpuConfig(BaseModel):
     # ``flm serve`` positional tag ([model].default) and is the only choice.
 
 
+class XdnaConfig(BaseModel):
+    """[xdna] table in a slot TOML — xdna (ggml-xdna NPU runner) knobs.
+
+    Only meaningful on a slot whose ``binary == "xdna"``; the write guard
+    (``hal0.slots.config_write``) refuses this table on any other slot.
+    All three fields are optional — an absent ``[xdna]`` table is the
+    all-defaults xdna slot.
+
+      - ``pmode``: one of :data:`hal0.runners.knobs.XDNA_PMODES`, validated
+        by :func:`hal0.runners.knobs.validate_xdna_pmode` at write time.
+      - ``env``: ``GGML_XDNA_*`` overrides (plus the one allowed
+        non-``GGML_XDNA_`` extra), screened by
+        :func:`hal0.runners.knobs.screen_xdna_env` at write time.
+      - ``host_xrt``: absolute host path to an XRT install, RO bind-mounted
+        into the container as ``HAL0_XDNA_HOST_XRT`` (write guard rejects a
+        relative path).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    pmode: str | None = Field(
+        default=None,
+        description="xrt-smi power mode token; see hal0.runners.knobs.XDNA_PMODES.",
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="GGML_XDNA_* env overrides (hal0.runners.knobs.XDNA_ENV_DOCS).",
+    )
+    host_xrt: str | None = Field(
+        default=None,
+        description="Absolute host XRT install path, RO bind-mounted into the container.",
+    )
+
+
 class ImageGenConfig(BaseModel):
     """[image] table in a slot TOML — persisted image-gen settings (#599).
 
@@ -689,6 +723,15 @@ class SlotConfig(BaseModel):
         description=(
             "[npu] table — FLM trio modality toggles (asr, embed). "
             "Absent on non-NPU slots. See NpuConfig."
+        ),
+    )
+
+    xdna: XdnaConfig | None = Field(
+        default=None,
+        description=(
+            "[xdna] table — pmode/env/host_xrt knobs for the xdna (ggml-xdna "
+            "NPU) runner. Absent on non-xdna slots; the write guard refuses "
+            "this table on any slot whose binary is not 'xdna'. See XdnaConfig."
         ),
     )
 
@@ -2733,6 +2776,22 @@ class MemoryPriorityConfig(BaseModel):
     )
 
 
+#: #3492: value shapes the ``hal0-systemctl`` showcase allow-list accepts
+#: (installer/wrappers/hal0-systemctl, ``validate_dropin_directive showcase``).
+#: Checked here too so a value the root side would refuse is rejected at save
+#: time instead of leaving the drop-in stale behind a saved ``hal0.toml``.
+_SHOWCASE_PROVIDER_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+_SHOWCASE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}$")
+_SHOWCASE_VIRTUAL_MODEL_RE = re.compile(r"^hal0/[A-Za-z0-9_.-]{1,64}$")
+_SHOWCASE_EFFORT_RE = re.compile(r"^[a-z]{1,16}$")
+
+
+def _showcase_shape(v: str, pattern: re.Pattern[str], what: str) -> str:
+    if not pattern.fullmatch(v) or ".." in v:
+        raise ValueError(f"{what} {v!r} must match {pattern.pattern} (no '..')")
+    return v
+
+
 class MemoryModelsConfig(BaseModel):
     """[memory.models] section of hal0.toml — Hindsight 1.2 embed/rerank models.
 
@@ -2767,6 +2826,16 @@ class MemoryModelsConfig(BaseModel):
         description="HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING.",
     )
 
+    @field_validator("embeddings_provider", "reranker_provider")
+    @classmethod
+    def _showcase_provider(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_PROVIDER_RE, "provider")
+
+    @field_validator("embeddings_model", "reranker_model")
+    @classmethod
+    def _showcase_model(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_MODEL_RE, "model id")
+
 
 class MemoryDecisionConfig(BaseModel):
     """[memory.decision] section of hal0.toml — the Hindsight 1.2 decision model.
@@ -2775,7 +2844,11 @@ class MemoryDecisionConfig(BaseModel):
     LLM calls (recall rank/prune/dedup, consolidation judgments, reflect
     sufficiency, page delta gating) with a single cheap forward pass. hal0
     runs it locally as the ``hal0-hs-decide`` CPU System One service
-    (src/hal0/memory/decision_server.py) on ``port``; ``provider = "hindsight"``
+    (packaging/hindsight-decision/hs_decide_serve.py, unit
+    installer/systemd/hal0-hs-decide.service) on ``port``. The showcase
+    drop-in points hindsight-api at it only while that unit is installed
+    (#3519, ``hal0.memory.extraction_env.decision_engine_base_url``);
+    ``provider = "hindsight"``
     with ``base_url = http://127.0.0.1:<port>`` is the verified-working local
     shape (hindsight-api still requires a non-empty, if placeholder, API key
     even for a local base URL — see ``zz-showcase-1.2.conf``).
@@ -2844,6 +2917,11 @@ class MemoryDecisionConfig(BaseModel):
         """The System One server URL: ``base_url`` if set, else the local port."""
         return (self.base_url or f"http://127.0.0.1:{self.port}").rstrip("/")
 
+    @field_validator("model")
+    @classmethod
+    def _decision_model_shape(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_MODEL_RE, "decision model id")
+
     @field_validator("provider")
     @classmethod
     def _decision_provider_known(cls, v: str) -> str:
@@ -2893,6 +2971,18 @@ class MemoryLaneOpConfig(BaseModel):
         description="Per-op HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA override.",
     )
 
+    @field_validator("virtual_model")
+    @classmethod
+    def _op_virtual_model_shape(cls, v: str | None) -> str | None:
+        return (
+            None if v is None else _showcase_shape(v, _SHOWCASE_VIRTUAL_MODEL_RE, "virtual_model")
+        )
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _op_effort_shape(cls, v: str | None) -> str | None:
+        return None if v is None else _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
+
 
 class MemoryLanesConfig(BaseModel):
     """[memory.lanes] section of hal0.toml — global + per-op LLM concurrency lanes.
@@ -2926,6 +3016,11 @@ class MemoryLanesConfig(BaseModel):
     consolidation: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
     reflect: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
     mental_model_refresh: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _effort_shape(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
 
 
 class MemoryConsoleConfig(BaseModel):
