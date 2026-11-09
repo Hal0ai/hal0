@@ -35,7 +35,7 @@ publishing an unqualified "auth is/isn't enforced" claim.
 | `/v1/audio/transcriptions` | POST | multipart/form-data. `model` form field is **required** — 400 `request.missing_model` if absent. See the `/v1/audio/transcriptions` entry under Request body deviations, below. |
 | `/v1/audio/speech` | POST | JSON body. `model` is **required** (400 `request.missing_model` if missing/blank) — a deliberate deviation from the dispatcher's usual default-model fallback. |
 | `/v1/images/generations` | POST | ComfyUI-backed. **Not** a passthrough — see the `/v1/images/generations` entry under Request body deviations, below. |
-| `/v1/systemone` | POST | Hindsight's "System One" decision gate. hal0's own route, not an OpenAI one — a raw proxy: the body goes out unchanged and the backend's status and body come straight back. See the `/v1/systemone` section below. |
+| `/v1/systemone` | POST | Hindsight's "System One" decision gate. hal0's own route, not an OpenAI one — a proxy: the request body is parsed and re-sent (a missing `model` is filled in), and the backend's status and body come straight back. See the `/v1/systemone` section below. |
 | `/v1/realtime` | WebSocket | Separate module (`realtime.py`) — not covered in depth by this pass. |
 
 ### Not implemented
@@ -54,13 +54,14 @@ path strings, not reachable over HTTP):
 `POST /v1/systemone` is hal0's own route, not an OpenAI one. It is the
 "System One" decision gate the Hindsight engine calls for cheap, frequent
 judgements — recall ranking and pruning, consolidation decisions, reflect
-sufficiency, page-delta gating. It gained a home in the router in 1.8.0
-(ADR-0056) because the engine used to call the decision backend's port
-directly: the call never counted as slot activity, so `idle_timeout_s` could
-unload the slot in the middle of it.
+sufficiency, page-delta gating. It gained a home in the router (ADR-0056)
+because the engine used to call the decision backend's port directly: the
+call never counted as slot activity, so `idle_timeout_s` could unload the slot
+in the middle of it.
 
-The route is a raw proxy. The body goes out unchanged and the backend's status
-and body come straight back:
+The route is a proxy. The request body is parsed as JSON and re-sent on the
+outgoing leg — a body with no `model` gets one filled in — while the
+backend's status and body come straight back:
 
 - If a slot carries the experimental `[npu].decision` tag, the call is
   forwarded there instead — with decision priority (it jumps ahead of queued

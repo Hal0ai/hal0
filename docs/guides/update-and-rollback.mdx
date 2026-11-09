@@ -196,9 +196,18 @@ sudo sqlite3 /var/lib/hal0/backups/hal0-pre-015-<timestamp>.db \
 
 ## Upgrading between releases
 
-`hal0 update` moves a box one release at a time, and some hops need a step by
-hand. The release-by-release path has its own page: [Upgrade paths between
-releases](/docs/guides/upgrade-paths/).
+`hal0 update` stages the release the channel's manifest serves, in one hop,
+and some hops need a step by hand. The release-by-release path has its own
+page: [Upgrade paths between releases](/docs/guides/upgrade-paths/).
+
+## Upgrading from an older release
+
+A box below the release's `upgrade_from` floor is refused before it downloads
+anything. `hal0 update` answers `system.update_upgrade_path_unsupported` and
+names both versions; re-running the installer over an older install refuses it
+the same way. Step the box through the floor release's own installer first —
+the exact commands are on [Upgrade paths between
+releases](/docs/guides/upgrade-paths/#upgrading-from-an-older-release).
 
 ## Component updates
 

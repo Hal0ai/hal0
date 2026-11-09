@@ -5,10 +5,13 @@ sidebar:
   order: 111
 ---
 
-`hal0 update` moves a box one release at a time. Some hops need a step by
-hand; this page lists them, oldest release first. The update command itself,
-the channels, the rollback and the component converges live in [Update and roll
-back](/docs/guides/update-and-rollback/).
+`hal0 update` stages the release the channel's manifest serves, in one hop — it
+does not walk a box through the intermediate releases. A box below that
+release's `upgrade_from` floor is refused before anything is downloaded; see
+[Upgrading from an older release](#upgrading-from-an-older-release) below.
+Some hops need a step by hand; this page lists them, one release per section.
+The update command itself, the channels, the rollback and the component
+converges live in [Update and roll back](/docs/guides/update-and-rollback/).
 
 ## Upgrading to 1.3.0
 
