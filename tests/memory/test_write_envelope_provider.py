@@ -100,6 +100,50 @@ async def test_a_caller_kind_tag_is_honoured() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_explicit_durable_keeps_a_lifecycle_word_as_a_topic_tag() -> None:
+    """``chat`` on a write the caller marked durable is a topic, not a
+    lifecycle marker: it stays a tag and nothing is moved to metadata."""
+    p = _unified()
+    await p.add(
+        "the chat panel needs a retry button", tags=["chat", "kind:durable"], client_id="pi"
+    )
+    rec = p._client.retained[-1]
+    assert rec["tags"] == ["chat", "agent:pi", "kind:durable"]
+    assert "lifecycle" not in rec["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_a_forged_visibility_tag_beside_a_lifecycle_word_is_dropped() -> None:
+    p = _unified()
+    await p.add("x", tags=[" Visibility:Private", "chat"], client_id="openwebui")
+    tags = p._client.retained[-1]["tags"]
+    assert tags == ["agent:openwebui", "kind:ephemeral"]
+    assert not [t for t in tags if t.strip().lower().startswith("visibility:")]
+    assert [t for t in tags if t.startswith("agent:")] == ["agent:openwebui"]
+
+
+@pytest.mark.asyncio
+async def test_a_uuid_tag_that_is_not_a_session_id_is_still_moved() -> None:
+    """Documented behaviour: any bare UUID leaves the tag space, under the
+    ``session_id`` metadata key, whatever it identifies."""
+    document_uuid = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+    p = _unified()
+    await p.add("x", tags=[document_uuid, "design-doc"], client_id="pi")
+    rec = p._client.retained[-1]
+    assert rec["tags"] == ["design-doc", "agent:pi", "kind:durable"]
+    assert rec["metadata"]["session_id"] == document_uuid
+
+
+@pytest.mark.asyncio
+async def test_an_md5_tag_stays_a_tag() -> None:
+    p = _unified()
+    await p.add("x", tags=["d41d8cd98f00b204e9800998ecf8427e"], client_id="pi")
+    rec = p._client.retained[-1]
+    assert rec["tags"] == ["d41d8cd98f00b204e9800998ecf8427e", "agent:pi", "kind:durable"]
+    assert rec["metadata"] == {}
+
+
+@pytest.mark.asyncio
 async def test_a_bare_string_of_tags_is_one_tag() -> None:
     p = _unified()
     await p.add("x", tags="hal0", client_id="hermes")  # type: ignore[arg-type]
@@ -147,6 +191,18 @@ async def test_caller_session_metadata_still_drives_the_document_id() -> None:
     assert out["id"] == "hermes:s1"
     assert rec["metadata"]["session_id"] == "s1"
     assert json.loads(rec["metadata"]["session_ids"]) == [OTHER_SESSION]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_caller_session_id_lets_the_tag_one_be_recorded() -> None:
+    """The provider treats an empty ``session_id`` as absent when it derives
+    the document id; the envelope agrees, so the tag-derived id is kept."""
+    p = _unified()
+    out = await p.add("x", tags=[SESSION], client_id="hermes", metadata={"session_id": ""})
+    rec = p._client.retained[-1]
+    assert rec["metadata"]["session_id"] == SESSION
+    assert SESSION not in out["id"]
+    assert not out["id"].startswith("hermes:")
 
 
 # ── Provider: observation scopes ────────────────────────────────────────────
@@ -213,6 +269,44 @@ async def test_a_private_write_in_the_unified_bank_sends_no_scope() -> None:
     await p.add("secret", dataset="private:alice", tags=["project:hal0"], client_id="alice")
     assert [rec["tags"][-1] for rec in p._client.retained] == ["visibility:private"] * 3
     assert all("observation_scopes" not in rec for rec in p._client.retained)
+
+
+@pytest.mark.asyncio
+async def test_a_private_write_with_list_form_scopes_sends_no_scope() -> None:
+    """A caller's list-form scope is dropped whole on a private write, the
+    harmless entry along with the one naming another agent."""
+    p = _unified()
+    await p.add(
+        "secret",
+        dataset="private:alice",
+        client_id="alice",
+        observation_scopes=[["agent:victim"], ["project:hal0"]],
+    )
+    assert "observation_scopes" not in p._client.retained[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_private_project_write_stays_hidden_from_another_agent_in_that_project() -> None:
+    """The envelope adds tags to a private write; the read filter must still
+    see ``visibility:private`` and the owner, project tag or not."""
+    p = _unified()
+    await p.add(
+        "alice private", dataset="private:alice", tags=["project:apollo"], client_id="alice"
+    )
+    await p.add("apollo note", dataset="project:apollo", client_id="alice")
+    assert p._client.retained[0]["tags"] == [
+        "project:apollo",
+        "agent:alice",
+        "kind:durable",
+        "visibility:private",
+    ]
+
+    as_bob = await p.recall("x", dataset="project:apollo", client_id="bob")
+    as_alice = await p.recall("x", dataset="project:apollo", client_id="alice")
+    listed_by_bob = await p.list_items(dataset="project:apollo", client_id="bob")
+    assert {i["text"] for i in as_bob} == {"apollo note"}
+    assert {i["text"] for i in as_alice} == {"alice private", "apollo note"}
+    assert {i["text"] for i in listed_by_bob["items"]} == {"apollo note"}
 
 
 @pytest.mark.asyncio

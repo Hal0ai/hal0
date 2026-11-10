@@ -26,6 +26,7 @@ from hal0.memory.envelope import (
 UUID4 = "3f2b8c1e-5a47-4d09-9e6b-7c1a2d3e4f50"
 UUID7 = "019a2b3c-4d5e-7f60-8a1b-2c3d4e5f6071"
 HEX32 = "3f2b8c1e5a474d099e6b7c1a2d3e4f50"
+MD5 = "d41d8cd98f00b204e9800998ecf8427e"
 SHA1 = "06f87da60c4b1e2d3a4f5b6c7d8e9f0a1b2c3d4e"
 SHA256 = "a1" * 32
 
@@ -74,9 +75,14 @@ def test_caller_agent_tag_is_replaced_by_the_resolved_identity(forged):
         # Both supplied: nothing the caller called ephemeral is promoted.
         (["kind:durable", "kind:ephemeral"], "ephemeral"),
         (["kind:ephemeral", "kind:durable"], "ephemeral"),
-        # A lifecycle word overrides an explicit durable.
-        (["kind:durable", "checkpoint"], "ephemeral"),
+        # An explicit durable wins over a lifecycle word, wherever it sits.
+        (["kind:durable", "checkpoint"], "durable"),
+        (["checkpoint", "kind:durable"], "durable"),
+        (["chat", " KIND:Durable "], "durable"),
+        # No kind sent: a lifecycle word makes the write ephemeral.
         (["chat"], "ephemeral"),
+        (["kind:ephemeral", "checkpoint"], "ephemeral"),
+        (["kind:durable", "kind:ephemeral", "checkpoint"], "ephemeral"),
         # A session id alone does not make a write ephemeral.
         ([UUID4], "durable"),
     ],
@@ -85,6 +91,47 @@ def test_exactly_one_kind_tag(tags, kind):
     env = apply_envelope(tags, agent="hermes")
     assert env.kind == kind
     assert [t for t in env.tags if t.lower().startswith("kind:")] == [f"kind:{kind}"]
+
+
+@pytest.mark.parametrize(
+    ("tags", "final_tags"),
+    [
+        # The topic tag ``chat`` on a write the caller called durable.
+        (["chat", "kind:durable"], ("chat", "agent:hermes", "kind:durable")),
+        (["kind:durable", "chat"], ("chat", "agent:hermes", "kind:durable")),
+        (
+            ["kind:durable", "checkpoint", "Bootstrap", "hal0"],
+            ("checkpoint", "Bootstrap", "hal0", "agent:hermes", "kind:durable"),
+        ),
+    ],
+)
+def test_explicit_durable_keeps_lifecycle_words_as_ordinary_tags(tags, final_tags):
+    env = apply_envelope(tags, agent="hermes")
+    assert env.tags == final_tags
+    assert env.kind == "durable"
+    assert env.metadata == {}
+
+
+def test_explicit_durable_still_moves_session_ids():
+    env = apply_envelope(["kind:durable", "chat", UUID4], agent="hermes")
+    assert env.tags == ("chat", "agent:hermes", "kind:durable")
+    assert env.metadata == {"session_id": UUID4}
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        ["kind:ephemeral", "chat"],
+        ["chat", "kind:ephemeral"],
+        # Both kinds sent: ephemeral wins, and the word is moved.
+        ["kind:durable", "kind:ephemeral", "chat"],
+        ["chat", "kind:ephemeral", "kind:durable"],
+    ],
+)
+def test_explicit_ephemeral_still_moves_lifecycle_words(tags):
+    env = apply_envelope(tags, agent="hermes")
+    assert env.tags == ("agent:hermes", "kind:ephemeral")
+    assert env.metadata == {"lifecycle": "chat"}
 
 
 def test_an_unrecognised_kind_value_is_user_vocabulary():
@@ -104,11 +151,6 @@ def test_an_unrecognised_kind_value_is_user_vocabulary():
         (UUID4.upper(), UUID4.upper()),
         (f"  {UUID7} ", UUID7),
         ("00000000-0000-0000-0000-000000000000", "00000000-0000-0000-0000-000000000000"),
-        # A UUID without its dashes: exactly 32 hexadecimal digits.
-        (HEX32, HEX32),
-        (HEX32.upper(), HEX32.upper()),
-        (f" {HEX32} ", HEX32),
-        ("0" * 32, "0" * 32),
         # The session namespace, in its four spellings.
         (f"session:{UUID4}", UUID4),
         ("session:20261109_153000_ab12cd", "20261109_153000_ab12cd"),
@@ -150,7 +192,12 @@ def test_session_shaped_tags_are_recognised(tag, session_id):
         "06f87da60",
         "79ed55c3b1a2",
         "a" * 31,
-        # Hex-looking but longer than a UUID: a full commit hash, a digest.
+        # Bare hexadecimal at any length: a UUID without dashes, an MD5
+        # checksum, a full commit hash, a digest.
+        HEX32,
+        HEX32.upper(),
+        MD5,
+        "0" * 32,
         "a" * 33,
         SHA1,
         SHA1.upper(),
@@ -187,9 +234,36 @@ def test_one_session_tag_moves_to_session_id_metadata():
 
 
 def test_several_session_tags_move_to_one_list_key():
-    env = apply_envelope([UUID4, f"session:{UUID7}", UUID4, HEX32], agent="codex")
+    env = apply_envelope([UUID4, f"session:{UUID7}", UUID4, "session:s3"], agent="codex")
     assert env.tags == ("agent:codex", "kind:durable")
-    assert env.metadata == {"session_ids": [UUID4, UUID7, HEX32]}
+    assert env.metadata == {"session_ids": [UUID4, UUID7, "s3"]}
+
+
+def test_an_md5_checksum_tag_passes_through():
+    env = apply_envelope([MD5, "artifact"], agent="hermes")
+    assert env.tags == (MD5, "artifact", "agent:hermes", "kind:durable")
+    assert env.metadata == {}
+
+
+def test_any_bare_uuid_is_moved_whatever_it_identifies():
+    """A tag cannot say whether a UUID names a session, a document or a
+    request, so every bare UUID is moved, under the ``session_id`` key."""
+    document_uuid = "7c9e6679-7425-40de-944b-e07fc1f90ae7"
+    env = apply_envelope([document_uuid, "design-doc"], agent="hermes")
+    assert env.tags == ("design-doc", "agent:hermes", "kind:durable")
+    assert env.metadata == {"session_id": document_uuid}
+
+
+@pytest.mark.parametrize("empty", ["", None, 0])
+def test_a_falsy_caller_session_id_is_treated_as_absent(empty):
+    env = apply_envelope([UUID4], agent="hermes", metadata={"session_id": empty})
+    assert env.tags == ("agent:hermes", "kind:durable")
+    assert env.metadata == {"session_id": UUID4}
+
+
+def test_a_falsy_caller_session_id_with_several_tag_ids():
+    env = apply_envelope([UUID4, UUID7], agent="hermes", metadata={"session_id": ""})
+    assert env.metadata == {"session_ids": [UUID4, UUID7]}
 
 
 @pytest.mark.parametrize(

@@ -168,37 +168,42 @@ across them.
 
 ## Write envelope
 
-Every write is normalised on its way to the engine, whichever surface it came
-through: REST, MCP, the Hermes memory plugin or Hal0 Brain (ADR-0058). The
-envelope never rejects a write. It rewrites the tag list and moves a few
-values into the document's metadata.
+A write bound for the Hindsight engine is normalised on its way there,
+whichever surface it came through: REST, MCP, the Hermes memory plugin or Hal0
+Brain (ADR-0058). The envelope never rejects a write. It rewrites the tag list
+and moves a few values into the document's metadata. The volatile `pgvector`
+fallback does not apply it: a write that provider accepts keeps its tags as
+given.
 
 Two tags are required, and hal0 adds them when the caller did not:
 
 - `agent:<id>`, the caller's resolved identity. A caller-supplied `agent:`
   tag is replaced. A write with no identity is tagged `agent:unknown`.
 - Exactly one of `kind:durable` or `kind:ephemeral`. The default is
-  `kind:durable`; a caller can send either tag to choose.
+  `kind:durable`. A caller can send either tag to choose, and an explicit
+  choice wins; if both are sent, `kind:ephemeral` wins.
 
 Two kinds of tag are moved out of the tag list:
 
 - **Session ids** go to metadata as `session_id`, or as the list
   `session_ids` when a write carries several. A tag counts as a session id
   when it is `session:<id>` (also `session_id:`, `session-id:` or
-  `sessionid:`), a bare UUID, or a bare run of exactly 32 hexadecimal digits
-  (a UUID without its dashes). A longer run, such as a commit hash or a
-  digest, stays a tag. A session id taken from a tag does not change the
-  document id.
+  `sessionid:`) or a bare UUID in the 8-4-4-4-12 form. Any bare UUID is
+  moved, whatever it identifies. A bare run of hexadecimal digits, such as an
+  MD5 checksum, a commit hash or a digest, stays a tag. A session id taken
+  from a tag does not change the document id.
 - **Lifecycle words** go to metadata as `lifecycle` (comma-separated when a
-  write carries several) and make the write `kind:ephemeral`. The words are
-  `checkpoint`, `session-end`, `pre-compress`, `continuity`, `bootstrap` and
-  `chat`, matched as whole tags.
+  write carries several). The words are `checkpoint`, `session-end`,
+  `pre-compress`, `continuity`, `bootstrap` and `chat`, matched as whole
+  tags. A write that sends no kind and carries one becomes `kind:ephemeral`.
+  A write you mark `kind:durable` keeps these words as ordinary tags: you
+  have said it is durable content, so `chat` there is a topic.
 
-A metadata key the caller already set is left as the caller set it. Every
-other tag passes through unchanged: namespaced tags such as `source:`,
-`knowledge:`, `origin:`, `harness:` and `project:`, and your own bare words.
-A `project:<slug>` tag is kept when you send one; hal0 does not derive one
-from text or metadata.
+A metadata key the caller already set is left as the caller set it; an empty
+`session_id` counts as not set. Every other tag passes through unchanged:
+namespaced tags such as `source:`, `knowledge:`, `origin:`, `harness:` and
+`project:`, and your own bare words. A `project:<slug>` tag is kept when you
+send one; hal0 does not derive one from text or metadata.
 
 The reason is how the engine consolidates. It builds observations per scope,
 and by default a scope is one distinct set of tags. A tag that changes with
@@ -220,7 +225,10 @@ than leaving it to the tag set:
   an observation built from a private note still carries `visibility:private`.
 
 Pass another value in the `observation_scopes` argument of the MCP
-`memory_add` tool to override the first two.
+`memory_add` tool to override the first two. Because hal0 now always sends a
+scope on a non-private write, a bank-level default observation scope
+(`default_observation_scopes` in the bank's config) no longer applies to those
+writes; it still applies to private writes in the unified bank.
 
 The envelope applies to new writes. Memories stored before it keep the tags
 they were written with.

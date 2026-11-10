@@ -1,7 +1,9 @@
 """The memory write envelope (ADR-0058, decision 4).
 
-Every memory write goes through :func:`apply_envelope` before it reaches the
-engine. The envelope normalises the caller's tags; it never rejects a write.
+Every write that reaches the Hindsight engine goes through
+:func:`apply_envelope` first. The envelope normalises the caller's tags; it
+never rejects a write. It is applied by ``HindsightProvider`` only: the
+volatile in-memory fallback provider stores tags as given.
 
 Why it exists: the engine builds observation scopes from tag sets, so a tag
 that changes on every call (a session id, a lifecycle word such as
@@ -15,12 +17,16 @@ The rules, in the order they are applied to each caller tag:
    stamped as ``agent:<id>``. An identity that cannot be resolved becomes
    :data:`UNKNOWN_AGENT`.
 2. A ``kind:durable`` or ``kind:ephemeral`` tag is taken as the caller's
-   choice of kind and re-emitted once, in canonical lower case.
+   choice of kind and re-emitted once, in canonical lower case. An explicit
+   choice wins; if both are sent, ``ephemeral`` wins.
 3. A session id (see :func:`session_id_of`) is removed from the tags and
    written to metadata: ``session_id`` when there is one, ``session_ids``
    (a list) when there are several.
-4. A bare lifecycle word (:data:`LIFECYCLE_WORDS`) is removed from the tags,
-   recorded in metadata as ``lifecycle``, and forces ``kind:ephemeral``.
+4. A bare lifecycle word (:data:`LIFECYCLE_WORDS`) is removed from the tags
+   and recorded in metadata as ``lifecycle``; with no kind sent it also makes
+   the write ``kind:ephemeral``. The exception is a write the caller marked
+   ``kind:durable`` (and not also ``kind:ephemeral``): the caller has said it
+   is durable content, so the word is an ordinary topic tag and stays.
 5. Every other tag passes through untouched. That includes the namespaces the
    system already uses (``visibility:``, ``source:``, ``knowledge:``,
    ``origin:``, ``harness:``, ``migrated:``, ``project:``) and unknown bare
@@ -93,15 +99,11 @@ COMBINED_OBSERVATION_SCOPES = "combined"
 _SESSION_TAG_RE = re.compile(r"session(?:[-_]?id)?:(?P<id>.*\S.*)", re.IGNORECASE | re.DOTALL)
 
 # A bare UUID in the canonical 8-4-4-4-12 form, any version and variant.
+# A bare run of hexadecimal digits is not a session id at any length: an MD5
+# checksum, a commit hash and a digest are all legitimate tags.
 _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
 )
-
-# A bare run of exactly 32 hexadecimal digits: a UUID without its dashes.
-# Any other length is an ordinary tag, shorter (a PR number, a date, an
-# abbreviated commit hash) or longer (a full 40-digit commit hash, a 64-digit
-# digest).
-_UUID_HEX_RE = re.compile(r"[0-9a-f]{32}", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,20 +154,33 @@ def resolve_agent(identity: str | None) -> str:
 def session_id_of(tag: str) -> str | None:
     """The session id a tag carries, or ``None`` when it is not a session tag.
 
-    Three shapes count, each judged on the whole stripped tag, ignoring case:
+    Two shapes count, each judged on the whole stripped tag, ignoring case:
 
     * ``session:<id>`` (also ``session_id:``, ``session-id:``, ``sessionid:``)
       with a non-blank id, which is returned without the prefix;
-    * a bare UUID in the 8-4-4-4-12 form, any version;
-    * a bare run of exactly 32 hexadecimal digits (a UUID without dashes).
+    * a bare UUID in the 8-4-4-4-12 form, any version.
+
+    Any bare UUID counts, whatever it identifies: a tag cannot say whether a
+    UUID names a session, a document or a request, and none of them belongs in
+    the tag space. A bare run of hexadecimal digits without dashes does not
+    count at any length.
     """
     text = tag.strip()
     prefixed = _SESSION_TAG_RE.fullmatch(text)
     if prefixed:
         return prefixed.group("id").strip()
-    if _UUID_RE.fullmatch(text) or _UUID_HEX_RE.fullmatch(text):
+    if _UUID_RE.fullmatch(text):
         return text
     return None
+
+
+def _kind_of(tag: str) -> str | None:
+    """``durable`` or ``ephemeral`` when the tag is that ``kind:`` tag."""
+    folded = tag.strip().lower()
+    if not folded.startswith(KIND_TAG_PREFIX):
+        return None
+    value = folded[len(KIND_TAG_PREFIX) :]
+    return value if value in KINDS else None
 
 
 def lifecycle_word_of(tag: str) -> str | None:
@@ -225,25 +240,30 @@ def apply_envelope(
     to avoid overwriting a key the caller already set.
     """
     caller_metadata = metadata or {}
+    caller_tags = coerce_tags(tags)
+
+    # The caller's choice of kind is read first, because it decides what a
+    # lifecycle word means wherever the two sit in the list. Between two
+    # caller-supplied kinds the narrower claim wins: nothing the caller called
+    # ephemeral is promoted. A write marked durable and nothing else keeps its
+    # lifecycle words as ordinary topic tags.
+    caller_kinds = {kind for kind in map(_kind_of, caller_tags) if kind is not None}
+    explicitly_durable = caller_kinds == {KIND_DURABLE}
+
     kept: list[str] = []
     seen: set[str] = set()
     session_ids: list[str] = []
     lifecycle: list[str] = []
-    caller_kinds: set[str] = set()
 
-    for tag in coerce_tags(tags):
-        folded = tag.strip().lower()
-        if folded.startswith(AGENT_TAG_PREFIX):
-            continue
-        if folded.startswith(KIND_TAG_PREFIX) and folded[len(KIND_TAG_PREFIX) :] in KINDS:
-            caller_kinds.add(folded[len(KIND_TAG_PREFIX) :])
+    for tag in caller_tags:
+        if tag.strip().lower().startswith(AGENT_TAG_PREFIX) or _kind_of(tag) is not None:
             continue
         session_id = session_id_of(tag)
         if session_id is not None:
             if session_id not in session_ids:
                 session_ids.append(session_id)
             continue
-        word = lifecycle_word_of(tag)
+        word = None if explicitly_durable else lifecycle_word_of(tag)
         if word is not None:
             if word not in lifecycle:
                 lifecycle.append(word)
@@ -252,8 +272,6 @@ def apply_envelope(
             seen.add(tag)
             kept.append(tag)
 
-    # A lifecycle word always wins. Between two caller-supplied kinds the
-    # narrower claim wins: nothing the caller called ephemeral is promoted.
     ephemeral = bool(lifecycle) or KIND_EPHEMERAL in caller_kinds
     kind = KIND_EPHEMERAL if ephemeral else KIND_DURABLE
 
@@ -267,8 +285,10 @@ def apply_envelope(
         kept.append(f"{PROJECT_TAG_PREFIX}{slug}")
 
     additions: dict[str, Any] = {}
+    # Truthiness, as the provider tests it when it derives the document id:
+    # an empty ``session_id`` is no session id, and a tag-derived one fills it.
     existing_session = caller_metadata.get(SESSION_ID_KEY)
-    if existing_session is not None:
+    if existing_session:
         # The caller's own session id stands; only ids it does not already
         # name are recorded beside it.
         session_ids = [s for s in session_ids if s != str(existing_session)]
