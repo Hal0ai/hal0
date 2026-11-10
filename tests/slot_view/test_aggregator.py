@@ -1551,6 +1551,23 @@ class TestTuneInSnapshot:
         d = await _ctx_view(_llm_cfg(device="npu", profile="flm", model={"default": "g:1b"}), None)
         assert d["tune_effective"] is None
 
+    async def test_xdna_npu_slot_carries_tune_effective(
+        self, no_mem: None, tmp_hal0_home: str
+    ) -> None:
+        """An xdna slot is a llama-server launch on the NPU: it gets the shape (#3536)."""
+        cfg = _llm_cfg(
+            device="npu",
+            binary="xdna",
+            profile="chat",
+            model={"default": _CTX_MODEL},
+            tune={"ctx_size": 4096},
+        )
+        d = await _ctx_view(cfg, 8000)
+        te = d["tune_effective"]
+        assert te is not None
+        assert te["ctx_size"] == 4096 and te["sources"]["ctx_size"] == "slot"
+        assert set(te["tune_unavailable"]) == {"speculation"}
+
 
 class TestTuneLiftIsValidated:
     async def test_invalid_tune_keys_are_left_out_of_tune(

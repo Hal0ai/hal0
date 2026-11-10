@@ -332,3 +332,35 @@ def test_guard_allows_off_on_halogen_slot(tmp_hal0_home: str) -> None:
     guard_tune_write({"type": "llm"}, {"tune": {"speculation": "off"}}, halogen)
     guard_tune_write({"type": "llm"}, {"tune": {"speculation": "auto"}}, halogen)
     guard_tune_write({"type": "llm"}, {"tune": {"vision": "off"}}, halogen)
+
+
+def test_guard_xdna_slot_takes_tune():
+    """An xdna slot is a llama-server launch on the NPU: [tune] applies (#3536)."""
+    xdna = {"type": "llm", "device": "npu", "binary": "xdna"}
+    guard_tune_write(xdna, {"tune": {"ctx_size": 8192}}, P)
+    guard_tune_write(xdna, {"tune": {"enable_thinking": False, "vision": "off"}}, P)
+    guard_tune_write(xdna, {"tune": {"speculation": "off"}}, P)
+    guard_tune_write(xdna, {"tune": {"speculation": "auto"}}, P)
+    # nested [slot] shape, and an update that flips the binary to xdna
+    guard_tune_write({"slot": {"binary": "xdna"}, "device": "npu"}, {"tune": {"ctx_size": 4096}}, P)
+    guard_tune_write(
+        {"type": "llm", "device": "npu"}, {"binary": "xdna", "tune": {"ctx_size": 4096}}, P
+    )
+
+
+def test_guard_xdna_refuses_ngram_and_non_llm():
+    xdna = {"type": "llm", "device": "npu", "binary": "xdna"}
+    with pytest.raises(BadRequest) as e:
+        guard_tune_write(xdna, {"tune": {"speculation": "ngram"}}, P)
+    assert e.value.code == "slot.tune_unsupported_value"
+    with pytest.raises(BadRequest) as e:
+        guard_tune_write({**xdna, "type": "embedding"}, {"tune": {"ctx_size": 4096}}, P)
+    assert e.value.code == "slot.tune_not_supported"
+    # FLM on the NPU stays refused, and an update flipping xdna away re-refuses
+    with pytest.raises(BadRequest) as e:
+        guard_tune_write(
+            {"type": "llm", "device": "npu", "binary": "flm"}, {"tune": {"ctx_size": 4096}}, P
+        )
+    assert e.value.code == "slot.tune_not_supported"
+    with pytest.raises(BadRequest):
+        guard_tune_write(xdna, {"binary": "flm", "tune": {"ctx_size": 4096}}, P)

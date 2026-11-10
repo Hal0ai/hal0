@@ -29,6 +29,7 @@ import { slotIndicatorFromPhase } from './slot-status.js'
 // the local copy (which also mis-classified backend tokens like "flm" —
 // the shared helper folds them through backend_to_device → npu).
 import { devKind } from '@/lib/deviceMeta'
+import { isXdnaSlot as isXdnaRunner } from '@/lib/slotModelFit'
 import { PillToggle } from './primitives.jsx'
 import { npuPillOn, npuModalityOn, npuApplyBody, npuRoleForSlot, isNpuShadowSlot } from './npu-modality.js'
 
@@ -69,15 +70,13 @@ const round1 = (n) => Math.round((n || 0) * 10) / 10
 // FLM trio members (no modality roles, never the anchor, never a shadow).
 // They get their own XdnaSlotCard in the occupancy card's RIGHT region.
 const isNpuSlot = (s) =>
-  (s.device_class === 'npu' || devKind(s.device) === 'npu') &&
-  String(s.runner || '').toLowerCase() !== 'xdna'
+  (s.device_class === 'npu' || devKind(s.device) === 'npu') && !isXdnaRunner(s)
 
 // xdna (ggml-xdna llama-server) slots — share the NPU with the FLM trio but
 // are never trio members (see isNpuSlot above). Each gets its own
 // XdnaSlotCard in the RIGHT region and its own grid holder.
 const isXdnaSlot = (s) =>
-  (s.device_class === 'npu' || devKind(s.device) === 'npu') &&
-  String(s.runner || '').toLowerCase() === 'xdna'
+  (s.device_class === 'npu' || devKind(s.device) === 'npu') && isXdnaRunner(s)
 
 // owner hues — assigned by slot index so each resident FLM reads as its own
 // owner. Three cohesive accents (deep-indigo → teal → sage); single-tenant NPU

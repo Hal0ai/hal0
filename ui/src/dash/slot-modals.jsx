@@ -56,6 +56,7 @@ import { footprintLine } from "./halogen-footprint.js";
 import { RichSelect } from "./rich-select.jsx";
 import { FitChip, ModalityTag } from "./fit-chip.jsx";
 import { TuneBlock, tuneApplies } from "./slot-tune-block.jsx";
+import { isXdnaSlot } from "@/lib/slotModelFit";
 import {
 	changedTuneKeys,
 	effectiveProfileName,
@@ -739,7 +740,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// engine-settings block below. Enabled only for an xdna slot and only
 	// while the drawer is open — a null-name query is a no-op (useSlotConfig
 	// mirrors useSlotResolved's enabled guard).
-	const isXdnaSlotEdit = String(slot?.runner || "").toLowerCase() === "xdna";
+	const isXdnaSlotEdit = isXdnaSlot(slot);
 	const xdnaCfgQuery = useSlotConfig(isXdnaSlotEdit ? slot.name : undefined);
 	// Full slot list — needed only to resolve a shadow's anchor STRUCTURALLY
 	// (see the NPU-modalities row below); #1637 already pays this same query

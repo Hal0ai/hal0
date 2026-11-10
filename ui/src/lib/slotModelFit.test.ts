@@ -85,6 +85,9 @@ describe('isFlmSlot', () => {
       false,
     )
     expect(isFlmSlot({ device: 'npu', runner: 'xdna' })).toBe(false)
+    // the slot API's own shape: the runner key rides on `binary`
+    expect(isFlmSlot({ device: 'npu', device_class: 'npu', binary: 'xdna' })).toBe(false)
+    expect(isFlmSlot({ device: 'npu', binary: 'flm' })).toBe(true)
     expect(isFlmSlot({ device_class: 'npu', runtime_family: 'llama-server' })).toBe(false)
   })
 })

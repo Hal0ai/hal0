@@ -98,7 +98,11 @@ from hal0.runners import (
     llama_build_from_tag,
     runner_supports_reasoning_effort,
 )
-from hal0.runners.knobs import HALOGEN_NATIVE_CTX, HALOGEN_TUNE_UNAVAILABLE
+from hal0.runners.knobs import (
+    HALOGEN_NATIVE_CTX,
+    HALOGEN_TUNE_UNAVAILABLE,
+    XDNA_TUNE_UNAVAILABLE,
+)
 from hal0.slot_lifecycle_budget import (
     HEALTH_TIMEOUT_S,
     TEARDOWN_MARGIN_S,
@@ -1882,9 +1886,12 @@ def _resolve_llama_scalars(
         "tune_effective": {
             **tune.as_dict(),
             "reasoning_effort_unavailable": effort_unavailable,
-            # llama-server takes every tune value; the key is always present so a
+            # llama-server takes every tune value except on the xdna runner,
+            # which has no speculative path; the key is always present so a
             # reader never has to tell "none" from "this engine does not say".
-            "tune_unavailable": {},
+            "tune_unavailable": (
+                dict(XDNA_TUNE_UNAVAILABLE) if getattr(runner, "key", None) == "xdna" else {}
+            ),
         },
         "lane_device": lane_device(effective_backend),
         "draft_device": (
