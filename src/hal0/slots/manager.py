@@ -1110,7 +1110,7 @@ class SlotManager:
         ``slot.port_seed_conflict``).
 
         Deliberately narrow: acts ONLY when ``cfg`` is an xdna slot AND its
-        stored row names the trio group. Every other row (FLM members, legacy
+        stored row names the trio group. Every other row (FLM members, older
         rows with no group, GPU slots) is left exactly as it is.
 
         Order, so a failure part-way leaves a state the next call retries:
