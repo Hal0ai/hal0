@@ -192,11 +192,24 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
     # Gather flm/npu slots first — presence is "hw present OR a flm slot".
     flm_slots: list[Any] = []
     all_slots: list[Any] = []
+    # xdna slots (ADR-0057), named from their config: their device is npu, so
+    # the backend mirror alone could read as FLM on an older state record.
+    xdna_names: set[str] = set()
     if sm is not None:
         try:
             all_slots = await sm.list()
         except Exception:
             all_slots = []
+        try:
+            from hal0.slots.activation import is_xdna_slot
+
+            xdna_names = {
+                str(cfg.get("name") or "")
+                for cfg in await sm.iter_configs()
+                if isinstance(cfg, dict) and is_xdna_slot(cfg)
+            }
+        except Exception:
+            xdna_names = set()
         for s in all_slots:
             meta = getattr(s, "metadata", None) or {}
             provider = str(meta.get("provider") or "").lower()
@@ -210,7 +223,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             # they never appear as standalone entries.
             if s.name.endswith("-stt") or s.name.endswith("-embed"):
                 continue
-            if provider == "flm" or backend in ("flm", "npu"):
+            if provider == "flm" or backend in ("flm", "npu") or s.name in xdna_names:
                 flm_slots.append(s)
 
     try:
@@ -252,7 +265,9 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         meta = getattr(s, "metadata", None) or {}
         provider = str(meta.get("provider") or "").lower()
         backend = str(getattr(s, "backend", None) or meta.get("backend") or "").lower()
-        engine = "xdna" if (provider != "flm" and backend == "npu") else "flm"
+        engine = (
+            "xdna" if s.name in xdna_names or (provider != "flm" and backend == "npu") else "flm"
+        )
 
         tag = _model_tag(getattr(s, "model_id", None))
         gb = _flm_footprint_gb(tag)

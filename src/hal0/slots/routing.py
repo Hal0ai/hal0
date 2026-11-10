@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from hal0.model_meta import SLOT_TYPES
+from hal0.slots.activation import slot_binary
 from hal0.slots.config_write import _cfg_effective_provider
 from hal0.slots.state import SlotConfigError
 
@@ -135,6 +136,8 @@ class LoadedSlot:
     default: bool = False
     tool_calling: bool = False
     modalities: frozenset[str] = frozenset()
+    #: The slot's ``binary`` (``"xdna"`` marks a llama-server slot on the NPU).
+    binary: str = ""
 
 
 def seeded_slots(*, include_npu: bool | None = None) -> tuple[str, ...]:
@@ -225,6 +228,7 @@ def loaded_slot_from_config(
         default=cfg.get("default") is True,
         tool_calling=bool(tool_calling),
         modalities=modalities,
+        binary=slot_binary(cfg),
     )
 
 

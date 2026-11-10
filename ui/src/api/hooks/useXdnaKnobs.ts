@@ -11,6 +11,8 @@ export interface XdnaEnvKnob {
   name: string
   default: string | null
   doc: string
+  /** Pinned by hal0 (a correctness fact): shown, never editable. */
+  fixed: boolean
 }
 
 export interface XdnaKnobs {

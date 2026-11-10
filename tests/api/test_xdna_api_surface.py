@@ -94,6 +94,23 @@ def test_guard_xdna_rejects_bad_env_key():
         guard_and_normalize_xdna(merged, {"xdna": {"env": {"NOT_ALLOWED": "1"}}})
 
 
+def test_guard_xdna_rejects_glu_a_flipped_back_on():
+    """GGML_XDNA_PGEMM_GLU_A=1 silently corrupts prefill logits (ADR-0057 d3)."""
+    merged = {"name": "s1", "binary": "xdna"}
+    with pytest.raises(BadRequest) as exc:
+        guard_and_normalize_xdna(merged, {"xdna": {"env": {"GGML_XDNA_PGEMM_GLU_A": "1"}}})
+    assert exc.value.status == 400
+    assert exc.value.code == "validation.xdna_env_pinned"
+    assert exc.value.details["key"] == "GGML_XDNA_PGEMM_GLU_A"
+    assert "xdna" not in merged
+
+
+def test_guard_xdna_accepts_glu_a_restated_as_zero():
+    merged = {"name": "s1", "binary": "xdna"}
+    guard_and_normalize_xdna(merged, {"xdna": {"env": {"GGML_XDNA_PGEMM_GLU_A": "0"}}})
+    assert merged["xdna"]["env"] == {"GGML_XDNA_PGEMM_GLU_A": "0"}
+
+
 def test_guard_xdna_rejects_relative_host_xrt():
     merged = {"name": "s1", "binary": "xdna"}
     with pytest.raises(BadRequest):

@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from hal0.providers.flm import FLM_EMBED_TAG
 from hal0.slot_config import slot_scalar_table, write_slot_toml
 from hal0.slots._cfg_helpers import _cfg_to_dict
+from hal0.slots.activation import is_xdna_slot
 from hal0.slots.layout import resolve_slot_stem
 
 if TYPE_CHECKING:
@@ -60,10 +61,17 @@ def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
     independently loadable. Issuing a standalone ``/v1/load`` for them on the
     busy single-tenant NPU returns HTTP 500, so callers skip the spawn and
     derive their state from the anchor. The anchor itself (``type=llm``) is
-    deliberately excluded.
+    deliberately excluded, and so is an xdna slot (``binary = "xdna"``): it runs
+    its own llama-server, not FLM's process. The write seam and the launch seam
+    (``ContainerProvider.check_load``) both refuse an xdna slot of these types;
+    this keeps a hand-edited one out of the trio's shadow handling meanwhile.
     """
     d = _cfg_to_dict(cfg)
-    return d.get("device") == "npu" and d.get("type") in ("transcription", "embedding")
+    return (
+        d.get("device") == "npu"
+        and d.get("type") in ("transcription", "embedding")
+        and not is_xdna_slot(d)
+    )
 
 
 #: FLM-trio shadow spec: (name suffix, slot type, anchor ``[npu]`` toggle
@@ -131,7 +139,7 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
         return 0
     anchor_cfg: dict[str, Any] | None = None
     for cfg in configs:
-        if cfg.get("type") == "llm" and cfg.get("device") == "npu":
+        if cfg.get("type") == "llm" and cfg.get("device") == "npu" and not is_xdna_slot(cfg):
             anchor_cfg = cfg
             break
     if anchor_cfg is None or not is_container_npu_cfg(anchor_cfg):

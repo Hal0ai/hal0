@@ -109,7 +109,7 @@ GGML_XDNA_ARENA_MB = "512"      # GGML_XDNA_* keys from the allow-list only
 | Key | Effect |
 |---|---|
 | `pmode` | Validated against the pmode list and **displayed** on the slot. It is *not* applied by the container: `xrt-smi configure --pmode` is a host-level setting outside the container's namespace, so until a host agent exists you set it on the host yourself. |
-| `env` | Merged into the container environment after the image defaults. Keys outside the `GGML_XDNA_*` allow-list are rejected with a 400 naming the key; `GGML_XDNA_PGEMM_GLU_A` stays pinned by the image. |
+| `env` | Merged into the container environment after the image defaults. Keys outside the `GGML_XDNA_*` allow-list are rejected with a 400 naming the key. `GGML_XDNA_PGEMM_GLU_A` is pinned to `0`: any other value is rejected with a 400 (here or in `[server].env`), and the launch forces `0` even over a hand-edited TOML. |
 | `host_xrt` | Bind-mounted read-only into the container and exported as `HAL0_XDNA_HOST_XRT`, for running a host XRT build instead of the image's. |
 
 ## What the API reports

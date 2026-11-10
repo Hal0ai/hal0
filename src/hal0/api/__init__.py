@@ -575,7 +575,12 @@ async def hal0_llm_slot_views(
         # (``gemma4-it:e2b``), not hal0's ``-FLM`` catalog id — otherwise
         # ``hal0/utility``/``hal0/npu`` never match the slot and fall through
         # to the chat slot. Translate via the same map as the FLM provider.
-        if (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm":
+        from hal0.slots.activation import is_xdna_slot, slot_binary
+
+        xdna = is_xdna_slot(cfg)
+        if not xdna and (
+            (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm"
+        ):
             from hal0.providers.flm import flm_id_to_tag_async
 
             # A cold catalog is probed off the event loop (#2334).
@@ -586,6 +591,7 @@ async def hal0_llm_slot_views(
             {
                 "name": name,
                 "device": (cfg.get("device") or "").strip(),
+                "binary": slot_binary(cfg),
                 "model_id": model_id,
                 "context_length": int(_slot_ctx_size(cfg, model_registry, model_id) or 0),
             }
@@ -771,6 +777,12 @@ def _flm_multiplex_tags(cfg: dict[str, Any]) -> list[str]:
     the pre-#733 ``[defaults] load_*`` legacy keys.
     """
     if not cfg.get("name"):
+        return []
+    from hal0.slots.activation import is_xdna_slot
+
+    # An xdna slot (ADR-0057) is on the NPU but is not FLM: a leftover [npu]
+    # table from before a binary flip must not advertise FLM ASR/embed tags.
+    if is_xdna_slot(cfg):
         return []
     # An FLM slot is named by its NPU device (the launch dispatch's signal and
     # the only one a converted slot keeps: ADR-0029's conversion drops the

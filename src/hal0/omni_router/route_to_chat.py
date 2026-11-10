@@ -161,10 +161,16 @@ def validate_delegation(
 
     # Guardrail 3: no NPU↔NPU delegation.
     caller_cfg = _slot_by_name(configs, caller_slot_name)
+    # Only two FLM slots force a swap: an xdna slot (ADR-0057) runs its own
+    # llama-server and time-slices the NPU beside FLM (#3537).
+    from hal0.slots.activation import is_xdna_slot
+
     if (
         caller_cfg is not None
         and caller_cfg.get("device") == "npu"
         and target_cfg.get("device") == "npu"
+        and not is_xdna_slot(caller_cfg)
+        and not is_xdna_slot(target_cfg)
     ):
         return (
             "route_to_chat refused: NPU↔NPU delegation would force "
@@ -198,6 +204,8 @@ def validate_delegation_slots(
         caller_slot is not None
         and getattr(caller_slot, "device", None) == "npu"
         and getattr(target_slot, "device", None) == "npu"
+        and getattr(caller_slot, "binary", "") != "xdna"
+        and getattr(target_slot, "binary", "") != "xdna"
     ):
         return (
             "route_to_chat refused: NPU↔NPU delegation would force "

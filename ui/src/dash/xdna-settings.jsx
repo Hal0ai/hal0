@@ -32,7 +32,10 @@ export function XdnaEngineSettings({ xdna, xdnaPath, readOnly = false, onChange 
   const knobsQuery = useXdnaKnobs()
   const knobs = knobsQuery.data
   const pmodes = knobs?.pmodes || []
-  const envCatalog = knobs?.env || []
+  // `fixed` knobs are pinned correctness facts (GGML_XDNA_PGEMM_GLU_A): the
+  // backend refuses any other value, so they are never offered for editing.
+  const envCatalog = (knobs?.env || []).filter((k) => !k.fixed)
+  const fixedNames = new Set((knobs?.env || []).filter((k) => k.fixed).map((k) => k.name))
   const legalNames = new Set(envCatalog.map((k) => k.name))
   const env = xdna?.env || {}
   const [draftName, setDraftName] = React.useState('')
@@ -50,6 +53,10 @@ export function XdnaEngineSettings({ xdna, xdnaPath, readOnly = false, onChange 
   const addRow = () => {
     const name = draftName.trim()
     if (!name) return
+    if (fixedNames.has(name)) {
+      setNameError(`"${name}" is pinned by hal0 and cannot be changed`)
+      return
+    }
     if (!legalNames.has(name)) {
       setNameError(`"${name}" is not a known GGML_XDNA_* knob`)
       return
