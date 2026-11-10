@@ -137,7 +137,15 @@ def test_models_table_shows_the_recorded_embedder_and_flags_a_difference(monkeyp
             "decision": {"enabled": False, "provider": "off", "model": "x", "reachable": False},
         },
     )
-    r = runner.invoke(memory_commands.app, ["models"], env={"COLUMNS": "200"})
+    # A wide console: the default one wraps the status cell at the runner's
+    # width. Height is pinned too, or rich falls back to 80x25 on a dumb terminal.
+    from rich.console import Console
+
+    monkeypatch.setattr(
+        "hal0.cli.memory_models_agents_commands.console",
+        Console(width=200, height=50, color_system=None),
+    )
+    r = runner.invoke(memory_commands.app, ["models"])
     assert r.exit_code == 0, r.output
     assert "BAAI/bge-small-en-v1.5" in r.output
     assert "configured: hindsight-ai/hs-embed-1 (not applied)" in r.output
