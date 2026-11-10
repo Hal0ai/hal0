@@ -37,6 +37,7 @@ __all__ = [
     "is_xdna_slot",
     "npu_anchor_config",
     "npu_modality_active",
+    "slot_binary",
     "slot_model_id",
 ]
 
@@ -105,15 +106,29 @@ def is_xdna_slot(cfg: Any) -> bool:
     never joins the FLM trio's shared port, and launches through the
     llama-server path. xdna is opt-in through an explicit ``binary = "xdna"``
     (never the hardware-gated default), so the raw field answers without a
-    runner lookup. Reads the flat shape and a nested ``[slot]`` table alike.
+    runner lookup. Reads the flat shape and a nested ``[slot]`` table alike
+    (:func:`slot_binary`). Matches exactly, as :func:`hal0.runners.get_runner`
+    does: a ``"XDNA"`` binary resolves to no runner, so it is not xdna here
+    either.
+    """
+    return slot_binary(cfg) == "xdna"
+
+
+def slot_binary(cfg: Any) -> str:
+    """The slot's ``binary`` as the loader resolves it, or ``""``.
+
+    ``[slot]`` wins on a clash with a root-level key, exactly as
+    :func:`hal0.config.loader._flatten_slot_toml` loads it; a root-level
+    ``binary`` still counts when the ``[slot]`` table does not carry one.
     """
     if not isinstance(cfg, dict):
-        return False
-    binary = cfg.get("binary")
-    if not binary:
-        slot_tbl = cfg.get("slot")
-        binary = slot_tbl.get("binary") if isinstance(slot_tbl, dict) else None
-    return isinstance(binary, str) and binary.strip().lower() == "xdna"
+        return ""
+    slot_tbl = cfg.get("slot")
+    if isinstance(slot_tbl, dict) and "binary" in slot_tbl:
+        binary = slot_tbl.get("binary")
+    else:
+        binary = cfg.get("binary")
+    return binary if isinstance(binary, str) else ""
 
 
 def _is_flm_npu_llm(cfg: dict[str, Any]) -> bool:

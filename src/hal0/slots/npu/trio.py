@@ -61,10 +61,16 @@ def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
     independently loadable. Issuing a standalone ``/v1/load`` for them on the
     busy single-tenant NPU returns HTTP 500, so callers skip the spawn and
     derive their state from the anchor. The anchor itself (``type=llm``) is
-    deliberately excluded.
+    deliberately excluded, and so is an xdna slot (``binary = "xdna"``): it runs
+    its own llama-server, not FLM's process. The write seam refuses an xdna slot
+    of these types; this is the belt for a hand-edited file.
     """
     d = _cfg_to_dict(cfg)
-    return d.get("device") == "npu" and d.get("type") in ("transcription", "embedding")
+    return (
+        d.get("device") == "npu"
+        and d.get("type") in ("transcription", "embedding")
+        and not is_xdna_slot(d)
+    )
 
 
 #: FLM-trio shadow spec: (name suffix, slot type, anchor ``[npu]`` toggle

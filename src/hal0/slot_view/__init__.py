@@ -370,6 +370,9 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # configured ``device`` so the UI renders a stable backend chip.
         _recipe, _llamacpp = device_to_backend(cfg.get("device"))
         declared_backend = _llamacpp or (_recipe if _recipe == "flm" else None)
+        if _is_xdna_cfg(cfg):
+            # The xdna runner's own backend token (ADR-0057), not FLM's.
+            declared_backend = "npu"
         if declared_backend:
             entry["declared_backend"] = declared_backend
 

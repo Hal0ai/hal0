@@ -358,7 +358,8 @@ Single source of truth for which `GGML_XDNA_*` names are legal — an env
 row name outside this list is rejected inline in the drawer
 (`xdna-settings.jsx`), same UX as `flags-tune.js`. A `fixed: true` row
 (`GGML_XDNA_PGEMM_GLU_A`, pinned to `0`) is never offered for editing; the
-slot-config PUT refuses any other value with a 400.
+slot-config PUT refuses any other value with a 400, in `[xdna].env` and in
+`[server].env` alike.
 
 ## /api/npu/occupancy (already exists)
 

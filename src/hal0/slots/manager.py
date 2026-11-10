@@ -41,6 +41,7 @@ from hal0.config import paths
 from hal0.errors import Hal0Error
 from hal0.registry import fallback as _registry_fallback
 from hal0.slot_config import (
+    slot_scalar_table,
     slot_write_lock,
     write_slot_toml,
 )
@@ -65,6 +66,7 @@ from hal0.slots.config_write import (
     guard_and_normalize_tune,
     guard_and_normalize_xdna,
     guard_slot_write_payload,
+    guard_xdna_slot_shape,
     reconcile_and_guard_slot_config,
     reconcile_slot_updates,
 )
@@ -1092,6 +1094,95 @@ class SlotManager:
             self._bind_key(canonical, int(row.id))
         return row
 
+    def _regroup_identity(
+        self, name: str, cfg: dict[str, Any], cfg_path: Path | None = None
+    ) -> Any | None:
+        """Re-derive a stored identity row's ``coresident_group`` from ``cfg``.
+
+        The group is stamped once, when the row is created, and the port
+        authority shares the group's port with every member. A slot whose
+        config has since moved out of the FLM trio (an xdna slot created beside
+        a live FLM anchor before ADR-0057's fix, or a slot flipped from flm to
+        ``binary = "xdna"``) would otherwise keep FLM's port forever: its row
+        still names the group, ``held_by`` resolves the group's port, and the
+        boot seed skips it with ``slot.port_seed_conflict``.
+
+        On a mismatch the row is updated, the slot's claim is re-granted under
+        the new group (its own port when it leaves the group, the group's when
+        it joins), and a moved port is written back to ``cfg_path`` (the TOML
+        ``port`` mirrors the claim). Returns the (possibly updated) row, or
+        ``None`` without an identity store or row. Never raises: a failure is
+        logged and the stored row is left as it was.
+        """
+        if self._identity is None:
+            return None
+        canonical = self._resolve_alias(name)
+        try:
+            row = self._identity.get_by_name(canonical)
+        except Exception:
+            return None
+        if row is None:
+            return None
+        _, _, grp, _ = self._derive_identity_fields(canonical, cfg)
+        if getattr(row, "coresident_group", None) == grp:
+            return row
+        old_port = _cfg_port(cfg) or None
+        try:
+            self._identity.set_coresident_group(row.id, grp)
+            granted: int | None = None
+            if self._port_authority is not None:
+                # Leaving the group: never prefer the shared port, another
+                # member (the FLM anchor) still owns it.
+                preferred = old_port if grp is not None else None
+                granted = self._port_authority.reallocate(
+                    row.id,
+                    preferred=preferred,
+                    coresident_group=grp,
+                    owner_label=f"slot:{canonical}",
+                    include_listeners=False,
+                )
+        except Exception as exc:
+            log.warning(
+                "slot.identity_regroup_failed",
+                extra={"slot": canonical, "group": grp, "error": str(exc)},
+            )
+            return row
+        log.warning(
+            "slot.identity_regrouped",
+            extra={
+                "slot": canonical,
+                "from_group": getattr(row, "coresident_group", None),
+                "to_group": grp,
+                "from_port": old_port,
+                "to_port": granted,
+            },
+        )
+        if granted is not None and granted != old_port:
+            self._write_back_port(canonical, granted, cfg_path)
+        try:
+            return self._identity.get_by_name(canonical)
+        except Exception:
+            return row
+
+    def _write_back_port(self, name: str, port: int, cfg_path: Path | None = None) -> None:
+        """Mirror a re-granted port into the slot TOML's ``port`` (best-effort)."""
+        import tomllib
+
+        path = cfg_path or self._config_file_for(name)
+        try:
+            with slot_write_lock():
+                with path.open("rb") as fh:
+                    raw = tomllib.load(fh)
+                slot_scalar_table(raw)["port"] = int(port)
+                write_slot_toml(path, raw)
+        except Exception as exc:
+            log.warning(
+                "slot.port_write_back_failed",
+                extra={"slot": name, "port": port, "error": str(exc)},
+            )
+            return
+        self._invalidate_cfg_cache(name)
+
     def _stamp_id(self, slot: Slot) -> Slot:
         """Populate ``slot.slot_id`` from the identity store, best-effort."""
         if self._identity is not None and slot.slot_id is None:
@@ -1171,6 +1262,10 @@ class SlotManager:
             row = self._ensure_identity(name, cfg)
             if row is None:
                 continue
+            # A row stamped with a group its config no longer has (an xdna slot
+            # created beside FLM before ADR-0057's fix) re-derives it here and
+            # gets its own port claim, instead of keeping FLM's shared one.
+            row = self._regroup_identity(name, cfg, _path) or row
             count += 1
             if self._port_authority is None:
                 continue
@@ -3457,6 +3552,7 @@ class SlotManager:
             guard_and_normalize_tune(cfg_dict, {"tune": cfg_dict["tune"]})
         if "xdna" in cfg_dict:
             guard_and_normalize_xdna(cfg_dict, {"xdna": cfg_dict["xdna"]})
+        guard_xdna_slot_shape(cfg_dict)
         await self._check_npu_exclusivity(slot_name, cfg_dict)
         # SC-4, first-of-type: the create modal no longer asks "make this the
         # default?" — the FIRST slot of a type silently becomes that type's
@@ -3736,6 +3832,10 @@ class SlotManager:
                     f"failed to rewrite {cfg_path}: {exc}",
                 ) from exc
             self._invalidate_cfg_cache(slot_name)
+            # A write that moves the slot in or out of the FLM trio (a
+            # ``binary`` flip to or from xdna, a device change) must move its
+            # port claim with it, or it keeps sharing FLM's port.
+            self._regroup_identity(slot_name, cfg_dict, cfg_path)
 
         # Config edit is operator intent: the crash cause was presumably
         # fixed, so the crash-loop breaker must not refuse the next load.
@@ -3771,7 +3871,7 @@ class SlotManager:
             # change can also move the effective backend now (it re-derives
             # ``device`` via _reconcile_device_profile), so refresh the mirror
             # for either trigger off the reconciled cfg.
-            if "device" in updates or "profile" in updates:
+            if "device" in updates or "profile" in updates or "binary" in updates:
                 eff = _cfg_effective_backend(cfg_dict)
                 if eff is not None:
                     new_extra["backend"] = eff
@@ -4421,8 +4521,7 @@ class SlotManager:
             return 1
         # The ggml-xdna runner (ADR-0057) launches llama-server with a fixed
         # ``-np 1``: another serial backend, so it gets the same default cap.
-        binary = str(cfg.get("binary") or (cfg.get("slot") or {}).get("binary") or "").lower()
-        return 1 if binary == "xdna" else None
+        return 1 if is_xdna_slot(cfg) else None
 
     # ── private helpers ──────────────────────────────────────────────────────
 

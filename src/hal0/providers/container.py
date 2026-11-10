@@ -1357,9 +1357,11 @@ def _refuse_foreign_runner(slot_cfg: Mapping[str, Any], spec_provider: Any | Non
     The llama path takes its image from ``binary``, so a non-llama runner there would
     launch with llama-server argv and exit. The write seam refuses this state, which
     leaves a hand edit. Only this path: a dispatched provider launches its own image,
-    so a stale ``binary`` beside one is inert and that slot keeps loading.
+    so a stale ``binary`` beside one is inert and that slot keeps loading. The one
+    exception is xdna: an xdna slot that dispatches anywhere but the llama path (an
+    FLM-family profile) would launch FastFlowLM in its place, so it is refused too.
     """
-    if spec_provider is None:
+    if spec_provider is None or is_xdna_slot(dict(slot_cfg)):
         mismatch = runner_family_mismatch(slot_cfg)
         if mismatch is not None:
             raise mismatch
@@ -1570,9 +1572,10 @@ def slot_effective_context(
     ``"fallback"``). An FLM trio shadow (``served_by`` its anchor)
     runs no process of its own: it reports its anchor's window.
     """
-    if str(slot_cfg.get("device") or "") == "npu" and slot_cfg.get("type") in (
-        "transcription",
-        "embedding",
+    if (
+        str(slot_cfg.get("device") or "") == "npu"
+        and slot_cfg.get("type") in ("transcription", "embedding")
+        and not is_xdna_slot(dict(slot_cfg))
     ):
         anchor = str(slot_cfg.get("served_by") or "flm")
         anchor_cfg = _served_by_anchor_cfg(anchor)
@@ -1652,6 +1655,8 @@ def _served_by_anchor_cfg(name: str) -> dict[str, Any] | None:
         return None
     if cfg.get("device") != "npu" or cfg.get("type") in ("transcription", "embedding"):
         return None
+    if is_xdna_slot(cfg):
+        return None  # an xdna slot runs its own llama-server, never an FLM trio anchor
     return cfg
 
 
