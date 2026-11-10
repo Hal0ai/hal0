@@ -1,3 +1,5 @@
+import { isXdnaSlot } from '@/lib/slotModelFit'
+
 // Single source of truth for the FLM [npu] modality defaults.
 //
 // Backend contract (config/schema.py NpuConfig + providers/flm.py build_env):
@@ -27,7 +29,7 @@ export const npuRoleForSlot = (slot) =>
 // transcription/embedding slot types today, but the runner check keeps this
 // correct even if that changes).
 export const isNpuShadowSlot = (slot) =>
-  String(slot?.runner || '').toLowerCase() !== 'xdna' &&
+  !isXdnaSlot(slot) &&
   (slot?.type === 'transcription' || slot?.type === 'embedding')
 
 // Resolved pill state — what the card should actually render as ON/OFF.

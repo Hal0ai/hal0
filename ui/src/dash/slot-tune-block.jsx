@@ -5,6 +5,7 @@
 // "the profile's value". The block is controlled: `value` is the staged tune
 // object (`{}` = no overrides) and `onChange` receives the next one. The parent
 // owns Save, validation of the numbers (tuneErrors) and the profile drawer.
+import { isXdnaSlot } from '@/lib/slotModelFit'
 import React from 'react'
 import { flagPairs, tokenizeFlags } from './flags-tune.js'
 import { TUNE_KEYS, effectiveProfileName, overrideCount, profileValueLabel, tuneErrors } from './tune-state.js'
@@ -179,7 +180,7 @@ function TuneRow({ k, tune, profile, tuneEffective, runtimeFamily, reason, error
  */
 export function tuneApplies(slot) {
   if (!slot || slot.type !== 'llm') return false
-  return slot.device !== 'npu' || String(slot.runner || '').toLowerCase() === 'xdna'
+  return slot.device !== 'npu' || isXdnaSlot(slot)
 }
 
 export function TuneBlock({

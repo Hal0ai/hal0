@@ -587,9 +587,12 @@ def resolve_tune_effective(cfg: Any) -> dict[str, Any] | None:
     Computed from the launch resolver's own scalars
     (:func:`hal0.providers.container.tune_effective_for_slot`) so the view and
     the launch cannot drift. ``None`` for a slot a ``[tune]`` cannot apply to
-    (not an llm slot, or on the NPU) and for one whose profile does not resolve.
+    (not an llm slot, or on the NPU off the xdna runner) and for one whose
+    profile does not resolve.
     """
-    if str(cfg.get("type") or "llm") != "llm" or str(cfg.get("device") or "") == "npu":
+    if str(cfg.get("type") or "llm") != "llm":
+        return None
+    if str(cfg.get("device") or "") == "npu" and not _is_xdna_cfg(cfg):
         return None
     try:
         from hal0.providers.container import tune_effective_for_slot

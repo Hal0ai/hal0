@@ -74,7 +74,7 @@ const XDNA_SLOT = {
   type: 'llm',
   device: 'npu',
   device_class: 'npu',
-  runner: 'xdna',
+  binary: 'xdna',
   modelDefault: 'llama3.1:8b',
   state: 'ready',
   xdna_path: 'fused',
