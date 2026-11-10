@@ -90,11 +90,33 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
    upsert. This closes #2017.
 6. **`hindsight_reflect` calls the engine's reflect endpoint**, with `budget`,
    tag scoping and an optional `response_schema`. Recall keeps its own tool.
-7. **Two banks.** The platform bank (`[memory] bank`, ADR-0052) and one
-   private bank per agent when `unified_bank = false`. `coding-agent::<repo>`
-   and other per-harness banks are folded into the platform bank by one
-   converter, `hal0 memory migrate consolidate`, tagged `project:<repo>`. There
-   is no alias or fallback that reads the old banks afterwards.
+7. **Two banks, named `hal0:shared` and `hal0:private`.** Every agent (Hermes,
+   the coding agents, the brain, the dashboard) writes durable memory to
+   `hal0:shared` and tags it `project:<slug>`; there are no per-harness or
+   per-repository banks. Private facts and raw session captures go to
+   `hal0:private`, one bank for all agents, where `agent:<id>` scopes each
+   agent to its own. The namespace grammar callers use (`shared`,
+   `private:<client_id>`, ADR-0005) does not change: the provider maps
+   `shared` to `hal0:shared` and every `private:<id>` to `hal0:private`. Both
+   names fit the bank-id grammar hal0-api already enforces. New installs get
+   these names; `[memory] bank` (ADR-0052) stays as the override. This
+   replaces both `unified_bank` modes: private facts no longer sit in the
+   shared bank behind a `visibility:private` stamp, and there is no
+   `private__<agent>` bank per agent.
+7a. **One converter folds everything else in.** `hal0 memory migrate
+   consolidate` moves `coding-agent::<repo>`, `pi-coder`, `Hal0::Agents`, the
+   old `shared` and any `private__<agent>` bank into the two banks, tagging by
+   project and agent as it goes, and splitting `visibility:private` facts out
+   to `hal0:private`. It is a dry run by default, additive, and compares
+   counts before anything is deleted. There is no alias or fallback that reads
+   the old banks afterwards.
+7b. **Shared reads see project-tagged memory.** Today a document carrying any
+   `project:` tag is hidden from every `shared` read
+   (`src/hal0/memory/hindsight_provider.py`, the unified project-scope
+   filter). That filter is removed in the same change that introduces the two
+   banks: `project:` becomes a recall scope the caller may narrow by, not a
+   visibility wall. Without this, decision 7 would make coding-agent memory
+   unreadable through hal0's own API.
 8. **The bank spec is applied by provisioning.** Install, update and
    `hal0 agent reprovision` apply missions, directives, mental-model seeds and
    knowledge-page seeds to the configured platform bank, idempotently. The
@@ -146,5 +168,10 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
   `migrate consolidate` must re-tag after import. To be proven on the test rig
   before the converter is written.
 - Import time and peak memory for a store of about 50,000 facts on CPU.
-- Whether the private bank should stay tag-stamped inside the platform bank
-  (`unified_bank = true`, today's default) or become a real bank by default.
+- One `hal0:private` bank isolates agents from each other by an `agent:` tag
+  filter, as the unified bank does today, not by a bank boundary. Whether any
+  agent (a public-facing chat profile, for example) needs a hard boundary and
+  its own bank is left to a follow-up.
+- With every project in one bank, recall quality depends on callers passing
+  their `project:` scope. The default scope for a caller that passes none
+  (all projects, or untagged only) needs a measured answer.
