@@ -493,10 +493,13 @@ def test_sync_turn_writes_formatted_transcript_privately() -> None:
     fake_client.add.assert_called_once()
     args, kwargs = fake_client.add.call_args
     assert args[0] == "User: hi\nAssistant: hello"
-    assert kwargs["tags"] == ["chat", "agent:hermes"]
+    # One fixed tag set for every session capture; the write kind is metadata
+    # (tests/agents/hermes/plugins/test_memory_session_documents.py has why).
+    assert kwargs["tags"] == ["agent:hermes", "kind:ephemeral"]
     # Raw turn capture is ALWAYS private — never the shared bank.
     assert kwargs["private"] is True
     assert kwargs["metadata"]["kind"] == "raw_turn"
+    assert kwargs["metadata"]["lifecycle"] == "chat"
     assert kwargs["metadata"]["visibility"] == "private"
     assert kwargs["metadata"]["source_event"]  # stable idempotency key present
 
@@ -505,6 +508,7 @@ def test_sync_turn_accepts_frozen_messages_kwarg() -> None:
     # Frozen MemoryProvider.sync_turn signature passes ``messages``; the
     # override must accept it (contract call-compatibility).
     fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.agent_id = "hermes"
     provider = Hal0MemoryProvider(client=fake_client)
     provider.initialize()
     provider.sync_turn("hi", "hello", session_id="s1", messages=[{"role": "user"}])
@@ -863,19 +867,18 @@ def test_handle_tool_call_hindsight_retain_dispatches_shared_by_default() -> Non
 
 
 def test_hindsight_reflect_is_exposed_and_dispatches() -> None:
-    # Reflect is advertised on the LLM surface AND dispatches to a consolidated
-    # recall carrying an explicit synthesis type-hint (best-effort synthesis).
+    # Reflect is advertised on the LLM surface AND dispatches to the engine's
+    # reflect, not to recall (tests/agents/hermes/plugins/test_memory_reflect_tool.py
+    # covers the request shape, the failures and the fallback).
     assert "hindsight_reflect" in {s["name"] for s in ALL_TOOL_SCHEMAS}
     fake_client = Mock(spec=Hal0MemoryClient)
-    fake_client.recall.return_value = {"items": [{"text": "synthesized"}]}
+    fake_client.reflect.return_value = {"text": "synthesized"}
     provider = Hal0MemoryProvider(client=fake_client)
     provider.initialize()
     out = json.loads(provider.handle_tool_call("hindsight_reflect", {"query": "topic"}))
-    assert fake_client.recall.call_count == 1
-    _, kwargs = fake_client.recall.call_args
-    assert kwargs["types"] == ["world", "experience", "observation"]
-    assert kwargs["max_tokens"] == 4096
-    assert out == {"items": [{"text": "synthesized"}]}
+    assert fake_client.reflect.call_count == 1
+    fake_client.recall.assert_not_called()
+    assert out["text"] == "synthesized"
 
 
 def test_hindsight_reflect_missing_query_errors() -> None:
@@ -884,18 +887,8 @@ def test_hindsight_reflect_missing_query_errors() -> None:
     provider.initialize()
     out = json.loads(provider.handle_tool_call("hindsight_reflect", {"query": "  "}))
     assert out["status"] == "error"
+    fake_client.reflect.assert_not_called()
     fake_client.recall.assert_not_called()
-
-
-def test_hindsight_reflect_empty_on_transport_failure() -> None:
-    # Best-effort posture like prefetch: a transport error yields an empty
-    # envelope, never a propagating tool error that could wedge the loop.
-    fake_client = Mock(spec=Hal0MemoryClient)
-    fake_client.recall.side_effect = Hal0MemoryClientError("boom")
-    provider = Hal0MemoryProvider(client=fake_client)
-    provider.initialize()
-    out = json.loads(provider.handle_tool_call("hindsight_reflect", {"query": "topic"}))
-    assert out == {"status": "ok", "items": []}
 
 
 def test_legacy_tool_name_aliases_still_dispatch() -> None:
@@ -1062,7 +1055,8 @@ def test_on_session_end_writes_private_checkpoint() -> None:
     provider.initialize()
     provider.on_session_end([{"role": "assistant", "content": "done"}])
     _args, kwargs = fake_client.add.call_args
-    assert "checkpoint" in kwargs["tags"]
+    assert kwargs["metadata"]["kind"] == "checkpoint"
+    assert kwargs["metadata"]["lifecycle"] == "session-end"
     assert kwargs["private"] is True
 
 
@@ -1383,14 +1377,15 @@ def test_initialize_ignores_a_stored_default_id_on_a_profile_home(
 
 
 def test_prompt_and_retain_schema_do_not_overclaim_privacy() -> None:
-    """Private notes are filtered from recall; reflect is not filtered yet."""
+    """Private notes are filtered from other agents' recall and reflect, but a
+    reflect answer blends the caller's own private notes in unmarked."""
     from hal0.agents.hermes.plugins.memory_hindsight import provider as prov
 
     provider = Hal0MemoryProvider(client=Mock(spec=Hal0MemoryClient))
     provider.initialize()
     block = provider.system_prompt_block()
     assert "only you" not in block and "only you" not in prov.RETAIN_SCHEMA["description"]
-    assert "reflect is not yet filtered" in block
+    assert "your own private notes without marking them" in block
 
 
 def test_a_yaml_parse_error_never_puts_the_config_text_in_the_log(tmp_path, caplog) -> None:

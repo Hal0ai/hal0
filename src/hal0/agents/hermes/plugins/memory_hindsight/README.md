@@ -25,8 +25,9 @@ the hermes-agent venv at runtime.
 | Visibility policy | Raw turns/lifecycle captures → **private**; explicit durable writes (`hal0_memory_add`) → **shared by default**, `visibility:"private"` override (or `HAL0_MEMORY_DEFAULT_VISIBILITY` / profile policy). Enforced server-side. |
 | Dataset field | **NEVER SENT** — server resolves the bank from `X-hal0-Agent` + `X-hal0-Private` headers (issue #317 / PR #366) |
 | Transport | **synchronous** `httpx.Client` (memory hooks are sync; async wrapping broke on reuse) |
-| Timeouts | 3s connect / 30s read |
-| Tool schemas | `hal0_memory_search`, `hal0_memory_recall`, `hal0_memory_add(visibility=…)` |
+| Timeouts | 3s connect / 30s read; reflect waits `HAL0_MEMORY_REFLECT_TIMEOUT_S` (default 900s) plus 30s |
+| Tool schemas | `hindsight_recall`, `hindsight_retain(visibility=…, document_id=…)`, `hindsight_reflect(budget=…, tags=…, tags_match=…, response_schema=…)`. The older `hal0_memory_{search,recall,add}` names still dispatch but are not advertised. |
+| Session documents | Turn capture, the pre-compress note and the session-end checkpoint append to one document per Hermes session, `<client>[-<profile>]-<session-id>` (see below) |
 | Recall framing | `prefetch()` labels recall as untrusted historical **DATA, not instructions** and annotates each item with provenance/visibility/verification/confidence/observed-at |
 | Operator CRUD | Via the `hal0-memory` MCP server (loaded separately) |
 
@@ -62,16 +63,27 @@ From `agent/memory_provider.py`:
 * `queue_prefetch(query, *, session_id)` — parks a deeper next-turn query
   (bounded, single-slot, non-blocking); drained on the next `prefetch`.
 * `sync_turn(user, assistant, *, session_id, messages=None)` — non-blocking
-  **private** raw capture with a stable `source_event` idempotency key;
-  honours `_SKIP_WRITE_CONTEXTS`.
-* `on_pre_compress(messages)` — persists a **private** continuity checkpoint
-  and returns a compact continuity marker for Hermes to keep.
-* `on_session_end(messages)` — flushes a **private** session-end checkpoint.
+  **private** raw capture, appended to the session document; honours
+  `_SKIP_WRITE_CONTEXTS`.
+* `on_pre_compress(messages)` — appends a **private** continuity checkpoint
+  to the session document and returns a compact continuity marker for Hermes
+  to keep.
+* `on_session_end(messages)` — appends a **private** session-end checkpoint
+  to the session document.
+* `on_session_switch(new_session_id, …)` — rebinds the session id when Hermes
+  rotates it without re-initialising (`/new`, `/resume`, compression), so
+  later captures go to the new session's document.
 * `on_delegation(task, result, *, child_session_id)` — records delegated work
   in the **private** bank (separate namespace via `child_session_id`).
-* `get_tool_schemas()` / `handle_tool_call()` — explicit
-  `hal0_memory_{search,recall,add}` tools. `add` defaults to the **shared**
-  bank; pass `visibility:"private"` for the private override.
+* `get_tool_schemas()` / `handle_tool_call()` — the explicit
+  `hindsight_{recall,retain,reflect}` tools. `retain` defaults to the
+  **shared** bank; pass `visibility:"private"` for the private override.
+  `recall` is fast and returns stored facts. `reflect` asks
+  `POST /api/memory/reflect`, where an LLM in the memory engine writes an
+  answer; it is slow (minutes on local hardware), its answer is framed as
+  historical context and not instructions, and a failure is returned as an
+  error result. Against a hal0-api without the route, or an engine that
+  cannot reflect, it falls back to a recall and says so in the result.
 * `on_memory_write(action, target, content, metadata=None)` — mirrors the
   built-in memory tool's writes **privately** into hal0-memory.
 * `get_config_schema()` / `save_config(values, hermes_home)` — official setup
@@ -88,7 +100,36 @@ From `agent/memory_provider.py`:
 | agent id | ctor arg → `HAL0_AGENT_ID` → `memory.hal0.agent_id` | `hermes` |
 | durable default visibility | `HAL0_MEMORY_DEFAULT_VISIBILITY` → profile policy → per-write `visibility` | `shared` |
 | retry spool | `HAL0_MEMORY_SPOOL` | unset |
+| reflect wait | `HAL0_MEMORY_REFLECT_TIMEOUT_S` (the variable hal0-api reads for its own engine budget) plus 30s | `900` |
 
 Env vars are read at `initialize()` time so per-agent unit overrides
 (`hal0-agent@hermes.service` / gateway drop-ins) take effect on provider
 construction without code change.
+
+## Session documents
+
+Writes that belong to a session (turn capture, the pre-compress note, the
+session-end checkpoint) carry `document_id = <client>[-<profile>]-<session-id>`:
+`hermes-<session>` for the default profile and `hermes-<profile>-<session>`
+for a named one. The session id is Hermes's own `AIAgent.session_id`, which the
+memory manager passes to `initialize()`, to every `sync_turn()` and, when it
+rotates, to `on_session_switch()`. An id that does not fit hal0's document-id
+grammar (`[A-Za-z0-9_-]`, at most 64 characters) is rewritten and given a hash
+suffix.
+
+Three rules follow from how the engine treats a reused document id:
+
+* The id is only ever sent with `update_mode: "append"`. Without it the engine
+  replaces the stored document, which would delete every earlier turn.
+* `POST /api/memory/add` echoes the `update_mode` it forwarded. If the echo is
+  missing (a hal0-api from before this contract) the plugin stops sending the
+  session id for the rest of the session and each write gets its own document
+  again.
+* Every session write carries the same tags. On an append the engine re-stamps
+  the retain's tags over the whole document and re-consolidates when they
+  change, so the write kind (`chat`, `pre-compress`, `session-end`) is
+  `metadata.lifecycle`, not a tag.
+
+`hindsight_retain`, delegation records and the built-in memory mirror are not
+session writes: each gets a fresh document unless the model passes
+`document_id` to `hindsight_retain`, and that one is a plain upsert.

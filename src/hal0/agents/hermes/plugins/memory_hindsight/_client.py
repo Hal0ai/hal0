@@ -33,6 +33,13 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8080"
 DEFAULT_AGENT_ID = "hermes"
 DEFAULT_CONNECT_TIMEOUT = 3.0
 DEFAULT_READ_TIMEOUT = 30.0  # recall/extraction can take a while on the iGPU
+# Reflect is an LLM loop inside the engine and runs for minutes on local
+# hardware. hal0-api gives the engine ``HAL0_MEMORY_REFLECT_TIMEOUT_S`` seconds
+# (default 900, ``hal0.memory.hindsight_client.REFLECT_TIMEOUT_S``); this client
+# waits that long plus a margin, so hal0-api's own answer arrives first. Setting
+# the same variable in the Hermes environment keeps the two in step.
+DEFAULT_REFLECT_TIMEOUT = 900.0
+REFLECT_TIMEOUT_MARGIN = 30.0
 
 
 class Hal0MemoryClientError(RuntimeError):
@@ -84,6 +91,17 @@ def _resolve_agent_id(override: str | None) -> str:
     return os.environ.get("HAL0_AGENT_ID", DEFAULT_AGENT_ID)
 
 
+def _reflect_read_timeout() -> float:
+    """Seconds to wait for a reflect answer; a bad or non-positive value means the default."""
+    try:
+        budget = float(os.environ.get("HAL0_MEMORY_REFLECT_TIMEOUT_S") or DEFAULT_REFLECT_TIMEOUT)
+    except ValueError:
+        budget = DEFAULT_REFLECT_TIMEOUT
+    if budget <= 0:
+        budget = DEFAULT_REFLECT_TIMEOUT
+    return budget + REFLECT_TIMEOUT_MARGIN
+
+
 class Hal0MemoryClient:
     """Synchronous REST client for hal0-memory.
 
@@ -102,6 +120,7 @@ class Hal0MemoryClient:
     ) -> None:
         self._base_url = _resolve_base_url(base_url)
         self._agent_id = _resolve_agent_id(agent_id)
+        self._connect_timeout = connect_timeout
         self._owns_client = http_client is None
         if http_client is None:
             timeout = httpx.Timeout(read_timeout, connect=connect_timeout)
@@ -142,13 +161,29 @@ class Hal0MemoryClient:
         tags: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         private: bool = True,
+        document_id: str | None = None,
+        update_mode: str | None = None,
+        observation_scopes: Any = None,
     ) -> dict[str, Any]:
-        """POST /api/memory/add. ``private=True`` → hermes-private, else shared."""
+        """POST /api/memory/add. ``private=True`` → hermes-private, else shared.
+
+        ``document_id`` names the document the text belongs to. The engine
+        REPLACES a document whose id it already holds unless ``update_mode`` is
+        ``"append"``, so a caller that reuses an id across writes must send
+        ``update_mode="append"`` and check that the response echoes it: a
+        hal0-api too old to forward the mode drops the field and replaces.
+        """
         payload: dict[str, Any] = {"text": text}
         if tags is not None:
             payload["tags"] = list(tags)
         if metadata is not None:
             payload["metadata"] = dict(metadata)
+        if document_id is not None:
+            payload["document_id"] = document_id
+        if update_mode is not None:
+            payload["update_mode"] = update_mode
+        if observation_scopes is not None:
+            payload["observation_scopes"] = observation_scopes
         return self._request("POST", "/api/memory/add", json=payload, private=private)
 
     def search(self, query: str, *, limit: int = 10) -> dict[str, Any]:
@@ -165,6 +200,41 @@ class Hal0MemoryClient:
         if types is not None:
             payload["types"] = list(types)
         return self._request("POST", "/api/memory/recall", json=payload, private=True)
+
+    def reflect(
+        self,
+        query: str,
+        *,
+        budget: str = "low",
+        max_tokens: int = 4096,
+        tags: list[str] | None = None,
+        tags_match: str | None = None,
+        response_schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """POST /api/memory/reflect — the engine's LLM synthesis over memory.
+
+        Slow: the engine runs an agentic loop, so this waits minutes, not the
+        30 s the other verbs get. Sent without the private toggle, so it reads
+        the shared namespace; hal0-api hides other agents' private notes.
+        """
+        payload: dict[str, Any] = {
+            "query": query,
+            "budget": budget,
+            "max_tokens": int(max_tokens),
+        }
+        if tags:
+            payload["tags"] = list(tags)
+        if tags_match is not None:
+            payload["tags_match"] = tags_match
+        if response_schema is not None:
+            payload["response_schema"] = dict(response_schema)
+        return self._request(
+            "POST",
+            "/api/memory/reflect",
+            json=payload,
+            private=False,
+            read_timeout=_reflect_read_timeout(),
+        )
 
     def list_items(self, *, limit: int = 50) -> dict[str, Any]:
         """GET /api/memory/list — page through stored items."""
@@ -184,10 +254,21 @@ class Hal0MemoryClient:
         json: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
         private: bool = True,
+        read_timeout: float | None = None,
     ) -> dict[str, Any]:
+        # A per-call timeout is passed only when a verb asks for one, so the
+        # client-wide default (and an injected client's) is otherwise untouched.
+        extra: dict[str, Any] = {}
+        if read_timeout is not None:
+            extra["timeout"] = httpx.Timeout(read_timeout, connect=self._connect_timeout)
         try:
             response = self._client.request(
-                method, path, headers=self._headers(private=private), json=json, params=params
+                method,
+                path,
+                headers=self._headers(private=private),
+                json=json,
+                params=params,
+                **extra,
             )
         except httpx.HTTPError as exc:
             raise Hal0MemoryClientError(
