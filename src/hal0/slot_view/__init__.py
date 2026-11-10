@@ -56,6 +56,7 @@ from hal0.slots.activation import (
     autoload_enabled,
     claims_npu_anchor,
     effective_npu_table,
+    is_xdna_slot,
     npu_modality_active,
 )
 from hal0.slots.naming import slot_instance_token, slot_unit_name
@@ -389,7 +390,7 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # Membership requires only a live anchor: the shadows are records for
         # that one process and carry placeholder models, so per-shadow
         # membership was never independently meaningful (#1369).
-        if cfg.get("device") == "npu" and trio_active:
+        if cfg.get("device") == "npu" and trio_active and not _is_xdna_cfg(cfg):
             entry["coresident_group"] = "npu-flm-trio"
 
         out[name] = entry
@@ -412,7 +413,7 @@ def _is_xdna_cfg(cfg: Mapping[str, Any]) -> bool:
     checking the raw field (no Runner resolution) is sufficient and keeps
     this module import-light.
     """
-    return str(cfg.get("binary") or "") == "xdna"
+    return is_xdna_slot(dict(cfg))
 
 
 def _npu_holder_names(configs: list[dict[str, Any]], *, exclude: str) -> list[str]:

@@ -349,14 +349,16 @@ HALOGEN_* profile flags are treated.
 ```
 {
   pmodes: string[],
-  env: [{ name: string, default: string | null, doc: string }],
+  env: [{ name: string, default: string | null, doc: string, fixed: boolean }],
   host_xrt: { doc: string },
 }
 ```
 
 Single source of truth for which `GGML_XDNA_*` names are legal — an env
 row name outside this list is rejected inline in the drawer
-(`xdna-settings.jsx`), same UX as `flags-tune.js`.
+(`xdna-settings.jsx`), same UX as `flags-tune.js`. A `fixed: true` row
+(`GGML_XDNA_PGEMM_GLU_A`, pinned to `0`) is never offered for editing; the
+slot-config PUT refuses any other value with a 400.
 
 ## /api/npu/occupancy (already exists)
 

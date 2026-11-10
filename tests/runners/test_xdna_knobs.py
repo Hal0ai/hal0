@@ -62,3 +62,34 @@ def test_validate_xdna_pmode_rejects_unknown_value() -> None:
     with pytest.raises(UnprocessableEntity) as exc:
         validate_xdna_pmode("ludicrous")
     assert exc.value.code == "runners.xdna_pmode_invalid"
+
+
+# ── GGML_XDNA_PGEMM_GLU_A is pinned to 0 (ADR-0057 decision 3) ───────────────
+
+
+@pytest.mark.parametrize("value", ["1", " 1", "true", "2", ""])
+def test_refuse_xdna_pinned_env_rejects_glu_a_other_than_zero(value: str) -> None:
+    from hal0.errors import BadRequest
+    from hal0.runners.knobs import refuse_xdna_pinned_env
+
+    with pytest.raises(BadRequest) as exc:
+        refuse_xdna_pinned_env({"GGML_XDNA_PGEMM_GLU_A": value})
+    assert exc.value.status == 400
+    assert exc.value.code == "validation.xdna_env_pinned"
+    assert exc.value.details["key"] == "GGML_XDNA_PGEMM_GLU_A"
+    assert "GGML_XDNA_PGEMM_GLU_A" in str(exc.value)
+    assert "prefill" in str(exc.value)
+
+
+def test_refuse_xdna_pinned_env_allows_restating_zero_and_other_knobs() -> None:
+    from hal0.runners.knobs import refuse_xdna_pinned_env
+
+    refuse_xdna_pinned_env({"GGML_XDNA_PGEMM_GLU_A": "0", "GGML_XDNA_HEAD": "1"})
+    refuse_xdna_pinned_env(None)
+
+
+def test_knob_schema_marks_glu_a_fixed() -> None:
+    from hal0.runners.knobs import xdna_knob_schema
+
+    fixed = {e["name"] for e in xdna_knob_schema()["env"] if e["fixed"]}
+    assert fixed == {"GGML_XDNA_PGEMM_GLU_A"}

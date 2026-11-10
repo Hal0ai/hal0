@@ -340,3 +340,108 @@ def test_id_keyed_real_peer_still_conflicts_and_is_named(tmp_hal0_home: str) -> 
         check_npu_exclusivity("flm", cfg, slots_dir=path.parent)
     # The offender is reported by its display name, not its opaque id stem.
     assert exc.value.details["conflicting_slots"] == ["npu-b"]
+
+
+# ── xdna slots are not FLM anchors (ADR-0057 decision 5) ────────────────────
+#
+# A slot on the xdna runner (``binary = "xdna"``) sits on ``device = "npu"``
+# but runs llama-server on the ggml-xdna image. The exclusivity invariant
+# protects FLM's single chat context; xdna time-slices the NPU beside it
+# (warn, never refuse), so it neither trips nor is tripped by the guard.
+
+
+def _xdna_create_cfg(name: str, port: int) -> dict[str, object]:
+    return {
+        "name": name,
+        "port": port,
+        "device": "npu",
+        "type": "llm",
+        "binary": "xdna",
+        "model": {"default": "qwen3.5-0.8b-q4_k_m"},
+    }
+
+
+async def test_create_allows_xdna_slot_beside_a_model_bound_flm_anchor(
+    tmp_hal0_home: str,
+) -> None:
+    _seed_npu_anchor(tmp_hal0_home)
+    sm = SlotManager()
+    snap = await sm.create("xdna", _xdna_create_cfg("xdna", 8090))
+    assert snap is not None
+
+
+async def test_binding_a_model_to_an_xdna_slot_beside_flm_is_allowed(
+    tmp_hal0_home: str,
+) -> None:
+    _seed_npu_anchor(tmp_hal0_home)
+    _write_slot_toml(
+        tmp_hal0_home,
+        "xdna",
+        [
+            'name = "xdna"',
+            "port = 8090",
+            'device = "npu"',
+            'type = "llm"',
+            'binary = "xdna"',
+            "[model]",
+            'default = ""',
+        ],
+    )
+    sm = SlotManager()
+    await sm.update_config("xdna", {"model": {"default": "qwen3.5-0.8b-q4_k_m"}})
+
+
+async def test_model_bound_xdna_slot_does_not_block_the_flm_anchor(
+    tmp_hal0_home: str,
+) -> None:
+    _write_slot_toml(
+        tmp_hal0_home,
+        "xdna",
+        [
+            'name = "xdna"',
+            "port = 8090",
+            'device = "npu"',
+            'type = "llm"',
+            'binary = "xdna"',
+            "[model]",
+            'default = "qwen3.5-0.8b-q4_k_m"',
+        ],
+    )
+    sm = SlotManager()
+    await sm.create(
+        "agent",
+        {
+            "name": "agent",
+            "port": 8082,
+            "device": "npu",
+            "type": "llm",
+            "model": {"default": "gemma3-1b"},
+        },
+    )
+
+
+async def test_two_xdna_slots_coexist(tmp_hal0_home: str) -> None:
+    """Two xdna slots time-slice the NPU too: surfaced as a warning, not refused."""
+    sm = SlotManager()
+    await sm.create("xdna-a", _xdna_create_cfg("xdna-a", 8090))
+    await sm.create("xdna-b", _xdna_create_cfg("xdna-b", 8091))
+
+
+async def test_second_flm_anchor_is_still_refused_beside_an_xdna_slot(
+    tmp_hal0_home: str,
+) -> None:
+    _seed_npu_anchor(tmp_hal0_home)
+    sm = SlotManager()
+    await sm.create("xdna", _xdna_create_cfg("xdna", 8090))
+    with pytest.raises(NpuExclusivityViolation) as exc:
+        await sm.create(
+            "agent-2",
+            {
+                "name": "agent-2",
+                "port": 8083,
+                "device": "npu",
+                "type": "llm",
+                "model": {"default": "qwen3-1b"},
+            },
+        )
+    assert exc.value.details["conflicting_slots"] == ["agent"]

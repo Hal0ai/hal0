@@ -34,6 +34,7 @@ __all__ = [
     "claims_npu_anchor",
     "effective_npu_table",
     "is_activated",
+    "is_xdna_slot",
     "npu_anchor_config",
     "npu_modality_active",
     "slot_model_id",
@@ -96,16 +97,43 @@ def autoload_enabled(cfg: dict[str, Any] | None) -> bool:
     return is_activated(cfg)
 
 
+def is_xdna_slot(cfg: Any) -> bool:
+    """True when the slot's own ``binary`` names the xdna runner (ADR-0057).
+
+    An xdna slot sits on ``device = "npu"`` but is a llama-server launch on the
+    ggml-xdna runner image, not a FastFlowLM one: it is never the FLM anchor,
+    never joins the FLM trio's shared port, and launches through the
+    llama-server path. xdna is opt-in through an explicit ``binary = "xdna"``
+    (never the hardware-gated default), so the raw field answers without a
+    runner lookup. Reads the flat shape and a nested ``[slot]`` table alike.
+    """
+    if not isinstance(cfg, dict):
+        return False
+    binary = cfg.get("binary")
+    if not binary:
+        slot_tbl = cfg.get("slot")
+        binary = slot_tbl.get("binary") if isinstance(slot_tbl, dict) else None
+    return isinstance(binary, str) and binary.strip().lower() == "xdna"
+
+
+def _is_flm_npu_llm(cfg: dict[str, Any]) -> bool:
+    """A ``device=npu, type=llm`` slot that FastFlowLM serves (not an xdna one)."""
+    return cfg.get("device") == "npu" and cfg.get("type") == "llm" and not is_xdna_slot(cfg)
+
+
 def claims_npu_anchor(cfg: dict[str, Any] | None) -> bool:
     """True when this slot claims the single AMDXDNA chat (NPU LLM) context.
 
     The exclusivity invariant (plan §5.3, ADR-0008 §5) admits exactly one
     such slot. The NPU trio's ``transcription`` / ``embedding`` shadows run
-    coresident on the same column and are deliberately NOT anchors.
+    coresident on the same column and are deliberately NOT anchors. Neither
+    is an xdna slot (:func:`is_xdna_slot`): the invariant exists for FLM's one
+    chat context, and xdna time-slices the NPU beside FLM rather than
+    excluding it (ADR-0057 decision 5).
     """
     if not isinstance(cfg, dict):
         return False
-    return cfg.get("device") == "npu" and cfg.get("type") == "llm" and is_activated(cfg)
+    return _is_flm_npu_llm(cfg) and is_activated(cfg)
 
 
 def npu_anchor_config(configs: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -114,13 +142,15 @@ def npu_anchor_config(configs: list[dict[str, Any]]) -> dict[str, Any] | None:
     Prefers an anchor that actually claims the hardware (has a model bound);
     falls back to a model-less ``device=npu, type=llm`` slot so callers that
     only need the ``[npu]`` modality table (or the anchor's port/name) still
-    find it. Exclusivity means there is at most one claiming anchor.
+    find it. Exclusivity means there is at most one claiming anchor. An xdna
+    slot (:func:`is_xdna_slot`) is never the anchor: it has no ``[npu]`` table
+    and does not run FLM.
     """
     fallback: dict[str, Any] | None = None
     for cfg in configs:
         if not isinstance(cfg, dict):
             continue
-        if cfg.get("device") != "npu" or cfg.get("type") != "llm":
+        if not _is_flm_npu_llm(cfg):
             continue
         if is_activated(cfg):
             return cfg

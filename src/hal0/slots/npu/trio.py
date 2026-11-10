@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from hal0.providers.flm import FLM_EMBED_TAG
 from hal0.slot_config import slot_scalar_table, write_slot_toml
 from hal0.slots._cfg_helpers import _cfg_to_dict
+from hal0.slots.activation import is_xdna_slot
 from hal0.slots.layout import resolve_slot_stem
 
 if TYPE_CHECKING:
@@ -131,7 +132,7 @@ async def reconcile_trio_slots(mgr: NpuTrioHost) -> int:
         return 0
     anchor_cfg: dict[str, Any] | None = None
     for cfg in configs:
-        if cfg.get("type") == "llm" and cfg.get("device") == "npu":
+        if cfg.get("type") == "llm" and cfg.get("device") == "npu" and not is_xdna_slot(cfg):
             anchor_cfg = cfg
             break
     if anchor_cfg is None or not is_container_npu_cfg(anchor_cfg):

@@ -105,7 +105,7 @@ from hal0.slot_lifecycle_budget import (
     UNIT_ADMIN_CALLS_ALLOWANCE_S,
     UNIT_START_TIMEOUT_S,
 )
-from hal0.slots.activation import autoload_enabled
+from hal0.slots.activation import autoload_enabled, is_xdna_slot
 from hal0.slots.argv import ResolvedArgv, deny_llama_env, resolve_argv
 from hal0.slots.model_fit import model_runtime_mismatch
 from hal0.slots.naming import (
@@ -1312,7 +1312,12 @@ def runner_family_mismatch(slot_cfg: Mapping[str, Any]) -> RunnerFamilyMismatch 
     A dispatch that cannot answer is not this check's to report.
     """
     runner = _binary_runner(slot_cfg)
-    if runner is None or runner.runtime_family == "llama-server":
+    if runner is None:
+        return None
+    # xdna is a llama-server runner, but it only runs on the NPU and is the
+    # slot's whole point there: a non-llama provider (an FLM profile) would
+    # launch FastFlowLM in its place, so that pairing is a mismatch too.
+    if runner.runtime_family == "llama-server" and runner.key != "xdna":
         return None
     try:
         provider = _spec_provider_for(dict(slot_cfg))
@@ -1427,7 +1432,10 @@ def _provider_for_family(slot_cfg: dict[str, Any], family: str | None) -> Any | 
     slot_type = str(slot_cfg.get("type", ""))
     provider = str(slot_cfg.get("provider", ""))
 
-    if family == "flm" or device == "npu":
+    # ``device == "npu"`` is FLM's profile-less fallback, but not for a slot
+    # on the xdna runner (ADR-0057): that is a llama-server launch on the NPU,
+    # and its ``binary`` picks the image on the llama path below.
+    if family == "flm" or (device == "npu" and not is_xdna_slot(slot_cfg)):
         from hal0.providers.flm import FLMProvider
 
         return FLMProvider()
@@ -1574,7 +1582,7 @@ def slot_effective_context(
         profile = resolve_slot_profile(slot_cfg)
     except Hal0Error:
         return None, None
-    if str(slot_cfg.get("device") or "") == "npu":
+    if str(slot_cfg.get("device") or "") == "npu" and not is_xdna_slot(dict(slot_cfg)):
         ctx_size = getattr(profile, "ctx_size", None)
         return (int(ctx_size), "profile") if ctx_size else (_FLM_DEFAULT_CTX, "fallback")
     profile = effective_tune(slot_cfg, profile)
@@ -2036,7 +2044,7 @@ class ContainerProvider(Provider):
         server_env = scalars["server_env"] or {}
         merged_env = {**vis_env, **server_env}
         if runner_key == "xdna":
-            from hal0.runners.knobs import screen_xdna_env, xdna_env_defaults
+            from hal0.runners.knobs import XDNA_PINNED_ENV, screen_xdna_env, xdna_env_defaults
 
             # Defaults first, then whatever's already resolved (visibility +
             # [server].env, which includes any operator GGML_XDNA_*/pmode/
@@ -2057,6 +2065,20 @@ class ContainerProvider(Provider):
                 if isinstance(host_xrt, str) and host_xrt:
                     extra_mounts.append(model_store_module.mount_for(host_xrt, read_only=True))
                     merged_env["HAL0_XDNA_HOST_XRT"] = host_xrt
+            # Pinned correctness env goes on LAST, over [server].env and
+            # [xdna].env alike: the write seam refuses another value, and this
+            # catches a hand-edited TOML (GLU_A=1 corrupts prefill logits).
+            for name, pinned in XDNA_PINNED_ENV.items():
+                if merged_env.get(name, pinned) != pinned:
+                    log.warning(
+                        "slot.xdna_pinned_env_overridden",
+                        extra={
+                            "slot": slot_cfg.get("name"),
+                            "key": name,
+                            "value": merged_env[name],
+                        },
+                    )
+                merged_env[name] = pinned
 
         plan = _llama_launch_plan(
             image=scalars["image"],

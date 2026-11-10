@@ -345,11 +345,16 @@ def slot_is_flm(cfg: Any) -> bool:
     ``BACKEND_TO_DEVICE`` so an old ``backend``-era token still counts, or an
     explicit ``provider = "flm"``) rather than a profile lookup: this runs on
     the write path, which must not resolve (and possibly persist) a profile.
+    A slot on the xdna runner (``binary = "xdna"``, ADR-0057) sits on the NPU
+    but runs llama-server on plain GGUF, so it is not an FLM slot.
     """
     from hal0.model_meta import BACKEND_TO_DEVICE
     from hal0.slot_config import slot_scalar_table
+    from hal0.slots.activation import is_xdna_slot
 
     scalars = slot_scalar_table(_cfg_to_dict(cfg))
+    if is_xdna_slot(scalars):
+        return False
     device = str(scalars.get("device") or "").strip().lower()
     if BACKEND_TO_DEVICE.get(device, device) == "npu":
         return True
@@ -751,7 +756,7 @@ def guard_and_normalize_xdna(merged: dict[str, Any], updates: dict[str, Any]) ->
             details={"slot": slot_name, "binary": binary},
         )
 
-    from hal0.runners.knobs import screen_xdna_env, validate_xdna_pmode
+    from hal0.runners.knobs import refuse_xdna_pinned_env, screen_xdna_env, validate_xdna_pmode
 
     pmode = xdna_update.get("pmode")
     validate_xdna_pmode(pmode)
@@ -771,6 +776,7 @@ def guard_and_normalize_xdna(merged: dict[str, Any], updates: dict[str, Any]) ->
                     details={"key": key},
                 )
     screen_xdna_env(env)
+    refuse_xdna_pinned_env(env)
 
     host_xrt = xdna_update.get("host_xrt")
     if host_xrt is not None:

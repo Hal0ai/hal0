@@ -53,6 +53,7 @@ from hal0.slots._cfg_helpers import (
     heal_missing_llm_type,
 )
 from hal0.slots.abandon import abandon_probe, is_abandoned, wait_for_load
+from hal0.slots.activation import is_xdna_slot
 from hal0.slots.config_write import (
     _cfg_effective_backend,
     _cfg_effective_provider,
@@ -1037,7 +1038,8 @@ class SlotManager:
         device = str(cfg.get("device") or "")
         # device=npu slots co-reside in one FLM process and share its port —
         # same derivation as the harvester's coresident marker (hal0.ports).
-        coresident_group = "npu-flm-trio" if device == "npu" else None
+        # An xdna slot runs its own llama-server on its own port (ADR-0057).
+        coresident_group = "npu-flm-trio" if device == "npu" and not is_xdna_slot(cfg) else None
         try:
             is_seed = name in self.seeded_slots()
         except Exception:

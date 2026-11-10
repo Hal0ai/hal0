@@ -436,6 +436,16 @@ XDNA_ENV_DEFAULTS: dict[str, str] = {
     "OMP_WAIT_POLICY": "PASSIVE",
 }
 
+#: Env values hal0 PINS on every xdna slot: correctness facts, not knobs
+#: (ADR-0057 decision 3). ``GGML_XDNA_PGEMM_GLU_A=1`` (the fork's own default)
+#: fuses SwiGLU into the down projection's A operand and silently corrupts
+#: prefill logits, so the slot-config write refuses any other value
+#: (:func:`refuse_xdna_pinned_env`) and the launch path writes these over
+#: whatever the merged env says, so a hand-edited TOML cannot flip it back on.
+XDNA_PINNED_ENV: dict[str, str] = {
+    "GGML_XDNA_PGEMM_GLU_A": "0",
+}
+
 #: Valid ``pmode`` values (AMD ``xrt-smi configure --pmode``). hal0 only
 #: validates and surfaces this — see :func:`xdna_env_defaults`'s module
 #: docstring note below; the container cannot apply it itself.
@@ -460,15 +470,21 @@ XDNA_HOST_XRT_DOC = (
 def xdna_knob_schema() -> dict[str, Any]:
     """The xdna runner's dashboard knob schema (``GET /api/runners/xdna/knobs``).
 
-    ``{"pmodes": [...], "env": [{"name", "default", "doc"}, ...], "host_xrt":
-    {"doc": ...}}`` — built straight off :data:`XDNA_PMODES`,
-    :data:`XDNA_ENV_DOCS` and :data:`XDNA_ENV_DEFAULTS` so the dashboard never
-    hardcodes the knob set.
+    ``{"pmodes": [...], "env": [{"name", "default", "doc", "fixed"}, ...],
+    "host_xrt": {"doc": ...}}`` — built straight off :data:`XDNA_PMODES`,
+    :data:`XDNA_ENV_DOCS`, :data:`XDNA_ENV_DEFAULTS` and
+    :data:`XDNA_PINNED_ENV` so the dashboard never hardcodes the knob set.
+    ``fixed`` marks a pinned variable: shown, never editable.
     """
     return {
         "pmodes": list(XDNA_PMODES),
         "env": [
-            {"name": name, "default": XDNA_ENV_DEFAULTS.get(name), "doc": doc}
+            {
+                "name": name,
+                "default": XDNA_ENV_DEFAULTS.get(name),
+                "doc": doc,
+                "fixed": name in XDNA_PINNED_ENV,
+            }
             for name, doc in sorted(XDNA_ENV_DOCS.items())
         ],
         "host_xrt": {"doc": XDNA_HOST_XRT_DOC},
@@ -492,6 +508,27 @@ def screen_xdna_env(env: Mapping[str, str] | None) -> None:
                 f"{name} is not a GGML_XDNA_* variable hal0's xdna runner knows about",
                 code="runners.xdna_env_unknown",
                 details={"flag": name, "allowed": sorted(XDNA_ENV_DOCS)},
+            )
+
+
+def refuse_xdna_pinned_env(env: Mapping[str, Any] | None) -> None:
+    """Refuse an xdna env override that sets a pinned variable to another value.
+
+    :data:`XDNA_PINNED_ENV` holds correctness facts; restating the pinned
+    value is harmless and passes, anything else is a 400 naming the key.
+    """
+    from hal0.errors import BadRequest
+
+    if not env:
+        return
+    for name, pinned in XDNA_PINNED_ENV.items():
+        if name in env and str(env[name]).strip() != pinned:
+            raise BadRequest(
+                f"{name} is pinned to {pinned!r} on the xdna runner: any other value "
+                "silently corrupts prefill logits (wrong tokens, no error); "
+                "remove it from [xdna.env]",
+                code="validation.xdna_env_pinned",
+                details={"key": name, "value": str(env[name]), "pinned": pinned},
             )
 
 
