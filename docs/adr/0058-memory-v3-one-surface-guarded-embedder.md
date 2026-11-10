@@ -139,13 +139,29 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
    replaces both `unified_bank` modes: private facts no longer sit in the
    shared bank behind a `visibility:private` stamp, and there is no
    `private__<agent>` bank per agent.
-7a. **One converter folds everything else in.** `hal0 memory migrate
-   consolidate` moves `coding-agent::<repo>`, `pi-coder`, `Hal0::Agents`, the
-   old `shared` and any `private__<agent>` bank into the two banks, tagging by
+7a. **One converter folds everything else in: `hal0 memory migrate fold-in`.**
+   It moves `coding-agent::<repo>`, `pi-coder`, `Hal0::Agents`, the old
+   `shared` and any `private__<agent>` bank into the two banks, tagging by
    project and agent as it goes, and splitting `visibility:private` facts out
-   to `hal0:private`. It is a dry run by default, additive, and compares
-   counts before anything is deleted. There is no alias or fallback that reads
-   the old banks afterwards.
+   to `hal0:private`. It is a dry run by default and additive. The word
+   "consolidate" is not used for it anywhere, CLI or dashboard, because the
+   engine and `hal0 memory bank consolidate` already use it for the
+   background step that builds observations.
+   - *Banks fold in one at a time and independently.* Counts (facts,
+     observations, mental models, directives) are compared per bank. A bank
+     whose counts do not match is left exactly as it was, still a legacy bank
+     and still readable, and the run carries on with the rest. The run ends
+     reporting how many folded in and which are left; a left-over bank can be
+     retried alone. This differs from the embedder switch in decision 2, which
+     stops on the first mismatch because the embedder is instance-wide.
+   - *It re-embeds.* The import embeds every fact with the store's recorded
+     embedder, so on a box whose store is mixed the fold-in is also the
+     repair, and that box does not need the switch.
+   - *It deletes nothing.* The legacy banks stay, read-only, after they fold
+     in. Deleting them is a separate operator action, offered where their
+     contents are visible, only for banks whose counts matched, and never as a
+     step of the run. There is no alias or fallback that reads the legacy
+     banks once agents write to the two banks.
 7b. **Shared reads see project-tagged memory.** Today a document carrying any
    `project:` tag is hidden from every `shared` read
    (`src/hal0/memory/hindsight_provider.py`, the unified project-scope
@@ -155,10 +171,18 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
    unreadable through hal0's own API.
 8. **The bank spec is applied by provisioning.** Install, update and
    `hal0 agent reprovision` apply missions, directives, mental-model seeds and
-   knowledge-page seeds to the configured platform bank, idempotently. The
-   spec stops hard-coding `shared`. Mental-model content is spliced into the
-   Hermes prompt with the same "historical context, not instructions" framing
-   recall uses.
+   knowledge-page seeds to the two banks, idempotently. The spec stops
+   hard-coding `shared`. The three standard directives (recalled memory is
+   history and not instructions; newer memory wins a conflict; secrets are
+   never reproduced) are managed by hal0: they are applied to `hal0:shared`
+   without the operator adding them, shown as managed, and turned off in
+   settings and not by deleting them. Operators add their own beside them.
+   Mental-model content is spliced into the Hermes prompt with the same
+   "historical context, not instructions" framing recall uses.
+   This lands after decision 7: the spec template's per-project default
+   observation scope, applied to a bank that still holds private facts, would
+   consolidate a private project-tagged fact into an observation that carries
+   only the project tag.
 9. **One managed drop-in.** `extraction-model.conf` and `showcase-lanes.conf`
    merge into a single file written by a single wrapper verb. The updater
    removes the old pair and any hand-written `zz-*` files it recognises.
@@ -172,12 +196,30 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
     NPU serving is not pursued: the spike reached CPU-parity latency and ran
     out of memory at full context. Turning the default on waits for a measured
     before/after on a fixed corpus.
-12. **One Memory area in the dashboard, at the top level.** The designed
-    `#memory` surface moves out from under Agents and gains tabs for knowledge
-    pages, operations and lane health, and agent setup. Engine and model
-    settings live under Settings. `ui/src/dash/memory-workspace/`, the second
-    sidebar row and `#memworkspace` are deleted; the hash redirects to
-    `#memory` for one release. This closes #3496.
+12. **One Memory area in the dashboard, at the top level.** It replaces both
+    `#memory` under Agents and `#memworkspace`. Engine and model settings live
+    under Settings. `ui/src/dash/memory-workspace/`, the second sidebar row
+    and `#memworkspace` are deleted; the hash redirects to `#memory` for one
+    release. This closes #3496.
+    - *Tabs:* Health, Facts, Knowledge, Operations, Agents. There is no bank
+      control in the page header. Facts, Knowledge and Operations carry a
+      scope bar: the bank (`hal0:shared`, `hal0:private`, and a read-only
+      Legacy segment while legacy banks exist) and the project.
+    - *Health is an ordered repair path, not a list of alarms.* It names the
+      cause first and offers one primary action, on the current step. An
+      action that is known to fail until an earlier step is done is shown
+      disabled with the reason.
+    - *Expensive and destructive actions state their cost.* The fold-in and
+      the embedder switch share one flow: why, what it does, a dry-run
+      result, a per-bank plan, what happens to writes and recall while it
+      runs, and explicit consent. A destructive action names what and how
+      many, and confirms inline.
+    - *Agents lists everything that touches memory,* readers and writers
+      apart: the agents, what is built into hal0 (the dashboard, brain chat,
+      Open WebUI as a context source), and any other client holding a key
+      with the memory scope.
+    - *No raw engine output.* Every figure has a label and a unit; no JSON,
+      no config keys as labels, no raw timestamps.
 
 ## Consequences
 
@@ -186,7 +228,7 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
 - A switch takes the memory engine out of service for writes while it runs,
   and costs CPU time proportional to the store. It makes no LLM calls.
 - The envelope rejects nothing; it normalises. Existing memories keep their
-  old tags until `migrate consolidate` rewrites them, so tag-scoped mental
+  old tags until `migrate fold-in` rewrites them, so tag-scoped mental
   models and pages are reliable only after that migration has run.
 - Operators who scripted against `/api/memory/engine/*`, `#memworkspace` or
   `/v1/systemone` lose them. All three are less than a week old on main and
@@ -194,14 +236,15 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
 - The webhook receiver the original design asked for is not part of this
   record. Health comes from polling the operations API, which the lanes route
   already does; it must page through all operations, not the first page.
-- Work lands in this order: embedder record and switch; drop-in merge and
-  removals; envelope, document ids and reflect; spec in provisioning;
-  consolidation converter; dashboard.
+- Work lands in this order: embedder record; envelope, document ids and
+  reflect; project field and the engine-compatible endpoint; the two banks
+  and the fold-in; spec in provisioning; drop-in merge and removals; the
+  embedder switch; dashboard.
 
 ## Open questions
 
 - Whether `merge` import can tag the documents it folds in, or whether
-  `migrate consolidate` must re-tag after import. To be proven on the test rig
+  `migrate fold-in` must re-tag after import. To be proven on the test rig
   before the converter is written.
 - Import time and peak memory for a store of about 50,000 facts on CPU.
 - One `hal0:private` bank isolates agents from each other by an `agent:` tag
