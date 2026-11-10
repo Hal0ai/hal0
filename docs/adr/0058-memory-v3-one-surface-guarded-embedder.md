@@ -85,6 +85,42 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
    Tags that look like a UUID or a session id are moved to document metadata,
    not stored as tags. Bare lifecycle words are rewritten to `kind:ephemeral`
    plus metadata. Writes are sent with `observation_scopes: "shared"`.
+4a. **Project is a request field, and the server does the tagging and the
+   filtering.** Agents do not write `project:` tags by hand.
+   - *One resolver.* A client derives the project slug from the git
+     repository (remote name, else the top-level directory), following a
+     worktree back to its repository. hal0 keeps a project registry with
+     aliases (`hal0-mono` is `hal0`) and a deny list of names that are never
+     projects (`tmp`, `root`, `workdir`, a home directory).
+   - *Write.* The client sends `project` as a field or header. The envelope
+     validates it, applies aliases, and stamps exactly one `project:<slug>`
+     tag; a `project:` tag in the caller's tag list is overridden by the
+     field. A durable write with no project is stamped `scope:global`, so
+     "no project" and "global" are different facts. A coding-agent identity
+     with no resolvable project is accepted and stamped `project:unresolved`.
+   - *Recall and reflect.* The server builds the scope from the same field:
+     this project plus `scope:global`, by default. Reading across projects is
+     an explicit request, never the fallback.
+   - *Observations.* Project-tagged facts consolidate into one observation
+     scope per project, and global facts into one global scope, so a
+     convention learned in one repository does not become a belief about
+     another. This refines decision 4: the write is sent with a per-project
+     scope when it carries a project and `"shared"` when it is global.
+   - *Measured.* The Memory page and `hal0 doctor` report the share of durable
+     facts that carry a registered project, the `project:unresolved` count,
+     and slugs seen that are not in the registry.
+4b. **Every writer goes through hal0; the engine is not a public door.** The
+   Hindsight coding-agents plugin (Claude Code, Codex, Pi) talks to the engine
+   directly today, so none of the envelope applies to its writes. hal0 exposes
+   an engine-compatible memory endpoint that the plugin is pointed at instead:
+   it authenticates the caller with a bridge key (ADR-0043), accepts the
+   subset of engine routes the plugin uses, maps every bank the plugin names
+   to `hal0:shared`, applies the envelope and decision 4a on the way in and
+   the project scope on the way out, and forwards to the engine. The engine
+   then binds loopback only. `hal0 memory agents install` writes the plugin
+   config for this endpoint. A box whose engine was deliberately exposed on
+   the network keeps working until the operator moves its clients, and
+   `hal0 doctor` names the exposure.
 5. **Documents have stable ids.** The Hermes provider sends
    `document_id = <client>[-<profile>]-<session-id>` and retain becomes an
    upsert. This closes #2017.
