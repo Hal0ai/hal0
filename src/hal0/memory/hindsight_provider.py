@@ -1415,14 +1415,15 @@ class HindsightProvider(MemoryProvider):
         # A private note in the unified bank must not feed an observation that
         # lacks ``visibility:private``, so on a private write the caller's
         # scopes (any form) are ignored and the engine default applies.
-        # Every other write is sent with the envelope's default scope unless the
-        # caller chose one: ``shared`` consolidates into one untagged scope, so
-        # per-call tags stop splitting observations into silos.
+        # Every other write is sent with the envelope's scope unless the caller
+        # chose one: one scope per ``project:`` tag when it carries any, else
+        # ``shared``, the one untagged scope. Either way per-call tags stop
+        # splitting observations into silos.
         if self._unified_bank and requested_private:
             observation_scopes = None
         else:
             observation_scopes = resolve_observation_scopes(
-                _strip_reserved_scopes(observation_scopes)
+                _strip_reserved_scopes(observation_scopes), out_tags
             )
         if observation_scopes is not None:
             extra["observation_scopes"] = observation_scopes

@@ -185,8 +185,10 @@ Two kinds of tag are moved out of the tag list:
 - **Session ids** go to metadata as `session_id`, or as the list
   `session_ids` when a write carries several. A tag counts as a session id
   when it is `session:<id>` (also `session_id:`, `session-id:` or
-  `sessionid:`), a bare UUID, or a bare run of 32 or more hexadecimal digits.
-  A session id taken from a tag does not change the document id.
+  `sessionid:`), a bare UUID, or a bare run of exactly 32 hexadecimal digits
+  (a UUID without its dashes). A longer run, such as a commit hash or a
+  digest, stays a tag. A session id taken from a tag does not change the
+  document id.
 - **Lifecycle words** go to metadata as `lifecycle` (comma-separated when a
   write carries several) and make the write `kind:ephemeral`. The words are
   `checkpoint`, `session-end`, `pre-compress`, `continuity`, `bootstrap` and
@@ -205,12 +207,20 @@ consolidate together and anything that reads by tag sees very little. With
 session ids and lifecycle words out of the tag list, the tag sets stay few and
 stable.
 
-For the same reason, a write is sent to the engine with
-`observation_scopes: "shared"`, which consolidates it into one untagged scope
-whatever its tags are. Pass another value in the `observation_scopes` argument
-of the MCP `memory_add` tool to override it. A private write in the unified
-bank is the exception: it keeps the engine's default scoping, so an
-observation built from a private note still carries `visibility:private`.
+For the same reason, hal0 chooses the observation scope of each write rather
+than leaving it to the tag set:
+
+- A write with no `project:` tag is sent with `observation_scopes: "shared"`,
+  which consolidates it into one untagged scope whatever its tags are.
+- A write that carries a `project:<slug>` tag is sent with the explicit scope
+  `[["project:<slug>"]]`, one scope per project tag. Its observations carry
+  that project tag and nothing else, so what is learned in one project does
+  not become a belief about another.
+- A private write in the unified bank keeps the engine's default scoping, so
+  an observation built from a private note still carries `visibility:private`.
+
+Pass another value in the `observation_scopes` argument of the MCP
+`memory_add` tool to override the first two.
 
 The envelope applies to new writes. Memories stored before it keep the tags
 they were written with.

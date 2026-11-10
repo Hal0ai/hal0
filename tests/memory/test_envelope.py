@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 
 from hal0.memory.envelope import (
+    COMBINED_OBSERVATION_SCOPES,
     DEFAULT_OBSERVATION_SCOPES,
     LIFECYCLE_WORDS,
     UNKNOWN_AGENT,
@@ -25,7 +26,8 @@ from hal0.memory.envelope import (
 UUID4 = "3f2b8c1e-5a47-4d09-9e6b-7c1a2d3e4f50"
 UUID7 = "019a2b3c-4d5e-7f60-8a1b-2c3d4e5f6071"
 HEX32 = "3f2b8c1e5a474d099e6b7c1a2d3e4f50"
-HEX64 = "a" * 64
+SHA1 = "06f87da60c4b1e2d3a4f5b6c7d8e9f0a1b2c3d4e"
+SHA256 = "a1" * 32
 
 
 # ── Rule 2: agent identity ──────────────────────────────────────────────────
@@ -102,11 +104,11 @@ def test_an_unrecognised_kind_value_is_user_vocabulary():
         (UUID4.upper(), UUID4.upper()),
         (f"  {UUID7} ", UUID7),
         ("00000000-0000-0000-0000-000000000000", "00000000-0000-0000-0000-000000000000"),
-        # Long hex ids: 32 hexadecimal digits or more.
+        # A UUID without its dashes: exactly 32 hexadecimal digits.
         (HEX32, HEX32),
         (HEX32.upper(), HEX32.upper()),
-        ("0" * 40, "0" * 40),
-        (HEX64, HEX64),
+        (f" {HEX32} ", HEX32),
+        ("0" * 32, "0" * 32),
         # The session namespace, in its four spellings.
         (f"session:{UUID4}", UUID4),
         ("session:20261109_153000_ab12cd", "20261109_153000_ab12cd"),
@@ -148,6 +150,14 @@ def test_session_shaped_tags_are_recognised(tag, session_id):
         "06f87da60",
         "79ed55c3b1a2",
         "a" * 31,
+        # Hex-looking but longer than a UUID: a full commit hash, a digest.
+        "a" * 33,
+        SHA1,
+        SHA1.upper(),
+        SHA256,
+        "0" * 40,
+        "f" * 64,
+        HEX32 + HEX32,
         # Not hexadecimal throughout.
         "g" * 32,
         f"{HEX32}-x",
@@ -433,11 +443,81 @@ def test_envelope_is_idempotent_on_its_own_output():
 # ── Rule 7: observation scopes ──────────────────────────────────────────────
 
 
-def test_default_observation_scope_is_shared():
+def test_the_scope_constants_are_engine_modes():
     assert DEFAULT_OBSERVATION_SCOPES == "shared"
-    assert resolve_observation_scopes(None) == "shared"
+    assert COMBINED_OBSERVATION_SCOPES == "combined"
 
 
-@pytest.mark.parametrize("requested", ["per_tag", "combined", "all_combinations", [["topic:*"]]])
-def test_an_explicit_observation_scope_is_kept(requested):
-    assert resolve_observation_scopes(requested) == requested
+@pytest.mark.parametrize(
+    "tags",
+    [
+        [],
+        ["agent:hermes", "kind:durable"],
+        ["hal0", "source:chat", "agent:hermes", "kind:ephemeral"],
+        # Not project tags to the read filter either: a bare word, another
+        # case, another namespace.
+        ["project", "agent:pi", "kind:durable"],
+        ["Project:hal0", "agent:pi", "kind:durable"],
+        ["my-project:hal0", "agent:pi", "kind:durable"],
+    ],
+)
+def test_a_write_with_no_project_gets_the_shared_scope(tags):
+    assert resolve_observation_scopes(None, tags) == "shared"
+
+
+@pytest.mark.parametrize(
+    ("tags", "scopes"),
+    [
+        (["project:hal0", "agent:pi", "kind:durable"], [["project:hal0"]]),
+        # Other tags take no part in the scope.
+        (
+            ["hal0", "source:chat", "agent:pi", "kind:ephemeral", "project:hal0"],
+            [["project:hal0"]],
+        ),
+        (
+            ["agent:pi", "kind:durable", "project:hal0", "visibility:private"],
+            [["project:hal0"]],
+        ),
+        # One scope per project, in tag order, each named once.
+        (
+            ["project:hal0-web", "agent:pi", "kind:durable", "project:hal0", "project:hal0-web"],
+            [["project:hal0-web"], ["project:hal0"]],
+        ),
+        (
+            ["project:example.com+acme+widgets", "agent:pi", "kind:durable"],
+            [["project:example.com+acme+widgets"]],
+        ),
+    ],
+)
+def test_a_write_with_a_project_gets_one_scope_per_project(tags, scopes):
+    assert resolve_observation_scopes(None, tags) == scopes
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        ["project:*", "agent:pi", "kind:durable"],
+        ["project:hal0*", "agent:pi", "kind:durable"],
+        ["project:hal0", "project:web*", "agent:pi", "kind:durable"],
+    ],
+)
+def test_a_project_tag_the_engine_would_read_as_a_glob_falls_back_to_combined(tags):
+    assert resolve_observation_scopes(None, tags) == "combined"
+
+
+@pytest.mark.parametrize("requested", ["per_tag", "combined", "all_combinations", "shared"])
+@pytest.mark.parametrize("tags", [[], ["project:hal0", "agent:pi", "kind:durable"]])
+def test_an_explicit_observation_scope_is_kept(requested, tags):
+    assert resolve_observation_scopes(requested, tags) == requested
+
+
+def test_an_explicit_scope_list_is_kept_for_a_project_write():
+    requested = [["topic:*"]]
+    assert resolve_observation_scopes(requested, ["project:hal0"]) is requested
+
+
+def test_the_scope_follows_the_envelopes_own_output():
+    project = apply_envelope(["checkpoint", "hal0"], agent="pi", project="hal0")
+    plain = apply_envelope(["checkpoint", "hal0"], agent="pi")
+    assert resolve_observation_scopes(None, project.tags) == [["project:hal0"]]
+    assert resolve_observation_scopes(None, plain.tags) == "shared"

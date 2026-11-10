@@ -29,6 +29,10 @@ The rules, in the order they are applied to each caller tag:
 The result always carries exactly one ``agent:<id>`` tag and exactly one of
 ``kind:durable`` / ``kind:ephemeral``.
 
+The module also chooses the observation scope a write is sent with, from its
+final tags (:func:`resolve_observation_scopes`): one scope per project when
+the write carries a ``project:`` tag, the one untagged scope when it does not.
+
 This module is pure: no I/O, no engine client, no provider state. The
 ``visibility:private`` stamp and its read-side enforcement (ADR-0005) stay in
 :mod:`hal0.memory.hindsight_provider`.
@@ -74,11 +78,15 @@ SESSION_ID_KEY = "session_id"
 SESSION_IDS_KEY = "session_ids"
 LIFECYCLE_KEY = "lifecycle"
 
-#: The observation scope a write is sent with unless the caller chose another.
-#: An engine ``RetainRequest`` item accepts ``"per_tag"``, ``"combined"``,
-#: ``"all_combinations"``, ``"shared"`` or a list of tag lists; ``"shared"``
-#: consolidates into one untagged scope regardless of the item's tags.
+#: The observation scope of a write that carries no project, unless the caller
+#: chose another. An engine ``RetainRequest`` item accepts ``"per_tag"``,
+#: ``"combined"``, ``"all_combinations"``, ``"shared"`` or a list of tag lists;
+#: ``"shared"`` consolidates into one untagged scope regardless of the item's
+#: tags. See :func:`resolve_observation_scopes`.
 DEFAULT_OBSERVATION_SCOPES = "shared"
+
+#: The engine's own default mode: one scope made of all the item's tags.
+COMBINED_OBSERVATION_SCOPES = "combined"
 
 # ``session:<id>``, ``session_id:<id>``, ``session-id:<id>``, ``sessionid:<id>``.
 # The id is everything after the first colon and must not be blank.
@@ -89,10 +97,11 @@ _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
 )
 
-# A bare run of 32 or more hexadecimal digits: a UUID without dashes, or a
-# longer digest-shaped id. Shorter runs (a PR number, a date, an abbreviated
-# commit hash) are ordinary tags.
-_LONG_HEX_RE = re.compile(r"[0-9a-f]{32,}", re.IGNORECASE)
+# A bare run of exactly 32 hexadecimal digits: a UUID without its dashes.
+# Any other length is an ordinary tag, shorter (a PR number, a date, an
+# abbreviated commit hash) or longer (a full 40-digit commit hash, a 64-digit
+# digest).
+_UUID_HEX_RE = re.compile(r"[0-9a-f]{32}", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,13 +157,13 @@ def session_id_of(tag: str) -> str | None:
     * ``session:<id>`` (also ``session_id:``, ``session-id:``, ``sessionid:``)
       with a non-blank id, which is returned without the prefix;
     * a bare UUID in the 8-4-4-4-12 form, any version;
-    * a bare run of 32 or more hexadecimal digits.
+    * a bare run of exactly 32 hexadecimal digits (a UUID without dashes).
     """
     text = tag.strip()
     prefixed = _SESSION_TAG_RE.fullmatch(text)
     if prefixed:
         return prefixed.group("id").strip()
-    if _UUID_RE.fullmatch(text) or _LONG_HEX_RE.fullmatch(text):
+    if _UUID_RE.fullmatch(text) or _UUID_HEX_RE.fullmatch(text):
         return text
     return None
 
@@ -165,9 +174,39 @@ def lifecycle_word_of(tag: str) -> str | None:
     return word if word in LIFECYCLE_WORDS else None
 
 
-def resolve_observation_scopes(requested: Any) -> Any:
-    """The caller's observation scopes, or the default when none was given."""
-    return DEFAULT_OBSERVATION_SCOPES if requested is None else requested
+def resolve_observation_scopes(requested: Any, tags: Iterable[str]) -> Any:
+    """The observation scope a write is sent with, given its final tags.
+
+    A scope the caller chose stands. Otherwise:
+
+    * a write that carries ``project:`` tags consolidates into one scope per
+      project, ``[["project:<slug>"], ...]``, so what is learned in one
+      project does not become a belief about another;
+    * a write with no project consolidates into the one untagged scope,
+      :data:`DEFAULT_OBSERVATION_SCOPES`.
+
+    The engine writes an explicit scope verbatim: the observation carries
+    exactly the scope's tags, whatever other tags the write has. It reads a
+    ``*`` in a scope entry as a glob, though, so a project tag containing one
+    cannot be named literally; such a write falls back to
+    :data:`COMBINED_OBSERVATION_SCOPES`, which keeps the project tag on the
+    observation along with the write's other tags.
+
+    A ``project:`` tag is recognised exactly as the read filter recognises it:
+    a string that starts with the lower-case prefix.
+    """
+    if requested is not None:
+        return requested
+    projects = list(
+        dict.fromkeys(
+            tag for tag in tags if isinstance(tag, str) and tag.startswith(PROJECT_TAG_PREFIX)
+        )
+    )
+    if not projects:
+        return DEFAULT_OBSERVATION_SCOPES
+    if any("*" in tag for tag in projects):
+        return COMBINED_OBSERVATION_SCOPES
+    return [[tag] for tag in projects]
 
 
 def apply_envelope(
@@ -248,6 +287,7 @@ def apply_envelope(
 __all__ = [
     "AGENT_TAG_PREFIX",
     "ANONYMOUS_AGENT",
+    "COMBINED_OBSERVATION_SCOPES",
     "DEFAULT_OBSERVATION_SCOPES",
     "KINDS",
     "KIND_DURABLE",

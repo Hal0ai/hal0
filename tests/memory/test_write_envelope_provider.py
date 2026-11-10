@@ -161,11 +161,57 @@ async def test_an_explicit_observation_scope_wins(explicit) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("make", [_unified, _legacy])
+async def test_a_write_with_a_project_tag_gets_that_projects_scope(make) -> None:
+    """ADR-0058 decision 4a: one observation scope per project, whatever other
+    tags the write carries."""
+    p = make()
+    await p.add("x", tags=["project:hal0", "checkpoint", "slots"], client_id="pi")
+    rec = p._client.retained[-1]
+    assert rec["tags"] == ["project:hal0", "slots", "agent:pi", "kind:ephemeral"]
+    assert rec["observation_scopes"] == [["project:hal0"]]
+
+
+@pytest.mark.asyncio
+async def test_a_project_namespace_write_gets_that_projects_scope() -> None:
+    p = _unified()
+    await p.add("x", dataset="project:apollo", client_id="pi")
+    rec = p._client.retained[-1]
+    assert rec["tags"] == ["agent:pi", "kind:durable", "project:apollo"]
+    assert rec["observation_scopes"] == [["project:apollo"]]
+
+
+@pytest.mark.asyncio
+async def test_a_write_under_two_projects_gets_one_scope_each() -> None:
+    p = _unified()
+    await p.add("x", tags=["project:hal0", "project:hal0-web"], client_id="pi")
+    assert p._client.retained[-1]["observation_scopes"] == [["project:hal0"], ["project:hal0-web"]]
+
+
+@pytest.mark.asyncio
+async def test_a_write_with_no_project_gets_the_shared_scope() -> None:
+    p = _unified()
+    await p.add("x", tags=["hal0", "slots"], client_id="pi")
+    assert p._client.retained[-1]["observation_scopes"] == "shared"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", ["shared", "per_tag", [["topic:cats"]]])
+async def test_an_explicit_scope_wins_over_the_project_scope(explicit) -> None:
+    p = _unified()
+    await p.add("x", tags=["project:hal0"], client_id="pi", observation_scopes=explicit)
+    assert p._client.retained[-1]["observation_scopes"] == explicit
+
+
+@pytest.mark.asyncio
 async def test_a_private_write_in_the_unified_bank_sends_no_scope() -> None:
-    """``shared`` is one untagged scope; a private note must not feed it."""
+    """Neither the untagged scope nor a project scope carries
+    ``visibility:private``; a private note must not feed either."""
     p = _unified()
     await p.add("secret", dataset="private:alice", client_id="alice")
     await p.add("secret", dataset="private:alice", client_id="alice", observation_scopes="shared")
+    await p.add("secret", dataset="private:alice", tags=["project:hal0"], client_id="alice")
+    assert [rec["tags"][-1] for rec in p._client.retained] == ["visibility:private"] * 3
     assert all("observation_scopes" not in rec for rec in p._client.retained)
 
 
@@ -233,6 +279,20 @@ async def test_rest_add_reaches_the_engine_enveloped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rest_add_with_a_project_tag_reaches_the_engine_project_scoped() -> None:
+    engine, provider = _wired()
+    response = await _rest_add(
+        provider,
+        {"text": "note", "tags": ["project:hal0", SESSION, "slots"]},
+        {"X-hal0-Agent": "pi"},
+    )
+    assert response.status_code == 200, response.text
+    item = engine.item
+    assert item["tags"] == ["project:hal0", "slots", "agent:pi", "kind:durable"]
+    assert item["observation_scopes"] == [["project:hal0"]]
+
+
+@pytest.mark.asyncio
 async def test_rest_add_without_identity_is_tagged_unknown() -> None:
     engine, provider = _wired()
     response = await _rest_add(provider, {"text": "note"}, {})
@@ -277,6 +337,16 @@ async def test_mcp_add_reaches_the_engine_enveloped() -> None:
     assert item["metadata"]["session_id"] == SESSION
     assert item["metadata"]["lifecycle"] == "bootstrap"
     assert item["observation_scopes"] == "shared"
+
+
+@pytest.mark.asyncio
+async def test_mcp_add_with_a_project_tag_reaches_the_engine_project_scoped() -> None:
+    engine, provider = _wired()
+    out = await _mcp(provider)("memory_add", {"text": "note", "tags": ["project:hal0", "slots"]})
+    assert out["status"] == "ok", out
+    item = engine.item
+    assert item["tags"] == ["project:hal0", "slots", "agent:pi-coder", "kind:durable"]
+    assert item["observation_scopes"] == [["project:hal0"]]
 
 
 @pytest.mark.asyncio
