@@ -232,6 +232,11 @@ WantedBy=multi-user.target
 - **Data root** — embedded Postgres at `/var/lib/hal0/memory/hindsight/.pg0`,
   pinned via the unit's `HOME=` env (Hindsight has no dedicated data-dir
   variable of its own).
+- **Embedder** — hal0 records the embeddings model the store was built with in
+  `/var/lib/hal0/state/memory-embedder.json` and starts the engine on that
+  model. `[memory.models].embeddings_model` does not change it. When the two
+  differ, `GET /api/memory/models` and the `memory_embedder` row of
+  `hal0 doctor all` say so and nothing is rewritten.
 
 ### Config files it reads
 

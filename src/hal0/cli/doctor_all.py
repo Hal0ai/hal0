@@ -3413,6 +3413,49 @@ def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
     return Check(name, title, _PASS, "hindsight-api runs with the values hal0 renders")
 
 
+def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
+    """The configured embedder must be the one the memory store was built with (#3518).
+
+    hal0 records the embedder a store was built with
+    (:mod:`hal0.memory.embedder_record`) and renders the engine environment
+    from that record, so a ``[memory.models].embeddings_model`` that differs
+    changes nothing: the engine stays on the recorded model and this row says
+    so. It also reports a store marked ``mixed``, one that existed before the
+    engine was moved off its default embedder and so may hold vectors from
+    two models. Advisory (``warn``): memory keeps working, and nothing here
+    is repaired by a restart. Re-embedding the store is the way out of both.
+
+    ``status`` is the injection point for tests; by default it is read from
+    this box's ``hal0.toml``, the record and the engine's data directory.
+    """
+    from hal0.memory.embedder_record import (
+        SOURCE_CONFIGURED,
+        embedder_notice,
+        embedder_status,
+    )
+
+    name, title = "memory_embedder", "Memory embedder"
+    if status is None:
+        from hal0.config.loader import load_hal0_config
+
+        try:
+            configured = load_hal0_config().memory.models.embeddings_model
+        except Exception as exc:
+            return Check(name, title, _WARN, f"hal0.toml unreadable — check skipped: {exc}")
+        status = embedder_status(configured)
+    notice = embedder_notice(status)
+    if notice:
+        return Check(name, title, _WARN, notice)
+    if status.get("source") == SOURCE_CONFIGURED and not status.get("recorded_at"):
+        return Check(name, title, _PASS, "no memory store on this box — nothing recorded yet")
+    return Check(
+        name,
+        title,
+        _PASS,
+        f"the memory store was built with {status.get('recorded')}, as configured",
+    )
+
+
 #: ``POST /api/memory/graph/throughput`` may run the 30 s probe (#2353).
 THROUGHPUT_PROBE_TIMEOUT_S: float = 45.0
 
@@ -3876,6 +3919,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),
         check_memory_engine_env(),
+        check_memory_embedder(),
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
         check_memory_retain_chunk(memory=payloads["memory"], base=base),
         check_memory_decision_lane(memory=payloads["memory"]),
@@ -3971,6 +4015,7 @@ __all__ = [
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
     "check_memory_decision_lane",
+    "check_memory_embedder",
     "check_memory_engine_env",
     "check_memory_engine_version",
     "check_memory_extraction_throughput",

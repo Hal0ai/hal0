@@ -1679,3 +1679,170 @@ def test_engine_env_report_never_carries_a_credential(tmp_path: Path, monkeypatc
 
     assert "sk-real-secret" not in repr(report)
     assert report["drift"] == []
+
+
+# ── the showcase env carries the store's embedder, not the config's (#3518) ──
+
+_BGE = "BAAI/bge-small-en-v1.5"
+_HS = "hindsight-ai/hs-embed-1"
+_EMBED_LINE = "Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL="
+
+
+def _engine_store(monkeypatch, tmp_path: Path) -> Path:
+    """An engine that has already started: its pg0 cluster under the engine home."""
+    from hal0.memory.engine_upgrade import hindsight_dir
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    data = hindsight_dir() / ".pg0" / "instances" / "hindsight" / "data"
+    data.mkdir(parents=True)
+    (data / "PG_VERSION").write_text("18\n")
+    return data
+
+
+def _recorded() -> dict:
+    import json
+
+    from hal0.memory.embedder_record import embedder_record_path
+
+    return json.loads(embedder_record_path().read_text())
+
+
+def test_render_takes_the_embeddings_model_from_the_record_not_the_config(
+    monkeypatch, tmp_path: Path
+):
+    from hal0.memory import extraction_env as ee
+    from hal0.memory.embedder_record import ensure_embedder_record
+
+    _redirect_showcase(monkeypatch, tmp_path)
+    _engine_store(monkeypatch, tmp_path)
+    cfg = _showcase_cfg()
+    assert cfg["models"].embeddings_model == _HS
+    ensure_embedder_record(_HS)  # existing store, no drop-in: recorded as the engine default
+
+    body = ee.render_showcase_env(**cfg)
+
+    assert _EMBED_LINE + _BGE + "\n" in body
+    assert _HS not in body
+    # Every other key renders exactly as it does for a store built with the configured model.
+    assert body.replace(_EMBED_LINE + _BGE, _EMBED_LINE + _HS) == ee.render_showcase_env(
+        **cfg, embeddings_model=_HS
+    )
+    assert (
+        ee.expected_engine_env(_memory_cfg(), slots_dir=tmp_path)[
+            "HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL"
+        ]
+        == _BGE
+    )
+
+
+def test_an_upgraded_box_with_a_store_and_no_showcase_dropin_renders_bge_small(
+    monkeypatch, tmp_path: Path
+):
+    """#3518 regression: the first showcase render on an upgraded box must keep
+    the embedder its store was built with, not move it to the config default."""
+    from hal0.memory import extraction_env as ee
+
+    extraction, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    _write_graph_config(monkeypatch, tmp_path)  # [memory.models] left at its default
+    _engine_store(monkeypatch, tmp_path)
+    extraction.parent.mkdir(parents=True)
+    extraction.write_text(render_drop_in(300))
+    quiet = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    result = ee.reconcile_showcase_dropin(restart=False, seam=quiet)
+
+    assert result["status"] == "applied"
+    written = showcase.read_text()
+    assert _EMBED_LINE + _BGE + "\n" in written
+    assert "hs-embed-1" not in written
+    assert "HINDSIGHT_API_RERANKER_LOCAL_MODEL=hindsight-ai/hs-rerank-1" in written
+    record = _recorded()
+    assert (record["model"], record["source"], record["mixed"]) == (_BGE, "engine-default", False)
+    # Stable: the next update is a no-op and the record is not rewritten.
+    assert ee.reconcile_showcase_dropin(restart=False, seam=quiet) == {"status": "converged"}
+    assert _recorded() == record
+
+
+def test_a_box_already_moved_to_hs_embed_stays_there_and_is_recorded_mixed(
+    monkeypatch, tmp_path: Path
+):
+    """A box that ran a build between #3486 and this fix: the drop-in names
+    hs-embed-1 over a store built with bge-small. Moving it back would make
+    things worse, so the drop-in is left as it is and the store is flagged."""
+    from hal0.memory import extraction_env as ee
+    from hal0.memory.embedder_record import record_store_embedder
+
+    extraction, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    _write_graph_config(monkeypatch, tmp_path)
+    _engine_store(monkeypatch, tmp_path)
+    extraction.parent.mkdir(parents=True)
+    extraction.write_text(render_drop_in(300))
+    showcase.write_text(ee.render_showcase_env(**_showcase_cfg(), ceiling=1, embeddings_model=_HS))
+    before = showcase.read_bytes()
+    quiet = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    record_store_embedder()  # what the update runs first
+    result = ee.reconcile_showcase_dropin(restart=False, seam=quiet)
+
+    assert result == {"status": "converged"}
+    assert showcase.read_bytes() == before
+    record = _recorded()
+    assert (record["model"], record["source"], record["mixed"]) == (_HS, "showcase-drop-in", True)
+
+
+def test_apply_on_a_box_with_no_store_records_the_configured_model_with_the_dropin(
+    monkeypatch, tmp_path: Path
+):
+    from hal0.memory.embedder_record import embedder_record_path
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    assert not embedder_record_path().exists()
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), restart=False, seam=seam)
+
+    assert result["written"]
+    assert _EMBED_LINE + _HS + "\n" in showcase.read_text()
+    record = _recorded()
+    assert (record["model"], record["source"], record["mixed"]) == (_HS, "configured", False)
+
+
+def test_a_refused_write_on_a_box_with_no_store_records_nothing(monkeypatch, tmp_path: Path):
+    """No drop-in landed, so nothing makes the engine use the configured model:
+    writing it down would let a store be built under a record that is wrong."""
+    from hal0.memory.embedder_record import embedder_record_path
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    _redirect_showcase(monkeypatch, tmp_path)
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    _calls, run = _seam_recorder(rc=64, stderr="drop-in rejected: nope")
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), seam=seam)
+
+    assert result["written"] is False
+    assert not embedder_record_path().exists()
+
+
+def test_changing_the_configured_embedder_does_not_change_the_rendered_one(
+    monkeypatch, tmp_path: Path
+):
+    """Config differs from record: the drop-in keeps the recorded model."""
+    from hal0.config.schema import MemoryModelsConfig
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    _engine_store(monkeypatch, tmp_path)
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+    cfg = _showcase_cfg()
+    apply_showcase_dropin(**cfg, restart=False, seam=seam)
+    first, record = showcase.read_bytes(), _recorded()
+    assert record["model"] == _BGE
+
+    cfg["models"] = MemoryModelsConfig(embeddings_model="example-org/another-embedder")
+    apply_showcase_dropin(**cfg, restart=False, seam=seam)
+
+    assert showcase.read_bytes() == first
+    assert _recorded() == record

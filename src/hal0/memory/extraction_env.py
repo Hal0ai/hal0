@@ -64,6 +64,12 @@ from hal0.agents.anchor_window import (
     AnchorWindow,
     resolve_anchor_window,
 )
+from hal0.memory.embedder_record import (
+    EMBEDDINGS_MODEL_ENV,
+    ensure_embedder_record,
+    persist_embedder_record,
+    resolve_embedder,
+)
 from hal0.system.seam import HINDSIGHT_LEGACY_CAP_DROPIN_NAME, SeamTimeout, SystemCtlSeam
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -325,8 +331,18 @@ def render_showcase_env(
     lanes: MemoryLanesConfig,
     ceiling: int | None = None,
     decision_unit_installed: bool | None = None,
+    embeddings_model: str | None = None,
 ) -> str:
     """Render the Hindsight 1.2 showcase env block (PLAN.md section 2).
+
+    The embeddings model is the one the store was built with, never
+    ``models.embeddings_model`` (#3518): ``embeddings_model`` when the caller
+    already holds the record, else read from it here
+    (:func:`hal0.memory.embedder_record.resolve_embedder`, which falls back to
+    what disk says on a box with no record). Swapping the embedder under an
+    existing store degrades recall with no error, so a config value that
+    differs from the record is reported, not rendered. Every other key below
+    renders from config as before.
 
     ``ceiling`` (#3492) is the extraction drop-in's effective concurrency —
     ``[memory.graph]`` held to the memory slot's ``--parallel``
@@ -353,6 +369,8 @@ def render_showcase_env(
     entirely so hindsight-api falls back to its configured LLM/reranker path
     (#3519).
     """
+    if embeddings_model is None:
+        embeddings_model = resolve_embedder(models.embeddings_model).model
     lines: list[str] = [
         "# Managed by hal0 ([memory.models]/[memory.decision]/[memory.lanes] in",
         "# hal0.toml, Hindsight 1.2 showcase — see PLAN.md section 2). Do not edit",
@@ -360,7 +378,7 @@ def render_showcase_env(
         "# hand-maintained zz-h0-98-llm-global-cap.conf drop-in.",
         "[Service]",
         f"Environment=HINDSIGHT_API_EMBEDDINGS_PROVIDER={models.embeddings_provider}",
-        f"Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL={models.embeddings_model}",
+        f"Environment={EMBEDDINGS_MODEL_ENV}={embeddings_model}",
         f"Environment=HINDSIGHT_API_RERANKER_PROVIDER={models.reranker_provider}",
         f"Environment=HINDSIGHT_API_RERANKER_LOCAL_MODEL={models.reranker_model}",
         "Environment=HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING="
@@ -1207,6 +1225,12 @@ def apply_showcase_dropin(
     — the engine reads these env vars only at start. Never raises; returns
     ``{"drop_in", "written", "daemon_reloaded", "restarted", "error"}``.
     Blocking: event-loop callers must hop a thread.
+
+    The embeddings model comes from the store's embedder record (#3518). A
+    box whose engine has already run gets its record written before the
+    render; a box with no store yet is recorded as the configured model only
+    after the drop-in carrying it is on disk, so the record cannot name a
+    model the engine was never started with.
     """
     seam = seam if seam is not None else SystemCtlSeam()
     result: dict[str, Any] = {
@@ -1216,14 +1240,20 @@ def apply_showcase_dropin(
         "restarted": False,
         "error": None,
     }
+    embedder = ensure_embedder_record(models.embeddings_model)
     try:
         body = render_showcase_env(
-            models=models, decision=decision, lanes=lanes, ceiling=showcase_ceiling(graph)
+            models=models,
+            decision=decision,
+            lanes=lanes,
+            ceiling=showcase_ceiling(graph),
+            embeddings_model=embedder.model,
         )
         seam.write_hindsight_showcase_dropin(
             body, path=SHOWCASE_DROP_IN_PATH, timeout=_SYSTEMCTL_TIMEOUT_S
         )
         result["written"] = True
+        persist_embedder_record(embedder)
         # #3520: the write also retires the hand-maintained H0-98 drop-in;
         # say so if it survived (e.g. a pre-#3520 seam wrapper on the box).
         result["legacy_drop_in_present"] = LEGACY_LLM_CAP_DROP_IN_PATH.exists()

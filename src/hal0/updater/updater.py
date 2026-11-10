@@ -2014,11 +2014,19 @@ def run_post_activation_migrations(
     # surprise memory outage, the same reason the engine pass is skipped there.
     if upgrade_memory_engine_venv:
         try:
+            from hal0.memory.embedder_record import record_store_embedder
             from hal0.memory.extraction_env import (
                 reconcile_extraction_dropin,
                 reconcile_showcase_dropin,
                 reload_and_restart_hindsight,
             )
+
+            # #3518: write down the embedder this box's store was built with
+            # before the showcase drop-in is rendered. The render reads the
+            # record, so an upgraded store stays on its own model instead of
+            # moving to the [memory.models] default. A box with no store has
+            # nothing to record here.
+            record_store_embedder()
 
             # #3492: write the showcase drop-in first without a restart, so a
             # box where both drifted pays for one engine restart, not two.

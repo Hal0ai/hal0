@@ -81,13 +81,17 @@ SERVICE_HAL0_API: str = "hal0-api"
 #                                            plumbing, but the generic PUT
 #                                            still tags the class so the
 #                                            UI renders the right badge).
-#   * ``[memory.embedding].model``          → service-restart[hal0-api]
-#                                            (the engine pins the
-#                                            embedding dimension at index
-#                                            build; switching silently
-#                                            corrupts the store — a
-#                                            process bounce + re-embed is
-#                                            the supported path).
+#   * ``[memory.models].embeddings_model``  → manual-restart (#3518: the
+#                                            embedder belongs to the store.
+#                                            The engine environment is
+#                                            rendered from the store's
+#                                            embedder record, not this key,
+#                                            so a save is kept in hal0.toml
+#                                            and changes nothing the engine
+#                                            runs; only re-embedding the
+#                                            store moves it. Swapping the
+#                                            model under stored vectors
+#                                            degrades recall with no error).
 #   * ``[memory.embedding].{rerank_*}``     → immediate (consumed on each
 #                                            ``memory_search`` call).
 #   * ``[memory.graph].{enabled,extraction_slot}`` → immediate (ADR-0023: the
@@ -243,7 +247,11 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # responds (#3492, settings._apply_showcase_dropin) — so the save IS the
     # apply. A failed write/restart is reported in _hal0.showcase_dropin.
     "memory.models.embeddings_provider": {"apply_class": "immediate", "services": []},
-    "memory.models.embeddings_model": {"apply_class": "immediate", "services": []},
+    # #3518: the one showcase key a save does NOT apply. The drop-in carries
+    # the embedder the store was built with (hal0.memory.embedder_record), so
+    # this value waits in hal0.toml until the store is re-embedded:
+    # manual-restart, the class for "a service restart will not apply this".
+    "memory.models.embeddings_model": {"apply_class": "manual-restart", "services": []},
     "memory.models.reranker_provider": {"apply_class": "immediate", "services": []},
     "memory.models.reranker_model": {"apply_class": "immediate", "services": []},
     "memory.models.reranker_bucket_batching": {"apply_class": "immediate", "services": []},

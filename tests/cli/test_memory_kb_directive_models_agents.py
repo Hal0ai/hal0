@@ -119,6 +119,30 @@ def test_models_bare_invocation(monkeypatch):
     assert payload["embeddings"]["provider"] == "openai"
 
 
+def test_models_table_shows_the_recorded_embedder_and_flags_a_difference(monkeypatch):
+    """#3518: the engine runs the recorded model; the configured one is named as not applied."""
+    monkeypatch.setattr("hal0.cli.memory_models_agents_commands._require_api", lambda: "http://x")
+    monkeypatch.setattr(
+        "hal0.cli.memory_models_agents_commands.api_get",
+        lambda path, **kw: {
+            "embeddings": {
+                "provider": "local",
+                "model": "hindsight-ai/hs-embed-1",
+                "recorded": "BAAI/bge-small-en-v1.5",
+                "configured": "hindsight-ai/hs-embed-1",
+                "mixed": False,
+                "needs_switch": True,
+            },
+            "reranker": {"provider": "local", "model": "hindsight-ai/hs-rerank-1"},
+            "decision": {"enabled": False, "provider": "off", "model": "x", "reachable": False},
+        },
+    )
+    r = runner.invoke(memory_commands.app, ["models"], env={"COLUMNS": "200"})
+    assert r.exit_code == 0, r.output
+    assert "BAAI/bge-small-en-v1.5" in r.output
+    assert "configured: hindsight-ai/hs-embed-1 (not applied)" in r.output
+
+
 def test_agents_install_dry_run(monkeypatch):
     monkeypatch.setattr(
         "hal0.cli.memory_models_agents_commands.api_get",

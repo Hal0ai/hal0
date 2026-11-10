@@ -1655,11 +1655,18 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         lambda **_kw: Check("memory_engine_env", "Memory engine env", "pass", "stubbed"),
     )
 
+    # Embedder row (#3518) reads hal0.toml, the record and the engine home otherwise.
+    monkeypatch.setattr(
+        da,
+        "check_memory_embedder",
+        lambda **_kw: Check("memory_embedder", "Memory embedder", "pass", "stubbed"),
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-48:] == [
+    assert keys[-49:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1705,6 +1712,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hindsight_llm_auth",
         "memory_engine_version",
         "memory_engine_env",
+        "memory_embedder",
         "memory_extraction_throughput",
         "memory_retain_chunk",
         "memory_decision_lane",
@@ -3717,3 +3725,78 @@ def test_memory_engine_env_warns_on_leftover_legacy_drop_in() -> None:
 def test_memory_engine_env_warns_when_unit_env_unreadable() -> None:
     report = {"installed": True, "checked": False, "drift": [], "legacy_drop_in": None}
     assert da.check_memory_engine_env(report=report).status == "warn"
+
+
+# ── memory embedder: recorded against configured (#3518) ─────────────────────
+
+_BGE = "BAAI/bge-small-en-v1.5"
+_HS = "hindsight-ai/hs-embed-1"
+
+
+def _embedder(recorded: str, configured: str, *, mixed: bool = False, **extra: object) -> dict:
+    return {
+        "recorded": recorded,
+        "configured": configured,
+        "mixed": mixed,
+        "needs_switch": mixed or recorded != configured,
+        "source": "engine-default",
+        "recorded_at": "2026-11-10T21:00:00+00:00",
+        **extra,
+    }
+
+
+def test_memory_embedder_passes_when_the_store_matches_the_config() -> None:
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE))
+    assert (check.key, check.status) == ("memory_embedder", "pass")
+    assert _BGE in check.detail
+
+
+def test_memory_embedder_warns_in_plain_words_when_the_config_differs() -> None:
+    check = da.check_memory_embedder(status=_embedder(_BGE, _HS))
+    assert check.status == "warn"
+    assert f"built with {_BGE}" in check.detail
+    assert f"embeddings_model is set to {_HS}" in check.detail
+    assert "no effect" in check.detail
+    # Names the way out without claiming the command exists.
+    assert "`hal0 memory embedder switch`" in check.detail
+    assert "not in this release yet" in check.detail
+
+
+def test_memory_embedder_warns_on_a_mixed_store_even_when_the_models_match() -> None:
+    check = da.check_memory_embedder(status=_embedder(_HS, _HS, mixed=True))
+    assert check.status == "warn"
+    assert "two embedders" in check.detail
+    assert "`hal0 memory embedder switch`" in check.detail
+    assert "has no effect" not in check.detail
+
+
+def test_memory_embedder_passes_on_a_box_with_no_store() -> None:
+    status = _embedder(_HS, _HS, source="configured", recorded_at=None)
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "pass"
+    assert "no memory store" in check.detail
+
+
+def test_memory_embedder_reads_this_boxs_store_by_default(tmp_path, monkeypatch) -> None:
+    """Unstubbed: an existing store and the default config is the upgraded-box warning."""
+    from hal0.memory import extraction_env as ee
+    from hal0.memory.engine_upgrade import hindsight_dir
+
+    monkeypatch.setattr(ee, "SHOWCASE_DROP_IN_PATH", tmp_path / "absent" / "showcase-lanes.conf")
+    assert da.check_memory_embedder().status == "pass"  # no store yet
+
+    (hindsight_dir() / ".pg0" / "instances" / "hindsight" / "data").mkdir(parents=True)
+    check = da.check_memory_embedder()
+
+    assert check.status == "warn"
+    assert _BGE in check.detail and _HS in check.detail
+
+
+def test_memory_embedder_skips_when_the_config_is_unreadable(monkeypatch) -> None:
+    def boom(*_a: object, **_k: object) -> None:
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr("hal0.config.loader.load_hal0_config", boom)
+    check = da.check_memory_embedder()
+    assert check.status == "warn"
+    assert "unreadable" in check.detail

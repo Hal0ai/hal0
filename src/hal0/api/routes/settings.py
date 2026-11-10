@@ -157,6 +157,11 @@ async def get_settings(request: Request) -> dict[str, Any]:
 #: Settings prefixes that live in hindsight-api's showcase drop-in (#3492).
 _SHOWCASE_PREFIXES = ("memory.models.", "memory.decision.", "memory.lanes.")
 
+#: The one key under those prefixes a save does not carry to the engine
+#: (#3518): the drop-in renders the embedder the store was built with, from
+#: hal0.memory.embedder_record, whatever this key says.
+_EMBEDDER_KEY = "memory.models.embeddings_model"
+
 
 async def _apply_showcase_dropin(cs: Any) -> dict[str, Any] | None:
     """Carry a changed ``[memory.models|decision|lanes]`` value to the engine.
@@ -164,7 +169,9 @@ async def _apply_showcase_dropin(cs: Any) -> dict[str, Any] | None:
     Those keys reach hindsight-api only through its showcase drop-in, read at
     start — persisting ``hal0.toml`` alone would leave the daemon on the old
     values. Runs only when one of them actually changed. ``None`` when nothing
-    to do.
+    to do, which includes a save that changed only :data:`_EMBEDDER_KEY`: that
+    value is not rendered, so writing an identical drop-in would cost a
+    memory-engine restart for nothing.
 
     Called inside :func:`hal0_config_txn` (the graph PUT's
     ``_propagate_extraction_slot`` precedent) so two saves cannot write their
@@ -172,7 +179,9 @@ async def _apply_showcase_dropin(cs: Any) -> dict[str, Any] | None:
     thread cannot be cancelled, so the wait is shielded and a cancelled caller
     still waits it out before the lock is released.
     """
-    if not any(c.path.startswith(_SHOWCASE_PREFIXES) for c in cs.changes):
+    if not any(
+        c.path.startswith(_SHOWCASE_PREFIXES) and c.path != _EMBEDDER_KEY for c in cs.changes
+    ):
         return None
     from hal0.memory.extraction_env import apply_showcase_dropin
 
@@ -193,6 +202,22 @@ async def _apply_showcase_dropin(cs: Any) -> dict[str, Any] | None:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.shield(task)
         raise
+
+
+async def _embedder_status_for(cs: Any) -> dict[str, Any] | None:
+    """Recorded-vs-configured embedder when a save changed :data:`_EMBEDDER_KEY`.
+
+    The key is accepted into ``hal0.toml`` but the engine stays on the model
+    its store was built with (#3518). The apply plan files the key under
+    ``manual_restart``; this says in the same response what is recorded and
+    what was just configured. ``None`` when the key did not change. Reads
+    disk only, off the event loop.
+    """
+    if not any(c.path == _EMBEDDER_KEY for c in cs.changes):
+        return None
+    from hal0.memory.embedder_record import embedder_status
+
+    return await asyncio.to_thread(embedder_status, cs.merged.memory.models.embeddings_model)
 
 
 @router.put("")
@@ -252,6 +277,7 @@ async def update_settings(request: Request) -> dict[str, Any]:
             ) from exc
 
         showcase = await _apply_showcase_dropin(cs)
+        embedder = await _embedder_status_for(cs)
 
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:
@@ -284,6 +310,8 @@ async def update_settings(request: Request) -> dict[str, Any]:
     config_view["_hal0"] = {"apply_plan": cs.plan, "changeset": changeset_payload(cs)}
     if showcase is not None:
         config_view["_hal0"]["showcase_dropin"] = showcase
+    if embedder is not None:
+        config_view["_hal0"]["memory_embedder"] = embedder
     return config_view
 
 

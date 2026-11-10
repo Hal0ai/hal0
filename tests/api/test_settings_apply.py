@@ -432,3 +432,20 @@ def test_put_settings_response_preserves_existing_top_level_shape(
         assert table in body, f"existing top-level {table!r} missing from PUT response"
     # And the new envelope is added without clobbering anything.
     assert body["_hal0"]["apply_plan"]["unknown"] == []
+
+
+# ── #3518: [memory.models].embeddings_model is saved, not applied ────────────
+
+
+def test_registry_classes_the_memory_embedder_key_as_manual_restart() -> None:
+    """The existing class for "a service restart will not apply this": the
+    engine keeps the embedder its store was built with."""
+    assert REGISTRY["memory.models.embeddings_model"] == {
+        "apply_class": "manual-restart",
+        "services": [],
+    }
+    # Its neighbours in the same drop-in still apply on save.
+    assert REGISTRY["memory.models.reranker_model"]["apply_class"] == "immediate"
+    plan = apply_plan(["memory.models.embeddings_model", "memory.models.reranker_model"])
+    assert plan["manual_restart"] == ["memory.models.embeddings_model"]
+    assert plan["immediate"] == ["memory.models.reranker_model"]

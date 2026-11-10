@@ -356,3 +356,76 @@ def test_put_settings_leaves_the_engine_alone_for_unrelated_keys(
     assert r.status_code == 200, r.text
     assert "showcase_dropin" not in r.json()["_hal0"]
     assert seen == []
+
+
+# ── #3518: the embedder key is accepted, classified, and not carried over ────
+
+
+def test_put_settings_accepts_a_new_embedder_without_touching_the_engine(
+    isolated_client: TestClient, monkeypatch, tmp_path
+) -> None:
+    """The value lands in hal0.toml; the response says it does not take effect,
+    and neither the drop-in nor the engine is touched."""
+    import hal0.memory.extraction_env as ee
+    from hal0.memory.embedder_record import embedder_record_path
+    from hal0.memory.engine_upgrade import hindsight_dir
+
+    seen = _spy_showcase(monkeypatch)
+    monkeypatch.setattr(ee, "SHOWCASE_DROP_IN_PATH", tmp_path / "absent" / "showcase-lanes.conf")
+    (hindsight_dir() / ".pg0" / "instances" / "hindsight" / "data").mkdir(parents=True)
+
+    r = isolated_client.put(
+        "/api/settings",
+        json={"memory": {"models": {"embeddings_model": "example-org/another-embedder"}}},
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["memory"]["models"]["embeddings_model"] == "example-org/another-embedder"
+    assert body["_hal0"]["apply_plan"]["manual_restart"] == ["memory.models.embeddings_model"]
+    assert body["_hal0"]["apply_plan"]["immediate"] == []
+    assert body["_hal0"]["memory_embedder"] == {
+        "recorded": "BAAI/bge-small-en-v1.5",
+        "configured": "example-org/another-embedder",
+        "mixed": False,
+        "needs_switch": True,
+        "source": "engine-default",
+        "recorded_at": None,
+    }
+    assert seen == []
+    assert "showcase_dropin" not in body["_hal0"]
+    assert not embedder_record_path().exists()
+
+
+def test_put_settings_still_applies_the_other_model_keys(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    seen = _spy_showcase(monkeypatch)
+
+    r = isolated_client.put(
+        "/api/settings",
+        json={
+            "memory": {
+                "models": {
+                    "embeddings_model": "example-org/another-embedder",
+                    "reranker_bucket_batching": False,
+                }
+            }
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    assert len(seen) == 1
+    assert "showcase_dropin" in r.json()["_hal0"]
+    assert "memory_embedder" in r.json()["_hal0"]
+
+
+def test_put_settings_says_nothing_about_the_embedder_when_it_did_not_change(
+    isolated_client: TestClient, monkeypatch
+) -> None:
+    _spy_showcase(monkeypatch)
+    r = isolated_client.put(
+        "/api/settings", json={"memory": {"lanes": {"retain": {"max_concurrent": 3}}}}
+    )
+    assert r.status_code == 200, r.text
+    assert "memory_embedder" not in r.json()["_hal0"]
