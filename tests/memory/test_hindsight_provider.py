@@ -1053,8 +1053,10 @@ async def test_add_forwards_retain_shape_only_when_set():
 
     await p.add("plain", dataset="shared", client_id="hermes")
     rec = fake.retained[0]
-    for key in ("entities", "observation_scopes", "strategy", "update_mode", "sync"):
+    for key in ("entities", "strategy", "update_mode", "sync"):
         assert key not in rec
+    # ADR-0058: the write envelope sends a default scope on every such write.
+    assert rec["observation_scopes"] == "shared"
 
     await p.add(
         "rich",

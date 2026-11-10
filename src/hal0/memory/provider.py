@@ -165,7 +165,9 @@ class MemoryProvider(ABC):
         ``observation_scopes``
             How to scope observations during consolidation
             (``"per_tag"|"combined"|"all_combinations"|"shared"`` or a list
-            of tag-lists).
+            of tag-lists). ``None`` lets the engine provider choose: the
+            Hindsight provider sends ``"shared"`` (ADR-0058), except on a
+            private write in the unified bank.
         ``strategy``
             Named retain strategy overriding the bank default for this item.
         ``update_mode``

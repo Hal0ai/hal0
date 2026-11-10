@@ -40,6 +40,13 @@ import httpx
 import structlog
 
 from hal0.errors import BadRequest, MemoryEngineUnavailable
+from hal0.memory.envelope import (
+    ANONYMOUS_AGENT,
+    UNKNOWN_AGENT,
+    apply_envelope,
+    coerce_tags,
+    resolve_observation_scopes,
+)
 from hal0.memory.provider import MemoryProvider
 
 log = structlog.get_logger(__name__)
@@ -91,9 +98,10 @@ def _strip_reserved_scopes(scopes: Any) -> Any:
 
 # The front-door sentinel for a missing X-hal0-Agent; collapses to ``unknown``
 # on both write (agent tag) and read (caller identity) so an absent identity
-# can never match a real agent's private docs.
-_ANONYMOUS = "anonymous"
-_UNKNOWN_AGENT = "unknown"
+# can never match a real agent's private docs. Both names are owned by the
+# write envelope (``hal0.memory.envelope``), which stamps the ``agent:`` tag.
+_ANONYMOUS = ANONYMOUS_AGENT
+_UNKNOWN_AGENT = UNKNOWN_AGENT
 
 # Unified-bank project tagging (#1300). The same compensator pattern as
 # ``visibility:private``: pre-unified multi-bank mode isolates ``project:<id>`` by
@@ -1368,36 +1376,54 @@ class HindsightProvider(MemoryProvider):
         # ``visibility:private`` is added only when the write came in under the
         # private toggle — otherwise a caller could plant a note in another
         # agent's private namespace. Other caller tags are preserved.
-        out_tags = [t for t in (tags or []) if not _is_reserved_tag(t)]
-        out_tags.append(f"{_AGENT_TAG_PREFIX}{agent}")
+        caller_tags = [t for t in coerce_tags(tags) if not _is_reserved_tag(t)]
+        # The write envelope (ADR-0058 decision 4) then normalises what is
+        # left: it stamps ``agent:`` and exactly one ``kind:`` tag, and moves
+        # session ids and lifecycle words out of the tag space into metadata.
+        # #1300: the ``project:<id>`` tag is stamped only in unified mode —
+        # pre-unified multi-bank mode isolates the project by bank, so tagging
+        # there would be a second owner of the same fact (and would change
+        # existing deployments' tag sets).
+        envelope = apply_envelope(
+            caller_tags,
+            agent=agent,
+            project=requested_project if self._unified_bank else None,
+            metadata=meta,
+        )
+        out_tags = list(envelope.tags)
         if requested_private:
             out_tags.append(_VISIBILITY_PRIVATE)
-        # #1300: only in unified mode — pre-unified multi-bank mode isolates the
-        # project by bank, so tagging there would be a second owner of the
-        # same fact (and would change existing deployments' tag sets).
-        if self._unified_bank and requested_project and requested_project not in out_tags:
-            out_tags.append(requested_project)
+        # Merged only now, after the document id was resolved above: a session
+        # id lifted out of the tags is provenance and must not become the
+        # ``<agent>:<session_id>`` join key, or every write of one session
+        # would replace the last.
+        meta.update(envelope.metadata)
 
         # Extraction quality suffers without a ``context`` line and a
         # timestamp; always supply both unless the caller already did.
         context = meta.pop("context", None) or meta.get("source") or f"{agent} conversation turn"
         timestamp = meta.pop("timestamp", None) or _now()
 
-        # Full RetainRequest item shape (entities/observation_scopes/strategy/
-        # update_mode) + the sync/async toggle — forwarded only when the
-        # caller actually set them, so a client fake built against the older
-        # narrow ``retain(bank_id, content, document_id, context, metadata,
-        # tags, timestamp)`` shape (every existing test double) keeps working
-        # unmodified; only a caller that opts into the new surface sees it.
+        # Full RetainRequest item shape (entities/strategy/update_mode) + the
+        # sync/async toggle — forwarded only when the caller actually set
+        # them. ``observation_scopes`` is the exception: every write that is
+        # not private-in-the-unified-bank carries one (see below), so a client
+        # fake must accept that keyword.
         extra: dict[str, Any] = {}
         if entities is not None:
             extra["entities"] = entities
         # A private note in the unified bank must not feed an observation that
         # lacks ``visibility:private``, so on a private write the caller's
         # scopes (any form) are ignored and the engine default applies.
+        # Every other write is sent with the envelope's default scope unless the
+        # caller chose one: ``shared`` consolidates into one untagged scope, so
+        # per-call tags stop splitting observations into silos.
         if self._unified_bank and requested_private:
             observation_scopes = None
-        observation_scopes = _strip_reserved_scopes(observation_scopes)
+        else:
+            observation_scopes = resolve_observation_scopes(
+                _strip_reserved_scopes(observation_scopes)
+            )
         if observation_scopes is not None:
             extra["observation_scopes"] = observation_scopes
         if strategy is not None:
