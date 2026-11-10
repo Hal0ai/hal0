@@ -3420,14 +3420,25 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     (:mod:`hal0.memory.embedder_record`) and renders the engine environment
     from that record, so a ``[memory.models].embeddings_model`` that differs
     changes nothing: the engine stays on the recorded model and this row says
-    so. It also reports a store marked ``mixed``, one that existed before the
-    engine was moved off its default embedder and so may hold vectors from
-    two models. Advisory (``warn``): memory keeps working, and nothing here
-    is repaired by a restart. Re-embedding the store is the way out of both.
+    so. Three outcomes:
+
+    * ``pass`` when the two match and the store is not ``mixed``;
+    * ``pass`` with a note when they differ only because the config still has
+      its shipped default. That is every upgraded box (its store was built
+      with the engine default) and nothing the operator did, and no release
+      ships a way to re-embed a store yet, so a warning would have no remedy;
+    * ``warn`` when the operator set a model of their own that differs from
+      the record, since that setting is not doing what they asked, and when
+      the store is ``mixed``: it existed before the engine was moved off its
+      default embedder and may hold vectors from two models.
+
+    Never ``fail``: memory keeps working, and nothing here is repaired by a
+    restart. Re-embedding the store is the way out of both warnings.
 
     ``status`` is the injection point for tests; by default it is read from
     this box's ``hal0.toml``, the record and the engine's data directory.
     """
+    from hal0.config.schema import MemoryModelsConfig
     from hal0.memory.embedder_record import (
         SOURCE_CONFIGURED,
         embedder_notice,
@@ -3435,6 +3446,7 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     )
 
     name, title = "memory_embedder", "Memory embedder"
+    shipped_default = MemoryModelsConfig.model_fields["embeddings_model"].default
     if status is None:
         from hal0.config.loader import load_hal0_config
 
@@ -3443,9 +3455,19 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
         except Exception as exc:
             return Check(name, title, _WARN, f"hal0.toml unreadable — check skipped: {exc}")
         status = embedder_status(configured)
-    notice = embedder_notice(status)
-    if notice:
-        return Check(name, title, _WARN, notice)
+    recorded, configured = status.get("recorded"), status.get("configured")
+    differs = recorded != configured
+    if status.get("mixed") or (differs and configured != shipped_default):
+        return Check(name, title, _WARN, embedder_notice(status) or "")
+    if differs:
+        return Check(
+            name,
+            title,
+            _PASS,
+            f"the memory store was built with {recorded} and stays on it; the configured "
+            f"model ({configured}) takes effect only through an embedder switch, which a "
+            "later release adds",
+        )
     if status.get("source") == SOURCE_CONFIGURED and not status.get("recorded_at"):
         return Check(name, title, _PASS, "no memory store on this box — nothing recorded yet")
     return Check(

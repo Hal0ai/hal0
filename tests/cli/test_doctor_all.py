@@ -3751,11 +3751,23 @@ def test_memory_embedder_passes_when_the_store_matches_the_config() -> None:
     assert _BGE in check.detail
 
 
-def test_memory_embedder_warns_in_plain_words_when_the_config_differs() -> None:
+def test_memory_embedder_passes_with_a_note_on_an_upgraded_box_at_the_default() -> None:
+    """Store on bge-small, config still at its shipped default: every upgraded
+    box. Not a warning, because no release ships a remedy yet."""
     check = da.check_memory_embedder(status=_embedder(_BGE, _HS))
+    assert check.status == "pass"
+    assert f"built with {_BGE} and stays on it" in check.detail
+    assert f"the configured model ({_HS})" in check.detail
+    assert "only through an embedder switch, which a later release adds" in check.detail
+    # Does not name a command that does not exist.
+    assert "`hal0 memory" not in check.detail
+
+
+def test_memory_embedder_warns_when_the_operator_set_a_model_that_differs() -> None:
+    check = da.check_memory_embedder(status=_embedder(_BGE, "example-org/another-embedder"))
     assert check.status == "warn"
     assert f"built with {_BGE}" in check.detail
-    assert f"embeddings_model is set to {_HS}" in check.detail
+    assert "embeddings_model is set to example-org/another-embedder" in check.detail
     assert "no effect" in check.detail
     # Names the way out without claiming the command exists.
     assert "`hal0 memory embedder switch`" in check.detail
@@ -3770,6 +3782,20 @@ def test_memory_embedder_warns_on_a_mixed_store_even_when_the_models_match() -> 
     assert "has no effect" not in check.detail
 
 
+def test_memory_embedder_warns_when_a_store_on_the_default_model_is_configured_away() -> None:
+    """Recorded hs-embed-1, operator asks for bge-small: an explicit setting that is not applied."""
+    check = da.check_memory_embedder(status=_embedder(_HS, _BGE))
+    assert check.status == "warn"
+    assert f"embeddings_model is set to {_BGE}" in check.detail
+
+
+def test_memory_embedder_warns_on_a_mixed_store_at_the_default_config() -> None:
+    """Mixed outranks the upgraded-box note."""
+    check = da.check_memory_embedder(status=_embedder(_BGE, _HS, mixed=True))
+    assert check.status == "warn"
+    assert "two embedders" in check.detail
+
+
 def test_memory_embedder_passes_on_a_box_with_no_store() -> None:
     status = _embedder(_HS, _HS, source="configured", recorded_at=None)
     check = da.check_memory_embedder(status=status)
@@ -3778,7 +3804,7 @@ def test_memory_embedder_passes_on_a_box_with_no_store() -> None:
 
 
 def test_memory_embedder_reads_this_boxs_store_by_default(tmp_path, monkeypatch) -> None:
-    """Unstubbed: an existing store and the default config is the upgraded-box warning."""
+    """Unstubbed: an existing store and the default config is the upgraded-box note."""
     from hal0.memory import extraction_env as ee
     from hal0.memory.engine_upgrade import hindsight_dir
 
@@ -3788,8 +3814,8 @@ def test_memory_embedder_reads_this_boxs_store_by_default(tmp_path, monkeypatch)
     (hindsight_dir() / ".pg0" / "instances" / "hindsight" / "data").mkdir(parents=True)
     check = da.check_memory_embedder()
 
-    assert check.status == "warn"
-    assert _BGE in check.detail and _HS in check.detail
+    assert check.status == "pass"
+    assert f"built with {_BGE} and stays on it" in check.detail and _HS in check.detail
 
 
 def test_memory_embedder_skips_when_the_config_is_unreadable(monkeypatch) -> None:
