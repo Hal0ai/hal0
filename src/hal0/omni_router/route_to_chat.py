@@ -204,6 +204,8 @@ def validate_delegation_slots(
         caller_slot is not None
         and getattr(caller_slot, "device", None) == "npu"
         and getattr(target_slot, "device", None) == "npu"
+        and getattr(caller_slot, "binary", "") != "xdna"
+        and getattr(target_slot, "binary", "") != "xdna"
     ):
         return (
             "route_to_chat refused: NPU↔NPU delegation would force "

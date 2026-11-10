@@ -256,3 +256,68 @@ async def test_update_config_refuses_glu_a_in_server_env(tmp_hal0_home: str) -> 
     with pytest.raises(BadRequest) as exc:
         await sm.update_config("xdna", {"server": {"env": {"GGML_XDNA_PGEMM_GLU_A": "1"}}})
     assert exc.value.code == "validation.xdna_env_pinned"
+
+
+def test_live_delegation_path_allows_xdna_beside_flm() -> None:
+    """``validate_delegation_slots`` (the omni_router dispatch path) mirrors #3537."""
+    from hal0.omni_router.route_to_chat import validate_delegation_slots
+    from hal0.slots.routing import loaded_slot_from_config
+
+    xdna = loaded_slot_from_config(_xdna())
+    flm = loaded_slot_from_config(_flm())
+    flm_b = loaded_slot_from_config(_flm(name="flm-b"))
+    assert xdna is not None and xdna.binary == "xdna"
+    assert flm is not None and flm_b is not None
+
+    def check(caller: Any, target: Any) -> str | None:
+        return validate_delegation_slots(
+            caller_slot=caller,
+            caller_slot_name=caller.name,
+            target=target.name,
+            target_slot=target,
+            current_depth=0,
+        )
+
+    assert check(xdna, flm) is None
+    assert check(flm, xdna) is None
+    refused = check(flm, flm_b)
+    assert refused is not None and "NPU" in refused
+
+
+def test_load_refuses_a_hand_edited_non_llm_xdna_slot() -> None:
+    import pytest
+
+    from hal0.errors import BadRequest
+    from hal0.providers.container import ContainerProvider
+
+    with pytest.raises(BadRequest) as exc:
+        ContainerProvider().check_load(_xdna(type="embedding"), {})
+    assert exc.value.code == "slot.xdna_not_supported"
+
+
+def test_id_keying_migration_reads_a_root_binary_beside_a_slot_table(tmp_path: Path) -> None:
+    from hal0.slot_config import write_slot_toml
+    from hal0.slots.identity import SlotIdentityStore
+    from hal0.slots.migrate_id_keying import RecordingSlotArtifactOps, migrate_slot_id_keying
+
+    config_dir = tmp_path / "slots"
+    config_dir.mkdir()
+    write_slot_toml(
+        config_dir / "xdna.toml",
+        {"binary": "xdna", "slot": {"name": "xdna", "type": "llm", "device": "npu"}},
+    )
+    write_slot_toml(
+        config_dir / "flm.toml",
+        {"slot": {"name": "flm", "type": "llm", "device": "npu"}},
+    )
+    identity = SlotIdentityStore(db_path=tmp_path / "hal0.db")
+    migrate_slot_id_keying(
+        identity=identity,
+        config_dir=config_dir,
+        data_dir=tmp_path / "data",
+        ops=RecordingSlotArtifactOps(),
+    )
+    xdna_row = identity.get_by_name("xdna")
+    flm_row = identity.get_by_name("flm")
+    assert xdna_row is not None and xdna_row.coresident_group is None
+    assert flm_row is not None and flm_row.coresident_group == "npu-flm-trio"

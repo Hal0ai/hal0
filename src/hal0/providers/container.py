@@ -2408,6 +2408,9 @@ class ContainerProvider(Provider):
           no other runtime pays for the sysfs walk. Raises whatever it refuses with
           (a ``SlotConfigError``).
         """
+        from hal0.slots.config_write import refuse_xdna_non_llm
+
+        refuse_xdna_non_llm(dict(slot_cfg))
         spec_provider = _spec_provider_for(slot_cfg)
         _refuse_foreign_runner(slot_cfg, spec_provider)
         slot_label = str(slot_cfg.get("name", "") or slot_instance_token(slot_cfg))

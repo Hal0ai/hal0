@@ -62,8 +62,9 @@ def is_npu_trio_shadow(cfg: SlotConfig | dict[str, Any]) -> bool:
     busy single-tenant NPU returns HTTP 500, so callers skip the spawn and
     derive their state from the anchor. The anchor itself (``type=llm``) is
     deliberately excluded, and so is an xdna slot (``binary = "xdna"``): it runs
-    its own llama-server, not FLM's process. The write seam refuses an xdna slot
-    of these types; this is the belt for a hand-edited file.
+    its own llama-server, not FLM's process. The write seam and the launch seam
+    (``ContainerProvider.check_load``) both refuse an xdna slot of these types;
+    this keeps a hand-edited one out of the trio's shadow handling meanwhile.
     """
     d = _cfg_to_dict(cfg)
     return (

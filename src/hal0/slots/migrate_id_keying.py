@@ -47,7 +47,7 @@ from typing import Any, Protocol
 
 from hal0.install.perms import ensure_shared_dir
 from hal0.slot_config import write_slot_toml
-from hal0.slots.activation import is_xdna_slot
+from hal0.slots.activation import slot_binary
 from hal0.slots.identity import SlotIdentityStore
 
 log = logging.getLogger("hal0.slots.migrate_id_keying")
@@ -282,7 +282,7 @@ def migrate_slot_id_keying(
                 slot_type=str(slot_tbl.get("type") or "llm"),
                 device=device,
                 coresident_group=(
-                    "npu-flm-trio" if device == "npu" and not is_xdna_slot(slot_tbl) else None
+                    "npu-flm-trio" if device == "npu" and slot_binary(raw) != "xdna" else None
                 ),
                 is_seed=name in seeded,
             )

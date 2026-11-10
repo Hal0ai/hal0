@@ -844,19 +844,9 @@ def guard_xdna_slot_shape(merged: dict[str, Any], changed_keys: set[str] | None 
         return
     if changed_keys is not None and not changed_keys & {"server", "binary", "type"}:
         return
-    from hal0.errors import BadRequest
     from hal0.runners.knobs import refuse_xdna_pinned_env
-    from hal0.slot_config import slot_scalar_table
 
-    slot_type = str(slot_scalar_table(merged).get("type") or merged.get("type") or "llm")
-    if slot_type != "llm":
-        slot_name = merged.get("name") or (merged.get("slot") or {}).get("name") or "?"
-        raise BadRequest(
-            f"slot {slot_name!r} is type {slot_type!r}, but the xdna runner serves "
-            "chat (type llm) only; pick another runtime for this slot",
-            code="slot.xdna_not_supported",
-            details={"slot": slot_name, "type": slot_type, "binary": "xdna"},
-        )
+    refuse_xdna_non_llm(merged)
     server = merged.get("server")
     env = server.get("env") if isinstance(server, dict) else None
     if isinstance(env, dict):
@@ -866,6 +856,30 @@ def guard_xdna_slot_shape(merged: dict[str, Any], changed_keys: set[str] | None 
         # and a leftover one from before a binary flip would advertise FLM
         # ASR/embed tags. Drop it as the slot becomes xdna.
         merged.pop("npu", None)
+
+
+def refuse_xdna_non_llm(cfg: dict[str, Any]) -> None:
+    """Refuse an xdna slot whose ``type`` is not ``llm`` (``slot.xdna_not_supported``).
+
+    The xdna runner serves chat only. Shared by the write seam
+    (:func:`guard_xdna_slot_shape`) and the launch seam
+    (``ContainerProvider.check_load``), which catches a hand-edited file.
+    """
+    from hal0.errors import BadRequest
+    from hal0.slot_config import slot_scalar_table
+    from hal0.slots.activation import is_xdna_slot
+
+    if not is_xdna_slot(cfg):
+        return
+    slot_type = str(slot_scalar_table(cfg).get("type") or cfg.get("type") or "llm")
+    if slot_type != "llm":
+        slot_name = cfg.get("name") or (cfg.get("slot") or {}).get("name") or "?"
+        raise BadRequest(
+            f"slot {slot_name!r} is type {slot_type!r}, but the xdna runner serves "
+            "chat (type llm) only; pick another runtime for this slot",
+            code="slot.xdna_not_supported",
+            details={"slot": slot_name, "type": slot_type, "binary": "xdna"},
+        )
 
 
 def _changed_scalar_keys(updates: dict[str, Any]) -> set[str]:
@@ -942,5 +956,6 @@ __all__ = [
     "model_is_flm",
     "reconcile_and_guard_slot_config",
     "reconcile_slot_updates",
+    "refuse_xdna_non_llm",
     "slot_is_flm",
 ]
