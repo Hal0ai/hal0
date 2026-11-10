@@ -154,6 +154,12 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      reporting how many folded in and which are left; a left-over bank can be
      retried alone. This differs from the embedder switch in decision 2, which
      stops on the first mismatch because the embedder is instance-wide.
+   - *It tags in the archive.* An engine import cannot add or change tags
+     (verified on engine 1.2.0), so the fold-in exports a bank, rewrites the
+     tags in the exported documents (project, agent, the envelope's rules, and
+     the split of private facts), and imports the rewritten archive. A merge
+     import carries documents, facts, observations and mental models but not
+     directives; directives come from the bank spec (decision 8).
    - *It re-embeds.* The import embeds every fact with the store's recorded
      embedder, so on a box whose store is mixed the fold-in is also the
      repair, and that box does not need the switch.
@@ -243,10 +249,12 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
 
 ## Open questions
 
-- Whether `merge` import can tag the documents it folds in, or whether
-  `migrate fold-in` must re-tag after import. To be proven on the test rig
-  before the converter is written.
-- Import time and peak memory for a store of about 50,000 facts on CPU.
+Measured on engine 1.2.0 on a test box, 2026-11-10: a bank restore re-embeds
+at roughly 60 facts per second on CPU with no LLM calls, so a store of 50,000
+facts folds in within minutes; a reflect is cancelled when its client
+disconnects; a resend with the same operation id and different content is
+dropped silently.
+
 - One `hal0:private` bank isolates agents from each other by an `agent:` tag
   filter, as the unified bank does today, not by a bank boundary. Whether any
   agent (a public-facing chat profile, for example) needs a hard boundary and
