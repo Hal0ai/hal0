@@ -58,6 +58,7 @@ from hal0.slots.activation import (
     effective_npu_table,
     is_xdna_slot,
     npu_modality_active,
+    slot_binary,
 )
 from hal0.slots.naming import slot_instance_token, slot_unit_name
 from hal0.slots.reaper import eviction_priority
@@ -338,8 +339,7 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # env-override warning).
         threads_val = cfg.get("threads")
         entry["threads"] = threads_val if isinstance(threads_val, int) else None
-        binary_val = cfg.get("binary")
-        entry["binary"] = binary_val if isinstance(binary_val, str) and binary_val else None
+        entry["binary"] = slot_binary(cfg) or None
         entry["image_pin"] = cfg.get("image_pin")
         # METRICS (#1810) — completes the HW-grid lift: SlotConfig.metrics
         # controls whether --metrics reaches llama-server's argv. Surface it

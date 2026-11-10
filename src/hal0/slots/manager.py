@@ -41,7 +41,6 @@ from hal0.config import paths
 from hal0.errors import Hal0Error
 from hal0.registry import fallback as _registry_fallback
 from hal0.slot_config import (
-    slot_scalar_table,
     slot_write_lock,
     write_slot_toml,
 )
@@ -112,6 +111,7 @@ from hal0.slots.state import (
     SlotState,
     SlotStateRecord,
     SlotTerminateTimeout,
+    XdnaInFlmPortGroup,
     is_transition_legal,
     provider_registry_miss_is_expected,
     provider_requires_model,
@@ -1097,150 +1097,32 @@ class SlotManager:
             self._bind_key(canonical, int(row.id))
         return row
 
-    def _evict_xdna_from_flm_group(
-        self, name: str, cfg: dict[str, Any], cfg_path: Path | None = None
-    ) -> Any | None:
-        """Move an xdna slot stuck in the FLM trio's port group onto a port of its own.
+    def _xdna_in_flm_port_group(self, name: str, cfg: Any) -> bool:
+        """True when ``cfg`` is an xdna slot whose stored identity row is in FLM's group.
 
-        Before ADR-0057's routing fix an xdna slot (``binary = "xdna"``) created
-        beside a live FLM anchor had its identity row stamped with the
-        ``npu-flm-trio`` coresident group, so the port authority shared FLM's
-        port with it. Nothing re-derives a stored group, so the slot would keep
-        FLM's port forever (the boot seed skips it with
-        ``slot.port_seed_conflict``).
-
-        Deliberately narrow: acts ONLY when ``cfg`` is an xdna slot AND its
-        stored row names the trio group. Every other row (FLM members, older
-        rows with no group, GPU slots) is left exactly as it is.
-
-        Order, so a failure part-way leaves a state the next call retries:
-
-          1. acquire a solo claim (or reuse one a previous, interrupted call
-             already took): the config's own port when it is free and is not
-             the group's shared port (an operator's explicit port), else the
-             lowest free port;
-          2. write that port into the slot TOML (it mirrors the claim);
-          3. only then persist ``coresident_group = None``.
-
-        A failed acquire changes nothing; a failed TOML write releases the
-        claim this call took. Either way the row keeps the trio group, so the
-        next boot fold or config write tries again. If the slot's own claim IS
-        the group's claim (it was the first member), moving it would strand the
-        FLM members, so this refuses loudly naming the port instead.
-
-        Returns the (possibly updated) identity row, or ``None`` when there is
-        no identity store or row. Never raises.
+        Only a slot made xdna before ADR-0057's launch fix can be here: its row
+        was stamped ``npu-flm-trio``, so the port authority shares FLM's port
+        with it. hal0 does not migrate that claim; the write and the load
+        refuse (:meth:`_refuse_xdna_in_flm_port_group`) and the fix is to delete
+        and recreate the slot. Never raises; no identity store reads as False.
         """
-        if self._identity is None:
-            return None
-        canonical = self._resolve_alias(name)
-        try:
-            row = self._identity.get_by_name(canonical)
-        except Exception:
-            return None
-        if row is None:
-            return None
-        if not is_xdna_slot(cfg) or getattr(row, "coresident_group", None) != _FLM_TRIO_GROUP:
-            return row
-        authority = self._port_authority
-        if authority is None:
-            return row
-        cfg_port = _cfg_port(cfg) or None
-        try:
-            claims = authority.claims()
-        except Exception as exc:
-            log.warning(
-                "slot.xdna_port_evict_failed",
-                extra={"slot": canonical, "step": "claims", "error": str(exc)},
-            )
-            return row
-        group_port = next((c.port for c in claims if c.coresident_group == _FLM_TRIO_GROUP), None)
-        own = next((c for c in claims if c.slot_id == row.id), None)
-        if own is not None and own.coresident_group == _FLM_TRIO_GROUP:
-            log.error(
-                "slot.xdna_holds_flm_group_port",
-                extra={
-                    "slot": canonical,
-                    "port": own.port,
-                    "hint": (
-                        f"xdna slot {canonical!r} owns the FLM trio's shared port "
-                        f"{own.port}; unload FLM, then set a different port on this slot"
-                    ),
-                },
-            )
-            return row
-
-        took_claim = False
-        if own is not None:
-            granted = own.port  # an interrupted earlier call already took it
-        else:
-            preferred = (
-                cfg_port
-                if cfg_port is not None
-                and cfg_port != group_port
-                and authority.is_free(cfg_port, include_listeners=False)
-                else None
-            )
-            try:
-                granted = authority.acquire(
-                    row.id,
-                    preferred=preferred,
-                    coresident_group=None,
-                    owner_label=f"slot:{canonical}",
-                    include_listeners=False,
-                )
-            except Exception as exc:
-                log.warning(
-                    "slot.xdna_port_evict_failed",
-                    extra={"slot": canonical, "step": "acquire", "error": str(exc)},
-                )
-                return row
-            took_claim = True
-
-        if granted != cfg_port and not self._write_back_port(canonical, granted, cfg_path):
-            if took_claim:
-                with contextlib.suppress(Exception):
-                    authority.release(row.id)
-            return row
-
-        try:
-            self._identity.set_coresident_group(row.id, None)
-        except Exception as exc:
-            # The claim and the TOML already agree; the next call sees the
-            # claim it owns and only retries this step.
-            log.warning(
-                "slot.xdna_port_evict_failed",
-                extra={"slot": canonical, "step": "regroup", "error": str(exc)},
-            )
-            return row
-        log.warning(
-            "slot.xdna_port_evicted",
-            extra={"slot": canonical, "from_port": group_port, "to_port": granted},
-        )
-        try:
-            return self._identity.get_by_name(canonical)
-        except Exception:
-            return row
-
-    def _write_back_port(self, name: str, port: int, cfg_path: Path | None = None) -> bool:
-        """Mirror a granted port into the slot TOML's ``port``; ``False`` on failure."""
-        import tomllib
-
-        path = cfg_path or self._config_file_for(name)
-        try:
-            with slot_write_lock():
-                with path.open("rb") as fh:
-                    raw = tomllib.load(fh)
-                slot_scalar_table(raw)["port"] = int(port)
-                write_slot_toml(path, raw)
-        except Exception as exc:
-            log.warning(
-                "slot.port_write_back_failed",
-                extra={"slot": name, "port": port, "error": str(exc)},
-            )
+        if self._identity is None or not is_xdna_slot(_cfg_to_dict(cfg)):
             return False
-        self._invalidate_cfg_cache(name)
-        return True
+        try:
+            row = self._identity.get_by_name(self._resolve_alias(name))
+        except Exception:
+            return False
+        return row is not None and getattr(row, "coresident_group", None) == _FLM_TRIO_GROUP
+
+    def _refuse_xdna_in_flm_port_group(self, name: str, cfg: Any) -> None:
+        """Raise :class:`XdnaInFlmPortGroup` for :meth:`_xdna_in_flm_port_group`."""
+        if self._xdna_in_flm_port_group(name, cfg):
+            raise XdnaInFlmPortGroup(
+                f"slot {name!r} is registered in the FLM trio's shared port group, "
+                "so as an xdna slot it would launch on FLM's port; delete the slot "
+                "and create a new xdna slot, which gets a port of its own",
+                details={"slot": name, "coresident_group": _FLM_TRIO_GROUP},
+            )
 
     def _stamp_id(self, slot: Slot) -> Slot:
         """Populate ``slot.slot_id`` from the identity store, best-effort."""
@@ -1321,11 +1203,18 @@ class SlotManager:
             row = self._ensure_identity(name, cfg)
             if row is None:
                 continue
-            # A row stamped with a group its config no longer has (an xdna slot
-            # created beside FLM before ADR-0057's fix) re-derives it here and
-            # gets its own port claim, instead of keeping FLM's shared one.
-            row = self._evict_xdna_from_flm_group(name, cfg, _path) or row
             count += 1
+            if self._xdna_in_flm_port_group(name, cfg):
+                # Changes nothing (no claim, TOML or group): the load refuses
+                # with the same error, and the operator recreates the slot.
+                log.error(
+                    "slot.xdna_in_flm_port_group",
+                    extra={
+                        "slot": name,
+                        "hint": "delete this slot and create a new xdna slot",
+                    },
+                )
+                continue
             if self._port_authority is None:
                 continue
             port = _cfg_port(cfg)
@@ -3202,6 +3091,7 @@ class SlotManager:
                 model_id, provider=_cfg_effective_provider(slot_cfg)
             )
 
+        self._refuse_xdna_in_flm_port_group(slot_name, slot_cfg)
         cfg = _launch_cfg(slot_cfg, model_id)
 
         # Container path: write + start the podman systemd unit.
@@ -3222,6 +3112,8 @@ class SlotManager:
     ) -> None:
         """Run the container seam's refusals on the config ``_spawn_locked`` will launch."""
         from hal0.providers.container import container_provider
+
+        self._refuse_xdna_in_flm_port_group(str(_cfg_to_dict(slot_cfg).get("name") or ""), slot_cfg)
 
         check = getattr(container_provider(), "check_load", None)
         if check is None:
@@ -3612,6 +3504,7 @@ class SlotManager:
         if "xdna" in cfg_dict:
             guard_and_normalize_xdna(cfg_dict, {"xdna": cfg_dict["xdna"]})
         guard_xdna_slot_shape(cfg_dict)
+        self._refuse_xdna_in_flm_port_group(slot_name, cfg_dict)
         await self._check_npu_exclusivity(slot_name, cfg_dict)
         # SC-4, first-of-type: the create modal no longer asks "make this the
         # default?" — the FIRST slot of a type silently becomes that type's
@@ -3883,6 +3776,13 @@ class SlotManager:
             # two-defaults-on-disk state is not rejected for a conflict it did
             # not create). Returns a fresh dict — rebind ``cfg_dict``.
             cfg_dict = reconcile_and_guard_slot_config(slot_name, cfg_dict, updates)
+            # A write that makes the slot xdna while its identity row is still
+            # in FLM's port group would launch on FLM's port: refused.
+            changed = set(updates) | set(
+                updates["slot"] if isinstance(updates.get("slot"), dict) else ()
+            )
+            if changed & {"binary", "device"}:
+                self._refuse_xdna_in_flm_port_group(slot_name, cfg_dict)
 
             try:
                 write_slot_toml(cfg_path, cfg_dict)
@@ -3891,10 +3791,6 @@ class SlotManager:
                     f"failed to rewrite {cfg_path}: {exc}",
                 ) from exc
             self._invalidate_cfg_cache(slot_name)
-            # A write that moves the slot in or out of the FLM trio (a
-            # ``binary`` flip to or from xdna, a device change) must move its
-            # port claim with it, or it keeps sharing FLM's port.
-            self._evict_xdna_from_flm_group(slot_name, cfg_dict, cfg_path)
 
         # Config edit is operator intent: the crash cause was presumably
         # fixed, so the crash-loop breaker must not refuse the next load.
