@@ -173,9 +173,13 @@ function TuneRow({ k, tune, profile, tuneEffective, runtimeFamily, reason, error
   )
 }
 
-/** Whether the Tune block applies to this slot at all. */
+/**
+ * Whether the Tune block applies to this slot at all. An NPU slot takes it only
+ * on the xdna runner, which is a llama-server launch; FastFlowLM has no tune.
+ */
 export function tuneApplies(slot) {
-  return !!slot && slot.type === 'llm' && slot.device !== 'npu'
+  if (!slot || slot.type !== 'llm') return false
+  return slot.device !== 'npu' || String(slot.runner || '').toLowerCase() === 'xdna'
 }
 
 export function TuneBlock({

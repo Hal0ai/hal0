@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
+from hal0.config.schema import ProfileConfig
 from hal0.providers.container import (
     ContainerProvider,
     _resolve_image_ref,
@@ -160,3 +161,29 @@ def test_launch_forces_glu_a_off_over_a_hand_edited_toml() -> None:
     ):
         plan = ContainerProvider().container_spec(cfg, model_info)
     assert plan.env["GGML_XDNA_PGEMM_GLU_A"] == "0"
+
+
+def _xdna_detail(cfg: dict[str, Any]) -> dict[str, Any]:
+    from hal0.providers.container import resolved_argv_detail_for_slot
+
+    model_info = {"path": "/models/qwen3.5-0.8b.gguf", "_model_key": "qwen3.5-0.8b-q4_k_m"}
+    with (
+        patch("hal0.providers.container._resolve_profile", return_value=ProfileConfig()),
+        patch("hal0.providers.container._best_effort_model_info", return_value=model_info),
+        patch("hal0.providers._image.operator_default_image", return_value=None),
+    ):
+        return resolved_argv_detail_for_slot(cfg)
+
+
+def test_xdna_slot_tune_reaches_the_launch() -> None:
+    """A slot [tune] window lands on an xdna slot's argv like a GPU slot's (#3536)."""
+    d = _xdna_detail(_xdna_cfg(tune={"ctx_size": 4096}))
+    argv = d["argv"]
+    assert argv[argv.index("--ctx-size") + 1] == "4096"
+    assert d["tune_effective"]["sources"]["ctx_size"] == "slot"
+    assert set(d["tune_effective"]["tune_unavailable"]) == {"speculation"}
+
+
+def test_gpu_slot_has_no_tune_unavailable() -> None:
+    d = _xdna_detail(_xdna_cfg(device="gpu-rocm", binary="rocm"))
+    assert d["tune_effective"]["tune_unavailable"] == {}

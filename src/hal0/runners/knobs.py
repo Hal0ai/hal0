@@ -44,6 +44,13 @@ HALOGEN_TUNE_UNAVAILABLE: dict[str, str] = {
     "speculation": "ngram: this engine has no n-gram drafter (auto or off)",
 }
 
+#: The same read shape for the xdna runner (ADR-0057). Its launch runs one
+#: sequence (``-np 1``) on the NPU fork, which has no MTP heads, no drafter
+#: kinds and no tested n-gram path: ``auto`` resolves to no speculation there.
+XDNA_TUNE_UNAVAILABLE: dict[str, str] = {
+    "speculation": "ngram: the xdna runner has no speculative path (auto or off)",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class EngineKnob:
