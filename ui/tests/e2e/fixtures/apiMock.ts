@@ -259,6 +259,16 @@ export async function installDefaultMocks(page: Page, state: MockState) {
       })),
     }),
   )
+  // GET /api/memory/banks/{bank}/config is not in the in-bundle mock's allow-list either, so
+  // it reaches page.route. Memory ▸ Knowledge reads the bank's minimum refresh interval from
+  // `config`; the catch-all's `{}` has no `config`, which reads as "the settings did not
+  // load". The default is the envelope the real route sends (`{bank_id, config}`) with the
+  // engine's default interval, 0. A write to the same path falls through to the catch-all.
+  await page.route(/\/api\/memory\/banks\/[^/]+\/config$/, (route) => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const bank = decodeURIComponent(route.request().url().split('/banks/')[1].split('/')[0])
+    return json(route, { bank_id: bank, config: { mental_model_min_refresh_interval_seconds: 0 } })
+  })
   await page.route('**/api/agent/approvals', (route) =>
     json(route, { approvals: state.approvals }),
   )

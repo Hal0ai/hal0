@@ -1310,12 +1310,16 @@ function buildUnitHistory(_url: string, match: RegExpMatchArray) {
 }
 
 // The list. The rows are MEM_MENTAL_MODELS (below, with the detail and
-// history builders), unchanged.
-function buildMentalModels() {
+// history builders): the models that hold a knowledge page's text, and the
+// ones that stand alone. The bank `empty` has none.
+function buildMentalModels(_url: string, match: RegExpMatchArray) {
+  if (bankFrom(match) === 'empty') return { items: [], total: 0 }
   return { items: MEM_MENTAL_MODELS, total: MEM_MENTAL_MODELS.length }
 }
 
-function buildDirectives() {
+function buildDirectives(_url: string, match: RegExpMatchArray) {
+  // The bank `empty` has no directives either: the Knowledge tab's empty bank.
+  if (bankFrom(match) === 'empty') return { items: [], total: 0 }
   const items = [
     { id: 'dir-citations', name: 'Always cite sources', content: 'Include inline citations / source references in answers; the operator values traceability over prose.', priority: 1, is_active: true, tags: ['operator'] },
     { id: 'dir-terse', name: 'Keep it terse', content: 'Default to terse, technical, lowercase responses. Expand only when explicitly asked.', priority: 2, is_active: true, tags: ['operator'] },
@@ -1735,18 +1739,35 @@ function buildBankOperations(url: string, match: RegExpMatchArray) {
 //     "folder". A node has `is_stale` and `last_refresh_failed_at` but no
 //     `last_refreshed_at`: that comes from the mental-models list, by the
 //     node's `mental_model_id`.
-//   - A mental model's history is a bare JSON list of revisions, newest
-//     first.
-// A page's own detail (`GET .../pages/{id}`) is still the set of fields the
-// dashboard reads from it; it has not been compared with an engine's answer.
+//   - A mental model's history is a bare JSON list, newest first. An entry
+//     is the text a refresh replaced (`previous_content`, at `changed_at`)
+//     or the record of a refresh that failed (`kind: "refresh_failed"`, with
+//     `error_message`). `mm-project-decisions` and `mm-operator-style` carry
+//     that shape; `mm-power-resilience` keeps the older `{updated_at,
+//     content}` rows the hooks' tests read.
+//   - A knowledge page is a mental model: the list marks its model with
+//     `is_knowledge_page`. A page's own detail (`GET .../pages/{id}`) sends
+//     its text as `body`, and again under front matter as `markdown`, with
+//     the question as `description` and the last refresh as `timestamp`. The
+//     page rows below carry those beside the fields the dashboard read
+//     before.
 //
 // States: two fresh pages; one stale page whose last refresh failed after
 // its last success (`kb-operator-style`); a model with three revisions
-// (`mm-power-resilience`); models with none; an empty tree (bank `empty`).
+// (`mm-power-resilience`); models with none; two mental models that are not
+// pages, one fresh with a history of versions and a failed refresh
+// (`mm-project-decisions`), one stale (`mm-operator-preferences`); a bank
+// with no pages, models or directives (`empty`).
+const MEM_PAGE_TRIGGER = { mode: 'delta', refresh_after_consolidation: false, refresh_cron: '0 */4 * * *', full_refresh_cron: null, min_refresh_interval_seconds: null, fact_types: ['world', 'experience', 'observation'] }
+const MEM_MODEL_TRIGGER = { mode: 'delta', refresh_after_consolidation: true, refresh_cron: null, full_refresh_cron: null, min_refresh_interval_seconds: 3600, fact_types: ['world', 'experience', 'observation'] }
+
 const MEM_MENTAL_MODELS = [
-  { id: 'mm-power-resilience', name: 'Power resilience posture', source_query: 'how does the box handle power loss?', content: 'Since the May 3 outage the operator runs a CyberPower 1500VA UPS (~22min idle runtime) with the NUT daemon set to gracefully shut down at 20% battery. Inference queues are now the main loss surface, not cold boots.', tags: ['reliability'], is_stale: false, last_refreshed_at: '2026-06-10T08:00:00.000Z' },
-  { id: 'mm-thermal-envelope', name: 'iGPU thermal envelope', source_query: 'what are the iGPU thermal limits?', content: 'Sustained ComfyUI load used to push the Radeon 8060S to 95C and throttle img throughput ~30%. A -30mV ryzenadj undervolt (now in the boot unit) holds peak at ~84C with baseline throughput.', tags: ['performance'], is_stale: false, last_refreshed_at: '2026-06-09T19:30:00.000Z' },
-  { id: 'mm-operator-style', name: 'Operator interaction style', source_query: 'how should I talk to the operator?', content: 'Terse, technical, lowercase. Inline citations expected — traceability over prose. Active 20:00–01:00; mornings are safe for heavy maintenance.', tags: ['operator'], is_stale: true, last_refreshed_at: '2026-05-28T23:00:00.000Z' },
+  { id: 'mm-power-resilience', name: 'Power resilience posture', source_query: 'how does the box handle power loss?', content: 'Since the May 3 outage the operator runs a CyberPower 1500VA UPS (~22min idle runtime) with the NUT daemon set to gracefully shut down at 20% battery. Inference queues are now the main loss surface, not cold boots.', tags: ['reliability'], is_stale: false, last_refreshed_at: '2026-06-10T08:00:00.000Z', is_knowledge_page: true, trigger: MEM_PAGE_TRIGGER },
+  { id: 'mm-thermal-envelope', name: 'iGPU thermal envelope', source_query: 'what are the iGPU thermal limits?', content: 'Sustained ComfyUI load used to push the Radeon 8060S to 95C and throttle img throughput ~30%. A -30mV ryzenadj undervolt (now in the boot unit) holds peak at ~84C with baseline throughput.', tags: ['performance'], is_stale: false, last_refreshed_at: '2026-06-09T19:30:00.000Z', is_knowledge_page: true, trigger: MEM_PAGE_TRIGGER },
+  { id: 'mm-operator-style', name: 'Operator interaction style', source_query: 'how should I talk to the operator?', content: 'Terse, technical, lowercase. Inline citations expected — traceability over prose. Active 20:00–01:00; mornings are safe for heavy maintenance.', tags: ['operator'], is_stale: true, last_refreshed_at: '2026-05-28T23:00:00.000Z', is_knowledge_page: true, trigger: MEM_PAGE_TRIGGER },
+  // Not knowledge pages: no node of the tree names them.
+  { id: 'mm-project-decisions', name: 'Project decisions', source_query: 'what has been decided about how this box is run, and why?', content: '## Decided\n\n- **Updates** go in before noon, never during the evening window.\n- **Models** are pulled to the fast pool; `/var` stays under 85%.\n- The UPS shuts the box down at 20% battery.\n\n## Still open\n\nWhether image generation gets its own slot.', tags: ['decisions'], is_stale: false, last_refreshed_at: '2026-06-10T09:30:00.000Z', is_knowledge_page: false, trigger: MEM_MODEL_TRIGGER },
+  { id: 'mm-operator-preferences', name: 'Operator preferences', source_query: 'what does the operator prefer, across every agent?', content: 'Short answers with sources. Destructive actions are confirmed in the dashboard, not over the API.', tags: ['operator'], is_stale: true, last_refreshed_at: '2026-06-01T07:00:00.000Z', is_knowledge_page: false, trigger: MEM_MODEL_TRIGGER },
 ]
 
 // The one refresh that failed: later than the model's last success, so it
@@ -1755,7 +1776,18 @@ const MEM_REFRESH_FAILED_AT: Record<string, string> = {
   'mm-operator-style': '2026-06-11T08:00:00.000Z',
 }
 
-const MEM_MODEL_HISTORY: Record<string, { updated_at: string; content: string }[]> = {
+const MEM_MODEL_HISTORY: Record<string, Record<string, unknown>[]> = {
+  // The engine's own shape: what each refresh replaced, and one that failed.
+  'mm-project-decisions': [
+    { previous_content: '## Decided\n\n- **Updates** go in before noon.\n- **Models** are pulled to the fast pool.\n\n## Still open\n\nWhat the UPS should do on low battery.', previous_reflect_response: null, changed_at: '2026-06-10T09:30:00.000Z' },
+    { previous_content: null, previous_reflect_response: null, changed_at: '2026-06-02T09:30:00.000Z', kind: 'refresh_failed', outcome: 'refresh_failed_error', failure_reason: 'unexpected_error', error_message: "Task exceeded the 300s wall-clock limit for 'refresh_mental_model' and was cancelled. Raise the task timeout to allow longer refreshes." },
+    { previous_content: 'Updates go in before noon. Nothing else has been decided yet.', previous_reflect_response: null, changed_at: '2026-05-21T09:30:00.000Z' },
+    { previous_content: null, previous_reflect_response: null, changed_at: '2026-05-06T09:30:00.000Z' },
+  ],
+  // Why the stale page's last refresh failed.
+  'mm-operator-style': [
+    { previous_content: null, previous_reflect_response: null, changed_at: '2026-06-11T08:00:00.000Z', kind: 'refresh_failed', outcome: 'refresh_failed_error', failure_reason: 'unexpected_error', error_message: 'APIConnectionError: Connection error. The extraction model did not answer.' },
+  ],
   'mm-power-resilience': [
     { updated_at: '2026-06-10T08:00:00.000Z', content: 'Since the May 3 outage the operator runs a CyberPower 1500VA UPS (~22min idle runtime) with the NUT daemon set to gracefully shut down at 20% battery. Inference queues are now the main loss surface, not cold boots.' },
     { updated_at: '2026-05-20T08:00:00.000Z', content: 'The operator bought a CyberPower 1500VA UPS after the May 3 outage. Graceful shutdown is not wired yet.' },
@@ -1777,19 +1809,53 @@ function buildMentalModelHistory(_url: string, match: RegExpMatchArray) {
   return MEM_MODEL_HISTORY[id] ?? []
 }
 
-const MEM_KNOWLEDGE_PAGES = MEM_MENTAL_MODELS.map((m) => ({
-  id: m.id.replace(/^mm-/, 'kb-'),
-  name: m.name,
-  content: m.content,
-  source_query: m.source_query,
-  tags: m.tags,
-  trigger: null,
-  max_tokens: null,
-  mental_model_id: m.id,
-  is_stale: m.is_stale,
-  last_refreshed_at: m.last_refreshed_at,
-  last_refresh_failed_at: MEM_REFRESH_FAILED_AT[m.id] ?? null,
-}))
+// A page's text as the engine stores it: markdown. Where a page has none
+// here, its model's one paragraph stands in.
+const MEM_PAGE_BODY: Record<string, string> = {
+  'mm-thermal-envelope': [
+    '## Limits',
+    '',
+    'Sustained ComfyUI load used to push the Radeon 8060S to **95 C** and throttle image throughput by about 30%.',
+    '',
+    '| Setting | Peak | Throughput |',
+    '| --- | --- | --- |',
+    '| Stock | 95 C | throttled, about 30% lower |',
+    '| `-30 mV` undervolt | 84 C | baseline |',
+    '',
+    '## What holds it',
+    '',
+    '1. A `ryzenadj` undervolt, applied by the boot unit.',
+    '2. The fan curve from the vendor firmware, unchanged.',
+    '',
+    '```',
+    'ryzenadj --set-coall=0xFFFE2',
+    '```',
+  ].join('\n'),
+}
+
+const MEM_KNOWLEDGE_PAGES = MEM_MENTAL_MODELS.filter((m) => m.is_knowledge_page).map((m) => {
+  const id = m.id.replace(/^mm-/, 'kb-')
+  const body = MEM_PAGE_BODY[m.id] ?? m.content
+  return {
+    id,
+    name: m.name,
+    content: m.content,
+    source_query: m.source_query,
+    tags: m.tags,
+    trigger: null,
+    max_tokens: null,
+    mental_model_id: m.id,
+    is_stale: m.is_stale,
+    last_refreshed_at: m.last_refreshed_at,
+    last_refresh_failed_at: MEM_REFRESH_FAILED_AT[m.id] ?? null,
+    // What a 1.x engine sends for a page.
+    type: 'knowledge-page',
+    description: m.source_query,
+    timestamp: m.last_refreshed_at,
+    body,
+    markdown: `---\nid: "${id}"\ntype: "knowledge-page"\ntitle: "${m.name}"\n---\n\n${body}`,
+  }
+})
 
 type MockKnowledgeNode = {
   id: string
@@ -1817,7 +1883,8 @@ function buildKnowledgeTree(_url: string, match: RegExpMatchArray) {
       name: p?.name ?? id,
       parent_id: parentId,
       children: [],
-      description: null,
+      // On a page the engine sends the question it answers as `description`.
+      description: p?.source_query ?? null,
       tags: p?.tags ?? [],
       managed: true,
       mental_model_id: p?.mental_model_id ?? null,

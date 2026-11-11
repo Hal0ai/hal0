@@ -122,7 +122,7 @@ test.describe('page shell', () => {
     await expect(page.getByTestId('mv-workspace')).toBeVisible()
     await expect(page.getByTestId('ma-health-summary')).toHaveCount(0)
     await tab(page, 'knowledge').click()
-    await expect(page.getByTestId('ma-knowledge-stub')).toBeVisible()
+    await expect(page.getByTestId('ma-kn-summary')).toBeVisible()
     await expect(page.getByTestId('mv-workspace')).toHaveCount(0)
     await tab(page, 'operations').click()
     await expect(page.getByTestId('ma-operations')).toBeVisible()
@@ -133,13 +133,15 @@ test.describe('page shell', () => {
   test('Back and Forward walk the tabs', async ({ page }) => {
     await page.goto('/#memory/health')
     await tab(page, 'knowledge').click()
+    // Knowledge is scoped to one bank: it writes the first one into its own address, in place.
+    await expect(page).toHaveURL(/#memory\/knowledge\?bank=primary$/)
     await tab(page, 'operations').click()
     await expect(tab(page, 'operations')).toHaveAttribute('aria-current', 'page')
 
     await page.goBack()
-    await expect(page).toHaveURL(/#memory\/knowledge$/)
+    await expect(page).toHaveURL(/#memory\/knowledge\?bank=primary$/)
     await expect(tab(page, 'knowledge')).toHaveAttribute('aria-current', 'page')
-    await expect(page.getByTestId('ma-knowledge-stub')).toBeVisible()
+    await expect(page.getByTestId('ma-kn-summary')).toBeVisible()
     await expect(currentTabs(page)).toHaveCount(1)
 
     await page.goBack()
@@ -148,10 +150,11 @@ test.describe('page shell', () => {
     await expect(page.getByTestId('ma-health-summary')).toBeVisible()
 
     await page.goForward()
-    await expect(page).toHaveURL(/#memory\/knowledge$/)
+    await expect(page).toHaveURL(/#memory\/knowledge\?bank=primary$/)
     await expect(tab(page, 'knowledge')).toHaveAttribute('aria-current', 'page')
     await page.goForward()
-    await expect(page).toHaveURL(/#memory\/operations$/)
+    // The bank chosen on Knowledge travelled with the tab link.
+    await expect(page).toHaveURL(/#memory\/operations\?bank=primary$/)
     await expect(page.getByTestId('ma-operations')).toBeVisible()
     await expect(currentTabs(page)).toHaveCount(1)
   })
@@ -211,7 +214,6 @@ test.describe('page shell', () => {
 
 test.describe('tabs that are not built yet', () => {
   for (const [id, heading, section] of [
-    ['knowledge', 'Knowledge', 'kb'],
     ['agents', 'Agents', 'agents'],
   ] as const) {
     test(`${heading} says it is being moved here and links to the legacy tools page`, async ({ page }) => {
