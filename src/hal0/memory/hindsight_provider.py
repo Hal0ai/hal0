@@ -1428,10 +1428,12 @@ class HindsightProvider(MemoryProvider):
         # mode the project is isolated by its bank, so a tag there would be a
         # second owner of the same fact: such a write gets neither a project
         # tag nor ``scope:global``. Every other write goes through the
-        # resolver: the caller's project field, else a single ``project:`` tag
-        # among its tags, then the registry's aliases and deny list.
+        # resolver: the project its caller named, else the caller's own
+        # ``project:`` tags, each through the registry's aliases and deny
+        # list. The envelope then removes every ``project:`` tag the caller
+        # sent and stamps only what the resolver made.
         namespace_slug = requested_project[len(_PROJECT) :].strip() if requested_project else ""
-        resolution: ProjectResolution | None
+        resolution: ProjectResolution
         if namespace_slug and self._unified_bank:
             resolution = ProjectResolution(
                 slug=namespace_slug,
@@ -1503,8 +1505,9 @@ class HindsightProvider(MemoryProvider):
         # scopes (any form) are ignored and the engine default applies.
         # Every other write is sent with the envelope's scope unless the caller
         # chose one: one scope per ``project:`` tag when it carries any, else
-        # ``shared``, the one untagged scope. Either way per-call tags stop
-        # splitting observations into silos.
+        # ``shared``, the one untagged scope (``project:unresolved`` is not a
+        # project for this). Either way per-call tags stop splitting
+        # observations into silos.
         if self._unified_bank and requested_private:
             observation_scopes = None
         else:
@@ -1624,8 +1627,7 @@ class HindsightProvider(MemoryProvider):
         (:meth:`_retain_item`): ``agent`` is the caller's identity for all of
         them, ``dataset`` the namespace they are written to, and
         ``project_resolution`` the project the request named. An item whose
-        request named no project still resolves one from a single
-        ``project:`` tag of its own.
+        request named no project is resolved from its own ``project:`` tags.
 
         ``async_`` and ``operation_id`` are the engine's request-level fields
         and are forwarded exactly as given; ``None`` leaves the field out of

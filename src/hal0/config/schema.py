@@ -50,6 +50,9 @@ from hal0.model_meta import (
 from hal0.model_meta import (
     VALID_DEVICES as _VALID_DEVICES,
 )
+from hal0.project_slug import DEFAULT_DENY as _PROJECT_DEFAULT_DENY
+from hal0.project_slug import RESERVED_SLUGS as _PROJECT_RESERVED_SLUGS
+from hal0.project_slug import normalise_slug as _normalise_project_slug
 from hal0.release.policy import ReleaseKind
 
 log = logging.getLogger(__name__)
@@ -3052,18 +3055,16 @@ class MemoryConsoleConfig(BaseModel):
 
 
 def _default_project_deny() -> list[str]:
-    # Imported here, not at module load: ``hal0.memory`` builds providers and
-    # must not be pulled in by reading the config schema.
-    from hal0.memory.projects import DEFAULT_DENY
-
-    return list(DEFAULT_DENY)
+    # The default list and the spelling rule come from ``hal0.project_slug``,
+    # a leaf module, and not from ``hal0.memory.projects``: importing anything
+    # under ``hal0.memory`` runs that package's ``__init__``, which imports
+    # the memory providers, and reading the config schema must not do that.
+    return list(_PROJECT_DEFAULT_DENY)
 
 
 def _project_slug(value: Any, key: str) -> str:
     """One ``[memory.projects]`` entry in its normalised spelling, or raise."""
-    from hal0.memory.projects import normalise_slug
-
-    slug = normalise_slug(value) if isinstance(value, str) else None
+    slug = _normalise_project_slug(value) if isinstance(value, str) else None
     if slug is None:
         raise ValueError(
             f"memory.projects.{key} entry {value!r} is not a project name: after "
@@ -3075,11 +3076,11 @@ def _project_slug(value: Any, key: str) -> str:
 class MemoryProjectsConfig(BaseModel):
     """[memory.projects] section of hal0.toml — the project registry.
 
-    ADR-0058 decision 4a: a memory write names its project in a request
-    field, and hal0 resolves that name to one slug before it tags the write
-    (``hal0.memory.projects.resolve_project``). This table is what the
-    resolver consults. Every entry is normalised at load with the resolver's
-    own spelling rule, so ``My Repo`` and ``my-repo`` are the same name.
+    ADR-0058 decision 4a: hal0 resolves the project of a memory write to one
+    slug before it tags the write (``hal0.memory.projects.resolve_project``).
+    This table is what the resolver consults. Every entry is normalised at
+    load with the resolver's own spelling rule, so ``My Repo`` and ``my-repo``
+    are the same name.
     """
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
@@ -3090,8 +3091,9 @@ class MemoryProjectsConfig(BaseModel):
             "Other spellings of a project: a name on the left is tagged as "
             "the project on the right (for example a repository's directory "
             "name that differs from the project's name). Applied before the "
-            "deny list. An alias may not point at a denied name, at itself, "
-            "or back at a name that leads to it."
+            "deny list. An alias may not point at a denied name or back at a "
+            "name that leads to it. An entry whose two sides are the same "
+            "name once normalised does nothing and is ignored."
         ),
     )
     deny: list[str] = Field(
@@ -3128,6 +3130,11 @@ class MemoryProjectsConfig(BaseModel):
         for name, target in v.items():
             key = _project_slug(name, "aliases")
             value = _project_slug(target, "aliases")
+            if key == value:
+                # ``{"Widgets": "widgets"}``: one name spelled twice. It maps
+                # the name to itself, which changes nothing, so it is dropped
+                # here as ``registry_from_config`` drops it.
+                continue
             if out.get(key, value) != value:
                 raise ValueError(
                     f"memory.projects.aliases names {key!r} twice with different targets "
@@ -3138,9 +3145,7 @@ class MemoryProjectsConfig(BaseModel):
 
     @model_validator(mode="after")
     def _aliases_are_usable(self) -> MemoryProjectsConfig:
-        from hal0.memory.projects import RESERVED_SLUGS
-
-        denied = set(self.deny) | RESERVED_SLUGS
+        denied = set(self.deny) | _PROJECT_RESERVED_SLUGS
         for name in self.aliases:
             seen = [name]
             target = self.aliases[name]

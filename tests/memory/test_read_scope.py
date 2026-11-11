@@ -219,3 +219,70 @@ def test_the_reflect_filter_is_the_rule_recall_enforces(caller, tags):
     assert _readable(reflect_visibility_scope(caller), tags) is HindsightProvider._is_visible_to(
         {"tags": tags}, caller
     )
+
+
+# ── identities that contain a colon or whitespace ──────────────────────────
+#
+# The REST front door only admits ``[a-zA-Z0-9_-]`` identities, but the
+# provider is also reached with ids that come from elsewhere (a bridge key's
+# bound name, a direct caller). An odd identity must stay one opaque string:
+# it reads its own private facts and nobody else's.
+
+ODD_IDENTITIES = [
+    "work:evil",
+    "work evil",
+    " work",
+    "work ",
+    "work\t",
+    "agent:work",
+    "a:b:c",
+    "visibility:private",
+    "work visibility:private",
+    "   ",
+]
+
+
+@pytest.mark.parametrize("caller", ODD_IDENTITIES)
+def test_an_odd_identity_is_one_exact_tag(caller):
+    private = {"tags": ["visibility:private"], "match": "any_strict"}
+    assert reflect_visibility_scope(caller) == [
+        {"or": [{"not": private}, {"tags": [f"agent:{caller}"], "match": "any_strict"}]}
+    ]
+
+
+@pytest.mark.parametrize("caller", ODD_IDENTITIES)
+def test_an_odd_identity_reads_its_own_private_facts_and_nobody_elses(caller):
+    scope = reflect_visibility_scope(caller)
+    assert _readable(scope, [f"agent:{caller}", "visibility:private"])
+    assert _readable(scope, ["agent:work"])
+    assert _readable(scope, [])
+    for other in ("work", "evil", "b", "private", caller.strip() + "x"):
+        assert not _readable(scope, [f"agent:{other}", "visibility:private"]), other
+    assert not _readable(scope, ["visibility:private"])
+
+
+@pytest.mark.parametrize("caller", ODD_IDENTITIES)
+@pytest.mark.parametrize(
+    "tags",
+    [
+        ["agent:work", "visibility:private"],
+        ["agent:work:evil", "visibility:private"],
+        ["agent: work", "visibility:private"],
+        ["agent:work ", "visibility:private"],
+        ["agent:agent:work", "visibility:private"],
+        ["agent:visibility:private", "visibility:private"],
+        ["agent:work"],
+        ["visibility:private"],
+    ],
+)
+def test_an_odd_identity_is_judged_as_recall_judges_it(caller, tags):
+    assert _readable(reflect_visibility_scope(caller), tags) is HindsightProvider._is_visible_to(
+        {"tags": tags}, caller
+    )
+
+
+@pytest.mark.parametrize("agent", ["work:evil", "work evil", " work ", "a:b:c", "agent:work"])
+def test_an_odd_identity_is_stamped_as_given_on_a_write(agent):
+    env = apply_envelope(["agent:work", "visibility:private", "topic:cats"], agent=agent)
+    agent_tags = [tag for tag in env.tags if tag.strip().lower().startswith("agent:")]
+    assert agent_tags == [f"agent:{agent}"]

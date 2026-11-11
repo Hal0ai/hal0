@@ -1,9 +1,11 @@
-"""Project as a request field, on the wire (ADR-0058 decision 4a).
+"""The project of a write, on the wire (ADR-0058 decision 4a).
 
 Every test here drives the real REST client over a mock transport, so what is
 asserted is the JSON body the engine would receive: through
-``HindsightProvider.add``, ``POST /api/memory/add``, the MCP ``memory_add``
-tool, and ``HindsightProvider.retain_items`` (one engine call for a batch).
+``HindsightProvider.add`` and ``HindsightProvider.retain_items`` (one engine
+call for a batch), which take the project, and through
+``POST /api/memory/add`` and the MCP ``memory_add`` tool, which do not take
+one yet and must ignore it.
 """
 
 from __future__ import annotations
@@ -133,24 +135,76 @@ async def test_a_denied_project_name_is_no_project() -> None:
 @pytest.mark.parametrize(
     ("tags", "final"),
     [
-        # A single project tag is the caller naming its project the old way:
-        # it goes through the same resolver as the field.
+        # A project tag is the caller naming its project the old way: it goes
+        # through the same resolver as a named project.
         (["project:atlas"], ["agent:pi", "kind:durable", "project:atlas"]),
         (["project:Atlas"], ["agent:pi", "kind:durable", "project:atlas"]),
         (["project:atlas-mono", "slots"], ["slots", "agent:pi", "kind:durable", "project:atlas"]),
         (["project:tmp"], ["agent:pi", "kind:durable", "scope:global"]),
         (["project:unresolved"], ["agent:pi", "kind:durable", "scope:global"]),
-        # Two or more name no single project and pass through as sent.
+        # A tag with nothing left after normalising is dropped like a denied
+        # one: it is not kept, and the write is not hidden behind it.
+        (["project:!!!"], ["agent:pi", "kind:durable", "scope:global"]),
+        (["project:"], ["agent:pi", "kind:durable", "scope:global"]),
+        (["project:..", "slots"], ["slots", "agent:pi", "kind:durable", "scope:global"]),
+        # A denied tag never survives beside others.
+        (["project:tmp", "project:atlas"], ["agent:pi", "kind:durable", "project:atlas"]),
+        (["project:tmp", "project:home"], ["agent:pi", "kind:durable", "scope:global"]),
+        # Two or more distinct projects: one normalised tag each.
         (
-            ["project:atlas", "project:borealis"],
-            ["project:atlas", "project:borealis", "agent:pi", "kind:durable"],
+            ["project:Atlas-Mono", "project:Borealis", "project:scratch"],
+            ["agent:pi", "kind:durable", "project:atlas", "project:borealis"],
         ),
     ],
 )
 async def test_caller_project_tags(tags, final) -> None:
     engine, provider = _wired()
     await provider.add("note", tags=tags, client_id="pi")
+    item = engine.item
+    assert item["tags"] == final
+    # The observation scope follows the final tags, never the tags as sent.
+    projects = [[tag] for tag in final if tag.startswith("project:")]
+    assert item["observation_scopes"] == (projects or "shared")
+
+
+async def test_a_named_project_wins_over_the_callers_tags() -> None:
+    engine, provider = _wired()
+    await provider.add(
+        "note", tags=["project:tmp", "project:borealis"], client_id="pi", project="atlas"
+    )
+    await provider.add("note", tags=["project:borealis"], client_id="pi", project="tmp")
+    named, denied = (body["items"][0] for body in engine.bodies)
+    assert named["tags"] == ["agent:pi", "kind:durable", "project:atlas"]
+    assert denied["tags"] == ["agent:pi", "kind:durable", "scope:global"]
+
+
+async def test_a_dropped_project_tag_does_not_hide_the_write_from_recall() -> None:
+    """Kept as sent, ``project:!!!`` would file the write under a project no
+    read can name. Dropped, it is an ordinary shared memory."""
+    from .test_unified_bank import RecordingClient
+
+    provider = HindsightProvider(client=RecordingClient(), unified_bank=True, projects=REGISTRY)
+    await provider.add("empty name", tags=["project:!!!"], client_id="pi")
+    await provider.add("denied name", tags=["project:tmp"], client_id="pi")
+    recalled = {item["text"] for item in await provider.recall("x", client_id="pi")}
+    assert recalled == {"empty name", "denied name"}
+
+
+@pytest.mark.parametrize(
+    ("tags", "project", "final"),
+    [
+        ([], None, ["agent:pi", "kind:durable", "scope:global"]),
+        (["scope:global"], None, ["agent:pi", "kind:durable", "scope:global"]),
+        ([], "atlas", ["agent:pi", "kind:durable", "project:atlas"]),
+        (["scope:global"], "atlas", ["agent:pi", "kind:durable", "project:atlas", "scope:global"]),
+    ],
+)
+async def test_scope_global_does_not_change_the_observation_scope(tags, project, final) -> None:
+    engine, provider = _wired()
+    await provider.add("note", tags=tags, client_id="pi", project=project)
     assert engine.item["tags"] == final
+    expected = [["project:atlas"]] if project else "shared"
+    assert engine.item["observation_scopes"] == expected
 
 
 async def test_the_default_registry_applies_when_none_is_configured() -> None:
@@ -171,7 +225,10 @@ async def test_a_coding_client_with_no_project_is_unresolved() -> None:
     await provider.add("note", client_id="claude-code", coding=True, project="atlas")
     durable, ephemeral, denied, resolved = (body["items"][0] for body in engine.bodies)
     assert durable["tags"] == ["agent:claude-code", "kind:durable", "project:unresolved"]
-    assert durable["observation_scopes"] == [["project:unresolved"]]
+    # Tagged, but scoped as any write with no project: unresolved writes get
+    # no observation scope of their own.
+    assert [item["observation_scopes"] for item in (durable, ephemeral, denied)] == ["shared"] * 3
+    assert resolved["observation_scopes"] == [["project:atlas"]]
     assert durable["metadata"]["project"] == "unresolved"
     assert durable["metadata"]["project_source"] == "none"
     assert ephemeral["tags"] == ["agent:claude-code", "kind:ephemeral", "project:unresolved"]
@@ -214,6 +271,30 @@ async def test_a_private_project_write_keeps_the_private_scope_guard() -> None:
     assert "observation_scopes" not in with_project and "observation_scopes" not in without
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"project": "atlas"},
+        {"tags": ["project:atlas"]},
+        {"tags": ["project:atlas", "project:borealis"]},
+        {"coding": True},
+        {"tags": ["scope:global"]},
+        {"project": "atlas", "observation_scopes": "per_tag"},
+        {"tags": ["checkpoint"], "project": "atlas"},
+    ],
+)
+async def test_a_private_write_sends_no_observation_scope_whatever_its_project(kwargs) -> None:
+    """Private, in the unified bank: the project is tagged, ``visibility:private``
+    is the last tag, and no observation scope is sent in any combination."""
+    engine, provider = _wired()
+    await provider.add("secret", dataset="private:alice", client_id="alice", **kwargs)
+    item = engine.item
+    assert "observation_scopes" not in item
+    assert item["tags"][-1] == "visibility:private"
+    assert item["tags"].count("visibility:private") == 1
+    assert "agent:alice" in item["tags"]
+
+
 async def test_split_banks_stamp_a_named_project_too() -> None:
     engine, provider = _wired(unified=False)
     await provider.add("note", client_id="pi", project="atlas")
@@ -253,7 +334,13 @@ async def test_a_project_bank_write_gets_no_project_tag_and_no_global_stamp() ->
     assert engine.item["tags"] == ["topic:cats", "agent:pi", "kind:durable"]
 
 
-# ── POST /api/memory/add ────────────────────────────────────────────────────
+# ── the entry points do not take a project yet ─────────────────────────────
+#
+# Under the unified bank a project-tagged memory is hidden from recall, search
+# and list (``HindsightProvider._is_in_scope``), so a caller that could name a
+# project on REST or MCP would hide its own writes. Until shared reads see
+# project-tagged memory (ADR-0058 decision 7b), both entry points ignore a
+# ``project`` key and the ``X-hal0-Project`` header.
 
 
 async def _rest_add(
@@ -271,54 +358,58 @@ async def _rest_add(
         )
 
 
-async def test_rest_add_with_a_project_field() -> None:
-    engine, provider = _wired()
-    response = await _rest_add(
-        provider, {"text": "note", "tags": ["slots", "project:stale"], "project": "Atlas Mono"}
+def _mcp(provider: Any, *, private: bool = False):
+    return memory_mcp.make_dispatcher(
+        provider,
+        client_id_resolver=lambda: "pi-coder",
+        private_resolver=lambda: private,
     )
-    assert response.status_code == 200, response.text
-    assert engine.item["tags"] == ["slots", "agent:pi", "kind:durable", "project:atlas"]
-    assert engine.item["observation_scopes"] == [["project:atlas"]]
-    assert engine.item["metadata"]["project_source"] == "field"
-
-
-async def test_rest_add_without_a_project() -> None:
-    engine, provider = _wired()
-    response = await _rest_add(provider, {"text": "note", "tags": ["slots"]})
-    assert response.status_code == 200, response.text
-    assert engine.item["tags"] == ["slots", "agent:pi", "kind:durable", "scope:global"]
-    assert engine.item["observation_scopes"] == "shared"
 
 
 @pytest.mark.parametrize(
-    ("body", "headers", "project_tag"),
+    ("body", "headers"),
     [
-        ({}, {"X-hal0-Project": "atlas"}, "project:atlas"),
-        ({}, {"x-hal0-project": "  Atlas Mono  "}, "project:atlas"),
-        # The body field wins over the header.
-        ({"project": "borealis"}, {"X-hal0-Project": "atlas"}, "project:borealis"),
-        # A blank field names nothing, so the header stands.
-        ({"project": "   "}, {"X-hal0-Project": "atlas"}, "project:atlas"),
-        ({"project": ""}, {"X-hal0-Project": "atlas"}, "project:atlas"),
-        ({"project": None}, {"X-hal0-Project": "atlas"}, "project:atlas"),
-        ({}, {"X-hal0-Project": "tmp"}, "scope:global"),
-        ({}, {"X-hal0-Project": "   "}, "scope:global"),
+        ({"project": "atlas"}, {}),
+        ({"project": "Atlas Mono"}, {}),
+        ({}, {"X-hal0-Project": "atlas"}),
+        ({}, {"x-hal0-project": "atlas"}),
+        ({"project": "borealis"}, {"X-hal0-Project": "atlas"}),
+        # Not validated either: the key is not part of the request.
+        ({"project": 7}, {}),
+        ({"project": ["atlas"]}, {}),
+        ({"project": {"name": "atlas"}}, {}),
+        ({"project": None}, {"X-hal0-Project": "   "}),
     ],
 )
-async def test_rest_add_project_header(body, headers, project_tag) -> None:
+async def test_rest_add_ignores_a_project_key_and_header(body, headers) -> None:
     engine, provider = _wired()
-    response = await _rest_add(provider, {"text": "note", **body}, headers)
+    response = await _rest_add(provider, {"text": "note", "tags": ["slots"], **body}, headers)
     assert response.status_code == 200, response.text
-    assert engine.item["tags"] == ["agent:pi", "kind:durable", project_tag]
+    item = engine.item
+    assert item["tags"] == ["slots", "agent:pi", "kind:durable", "scope:global"]
+    assert item["observation_scopes"] == "shared"
+    assert "project" not in item["metadata"] and "project_source" not in item["metadata"]
 
 
-@pytest.mark.parametrize("project", [7, ["atlas"], {"name": "atlas"}, True])
-async def test_rest_add_refuses_a_project_that_is_not_a_string(project) -> None:
+@pytest.mark.parametrize(
+    "project", ["atlas", "Atlas Mono", "tmp", 7, ["atlas"], {"name": "atlas"}, None]
+)
+async def test_mcp_add_ignores_a_project_key(project) -> None:
     engine, provider = _wired()
-    response = await _rest_add(provider, {"text": "note", "project": project})
-    assert response.status_code == 400
-    assert "'project' must be a string" in response.text
-    assert engine.bodies == []
+    out = await _mcp(provider)(
+        "memory_add", {"text": "note", "tags": ["slots"], "project": project}
+    )
+    assert out["status"] == "ok", out
+    item = engine.item
+    assert item["tags"] == ["slots", "agent:pi-coder", "kind:durable", "scope:global"]
+    assert item["observation_scopes"] == "shared"
+    assert "project" not in item["metadata"] and "project_source" not in item["metadata"]
+
+
+def test_the_mcp_tool_does_not_advertise_a_project_parameter() -> None:
+    tool = memory_mcp._memory_tool_definitions()["memory_add"]
+    assert "project" not in tool.parameters["properties"]
+    assert "project" not in tool.description.lower()
 
 
 class _KeywordRecorder:
@@ -332,76 +423,35 @@ class _KeywordRecorder:
         return {"id": "doc-1", "timestamp": "2026-01-01T00:00:00+00:00"}
 
 
-async def test_the_project_is_passed_on_only_when_the_caller_named_one() -> None:
-    """A provider that predates the field is never handed it by a caller that
-    named no project, on either entry point."""
+async def test_no_entry_point_hands_the_provider_a_project_or_the_coding_flag() -> None:
+    """Whatever the caller sends, neither entry point passes ``project`` or
+    ``coding`` on, so a write cannot be hidden from recall by accident."""
     provider = _KeywordRecorder()
-    dispatch = memory_mcp.make_dispatcher(provider, client_id_resolver=lambda: "pi")
+    named = {"text": "note", "project": "atlas", "coding": True}
+    header = {"X-hal0-Project": "atlas"}
     assert (await _rest_add(provider, {"text": "note"})).status_code == 200
-    assert (await dispatch("memory_add", {"text": "note"}))["status"] == "ok"
-    assert (await _rest_add(provider, {"text": "note", "project": "atlas"})).status_code == 200
-    assert (await dispatch("memory_add", {"text": "note", "project": "atlas"}))["status"] == "ok"
-    rest_plain, mcp_plain, rest_named, mcp_named = provider.calls
-    assert "project" not in rest_plain and "project" not in mcp_plain
-    assert rest_named["project"] == "atlas" and mcp_named["project"] == "atlas"
-    # No entry point sets the coding flag yet; the provider default applies.
-    assert not any("coding" in call for call in provider.calls)
+    assert (await _rest_add(provider, named, header)).status_code == 200
+    assert (await _mcp(provider)("memory_add", {"text": "note"}))["status"] == "ok"
+    assert (await _mcp(provider)("memory_add", named))["status"] == "ok"
+    assert len(provider.calls) == 4
+    assert not any("project" in call or "coding" in call for call in provider.calls)
 
 
-# ── MCP memory_add ──────────────────────────────────────────────────────────
+async def test_a_write_through_the_entry_points_stays_readable_by_recall() -> None:
+    """The reason the field is held back, as a round trip: what REST and MCP
+    write with a ``project`` key is still returned by a shared recall, while
+    the same write made with the provider's ``project`` argument is not."""
+    from .test_unified_bank import RecordingClient
 
-
-def _mcp(provider: HindsightProvider, *, private: bool = False):
-    return memory_mcp.make_dispatcher(
-        provider,
-        client_id_resolver=lambda: "pi-coder",
-        private_resolver=lambda: private,
-    )
-
-
-async def test_mcp_add_with_a_project() -> None:
-    engine, provider = _wired()
-    out = await _mcp(provider)(
-        "memory_add",
-        {"text": "note", "tags": ["slots", "project:stale"], "project": "Atlas Mono"},
-    )
+    provider = HindsightProvider(client=RecordingClient(), unified_bank=True, projects=REGISTRY)
+    response = await _rest_add(provider, {"text": "via rest", "project": "atlas"})
+    assert response.status_code == 200, response.text
+    out = await _mcp(provider)("memory_add", {"text": "via mcp", "project": "atlas"})
     assert out["status"] == "ok", out
-    assert engine.item["tags"] == ["slots", "agent:pi-coder", "kind:durable", "project:atlas"]
-    assert engine.item["observation_scopes"] == [["project:atlas"]]
-    assert engine.item["metadata"]["project"] == "atlas"
+    await provider.add("via provider", client_id="pi", project="atlas")
 
-
-async def test_mcp_add_without_a_project() -> None:
-    engine, provider = _wired()
-    out = await _mcp(provider)("memory_add", {"text": "note", "project": "   "})
-    assert out["status"] == "ok", out
-    assert engine.item["tags"] == ["agent:pi-coder", "kind:durable", "scope:global"]
-
-
-async def test_mcp_private_add_with_a_project() -> None:
-    engine, provider = _wired()
-    out = await _mcp(provider, private=True)("memory_add", {"text": "note", "project": "atlas"})
-    assert out["status"] == "ok", out
-    assert engine.item["tags"] == [
-        "agent:pi-coder",
-        "kind:durable",
-        "project:atlas",
-        "visibility:private",
-    ]
-    assert "observation_scopes" not in engine.item
-
-
-async def test_mcp_add_refuses_a_project_that_is_not_a_string() -> None:
-    engine, provider = _wired()
-    out = await _mcp(provider)("memory_add", {"text": "note", "project": ["atlas"]})
-    assert out["status"] == "error" and out["error"]["code"] == "mcp.memory_schema"
-    assert engine.bodies == []
-
-
-def test_the_mcp_tool_advertises_the_project_parameter() -> None:
-    tool = memory_mcp._memory_tool_definitions()["memory_add"]
-    assert "project" in tool.parameters["properties"]
-    assert "project" not in tool.parameters.get("required", [])
+    recalled = {item["text"] for item in await provider.recall("x", client_id="pi")}
+    assert recalled == {"via rest", "via mcp"}
 
 
 # ── HindsightProvider.retain_items ──────────────────────────────────────────
@@ -566,11 +616,13 @@ async def test_an_item_resolves_its_own_project_tag_when_the_request_named_none(
     assert b["tags"] == ["agent:claude-code", "kind:durable", "project:unresolved"]
     assert c["tags"] == ["agent:claude-code", "kind:durable", "project:unresolved"]
     assert c["metadata"]["project_source"] == "denied"
-    assert d["tags"] == ["project:atlas", "project:borealis", "agent:claude-code", "kind:durable"]
-    assert [item["observation_scopes"] for item in (a, b, c)] == [
+    assert d["tags"] == ["agent:claude-code", "kind:durable", "project:atlas", "project:borealis"]
+    assert d["metadata"]["project"] == "atlas,borealis"
+    assert [item["observation_scopes"] for item in (a, b, c, d)] == [
         [["project:atlas"]],
-        [["project:unresolved"]],
-        [["project:unresolved"]],
+        "shared",
+        "shared",
+        [["project:atlas"], ["project:borealis"]],
     ]
 
 

@@ -77,10 +77,9 @@ def test_the_table_parses_from_toml_shaped_input():
 @pytest.mark.parametrize(
     ("table", "message"),
     [
-        ({"aliases": {"a": "a"}}, "forms a cycle: a -> a"),
-        ({"aliases": {"a": "b", "b": "a"}}, "forms a cycle"),
+        ({"aliases": {"a": "b", "b": "a"}}, "forms a cycle: a -> b -> a"),
         ({"aliases": {"a": "b", "b": "c", "c": "a"}}, "forms a cycle"),
-        ({"aliases": {"A": "a"}}, "forms a cycle"),  # the same name after normalising
+        ({"aliases": {"A": "b", "B": "a"}}, "forms a cycle"),
         ({"aliases": {"atlas-mono": "tmp"}}, "denied name"),
         ({"aliases": {"atlas-mono": "TMP"}}, "denied name"),
         ({"aliases": {"atlas-mono": "sandbox"}, "deny": ["sandbox"]}, "denied name"),
@@ -104,6 +103,62 @@ def test_invalid_tables_are_refused_at_load(table, message):
     with pytest.raises(ValidationError) as excinfo:
         MemoryProjectsConfig.model_validate(table)
     assert message in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("aliases", "kept"),
+    [
+        ({"Widgets": "widgets"}, {}),
+        ({"widgets": "widgets"}, {}),
+        ({"My Repo": "my-repo", "MY REPO": "My  Repo"}, {}),
+        # A no-op entry beside real ones is dropped and the rest stand.
+        ({"Widgets": "widgets", "widgets-mono": "Widgets"}, {"widgets-mono": "widgets"}),
+        ({"Widgets": "widgets", "widgets": "gadgets"}, {"widgets": "gadgets"}),
+        # A name that is denied anyway: mapping it to itself changes nothing.
+        ({"TMP": "tmp"}, {}),
+    ],
+)
+def test_an_alias_from_a_name_to_itself_is_a_no_op_not_a_cycle(aliases, kept):
+    """``{"Widgets": "widgets"}`` is one name spelled twice. The validator and
+    ``registry_from_config`` both ignore it, so they cannot disagree."""
+    from types import SimpleNamespace
+
+    projects = MemoryProjectsConfig(aliases=aliases)
+    assert projects.aliases == kept
+    assert dict(registry_from_config(projects).aliases) == kept
+    # The same table, never validated: the registry reaches the same result.
+    assert dict(registry_from_config(SimpleNamespace(aliases=aliases)).aliases) == kept
+
+
+def test_building_the_config_does_not_import_the_memory_providers():
+    """The schema takes the slug rule and the deny list from the leaf module
+    ``hal0.project_slug``. Importing ``hal0.memory.projects`` instead would run
+    ``hal0/memory/__init__.py``, which imports the providers and their HTTP
+    client: a cost every config load would pay."""
+    import subprocess
+    import sys
+
+    script = (
+        "import sys\n"
+        "import hal0.config.schema as s\n"
+        "s.MemoryConfig()\n"
+        "s.Hal0Config()\n"
+        "s.MemoryProjectsConfig(aliases={'My Repo': 'core'}, deny=['TMP'], registered=['Core'])\n"
+        "loaded = sorted(m for m in sys.modules if m == 'hal0.memory' "
+        "or m.startswith('hal0.memory.'))\n"
+        "assert loaded == [], loaded\n"
+        "assert 'hal0.project_slug' in sys.modules\n"
+    )
+    done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+
+
+def test_the_resolver_module_re_exports_the_leaf_module():
+    import hal0.project_slug as leaf
+    from hal0.memory import projects
+
+    for name in leaf.__all__:
+        assert getattr(projects, name) is getattr(leaf, name), name
 
 
 def test_valid_alias_shapes():

@@ -310,7 +310,7 @@ async def _memory_add(
     provenance: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """memory_add(text, dataset?, tags?, metadata?, document_id?, entities?,
-    observation_scopes?, strategy?, update_mode?, sync?, project?)
+    observation_scopes?, strategy?, update_mode?, sync?)
     → {id, timestamp, operation_id?, operation_ids?, items_count?}.
 
     Schema:
@@ -338,9 +338,10 @@ async def _memory_add(
       - ``sync``: ``true`` waits for extraction before returning (no
         ``operation_id``, but ``items_count`` reflects the finished write);
         ``false`` (default) is the existing fire-and-forget path.
-      - ``project``: optional name of the project the caller is working in.
-        The provider resolves it against ``[memory.projects]`` and stamps
-        one ``project:<slug>`` tag (ADR-0058 decision 4a).
+      - ``project``: NOT an argument yet, and a ``project`` key is ignored.
+        Under the unified bank a project-tagged memory is hidden from
+        recall, search and list, so the argument arrives with the change
+        that lets shared reads see it (ADR-0058 decision 7b).
       - ``source``: NOT accepted from the caller. Server-injected from
         ``client_id`` so callers cannot lie about their identity,
         keeping the audit trail grounded.
@@ -392,9 +393,6 @@ async def _memory_add(
     if update_mode is not None and update_mode not in ("replace", "append"):
         raise MemorySchemaError("update_mode must be 'replace' or 'append'")
     sync = _optional_bool(args, "sync", default=False)
-    # Passed on only when the caller named one, like the REST route does.
-    project = (_optional(args, "project", str) or "").strip()
-    named_project: dict[str, Any] = {"project": project} if project else {}
     source = client_id or "anonymous"
     if provenance:
         user = provenance.get("user")
@@ -418,7 +416,6 @@ async def _memory_add(
         strategy=strategy,
         update_mode=update_mode,
         sync=bool(sync),
-        **named_project,
     )
     out = {
         "id": result["id"],
@@ -1671,9 +1668,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
             "a conversation). sync=true waits for extraction instead of the "
             "default fire-and-forget background ingest. Writes are shared by "
             "default; private=true keeps this one write in your own private "
-            "bank (it can only make a write more private). project names the "
-            "project you are working in (a repository name); hal0 tags the "
-            "write with it, so do not add a project: tag yourself."
+            "bank (it can only make a write more private)."
         ),
         annotations=_ANNOTATIONS["memory_add"],
     )
@@ -1689,7 +1684,6 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         update_mode: str | None = None,
         sync: bool | None = None,
         private: bool | None = None,
-        project: str | None = None,
         args: dict[str, Any] | None = None,
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
@@ -1709,7 +1703,6 @@ def _memory_tool_definitions() -> dict[str, Tool]:
                 update_mode=update_mode,
                 sync=sync,
                 private=private,
-                project=project,
             ),
         )
 

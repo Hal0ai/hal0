@@ -181,6 +181,101 @@ async def test_caller_arguments_narrow_the_read_and_never_widen_it(args) -> None
     assert not _readable(sent["tag_groups"], WORK_PRIVATE)
 
 
+def _used(answer: str) -> set[str]:
+    """Which of the bank's texts the answer was built from."""
+    return {text for text in (SHARED_TEXT, WORK_NOTE, DISCORD_OWN, MODEL_TEXT) if text in answer}
+
+
+#: A leaf that matches every fact in the bank, the other profile's included.
+_EVERYTHING = {"tags": ["kind:durable"], "match": "any"}
+_PRIVATE_LEAF = {"tags": ["visibility:private"], "match": "any"}
+_WORK_LEAF = {"tags": [f"agent:{WORK}"], "match": "any_strict"}
+
+
+@pytest.mark.parametrize(
+    "tag_groups",
+    [
+        # A top-level ``or`` whose branches, between them, admit everything.
+        [{"or": [_PRIVATE_LEAF, _EVERYTHING]}],
+        [{"or": [_WORK_LEAF, {"not": _WORK_LEAF}]}],
+        [{"or": [{"and": [_PRIVATE_LEAF, _WORK_LEAF]}, _EVERYTHING]}],
+        # The visibility rule itself, restated for the other profile.
+        [{"or": [{"not": {**_PRIVATE_LEAF, "match": "any_strict"}}, _WORK_LEAF]}],
+        # Two ``or`` groups at the top level.
+        [{"or": [_WORK_LEAF, _EVERYTHING]}, {"or": [_PRIVATE_LEAF, _EVERYTHING]}],
+    ],
+)
+async def test_a_top_level_or_cannot_re_admit_another_agents_private_fact(tag_groups) -> None:
+    """Alone, each of these groups reads the other profile's private note. The
+    engine ANDs the caller's groups with the visibility group, so the ``or``
+    only chooses among facts the caller may already read."""
+    assert _readable(tag_groups, WORK_PRIVATE)
+    bank = BankDouble()
+    provider = HindsightProvider(client=bank, unified_bank=True)
+    answer = await _reflect_as(DISCORD, provider, tag_groups=tag_groups)
+    assert WORK_NOTE not in answer and "Acme" not in answer
+    assert _used(answer) <= {SHARED_TEXT, DISCORD_OWN}
+    assert SHARED_TEXT in answer
+    sent = bank.calls[0]["tag_groups"]
+    assert sent == [*reflect_visibility_scope(DISCORD), *tag_groups]
+    assert not _readable(sent, WORK_PRIVATE)
+
+
+@pytest.mark.parametrize(
+    "tag_groups",
+    [
+        # Negations that are true of the other profile's private note.
+        [{"not": {"tags": ["no-such-tag"], "match": "any_strict"}}],
+        [{"not": {"tags": [f"agent:{DISCORD}"], "match": "any_strict"}}],
+        [{"not": {"not": _PRIVATE_LEAF}}],
+        [{"not": {"not": _WORK_LEAF}}],
+        # The visibility rule negated: "only what I may not read".
+        [{"not": {"not": {**_PRIVATE_LEAF, "match": "any_strict"}}}],
+        [{"not": {"or": [{"not": _PRIVATE_LEAF}, {"tags": [f"agent:{DISCORD}"]}]}}],
+    ],
+)
+async def test_a_not_cannot_re_admit_another_agents_private_fact(tag_groups) -> None:
+    assert _readable(tag_groups, WORK_PRIVATE)
+    bank = BankDouble()
+    provider = HindsightProvider(client=bank, unified_bank=True)
+    answer = await _reflect_as(DISCORD, provider, tag_groups=tag_groups)
+    assert WORK_NOTE not in answer and "Acme" not in answer
+    sent = bank.calls[0]["tag_groups"]
+    assert sent[0] == reflect_visibility_scope(DISCORD)[0]
+    assert not _readable(sent, WORK_PRIVATE)
+    # Nothing but shared facts and the caller's own can be in the answer.
+    assert _used(answer) <= {SHARED_TEXT, DISCORD_OWN}
+
+
+@pytest.mark.parametrize(
+    "caller",
+    [
+        f"{WORK}:evil",
+        f"{WORK} ",
+        f" {WORK}",
+        f"{WORK}\t",
+        f"agent:{WORK}",
+        f"x {WORK}",
+        f"{WORK} visibility:private",
+        "visibility:private",
+        "a:b:c",
+        "with space",
+    ],
+)
+async def test_an_identity_with_a_colon_or_whitespace_reads_nobody_elses_private_fact(
+    caller,
+) -> None:
+    """An odd identity stays one opaque string on the way to the engine: it
+    cannot be made to look like another agent's ``agent:<id>`` tag."""
+    bank = BankDouble()
+    answer = await _reflect_as(caller, HindsightProvider(client=bank, unified_bank=True))
+    assert answer == SHARED_TEXT
+    sent = bank.calls[0]
+    assert sent["tag_groups"] == reflect_visibility_scope(caller)
+    assert sent["tag_groups"][0]["or"][1] == {"tags": [f"agent:{caller}"], "match": "any_strict"}
+    assert sent["exclude_mental_models"] is True
+
+
 async def test_caller_tags_travel_inside_the_groups() -> None:
     """The engine refuses ``tags`` beside ``tag_groups``, so the tool can
     accept both from a caller and still send a request the engine takes."""

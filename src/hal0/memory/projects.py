@@ -1,18 +1,24 @@
 """The memory project resolver and registry (ADR-0058, decision 4a).
 
-A project is a request field, not a tag an agent writes by hand. A caller
-names the project it is working in; this module turns that name into one
-slug, or into "no project", and the write envelope
-(:mod:`hal0.memory.envelope`) stamps the result.
+The decision makes the project something hal0 resolves and stamps, not a tag
+an agent writes by hand. This module turns a project name into one slug, or
+into "no project", and the write envelope (:mod:`hal0.memory.envelope`)
+stamps the result. The provider takes a named project already; no REST or MCP
+entry point passes one yet, because under the unified bank a project-tagged
+memory is hidden from recall, search and list until decision 7b lands. Until
+then the only source that reaches the resolver is a caller's own ``project:``
+tags.
 
 Three things live here:
 
-* :func:`normalise_slug`, the one spelling rule for a project name;
+* :func:`normalise_slug`, the one spelling rule for a project name (defined
+  in :mod:`hal0.project_slug`, a leaf module the config schema can import
+  without importing this package, and re-exported here);
 * :func:`strip_legacy_bank_prefix`, which reads a project name out of a
   per-repository bank id written by a coding-agent client;
 * :func:`resolve_project`, which picks the name from the request (field, bank
-  segment or a single ``project:`` tag), applies the registry's aliases, and
-  then its deny list.
+  segment or the caller's ``project:`` tags), applies the registry's aliases,
+  and then its deny list.
 
 The registry (:class:`ProjectRegistry`) is the operator's ``[memory.projects]``
 table: aliases, names that are never projects, and names the operator has
@@ -29,39 +35,17 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
 
+from hal0.project_slug import (
+    DEFAULT_DENY,
+    MAX_SLUG_LENGTH,
+    RESERVED_SLUGS,
+    UNRESOLVED_SLUG,
+    normalise_slug,
+)
+
 PROJECT_TAG_PREFIX = "project:"
 
-#: The longest slug :func:`normalise_slug` returns. 100 is the longest
-#: repository name GitHub accepts, so a slug derived from a repository name on
-#: the most common host is never cut; a longer name (a deep directory path,
-#: pasted text) is cut to this many characters so one request cannot mint an
-#: unbounded tag.
-MAX_SLUG_LENGTH = 100
-
-#: The slug of the ``project:unresolved`` tag: a write from a coding client
-#: that named no usable project. It is never a real project, so the resolver
-#: refuses it whatever the registry says.
-UNRESOLVED_SLUG = "unresolved"
-
 _UNRESOLVED_TAG = f"{PROJECT_TAG_PREFIX}{UNRESOLVED_SLUG}"
-
-#: Names that are never projects, whatever the configured deny list says.
-RESERVED_SLUGS = frozenset({UNRESOLVED_SLUG})
-
-#: The shipped ``[memory.projects].deny``: directory names a client reports
-#: when it is not inside a repository at all.
-DEFAULT_DENY: tuple[str, ...] = (
-    "tmp",
-    "temp",
-    "root",
-    "home",
-    "workdir",
-    "work",
-    "scratch",
-    "scratchpad",
-    "unknown",
-    "default",
-)
 
 #: Where a resolved (or refused) project name came from.
 SOURCE_FIELD = "field"
@@ -72,13 +56,6 @@ SOURCE_TAG = "tag"
 #: by :func:`resolve_project`.
 SOURCE_NAMESPACE = "namespace"
 SOURCE_NONE = "none"
-
-_SEPARATORS = "-._"
-
-# A run that becomes one ``-``: any character outside ``[a-z0-9._-]``, or two
-# or more dots in a row, together with the hyphens touching it. Dots are kept
-# one at a time only, so a slug never contains ``..``.
-_SEPARATOR_RUN_RE = re.compile(r"-*(?:(?:[^a-z0-9._-]|\.{2,})-*)+")
 
 # The agent half of a ``<agent>::<project>`` bank id: a lower-case identifier,
 # which is what the coding-agent integrations use for a harness name.
@@ -104,28 +81,6 @@ ROLE_WORDS = frozenset(
         "unknown",
     }
 )
-
-
-def normalise_slug(text: Any) -> str | None:
-    """The one spelling of a project name, or ``None`` when nothing is left.
-
-    Lower case; the characters ``[a-z0-9._-]`` are kept; every run of anything
-    else becomes a single ``-``; leading and trailing ``-``, ``.`` and ``_``
-    are removed; the result is cut to :data:`MAX_SLUG_LENGTH`. Two or more dots
-    in a row count as "anything else", so ``..`` never survives and a path such
-    as ``a/../b`` becomes ``a-b``. A character outside ASCII is "anything
-    else" too: ``café`` becomes ``caf`` and a name with no ASCII letter or
-    digit at all becomes ``None``.
-
-    The function is idempotent, and the result is safe as a tag value, a URL
-    path segment and a file name.
-    """
-    if not isinstance(text, str):
-        return None
-    slug = _SEPARATOR_RUN_RE.sub("-", text.strip().lower()).strip(_SEPARATORS)
-    if len(slug) > MAX_SLUG_LENGTH:
-        slug = slug[:MAX_SLUG_LENGTH].rstrip(_SEPARATORS)
-    return slug or None
 
 
 def strip_legacy_bank_prefix(bank_id: Any) -> str | None:
@@ -235,13 +190,19 @@ def _slugs(names: Iterable[Any]) -> frozenset[str]:
 class ProjectResolution:
     """What :func:`resolve_project` decided for one write or read.
 
-    ``slug`` is the project, or ``None`` for "no project". ``source`` says
-    where the name came from (``field``, ``bank``, ``tag``, ``namespace``) or
-    is ``none`` when the request named nothing. ``denied`` is true when a name
-    was given and the deny list refused it; ``source`` then still names where
-    it came from. ``unresolved`` is true only for a coding client that ended
-    up with no project. ``registered`` is true when the operator has confirmed
-    the slug or made it the target of an alias.
+    ``slug`` is the project, or ``None`` when there is not exactly one.
+    ``source`` says where the name came from (``field``, ``bank``, ``tag``,
+    ``namespace``) or is ``none`` when the request named nothing. ``denied``
+    is true when a name was given and nothing usable was left of it: the deny
+    list refused it, or it normalised to nothing; ``source`` then still names
+    where it came from. ``unresolved`` is true only for a coding client that
+    ended up with no project. ``registered`` is true when the operator has
+    confirmed the slug (every slug, when there are several) or made it the
+    target of an alias.
+
+    ``slugs`` is the one case with more than one project: the caller's tags
+    named two or more distinct projects, each of which resolved. They are held
+    in the caller's order, and ``slug`` is ``None``.
     """
 
     slug: str | None = None
@@ -249,11 +210,17 @@ class ProjectResolution:
     unresolved: bool = False
     registered: bool = False
     denied: bool = False
+    slugs: tuple[str, ...] = ()
 
     @property
     def tag(self) -> str | None:
-        """The ``project:<slug>`` tag, or ``None`` when there is no project."""
+        """The ``project:<slug>`` tag, or ``None`` when there is not exactly one."""
         return f"{PROJECT_TAG_PREFIX}{self.slug}" if self.slug else None
+
+    @property
+    def project_slugs(self) -> tuple[str, ...]:
+        """Every project of the write: the one slug, or the several."""
+        return (self.slug,) if self.slug else self.slugs
 
 
 def _strip_tag_prefix(text: str) -> str:
@@ -293,29 +260,36 @@ def resolve_project(
 
     The name is taken from the first of these that gives one:
 
-    1. ``field``: the project the caller named in a request field or header;
+    1. ``field``: the project a caller named outside its tags;
     2. ``bank_segment``: the project part of a per-repository bank id (see
        :func:`strip_legacy_bank_prefix`);
-    3. ``tags``: a ``project:`` tag, when the caller's tags carry exactly one.
-       Two or more are ambiguous and name nothing.
+    3. ``tags``: the caller's ``project:`` tags.
 
-    A source whose value normalises to nothing (:func:`normalise_slug`) counts
-    as absent, and the next one is tried. The chosen name then goes through
-    the registry's aliases, and the result through its deny list. A denied
-    name is "no project", not an error, and resolution stops there: a lower
-    source is not consulted, because the caller did name a project and it was
-    refused.
+    A ``field`` or ``bank_segment`` that normalises to nothing
+    (:func:`normalise_slug`) counts as absent, and the next source is tried.
+    The chosen name goes through the registry's aliases, and the result
+    through its deny list. A denied name is "no project", not an error, and
+    resolution stops there: a lower source is not consulted, because the
+    caller did name a project and it was refused.
+
+    Every ``project:`` tag is judged the same way, one by one: normalised,
+    aliased, and dropped when it is denied or when nothing is left of it.
+    What survives decides:
+
+    * one distinct project: that is the project (``slug``);
+    * two or more distinct projects: the write is filed under each
+      (``slugs``), in the caller's order;
+    * none, although the caller sent at least one tag: "no project", reported
+      as ``denied``.
+
+    So a ``project:`` tag never reaches a write in any spelling but the one
+    this function produces, and a denied name never reaches it at all.
 
     ``coding`` says the caller is a coding client, which is expected to work
     inside a project. ``unresolved`` is true only for such a caller that ends
     with no project.
     """
-    candidates = [(SOURCE_FIELD, field), (SOURCE_BANK, bank_segment)]
-    caller_projects = project_tags_of(tags)
-    if len(caller_projects) == 1:
-        candidates.append((SOURCE_TAG, caller_projects[0]))
-
-    for source, raw in candidates:
+    for source, raw in ((SOURCE_FIELD, field), (SOURCE_BANK, bank_segment)):
         if not isinstance(raw, str):
             continue
         name = normalise_slug(_strip_tag_prefix(raw))
@@ -325,7 +299,24 @@ def resolve_project(
         if registry.is_denied(slug):
             return ProjectResolution(source=source, unresolved=coding, denied=True)
         return ProjectResolution(slug=slug, source=source, registered=registry.is_registered(slug))
-    return ProjectResolution(unresolved=coding)
+
+    caller_projects = project_tags_of(tags)
+    if not caller_projects:
+        return ProjectResolution(unresolved=coding)
+    valid: list[str] = []
+    for raw in caller_projects:
+        name = normalise_slug(_strip_tag_prefix(raw))
+        if name is None:
+            continue
+        slug = registry.canonical(name)
+        if not registry.is_denied(slug) and slug not in valid:
+            valid.append(slug)
+    if not valid:
+        return ProjectResolution(source=SOURCE_TAG, unresolved=coding, denied=True)
+    registered = all(registry.is_registered(slug) for slug in valid)
+    if len(valid) == 1:
+        return ProjectResolution(slug=valid[0], source=SOURCE_TAG, registered=registered)
+    return ProjectResolution(source=SOURCE_TAG, registered=registered, slugs=tuple(valid))
 
 
 __all__ = [

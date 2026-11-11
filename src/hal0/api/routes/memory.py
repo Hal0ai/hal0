@@ -93,9 +93,6 @@ _TAGS_MATCH_MODES = ("any", "all", "any_strict", "all_strict", "exact")
 
 _AGENT_HEADER = "x-hal0-agent"
 _PRIVATE_HEADER = "x-hal0-private"
-#: The project a write belongs to, for a client that sets it once per session
-#: and not per call. The body's ``project`` field wins over it.
-_PROJECT_HEADER = "x-hal0-project"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 # Security hardening: agent identity feeds the
@@ -1228,14 +1225,15 @@ def make_add_preflight(app: Any, wrapper: Any) -> Callable[[], Awaitable[None]]:
 @router.post("/add")
 async def memory_add(request: Request) -> dict[str, Any]:
     """Add a memory item. Body: ``{text, dataset?, tags?, metadata?,
-    document_id?, update_mode?, append_document_id?, observation_scopes?,
-    project?}``.
+    document_id?, update_mode?, append_document_id?, observation_scopes?}``.
 
-    ``project`` names the project the caller is working in (a repository
-    name, say). hal0 resolves it against ``[memory.projects]`` and tags the
-    write with one ``project:<slug>``; a caller does not write that tag by
-    hand. The ``X-hal0-Project`` header carries the same value for a client
-    that sets it once; the body field wins.
+    There is no ``project`` field yet, and a ``project`` key or an
+    ``X-hal0-Project`` header is ignored. Under the unified bank a
+    project-tagged memory is hidden from recall, search and list, so naming a
+    project here would hide the caller's own writes; the field arrives with
+    the change that lets shared reads see project-tagged memory (ADR-0058
+    decision 7b). The provider already takes the project
+    (``HindsightProvider.add(project=...)``).
 
     Returns ``{id, timestamp}`` plus ``operation_id`` when the engine
     ingests asynchronously (Hindsight retain). Reuse ``document_id``
@@ -1368,18 +1366,6 @@ async def memory_add(request: Request) -> dict[str, Any]:
                 details={"path": "/api/memory/add"},
             )
         passthrough["observation_scopes"] = observation_scopes
-    # The project the caller is working in (ADR-0058 decision 4a): the body
-    # field, else the header. The provider resolves the name; nothing is
-    # passed on when the caller named none.
-    project = body.get("project")
-    if project is not None and not isinstance(project, str):
-        raise BadRequest(
-            "memory_add 'project' must be a string",
-            details={"path": "/api/memory/add"},
-        )
-    project = (project or "").strip() or request.headers.get(_PROJECT_HEADER, "").strip()
-    if project:
-        passthrough["project"] = project
 
     wrapper = _wrapper(request)
 

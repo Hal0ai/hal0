@@ -246,16 +246,21 @@ REGISTRY = ProjectRegistry(
 )
 
 
-def _r(slug=None, source="none", *, unresolved=False, registered=False, denied=False):
+def _r(slug=None, source="none", *, unresolved=False, registered=False, denied=False, slugs=()):
     return ProjectResolution(
-        slug=slug, source=source, unresolved=unresolved, registered=registered, denied=denied
+        slug=slug,
+        source=source,
+        unresolved=unresolved,
+        registered=registered,
+        denied=denied,
+        slugs=tuple(slugs),
     )
 
 
 @pytest.mark.parametrize(
     ("kwargs", "expected"),
     [
-        # Precedence: field, then bank segment, then a single project tag.
+        # Precedence: field, then bank segment, then the caller's project tags.
         ({"field": "borealis"}, _r("borealis", "field", registered=True)),
         ({"bank_segment": "borealis"}, _r("borealis", "bank", registered=True)),
         ({"tags": ["project:borealis"]}, _r("borealis", "tag", registered=True)),
@@ -280,12 +285,36 @@ def _r(slug=None, source="none", *, unresolved=False, registered=False, denied=F
         ({"field": "PROJECT:borealis"}, _r("borealis", "field", registered=True)),
         ({"tags": [" Project:Borealis "]}, _r("borealis", "tag", registered=True)),
         ({"tags": ["topic:cats", "project:cirrus", "kind:durable"]}, _r("cirrus", "tag")),
-        # Tags: exactly one project tag names a project; two or more do not.
-        ({"tags": ["project:atlas", "project:borealis"]}, _r()),
+        # Tags: each one is normalised, aliased and checked against the deny
+        # list. One distinct project left is the project.
         ({"tags": ["project:atlas", "project:atlas"]}, _r("atlas", "tag", registered=True)),
-        ({"tags": ["project:atlas", "Project:atlas"]}, _r()),
+        ({"tags": ["project:atlas", "Project:Atlas"]}, _r("atlas", "tag", registered=True)),
+        ({"tags": ["project:atlas", "project:atlas-mono"]}, _r("atlas", "tag", registered=True)),
+        ({"tags": ["project:tmp", "project:cirrus"]}, _r("cirrus", "tag")),
+        ({"tags": ["project:cirrus", "project:!!!", "project:"]}, _r("cirrus", "tag")),
+        # Two or more distinct projects left: the write is filed under each,
+        # in the caller's order, and there is no single project.
+        (
+            {"tags": ["project:atlas", "project:borealis"]},
+            _r(source="tag", registered=True, slugs=["atlas", "borealis"]),
+        ),
+        (
+            {"tags": ["project:Cirrus", "topic:cats", "project:old-atlas", "project:cirrus"]},
+            _r(source="tag", slugs=["cirrus", "atlas"]),
+        ),
+        (
+            {"tags": ["project:tmp", "project:Borealis", "project:..", "project:atlas"]},
+            _r(source="tag", registered=True, slugs=["borealis", "atlas"]),
+        ),
+        # None left, although the caller sent a project tag: no project, and
+        # reported as denied so the envelope drops the tag.
+        ({"tags": ["project:"]}, _r(source="tag", denied=True)),
+        ({"tags": ["project:!!!"]}, _r(source="tag", denied=True)),
+        ({"tags": ["project:..", "Project:  "]}, _r(source="tag", denied=True)),
+        ({"tags": ["project:tmp", "project:home"]}, _r(source="tag", denied=True)),
+        ({"tags": ["project:tmp", "project:!!!"]}, _r(source="tag", denied=True)),
+        # Not project tags at all.
         ({"tags": ["projects:atlas", "my-project:atlas", "project"]}, _r()),
-        ({"tags": ["project:"]}, _r()),
         ({"tags": "project:cirrus"}, _r()),  # a bare string is not a tag list here
         # The unresolved marker is not a name: alone it is nothing, and it
         # does not make a real project tag ambiguous.
@@ -311,10 +340,41 @@ def _r(slug=None, source="none", *, unresolved=False, registered=False, denied=F
         ({"field": "unresolved"}, _r(source="field", denied=True)),
         ({"field": "tmp", "bank_segment": "borealis"}, _r(source="field", denied=True)),
         ({"field": "tmp", "tags": ["project:borealis"]}, _r(source="field", denied=True)),
+        # A field or bank segment decides alone: the tags are not consulted,
+        # denied or not.
+        ({"field": "cirrus", "tags": ["project:tmp"]}, _r("cirrus", "field")),
+        (
+            {"bank_segment": "atlas", "tags": ["project:tmp", "project:borealis"]},
+            _r("atlas", "bank", registered=True),
+        ),
     ],
 )
 def test_resolve_project(kwargs, expected):
     assert resolve_project(registry=REGISTRY, **kwargs) == expected
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        ["project:tmp"],
+        ["project:TMP", "project:atlas"],
+        ["project:atlas", " Project:Home ", "project:borealis"],
+        ["project:scratch", "project:workdir", "project:unknown"],
+        ["project:unresolved", "project:default"],
+        ["project:My Repo", "project:tmp", "project:"],
+    ],
+)
+@pytest.mark.parametrize("field", [None, "cirrus", "tmp", "!!!"])
+def test_no_denied_or_unnormalised_name_is_ever_resolved(tags, field):
+    """Whatever the combination, what comes out is made of names the resolver
+    itself wrote: normalised, aliased, and not on the deny list."""
+    resolution = resolve_project(field=field, tags=tags, registry=REGISTRY)
+    for slug in resolution.project_slugs:
+        assert slug == normalise_slug(slug)
+        assert slug == REGISTRY.canonical(slug)
+        assert not REGISTRY.is_denied(slug)
+    assert bool(resolution.slug) + bool(resolution.slugs) <= 1
+    assert len(resolution.slugs) != 1
 
 
 @pytest.mark.parametrize("name", DEFAULT_DENY)
@@ -346,10 +406,11 @@ def test_the_default_deny_list():
     [
         ({}, True),
         ({"field": "tmp"}, True),
-        ({"tags": ["project:a", "project:b"]}, True),
+        ({"tags": ["project:tmp", "project:!!!"]}, True),
         ({"field": "..", "bank_segment": ""}, True),
         ({"field": "cirrus"}, False),
         ({"bank_segment": "atlas-mono"}, False),
+        ({"tags": ["project:a", "project:b"]}, False),
     ],
 )
 def test_unresolved_is_for_a_coding_client_that_ends_with_no_project(kwargs, unresolved):
@@ -377,9 +438,14 @@ def test_an_alias_cycle_in_a_hand_built_registry_terminates():
 
 
 def test_the_resolution_knows_its_tag():
-    assert resolve_project(field="Atlas", registry=REGISTRY).tag == "project:atlas"
+    one = resolve_project(field="Atlas", registry=REGISTRY)
+    assert one.tag == "project:atlas" and one.project_slugs == ("atlas",)
     assert resolve_project(field="tmp", registry=REGISTRY).tag is None
-    assert ProjectResolution().tag is None
+    assert ProjectResolution().tag is None and ProjectResolution().project_slugs == ()
+    several = resolve_project(tags=["project:atlas", "project:cirrus"], registry=REGISTRY)
+    assert several.tag is None and several.project_slugs == ("atlas", "cirrus")
+    # Registered only when every project is.
+    assert several.registered is False
 
 
 @pytest.mark.parametrize(

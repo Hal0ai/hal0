@@ -3724,7 +3724,8 @@ def check_memory_projects(
         remedies = []
         if unresolved:
             remedies.append(
-                "a coding client is writing without a project: set its project field or header"
+                "a coding client is writing without a project: it named none, or one "
+                "that [memory.projects].deny refuses"
             )
         if len(unregistered) > PROJECTS_UNREGISTERED_WARN_ABOVE:
             remedies.append(

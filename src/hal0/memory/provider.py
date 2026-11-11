@@ -185,7 +185,9 @@ class MemoryProvider(ABC):
             (ADR-0058 decision 4a). The Hindsight provider resolves it
             against the ``[memory.projects]`` registry and stamps one
             ``project:<slug>`` tag; an engine without the write envelope
-            ignores it.
+            ignores it. No REST or MCP entry point passes it yet: under the
+            unified bank a project-tagged memory is hidden from recall,
+            search and list until decision 7b lands.
         ``coding``
             ``True`` when the caller is a coding client, which is expected
             to work inside a project: a write of its with no project is

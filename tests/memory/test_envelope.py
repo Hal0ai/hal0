@@ -371,11 +371,16 @@ def test_lifecycle_words_match_whole_bare_tags_only(tag):
             (
                 "harness:claude-code",
                 "source:chat",
-                "project:hal0",
                 "agent:hermes",
                 "kind:ephemeral",
+                "project:hal0",
             ),
-            {"session_id": UUID4, "lifecycle": "checkpoint"},
+            {
+                "session_id": UUID4,
+                "lifecycle": "checkpoint",
+                "project": "hal0",
+                "project_source": "tag",
+            },
         ),
         # A repeated word is recorded once.
         (
@@ -404,6 +409,7 @@ NOTHING = ProjectResolution()
 DENIED = ProjectResolution(source="field", denied=True)
 CODING_NOTHING = ProjectResolution(unresolved=True)
 CODING_DENIED = ProjectResolution(source="bank", denied=True, unresolved=True)
+SEVERAL = ProjectResolution(source="tag", slugs=("atlas", "borealis"))
 
 
 @pytest.mark.parametrize(
@@ -419,22 +425,30 @@ CODING_DENIED = ProjectResolution(source="bank", denied=True, unresolved=True)
             ("topic:cats", "agent:pi", "kind:durable", "project:atlas"),
         ),
         (["checkpoint"], ATLAS, ("agent:pi", "kind:ephemeral", "project:atlas")),
-        # Rule 7: a refused name is no project, and the caller's tag goes too.
+        # Rule 7: several projects, one tag each, as the resolver spelled them.
+        (
+            ["Project:Atlas", "topic:cats", "project:borealis"],
+            SEVERAL,
+            ("topic:cats", "agent:pi", "kind:durable", "project:atlas", "project:borealis"),
+        ),
+        (
+            ["checkpoint"],
+            SEVERAL,
+            ("agent:pi", "kind:ephemeral", "project:atlas", "project:borealis"),
+        ),
+        # Rule 8: a refused name is no project, and the caller's tag goes too.
         ([], DENIED, ("agent:pi", "kind:durable", "scope:global")),
         (["project:tmp"], DENIED, ("agent:pi", "kind:durable", "scope:global")),
         (["project:tmp", "checkpoint"], DENIED, ("agent:pi", "kind:ephemeral")),
-        # Rule 8: nothing resolved, nothing refused: the caller's tags stand.
+        # The resolution is the only source of project tags: a caller tag it
+        # does not account for is removed, never kept as sent.
         (
             ["project:atlas", "project:borealis"],
             NOTHING,
-            ("project:atlas", "project:borealis", "agent:pi", "kind:durable"),
+            ("agent:pi", "kind:durable", "scope:global"),
         ),
-        (
-            ["project:atlas", "project:borealis"],
-            CODING_NOTHING,
-            ("project:atlas", "project:borealis", "agent:pi", "kind:durable"),
-        ),
-        (["project:atlas"], None, ("project:atlas", "agent:pi", "kind:durable")),
+        (["project:Whatever"], NOTHING, ("agent:pi", "kind:durable", "scope:global")),
+        (["project:atlas"], CODING_NOTHING, ("agent:pi", "kind:durable", "project:unresolved")),
         # Rule 9: a coding client with no project, whatever the kind.
         ([], CODING_NOTHING, ("agent:pi", "kind:durable", "project:unresolved")),
         (["checkpoint"], CODING_NOTHING, ("agent:pi", "kind:ephemeral", "project:unresolved")),
@@ -470,7 +484,7 @@ CODING_DENIED = ProjectResolution(source="bank", denied=True, unresolved=True)
         (
             ["project:unresolved", "project:atlas"],
             None,
-            ("project:atlas", "agent:pi", "kind:durable"),
+            ("agent:pi", "kind:durable", "project:atlas"),
         ),
         (
             ["project:unresolved"],
@@ -481,6 +495,120 @@ CODING_DENIED = ProjectResolution(source="bank", denied=True, unresolved=True)
 )
 def test_project_rules(tags, resolution, expected):
     assert apply_envelope(tags, agent="pi", project_resolution=resolution).tags == expected
+
+
+@pytest.mark.parametrize(
+    ("tags", "expected", "metadata"),
+    [
+        # One tag: the same resolution a named project gets.
+        (
+            ["project:atlas"],
+            ("agent:pi", "kind:durable", "project:atlas"),
+            {"project": "atlas", "project_source": "tag"},
+        ),
+        (
+            ["topic:cats", " Project:My Repo "],
+            ("topic:cats", "agent:pi", "kind:durable", "project:my-repo"),
+            {"project": "my-repo", "project_source": "tag"},
+        ),
+        # A denied tag never survives, alone or beside others.
+        (
+            ["project:tmp"],
+            ("agent:pi", "kind:durable", "scope:global"),
+            {"project_source": "denied"},
+        ),
+        (
+            ["project:tmp", "project:atlas"],
+            ("agent:pi", "kind:durable", "project:atlas"),
+            {"project": "atlas", "project_source": "tag"},
+        ),
+        (
+            ["project:scratch", "PROJECT:Home", "project:workdir"],
+            ("agent:pi", "kind:durable", "scope:global"),
+            {"project_source": "denied"},
+        ),
+        (
+            ["project:atlas", "project:tmp", "project:Borealis", "project:default"],
+            ("agent:pi", "kind:durable", "project:atlas", "project:borealis"),
+            {"project": "atlas,borealis", "project_source": "tag"},
+        ),
+        # A tag with nothing left after normalising is dropped like a denied
+        # one: it is not kept as sent, and it earns no project scope.
+        (
+            ["project:!!!"],
+            ("agent:pi", "kind:durable", "scope:global"),
+            {"project_source": "denied"},
+        ),
+        (
+            ["project:"],
+            ("agent:pi", "kind:durable", "scope:global"),
+            {"project_source": "denied"},
+        ),
+        (
+            ["project:..", "project:   ", "checkpoint"],
+            ("agent:pi", "kind:ephemeral"),
+            {"project_source": "denied", "lifecycle": "checkpoint"},
+        ),
+        (
+            ["project:!!!", "project:atlas"],
+            ("agent:pi", "kind:durable", "project:atlas"),
+            {"project": "atlas", "project_source": "tag"},
+        ),
+        # Two or more distinct projects: one tag each, normalised, in order.
+        (
+            ["project:Borealis", "topic:cats", "project:atlas", "project:BOREALIS"],
+            ("topic:cats", "agent:pi", "kind:durable", "project:borealis", "project:atlas"),
+            {"project": "borealis,atlas", "project_source": "tag"},
+        ),
+        # Two spellings of one project are one project.
+        (
+            ["project:Atlas", "project:atlas"],
+            ("agent:pi", "kind:durable", "project:atlas"),
+            {"project": "atlas", "project_source": "tag"},
+        ),
+    ],
+)
+def test_caller_project_tags_without_a_resolution(tags, expected, metadata):
+    """With no resolution handed in, the envelope runs the resolver over the
+    caller's tags against the default registry. No row keeps a tag as sent."""
+    env = apply_envelope(tags, agent="pi")
+    assert env.tags == expected
+    assert env.metadata == metadata
+
+
+@pytest.mark.parametrize("coding", [False, True])
+@pytest.mark.parametrize(
+    "resolution",
+    [None, ATLAS, NOTHING, DENIED, CODING_NOTHING, CODING_DENIED, SEVERAL],
+)
+@pytest.mark.parametrize(
+    "tags",
+    [
+        ["project:tmp"],
+        ["project:TMP", "project:home", "topic:cats"],
+        ["project:atlas", " Project:Scratch "],
+        ["project:tmp", "project:atlas", "project:borealis", "checkpoint"],
+        ["project:My Repo", "project:!!!", "project:"],
+        ["project:unresolved", "project:default"],
+    ],
+)
+def test_no_combination_leaves_a_denied_or_unnormalised_project_tag(tags, resolution, coding):
+    from hal0.memory.projects import DEFAULT_DENY, normalise_slug
+
+    env = apply_envelope(tags, agent="pi", project_resolution=resolution, coding=coding)
+    project_tags = [tag for tag in env.tags if tag.strip().lower().startswith("project:")]
+    for tag in project_tags:
+        slug = tag[len("project:") :]
+        assert tag.startswith("project:") and slug == normalise_slug(slug)
+        assert slug not in DEFAULT_DENY
+    # Only the resolver's own output, or the envelope's marker, is stamped.
+    allowed = {"project:unresolved"}
+    if resolution is not None:
+        allowed |= {f"project:{slug}" for slug in resolution.project_slugs}
+    else:
+        allowed |= {"project:atlas", "project:borealis", "project:my-repo"}
+    assert set(project_tags) <= allowed
+    assert len(project_tags) == len(set(project_tags))
 
 
 def test_the_coding_flag_alone_marks_a_projectless_write_unresolved():
@@ -712,10 +840,46 @@ def test_the_scope_constants_are_engine_modes():
         ["project", "agent:pi", "kind:durable"],
         ["Project:hal0", "agent:pi", "kind:durable"],
         ["my-project:hal0", "agent:pi", "kind:durable"],
+        # project:unresolved is a marker, not a project: the write is scoped
+        # as a write with no project tag would be, durable or ephemeral.
+        ["agent:pi", "kind:durable", "project:unresolved"],
+        ["agent:pi", "kind:ephemeral", "project:unresolved"],
+        ["agent:pi", "kind:durable", "project:unresolved", "scope:global"],
     ],
 )
 def test_a_write_with_no_project_gets_the_shared_scope(tags):
     assert resolve_observation_scopes(None, tags) == "shared"
+
+
+@pytest.mark.parametrize(
+    ("tags", "scopes"),
+    [
+        (["agent:pi", "kind:durable"], "shared"),
+        (["agent:pi", "kind:durable", "project:atlas"], [["project:atlas"]]),
+        (
+            ["agent:pi", "kind:durable", "project:atlas", "project:borealis"],
+            [["project:atlas"], ["project:borealis"]],
+        ),
+        (["agent:pi", "kind:ephemeral", "project:unresolved"], "shared"),
+    ],
+)
+def test_scope_global_does_not_change_the_scope_chosen(tags, scopes):
+    """``scope:global`` is a tag for reads. It is not a project and not an
+    observation scope: with it or without it the write is scoped the same."""
+    assert resolve_observation_scopes(None, tags) == scopes
+    assert resolve_observation_scopes(None, [*tags, "scope:global"]) == scopes
+    assert resolve_observation_scopes(None, ["scope:global", *tags]) == scopes
+    assert resolve_observation_scopes(None, [*tags, "scope:team"]) == scopes
+
+
+def test_an_unresolved_write_never_gets_a_scope_of_its_own():
+    """Every repository's unresolved writes would otherwise consolidate into
+    one set of beliefs. Beside a real project, the real project decides."""
+    assert resolve_observation_scopes(None, ["project:unresolved"]) == "shared"
+    mixed = ["project:unresolved", "project:atlas"]
+    assert resolve_observation_scopes(None, mixed) == [["project:atlas"]]
+    # A caller's explicit choice still stands, as for any write.
+    assert resolve_observation_scopes("per_tag", ["project:unresolved"]) == "per_tag"
 
 
 @pytest.mark.parametrize(
@@ -739,16 +903,6 @@ def test_a_write_with_no_project_gets_the_shared_scope(tags):
         (
             ["project:example.com+acme+widgets", "agent:pi", "kind:durable"],
             [["project:example.com+acme+widgets"]],
-        ),
-        # An unresolved coding write is scoped as a project of its own, so it
-        # does not consolidate into the global scope.
-        (
-            ["agent:pi", "kind:durable", "project:unresolved"],
-            [["project:unresolved"]],
-        ),
-        (
-            ["agent:pi", "kind:ephemeral", "project:unresolved"],
-            [["project:unresolved"]],
         ),
     ],
 )
@@ -787,4 +941,10 @@ def test_the_scope_follows_the_envelopes_own_output():
     assert resolve_observation_scopes(None, project.tags) == [["project:atlas"]]
     assert resolve_observation_scopes(None, plain.tags) == "shared"
     assert resolve_observation_scopes(None, durable.tags) == "shared"
-    assert resolve_observation_scopes(None, unresolved.tags) == [["project:unresolved"]]
+    assert "project:unresolved" in unresolved.tags
+    assert resolve_observation_scopes(None, unresolved.tags) == "shared"
+    several = apply_envelope(["project:Atlas", "project:borealis"], agent="pi")
+    assert resolve_observation_scopes(None, several.tags) == [
+        ["project:atlas"],
+        ["project:borealis"],
+    ]
