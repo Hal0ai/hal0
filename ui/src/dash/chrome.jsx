@@ -487,11 +487,10 @@ function useNavItems() {
   const modelsQuery = useModels();
   const slotCount   = slotsQuery.data?.length  ?? 0;
   const modelCount  = modelsQuery.data?.length ?? 0;
-  // 0.4 gate: the Agent route is reduced to the Memory tab, so when the
-  // memory subsystem is disabled ([memory].enabled=false) there is nothing
-  // to show — drop the nav item entirely. Driven by /api/status so the UI
-  // can never disagree with the backend. main.jsx applies the matching
-  // route guard for deep links.
+  // Memory gate: when the memory subsystem is disabled
+  // ([memory].enabled=false) the Memory rows have nothing to show — drop
+  // them entirely. Driven by /api/status so the UI can never disagree with
+  // the backend. main.jsx applies the matching route guard for deep links.
   const memoryEnabled = useMemoryEnabled();
   return [
     { id: "dashboard", label: "Overview", icon: Icons.dashboard },
@@ -528,21 +527,22 @@ function useNavItems() {
       { id: "benchmarks/evals",  label: "Evals" },
       { id: "benchmarks/queue",  label: "Run Queue" },
     ] },
-    // v0.5 nav: clicking Agents lands on the Overview (the agent-card library,
-    // with Hermes wired live). It then hosts Memory (full Hindsight page, gated
-    // on the memory subsystem) and MCP (bundled FastMCP servers) as tabs. MCP
-    // is always shown; Memory follows the gate.
+    // Clicking Agents lands on the Overview (the agent-card library, with
+    // Hermes wired live). MCP (bundled FastMCP servers) is its other tab.
     { id: "agent", label: "Agents", icon: Icons.agent, children: [
       { id: "agent/overview", label: "Overview",
         match: (route, param) => route === "agent" && (!param || param === "overview") },
-      ...(memoryEnabled ? [{ id: "memory", label: "Memory" }] : []),
       { id: "mcp", label: "MCP" },
     ] },
-    // Memory workspace (#memworkspace): the Hindsight 1.2 showcase — bank
-    // switcher + Overview/KB/Mental models/Directives/Operations/Agents/
-    // Models tabs. Separate route from the legacy #memory tab above (which
-    // stays as the v2 overview/bank-workspace shell); gated the same way.
-    ...(memoryEnabled ? [{ id: "memworkspace", label: "Memory", icon: Icons.memory, children: [
+    // Memory (#memory/<tab>): the one Memory area (ADR-0058 decision 12). No
+    // sub-links: its tabs are in the page. Shown only while the memory
+    // subsystem is enabled; main.jsx applies the matching route guard.
+    ...(memoryEnabled ? [{ id: "memory", label: "Memory", icon: Icons.memory }] : []),
+    // The older memory tools page (#memworkspace): knowledge base, mental
+    // models, directives, operations, agents and model identities. It stays
+    // reachable until each of those has moved into the Memory area, and is
+    // labelled so there is exactly one row called "Memory". Gated the same way.
+    ...(memoryEnabled ? [{ id: "memworkspace", label: "Memory (legacy tools)", icon: Icons.memory, children: [
       { id: "memworkspace/overview", label: "Overview",
         match: (route, param) => route === "memworkspace" && (!param || param === "overview") },
       { id: "memworkspace/kb", label: "Knowledge base" },
@@ -573,7 +573,8 @@ function useNavItems() {
 // Active-state for sidebar/drawer rows. `id` is the row's hash target
 // ("slots", "slots/endpoints", "agent", "memory", "mcp"). A parent row
 // highlights across its whole section; a child row highlights for its exact
-// sub-path. The Agent parent groups the agent/memory/mcp routes.
+// sub-path. The Agent parent groups the agent and mcp routes; Memory is its
+// own row, active on every #memory/<tab>.
 function _navActive(route, param, id, match) {
   if (match) return match(route, param);
   // A Slots param is `<tab>[/<sub>]`; the sub-tab never changes which sidebar row is active.
@@ -581,7 +582,7 @@ function _navActive(route, param, id, match) {
   const cur = route + (tab ? "/" + tab : "");
   if (cur === id) return true;
   if (id === route) return true;
-  if (id === "agent" && (route === "agent" || route === "memory" || route === "mcp")) return true;
+  if (id === "agent" && (route === "agent" || route === "mcp")) return true;
   return false;
 }
 

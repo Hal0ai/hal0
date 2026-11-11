@@ -104,6 +104,57 @@ describe('knowledge base fixtures', () => {
     ])
   })
 
+  it('gives every node, folder or page, the thirteen fields the engine sends', () => {
+    const raw = serve(ENDPOINTS.memoryBankKnowledgeTree('primary')).payload as {
+      roots: Record<string, unknown>[]
+    }
+    const fields = [
+      'children',
+      'description',
+      'id',
+      'is_stale',
+      'kind',
+      'last_refresh_failed_at',
+      'managed',
+      'mental_model_id',
+      'name',
+      'parent_id',
+      'tags',
+      'timestamp',
+      'trigger',
+    ]
+    const walk = (nodes: Record<string, unknown>[], parent: string | null) => {
+      for (const node of nodes) {
+        expect(Object.keys(node).sort()).toEqual(fields)
+        expect(['page', 'folder']).toContain(node.kind)
+        expect(node.parent_id).toBe(parent)
+        // When a page was last refreshed is on its mental model, not on the node.
+        expect(node).not.toHaveProperty('last_refreshed_at')
+        walk(node.children as Record<string, unknown>[], node.id as string)
+      }
+    }
+    walk(raw.roots, null)
+    expect(raw.roots.length).toBeGreaterThan(0)
+  })
+
+  it('names, on each page node, a mental model the list serves', () => {
+    const models = serve(ENDPOINTS.memoryBankMentalModels('primary')).payload as { items: MentalModel[] }
+    for (const { node } of knowledgePages(tree)) {
+      const model = models.items.find((m) => m.id === node.mental_model_id)
+      expect(model, node.id).toBeTruthy()
+      expect(model?.last_refreshed_at).toBeTruthy()
+    }
+  })
+
+  it('marks the stale page, and its failed refresh, on the node itself', () => {
+    const node = knowledgePages(tree).find((r) => r.node.id === 'kb-operator-style')!.node
+    expect(node.is_stale).toBe(true)
+    expect(node.last_refresh_failed_at).toBeTruthy()
+    const fresh = knowledgePages(tree).find((r) => r.node.id === 'kb-power-resilience')!.node
+    expect(fresh.is_stale).toBe(false)
+    expect(fresh.last_refresh_failed_at).toBeNull()
+  })
+
   it('serves every page the tree names', () => {
     for (const { node } of knowledgePages(tree)) {
       const page = pageOf(node.id)
@@ -145,10 +196,10 @@ describe('mental model fixtures', () => {
     }
   })
 
-  it('has a model with history, newest first', () => {
-    const history = normalizeMentalModelHistory(
-      serve(ENDPOINTS.memoryBankMentalModelHistory('primary', 'mm-power-resilience')).payload,
-    )
+  it('has a model with history, newest first, as the bare list the engine sends', () => {
+    const raw = serve(ENDPOINTS.memoryBankMentalModelHistory('primary', 'mm-power-resilience')).payload
+    expect(Array.isArray(raw)).toBe(true)
+    const history = normalizeMentalModelHistory(raw)
     expect(history.items).toHaveLength(3)
     const stamps = history.items.map((r) => Date.parse(r.updated_at as string))
     expect([...stamps].sort((a, b) => b - a)).toEqual(stamps)
@@ -157,6 +208,7 @@ describe('mental model fixtures', () => {
 
   it('has a model with no history, and a model whose refresh failed', () => {
     const none = serve(ENDPOINTS.memoryBankMentalModelHistory('primary', 'mm-thermal-envelope')).payload
+    expect(none).toEqual([])
     expect(normalizeMentalModelHistory(none)).toEqual({ items: [] })
     const failed = serve(ENDPOINTS.memoryBankMentalModel('primary', 'mm-operator-style')).payload as MentalModel
     expect(failed.is_stale).toBe(true)
@@ -176,6 +228,37 @@ describe('operations fixtures', () => {
       'op-ing-8975',
     ])
     expect(operations('primary')).toMatchObject({ bank_id: 'primary', total: 3, limit: 50, offset: 0 })
+  })
+
+  it('gives every row the sixteen fields the engine sends', () => {
+    const fields = [
+      'created_at',
+      'details',
+      'document_id',
+      'error_message',
+      'filename',
+      'id',
+      'items_count',
+      'mental_model_id',
+      'next_retry_at',
+      'operation_id',
+      'operation_type',
+      'progress',
+      'retry_count',
+      'status',
+      'task_type',
+      'updated_at',
+    ]
+    for (const bank of ['primary', 'ingest', 'big']) {
+      const rows = operations(bank, '?limit=500').operations as unknown as Record<string, unknown>[]
+      expect(rows.length).toBeGreaterThan(0)
+      for (const row of rows) {
+        expect(Object.keys(row).sort()).toEqual(fields)
+        expect(row.operation_id).toBe(row.id)
+        expect(row.operation_type).toBe(row.task_type)
+        expect(Date.parse(row.updated_at as string)).toBeGreaterThanOrEqual(Date.parse(row.created_at as string))
+      }
+    }
   })
 
   it('has waiting, running, failed and done rows, and the failed one says why', () => {

@@ -71,8 +71,9 @@ export interface BankOperation {
   created_at: string
   error_message: string | null
   retry_count: number
-  // The rest of the row a 1.x engine returns (seen on a live
-  // `GET .../operations`); optional because older engines omit them.
+  // The rest of the row a 1.x engine returns; optional because older engines
+  // omit them. `operation_id` is the same value as `id`.
+  operation_id?: string
   operation_type?: string
   updated_at?: string | null
   items_count?: number | null
@@ -80,11 +81,15 @@ export interface BankOperation {
   /** Set on a mental-model or knowledge-page refresh operation. */
   mental_model_id?: string | null
   next_retry_at?: string | null
+  /** Engine-defined, and null on every row seen so far. Never shown raw. */
+  progress?: unknown
+  details?: unknown
+  filename?: string | null
 }
 
-// Real hindsight-api 0.8.4 envelope — verified live against
-// GET /v1/default/banks/{bank}/operations. NOT the `{items, total}` shape
-// every other Hindsight list endpoint uses (#1645).
+// The engine's envelope for `GET .../operations`: `{bank_id, total, limit,
+// offset, operations: [...]}`. NOT the `{items, total}` shape every other
+// Hindsight list endpoint uses (#1645).
 export interface BankOperations {
   bank_id?: string
   total: number
@@ -631,9 +636,9 @@ export interface MentalModelHistory {
   items: MentalModelRevision[]
 }
 
-// `hal0 memory mm history` reads this response as `{items: [...]}` or a bare
-// array (cli/memory_mm_commands.py), and the engine's unit history is a bare
-// array. Both are accepted so the reader never branches on the wire shape.
+// The engine answers with a bare JSON list of revisions. `{items: [...]}` is
+// accepted too, as `hal0 memory mm history` does (cli/memory_mm_commands.py),
+// so a caller never branches on the wire shape.
 export function normalizeMentalModelHistory(raw: unknown): MentalModelHistory {
   if (Array.isArray(raw)) return { items: raw as MentalModelRevision[] }
   if (raw && typeof raw === 'object') {
@@ -670,18 +675,38 @@ export function useMentalModelHistory(
 // two mutations invalidate that prefix, so a change always reaches both the
 // tree and the open page.
 
+// One node of the tree, as a 1.x engine sends it. Folders and pages carry the
+// same fields; on a folder the page-only ones are null, empty or false.
+//
+// A node has no `last_refreshed_at`. When a page was last refreshed is on the
+// mental model it is generated from: look `mental_model_id` up in the
+// mental-models list (`useMentalModels`).
 export interface KnowledgeNode {
   id: string
   kind: 'folder' | 'page' | string
   name: string
+  parent_id: string | null
   children: KnowledgeNode[]
-  /** The mental model a page is generated from, when the engine reports it. */
-  mental_model_id?: string | null
+  description: string | null
+  tags: string[]
+  /** The engine's own flag, carried as it is sent. */
+  managed: boolean
+  /** The mental model a page is generated from. */
+  mental_model_id: string | null
+  timestamp: string | null
+  trigger: string | null
+  /** The bank was written since the page's model last refreshed. A hint, not a fault. */
+  is_stale: boolean
+  /** Set when a refresh failed. A fault only when later than the model's `last_refreshed_at`. */
+  last_refresh_failed_at: string | null
 }
 
 export interface KnowledgeTree {
   roots: KnowledgeNode[]
 }
+
+const textOrNull = (value: unknown): string | null =>
+  typeof value === 'string' && value ? value : null
 
 function normalizeKnowledgeNode(raw: unknown): KnowledgeNode | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
@@ -694,18 +719,27 @@ function normalizeKnowledgeNode(raw: unknown): KnowledgeNode | null {
     id,
     kind: typeof kind === 'string' ? kind : 'page',
     name: typeof node.name === 'string' && node.name ? node.name : id,
+    parent_id: textOrNull(node.parent_id),
     children: children
       .map(normalizeKnowledgeNode)
       .filter((child): child is KnowledgeNode => child !== null),
-    mental_model_id: typeof node.mental_model_id === 'string' ? node.mental_model_id : null,
+    description: textOrNull(node.description),
+    tags: Array.isArray(node.tags) ? node.tags.filter((t): t is string => typeof t === 'string') : [],
+    managed: node.managed === true,
+    mental_model_id: textOrNull(node.mental_model_id),
+    timestamp: textOrNull(node.timestamp),
+    trigger: textOrNull(node.trigger),
+    is_stale: node.is_stale === true,
+    last_refresh_failed_at: textOrNull(node.last_refresh_failed_at),
   }
 }
 
-// The engine answers `{roots: [...]}`. hal0's own readers of this route
-// (cli/memory_kb_commands.py, memory/spec_apply.py) also accept `nodes`,
-// `children` or `items` for the list, `type` for a node's kind and `page_id`
-// for its id, so the same spellings are accepted here and folded into one
-// shape. A node without an id is dropped: it could never be opened.
+// The engine answers `{roots: [...]}`, with `kind` and `id` on every node.
+// hal0's own readers of this route (cli/memory_kb_commands.py,
+// memory/spec_apply.py) also accept `nodes`, `children` or `items` for the
+// list, `type` for a node's kind and `page_id` for its id, so the same
+// spellings are accepted here and folded into one shape. A node without an
+// id is dropped: it could never be opened.
 export function normalizeKnowledgeTree(raw: unknown): KnowledgeTree {
   const body = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
   const list = Array.isArray(raw)

@@ -341,7 +341,10 @@ function AddModal({ bank, tab0 = 'fact', onClose }) {
   )
 }
 
-function BankBar({ bank, setBank }) {
+// `embedded` is set when the bar is drawn inside the Memory area (#memory/facts): the area's
+// scope bar chooses the bank and its Knowledge tab holds directives and mental models, so the
+// bar drops its own bank <select> and its Rules tab there. Everything else is unchanged.
+function BankBar({ bank, setBank, embedded = false }) {
   const { FACT_COLORS, fmtN, Icon, MvError } = window.MemV2
   const Spark = window.Spark
 
@@ -549,18 +552,20 @@ function BankBar({ bank, setBank }) {
   return (
     <div className="mv-card mv-bankbar" data-testid="mv-bankbar">
       <div className="row">
-        <select
-          className="mono pick"
-          data-testid="mv-bank-select"
-          value={bank}
-          onChange={(e) => setBank(e.target.value)}
-        >
-          {banks.map((x) => (
-            <option key={x.bank_id} value={x.bank_id}>
-              {x.name || x.bank_id}
-            </option>
-          ))}
-        </select>
+        {!embedded && (
+          <select
+            className="mono pick"
+            data-testid="mv-bank-select"
+            value={bank}
+            onChange={(e) => setBank(e.target.value)}
+          >
+            {banks.map((x) => (
+              <option key={x.bank_id} value={x.bank_id}>
+                {x.name || x.bank_id}
+              </option>
+            ))}
+          </select>
+        )}
         {editingMission ? (
           <form className="pers editing" onSubmit={saveMission} data-testid="mv-bank-mission-form">
             <textarea
@@ -686,13 +691,15 @@ function BankBar({ bank, setBank }) {
         >
           Reflect
         </button>
-        <button
-          className={'btab' + (tab === 'rules' ? ' on' : '')}
-          data-testid="mv-rules-tab"
-          onClick={() => setTab('rules')}
-        >
-          Rules <span className="n num">{onCount} · {mentalModels.length}</span>
-        </button>
+        {!embedded && (
+          <button
+            className={'btab' + (tab === 'rules' ? ' on' : '')}
+            data-testid="mv-rules-tab"
+            onClick={() => setTab('rules')}
+          >
+            Rules <span className="n num">{onCount} · {mentalModels.length}</span>
+          </button>
+        )}
       </div>
       {tab === 'reflect' && (
         <div>

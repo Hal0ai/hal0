@@ -4,7 +4,7 @@
 
 import { useMemoryEnabled } from '@/api/hooks/useMemory'
 import { useMemoryEngine, useMemoryBanks, useBankStats } from '@/api/hooks/useHindsight'
-import { bankFigures, chosenBank } from './memory-pure'
+import { bankFigures, chosenBank, memoryCardTarget } from './memory-pure'
 
 const { useMemo } = React
 
@@ -44,7 +44,7 @@ function OvMemoryBody({ onGo }) {
       title="Memory"
       foot={
         <>
-          <button type="button" className="ov-lnk" onClick={() => onGo('memory')}>
+          <button type="button" className="ov-lnk" onClick={() => onGo(memoryCardTarget(bank))}>
             Open memory →
           </button>
         </>

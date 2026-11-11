@@ -203,10 +203,26 @@ describe('query hooks call the classified routes', () => {
       ].sort(),
     )
     expect(get().tree.data).toEqual({
-      roots: [{ id: 'kb-1', kind: 'page', name: 'One', children: [], mental_model_id: null }],
+      roots: [
+        {
+          id: 'kb-1',
+          kind: 'page',
+          name: 'One',
+          parent_id: null,
+          children: [],
+          description: null,
+          tags: [],
+          managed: false,
+          mental_model_id: null,
+          timestamp: null,
+          trigger: null,
+          is_stale: false,
+          last_refresh_failed_at: null,
+        },
+      ],
     })
     expect(get().page.data).toEqual({ id: 'x', name: 'X' })
-    // A bare array is folded into {items}.
+    // The engine's bare list is folded into {items}.
     expect(get().history.data).toEqual({ items: [{ updated_at: '2026-06-10T08:00:00Z', content: 'v2' }] })
     // The cache holds exactly the keys the key helpers name.
     expect(qc.getQueryState(hindsight.knowledgeTreeKey(BANK))?.status).toBe('success')
@@ -376,6 +392,52 @@ describe('mutations invalidate the queries that exist', () => {
 
 describe('normalizeKnowledgeTree', () => {
   const page = (id: string, extra: Record<string, unknown> = {}) => ({ id, kind: 'page', name: id, children: [], ...extra })
+  // What a node holds for each field the answer leaves out.
+  const NODE_DEFAULTS = {
+    parent_id: null,
+    description: null,
+    tags: [],
+    managed: false,
+    mental_model_id: null,
+    timestamp: null,
+    trigger: null,
+    is_stale: false,
+    last_refresh_failed_at: null,
+  }
+
+  it('keeps every field of a node as the engine sends it', () => {
+    const node = {
+      id: 'kb-operator-style',
+      kind: 'page',
+      name: 'Operator interaction style',
+      parent_id: 'kbf-operator',
+      children: [],
+      description: 'How to talk to the operator',
+      tags: ['operator'],
+      managed: true,
+      mental_model_id: 'mm-operator-style',
+      timestamp: '2026-05-28T23:00:00.000Z',
+      trigger: 'after_consolidation',
+      is_stale: true,
+      last_refresh_failed_at: '2026-06-11T08:00:00.000Z',
+    }
+    expect(hindsight.normalizeKnowledgeTree({ roots: [node] })).toEqual({ roots: [node] })
+  })
+
+  it('has no last_refreshed_at on a node: that is read from the mental-models list', () => {
+    const tree = hindsight.normalizeKnowledgeTree({
+      roots: [page('a', { mental_model_id: 'mm-1', last_refreshed_at: '2026-06-10T08:00:00.000Z' })],
+    })
+    expect(tree.roots[0]).not.toHaveProperty('last_refreshed_at')
+    expect(tree.roots[0].mental_model_id).toBe('mm-1')
+  })
+
+  it('reads a wrong-typed field as its empty value', () => {
+    const tree = hindsight.normalizeKnowledgeTree({
+      roots: [page('a', { tags: ['x', 7, null], managed: 'yes', is_stale: 1, parent_id: 4, trigger: '' })],
+    })
+    expect(tree.roots[0]).toMatchObject({ tags: ['x'], managed: false, is_stale: false, parent_id: null, trigger: null })
+  })
 
   it.each([
     ['the engine envelope', { roots: [page('a')] }],
@@ -401,11 +463,13 @@ describe('normalizeKnowledgeTree', () => {
     expect(tree).toEqual({
       roots: [
         {
+          ...NODE_DEFAULTS,
           id: 'f1',
           kind: 'folder',
           name: 'Folder',
-          mental_model_id: null,
-          children: [{ id: 'p1', kind: 'page', name: 'Page', children: [], mental_model_id: 'mm-1' }],
+          children: [
+            { ...NODE_DEFAULTS, id: 'p1', kind: 'page', name: 'Page', children: [], mental_model_id: 'mm-1' },
+          ],
         },
       ],
     })

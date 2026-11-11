@@ -1,5 +1,6 @@
 /*
- * The Memory area (ADR-0058, decision 12): the shared parts under ./shared/.
+ * The Memory area (ADR-0058, decision 12): the page frame (MemoryArea.jsx), the pieces every tab
+ * is built from (card, table, key and value rows, links), and the shared parts under ./shared/.
  *
  * Every class here starts with `.ma-`. The area's root element carries `.ma`, which scopes the
  * few rules that restyle a global class (`.btn`, `.rsel-*`). Colours, radii and fonts come from
@@ -372,3 +373,382 @@
   padding: 0;
   color: var(--fg-2);
 }
+
+/* ── Page frame (MemoryArea.jsx) ────────────────────────────────────────────── */
+
+/* Cards sit 14px apart, everywhere in the area. */
+.ma-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* The dashboard's `.vh` header, with the summary line on the title's baseline. */
+.ma .ma-head {
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-bottom: 14px;
+}
+.ma-meta {
+  font-family: var(--jbm);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--fg-2);
+}
+
+/* ── Tab row ────────────────────────────────────────────────────────────────── */
+
+/* Tabs are links. The row scrolls sideways when it does not fit; it never wraps. */
+.ma-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 0 4px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.ma-tab {
+  flex: none;
+  padding: 10px 16px;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.ma-tab:hover { color: var(--fg); }
+/* The open tab: the accent, an underline, and `aria-current`. Exactly one tab has it. */
+.ma-tab[aria-current="page"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.ma-tabs-gap { flex: 1 0 16px; }
+/* A quiet link at the end of the row. It leaves the area, so it is not a tab. */
+.ma-tabs-aside {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 2px;
+  color: var(--fg-2);
+  font-family: var(--jbm);
+  font-size: 11px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.ma-tabs-aside:hover { color: var(--fg); }
+/* The row clips, so the ring is drawn inside the control. */
+.ma-tab:focus-visible,
+.ma-tabs-aside:focus-visible { outline-offset: -2px; }
+
+/* ── Text ───────────────────────────────────────────────────────────────────── */
+
+/* The lead of a view: a verdict, a flow's title. */
+.ma-lead {
+  margin: 0 0 6px;
+  font-family: var(--jbm);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+/* The title of one item: a list entry, a step, an empty state. */
+.ma-item-title {
+  margin: 0 0 4px;
+  font-family: var(--geist);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.ma-body {
+  margin: 0;
+  max-width: 72ch;
+  font-family: var(--geist);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+/* Emphasis is a colour step, not bold. */
+.ma-em { color: var(--fg); }
+.ma-helper {
+  margin: 0;
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.ma-eyebrow-block {
+  display: block;
+  margin-bottom: 6px;
+}
+
+/* ── Links ──────────────────────────────────────────────────────────────────── */
+
+/* A link is underlined: the underline is the cue, not the colour. */
+.ma-link {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: var(--fg-3);
+  text-underline-offset: 3px;
+}
+/* A link that stands alone and leaves the view: underlined text and an arrow (after the text to
+   go on, before it to go back). */
+.ma-go {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg);
+  font-family: var(--jbm);
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.ma-go-text {
+  text-decoration: underline;
+  text-decoration-color: var(--fg-3);
+  text-underline-offset: 3px;
+}
+.ma-link:hover,
+.ma-go:hover { color: var(--hal0-accent-hover); }
+
+/* ── Card ───────────────────────────────────────────────────────────────────── */
+
+/* The one container. Worn with the global `.card` (fill, edge, radius); this adds the clip that
+   keeps a header rule and a table inside the rounded corners. */
+.ma-card {
+  min-width: 0;
+  overflow: hidden;
+}
+.ma-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ma-card-head > h2,
+.ma-card-head > h3 { margin: 0; }
+.ma-card-gap { flex: 1 1 0; }
+.ma-card-meta {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-2);
+}
+.ma-card-body { padding: 16px 18px; }
+.ma-card-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line-soft);
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+/* A raised row inside a card: the one place a card has a second fill. */
+.ma-card-raised {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 14px 20px;
+  padding: 16px 18px;
+  background: var(--bg-2);
+  border-top: 1px solid var(--line-soft);
+}
+/* An inner box: a tile, a consent row. */
+.ma-box {
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+}
+/* Two cards side by side, one above the other when there is no room. */
+.ma-cards {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 14px;
+}
+.ma-cards > * {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+
+/* The top of a card that leads with a sentence: the lead and its text, with a chip or a small
+   button beside them. */
+.ma-lead-row {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  padding: 18px;
+}
+.ma-lead-main {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+.ma-lead-side {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.ma-cmd-wrap {
+  max-width: 420px;
+  margin-top: 12px;
+}
+
+/* ── Rows inside a card ─────────────────────────────────────────────────────── */
+
+/* Key and value rows: a short list of facts that are sentences, not numbers. A row may end in
+   one link. */
+.ma-kv {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 4px 18px 8px;
+}
+.ma-kv-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ma-kv-row:last-child { border-bottom: 0; }
+.ma-kv-row > dt {
+  flex: 0 0 96px;
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+/* A key that is a phrase, not one word. */
+.ma-kv-wide > .ma-kv-row > dt { flex-basis: 200px; }
+.ma-kv-row > dd {
+  flex: 1 1 220px;
+  min-width: 0;
+  margin: 0;
+  font-family: var(--geist);
+  font-size: 13.5px;
+  color: var(--fg);
+}
+/* A value that was not reported reads quieter than one that was. */
+.ma-kv-row > .ma-kv-unknown { color: var(--fg-3); }
+
+/* A plain list of sentences. */
+.ma-list {
+  margin: 0;
+  padding: 0 18px 8px;
+  list-style: none;
+}
+.ma-list-row {
+  padding: 9px 0;
+  border-top: 1px solid var(--line-soft);
+  font-family: var(--geist);
+  font-size: 13.5px;
+  color: var(--fg);
+}
+
+/* A row that opens something (a fact, an operation, a page): the whole row is one button. */
+.ma-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--fg);
+  font-family: var(--geist);
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+.ma-row:hover { background: var(--bg-2); }
+/* The open row: a fill, and the word "open" (`.ma-row-open`) in place of the chevron. */
+.ma-row[aria-current="true"] { background: var(--bg-3); }
+.ma-row-open {
+  flex: none;
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-2);
+}
+.ma-row:focus-visible { outline-offset: -2px; }
+
+/* ── Table ──────────────────────────────────────────────────────────────────── */
+
+/* A table scrolls sideways inside its card, and the scroll box can be reached by keyboard. */
+.ma-table-region { overflow-x: auto; }
+.ma-table-region:focus-visible { outline-offset: -2px; }
+.ma-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  font-feature-settings: "zero" 1, "tnum" 1;
+}
+.ma-table thead th {
+  padding: 9px 14px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-3);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.ma-table tbody th,
+.ma-table tbody td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
+.ma-table tbody tr:last-child > * { border-bottom: 0; }
+/* The row's name. An id wraps; it is never cut short. */
+.ma-table tbody th {
+  color: var(--fg);
+  font-weight: 500;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.ma-table tbody td { color: var(--fg-2); }
+/* A numeric column, header and cells: right-aligned. The unit is in the header. */
+.ma-table .ma-num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ── Loading ────────────────────────────────────────────────────────────────── */
+
+/* Sizes of the `.ma-skel` block for a line of text, the summary line and a table cell. */
+.ma-skel-line {
+  display: block;
+  width: min(420px, 80%);
+  height: 14px;
+}
+.ma-skel-line + .ma-skel-line { margin-top: 10px; }
+.ma-skel-meta {
+  width: 220px;
+  height: 11px;
+  vertical-align: middle;
+}
+.ma-skel-cell {
+  width: 36px;
+  height: 12px;
+  vertical-align: middle;
+}
+
+/* A notice that is information, not a state: no chip, and quieter text. */
+.ma-notice-quiet { color: var(--fg-2); }
