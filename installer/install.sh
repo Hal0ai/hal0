@@ -4098,10 +4098,13 @@ else
             # the configured embedder ([memory.models]). The base unit names
             # none, so before the engine's FIRST start hal0 writes its managed
             # drop-in and the embedder record, starts the engine on them, and
-            # moves it to the engine default if that start fails. It acts only
-            # on a box with no memory store; on any other box (an upgrade, a
-            # re-run, a store whose disk is missing) it changes nothing. All of
-            # it is hal0.memory.first_start; exit 3 = fell back, 4 = failed.
+            # moves it to the engine default only when that start fails and a
+            # start on the default then works. It acts only on a box with no
+            # memory store; on any other box (an upgrade, a re-run, a store
+            # whose disk is missing) it changes nothing. All of it is
+            # hal0.memory.first_start; exit 3 = fell back to the default,
+            # 5 = the engine starts on neither embedder, anything else = the
+            # step itself failed.
             hs_first_rc=0
             "${VENV_DIR}/bin/python" -I -m hal0.memory.first_start || hs_first_rc=$?
             case "${hs_first_rc}" in
@@ -4110,12 +4113,22 @@ else
                     warn "the memory engine could not start on the configured embedder; it runs on the engine default instead (see the line above)"
                     warn "  check 'journalctl -u hindsight-api -n 40' for the cause; '${HAL0_BIN} doctor all' shows the recorded embedder"
                     ;;
+                5)
+                    warn "the memory engine did not start (see the line above); it stays on the configured embedder and keeps retrying"
+                    warn "  its first start downloads the embedding and the reranker model, so check the network, then 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'"
+                    ;;
                 *)
                     warn "the memory engine's embedder could not be set up before its first start (see the line above)"
                     ;;
             esac
             systemctl daemon-reload
-            systemctl enable --now hindsight-api
+            # A unit that reached its start limit (a first start that kept
+            # failing above) is refused by `enable --now`, and this file runs
+            # under `set -e`: clear the failed state first, and treat a start
+            # that still fails like the not-yet-healthy engine below (warn).
+            systemctl reset-failed hindsight-api 2>/dev/null || true
+            systemctl enable --now hindsight-api \
+                || warn "could not enable and start the memory engine; check 'journalctl -u hindsight-api -n 40'"
             if [[ "${hs_unit_changed}" -eq 1 && "${hs_was_active}" -eq 1 ]]; then
                 info "hindsight-api unit changed — restarting the running engine so it reads the new unit"
                 systemctl restart hindsight-api || warn "hindsight-api restart failed; restart it by hand to apply the new unit"

@@ -91,7 +91,7 @@ in order:
     catalog.
 14. **Bundled agent skills** — installs the shipped agent skill set.
 15. **Service start** — starts `hal0-api` and `hal0-openwebui` (unless
-    `--no-start`), waits up to 60 s for `/api/health` to answer before the post-install checks run, stands up the Hindsight memory engine (a new install starts it on the embedder in `[memory.models]`, `hindsight-ai/hs-embed-1` by default; an existing store keeps the embedder it was built with), then provisions the bundled Hermes agent (skip with `HAL0_SKIP_HERMES=1`; install later with `hal0 agent install hermes`). Hermes provisioning builds a release and can take a few minutes.
+    `--no-start`), waits up to 60 s for `/api/health` to answer before the post-install checks run, stands up the Hindsight memory engine (a new install starts it on the embedder in `[memory.models]`, `hindsight-ai/hs-embed-1` by default; an existing store keeps the embedder it was built with; that first start downloads the embedding and the reranker model), then provisions the bundled Hermes agent (skip with `HAL0_SKIP_HERMES=1`; install later with `hal0 agent install hermes`). Hermes provisioning builds a release and can take a few minutes.
 
 </Steps>
 

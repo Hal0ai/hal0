@@ -77,10 +77,10 @@ record of a new install are written later, immediately before the engine's
 first start, by :mod:`hal0.memory.first_start`.
 
 One writer replaces a record: when that first start fails on the configured
-embedder, ``first_start`` rewrites it as the engine default with the source
-``first-start-fallback`` before it starts the engine on the default. The
-engine never answered a request, so no vector was made with the pair being
-replaced.
+embedder and a trial start on the engine default then comes up healthy,
+``first_start`` rewrites it as the engine default with the source
+``first-start-fallback``. The engine never answered a request on the
+configured pair, so no vector was made with the pair being replaced.
 
 When a record exists
 --------------------

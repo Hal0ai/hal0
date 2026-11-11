@@ -93,6 +93,7 @@ def _step_block() -> str:
     [
         (0, ""),
         (3, "could not start on the configured embedder"),
+        (5, "did not start"),
         (4, "could not be set up before its first start"),
         (1, "could not be set up before its first start"),
     ],
@@ -121,6 +122,65 @@ def test_step_exit_codes_warn_and_never_abort(tmp_path: Path, rc: int, warned: s
         assert "WARN the memory engine" in res.stdout and warned in res.stdout
     else:
         assert "WARN" not in res.stdout
+    if rc == 5:
+        # The generic line: no blame on the embedder, and both downloads named.
+        assert "reranker" in res.stdout and "journalctl -u hindsight-api" in res.stdout
+        assert "doctor" in res.stdout and "engine default" not in res.stdout
+
+
+# ── the installer's own start cannot abort the install ────────────────────────
+
+_RESET = "systemctl reset-failed hindsight-api 2>/dev/null || true"
+
+
+def test_reset_failed_runs_between_the_step_and_a_tolerant_enable() -> None:
+    """A unit that reached its start limit is refused by ``enable --now``."""
+    step = _TEXT.index(_STEP)
+    reset = _TEXT.index(_RESET)
+    start = _TEXT.index(_FIRST_START)
+    assert step < reset < start
+    assert _TEXT[start:].startswith(_FIRST_START + " \\\n")
+    assert _TEXT[start:].splitlines()[1].lstrip().startswith("|| warn ")
+
+
+@pytest.mark.parametrize("enable_rc", [0, 1])
+def test_a_failing_enable_warns_and_the_install_goes_on(tmp_path: Path, enable_rc: int) -> None:
+    start = _TEXT.index(_RESET)
+    end = _TEXT.index("\n", _TEXT.index("|| warn", _TEXT.index(_FIRST_START)))
+    log = tmp_path / "systemctl.log"
+    systemctl = tmp_path / "systemctl"
+    systemctl.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$*" >> "{log}"\n'
+        f'[[ "$1" == enable ]] && exit {enable_rc}\n'
+        '[[ "$1" == reset-failed ]] && exit 1\n'
+        "exit 0\n"
+    )
+    systemctl.chmod(systemctl.stat().st_mode | stat.S_IEXEC)
+    script = tmp_path / "drive.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        'warn() { echo "WARN $*"; }\n'
+        f"{_TEXT[start:end]}\n"
+        "echo REACHED\n",
+        encoding="utf-8",
+    )
+    res = subprocess.run(
+        ["bash", str(script)],
+        env={"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert res.returncode == 0, res.stderr
+    assert "REACHED" in res.stdout
+    assert ("WARN could not enable and start the memory engine" in res.stdout) == bool(enable_rc)
+    assert log.read_text().splitlines() == [
+        "reset-failed hindsight-api",
+        "enable --now hindsight-api",
+    ]
 
 
 # ── bank seeding waits for hal0-api to have the engine ────────────────────────
