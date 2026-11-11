@@ -1,5 +1,5 @@
 /*
- * The Memory area (ADR-0058, decision 12): the shared parts under ./parts/.
+ * The Memory area (ADR-0058, decision 12): the shared parts under ./shared/.
  *
  * Every class here starts with `.ma-`. The area's root element carries `.ma`, which scopes the
  * few rules that restyle a global class (`.btn`, `.rsel-*`). Colours, radii and fonts come from
@@ -48,7 +48,7 @@
  *   <button class="btn" disabled aria-describedby="why">Refresh</button>
  *   <p id="why" class="ma-reason">Waiting on the extraction connection.</p>
  *
- * parts/ReasonedButton.jsx renders exactly that.
+ * shared/ReasonedButton.jsx renders exactly that.
  */
 .ma .btn[disabled] {
   opacity: 1;
