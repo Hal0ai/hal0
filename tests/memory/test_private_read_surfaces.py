@@ -191,6 +191,7 @@ def _seed(engine: _Engine, bank: str) -> None:
             "id": "mm-alice",
             "name": "Alice",
             "tags": ["agent:alice", "visibility:private"],
+            "trigger": {"exclude_mental_models": True},
             "content": "alice only",
         },
     }
@@ -365,22 +366,78 @@ async def test_knowledge_pages_owner_reads(layout):
 
 def test_model_scope_confinement_rules():
     own = "agent:alice"
-    assert model_scope_confined_to({"tags": [own, "visibility:private"]}, "alice")
-    assert model_scope_confined_to({"tags": [own], "trigger": {"tags_match": "any"}}, "alice")
+    ex = {"exclude_mental_models": True}
+
+    def m(tags, **trigger):
+        return {"tags": tags, "trigger": {**ex, **trigger}}
+
+    assert model_scope_confined_to(m([own, "visibility:private"]), "alice")
+    assert model_scope_confined_to(m([own], tags_match="any_strict"), "alice")
+    assert model_scope_confined_to(m([own, "topic:x"], tags_match="exact"), "alice")
+    # Non-strict matches admit untagged memories and untagged mental models.
+    assert not model_scope_confined_to(m([own], tags_match="all"), "alice")
+    assert not model_scope_confined_to(m([own], tags_match="any"), "alice")
+    assert not model_scope_confined_to(m([own, "topic:x"], tags_match="any_strict"), "alice")
+    assert not model_scope_confined_to(m([]), "alice")
+    assert not model_scope_confined_to(m([own]), "bob")
+    assert not model_scope_confined_to(m(["agent:unknown"]), "unknown")
+    # Without exclude_mental_models a refresh also reads the other models.
+    assert not model_scope_confined_to({"tags": [own, "visibility:private"]}, "alice")
     assert not model_scope_confined_to(
-        {"tags": [own, "topic:x"], "trigger": {"tags_match": "any"}}, "alice"
+        {"tags": [own], "trigger": {"exclude_mental_models": False}}, "alice"
     )
-    assert not model_scope_confined_to({"tags": []}, "alice")
-    assert not model_scope_confined_to({"tags": [own]}, "bob")
-    assert not model_scope_confined_to({"tags": ["agent:unknown"]}, "unknown")
-    # tag_groups replace the flat tags.
-    assert not model_scope_confined_to(
-        {"tags": [own], "trigger": {"tag_groups": [{"tags": ["topic:x"]}]}}, "alice"
-    )
+    # tag_groups replace the flat tags; a leaf defaults to any_strict.
+    assert not model_scope_confined_to(m([own], tag_groups=[{"tags": ["topic:x"]}]), "alice")
+    assert model_scope_confined_to(m([], tag_groups=[{"tags": [own]}]), "alice")
     assert model_scope_confined_to(
-        {"tags": [], "trigger": {"tag_groups": [{"tags": [own], "match": "all_strict"}]}},
-        "alice",
+        m([], tag_groups=[{"tags": [own], "match": "all_strict"}]), "alice"
     )
+    assert not model_scope_confined_to(m([], tag_groups=[{"tags": [own], "match": "all"}]), "alice")
+    assert not model_scope_confined_to(m([], tag_groups=[{"tags": [own], "match": "any"}]), "alice")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("match", ["all", "any"])
+@pytest.mark.parametrize("where", ["tags_match", "leaf"])
+async def test_pre_existing_non_strict_model_is_not_served(layout, match, where):
+    """bob's model scoped ``agent:bob`` with a non-strict match also drew on
+    untagged whole-bank models; with alice's private note in the bank it is
+    not bob's to read."""
+    p, engine, bank = _provider(layout)
+    trigger: dict[str, Any] = {"exclude_mental_models": True}
+    if where == "tags_match":
+        trigger["tags_match"] = match
+    else:
+        trigger["tag_groups"] = [{"tags": ["agent:bob"], "match": match}]
+    engine.models[bank]["mm-bob"] = {
+        "id": "mm-bob",
+        "tags": ["agent:bob"],
+        "trigger": trigger,
+        "content": "drew on working-context",
+    }
+    assert (await p.list_mental_models(client_id="bob"))["items"] == []
+    with pytest.raises(NotFound):
+        await p.get_mental_model("mm-bob", client_id="bob")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+async def test_agent_created_and_retriggered_models_exclude_other_models(layout):
+    p, engine, bank = _provider(layout)
+    await p.create_mental_model(
+        name="n",
+        source_query="q",
+        id="mm-new",
+        client_id="alice",
+        tags=["agent:alice"],
+        trigger={"exclude_mental_models": False, "tags_match": "all_strict"},
+    )
+    assert engine.models[bank]["mm-new"]["trigger"]["exclude_mental_models"] is True
+    out = await p.update_mental_model(
+        "mm-alice", client_id="alice", trigger={"fact_types": ["world"]}
+    )
+    assert out["trigger"] == {"exclude_mental_models": True, "fact_types": ["world"]}
 
 
 # ── tags ─────────────────────────────────────────────────────────────────────

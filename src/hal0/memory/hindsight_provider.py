@@ -2903,18 +2903,25 @@ class HindsightProvider(MemoryProvider):
     # operator's.
 
     @staticmethod
-    def _check_model_trigger(trigger: dict[str, Any] | None) -> None:
-        """Refuse a ``trigger.tag_groups`` that is set but filters nothing.
+    def _agent_model_trigger(trigger: dict[str, Any] | None) -> dict[str, Any]:
+        """The trigger an agent's create or re-trigger sends to the engine.
 
-        The engine treats any ``tag_groups`` that is not None as replacing the
-        model's tags, and an empty list as no filter: the model is then built
-        from the whole bank whatever its tags say.
+        A ``trigger.tag_groups`` that is set but filters nothing is refused:
+        the engine treats any ``tag_groups`` that is not None as replacing
+        the model's tags, and an empty list as no filter, so the model would
+        be built from the whole bank whatever its tags say.
+
+        ``exclude_mental_models`` is always set: a refresh's reflect otherwise
+        also searches the bank's other mental models, and an untagged one may
+        have been written from other agents' private memory. A model without
+        it is never confined to its caller
+        (:func:`hal0.memory.read_scope.model_scope_confined_to`).
         """
-        if not isinstance(trigger, dict) or "tag_groups" not in trigger:
-            return
-        groups = trigger["tag_groups"]
-        if groups is None:
-            return
+        out = dict(trigger) if isinstance(trigger, dict) else {}
+        out["exclude_mental_models"] = True
+        if "tag_groups" not in out or out["tag_groups"] is None:
+            return out
+        groups = out["tag_groups"]
         if not isinstance(groups, list) or not groups:
             raise BadRequest(
                 "trigger.tag_groups must be a non-empty list of tag groups; "
@@ -2922,6 +2929,7 @@ class HindsightProvider(MemoryProvider):
                 code="memory.mental_model_scope_invalid",
                 details={"field": "trigger.tag_groups"},
             )
+        return out
 
     @staticmethod
     def _model_missing(mental_model_id: str) -> NotFound:
@@ -3001,7 +3009,7 @@ class HindsightProvider(MemoryProvider):
         max_tokens: int = 2048,
         trigger: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        self._check_model_trigger(trigger)
+        trigger = self._agent_model_trigger(trigger)
         bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "create_mental_model",
@@ -3038,14 +3046,19 @@ class HindsightProvider(MemoryProvider):
         when both the old and the new scope are confined to the caller
         (``memory.mental_model_rescope_refused`` otherwise; create a new model
         instead). The engine's answer is returned without its content when
-        the caller may not read the model under its new scope.
+        the caller may not read the model under its new scope. A trigger sent
+        here is merged over the model's current one and always carries
+        ``exclude_mental_models`` (:meth:`_agent_model_trigger`).
         """
-        self._check_model_trigger(trigger)
+        if trigger is not None:
+            self._agent_model_trigger(trigger)  # refuses an empty tag_groups
         bank = self._bank_of(self._write_namespace(dataset, client_id))
         caller = self._caller_agent(client_id)
         before = await self._require_readable_model(bank, mental_model_id, caller)
+        old_trigger = before.get("trigger") if isinstance(before.get("trigger"), dict) else {}
+        if trigger is not None:
+            trigger = self._agent_model_trigger({**old_trigger, **trigger})
         if tags is not None or trigger is not None:
-            old_trigger = before.get("trigger") if isinstance(before.get("trigger"), dict) else {}
             after = {
                 **before,
                 "tags": list(tags) if tags is not None else before.get("tags"),

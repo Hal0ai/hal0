@@ -336,7 +336,10 @@ answers as one that does not exist (`memory.document_not_found`,
 `memory.memory_not_found`; an operation answers `operation_status:
 not_found`). A mental model or knowledge page is built from every memory its
 tags admit, so while the bank holds another agent's private memory only the
-models scoped to the caller's own `agent:<id>` tag are listed. Updating,
+models whose scope strictly requires the caller's own `agent:<id>` tag
+(`all_strict`, `exact`, or `any_strict` over that one tag) and that leave
+other mental models out of their refresh (`trigger.exclude_mental_models`,
+which hal0 sets on every model an agent creates or re-triggers) are listed. Updating,
 refreshing or deleting a model the caller may not read is the same 404, and
 while the bank holds another agent's private memory a model's tags or
 trigger may change only from one scope confined to the caller to another
