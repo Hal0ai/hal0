@@ -201,6 +201,13 @@ export async function installDefaultMocks(page: Page, state: MockState) {
       console_url: null,
     }),
   )
+  // The Memory area's Agents tab also reads who is installed and who holds a key. Neither is in
+  // the in-bundle mock's allow-list, and the catch-all's `{}` is not the body of either route.
+  // The defaults are a box with no bundled agent installed (`list_agents` in
+  // src/hal0/api/routes/agents.py) and no bridge client (`list_clients` in
+  // src/hal0/api/routes/bridge.py).
+  await page.route(/\/api\/agents(\?|$)/, (route) => json(route, { agents: [], count: 0 }))
+  await page.route(/\/api\/bridge\/clients(\?|$)/, (route) => json(route, { items: [] }))
   // GET /api/memory/health is answered in the bundle under the forced mock (three states, chosen
   // by `window.__hal0MockMemoryHealth`; see src/api/mockFixtures.ts), so it only reaches
   // page.route when a spec names it in `__hal0MockPassthrough` or the suite runs without the

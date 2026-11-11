@@ -56,6 +56,15 @@ vi.mock('./operations-data', () => ({
   useQueueRefresh: () => () => {},
 }))
 
+// The Agents tab's requests: no answer yet. The tab's own states are in AgentsTab.test.
+vi.mock('./agents-data', () => ({
+  useAgentsRoute: () => ({}),
+  useInstalledAgents: () => ({}),
+  useMemoryKeyClients: () => ({}),
+  useAllBankTags: (ids: string[]) => ids.map((bankId) => ({ bankId, items: null, isLoading: true })),
+  useTagsRefresh: () => () => {},
+}))
+
 const { MemoryArea } = await import('./MemoryArea.jsx')
 
 const setHash = (hash: string) =>
@@ -150,7 +159,7 @@ describe('tab row', () => {
     expect(byId(render('#memory/operations'), 'ma-operations')).not.toBeNull()
     cleanup()
     const agents = render('#memory/agents')
-    expect(byId(agents, 'ma-agents-stub')).not.toBeNull()
+    expect(byId(agents, 'ma-agents')).not.toBeNull()
     expect(byId(agents, 'ma-health-summary')).toBeNull()
     expect(byId(agents, 'ma-knowledge')).toBeNull()
   })
@@ -166,10 +175,10 @@ describe('tab row', () => {
     const host = render('#memory/health')
     navigate('#memory/agents')
     expect(current(host).map((a) => a.textContent)).toEqual(['Agents'])
-    expect(byId(host, 'ma-agents-stub')).not.toBeNull()
+    expect(byId(host, 'ma-agents')).not.toBeNull()
     navigate('#memory/health')
     expect(current(host).map((a) => a.textContent)).toEqual(['Health'])
-    expect(byId(host, 'ma-agents-stub')).toBeNull()
+    expect(byId(host, 'ma-agents')).toBeNull()
   })
 
   it('ignores an address outside the area (the page is about to unmount)', () => {

@@ -127,7 +127,7 @@ test.describe('page shell', () => {
     await tab(page, 'operations').click()
     await expect(page.getByTestId('ma-operations')).toBeVisible()
     await tab(page, 'agents').click()
-    await expect(page.getByTestId('ma-agents-stub')).toBeVisible()
+    await expect(page.getByTestId('ma-agents')).toBeVisible()
   })
 
   test('Back and Forward walk the tabs', async ({ page }) => {
@@ -212,19 +212,16 @@ test.describe('page shell', () => {
   })
 })
 
-test.describe('tabs that are not built yet', () => {
-  for (const [id, heading, section] of [
-    ['agents', 'Agents', 'agents'],
+test.describe('built tabs, and the legacy tools page they replace', () => {
+  for (const [id, section] of [
+    ['knowledge', 'kb'],
+    ['agents', 'agents'],
   ] as const) {
-    test(`${heading} says it is being moved here and links to the legacy tools page`, async ({ page }) => {
+    test(`${id} is built, and the legacy tools page keeps its own ${section} section`, async ({ page }) => {
       await page.goto(`/#memory/${id}`)
-      const stub = page.getByTestId(`ma-${id}-stub`)
-      await expect(stub.getByRole('heading', { level: 2 })).toHaveText(heading)
-      await expect(stub).toContainText(/being moved (here|into this tab)/)
-      const link = page.getByTestId(`ma-${id}-legacy`)
-      await expect(link).toHaveAttribute('href', `#memworkspace/${section}`)
-      await link.click()
-      await expect(page).toHaveURL(new RegExp(`#memworkspace/${section}$`))
+      await expect(page.getByTestId(`ma-${id}`)).toBeVisible()
+      await expect(page.getByTestId(`ma-${id}-stub`)).toHaveCount(0)
+      await page.goto(`/#memworkspace/${section}`)
       await expect(page.getByTestId(`memws-tab-${section}`)).toHaveAttribute('aria-selected', 'true')
       // The section itself, with its data: the tab row renders before the section's requests
       // answer, so on its own it does not show that the page is still standing afterwards.
@@ -233,7 +230,6 @@ test.describe('tabs that are not built yet', () => {
         await expect(page.getByTestId('memws-install-command')).toContainText('install claude-code')
       }
       await expect(page.getByRole('heading', { name: 'This view hit an error' })).toHaveCount(0)
-      await expect(page.getByTestId(`memws-tab-${section}`)).toHaveAttribute('aria-selected', 'true')
     })
   }
 })
@@ -291,7 +287,7 @@ test.describe('narrow screen', () => {
     // The last tab can be reached.
     await tab(page, 'agents').scrollIntoViewIfNeeded()
     await tab(page, 'agents').click()
-    await expect(page.getByTestId('ma-agents-stub')).toBeVisible()
+    await expect(page.getByTestId('ma-agents')).toBeVisible()
   })
 
   test('the drawer has exactly one row named "Memory", top-level', async ({ page }) => {
