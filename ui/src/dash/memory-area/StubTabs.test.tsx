@@ -5,7 +5,6 @@
 import { createElement } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AgentsTab } from './AgentsTab.jsx'
-import { KnowledgeTab } from './KnowledgeTab.jsx'
 import { cleanup, mount } from './shared/test-harness'
 
 afterEach(cleanup)
@@ -13,7 +12,6 @@ afterEach(cleanup)
 const textOf = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim()
 
 describe.each([
-  { name: 'Knowledge', tab: KnowledgeTab, testId: 'ma-knowledge', href: '#memworkspace/kb' },
   { name: 'Agents', tab: AgentsTab, testId: 'ma-agents', href: '#memworkspace/agents' },
 ])('$name stub', ({ name, tab, testId, href }) => {
   it('has the tab heading, and is named by it', () => {
@@ -39,15 +37,5 @@ describe.each([
     const link = host.querySelector(`[data-testid="${testId}-legacy"]`)!
     expect(link.tagName).toBe('A')
     expect(link.getAttribute('href')).toBe(href)
-  })
-})
-
-describe('Knowledge stub', () => {
-  it('also links to mental models and directives, which live on their own legacy tabs', () => {
-    const { host } = mount(createElement(KnowledgeTab))
-    const hrefs = [...host.querySelectorAll('a')].map((a) => a.getAttribute('href'))
-    expect(hrefs).toEqual(
-      expect.arrayContaining(['#memworkspace/kb', '#memworkspace/mental-models', '#memworkspace/directives']),
-    )
   })
 })

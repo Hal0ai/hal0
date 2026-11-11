@@ -17,10 +17,16 @@ const m = vi.hoisted(() => ({
   statsFor: [] as string[][],
 }))
 
-vi.mock('@/api/hooks/useHindsight', () => ({
-  useMemoryEngine: () => m.engine,
-  useMemoryBanks: () => m.banks,
-}))
+vi.mock('@/api/hooks/useHindsight', async () => {
+  // The Knowledge tab's own reads, all still loading: this file is about the page around the tabs.
+  const { knowledgeHooks, knowledgeState } = await import('./knowledge-test-fixtures')
+  const idle = knowledgeState()
+  return {
+    ...knowledgeHooks(() => idle),
+    useMemoryEngine: () => m.engine,
+    useMemoryBanks: () => m.banks,
+  }
+})
 vi.mock('@/api/hooks/useMemory', () => ({
   useMemoryGraphStatus: () => ({ data: GRAPH }),
   useMemoryModels: () => ({ data: modelsAnswer() }),
@@ -139,14 +145,14 @@ describe('tab row', () => {
   })
 
   it('shows the view of the tab that is open, and only that one', () => {
-    expect(byId(render('#memory/knowledge'), 'ma-knowledge-stub')).not.toBeNull()
+    expect(byId(render('#memory/knowledge'), 'ma-knowledge')).not.toBeNull()
     cleanup()
     expect(byId(render('#memory/operations'), 'ma-operations')).not.toBeNull()
     cleanup()
     const agents = render('#memory/agents')
     expect(byId(agents, 'ma-agents-stub')).not.toBeNull()
     expect(byId(agents, 'ma-health-summary')).toBeNull()
-    expect(byId(agents, 'ma-knowledge-stub')).toBeNull()
+    expect(byId(agents, 'ma-knowledge')).toBeNull()
   })
 
   it('carries the chosen bank to the other tabs, and leaves the open fact behind', () => {

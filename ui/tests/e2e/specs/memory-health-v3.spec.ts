@@ -80,8 +80,8 @@ test.describe('all clear', () => {
     const knowledge = page.getByTestId('ma-health-knowledge')
     await expect(knowledge).toContainText(/\d+ of \d+ mental models are stale, summed across 6 banks\./)
     await knowledge.getByRole('link', { name: 'Open Knowledge' }).click()
-    await expect(page).toHaveURL(/#memory\/knowledge$/)
-    await expect(page.getByTestId('ma-knowledge-stub')).toBeVisible()
+    await expect(page).toHaveURL(/#memory\/knowledge\?bank=primary$/)
+    await expect(page.getByTestId('ma-kn-summary')).toBeVisible()
   })
 
   test('banks table: a real table, a row for each of the six banks, largest first', async ({ page }) => {

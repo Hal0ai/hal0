@@ -1111,3 +1111,71 @@ export function useUnitHistory(
     staleTime: 30_000,
   })
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Memory ▸ Knowledge tab (ADR-0058 decision 12)
+//
+// A knowledge page is a mental model: the tree names the model in
+// `mental_model_id`, and the page's question, tags and refresh settings live
+// on that model. The engine refreshes and edits a page through the model's
+// routes; it serves no `POST .../knowledge-base/pages/{id}/refresh` and no
+// `PATCH .../knowledge-base/pages/{id}`. So the Knowledge tab refreshes a page
+// with `useMentalModelRefresh` on the page's model, and edits it with the
+// mutation below.
+// ═════════════════════════════════════════════════════════════════════════════
+
+import { useEffect, useState } from 'react'
+
+/** The fields of a mental model the Knowledge tab changes (`PATCH .../mental-models/{id}`). */
+export interface MentalModelUpdate {
+  source_query?: string
+  tags?: string[]
+}
+
+// A change to a model changes the page written from it, so both lists are
+// refetched: the mental models, and the bank's knowledge tree and pages.
+export function useMentalModelUpdate() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, id, body }: { bank: string; id: string; body: MentalModelUpdate }) =>
+      apiPatch<MentalModel>(
+        ENDPOINTS.memoryBankMentalModel(bank, id),
+        body as Record<string, unknown>,
+      ),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'mental-models'] })
+      void qc.invalidateQueries({ queryKey: knowledgeKey(vars.bank) })
+    },
+  })
+}
+
+/**
+ * While `active`, refetch a bank's knowledge (its tree, its open page and its
+ * mental models) every `everyMs`. A refresh is queued when its request
+ * returns and finishes later, so this is how a page that started one learns
+ * the outcome. One more round runs when it stops being active: the caller
+ * stops as soon as one list shows the refresh ended, and the others (the
+ * tree's stale flag, the page's new text) have to catch up with it. Answers a
+ * count that rises with each round, for a caller that measures how long it
+ * has waited.
+ */
+export function useKnowledgePolling(bank: string | null, active: boolean, everyMs = 5_000): number {
+  const qc = useQueryClient()
+  const [round, setRound] = useState(0)
+  useEffect(() => {
+    if (!active || !bank) return undefined
+    const refetch = () => {
+      void qc.invalidateQueries({ queryKey: knowledgeKey(bank) })
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', bank, 'mental-models'] })
+    }
+    const timer = setInterval(() => {
+      refetch()
+      setRound((n) => n + 1)
+    }, everyMs)
+    return () => {
+      clearInterval(timer)
+      refetch()
+    }
+  }, [qc, bank, active, everyMs])
+  return round
+}

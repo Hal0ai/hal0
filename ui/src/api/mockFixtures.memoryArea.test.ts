@@ -218,6 +218,75 @@ describe('mental model fixtures', () => {
   })
 })
 
+// The states the Knowledge tab reads, in the shapes a 1.x engine sends.
+describe('knowledge tab fixtures', () => {
+  type Model = MentalModel & { is_knowledge_page?: boolean; trigger?: Record<string, unknown> }
+  const models = (bank: string) =>
+    (serve(ENDPOINTS.memoryBankMentalModels(bank)).payload as { items: Model[]; total: number }).items
+  const tree = normalizeKnowledgeTree(serve(ENDPOINTS.memoryBankKnowledgeTree('primary')).payload)
+
+  it('marks which models are knowledge pages, and the tree names exactly those', () => {
+    const pageModels = models('primary').filter((m) => m.is_knowledge_page).map((m) => m.id)
+    expect(pageModels.sort()).toEqual(knowledgePages(tree).map((r) => r.node.mental_model_id).sort())
+    for (const m of models('primary')) expect(typeof m.is_knowledge_page, m.id).toBe('boolean')
+  })
+
+  it('has mental models that are not pages: one fresh, one stale', () => {
+    const plain = models('primary').filter((m) => !m.is_knowledge_page)
+    expect(plain.map((m) => [m.id, m.is_stale])).toEqual([
+      ['mm-project-decisions', false],
+      ['mm-operator-preferences', true],
+    ])
+    for (const m of plain) expect(m.trigger, m.id).toBeTruthy()
+  })
+
+  it("sends a page's text as `body`, its question as `description`, and the document as `markdown`", () => {
+    for (const { node } of knowledgePages(tree)) {
+      const page = serve(ENDPOINTS.memoryBankKnowledgePage('primary', node.id)).payload as Record<string, unknown>
+      expect(page.type).toBe('knowledge-page')
+      expect(page.body, node.id).toBeTruthy()
+      expect(page.description).toBe(node.description)
+      expect(String(page.markdown).startsWith('---\n')).toBe(true)
+      expect(String(page.markdown).endsWith(String(page.body))).toBe(true)
+    }
+  })
+
+  it('has a history in the engine’s shape: replaced text, a failed refresh, the first write', () => {
+    const raw = serve(ENDPOINTS.memoryBankMentalModelHistory('primary', 'mm-project-decisions')).payload as Record<
+      string,
+      unknown
+    >[]
+    expect(raw.map((e) => [typeof e.previous_content, e.kind ?? null])).toEqual([
+      ['string', null],
+      ['object', 'refresh_failed'],
+      ['string', null],
+      ['object', null],
+    ])
+    const stamps = raw.map((e) => Date.parse(e.changed_at as string))
+    expect([...stamps].sort((a, b) => b - a)).toEqual(stamps)
+    expect(raw[1].error_message).toBeTruthy()
+  })
+
+  it('says why the stale page’s last refresh failed, at the time the page says it failed', () => {
+    const [entry] = serve(ENDPOINTS.memoryBankMentalModelHistory('primary', 'mm-operator-style')).payload as Record<
+      string,
+      unknown
+    >[]
+    const node = knowledgePages(tree).find((r) => r.node.id === 'kb-operator-style')!.node
+    expect(entry.kind).toBe('refresh_failed')
+    expect(entry.changed_at).toBe(node.last_refresh_failed_at)
+  })
+
+  it('has a bank with no pages, no mental models and no directives', () => {
+    expect(serve(ENDPOINTS.memoryBankKnowledgeTree('empty')).payload).toEqual({ roots: [] })
+    expect(serve(ENDPOINTS.memoryBankMentalModels('empty')).payload).toEqual({ items: [], total: 0 })
+    expect(serve(ENDPOINTS.memoryBankDirectives('empty')).payload).toEqual({ items: [], total: 0 })
+    // Every other bank still has them.
+    expect(models('scratch').length).toBeGreaterThan(0)
+    expect((serve(ENDPOINTS.memoryBankDirectives('scratch')).payload as { items: unknown[] }).items.length).toBe(4)
+  })
+})
+
 describe('operations fixtures', () => {
   it('keeps the unparameterised payloads the existing surfaces read', () => {
     expect(operations('primary').operations.map((o) => o.id)).toEqual(['op-7741', 'op-7742', 'op-7710'])

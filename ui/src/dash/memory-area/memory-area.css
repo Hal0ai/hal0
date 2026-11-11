@@ -867,3 +867,425 @@
 }
 /* Empty until the button is used; it gives back the row gap it would otherwise add. */
 .ma-ops-consolidate-status:empty { margin-top: -6px; }
+
+/* knowledge */
+
+/*
+ * Memory ▸ Knowledge (KnowledgeTab.jsx and ./knowledge/). Every class here starts `.ma-kn-`.
+ *
+ * The lists sit beside the reader while there is room for both, and above it when there is
+ * not (a phone): the two columns are flex items that wrap.
+ */
+.ma-kn-cols {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 14px;
+}
+.ma-kn-side {
+  flex: 1 1 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ma-kn-main {
+  flex: 2.4 1 520px;
+  min-width: 0;
+}
+
+/* A long tree or list scrolls inside its card, so it never pushes the reader off the page. */
+.ma-kn-scroll {
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+/* A line of text that stands where a list or a page's text would be. */
+.ma-kn-text { padding: 14px 18px 16px; }
+
+/* ── The page tree ──────────────────────────────────────────────────────────── */
+
+.ma-kn-tree {
+  display: flex;
+  flex-direction: column;
+}
+/* One row: a folder or a page. Its left padding is its depth, set by the component. */
+.ma-kn-node {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--fg);
+  font-family: var(--geist);
+  font-size: 13px;
+  line-height: 1.45;
+  cursor: pointer;
+}
+.ma-kn-node:last-child { border-bottom: 0; }
+.ma-kn-node:hover { background: var(--bg-2); }
+.ma-kn-node[data-kind="folder"] {
+  color: var(--fg-2);
+  font-family: var(--jbm);
+  font-size: 12px;
+}
+/* The open page: a fill, a heavier name, and the word "open" (`.ma-row-open`). No hue. */
+.ma-kn-node[aria-selected="true"] {
+  background: var(--bg-3);
+  font-weight: 600;
+}
+/* The card clips, so the ring is drawn inside the row. */
+.ma-kn-node:focus-visible { outline-offset: -2px; }
+.ma-kn-node-icon {
+  flex: none;
+  margin-top: 4px;
+  color: var(--fg-3);
+}
+/* A long name wraps. It is never cut short. */
+.ma-kn-node-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ma-kn-node-meta {
+  flex: none;
+  margin-top: 1px;
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--fg-3);
+}
+
+/* ── Lists of rows (mental models, history) ─────────────────────────────────── */
+
+.ma-kn-list,
+.ma-kn-history-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ma-kn-list > li:last-child > .ma-row { border-bottom: 0; }
+.ma-kn-row-main {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ma-kn-row-sub {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  color: var(--fg-3);
+}
+.ma-kn-row-chevron {
+  flex: none;
+  margin-top: 4px;
+  color: var(--fg-3);
+}
+
+/* ── The reader ─────────────────────────────────────────────────────────────── */
+
+.ma-kn-reader-top { padding: 16px 18px 8px; }
+.ma-kn-title {
+  max-width: 72ch;
+  margin: 0 0 10px;
+  overflow-wrap: anywhere;
+}
+/* A row of buttons. A disabled one carries its reason under it, so rows align at the top. */
+.ma-kn-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px 10px;
+}
+/* A line that appears after an action. It is in the page from the start (a live region must
+   exist before its text does) and takes no room while it is empty. */
+.ma-kn-status { margin: 0; }
+.ma-kn-status:not(:empty) { margin-top: 8px; }
+/* Something that did not work. The sentence says so; it is set stronger, not coloured. */
+.ma-kn-error { color: var(--fg); }
+.ma-kn-details { padding-top: 0; }
+/* Wide enough for "Last refreshed" on one line. */
+.ma-kn-details > .ma-kv-row > dt { flex-basis: 120px; }
+.ma-kn-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* A tag, shown as it is written: tags are case-sensitive. */
+.ma .ma-kn-tag {
+  color: var(--fg-2);
+  text-transform: none;
+}
+.ma-kn-version-note { padding: 10px 18px 0; }
+
+.ma-kn-history { border-top: 1px solid var(--line-soft); }
+.ma-kn-history-head {
+  margin: 0;
+  padding: 12px 14px 10px;
+}
+.ma-kn-history-list {
+  max-height: 280px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line-soft);
+}
+.ma-kn-history-list > li:last-child,
+.ma-kn-history-list > li:last-child > .ma-row { border-bottom: 0; }
+/* An entry that opens nothing (a failed refresh, the first write): a row, but not a button. */
+.ma-kn-history-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--fg-2);
+  font-family: var(--geist);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* ── A page's text (Markdown.jsx) ───────────────────────────────────────────── */
+
+.ma-kn-md {
+  max-width: 86ch;
+  padding: 6px 18px 18px;
+  color: var(--fg-2);
+  font-family: var(--geist);
+  font-size: 13.5px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.ma-kn-md > :first-child { margin-top: 8px; }
+.ma-kn-md > :last-child { margin-bottom: 0; }
+.ma-kn-md-h {
+  margin: 18px 0 6px;
+  color: var(--fg);
+  font-family: var(--geist);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.ma-kn-md-h1,
+.ma-kn-md-h2 { font-size: 14px; }
+.ma-kn-md-p { margin: 0 0 10px; }
+.ma-kn-md-list {
+  margin: 0 0 10px;
+  padding-left: 20px;
+}
+.ma-kn-md-list .ma-kn-md-list { margin: 4px 0 0; }
+.ma-kn-md-list > li { margin: 2px 0; }
+.ma-kn-md strong {
+  color: var(--fg);
+  font-weight: 600;
+}
+.ma-kn-md-code {
+  padding: 0 4px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-xs);
+  color: var(--fg);
+  font-family: var(--jbm);
+  font-size: 12px;
+}
+/* A long line scrolls inside the block. */
+.ma-kn-md-pre {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+  color: var(--fg-2);
+  font-family: var(--jbm);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-x: auto;
+}
+/* The browser gives `code` its own font; inside the block it takes the block's. */
+.ma-kn-md-pre > code { font: inherit; }
+.ma-kn-md-pre:focus-visible { outline-offset: -2px; }
+.ma-kn-md-quote {
+  margin: 0 0 12px;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--line-strong);
+}
+.ma-kn-md-table-region {
+  margin: 0 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+}
+.ma-kn-md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  overflow-wrap: normal;
+}
+.ma-kn-md-table th,
+.ma-kn-md-table td {
+  min-width: 90px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: left;
+  vertical-align: top;
+}
+.ma-kn-md-table th {
+  border-bottom-color: var(--line);
+  color: var(--fg);
+  font-weight: 600;
+}
+.ma-kn-md-table tbody tr:last-child > td { border-bottom: 0; }
+.ma-kn-md-rule {
+  margin: 14px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+/* ── Forms (edit a page, add a model, add or edit a directive) ──────────────── */
+
+/* A form is a raised row inside its card. */
+.ma-kn-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 18px 16px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line-soft);
+}
+.ma-kn-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 72ch;
+}
+.ma-kn-field-narrow { max-width: 260px; }
+.ma-kn-textarea {
+  min-height: 72px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.ma-kn-added { margin: 0; }
+.ma-kn-added:not(:empty) {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+/* ── Directives ─────────────────────────────────────────────────────────────── */
+
+.ma-kn-directives {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ma-kn-directive {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px 18px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ma-kn-directive:last-child { border-bottom: 0; }
+/* While it is being edited the row is the form, edge to edge. */
+.ma-kn-directive[data-mode="edit"] {
+  display: block;
+  padding: 0;
+}
+.ma-kn-directive-main {
+  flex: 1 1 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ma-kn-directive-name {
+  color: var(--fg);
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.ma-kn-directive-text {
+  max-width: 72ch;
+  margin: 0;
+  color: var(--fg);
+  font-family: var(--geist);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+.ma-kn-directive-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 11px;
+}
+.ma-kn-directive-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+/* The confirm step and a failure line take the row's full width, under its text. */
+.ma-kn-directive-confirm,
+.ma-kn-directive-problem { flex: 1 1 100%; }
+.ma-kn-directive-problem { margin: 0; }
+.ma-kn-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  color: var(--fg-2);
+  font-family: var(--jbm);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ma-kn-check > input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ── The Refresh card ───────────────────────────────────────────────────────── */
+
+.ma-kn-refresh {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px 28px;
+  padding: 16px 18px;
+}
+.ma-kn-refresh-main {
+  flex: 1 1 380px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+/* The interval setting: an inner box beside the action. */
+.ma-kn-interval {
+  flex: 1 1 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+}
+.ma-kn-interval-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+.ma-kn-interval-select {
+  flex: 0 1 auto;
+  min-width: 220px;
+  max-width: 100%;
+}
