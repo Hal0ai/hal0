@@ -243,43 +243,34 @@ WantedBy=multi-user.target
 - **First start** — on a box with no memory store, the installer writes the
   `showcase-lanes.conf` drop-in and the embedder record from
   `[memory.models]` before it starts the engine, so a new store is built with
-  the configured embedder (`hindsight-ai/hs-embed-1` unless you changed it).
-  The engine downloads its local models into `HF_HOME` on that start: the
-  embedder and the reranker (`[memory.models].reranker_model`), two downloads
-  of roughly 260 MB each with the defaults. A box that already has a store,
-  or whose store location is unavailable, is not touched by this step.
+  the configured embedder (`hindsight-ai/hs-embed-1` by default). That start
+  downloads the embedder and the reranker into `HF_HOME`, roughly 260 MB each
+  with the defaults. A box that has a store, or whose store location is
+  unavailable, is not touched.
 
-  If systemd reports that first start failing (the unit is `failed`, or has
-  restarted twice), the installer first finds out whether the embedder is
-  the cause. It stops the engine, renders the drop-in with the engine-default
-  embedder (`BAAI/bge-small-en-v1.5`) and nothing else changed, leaves the
-  record alone, and starts the engine again.
-  - The engine becomes healthy: the embedder was the cause. The record is
-    rewritten as the engine default (source `first-start-fallback`) and the
-    install log gets a `!!` line naming the configured model.
-  - It still does not start: the embedder was not the cause (no network, the
-    reranker download, a taken port). The configured drop-in is put back, the
-    record stays on the configured embedder, and the engine is left retrying.
-    The install log gets a `!!` line that says the engine did not start. Once
-    the cause is fixed the engine comes up on the configured embedder with no
-    further step.
+  If systemd reports that start failing (unit `failed`, or two restarts), the
+  installer tests whether the embedder is the cause: it stops the engine,
+  renders the drop-in with the engine-default embedder
+  (`BAAI/bge-small-en-v1.5`) and nothing else changed, leaves the record
+  alone, and starts again.
+  - Healthy: the embedder was the cause. The record becomes the engine
+    default (source `first-start-fallback`), with a `!!` line naming the
+    configured model.
+  - Still down: something else is wrong (no network, the reranker download, a
+    taken port). The configured drop-in is put back, the record stays, and the
+    engine keeps retrying, with a `!!` line saying it did not start. Once the
+    cause is fixed it comes up on the configured embedder.
 
-  An engine that is only slow (still on its first attempt after 120 s) is
-  left on the configured embedder.
-
-  One case the installer cannot settle: a download that outlasts that watch
-  and fails afterwards. The engine then restarts in a loop on the configured
-  embedder, a store directory (`.pg0`) already exists, and a re-run of the
-  installer skips the step because of it. The `memory` row of
-  `hal0 doctor all` (Hindsight / banks) warns that the engine is degraded or
-  unreachable while it is down. To recover, read
-  `journalctl -u hindsight-api -n 40`, fix the cause (usually the network),
-  then run `sudo systemctl reset-failed hindsight-api` and
-  `sudo systemctl restart hindsight-api`; the engine comes up on the
-  configured embedder and the record is already right. To give the configured
-  embedder up instead, and only on a box whose engine has never been healthy
-  (its store holds nothing): stop `hindsight-api`, remove
-  `/var/lib/hal0/memory/hindsight/.pg0`,
+  An engine that is only slow (first attempt still running after 120 s) is
+  left on the configured embedder. If its download fails later, the engine
+  restarts in a loop, a `.pg0` directory exists, and a re-run of the installer
+  skips this step. The `memory` row of `hal0 doctor all` warns that the engine
+  is degraded or unreachable. Fix the cause shown by
+  `journalctl -u hindsight-api -n 40`, then run
+  `sudo systemctl reset-failed hindsight-api` and
+  `sudo systemctl restart hindsight-api`. To give the configured embedder up
+  instead, only where the engine has never been healthy (the store is empty):
+  stop `hindsight-api`, remove `/var/lib/hal0/memory/hindsight/.pg0`,
   `/var/lib/hal0/state/memory-embedder.json` and
   `hindsight-api.service.d/showcase-lanes.conf`, set
   `[memory.models].embeddings_model`, and re-run the installer.
