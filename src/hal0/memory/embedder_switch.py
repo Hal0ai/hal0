@@ -823,7 +823,8 @@ class EmbedderSwitch:
         raise SwitchError(
             f"the archive of bank {entry.bank} does not match the bank: {_diff_text(last)} "
             "(the archive's count, then the bank's). Either something is still writing to "
-            "the bank, or it holds memories the engine's export does not carry",
+            "the bank, or it holds what the engine's export leaves out: an observation whose "
+            "source facts are gone, or a fact that belongs to no document. Nothing was changed",
             bank=entry.bank,
             details={"differs": last},
         )
