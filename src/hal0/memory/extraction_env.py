@@ -1341,9 +1341,12 @@ def apply_showcase_dropin(
     was never started with. A record file that cannot be read is left alone.
 
     ``embedder`` renders that pair instead and leaves the record exactly as
-    it is. It has one caller, :mod:`hal0.memory.first_start`, which uses it
-    to try a new install's engine on the engine default before any store
-    exists and then either records that pair or puts the drop-in back. Used
+    it is: the record is the caller's to write. It has two callers.
+    :mod:`hal0.memory.first_start` uses it to try a new install's engine on
+    the engine default before any store exists and then either records that
+    pair or puts the drop-in back. ``hal0 memory embedder switch``
+    (:mod:`hal0.memory.embedder_switch`) uses it for the one restart that is
+    meant to move an existing store's engine to another embedder. Used
     anywhere else it would swap the embedder under a store.
     """
     seam = seam if seam is not None else SystemCtlSeam()
@@ -1354,20 +1357,20 @@ def apply_showcase_dropin(
         "restarted": False,
         "error": None,
     }
-    view = ensure_embedder_record(configured_embedder(models))
+    view = ensure_embedder_record(configured_embedder(models)) if embedder is None else None
     try:
         body = render_showcase_env(
             models=models,
             decision=decision,
             lanes=lanes,
             ceiling=showcase_ceiling(graph),
-            embedder=embedder if embedder is not None else view.render,
+            embedder=view.render if view is not None else embedder,
         )
         seam.write_hindsight_showcase_dropin(
             body, path=SHOWCASE_DROP_IN_PATH, timeout=_SYSTEMCTL_TIMEOUT_S
         )
         result["written"] = True
-        if embedder is None and view.record_error is None and not view.record.persisted:
+        if view is not None and view.record_error is None and not view.record.persisted:
             persist_embedder_record(view.record)
         # #3520: the write also retires the hand-maintained H0-98 drop-in;
         # say so if it survived (e.g. a pre-#3520 seam wrapper on the box).

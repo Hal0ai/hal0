@@ -705,7 +705,8 @@ def test_status_reports_a_config_that_differs_and_changes_nothing(box: Box) -> N
     notice = er.embedder_notice(status)
     assert notice is not None
     assert BGE in notice and HS in notice
-    assert "hal0 memory embedder switch" in notice and "not in this release yet" in notice
+    # Names the command that moves the store to the configured embedder.
+    assert f"`hal0 memory embedder switch {HS}` (a dry run; add --apply" in notice
     assert box.record.read_bytes() == before
 
 

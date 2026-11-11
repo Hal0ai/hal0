@@ -3965,14 +3965,14 @@ def test_memory_embedder_passes_when_the_store_matches_the_config() -> None:
 
 def test_memory_embedder_passes_with_a_note_on_an_upgraded_box_at_the_default() -> None:
     """Store on bge-small, config still at its shipped default: every upgraded
-    box. Not a warning, because no release ships a remedy yet."""
+    box. Not a warning (nothing the operator did), but it names the way to
+    move the store."""
     check = da.check_memory_embedder(status=_embedder(_BGE, _HS))
     assert check.status == "pass"
     assert f"built with {_BGE} and stays on it" in check.detail
     assert f"the configured model ({_HS})" in check.detail
-    assert "only through an embedder switch, which a later release adds" in check.detail
-    # Does not name a command that does not exist.
-    assert "`hal0 memory" not in check.detail
+    assert f"only through `hal0 memory embedder switch {_HS}`" in check.detail
+    assert "re-embeds the store" in check.detail
 
 
 def test_memory_embedder_warns_when_the_operator_set_a_model_that_differs() -> None:
@@ -3981,9 +3981,52 @@ def test_memory_embedder_warns_when_the_operator_set_a_model_that_differs() -> N
     assert f"built with {_BGE}" in check.detail
     assert "[memory.models] asks for example-org/another-embedder" in check.detail
     assert "no effect" in check.detail
-    # Names the way out without claiming the command exists.
-    assert "`hal0 memory embedder switch`" in check.detail
-    assert "not in this release yet" in check.detail
+    # Names the way out, with the model it would move the store to.
+    assert "`hal0 memory embedder switch example-org/another-embedder`" in check.detail
+    assert "a dry run; add --apply" in check.detail
+
+
+def test_memory_embedder_names_the_provider_in_the_switch_command() -> None:
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE, configured_provider="openai"))
+    assert f"`hal0 memory embedder switch {_BGE} --provider openai`" in check.detail
+
+
+def test_memory_embedder_offers_the_switch_as_the_repair_for_a_mixed_store() -> None:
+    check = da.check_memory_embedder(status=_embedder(_HS, _HS, mixed=True))
+    assert check.status == "warn"
+    assert f"`hal0 memory embedder switch {_HS}`" in check.detail
+
+
+def test_memory_embedder_reports_an_interrupted_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A switch that stopped half-way leaves memory writes paused: say so first."""
+    from hal0.memory import embedder_switch as es
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    es.journal_path().parent.mkdir(parents=True)
+    es.journal_path().write_text(
+        jsonlib.dumps(
+            {
+                "version": 1,
+                "run_id": "3f9a1c2e",
+                "started_at": "2026-11-11T02:00:00+00:00",
+                "pid": 1,
+                "phase": "swapping",
+                "target": {"provider": "local", "model": _HS},
+                "previous": {"provider": "local", "model": _BGE},
+                "archive_dir": "/nowhere",
+                "error": "hindsight-admin rename-bank exited 1",
+            }
+        )
+    )
+
+    check = da.check_memory_embedder()
+
+    assert (check.key, check.status) == ("memory_embedder", "warn")
+    assert "did not finish (hindsight-admin rename-bank exited 1)" in check.detail
+    assert "memory writes stay paused" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
 
 
 def test_memory_embedder_warns_when_the_operator_set_a_provider_that_differs() -> None:
@@ -4004,7 +4047,7 @@ def test_memory_embedder_warns_on_a_mixed_store_even_when_the_models_match() -> 
     check = da.check_memory_embedder(status=_embedder(_HS, _HS, mixed=True))
     assert check.status == "warn"
     assert "two embedders" in check.detail
-    assert "`hal0 memory embedder switch`" in check.detail
+    assert f"`hal0 memory embedder switch {_HS}`" in check.detail
     assert "has no effect" not in check.detail
 
 

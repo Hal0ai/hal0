@@ -3425,8 +3425,9 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     * ``pass`` when the two match and the store is not ``mixed``;
     * ``pass`` with a note when they differ only because the config still has
       its shipped default. That is every upgraded box (its store was built
-      with the engine default) and nothing the operator did, and no release
-      ships a way to re-embed a store yet, so a warning would have no remedy;
+      with the engine default) and nothing the operator did; the note names
+      ``hal0 memory embedder switch``, the way to move the store when the
+      operator wants to;
     * ``warn`` when the operator set a provider or model of their own that
       differs from the record, since that setting is not doing what they
       asked, and when the store is ``mixed``: it existed before the engine
@@ -3436,9 +3437,12 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
       embedder. Both are named, neither is changed. It is the same evidence
       the ``memory_engine_env`` row is judged on for these keys;
     * ``warn`` when the record file cannot be read (it is left alone), or
-      the store's location is unavailable.
+      the store's location is unavailable;
+    * ``warn`` when an embedder switch was interrupted
+      (:func:`hal0.memory.embedder_switch.interrupted_switch`): memory writes
+      stay paused until ``hal0 memory embedder switch --resume`` has run.
 
-    Never ``fail``: memory keeps working, and nothing here is repaired by a
+    Never ``fail``: recall keeps working, and nothing here is repaired by a
     restart.
 
     ``status`` is the injection point for tests; by default it is read from
@@ -3451,12 +3455,25 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
         describe_embedder,
         embedder_notice,
         embedder_status,
+        switch_command,
     )
     from hal0.memory.embedder_verdict import embedder_verdict
 
     name, title = "memory_embedder", "Memory embedder"
     if status is None:
         from hal0.config.loader import load_hal0_config
+        from hal0.memory.embedder_switch import interrupted_switch
+
+        left = interrupted_switch()
+        if left is not None:
+            reason = f" ({left['error']})" if left.get("error") else ""
+            return Check(
+                name,
+                title,
+                _WARN,
+                f"an embedder switch did not finish{reason}; memory writes stay paused "
+                "(recall still works) until `hal0 memory embedder switch --resume` has run",
+            )
 
         try:
             models = load_hal0_config().memory.models
@@ -3476,8 +3493,8 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
             title,
             _PASS,
             f"the memory store was built with {built_with} and stays on it; the configured "
-            f"model ({describe_embedder(*configured)}) takes effect only through an embedder "
-            "switch, which a later release adds",
+            f"model ({describe_embedder(*configured)}) takes effect only through "
+            f"`{switch_command(status)}` (a dry run; add --apply), which re-embeds the store",
         )
     if status.get("source") == SOURCE_CONFIGURED and not status.get("recorded_at"):
         return Check(name, title, _PASS, "no memory store on this box — nothing recorded yet")

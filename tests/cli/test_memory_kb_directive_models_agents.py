@@ -148,7 +148,9 @@ def test_models_table_shows_the_recorded_embedder_and_flags_a_difference(monkeyp
     r = runner.invoke(memory_commands.app, ["models"])
     assert r.exit_code == 0, r.output
     assert "BAAI/bge-small-en-v1.5" in r.output
-    assert "configured: hindsight-ai/hs-embed-1 (not applied)" in r.output
+    assert "configured: hindsight-ai/hs-embed-1 (not applied;" in r.output
+    # #3518: the row names the command that moves the store.
+    assert "`hal0 memory embedder switch` moves the store" in r.output
 
 
 def test_agents_install_dry_run(monkeypatch):

@@ -74,9 +74,13 @@ def models_cmd(
         wanted = emb.get("configured")
         if emb.get("recorded_provider") != emb.get("configured_provider"):
             wanted = f"{emb.get('configured_provider')}/{wanted}"
-        emb_notes.append(f"configured: {wanted} (not applied)")
+        emb_notes.append(
+            f"configured: {wanted} (not applied; `hal0 memory embedder switch` moves the store)"
+        )
     if emb.get("mixed"):
-        emb_notes.append("store may hold vectors from two embedders")
+        emb_notes.append(
+            "store may hold vectors from two embedders; `hal0 memory embedder switch` repairs it"
+        )
     if emb.get("conflict"):
         emb_notes.append("record and engine disagree, see hal0 doctor")
     emb_status = f"[yellow]{'; '.join(emb_notes)}[/yellow]" if emb_notes else ""
