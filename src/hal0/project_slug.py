@@ -50,7 +50,20 @@ _SEPARATORS = "-._"
 # A run that becomes one ``-``: any character outside ``[a-z0-9._-]``, or two
 # or more dots in a row, together with the hyphens touching it. Dots are kept
 # one at a time only, so a slug never contains ``..``.
-_SEPARATOR_RUN_RE = re.compile(r"-*(?:(?:[^a-z0-9._-]|\.{2,})-*)+")
+#
+# The pattern starts at the first character of a run that is not kept and
+# takes the hyphens after it; the hyphens just before the run are removed by
+# :func:`_collapse_runs`. It is not written as one pattern with a leading
+# ``-*``: on a long string of hyphens that form is tried again from every
+# hyphen and gives each one back, which is quadratic, and the text comes from
+# a request (a bank id in a URL, a tag in a body).
+_SEPARATOR_RUN_RE = re.compile(r"((?:(?:[^a-z0-9._-]|\.{2,})-*)+)")
+
+
+def _collapse_runs(text: str) -> str:
+    """``text`` with every separator run, and the hyphens before it, as one ``-``."""
+    kept = _SEPARATOR_RUN_RE.split(text)[0::2]
+    return "-".join([*(part.rstrip("-") for part in kept[:-1]), kept[-1]])
 
 
 def normalise_slug(text: Any) -> str | None:
@@ -69,7 +82,7 @@ def normalise_slug(text: Any) -> str | None:
     """
     if not isinstance(text, str):
         return None
-    slug = _SEPARATOR_RUN_RE.sub("-", text.strip().lower()).strip(_SEPARATORS)
+    slug = _collapse_runs(text.strip().lower()).strip(_SEPARATORS)
     if len(slug) > MAX_SLUG_LENGTH:
         slug = slug[:MAX_SLUG_LENGTH].rstrip(_SEPARATORS)
     return slug or None

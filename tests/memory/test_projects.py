@@ -144,6 +144,55 @@ def test_normalise_slug_is_idempotent(text):
     assert normalise_slug(once) == once
 
 
+def test_normalise_slug_agrees_with_its_one_pattern_definition():
+    """The rule was first written as one substitution, ``-*(?:run-*)+`` to
+    ``-``. It is now a split plus a strip, to stay linear. Same answers, held
+    here against that original pattern on many short strings."""
+    import random
+    import re
+
+    original = re.compile(r"-*(?:(?:[^a-z0-9._-]|\.{2,})-*)+")
+
+    def reference(text: str) -> str | None:
+        slug = original.sub("-", text.strip().lower()).strip("-._")
+        if len(slug) > MAX_SLUG_LENGTH:
+            slug = slug[:MAX_SLUG_LENGTH].rstrip("-._")
+        return slug or None
+
+    rng = random.Random(3558)
+    for alphabet in ("ab-._ /!", "a-.", "-!.", "A é_-/.", "ab"):
+        for _ in range(6000):
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 16)))
+            assert normalise_slug(text) == reference(text), repr(text)
+    long = "a" + "-!." * 60 + "b" * 120
+    assert normalise_slug(long) == reference(long)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "-" * 200_000,
+        "-" * 200_000 + "!",
+        "a" + "-" * 200_000 + "b",
+        "." * 200_000,
+        "-." * 100_000,
+        "!-" * 100_000,
+        " " * 100_000 + "x" + "/" * 100_000,
+    ],
+)
+def test_normalise_slug_takes_linear_time_on_a_hostile_name(text):
+    """The name comes from a request: a bank id in a URL, a tag in a body. A
+    long run of hyphens used to cost quadratic time (about three seconds at
+    twenty thousand characters, minutes at this size). Linear is a few
+    milliseconds; the bound here is loose on purpose."""
+    import time
+
+    started = time.perf_counter()
+    slug = normalise_slug(text)
+    assert time.perf_counter() - started < 5.0
+    assert slug is None or len(slug) <= MAX_SLUG_LENGTH
+
+
 # ── strip_legacy_bank_prefix ────────────────────────────────────────────────
 
 
