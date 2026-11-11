@@ -259,6 +259,15 @@ export interface MemoryGraphStatus {
   // #2918: the LLM hindsight-api really loads, and whether
   // /etc/hal0/hindsight-llm.env overrides hal0's target.
   engine_llm?: MemoryEngineLlm
+  // #3388/#3389: whether the hindsight-api unit env carries what hal0 renders.
+  // `warning` is one operator sentence, null when the env matches. Absent on
+  // older backends.
+  engine_env?: {
+    checked: boolean
+    drift: { key: string; expected: string; effective: string | null }[]
+    legacy_drop_in: string | null
+    warning: string | null
+  }
   // Hindsight daemon LLM timeout ([memory.graph].llm_timeout_s) — echoed by
   // the status route so the settings panel can edit it in one round trip.
   llm_timeout_s?: number
@@ -453,8 +462,8 @@ export function useMemoryEnabledPending(): boolean {
 
 // ── Agents (GET /api/memory/agents) ─────────────────────────────────────────
 //
-// Connected coding-agent banks and the harness install one-liner. Moved here
-// from useMemoryWorkspace.ts (which re-exports it); same query key.
+// Connected coding-agent banks and the harness install one-liner.
+// Read by the Memory area's Agents tab.
 
 export interface MemoryAgentsInstall {
   harnesses: string[]
@@ -479,8 +488,8 @@ export function useMemoryWorkspaceAgents() {
 
 // ── Models (GET /api/memory/models) ─────────────────────────────────────────
 //
-// Embedding / reranker / decision model identities. Moved here from
-// useMemoryWorkspace.ts (which re-exports it); same query key.
+// Embedding / reranker / decision model identities.
+// Read by the Memory area's Health tab.
 
 export interface MemoryModelInfo {
   model: string
