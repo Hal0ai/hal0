@@ -3207,8 +3207,45 @@ class MemoryCompatConfig(BaseModel):
             "How many reflects through the endpoint may run at once, across "
             "all clients. A reflect holds the memory engine's language model "
             "for minutes; this keeps coding agents from starving hal0's own "
-            "agents of it. One client is always limited to one at a time. A "
-            "request over the limit is answered 429 with Retry-After."
+            "agents of it. One client is always limited to one at a time, "
+            "and the endpoint never runs more than one fewer than "
+            "[memory.lanes] lets the engine run (one, when the engine runs "
+            "one). A request over the limit is answered 429 with Retry-After."
+        ),
+    )
+    max_concurrent_recalls: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        description=(
+            "How many recalls through the endpoint may run at once, across "
+            "all clients. One client is always limited to two. A request "
+            "over the limit is answered 429 with Retry-After."
+        ),
+    )
+    max_outstanding_operations: int = Field(
+        default=64,
+        ge=1,
+        le=10000,
+        description=(
+            "How many asynchronous retains one client may have submitted "
+            "that the engine has not finished. An async retain is accepted "
+            "at once and extracted later, so without this one client could "
+            "fill the engine's queue. A session submits one retain per turn "
+            "and the plugin polls ten at a time; a first-time repository "
+            "ingest (the plugin's default is 300 commits) is slowed by this "
+            "limit, not refused: the next retain is answered 429 with "
+            "Retry-After until earlier ones finish."
+        ),
+    )
+    max_outstanding_bytes: int = Field(
+        default=256 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=16 * 1024 * 1024 * 1024,
+        description=(
+            "The most bytes of unfinished asynchronous retains one client "
+            "may have submitted. A single retain is always accepted when "
+            "the client has nothing outstanding."
         ),
     )
     max_item_bytes: int = Field(
@@ -3232,11 +3269,17 @@ class MemoryCompatConfig(BaseModel):
             if (
                 not isinstance(item, str)
                 or "::" in item
+                or len(item) < 3
+                or not item.endswith(":")
                 or not _SHARED_DOCUMENT_PREFIX_RE.fullmatch(item)
             ):
+                # A short or open-ended entry (``g``, ``sha``) would sweep
+                # ordinary ids, and the digest form of a long one, into the
+                # namespace every client of a project may write.
                 raise ValueError(
-                    "memory.compat.shared_document_prefixes entries must be 1 to 64 "
-                    f"characters of [a-zA-Z0-9._:-] with no '::': {item!r}"
+                    "memory.compat.shared_document_prefixes entries must be 3 to 64 "
+                    "characters of [a-zA-Z0-9._:-], end with ':' and hold no '::': "
+                    f"{item!r}"
                 )
             if item not in out:
                 out.append(item)

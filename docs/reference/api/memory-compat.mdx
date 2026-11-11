@@ -106,12 +106,15 @@ the client its own id back:
 - The shared prefixes are `[memory.compat] shared_document_prefixes`
   ([config reference](/docs/reference/config-schema/)), by default `git:`, `gitlog:` and
   `survey-baseline:`: the ids the plugin derives from the repository itself, which a second
-  agent on the same repository should find already ingested. A client with no project has no
-  shared namespace.
+  agent on the same repository should find already ingested. A prefix is at least three
+  characters and ends with `:`. A client with no project has no shared namespace.
 - A stored id must stay usable in hal0's own bank routes: at most 256 characters of
   `a-z A-Z 0-9 . _ : -`, with no `..`. An id that would not fit is stored as
   `<project>::<owner>::sha256-<hex>` and the client's id is kept in the document's metadata as
-  `client_document_id`, from which listings show it back.
+  `client_document_id`, from which the client that wrote it is shown it back.
+- A shared id that would not fit keeps its shared prefix: `git:<300 characters>` is stored as
+  `<project>::shared::git:sha256-<hex>`. Another client of the project sees it as
+  `git:sha256-<hex>`, which is itself a shared id and names the same document when sent back.
 - A retained item that names no `document_id` gets a new one in the client's namespace.
 
 ## Routes
@@ -128,7 +131,7 @@ how long hal0 waits for the engine.
 | POST | `/v1/default/banks/{bank}/memories/recall` | the read scope is added as `tag_groups` | the engine's JSON, [scrubbed](#recall) | 60 s |
 | GET | `/v1/default/banks/{bank}/documents` | [narrowed to the client's documents](#documents) | the engine's page, filtered | 30 s per engine page |
 | DELETE | `/v1/default/banks/{bank}/documents/{document_id}` | read first; deleted only when the client wrote it | `{success, message, document_id, memory_units_deleted}` | 30 s per call |
-| GET | `/v1/default/banks/{bank}/operations` | `status`, `type`, `offset`, `exclude_parents` forwarded | [the client's own, as statuses](#operations) | 15 s |
+| GET | `/v1/default/banks/{bank}/operations` | each of the client's unfinished operations is read by id; nothing of the request is forwarded | [the client's own, as statuses](#operations) | 15 s per read |
 | GET | `/v1/default/banks/{bank}/operations/{operation_id}` | the engine id is derived; `include_payload=false`, always | the client's own, as a status | 15 s |
 | GET | `/v1/default/banks/{bank}/config` | read for the platform bank | the three mission keys only | 15 s |
 | POST | `/v1/default/banks/{bank}/import` | not applied | `200 {"status": "ignored", "reason": "bank configuration is managed by hal0"}` | none |
@@ -160,6 +163,16 @@ same id is therefore still the same operation, and one client's id can never nam
 client's. A client that sends no `operation_id` is given one. A synchronous retain has no
 operation.
 
+An asynchronous retain is accepted at once and processed later, so each client is held to a
+quota of unfinished ones: `[memory.compat] max_outstanding_operations` (64) operations and
+`max_outstanding_bytes` (256 MiB) of request bodies. Beyond either, an asynchronous retain is
+`429 memory.compat_busy` with `Retry-After: 30` until earlier ones finish. hal0 learns that an
+operation finished from the client's own status polls, and reads the oldest from the engine
+itself before it refuses (at most once every 5 seconds per client). A resend of an operation
+already counted, a synchronous retain, and a single retain while nothing is outstanding are
+never refused by the quota. The count is kept in the hal0-api process: after hal0-api restarts,
+operations submitted before the restart are not counted.
+
 ### What a read sees
 
 A reflect, a recall and a documents listing are all held to two rules, and both go to the engine
@@ -185,11 +198,18 @@ Forwards `query`, `types`, `budget`, `max_tokens`, `query_timestamp`, `min_score
 shape (`{results, …}`), with these changes:
 
 - `entities` is always `null`. An entity's state is built from the whole bank.
-- `source_facts` and `chunks` are kept only where a returned result refers to them.
 - `trace` is never requested or returned.
-- A `document_id` in the client's namespaces is the client's own id. One in another client's
-  namespace is `null`. One hal0's own agents chose is unchanged. Chunk ids, which contain the
-  document id, are rewritten the same way or replaced by an opaque one.
+- **A result the caller wrote** (it carries `agent:<caller>`) is returned whole, with its
+  `document_id` as the client knows it and its chunk id rewritten the same way.
+- **Any other result**, another client's or one of hal0's own agents', is reduced to an
+  allow-list: `id` (the engine's id for the memory), `text`, `type`, `occurred_start`,
+  `occurred_end`, `mentioned_at`, and of its `tags` only the project tag, `scope:global` and
+  the `kind:`, `knowledge:` and `source:` tags (never `source:bridge:`). Its `document_id` is
+  `null` and its `chunk_id` an opaque value. Its `metadata`, `context`, `entities`, scores,
+  `agent:` tag and any field not named here are not returned: they name the client that wrote
+  it, its session and its document.
+- `source_facts` are kept where one of the caller's own results refers to them, each reduced
+  the same way when it is not the caller's. `chunks` are kept only for the caller's own results.
 
 ### Documents
 
@@ -202,6 +222,9 @@ namespaces and that are not private to another agent. The consequences:
 - The listing shows the client's own documents and its project's shared ones, under the client's
   ids. Documents another client or hal0's own agents wrote into the project under ids of their
   own are not in it, and neither are global documents.
+- A shared document another client wrote last is listed as `id`, `created_at`, `updated_at`
+  and its descriptive tags (the same tag rule as in [Recall](#recall)), and nothing else: not
+  its metadata, its retain parameters or its writer's tags.
 - `tags_match` on the request must be `all` or `all_strict`, or anything over at most one tag.
   `exact`, and `any` over several tags, are `400 memory.compat_filter_unsupported`.
 - A `project:` tag in the request is replaced by the resolved one. `q` and `offset` are
@@ -227,16 +250,23 @@ that id, so an id the client did not start, another client's included, is
 `404 memory.compat_operation_not_found`. This needs no bookkeeping and answers the same after
 hal0-api restarts.
 
-`GET …/operations` lists the client's own operations. The engine does not record who started an
-operation, so the list covers the operations this hal0-api process has seen the client start,
-looked up in the engine's most recent 100; after a restart it is empty until the client retains
-again. `limit` is at most 100 and `total` is not returned.
+`GET …/operations` lists the client's own operations, newest first. The engine's own list covers
+every client and does not say who started what, so hal0 does not read it: the list is the
+operations this hal0-api process has seen the client start, and each unfinished one is read from
+the engine by its id. `limit` (at most 100) and `offset` index into the client's own operations
+and are not sent to the engine; `status` and `type` filter them; `total` counts them. After a
+restart the list is empty until the client retains again.
 
-Both return statuses and nothing a client submitted: `id`, `operation_id` (the client's own id),
-`task_type`, `operation_type`, `status`, `items_count`, `created_at`, `updated_at`,
+`X-hal0-Listing-Incomplete: 1` is set when the list may be missing operations: hal0 remembers
+2000 operations per client and drops the oldest finished ones beyond that, and it reads at most
+the 64 newest unfinished operations per request.
+
+Both routes return statuses and nothing a client submitted: `id`, `operation_id` (the client's
+own id), `task_type`, `operation_type`, `status`, `items_count`, `created_at`, `updated_at`,
 `completed_at`, `retry_count`, `next_retry_at`, `error_message` cut to 500 characters, the
 `stage`, `at`, `processed` and `total` of `progress`, and each child operation's status and item
-count. Payloads, result metadata, document ids and engine ids are not returned.
+count. Payloads, result metadata, document ids and engine ids are not returned, and the client's
+stored-id prefixes are removed from `error_message`.
 
 ## Limits
 
@@ -250,12 +280,29 @@ count. Payloads, result metadata, document ids and engine ids are not returned.
 | `max_tokens` | 8192 on a reflect, 16384 on a recall | lowered to the limit |
 | Documents `limit` | 500 | lowered to the limit |
 | `operation_id` | 200 characters | `400` |
+| Operations `limit` | 100 | lowered to the limit |
 | Retains in flight, per client | 4 | `429 memory.compat_busy`, `Retry-After: 2` |
+| Retain bodies over 1 MiB in flight | 2 across all clients, 1 per client | `429 memory.compat_busy`, `Retry-After: 2` |
+| Unfinished asynchronous retains, per client | `[memory.compat] max_outstanding_operations`, 64, and `max_outstanding_bytes`, 256 MiB | `429 memory.compat_busy`, `Retry-After: 30` |
 | Reflects in flight, per client | 1 | `429 memory.compat_busy`, `Retry-After: 15` |
-| Reflects in flight, all clients | `[memory.compat] max_concurrent_reflects`, 2 | `429 memory.compat_busy`, `Retry-After: 15` |
+| Reflects in flight, all clients | `[memory.compat] max_concurrent_reflects`, 2, and never more than one fewer than the engine runs | `429 memory.compat_busy`, `Retry-After: 15` |
+| Recalls in flight, per client | 2 | `429 memory.compat_busy`, `Retry-After: 5` |
+| Recalls in flight, all clients | `[memory.compat] max_concurrent_recalls`, 4 | `429 memory.compat_busy`, `Retry-After: 5` |
 
-The item limit is sized for the largest thing the plugin sends, a whole session transcript. The
-in-flight limits are counted in the hal0-api process.
+The item limit is sized for the largest thing the plugin sends, a whole session transcript.
+
+A retain body of at most 1 MiB is read at once. A larger one, or one that does not declare its
+size, takes one of two slots shared by all clients, which keeps the memory hal0-api spends on
+retain bodies near 300 MiB however many clients send at once. A body that declares a small size
+and turns out larger is cut off at 1 MiB with `413`.
+
+The engine runs `[memory.lanes] llm_max_concurrent` language-model calls at once (one, as
+shipped), and a reflect's at most `[memory.lanes.reflect] max_concurrent` of them when that is
+set. Reflects through this endpoint always leave one of those slots to hal0's own agents and the
+dashboard, so with the shipped lanes one reflect runs here at a time whatever
+`max_concurrent_reflects` says.
+
+All of these are counted in the hal0-api process and start empty when it restarts.
 
 ## What is refused or ignored
 
@@ -290,7 +337,7 @@ A failure hal0 raises is the standard envelope `{"error": {"code", "message", "d
 | 404 | `memory.compat_route_unsupported` | A read this endpoint does not serve |
 | 405 | `memory.compat_mutation_unsupported` | A write this endpoint does not serve |
 | 413 | `memory.compat_body_too_large`, `memory.compat_too_many_items`, `memory.compat_item_too_large` | See [Limits](#limits) |
-| 429 | `memory.compat_busy` | Too many retains or reflects in flight; `Retry-After` says when to retry |
+| 429 | `memory.compat_busy` | Too many retains, reflects or recalls in flight, or the client's quota of unfinished retains is used up; `Retry-After` says when to retry |
 | 502 | `memory.compat_engine_error` | The engine answered `5xx`, refused hal0's own credential, or answered `404` to a retain. `error.details.upstream_status` has its status |
 | 503 | `memory.engine_unavailable`, `memory.unavailable` | The engine cannot be reached, or hal0 is running on its volatile fallback store |
 | 503 | `memory.extraction_ctx_too_small` | The extraction model's context window is too small to process any retain |

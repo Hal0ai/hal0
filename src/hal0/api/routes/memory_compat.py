@@ -41,8 +41,16 @@ client can replace, extend or delete a document it did not write. And an
 asynchronous retain's operation id is derived from the client and the id it
 sent (:func:`_engine_operation_id`), so a client can poll its own operations
 and no one else's. A write here is never global: caller ``scope:`` tags are
-dropped. What one request and one client may cost is bounded: see the
-constants below and ``[memory.compat]``.
+dropped.
+
+Sharing a project shares content, not identity: of a memory or a shared
+document the caller did not write, a read returns an allow-list
+(:func:`_recall_row`, :func:`_listing_row`), which leaves out the writer's
+name, document id, session id, context and metadata.
+
+What one request and one client may cost is bounded: see the constants below
+and ``[memory.compat]``. The counters live in this process
+(:class:`_CompatState`) and start empty when it restarts.
 
 What the plugin does with a status shapes the answers. It returns a 404 to
 its caller without raising on every route, so a 404 on a retain would be
@@ -78,7 +86,7 @@ from hal0.activity import audit_action
 from hal0.api.auth import judged_principal
 from hal0.api.routes.memory import MemoryUnavailable, extraction_ctx_preflight
 from hal0.bridge.keys import is_reserved_name
-from hal0.config.schema import MemoryCompatConfig
+from hal0.config.schema import MemoryCompatConfig, MemoryLanesConfig
 from hal0.errors import (
     BadRequest,
     Forbidden,
@@ -94,12 +102,14 @@ from hal0.memory.document_namespace import (
     is_namespaced,
     readable_prefixes,
     stored_document_id,
+    strip_stored_prefixes,
     visible_document_id,
 )
 from hal0.memory.envelope import (
     AGENT_TAG_PREFIX,
     PROJECT_TAG_PREFIX,
     PROJECT_UNRESOLVED_TAG,
+    SCOPE_GLOBAL_TAG,
     SCOPE_TAG_PREFIX,
     coerce_tags,
 )
@@ -155,9 +165,38 @@ MAX_ERROR_MESSAGE_LENGTH = 500
 #: plugin honours. The limit across all clients' reflects is
 #: ``[memory.compat].max_concurrent_reflects``.
 REFLECTS_PER_CLIENT = 1
+RECALLS_PER_CLIENT = 2
 RETAINS_PER_CLIENT = 4
 _REFLECT_RETRY_AFTER_S = 15
+_RECALL_RETRY_AFTER_S = 5
 _RETAIN_RETRY_AFTER_S = 2
+
+#: A retain body up to this size is read without waiting on anyone; a larger
+#: one takes one of :data:`LARGE_RETAIN_BODIES` slots, across all clients,
+#: and one client holds at most :data:`LARGE_RETAIN_BODIES_PER_CLIENT` of
+#: them. That bounds what retain bodies hold in hal0-api's memory: a large
+#: body is at most 48 MiB as received, about as much again parsed, and once
+#: more while the engine request is written, so two at once stay near
+#: 300 MiB; small ones add at most 1 MiB each, :data:`RETAINS_PER_CLIENT`
+#: per client.
+SMALL_RETAIN_BODY_BYTES = 1024 * 1024
+LARGE_RETAIN_BODIES = 2
+LARGE_RETAIN_BODIES_PER_CLIENT = 1
+
+#: When a client is at its quota of unfinished asynchronous retains: how many
+#: of its oldest are read from the engine before it is refused, how many
+#: status reads run at once, how long before the engine is asked again for
+#: the same client, and what the refusal says to wait.
+_QUOTA_STATUS_READS = 16
+_OPERATION_READS_AT_ONCE = 4
+_QUOTA_RECHECK_S = 5.0
+_QUOTA_RETRY_AFTER_S = 30
+
+#: How many operations one client's listing reads fresh from the engine, the
+#: largest listing page, and how many operations are remembered per client.
+_LISTING_STATUS_READS = 64
+MAX_OPERATIONS_LIMIT = 100
+OPERATIONS_REMEMBERED_PER_CLIENT = 2000
 _EVERY_CLIENT = "*"
 
 #: Namespace of the engine operation ids this endpoint derives
@@ -166,6 +205,7 @@ _EVERY_CLIENT = "*"
 _OPERATION_ID_NAMESPACE = uuid.UUID("6b0f5d1e-3c8a-5e47-9d52-a1c4e7f20b93")
 
 _DEFAULT_SETTINGS = MemoryCompatConfig()
+_DEFAULT_LANES = MemoryLanesConfig()
 
 PROJECT_HEADER = "X-hal0-Project"
 IGNORED_FIELDS_HEADER = "X-hal0-Ignored-Fields"
@@ -237,12 +277,6 @@ _BRIDGE_SOURCE_TAG_PREFIX = "source:bridge:"
 #: How many more engine pages a documents listing reads to fill a page that
 #: hal0's own filter shortened.
 _LISTING_EXTRA_FETCHES = 3
-#: The engine's largest operations page, read whole and then narrowed to the
-#: caller's own operations.
-_OPERATION_PAGE = 100
-#: How many operation owners one process remembers.
-_OPERATIONS_REMEMBERED = 20_000
-
 _REFLECT_FIELDS = frozenset(
     {"query", "budget", "max_tokens", "response_schema", "tags", "tags_match", "tag_groups"}
 )
@@ -287,9 +321,18 @@ _OPERATION_FIELDS = (
 )
 _PROGRESS_FIELDS = ("stage", "at", "processed", "total")
 _CHILD_FIELDS = ("status", "sub_batch_index", "items_count")
-# ``total`` is the engine's count over every client's operations, so it is
-# not passed on.
-_OPERATION_LIST_FIELDS = ("bank_id", "limit", "offset")
+
+# What is returned of a memory, and of a document, the caller did not write:
+# an allow-list. Not on it, on purpose: ``metadata`` / ``document_metadata``
+# (the writer's client name, its own document id, its session id),
+# ``context`` and ``retain_params`` (the writer's name by default),
+# ``entities``, the stored ``document_id``, and everything the engine may add
+# later. What is on it: the engine's own id for the row, the content, what
+# type of memory it is, and when.
+_FOREIGN_RESULT_FIELDS = ("id", "text", "type", "occurred_start", "occurred_end", "mentioned_at")
+_FOREIGN_DOCUMENT_FIELDS = ("created_at", "updated_at")
+#: Tag namespaces that describe a memory without naming who wrote it.
+_DESCRIPTIVE_TAG_PREFIXES = (PROJECT_TAG_PREFIX, "kind:", "knowledge:", "source:")
 
 # A reflect answer as returned: ``based_on`` and ``trace`` name facts and
 # documents by their stored ids, are never requested, and are not passed on.
@@ -398,32 +441,70 @@ _CALLER = Depends(require_memory_bridge())
 # ── the engine, the project, the read scope ──────────────────────────────────
 
 
+#: An operation status after which the engine does no more work on it.
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "error", "not_found"})
+
+
+@dataclass(slots=True)
+class _Operation:
+    """One asynchronous retain a client started, as this process knows it."""
+
+    visible_id: str
+    size: int
+    #: The engine has answered the retain that started it. Until then it is
+    #: counted, and the engine is not asked about it: it would not know it.
+    accepted: bool = False
+    #: The engine has finished with it (or no longer has it).
+    done: bool = False
+    #: Its last status, as the client is shown it; ``None`` until first read.
+    view: dict[str, Any] | None = None
+
+
 @dataclass(slots=True)
 class _CompatState:
     """What this router keeps per app, in memory.
 
     The strategy cache and the import log are conveniences. ``operations``
     and ``in_flight`` are per process: hal0-api serves this endpoint from one
-    process, and both are rebuilt empty when it restarts (see
-    :func:`list_operations` for what that means for a listing).
+    process, and both are rebuilt empty when it restarts. After a restart the
+    operations a client started before it are not known here, so they are
+    not listed and do not count toward its quota (:func:`_admit_operation`);
+    a poll by id still answers (:func:`get_operation`).
     """
 
     strategies: dict[str, tuple[float, frozenset[str]]] = field(default_factory=dict)
     import_noted: set[str] = field(default_factory=set)
-    #: Engine operation id -> ``(client, the id that client knows it by)``.
-    operations: OrderedDict[str, tuple[str, str]] = field(default_factory=OrderedDict)
+    #: Client -> engine operation id -> the operation, oldest first. Kept per
+    #: client so that one client's volume cannot push out another's entries.
+    operations: dict[str, OrderedDict[str, _Operation]] = field(default_factory=dict)
+    #: Clients whose oldest remembered operations have been dropped.
+    forgotten: set[str] = field(default_factory=set)
     #: ``(kind, client)`` -> requests in flight.
     in_flight: dict[tuple[str, str], int] = field(default_factory=dict)
+    #: Client -> when its outstanding operations were last read from the
+    #: engine for the quota (``time.monotonic``).
+    quota_read_at: dict[str, float] = field(default_factory=dict)
 
-    def remember_operation(self, engine_id: str, client: str, visible_id: str) -> None:
-        self.operations[engine_id] = (client, visible_id)
-        self.operations.move_to_end(engine_id)
-        while len(self.operations) > _OPERATIONS_REMEMBERED:
-            self.operations.popitem(last=False)
+    def operations_of(self, client: str) -> OrderedDict[str, _Operation]:
+        return self.operations.setdefault(client, OrderedDict())
+
+    def remember_operation(self, client: str, engine_id: str, visible_id: str, size: int) -> None:
+        mine = self.operations_of(client)
+        if engine_id in mine:
+            return  # a resend of the same operation: the engine starts nothing new
+        mine[engine_id] = _Operation(visible_id=visible_id, size=size)
+        while len(mine) > OPERATIONS_REMEMBERED_PER_CLIENT:
+            # Finished ones go first, so what is dropped is history, not quota.
+            oldest = next((key for key, op in mine.items() if op.done), next(iter(mine)))
+            del mine[oldest]
+            self.forgotten.add(client)
+
+    def outstanding(self, client: str) -> list[tuple[str, _Operation]]:
+        return [(key, op) for key, op in self.operations_of(client).items() if not op.done]
 
 
 class _Busy(Exception):
-    """A client, or the endpoint as a whole, is at its concurrency limit."""
+    """A client, or the endpoint as a whole, is at a limit; try again later."""
 
     def __init__(self, what: str, retry_after_s: int) -> None:
         super().__init__(what)
@@ -435,7 +516,7 @@ class _Busy(Exception):
         body = {
             "error": {
                 "code": "memory.compat_busy",
-                "message": f"too many {self.what} in flight; retry shortly",
+                "message": f"{self.what}; retry shortly",
                 "details": {"retry_after_s": self.retry_after_s},
             }
         }
@@ -453,8 +534,8 @@ def _in_flight(
     """Hold one of ``client``'s ``limit`` slots of ``kind``, or raise :class:`_Busy`."""
     key = (kind, client)
     if state.in_flight.get(key, 0) >= limit:
-        scope = "requests" if client == _EVERY_CLIENT else "requests from this client"
-        raise _Busy(f"{kind} {scope}", retry_after_s)
+        whose = "in flight" if client == _EVERY_CLIENT else "in flight from this client"
+        raise _Busy(f"too many {kind} requests {whose}", retry_after_s)
     state.in_flight[key] = state.in_flight.get(key, 0) + 1
     try:
         yield
@@ -471,6 +552,36 @@ def _settings(request: Request) -> MemoryCompatConfig:
     config = getattr(request.app.state, "hal0_config", None)
     compat = getattr(getattr(config, "memory", None), "compat", None)
     return compat if isinstance(compat, MemoryCompatConfig) else _DEFAULT_SETTINGS
+
+
+def _reflect_limit(request: Request) -> int:
+    """How many reflects this endpoint runs at once, across all clients.
+
+    ``[memory.compat].max_concurrent_reflects``, lowered so that it always
+    leaves one of the engine's language-model slots to callers that do not
+    come through this endpoint (hal0's own agents, the dashboard). The engine
+    runs ``[memory.lanes].llm_max_concurrent`` model calls at once, and a
+    reflect's at most ``reflect.max_concurrent`` of those when that is set;
+    nothing in the engine reserves one. Where it has a single slot (the
+    shipped default) there is none to leave: one reflect runs here at a
+    time, and since the engine's limit is per model call, other callers'
+    calls take their turn between a reflect's steps. Lanes hal0-api cannot
+    read are taken to be the shipped ones.
+    """
+    configured = _settings(request).max_concurrent_reflects
+    lanes = getattr(
+        getattr(getattr(request.app.state, "hal0_config", None), "memory", None), "lanes", None
+    )
+    caps = [
+        cap
+        for cap in (
+            getattr(lanes, "llm_max_concurrent", None),
+            getattr(getattr(lanes, "reflect", None), "max_concurrent", None),
+        )
+        if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1
+    ]
+    engine_slots = min(caps) if caps else _DEFAULT_LANES.llm_max_concurrent
+    return min(configured, max(1, engine_slots - 1))
 
 
 def _engine_operation_id(client: str, caller_id: str) -> str:
@@ -547,7 +658,7 @@ class _Scope:
     def visible_id(self, stored_id: Any, metadata: Any = None) -> str | None:
         """The caller's own id for a stored document; ``None`` if the document
         is in neither of its namespaces."""
-        return visible_document_id(self.slug, self.agent, stored_id, metadata)
+        return visible_document_id(self.slug, self.agent, stored_id, metadata, self.shared_prefixes)
 
     def project_groups(self) -> list[dict[str, Any]]:
         if self.slug:
@@ -583,11 +694,13 @@ def _scope(
 # ── reading the request ──────────────────────────────────────────────────────
 
 
-async def _read_json(request: Request, *, cap: int) -> dict[str, Any]:
-    """The JSON object in the body, read with a hard size cap.
+async def _read_json_sized(request: Request, *, cap: int) -> tuple[dict[str, Any], int]:
+    """The JSON object in the body and its size in bytes, read with a hard cap.
 
     The body is streamed and counted, so a request without (or with a false)
-    ``Content-Length`` is cut off at ``cap`` bytes too.
+    ``Content-Length`` is cut off at ``cap`` bytes too. It is collected in one
+    buffer and parsed from it once; the buffer is gone when this returns, so
+    what the handler holds is the parsed object alone.
     """
     declared = request.headers.get("content-length", "")
     too_large = CompatBodyTooLarge(
@@ -595,19 +708,23 @@ async def _read_json(request: Request, *, cap: int) -> dict[str, Any]:
     )
     if declared.isdigit() and int(declared) > cap:
         raise too_large
-    chunks: list[bytes] = []
-    size = 0
+    buffer = bytearray()
     async for chunk in request.stream():
-        size += len(chunk)
-        if size > cap:
+        if len(buffer) + len(chunk) > cap:
             raise too_large
-        chunks.append(chunk)
+        buffer += chunk
+    size = len(buffer)
     try:
-        body = json.loads(b"".join(chunks) or b"null")
+        body = json.loads(buffer or b"null")
     except ValueError as exc:
         raise BadRequest("request body must be valid JSON", code="request.invalid_json") from exc
     if not isinstance(body, dict):
         raise BadRequest("request body must be a JSON object", code="request.invalid_json")
+    return body, size
+
+
+async def _read_json(request: Request, *, cap: int) -> dict[str, Any]:
+    body, _size = await _read_json_sized(request, cap=cap)
     return body
 
 
@@ -966,23 +1083,45 @@ async def retain(bank: str, request: Request, agent: str = _CALLER) -> Response:
     and the client's own id is what the answer carries. The plugin's resend
     with the same id is therefore still one operation.
 
-    One client may have :data:`RETAINS_PER_CLIENT` retains in flight; the
-    next is 429 with ``Retry-After``.
+    What it may cost is bounded three ways, each answered 429 with
+    ``Retry-After``: one client has :data:`RETAINS_PER_CLIENT` retains in
+    flight; :data:`LARGE_RETAIN_BODIES` bodies over
+    :data:`SMALL_RETAIN_BODY_BYTES` are held in memory at once, across all
+    clients, and one of them per client; and one client's unfinished
+    asynchronous retains are held to a count and a size
+    (:func:`_admit_operation`).
     """
+    state = _state(request)
+    declared = request.headers.get("content-length", "")
+    # A body that says it is small is read with the small cap, so it cannot
+    # turn out large; one that does not say takes a large-body slot.
+    small = declared.isdigit() and int(declared) <= SMALL_RETAIN_BODY_BYTES
     try:
-        with _in_flight(
-            _state(request), "retain", agent, RETAINS_PER_CLIENT, _RETAIN_RETRY_AFTER_S
-        ):
-            return await _retain(bank, request, agent)
+        with contextlib.ExitStack() as held:
+            held.enter_context(
+                _in_flight(state, "retain", agent, RETAINS_PER_CLIENT, _RETAIN_RETRY_AFTER_S)
+            )
+            if not small:
+                # One per client, so that one key cannot hold every slot.
+                for whose, limit in (
+                    (agent, LARGE_RETAIN_BODIES_PER_CLIENT),
+                    (_EVERY_CLIENT, LARGE_RETAIN_BODIES),
+                ):
+                    held.enter_context(
+                        _in_flight(state, "large retain", whose, limit, _RETAIN_RETRY_AFTER_S)
+                    )
+            cap = SMALL_RETAIN_BODY_BYTES if small else MAX_RETAIN_BODY_BYTES
+            return await _retain(bank, request, agent, body_cap=cap)
     except _Busy as busy:
         return busy.response()
 
 
-async def _retain(bank: str, request: Request, agent: str) -> Response:
+async def _retain(bank: str, request: Request, agent: str, *, body_cap: int) -> Response:
     _require_writes_allowed()
     provider = _provider(request)
     settings = _settings(request)
-    body = await _read_json(request, cap=MAX_RETAIN_BODY_BYTES)
+    state = _state(request)
+    body, size = await _read_json_sized(request, cap=body_cap)
     items = body.get("items")
     if not isinstance(items, list) or not items:
         raise BadRequest("retain requires 'items' (a non-empty list)")
@@ -1039,62 +1178,206 @@ async def _retain(bank: str, request: Request, agent: str) -> Response:
     for item, scope in zip(wire_items, item_scopes, strict=True):
         _namespace_item(item, scope)
 
-    # The same rule every other hal0 writer runs first (#1903): an extraction
-    # slot too small for the extraction prompt can never process a retain.
-    await extraction_ctx_preflight(request.app, provider)
-
+    # An admitted operation is counted from here on, so that retains of one
+    # client running side by side cannot each find the quota free. It is
+    # given back if the engine never accepts it.
+    counted = asynchronous and await _admit_operation(
+        request, provider, agent, engine_operation, visible_operation, size
+    )
+    accepted = False
     try:
-        out = await provider.retain_items(
-            wire_items,
-            agent=agent,
-            project_resolution=bank_scope.resolution,
-            coding=True,
-            timeout_s=_RETAIN_ASYNC_TIMEOUT_S if asynchronous else _RETAIN_SYNC_TIMEOUT_S,
-            **request_fields,
-        )
-    except ValueError as exc:
-        # The unified bank keeps ``private:``-prefixed document ids for private
-        # documents. A stored id here starts with its project, so only a
-        # project literally named ``private`` can reach this.
-        raise BadRequest(
-            "this project name cannot hold documents through this endpoint",
-            code="memory.compat_document_id_reserved",
-        ) from exc
-    except Exception as exc:
-        return _engine_failure(
-            exc,
-            what="the retain",
-            headers=headers,
-            not_found_is_gateway=True,
-            hidden=[prefix for scope in item_scopes for prefix in scope.id_prefixes()],
-        )
-    answer = dict(out.get("engine_response") or {})
+        # The same rule every other hal0 writer runs first (#1903): an
+        # extraction slot too small for the extraction prompt can never
+        # process a retain.
+        await extraction_ctx_preflight(request.app, provider)
+        try:
+            out = await provider.retain_items(
+                wire_items,
+                agent=agent,
+                project_resolution=bank_scope.resolution,
+                coding=True,
+                timeout_s=_RETAIN_ASYNC_TIMEOUT_S if asynchronous else _RETAIN_SYNC_TIMEOUT_S,
+                **request_fields,
+            )
+        except ValueError as exc:
+            # The unified bank keeps ``private:``-prefixed document ids for
+            # private documents. A stored id here starts with its project, so
+            # only a project literally named ``private`` can reach this.
+            raise BadRequest(
+                "this project name cannot hold documents through this endpoint",
+                code="memory.compat_document_id_reserved",
+            ) from exc
+        except Exception as exc:
+            return _engine_failure(
+                exc,
+                what="the retain",
+                headers=headers,
+                not_found_is_gateway=True,
+                hidden=[prefix for scope in item_scopes for prefix in scope.id_prefixes()],
+            )
+        accepted = True
+    finally:
+        started = state.operations_of(agent).get(engine_operation)
+        if started is not None and accepted:
+            started.accepted = True
+        elif counted:
+            state.operations_of(agent).pop(engine_operation, None)
+    # The engine's answer names no document today; any string in it is still
+    # cleared of this client's stored-id prefixes before it is passed on.
+    answer = _without_stored_ids(dict(out.get("engine_response") or {}), agent)
     if asynchronous:
-        _own_operations(answer, _state(request), agent, engine_operation, visible_operation)
+        _own_operations(answer, state, agent, engine_operation, visible_operation, size)
     return _json(answer, headers)
 
 
+def _without_stored_ids(value: Any, client: str) -> Any:
+    """``value`` with ``client``'s stored-id prefixes cut out of every string."""
+    if isinstance(value, str):
+        return strip_stored_prefixes(value, client)
+    if isinstance(value, list):
+        return [_without_stored_ids(item, client) for item in value]
+    if isinstance(value, dict):
+        return {key: _without_stored_ids(item, client) for key, item in value.items()}
+    return value
+
+
 def _own_operations(
-    answer: dict[str, Any], state: _CompatState, agent: str, engine_id: str, visible_id: str
+    answer: dict[str, Any],
+    state: _CompatState,
+    agent: str,
+    engine_id: str,
+    visible_id: str,
+    size: int,
 ) -> None:
     """Record the operations a retain started and show the caller its own id.
 
     The engine answers with the id it was given, and with further ids of its
     own when it split the items by strategy. Those stay as they are and are
-    remembered, so the client that was handed them can poll them.
+    remembered, so the client that was handed them can poll them. The
+    request's size is counted once, on the operation the client named.
     """
 
     def shown(operation_id: Any) -> Any:
         if not isinstance(operation_id, str) or not operation_id:
             return operation_id
-        visible = visible_id if operation_id == engine_id else operation_id
-        state.remember_operation(operation_id, agent, visible)
-        return visible
+        named = operation_id == engine_id
+        state.remember_operation(
+            agent, operation_id, visible_id if named else operation_id, size if named else 0
+        )
+        remembered = state.operations_of(agent).get(operation_id)
+        if remembered is not None:
+            remembered.accepted = True
+        return visible_id if named else operation_id
 
     if "operation_id" in answer:
         answer["operation_id"] = shown(answer["operation_id"])
     if isinstance(answer.get("operation_ids"), list):
         answer["operation_ids"] = [shown(operation_id) for operation_id in answer["operation_ids"]]
+
+
+async def _refresh_operations(
+    provider: Any, agent: str, operations: list[tuple[str, _Operation]]
+) -> None:
+    """Read the current status of ``operations`` from the engine, in place.
+
+    One status read each, a few at a time. A finished operation is marked
+    done and keeps its last view; one the engine no longer has is done too.
+    A read that fails leaves the operation as it was, and one whose retain
+    the engine has not answered yet is not read.
+    """
+    client = provider.hindsight_client
+    gate = asyncio.Semaphore(_OPERATION_READS_AT_ONCE)
+
+    async def read(engine_id: str, operation: _Operation) -> None:
+        if not operation.accepted:
+            return
+        path = _bank_path(provider, f"/operations/{quote(engine_id, safe='')}")
+        async with gate:
+            try:
+                record = await client.request_json(
+                    "GET",
+                    path,
+                    params={"include_payload": "false"},
+                    timeout_s=_OPERATION_TIMEOUT_S,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    operation.done = True
+                return
+            except httpx.HTTPError:
+                return
+        _note_status(operation, record, agent)
+
+    await asyncio.gather(*(read(engine_id, operation) for engine_id, operation in operations))
+
+
+def _note_status(operation: _Operation, record: Any, agent: str) -> None:
+    """Keep what a status read said about a remembered operation."""
+    if not isinstance(record, dict) or not operation.accepted:
+        return
+    if record.get("status") == "not_found":
+        operation.done = True
+        return
+    operation.view = _operation_view(record, operation.visible_id, agent)
+    if str(record.get("status") or "").lower() in _TERMINAL_STATUSES:
+        operation.done = True
+
+
+async def _admit_operation(
+    request: Request, provider: Any, agent: str, engine_id: str, visible_id: str, size: int
+) -> bool:
+    """Hold one client's unfinished asynchronous retains to a count and a size.
+
+    An asynchronous retain is accepted at once and extracted later, so the
+    in-flight limit bounds how fast a client submits, not how much it has
+    queued in the engine. This does: beyond
+    ``[memory.compat].max_outstanding_operations`` unfinished operations, or
+    ``max_outstanding_bytes`` of them, the retain is refused with 429 until
+    earlier ones finish. A resend of an operation already counted is let
+    through (the engine starts nothing new for it), and so is any single
+    retain when the client has nothing outstanding.
+
+    An admitted operation is counted at once, before the engine is called,
+    and the answer is ``True`` when this call added it (the caller gives it
+    back if the engine then refuses the retain).
+
+    What is outstanding is what this process saw the client start and has
+    not seen finish. The client's own polling keeps that current
+    (:func:`get_operation`); when the limit is reached the oldest are read
+    from the engine here first, at most once every
+    :data:`_QUOTA_RECHECK_S` seconds per client. After a hal0-api restart
+    the operations submitted before it are unknown and are not counted: the
+    quota fails open for those.
+    """
+    state = _state(request)
+    settings = _settings(request)
+    if engine_id in state.operations_of(agent):
+        return False
+
+    def over() -> bool:
+        waiting = state.outstanding(agent)
+        queued = sum(operation.size for _key, operation in waiting)
+        return len(waiting) >= settings.max_outstanding_operations or (
+            bool(waiting) and queued + size > settings.max_outstanding_bytes
+        )
+
+    if over():
+        now = time.monotonic()
+        if now - state.quota_read_at.get(agent, float("-inf")) >= _QUOTA_RECHECK_S:
+            state.quota_read_at[agent] = now
+            await _refresh_operations(
+                provider, agent, state.outstanding(agent)[:_QUOTA_STATUS_READS]
+            )
+        # Judged again after the reads, with nothing awaited before the
+        # operation is counted below.
+        if engine_id in state.operations_of(agent):
+            return False
+        if over():
+            raise _Busy(
+                "this client's earlier retains are still being processed", _QUOTA_RETRY_AFTER_S
+            )
+    state.remember_operation(agent, engine_id, visible_id, size)
+    return True
 
 
 # ── 3. reflect ───────────────────────────────────────────────────────────────
@@ -1135,8 +1418,9 @@ async def reflect(bank: str, request: Request, agent: str = _CALLER) -> Response
 
     A reflect holds the engine's language model for minutes, so one client
     runs one at a time and all clients together run
-    ``[memory.compat].max_concurrent_reflects``; beyond either the answer is
-    429 with ``Retry-After``. The answer is the engine's ``text``,
+    ``[memory.compat].max_concurrent_reflects``, less what
+    :func:`_reflect_limit` keeps back for callers outside this endpoint;
+    beyond either the answer is 429 with ``Retry-After``. The answer is the engine's ``text``,
     ``structured_output`` and ``usage``.
     """
     provider = _provider(request)
@@ -1159,7 +1443,7 @@ async def reflect(bank: str, request: Request, agent: str = _CALLER) -> Response
     headers = {**scope.headers(), **_ignored(n for n in body if n not in _REFLECT_FIELDS)}
     groups = [*scope.project_groups(), *_caller_groups(body, "reflect")]
     state = _state(request)
-    everyone = _settings(request).max_concurrent_reflects
+    everyone = _reflect_limit(request)
     try:
         with (
             _in_flight(state, "reflect", agent, REFLECTS_PER_CLIENT, _REFLECT_RETRY_AFTER_S),
@@ -1205,33 +1489,70 @@ def _opaque_chunk_id(chunk_id: str) -> str:
     return "chunk-" + hashlib.sha256(chunk_id.encode("utf-8", "surrogatepass")).hexdigest()[:32]
 
 
-def _visible_record(
-    record: dict[str, Any], scope: _Scope, chunk_ids: dict[str, str]
-) -> dict[str, Any]:
-    """A recall result or source fact with its ids as the caller may see them.
+def _descriptive_tags(tags: Any) -> list[str]:
+    """The tags of someone else's memory that say what it is, not whose.
 
-    A document in one of the caller's namespaces gets the caller's own id. A
-    namespaced id that is not the caller's (another client's document in the
-    same project) is not shown at all. An id with no namespace was chosen by
-    one of hal0's own agents and is shown as it is. The engine's chunk id has
-    the document id inside it, so it is rewritten the same way, or replaced
-    by an opaque one; ``chunk_ids`` collects old id to new id for the
-    response's ``chunks``.
+    The project (or ``scope:global``), and the ``kind:``, ``knowledge:`` and
+    ``source:`` tags. Every ``agent:`` tag, the bridge's ``source:bridge:``
+    stamp, ``harness:`` and any free tag are left out.
     """
+    return [
+        tag
+        for tag in (tags if isinstance(tags, list) else [])
+        if isinstance(tag, str)
+        and (tag == SCOPE_GLOBAL_TAG or tag.startswith(_DESCRIPTIVE_TAG_PREFIXES))
+        and not tag.startswith(_BRIDGE_SOURCE_TAG_PREFIX)
+    ]
+
+
+def _is_own(record: dict[str, Any], scope: _Scope) -> bool:
+    """True when the caller itself wrote the memory ``record`` came from.
+
+    Every write through hal0 carries exactly one ``agent:`` tag, its
+    writer's, and a caller cannot set it.
+    """
+    return _carries(record.get("tags"), (scope.agent_tag,))
+
+
+def _recall_row(record: dict[str, Any], scope: _Scope, chunk_ids: dict[str, str]) -> dict[str, Any]:
+    """A recall result or source fact as the caller may see it.
+
+    **The caller's own** is returned whole, with its document id as the
+    caller knows it. The engine's chunk id has the document id inside it, so
+    it is rewritten the same way, or replaced by an opaque one; ``chunk_ids``
+    collects old id to new id for the response's ``chunks``.
+
+    **Anyone else's** (another client's memory in the same project, a shared
+    document another client wrote, anything hal0's own agents wrote) is
+    reduced to an allow-list: :data:`_FOREIGN_RESULT_FIELDS` and its
+    descriptive tags. Its ``document_id`` is ``null`` and its chunk id opaque;
+    its ``metadata`` (which holds the other client's name, its document id
+    and its session id), its ``context`` (the other client's name by default)
+    and its entities are not returned, and neither is its chunk: a raw chunk
+    of another client's session names that session.
+    """
+    chunk_id = record.get("chunk_id")
+    if not _is_own(record, scope):
+        out = _pick(record, _FOREIGN_RESULT_FIELDS)
+        if "tags" in record:
+            out["tags"] = _descriptive_tags(record["tags"])
+        if "document_id" in record:
+            out["document_id"] = None
+        if isinstance(chunk_id, str) and chunk_id:
+            out["chunk_id"] = _opaque_chunk_id(chunk_id)
+        return out
     out = dict(record)
     stored = record.get("document_id")
-    chunk_id = record.get("chunk_id")
     visible = scope.visible_id(stored, record.get("metadata")) if stored is not None else None
-    foreign = visible is None and is_namespaced(stored)
     if visible is not None:
         out["document_id"] = visible
-    elif foreign:
+    elif is_namespaced(stored):
         out["document_id"] = None
     if isinstance(chunk_id, str) and chunk_id:
         shown = chunk_id
         if visible is not None and isinstance(stored, str):
             shown = chunk_id.replace(chunk_id_part(stored), chunk_id_part(visible), 1)
-        if foreign or any(chunk_id_part(prefix) in shown for prefix in scope.id_prefixes()):
+        if any(chunk_id_part(prefix) in shown for prefix in scope.id_prefixes()):
             shown = _opaque_chunk_id(chunk_id)
         chunk_ids[chunk_id] = shown
         out["chunk_id"] = shown
@@ -1250,12 +1571,14 @@ def _scrub_recall(
 
     * ``entities`` is bank-wide state, built from every project's and every
       agent's facts, and says nothing about where it came from: removed;
-    * ``source_facts`` are kept when a surviving result names them and their
-      own tags are inside the groups;
-    * ``chunks`` are kept when a surviving result or source fact names them;
+    * ``source_facts`` are kept when one of the caller's OWN results names
+      them and their own tags are inside the groups (a result that is not
+      the caller's is returned without its ``source_fact_ids``);
+    * ``chunks`` are kept when one of the caller's OWN results or source
+      facts names them;
     * ``trace`` is never requested and is removed if present.
 
-    Document and chunk ids are then shown as :func:`_visible_record` says.
+    Every kept row then goes through :func:`_recall_row`.
     """
     out = dict(response)
     raw_results = response.get("results")
@@ -1270,15 +1593,15 @@ def _scrub_recall(
     named = {
         str(i)
         for r in results
-        if isinstance(r.get("source_fact_ids"), list)
+        if _is_own(r, scope) and isinstance(r.get("source_fact_ids"), list)
         for i in r["source_fact_ids"]
     }
     chunk_ids: dict[str, str] = {}
-    out["results"] = [_visible_record(r, scope, chunk_ids) for r in results]
+    out["results"] = [_recall_row(r, scope, chunk_ids) for r in results]
     source_facts = response.get("source_facts")
     if isinstance(source_facts, dict):
         out["source_facts"] = {
-            key: _visible_record(fact, scope, chunk_ids)
+            key: _recall_row(fact, scope, chunk_ids)
             for key, fact in source_facts.items()
             if str(key) in named
             and isinstance(fact, dict)
@@ -1292,7 +1615,9 @@ def _scrub_recall(
                 continue
             shown = chunk_ids[str(key)]
             if isinstance(chunk, dict):
-                chunk = _visible_record(chunk, scope, {})
+                chunk = dict(chunk)
+                if "document_id" in chunk:
+                    chunk["document_id"] = scope.visible_id(chunk["document_id"])
                 for id_field in ("id", "chunk_id"):
                     if chunk.get(id_field) == key:
                         chunk[id_field] = shown
@@ -1309,7 +1634,11 @@ async def recall(bank: str, request: Request, agent: str = _CALLER) -> Response:
     items: ``HindsightProvider.recall_raw`` returns what the engine returned
     for the platform bank, filtered by the engine to the same groups a
     reflect gets. :func:`_scrub_recall` then removes what a tag filter cannot
-    vouch for and shows document ids as the caller knows them.
+    vouch for, and what is not the caller's own is reduced to an allow-list.
+
+    One client runs :data:`RECALLS_PER_CLIENT` recalls at a time and all
+    clients together ``[memory.compat].max_concurrent_recalls``; beyond
+    either the answer is 429 with ``Retry-After``.
     """
     provider = _provider(request)
     body = await _read_json(request, cap=MAX_QUERY_BODY_BYTES)
@@ -1340,16 +1669,25 @@ async def recall(bank: str, request: Request, agent: str = _CALLER) -> Response:
 
     scope = _scope(request, provider, bank, agent, tags or ())
     headers = {**scope.headers(), **_ignored(n for n in body if n not in _RECALL_FIELDS)}
+    groups = [*scope.project_groups(), *_caller_groups(body, "recall")]
+    state = _state(request)
+    everyone = _settings(request).max_concurrent_recalls
     try:
-        result = await provider.recall_raw(
-            query,
-            client_id=agent,
-            tags=tags,
-            tags_match=tags_match,
-            tag_groups=[*scope.project_groups(), *_caller_groups(body, "recall")],
-            timeout_s=_RECALL_TIMEOUT_S,
-            **extra,
-        )
+        with (
+            _in_flight(state, "recall", agent, RECALLS_PER_CLIENT, _RECALL_RETRY_AFTER_S),
+            _in_flight(state, "recall", _EVERY_CLIENT, everyone, _RECALL_RETRY_AFTER_S),
+        ):
+            result = await provider.recall_raw(
+                query,
+                client_id=agent,
+                tags=tags,
+                tags_match=tags_match,
+                tag_groups=groups,
+                timeout_s=_RECALL_TIMEOUT_S,
+                **extra,
+            )
+    except _Busy as busy:
+        return busy.response(headers)
     except Exception as exc:
         return _engine_failure(exc, what="the recall", headers=headers, hidden=scope.id_prefixes())
     return _json(_scrub_recall(result, scope.read_groups(), scope), headers)
@@ -1410,16 +1748,47 @@ def _page_number(request: Request, name: str, default: int) -> int:
     return int(raw)
 
 
+def _listing_row(
+    row: Any, scope: _Scope, required: list[str], visible: list[dict[str, Any]]
+) -> Any:
+    """One engine row as the caller may see it, or ``None`` to leave it out.
+
+    Left out: a row outside the caller's namespaces, one without the required
+    tags, one private to another agent. The caller's own document is returned
+    whole under the caller's id. A shared document another client wrote last
+    is returned as an allow-list (:data:`_FOREIGN_DOCUMENT_FIELDS` and its
+    descriptive tags): its id is the shared id every client of the project
+    derives, and nothing of its writer (metadata, retain parameters, the
+    writer's tags) comes with it.
+    """
+    if not isinstance(row, dict) or not _carries(row.get("tags"), required):
+        return None
+    if not tags_readable(visible, row["tags"]):
+        return None
+    own = _is_own(row, scope)
+    shown = scope.visible_id(row.get("id"), row.get("document_metadata") if own else None)
+    if shown is None:
+        return None
+    if own:
+        return {**row, "id": shown}
+    return {
+        **_pick(row, _FOREIGN_DOCUMENT_FIELDS),
+        "id": shown,
+        "tags": _descriptive_tags(row["tags"]),
+    }
+
+
 @router.get(_BANK + "/documents")
 async def list_documents(bank: str, request: Request, agent: str = _CALLER) -> Response:
     """List documents: the engine's ``GET .../documents``, for this caller.
 
     The engine filters by tag (:func:`_document_filter`). What it cannot
-    express is applied to each returned row in hal0: the row's stored id must
-    be in one of the caller's namespaces (its own, or the project's shared
-    one), which leaves out every document hal0's own agents or another client
-    wrote under an id of their own, and the row must not be private to
-    someone else. A kept row is returned with the caller's own id.
+    express is applied to each returned row in hal0 (:func:`_listing_row`):
+    the row's stored id must be in one of the caller's namespaces (its own,
+    or the project's shared one), which leaves out every document hal0's own
+    agents or another client wrote under an id of their own, and the row must
+    not be private to someone else. A kept row is returned with the caller's
+    own id.
 
     The plugin stops paging at the first page shorter than ``limit``. So when
     rows were left out, the listing reads on from the engine, up to
@@ -1468,19 +1837,11 @@ async def list_documents(bank: str, request: Request, agent: str = _CALLER) -> R
         for row in rows:
             if len(kept) >= limit:
                 break
-            shown = (
-                scope.visible_id(row.get("id"), row.get("document_metadata"))
-                if isinstance(row, dict)
-                else None
-            )
-            if (
-                shown is None
-                or not _carries(row.get("tags"), required)
-                or not tags_readable(visible, row["tags"])
-            ):
+            shown = _listing_row(row, scope, required, visible)
+            if shown is None:
                 left_out += 1
-                continue
-            kept.append({**row, "id": shown})
+            else:
+                kept.append(shown)
         exhausted = len(rows) < limit or limit == 0
         if exhausted or len(kept) >= limit:
             break
@@ -1593,23 +1954,28 @@ def _pick(record: Any, fields: Iterable[str]) -> dict[str, Any]:
     return {key: source[key] for key in fields if key in source}
 
 
-def _operation_view(record: Any, visible_id: str) -> dict[str, Any]:
+def _operation_view(record: Any, visible_id: str, agent: str) -> dict[str, Any]:
     """One of the caller's operations as a status poll needs it.
 
     Nothing a client submitted is returned: no payload, no result metadata,
     no document id, no file name, and no engine id (the operation's id is the
     one the caller knows it by; child operations are counted, not named).
-    ``error_message`` is the caller's own operation's and is cut to
-    :data:`MAX_ERROR_MESSAGE_LENGTH`.
+    ``error_message`` is the caller's own operation's; the engine may name a
+    document in it by its stored id, so the caller's stored-id prefixes are
+    cut out of it, and it is cut to :data:`MAX_ERROR_MESSAGE_LENGTH`.
     """
     view = _pick(record, _OPERATION_FIELDS)
     source = record if isinstance(record, dict) else {}
     for id_field in ("id", "operation_id"):
         if id_field in view:
             view[id_field] = visible_id
-    error = source.get("error_message")
     if "error_message" in source:
-        view["error_message"] = error[:MAX_ERROR_MESSAGE_LENGTH] if isinstance(error, str) else None
+        error = source["error_message"]
+        view["error_message"] = (
+            strip_stored_prefixes(error, agent)[:MAX_ERROR_MESSAGE_LENGTH]
+            if isinstance(error, str)
+            else None
+        )
     if isinstance(source.get("progress"), dict):
         view["progress"] = _pick(source["progress"], _PROGRESS_FIELDS)
     children = source.get("child_operations")
@@ -1623,42 +1989,52 @@ async def list_operations(bank: str, request: Request, agent: str = _CALLER) -> 
     """The caller's own operations on the platform bank, as statuses.
 
     The engine's list covers every client's operations and does not say who
-    started which, and an engine operation id cannot be turned back into the
-    client it was derived for. So the list is narrowed to the operations this
-    hal0-api process saw the caller start (:class:`_CompatState`): after a
-    restart it is empty until the caller retains again. A poll by id
-    (:func:`get_operation`) does not depend on that memory. The engine's
-    largest page is read and then narrowed, and ``total`` is not returned.
+    started which, so it is not used. The list is built from the operations
+    this hal0-api process saw the caller start (:class:`_CompatState`),
+    newest first; each unfinished one is read from the engine by id, so the
+    statuses are current however many operations other clients have. The
+    caller's ``limit`` and ``offset`` index into the caller's own operations
+    only, ``status`` and ``type`` filter them, and ``total`` counts them.
+
+    Two things can make the list incomplete, and both set
+    ``X-hal0-Listing-Incomplete``: the client has more than
+    :data:`OPERATIONS_REMEMBERED_PER_CLIENT` remembered operations (the
+    oldest finished ones are dropped), or more than
+    :data:`_LISTING_STATUS_READS` of them are unfinished. After a restart the
+    list is empty until the caller retains again; a poll by id
+    (:func:`get_operation`) does not depend on this memory.
     """
     provider = _provider(request)
-    params: dict[str, Any] = {
-        name: request.query_params[name]
-        for name in ("status", "type", "offset", "exclude_parents")
-        if name in request.query_params
-    }
-    params["limit"] = _OPERATION_PAGE
-    limit = min(_page_number(request, "limit", 20), _OPERATION_PAGE)
+    state = _state(request)
+    limit = min(_page_number(request, "limit", 20), MAX_OPERATIONS_LIMIT)
+    offset = _page_number(request, "offset", 0)
     headers = _scope(request, provider, bank, agent).headers()
-    out = await _forward(
-        request,
-        "GET",
-        _bank_path(provider, "/operations"),
-        what="the operations listing",
-        timeout_s=_OPERATION_TIMEOUT_S,
-        params=params,
-        headers=headers,
-    )
-    if isinstance(out, Response):
-        return out
-    known = _state(request).operations
-    listed = out.get("operations") if isinstance(out, dict) else None
-    mine: list[dict[str, Any]] = []
-    for row in listed if isinstance(listed, list) else []:
-        engine_id = row.get("id") or row.get("operation_id") if isinstance(row, dict) else None
-        owner = known.get(engine_id) if isinstance(engine_id, str) else None
-        if owner is not None and owner[0] == agent and len(mine) < limit:
-            mine.append(_operation_view(row, owner[1]))
-    page = {**_pick(out, _OPERATION_LIST_FIELDS), "limit": limit, "operations": mine}
+
+    waiting = state.outstanding(agent)
+    await _refresh_operations(provider, agent, waiting[-_LISTING_STATUS_READS:])
+    if agent in state.forgotten or len(waiting) > _LISTING_STATUS_READS:
+        headers[INCOMPLETE_LISTING_HEADER] = "1"
+
+    wanted_status = request.query_params.get("status")
+    wanted_type = request.query_params.get("type")
+    mine = [
+        operation.view
+        for operation in reversed(state.operations_of(agent).values())
+        if operation.view is not None
+        and (wanted_status is None or operation.view.get("status") == wanted_status)
+        and (
+            wanted_type is None
+            or wanted_type
+            in (operation.view.get("task_type"), operation.view.get("operation_type"))
+        )
+    ]
+    page = {
+        "bank_id": str(provider.platform_bank),
+        "total": len(mine),
+        "limit": limit,
+        "offset": offset,
+        "operations": mine[offset : offset + limit],
+    }
     return _json(page, headers)
 
 
@@ -1676,13 +2052,17 @@ async def get_operation(
     The exception is an id the engine chose itself and this client was handed
     in a retain answer, which is remembered per process. The submitted
     payload is never requested (``include_payload=false``) or returned.
+
+    What the poll learns is kept: a finished operation stops counting toward
+    the client's quota (:func:`_admit_operation`).
     """
     provider = _provider(request)
     client = provider.hindsight_client
     headers = _scope(request, provider, bank, agent).headers()
+    remembered = _state(request).operations_of(agent)
     candidates = [_engine_operation_id(agent, operation_id)]
-    handed = _state(request).operations.get(operation_id)
-    if handed is not None and handed == (agent, operation_id):
+    handed = remembered.get(operation_id)
+    if handed is not None and handed.visible_id == operation_id:
         candidates.append(operation_id)
     for engine_id in candidates:
         try:
@@ -1698,8 +2078,11 @@ async def get_operation(
             return _engine_failure(exc, what="the operation read", headers=headers)
         except Exception as exc:
             return _engine_failure(exc, what="the operation read", headers=headers)
+        known = remembered.get(engine_id)
+        if known is not None:
+            _note_status(known, record, agent)
         if isinstance(record, dict) and record.get("status") != "not_found":
-            return _json(_operation_view(record, operation_id), headers)
+            return _json(_operation_view(record, operation_id, agent), headers)
     raise NotFound(
         "no such operation",
         code="memory.compat_operation_not_found",

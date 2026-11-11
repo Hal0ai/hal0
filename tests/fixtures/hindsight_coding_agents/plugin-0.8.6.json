@@ -180,7 +180,7 @@
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/operations",
       "expect": {
         "status": 200,
-        "engine": "GET /v1/default/banks/hal0:shared/operations"
+        "engine": null
       }
     },
     {

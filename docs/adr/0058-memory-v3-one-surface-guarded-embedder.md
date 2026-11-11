@@ -155,6 +155,19 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      the client its own ids are all it ever sees. A write through the endpoint
      is never global: it carries a project or `project:unresolved`, and an
      unresolved write's observations are scoped to its writer (decision 4a).
+   - *Sharing a project shares content, not identity.* A client reads the
+     project memory other clients wrote. What it is given of a memory or a
+     shared document it did not write is an allow-list: the content, the type
+     of memory, when, and the tags that describe it (the project, `kind:`,
+     `knowledge:`, `source:`). The writer's name, its `agent:` tag, its
+     document id, its session id, its `context` and its metadata are not
+     returned.
+   - *What one key can cost is bounded.* Retains, reflects and recalls in
+     flight are limited per client and across clients, a client's unfinished
+     asynchronous retains are held to a quota, large retain bodies are read a
+     few at a time, and reflects through the endpoint always leave an engine
+     slot to hal0's own agents. The limits are kept in the hal0-api process
+     and start empty when it restarts; the values are in the API reference.
    - *Typed routes, not a proxy.* Each route is parsed and goes through the
      provider or one scoped forwarder, so a field or route the endpoint does
      not name never reaches the engine. A bank cannot be deleted, a bank

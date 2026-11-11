@@ -39,7 +39,7 @@ from hal0.api.middleware import error_codes
 from hal0.api.routes import memory_compat
 from hal0.api.routes.memory_compat import _engine_operation_id
 from hal0.bridge.store import BridgeStore, BridgeStoreError
-from hal0.config.schema import MemoryCompatConfig
+from hal0.config.schema import MemoryCompatConfig, MemoryLanesConfig
 from hal0.errors import Hal0Error
 from hal0.memory.hindsight_client import REFLECT_TIMEOUT_S, HindsightRestClient
 from hal0.memory.hindsight_provider import HindsightProvider
@@ -748,6 +748,7 @@ def test_a_body_over_the_cap_is_413_whether_or_not_it_declares_its_size(
     client: TestClient, engine: Engine, key: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(memory_compat, "MAX_RETAIN_BODY_BYTES", 2048)
+    monkeypatch.setattr(memory_compat, "SMALL_RETAIN_BODY_BYTES", 1024)
     raw = json.dumps({"items": [_item(content="x" * 4096)]}).encode()
 
     declared = client.post(
@@ -1877,41 +1878,110 @@ def test_the_operations_listing_is_the_callers_own(
     given = _start(client, key)  # no id sent: the caller is handed one
     engine.operations["0d9b6c0a-41f7-4e7c-b3a8-52c1e8f97d24"] = {
         "status": "pending",
-        "document_id": "private:hermes:s-9",
         "error_message": "ANOTHER CLIENT'S ERROR",
     }
     engine.calls.clear()
     resp = client.get(
         _url(URL_BANK + "/operations"),
         headers=_auth(key),
-        params={"status": "pending", "limit": "50", "include_payload": "true"},
+        params={"limit": "50", "include_payload": "true"},
     )
     assert resp.status_code == 200
-    (call,) = engine.calls
-    # The engine's largest page is read, then narrowed to this client.
-    assert call.params == {"status": ["pending"], "limit": ["100"]}
-    page = resp.json()
-    assert set(page) == {"bank_id", "limit", "offset", "operations"}
-    assert [op["id"] for op in page["operations"]] == ["mine-1", given]
-    assert all(
-        set(op)
-        <= {
-            "id",
-            "operation_id",
-            "task_type",
-            "status",
-            "items_count",
-            "created_at",
-            "error_message",
-        }
-        for op in page["operations"]
+    # The engine's list, which covers every client, is never read: each of
+    # the caller's own unfinished operations is read by its id.
+    assert sorted(engine.lines()) == sorted(
+        f"GET {ENGINE_BANK}/operations/{_engine_operation_id('cc', op)}" for op in ("mine-1", given)
     )
+    assert all(c.params == {"include_payload": ["false"]} for c in engine.calls)
+    page = resp.json()
+    assert set(page) == {"bank_id", "total", "limit", "offset", "operations"}
+    assert (page["total"], page["limit"], page["offset"]) == (2, 50, 0)
+    # Newest first, under the caller's own ids.
+    assert [op["id"] for op in page["operations"]] == [given, "mine-1"]
     assert "theirs-1" not in resp.text and "ANOTHER CLIENT" not in resp.text
     assert _engine_operation_id("cc", "mine-1") not in resp.text
     assert "hal0::" not in resp.text and "private:hermes" not in resp.text
 
     theirs = client.get(_url(URL_BANK + "/operations"), headers=_auth(codex)).json()
     assert [op["id"] for op in theirs["operations"]] == ["theirs-1"]
+
+
+def test_the_operations_listing_pages_over_the_callers_own_operations_only(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore
+) -> None:
+    """A caller's ``offset`` and ``limit`` index into its own operations. They
+    are never sent to the engine, where they would index into everyone's, and
+    the caller's operations are found however many others there are."""
+    _row, codex = store.add_client("codex", created_by="t")
+    for n in range(3):
+        _start(client, key, f"mine-{n}")
+    for n in range(150):  # more than one engine page of someone else's
+        engine.operations[f"00000000-0000-4000-8000-{n:012d}"] = {"status": "pending"}
+    _start(client, codex, "theirs")
+    for n in range(3, 6):
+        _start(client, key, f"mine-{n}")
+    engine.operations[_engine_operation_id("cc", "mine-4")]["status"] = "completed"
+
+    def listing(**params: str) -> dict[str, Any]:
+        engine.calls.clear()
+        resp = client.get(_url(URL_BANK + "/operations"), headers=_auth(key), params=params)
+        assert resp.status_code == 200
+        assert all("offset" not in c.params and "limit" not in c.params for c in engine.calls)
+        return resp.json()
+
+    everything = listing()
+    assert [op["id"] for op in everything["operations"]] == [
+        f"mine-{n}" for n in (5, 4, 3, 2, 1, 0)
+    ]
+    assert everything["total"] == 6
+    second = listing(limit="2", offset="2")
+    assert [op["id"] for op in second["operations"]] == ["mine-3", "mine-2"]
+    assert (second["total"], second["limit"], second["offset"]) == (6, 2, 2)
+    assert [op["id"] for op in listing(status="completed")["operations"]] == ["mine-4"]
+    assert listing(type="consolidation")["operations"] == []
+    # A finished operation is not read again.
+    assert _engine_operation_id("cc", "mine-4") not in "".join(engine.lines())
+
+
+def test_one_clients_operations_cannot_push_out_anothers(
+    client: TestClient,
+    engine: Engine,
+    key: str,
+    store: BridgeStore,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What is remembered is bounded per client. A client that churns through
+    operations loses its own oldest finished ones, and says so; another
+    client's are untouched."""
+    monkeypatch.setattr(memory_compat, "OPERATIONS_REMEMBERED_PER_CLIENT", 3)
+    _row, codex = store.add_client("codex", created_by="t")
+    _start(client, key, "mine")
+    for n in range(8):
+        operation = _start(client, codex, f"churn-{n}")
+        engine.operations[_engine_operation_id("codex", operation)]["status"] = "completed"
+        client.get(_url(URL_BANK + f"/operations/{operation}"), headers=_auth(codex))
+    state = _compat_state(app)
+    assert len(state.operations_of("codex")) == 3 and len(state.operations_of("cc")) == 1
+    mine = client.get(_url(URL_BANK + "/operations"), headers=_auth(key))
+    assert [op["id"] for op in mine.json()["operations"]] == ["mine"]
+    assert "X-hal0-Listing-Incomplete" not in mine.headers
+    theirs = client.get(_url(URL_BANK + "/operations"), headers=_auth(codex))
+    assert [op["id"] for op in theirs.json()["operations"]] == ["churn-7", "churn-6", "churn-5"]
+    assert theirs.headers["X-hal0-Listing-Incomplete"] == "1"
+
+
+def test_an_operation_error_never_shows_a_stored_id(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    _start(client, key, "my-op-1")
+    engine.operations[_engine_operation_id("cc", "my-op-1")]["error_message"] = (
+        "document hal0::cc::conversation:s-1 failed; see atlas::shared::git:4f2a too"
+    )
+    for path in ("/operations/my-op-1", "/operations"):
+        resp = client.get(_url(URL_BANK + path), headers=_auth(key))
+        assert "document conversation:s-1 failed; see git:4f2a too" in resp.text
+        assert "::" not in resp.text.replace("hal0:shared", "")
 
 
 def test_an_operation_the_engine_named_itself_is_pollable_by_the_client_it_was_handed_to(
@@ -2171,11 +2241,13 @@ def test_recall_shows_ids_as_the_caller_knows_them(
             "tags": OWN_PROJECT,
             "document_id": "hal0::cc::conversation:s_1",
             "chunk_id": "hal0:shared_hal0::cc::conversation:s~5F1_0",
+            "metadata": {"bridge_client": "cc", "session_id": "s_1"},
+            "context": "coding agent session",
         },
         {
             "id": "f-2",
-            "text": "shared",
-            "tags": OTHER_AGENT_PROJECT,
+            "text": "a shared document this client wrote",
+            "tags": OWN_PROJECT,
             "document_id": "hal0::shared::git:4f2a",
             "chunk_id": "hal0:shared_hal0::shared::git:4f2a_2",
         },
@@ -2185,13 +2257,6 @@ def test_recall_shows_ids_as_the_caller_knows_them(
             "tags": OTHER_AGENT_PROJECT,
             "document_id": "hal0::codex::readme",
             "chunk_id": "hal0:shared_hal0::codex::readme_0",
-        },
-        {
-            "id": "f-4",
-            "text": "one of hal0's own agents wrote this",
-            "tags": GLOBAL,
-            "document_id": "hermes:s-9",
-            "chunk_id": "hal0:shared_hermes:s-9_0",
         },
     ]
     engine.recall_extras = {
@@ -2206,21 +2271,229 @@ def test_recall_shows_ids_as_the_caller_knows_them(
         json={"query": "q", "include": {"chunks": {}}},
     )
     results = resp.json()["results"]
-    assert [r["document_id"] for r in results] == [
-        "conversation:s_1",
-        "git:4f2a",
-        None,
-        "hermes:s-9",
-    ]
+    assert [r["document_id"] for r in results] == ["conversation:s_1", "git:4f2a", None]
     assert [r["chunk_id"] for r in results[:2]] == [
         "hal0:shared_conversation:s~5F1_0",
         "hal0:shared_git:4f2a_2",
     ]
     assert results[2]["chunk_id"].startswith("chunk-")
-    assert results[3]["chunk_id"] == "hal0:shared_hermes:s-9_0"
-    assert sorted(resp.json()["chunks"]) == sorted(r["chunk_id"] for r in (results[0], results[2]))
+    # The caller's own row is whole.
+    assert results[0]["metadata"] == {"bridge_client": "cc", "session_id": "s_1"}
+    assert results[0]["context"] == "coding agent session"
+    # Only the caller's own chunk comes back.
+    assert resp.json()["chunks"] == {"hal0:shared_conversation:s~5F1_0": {"text": "chunk of mine"}}
     assert "::cc::" not in resp.text and "::codex::" not in resp.text
     assert "::shared::" not in resp.text
+
+
+# ── what a client learns about another client ───────────────────────────────
+
+# Client A, with a name, a session and document ids that appear nowhere else.
+PEER = "alpha-agent"
+PEER_SESSION = "0f3c1c1e-5b7a-4a52-9d0e-6c2f1a9b8e77"
+PEER_TAGS = [
+    "team:their-own-word",
+    "source:chat",
+    "harness:claude-code",
+    f"agent:{PEER}",
+    "kind:durable",
+    "project:hal0",
+    "knowledge:decision",
+    f"source:bridge:{PEER}",
+]
+PEER_METADATA = {
+    "bridge_client": PEER,
+    "source": PEER,
+    "client_source": "chat",
+    "client_document_id": "their title with spaces",
+    "session_id": PEER_SESSION,
+    "ref_id": f"conversation:{PEER_SESSION}",
+    "project": "hal0",
+}
+PEER_STRINGS = (
+    PEER,
+    PEER_SESSION,
+    "their-own-word",
+    "their title with spaces",
+    "sha256-",
+    "::",
+    "claude-code",
+)
+
+
+def _no_trace_of_the_peer(resp: httpx.Response) -> None:
+    text = resp.text.replace('"bank_id":"hal0:shared"', "")
+    for needle in PEER_STRINGS:
+        assert needle not in text, needle
+
+
+def test_a_recall_says_nothing_about_who_wrote_another_clients_memory(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    """Key B reads project memory key A wrote. It gets the content, what kind
+    of memory it is and when; not A's name, document id, session id, context
+    or vocabulary. An allow-list: a field hal0 does not name is not returned."""
+    digest = hashlib.sha256(b"their title with spaces").hexdigest()
+    peer_fact = {
+        "id": "f-1",
+        "text": "the release is cut from main after the nightly passes",
+        "type": "world",
+        "tags": PEER_TAGS,
+        "document_id": f"hal0::{PEER}::conversation:{PEER_SESSION}",
+        "chunk_id": f"hal0:shared_hal0::{PEER}::conversation:{PEER_SESSION}_0",
+        "metadata": PEER_METADATA,
+        "context": f"{PEER} conversation turn",
+        "entities": [PEER, "release"],
+        "occurred_start": "2026-11-10T09:14:02Z",
+        "mentioned_at": "2026-11-10T09:14:02Z",
+        "scores": {"final": 0.9},
+        "source_fact_ids": ["sf-1"],
+        "some_future_field": PEER,
+    }
+    engine.recall_results = [
+        peer_fact,
+        {**peer_fact, "id": "f-2", "document_id": f"hal0::{PEER}::sha256-{digest}"},
+        {**peer_fact, "id": "f-3", "document_id": "hal0::shared::git:4f2a"},
+        # One of hal0's own agents, by an id of its own.
+        {**peer_fact, "id": "f-4", "document_id": f"{PEER}:{PEER_SESSION}", "tags": [*GLOBAL]},
+    ]
+    engine.recall_extras = {
+        "chunks": {peer_fact["chunk_id"]: {"text": f'{{"ref":"conversation:{PEER_SESSION}"}}'}},
+        "source_facts": {"sf-1": {**peer_fact, "id": "sf-1", "text": "an earlier fact"}},
+        "entities": {PEER: {"observations": ["wrote a lot"]}},
+    }
+    resp = client.post(
+        _url(URL_BANK + "/memories/recall"),
+        headers=_auth(key),
+        json={"query": "q", "include": {"chunks": {}, "source_facts": {}}},
+    )
+    assert resp.status_code == 200
+    _no_trace_of_the_peer(resp)
+    body = resp.json()
+    assert len(body["results"]) == 4
+    first = body["results"][0]
+    assert set(first) == {
+        "id",
+        "text",
+        "type",
+        "tags",
+        "document_id",
+        "chunk_id",
+        "occurred_start",
+        "mentioned_at",
+    }
+    assert first["text"] == peer_fact["text"]
+    assert first["document_id"] is None and first["chunk_id"].startswith("chunk-")
+    assert first["tags"] == ["source:chat", "kind:durable", "project:hal0", "knowledge:decision"]
+    assert body["results"][3]["tags"] == ["kind:durable", "scope:global"]
+    assert body["chunks"] == {} and body["entities"] is None
+    # A source fact is named by ``source_fact_ids``, which is not returned for
+    # a result that is not the caller's, so nothing names this one.
+    assert body["source_facts"] == {}
+
+    # The same fact under one of the caller's own results: also allow-listed.
+    own = {"id": "f-9", "text": "mine", "tags": OWN_PROJECT, "source_fact_ids": ["sf-1"]}
+    engine.recall_results = [own]
+    resp = client.post(
+        _url(URL_BANK + "/memories/recall"),
+        headers=_auth(key),
+        json={"query": "q", "include": {"source_facts": {}}},
+    )
+    _no_trace_of_the_peer(resp)
+    assert resp.json()["results"] == [own]
+    assert set(resp.json()["source_facts"]["sf-1"]) == set(first)
+
+
+def test_a_listing_says_nothing_about_who_last_wrote_a_shared_document(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    long_id = "git:" + "f" * 300
+    digest = hashlib.sha256(long_id.encode()).hexdigest()
+    row = {
+        "tags": PEER_TAGS,
+        "document_metadata": PEER_METADATA,
+        "retain_params": {"context": f"{PEER} conversation turn"},
+        "content_hash": "abc",
+        "created_at": "2026-11-10T09:14:02Z",
+        "updated_at": "2026-11-10T09:15:00Z",
+        "text_length": 120,
+        "memory_unit_count": 4,
+        "some_future_field": PEER,
+    }
+    _seed(
+        engine,
+        {**_doc("hal0::shared::git:4f2a", PEER_TAGS), **row},
+        # A long shared id: its digest form keeps the shared prefix, and the
+        # writer's own spelling of it is not read from the writer's metadata.
+        {
+            **_doc(f"hal0::shared::git:sha256-{digest}", PEER_TAGS),
+            **row,
+            "document_metadata": {**PEER_METADATA, "client_document_id": "their title with spaces"},
+        },
+        {**_doc(f"hal0::{PEER}::readme", PEER_TAGS), **row},
+        _doc(
+            "hal0::cc::mine", [*OWN_PROJECT, "team:mine"], document_metadata={"bridge_client": "cc"}
+        ),
+    )
+    resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key))
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert [d["id"] for d in items] == ["git:4f2a", f"git:sha256-{digest}", "mine"]
+    shared = items[0]
+    assert shared == {
+        "id": "git:4f2a",
+        "created_at": "2026-11-10T09:14:02Z",
+        "updated_at": "2026-11-10T09:15:00Z",
+        "tags": ["source:chat", "kind:durable", "project:hal0", "knowledge:decision"],
+    }
+    # The caller's own document is whole.
+    assert items[2]["tags"] == [*OWN_PROJECT, "team:mine"]
+    assert items[2]["document_metadata"] == {"bridge_client": "cc"}
+    text = resp.text
+    for needle in (PEER, PEER_SESSION, "their-own-word", "their title with spaces", "::"):
+        assert needle not in text.replace('"bank_id":"hal0:shared"', ""), needle
+
+
+def test_a_long_shared_id_round_trips_through_the_shared_namespace(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore
+) -> None:
+    """A shared id too long to store is kept as ``<shared prefix>sha256-...``
+    in the SHARED namespace, so the form a listing shows another client maps
+    back to the same document. Without the kept prefix it would map into the
+    sender's own namespace: a second document, and a delete that finds none."""
+    _row, codex = store.add_client("codex", created_by="t")
+    long_id = "git:" + "f" * 300
+    digest = hashlib.sha256(long_id.encode()).hexdigest()
+    stored = f"hal0::shared::git:sha256-{digest}"
+
+    client.post(
+        _url(URL_BANK + "/memories"),
+        headers=_auth(key),
+        json={"items": [_item(document_id=long_id)]},
+    )
+    (item,) = engine.only("POST", "/memories").body["items"]
+    assert item["document_id"] == stored
+    _seed(engine, _doc(stored, item["tags"], document_metadata=item["metadata"]))
+
+    # The writer sees its own id back; another client sees the digest form.
+    mine = client.get(_url(URL_BANK + "/documents"), headers=_auth(key)).json()["items"]
+    theirs = client.get(_url(URL_BANK + "/documents"), headers=_auth(codex)).json()["items"]
+    assert [d["id"] for d in mine] == [long_id]
+    assert [d["id"] for d in theirs] == [f"git:sha256-{digest}"]
+
+    # Either spelling, from either client, is the one shared document.
+    for auth_key, spelling in ((codex, f"git:sha256-{digest}"), (codex, long_id), (key, long_id)):
+        engine.calls.clear()
+        client.post(
+            _url(URL_BANK + "/memories"),
+            headers=_auth(auth_key),
+            json={"items": [_item(document_id=spelling)]},
+        )
+        assert engine.only("POST", "/memories").body["items"][0]["document_id"] == stored
+    engine.calls.clear()
+    deleted = client.delete(_url(URL_BANK + f"/documents/git:sha256-{digest}"), headers=_auth(key))
+    assert deleted.status_code == 200
+    assert engine.lines()[-1] == f"DELETE {ENGINE_BANK}/documents/{stored}"
 
 
 def test_a_reflect_answer_names_no_stored_document(
@@ -2332,6 +2605,8 @@ def test_all_clients_together_run_a_configured_number_of_reflects(
     client: TestClient, engine: Engine, key: str, app: FastAPI
 ) -> None:
     assert MemoryCompatConfig().max_concurrent_reflects == 2
+    roomy = types.SimpleNamespace(llm_max_concurrent=8, reflect=None)
+    _configure(app, roomy)
     state = _compat_state(app)
     state.in_flight[("reflect", "*")] = 2
     _busy(client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"}), "15")
@@ -2339,8 +2614,7 @@ def test_all_clients_together_run_a_configured_number_of_reflects(
     # The refused request holds no slot of its own afterwards.
     assert state.in_flight == {("reflect", "*"): 2}
 
-    compat = MemoryCompatConfig(max_concurrent_reflects=3)
-    app.state.hal0_config = types.SimpleNamespace(memory=types.SimpleNamespace(compat=compat))
+    _configure(app, roomy, max_concurrent_reflects=3)
     assert (
         client.post(
             _url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"}
@@ -2374,6 +2648,326 @@ def test_a_failed_request_gives_its_slot_back(
     client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": [_item()]})
     client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": "bad"})
     assert _compat_state(app).in_flight == {}
+
+
+def _configure(app: FastAPI, lanes: Any = None, **compat: Any) -> None:
+    memory = types.SimpleNamespace(compat=MemoryCompatConfig(**compat), lanes=lanes)
+    app.state.hal0_config = types.SimpleNamespace(memory=memory)
+
+
+def test_one_client_runs_two_recalls_at_a_time(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore, app: FastAPI
+) -> None:
+    """A recall costs an embedding and a search each time; without a limit one
+    key could run as many as it can open connections."""
+    _row, other = store.add_client("codex", created_by="t")
+    state = _compat_state(app)
+    recall = {"query": "q"}
+    state.in_flight[("recall", "cc")] = memory_compat.RECALLS_PER_CLIENT
+    _busy(client.post(_url(URL_BANK + "/memories/recall"), headers=_auth(key), json=recall), "5")
+    assert engine.calls == []
+    assert (
+        client.post(
+            _url(URL_BANK + "/memories/recall"), headers=_auth(other), json=recall
+        ).status_code
+        == 200
+    )
+    state.in_flight[("recall", "cc")] -= 1
+    assert (
+        client.post(
+            _url(URL_BANK + "/memories/recall"), headers=_auth(key), json=recall
+        ).status_code
+        == 200
+    )
+    assert state.in_flight == {("recall", "cc"): 1}
+    assert memory_compat.RECALLS_PER_CLIENT == 2
+
+
+def test_all_clients_together_run_a_configured_number_of_recalls(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    assert MemoryCompatConfig().max_concurrent_recalls == 4
+    state = _compat_state(app)
+    state.in_flight[("recall", "*")] = 4
+    _busy(
+        client.post(_url(URL_BANK + "/memories/recall"), headers=_auth(key), json={"query": "q"}),
+        "5",
+    )
+    assert engine.calls == [] and state.in_flight == {("recall", "*"): 4}
+    _configure(app, max_concurrent_recalls=5)
+    resp = client.post(_url(URL_BANK + "/memories/recall"), headers=_auth(key), json={"query": "q"})
+    assert resp.status_code == 200
+    # A recall that fails gives both slots back.
+    engine.overrides[("POST", ENGINE_BANK + "/memories/recall")] = httpx.ReadTimeout("slow")
+    client.post(_url(URL_BANK + "/memories/recall"), headers=_auth(key), json={"query": "q"})
+    assert state.in_flight == {("recall", "*"): 4}
+
+
+@pytest.mark.parametrize(
+    ("configured", "engine_slots", "reflect_slots", "allowed"),
+    [
+        # The shipped engine runs one model call at a time: one reflect here.
+        (2, 1, None, 1),
+        (2, 2, None, 1),
+        (2, 3, None, 2),
+        (8, 4, None, 3),
+        # The reflect lane's own setting counts when it is the smaller one;
+        # the engine's overall limit holds whatever the lane says.
+        (8, 4, 2, 1),
+        (8, 2, 8, 1),
+        (1, 8, None, 1),
+    ],
+)
+def test_reflects_here_always_leave_an_engine_slot_for_everyone_else(
+    client: TestClient,
+    engine: Engine,
+    key: str,
+    app: FastAPI,
+    configured: int,
+    engine_slots: int,
+    reflect_slots: int | None,
+    allowed: int,
+) -> None:
+    """Two keys held by one operator must not be able to take every model
+    slot the engine has: hal0's own agents reflect through other routes and
+    are not counted here, so one slot is kept back for them."""
+    lanes = types.SimpleNamespace(
+        llm_max_concurrent=engine_slots,
+        reflect=types.SimpleNamespace(max_concurrent=reflect_slots),
+    )
+    _configure(app, lanes, max_concurrent_reflects=configured)
+    state = _compat_state(app)
+    state.in_flight[("reflect", "*")] = allowed
+    _busy(client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"}), "15")
+    state.in_flight[("reflect", "*")] = allowed - 1
+    resp = client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"})
+    assert resp.status_code == 200
+
+
+def test_lanes_hal0_cannot_read_are_taken_to_be_the_shipped_single_slot(
+    client: TestClient, key: str, app: FastAPI
+) -> None:
+    assert MemoryLanesConfig().llm_max_concurrent == 1
+    _configure(app, None, max_concurrent_reflects=8)
+    _compat_state(app).in_flight[("reflect", "*")] = 1
+    _busy(client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"}), "15")
+
+
+def _async_retain(client: TestClient, key: str, operation: str, **item: Any) -> httpx.Response:
+    return client.post(
+        _url(URL_BANK + "/memories"),
+        headers=_auth(key),
+        json={"items": [_item(**item)], "async": True, "operation_id": operation},
+    )
+
+
+def test_a_client_is_held_to_a_number_of_unfinished_async_retains(
+    client: TestClient,
+    engine: Engine,
+    key: str,
+    store: BridgeStore,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An async retain is accepted at once and extracted later, so the
+    in-flight limit says nothing about how much one key has queued in the
+    engine. The quota does."""
+    assert MemoryCompatConfig().max_outstanding_operations == 64
+    assert MemoryCompatConfig().max_outstanding_bytes == 256 * 1024 * 1024
+    monkeypatch.setattr(memory_compat, "_QUOTA_RECHECK_S", 0.0)
+    _configure(app, max_outstanding_operations=3)
+    _row, other = store.add_client("codex", created_by="t")
+    for n in range(5):
+        engine.operations[_engine_operation_id("cc", f"op-{n}")] = {"status": "pending"}
+    for n in range(3):
+        assert _async_retain(client, key, f"op-{n}").status_code == 200
+
+    engine.calls.clear()
+    refused = _async_retain(client, key, "op-3")
+    _busy(refused, "30")
+    # Before refusing, the oldest were read from the engine: still pending.
+    assert len(engine.calls) == 3 and all(c.method == "GET" for c in engine.calls)
+    # A resend of one already counted starts nothing new, and is let through.
+    assert _async_retain(client, key, "op-1").status_code == 200
+    # Another client, and a synchronous retain, are not held up by it.
+    assert _async_retain(client, other, "op-3").status_code == 200
+    sync = client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": [_item()]})
+    assert sync.status_code == 200
+
+    # One finishes; the next retain finds that out by itself.
+    engine.operations[_engine_operation_id("cc", "op-0")]["status"] = "completed"
+    assert _async_retain(client, key, "op-3").status_code == 200
+    _busy(_async_retain(client, key, "op-4"), "30")
+    # The plugin's own poll also frees a place.
+    engine.operations[_engine_operation_id("cc", "op-2")]["status"] = "failed"
+    assert client.get(_url(URL_BANK + "/operations/op-2"), headers=_auth(key)).status_code == 200
+    engine.calls.clear()
+    assert _async_retain(client, key, "op-4").status_code == 200
+    assert engine.lines() == [f"POST {ENGINE_BANK}/memories"]
+
+
+def test_a_client_is_held_to_a_size_of_unfinished_async_retains(
+    client: TestClient, engine: Engine, key: str, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(memory_compat, "_QUOTA_RECHECK_S", 0.0)
+    _configure(app, max_outstanding_bytes=1024 * 1024)
+    big = "x" * (700 * 1024)
+    engine.operations[_engine_operation_id("cc", "op-0")] = {"status": "pending"}
+    # A single retain is accepted whatever its size while nothing is outstanding.
+    assert _async_retain(client, key, "op-0", content=big + big).status_code == 200
+    _busy(_async_retain(client, key, "op-1", content="small"), "30")
+    engine.operations[_engine_operation_id("cc", "op-0")]["status"] = "completed"
+    assert _async_retain(client, key, "op-1", content=big).status_code == 200
+    engine.operations[_engine_operation_id("cc", "op-1")]["status"] = "pending"
+    _busy(_async_retain(client, key, "op-2", content=big), "30")
+
+
+def test_the_quota_fails_open_for_operations_from_before_a_restart(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    """What is outstanding is what this process saw start. After a restart
+    the earlier operations are unknown and are not counted."""
+    _configure(app, max_outstanding_operations=1)
+    engine.operations[_engine_operation_id("cc", "op-0")] = {"status": "pending"}
+    assert _async_retain(client, key, "op-0").status_code == 200
+    _busy(_async_retain(client, key, "op-1"), "30")
+    app.state.memory_compat = None
+    assert _async_retain(client, key, "op-1").status_code == 200
+
+
+def test_a_client_at_its_quota_cannot_make_hal0_poll_the_engine_on_every_request(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    _configure(app, max_outstanding_operations=1)
+    engine.operations[_engine_operation_id("cc", "op-0")] = {"status": "pending"}
+    assert _async_retain(client, key, "op-0").status_code == 200
+    engine.calls.clear()
+    _busy(_async_retain(client, key, "op-1"), "30")
+    assert len(engine.calls) == 1
+    for _ in range(5):
+        _busy(_async_retain(client, key, "op-1"), "30")
+    assert len(engine.calls) == 1
+    assert memory_compat._QUOTA_RECHECK_S == 5.0
+
+
+def test_a_retain_the_engine_refuses_does_not_count_toward_the_quota(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    """An operation is counted when it is admitted, before the engine call, so
+    that side-by-side retains cannot each find the quota free. One the engine
+    never accepted is given back."""
+    _configure(app, max_outstanding_operations=1)
+    engine.overrides[("POST", ENGINE_BANK + "/memories")] = httpx.Response(500, json={})
+    assert _async_retain(client, key, "op-0").status_code == 502
+    state = _compat_state(app)
+    assert state.outstanding("cc") == []
+    del engine.overrides[("POST", ENGINE_BANK + "/memories")]
+
+    # While the engine is still answering, the operation is already counted.
+    seen: list[int] = []
+    real = app.state.memory_provider.retain_items
+
+    async def watched(*args: Any, **kwargs: Any) -> Any:
+        seen.append(len(state.outstanding("cc")))
+        return await real(*args, **kwargs)
+
+    app.state.memory_provider.retain_items = watched
+    engine.operations[_engine_operation_id("cc", "op-1")] = {"status": "pending"}
+    assert _async_retain(client, key, "op-1").status_code == 200
+    assert seen == [1]
+    assert [op.accepted for _id, op in state.outstanding("cc")] == [True]
+
+
+def test_only_a_few_large_retain_bodies_are_held_at_once(
+    client: TestClient,
+    engine: Engine,
+    key: str,
+    store: BridgeStore,
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two large bodies at once, and one per client, bound what retains hold
+    in hal0-api's memory. A small body does not wait behind them."""
+    monkeypatch.setattr(memory_compat, "SMALL_RETAIN_BODY_BYTES", 1024)
+    _row, other = store.add_client("codex", created_by="t")
+    state = _compat_state(app)
+    state.in_flight[("large retain", "cc")] = memory_compat.LARGE_RETAIN_BODIES_PER_CLIENT
+    busy = client.post(
+        _url(URL_BANK + "/memories"),
+        headers=_auth(key),
+        json={"items": [_item(content="x" * 4096)]},
+    )
+    _busy(busy, "2")
+    assert (
+        client.post(
+            _url(URL_BANK + "/memories"),
+            headers=_auth(other),
+            json={"items": [_item(content="x" * 4096)]},
+        ).status_code
+        == 200
+    )
+    assert memory_compat.LARGE_RETAIN_BODIES_PER_CLIENT == 1
+    state.in_flight.clear()
+    engine.calls.clear()
+    state.in_flight[("large retain", "*")] = memory_compat.LARGE_RETAIN_BODIES
+    large = {"items": [_item(content="x" * 4096)]}
+    small = {"items": [_item()]}
+    _busy(client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json=large), "2")
+    assert engine.calls == []
+    assert (
+        client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json=small).status_code == 200
+    )
+    # A body that does not say how large it is counts as large.
+    unsized = client.post(
+        _url(URL_BANK + "/memories"),
+        headers={**_auth(key), "Content-Type": "application/json"},
+        content=iter([json.dumps(small).encode()]),
+    )
+    _busy(unsized, "2")
+    state.in_flight[("large retain", "*")] -= 1
+    assert (
+        client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json=large).status_code == 200
+    )
+    assert state.in_flight == {("large retain", "*"): 1}
+    assert memory_compat.LARGE_RETAIN_BODIES == 2
+
+
+def test_a_body_that_says_it_is_small_is_read_as_small(
+    client: TestClient, engine: Engine, key: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The small path has the small cap, so a declared size cannot be used to
+    get a large body past the large-body limit."""
+
+    async def lying_stream(self: Request) -> Any:
+        yield b'{"items": [{"content": "'
+        yield b"x" * (memory_compat.SMALL_RETAIN_BODY_BYTES + 1)
+        yield b'"}]}'
+
+    monkeypatch.setattr(Request, "stream", lying_stream)
+    resp = client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": [_item()]})
+    assert (resp.status_code, _code(resp)) == (413, "memory.compat_body_too_large")
+    assert resp.json()["error"]["details"] == {"max_bytes": memory_compat.SMALL_RETAIN_BODY_BYTES}
+    assert engine.calls == []
+
+
+def test_a_retain_answer_never_shows_a_stored_id(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    engine.overrides[("POST", ENGINE_BANK + "/memories")] = httpx.Response(
+        200,
+        json={
+            "success": True,
+            "items_count": 1,
+            "async": False,
+            "warnings": ["document hal0::cc::readme replaced", {"id": "hal0::shared::git:x"}],
+        },
+    )
+    resp = client.post(
+        _url(URL_BANK + "/memories"),
+        headers=_auth(key),
+        json={"items": [_item(document_id="readme")]},
+    )
+    assert resp.json()["warnings"] == ["document readme replaced", {"id": "git:x"}]
 
 
 # ── a key whose name hal0 reserves ──────────────────────────────────────────

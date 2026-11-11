@@ -216,8 +216,11 @@ so a change needs a restart; `hal0 doctor` reads the file each run.
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `shared_document_prefixes` | list[str] | `["git:", "gitlog:", "survey-baseline:"]` | at most 32 entries, each 1 to 64 characters of `a-z A-Z 0-9 . _ : -` with no `::`. A client's documents are stored in a namespace of its own; a document id that starts with one of these is stored in its project's shared namespace, which any client of that project may write. Setting the key replaces the default list; `[]` shares nothing |
-| `max_concurrent_reflects` | int | `2` | `1-64`. Reflects through the endpoint running at once, across all clients; one client always runs one at a time. Beyond the limit a request is `429` with `Retry-After` |
+| `shared_document_prefixes` | list[str] | `["git:", "gitlog:", "survey-baseline:"]` | at most 32 entries, each 3 to 64 characters of `a-z A-Z 0-9 . _ : -`, ending with `:` and with no `::`. A client's documents are stored in a namespace of its own; a document id that starts with one of these is stored in its project's shared namespace, which any client of that project may write. Setting the key replaces the default list; `[]` shares nothing |
+| `max_concurrent_reflects` | int | `2` | `1-64`. Reflects through the endpoint running at once, across all clients; one client always runs one at a time. Never more than one fewer than `[memory.lanes]` lets the engine run, so with the shipped lanes the effective value is `1`. Beyond the limit a request is `429` with `Retry-After` |
+| `max_concurrent_recalls` | int | `4` | `1-64`. Recalls through the endpoint running at once, across all clients; one client runs at most two. Beyond the limit a request is `429` with `Retry-After` |
+| `max_outstanding_operations` | int | `64` | `1-10000`. Asynchronous retains one client may have unfinished in the engine. Beyond it an asynchronous retain is `429` with `Retry-After` until earlier ones finish. Counted in the hal0-api process; operations from before a restart are not counted |
+| `max_outstanding_bytes` | int | `268435456` | `1048576-17179869184`. Total request-body size of one client's unfinished asynchronous retains. A single retain is accepted whatever its size while the client has none outstanding |
 | `max_item_bytes` | int | `16777216` | `1024-33554432`. The largest `content` of one retained item, in UTF-8 bytes. The request body is capped at 48 MiB whatever this is |
 
 The default prefixes are the document ids the Hindsight coding-agents plugin

@@ -1,8 +1,9 @@
 """``[memory.compat]``: the engine-compatible memory endpoint's tunables.
 
-Three keys, each with a reader in ``hal0.api.routes.memory_compat``
-(``_settings``): the shared document-id prefixes, the cap on concurrent
-reflects, and the largest retained item.
+Six keys, each with a reader in ``hal0.api.routes.memory_compat``
+(``_settings``): the shared document-id prefixes, the caps on concurrent
+reflects and recalls, one client's quota of unfinished asynchronous retains
+(a count and a size), and the largest retained item.
 """
 
 from __future__ import annotations
@@ -19,6 +20,11 @@ def test_the_shipped_defaults():
     # itself: one commit, the commit log, a codebase-survey marker.
     assert compat.shared_document_prefixes == ["git:", "gitlog:", "survey-baseline:"]
     assert compat.max_concurrent_reflects == 2
+    assert compat.max_concurrent_recalls == 4
+    # One client's unfinished asynchronous retains: a session submits one per
+    # turn and the plugin polls ten at a time.
+    assert compat.max_outstanding_operations == 64
+    assert compat.max_outstanding_bytes == 256 * 1024 * 1024
     assert compat.max_item_bytes == 16 * 1024 * 1024
     assert MemoryConfig().compat == compat
     assert Hal0Config().memory.compat == compat
@@ -60,6 +66,14 @@ def test_it_loads_from_toml_shaped_input():
         ["x" * 65],
         [7],
         ["a/b"],
+        # Too short, or open-ended: it would sweep ordinary ids, and the
+        # digest form of a long one (``sha256-...``), into the shared namespace.
+        ["g:"],
+        ["s"],
+        ["sha"],
+        ["sha256-"],
+        ["git"],
+        ["conversation"],
         [f"p{n}:" for n in range(33)],
     ],
 )
@@ -76,6 +90,9 @@ def test_a_prefix_that_could_not_start_a_stored_id_is_refused(prefixes):
         {"max_concurrent_reflects": 0},
         {"max_concurrent_reflects": 65},
         {"max_item_bytes": 1023},
+        {"max_concurrent_recalls": 0},
+        {"max_outstanding_operations": 0},
+        {"max_outstanding_bytes": 1024},
         # The request body is capped at 48 MiB: an item must fit inside it.
         {"max_item_bytes": 32 * 1024 * 1024 + 1},
         {"shared_prefixes": ["git:"]},

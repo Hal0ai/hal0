@@ -33,9 +33,13 @@ hal0's own bank routes do: ``/api/memory/banks/{bank}/documents/{id}`` accepts
 an id of at most 256 characters from ``[a-zA-Z0-9._:-]`` with no ``..``
 (``hal0.api.routes.memory_admin``). A stored id that would not fit keeps its
 two-part prefix and carries ``sha256-<hex>`` of the client's id in place of
-the id, so an operator can still open and delete the document. The mapping
-stays a pure function of the client's id; the id itself is kept in the
-document's metadata (:data:`CLIENT_DOCUMENT_ID_KEY`) so it can be shown back.
+the id, so an operator can still open and delete the document. A shared id
+keeps the shared prefix it matched in front of the digest
+(``<project>::shared::git:sha256-<hex>``): the digest form is then itself a
+shared id, and a client that sends it back reaches the same document. The
+mapping stays a pure function of the client's id; the id itself is kept in
+the document's metadata (:data:`CLIENT_DOCUMENT_ID_KEY`) so it can be shown
+back to the client that wrote it.
 
 The fold-in of the old per-repository banks (decision 7a) writes through
 :func:`stored_document_id` too, so that a client moved onto the
@@ -80,9 +84,17 @@ _OWNER_PART_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 _CHUNK_ESCAPES = {"~": "~7E", "_": "~5F"}
 
 
+def shared_prefix_of(client_id: str, shared_prefixes: Iterable[str]) -> str | None:
+    """The first shared-id prefix ``client_id`` starts with, or ``None``."""
+    for prefix in shared_prefixes:
+        if prefix and client_id.startswith(prefix):
+            return prefix
+    return None
+
+
 def is_shared_id(client_id: str, shared_prefixes: Iterable[str]) -> bool:
     """True when ``client_id`` starts with one of the shared-id prefixes."""
-    return any(prefix and client_id.startswith(prefix) for prefix in shared_prefixes)
+    return shared_prefix_of(client_id, shared_prefixes) is not None
 
 
 def id_prefix(slug: str | None, owner: str) -> str:
@@ -90,11 +102,23 @@ def id_prefix(slug: str | None, owner: str) -> str:
     return f"{slug or UNRESOLVED_SLUG}{SEPARATOR}{owner}{SEPARATOR}"
 
 
-def _owner(slug: str | None, client: str, client_id: str, shared_prefixes: Iterable[str]) -> str:
-    return SHARED_OWNER if slug and is_shared_id(client_id, shared_prefixes) else client
+def _placement(
+    slug: str | None, client: str, client_id: str, shared_prefixes: Iterable[str]
+) -> tuple[str, str]:
+    """``(stored-id prefix, what a digest keeps of the client's id)``.
+
+    A shared id goes to the project's shared namespace and its digest form
+    keeps the shared prefix it matched (``git:sha256-...``), so that the
+    digest form, sent back, is a shared id again and names the same document.
+    Without that it would land in the sender's own namespace.
+    """
+    shared = shared_prefix_of(client_id, shared_prefixes) if slug else None
+    if shared is not None:
+        return id_prefix(slug, SHARED_OWNER), shared
+    return id_prefix(slug, client), ""
 
 
-def _stored(prefix: str, client_id: str) -> str:
+def _stored(prefix: str, client_id: str, kept: str = "") -> str:
     stored = f"{prefix}{client_id}"
     if (
         client_id
@@ -104,7 +128,7 @@ def _stored(prefix: str, client_id: str) -> str:
     ):
         return stored
     digest = hashlib.sha256(client_id.encode("utf-8", "surrogatepass")).hexdigest()
-    return f"{prefix}{DIGEST_PREFIX}{digest}"
+    return f"{prefix}{kept}{DIGEST_PREFIX}{digest}"
 
 
 def stored_document_id(
@@ -116,15 +140,16 @@ def stored_document_id(
     whole, whatever it contains: it is never split and never read as a
     namespace of its own.
     """
-    return _stored(id_prefix(slug, _owner(slug, client, client_id, shared_prefixes)), client_id)
+    prefix, kept = _placement(slug, client, client_id, shared_prefixes)
+    return _stored(prefix, client_id, kept)
 
 
 def is_digested(
     slug: str | None, client: str, client_id: str, shared_prefixes: Iterable[str] = ()
 ) -> bool:
     """True when ``client_id`` is stored as a digest, not as itself."""
-    prefix = id_prefix(slug, _owner(slug, client, client_id, shared_prefixes))
-    return _stored(prefix, client_id) != f"{prefix}{client_id}"
+    prefix, kept = _placement(slug, client, client_id, shared_prefixes)
+    return _stored(prefix, client_id, kept) != f"{prefix}{client_id}"
 
 
 def readable_prefixes(slug: str | None, client: str) -> tuple[str, ...]:
@@ -135,26 +160,63 @@ def readable_prefixes(slug: str | None, client: str) -> tuple[str, ...]:
 
 
 def visible_document_id(
-    slug: str | None, client: str, stored_id: Any, metadata: Any = None
+    slug: str | None,
+    client: str,
+    stored_id: Any,
+    metadata: Any = None,
+    shared_prefixes: Iterable[str] = (),
 ) -> str | None:
     """The client's own id for a stored document, or ``None``.
 
     ``None`` means the document is in neither of the client's namespaces: it
     is not this client's to see or address, whatever else is true of it. For
     a digested id the client's id is read from ``metadata`` and returned only
-    if it really maps to ``stored_id``; without it the digest form is
-    returned, which addresses the same document when the client sends it
+    if it really maps to ``stored_id``; pass no metadata for a document the
+    caller did not write. Without it the digest form is returned
+    (``sha256-...``, or ``<shared prefix>sha256-...`` in the shared
+    namespace), which maps to the same stored id when the client sends it
     back.
     """
     if not isinstance(stored_id, str):
         return None
-    original = metadata.get(CLIENT_DOCUMENT_ID_KEY) if isinstance(metadata, dict) else None
     for prefix in readable_prefixes(slug, client):
         if stored_id.startswith(prefix):
-            if isinstance(original, str) and _stored(prefix, original) == stored_id:
+            original = metadata.get(CLIENT_DOCUMENT_ID_KEY) if isinstance(metadata, dict) else None
+            if (
+                isinstance(original, str)
+                and stored_document_id(slug, client, original, shared_prefixes) == stored_id
+            ):
                 return original
             return stored_id[len(prefix) :]
     return None
+
+
+_NAMESPACE_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
+
+
+def strip_stored_prefixes(text: str, client: str) -> str:
+    """``text`` with every stored-id prefix of ``client`` removed.
+
+    For free text the engine wrote (an error message, a refusal) that may
+    name a document by its stored id: ``<project>::<client>::`` and
+    ``<project>::shared::`` are cut out, whatever the project, leaving the
+    client's own id. Linear in the length of ``text``.
+    """
+    for owner in (client, SHARED_OWNER):
+        marker = f"{SEPARATOR}{owner}{SEPARATOR}"
+        if marker not in text:
+            continue
+        pieces: list[str] = []
+        position = 0
+        while (found := text.find(marker, position)) != -1:
+            start = found
+            while start > position and text[start - 1] in _NAMESPACE_CHARS:
+                start -= 1
+            pieces.append(text[position:start])
+            position = found + len(marker)
+        pieces.append(text[position:])
+        text = "".join(pieces)
+    return text
 
 
 def is_namespaced(stored_id: Any) -> bool:
@@ -185,6 +247,8 @@ __all__ = [
     "is_namespaced",
     "is_shared_id",
     "readable_prefixes",
+    "shared_prefix_of",
     "stored_document_id",
+    "strip_stored_prefixes",
     "visible_document_id",
 ]

@@ -25,6 +25,7 @@ from hal0.memory.document_namespace import (
     is_shared_id,
     readable_prefixes,
     stored_document_id,
+    strip_stored_prefixes,
     visible_document_id,
 )
 from hal0.project_slug import RESERVED_SLUGS, UNRESOLVED_SLUG, normalise_slug
@@ -118,11 +119,59 @@ def test_an_id_hal0_cannot_address_is_digested(client_id):
     assert stored_document_id("hal0", "cc", f"sha256-{digest}", SHARED) == stored
 
 
-def test_a_long_shared_id_keeps_the_shared_namespace():
+def test_a_long_shared_id_round_trips_through_the_shared_namespace():
+    """The digest form of a shared id keeps the shared prefix it matched, so
+    it is itself a shared id: whoever sends it back reaches the same
+    document. Without the kept prefix ``sha256-...`` would be an ordinary id
+    and land in the sender's own namespace."""
     client_id = "git:" + "f" * 300
+    digest = hashlib.sha256(client_id.encode()).hexdigest()
     stored = stored_document_id("hal0", "cc", client_id, SHARED)
-    assert stored.startswith("hal0::shared::sha256-")
+    assert stored == f"hal0::shared::git:sha256-{digest}"
     assert stored == stored_document_id("hal0", "codex", client_id, SHARED)
+    assert is_digested("hal0", "cc", client_id, SHARED)
+    # What a client that did not write it is shown, and where that leads.
+    shown = visible_document_id("hal0", "codex", stored, None, SHARED)
+    assert shown == f"git:sha256-{digest}"
+    assert stored_document_id("hal0", "codex", shown, SHARED) == stored
+    assert not stored.startswith("hal0::codex::") and not stored.startswith("hal0::cc::")
+    # The writer gets its own spelling back from the metadata hal0 wrote.
+    meta = {CLIENT_DOCUMENT_ID_KEY: client_id}
+    assert visible_document_id("hal0", "cc", stored, meta, SHARED) == client_id
+    # A longer shared prefix that also matches is kept as it matched.
+    survey = "survey-baseline:" + "a" * 300
+    assert stored_document_id("hal0", "cc", survey, SHARED).startswith(
+        "hal0::shared::survey-baseline:sha256-"
+    )
+    # With no project there is no shared namespace, and nothing is kept.
+    assert stored_document_id(None, "cc", client_id, SHARED) == f"unresolved::cc::sha256-{digest}"
+
+
+@pytest.mark.parametrize(
+    ("text", "client", "stripped"),
+    [
+        ("document hal0::cc::readme failed", "cc", "document readme failed"),
+        ("see hal0.web::shared::git:4f2a and atlas::cc::x", "cc", "see git:4f2a and x"),
+        ("unresolved::cc::notes", "cc", "notes"),
+        # Another client's prefix is not this client's to recognise.
+        ("hal0::codex::readme", "cc", "hal0::codex::readme"),
+        ("a::b and cc:: and ::cc", "cc", "a::b and cc:: and ::cc"),
+        ("::cc::x", "cc", "x"),
+        ("nothing to strip", "cc", "nothing to strip"),
+        ("", "cc", ""),
+    ],
+)
+def test_strip_stored_prefixes(text, client, stripped):
+    assert strip_stored_prefixes(text, client) == stripped
+
+
+def test_strip_stored_prefixes_is_linear():
+    import time
+
+    hostile = ("a" * 50 + "::cc::") * 20_000 + "-" * 200_000
+    started = time.perf_counter()
+    assert "::cc::" not in strip_stored_prefixes(hostile, "cc")
+    assert time.perf_counter() - started < 5.0
 
 
 @pytest.mark.parametrize(
