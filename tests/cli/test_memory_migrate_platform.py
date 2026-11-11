@@ -171,3 +171,48 @@ def test_skip_clone_folds_and_verifies_an_existing_target(stub_api) -> None:
     assert payload["clone"] is False
     paths = [p for p, _ in stub_api["calls"]["post"]]
     assert all("/clone" not in p for p in paths)
+
+
+# ── the default target (ADR-0058 decision 7) ───────────────────────────────────
+
+
+def _config(monkeypatch: pytest.MonkeyPatch, **raw: Any) -> None:
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+
+    memory = MemoryConfig.model_validate(raw)
+    monkeypatch.setattr(loader, "load_hal0_config", lambda: SimpleNamespace(memory=memory))
+
+
+@pytest.mark.parametrize("raw", [{}, {"bank": "hal0:shared"}])
+def test_the_two_bank_default_is_never_a_target(stub_api, monkeypatch, raw) -> None:
+    """The shipped default is the two-bank layout's bank, which a legacy
+    store reaches through the fold-in, not a clone."""
+    _config(monkeypatch, **raw)
+    result = runner.invoke(mgc.app, ["platform"])
+    assert result.exit_code != 0
+    assert "--target" in result.output
+    assert not stub_api["calls"]["get"]
+
+
+def test_an_operator_set_bank_is_the_default_target(stub_api, monkeypatch) -> None:
+    _config(monkeypatch, bank=TARGET)
+    result = runner.invoke(mgc.app, ["platform", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["target"] == TARGET
+
+
+@pytest.mark.parametrize("target", ["hal0:shared", "hal0:private"])
+def test_a_two_bank_name_is_refused_as_a_target(stub_api, target) -> None:
+    result = runner.invoke(mgc.app, ["platform", "--target", target])
+    assert result.exit_code != 0
+    assert "two-bank layout" in result.output
+    assert not stub_api["calls"]["get"]
+
+
+def test_migrate_unify_is_gone() -> None:
+    result = runner.invoke(mgc.app, ["unify", "--source", "private__hermes"])
+    assert result.exit_code != 0
+    assert [c.name for c in mgc.app.registered_commands] == ["platform"]

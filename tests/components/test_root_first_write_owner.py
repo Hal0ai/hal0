@@ -113,3 +113,16 @@ def test_memory_embedder_record_first_write_adopts_owner(
 
     assert er.load_embedder_record() == saved
     _adopted(as_root, "memory-embedder.json")
+
+
+def test_memory_layout_record_first_write_adopts_owner(
+    as_root: list[tuple[str, int, int]],
+) -> None:
+    """ADR-0058 decision 7: install.sh's update pass writes the layout record as
+    root; the service reads it at every boot."""
+    from hal0.memory import bank_layout as bl
+
+    saved = bl.save_layout_record(bl.BankLayout(bl.LAYOUT_TWO_BANK, source="store-absent"))
+
+    assert bl.load_layout_record() == saved
+    _adopted(as_root, "memory-layout.json")

@@ -3350,7 +3350,10 @@ def test_projects_row_reads_the_bank_and_registry_from_hal0_toml(monkeypatch) ->
         bank="platform-bank",
         projects={"aliases": {"Atlas Mono": "atlas"}, "registered": ["Borealis"]},
     )
+    from hal0.memory import bank_layout as bl
+
     monkeypatch.setattr(loader, "load_hal0_config", lambda: SimpleNamespace(memory=memory))
+    monkeypatch.setattr(bl, "current_layout", lambda _cfg, **_kw: bl.BankLayout("two_bank"))
     bank, registry, read_ok = da._projects_config()
     assert (bank, read_ok) == ("platform-bank", True)
     assert registry.is_known("atlas-mono") and registry.is_known("atlas")
@@ -3361,8 +3364,29 @@ def test_projects_row_reads_the_bank_and_registry_from_hal0_toml(monkeypatch) ->
 
     monkeypatch.setattr(loader, "load_hal0_config", unreadable)
     bank, registry, read_ok = da._projects_config()
-    assert (bank, read_ok) == ("shared", False)
+    assert (bank, read_ok) == ("hal0:shared", False)
     assert not registry.aliases and not registry.registered
+
+
+def test_projects_row_reads_a_legacy_stores_recorded_bank(monkeypatch) -> None:
+    """ADR-0058 decision 7: on a store still on its legacy layout the row
+    counts the bank hal0-api reads, not the two-bank default."""
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import bank_layout as bl
+
+    legacy = bl.BankLayout("legacy", legacy_platform_bank="shared", legacy_unified=True)
+    monkeypatch.setattr(bl, "current_layout", lambda _cfg, **_kw: legacy)
+    monkeypatch.setattr(loader, "load_hal0_config", lambda: SimpleNamespace(memory=MemoryConfig()))
+    assert da._projects_config()[0] == "shared"
+
+    def unreadable():
+        raise PermissionError("hal0.toml")
+
+    monkeypatch.setattr(loader, "load_hal0_config", unreadable)
+    assert da._projects_config()[0] == "shared"
 
 
 # ── memory decision lane (#3519, advisory) ──────────────────────────────────

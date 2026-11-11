@@ -65,8 +65,14 @@ def bank(documents: int = 0, facts: int = 0, **overrides: Any) -> dict[str, Any]
 
 
 def provider(engine: Engine, **kwargs: Any) -> HindsightProvider:
-    kwargs.setdefault("unified_bank", True)  # the shipped default
+    kwargs.setdefault("unified_bank", True)  # a legacy unified store
     return HindsightProvider(client=engine, **kwargs)
+
+
+def two_bank(engine: Engine, **kwargs: Any) -> HindsightProvider:
+    """A new store's provider (ADR-0058 decision 7)."""
+    kwargs.setdefault("bank", "hal0:shared")
+    return HindsightProvider(client=engine, two_bank=True, **kwargs)
 
 
 def run_hook(prov: Any) -> bool:
@@ -76,7 +82,7 @@ def run_hook(prov: Any) -> bool:
 # ── which banks ───────────────────────────────────────────────────────────────
 
 
-def test_default_box_seeds_only_the_platform_bank() -> None:
+def test_a_legacy_unified_box_seeds_only_the_platform_bank() -> None:
     """Unified bank: private memory lives in the platform bank, so no private bank."""
     engine = Engine()
 
@@ -95,13 +101,29 @@ def test_a_renamed_platform_bank_is_the_one_seeded() -> None:
     assert not any("/banks/shared/" in path for _, path in engine.calls)
 
 
-def test_without_the_unified_bank_the_private_bank_is_the_providers_engine_bank() -> None:
+def test_a_legacy_split_box_seeds_only_the_platform_bank() -> None:
+    """A store on its old layout is folded into the two banks, not seeded into
+    new ones, and its per-agent banks are left as they are."""
     engine = Engine()
 
     assert run_hook(provider(engine, unified_bank=False)) is True
-    assert engine.imports() == ["shared", "private__hermes"]
-    assert engine.banks["private__hermes"]["overrides"] == PRIVATE["bank"]
-    assert "private:hermes" not in engine.banks
+    assert engine.imports() == ["shared"]
+    assert "private__hermes" not in engine.banks
+
+
+def test_a_two_bank_box_seeds_both_banks() -> None:
+    engine = Engine()
+
+    assert run_hook(two_bank(engine)) is True
+    assert engine.imports() == ["hal0:shared", "hal0:private"]
+    assert engine.banks["hal0:shared"]["overrides"] == SHARED["bank"]
+    assert engine.banks["hal0:private"]["overrides"] == PRIVATE["bank"]
+    assert "shared" not in engine.banks and "private__hermes" not in engine.banks
+
+
+def test_two_bank_targets_follow_the_configured_names() -> None:
+    prov = two_bank(Engine(), bank="a:shared", private_bank="a:private")
+    assert bank_seed.seed_targets(prov) == {"a:shared": SHARED, "a:private": PRIVATE}
 
 
 def test_targets_are_empty_for_a_provider_that_is_not_hindsight() -> None:
@@ -180,18 +202,18 @@ def test_a_second_run_writes_nothing() -> None:
 
 def test_one_failed_bank_does_not_stop_the_other_and_rearms_the_hook() -> None:
     engine = Engine()
-    engine.fail_import = {"shared"}
-    prov = provider(engine, unified_bank=False)
+    engine.fail_import = {"hal0:shared"}
+    prov = two_bank(engine)
 
     assert run_hook(prov) is False
-    assert "private__hermes" in engine.banks
+    assert "hal0:private" in engine.banks
     engine.fail_import = set()
     assert run_hook(prov) is True
 
 
 def test_logs_once_when_it_seeds_and_nothing_when_it_skips() -> None:
     engine = Engine()
-    prov = provider(engine, unified_bank=False)
+    prov = two_bank(engine)
 
     with structlog.testing.capture_logs() as first:
         run_hook(prov)
@@ -199,7 +221,7 @@ def test_logs_once_when_it_seeds_and_nothing_when_it_skips() -> None:
         run_hook(prov)
 
     assert [(e["event"], e["log_level"], e["banks"]) for e in first] == [
-        ("hal0.memory.banks_seeded", "info", ["shared", "private__hermes"])
+        ("hal0.memory.banks_seeded", "info", ["hal0:shared", "hal0:private"])
     ]
     assert second == []
 

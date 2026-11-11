@@ -280,7 +280,9 @@ def engine() -> Engine:
     return Engine()
 
 
-def build_app(engine_handler: Callable[..., Any], *, unified_bank: bool = True) -> FastAPI:
+def build_app(
+    engine_handler: Callable[..., Any], *, unified_bank: bool = True, two_bank: bool = False
+) -> FastAPI:
     app = FastAPI()
     error_codes.install(app)
     app.include_router(memory_compat.router, prefix=COMPAT_MEMORY_PREFIX)
@@ -290,6 +292,7 @@ def build_app(engine_handler: Callable[..., Any], *, unified_bank: bool = True) 
     app.state.memory_provider = HindsightProvider(
         client=HindsightRestClient(base_url="http://engine.test", http_client=http),
         unified_bank=unified_bank,
+        two_bank=two_bank,
         bank=BANK,
         projects=ProjectRegistry(aliases={"hal0-mono": "hal0"}),
     )
@@ -1208,6 +1211,26 @@ def test_reflect_passes_its_three_knobs_and_leaves_mental_models_out(
     }
     assert call.read_timeout == REFLECT_TIMEOUT_S
     assert resp.headers["X-hal0-Ignored-Fields"] == "context,exclude_mental_models,include"
+
+
+def test_two_bank_reads_stay_scoped_to_the_callers_project(engine: Engine, key: str) -> None:
+    """ADR-0058 decision 7: the platform bank holds no private memory in the
+    two-bank layout, but a mental model is still written from every project
+    in it, and this endpoint never reads another project (decision 4b). The
+    read groups are the ones the legacy layout sends."""
+    client = TestClient(
+        AuthEnforcementMiddleware(build_app(engine.handler, unified_bank=False, two_bank=True)),
+        client=("127.0.0.1", 50000),
+    )
+    resp = client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "why?"})
+    assert resp.status_code == 200, resp.text
+    call = engine.only("POST", "/reflect")
+    assert call.path == f"/v1/default/banks/{BANK}/reflect"
+    assert call.body["exclude_mental_models"] is True
+    assert call.body["tag_groups"] == [
+        *reflect_visibility_scope("cc"),
+        *project_scope_groups("hal0"),
+    ]
 
 
 def test_the_plugins_reflect_body_is_enough(client: TestClient, engine: Engine, key: str) -> None:

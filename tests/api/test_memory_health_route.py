@@ -340,7 +340,7 @@ def test_a_healthy_box_is_clear_and_fills_the_whole_shape(
     age = datetime.now(UTC) - datetime.fromisoformat(knowledge["last_success_at"])
     assert 115.0 <= age.total_seconds() <= 135.0
     assert body["banks"] == {
-        "layout": "per_bank",
+        "layout": "legacy_unified",
         "total": 2,
         "facts": 1355,
         "list": [
@@ -786,7 +786,32 @@ def test_a_malformed_bank_list_is_partial_everywhere_it_matters(
     body = _health(client)
     assert body["verdict"] == "clear"  # the engine answered /version
     assert body["partial"] == ["extraction", "queue", "knowledge", "banks"]
-    assert body["banks"] == {"layout": "per_bank", "total": None, "facts": None, "list": []}
+    assert body["banks"] == {"layout": "legacy_unified", "total": None, "facts": None, "list": []}
+
+
+@pytest.mark.parametrize("layout", ["legacy_unified", "legacy_split", "two_bank"])
+def test_the_bank_layout_is_the_providers(engine: _Engine, layout: str) -> None:
+    """ADR-0058 decision 7: ``banks.layout`` comes from the layout record,
+    which the provider was built from."""
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(engine.handler), base_url="http://127.0.0.1:9177"
+    )
+    provider = _Provider(HindsightRestClient(http_client=http, api_key="hal0-local-noauth"))
+    provider.layout = layout
+    with TestClient(_app(provider, "memory", "agent")) as c:
+        assert _health(c)["banks"]["layout"] == layout
+
+
+def test_the_real_provider_reports_its_layout(engine: _Engine) -> None:
+    from hal0.memory.hindsight_provider import HindsightProvider
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(engine.handler), base_url="http://127.0.0.1:9177"
+    )
+    rest = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+    provider = HindsightProvider(client=rest, two_bank=True, bank="hal0:shared")
+    with TestClient(_app(provider, "memory", "agent")) as c:
+        assert _health(c)["banks"]["layout"] == "two_bank"
 
 
 # ── cache ────────────────────────────────────────────────────────────────

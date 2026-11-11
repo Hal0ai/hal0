@@ -1153,6 +1153,7 @@ def test_pin_override_and_hermes_state_rows_declare_service_owner(tmp_hal0_home:
     for key in (
         (state, "*.pin-override"),
         (state, "memory-embedder.json"),  # #3518
+        (state, "memory-layout.json"),  # ADR-0058 decision 7
         (hermes, "provision.json"),
         (hermes, "venv.pin"),
     ):
