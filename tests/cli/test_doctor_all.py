@@ -4021,12 +4021,53 @@ def test_memory_embedder_reports_an_interrupted_switch(
         )
     )
 
+    # The journal alone, its pause gone: writes may be reaching half-replaced banks.
     check = da.check_memory_embedder()
 
     assert (check.key, check.status) == ("memory_embedder", "warn")
     assert "did not finish (hindsight-admin rename-bank exited 1)" in check.detail
-    assert "memory writes stay paused" in check.detail
+    assert "run 3f9a1c2e, archives in /nowhere" in check.detail
+    assert "its write pause is gone" in check.detail
+    assert "`hal0 memory embedder switch --status`" in check.detail
     assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
+def test_memory_embedder_reports_a_write_gate_that_no_switch_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killed switch leaves the gate set on purpose; this row is its liveness story."""
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/backups/memory-embedder-switch-x")
+
+    check = da.check_memory_embedder()
+
+    assert check.status == "warn"
+    assert "run 3f9a1c2e, archives in /backups/memory-embedder-switch-x" in check.detail
+    assert "no switch is running, so every memory write is refused" in check.detail
+    assert "`hal0 memory embedder switch --status`" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
+def test_memory_embedder_passes_while_a_switch_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    from hal0.memory import embedder_switch as es
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/x")
+    fd = os.open(es.lock_path(), os.O_RDONLY | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        check = da.check_memory_embedder()
+    finally:
+        os.close(fd)
+
+    assert check.status == "pass" and "an embedder switch is running" in check.detail
 
 
 def test_memory_embedder_warns_when_the_operator_set_a_provider_that_differs() -> None:

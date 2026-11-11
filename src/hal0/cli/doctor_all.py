@@ -3439,8 +3439,13 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     * ``warn`` when the record file cannot be read (it is left alone), or
       the store's location is unavailable;
     * ``warn`` when an embedder switch was interrupted
-      (:func:`hal0.memory.embedder_switch.interrupted_switch`): memory writes
-      stay paused until ``hal0 memory embedder switch --resume`` has run.
+      (:func:`hal0.memory.embedder_switch.interrupted_switch`), or the memory
+      write gate is set and no switch process holds the lock: every memory
+      write is refused until ``hal0 memory embedder switch --resume`` has
+      run. The gate outlives a killed run on purpose, so this row is where a
+      forgotten one shows up; it names the run, its archive directory and
+      the ``--status`` and ``--resume`` commands. While a switch is running
+      the row passes and says so.
 
     Never ``fail``: recall keeps working, and nothing here is repaired by a
     restart.
@@ -3462,17 +3467,37 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     name, title = "memory_embedder", "Memory embedder"
     if status is None:
         from hal0.config.loader import load_hal0_config
-        from hal0.memory.embedder_switch import interrupted_switch
+        from hal0.memory.embedder_switch import interrupted_switch, lock_held
+        from hal0.memory.write_gate import read_gate
 
-        left = interrupted_switch()
-        if left is not None:
-            reason = f" ({left['error']})" if left.get("error") else ""
+        left, gate = interrupted_switch(), read_gate()
+        if lock_held():
+            return Check(
+                name,
+                title,
+                _PASS,
+                "an embedder switch is running; memory writes are paused until it finishes "
+                "(`hal0 memory embedder switch --status` shows where it stands)",
+            )
+        if left is not None or gate is not None:
+            run = (left or {}).get("run_id") or (gate or {}).get("run_id") or "unknown"
+            archives = (left or {}).get("archive_dir") or (gate or {}).get("archive_dir")
+            reason = f" ({left['error']})" if (left or {}).get("error") else ""
+            paused = (
+                "memory writes are paused and no switch is running, so every memory write is "
+                "refused (recall still works)"
+                if gate is not None
+                else "its write pause is gone, so writes may be reaching banks it has not "
+                "finished replacing"
+            )
             return Check(
                 name,
                 title,
                 _WARN,
-                f"an embedder switch did not finish{reason}; memory writes stay paused "
-                "(recall still works) until `hal0 memory embedder switch --resume` has run",
+                f"an embedder switch did not finish{reason}: run {run}, archives in "
+                f"{archives or 'an unknown directory'}; {paused}. Run "
+                "`hal0 memory embedder switch --status` to see where it stands, then "
+                "`hal0 memory embedder switch --resume`",
             )
 
         try:

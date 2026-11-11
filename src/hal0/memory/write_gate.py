@@ -7,7 +7,18 @@ first::
 
     /var/lib/hal0/state/memory-writes-paused.json
         {"version": 1, "reason": "embedder_switch", "run_id": "3f9a1c2e",
+         "archive_dir": "/var/lib/hal0/backups/memory-embedder-switch-...-3f9a1c2e",
          "since": "2026-11-11T02:14:09+00:00", "pid": 41822}
+
+The run id and the archive directory are there so that the run can be found
+again from the gate alone: the archive directory holds a mirror of the run's
+journal.
+
+The gate is meant to outlive the process that set it. A switch that is killed
+half-way leaves banks that must not take writes until
+``hal0 memory embedder switch --resume`` has finished or undone the run, so
+nothing lifts the gate on a timer or because its ``pid`` is gone. ``hal0
+doctor`` reports a gate that no running switch holds.
 
 The flag is a file, not process state, because the command and hal0-api are
 different processes (and often different accounts).
@@ -145,7 +156,11 @@ def require_engine_call_allowed(method: str, path: str) -> None:
 
 
 def engage_gate(
-    *, reason: str = REASON_EMBEDDER_SWITCH, run_id: str | None = None, path: Path | None = None
+    *,
+    reason: str = REASON_EMBEDDER_SWITCH,
+    run_id: str | None = None,
+    archive_dir: str | None = None,
+    path: Path | None = None,
 ) -> dict[str, Any]:
     """Set the gate and return what was written. Raises ``OSError`` on failure.
 
@@ -157,6 +172,7 @@ def engage_gate(
         "version": GATE_VERSION,
         "reason": reason,
         "run_id": run_id,
+        "archive_dir": archive_dir,
         "since": datetime.now(UTC).isoformat(timespec="seconds"),
         "pid": os.getpid(),
     }

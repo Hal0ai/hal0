@@ -7,6 +7,8 @@ the switch is a stub and only the command line around it is exercised.
 from __future__ import annotations
 
 import json
+import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +83,15 @@ class StubSwitch:
 
     async def resume(self) -> Any:
         return await self._answer("resume")
+
+    async def status(self) -> Any:
+        return await self._answer("status")
+
+    def clear_gate(self) -> Any:
+        self.calls.append("clear_gate")
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
 
 
 class _Client:
@@ -218,6 +229,8 @@ def test_a_run_that_stopped_in_the_swap_points_at_resume(stub) -> None:
     flat = " ".join(result.output.split())
     assert "Memory writes stay paused" in flat
     assert "hal0 memory embedder switch --resume" in flat
+    # Where to look, and where the archives are.
+    assert "hal0 memory embedder switch --status" in flat and "Archives: /x" in flat
 
 
 def test_a_refused_apply_prints_the_plan_it_refused(stub) -> None:
@@ -243,6 +256,98 @@ def test_resume_needs_no_model(stub) -> None:
     assert result.exit_code == 0, result.output
     assert stub["calls"] == ["resume"] and stub["kwargs"]["target"] is None
     assert "was undone" in " ".join(result.output.split())
+
+
+STATUS: dict[str, Any] = {
+    "journal": {
+        "run_id": "3f9a1c2e",
+        "phase": "swapping",
+        "target": {"provider": "local", "model": HS},
+        "started_at": "2026-11-11T02:00:00+00:00",
+        "archive_dir": "/var/lib/hal0/backups/memory-embedder-switch-x-3f9a1c2e",
+        "error": "hindsight-admin rename-bank exited 1",
+    },
+    "journal_source": "/var/lib/hal0/state/memory-embedder-switch.json",
+    "journal_error": None,
+    "gate": {"run_id": "3f9a1c2e", "since": "2026-11-11T02:00:01+00:00", "archive_dir": "/a"},
+    "lock_held": False,
+    "engine": {"reachable": True, "live": {"provider": "local", "model": HS}},
+    "banks": [
+        {"bank": "shared", "role": "original or rebuilt", "counts": {"facts": 12}},
+        {
+            "bank": "agents.switch-3f9a1c2e",
+            "role": "temporary (rebuilt copy of agents)",
+            "counts": {"facts": 3},
+        },
+    ],
+    "resume": [
+        {"bank": "shared", "step": "renamed", "action": "check the bank under its final id"},
+        {"bank": "agents", "step": "deleted", "action": "rename the rebuilt bank into place"},
+    ],
+    "summary": "the run stopped inside the swap: --resume finishes it bank by bank as listed",
+}
+
+
+def test_status_prints_the_journal_the_gate_the_banks_and_what_resume_would_do(stub) -> None:
+    stub["outcome"] = STATUS
+
+    result = runner.invoke(mec.app, ["switch", "--status"])
+
+    assert result.exit_code == 0, result.output
+    assert stub["calls"] == ["status"], "status only reads"
+    flat = " ".join(result.output.split())
+    assert "run 3f9a1c2e, phase swapping" in flat
+    assert "memory writes are paused" in flat and "no switch process is running" in flat
+    assert "agents.switch-3f9a1c2e" in flat and "temporary (rebuilt copy of agents)" in flat
+    assert "agents (step deleted): rename the rebuilt bank into place" in flat
+    assert "--resume finishes it" in flat
+    assert json.loads(runner.invoke(mec.app, ["switch", "--status", "--json"]).output) == STATUS
+
+
+def test_clear_gate_is_loud_about_what_it_did_not_check(stub) -> None:
+    stub["outcome"] = {
+        "status": "cleared",
+        "gate": {"run_id": "3f9a1c2e", "since": "t", "archive_dir": "/a"},
+    }
+
+    result = runner.invoke(mec.app, ["switch", "--clear-gate"])
+
+    assert result.exit_code == 0 and stub["calls"] == ["clear_gate"]
+    flat = " ".join(result.output.split())
+    assert "lifted by hand" in flat and "Nothing was checked" in flat
+    assert "hal0 memory embedder switch --status" in flat
+
+
+def test_a_refused_clear_gate_exits_non_zero(stub) -> None:
+    stub["outcome"] = es.SwitchRefused("an embedder switch (run x, phase swapping) is unfinished")
+    result = runner.invoke(mec.app, ["switch", "--clear-gate"])
+    assert result.exit_code == 1 and "is unfinished" in " ".join(result.output.split())
+
+
+def test_the_modes_do_not_combine(stub) -> None:
+    for argv in (
+        ["switch", HS, "--apply", "--resume"],
+        ["switch", "--status", "--clear-gate"],
+        ["switch", "--resume", "--status"],
+    ):
+        assert runner.invoke(mec.app, argv).exit_code == 2
+    assert stub["calls"] == []
+
+
+def test_the_kill_point_is_only_armed_from_the_environment(monkeypatch) -> None:
+    """The live-verification aid: off unless the variable names a hook point."""
+    monkeypatch.delenv(mec.KILL_AT_ENV, raising=False)
+    assert mec._kill_hook() is None
+
+    monkeypatch.setenv(mec.KILL_AT_ENV, "deleted:shared")
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(mec.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    hook = mec._kill_hook()
+    assert hook is not None
+    hook("before_delete:shared")
+    assert killed == []
+    hook("deleted:shared")
+    assert killed == [(os.getpid(), signal.SIGKILL)]
 
 
 def test_a_model_is_required_without_resume(stub) -> None:
