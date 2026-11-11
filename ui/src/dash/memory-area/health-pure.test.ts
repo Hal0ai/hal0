@@ -22,6 +22,7 @@ import {
   incompleteNote,
   labelledFigures,
   readableError,
+  refreshFailed,
   segmentsText,
   stepCopy,
   stepName,
@@ -943,5 +944,17 @@ describe('readableError', () => {
     })
     const extraction = buildPath(report).find((step) => step.id === 'extraction')!
     expect(extraction.errors.map((group) => group.message)).toEqual(['Task exceeded the Ns wall-clock limit'])
+  })
+})
+
+describe('refreshFailed', () => {
+  const model = (over: Record<string, string | null> = {}) =>
+    ({ last_refreshed_at: '2026-11-05T08:00:00Z', last_refresh_failed_at: null, ...over }) as never
+
+  it('is a fault only when the failure is later than the last refresh that worked', () => {
+    expect(refreshFailed(model())).toBe(false)
+    expect(refreshFailed(model({ last_refresh_failed_at: '2026-11-04T08:00:00Z' }))).toBe(false)
+    expect(refreshFailed(model({ last_refresh_failed_at: '2026-11-06T08:00:00Z' }))).toBe(true)
+    expect(refreshFailed(model({ last_refreshed_at: null, last_refresh_failed_at: '2026-11-06T08:00:00Z' }))).toBe(true)
   })
 })

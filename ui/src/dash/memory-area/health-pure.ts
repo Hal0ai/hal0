@@ -20,6 +20,7 @@
 //
 // No React and no window.
 
+import type { MentalModel } from '@/api/hooks/useHindsight'
 import type {
   MemoryGraphStatus,
   MemoryHealthEmbedder,
@@ -799,6 +800,17 @@ export function healthVerdict(report: Report, path: PathStep[] = buildPath(repor
     chip: null,
     open: open.length,
   }
+}
+
+// ── Knowledge ─────────────────────────────────────────────────────────────────
+
+/**
+ * A failed refresh is a fault only when it is later than the last one that worked. Health reads
+ * its knowledge figures from the route; the Knowledge tab (knowledge-pure.ts) reads this rule.
+ */
+export function refreshFailed(model: Pick<MentalModel, 'last_refreshed_at' | 'last_refresh_failed_at'>): boolean {
+  if (!model.last_refresh_failed_at) return false
+  return !model.last_refreshed_at || model.last_refresh_failed_at > model.last_refreshed_at
 }
 
 // ── Engine facts strip ────────────────────────────────────────────────────────
