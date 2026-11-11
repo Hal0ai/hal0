@@ -99,7 +99,6 @@ describe('endpoints: classified bank routes, path segments encoded', () => {
   it.each([
     ['memoryBankKnowledgeTree', [BANK], `${BANK_PATH}/knowledge-base/tree`],
     ['memoryBankKnowledgePage', [BANK, 'kb-1'], `${BANK_PATH}/knowledge-base/pages/kb-1`],
-    ['memoryBankKnowledgePageRefresh', [BANK, 'kb-1'], `${BANK_PATH}/knowledge-base/pages/kb-1/refresh`],
     ['memoryBankMentalModel', [BANK, 'mm-1'], `${BANK_PATH}/mental-models/mm-1`],
     ['memoryBankMentalModelHistory', [BANK, 'mm-1'], `${BANK_PATH}/mental-models/mm-1/history`],
   ] as const)('%s', (name, args, expected) => {
@@ -111,7 +110,6 @@ describe('endpoints: classified bank routes, path segments encoded', () => {
     for (const url of [
       ENDPOINTS.memoryBankKnowledgeTree(BANK),
       ENDPOINTS.memoryBankKnowledgePage(BANK, 'p'),
-      ENDPOINTS.memoryBankKnowledgePageRefresh(BANK, 'p'),
       ENDPOINTS.memoryBankMentalModel(BANK, 'm'),
       ENDPOINTS.memoryBankMentalModelHistory(BANK, 'm'),
     ]) {
@@ -290,71 +288,30 @@ describe('mutations invalidate the queries that exist', () => {
       otherTree: hindsight.useKnowledgeTree(OTHER),
       ops: hindsight.useBankOperations(BANK),
       models: hindsight.useMentalModels(BANK),
-      refresh: hindsight.useKnowledgePageRefresh(),
-      update: hindsight.useKnowledgePageUpdate(),
+      refreshModel: hindsight.useMentalModelRefresh(),
     }))
   }
 
-  it('a page refresh refetches the tree and the page of that bank', async () => {
+  it('no hook or endpoint calls a page refresh or page PATCH route (#3564)', () => {
+    // A 1.x engine serves neither; a page is refreshed and edited through its mental model.
+    const exported = hindsight as Record<string, unknown>
+    expect(exported.useKnowledgePageRefresh).toBeUndefined()
+    expect(exported.useKnowledgePageUpdate).toBeUndefined()
+    expect((ENDPOINTS as Record<string, unknown>).memoryBankKnowledgePageRefresh).toBeUndefined()
+  })
+
+  it('a page is refreshed through its mental model, not a page route', async () => {
     const get = mountAll()
     await settle()
-    expect(countGets(TREE)).toBe(1)
-    expect(countGets(PAGE)).toBe(1)
-
+    expect(countGets(MODELS)).toBe(1)
     await act(async () => {
-      await get().refresh.mutateAsync({ bank: BANK, id: 'kb-1' })
+      await get().refreshModel.mutateAsync({ bank: BANK, id: 'mm-1' })
     })
     await settle()
-
-    expect(calls.filter((c: Call) => c.method === 'POST')).toEqual([
-      { method: 'POST', url: `${PAGE}/refresh`, body: {} },
+    expect(calls.filter((c: Call) => c.method !== 'GET')).toEqual([
+      { method: 'POST', url: `${BANK_PATH}/mental-models/mm-1/refresh`, body: {} },
     ])
-    // The hooks that were on screen fetched again: the invalidation matched real queries.
-    expect(countGets(TREE)).toBe(2)
-    expect(countGets(PAGE)).toBe(2)
-    // The refresh queues an operation and rebuilds a model, so those lists follow too.
-    expect(countGets(OPS)).toBe(2)
     expect(countGets(MODELS)).toBe(2)
-    // Another bank is left alone.
-    expect(countGets(OTHER_TREE)).toBe(1)
-  })
-
-  it('a page refresh marks the tree and page queries invalidated when nothing is mounted', async () => {
-    // The same check against the cache alone, with the entries created by the hooks' own keys.
-    qc.setQueryData(hindsight.knowledgeTreeKey(BANK), { roots: [] })
-    qc.setQueryData(hindsight.knowledgePageKey(BANK, 'kb-1'), { id: 'kb-1', name: 'One' })
-    qc.setQueryData(hindsight.knowledgePageKey(BANK, 'kb-2'), { id: 'kb-2', name: 'Two' })
-    qc.setQueryData(hindsight.knowledgeTreeKey(OTHER), { roots: [] })
-    const get = mountHooks(() => hindsight.useKnowledgePageRefresh())
-    await act(async () => {
-      await get().mutateAsync({ bank: BANK, id: 'kb-1' })
-    })
-    const invalidated = (key: readonly unknown[]) => qc.getQueryState(key)?.isInvalidated
-    expect(invalidated(hindsight.knowledgeTreeKey(BANK))).toBe(true)
-    expect(invalidated(hindsight.knowledgePageKey(BANK, 'kb-1'))).toBe(true)
-    expect(invalidated(hindsight.knowledgePageKey(BANK, 'kb-2'))).toBe(true)
-    expect(invalidated(hindsight.knowledgeTreeKey(OTHER))).toBe(false)
-  })
-
-  it('a page update sends a PATCH and refetches the tree and the page', async () => {
-    const get = mountAll()
-    await settle()
-    await act(async () => {
-      await get().update.mutateAsync({
-        bank: BANK,
-        id: 'kb-1',
-        body: { source_query: 'what changed?', tags: ['a'], trigger: null },
-      })
-    })
-    await settle()
-    expect(calls.filter((c: Call) => c.method === 'PATCH')).toEqual([
-      { method: 'PATCH', url: PAGE, body: { source_query: 'what changed?', tags: ['a'], trigger: null } },
-    ])
-    expect(countGets(TREE)).toBe(2)
-    expect(countGets(PAGE)).toBe(2)
-    expect(countGets(OTHER_TREE)).toBe(1)
-    // An edit queues nothing, so the operations list is not refetched.
-    expect(countGets(OPS)).toBe(1)
   })
 
   it('a mental-model refresh refetches the detail and history of that model', async () => {

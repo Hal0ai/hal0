@@ -1102,7 +1102,14 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/mental-models/{model_id}/history",
         "/v1/default/banks/{bank_id}/mental-models/{model_id}/history",
     ),
-    # knowledge base (folders/pages tree, per-page read/refresh — #showcase)
+    # knowledge base (folders/pages tree, per-page read — #showcase)
+    #
+    # A 1.x engine serves no ``PATCH .../knowledge-base/pages/{id}`` and no
+    # ``POST .../knowledge-base/pages/{id}/refresh`` (#3564), so neither is
+    # forwarded. A page is generated from the mental model its tree node names
+    # in ``mental_model_id`` (a different id from the page's own): refresh it
+    # with ``POST /banks/{bank_id}/mental-models/{model_id}/refresh`` above, and
+    # edit its question, tags and trigger with ``PATCH .../mental-models/{id}``.
     (
         "GET",
         "/banks/{bank_id}/knowledge-base/tree",
@@ -1122,16 +1129,6 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "GET",
         "/banks/{bank_id}/knowledge-base/pages/{page_id}",
         "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}",
-    ),
-    (
-        "PATCH",
-        "/banks/{bank_id}/knowledge-base/pages/{page_id}",
-        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}",
-    ),
-    (
-        "POST",
-        "/banks/{bank_id}/knowledge-base/pages/{page_id}/refresh",
-        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}/refresh",
     ),
     # directives
     ("GET", "/banks/{bank_id}/directives", "/v1/default/banks/{bank_id}/directives"),

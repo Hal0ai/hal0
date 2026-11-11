@@ -65,7 +65,7 @@ describe('mockFetch serves the new routes for GET only', () => {
     vi.resetModules()
   })
 
-  it('falls back to the fixture for a GET, and never for the PATCH or the refresh POST', async () => {
+  it('falls back to the fixture for a GET, and never for a write', async () => {
     globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('network error'))
     const { mockFetch } = await import('./mock')
     const page = ENDPOINTS.memoryBankKnowledgePage('primary', 'kb-power-resilience')
@@ -76,7 +76,7 @@ describe('mockFetch serves the new routes for GET only', () => {
 
     await expect(mockFetch(page, { method: 'PATCH', body: '{}' })).rejects.toThrow('network error')
     await expect(
-      mockFetch(ENDPOINTS.memoryBankKnowledgePageRefresh('primary', 'kb-power-resilience'), { method: 'POST' }),
+      mockFetch(`${ENDPOINTS.memoryBankMentalModel('primary', 'mm-power-resilience')}/refresh`, { method: 'POST' }),
     ).rejects.toThrow('network error')
   })
 

@@ -177,9 +177,13 @@ def apply_spec(
                     for p in kb["pages"]:
                         if p["name"] in pages:
                             pid = pages[p["name"]].get("id") or pages[p["name"]].get("page_id")
+                            # A page is changed through its tree node: a 1.x
+                            # engine serves ``PATCH .../knowledge-base/nodes/
+                            # {node_id}`` (UpdateNodeRequest), not ``PATCH
+                            # .../pages/{id}`` (#3564).
                             c.call(
                                 "PATCH",
-                                f"/{bank}/knowledge-base/pages/{pid}",
+                                f"/{bank}/knowledge-base/nodes/{pid}",
                                 {
                                     k: p[k]
                                     for k in ("source_query", "tags", "max_tokens", "trigger")
