@@ -301,6 +301,21 @@ export const ENDPOINTS = {
     `/api/memory/banks/${encodeURIComponent(bank)}/reflect`,
   memoryBankMentalModels: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/mental-models`,
+  // One mental model (GET detail) and its revision history. Refresh is
+  // `${memoryBankMentalModel(bank, id)}/refresh` (see useMentalModelRefresh).
+  memoryBankMentalModel: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/mental-models/${encodeURIComponent(id)}`,
+  memoryBankMentalModelHistory: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/mental-models/${encodeURIComponent(id)}/history`,
+  // Knowledge base — the classified bank routes in routes/memory_admin.py's
+  // _FORWARDS (tree; page GET | PATCH; page refresh POST). These replace the
+  // `/api/memory/engine/<path>` passthrough for the same resources.
+  memoryBankKnowledgeTree: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/knowledge-base/tree`,
+  memoryBankKnowledgePage: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/knowledge-base/pages/${encodeURIComponent(id)}`,
+  memoryBankKnowledgePageRefresh: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/knowledge-base/pages/${encodeURIComponent(id)}/refresh`,
   memoryBankDirectives: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/directives`,
   memoryBankOperations: (bank: string) =>
