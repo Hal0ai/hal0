@@ -104,11 +104,23 @@ def stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return state
 
 
-def test_the_command_is_mounted_under_hal0_memory(stub) -> None:
-    result = runner.invoke(memory_app, ["embedder", "switch", "--help"])
-    assert result.exit_code == 0
-    for flag in ("--apply", "--dry-run", "--allow-pending", "--resume", "--provider", "--json"):
-        assert flag in result.output
+def test_the_command_is_mounted_under_hal0_memory() -> None:
+    """Read from the command tree, not from rendered help: rich colours the
+    help on some terminals and splits an option name across escape codes."""
+    import typer
+
+    memory = typer.main.get_command(memory_app)
+    switch = memory.commands["embedder"].commands["switch"]  # type: ignore[attr-defined]
+    options = {opt for param in switch.params for opt in (*param.opts, *param.secondary_opts)}
+    assert {
+        "--apply",
+        "--dry-run",
+        "--allow-pending",
+        "--resume",
+        "--provider",
+        "--json",
+    } <= options
+    assert [p.name for p in switch.params if p.param_type_name == "argument"] == ["model"]
 
 
 def test_it_is_a_dry_run_by_default(stub) -> None:
