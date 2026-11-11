@@ -31,6 +31,7 @@ class RecordingClient:
         metadata=None,
         tags=None,
         timestamp=None,
+        **extra,
     ):
         self.retained.append(
             {
@@ -41,6 +42,7 @@ class RecordingClient:
                 "metadata": dict(metadata or {}),
                 "tags": list(tags or []),
                 "timestamp": timestamp,
+                **extra,
             }
         )
         self._facts_by_bank.setdefault(bank_id, []).append(
