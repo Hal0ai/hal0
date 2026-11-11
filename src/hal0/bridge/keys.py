@@ -50,10 +50,17 @@ DEFAULT_SCOPES: tuple[str, ...] = ("agents", "memory")
 # Hermes agent's private memory namespace, and ``shared`` or ``anonymous``
 # would alias the namespaces memory already treats specially. ``admin`` is the
 # name the operator's own credential reports on ``GET /api/bridge/me``.
+# ``unknown`` is the identity stamped on a memory write whose caller had none
+# (``hal0.memory.envelope.UNKNOWN_AGENT``): a client of that name would read
+# those writers' private notes. ``unresolved`` and ``shared`` are also parts
+# of a stored document id that are never a client
+# (``hal0.memory.document_namespace``).
 # Every name starting ``hal0`` is hal0's own (``hal0``, ``hal0-cli``,
 # ``hal0-doctor``, and whatever caller it adds next), and ``hermes__<profile>``
 # is a Hermes profile's namespace.
-RESERVED_CLIENT_NAMES: frozenset[str] = frozenset({"hermes", "pi", "admin", "anonymous", "shared"})
+RESERVED_CLIENT_NAMES: frozenset[str] = frozenset(
+    {"hermes", "pi", "admin", "anonymous", "shared", "unknown", "unresolved"}
+)
 RESERVED_CLIENT_PREFIXES: tuple[str, ...] = ("hermes__", "hal0")
 
 

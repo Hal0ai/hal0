@@ -64,7 +64,7 @@ All routes take and return JSON. A bridge client cannot call any of them except 
 and `scopes`, a sorted list. The record never carries key material, not even the hash.
 
 **Names.** A name is 1 to 32 characters from `a-z`, `0-9`, `_` and `-`, starting with a letter or
-a digit. `hermes`, `pi`, `admin`, `anonymous` and `shared` are reserved, and so is any name
+a digit. `hermes`, `pi`, `admin`, `anonymous`, `shared`, `unknown` and `unresolved` are reserved, and so is any name
 starting `hermes__` or `hal0`; each is `422 bridge.invalid_name`. A revoked client keeps its name,
 so past runs stay attributable and adding it again is `409 bridge.client_exists`.
 
