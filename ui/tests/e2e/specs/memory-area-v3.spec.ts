@@ -125,7 +125,7 @@ test.describe('page shell', () => {
     await expect(page.getByTestId('ma-knowledge-stub')).toBeVisible()
     await expect(page.getByTestId('mv-workspace')).toHaveCount(0)
     await tab(page, 'operations').click()
-    await expect(page.getByTestId('ma-operations-stub')).toBeVisible()
+    await expect(page.getByTestId('ma-operations')).toBeVisible()
     await tab(page, 'agents').click()
     await expect(page.getByTestId('ma-agents-stub')).toBeVisible()
   })
@@ -152,7 +152,7 @@ test.describe('page shell', () => {
     await expect(tab(page, 'knowledge')).toHaveAttribute('aria-current', 'page')
     await page.goForward()
     await expect(page).toHaveURL(/#memory\/operations$/)
-    await expect(page.getByTestId('ma-operations-stub')).toBeVisible()
+    await expect(page.getByTestId('ma-operations')).toBeVisible()
     await expect(currentTabs(page)).toHaveCount(1)
   })
 
@@ -212,7 +212,6 @@ test.describe('page shell', () => {
 test.describe('tabs that are not built yet', () => {
   for (const [id, heading, section] of [
     ['knowledge', 'Knowledge', 'kb'],
-    ['operations', 'Operations', 'operations'],
     ['agents', 'Agents', 'agents'],
   ] as const) {
     test(`${heading} says it is being moved here and links to the legacy tools page`, async ({ page }) => {

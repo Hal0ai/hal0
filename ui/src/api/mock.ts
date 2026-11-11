@@ -113,6 +113,9 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   // is for unrouted dev/preview only.
   { re: /^\/api\/memory\/graph\/status$/, key: 'memoryGraphStatus', networkFirst: true },
   { re: /^\/api\/memory\/engine$/, key: 'memoryEngine' },
+  // The composed health answer (ADR-0058). Three states, chosen by
+  // `window.__hal0MockMemoryHealth` (see the builder in ./mockFixtures.ts).
+  { re: /^\/api\/memory\/health$/, key: 'memoryHealth' },
   { re: /^\/api\/memory\/banks$/, key: 'memoryBanks' },
   { re: /^\/api\/memory\/banks\/([^/]+)\/stats\/timeseries$/, key: 'bankTimeseries' },
   { re: /^\/api\/memory\/banks\/([^/]+)\/stats$/, key: 'bankStats' },

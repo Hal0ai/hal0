@@ -500,3 +500,152 @@ export function useMemoryModels() {
     queryFn: () => apiGet<MemoryModels>(ENDPOINTS.memoryModels),
   })
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Health (GET /api/memory/health)
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Does memory need the operator, and what first: an ordered repair path with
+// the figures behind each step. The types mirror the route's response
+// (src/hal0/api/routes/memory_health.py and its collector) field for field.
+//
+// The route answers 200 whatever state the engine is in, so an engine that is
+// down is `verdict: 'unreachable'`, not an error. A failed request means
+// hal0's own API did not answer.
+
+/** The sections a read can leave unfinished, as `partial` names them. */
+export type MemoryHealthSection = 'extraction' | 'embedder' | 'queue' | 'knowledge' | 'banks'
+
+/** One group of failure messages, already reduced to text that is safe to show. */
+export interface MemoryHealthErrorGroup {
+  message: string
+  count: number
+}
+
+export interface MemoryHealthExtraction {
+  slot: string | null
+  /** `dedicated`, `shared` or `custom`. */
+  mode: string | null
+  /** Whether the slot has a model. `null` when no slot is in play. */
+  slot_resolves: boolean | null
+  /** Whether the engine's LLM endpoint accepts a connection. `null` when it names none. */
+  llm_reachable: boolean | null
+  concurrency: number | null
+  /** Retain operations that failed in the last 6 hours. */
+  failures_6h: number
+  /** Up to 5 groups, most frequent first. */
+  top_errors: MemoryHealthErrorGroup[]
+}
+
+export interface MemoryHealthEmbedderId {
+  provider: string | null
+  model: string | null
+}
+
+export interface MemoryHealthEmbedder {
+  recorded: MemoryHealthEmbedderId
+  configured: MemoryHealthEmbedderId
+  mixed: boolean
+  needs_switch: boolean
+  conflict: unknown
+  /** The two differ only because settings still hold the shipped default. */
+  informational: boolean
+}
+
+/** One bank's share of the queue. A figure that could not be read is `null`. */
+export interface MemoryHealthQueueBank {
+  bank_id: string
+  waiting: number | null
+  failed: number | null
+  oldest_waiting_s: number | null
+}
+
+export interface MemoryHealthQueue {
+  /** Operations in the engine's `pending` state, across banks. Split parent batches are left out. */
+  waiting: number
+  failed: number
+  /** Age of the oldest waiting operation that is due. `null` when none is. */
+  oldest_waiting_s: number | null
+  /** Source memories still to be consolidated, and those whose consolidation failed. */
+  consolidation_pending: number
+  consolidation_failed: number
+  by_bank: MemoryHealthQueueBank[]
+  /** A bank held more operations than were read: counts stay exact, ages and reasons are a floor. */
+  truncated: boolean
+}
+
+export interface MemoryHealthKnowledge {
+  pages: number
+  pages_stale: number
+  models: number
+  models_stale: number
+  refresh_failed: number
+  last_success_at: string | null
+}
+
+export interface MemoryHealthBanks {
+  layout: 'per_bank' | string
+  total: number | null
+  facts: number | null
+  list: Array<{ bank_id: string; facts: number | null; documents: number | null }>
+}
+
+/**
+ * One step of the repair path. The first open step is `current`; a later open
+ * step is `waiting` and names the open step before it in `waits_on`.
+ */
+export interface MemoryHealthStep {
+  id: 'engine' | 'extraction' | 'queue' | 'fold_in' | 'embedder' | 'knowledge' | string
+  state: 'current' | 'waiting' | 'clear'
+  waits_on: string | null
+  reason_code: string | null
+  figures: Record<string, unknown>
+}
+
+/** The answer when there is an engine to report on. */
+export interface MemoryHealthReport {
+  enabled: true
+  verdict: 'clear' | 'attention' | 'unreachable'
+  checked_at: string
+  /** Sections whose reads did not all finish; their figures are what was read. */
+  partial: MemoryHealthSection[]
+  engine: { reachable: boolean; version: string | null }
+  /** Every section below is `null` while the engine is unreachable. */
+  extraction: MemoryHealthExtraction | null
+  embedder: MemoryHealthEmbedder | null
+  queue: MemoryHealthQueue | null
+  knowledge: MemoryHealthKnowledge | null
+  banks: MemoryHealthBanks | null
+  writes: null
+  steps: MemoryHealthStep[]
+}
+
+/** The answer with memory off, or on an engine that has no banks or operations. */
+export interface MemoryHealthNoPath {
+  enabled: boolean
+  reason: 'memory_disabled' | 'engine_unsupported'
+  checked_at: string
+  verdict: null
+  partial: []
+  steps: []
+}
+
+export type MemoryHealth = MemoryHealthReport | MemoryHealthNoPath
+
+export const MEMORY_HEALTH_KEY = ['memory', 'health'] as const
+
+/**
+ * The server caches its answer for 10 seconds and one read can cost several
+ * dozen engine requests, so this asks every 30 seconds and tries a failed
+ * request once more, not three times.
+ */
+export function useMemoryHealth(opts: { enabled?: boolean } = {}) {
+  return useQuery<MemoryHealth>({
+    queryKey: MEMORY_HEALTH_KEY,
+    queryFn: () => apiGet<MemoryHealth>(ENDPOINTS.memoryHealth),
+    enabled: opts.enabled !== false,
+    staleTime: 10_000,
+    refetchInterval: 30_000,
+    retry: 1,
+  })
+}

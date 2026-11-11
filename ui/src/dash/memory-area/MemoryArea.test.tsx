@@ -37,6 +37,18 @@ vi.mock('./area-data', () => ({
   },
   useAllMentalModels: (ids: string[]) => ids.map((bankId) => ({ bankId, models: [] })),
 }))
+// The Operations tab's requests: no answer yet. The tab's own states are in OperationsTab.test.
+vi.mock('./operations-data', () => ({
+  useQueueHealth: () => ({}),
+  useBankConsolidation: () => ({}),
+  useOperationLists: () => ({ entries: [], refetch: () => {} }),
+  useRetryOne: () => ({ mutateAsync: async () => ({}) }),
+  useConsolidateNow: () => ({ mutate: () => {}, isPending: false }),
+  collectFailed: async () => ({ targets: [], more: false }),
+  retryOperation: async () => ({}),
+  discardOperation: async () => ({}),
+  useQueueRefresh: () => () => {},
+}))
 
 const { MemoryArea } = await import('./MemoryArea.jsx')
 
@@ -129,7 +141,7 @@ describe('tab row', () => {
   it('shows the view of the tab that is open, and only that one', () => {
     expect(byId(render('#memory/knowledge'), 'ma-knowledge-stub')).not.toBeNull()
     cleanup()
-    expect(byId(render('#memory/operations'), 'ma-operations-stub')).not.toBeNull()
+    expect(byId(render('#memory/operations'), 'ma-operations')).not.toBeNull()
     cleanup()
     const agents = render('#memory/agents')
     expect(byId(agents, 'ma-agents-stub')).not.toBeNull()
