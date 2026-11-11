@@ -1,476 +1,960 @@
+// What the Health tab says, checked as text: the copy of every reason code the route can send,
+// the order and state of the path, the verdict, what a cut-short read adds, and the engine strip.
+//
+// @ts-expect-error The app's tsconfig carries no Node types on purpose; this test runs in Node.
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import type { MemoryEngine, MentalModel } from '@/api/hooks/useHindsight'
-import type { BankTotals } from './area-pure'
+import type { MemoryHealthReport, MemoryHealthStep } from '@/api/hooks/useMemory'
+import { memoryHealthFixture, type MockMemoryHealthState } from '@/api/mockFixtures'
+import { readHealth } from './area-pure'
+import { EMBEDDER_ID, GRAPH, OLD_EMBEDDER_ID, healthReport, modelsAnswer, pathSteps } from './area-test-fixtures'
 import {
-  ENGINE_DEFAULT_EMBEDDER,
+  KNOWN_REASON_CODES,
+  PARTIAL_BANKS_NOTE,
+  PARTIAL_EMBEDDER_NOTE,
+  TRUNCATED_NOTE,
+  banksNote,
+  buildPath,
   embedderNotice,
   embedderView,
   engineStrip,
   healthVerdict,
-  knowledgeLine,
-  knowledgeTotals,
-  queueLine,
+  incompleteNote,
+  labelledFigures,
+  readableError,
   refreshFailed,
   segmentsText,
-  type KnowledgeTotals,
+  stepCopy,
+  stepName,
+  switchCommand,
+  type PathStep,
 } from './health-pure'
 
-const ENGINE: MemoryEngine = {
-  enabled: true,
-  engine: 'hindsight',
-  reachable: true,
-  version: '1.2.0',
-  features: null,
-  banks_total: 21,
+/** A step as the route sends it. */
+const step = (id: string, reason: string, figures: Record<string, unknown> = {}): MemoryHealthStep => ({
+  id,
+  state: 'current',
+  waits_on: null,
+  reason_code: reason,
+  figures,
+})
+
+/** The title and the sentences of an open step, as plain text. */
+function copy(id: string, reason: string, figures: Record<string, unknown> = {}, report = healthReport()) {
+  const written = stepCopy(step(id, reason, figures), report)
+  return { title: written.title, body: segmentsText(written.body), known: written.known }
 }
 
-// The embedder record as GET /api/memory/models carries it.
-const record = (over: Record<string, unknown> = {}) => ({
-  provider: 'local',
-  model: 'hs-embed-1',
-  recorded: 'hs-embed-1',
-  recorded_provider: 'local',
-  configured: 'hs-embed-1',
-  configured_provider: 'local',
-  mixed: false,
-  needs_switch: false,
-  source: 'record',
-  recorded_at: '2026-11-06T09:00:00Z',
-  effective: { provider: 'local', model: 'hs-embed-1', source: 'process' },
-  conflict: null,
-  record_error: null,
-  store_unavailable: null,
-  ...over,
-})
+const WINDOW = { window_s: 21600 }
+const byId = (path: PathStep[], id: string) => path.find((s) => s.id === id)!
+const bodyOf = (s: PathStep) => segmentsText(s.body)
 
-const CLEAN = record()
-const UPGRADED = record({ recorded: 'BAAI/bge-small-en-v1.5', needs_switch: true })
-const MIXED = record({ mixed: true, needs_switch: true })
-const CONFLICT_LIVE = record({ conflict: { live: { provider: 'local', model: 'BAAI/bge-small-en-v1.5' } } })
-const CONFLICT_DISK = record({ conflict: { on_disk: { provider: 'tei', model: 'hs-embed-1' } } })
-
-const GRAPH = {
-  enabled: true,
-  extraction_slot: 'memory',
-  mode: 'dedicated',
-  slot_resolves: true,
-  available_slots: ['agent', 'memory'],
+/** Nothing the route wrote may reach the page raw. */
+function expectPlainWords(words: string) {
+  expect(words).not.toMatch(/[{}[\]"]/)
+  expect(words).not.toMatch(/[a-z]+_[a-z]+/)
+  expect(words).not.toMatch(/\d{4}-\d{2}-\d{2}T/)
+  expect(words).not.toMatch(/\bnull\b|\bundefined\b|\bNaN\b|\btrue\b|\bfalse\b/)
 }
 
-const MODELS = {
-  embeddings: CLEAN,
-  reranker: { provider: 'local', model: 'hs-rerank-1' },
-  decision: { enabled: false, provider: 'local', model: 'decider', reachable: false },
-}
+describe('reason codes', () => {
+  const source = (name: string) => new URL(`../../../../src/hal0/memory/${name}`, import.meta.url)
+  const inRepo = existsSync(source('health_path.py')) && existsSync(source('embedder_verdict.py'))
 
-const cell = (cells: ReturnType<typeof engineStrip>, id: string) => cells.find((c) => c.id === id)!
-
-const totals = (over: Partial<BankTotals> = {}): BankTotals => ({
-  banks: 21,
-  listed: 21,
-  counted: 21,
-  reported: 21,
-  facts: 52955,
-  waiting: 0,
-  failed: 0,
-  ...over,
-})
-
-const knowledge = (over: Partial<KnowledgeTotals> = {}): KnowledgeTotals => ({
-  banks: 21,
-  reported: 21,
-  models: 5,
-  stale: 0,
-  refreshFailed: 0,
-  ...over,
-})
-
-describe('embedderView', () => {
-  it('is clean when the store and the settings agree', () => {
-    expect(embedderView(CLEAN)).toEqual({ state: 'clean', recorded: 'hs-embed-1', configured: 'hs-embed-1', other: null })
+  it.skipIf(!inRepo)('has its own words for every code the route can send', () => {
+    const path = readFileSync(source('health_path.py'), 'utf8') as string
+    const verdict = readFileSync(source('embedder_verdict.py'), 'utf8') as string
+    const constants = [...path.matchAll(/^REASON_[A-Z_]+ = "([a-z_]+)"/gm)].map((m) => m[1])
+    const prefix = constants.find((c) => c.endsWith('_'))!
+    const embedder = [...verdict.matchAll(/^[A-Z_]+ = "([a-z_]+)"/gm)].map((m) => `${prefix}${m[1]}`)
+    expect(prefix).toBe('embedder_')
+    expect(embedder).toHaveLength(5)
+    // The fold-in step has no backend yet and no copy of its own: it takes the generic words.
+    const expected = [...constants.filter((c) => c !== prefix && c !== 'fold_in_pending'), ...embedder]
+    expect([...KNOWN_REASON_CODES].sort()).toEqual(expected.sort())
   })
 
-  it('reads the ordinary upgraded box: recorded differs from configured, nothing else', () => {
-    expect(embedderView(UPGRADED)).toEqual({
-      state: 'differs',
-      recorded: 'BAAI/bge-small-en-v1.5',
-      configured: 'hs-embed-1',
-      other: null,
-    })
-  })
-
-  it('reads a difference by name when the route has no needs_switch', () => {
-    const { needs_switch: _dropped, ...older } = UPGRADED
-    expect(embedderView(older).state).toBe('differs')
-    const { needs_switch: _dropped2, ...same } = CLEAN
-    expect(embedderView(same).state).toBe('clean')
-  })
-
-  it('reads a mixed store, and names the model it started on', () => {
-    expect(embedderView(MIXED)).toEqual({
-      state: 'mixed',
-      recorded: 'hs-embed-1',
-      configured: 'hs-embed-1',
-      other: ENGINE_DEFAULT_EMBEDDER,
-    })
-  })
-
-  it('reads a conflict with the running engine or with its unit files', () => {
-    expect(embedderView(CONFLICT_LIVE)).toMatchObject({ state: 'conflict', other: 'BAAI/bge-small-en-v1.5' })
-    // A provider that is not the local one is named in place of its model.
-    expect(embedderView(CONFLICT_DISK)).toMatchObject({ state: 'conflict', other: 'the tei provider' })
-  })
-
-  it('puts a conflict ahead of a mixed store', () => {
-    expect(embedderView(record({ mixed: true, conflict: { live: { provider: 'local', model: 'x' } } })).state).toBe('conflict')
-  })
-
-  it('ignores an empty conflict', () => {
-    expect(embedderView(record({ conflict: {} })).state).toBe('clean')
-  })
-
-  it.each([[undefined], [null], [{}], ['nope'], [[]]])('is unknown for %j', (raw) => {
-    expect(embedderView(raw)).toEqual({ state: 'unknown', recorded: null, configured: null, other: null })
-  })
-
-  it('is unknown, with the configured model kept, for an API from before the record', () => {
-    expect(embedderView({ provider: 'local', model: 'hs-embed-1' })).toEqual({
-      state: 'unknown',
-      recorded: null,
-      configured: 'hs-embed-1',
-      other: null,
-    })
+  it('knows thirteen codes', () => {
+    expect([...KNOWN_REASON_CODES].sort()).toEqual([
+      'embedder_conflict',
+      'embedder_mixed',
+      'embedder_needs_switch',
+      'embedder_record_unreadable',
+      'embedder_store_unavailable',
+      'engine_unreachable',
+      'extraction_llm_unreachable',
+      'extraction_recent_failures',
+      'extraction_slot_unresolved',
+      'knowledge_refresh_failed',
+      'knowledge_stale',
+      'queue_operations_failed',
+      'queue_waiting_too_long',
+    ])
   })
 })
 
-describe('embedderNotice', () => {
-  const notice = (raw: unknown) => embedderNotice(embedderView(raw))
-
-  it('says nothing for a clean record, or one that was not reported', () => {
-    expect(notice(CLEAN)).toBeNull()
-    expect(notice({})).toBeNull()
+describe('stepCopy, one case per reason code', () => {
+  it('engine_unreachable', () => {
+    expect(copy('engine', 'engine_unreachable', { reachable: false })).toEqual({
+      title: 'Check the memory engine service',
+      body: 'The memory engine is not answering, so nothing else on this page can be read.',
+      known: true,
+    })
   })
 
-  it('is one quiet line for the upgraded box, naming both models', () => {
-    const n = notice(UPGRADED)!
-    expect(n.kind).toBe('quiet')
-    expect(n.status).toBeNull()
-    expect(segmentsText(n.segments)).toBe(
-      'This store was built with BAAI/bge-small-en-v1.5 and the engine stays on it. ' +
-        'Settings ask for hs-embed-1, which has no effect until the store is re-embedded.',
+  it('extraction_slot_unresolved', () => {
+    expect(copy('extraction', 'extraction_slot_unresolved', { slot_resolves: false, ...WINDOW })).toEqual({
+      title: 'Give the extraction slot a model',
+      body: 'Storing a memory runs on the memory slot, and that slot has no model. Until it has one, nothing agents send becomes a fact.',
+      known: true,
+    })
+  })
+
+  it('extraction_llm_unreachable, on a slot and on an upstream model', () => {
+    expect(copy('extraction', 'extraction_llm_unreachable', { slot_resolves: true, llm_reachable: false })).toEqual({
+      title: 'Reconnect extraction to its model',
+      body: 'Storing a memory runs on the memory slot, and its model is not accepting connections. Until it does, nothing agents send becomes a fact.',
+      known: true,
+    })
+    // No slot in play: the slot is not named.
+    expect(copy('extraction', 'extraction_llm_unreachable', { slot_resolves: null, llm_reachable: false }).body).toBe(
+      'The model that turns what agents send into facts is not accepting connections. Until it does, nothing agents send becomes a fact.',
     )
-    expect(n.segments).toContainEqual({ code: 'BAAI/bge-small-en-v1.5' })
-    expect(n.segments).toContainEqual({ code: 'hs-embed-1' })
   })
 
-  it('is a warning for a mixed store, naming both models', () => {
-    const n = notice(MIXED)!
-    expect(n).toMatchObject({ kind: 'warning', status: 'mixed' })
-    expect(segmentsText(n.segments)).toBe(
-      'This store may hold vectors from two embedders: it existed before the engine moved from ' +
-        'BAAI/bge-small-en-v1.5 to hs-embed-1. Recall over older facts is degraded until the store is re-embedded.',
+  it('extraction_recent_failures, plural and singular', () => {
+    expect(copy('extraction', 'extraction_recent_failures', { failures: 37, ...WINDOW })).toEqual({
+      title: 'Fix what is failing when memories are stored',
+      body: '37 attempts to store a memory failed in the last 6 h. Until the cause is fixed, operations wait in the queue and a retry would fail.',
+      known: true,
+    })
+    expect(copy('extraction', 'extraction_recent_failures', { failures: 1, ...WINDOW }).body).toMatch(
+      /^1 attempt to store a memory failed in the last 6 h\./,
     )
-    expect(n.segments).toContainEqual({ code: 'BAAI/bge-small-en-v1.5' })
-    expect(n.segments).toContainEqual({ code: 'hs-embed-1' })
-  })
-
-  it('adds what the settings ask for when a mixed store is also behind them', () => {
-    const n = notice(record({ mixed: true, needs_switch: true, configured: 'hs-embed-2' }))!
-    expect(segmentsText(n.segments)).toContain('Settings ask for hs-embed-2, which has no effect')
-  })
-
-  it('is a warning for a conflict, naming both models', () => {
-    const n = notice(CONFLICT_LIVE)!
-    expect(n).toMatchObject({ kind: 'warning', status: 'conflict' })
-    expect(segmentsText(n.segments)).toBe(
-      'The embedder record says hs-embed-1, but the engine is set to run on BAAI/bge-small-en-v1.5. ' +
-        'hal0 has changed neither. Remove the override or correct the record so the two agree.',
+    // The window is the route's, not a constant of this page.
+    expect(copy('extraction', 'extraction_recent_failures', { failures: 2, window_s: 3600 }).body).toMatch(
+      /^2 attempts to store a memory failed in the last 1 h\./,
     )
-    expect(n.segments).toContainEqual({ code: 'hs-embed-1' })
-    expect(n.segments).toContainEqual({ code: 'BAAI/bge-small-en-v1.5' })
   })
 
-  it('names the provider when the conflict is with one that is not local', () => {
-    expect(segmentsText(notice(CONFLICT_DISK)!.segments)).toContain('set to run on the tei provider')
-  })
-})
-
-describe('engineStrip', () => {
-  const strip = (over: Record<string, unknown> = {}) =>
-    engineStrip({ engine: ENGINE, graph: GRAPH, models: MODELS, ...over })
-
-  it('is five cells in a fixed order', () => {
-    expect(strip().map((c) => c.label)).toEqual(['Engine', 'Extraction', 'Embedder', 'Reranker', 'Decision model'])
-  })
-
-  it('names the engine with its version, and says it is reachable', () => {
-    expect(cell(strip(), 'engine')).toEqual({
-      id: 'engine',
-      label: 'Engine',
-      value: 'Hindsight 1.2.0',
-      helper: 'memory engine',
-      chip: { tone: 'ok', word: 'reachable' },
+  it('queue_operations_failed, plural and singular, with and without a queue behind it', () => {
+    expect(
+      copy('queue', 'queue_operations_failed', { failed: 105, waiting: 1093, oldest_waiting_s: 21600 }),
+    ).toEqual({
+      title: 'Retry or discard the failed operations',
+      body: '105 operations have failed and 1,093 are waiting, the oldest for 6 h. Retry or discard them on the Operations tab.',
+      known: true,
     })
-    expect(cell(strip({ engine: { ...ENGINE, version: null } }), 'engine').value).toBe('Hindsight')
+    expect(copy('queue', 'queue_operations_failed', { failed: 1, waiting: 1, oldest_waiting_s: 720 }).body).toBe(
+      '1 operation has failed and 1 is waiting, for 12 min. Retry or discard it on the Operations tab.',
+    )
+    expect(copy('queue', 'queue_operations_failed', { failed: 3, waiting: 0, oldest_waiting_s: null }).body).toBe(
+      '3 operations have failed, and nothing is waiting. Retry or discard them on the Operations tab.',
+    )
   })
 
-  it('shows the extraction slot, its mode, and that it resolves', () => {
-    expect(cell(strip(), 'extraction')).toMatchObject({
-      value: 'memory slot',
-      helper: 'dedicated slot · resolves to a model',
-      chip: null,
+  it('queue_waiting_too_long, plural and singular, with the threshold the route sent', () => {
+    expect(
+      copy('queue', 'queue_waiting_too_long', {
+        failed: 0,
+        waiting: 52,
+        oldest_waiting_s: 5400,
+        max_waiting_age_s: 1800,
+      }),
+    ).toEqual({
+      title: 'Find out why the queue is not moving',
+      body: '52 operations are waiting, the oldest for 1 h. Nothing has failed, but this page asks for you once one has waited longer than 30 min. The Operations tab shows what is running.',
+      known: true,
     })
-    expect(cell(strip({ graph: { ...GRAPH, mode: 'shared', extraction_slot: 'agent' } }), 'extraction')).toMatchObject({
-      value: 'agent slot',
-      helper: 'shared slot · resolves to a model',
-    })
+    expect(
+      copy('queue', 'queue_waiting_too_long', { waiting: 1, oldest_waiting_s: 7200, max_waiting_age_s: 3600 }).body,
+    ).toBe(
+      '1 operation has been waiting for 2 h. Nothing has failed, but this page asks for you once one has waited longer than 1 h. The Operations tab shows what is running.',
+    )
   })
 
-  it('flags an extraction slot that does not resolve', () => {
-    expect(cell(strip({ graph: { ...GRAPH, slot_resolves: false } }), 'extraction')).toMatchObject({
-      value: 'memory slot',
-      helper: 'dedicated slot · no enabled slot with this name',
-      chip: { tone: 'err', word: 'unreachable' },
-    })
-  })
-
-  it('says routing to the target is off, without calling extraction off or judging the slot', () => {
-    const off = { ...GRAPH, enabled: false, slot_resolves: false }
-    expect(cell(strip({ graph: off }), 'extraction')).toEqual({
-      id: 'extraction',
-      label: 'Extraction',
-      value: 'memory slot',
-      helper: 'routing to this target is off in Engine settings',
-      chip: null,
-    })
-    // A slot that is not in use is not a finding.
-    const verdict = healthVerdict({
-      strip: strip({ graph: off }),
-      embedder: embedderView(CLEAN),
-      totals: totals(),
-      knowledge: knowledge(),
-    })
-    expect(verdict.kind).toBe('clear')
-  })
-
-  it('names an upstream model in place of a slot', () => {
-    const graph = { ...GRAPH, mode: 'custom', target: { kind: 'upstream', model: 'minimax/m2', alias: 'hal0/memory' } }
-    expect(cell(strip({ graph }), 'extraction')).toMatchObject({
-      value: 'minimax/m2',
-      helper: 'upstream model, through hal0',
-      chip: null,
+  it('embedder_record_unreadable', () => {
+    expect(copy('embedder', 'embedder_record_unreadable', { recorded: EMBEDDER_ID, configured: EMBEDDER_ID })).toEqual({
+      title: 'Repair the embedder record',
+      body: 'The record of the embedder this store was built with cannot be read. hal0 has left the file as it is and keeps the engine on hs-embed-1.',
+      known: true,
     })
   })
 
-  it('shows the embedder for each state of its record', () => {
-    const embedder = (embeddings: unknown) => cell(strip({ models: { ...MODELS, embeddings } }), 'embedder')
-    expect(embedder(CLEAN)).toMatchObject({ value: 'hs-embed-1', helper: 'the model this store was built with', chip: null })
-    expect(embedder(UPGRADED)).toMatchObject({
-      value: 'BAAI/bge-small-en-v1.5',
-      helper: 'settings ask for hs-embed-1',
-      chip: null,
-    })
-    expect(embedder(MIXED)).toMatchObject({
-      value: 'BAAI/bge-small-en-v1.5 and hs-embed-1',
-      chip: { tone: 'warn', word: 'mixed' },
-    })
-    expect(embedder(CONFLICT_LIVE)).toMatchObject({
-      value: 'hs-embed-1 and BAAI/bge-small-en-v1.5',
-      chip: { tone: 'warn', word: 'conflict' },
-    })
-    expect(embedder({ provider: 'local', model: 'hs-embed-1' })).toMatchObject({
-      value: 'hs-embed-1',
-      helper: 'configured model',
+  it('embedder_store_unavailable', () => {
+    expect(copy('embedder', 'embedder_store_unavailable', {})).toEqual({
+      title: 'Bring the memory store back',
+      body: 'The place the memory store is kept is not available: a link that does not resolve, or a disk that is not mounted. Nothing is recorded about its embedder until it is back.',
+      known: true,
     })
   })
 
-  it('shows the reranker and the decision model', () => {
-    expect(cell(strip(), 'reranker')).toMatchObject({ value: 'hs-rerank-1', helper: 'local provider' })
-    expect(cell(strip(), 'decision')).toMatchObject({ value: 'Off', helper: 'optional component, not enabled', chip: null })
-    const on = { ...MODELS, decision: { enabled: true, model: 'decider-1', reachable: true } }
-    expect(cell(strip({ models: on }), 'decision')).toMatchObject({
-      value: 'decider-1',
-      chip: { tone: 'ok', word: 'reachable' },
+  it('embedder_conflict: the running engine, its unit files, or both', () => {
+    const facts = { recorded: EMBEDDER_ID, configured: EMBEDDER_ID }
+    expect(copy('embedder', 'embedder_conflict', { ...facts, conflict: { live: OLD_EMBEDDER_ID } })).toEqual({
+      title: 'Make the embedder record and the engine agree',
+      body: 'The embedder record says hs-embed-1, but the running engine is on BAAI/bge-small-en-v1.5. hal0 has changed neither. Remove the override or correct the record so the two agree.',
+      known: true,
     })
-    const down = { ...MODELS, decision: { enabled: true, model: 'decider-1', reachable: false } }
-    expect(cell(strip({ models: down }), 'decision').chip).toEqual({ tone: 'err', word: 'unreachable' })
+    expect(copy('embedder', 'embedder_conflict', { ...facts, conflict: { on_disk: OLD_EMBEDDER_ID } }).body).toMatch(
+      /^The embedder record says hs-embed-1, but its unit files would start it on BAAI\/bge-small-en-v1\.5\./,
+    )
+    expect(
+      copy('embedder', 'embedder_conflict', {
+        ...facts,
+        conflict: { live: OLD_EMBEDDER_ID, on_disk: { provider: 'openai', model: 'text-embedding-3-small' } },
+      }).body,
+    ).toMatch(
+      /but the running engine is on BAAI\/bge-small-en-v1\.5 and its unit files would start it on the openai provider\./,
+    )
   })
 
-  it('leaves a cell with no value, not a guess, when its route did not answer', () => {
-    const cells = strip({ graph: null, models: {} })
-    for (const id of ['extraction', 'embedder', 'reranker', 'decision']) {
-      expect(cell(cells, id)).toMatchObject({ value: null, chip: null })
+  it('embedder_mixed', () => {
+    expect(copy('embedder', 'embedder_mixed', { recorded: EMBEDDER_ID, configured: EMBEDDER_ID, mixed: true })).toEqual({
+      title: 'Re-embed the store on one embedder',
+      body: 'This store may hold vectors from two embedders: it existed before the engine moved to hs-embed-1. Recall over older facts is degraded until the store is re-embedded.',
+      known: true,
+    })
+    // Settings that ask for a third thing are said too.
+    expect(
+      copy('embedder', 'embedder_mixed', {
+        recorded: EMBEDDER_ID,
+        configured: { provider: 'local', model: 'nomic-embed' },
+        mixed: true,
+      }).body,
+    ).toMatch(/re-embedded\. Settings ask for nomic-embed\.$/)
+  })
+
+  it('embedder_needs_switch', () => {
+    expect(
+      copy('embedder', 'embedder_needs_switch', {
+        recorded: OLD_EMBEDDER_ID,
+        configured: { provider: 'local', model: 'nomic-embed' },
+      }),
+    ).toEqual({
+      title: 'Re-embed the store on the embedder settings ask for',
+      body: 'This store was built with BAAI/bge-small-en-v1.5 and the engine stays on it. Settings ask for nomic-embed, which has no effect until the store is re-embedded.',
+      known: true,
+    })
+  })
+
+  it('knowledge_refresh_failed, plural and singular, with the date of the last one that worked', () => {
+    expect(
+      copy('knowledge', 'knowledge_refresh_failed', { pages_stale: 29, models_stale: 5, refresh_failed: 31 }),
+    ).toEqual({
+      title: 'Refresh the knowledge that failed',
+      body: '31 knowledge pages and mental models failed their last refresh, and 34 are stale. The last refresh that worked was on 5 Nov 2026.',
+      known: true,
+    })
+    const one = copy(
+      'knowledge',
+      'knowledge_refresh_failed',
+      { pages_stale: 1, models_stale: 0, refresh_failed: 1 },
+      healthReport({ knowledge: { ...healthReport().knowledge!, last_success_at: null } }),
+    )
+    expect(one.body).toBe('1 knowledge page or mental model failed its last refresh, and 1 is stale.')
+  })
+
+  it('knowledge_stale, plural and singular', () => {
+    expect(copy('knowledge', 'knowledge_stale', { pages_stale: 5, models_stale: 6, refresh_failed: 0 })).toEqual({
+      title: 'Refresh stale knowledge',
+      body: '5 knowledge pages and 6 mental models are stale: behind the facts they were built from. No refresh has failed.',
+      known: true,
+    })
+    expect(copy('knowledge', 'knowledge_stale', { pages_stale: 0, models_stale: 1, refresh_failed: 0 }).body).toBe(
+      '1 mental model is stale: behind the facts it was built from. No refresh has failed.',
+    )
+    expect(copy('knowledge', 'knowledge_stale', { pages_stale: 1, models_stale: 0, refresh_failed: 0 }).body).toMatch(
+      /^1 knowledge page is stale:/,
+    )
+  })
+
+  it('writes nothing raw for any known code, even with no figures at all', () => {
+    for (const reason of KNOWN_REASON_CODES) {
+      const empty = healthReport({ extraction: null, embedder: null, queue: null, knowledge: null })
+      for (const written of [copy('x', reason, {}, empty), copy('x', reason, {})]) {
+        expect(written.known).toBe(true)
+        expectPlainWords(written.title)
+        expectPlainWords(written.body)
+        expect(written.body).not.toMatch(/\b0 (attempts|operations|knowledge)/)
+      }
     }
   })
 })
 
-describe('queueLine', () => {
-  it('sums waiting and failed operations, and says across how many banks', () => {
-    expect(queueLine(totals({ waiting: 1093, failed: 105 }))).toEqual({
-      known: true,
-      text: '1,093 operations waiting and 105 failed, summed across 21 banks.',
-    })
-    expect(queueLine(totals({ banks: 1, listed: 1, reported: 1, waiting: 1, failed: 0 })).text).toBe(
-      '1 operation waiting and 0 failed, summed across 1 bank.',
+describe('a reason code this page does not know', () => {
+  const unknown = step('fold_in', 'fold_in_pending', { banks: 21 })
+
+  it('gets a generic sentence under a plain title, and never the code', () => {
+    const written = stepCopy(unknown, healthReport())
+    expect(written.known).toBe(false)
+    expect(written.title).toBe('Fold in needs attention')
+    expect(segmentsText(written.body)).toBe(
+      'This step is open, and this page has no description for its cause yet. The figures the check reported are below.',
     )
+    expectPlainWords(written.title + segmentsText(written.body))
+    expect(written.title + segmentsText(written.body)).not.toContain('pending')
   })
 
-  it('says which banks a partial sum covers', () => {
-    expect(queueLine(totals({ reported: 18, waiting: 40, failed: 2 })).text).toBe(
-      '40 operations waiting and 2 failed, summed across the 18 of 21 banks that reported.',
-    )
+  it('still shows its figures, under labels, as words', () => {
+    expect(labelledFigures(unknown.figures)).toEqual([{ label: 'Banks', value: '21' }])
+    expect(
+      labelledFigures({
+        failed: 1093,
+        oldest_waiting_s: 21600,
+        llm_reachable: false,
+        recorded: EMBEDDER_ID,
+        some_new_count: 4,
+        retry_after_s: 90,
+        note: 'held for review',
+      }),
+    ).toEqual([
+      { label: 'Failed operations', value: '1,093' },
+      { label: 'Oldest waiting', value: '6 h' },
+      { label: 'The extraction model accepts connections', value: 'no' },
+      { label: 'Store built with', value: 'hs-embed-1' },
+      { label: 'Some new count', value: '4' },
+      { label: 'Retry after', value: '1 min' },
+      { label: 'Note', value: 'held for review' },
+    ])
   })
 
-  it('has no figure when no bank reported', () => {
-    expect(queueLine(totals({ reported: 0, waiting: null, failed: null }))).toEqual({
-      known: false,
-      text: 'Not reported: no bank answered with its operation counts.',
+  it('leaves out lists, nested objects and empty values: nothing is printed as JSON', () => {
+    const figures = labelledFigures({
+      top_errors: [{ message: 'x', count: 1 }],
+      reasons: ['mixed'],
+      conflict: { live: EMBEDDER_ID },
+      detail: { a: 1 },
+      missing: null,
+      blank: ' ',
+      rows: [1, 2],
     })
+    expect(figures).toEqual([])
+    expect(labelledFigures(null)).toEqual([])
+    expect(labelledFigures('x')).toEqual([])
   })
 
-  it('says there is no queue with no banks', () => {
-    expect(queueLine(totals({ banks: 0, listed: 0, reported: 0, waiting: null, failed: null })).known).toBe(true)
+  it('says so when the check sent no figures', () => {
+    const written = stepCopy(step('queue', 'queue_something_new', {}), healthReport())
+    expect(written.title).toBe('The queue needs attention')
+    expect(segmentsText(written.body)).toMatch(/The check reported no figures with it\.$/)
+  })
+
+  it('is a row of the path like any other, in its place, with no action', () => {
+    const report = healthReport({
+      steps: pathSteps(
+        { fold_in: { reason: 'fold_in_pending', figures: { banks: 21 } }, knowledge: { reason: 'knowledge_stale' } },
+        ['engine', 'extraction', 'queue', 'fold_in', 'knowledge'],
+      ),
+    })
+    const path = buildPath(report)
+    const row = byId(path, 'fold_in')
+    expect(row).toMatchObject({ position: 3, of: 4, state: 'current', name: 'fold in', links: [], command: null })
+    expect(row.figures).toEqual([{ label: 'Banks', value: '21' }])
+    expect(byId(path, 'knowledge').waitsOn).toBe('Waiting on step 3: fold in')
   })
 })
 
-describe('knowledge', () => {
-  const model = (over: Partial<MentalModel> = {}): MentalModel => ({
-    id: 'mm',
-    name: 'Model',
-    source_query: 'q',
-    is_stale: false,
-    last_refreshed_at: '2026-11-05T08:00:00Z',
-    last_refresh_failed_at: null,
-    ...over,
+describe('stepName', () => {
+  it('names each step in plain words', () => {
+    expect(['extraction', 'queue', 'embedder', 'knowledge'].map(stepName)).toEqual([
+      'storing memories',
+      'the queue',
+      'the embedder',
+      'knowledge',
+    ])
+    expect(stepName('some-new_step')).toBe('some new step')
   })
+})
 
-  it('counts a failed refresh only when it is later than the last success', () => {
-    expect(refreshFailed(model())).toBe(false)
-    expect(refreshFailed(model({ last_refresh_failed_at: '2026-11-04T08:00:00Z' }))).toBe(false)
-    expect(refreshFailed(model({ last_refresh_failed_at: '2026-11-06T08:00:00Z' }))).toBe(true)
-    expect(refreshFailed(model({ last_refreshed_at: null, last_refresh_failed_at: '2026-11-06T08:00:00Z' }))).toBe(true)
-  })
-
-  it('adds the mental models of the banks that answered', () => {
-    const t = knowledgeTotals(
-      [
-        { bankId: 'a', models: [model({ is_stale: true }), model()] },
-        { bankId: 'b', models: [model({ is_stale: true, last_refresh_failed_at: '2026-11-06T08:00:00Z' })] },
-        { bankId: 'c', models: null, isError: true },
+describe('buildPath', () => {
+  const failing = {
+    extraction: { reason: 'extraction_recent_failures', figures: { failures: 37, ...WINDOW } },
+    queue: { reason: 'queue_operations_failed', figures: { failed: 105, waiting: 1093, oldest_waiting_s: 21600 } },
+    knowledge: { reason: 'knowledge_refresh_failed', figures: { pages_stale: 29, models_stale: 5, refresh_failed: 31 } },
+  }
+  const report = healthReport({
+    steps: pathSteps(failing),
+    extraction: {
+      ...healthReport().extraction!,
+      failures_6h: 37,
+      top_errors: [
+        { message: 'APIConnectionError: Connection error.', count: 36 },
+        { message: `Task exceeded the <n>s wall-clock limit ${'x'.repeat(200)}`, count: 1 },
       ],
-      3,
-    )
-    expect(t).toEqual({ banks: 3, reported: 2, models: 3, stale: 2, refreshFailed: 1 })
+    },
+  })
+  const path = buildPath(report)
+
+  it('keeps the route order, numbers the steps from one, and leaves the engine step out', () => {
+    expect(path.map((s) => [s.position, s.id, s.state])).toEqual([
+      [1, 'extraction', 'current'],
+      [2, 'queue', 'waiting'],
+      [3, 'embedder', 'clear'],
+      [4, 'knowledge', 'waiting'],
+    ])
+    expect(path.every((s) => s.of === 4)).toBe(true)
   })
 
-  it('says how many are stale, and across how many banks', () => {
-    expect(knowledgeLine(knowledge({ models: 12, stale: 5 }))).toEqual({
-      known: true,
-      text: '5 of 12 mental models are stale, summed across 21 banks.',
+  it('does not reorder what the route sent', () => {
+    const shuffled = healthReport({ steps: [...pathSteps(failing)].reverse() })
+    expect(buildPath(shuffled).map((s) => s.id)).toEqual(['knowledge', 'embedder', 'queue', 'extraction'])
+  })
+
+  it('says what a waiting step waits on, by position and in words', () => {
+    expect(byId(path, 'queue').waitsOn).toBe('Waiting on step 1: storing memories')
+    // Knowledge waits on the nearest open step before it, which is the queue.
+    expect(byId(path, 'knowledge').waitsOn).toBe('Waiting on step 2: the queue')
+    expect(byId(path, 'extraction').waitsOn).toBeNull()
+    expect(byId(path, 'embedder').waitsOn).toBeNull()
+  })
+
+  it('names what it waits on even when that step is not in the list', () => {
+    const odd = healthReport({
+      steps: [{ id: 'queue', state: 'waiting', waits_on: 'engine', reason_code: 'queue_operations_failed', figures: {} }],
     })
-    expect(knowledgeLine(knowledge({ models: 12, stale: 5, refreshFailed: 1 })).text).toBe(
-      '5 of 12 mental models are stale and 1 failed its last refresh, summed across 21 banks.',
-    )
-    expect(knowledgeLine(knowledge({ models: 12, stale: 5, refreshFailed: 3, reported: 20 })).text).toBe(
-      '5 of 12 mental models are stale and 3 failed their last refresh, summed across the 20 of 21 banks that reported.',
-    )
-  })
-
-  it('reads well for one model and for none', () => {
-    expect(knowledgeLine(knowledge({ models: 1, stale: 1 })).text).toBe(
-      'The 1 mental model is stale, summed across 21 banks.',
-    )
-    expect(knowledgeLine(knowledge({ models: 0 })).text).toBe('No mental models yet, summed across 21 banks.')
-  })
-
-  it('has no figure when no bank answered', () => {
-    expect(knowledgeLine(knowledge({ reported: 0, models: 0 }))).toEqual({
-      known: false,
-      text: 'Not reported: no bank answered with its mental models.',
+    expect(buildPath(odd)[0].waitsOn).toBe('Waiting on the memory engine')
+    const none = healthReport({
+      steps: [{ id: 'queue', state: 'waiting', waits_on: null, reason_code: 'queue_operations_failed', figures: {} }],
     })
+    expect(buildPath(none)[0].waitsOn).toBe('Waiting on an earlier step')
+  })
+
+  it('gives the current step its status as a chip, and a waiting step the word waiting', () => {
+    expect(byId(path, 'extraction').chip).toEqual({ tone: 'err', word: '37 failures in 6 h' })
+    expect(byId(path, 'queue').chip).toEqual({ tone: 'neutral', word: 'waiting' })
+    expect(byId(path, 'knowledge').chip).toEqual({ tone: 'neutral', word: 'waiting' })
+    expect(byId(path, 'embedder').chip).toBeNull()
+  })
+
+  it('collapses a clear step to its name and one sentence', () => {
+    const embedder = byId(path, 'embedder')
+    expect(embedder.title).toBe('The embedder')
+    expect(bodyOf(embedder)).toBe('The store and the engine are on hs-embed-1.')
+    expect(embedder).toMatchObject({ errors: [], figures: [], command: null, links: [] })
+  })
+
+  it('lists the extraction failures, cut to one line, most frequent first, with their counts', () => {
+    const errors = byId(path, 'extraction').errors
+    expect(errors[0]).toEqual({ message: 'APIConnectionError: Connection error.', count: 36 })
+    expect(errors[1].count).toBe(1)
+    expect(errors[1].message.length).toBeLessThanOrEqual(110)
+    expect(errors[1].message.endsWith('…')).toBe(true)
+  })
+
+  it('links extraction to Services and engine settings, the queue to Operations, knowledge to Knowledge', () => {
+    expect(byId(path, 'extraction').links).toEqual([
+      { to: 'services', label: 'Open Services' },
+      { to: 'settings', label: 'Open engine settings' },
+    ])
+    expect(byId(path, 'queue').links).toEqual([{ to: 'operations', label: 'Open Operations' }])
+    expect(byId(path, 'knowledge').links).toEqual([{ to: 'knowledge', label: 'Open Knowledge' }])
+  })
+
+  it('offers no command to a step that is not the current one', () => {
+    const waiting = healthReport({
+      steps: pathSteps({
+        queue: { reason: 'queue_operations_failed', figures: { failed: 2, waiting: 0 } },
+        embedder: { reason: 'embedder_mixed', figures: { recorded: EMBEDDER_ID, configured: EMBEDDER_ID, mixed: true } },
+      }),
+    })
+    const embedder = byId(buildPath(waiting), 'embedder')
+    expect(embedder.state).toBe('waiting')
+    expect(embedder.command).toBeNull()
+    expect(embedder.waitsOn).toBe('Waiting on step 2: the queue')
+    // Its facts are still said.
+    expect(bodyOf(embedder)).toMatch(/may hold vectors from two embedders/)
+  })
+
+  it('reads a state it does not know as clear only when the route said nothing is open', () => {
+    const odd = healthReport({
+      steps: [{ id: 'queue', state: 'paused' as never, waits_on: null, reason_code: null, figures: {} }],
+    })
+    expect(buildPath(odd)[0].state).toBe('clear')
+  })
+
+  describe('clear rows', () => {
+    const clear = buildPath(healthReport())
+
+    it('says what each check found', () => {
+      expect(clear.map((s) => [s.title, bodyOf(s)])).toEqual([
+        ['Storing memories', 'No attempt to store a memory failed in the last 6 h.'],
+        ['The queue', 'Nothing is waiting and nothing has failed.'],
+        ['The embedder', 'The store and the engine are on hs-embed-1.'],
+        ['Knowledge', '34 knowledge pages and mental models are fresh.'],
+      ])
+      expect(clear.every((s) => s.state === 'clear' && s.chip === null && s.command === null)).toBe(true)
+    })
+
+    it('counts what is waiting when the queue is merely busy', () => {
+      const busy = healthReport({ queue: { ...healthReport().queue!, waiting: 7, oldest_waiting_s: 720 } })
+      expect(bodyOf(byId(buildPath(busy), 'queue'))).toBe('Nothing has failed. 7 operations are waiting, the oldest for 12 min.')
+      const one = healthReport({ queue: { ...healthReport().queue!, waiting: 1, oldest_waiting_s: 30 } })
+      expect(bodyOf(byId(buildPath(one), 'queue'))).toBe('Nothing has failed. 1 operation is waiting, for 30 s.')
+    })
+
+    it('says a box has no knowledge yet, and counts one', () => {
+      const none = healthReport({ knowledge: { ...healthReport().knowledge!, pages: 0, models: 0 } })
+      expect(bodyOf(byId(buildPath(none), 'knowledge'))).toBe('No knowledge pages or mental models yet.')
+      const single = healthReport({ knowledge: { ...healthReport().knowledge!, pages: 1, models: 0 } })
+      expect(bodyOf(byId(buildPath(single), 'knowledge'))).toBe('1 knowledge page or mental model is fresh.')
+    })
+
+    it('says the ordinary upgraded box needs nothing, and a missing record is not called fine', () => {
+      const upgraded = healthReport({
+        embedder: { ...healthReport().embedder!, recorded: OLD_EMBEDDER_ID, needs_switch: true, informational: true },
+      })
+      expect(bodyOf(byId(buildPath(upgraded), 'embedder'))).toBe(
+        'The store stays on BAAI/bge-small-en-v1.5, the embedder it was built with. Nothing to do.',
+      )
+      const unread = healthReport({ embedder: null, partial: ['embedder'] })
+      const row = byId(buildPath(unread), 'embedder')
+      expect(bodyOf(row)).toBe('The embedder record was not reported, so nothing is known about it.')
+      expect(row.note).toBe(PARTIAL_EMBEDDER_NOTE)
+    })
+
+    it('keeps the links to Operations and Knowledge, and none for extraction', () => {
+      expect(byId(clear, 'queue').links).toEqual([{ to: 'operations', label: 'Open Operations' }])
+      expect(byId(clear, 'knowledge').links).toEqual([{ to: 'knowledge', label: 'Open Knowledge' }])
+      expect(byId(clear, 'extraction').links).toEqual([])
+    })
+  })
+
+  describe('the embedder step, when it is the one to do now', () => {
+    const current = (reason: string, figures: Record<string, unknown>) =>
+      byId(buildPath(healthReport({ steps: pathSteps({ embedder: { reason, figures } }) })), 'embedder')
+
+    it('shows the switch as a command to review for a mixed store, and says it is a dry run', () => {
+      const row = current('embedder_mixed', { recorded: EMBEDDER_ID, configured: EMBEDDER_ID, mixed: true })
+      expect(row.state).toBe('current')
+      expect(row.chip).toEqual({ tone: 'warn', word: 'mixed' })
+      expect(row.command!.command).toBe('hal0 memory embedder switch hs-embed-1')
+      expect(row.command!.note).toContain('dry run by default')
+      expect(row.command!.note).toContain('changes nothing')
+      expect(row.links).toEqual([])
+    })
+
+    it('switches towards the model settings ask for', () => {
+      const row = current('embedder_needs_switch', {
+        recorded: OLD_EMBEDDER_ID,
+        configured: { provider: 'local', model: 'hindsight-ai/hs-embed-1' },
+      })
+      expect(row.command!.command).toBe('hal0 memory embedder switch hindsight-ai/hs-embed-1')
+      expect(row.chip).toBeNull()
+    })
+
+    it('does not offer the switch for a conflict: the doctor names what disagrees', () => {
+      const row = current('embedder_conflict', {
+        recorded: EMBEDDER_ID,
+        configured: EMBEDDER_ID,
+        conflict: { live: OLD_EMBEDDER_ID },
+      })
+      expect(row.chip).toEqual({ tone: 'warn', word: 'conflict' })
+      expect(row.command!.command).toBe('hal0 doctor')
+      expect(row.command!.note).toContain('changes nothing')
+    })
+
+    it('gives the doctor for a record that cannot be read and a store that is gone', () => {
+      expect(current('embedder_record_unreadable', {}).command!.command).toBe('hal0 doctor')
+      expect(current('embedder_store_unavailable', {}).command!.command).toBe('hal0 doctor')
+    })
+  })
+})
+
+describe('switchCommand', () => {
+  it('names the configured model, and the provider when it is not the local one', () => {
+    expect(switchCommand({ recorded: OLD_EMBEDDER_ID, configured: EMBEDDER_ID })).toBe(
+      'hal0 memory embedder switch hs-embed-1',
+    )
+    expect(
+      switchCommand({ recorded: OLD_EMBEDDER_ID, configured: { provider: 'openai', model: 'text-embedding-3-small' } }),
+    ).toBe('hal0 memory embedder switch text-embedding-3-small --provider openai')
+  })
+
+  it('falls back to the recorded model, and to nothing when no model is known', () => {
+    expect(switchCommand({ recorded: EMBEDDER_ID, configured: { provider: null, model: null } })).toBe(
+      'hal0 memory embedder switch hs-embed-1',
+    )
+    expect(switchCommand({})).toBeNull()
+    expect(switchCommand(null)).toBeNull()
+  })
+
+  it('does not build a command from a model name that is not one word', () => {
+    expect(switchCommand({ configured: { provider: 'local', model: 'x; rm -rf /' } })).toBeNull()
   })
 })
 
 describe('healthVerdict', () => {
-  const verdict = (over: Record<string, unknown> = {}) => {
-    const models = (over.models as typeof MODELS) ?? MODELS
-    const graph = (over.graph as typeof GRAPH) ?? GRAPH
-    return healthVerdict({
-      strip: engineStrip({ engine: ENGINE, graph, models }),
-      embedder: embedderView(models.embeddings),
-      totals: (over.totals as BankTotals) ?? totals(),
-      knowledge: (over.knowledge as KnowledgeTotals) ?? knowledge(),
-      banksFailed: over.banksFailed as boolean | undefined,
-    })
-  }
+  const lead = (report: MemoryHealthReport) => healthVerdict(report)
 
-  it('is clear when nothing failed and everything was reported', () => {
-    expect(verdict()).toEqual({
+  it('is clear, calm and complete when no step is open', () => {
+    expect(lead(healthReport())).toEqual({
       kind: 'clear',
       lead: 'Nothing needs attention',
       detail:
-        'The engine answers, the embedder record is consistent, and no operation or mental-model refresh has failed.',
-      findings: [],
+        'The engine answers, and the 4 things this page watches are clear: storing memories, the queue, the embedder and knowledge.',
+      qualifier: null,
+      chip: { tone: 'ok', word: 'working' },
+      open: 0,
     })
   })
 
-  it('stays clear with operations waiting and mental models stale: both are normal', () => {
-    expect(verdict({ totals: totals({ waiting: 978 }), knowledge: knowledge({ stale: 5 }) }).kind).toBe('clear')
-  })
-
-  it('stays clear on the ordinary upgraded box', () => {
-    expect(verdict({ models: { ...MODELS, embeddings: UPGRADED } }).kind).toBe('clear')
-  })
-
-  it('lists each thing that failed, and counts them in the lead', () => {
-    const v = verdict({
-      graph: { ...GRAPH, slot_resolves: false },
-      models: { ...MODELS, embeddings: MIXED },
-      totals: totals({ failed: 105 }),
-      knowledge: knowledge({ refreshFailed: 1 }),
+  it('counts the open steps, and names the one to start with', () => {
+    const three = healthReport({
+      steps: pathSteps({
+        extraction: { reason: 'extraction_recent_failures', figures: { failures: 7 } },
+        queue: { reason: 'queue_operations_failed', figures: { failed: 10 } },
+        knowledge: { reason: 'knowledge_refresh_failed', figures: { refresh_failed: 5 } },
+      }),
     })
-    expect(v.kind).toBe('attention')
-    expect(v.lead).toBe('4 things need attention')
-    expect(v.findings.map((f) => f.id)).toEqual(['extraction', 'embedder', 'queue', 'knowledge'])
-    expect(v.findings.map((f) => f.text)).toEqual([
-      'Extraction is stalled: its slot does not match an enabled LLM slot.',
-      'The store may hold vectors from two embedders.',
-      '105 operations have failed.',
-      '1 mental model failed its last refresh.',
-    ])
+    expect(lead(three)).toMatchObject({
+      kind: 'attention',
+      lead: '3 things need you',
+      detail:
+        'Start with step 1, storing memories: fix what is failing when memories are stored. The other 2 wait on it, in the order below.',
+      chip: null,
+      open: 3,
+    })
+    const two = healthReport({
+      steps: pathSteps({
+        queue: { reason: 'queue_operations_failed', figures: { failed: 10 } },
+        knowledge: { reason: 'knowledge_stale', figures: { pages_stale: 1 } },
+      }),
+    })
+    expect(lead(two)).toMatchObject({
+      lead: '2 things need you',
+      detail:
+        'Start with step 2, the queue: retry or discard the failed operations. The other one waits on it, in the order below.',
+    })
   })
 
-  it('reads well for one finding', () => {
-    const v = verdict({ totals: totals({ failed: 1 }) })
-    expect(v.lead).toBe('1 thing needs attention')
-    expect(v.findings[0].text).toBe('1 operation has failed.')
+  it('says "1 thing needs you" for one', () => {
+    const one = healthReport({
+      steps: pathSteps({ knowledge: { reason: 'knowledge_stale', figures: { pages_stale: 5, models_stale: 6 } } }),
+    })
+    expect(lead(one)).toMatchObject({
+      kind: 'attention',
+      lead: '1 thing needs you',
+      detail: 'It is step 4, knowledge: refresh stale knowledge.',
+      open: 1,
+    })
   })
 
-  it('names a conflict as a finding', () => {
-    expect(verdict({ models: { ...MODELS, embeddings: CONFLICT_LIVE } }).findings).toEqual([
-      { id: 'embedder', text: 'The embedder record and the engine disagree.' },
-    ])
+  it('is decided from the steps, not from the verdict word', () => {
+    const lying = healthReport({
+      steps: pathSteps({ queue: { reason: 'queue_operations_failed', figures: { failed: 1 } } }),
+      verdict: 'clear',
+    })
+    expect(lead(lying).kind).toBe('attention')
   })
 
-  it('never puts an order on the findings in words', () => {
-    const v = verdict({ totals: totals({ failed: 3 }), knowledge: knowledge({ refreshFailed: 2 }) })
-    const words = [v.lead, v.detail, ...v.findings.map((f) => f.text)].join(' ')
-    expect(words).not.toMatch(/\bstep\b/i)
-    expect(words).not.toMatch(/\bfirst,|\bthen\b/i)
+  it('never calls a partial read clear without saying so, and drops the "working" chip', () => {
+    const partial = lead(healthReport({ partial: ['queue', 'banks'] }))
+    expect(partial).toMatchObject({
+      kind: 'clear',
+      lead: 'Nothing needs attention in what was read',
+      qualifier: PARTIAL_BANKS_NOTE,
+      chip: null,
+    })
+    expect(PARTIAL_BANKS_NOTE).toBe('Some banks did not answer in time; figures are what was read.')
   })
 
-  it('does not call it clear when something was not reported', () => {
-    const v = verdict({ models: {}, totals: totals({ reported: 18 }), knowledge: knowledge({ reported: 20 }) })
-    expect(v.kind).toBe('partial')
-    expect(v.lead).toBe('No problems found in what was reported')
-    expect(v.detail).toBe(
-      'Not reported: the embedder record, operation counts for every bank, mental models for every bank.',
+  it('qualifies a truncated read the same way', () => {
+    const truncated = lead(healthReport({ queue: { ...healthReport().queue!, truncated: true } }))
+    expect(truncated).toMatchObject({ lead: 'Nothing needs attention in what was read', qualifier: TRUNCATED_NOTE, chip: null })
+  })
+
+  it('says the gap beside an attention verdict too', () => {
+    const open = healthReport({
+      steps: pathSteps({ queue: { reason: 'queue_operations_failed', figures: { failed: 1 } } }),
+      partial: ['knowledge'],
+    })
+    expect(lead(open)).toMatchObject({ kind: 'attention', lead: '1 thing needs you', qualifier: PARTIAL_BANKS_NOTE })
+  })
+})
+
+describe('what was cut short', () => {
+  it('has nothing to say about a whole read', () => {
+    const report = healthReport()
+    expect(incompleteNote(report)).toBeNull()
+    expect(banksNote(report)).toBeNull()
+    expect(buildPath(report).every((s) => s.note === null)).toBe(true)
+  })
+
+  it('puts the partial wording beside the step whose section was cut short, and only there', () => {
+    const path = buildPath(healthReport({ partial: ['queue'] }))
+    expect(byId(path, 'queue').note).toBe(PARTIAL_BANKS_NOTE)
+    expect(byId(path, 'extraction').note).toBeNull()
+    expect(byId(path, 'knowledge').note).toBeNull()
+    expect(byId(buildPath(healthReport({ partial: ['knowledge'] })), 'knowledge').note).toBe(PARTIAL_BANKS_NOTE)
+    expect(byId(buildPath(healthReport({ partial: ['extraction'] })), 'extraction').note).toBe(PARTIAL_BANKS_NOTE)
+  })
+
+  it('puts the truncated wording beside the queue and the failure reasons', () => {
+    const path = buildPath(healthReport({ queue: { ...healthReport().queue!, truncated: true } }))
+    expect(byId(path, 'queue').note).toBe(TRUNCATED_NOTE)
+    expect(byId(path, 'extraction').note).toBe(TRUNCATED_NOTE)
+    expect(byId(path, 'knowledge').note).toBeNull()
+    expect(TRUNCATED_NOTE).toMatch(/more operations than were read/)
+  })
+
+  it('says both when both hold', () => {
+    const report = healthReport({ partial: ['queue', 'embedder'], queue: { ...healthReport().queue!, truncated: true } })
+    expect(byId(buildPath(report), 'queue').note).toBe(`${PARTIAL_BANKS_NOTE} ${TRUNCATED_NOTE}`)
+    expect(incompleteNote(report)).toBe(`${PARTIAL_BANKS_NOTE} ${PARTIAL_EMBEDDER_NOTE} ${TRUNCATED_NOTE}`)
+  })
+
+  it('qualifies the banks table when its facts or its operation counts were cut short', () => {
+    expect(banksNote(healthReport({ partial: ['banks'] }))).toBe(PARTIAL_BANKS_NOTE)
+    expect(banksNote(healthReport({ partial: ['queue'] }))).toBe(PARTIAL_BANKS_NOTE)
+    expect(banksNote(healthReport({ partial: ['knowledge'] }))).toBeNull()
+  })
+})
+
+describe('embedderView', () => {
+  const base = healthReport().embedder!
+
+  it('is clean when the store and the settings agree', () => {
+    expect(embedderView(base)).toEqual({ state: 'clean', recorded: 'hs-embed-1', configured: 'hs-embed-1', other: null })
+    expect(embedderNotice(embedderView(base))).toBeNull()
+  })
+
+  it("takes the ordinary upgraded box from the route's own mark, and gives it one quiet line", () => {
+    const view = embedderView({ ...base, recorded: OLD_EMBEDDER_ID, needs_switch: true, informational: true })
+    expect(view.state).toBe('informational')
+    expect(segmentsText(embedderNotice(view)!)).toBe(
+      'This store was built with BAAI/bge-small-en-v1.5 and the engine stays on it. ' +
+        'Settings ask for hs-embed-1, which has no effect until the store is re-embedded.',
     )
   })
 
-  it('says the bank list did not load', () => {
-    const v = verdict({ banksFailed: true, totals: totals({ banks: 0, listed: 0, reported: 0, failed: null }) })
-    expect(v.kind).toBe('partial')
-    expect(v.detail).toContain('the bank list')
+  it('does not call a difference the operator made informational', () => {
+    const view = embedderView({ ...base, recorded: OLD_EMBEDDER_ID, needs_switch: true, informational: false })
+    expect(view.state).toBe('differs')
+    // It is a step of the path, so it gets no line of its own under the strip.
+    expect(embedderNotice(view)).toBeNull()
+  })
+
+  it('reads mixed and conflict, a conflict first', () => {
+    expect(embedderView({ ...base, mixed: true, needs_switch: true }).state).toBe('mixed')
+    const conflict = embedderView({ ...base, mixed: true, conflict: { on_disk: OLD_EMBEDDER_ID } })
+    expect(conflict).toMatchObject({ state: 'conflict', other: 'BAAI/bge-small-en-v1.5' })
+    expect(embedderNotice(conflict)).toBeNull()
+  })
+
+  it('names a provider that is not the local one', () => {
+    const view = embedderView({ ...base, recorded: { provider: 'openai', model: 'text-embedding-3-small' } })
+    expect(view.recorded).toBe('the openai provider')
+  })
+
+  it('is unknown without a record', () => {
+    expect(embedderView(null).state).toBe('unknown')
+    expect(embedderView({ ...base, recorded: { provider: null, model: null } }).state).toBe('unknown')
+  })
+})
+
+describe('engineStrip', () => {
+  const cells = (report: MemoryHealthReport, graph: unknown = GRAPH, models: unknown = modelsAnswer()) =>
+    engineStrip({ report, graph: graph as never, models: models as never })
+  const cell = (list: ReturnType<typeof cells>, id: string) => list.find((c) => c.id === id)!
+
+  it('is five cells, always in this order', () => {
+    expect(cells(healthReport()).map((c) => c.label)).toEqual([
+      'Engine',
+      'Extraction',
+      'Embedder',
+      'Reranker',
+      'Decision model',
+    ])
+  })
+
+  it('reads the engine, extraction and embedder from the health answer', () => {
+    const list = cells(healthReport())
+    expect(cell(list, 'engine')).toMatchObject({ value: 'Hindsight 1.2.0', chip: { tone: 'ok', word: 'reachable' } })
+    expect(cell(list, 'extraction')).toEqual({
+      id: 'extraction',
+      label: 'Extraction',
+      value: 'memory slot',
+      helper: 'dedicated slot · 2 at a time · 0 failures in 6 h',
+      chip: { tone: 'ok', word: 'working' },
+    })
+    expect(cell(list, 'embedder')).toMatchObject({ value: 'hs-embed-1', helper: 'the model this store was built with' })
+  })
+
+  it('does not need the older reads for those three', () => {
+    const list = cells(healthReport(), null, null)
+    expect(cell(list, 'engine').value).toBe('Hindsight 1.2.0')
+    expect(cell(list, 'extraction').value).toBe('memory slot')
+    expect(cell(list, 'embedder').value).toBe('hs-embed-1')
+    // The reranker and the decision model are the models read's, and are not reported without it.
+    expect(cell(list, 'reranker').value).toBeNull()
+    expect(cell(list, 'decision').value).toBeNull()
+  })
+
+  it('marks extraction failing while its step is open, with the count as words', () => {
+    const report = healthReport({
+      steps: pathSteps({ extraction: { reason: 'extraction_recent_failures', figures: { failures: 37, ...WINDOW } } }),
+      extraction: { ...healthReport().extraction!, failures_6h: 37 },
+    })
+    expect(cell(cells(report), 'extraction')).toMatchObject({
+      helper: 'dedicated slot · 2 at a time · 37 failures in 6 h',
+      chip: { tone: 'err', word: 'failing' },
+    })
+    const unresolved = healthReport({
+      steps: pathSteps({ extraction: { reason: 'extraction_slot_unresolved' } }),
+      extraction: { ...healthReport().extraction!, slot_resolves: false, failures_6h: 1 },
+    })
+    expect(cell(cells(unresolved), 'extraction').helper).toBe(
+      'dedicated slot · no enabled slot with this name · 2 at a time · 1 failure in 6 h',
+    )
+  })
+
+  it('takes the upstream model and the routing switch from graph status, the two things health does not carry', () => {
+    const upstream = cells(healthReport({ extraction: { ...healthReport().extraction!, slot_resolves: null, mode: 'custom' } }), {
+      ...GRAPH,
+      target: { kind: 'upstream', model: 'gpt-oss-120b' },
+    })
+    expect(cell(upstream, 'extraction')).toMatchObject({
+      value: 'gpt-oss-120b',
+      helper: 'upstream model, through hal0 · 2 at a time · 0 failures in 6 h',
+    })
+    const off = cells(healthReport(), { ...GRAPH, enabled: false })
+    expect(cell(off, 'extraction')).toMatchObject({
+      value: 'memory slot',
+      helper: 'routing to this target is off in Engine settings',
+      chip: null,
+    })
+  })
+
+  it('shows a mixed store and a conflict as a chip beside the recorded model, never a tinted name', () => {
+    const mixed = cells(healthReport({ embedder: { ...healthReport().embedder!, mixed: true, needs_switch: true } }))
+    expect(cell(mixed, 'embedder')).toMatchObject({ value: 'hs-embed-1', chip: { tone: 'warn', word: 'mixed' } })
+    const conflict = cells(
+      healthReport({ embedder: { ...healthReport().embedder!, conflict: { live: OLD_EMBEDDER_ID } } }),
+    )
+    expect(cell(conflict, 'embedder')).toMatchObject({
+      value: 'hs-embed-1',
+      helper: 'the engine is set to run on BAAI/bge-small-en-v1.5',
+      chip: { tone: 'warn', word: 'conflict' },
+    })
+  })
+
+  it('reads the reranker and the decision model from the models read', () => {
+    const list = cells(healthReport())
+    expect(cell(list, 'reranker')).toMatchObject({ value: 'hs-rerank-1', helper: 'local provider' })
+    expect(cell(list, 'decision')).toMatchObject({ value: 'Off', chip: null })
+    const on = cells(healthReport(), GRAPH, {
+      ...modelsAnswer(),
+      decision: { enabled: true, model: 'decider', reachable: true },
+    })
+    expect(cell(on, 'decision')).toMatchObject({ value: 'decider', chip: { tone: 'ok', word: 'reachable' } })
+  })
+
+  it('reports nothing it was not told', () => {
+    const list = cells(healthReport({ extraction: null, embedder: null }), undefined, {})
+    for (const id of ['extraction', 'embedder', 'reranker', 'decision']) {
+      expect(cell(list, id)).toMatchObject({ value: null, chip: null })
+    }
+  })
+})
+
+describe('the forced mock, one fixture per step that can be first', () => {
+  const read = (state: MockMemoryHealthState) => {
+    const view = readHealth({ data: memoryHealthFixture(state) as never })
+    if (view.kind !== 'ready') throw new Error(`${state} is not a report`)
+    return { report: view.report, path: buildPath(view.report) }
+  }
+  const states = (path: PathStep[]) => path.map((s) => `${s.id}:${s.state}`)
+
+  it('attention: extraction is current, the queue and knowledge wait on it in turn', () => {
+    const { report, path } = read('attention')
+    expect(states(path)).toEqual(['extraction:current', 'queue:waiting', 'embedder:clear', 'knowledge:waiting'])
+    expect(healthVerdict(report, path).lead).toBe('3 things need you')
+    expect(byId(path, 'queue').waitsOn).toBe('Waiting on step 1: storing memories')
+    expect(byId(path, 'knowledge').waitsOn).toBe('Waiting on step 2: the queue')
+    expect(byId(path, 'extraction').errors.length).toBeGreaterThan(0)
+  })
+
+  it('queue: the queue is current, alone', () => {
+    const { report, path } = read('queue')
+    expect(states(path)).toEqual(['extraction:clear', 'queue:current', 'embedder:clear', 'knowledge:clear'])
+    expect(healthVerdict(report, path)).toMatchObject({ lead: '1 thing needs you', open: 1 })
+    expect(bodyOf(byId(path, 'queue'))).toMatch(/^\d+ operations have failed and \d+ are waiting, the oldest for \d+ h\./)
+  })
+
+  it('embedder-mixed and embedder-conflict: the embedder is current, alone', () => {
+    const mixed = read('embedder-mixed').path
+    expect(states(mixed)).toEqual(['extraction:clear', 'queue:clear', 'embedder:current', 'knowledge:clear'])
+    expect(byId(mixed, 'embedder').command!.command).toBe('hal0 memory embedder switch hindsight-ai/hs-embed-1')
+    const conflict = read('embedder-conflict').path
+    expect(states(conflict)).toEqual(['extraction:clear', 'queue:clear', 'embedder:current', 'knowledge:clear'])
+    expect(bodyOf(byId(conflict, 'embedder'))).toContain('the running engine is on BAAI/bge-small-en-v1.5')
+    expect(byId(conflict, 'embedder').command!.command).toBe('hal0 doctor')
+  })
+
+  it('knowledge: knowledge is current, alone, and only stale', () => {
+    const { path } = read('knowledge')
+    expect(states(path)).toEqual(['extraction:clear', 'queue:clear', 'embedder:clear', 'knowledge:current'])
+    expect(bodyOf(byId(path, 'knowledge'))).toBe(
+      '5 knowledge pages and 6 mental models are stale: behind the facts they were built from. No refresh has failed.',
+    )
+  })
+
+  it('clear: nothing is open and the verdict says working', () => {
+    const { report, path } = read('clear')
+    expect(path.every((s) => s.state === 'clear')).toBe(true)
+    expect(healthVerdict(report, path)).toMatchObject({ lead: 'Nothing needs attention', chip: { tone: 'ok', word: 'working' } })
+  })
+
+  it('partial: nothing is open, and the verdict says what was not read', () => {
+    const { report, path } = read('partial')
+    expect(report.partial).toEqual(['queue', 'banks'])
+    expect(path.every((s) => s.state === 'clear')).toBe(true)
+    expect(healthVerdict(report, path)).toMatchObject({
+      lead: 'Nothing needs attention in what was read',
+      qualifier: PARTIAL_BANKS_NOTE,
+      chip: null,
+    })
+    expect(byId(path, 'queue').note).toBe(PARTIAL_BANKS_NOTE)
+    expect(banksNote(report)).toBe(PARTIAL_BANKS_NOTE)
+  })
+})
+
+describe('readableError', () => {
+  it('turns the route placeholders into words a person reads', () => {
+    expect(readableError('Task exceeded the <n>s wall-clock limit')).toBe('Task exceeded the Ns wall-clock limit')
+    expect(readableError('HTTP 503 from <host> for <id>')).toBe('HTTP 503 from a host for ID')
+    expect(readableError('Retried <n> times, <n> left')).toBe('Retried N times, N left')
+  })
+
+  it('leaves other angle-bracket text alone', () => {
+    expect(readableError('expected <list> got <none>')).toBe('expected <list> got <none>')
+  })
+
+  it('is applied to the extraction step errors in the path', () => {
+    const report = healthReport({
+      steps: pathSteps({
+        extraction: { reason: 'extraction_recent_failures', figures: { failures: 3, window_s: 21600 } },
+      }),
+      extraction: {
+        ...healthReport().extraction!,
+        failures_6h: 3,
+        top_errors: [{ message: 'Task exceeded the <n>s wall-clock limit', count: 3 }],
+      },
+    })
+    const extraction = buildPath(report).find((step) => step.id === 'extraction')!
+    expect(extraction.errors.map((group) => group.message)).toEqual(['Task exceeded the Ns wall-clock limit'])
+  })
+})
+
+describe('refreshFailed', () => {
+  const model = (over: Record<string, string | null> = {}) =>
+    ({ last_refreshed_at: '2026-11-05T08:00:00Z', last_refresh_failed_at: null, ...over }) as never
+
+  it('is a fault only when the failure is later than the last refresh that worked', () => {
+    expect(refreshFailed(model())).toBe(false)
+    expect(refreshFailed(model({ last_refresh_failed_at: '2026-11-04T08:00:00Z' }))).toBe(false)
+    expect(refreshFailed(model({ last_refresh_failed_at: '2026-11-06T08:00:00Z' }))).toBe(true)
+    expect(refreshFailed(model({ last_refreshed_at: null, last_refresh_failed_at: '2026-11-06T08:00:00Z' }))).toBe(true)
   })
 })

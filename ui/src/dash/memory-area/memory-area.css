@@ -1393,3 +1393,163 @@
 .ma-agents-connect-body .ma-body { overflow-wrap: anywhere; }
 /* The heading is focused when the empty state sends the reader here; the ring sits inside. */
 .ma-agents-connect h2:focus-visible { outline-offset: 2px; }
+||||||| parent of 1290edc3b (feat(ui): Memory area Health as an ordered repair path (ADR-0058 decision 12))
+/* health */
+
+/* ── Health tab: the verdict and the repair path (health/RepairPath.jsx) ────── */
+
+/* Under the verdict: what a read that was cut short left out. It changes how the verdict reads,
+   so it is body text at full strength, not a helper line. */
+.ma-health-qualifier {
+  margin-top: 8px;
+  color: var(--fg);
+}
+
+/* The steps, in the route's order. An ordered list without markers of its own: each row draws
+   its position. */
+.ma-path {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line-soft);
+}
+.ma-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ma-step:last-child { border-bottom: 0; }
+/* The step to do now: the one raised row of the card. Its eyebrow says "do this now" and the row
+   carries `aria-current`, so the fill and the marker below only repeat that. */
+.ma-step-current {
+  padding: 18px;
+  background: var(--bg-2);
+  border-bottom-color: var(--line);
+}
+/* The position, in a ring. */
+.ma-step-marker {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--fg-2);
+  font-family: var(--jbm);
+  font-size: 12px;
+  font-weight: 600;
+}
+/* The current step's marker is the one filled with the accent. */
+.ma-step-current .ma-step-marker {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--bg);
+}
+/* A clear step's ring holds a tick; the row says "clear" in words. */
+.ma-step-marker-clear { color: var(--ok); }
+.ma-step-main {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.ma-step-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-bottom: 5px;
+}
+/* What follows a step's sentences: what it waits on, the engine's messages, a command, a note. */
+.ma-step-extra { margin-top: 10px; }
+/* Where a step's remedy is: one or two links that leave the tab. */
+.ma-step-links {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 100%;
+  padding-top: 3px;
+}
+
+/* A clear step is one line: its state, its name, and what was found. */
+.ma-step-clear {
+  align-items: center;
+  padding-top: 11px;
+  padding-bottom: 11px;
+}
+.ma-step-clear .ma-step-links { padding-top: 0; }
+.ma-step-line {
+  flex: 1 1 260px;
+  min-width: 0;
+  margin: 0;
+  font-family: var(--geist);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+.ma-step-line-title {
+  margin: 0 4px 0 6px;
+  color: var(--fg);
+  font-weight: 500;
+}
+.ma-step-line-note {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* The engine's own failure messages: each on a line of its own, with how often it was seen. */
+.ma-step-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.ma-step-error-count {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-2);
+  white-space: nowrap;
+}
+/* The figures of a step this page has no sentence for: a label, then its value. */
+.ma-step-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 24px;
+  margin: 10px 0 0;
+}
+.ma-step-figure {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.ma-step-figure > dt {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.ma-step-figure > dd {
+  margin: 0;
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+/* A command to copy, and under it what running it does. */
+.ma-step-command { max-width: 560px; }
+.ma-step-command-note {
+  margin-top: 6px;
+  line-height: 1.6;
+}

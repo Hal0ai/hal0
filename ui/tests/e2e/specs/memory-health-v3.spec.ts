@@ -1,317 +1,299 @@
 /**
- * memory-health-v3 — Memory ▸ Health (#memory/health), the interim status view.
+ * memory-health-v3 — Memory ▸ Health (#memory/health) as an ordered repair path
+ * (ADR-0058 decision 12).
  *
- * It is built from the per-subject routes, not yet from the composed `/api/memory/health`, so it
- * has no order to it: it lists what it can see and never calls anything a "step". This spec pins
- * its states (all clear, something needs attention, engine unreachable), the notice for each state
- * of the embedder record, and the banks table.
+ * The tab reads ONE answer, `GET /api/memory/health`: the verdict, the path in the route's order
+ * (the step to do now, the ones that wait on it, the clear ones), the banks table and the page's
+ * summary line. Only the engine facts strip still makes two older reads (`/api/memory/models`
+ * and `/api/memory/graph/status`), routed here by the helpers in fixtures/memoryArea.ts.
  *
- * The engine panel, bank rows and outage assertions that memory-v2-overview, memory-v2-view and
- * memory-bank-error-branches made against the old Overview live here now; the growth chart and
- * the New bank form they also covered were dropped with that page.
+ * Forced mock. The health answer is built in the bundle in the state named by
+ * `window.__hal0MockMemoryHealth` (src/api/mockFixtures.ts): `attention` (the default: extraction
+ * is current, the queue and knowledge wait on it), `clear`, `unreachable`, `queue`,
+ * `embedder-mixed`, `embedder-conflict`, `knowledge` and `partial`. Memory off and a non-Hindsight
+ * engine are not bundle states, so those tests take the route out of the bundle's hands.
  *
- * Forced mock: six banks, `ingest` with 7 operations waiting and 1 failed (so the default box
- * needs attention). Per-spec routes set the rest; see fixtures/memoryArea.ts.
+ * Every test also routes the per-bank stats and mental-models reads past the bundle, so that if
+ * the tab ever asked for them again the request would reach the network and be counted here.
  */
 import type { Page } from '@playwright/test'
 
-import { test, expect } from '../fixtures/apiMock'
-import {
-  RECORD_CONFLICT,
-  RECORD_MIXED,
-  RECORD_UPGRADED,
-  routeAllClear,
-  routeEngineDown,
-  routeGraph,
-  routeModels,
-} from '../fixtures/memoryArea'
+import { test, expect, json } from '../fixtures/apiMock'
+import { routeGraph, routeModels } from '../fixtures/memoryArea'
 
-const stat = (page: Page, id: string) => page.locator(`[data-testid="ma-health-strip"] [data-stat="${id}"]`)
-const summary = (page: Page) => page.getByTestId('ma-health-summary')
+type HealthState =
+  | 'attention'
+  | 'clear'
+  | 'unreachable'
+  | 'queue'
+  | 'embedder-mixed'
+  | 'embedder-conflict'
+  | 'knowledge'
+  | 'partial'
 
-/** Nothing on this page is a step, in any state. */
-async function expectNoStepWording(page: Page) {
-  await expect(page.getByTestId('memory-area')).not.toContainText(/\bstep\b/i)
+const PER_BANK = /\/api\/memory\/banks\/[^/]+\/(stats|mental-models)/
+
+/** Paths taken out of the bundle's hands, so a request for them reaches `page.route`. */
+async function passthrough(page: Page, extra: string[] = []) {
+  await page.addInitScript((paths) => {
+    ;(window as unknown as { __hal0MockPassthrough?: unknown }).__hal0MockPassthrough = [
+      /^\/api\/memory\/banks\/[^/]+\/(stats|mental-models)/,
+      ...paths,
+    ]
+  }, extra)
 }
 
-test.describe('all clear', () => {
-  test.beforeEach(async ({ page }) => {
-    await routeAllClear(page)
-    await page.goto('/#memory/health')
+/** Count every per-bank stats or mental-models request the page makes. */
+async function countPerBank(page: Page) {
+  const seen: string[] = []
+  await page.route(PER_BANK, (route) => {
+    seen.push(route.request().url())
+    return json(route, {})
   })
+  return seen
+}
 
-  test('says nothing needs attention', async ({ page }) => {
+async function open(page: Page, state: HealthState) {
+  await page.addInitScript((s) => {
+    ;(window as unknown as { __hal0MockMemoryHealth?: string }).__hal0MockMemoryHealth = s
+  }, state)
+  await passthrough(page)
+  const perBank = await countPerBank(page)
+  await routeModels(page)
+  await routeGraph(page)
+  await page.goto('/#memory/health')
+  return perBank
+}
+
+const summary = (page: Page) => page.getByTestId('ma-health-summary')
+const path = (page: Page) => page.getByTestId('ma-health-path')
+const step = (page: Page, id: string) => path(page).locator(`> li[data-step="${id}"]`)
+
+test.afterEach(async ({ page }) => {
+  // An unrouted read answered `{}` would throw in a component: the view falls to the boundary.
+  await expect(page.getByText('This view hit an error')).toHaveCount(0)
+})
+
+test.describe('one request', () => {
+  test('mounting Health asks no bank for its stats or its mental models', async ({ page }) => {
+    const perBank = await open(page, 'attention')
+    await expect(summary(page)).toHaveAttribute('data-state', 'attention')
+    await expect(page.getByTestId('ma-health-banks')).toBeVisible()
+    await expect(page.getByTestId('ma-meta')).toHaveText(/^[\d,]+ facts in 6 banks$/)
+    // Let a 30 s poll's worth of work settle: nothing per bank, ever.
+    await page.waitForTimeout(500)
+    expect(perBank).toEqual([])
+  })
+})
+
+test.describe('clear', () => {
+  test('says nothing needs attention and, in one sentence, what was checked', async ({ page }) => {
+    await open(page, 'clear')
     await expect(summary(page)).toHaveAttribute('data-state', 'clear')
     await expect(summary(page).getByRole('heading', { level: 2 })).toHaveText('Nothing needs attention')
+    await expect(page.getByTestId('ma-health-detail')).toHaveText(
+      'The engine answers, and the 4 things this page watches are clear: storing memories, the queue, the embedder and knowledge.',
+    )
     await expect(summary(page).locator('.chip')).toHaveText('working')
-    await expect(page.getByTestId('ma-health-findings')).toHaveCount(0)
-    await expect(page.getByTestId('ma-health-embedder')).toHaveCount(0)
-    await expectNoStepWording(page)
-  })
-
-  test('engine facts: version and reachability, extraction, embedder, reranker, decision model', async ({
-    page,
-  }) => {
-    const strip = page.getByTestId('ma-health-strip')
-    await expect(strip.locator('.ma-stat-label')).toHaveText([
-      'Engine',
-      'Extraction',
-      'Embedder',
-      'Reranker',
-      'Decision model',
-    ])
-    // buildMemoryEngine() in the mock: reachable, version 0.9.2.
-    await expect(stat(page, 'engine')).toContainText('Hindsight 0.9.2')
-    await expect(stat(page, 'engine').locator('.chip')).toHaveText('reachable')
-    await expect(stat(page, 'extraction')).toContainText('memory slot')
-    await expect(stat(page, 'extraction')).toContainText('dedicated slot · resolves to a model')
-    await expect(stat(page, 'embedder')).toContainText('hs-embed-1')
-    await expect(stat(page, 'reranker')).toContainText('hs-rerank-1')
-    await expect(stat(page, 'decision')).toContainText('Off')
-  })
-
-  test('one line for the queue and one for knowledge, each a stated sum, each with its link', async ({
-    page,
-  }) => {
-    await expect(page.getByTestId('ma-health-work')).toContainText('each line is a sum of per-bank figures')
-    const queue = page.getByTestId('ma-health-queue')
-    await expect(queue).toContainText('7 operations waiting and 0 failed, summed across 6 banks.')
-    await expect(queue.getByRole('link', { name: 'Open Operations' })).toHaveAttribute('href', '#memory/operations')
-    const knowledge = page.getByTestId('ma-health-knowledge')
-    await expect(knowledge).toContainText(/\d+ of \d+ mental models are stale, summed across 6 banks\./)
-    await knowledge.getByRole('link', { name: 'Open Knowledge' }).click()
-    await expect(page).toHaveURL(/#memory\/knowledge\?bank=primary$/)
-    await expect(page.getByTestId('ma-kn-summary')).toBeVisible()
-  })
-
-  test('banks table: a real table, a row for each of the six banks, largest first', async ({ page }) => {
-    const region = page.getByRole('region', { name: 'Banks table' })
-    await expect(region).toHaveAttribute('tabindex', '0')
-    const table = page.getByTestId('ma-health-banks')
-    await expect(table.locator('thead th')).toHaveText(['Bank', 'Facts', 'Documents', 'Waiting', 'Failed'])
-    await expect(table.locator('thead th[scope="col"]')).toHaveCount(5)
-    await expect(table.locator('tbody th[scope="row"]')).toHaveText([
-      'ingest',
-      'hermes',
-      'big',
-      'scratch',
-      'primary',
-      'empty',
-    ])
-    const ingest = table.locator('tr[data-bank="ingest"]')
-    await expect(ingest.locator('[data-col="facts"]')).toHaveText('4,310')
-    await expect(ingest.locator('[data-col="waiting"]')).toHaveText('7')
-    await expect(ingest.locator('[data-col="failed"]')).toHaveText('0')
-    // An empty bank reports zero: that is a figure, not a gap.
-    await expect(table.locator('tr[data-bank="empty"] [data-col="facts"]')).toHaveText('0')
-    await expect(page.getByTestId('ma-health-banks-foot')).toHaveCount(0)
-  })
-
-  test('a bank row opens that bank in Facts', async ({ page }) => {
-    const link = page.getByTestId('ma-health-banks').getByRole('link', { name: 'scratch' })
-    await expect(link).toHaveAttribute('href', '#memory/facts?bank=scratch')
-    await link.click()
-    await expect(page).toHaveURL(/#memory\/facts\?bank=scratch$/)
-    await expect(page.getByTestId('mv-workspace')).toBeVisible()
-    await expect(page.getByTestId('ma-scope-bank').getByRole('radio', { name: 'scratch' })).toHaveAttribute(
-      'aria-checked',
-      'true',
-    )
-  })
-
-  test('no chart, and no figure at display size', async ({ page }) => {
-    const area = page.getByTestId('memory-area')
-    await expect(area.locator('canvas')).toHaveCount(0)
-    await expect(area.locator('svg rect')).toHaveCount(0)
-    // The page title is the largest type; no number is set larger than the kit's 18px.
-    const sizes = await area.evaluate((root) =>
-      [...root.querySelectorAll('*')]
-        .filter((el) => el.tagName !== 'H1' && /\d/.test(el.textContent || '') && el.children.length === 0)
-        .map((el) => parseFloat(getComputedStyle(el).fontSize)),
-    )
-    expect(Math.max(...sizes)).toBeLessThanOrEqual(18)
+    await expect(path(page).locator('> li')).toHaveCount(4)
+    await expect(path(page).locator('> li[data-state="clear"]')).toHaveCount(4)
+    await expect(page.locator('.btn.primary, .primary')).toHaveCount(0)
   })
 })
 
-test.describe('embedder record', () => {
-  test('the ordinary upgraded box gets one quiet line, and stays clear', async ({ page }) => {
-    await routeAllClear(page)
-    await routeModels(page, RECORD_UPGRADED)
-    await page.goto('/#memory/health')
-    const note = page.getByTestId('ma-health-embedder')
-    await expect(note).toHaveAttribute('data-kind', 'quiet')
-    await expect(note.locator('.chip')).toHaveCount(0)
-    await expect(note).toHaveText(
-      'This store was built with BAAI/bge-small-en-v1.5 and the engine stays on it. ' +
-        'Settings ask for hs-embed-1, which has no effect until the store is re-embedded.',
-    )
-    await expect(summary(page)).toHaveAttribute('data-state', 'clear')
-    await expect(stat(page, 'embedder')).toContainText('settings ask for hs-embed-1')
+test.describe('attention: extraction current, queue and knowledge waiting', () => {
+  test.beforeEach(async ({ page }) => {
+    await open(page, 'attention')
   })
 
-  test('a mixed store is a warning that names both models', async ({ page }) => {
-    await routeAllClear(page)
-    await routeModels(page, RECORD_MIXED)
-    await page.goto('/#memory/health')
-    const note = page.getByTestId('ma-health-embedder')
-    await expect(note.locator('.chip')).toHaveText('mixed')
-    await expect(note.locator('.chip')).toHaveAttribute('data-tone', 'warn')
-    await expect(note.locator('.ma-notice-text')).toHaveText(
-      'This store may hold vectors from two embedders: it existed before the engine moved from ' +
-        'BAAI/bge-small-en-v1.5 to hs-embed-1. Recall over older facts is degraded until the store is re-embedded.',
+  test('counts the open steps in words and names the current one', async ({ page }) => {
+    await expect(summary(page).getByRole('heading', { level: 2 })).toHaveText('3 things need you')
+    await expect(page.getByTestId('ma-health-detail')).toHaveText(
+      /^Start with step 1, storing memories: fix what is failing when memories are stored\. The other 2 wait on it, in the order below\.$/,
     )
-    await expect(summary(page)).toHaveAttribute('data-state', 'attention')
-    await expect(page.getByTestId('ma-health-findings')).toContainText('two embedders')
-    await expect(stat(page, 'embedder').locator('.chip')).toHaveText('mixed')
   })
 
-  test('a conflict is a warning that names both models', async ({ page }) => {
-    await routeAllClear(page)
-    await routeModels(page, RECORD_CONFLICT)
-    await page.goto('/#memory/health')
-    const note = page.getByTestId('ma-health-embedder')
-    await expect(note.locator('.chip')).toHaveAttribute('data-tone', 'warn')
-    await expect(note.locator('.ma-notice-text')).toHaveText(
-      'The embedder record says hs-embed-1, but the engine is set to run on BAAI/bge-small-en-v1.5. ' +
-        'hal0 has changed neither. Remove the override or correct the record so the two agree.',
-    )
-    await expect(summary(page)).toHaveAttribute('data-state', 'attention')
+  test('an ordered list in the route order; the current row is marked by words and aria-current', async ({
+    page,
+  }) => {
+    await expect(path(page)).toHaveJSProperty('tagName', 'OL')
+    const ids = await path(page).locator('> li').evaluateAll((lis) => lis.map((li) => `${li.dataset.step}:${li.dataset.state}`))
+    expect(ids).toEqual(['extraction:current', 'queue:waiting', 'embedder:clear', 'knowledge:waiting'])
+    await expect(step(page, 'extraction')).toHaveAttribute('aria-current', 'step')
+    await expect(step(page, 'extraction')).toContainText('Step 1 of 4 · do this now')
+    await expect(page.locator('[aria-current="step"]')).toHaveCount(1)
   })
 
-  test('no state of the notice offers a button: nothing here starts a switch', async ({ page }) => {
-    await routeAllClear(page)
-    await routeModels(page, RECORD_MIXED)
-    await page.goto('/#memory/health')
-    await expect(page.getByTestId('ma-health-embedder')).toBeVisible()
-    await expect(page.getByTestId('ma-health-embedder').locator('button, a')).toHaveCount(0)
-    await expect(page.getByTestId('memory-area').getByRole('button')).toHaveCount(0)
+  test('waiting steps say what they wait on', async ({ page }) => {
+    await expect(page.getByTestId('ma-health-step-queue-waits')).toHaveText('Waiting on step 1: storing memories.')
+    await expect(page.getByTestId('ma-health-step-knowledge-waits')).toHaveText('Waiting on step 2: the queue.')
+  })
+
+  test('extraction: Services and Engine settings links, the grouped errors, no primary control', async ({ page }) => {
+    await expect(page.getByTestId('ma-health-step-extraction-services')).toHaveAttribute('href', '#services')
+    await expect(page.getByTestId('ma-health-step-extraction-settings')).toHaveAttribute('href', '#settings/memory')
+    const errors = page.getByTestId('ma-health-step-extraction-errors')
+    await expect(errors.locator('li').first()).toContainText(/seen \d+ times?/)
+    await expect(errors).not.toContainText(/[{}]/)
+    await expect(page.locator('.btn.primary, .primary')).toHaveCount(0)
+  })
+
+  test('no reason code or figure key reaches the page', async ({ page }) => {
+    // The engine's own error text (which may name a task type) is quoted as reported; the rest
+    // of the path is the page's words.
+    const text = await path(page).evaluate((el) => {
+      const copy = el.cloneNode(true) as HTMLElement
+      copy.querySelectorAll('[data-testid$="-errors"]').forEach((node) => node.remove())
+      return copy.innerText
+    })
+    expect(text).not.toMatch(/\b[a-z]+_[a-z_]+\b/)
+    expect(text).not.toMatch(/[{}]/)
+  })
+
+  test('"Open Operations" opens the Operations tab', async ({ page }) => {
+    await page.getByTestId('ma-health-step-queue-operations').click()
+    await expect(page).toHaveURL(/#memory\/operations/)
   })
 })
 
-test.describe('something needs attention', () => {
-  test('lists what failed, in no order, and never as steps', async ({ page }) => {
-    // The default mock: `ingest` has a failed operation. Add an extraction slot that does not
-    // resolve.
-    await routeModels(page)
-    await routeGraph(page, { slot_resolves: false })
-    await page.goto('/#memory/health')
-    await expect(summary(page)).toHaveAttribute('data-state', 'attention')
-    await expect(summary(page).getByRole('heading', { level: 2 })).toHaveText('2 things need attention')
-    const findings = page.getByTestId('ma-health-findings')
-    await expect(findings.locator('li')).toHaveText([
-      'Extraction is stalled: its slot does not match an enabled LLM slot.',
-      '1 operation has failed.',
-    ])
-    await expect(stat(page, 'extraction').locator('.chip')).toHaveText('unreachable')
-    await expect(page.getByTestId('ma-health-queue')).toContainText(
-      /\d+ operations waiting and 1 failed, summed across 6 banks\./,
-    )
-    await expect(page.getByTestId('ma-health-banks').locator('tr[data-bank="ingest"] [data-col="failed"]')).toHaveText('1')
-    await expectNoStepWording(page)
+test.describe('each later step current in turn', () => {
+  test('the queue alone', async ({ page }) => {
+    await open(page, 'queue')
+    await expect(summary(page).getByRole('heading', { level: 2 })).toHaveText('1 thing needs you')
+    await expect(step(page, 'queue')).toHaveAttribute('data-state', 'current')
+    await expect(step(page, 'extraction')).toHaveAttribute('data-state', 'clear')
+    await expect(page.getByTestId('ma-health-step-queue-operations')).toHaveText(/Open Operations/)
   })
 
-  test('a record the models route does not carry reads as not reported, never as fine', async ({ page }) => {
-    // The default fixtures: the models route answers `{}`.
-    await routeAllClear(page)
-    await page.unroute('**/api/memory/models')
-    await page.goto('/#memory/health')
-    await expect(stat(page, 'embedder').getByRole('img', { name: 'not reported' })).toBeVisible()
-    await expect(summary(page)).toHaveAttribute('data-state', 'partial')
-    await expect(summary(page)).toContainText('Not reported: the embedder record.')
+  test('the embedder, for a mixed store: the switch as a dry run to copy, and nothing that runs it', async ({
+    page,
+  }) => {
+    await open(page, 'embedder-mixed')
+    await expect(step(page, 'embedder')).toHaveAttribute('data-state', 'current')
+    await expect(page.getByTestId('ma-health-step-embedder-text')).toContainText('two embedders')
+    await expect(page.getByTestId('ma-health-step-embedder-command').locator('code')).toHaveText(
+      'hal0 memory embedder switch hindsight-ai/hs-embed-1',
+    )
+    await expect(step(page, 'embedder')).toContainText('dry run')
+    await expect(step(page, 'embedder').locator('button')).toHaveCount(1)
+    await expect(step(page, 'embedder').locator('button')).toHaveAttribute('aria-label', 'Copy command')
+  })
+
+  test('the embedder, for a conflict: both models named, hal0 doctor to copy', async ({ page }) => {
+    await open(page, 'embedder-conflict')
+    await expect(step(page, 'embedder')).toHaveAttribute('data-state', 'current')
+    await expect(page.getByTestId('ma-health-step-embedder-text')).toContainText('hindsight-ai/hs-embed-1')
+    await expect(page.getByTestId('ma-health-step-embedder-text')).toContainText('BAAI/bge-small-en-v1.5')
+    await expect(page.getByTestId('ma-health-step-embedder-command').locator('code')).toHaveText('hal0 doctor')
+  })
+
+  test('knowledge alone', async ({ page }) => {
+    await open(page, 'knowledge')
+    await expect(step(page, 'knowledge')).toHaveAttribute('data-state', 'current')
+    await expect(page.getByTestId('ma-health-step-knowledge-text')).toHaveText(
+      '5 knowledge pages and 6 mental models are stale: behind the facts they were built from. No refresh has failed.',
+    )
+    await page.getByTestId('ma-health-step-knowledge-knowledge').click()
+    await expect(page).toHaveURL(/#memory\/knowledge/)
+  })
+})
+
+test.describe('partial', () => {
+  test('never an unqualified all clear; the gap is said beside the figures', async ({ page }) => {
+    await open(page, 'partial')
+    await expect(summary(page).getByRole('heading', { level: 2 })).toHaveText('Nothing needs attention in what was read')
+    await expect(summary(page).locator('.chip')).toHaveCount(0)
+    await expect(page.getByTestId('ma-health-qualifier')).toContainText('did not answer in time')
+    await expect(page.getByTestId('ma-health-step-queue-note')).toContainText('did not answer in time')
+    await expect(page.getByTestId('ma-health-banks-partial')).toContainText('did not answer in time')
+    // The banks that did not answer show the mark, not zero.
+    await expect(page.locator('[data-bank="big"] [data-col="waiting"] .ma-missing')).toHaveCount(1)
   })
 })
 
 test.describe('engine unreachable', () => {
   test.beforeEach(async ({ page }) => {
-    await routeEngineDown(page)
-    await page.goto('/#memory/health')
+    await open(page, 'unreachable')
   })
 
-  test('says what is known and what is not, with no figure anywhere', async ({ page }) => {
-    await expect(page.getByTestId('ma-meta')).toHaveText('Engine unreachable · no counts available')
+  test('says what is known and what is not, with no figure', async ({ page }) => {
     const card = page.getByTestId('ma-health-unreachable')
     await expect(card.getByRole('heading', { level: 2 })).toHaveText('The memory engine is not answering')
-    await expect(card.locator('.chip').first()).toHaveText('unreachable')
-    await expect(card).toContainText('Nothing here is counted as zero')
-    await expect(page.getByRole('heading', { name: 'What is known' })).toBeVisible()
-    await expect(page.getByRole('heading', { name: 'What is not known until it answers' })).toBeVisible()
-    await expect(page.getByTestId('ma-health-strip')).toHaveCount(0)
+    await expect(page.getByText('What is known', { exact: true })).toBeVisible()
+    await expect(page.getByText('What is not known until it answers')).toBeVisible()
     await expect(page.getByTestId('ma-health-banks')).toHaveCount(0)
-    await expect(page.getByTestId('ma-health-summary')).toHaveCount(0)
-    // No count of anything: an outage is not an empty engine.
-    const words = (await page.getByTestId('memory-area').innerText()).replace(/hal0/g, '')
-    expect(words).not.toMatch(/\d/)
-    await expectNoStepWording(page)
+    await expect(page.getByTestId('ma-meta')).toHaveText('Engine unreachable · no counts available')
   })
 
   test('links to Services and gives the doctor command', async ({ page }) => {
-    const box = page.getByTestId('ma-health-doctor')
-    await expect(box.locator('code')).toHaveText('hal0 doctor')
-    await expect(box.getByRole('button', { name: 'Copy command' })).toBeVisible()
-    await page.getByTestId('ma-health-services').click()
-    await expect(page).toHaveURL(/#services$/)
+    await expect(page.getByTestId('ma-health-services')).toHaveAttribute('href', '#services')
+    await expect(page.getByTestId('ma-health-doctor').locator('code')).toHaveText('hal0 doctor')
   })
 
-  test('"Check again" asks the engine again', async ({ page }) => {
-    let checks = 0
-    await page.route('**/api/memory/engine', (route) => {
-      checks += 1
-      return route.fallback()
-    })
+  test('"Check again" asks for the health answer again', async ({ page }) => {
     await page.getByTestId('ma-health-recheck').click()
-    await expect.poll(() => checks).toBeGreaterThan(0)
-    await expect(page.getByTestId('ma-health-unreachable')).toBeVisible()
-  })
-
-  test('the other tabs say so too, instead of showing an empty bank', async ({ page }) => {
-    await page.getByTestId('ma-tab-facts').click()
-    await expect(page.getByTestId('ma-facts-unreachable')).toContainText('The memory engine is not answering')
-    await expect(page.getByTestId('mv-workspace')).toHaveCount(0)
-    await page.getByTestId('ma-facts-unreachable').getByRole('link', { name: 'Open Health' }).click()
     await expect(page.getByTestId('ma-health-unreachable')).toBeVisible()
   })
 })
 
-test.describe('a bank that does not answer (#1539)', () => {
-  // An outage must not read as an empty bank: with every bank-scoped route failing, a row shows
-  // the "not reported" mark, never a zero, and each sum says it has nothing to add up.
-  test.beforeEach(async ({ page }) => {
-    await routeModels(page)
-    await routeGraph(page)
-    await page.addInitScript(() => {
-      ;(window as unknown as { __hal0MockPassthrough?: unknown }).__hal0MockPassthrough = ['/api/memory/banks/']
-    })
-    await page.route('**/api/memory/banks/*/**', (route) =>
-      route.fulfill({
-        status: 503,
-        contentType: 'application/json',
-        body: JSON.stringify({
-          error: { code: 'memory.engine_unreachable', message: 'hindsight-api is not responding', details: {} },
-        }),
-      }),
-    )
-    await page.goto('/#memory/health')
+test.describe('no path', () => {
+  const noPath = (enabled: boolean, reason: string) => ({
+    enabled,
+    reason,
+    checked_at: '2026-06-12T22:20:00+00:00',
+    verdict: null,
+    partial: [],
+    steps: [],
   })
 
-  test('rows show "not reported", not zero facts', async ({ page }) => {
-    const row = page.getByTestId('ma-health-banks').locator('tr[data-bank="hermes"]')
-    await expect(row.locator('[data-col="documents"]').getByRole('img', { name: 'not reported' })).toBeVisible({
-      timeout: 15_000,
+  for (const [name, enabled, reason, testId] of [
+    ['memory turned off', false, 'memory_disabled', 'ma-health-off'],
+    ['a non-Hindsight engine', true, 'engine_unsupported', 'ma-health-fallback'],
+  ] as const) {
+    test(`${name}: says so, links to engine settings, shows no path`, async ({ page }) => {
+      await passthrough(page, ['/api/memory/health'])
+      await countPerBank(page)
+      await routeModels(page)
+      await routeGraph(page)
+      await page.route('**/api/memory/health', (route) => json(route, noPath(enabled, reason)))
+      await page.goto('/#memory/health')
+      await expect(page.getByTestId(testId)).toBeVisible()
+      await expect(page.getByTestId(testId).locator('a')).toHaveAttribute('href', '#settings/memory')
+      await expect(path(page)).toHaveCount(0)
     })
-    await expect(row.locator('[data-col="waiting"]')).toHaveText('–')
-    await expect(row.locator('[data-col="failed"]')).toHaveText('–')
-    await expect(page.getByTestId('ma-health-banks-foot')).toHaveText('– means the engine did not report a figure')
+  }
+})
+
+test.describe('below the path', () => {
+  test('engine facts strip: five cells, in order', async ({ page }) => {
+    await open(page, 'clear')
+    const strip = page.getByTestId('ma-health-strip')
+    await expect(strip.locator('.ma-stat-label')).toHaveText(['Engine', 'Extraction', 'Embedder', 'Reranker', 'Decision model'])
+    await expect(strip.locator('[data-stat="engine"]')).toContainText('Hindsight 0.9.2')
+    await expect(strip.locator('[data-stat="embedder"]')).toContainText('hindsight-ai/hs-embed-1')
+    await expect(strip.locator('[data-stat="reranker"]')).toContainText('hs-rerank-1')
   })
 
-  test('the sums say they have nothing to add up, and the page is not called clear', async ({ page }) => {
-    await expect(page.getByTestId('ma-health-queue')).toContainText(
-      'Not reported: no bank answered with its operation counts.',
-      { timeout: 15_000 },
-    )
-    await expect(page.getByTestId('ma-health-knowledge')).toContainText(
-      'Not reported: no bank answered with its mental models.',
-    )
-    await expect(summary(page)).toHaveAttribute('data-state', 'partial')
-    await expect(summary(page).getByRole('heading', { level: 2 })).toHaveText('No problems found in what was reported')
+  test('banks table: a row for each of the six banks, largest first, a row opens its facts', async ({ page }) => {
+    await open(page, 'clear')
+    const rows = page.getByTestId('ma-health-banks').locator('tbody tr')
+    await expect(rows).toHaveCount(6)
+    const facts = await rows
+      .locator('[data-col="facts"]')
+      .evaluateAll((tds) => tds.map((td) => Number((td.textContent || '').replace(/,/g, ''))))
+    expect([...facts].sort((a, b) => b - a)).toEqual(facts)
+    await rows.first().locator('a').click()
+    await expect(page).toHaveURL(/#memory\/facts\?bank=/)
+  })
+})
+
+test.describe('narrow screen', () => {
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test('the page does not scroll sideways', async ({ page }) => {
+    await open(page, 'attention')
+    await expect(path(page)).toBeVisible()
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+    expect(overflow).toBeLessThanOrEqual(0)
   })
 })

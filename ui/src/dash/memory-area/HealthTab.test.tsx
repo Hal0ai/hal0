@@ -1,42 +1,33 @@
 // @vitest-environment happy-dom
 //
-// Memory ▸ Health, the interim view: each of its states, the copy of each embedder state, and
-// the banks table. The hooks are replaced; the area object is built as MemoryArea builds it.
+// Memory ▸ Health as an ordered repair path (ADR-0058 decision 12): the verdict, the steps in the
+// route's order with each step current in turn, the states with no path (loading, failed, off,
+// another engine, unreachable), a partial read, the engine facts strip, the quiet embedder line
+// and the banks table. The two strip hooks are replaced; the area object is built as MemoryArea
+// builds it, from one health answer.
 import { createElement } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { MemoryBank } from '@/api/hooks/useHindsight'
-import type { MentalModelsEntry } from './health-pure'
+import type { MemoryHealth, MemoryHealthReport } from '@/api/hooks/useMemory'
 import {
-  BANKS,
-  ENGINE,
+  EMBEDDER_ID,
   GRAPH,
-  STATS,
-  bankStats,
-  embedderRecord,
+  OLD_EMBEDDER_ID,
+  healthReport,
+  healthUnreachable,
   makeArea,
-  mentalModel,
   modelsAnswer,
-  type FakeQuery,
+  pathSteps,
 } from './area-test-fixtures'
 import { cleanup, click, mount } from './shared/test-harness'
 
 const m = vi.hoisted(() => ({
   graph: {} as { data?: unknown; isError?: boolean },
   models: {} as { data?: unknown; isError?: boolean },
-  mental: null as null | ((ids: string[]) => unknown[]),
-  mentalFor: [] as string[][],
 }))
 
 vi.mock('@/api/hooks/useMemory', () => ({
   useMemoryGraphStatus: () => m.graph,
   useMemoryModels: () => m.models,
-}))
-vi.mock('./area-data', () => ({
-  useAllBankStats: () => [],
-  useAllMentalModels: (ids: string[]) => {
-    m.mentalFor.push(ids)
-    return m.mental ? m.mental(ids) : ids.map((bankId) => ({ bankId, models: [] }))
-  },
 }))
 
 const { HealthTab } = await import('./HealthTab.jsx')
@@ -44,31 +35,115 @@ const { HealthTab } = await import('./HealthTab.jsx')
 beforeEach(() => {
   m.graph = { data: GRAPH }
   m.models = { data: modelsAnswer() }
-  m.mental = null
-  m.mentalFor = []
 })
 afterEach(cleanup)
 
 const render = (area = makeArea()) => mount(createElement(HealthTab, { area })).host
+const withReport = (report: MemoryHealth) => render(makeArea({ health: report }))
 const byId = (host: HTMLElement, id: string) => host.querySelector<HTMLElement>(`[data-testid="${id}"]`)
-const stat = (host: HTMLElement, id: string) => host.querySelector<HTMLElement>(`[data-stat="${id}"]`)!
 const textOf = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, ' ').trim()
+const rows = (host: HTMLElement) => [...host.querySelectorAll<HTMLElement>('[data-testid="ma-health-path"] > li')]
+const row = (host: HTMLElement, id: string) => host.querySelector<HTMLElement>(`[data-testid="ma-health-path"] > li[data-step="${id}"]`)!
+const stat = (host: HTMLElement, id: string) => host.querySelector<HTMLElement>(`[data-stat="${id}"]`)!
 
-/** Every state: nothing on this page is called a step, and nothing puts the page in an order. */
-function expectNoStepWording(host: HTMLElement) {
-  expect(host.textContent).not.toMatch(/\bstep\b/i)
-  expect(host.textContent).not.toMatch(/do this now|waiting on step/i)
+/** Nothing the route wrote reaches the page raw: no reason code, no figure key, no JSON. */
+function expectNoRawRouteText(host: HTMLElement) {
+  const text = host.textContent ?? ''
+  expect(text).not.toMatch(/[a-z]+_[a-z_]+/) // reason codes and figure keys
+  expect(text).not.toMatch(/[{}[\]]/)
+  expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}T/)
 }
+
+/** No primary-styled control anywhere on the page: every remedy today is a link or a command. */
+/** No figure: the only digit allowed is the product's own name. */
+const expectNoFigure = (host: HTMLElement) => expect((host.textContent ?? '').replace(/hal0/g, '')).not.toMatch(/\d/)
+
+function expectNoPrimary(host: HTMLElement) {
+  expect(host.querySelector('.primary, [class*="btn-primary"]')).toBeNull()
+}
+
+// ── Fixtures for each step current in turn ──────────────────────────────────
+
+const WINDOW = { window_s: 21600 }
+const QUEUE_LIMIT = { max_waiting_age_s: 1800 }
+const TOP_ERRORS = [
+  { message: 'Task exceeded the <n>s wall-clock limit', count: 3 },
+  { message: 'HTTP 503 from <host>', count: 1 },
+]
+
+/** Extraction current; the queue and knowledge wait on it, in order. */
+function extractionFirst(): MemoryHealthReport {
+  const base = healthReport()
+  return healthReport({
+    steps: pathSteps({
+      extraction: {
+        reason: 'extraction_recent_failures',
+        figures: { slot_resolves: true, llm_reachable: true, failures: 4, ...WINDOW, top_errors: TOP_ERRORS },
+      },
+      queue: {
+        reason: 'queue_operations_failed',
+        figures: { failed: 3, waiting: 52, oldest_waiting_s: 5400, ...QUEUE_LIMIT },
+      },
+      knowledge: { reason: 'knowledge_refresh_failed', figures: { pages_stale: 4, models_stale: 0, refresh_failed: 1 } },
+    }),
+    extraction: { ...base.extraction!, failures_6h: 4, top_errors: TOP_ERRORS },
+    queue: { ...base.queue!, waiting: 52, failed: 3, oldest_waiting_s: 5400 },
+    knowledge: { ...base.knowledge!, pages_stale: 4, refresh_failed: 1 },
+  })
+}
+
+function queueAlone(): MemoryHealthReport {
+  const base = healthReport()
+  return healthReport({
+    steps: pathSteps({
+      queue: { reason: 'queue_operations_failed', figures: { failed: 1, waiting: 0, oldest_waiting_s: null, ...QUEUE_LIMIT } },
+    }),
+    queue: { ...base.queue!, failed: 1 },
+  })
+}
+
+function embedderStep(reason: 'embedder_mixed' | 'embedder_conflict' | 'embedder_needs_switch') {
+  const conflict = reason === 'embedder_conflict' ? { live: OLD_EMBEDDER_ID } : null
+  const mixed = reason === 'embedder_mixed'
+  const configured = reason === 'embedder_needs_switch' ? { provider: 'local', model: 'operator/embed-2' } : EMBEDDER_ID
+  return healthReport({
+    steps: pathSteps({
+      embedder: {
+        reason,
+        figures: {
+          recorded: EMBEDDER_ID,
+          configured,
+          mixed,
+          conflict,
+          reasons: [reason.replace('embedder_', '')],
+          informational: false,
+        },
+      },
+    }),
+    embedder: { recorded: EMBEDDER_ID, configured, mixed, needs_switch: mixed, conflict, informational: false },
+  })
+}
+
+function knowledgeAlone(): MemoryHealthReport {
+  const base = healthReport()
+  return healthReport({
+    steps: pathSteps({
+      knowledge: { reason: 'knowledge_stale', figures: { pages_stale: 5, models_stale: 6, refresh_failed: 0 } },
+    }),
+    knowledge: { ...base.knowledge!, pages_stale: 5, models_stale: 6 },
+  })
+}
+
+// ── States with no path ─────────────────────────────────────────────────────
 
 describe('loading', () => {
   it('shows skeletons and not one figure', () => {
-    const host = render(makeArea({ engineQuery: {} }))
+    const host = render(makeArea({ healthQuery: {} }))
     expect(byId(host, 'ma-health-loading')).not.toBeNull()
     expect(host.querySelectorAll('.ma-skel').length).toBeGreaterThan(4)
-    // No digit anywhere: a loading page never shows a zero.
     expect(host.textContent).not.toMatch(/\d/)
     expect(host.querySelector('table')).toBeNull()
-    // The five cells keep their labels while their values load.
+    expect(byId(host, 'ma-health-path')).toBeNull()
     expect([...host.querySelectorAll('.ma-stat-label')].map((el) => el.textContent)).toEqual([
       'Engine',
       'Extraction',
@@ -76,328 +151,361 @@ describe('loading', () => {
       'Reranker',
       'Decision model',
     ])
-    expectNoStepWording(host)
   })
 
-  it('keeps the strip and the summary as skeletons until the extraction and model routes answer', () => {
+  it('keeps the strip busy, not zero, until the older reads answer; the verdict does not wait', () => {
     m.graph = {}
     const host = render()
     expect(byId(host, 'ma-health-strip')!.getAttribute('aria-busy')).toBe('true')
-    expect(stat(host, 'engine').textContent).not.toContain('Hindsight')
-    expect(byId(host, 'ma-health-summary')!.dataset.state).toBe('loading')
-    expect(byId(host, 'ma-health-embedder')).toBeNull()
+    expect(byId(host, 'ma-health-summary')!.dataset.state).toBe('clear')
+  })
+})
+
+describe('hal0 did not answer', () => {
+  it('says so, shows no verdict and no figure, and offers to check again', () => {
+    const refetch = vi.fn()
+    const host = render(makeArea({ healthQuery: { isError: true, refetch } }))
+    expect(textOf(byId(host, 'ma-health-failed'))).toContain("Memory's health did not load")
+    expectNoFigure(host)
+    click(byId(host, 'ma-health-recheck')!)
+    expect(refetch).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('memory off, or another engine', () => {
+  it('memory off: says so and links to engine settings', () => {
+    const host = withReport({
+      enabled: false,
+      reason: 'memory_disabled',
+      checked_at: '2026-11-11T03:00:00+00:00',
+      verdict: null,
+      partial: [],
+      steps: [],
+    })
+    const card = byId(host, 'ma-health-off')!
+    expect(textOf(card)).toContain('Memory is turned off')
+    expect(card.querySelector('a')!.getAttribute('href')).toBe('#settings/memory')
+    expect(byId(host, 'ma-health-path')).toBeNull()
+    expect(host.textContent).not.toMatch(/\d/)
   })
 
-  it('draws a skeleton, not a zero, in a bank row whose stats are still loading', () => {
-    const stats = BANKS.map((b) => ({ bankId: b.bank_id, stats: null, isLoading: true }))
-    const host = render(makeArea({ stats }))
-    const cells = [...host.querySelectorAll('[data-testid="ma-health-banks"] tbody td')]
-    expect(cells).toHaveLength(BANKS.length * 4)
-    for (const cell of cells) {
-      expect(cell.querySelector('.ma-skel')).not.toBeNull()
-      expect(cell.textContent).toBe('')
-    }
-    expect(byId(host, 'ma-health-summary')!.dataset.state).toBe('loading')
-    expect(byId(host, 'ma-health-banks-foot')).toBeNull()
+  it('a non-Hindsight engine: the fallback notice, no path', () => {
+    const host = withReport({
+      enabled: true,
+      reason: 'engine_unsupported',
+      checked_at: '2026-11-11T03:00:00+00:00',
+      verdict: null,
+      partial: [],
+      steps: [],
+    })
+    expect(textOf(byId(host, 'ma-health-fallback'))).toContain('Memory is not running on Hindsight')
+    expect(byId(host, 'ma-health-path')).toBeNull()
   })
 })
 
 describe('engine unreachable', () => {
-  const down = (over: Partial<FakeQuery<typeof ENGINE>> = {}) =>
-    makeArea({
-      engineQuery: { data: { ...ENGINE, reachable: false, version: null, banks_total: null }, ...over },
-      banksQuery: { isError: true },
-    })
-
-  it('says what is known and what is not, and shows no figure', () => {
-    const host = render(down())
+  it('says what is known and what is not, with no figure anywhere', () => {
+    const host = withReport(healthUnreachable())
     const card = byId(host, 'ma-health-unreachable')!
     expect(card.querySelector('h2')!.textContent).toBe('The memory engine is not answering')
-    expect(card.querySelector('.chip')!.textContent).toBe('unreachable')
-    expect(textOf(card)).toContain('Nothing here is counted as zero')
     expect(textOf(host)).toContain('What is known')
-    expect(textOf(host)).toContain("Hindsight did not answer this dashboard's check.")
     expect(textOf(host)).toContain('What is not known until it answers')
-    for (const key of ['Banks', 'Queue', 'Knowledge', 'Engine facts']) {
-      expect([...host.querySelectorAll('dt')].map((dt) => dt.textContent)).toContain(key)
-    }
-    // No figure at all (the product's name is the only digit on the page).
-    expect(host.textContent!.replace(/hal0/g, '')).not.toMatch(/\d/)
     expect(host.querySelector('table')).toBeNull()
-    expect(byId(host, 'ma-health-strip')).toBeNull()
-    expectNoStepWording(host)
+    expectNoFigure(host)
+    expectNoRawRouteText(host)
   })
 
-  it('links to Services and gives the doctor command to copy', () => {
-    const host = render(down())
-    expect(byId(host, 'ma-health-services')!.getAttribute('href')).toBe('#services')
-    const box = byId(host, 'ma-health-doctor')!
-    expect(box.querySelector('code')!.textContent).toBe('hal0 doctor')
-    expect(box.querySelector('button')!.getAttribute('aria-label')).toBe('Copy command')
-  })
-
-  it('shows the error the check came back with, when there is one', () => {
-    const host = render(makeArea({ engineQuery: { isError: true, error: { message: 'HTTP 503' } } }))
-    expect(byId(host, 'ma-health-unreachable')).not.toBeNull()
-    const rows = [...host.querySelectorAll('.ma-kv-row')].map(textOf)
-    expect(rows).toContain('ErrorHTTP 503')
-  })
-
-  it('checks again on request', () => {
+  it('links to Services, gives hal0 doctor to copy, and checks again', () => {
     const refetch = vi.fn()
-    const host = render(down({ refetch }))
+    const host = render(makeArea({ healthQuery: { data: healthUnreachable(), refetch } }))
+    expect(byId(host, 'ma-health-services')!.getAttribute('href')).toBe('#services')
+    expect(byId(host, 'ma-health-doctor')!.querySelector('code')!.textContent).toBe('hal0 doctor')
     click(byId(host, 'ma-health-recheck')!)
     expect(refetch).toHaveBeenCalledTimes(1)
-  })
-
-  it('never asks the routes that only a reachable engine answers', () => {
-    render(down())
-    expect(m.mentalFor).toEqual([])
+    expectNoPrimary(host)
   })
 })
 
-describe('memory engine is not Hindsight', () => {
-  it('keeps the wording of the notice the old page showed', () => {
-    const host = render(makeArea({ engineQuery: { data: { ...ENGINE, engine: null, reachable: false } } }))
-    const card = byId(host, 'ma-health-fallback')!
-    expect(textOf(card)).toContain(
-      "Memory is running on a non-Hindsight fallback engine — volatile, writes don't survive restart. " +
-        "Graph extraction, reflect, and directives aren't available either.",
-    )
-    expect(card.querySelector('a')!.getAttribute('href')).toBe('#settings/memory')
-    expect(host.querySelector('table')).toBeNull()
-    expectNoStepWording(host)
-  })
-})
+// ── The verdict and the path ────────────────────────────────────────────────
 
-describe('all clear', () => {
-  it('says nothing needs attention', () => {
+describe('clear', () => {
+  it('says nothing needs attention, and in one sentence what was checked', () => {
     const host = render()
     const summary = byId(host, 'ma-health-summary')!
     expect(summary.dataset.state).toBe('clear')
     expect(summary.querySelector('h2')!.textContent).toBe('Nothing needs attention')
-    expect(summary.querySelector('.chip')!.textContent).toBe('working')
-    expect(byId(host, 'ma-health-findings')).toBeNull()
-    expect(byId(host, 'ma-health-embedder')).toBeNull()
-    expectNoStepWording(host)
-  })
-
-  it('shows the five engine facts', () => {
-    const host = render()
-    expect(textOf(stat(host, 'engine'))).toBe('EngineHindsight 1.2.0reachablememory engine')
-    expect(textOf(stat(host, 'extraction'))).toBe('Extractionmemory slotdedicated slot · resolves to a model')
-    expect(textOf(stat(host, 'embedder'))).toBe('Embedderhs-embed-1the model this store was built with')
-    expect(textOf(stat(host, 'reranker'))).toBe('Rerankerhs-rerank-1local provider')
-    expect(textOf(stat(host, 'decision'))).toBe('Decision modelOffoptional component, not enabled')
-  })
-
-  it('has one line for the queue and one for knowledge, each said to be a sum, each with its link', () => {
-    m.mental = (ids) =>
-      ids.map((bankId, at) => ({ bankId, models: at === 0 ? [mentalModel({ is_stale: true }), mentalModel()] : [] }))
-    const stats = BANKS.map((b, at) => ({
-      bankId: b.bank_id,
-      stats: bankStats(b.bank_id, { ...STATS[b.bank_id], pending_operations: at === 0 ? 978 : 115 }),
-    }))
-    const host = render(makeArea({ stats, hash: '#memory/health?bank=shared' }))
-    expect(textOf(byId(host, 'ma-health-work')!.querySelector('.ma-card-meta'))).toBe(
-      'each line is a sum of per-bank figures',
+    expect(textOf(byId(host, 'ma-health-detail'))).toBe(
+      'The engine answers, and the 4 things this page watches are clear: storing memories, the queue, the embedder and knowledge.',
     )
-    const queue = byId(host, 'ma-health-queue')!
-    expect(textOf(queue.querySelector('dd'))).toBe('1,208 operations waiting and 0 failed, summed across 3 banks.')
-    expect(queue.querySelector('a')!.getAttribute('href')).toBe('#memory/operations?bank=shared')
-    expect(textOf(queue.querySelector('a'))).toBe('Open Operations')
-    const knowledge = byId(host, 'ma-health-knowledge')!
-    expect(textOf(knowledge.querySelector('dd'))).toBe('1 of 2 mental models are stale, summed across 3 banks.')
-    expect(knowledge.querySelector('a')!.getAttribute('href')).toBe('#memory/knowledge?bank=shared')
-    // Operations waiting and a stale model are normal: still clear.
+    expect(summary.querySelector('.chip')!.textContent).toBe('working')
+    expect(byId(host, 'ma-health-qualifier')).toBeNull()
+  })
+
+  it('lists what was checked as one quiet line each, unnumbered', () => {
+    const host = render()
+    const list = byId(host, 'ma-health-path')!
+    expect(list.tagName).toBe('UL')
+    expect(rows(host).map((li) => li.dataset.step)).toEqual(['extraction', 'queue', 'embedder', 'knowledge'])
+    for (const li of rows(host)) {
+      expect(li.dataset.state).toBe('clear')
+      expect(li.querySelector('p.ma-step-line')).not.toBeNull()
+      expect(li.hasAttribute('aria-current')).toBe(false)
+    }
+    expect(host.textContent).not.toMatch(/\bstep \d/i)
+    expectNoRawRouteText(host)
+    expectNoPrimary(host)
+  })
+})
+
+describe('attention: extraction current, queue and knowledge waiting', () => {
+  it('counts the open steps in words and names the current one', () => {
+    const host = withReport(extractionFirst())
+    const summary = byId(host, 'ma-health-summary')!
+    expect(summary.dataset.state).toBe('attention')
+    expect(summary.querySelector('h2')!.textContent).toBe('3 things need you')
+    expect(textOf(byId(host, 'ma-health-detail'))).toBe(
+      'Start with step 1, storing memories: fix what is failing when memories are stored. The other 2 wait on it, in the order below.',
+    )
+  })
+
+  it('is an ordered list in the route order, with the position and state of each row', () => {
+    const host = withReport(extractionFirst())
+    expect(byId(host, 'ma-health-path')!.tagName).toBe('OL')
+    expect(rows(host).map((li) => [li.dataset.step, li.dataset.state])).toEqual([
+      ['extraction', 'current'],
+      ['queue', 'waiting'],
+      ['embedder', 'clear'],
+      ['knowledge', 'waiting'],
+    ])
+    expect(textOf(row(host, 'extraction'))).toContain('Step 1 of 4 · do this now')
+    expect(textOf(row(host, 'embedder'))).toContain('Step 3 of 4 · clear')
+  })
+
+  it('marks the current row by more than colour: words, aria-current and a raised row', () => {
+    const host = withReport(extractionFirst())
+    const current = row(host, 'extraction')
+    expect(current.getAttribute('aria-current')).toBe('step')
+    expect(current.classList.contains('ma-step-current')).toBe(true)
+    expect(host.querySelectorAll('[aria-current="step"]')).toHaveLength(1)
+  })
+
+  it('writes each open step from its reason code and figures', () => {
+    const host = withReport(extractionFirst())
+    expect(textOf(byId(host, 'ma-health-step-extraction-text'))).toBe(
+      '4 attempts to store a memory failed in the last 6 h. Until the cause is fixed, operations wait in the queue and a retry would fail.',
+    )
+    expect(textOf(byId(host, 'ma-health-step-queue-text'))).toBe(
+      '3 operations have failed and 52 are waiting, the oldest for 1 h. Retry or discard them on the Operations tab.',
+    )
+    expect(textOf(byId(host, 'ma-health-step-knowledge-text'))).toBe(
+      '1 knowledge page or mental model failed its last refresh, and 4 are stale. The last refresh that worked was on 5 Nov 2026.',
+    )
+    expectNoRawRouteText(host)
+  })
+
+  it('says in words what a waiting step waits on', () => {
+    const host = withReport(extractionFirst())
+    expect(textOf(byId(host, 'ma-health-step-queue-waits'))).toBe('Waiting on step 1: storing memories.')
+    expect(textOf(byId(host, 'ma-health-step-knowledge-waits'))).toBe('Waiting on step 2: the queue.')
+  })
+
+  it('gives extraction its links and the grouped errors, and no primary control', () => {
+    const host = withReport(extractionFirst())
+    expect(byId(host, 'ma-health-step-extraction-services')!.getAttribute('href')).toBe('#services')
+    expect(byId(host, 'ma-health-step-extraction-settings')!.getAttribute('href')).toBe('#settings/memory')
+    const errors = byId(host, 'ma-health-step-extraction-errors')!
+    expect([...errors.querySelectorAll('li')].map(textOf)).toEqual([
+      'Task exceeded the Ns wall-clock limit seen 3 times',
+      'HTTP 503 from a host seen 1 time',
+    ])
+    expectNoPrimary(host)
+  })
+
+  it('the queue and knowledge rows link to their tabs', () => {
+    const host = withReport(extractionFirst())
+    expect(byId(host, 'ma-health-step-queue-operations')!.getAttribute('href')).toBe('#memory/operations')
+    expect(byId(host, 'ma-health-step-knowledge-knowledge')!.getAttribute('href')).toBe('#memory/knowledge')
+    expect(textOf(byId(host, 'ma-health-step-queue-operations'))).toContain('Open Operations')
+  })
+})
+
+describe('attention: each later step current in turn', () => {
+  it('the queue alone', () => {
+    const host = withReport(queueAlone())
+    expect(byId(host, 'ma-health-summary')!.querySelector('h2')!.textContent).toBe('1 thing needs you')
+    expect(textOf(byId(host, 'ma-health-detail'))).toBe(
+      'It is step 2, the queue: retry or discard the failed operations.',
+    )
+    expect(row(host, 'queue').dataset.state).toBe('current')
+    expect(textOf(byId(host, 'ma-health-step-queue-text'))).toBe(
+      '1 operation has failed, and nothing is waiting. Retry or discard it on the Operations tab.',
+    )
+    expect(byId(host, 'ma-health-step-queue-operations')).not.toBeNull()
+    expectNoPrimary(host)
+  })
+
+  it('the embedder, for a mixed store: both models and the switch as a dry run to copy', () => {
+    const host = withReport(embedderStep('embedder_mixed'))
+    expect(row(host, 'embedder').dataset.state).toBe('current')
+    expect(textOf(byId(host, 'ma-health-step-embedder-text'))).toContain('may hold vectors from two embedders')
+    expect(textOf(byId(host, 'ma-health-step-embedder-text'))).toContain('hs-embed-1')
+    expect(byId(host, 'ma-health-step-embedder-command')!.querySelector('code')!.textContent).toBe(
+      'hal0 memory embedder switch hs-embed-1',
+    )
+    expect(textOf(row(host, 'embedder'))).toContain('It is a dry run by default')
+    expect(textOf(row(host, 'embedder'))).toContain('changes nothing')
+    // Nothing on the row runs the switch: the only button copies the command.
+    const buttons = [...row(host, 'embedder').querySelectorAll('button')]
+    expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual(['Copy command'])
+    expectNoPrimary(host)
+  })
+
+  it('the embedder, for a conflict: the record and the running engine, and hal0 doctor', () => {
+    const host = withReport(embedderStep('embedder_conflict'))
+    const text = textOf(byId(host, 'ma-health-step-embedder-text'))
+    expect(text).toBe(
+      'The embedder record says hs-embed-1, but the running engine is on BAAI/bge-small-en-v1.5. hal0 has changed neither. Remove the override or correct the record so the two agree.',
+    )
+    expect(textOf(row(host, 'embedder'))).toContain('conflict')
+    expect(byId(host, 'ma-health-step-embedder-command')!.querySelector('code')!.textContent).toBe('hal0 doctor')
+  })
+
+  it('the embedder, when settings ask for another: the switch towards the configured model', () => {
+    const host = withReport(embedderStep('embedder_needs_switch'))
+    expect(byId(host, 'ma-health-step-embedder-command')!.querySelector('code')!.textContent).toBe(
+      'hal0 memory embedder switch operator/embed-2',
+    )
+  })
+
+  it('knowledge alone', () => {
+    const host = withReport(knowledgeAlone())
+    expect(row(host, 'knowledge').dataset.state).toBe('current')
+    expect(textOf(byId(host, 'ma-health-step-knowledge-text'))).toBe(
+      '5 knowledge pages and 6 mental models are stale: behind the facts they were built from. No refresh has failed.',
+    )
+    expect(byId(host, 'ma-health-step-knowledge-knowledge')).not.toBeNull()
+    expectNoPrimary(host)
+  })
+
+  it('a reason code the page does not know: a generic sentence and its figures, never the code', () => {
+    const host = withReport(
+      healthReport({
+        steps: pathSteps({ queue: { reason: 'queue_brand_new_reason', figures: { failed: 2, stuck_for_s: 4000 } } }),
+      }),
+    )
+    const current = row(host, 'queue')
+    expect(textOf(current)).toContain('this page has no description for its cause yet')
+    expect(textOf(byId(host, 'ma-health-step-queue-figures'))).toContain('Failed operations2')
+    expect(textOf(current)).not.toContain('queue_brand_new_reason')
+    expectNoRawRouteText(host)
+  })
+})
+
+describe('partial and truncated reads', () => {
+  it('a partial read is never an unqualified all clear', () => {
+    const host = withReport(healthReport({ partial: ['queue', 'banks'] }))
+    const summary = byId(host, 'ma-health-summary')!
+    expect(summary.querySelector('h2')!.textContent).toBe('Nothing needs attention in what was read')
+    expect(summary.querySelector('.chip')).toBeNull()
+    expect(textOf(byId(host, 'ma-health-qualifier'))).toBe(
+      'Some banks did not answer in time; figures are what was read.',
+    )
+    // Beside the figures it touches: the queue row and the banks table.
+    expect(textOf(byId(host, 'ma-health-step-queue-note'))).toContain('did not answer in time')
+    expect(textOf(byId(host, 'ma-health-banks-partial'))).toContain('did not answer in time')
+  })
+
+  it('a truncated queue says so beside the queue and extraction figures', () => {
+    const base = healthReport()
+    const host = withReport(healthReport({ queue: { ...base.queue!, truncated: true } }))
+    expect(textOf(byId(host, 'ma-health-step-queue-note'))).toContain('more operations than were read')
+    expect(textOf(byId(host, 'ma-health-step-extraction-note'))).toContain('more operations than were read')
+  })
+
+  it('a bank whose figures were not read shows the mark, never zero', () => {
+    const base = healthReport()
+    const host = withReport(
+      healthReport({
+        partial: ['queue'],
+        queue: {
+          ...base.queue!,
+          by_bank: base.queue!.by_bank.map((b) =>
+            b.bank_id === 'shared' ? { ...b, waiting: null, failed: null, oldest_waiting_s: null } : b,
+          ),
+        },
+      }),
+    )
+    const shared = host.querySelector('[data-bank="shared"]')!
+    expect(shared.querySelector('[data-col="waiting"] .ma-missing')).not.toBeNull()
+    expect(shared.querySelector('[data-col="failed"]')!.textContent).toBe('–')
+    expect(byId(host, 'ma-health-banks-foot')).not.toBeNull()
+  })
+})
+
+// ── Below the path ──────────────────────────────────────────────────────────
+
+describe('engine facts strip', () => {
+  it('is five cells in order, the first three from the health answer', () => {
+    const host = render()
+    expect(textOf(stat(host, 'engine'))).toContain('Hindsight 1.2.0')
+    expect(textOf(stat(host, 'extraction'))).toContain('memory slot')
+    expect(textOf(stat(host, 'embedder'))).toContain('hs-embed-1')
+    expect(textOf(stat(host, 'reranker'))).toContain('hs-rerank-1')
+    expect(textOf(stat(host, 'decision'))).toContain('Off')
+  })
+})
+
+describe('the ordinary upgraded box', () => {
+  it('gets one quiet line from the route embedder fields, and stays clear', () => {
+    const host = withReport(
+      healthReport({
+        embedder: {
+          recorded: OLD_EMBEDDER_ID,
+          configured: EMBEDDER_ID,
+          mixed: false,
+          needs_switch: false,
+          conflict: null,
+          informational: true,
+        },
+      }),
+    )
+    const line = byId(host, 'ma-health-embedder')!
+    expect(line.dataset.kind).toBe('quiet')
+    expect(textOf(line)).toBe(
+      'This store was built with BAAI/bge-small-en-v1.5 and the engine stays on it. Settings ask for hs-embed-1, which has no effect until the store is re-embedded.',
+    )
+    expect(line.querySelector('.chip, button')).toBeNull()
     expect(byId(host, 'ma-health-summary')!.dataset.state).toBe('clear')
   })
 
-  it('asks for the mental models of every listed bank', () => {
-    render()
-    expect(m.mentalFor.at(-1)!.slice().sort()).toEqual(BANKS.map((b) => b.bank_id).sort())
-  })
-
-  it('draws no chart', () => {
-    const host = render()
-    expect(host.querySelector('canvas')).toBeNull()
-    // The only drawings are the arrows of the two go-links.
-    expect(host.querySelectorAll('svg')).toHaveLength(2)
+  it('is not shown on a box whose store and settings agree', () => {
+    expect(byId(render(), 'ma-health-embedder')).toBeNull()
   })
 })
 
 describe('banks table', () => {
-  it('is a real table with header cells, in a scroll region the keyboard can reach', () => {
+  it('a row per bank, largest first, every figure from the health answer', () => {
     const host = render()
-    const region = host.querySelector('.ma-table-region')!
-    expect(region.getAttribute('role')).toBe('region')
-    expect(region.getAttribute('aria-label')).toBe('Banks table')
-    expect(region.getAttribute('tabindex')).toBe('0')
-    const table = region.querySelector('table')!
-    const heads = [...table.querySelectorAll('thead th')]
-    expect(heads.map((th) => th.textContent)).toEqual(['Bank', 'Facts', 'Documents', 'Waiting', 'Failed'])
-    for (const th of heads) expect(th.getAttribute('scope')).toBe('col')
-    for (const th of table.querySelectorAll('tbody th')) expect(th.getAttribute('scope')).toBe('row')
+    const bankRows = [...host.querySelectorAll<HTMLElement>('[data-testid="ma-health-banks"] tbody tr')]
+    expect(bankRows.map((tr) => tr.dataset.bank)).toEqual(['Hal0::Agents', 'shared', 'coding-agent::ultrareview-1.4'])
+    expect(textOf(bankRows[0].querySelector('[data-col="facts"]'))).toBe('24,530')
+    expect(textOf(bankRows[0].querySelector('[data-col="documents"]'))).toBe('4,100')
+    expect(bankRows[0].querySelector('a')!.getAttribute('href')).toBe('#memory/facts?bank=Hal0::Agents')
   })
 
-  it('lists the banks as they are, largest first, each linking to its facts', () => {
-    const host = render()
-    const rows = [...host.querySelectorAll('[data-testid="ma-health-banks"] tbody tr')]
-    expect(rows.map((tr) => tr.querySelector('th')!.textContent)).toEqual([
-      'Hal0::Agents',
-      'shared',
-      'coding-agent::ultrareview-1.4',
-    ])
-    expect(rows.map((tr) => tr.querySelector('a')!.getAttribute('href'))).toEqual([
-      '#memory/facts?bank=Hal0::Agents',
-      '#memory/facts?bank=shared',
-      '#memory/facts?bank=coding-agent::ultrareview-1.4',
-    ])
-    expect([...rows[0].querySelectorAll('td')].map((td) => td.textContent)).toEqual(['24,530', '4,100', '0', '0'])
-    expect(byId(host, 'ma-health-banks-foot')).toBeNull()
+  it('says when the answer could not list the banks', () => {
+    const host = withReport(healthReport({ banks: { layout: 'per_bank', total: null, facts: null, list: [] } }))
+    expect(byId(host, 'ma-health-banks-error')).not.toBeNull()
   })
 
-  it('marks a figure that was not reported, and says what the mark means', () => {
-    const stats = [
-      { bankId: 'shared', stats: STATS.shared },
-      { bankId: 'Hal0::Agents', stats: null, isError: true },
-      { bankId: 'coding-agent::ultrareview-1.4', stats: STATS['coding-agent::ultrareview-1.4'] },
-    ]
-    const host = render(makeArea({ stats }))
-    const row = host.querySelector('tr[data-bank="Hal0::Agents"]')!
-    const marks = [...row.querySelectorAll('td [role="img"]')]
-    expect(marks).toHaveLength(4)
-    for (const mark of marks) {
-      expect(mark.getAttribute('aria-label')).toBe('not reported')
-      expect(mark.textContent).toBe('–')
-    }
-    expect(textOf(byId(host, 'ma-health-banks-foot'))).toBe('– means the engine did not report a figure')
-    // A sum that leaves a bank out says so.
-    expect(textOf(byId(host, 'ma-health-queue')!.querySelector('dd'))).toBe(
-      '0 operations waiting and 0 failed, summed across the 2 of 3 banks that reported.',
+  it('says when there are no banks yet', () => {
+    const base = healthReport()
+    const host = withReport(
+      healthReport({
+        banks: { layout: 'per_bank', total: 0, facts: 0, list: [] },
+        queue: { ...base.queue!, by_bank: [] },
+      }),
     )
-    expect(byId(host, 'ma-health-summary')!.dataset.state).toBe('partial')
-  })
-
-  it('says when the list is only the first page', () => {
-    const host = render(makeArea({ banksQuery: { data: { banks: BANKS, total: 140 } } }))
-    expect(textOf(byId(host, 'ma-health-banks-paged'))).toBe('Showing the first 3 of 140 banks.')
-  })
-
-  it('has an empty state for no banks, and one for a bank list that did not load', () => {
-    const none = render(makeArea({ banksQuery: { data: { banks: [] as MemoryBank[] } } }))
-    expect(textOf(byId(none, 'ma-health-banks-empty'))).toContain('No banks yet')
-    expect(none.querySelector('table')).toBeNull()
-    cleanup()
-
-    const refetch = vi.fn()
-    const failed = render(makeArea({ banksQuery: { isError: true, refetch } }))
-    expect(textOf(byId(failed, 'ma-health-banks-error'))).toContain('The bank list did not load')
-    click(byId(failed, 'ma-health-banks-error')!.querySelector('button')!)
-    expect(refetch).toHaveBeenCalledTimes(1)
-    expect(textOf(byId(failed, 'ma-health-queue')!.querySelector('dd'))).toBe(
-      'Not reported: the bank list did not load.',
-    )
-    expect(byId(failed, 'ma-health-summary')!.dataset.state).toBe('partial')
-  })
-})
-
-describe('embedder record', () => {
-  const withRecord = (over: Record<string, unknown>) => {
-    m.models = { data: modelsAnswer(embedderRecord(over)) }
-    return render()
-  }
-
-  it('is one quiet line on the ordinary upgraded box: no chip, no warning, still clear', () => {
-    const host = withRecord({ recorded: 'BAAI/bge-small-en-v1.5', needs_switch: true })
-    const note = byId(host, 'ma-health-embedder')!
-    expect(note.dataset.kind).toBe('quiet')
-    expect(note.querySelector('.chip')).toBeNull()
-    expect(textOf(note)).toBe(
-      'This store was built with BAAI/bge-small-en-v1.5 and the engine stays on it. ' +
-        'Settings ask for hs-embed-1, which has no effect until the store is re-embedded.',
-    )
-    expect(textOf(stat(host, 'embedder'))).toBe('EmbedderBAAI/bge-small-en-v1.5settings ask for hs-embed-1')
-    expect(byId(host, 'ma-health-summary')!.dataset.state).toBe('clear')
-  })
-
-  it('is a warning that names both models when the store is mixed', () => {
-    const host = withRecord({ mixed: true, needs_switch: true })
-    const note = byId(host, 'ma-health-embedder')!
-    expect(note.querySelector('.chip')!.textContent).toBe('mixed')
-    expect(note.querySelector('.chip')!.getAttribute('data-tone')).toBe('warn')
-    expect(textOf(note.querySelector('.ma-notice-text'))).toBe(
-      'This store may hold vectors from two embedders: it existed before the engine moved from ' +
-        'BAAI/bge-small-en-v1.5 to hs-embed-1. Recall over older facts is degraded until the store is re-embedded.',
-    )
-    expect([...note.querySelectorAll('.ma-mono')].map((el) => el.textContent)).toEqual([
-      'BAAI/bge-small-en-v1.5',
-      'hs-embed-1',
-    ])
-    expect(textOf(stat(host, 'embedder'))).toContain('BAAI/bge-small-en-v1.5 and hs-embed-1mixed')
-    expect(byId(host, 'ma-health-summary')!.dataset.state).toBe('attention')
-    expect(textOf(byId(host, 'ma-health-findings'))).toBe('The store may hold vectors from two embedders.')
-  })
-
-  it('is a warning that names both models when the record and the engine disagree', () => {
-    const host = withRecord({ conflict: { live: { provider: 'local', model: 'BAAI/bge-small-en-v1.5' } } })
-    const note = byId(host, 'ma-health-embedder')!
-    expect(note.querySelector('.chip')!.textContent).toBe('conflict')
-    expect(note.querySelector('.chip')!.getAttribute('data-tone')).toBe('warn')
-    expect(textOf(note.querySelector('.ma-notice-text'))).toBe(
-      'The embedder record says hs-embed-1, but the engine is set to run on BAAI/bge-small-en-v1.5. ' +
-        'hal0 has changed neither. Remove the override or correct the record so the two agree.',
-    )
-    expect(byId(host, 'ma-health-summary')!.dataset.state).toBe('attention')
-  })
-
-  it('has no button in any of its states: nothing here starts a switch', () => {
-    for (const over of [
-      { recorded: 'BAAI/bge-small-en-v1.5', needs_switch: true },
-      { mixed: true, needs_switch: true },
-      { conflict: { on_disk: { provider: 'local', model: 'other' } } },
-    ]) {
-      const host = withRecord(over)
-      expect(byId(host, 'ma-health-embedder')!.querySelector('button')).toBeNull()
-      expect(byId(host, 'ma-health-embedder')!.querySelector('a')).toBeNull()
-      cleanup()
-    }
-  })
-
-  it('shows the cell as not reported, and no notice, when the route carries no record', () => {
-    m.models = { data: {} }
-    const host = render()
-    expect(byId(host, 'ma-health-embedder')).toBeNull()
-    expect(stat(host, 'embedder').querySelector('[role="img"]')!.getAttribute('aria-label')).toBe('not reported')
-    expect(byId(host, 'ma-health-summary')!.dataset.state).toBe('partial')
-  })
-})
-
-describe('needs attention', () => {
-  it('lists what failed, in a plain list', () => {
-    m.graph = { data: { ...GRAPH, slot_resolves: false } }
-    m.mental = (ids): MentalModelsEntry[] =>
-      ids.map((bankId, at) => ({
-        bankId,
-        models: at === 0 ? [mentalModel({ is_stale: true, last_refresh_failed_at: '2026-11-06T08:00:00Z' })] : [],
-      }))
-    const stats = BANKS.map((b) => ({
-      bankId: b.bank_id,
-      stats: bankStats(b.bank_id, { ...STATS[b.bank_id], failed_operations: b.bank_id === 'shared' ? 105 : 0 }),
-    }))
-    const host = render(makeArea({ stats }))
-    const summary = byId(host, 'ma-health-summary')!
-    expect(summary.dataset.state).toBe('attention')
-    expect(summary.querySelector('h2')!.textContent).toBe('3 things need attention')
-    const list = byId(host, 'ma-health-findings')!
-    expect(list.tagName).toBe('UL')
-    expect([...list.querySelectorAll('li')].map((li) => li.dataset.finding)).toEqual([
-      'extraction',
-      'queue',
-      'knowledge',
-    ])
-    expect(textOf(stat(host, 'extraction'))).toContain('unreachable')
-    expect(host.querySelector('tr[data-bank="shared"] [data-col="failed"]')!.textContent).toBe('105')
-    expectNoStepWording(host)
+    expect(byId(host, 'ma-health-banks-empty')).not.toBeNull()
   })
 })

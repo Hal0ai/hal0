@@ -5,9 +5,9 @@
  * (six banks: primary, big, hermes, scratch, ingest, empty; `ingest` has 7 operations waiting and
  * 1 failed). Two of the routes Health reads are NOT in the bundle's allow-list and reach
  * `page.route`: `/api/memory/models` (the catch-all answers `{}`) and `/api/memory/graph/status`
- * (the default fixture answers with slot routing off). The helpers below set those, and replace
- * bundle-answered routes where a state needs it (a bundle-answered route has to be named in
- * `window.__hal0MockPassthrough` before a `page.route` for it is ever reached).
+ * (the default fixture answers with slot routing off). The helpers below set those. A
+ * bundle-answered route has to be named in `window.__hal0MockPassthrough` before a `page.route`
+ * for it is ever reached.
  */
 import type { Page } from '@playwright/test'
 
@@ -50,13 +50,6 @@ export function embedderRecord(over: Record<string, unknown> = {}) {
   }
 }
 
-/** The store was built with the engine default and settings ask for another model. */
-export const RECORD_UPGRADED = { recorded: 'BAAI/bge-small-en-v1.5', needs_switch: true }
-/** The store may hold vectors from two models. */
-export const RECORD_MIXED = { mixed: true, needs_switch: true }
-/** The running engine is on another model than the record says. */
-export const RECORD_CONFLICT = { conflict: { live: { provider: 'local', model: 'BAAI/bge-small-en-v1.5' } } }
-
 export async function routeModels(page: Page, record: Record<string, unknown> = {}) {
   await page.route('**/api/memory/models', (route) =>
     json(route, {
@@ -71,53 +64,24 @@ export async function routeGraph(page: Page, over: Record<string, unknown> = {})
   await page.route('**/api/memory/graph/status', (route) => json(route, { ...GRAPH_RESOLVES, ...over }))
 }
 
-const FACTS: Record<string, number> = { primary: 26, big: 600, hermes: 612, scratch: 88, ingest: 4310, empty: 0 }
-
 /**
- * Replace every bank's stats with ones where nothing has failed (`ingest` keeps its 7 waiting
- * operations: waiting is normal). With `routeModels` and `routeGraph` this is the all-clear box.
+ * The all-clear strip: a consistent embedder record and extraction resolving. Every other figure
+ * on Health is the health answer's (the bundle's, by `window.__hal0MockMemoryHealth`).
  */
-export async function routeCleanStats(page: Page) {
-  await page.addInitScript(() => {
-    ;(window as unknown as { __hal0MockPassthrough?: unknown }).__hal0MockPassthrough = [
-      /^\/api\/memory\/banks\/[^/]+\/stats$/,
-    ]
-  })
-  await page.route(/\/api\/memory\/banks\/[^/]+\/stats$/, (route) => {
-    const bank = decodeURIComponent(route.request().url().split('/banks/')[1].split('/')[0])
-    const facts = FACTS[bank] ?? 10
-    return json(route, {
-      bank_id: bank,
-      total_nodes: facts,
-      total_links: facts * 2,
-      total_documents: Math.round(facts / 6),
-      nodes_by_fact_type: {},
-      links_by_link_type: {},
-      pending_operations: bank === 'ingest' ? 7 : 0,
-      failed_operations: 0,
-      operations_by_status: {},
-      last_consolidated_at: null,
-      pending_consolidation: 0,
-      failed_consolidation: 0,
-      total_observations: 0,
-    })
-  })
-}
-
-/** The all-clear box: a consistent embedder record, extraction resolving, nothing failed. */
 export async function routeAllClear(page: Page) {
   await routeModels(page)
   await routeGraph(page)
-  await routeCleanStats(page)
 }
 
-/** The engine does not answer: its own check says so, and the bank list fails. */
+/**
+ * The engine does not answer: its own check says so, the bank list fails, and the health answer
+ * (which the page header reads on every tab) is the bundle's `unreachable` state.
+ */
 export async function routeEngineDown(page: Page) {
   await page.addInitScript(() => {
-    ;(window as unknown as { __hal0MockPassthrough?: unknown }).__hal0MockPassthrough = [
-      '/api/memory/engine',
-      '/api/memory/banks',
-    ]
+    const w = window as unknown as { __hal0MockPassthrough?: unknown; __hal0MockMemoryHealth?: string }
+    w.__hal0MockPassthrough = ['/api/memory/engine', '/api/memory/banks']
+    w.__hal0MockMemoryHealth = 'unreachable'
   })
   await page.route('**/api/memory/engine', (route) =>
     json(route, {
