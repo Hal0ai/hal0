@@ -85,7 +85,44 @@ Knowledge-base pages are documents Hindsight 1.2 synthesizes from a bank's memor
 | `memory agents install <harness>` | `harness` (e.g. `claude-code`, `cursor`, `codex`) | `--dry-run`, `--json` |
 | `memory spec apply` | — | `--dry-run`, `--bank BANK`, `--api URL` (default `http://127.0.0.1:9177`), `--json` |
 
-`memory models show` lists the embeddings, reranker and decision models from `[memory.models]` and `[memory.decision]`. The embeddings row shows the provider and model the memory store was built with, which is what the engine runs; when `[memory.models]` names a different provider or model, the row says that value is not applied. `memory agents install` wires a coding-agent harness to `hal0-memory`; `--dry-run` prints the installer command and config merge without running or writing anything. `memory spec apply` applies the packaged bank spec (templates, `config_extra`, knowledge-base pages) through Hindsight's `/import`. It is idempotent, and `--dry-run` posts with `dry_run=true`.
+`memory models show` lists the embeddings, reranker and decision models from `[memory.models]` and `[memory.decision]`. The embeddings row shows the provider and model the memory store was built with, which is what the engine runs; when `[memory.models]` names a different provider or model, the row says that value is not applied and names `hal0 memory embedder switch`. `memory agents install` wires a coding-agent harness to `hal0-memory`; `--dry-run` prints the installer command and config merge without running or writing anything. `memory spec apply` applies the packaged bank spec (templates, `config_extra`, knowledge-base pages) through Hindsight's `/import`. It is idempotent, and `--dry-run` posts with `dry_run=true`.
+
+### `memory embedder switch`
+
+```sh
+hal0 memory embedder switch MODEL [--provider local] [--apply|--dry-run]
+                            [--allow-pending] [--json]
+hal0 memory embedder switch --resume [--json]
+```
+
+Moves the memory store to another embedding model by exporting every bank,
+restarting the engine on the new model, restoring each bank (which re-embeds
+it) under a temporary id, comparing counts, and replacing the originals. See
+[Change the embedding model](/docs/guides/enable-memory#change-the-embedding-model)
+for the steps and the failure behaviour.
+
+Unlike the other `hal0 memory` commands it does not call hal0-api: it runs on
+the box, as root or the `hal0` account, and talks to the engine directly.
+
+| Flag | Meaning |
+|---|---|
+| `MODEL` | The embedding model to move to, for example `hindsight-ai/hs-embed-1`. Omitted with `--resume`. |
+| `--provider` | The embeddings provider the model belongs to. Default `local`. |
+| `--apply` / `--dry-run` | Default `--dry-run`: run the preflight, print the plan, change nothing. |
+| `--allow-pending` | Go ahead while the engine has queued or running operations. What they have not written when a bank is exported is not carried over. |
+| `--resume` | Finish an interrupted switch from its journal: carry a started swap forward, or undo a run that stopped before the swap. |
+| `--json` | Print the plan or the result as JSON; progress goes to stderr. |
+
+The preflight refuses, and the command exits 1, when: the store is already on
+that embedder and is not mixed; the engine does not answer or its environment
+cannot be read; the embedder record cannot be read or disagrees with the
+engine; the engine's export or import API is off; a bank has queued or running
+operations (without `--allow-pending`); free disk space is under 1.5 times
+the engine's data directory; the engine's `hindsight-admin` command is
+missing; an earlier switch did not finish; an engine upgrade is in progress;
+or another switch is running. An `--apply` or `--resume` also exits 1 when
+the run fails. Then it has either been undone, or, if it stopped inside the
+swap, memory writes stay paused until `--resume` completes.
 
 ### `memory migrate unify`
 

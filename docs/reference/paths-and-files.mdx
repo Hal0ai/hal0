@@ -57,13 +57,16 @@ key layout.
 ├── .first_run_done          # first-run completion sentinel
 ├── registry/
 │   └── ignored-paths.json   # model paths the discovery scan skips (deleted models' kept files)
-├── backups/                 # 0600 tar.gz archives written before a one-shot conversion: runners-<ts>.tar.gz, and hal0-pre-015-<ts>.db, a 0600 copy of hal0.db taken before schema migration 015 drops retired model tuning (an older box may also hold profiles-<ts>.tar.gz and the profile-centric*.json records from the 1.4.0 conversion; nothing reads them now and they can be deleted)
+├── backups/                 # 0600 tar.gz archives written before a one-shot conversion: runners-<ts>.tar.gz, and hal0-pre-015-<ts>.db, a 0600 copy of hal0.db taken before schema migration 015 drops retired model tuning (an older box may also hold profiles-<ts>.tar.gz and the profile-centric*.json records from the 1.4.0 conversion; nothing reads them now and they can be deleted). `hal0 memory embedder switch` adds one 0700 directory per run, memory-embedder-switch-<time>-<run>/, holding a bank export archive per bank; they are kept until you delete them
 ├── models/                  # default model cache (unless overridden — see below)
 ├── slots/<name>/             # per-slot working dir
 ├── agents/
 │   ├── secret.bin            # 0600 HMAC secret for dashboard session cookies
 │   └── <name>/workspace/     # per-agent sandbox root (chroot/bind-mount target)
 ├── stacks/state.json         # active-stack pointer + content hash
+├── state/memory-embedder.json          # the embedder the memory store was built with
+├── state/memory-writes-paused.json     # present only while `hal0 memory embedder switch` runs: memory writes answer 503
+├── state/memory-embedder-switch.json   # journal of a switch in progress; left behind only by an interrupted one (`--resume`)
 ├── mcp/hermes-managed.json   # MCP server ids hal0 itself joined into Hermes config
 ├── venvs/hermes -> /var/lib/hal0/hermes/current/venv   # fixed symlink; a real directory only before the first migration
 ├── hermes/                   # Hermes release tree (hal0:hal0), see below
@@ -161,6 +164,7 @@ hal0 uses a generic sibling-lock pattern (`hal0.config.locking.file_lock()`):
 |---|---|
 | `/etc/hal0/*.lock` | Advisory read-modify-write locks on config writes. |
 | `/var/lib/hal0/*.lock` | Advisory read-modify-write locks on state writes. |
+| `/var/lib/hal0/state/memory-embedder-switch.lock` | Held by a running `hal0 memory embedder switch`, so two cannot run at once. Released when the process ends. |
 | `<slots_dir>.lock` | Slot-config directory-level lock. |
 | `<record>.lock` | Per-record lock for MCP `installed.py` read-modify-write. |
 

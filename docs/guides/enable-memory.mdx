@@ -340,6 +340,80 @@ a Cognee migration path — there is no CLI command for migrating a
 Cognee-era store. See the engine note above.
 </Aside>
 
+## Change the embedding model
+
+The embedding model belongs to the store, not to the config. hal0 records the
+provider and model a store was built with and keeps the engine on that pair,
+because the engine does not re-embed stored vectors: started on another model
+it raises no error and recall over older memories quietly gets worse. Editing
+`[memory.models]` therefore changes nothing by itself. One command moves a
+store:
+
+```sh
+sudo hal0 memory embedder switch hindsight-ai/hs-embed-1            # dry run: checks and the plan
+sudo hal0 memory embedder switch hindsight-ai/hs-embed-1 --apply    # do it
+```
+
+Run it on the box, as root or as the `hal0` account. The dry run lists every
+bank with its fact, observation, mental-model, directive and document counts,
+the free disk space, and an estimate of the rebuild time (about 60 facts per
+second on CPU), and it changes nothing. With `--apply` the command:
+
+1. Exports every bank to
+   `/var/lib/hal0/backups/memory-embedder-switch-<time>-<run>/` and checks
+   each archive against the bank's counts.
+2. Pauses memory writes. A write through hal0 (REST, MCP, the agents) gets
+   `503 memory.writes_paused` with `Retry-After: 30` and is not stored;
+   recall keeps working, except for the seconds the engine takes to restart.
+3. Records the new embedder, rewrites the engine's managed drop-in from that
+   record, restarts the engine and confirms from its environment that it runs
+   the new model.
+4. Restores each archive into a temporary bank named `<bank>.switch-<run>`,
+   which re-embeds every fact with the new model and makes no LLM call, and
+   compares the five counts with the ones taken before the switch.
+5. Only when every bank matches: deletes each original and renames its rebuilt
+   bank into place, clears the mixed flag on the record, and lets writes
+   through again.
+
+If anything fails before step 5 (an import fails, a count differs, the engine
+does not come up on the new model), the command deletes the temporary banks,
+puts the record and the drop-in back, restarts the engine on the original
+model, lifts the pause and exits non-zero naming the bank and the counts that
+differ. The original banks were never touched.
+
+Step 5 cannot be undone, so it can be resumed instead. If it stops part-way
+(the box loses power, the rename fails), memory writes stay paused and
+`hal0 doctor all` says so. Run:
+
+```sh
+sudo hal0 memory embedder switch --resume
+```
+
+It finishes the swap from its journal; a bank it finds under neither name is
+restored from its archive. Run after a stop that happened before step 5, the
+same command undoes the run instead.
+
+Things to know before you start:
+
+- The preflight refuses while any bank has queued or running operations.
+  The engine's export does not carry them, so a queued retain would be lost
+  with the old bank. Wait for them (`hal0 memory ops list` shows them) or
+  cancel them (`DELETE /api/memory/banks/<bank>/operations/<id>`).
+  `--allow-pending` goes ahead anyway and reports what was left behind.
+- The pause covers every write that goes through hal0. A client that writes
+  to the engine's own port directly is not stopped; if one writes during the
+  switch, the command notices before it deletes anything and undoes the run.
+- It needs free disk space of about one and a half times the engine's data
+  directory: the rebuilt banks sit beside the originals until the swap.
+- The archives are kept. The command prints their directory and the `rm -r`
+  line that deletes them. They hold your memories in plain text; the
+  directory is `0700`.
+- The audit log and LLM request traces of a bank are not carried over.
+- A store flagged as mixed (it may hold vectors from two models) is repaired
+  the same way: switch it to the model it is already recorded on.
+- Afterwards set `[memory.models]` `embeddings_provider` and
+  `embeddings_model` to the new pair, so the config and the store agree.
+
 ## Destructive ops are audited
 
 Every destructive call under `/api/memory/*` — bank delete, and the

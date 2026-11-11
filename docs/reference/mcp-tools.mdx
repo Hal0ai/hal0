@@ -334,6 +334,11 @@ timeout), it returns `status: "error"` with code `memory.engine_unavailable`,
 a message asking the caller to retry shortly, and `error.details.retry_after_s: 5`.
 An error response from the engine is not reclassified as engine unavailability.
 
+While `hal0 memory embedder switch` is rebuilding the store, `memory_add` and
+every other tool that changes memory return `status: "error"` with code
+`memory.writes_paused` and `error.details.retry_after_s: 30`. Nothing is
+written; the read tools keep working.
+
 | Tool | Required | Returns |
 |---|---|---|
 | `memory_add` | `text` (non-empty) | `{id, timestamp, operation_id?}` |
