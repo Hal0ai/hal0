@@ -69,11 +69,15 @@ A bridge client (a coding agent on another machine) carries a key of its own,
 accepts it from ``Authorization: Bearer`` only, never from ``?api_key=``, and
 resolves it to the ``bridge`` tier carrying the client's name and scopes; a
 revoked, rotated-out or unknown key resolves to ``anon``. The tier opens the
-BRIDGE class (``/mcp/agents``, ``GET /api/bridge/me``) and the MCP mounts its
-scopes name (:data:`BRIDGE_SCOPE_PREFIXES`); every other route refuses it with
-403. Both checks run ahead of the dev-open bypass: a BRIDGE-class request is
-never waved through, and a bridge key is held to its scopes on a box with auth
-off as well. OPEN routes stay open to it, as to anyone.
+BRIDGE class (``/mcp/agents``, ``GET /api/bridge/me``, ``/api/memory/compat``)
+and the MCP mounts its scopes name (:data:`BRIDGE_SCOPE_PREFIXES`); every other
+route refuses it with 403. Both checks run ahead of the dev-open bypass: a
+BRIDGE-class request is never waved through, and a bridge key is held to its
+scopes on a box with auth off as well. OPEN routes stay open to it, as to
+anyone. On a BRIDGE-class path the middleware checks the tier only, not the
+key's scopes (:func:`_verdict`), so a BRIDGE surface that needs a scope checks
+it in its handlers, as ``/api/memory/compat`` does for ``memory``
+(:func:`hal0.api.routes.memory_compat.require_memory_bridge`).
 
 ``[bridge].enabled`` is recorded here when hal0-api boots
 (:func:`set_bridge_enabled`). While it is off no bridge key verifies, and the

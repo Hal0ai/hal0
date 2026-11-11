@@ -113,15 +113,40 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
 4b. **Every writer goes through hal0; the engine is not a public door.** The
    Hindsight coding-agents plugin (Claude Code, Codex, Pi) talks to the engine
    directly today, so none of the envelope applies to its writes. hal0 exposes
-   an engine-compatible memory endpoint that the plugin is pointed at instead:
-   it authenticates the caller with a bridge key (ADR-0043), accepts the
-   subset of engine routes the plugin uses, maps every bank the plugin names
-   to `hal0:shared`, applies the envelope and decision 4a on the way in and
-   the project scope on the way out, and forwards to the engine. The engine
-   then binds loopback only. `hal0 memory agents install` writes the plugin
-   config for this endpoint. A box whose engine was deliberately exposed on
-   the network keeps working until the operator moves its clients, and
-   `hal0 doctor` names the exposure.
+   an engine-compatible memory endpoint that the plugin is pointed at instead,
+   at `/api/memory/compat`: the plugin's `apiUrl` becomes hal0's origin plus
+   that prefix and its requests keep the engine's own paths below it
+   (`/api/memory/compat/v1/default/banks/{bank}/...`). It authenticates the
+   caller with a bridge key that holds the `memory` scope (ADR-0043, amended
+   for this), accepts the subset of engine routes the plugin uses, maps every
+   bank the plugin names to the platform bank (`hal0:shared` once decision 7
+   lands), applies the envelope and decision 4a on the way in and the project
+   scope on the way out, and forwards to the engine. The engine then binds
+   loopback only. `hal0 memory agents install` writes the plugin config for
+   this endpoint. A box whose engine was deliberately exposed on the network
+   keeps working until the operator moves its clients, and `hal0 doctor`
+   names the exposure.
+   - *The bank segment carries the project.* The plugin has no project field
+     and no way to add a request header; what it does have is the bank id in
+     every URL, which defaults to `coding-agent::{gitProject}`. hal0 reads the
+     project from the part after `::`, and the write is still filed in the
+     platform bank. `{gitProject}` is the directory name of the repository's
+     main worktree, not the name of its remote, so a checkout called
+     `hal0-mono` reports that name: this is the case the registry's aliases
+     in decision 4a exist for, and a directory name that is no project
+     (`tmp`, `unknown`) is why it has a deny list. A bank id that names no
+     project falls back to the request's own `project:` tags, and a caller
+     left with none is stamped `project:unresolved`.
+   - *Reads are scoped the same way.* A recall, reflect or document listing
+     through the endpoint sees the caller's project plus global memory, and
+     never another project. An unresolved caller sees global memory plus its
+     own unresolved writes.
+   - *Typed routes, not a proxy.* Each route is parsed and goes through the
+     provider or one scoped forwarder, so a field or route the endpoint does
+     not name never reaches the engine. A bank cannot be deleted, a bank
+     template is accepted and ignored, and the knowledge-base routes answer
+     404, which the plugin reads as "no pages", until they are mapped to
+     per-project folders.
 5. **A session is one document.** Every session-scoped write from the Hermes
    provider (turn capture, continuity note, checkpoint) is appended to one
    document per session, with one fixed tag set and the write kind in

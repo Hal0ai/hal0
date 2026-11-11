@@ -493,3 +493,36 @@ async def test_tags_stats_and_consolidate_hit_expected_paths():
     assert ("GET", "/v1/default/banks/shared/tags") in seen
     assert ("GET", "/v1/default/banks/shared/stats") in seen
     assert ("POST", "/v1/default/banks/shared/consolidate") in seen
+
+
+# ── per-call read budgets ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_retain_batch_and_recall_take_a_read_budget_of_their_own():
+    """Both used the client-wide read budget only. A caller that knows what it
+    is waiting for (an async retain, a recall) can now say so; without one the
+    client default still applies."""
+    seen: list[tuple[str, float]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.extensions["timeout"]["read"]))
+        return httpx.Response(200, json={"results": []})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:9177", timeout=httpx.Timeout(120.0)
+    ) as http:
+        client = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+        items = [{"content": "x", "document_id": "d"}]
+        await client.retain_batch(bank_id="shared", items=items, timeout_s=30.0)
+        await client.retain_batch(bank_id="shared", items=items)
+        await client.recall(bank_id="shared", query="q", timeout_s=60.0)
+        await client.recall(bank_id="shared", query="q")
+
+    assert seen == [
+        ("/v1/default/banks/shared/memories", 30.0),
+        ("/v1/default/banks/shared/memories", 120.0),
+        ("/v1/default/banks/shared/memories/recall", 60.0),
+        ("/v1/default/banks/shared/memories/recall", 120.0),
+    ]
