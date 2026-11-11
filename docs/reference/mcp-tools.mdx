@@ -1,11 +1,9 @@
 ---
 title: MCP tools reference
-description: "Every MCP tool hal0 exposes over hal0-admin, hal0-memory and hal0-agents, gating rules, and how hal0 acts as an MCP client — verified against src/hal0/mcp."
+description: "Every hal0-admin MCP tool and its gating rules, the MCP server management API, and how hal0 acts as an MCP client — verified against src/hal0/mcp. The hal0-memory and hal0-agents tools have their own pages."
 sidebar:
   order: 90
 ---
-
-import { Aside } from '@astrojs/starlight/components';
 
 hal0 mounts three [FastMCP](https://github.com/jlowin/fastmcp) (Streamable-HTTP) servers
 on the main FastAPI app: `hal0-admin` at `/mcp/admin`, `hal0-memory` at
@@ -13,7 +11,7 @@ on the main FastAPI app: `hal0-admin` at `/mcp/admin`, `hal0-memory` at
 admitted with [`hal0 bridge`](/docs/reference/cli-operator#hal0-bridge--admit-remote-coding-agents);
 it is mounted whenever `[bridge].enabled` is on (the default), and is 404 while it is off.
 
-Every Hermes profile is wired to both servers. hal0 writes `hal0-admin` and `hal0-memory` into each named profile's `config.yaml` as `hermes__<profile>`, with shared memory by default (`hal0: {memory_private: true}` in a profile's `config.yaml` makes its memory facts private; directives are bank-level in the unified bank and are not covered, and mental models follow the read rule under the memory tools below) and the box bearer, at provisioning and on every hal0-api reconcile sweep (120 s). A profile opts out with `hal0: {wire_mcp: false}`. The default profile is not converged periodically: after adding the opt-in to its `config.yaml` by hand, run `sudo hal0 agent reprovision hermes --repair` (or the next `hal0 update` does it). `hal0 doctor` reports the state on the `hermes_profiles_mcp` row, and on `hermes_default_memory` and `hermes_brain_memory` for the default and `hal0-brain` profiles.
+Every Hermes profile is wired to both servers. hal0 writes `hal0-admin` and `hal0-memory` into each named profile's `config.yaml` as `hermes__<profile>`, with shared memory by default (`hal0: {memory_private: true}` in a profile's `config.yaml` makes its memory facts private; directives are bank-level in the unified bank and are not covered, and mental models follow the read rule on [MCP tools: hal0-memory](/docs/reference/mcp-tools-memory)) and the box bearer, at provisioning and on every hal0-api reconcile sweep (120 s). A profile opts out with `hal0: {wire_mcp: false}`. The default profile is not converged periodically: after adding the opt-in to its `config.yaml` by hand, run `sudo hal0 agent reprovision hermes --repair` (or the next `hal0 update` does it). `hal0 doctor` reports the state on the `hermes_profiles_mcp` row, and on `hermes_default_memory` and `hermes_brain_memory` for the default and `hal0-brain` profiles.
 
 ## Per-slot tune through MCP
 
@@ -296,109 +294,7 @@ policy.
 
 ## `hal0-memory` (`/mcp/memory`)
 
-Unlike `hal0-admin`, each tool here registers with a real typed signature, so
-`tools/list` returns real per-field schemas, not an opaque `args` blob.
-
-hal0-memory registers 30 tools total. Gating tier is classified the same way as
-the admin tools above — via `AUTONOMOUS_READ_TOOLS` / `AUTONOMOUS_WRITE_TOOLS`
-/ `GATED_TOOLS` in `hal0.mcp.admin` (the standalone mount additionally
-hard-gates its two delete tools through its own local list, checked first —
-same verdict, belt and braces).
-
-**Autonomous — read**
-
-| Tool | Required | Returns |
-|---|---|---|
-| `memory_search` | `query` | `{results: [{id, text, score, timestamp, dataset, tags, source, metadata}]}` |
-| `memory_list` | none | `{items: [...], next_cursor}` |
-| `memory_recall` | `query` | token-budgeted, consolidated memory — `{results: [...]}` |
-| `memory_reflect` | `query` | LLM-backed synthesis grounded in recalled facts; `{status: "unsupported"}` on engines without this capability |
-| `memory_history` | `id` | curation history for one memory unit |
-| `memory_mental_model_list` | none | a bank's mental models (stored `memory_reflect` answers kept refreshed). Metadata only (id, name, tags, staleness) unless `detail` is `content` or `full`; read one model's content with `memory_mental_model_get` |
-| `memory_mental_model_get` | `id` | one mental model |
-| `memory_directive_list` | none | a bank's directives (standing instructions injected into prompts) |
-| `memory_directive_get` | `id` | one directive |
-| `memory_operation_list` | none | async operations (retain, consolidation, refresh, ...) |
-| `memory_operation_get` | `id` | one async operation's status — the poll target for `memory_add`'s `operation_id`, `memory_mental_model_refresh`, `memory_bank_consolidate`. A completed retain reports its extraction yield: `facts_extracted`, plus `nothing_learned` and a `notice` when zero facts made it into memory. A zero-yield retain of an already-extracted document instead carries `document_fact_count` and a "content was already known" `notice` |
-| `memory_tags_list` | none | tags in use in a bank, with usage counts |
-| `memory_bank_stats` | none | node/link/observation/operation counts for a bank |
-| `memory_kb_tree` | none | a bank's knowledge-base page tree (pages Hindsight synthesizes from the bank) |
-| `memory_kb_read` | `page_id` | one knowledge-base page's content |
-| `memory_documents_list` | none | a bank's retained documents; filter with `q`, `tags`, `tags_match`, page with `limit`/`offset` |
-| `memory_documents_get` | `document_id` | one retained document |
-
-These read tools apply the same private-memory rule as `memory_recall`: a
-memory tagged `visibility:private` is readable only by the agent named in its
-`agent:<id>` tag, and a caller with no identity reads none. A document,
-mental model, knowledge page or memory history the caller may not read
-answers as one that does not exist (`memory.document_not_found`,
-`memory.mental_model_not_found`, `memory.knowledge_page_not_found`,
-`memory.memory_not_found`; an operation answers `operation_status:
-not_found`). A mental model or knowledge page is built from every memory its
-tags admit, so while the bank holds another agent's private memory only the
-models whose scope strictly requires the caller's own `agent:<id>` tag
-(`all_strict`, `exact`, or `any_strict` over that one tag) and that leave
-other mental models out of their refresh (`trigger.exclude_mental_models`,
-which hal0 sets on every model an agent creates or re-triggers) are listed. Updating,
-refreshing or deleting a model the caller may not read is the same 404, and
-while the bank holds another agent's private memory a model's tags or
-trigger may change only from one scope confined to the caller to another
-(`memory.mental_model_rescope_refused` otherwise). A `trigger.tag_groups`
-that is empty or not a list is refused (`memory.mental_model_scope_invalid`):
-the engine reads it as the whole bank. A listing's `total` counts only what
-the caller can see. A tag that
-appears only on other agents' private documents is left out of
-`memory_tags_list`. `memory_bank_stats` returns only its health fields, with
-`counts_withheld: true`, while the bank holds another agent's private memory.
-The dashboard's admin API (`/api/memory/banks/{bank}/...`) is not filtered.
-
-**Autonomous — write** (reversible, low blast radius)
-
-If `memory_add` cannot connect to the memory engine (including a connect
-timeout), it returns `status: "error"` with code `memory.engine_unavailable`,
-a message asking the caller to retry shortly, and `error.details.retry_after_s: 5`.
-An error response from the engine is not reclassified as engine unavailability.
-
-While `hal0 memory embedder switch` is rebuilding the store, `memory_add` and
-every other tool that changes memory return `status: "error"` with code
-`memory.writes_paused` and `error.details.retry_after_s: 30`. Nothing is
-written. The engine is on a private port for the same span, so the read tools
-return `memory.engine_unavailable` until the switch has finished.
-
-| Tool | Required | Returns |
-|---|---|---|
-| `memory_add` | `text` (non-empty) | `{id, timestamp, operation_id?}` |
-| `memory_delete` | `ids` (non-empty list) | `{deleted: int}`; bulk deletes (>1 id) or a foreign/list dataset instead return `{status: "pending_approval", approval_id, detail}` |
-| `memory_curate` | `id`, plus at least one field to change (`text`, `context`, `occurred_start`, `occurred_end`, `fact_type`, `entities`, or `state`) | edits a memory unit's text/context/occurred-range/fact_type/entities, or soft-invalidates it via `state` — the non-destructive correction path; `id` alone returns `mcp.memory_schema` |
-| `memory_mental_model_create` | `name`, `source_query` | `{mental_model_id, operation_id}` — initial content generation runs as an async refresh |
-| `memory_mental_model_update` | `id` | updates name/source_query/max_tokens/tags/trigger |
-| `memory_mental_model_refresh` | `id` | triggers a mental model refresh (async) — `{operation_id, ...}` |
-| `memory_directive_create` | `name`, `content` | creates a directive |
-| `memory_directive_update` | `id` | updates name/content/priority/is_active/tags |
-| `memory_operation_cancel` | `id` | aborts pending/processing work |
-| `memory_operation_retry` | `id` | re-queues a failed operation |
-| `memory_bank_consolidate` | none | triggers the engine's world/experience → observation consolidation pass early — `{operation_id, deduplicated}` |
-
-**Gated** (destructive — require operator approval)
-
-| Tool | Required | Returns |
-|---|---|---|
-| `memory_mental_model_delete` | `id` | deletes a mental model |
-| `memory_directive_delete` | `id` | deletes a directive |
-
-Validation errors return `{"status": "error", "error": {"code": "mcp.memory_schema", "detail": ...}}`.
-
-`source` on `memory_add` is server-injected from the caller's identity — a client
-cannot set it directly; attempting to pass it raises.
-
-Namespace rule: `dataset` defaults to `"shared"`; the `X-hal0-Private` header promotes
-it to `private:<client_id>`.
-
-<Aside type="note">
-`hal0-admin`'s `memory_*` tools and the standalone `/mcp/memory` mount share the exact
-same handlers — the admin server calls them in-process via a `memory_dispatcher`
-closure, with no HTTP hop.
-</Aside>
+The memory server's tools, their gating tiers and the private-memory read rule are on their own page: [MCP tools: hal0-memory](/docs/reference/mcp-tools-memory).
 
 ## `hal0-agents` (`/mcp/agents`)
 
