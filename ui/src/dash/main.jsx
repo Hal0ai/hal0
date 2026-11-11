@@ -31,6 +31,9 @@ import { captureUiException } from '@/sentry'
 // than read off a `window.BenchmarksView` global.
 import Benchmarks from './Benchmarks'
 import MemoryWorkspaceView from './memory-workspace/MemoryWorkspaceView'
+// The Memory area (#memory/<tab>, ADR-0058 decision 12): a real ES module, like Benchmarks.
+import { MemoryArea } from './memory-area/MemoryArea.jsx'
+import { legacyMemoryRedirect } from './memory-area/memory-route-pure'
 import { Dock } from './dock/Dock.jsx'
 import { GpuGateBlockedBanner } from './dock/GpuGateBlockedBanner.jsx'
 import { slotsSub } from './slots-route'
@@ -63,7 +66,18 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // the dashboard.
 const ROUTES = ["dashboard", "slots", "models", "logs", "agent", "memory", "memworkspace", "settings", "mcp", "board", "services", "benchmarks"];
 function parseRoute() {
-  const raw = (window.location.hash || "#dashboard").replace(/^#/, "");
+  // Memory addresses from before the Memory area (#memory, #memory/bank, #agent/memory) are
+  // rewritten in place to where they live now, so a saved link lands on the right tab and Back
+  // does not return to an address that redirects again. Remove with the next minor release.
+  const moved = legacyMemoryRedirect(window.location.hash || "");
+  if (moved) {
+    try {
+      window.history.replaceState(window.history.state, "", moved);
+    } catch {
+      /* a sandboxed frame may refuse; the route below still resolves */
+    }
+  }
+  const raw = (moved || window.location.hash || "#dashboard").replace(/^#/, "");
   const [path, qs] = raw.split("?");
   const parts = path.split("/");
   let head = parts[0];
@@ -164,11 +178,10 @@ function App() {
   const useBoardChatHook = (typeof window !== "undefined" && window.__hal0UseBoardChat) || null;
   const agentChat = useBoardChatHook ? useBoardChatHook() : undefined;
 
-  // 0.4 gate: the Agent route is reduced to the Memory tab, so it only
-  // renders when the memory subsystem is live ([memory].enabled, surfaced
-  // via /api/status). Read through the window bridge to keep this strict
-  // no-ES-imports prototype file within the dash/*.jsx contract — the bridge
-  // is imported in main.tsx before main.jsx evaluates, so the ref is stable.
+  // Memory gate: the Memory area (#memory/*) only renders when the memory
+  // subsystem is live ([memory].enabled, surfaced via /api/status). Read
+  // through the window bridge — it is imported in main.tsx before main.jsx
+  // evaluates, so the ref is stable.
   const useMemEnabled = (typeof window !== "undefined" && window.__hal0UseMemoryEnabled) || null;
   const memoryEnabled = useMemEnabled ? useMemEnabled() : false;
   // Companion pending flag: useMemoryEnabled() returns false during loading
@@ -176,6 +189,14 @@ function App() {
   // transient loading false — only redirect once the query has settled.
   const useMemEnabledPending = (typeof window !== "undefined" && window.__hal0UseMemoryEnabledPending) || null;
   const memoryStatusPending = useMemEnabledPending ? useMemEnabledPending() : true;
+  // Memory off: a #memory/* address has nothing to show, so it goes to the
+  // dashboard. `replace` takes the address out of the history, so Back does
+  // not land on it and bounce again.
+  useEffectA(() => {
+    if (route === "memory" && !memoryStatusPending && !memoryEnabled) {
+      window.location.replace("#dashboard");
+    }
+  }, [route, memoryStatusPending, memoryEnabled]);
 
   // Live approval queue — bridges installed by chrome.jsx (loaded before main.jsx).
   // TODO endpoints.ts (ui-sweep-b owns) — inline paths live in useAgents.ts hooks.
@@ -293,15 +314,18 @@ function App() {
       case "models":   return <ModelsView modelParam={param} />;
       // ?unit= comes from parseRoute: the agent card's Unit logs control (hal0#2931).
       case "logs":     return <LogsView unit={query.unit || null} />;
-      // v0.5 nav: Agent is a tabbed shell hosting Memory + MCP. #memory and
-      // #mcp are kept as routes that resolve to their tab inside AgentView (so
-      // MemoryView's internal #memory/<section> nav round-trips and old
-      // deep-links still land on the right surface). The memory gate is
-      // enforced inside AgentView — the Memory tab only renders when enabled.
+      // Agents is a tabbed shell hosting the agent cards and MCP. #mcp is kept
+      // as a route that resolves to its tab inside AgentView.
       case "agent":
-      case "memory":
       case "mcp":
         return <AgentView />;
+      // The Memory area (#memory/<tab>). It reads its own address (tab, bank,
+      // fact), because it rewrites it with replaceState, which this router
+      // does not see. Nothing mounts, and nothing under /api/memory is asked
+      // for, until the gate has answered yes; the effect above redirects when
+      // it answers no.
+      case "memory":
+        return memoryEnabled ? <MemoryArea /> : null;
       // Operator Board (#board): a hal0-skinned kanban wired to the Hermes
       // kanban backend via /api/board/*. BoardView owns its own selector /
       // filters / drawers; renders inside the standard .view shell.
