@@ -901,7 +901,9 @@ class EmbedderSwitch:
         """
         path = lock_path()
         os.close(nofollow.open_dir(path.parent, create=True))
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+        # Read-only is enough for ``flock``, and it means a lock file left
+        # root-owned by one run never locks the service account out of the next.
+        fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -914,8 +916,6 @@ class EmbedderSwitch:
             if owner is not None:
                 with contextlib.suppress(OSError):
                     os.fchown(fd, *owner)
-            os.ftruncate(fd, 0)
-            os.write(fd, f"{os.getpid()}\n".encode())
             yield
         finally:
             os.close(fd)
