@@ -14,6 +14,8 @@
 //                        delete action; same situation as useMemoryAdd, no
 //                        pre-existing per-fact delete hook was found — only a
 //                        whole-bank useBankDelete existed)
+//   useMemoryWorkspaceAgents — GET /api/memory/agents
+//   useMemoryModels    — GET /api/memory/models
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiGet, apiPost, apiPut } from '../client'
@@ -447,4 +449,54 @@ export function useMemoryEnabledPending(): boolean {
     refetchInterval: 30_000,
   })
   return q.isPending
+}
+
+// ── Agents (GET /api/memory/agents) ─────────────────────────────────────────
+//
+// Connected coding-agent banks and the harness install one-liner. Moved here
+// from useMemoryWorkspace.ts (which re-exports it); same query key.
+
+export interface MemoryAgentsInstall {
+  harnesses: string[]
+  command: string
+}
+
+export interface MemoryAgents {
+  banks: string[]
+  install: MemoryAgentsInstall
+  /** Hindsight Control Plane console URL from [memory.console]; null when
+   * disabled. Absent entirely on older backends that predate this field —
+   * callers should fall back to the fixed-port default in that case. */
+  console_url?: string | null
+}
+
+export function useMemoryWorkspaceAgents() {
+  return useQuery({
+    queryKey: ['memory', 'agents'],
+    queryFn: () => apiGet<MemoryAgents>(ENDPOINTS.memoryAgents),
+  })
+}
+
+// ── Models (GET /api/memory/models) ─────────────────────────────────────────
+//
+// Embedding / reranker / decision model identities. Moved here from
+// useMemoryWorkspace.ts (which re-exports it); same query key.
+
+export interface MemoryModelInfo {
+  model: string
+  enabled?: boolean
+  [key: string]: unknown
+}
+
+export interface MemoryModels {
+  embeddings: MemoryModelInfo
+  reranker: MemoryModelInfo
+  decision: MemoryModelInfo
+}
+
+export function useMemoryModels() {
+  return useQuery({
+    queryKey: ['memory', 'models'],
+    queryFn: () => apiGet<MemoryModels>(ENDPOINTS.memoryModels),
+  })
 }

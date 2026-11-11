@@ -71,6 +71,15 @@ export interface BankOperation {
   created_at: string
   error_message: string | null
   retry_count: number
+  // The rest of the row a 1.x engine returns (seen on a live
+  // `GET .../operations`); optional because older engines omit them.
+  operation_type?: string
+  updated_at?: string | null
+  items_count?: number | null
+  document_id?: string | null
+  /** Set on a mental-model or knowledge-page refresh operation. */
+  mental_model_id?: string | null
+  next_retry_at?: string | null
 }
 
 // Real hindsight-api 0.8.4 envelope — verified live against
@@ -250,21 +259,48 @@ export function summarizeBankOperations(ops?: BankOperations | null): BankActivi
   }
 }
 
+/** `status`, `limit` and `offset` are the engine's own query parameters. */
+export interface BankOperationsOptions {
+  status?: string
+  limit?: number
+  offset?: number
+  enabled?: boolean
+}
+
+/**
+ * Query key for one bank's operations list. A caller that does not page gets
+ * the key this hook has always used (`[..., 'operations', status | 'all']`),
+ * so the bank card and the bank panel keep sharing one cache entry; a paged
+ * read appends its window. Every variant sits under the
+ * `['memory', 'banks', bank, 'operations']` prefix the mutations invalidate.
+ */
+export function bankOperationsKey(
+  bank: string | null,
+  opts?: Pick<BankOperationsOptions, 'status' | 'limit' | 'offset'>,
+) {
+  const base = ['memory', 'banks', bank, 'operations', opts?.status ?? 'all'] as const
+  if (opts?.limit === undefined && opts?.offset === undefined) return base
+  return [...base, { limit: opts?.limit ?? null, offset: opts?.offset ?? null }] as const
+}
+
 // Shared query — the bank list card AND the bank detail panel read the same
 // key so there is one poll per bank, not one per consumer (no stampede).
 // Polling is adaptive: fast (3s) while work is in flight so ingest/extraction
 // visibly progresses, then it backs off (20s) once the bank is quiescent.
-export function useBankOperations(
-  bank: string | null,
-  opts?: { status?: string; enabled?: boolean },
-) {
-  const qs = opts?.status ? `?status=${encodeURIComponent(opts.status)}` : ''
+//
+// `limit` and `offset` are optional. A caller that passes neither sends the
+// request, and uses the query key, this hook always has.
+export function useBankOperations(bank: string | null, opts?: BankOperationsOptions) {
+  const paged = opts?.limit !== undefined || opts?.offset !== undefined
+  const search = qs({ status: opts?.status, limit: opts?.limit, offset: opts?.offset })
   return useQuery<BankOperations>({
-    queryKey: ['memory', 'banks', bank, 'operations', opts?.status ?? 'all'],
+    queryKey: bankOperationsKey(bank, opts),
     queryFn: () =>
-      apiGet<BankOperations>(`${ENDPOINTS.memoryBankOperations(bank as string)}${qs}`),
+      apiGet<BankOperations>(`${ENDPOINTS.memoryBankOperations(bank as string)}${search}`),
     enabled: !!bank && opts?.enabled !== false,
     staleTime: 3_000,
+    // A paged read keeps the previous page on screen while the next loads.
+    placeholderData: paged ? keepPreviousData : undefined,
     refetchInterval: (query) => {
       const items = query.state.data?.operations ?? []
       const inFlight = items.some((o) => IN_FLIGHT_STATUSES.has(o.status))
@@ -553,6 +589,238 @@ export function useMentalModelDelete() {
     mutationFn: ({ bank, id }: { bank: string; id: string }) =>
       apiDelete(`${ENDPOINTS.memoryBankMentalModels(bank)}/${encodeURIComponent(id)}`),
     onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'mental-models'] })
+    },
+  })
+}
+
+export function mentalModelKey(bank: string | null, id: string | null) {
+  return ['memory', 'banks', bank, 'mental-models', id] as const
+}
+
+export function mentalModelHistoryKey(bank: string | null, id: string | null) {
+  return ['memory', 'banks', bank, 'mental-models', id, 'history'] as const
+}
+
+// `GET .../mental-models/{id}`: one model with its content. Both keys extend
+// the list key (`[..., 'mental-models']`), so the refresh, create and delete
+// mutations above already invalidate them by prefix.
+export function useMentalModel(
+  bank: string | null,
+  id: string | null,
+  opts: { enabled?: boolean } = {},
+) {
+  return useQuery<MentalModel>({
+    queryKey: mentalModelKey(bank, id),
+    queryFn: () =>
+      apiGet<MentalModel>(ENDPOINTS.memoryBankMentalModel(bank as string, id as string)),
+    enabled: (opts.enabled ?? true) && !!bank && !!id,
+    staleTime: 10_000,
+  })
+}
+
+/** One earlier revision of a mental model. */
+export interface MentalModelRevision {
+  content?: string | null
+  updated_at?: string | null
+  created_at?: string | null
+  [key: string]: unknown
+}
+
+export interface MentalModelHistory {
+  items: MentalModelRevision[]
+}
+
+// `hal0 memory mm history` reads this response as `{items: [...]}` or a bare
+// array (cli/memory_mm_commands.py), and the engine's unit history is a bare
+// array. Both are accepted so the reader never branches on the wire shape.
+export function normalizeMentalModelHistory(raw: unknown): MentalModelHistory {
+  if (Array.isArray(raw)) return { items: raw as MentalModelRevision[] }
+  if (raw && typeof raw === 'object') {
+    const items = (raw as { items?: unknown }).items
+    return { items: Array.isArray(items) ? (items as MentalModelRevision[]) : [] }
+  }
+  return { items: [] }
+}
+
+export function useMentalModelHistory(
+  bank: string | null,
+  id: string | null,
+  opts: { enabled?: boolean } = {},
+) {
+  return useQuery<MentalModelHistory>({
+    queryKey: mentalModelHistoryKey(bank, id),
+    queryFn: async () =>
+      normalizeMentalModelHistory(
+        await apiGet<unknown>(ENDPOINTS.memoryBankMentalModelHistory(bank as string, id as string)),
+      ),
+    enabled: (opts.enabled ?? true) && !!bank && !!id,
+    staleTime: 30_000,
+  })
+}
+
+// ── knowledge base (folders and pages) ───────────────────────────────────────
+//
+// The classified routes in routes/memory_admin.py's _FORWARDS:
+//   GET   /api/memory/banks/{bank}/knowledge-base/tree
+//   GET   /api/memory/banks/{bank}/knowledge-base/pages/{page}
+//   PATCH /api/memory/banks/{bank}/knowledge-base/pages/{page}
+//   POST  /api/memory/banks/{bank}/knowledge-base/pages/{page}/refresh
+// Every query key sits under `['memory', 'banks', bank, 'knowledge']`, and the
+// two mutations invalidate that prefix, so a change always reaches both the
+// tree and the open page.
+
+export interface KnowledgeNode {
+  id: string
+  kind: 'folder' | 'page' | string
+  name: string
+  children: KnowledgeNode[]
+  /** The mental model a page is generated from, when the engine reports it. */
+  mental_model_id?: string | null
+}
+
+export interface KnowledgeTree {
+  roots: KnowledgeNode[]
+}
+
+function normalizeKnowledgeNode(raw: unknown): KnowledgeNode | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const node = raw as Record<string, unknown>
+  const id = node.id ?? node.page_id
+  if (typeof id !== 'string' || !id) return null
+  const kind = node.kind ?? node.type
+  const children = Array.isArray(node.children) ? node.children : []
+  return {
+    id,
+    kind: typeof kind === 'string' ? kind : 'page',
+    name: typeof node.name === 'string' && node.name ? node.name : id,
+    children: children
+      .map(normalizeKnowledgeNode)
+      .filter((child): child is KnowledgeNode => child !== null),
+    mental_model_id: typeof node.mental_model_id === 'string' ? node.mental_model_id : null,
+  }
+}
+
+// The engine answers `{roots: [...]}`. hal0's own readers of this route
+// (cli/memory_kb_commands.py, memory/spec_apply.py) also accept `nodes`,
+// `children` or `items` for the list, `type` for a node's kind and `page_id`
+// for its id, so the same spellings are accepted here and folded into one
+// shape. A node without an id is dropped: it could never be opened.
+export function normalizeKnowledgeTree(raw: unknown): KnowledgeTree {
+  const body = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
+  const list = Array.isArray(raw)
+    ? raw
+    : ([body.roots, body.nodes, body.children, body.items].find(Array.isArray) ?? [])
+  return {
+    roots: (list as unknown[])
+      .map(normalizeKnowledgeNode)
+      .filter((node): node is KnowledgeNode => node !== null),
+  }
+}
+
+/** Every page in the tree, in reading order, with its folder depth. */
+export function knowledgePages(
+  tree: KnowledgeTree | null | undefined,
+): { node: KnowledgeNode; depth: number }[] {
+  const out: { node: KnowledgeNode; depth: number }[] = []
+  const walk = (nodes: KnowledgeNode[], depth: number) => {
+    for (const node of nodes) {
+      if (node.kind === 'page') out.push({ node, depth })
+      walk(node.children, depth + 1)
+    }
+  }
+  walk(tree?.roots ?? [], 0)
+  return out
+}
+
+export interface KnowledgePage {
+  id: string
+  name: string
+  content?: string | null
+  source_query?: string | null
+  tags?: string[]
+  trigger?: string | null
+  max_tokens?: number | null
+  mental_model_id?: string | null
+  is_stale?: boolean
+  last_refreshed_at?: string | null
+  // A fault only when later than last_refreshed_at (same rule as MentalModel).
+  last_refresh_failed_at?: string | null
+}
+
+/** The page fields `PATCH .../pages/{id}` accepts (memory/spec_apply.py). */
+export interface KnowledgePageUpdate {
+  source_query?: string | null
+  tags?: string[]
+  trigger?: string | null
+  max_tokens?: number | null
+}
+
+export function knowledgeKey(bank: string | null) {
+  return ['memory', 'banks', bank, 'knowledge'] as const
+}
+
+export function knowledgeTreeKey(bank: string | null) {
+  return ['memory', 'banks', bank, 'knowledge', 'tree'] as const
+}
+
+export function knowledgePageKey(bank: string | null, pageId: string | null) {
+  return ['memory', 'banks', bank, 'knowledge', 'page', pageId] as const
+}
+
+export function useKnowledgeTree(bank: string | null, opts: { enabled?: boolean } = {}) {
+  return useQuery<KnowledgeTree>({
+    queryKey: knowledgeTreeKey(bank),
+    queryFn: async () =>
+      normalizeKnowledgeTree(
+        await apiGet<unknown>(ENDPOINTS.memoryBankKnowledgeTree(bank as string)),
+      ),
+    enabled: (opts.enabled ?? true) && !!bank,
+    staleTime: 10_000,
+  })
+}
+
+export function useKnowledgePage(
+  bank: string | null,
+  pageId: string | null,
+  opts: { enabled?: boolean } = {},
+) {
+  return useQuery<KnowledgePage>({
+    queryKey: knowledgePageKey(bank, pageId),
+    queryFn: () =>
+      apiGet<KnowledgePage>(ENDPOINTS.memoryBankKnowledgePage(bank as string, pageId as string)),
+    enabled: (opts.enabled ?? true) && !!bank && !!pageId,
+    staleTime: 10_000,
+  })
+}
+
+export function useKnowledgePageUpdate() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, id, body }: { bank: string; id: string; body: KnowledgePageUpdate }) =>
+      apiPatch<KnowledgePage>(
+        ENDPOINTS.memoryBankKnowledgePage(bank, id),
+        body as Record<string, unknown>,
+      ),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: knowledgeKey(vars.bank) })
+    },
+  })
+}
+
+// A refresh is queued, not finished, when this resolves: the engine answers
+// with the operation it started. The tree and the page are refetched so their
+// state follows the queue, the operations list so the new operation shows
+// without waiting for its poll, and the mental models because a page is
+// generated from one.
+export function useKnowledgePageRefresh() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ bank, id }: { bank: string; id: string }) =>
+      apiPost<{ operation_id?: string }>(ENDPOINTS.memoryBankKnowledgePageRefresh(bank, id), {}),
+    onSuccess: (_d, vars) => {
+      void qc.invalidateQueries({ queryKey: knowledgeKey(vars.bank) })
+      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'operations'] })
       void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'mental-models'] })
     },
   })
