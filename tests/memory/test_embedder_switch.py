@@ -611,15 +611,7 @@ async def test_the_engine_filesystem_and_the_archive_filesystem_are_checked_apar
     box: Box, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Archives on a roomy disk do not excuse a full disk under the engine's data."""
-    real_stat = os.stat
-    engine_dev = real_stat(box.hs).st_dev
-
-    class OtherDevice:
-        st_dev = engine_dev + 1
-
-    monkeypatch.setattr(
-        es.os, "stat", lambda p, *a, **k: OtherDevice if "backups" in str(p) else real_stat(p)
-    )
+    monkeypatch.setattr(es, "_device", lambda p: 2 if "backups" in str(p) else 1)
     monkeypatch.setattr(es, "_nearest_existing", lambda p: p)
     monkeypatch.setattr(
         es.shutil, "disk_usage", lambda p: _usage(10**12 if "backups" in str(p) else 100)

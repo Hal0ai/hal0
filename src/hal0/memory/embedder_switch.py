@@ -581,6 +581,11 @@ def _du_bytes(path: Path) -> int:
     return total
 
 
+def _device(path: Path) -> int:
+    """The filesystem ``path`` is on."""
+    return os.stat(path).st_dev
+
+
 def _nearest_existing(path: Path) -> Path:
     for candidate in (path, *path.parents):
         if candidate.exists():
@@ -1689,7 +1694,7 @@ class EmbedderSwitch:
         archive_free = shutil.disk_usage(archive_at).free
         store_need = int(store_bytes * STORE_FREE_FACTOR)
         archive_need = int(store_bytes * ARCHIVE_FREE_FACTOR)
-        same = os.stat(store_at).st_dev == os.stat(archive_at).st_dev
+        same = _device(store_at) == _device(archive_at)
         disk = {
             "archive_root": str(archive_root()),
             "store_bytes": store_bytes,
