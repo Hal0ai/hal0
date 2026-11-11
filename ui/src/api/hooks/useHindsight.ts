@@ -669,11 +669,11 @@ export function useMentalModelHistory(
 // The classified routes in routes/memory_admin.py's _FORWARDS:
 //   GET   /api/memory/banks/{bank}/knowledge-base/tree
 //   GET   /api/memory/banks/{bank}/knowledge-base/pages/{page}
-//   PATCH /api/memory/banks/{bank}/knowledge-base/pages/{page}
-//   POST  /api/memory/banks/{bank}/knowledge-base/pages/{page}/refresh
-// Every query key sits under `['memory', 'banks', bank, 'knowledge']`, and the
-// two mutations invalidate that prefix, so a change always reaches both the
-// tree and the open page.
+// Every query key sits under `['memory', 'banks', bank, 'knowledge']`, so a
+// change invalidates that prefix to reach both the tree and the open page.
+// There is no page refresh or page PATCH: a 1.x engine serves neither (#3564).
+// A page is refreshed and edited through its mental model, see the Knowledge
+// tab section at the end of this file.
 
 // One node of the tree, as a 1.x engine sends it. Folders and pages carry the
 // same fields; on a folder the page-only ones are null, empty or false.
@@ -782,14 +782,6 @@ export interface KnowledgePage {
   last_refresh_failed_at?: string | null
 }
 
-/** The page fields `PATCH .../pages/{id}` accepts (memory/spec_apply.py). */
-export interface KnowledgePageUpdate {
-  source_query?: string | null
-  tags?: string[]
-  trigger?: string | null
-  max_tokens?: number | null
-}
-
 export function knowledgeKey(bank: string | null) {
   return ['memory', 'banks', bank, 'knowledge'] as const
 }
@@ -825,38 +817,6 @@ export function useKnowledgePage(
       apiGet<KnowledgePage>(ENDPOINTS.memoryBankKnowledgePage(bank as string, pageId as string)),
     enabled: (opts.enabled ?? true) && !!bank && !!pageId,
     staleTime: 10_000,
-  })
-}
-
-export function useKnowledgePageUpdate() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: ({ bank, id, body }: { bank: string; id: string; body: KnowledgePageUpdate }) =>
-      apiPatch<KnowledgePage>(
-        ENDPOINTS.memoryBankKnowledgePage(bank, id),
-        body as Record<string, unknown>,
-      ),
-    onSuccess: (_d, vars) => {
-      void qc.invalidateQueries({ queryKey: knowledgeKey(vars.bank) })
-    },
-  })
-}
-
-// A refresh is queued, not finished, when this resolves: the engine answers
-// with the operation it started. The tree and the page are refetched so their
-// state follows the queue, the operations list so the new operation shows
-// without waiting for its poll, and the mental models because a page is
-// generated from one.
-export function useKnowledgePageRefresh() {
-  const qc = useQueryClient()
-  return useMutation({
-    mutationFn: ({ bank, id }: { bank: string; id: string }) =>
-      apiPost<{ operation_id?: string }>(ENDPOINTS.memoryBankKnowledgePageRefresh(bank, id), {}),
-    onSuccess: (_d, vars) => {
-      void qc.invalidateQueries({ queryKey: knowledgeKey(vars.bank) })
-      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'operations'] })
-      void qc.invalidateQueries({ queryKey: ['memory', 'banks', vars.bank, 'mental-models'] })
-    },
   })
 }
 

@@ -329,12 +329,38 @@ def test_knowledge_base_tree_and_page_forward(client: TestClient, recorder: _Rec
     r = client.get("/api/memory/banks/shared/knowledge-base/pages/p1")
     assert r.status_code == 200
 
+
+def test_knowledge_page_refresh_and_edit_go_through_engine_routes(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    """#3564: a 1.x engine serves no page refresh and no page PATCH.
+
+    hal0 forwards neither; a page is refreshed and edited through the mental
+    model its tree node names, on routes the engine does serve.
+    """
+    before = len(recorder.requests)
+    r = client.post("/api/memory/banks/shared/knowledge-base/pages/kp-1/refresh")
+    assert r.status_code == 404
+    r = client.patch("/api/memory/banks/shared/knowledge-base/pages/kp-1", json={"tags": []})
+    assert r.status_code == 405
+    assert len(recorder.requests) == before
+
     recorder.respond(
-        "POST", "/v1/default/banks/shared/knowledge-base/pages/p1/refresh", 200, {"queued": True}
+        "POST",
+        "/v1/default/banks/shared/mental-models/mm-1/refresh",
+        200,
+        {"operation_id": "op-1"},
     )
-    r = client.post("/api/memory/banks/shared/knowledge-base/pages/p1/refresh")
+    r = client.post("/api/memory/banks/shared/mental-models/mm-1/refresh")
     assert r.status_code == 200
     assert recorder.requests[-1]["method"] == "POST"
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/mental-models/mm-1/refresh"
+
+    recorder.respond("PATCH", "/v1/default/banks/shared/mental-models/mm-1", 200, {"id": "mm-1"})
+    r = client.patch("/api/memory/banks/shared/mental-models/mm-1", json={"tags": ["a"]})
+    assert r.status_code == 200
+    assert recorder.requests[-1]["method"] == "PATCH"
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/mental-models/mm-1"
 
 
 def test_bank_create_put_and_delete_forward(client: TestClient, recorder: _Recorder) -> None:

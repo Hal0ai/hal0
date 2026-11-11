@@ -61,7 +61,7 @@ export const KnowledgeBaseTab: React.FC<{ bank: string }> = ({ bank }) => {
     if (!pageId || !draft) return
     saveMutation.mutate(
       {
-        sub: `v1/default/banks/${bank}/knowledge-base/pages/${pageId}`,
+        sub: `v1/default/banks/${bank}/knowledge-base/nodes/${pageId}`,
         body: {
           source_query: draft.source_query || null,
           tags: draft.tags.split(',').map((t) => t.trim()).filter(Boolean),
@@ -119,7 +119,7 @@ export const KnowledgeBaseTab: React.FC<{ bank: string }> = ({ bank }) => {
                 data-testid="memws-kb-refresh"
                 disabled={refreshMutation.isPending}
                 onClick={() =>
-                  refreshMutation.mutate({ sub: `v1/default/banks/${bank}/knowledge-base/pages/${pageId}/refresh` })
+                  refreshMutation.mutate({ sub: `v1/default/banks/${bank}/mental-models/${rows.find((r) => r.node.id === pageId)?.node.mental_model_id}/refresh` })
                 }
               >
                 Refresh
