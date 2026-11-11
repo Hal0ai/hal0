@@ -216,19 +216,37 @@ describe('legacyMemoryRedirect', () => {
   })
 
   it.each([
-    '#memworkspace',
-    '#memworkspace/overview',
-    '#memworkspace/kb',
-    '#memworkspace/mental-models',
-    '#memworkspace/directives',
-    '#memworkspace/operations',
-    '#memworkspace/agents',
-    '#memworkspace/models',
-  ])('does not redirect %s: that page still exists', (hash) => {
-    expect(legacyMemoryRedirect(hash)).toBeNull()
+    ['#memworkspace', '#memory/health'],
+    ['#memworkspace/', '#memory/health'],
+    ['#memworkspace/overview', '#memory/health'],
+    ['#memworkspace/kb', '#memory/knowledge'],
+    ['#memworkspace/mental-models', '#memory/knowledge'],
+    ['#memworkspace/directives', '#memory/knowledge'],
+    ['#memworkspace/operations', '#memory/operations'],
+    ['#memworkspace/agents', '#memory/agents'],
+    ['#memworkspace/models', '#settings/memory'],
+    ['memworkspace/kb', '#memory/knowledge'],
+  ])('sends the deleted tools page %s to %s', (hash, to) => {
+    expect(legacyMemoryRedirect(hash)).toBe(to)
   })
 
-  it.each(['', '#', '#dashboard', '#agent', '#agent/mcp', '#agent/memoryx', '#settings/memory', '#memoryx'])(
+  it('sends an unknown #memworkspace section to Health rather than to the dashboard', () => {
+    expect(legacyMemoryRedirect('#memworkspace/nope')).toBe('#memory/health')
+    expect(legacyMemoryRedirect('#memworkspace/kb/extra')).toBe('#memory/knowledge')
+  })
+
+  it('drops a query on a #memworkspace address: that page kept none worth carrying', () => {
+    expect(legacyMemoryRedirect('#memworkspace/kb?bank=shared')).toBe('#memory/knowledge')
+  })
+
+  it.each(['#memory/health', '#memory/knowledge', '#memory/operations', '#memory/agents'])(
+    'a #memworkspace target %s does not redirect again',
+    (hash) => {
+      expect(legacyMemoryRedirect(hash)).toBeNull()
+    },
+  )
+
+  it.each(['', '#', '#dashboard', '#agent', '#agent/mcp', '#agent/memoryx', '#settings/memory', '#memoryx', '#memworkspacex'])(
     'leaves %j alone',
     (hash) => {
       expect(legacyMemoryRedirect(hash)).toBeNull()

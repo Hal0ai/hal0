@@ -36,11 +36,13 @@ test.describe('sidebar', () => {
     // No sub-links: the area's tabs are in the page.
     await expect(nav.getByTestId('nav-memory-toggle')).toHaveCount(0)
 
-    // Top-level order: … Agents, Memory, Memory (legacy tools), Services …
+    // Top-level order: … Agents, Memory, Services …, and no other row names memory.
     const top = await nav.locator('.sb-row:not(.sb-sub) .lbl').allTextContents()
     const at = top.indexOf('Memory')
     expect(top[at - 1]).toBe('Agents')
-    expect(top[at + 1]).toBe('Memory (legacy tools)')
+    expect(top[at + 1]).toBe('Services')
+    expect(top.filter((label) => /memory/i.test(label))).toEqual(['Memory'])
+    await expect(nav.getByTestId('nav-memworkspace')).toHaveCount(0)
   })
 
   test('Memory is no longer a sub-link of Agents', async ({ page }) => {
@@ -60,29 +62,12 @@ test.describe('sidebar', () => {
     await expect(page.getByTestId('memory-area')).toBeVisible()
     await expect(nav.getByTestId('nav-memory')).toHaveAttribute('aria-current', 'page')
     await expect(nav.getByTestId('nav-agent')).not.toHaveAttribute('aria-current', 'page')
-    await expect(nav.getByTestId('nav-memworkspace')).not.toHaveAttribute('aria-current', 'page')
 
     // It stays the active row on every tab.
     for (const id of TABS) {
       await page.goto(`/#memory/${id}`)
       await expect(nav.getByTestId('nav-memory')).toHaveAttribute('aria-current', 'page')
     }
-  })
-
-  test('the older tools page stays reachable under its own label, sub-links unchanged', async ({ page }) => {
-    await page.goto('/#dashboard')
-    const nav = page.locator('.sidebar .sb-list')
-    const legacy = nav.getByTestId('nav-memworkspace')
-    await expect(legacy.locator('.lbl')).toHaveText('Memory (legacy tools)')
-    await nav.getByTestId('nav-memworkspace-toggle').click()
-    for (const sub of ['overview', 'kb', 'mental-models', 'directives', 'operations', 'agents', 'models']) {
-      await expect(nav.getByTestId(`nav-memworkspace-${sub}`)).toBeVisible()
-    }
-    await nav.getByTestId('nav-memworkspace-kb').click()
-    await expect(page).toHaveURL(/#memworkspace\/kb$/)
-    await expect(page.getByTestId('memws-tab-kb')).toHaveAttribute('aria-selected', 'true')
-    // The new row is not lit while the legacy page is open.
-    await expect(nav.getByTestId('nav-memory')).not.toHaveAttribute('aria-current', 'page')
   })
 })
 
@@ -212,24 +197,13 @@ test.describe('page shell', () => {
   })
 })
 
-test.describe('built tabs, and the legacy tools page they replace', () => {
-  for (const [id, section] of [
-    ['knowledge', 'kb'],
-    ['agents', 'agents'],
-  ] as const) {
-    test(`${id} is built, and the legacy tools page keeps its own ${section} section`, async ({ page }) => {
+test.describe('every tab is built', () => {
+  for (const id of ['health', 'facts', 'knowledge', 'operations', 'agents'] as const) {
+    test(`${id} renders its own view, not a placeholder`, async ({ page }) => {
       await page.goto(`/#memory/${id}`)
-      await expect(page.getByTestId(`ma-${id}`)).toBeVisible()
       await expect(page.getByTestId(`ma-${id}-stub`)).toHaveCount(0)
-      await page.goto(`/#memworkspace/${section}`)
-      await expect(page.getByTestId(`memws-tab-${section}`)).toHaveAttribute('aria-selected', 'true')
-      // The section itself, with its data: the tab row renders before the section's requests
-      // answer, so on its own it does not show that the page is still standing afterwards.
-      await expect(page.getByTestId(`memws-${section}`)).toBeVisible()
-      if (section === 'agents') {
-        await expect(page.getByTestId('memws-install-command')).toContainText('install claude-code')
-      }
       await expect(page.getByRole('heading', { name: 'This view hit an error' })).toHaveCount(0)
+      await expect(page.locator('[data-testid="memory-area"] a[href*="memworkspace"]')).toHaveCount(0)
     })
   }
 })

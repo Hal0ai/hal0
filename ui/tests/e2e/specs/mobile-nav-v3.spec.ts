@@ -57,7 +57,8 @@ test.describe('Mobile nav drawer (≤720px)', () => {
     await expect(memory).toBeVisible()
     await expect(memory).not.toHaveClass(/sb-sub/)
     await expect(drawer.locator('.sb-row .lbl').filter({ hasText: /^Memory$/ })).toHaveCount(1)
-    await expect(drawer.locator('[data-testid="nav-drawer-memworkspace"] .lbl')).toHaveText('Memory (legacy tools)')
+    await expect(drawer.locator('[data-testid="nav-drawer-memworkspace"]')).toHaveCount(0)
+    await expect(drawer.locator('.sb-row .lbl').filter({ hasText: /memory/i })).toHaveCount(1)
     // the removed top-level items are gone from the drawer too.
     await expect(drawer.locator('.sb-row .lbl', { hasText: 'Connections' })).toHaveCount(0)
     // command palette folded into the drawer on mobile

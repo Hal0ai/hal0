@@ -1,9 +1,11 @@
-// hal0 dashboard — window-globals bridge for the Hindsight Memory view.
+// hal0 dashboard — window-globals bridge for the fact workspace.
 //
-// MemoryView is a .jsx prototype file (no ES imports across dash/*).
-// This bridge republishes the TanStack-Query Hindsight hooks under
-// `window.__hal0Use*` so memory.jsx finds them at runtime. Must be
-// imported in main.tsx BEFORE dash/memory.jsx evaluates.
+// The fact workspace the Memory area's Facts tab mounts
+// (memory-bank-workspace.jsx, memory-bank-bar.jsx, memory-web-graph.jsx) is
+// written as .jsx prototype files (no ES imports across dash/*). This bridge
+// republishes the TanStack-Query Hindsight hooks under `window.__hal0Use*`
+// so they find them at runtime. Must be imported in main.tsx BEFORE those
+// files evaluate.
 
 import {
   forceCenter,

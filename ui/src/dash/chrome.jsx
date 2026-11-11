@@ -538,20 +538,6 @@ function useNavItems() {
     // sub-links: its tabs are in the page. Shown only while the memory
     // subsystem is enabled; main.jsx applies the matching route guard.
     ...(memoryEnabled ? [{ id: "memory", label: "Memory", icon: Icons.memory }] : []),
-    // The older memory tools page (#memworkspace): knowledge base, mental
-    // models, directives, operations, agents and model identities. It stays
-    // reachable until each of those has moved into the Memory area, and is
-    // labelled so there is exactly one row called "Memory". Gated the same way.
-    ...(memoryEnabled ? [{ id: "memworkspace", label: "Memory (legacy tools)", icon: Icons.memory, children: [
-      { id: "memworkspace/overview", label: "Overview",
-        match: (route, param) => route === "memworkspace" && (!param || param === "overview") },
-      { id: "memworkspace/kb", label: "Knowledge base" },
-      { id: "memworkspace/mental-models", label: "Mental models" },
-      { id: "memworkspace/directives", label: "Directives" },
-      { id: "memworkspace/operations", label: "Operations" },
-      { id: "memworkspace/agents", label: "Agents" },
-      { id: "memworkspace/models", label: "Models" },
-    ] }] : []),
     // Services (#services): dedicated companion-service management page
     // (status + lifecycle + mDNS). The sidebar-bottom ServiceLinks zone
     // stays as the quick external-launch shortcuts; this is the manager.

@@ -308,9 +308,8 @@ export const ENDPOINTS = {
   memoryBankMentalModelHistory: (bank: string, id: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/mental-models/${encodeURIComponent(id)}/history`,
   // Knowledge base — the classified bank routes in routes/memory_admin.py's
-  // _FORWARDS (tree; page GET). These replace the `/api/memory/engine/<path>`
-  // passthrough for the same resources. A page is refreshed and edited through
-  // its mental model (memoryBankMentalModel), never a page route (#3564).
+  // _FORWARDS (tree; page GET). A page is refreshed and edited through its
+  // mental model (memoryBankMentalModel), never a page route (#3564).
   memoryBankKnowledgeTree: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/knowledge-base/tree`,
   memoryBankKnowledgePage: (bank: string, id: string) =>
@@ -579,16 +578,7 @@ export const ENDPOINTS = {
   boardOrchestration: '/api/board/orchestration', // GET | PUT (4 knobs)
   boardEvents: '/api/board/events',          // WS ?since=&board= (local BoardStore poll — no token/tenant, see board_ws.py)
   brainChat: '/api/brain/chat',              // POST (SSE) — hal0-brain steward chat
-  // ── Memory workspace (Hindsight 1.2 showcase, H0-?) ──────────────────────
-  // Authenticated allowlisted passthrough to the Hindsight engine; `sub` is
-  // the upstream path with its leading slash stripped (e.g.
-  // `v1/default/banks`). Shape = hindsight-1.2.0-openapi.json.
-  // NOTE: distinct from `memoryEngine` above (the pre-existing Overview
-  // "engine card" endpoint) — this one is parameterized passthrough.
-  memoryEnginePath: (sub: string) => `/api/memory/engine/${sub.replace(/^\/+/, '')}`,
-  // Decision-lane / LLM-lane / per-bank queue health (NPU box only; `npu` is
-  // null off-box).
-  memoryLanes: '/api/memory/lanes',
+  // ── Memory area aggregates ─────────────────────────────────────────────
   // Connected coding-agent banks + the harness install one-liners.
   memoryAgents: '/api/memory/agents',
   // Embedding / reranker / decision model identities.

@@ -110,21 +110,43 @@ export function memoryTabHref(tab: MemoryTab, from?: Pick<MemoryRoute, 'bank' | 
 }
 
 /**
+ * Where each section of the deleted `#memworkspace` page lives now. `models` (the embedding,
+ * reranker and decision model identities) is engine configuration, so it goes to Settings.
+ */
+const MEMWORKSPACE_REDIRECTS: Record<string, string> = {
+  '': '#memory/health',
+  overview: '#memory/health',
+  kb: '#memory/knowledge',
+  'mental-models': '#memory/knowledge',
+  directives: '#memory/knowledge',
+  operations: '#memory/operations',
+  agents: '#memory/agents',
+  models: '#settings/memory',
+}
+
+/**
  * Where an address from before the Memory area now lives, or null when `hash` needs no
- * redirect. The query is kept as it was written.
+ * redirect. The query is kept as it was written for the Memory addresses; the old tools page
+ * had no query of its own, so its redirects drop one.
  *
  *   #memory                    → #memory/health
  *   #memory/bank?…             → #memory/facts?…     (the bank workspace)
  *   #agent/memory[/…][?…]      → #memory/facts?…     (the Agents ▸ Memory tab)
+ *   #memworkspace[/overview]   → #memory/health
+ *   #memworkspace/kb, /mental-models, /directives → #memory/knowledge
+ *   #memworkspace/operations   → #memory/operations
+ *   #memworkspace/agents       → #memory/agents
+ *   #memworkspace/models       → #settings/memory
+ *   #memworkspace/<anything else> → #memory/health
  *
- * `#memworkspace/…` is not redirected: that page still exists.
- *
- * Remove these with the next minor release: by then no saved link uses the old addresses.
+ * HAL0-SUNSET: v1.9.0 — remove these with the next minor release: by then no saved link uses
+ * the old addresses.
  */
 export function legacyMemoryRedirect(hash: string): string | null {
   const [path, query] = splitHash(hash)
   const parts = path.split('/')
   const tail = query ? `?${query}` : ''
+  if (parts[0] === 'memworkspace') return MEMWORKSPACE_REDIRECTS[parts[1] ?? ''] ?? '#memory/health'
   if (parts[0] === 'agent' && parts[1] === 'memory') return `#memory/facts${tail}`
   if (parts[0] !== 'memory') return null
   const sub = parts[1] ?? ''
