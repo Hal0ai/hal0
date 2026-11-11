@@ -85,7 +85,7 @@ def test_an_unavailable_store_is_legacy() -> None:
     assert (got.layout, got.source) == (bl.LAYOUT_LEGACY, bl.SOURCE_STORE_UNAVAILABLE)
 
 
-@pytest.mark.parametrize("url", ["http://10.9.8.7:9177", "https://memory.example.org"])
+@pytest.mark.parametrize("url", ["http://192.0.2.10:9177", "https://memory.example.org"])
 def test_an_engine_on_another_host_is_legacy(url: str) -> None:
     got = bl.determine_layout(cfg(), store=STORE_ABSENT, engine_url=url)
     assert (got.layout, got.source) == (bl.LAYOUT_LEGACY, bl.SOURCE_REMOTE_ENGINE)
@@ -126,7 +126,7 @@ def test_ensure_writes_an_upgraded_store_as_legacy_and_never_flips_it(record: Pa
 
 
 @pytest.mark.parametrize(
-    ("store", "url"), [(STORE_UNAVAILABLE, ""), (STORE_ABSENT, "http://10.9.8.7:9177")]
+    ("store", "url"), [(STORE_UNAVAILABLE, ""), (STORE_ABSENT, "http://192.0.2.10:9177")]
 )
 def test_a_store_hal0_cannot_see_is_not_written_down(record: Path, store: str, url: str) -> None:
     got = bl.ensure_layout_record(cfg(), path=record, store=store, engine_url=url)
