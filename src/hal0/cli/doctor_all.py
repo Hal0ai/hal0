@@ -3490,7 +3490,7 @@ def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
     return Check(name, title, _PASS, f"hindsight-api runs with the values hal0 renders{in_force}")
 
 
-def check_memory_layout(*, path: Any = None) -> Check:
+def check_memory_layout(*, path: Any = None, memory: dict[str, Any] | None = None) -> Check:
     """Which banks the memory store is laid out in (ADR-0058 decision 7).
 
     Reads ``/var/lib/hal0/state/memory-layout.json``
@@ -3500,6 +3500,10 @@ def check_memory_layout(*, path: Any = None) -> Check:
     * ``pass`` with the layout and its banks;
     * ``pass`` with a note when there is no record yet: the next update or
       hal0-api start writes it;
+    * ``warn`` with hal0-api's reason when there is no record and hal0-api
+      reports the layout undecided (``layout_undecided`` in
+      ``GET /api/memory/engine``, the ``memory`` payload): a two-bank decision
+      it could not write down. Memory writes are refused meanwhile;
     * ``fail`` when the file exists and cannot be read. hal0-api then serves
       no memory bank at all (the degraded fallback), because guessing a
       layout can put new memory in banks the store does not read; the detail
@@ -3520,6 +3524,16 @@ def check_memory_layout(*, path: Any = None) -> Check:
             "Restore it from a backup, or remove it to have the layout decided again "
             "(only on a box whose banks you know: an existing store is recorded as the "
             "old layout), then restart hal0-api",
+        )
+    undecided = (memory or {}).get("layout_undecided")
+    if record is None and isinstance(undecided, str) and undecided:
+        return Check(
+            name,
+            title,
+            _WARN,
+            f"hal0-api serves no memory bank and refuses memory writes: {undecided}. "
+            "Fix the cause (usually the state directory is not writable), then restart "
+            "hal0-api",
         )
     if record is None:
         return Check(
@@ -3831,22 +3845,16 @@ def _projects_config() -> tuple[str, Any, bool]:
     """
     from hal0.config.loader import ConfigError, load_hal0_config
     from hal0.config.schema import MemoryConfig
-    from hal0.memory.bank_layout import LayoutUndecided, platform_bank
+    from hal0.memory.bank_layout import platform_bank
     from hal0.memory.projects import ProjectRegistry, registry_from_config
 
-    def bank_of(memory: Any) -> str:
-        # An unreadable layout record is the memory_layout row's to report;
-        # this row counts the configured bank meanwhile.
-        try:
-            return platform_bank(memory)
-        except LayoutUndecided:
-            return str(memory.bank)
-
+    # Raises LayoutUndecided when the layout cannot be told here (an
+    # unreadable record; no record and no api.env to read): the caller says so.
     try:
         memory = load_hal0_config().memory
     except (ConfigError, OSError):
-        return bank_of(MemoryConfig()), ProjectRegistry(), False
-    return bank_of(memory), registry_from_config(memory.projects), True
+        return platform_bank(MemoryConfig()), ProjectRegistry(), False
+    return platform_bank(memory), registry_from_config(memory.projects), True
 
 
 def check_memory_projects(
@@ -3884,7 +3892,14 @@ def check_memory_projects(
         return Check(name, title, _PASS, "memory disabled — nothing to check")
     if not memory.get("reachable"):
         return Check(name, title, _PASS, "engine unreachable — nothing counted; see the memory row")
-    bank, registry, read_ok = config if config is not None else _projects_config()
+    from hal0.memory.bank_layout import LayoutUndecided
+
+    try:
+        bank, registry, read_ok = config if config is not None else _projects_config()
+    except LayoutUndecided as exc:
+        return Check(
+            name, title, _PASS, f"the memory bank layout is undecided ({exc}) — nothing counted"
+        )
     rows = (fetch or _fetch_project_tags)(base, bank)
     if rows is None:
         return Check(
@@ -4306,7 +4321,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),
         check_memory_engine_env(),
-        check_memory_layout(),
+        check_memory_layout(memory=payloads["memory"]),
         check_memory_embedder(),
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
         check_memory_retain_chunk(memory=payloads["memory"], base=base),

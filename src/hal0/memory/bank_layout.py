@@ -77,6 +77,7 @@ from urllib.parse import urlsplit
 import structlog
 
 from hal0.config.paths import var_lib
+from hal0.errors import Hal0Error
 from hal0.install import perms
 from hal0.security import nofollow
 
@@ -113,6 +114,11 @@ SOURCE_ENGINE_UNKNOWN = "engine-unknown"
 #: Sources that describe a store hal0 could not look at. Never written down.
 _UNSETTLED_SOURCES = frozenset(
     {SOURCE_STORE_UNAVAILABLE, SOURCE_REMOTE_ENGINE, SOURCE_ENGINE_UNKNOWN}
+)
+
+_ENGINE_UNKNOWN_TEXT = (
+    "the memory engine hal0-api uses cannot be read from api.env here; "
+    "the layout is decided when hal0-api starts"
 )
 
 #: The hal0-api environment variable that points it at its engine.
@@ -190,6 +196,47 @@ class LayoutRecordUnsaved(LayoutUndecided):
     """A ``two_bank`` decision that could not be written down."""
 
 
+class MemoryLayoutUndecided(Hal0Error):
+    """503: the memory store's bank layout is not settled, so no write is taken.
+
+    Raised by the fallback hal0-api serves in that state
+    (:func:`undecided_fallback`) instead of accepting a write into the
+    volatile store, where it would be lost on the next restart.
+    """
+
+    code = "memory.layout_undecided"
+    status = 503
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(
+            f"memory writes are refused until the memory bank layout is settled: {reason}. "
+            "See the memory_layout row of `hal0 doctor`.",
+            details={"reason": reason},
+        )
+
+
+def undecided_fallback(reason: str) -> Any:
+    """The provider hal0-api serves while the layout is undecided.
+
+    The volatile fallback for reads (empty, ``degraded``), refusing every
+    write with :class:`MemoryLayoutUndecided`. It carries the reason as
+    ``layout_undecided`` for the status surfaces. The self-healing wrapper
+    retries the real provider, as it does for an engine that is down.
+    """
+    from hal0.memory.pgvector_provider import PgVectorProvider
+
+    class _UndecidedProvider(PgVectorProvider):
+        layout_undecided = reason
+
+        async def add(self, *_a: Any, **_k: Any) -> dict[str, Any]:
+            raise MemoryLayoutUndecided(reason)
+
+        async def delete(self, *_a: Any, **_k: Any) -> dict[str, int]:
+            raise MemoryLayoutUndecided(reason)
+
+    return _UndecidedProvider()
+
+
 def layout_record_path() -> Path:
     """``/var/lib/hal0/state/memory-layout.json`` (sandboxed under ``HAL0_HOME``)."""
     return var_lib() / "state" / "memory-layout.json"
@@ -212,18 +259,47 @@ def _explicit_bank(memory_cfg: Any) -> str | None:
     return value
 
 
-def _bank_in_file(memory_cfg: Any) -> str | None:
-    """``[memory] bank`` when hal0.toml sets it, whatever its value, else ``None``.
+def _raw_memory_table() -> dict[str, Any] | None:
+    """hal0.toml's ``[memory]`` table as the file holds it, before any default
+    is filled in; ``None`` when the file cannot be read or parsed."""
+    import tomllib
 
-    What the capture reads: it runs before a config save of this version can
-    have written the new default back, so a value in the file, the two-bank
-    default included, is one the operator chose.
-    """
-    fields_set = getattr(memory_cfg, "model_fields_set", None) or set()
-    if "bank" not in fields_set:
+    from hal0.config.paths import hal0_toml
+
+    try:
+        data = tomllib.loads(hal0_toml().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
-    value = str(getattr(memory_cfg, "bank", "") or "").strip()
-    return value or None
+    table = data.get("memory")
+    return table if isinstance(table, dict) else {}
+
+
+def _bank_in_file(memory_cfg: Any) -> str | None:
+    """``[memory] bank`` when the operator set it in hal0.toml, else ``None``.
+
+    Read from the file itself (:func:`_raw_memory_table`), not the loaded
+    model. A config save by this version writes every field back, the
+    two-bank defaults included, and always ``bank`` and ``private_bank``
+    together; no config before this version had ``private_bank``. So
+    ``bank = "hal0:shared"`` beside a ``private_bank`` key is a save's
+    default, not a choice, and an old layout's bank is never captured from
+    it; without one it is what the operator wrote. Any other value is the
+    operator's. When the file cannot be read the loaded model's set fields
+    stand in, by the same rule.
+    """
+    raw = _raw_memory_table()
+    if raw is not None:
+        present = set(raw)
+        value = raw.get("bank")
+    else:
+        present = set(getattr(memory_cfg, "model_fields_set", None) or ())
+        value = getattr(memory_cfg, "bank", None) if "bank" in present else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if value == TWO_BANK_PLATFORM_BANK and "private_bank" in present:
+        return None
+    return value
 
 
 def _legacy_unified(memory_cfg: Any) -> bool:
@@ -456,10 +532,7 @@ def ensure_layout_record(
         return existing
     determined = determine_layout(memory_cfg, store=store, engine_url=engine_url, evidence=evidence)
     if determined.source == SOURCE_ENGINE_UNKNOWN:
-        raise LayoutRecordUnsaved(
-            "the memory engine hal0-api uses cannot be read from api.env here; "
-            "the layout is decided when hal0-api starts"
-        )
+        raise LayoutRecordUnsaved(_ENGINE_UNKNOWN_TEXT)
     if determined.source in _UNSETTLED_SOURCES:
         return determined
     try:
@@ -485,9 +558,16 @@ def ensure_layout_record(
 def current_layout(memory_cfg: Any, *, path: Path | None = None) -> BankLayout:
     """The box's layout for a reader that must not write: the record, else
     what :func:`determine_layout` says. Raises :class:`LayoutRecordError` for
-    a record that cannot be read."""
+    a record that cannot be read, and :class:`LayoutRecordUnsaved` when no
+    record exists and the layout cannot be decided here (this process cannot
+    read ``api.env``): such a reader must not name the two banks."""
     existing = load_layout_record(path)
-    return existing if existing is not None else determine_layout(memory_cfg)
+    if existing is not None:
+        return existing
+    determined = determine_layout(memory_cfg)
+    if determined.source == SOURCE_ENGINE_UNKNOWN:
+        raise LayoutRecordUnsaved(_ENGINE_UNKNOWN_TEXT)
+    return determined
 
 
 def platform_bank(memory_cfg: Any, *, path: Path | None = None) -> str:
@@ -534,6 +614,7 @@ __all__ = [
     "LayoutRecordError",
     "LayoutRecordUnsaved",
     "LayoutUndecided",
+    "MemoryLayoutUndecided",
     "capture_legacy",
     "configured_engine_url",
     "current_layout",
@@ -545,4 +626,5 @@ __all__ = [
     "platform_bank",
     "record_memory_layout",
     "save_layout_record",
+    "undecided_fallback",
 ]

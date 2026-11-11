@@ -4375,7 +4375,7 @@ def test_memory_layout_row(tmp_path) -> None:
     assert str(record) in broken.detail and "serves no memory bank" in broken.detail
 
 
-def test_projects_row_survives_an_unreadable_layout_record(monkeypatch) -> None:
+def test_projects_row_says_when_the_layout_is_undecided(monkeypatch) -> None:
     from types import SimpleNamespace
 
     from hal0.config import loader
@@ -4389,4 +4389,15 @@ def test_projects_row_survives_an_unreadable_layout_record(monkeypatch) -> None:
     monkeypatch.setattr(
         loader, "load_hal0_config", lambda: SimpleNamespace(memory=MemoryConfig(bank="x"))
     )
-    assert da._projects_config()[0] == "x"
+    memory = {"engine": "hindsight", "enabled": True, "reachable": True}
+    check = da.check_memory_projects(memory=memory, fetch=lambda *_a: [])
+    assert check.status == "pass"
+    assert "layout is undecided" in check.detail and "is not JSON" in check.detail
+
+
+def test_memory_layout_row_warns_while_hal0_api_cannot_settle_it(tmp_path) -> None:
+    """No record, and hal0-api reports why it serves no bank (review C)."""
+    payload = {"enabled": True, "reachable": False, "layout_undecided": "disk full"}
+    check = da.check_memory_layout(path=tmp_path / "memory-layout.json", memory=payload)
+    assert check.status == "warn"
+    assert "disk full" in check.detail and "refuses memory writes" in check.detail

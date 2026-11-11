@@ -247,15 +247,17 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
     # engine is probed, so a boot that finds no store yet records it before
     # the engine's first start creates one. A layout that cannot be settled
     # (an unreadable record, a two-bank decision that could not be written)
-    # serves no bank at all: the degraded fallback, which the self-healing
-    # wrapper retries, and `hal0 doctor`'s memory_layout row names the cause.
-    from hal0.memory.bank_layout import LayoutUndecided, ensure_layout_record
+    # serves no bank at all: a degraded fallback that refuses every write
+    # with memory.layout_undecided (503) rather than keep it in the volatile
+    # store, which the self-healing wrapper retries; `hal0 doctor`'s
+    # memory_layout row names the cause.
+    from hal0.memory.bank_layout import LayoutUndecided, ensure_layout_record, undecided_fallback
 
     try:
         layout = ensure_layout_record(cfg.memory)
     except LayoutUndecided as exc:
         log.error("hal0.memory.layout_undecided", error=str(exc), fallback="pgvector")
-        return PgVectorProvider()
+        return undecided_fallback(str(exc))
 
     try:
         client = _build_hindsight_client(cfg)

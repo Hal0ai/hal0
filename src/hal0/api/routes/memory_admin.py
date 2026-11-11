@@ -208,12 +208,13 @@ async def engine_status(request: Request) -> dict[str, Any]:
           "version":     "0.7.2" | null,
           "features":    {...} | null, # 0.7.x feature flags (observations, mcp, …)
           "banks_total": int | null,
+          "layout_undecided": str,    # only while the bank layout is unsettled
         }
     """
     provider = getattr(request.app.state, "memory_provider", None)
     client = getattr(provider, "hindsight_client", None) if provider is not None else None
     if client is None:
-        return {
+        out: dict[str, Any] = {
             "enabled": provider is not None,
             "engine": None,
             "reachable": False,
@@ -221,6 +222,12 @@ async def engine_status(request: Request) -> dict[str, Any]:
             "features": None,
             "banks_total": None,
         }
+        # ADR-0058 decision 7: memory is degraded because the store's bank
+        # layout is not settled, not because the engine is down.
+        undecided = getattr(provider, "layout_undecided", None)
+        if isinstance(undecided, str) and undecided:
+            out["layout_undecided"] = undecided
+        return out
     version, banks = await asyncio.gather(
         _probe(client, "/version"), _probe(client, "/v1/default/banks")
     )

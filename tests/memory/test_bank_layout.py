@@ -31,6 +31,21 @@ def no_engine_unit(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(embedder_record, "engine_evidence", lambda **_kw: {})
     monkeypatch.delenv(bl.ENGINE_URL_ENV, raising=False)
+    # hal0.toml as a file: tests that care hand one in (``raw_toml``); the
+    # rest read the loaded model, as a box whose file cannot be read does.
+    monkeypatch.setattr(bl, "_raw_memory_table", lambda: None)
+
+
+def raw_toml(monkeypatch: pytest.MonkeyPatch, table: dict[str, Any]) -> MemoryConfig:
+    """Make ``table`` hal0.toml's ``[memory]`` table; return it loaded."""
+    monkeypatch.setattr(bl, "_raw_memory_table", lambda: dict(table))
+    return MemoryConfig.model_validate(table)
+
+
+def saved_by_this_version(table: dict[str, Any]) -> dict[str, Any]:
+    """``[memory]`` after a config save by this version: every field written
+    back (``save_hal0_config`` dumps the whole model)."""
+    return MemoryConfig.model_validate(table).model_dump(mode="python", exclude_none=True)
 
 
 @pytest.fixture
@@ -357,7 +372,119 @@ def test_provider_from_config_serves_no_bank_while_the_layout_is_undecided(monke
     monkeypatch.setattr(bl, "ensure_layout_record", undecided)
     provider = memory.provider_from_config(Hal0Config())
     assert isinstance(provider, PgVectorProvider) and provider.degraded
+    assert provider.layout_undecided == "no"
     assert probed == []
+
+
+@pytest.mark.asyncio
+async def test_the_undecided_fallback_refuses_writes_and_keeps_reading() -> None:
+    """A write accepted there would be lost on restart (review B)."""
+    provider = bl.undecided_fallback("the record cannot be written")
+    with pytest.raises(bl.MemoryLayoutUndecided) as refused:
+        await provider.add("a note", client_id="hermes")
+    assert (refused.value.status, refused.value.code) == (503, "memory.layout_undecided")
+    assert refused.value.details == {"reason": "the record cannot be written"}
+    with pytest.raises(bl.MemoryLayoutUndecided):
+        await provider.delete(["x"], client_id="hermes")
+    assert await provider.search("q") == []
+    assert (await provider.list_items())["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_the_add_route_answers_a_typed_503_while_undecided() -> None:
+    import httpx
+    from fastapi import FastAPI
+
+    from hal0.api.middleware import error_codes
+    from hal0.api.routes import memory as memory_routes
+    from hal0.api.routes import memory_admin
+
+    app = FastAPI()
+    error_codes.install(app)
+    app.include_router(memory_routes.router, prefix="/api/memory")
+    app.include_router(memory_admin.router, prefix="/api/memory")
+    app.state.memory_provider = bl.undecided_fallback("the record cannot be written")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app)) as client:
+        added = await client.post("http://t/api/memory/add", json={"text": "x"})
+        engine = await client.get("http://t/api/memory/engine")
+    assert added.status_code == 503
+    assert added.json()["error"]["code"] == "memory.layout_undecided"
+    assert engine.json()["layout_undecided"] == "the record cannot be written"
+
+
+# ── a config save by this version does not move an old layout's bank (review A)
+
+
+@pytest.mark.parametrize(
+    ("store", "url"),
+    [(STORE_EXISTS, "http://192.0.2.10:9177"), (STORE_UNAVAILABLE, "")],
+)
+def test_a_save_between_captures_keeps_the_old_bank(record, monkeypatch, store, url) -> None:
+    """The paths that never write a record capture again at every start:
+    capture, save, capture must name the same bank."""
+    old = {"enabled": True, "unified_bank": True}
+    first = bl.ensure_layout_record(
+        raw_toml(monkeypatch, old), path=record, store=store, engine_url=url
+    )
+    assert first.legacy_platform_bank == "shared" and not first.persisted
+
+    saved = saved_by_this_version(old)
+    assert saved["bank"] == "hal0:shared" and "private_bank" in saved
+    again = bl.ensure_layout_record(
+        raw_toml(monkeypatch, saved), path=record, store=store, engine_url=url
+    )
+    assert again.legacy_platform_bank == "shared" and again.legacy_unified is True
+    assert not record.exists()
+
+
+def test_an_operator_set_two_bank_name_is_captured_as_written(monkeypatch) -> None:
+    """``bank = "hal0:shared"`` with no ``private_bank`` beside it was written
+    by hand (no older version wrote ``private_bank``)."""
+    memory = raw_toml(monkeypatch, {"bank": "hal0:shared", "unified_bank": True})
+    got = bl.determine_layout(memory, store=STORE_EXISTS, engine_url="")
+    assert got.legacy_platform_bank == "hal0:shared"
+
+
+def test_an_operator_bank_survives_a_save(monkeypatch) -> None:
+    saved = saved_by_this_version({"bank": "Hal0::Platform", "unified_bank": True})
+    got = bl.determine_layout(raw_toml(monkeypatch, saved), store=STORE_EXISTS, engine_url="")
+    assert got.legacy_platform_bank == "Hal0::Platform"
+
+
+def test_the_loaded_model_stands_in_for_an_unreadable_file() -> None:
+    """Same rule from the model's set fields (the fixture hides the file)."""
+    saved = cfg(bank="hal0:shared", private_bank="hal0:private", unified_bank=True)
+    assert bl.determine_layout(saved, store=STORE_EXISTS, engine_url="").legacy_platform_bank == (
+        "shared"
+    )
+
+
+def test_the_raw_table_reads_hal0_toml(tmp_path, monkeypatch) -> None:
+    monkeypatch.undo()
+    toml = tmp_path / "hal0.toml"
+    toml.write_text('[memory]\nbank = "hal0:shared"\nunified_bank = true\n')
+    monkeypatch.setattr("hal0.config.paths.hal0_toml", lambda: toml)
+    assert bl._raw_memory_table() == {"bank": "hal0:shared", "unified_bank": True}
+    toml.write_text("not = [toml")
+    assert bl._raw_memory_table() is None
+
+
+# ── a reader that cannot decide says so (review D) ────────────────────────────
+
+
+def test_current_layout_refuses_an_undecided_two_bank(record, monkeypatch) -> None:
+    monkeypatch.setattr(bl, "configured_engine_url", lambda **_kw: (None, False))
+    monkeypatch.setattr("hal0.memory.embedder_record.store_state", lambda *_a, **_k: STORE_ABSENT)
+    with pytest.raises(bl.LayoutUndecided, match="hal0-api starts"):
+        bl.current_layout(cfg(), path=record)
+    with pytest.raises(bl.LayoutUndecided):
+        bl.platform_bank(cfg(), path=record)
+
+    from hal0.memory.spec_apply import spec_targets
+
+    monkeypatch.setattr(bl, "layout_record_path", lambda: record)
+    with pytest.raises(bl.LayoutUndecided):
+        spec_targets(cfg())
 
 
 def test_provider_from_config_records_the_layout_before_the_engine_answers(monkeypatch) -> None:

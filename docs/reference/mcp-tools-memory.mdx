@@ -84,6 +84,13 @@ every other tool that changes memory return `status: "error"` with code
 written. The engine is on a private port for the same span, so the read tools
 return `memory.engine_unavailable` until the switch has finished.
 
+While the memory store's bank layout is undecided (its record cannot be read,
+or a two-bank decision could not be written; see
+[Memory banks](/docs/concepts/memory-banks#the-layout-record)), `memory_add`
+and `memory_delete` return `status: "error"` with code
+`memory.layout_undecided` and the cause in `error.details.reason`. Nothing is
+written; reads return nothing.
+
 | Tool | Required | Returns |
 |---|---|---|
 | `memory_add` | `text` (non-empty) | `{id, timestamp, operation_id?}`; optional `project` names the project the write belongs to, and hal0 tags it `project:<slug>` |
