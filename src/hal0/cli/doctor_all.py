@@ -2618,6 +2618,10 @@ def check_bridge_store(
       shuts out): WARN "cannot read", the ``hermes-api`` row's wording.
     * Schema older than this build ships, or never applied: WARN. hal0-api
       applies migrations at start, so a restart brings it current.
+    * A live client under a name hal0 reserves (:func:`hal0.bridge.keys.is_reserved_name`),
+      minted before the name was reserved: WARN, naming it and how to revoke
+      it and mint a replacement. hal0-api refuses its key on every surface
+      (#3560), so the agent using it is cut off until then.
 
     ADVISORY (never critical): a broken store only stops bridge keys from
     authenticating, and the admin key still works.
@@ -2684,6 +2688,12 @@ def check_bridge_store(
                 "SELECT COUNT(*) FILTER (WHERE revoked_at IS NULL), "
                 "COUNT(*) FILTER (WHERE revoked_at IS NOT NULL) FROM clients"
             ).fetchone()
+            live_names = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM clients WHERE revoked_at IS NULL ORDER BY name"
+                )
+            ]
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -2694,6 +2704,28 @@ def check_bridge_store(
         )
     counted = f"{live} client{'' if live == 1 else 's'}"
     detail = f"{counted}, schema v{version}" + (f" ({revoked} revoked)" if revoked else "")
+    from hal0.bridge.keys import is_reserved_name
+
+    reserved = [name for name in live_names if is_reserved_name(name)]
+    if reserved:
+        listed = ", ".join(repr(name) for name in reserved)
+        return Check(
+            key,
+            label,
+            _WARN,
+            "; ".join(
+                [
+                    *problems,
+                    detail,
+                    f"bridge client{'' if len(reserved) == 1 else 's'} {listed} "
+                    f"{'has a name' if len(reserved) == 1 else 'have names'} hal0 now reserves, "
+                    "so hal0-api refuses the key everywhere (bridge.client_name_reserved); "
+                    "revoke it with `hal0 bridge revoke <name>` and mint a replacement under "
+                    "another name with `hal0 bridge add <new-name>`",
+                ]
+            )
+            + (fix if problems else ""),
+        )
     if problems:
         return _warn(detail)
     return Check(key, label, _PASS, detail)

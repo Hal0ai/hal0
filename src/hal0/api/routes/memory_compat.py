@@ -85,7 +85,6 @@ from fastapi.responses import JSONResponse
 from hal0.activity import audit_action
 from hal0.api.auth import judged_principal
 from hal0.api.routes.memory import MemoryUnavailable, extraction_ctx_preflight
-from hal0.bridge.keys import is_reserved_name
 from hal0.config.schema import MemoryCompatConfig, MemoryLanesConfig
 from hal0.errors import (
     BadRequest,
@@ -398,9 +397,10 @@ def require_memory_bridge() -> Callable[[Request], str]:
 
     * the admin credential is admitted and acts as :data:`ADMIN_AGENT`;
     * a bridge key that holds :data:`MEMORY_SCOPE` is admitted and acts as
-      its client name, unless that name is one hal0 reserves
-      (``hal0.bridge.keys``), which a key minted before the reservation
-      could carry: 403 ``memory.compat_client_name_reserved``;
+      its client name. A key under a name hal0 reserves (``hal0.bridge.keys``),
+      which one minted before the reservation could carry, never gets here:
+      the middleware refuses it on every non-OPEN path with 403
+      ``bridge.client_name_reserved`` (:func:`hal0.api.auth.reserved_bridge_principal`);
     * any other bridge key, and the box client key, is refused with 403
       ``memory.compat_scope_required``;
     * no credential is 401. The middleware answers that case first, at every
@@ -416,14 +416,6 @@ def require_memory_bridge() -> Callable[[Request], str]:
         if principal.tier == "admin":
             return ADMIN_AGENT
         if principal.tier == "bridge" and principal.name and MEMORY_SCOPE in principal.scopes:
-            if is_reserved_name(principal.name):
-                # A key minted before the name was reserved. Its name is an
-                # identity hal0 uses itself (``unknown``, ``unresolved``, ...),
-                # so nothing is written or read as it here.
-                raise CompatScopeRequired(
-                    "this bridge client's name is reserved; mint a key under another name",
-                    code="memory.compat_client_name_reserved",
-                )
             return principal.name
         if principal.tier == "anon":
             raise Unauthorized("authentication required")

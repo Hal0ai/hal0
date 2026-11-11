@@ -198,6 +198,8 @@ def test_the_visibility_tag_has_one_owner():
 def test_reflect_visibility_scope_shape():
     private = {"tags": ["visibility:private"], "match": "any_strict"}
     assert reflect_visibility_scope(None) == [{"not": private}]
+    assert reflect_visibility_scope("anonymous") == [{"not": private}]
+    assert reflect_visibility_scope("unknown") == [{"not": private}]
     assert reflect_visibility_scope("work") == [
         {"or": [{"not": private}, {"tags": ["agent:work"], "match": "any_strict"}]}
     ]

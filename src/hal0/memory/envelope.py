@@ -204,6 +204,17 @@ def resolve_agent(identity: str | None) -> str:
     return identity
 
 
+def is_identified(identity: str | None) -> bool:
+    """True when ``identity`` names a real agent that can own private memory.
+
+    A missing identity, the :data:`ANONYMOUS_AGENT` sentinel and the literal
+    :data:`UNKNOWN_AGENT` are not identities: ``agent:unknown`` is what an
+    unidentified write is stamped with, so a reader presenting any of them must
+    never be matched against it.
+    """
+    return bool(identity) and identity not in (ANONYMOUS_AGENT, UNKNOWN_AGENT)
+
+
 def session_id_of(tag: str) -> str | None:
     """The session id a tag carries, or ``None`` when it is not a session tag.
 
@@ -458,6 +469,7 @@ __all__ = [
     "WriteEnvelope",
     "apply_envelope",
     "coerce_tags",
+    "is_identified",
     "lifecycle_word_of",
     "resolve_agent",
     "resolve_observation_scopes",

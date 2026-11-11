@@ -111,7 +111,13 @@ ADR-0035 was verified against), shapes the answer:
    and `unresolved` is a part of a stored document id),
    every name starting `hal0`, and every name starting `hermes__`
    (`RESERVED_CLIENT_NAMES` and `RESERVED_CLIENT_PREFIXES` in
-   `src/hal0/bridge/keys.py`).
+   `src/hal0/bridge/keys.py`). Minting refuses a reserved name, and a key
+   minted before its name was reserved is refused where the auth middleware
+   judges a bridge principal (`reserved_bridge_principal` in
+   `src/hal0/api/auth.py`): `403 bridge.client_name_reserved` on every
+   non-OPEN path, every MCP mount and `/api/memory/compat` included (#3560).
+   The `bridge-store` doctor row names such a client and says to revoke it
+   (`hal0 bridge revoke <name>`) and mint a replacement under another name.
 2. **The store is `bridge.db`, a separate SQLite file.**
    `/var/lib/hal0/bridge.db`, `hal0:hal0` mode `0600`, with the `-wal` and
    `-shm` siblings listed as permission rows in `install/perms.py` so
@@ -407,8 +413,9 @@ identity to. That is a bridge key.
   and `X-hal0-Private` are not read. The admin credential acts as `admin`, a
   name no client can take (Decision 1). The name is also the client's
   document namespace and the seed of its operation ids, so a key whose name
-  has since been reserved (`unknown`, `unresolved`) is refused here with
-  `403 memory.compat_client_name_reserved`.
+  has since been reserved (`unknown`, `unresolved`) is refused, by the auth
+  middleware before any handler runs, with `403 bridge.client_name_reserved`
+  (Decision 1).
 - **What it is not.** It is not a way round the scope table for the rest of
   REST: a bridge key is still refused on every other non-OPEN `/api/*` and
   `/v1/*` route, `/api/memory/*` outside this prefix included. It reaches no

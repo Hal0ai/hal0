@@ -122,3 +122,11 @@ def test_scope_table_is_the_one_owner_of_scopes_and_mounts() -> None:
         scope: mount for scope, (_server, mount) in keys.SCOPE_SERVERS.items() if scope != "agents"
     }
     assert list(keys.SCOPE_SERVERS) == bridge_routes._ADMIN_SCOPES
+
+
+def test_the_memory_sentinel_identities_are_reserved() -> None:
+    """#3560: the identities memory stamps on a caller-less write must never be a client's."""
+    from hal0.memory.envelope import ANONYMOUS_AGENT, UNKNOWN_AGENT
+
+    assert keys.is_reserved_name(UNKNOWN_AGENT)
+    assert keys.is_reserved_name(ANONYMOUS_AGENT)

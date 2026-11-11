@@ -304,3 +304,47 @@ def test_reading_leaves_bridge_db_itself_untouched(tmp_path: Path) -> None:
     for sibling in (db.with_name(db.name + "-wal"), db.with_name(db.name + "-shm")):
         if sibling.exists():
             assert sibling.stat().st_mode & 0o777 == 0o600
+
+
+def _legacy_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *names: str) -> Path:
+    """A ``bridge.db`` holding clients minted before their names were reserved."""
+    from hal0.bridge import keys as bridge_keys
+
+    with monkeypatch.context() as earlier:
+        earlier.setattr(bridge_keys, "RESERVED_CLIENT_NAMES", frozenset())
+        earlier.setattr(bridge_keys, "RESERVED_CLIENT_PREFIXES", ())
+        return _store(tmp_path, *names)
+
+
+def test_a_live_client_under_a_reserved_name_warns_how_to_replace_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3560: hal0-api refuses such a key everywhere; the row says which and what to run."""
+    db = _legacy_store(tmp_path, monkeypatch, "cc", "unknown")
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "warn"
+    assert not c.critical
+    assert "'unknown'" in c.detail
+    assert "'cc'" not in c.detail
+    assert "hal0 bridge revoke <name>" in c.detail
+    assert "hal0 bridge add <new-name>" in c.detail
+    assert "2 clients" in c.detail
+
+
+def test_several_reserved_clients_are_all_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _legacy_store(tmp_path, monkeypatch, "anonymous", "hal0-x")
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "warn"
+    assert "'anonymous', 'hal0-x' have names" in c.detail
+
+
+def test_a_revoked_client_under_a_reserved_name_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = _legacy_store(tmp_path, monkeypatch, "cc", "unknown")
+    BridgeStore(db).revoke_client("unknown")
+    c = da.check_bridge_store(path=db, enabled=True)
+    assert c.status == "pass", c.detail
+    assert "unknown" not in c.detail

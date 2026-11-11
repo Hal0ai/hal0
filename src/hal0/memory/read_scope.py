@@ -31,6 +31,7 @@ from hal0.memory.envelope import (
     PROJECT_TAG_PREFIX,
     PROJECT_UNRESOLVED_TAG,
     SCOPE_GLOBAL_TAG,
+    is_identified,
 )
 
 #: The tag of a memory only its owning agent may read (ADR-0005).
@@ -47,7 +48,8 @@ def reflect_visibility_scope(
     be filtered afterwards, so the same rule is given to the engine as a tag
     filter instead: a memory is readable when it is not ``visibility:private``,
     or when it carries the caller's own ``agent:<id>`` tag. A caller with no
-    identity reads no private memory at all.
+    identity (none, ``anonymous`` or ``unknown``) reads no private memory at
+    all, and no private memory owned by ``unknown`` is readable by anyone.
 
     What this covers and what it does not: the engine applies ``tag_groups``
     to the reflect loop's fact and observation searches, where every item
@@ -64,7 +66,7 @@ def reflect_visibility_scope(
     (groups are AND-ed) with the engine's top-level default, ``any``.
     """
     readable: dict[str, Any] = {"not": {"tags": [VISIBILITY_PRIVATE_TAG], "match": "any_strict"}}
-    if agent_id:
+    if is_identified(agent_id):
         own = {"tags": [f"{AGENT_TAG_PREFIX}{agent_id}"], "match": "any_strict"}
         readable = {"or": [readable, own]}
     groups = [readable]
@@ -117,7 +119,7 @@ def unresolved_scope_groups(agent_id: str | None) -> list[dict[str, Any]]:
     group, to be concatenated with :func:`reflect_visibility_scope`.
     """
     global_scope: dict[str, Any] = {"tags": [SCOPE_GLOBAL_TAG], "match": "any"}
-    if not agent_id:
+    if not is_identified(agent_id):
         return [global_scope]
     own_unresolved = {
         "and": [

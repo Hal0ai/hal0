@@ -2973,7 +2973,9 @@ def test_a_retain_answer_never_shows_a_stored_id(
 # ── a key whose name hal0 reserves ──────────────────────────────────────────
 
 
-@pytest.mark.parametrize("name", ["unknown", "unresolved"])
+@pytest.mark.parametrize(
+    "name", ["unknown", "anonymous", "unresolved", "shared", "admin", "hermes", "pi", "hal0-cli"]
+)
 def test_a_key_minted_under_a_name_since_reserved_is_refused(
     client: TestClient,
     engine: Engine,
@@ -2983,21 +2985,30 @@ def test_a_key_minted_under_a_name_since_reserved_is_refused(
 ) -> None:
     """``unknown`` is the identity of a memory write with no caller: a client
     of that name would read those writers' private notes. No such key can be
-    minted now; one that already exists is refused here."""
+    minted now; one that already exists is refused here, by the auth
+    middleware's one check (#3560), before any handler runs."""
     from hal0.bridge import keys as bridge_keys
 
     with pytest.raises(BridgeStoreError):
         store.add_client(name, created_by="t")
     with monkeypatch.context() as earlier:
         earlier.setattr(bridge_keys, "RESERVED_CLIENT_NAMES", frozenset())
+        earlier.setattr(bridge_keys, "RESERVED_CLIENT_PREFIXES", ())
         _row, old_key = store.add_client(name, created_by="t")
 
     for method, path in (("POST", URL_BANK + "/memories"), ("POST", URL_BANK + "/reflect")):
         resp = client.request(
             method, _url(path), headers=_auth(old_key), json={"items": [_item()], "query": "q"}
         )
-        assert (resp.status_code, _code(resp)) == (403, "memory.compat_client_name_reserved")
+        assert (resp.status_code, _code(resp)) == (403, "bridge.client_name_reserved")
     assert engine.calls == []
+
+
+def test_a_key_under_an_ordinary_name_is_still_served(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    resp = client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": [_item()]})
+    assert resp.status_code == 200, resp.text
 
 
 # ── the plugin's own requests ───────────────────────────────────────────────
