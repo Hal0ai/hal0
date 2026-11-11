@@ -2,13 +2,14 @@
 
 ## Status
 
-**PROPOSED (2026-11-10).** The operator agreed the direction on 2026-11-10:
-a single top-level Memory area, `hs-embed-1` as the target embedder, and
-v1.9.0 held until the embedder fix lands. The rest is for review.
+**ACCEPTED (2026-11-10).** The operator agreed each decision in turn on
+2026-11-10. Decisions 1, 4, 5 and 6 are on main (#3540, #3541, #3542); the
+rest are in progress or planned in the order given under Consequences.
 
-Amends ADR-0005 (tag scoping gains a required envelope) and ADR-0023 (the
-engine's environment has one managed drop-in, not two). ADR-0052 and ADR-0056
-stand. Tracking issues: #3518, #3389, #3388, #2017, #3496.
+Amends ADR-0005 (tag scoping gains a required envelope; decision 7 replaces
+both `unified_bank` layouts) and ADR-0023 (the engine's environment has one
+managed drop-in, not two). ADR-0052 and ADR-0056 stand. Tracking issues:
+#3518, #3389, #3388, #2017, #3496, #3547.
 
 ## Context
 
@@ -121,11 +122,22 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
    config for this endpoint. A box whose engine was deliberately exposed on
    the network keeps working until the operator moves its clients, and
    `hal0 doctor` names the exposure.
-5. **Documents have stable ids.** The Hermes provider sends
-   `document_id = <client>[-<profile>]-<session-id>` and retain becomes an
-   upsert. This closes #2017.
-6. **`hindsight_reflect` calls the engine's reflect endpoint**, with `budget`,
-   tag scoping and an optional `response_schema`. Recall keeps its own tool.
+5. **A session is one document.** Every session-scoped write from the Hermes
+   provider (turn capture, continuity note, checkpoint) is appended to one
+   document per session, with one fixed tag set and the write kind in
+   metadata. The id travels in a dedicated request field,
+   `append_document_id`, which hal0 maps to the engine's append mode. A
+   hal0-api from before this change does not know the field and ignores it,
+   so it can never replace a session document by mistake after a rollback.
+   The engine re-extracts only the chunks an append changes. This answers
+   #2017 except for the existing per-turn documents, which the fold-in
+   handles.
+6. **`hindsight_reflect` calls the engine's reflect** through a
+   namespace-level route, `POST /api/memory/reflect`, with `budget`, tag
+   scoping and an optional `response_schema`. The route gives the engine a
+   tag filter equal to the read-side visibility rule, and leaves mental
+   models out of the reflect while a bank can hold other agents' private
+   facts. Recall keeps its own tool.
 7. **Two banks, named `hal0:shared` and `hal0:private`.** Every agent (Hermes,
    the coding agents, the brain, the dashboard) writes durable memory to
    `hal0:shared` and tags it `project:<slug>`; there are no per-harness or
