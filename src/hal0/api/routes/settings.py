@@ -157,14 +157,27 @@ async def get_settings(request: Request) -> dict[str, Any]:
 #: Settings prefixes that live in hindsight-api's showcase drop-in (#3492).
 _SHOWCASE_PREFIXES = ("memory.models.", "memory.decision.", "memory.lanes.")
 
+#: The two keys under those prefixes a save does not carry to the engine
+#: (#3518): provider and model are one fact, the embedder, and the drop-in
+#: renders the pair the store was built with, from
+#: hal0.memory.embedder_record, whatever these keys say.
+_EMBEDDER_KEYS = frozenset({"memory.models.embeddings_provider", "memory.models.embeddings_model"})
 
-async def _apply_showcase_dropin(cs: Any) -> dict[str, Any] | None:
+
+async def _apply_showcase_dropin(
+    cs: Any, *, embedder_pending: bool = False
+) -> dict[str, Any] | None:
     """Carry a changed ``[memory.models|decision|lanes]`` value to the engine.
 
     Those keys reach hindsight-api only through its showcase drop-in, read at
     start — persisting ``hal0.toml`` alone would leave the daemon on the old
     values. Runs only when one of them actually changed. ``None`` when nothing
-    to do.
+    to do, which includes a save that changed only :data:`_EMBEDDER_KEYS` on a
+    box with a store: those values are not rendered, so writing an identical
+    drop-in would cost a memory-engine restart for nothing.
+    ``embedder_pending`` says the embedder keys changed on a box with no store
+    and no record, where the configured pair IS what gets rendered: the
+    drop-in is written then, like any other key.
 
     Called inside :func:`hal0_config_txn` (the graph PUT's
     ``_propagate_extraction_slot`` precedent) so two saves cannot write their
@@ -172,7 +185,9 @@ async def _apply_showcase_dropin(cs: Any) -> dict[str, Any] | None:
     thread cannot be cancelled, so the wait is shielded and a cancelled caller
     still waits it out before the lock is released.
     """
-    if not any(c.path.startswith(_SHOWCASE_PREFIXES) for c in cs.changes):
+    if not embedder_pending and not any(
+        c.path.startswith(_SHOWCASE_PREFIXES) and c.path not in _EMBEDDER_KEYS for c in cs.changes
+    ):
         return None
     from hal0.memory.extraction_env import apply_showcase_dropin
 
@@ -193,6 +208,65 @@ async def _apply_showcase_dropin(cs: Any) -> dict[str, Any] | None:
             with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.shield(task)
         raise
+
+
+async def _embedder_status_for(cs: Any) -> dict[str, Any]:
+    """Recorded-vs-configured embedder for the config a save just wrote (#3518).
+
+    Reads the embedder record and the engine's environment only, off the
+    event loop.
+    """
+    from hal0.memory.embedder_record import configured_embedder, embedder_status
+
+    return await asyncio.to_thread(embedder_status, configured_embedder(cs.merged.memory.models))
+
+
+def _embedder_keys_touched(cs: Any) -> set[str]:
+    """The embedder keys this save's apply plan classifies (changed or not)."""
+    plan = cs.plan
+    listed = set(plan.get("immediate", [])) | set(plan.get("manual_restart", []))
+    return listed & _EMBEDDER_KEYS
+
+
+def _embedder_took_effect(status: dict[str, Any], showcase: dict[str, Any] | None) -> bool:
+    """True when the engine is, after this save, on the embedder the config asks for.
+
+    Either the configured pair is the one the store was built with (nothing
+    had to move), or the box has no store and the drop-in carrying the pair
+    was just written.
+    """
+    same = (status["recorded_provider"], status["recorded"]) == (
+        status["configured_provider"],
+        status["configured"],
+    )
+    if not same or status.get("record_error") or status.get("store_unavailable"):
+        return False
+    if status["source"] == "configured" and not status["recorded_at"]:
+        return bool(showcase and showcase.get("written"))
+    return True
+
+
+def _reclass_embedder_keys(
+    plan: dict[str, Any], changeset: dict[str, Any], keys: set[str]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Report ``keys`` as applied: out of ``manual_restart``, into ``immediate``.
+
+    The registry classes the embedder keys for the usual case, a box with a
+    store, where a save changes nothing the engine runs. This is the save
+    where it did take effect, and the response has to say what happened.
+    """
+    plan = {
+        **plan,
+        "manual_restart": [k for k in plan.get("manual_restart", []) if k not in keys],
+        "immediate": sorted(set(plan.get("immediate", [])) | keys),
+    }
+    changes = [
+        {k: v for k, v in {**c, "apply_class": "immediate"}.items() if k != "note"}
+        if c["path"] in keys
+        else c
+        for c in changeset["changes"]
+    ]
+    return plan, {**changeset, "changes": changes}
 
 
 @router.put("")
@@ -251,7 +325,22 @@ async def update_settings(request: Request) -> dict[str, Any]:
                 details={"error": str(exc), "errno": getattr(exc, "errno", None)},
             ) from exc
 
-        showcase = await _apply_showcase_dropin(cs)
+        # #3518: the embedder keys are saved but rendered from the store's
+        # record. Only on a box with no store and no record is the configured
+        # pair what the drop-in carries, and there the save applies it.
+        embedder_keys = _embedder_keys_touched(cs)
+        embedder_changed = any(c.path in _EMBEDDER_KEYS for c in cs.changes)
+        embedder = await _embedder_status_for(cs) if embedder_keys else None
+        pending = bool(
+            embedder_changed
+            and embedder is not None
+            and embedder["source"] == "configured"
+            and not embedder["recorded_at"]
+        )
+        showcase = await _apply_showcase_dropin(cs, embedder_pending=pending)
+        embedder_applied = embedder is not None and _embedder_took_effect(embedder, showcase)
+        if embedder is not None and showcase is not None:
+            embedder = await _embedder_status_for(cs)  # the write may have recorded it
 
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:
@@ -281,9 +370,15 @@ async def update_settings(request: Request) -> dict[str, Any]:
     # before/after and reload class, so the UI can toast from truth
     # instead of re-deriving "what changed" from the raw PATCH body.
     config_view = _config_to_dict(cs.merged)
-    config_view["_hal0"] = {"apply_plan": cs.plan, "changeset": changeset_payload(cs)}
+    plan: dict[str, Any] = dict(cs.plan)
+    changeset = changeset_payload(cs)
+    if embedder_applied:
+        plan, changeset = _reclass_embedder_keys(plan, changeset, embedder_keys)
+    config_view["_hal0"] = {"apply_plan": plan, "changeset": changeset}
     if showcase is not None:
         config_view["_hal0"]["showcase_dropin"] = showcase
+    if embedder is not None and embedder_changed:
+        config_view["_hal0"]["memory_embedder"] = embedder
     return config_view
 
 

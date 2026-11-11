@@ -488,6 +488,17 @@ def ownership_table(
             child_mode=0o644,
             role="state/ (+ *.pin-override markers)",
         ),
+        # The memory store's embedder record (#3518): written by the service,
+        # or by a root-run update on its first pass — the same class again.
+        PermRow(
+            var_lib / "state",
+            state_owner,
+            service_group,
+            SHARED_DIR_MODE,
+            glob="memory-embedder.json",
+            child_mode=0o644,
+            role="state/ (+ memory-embedder.json)",
+        ),
         # Hermes last-run report and venv stamp, same class (#3260). The dir
         # is declared at 0755, the mode install-time mkdir births it at, so
         # the row never widens it.

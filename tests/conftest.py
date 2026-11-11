@@ -9,6 +9,7 @@ import tempfile
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from starlette.exceptions import StarletteDeprecationWarning
@@ -429,6 +430,36 @@ def _isolate_privileged_host_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
         "hal0.updater.updater.GPU_PERMS_UNIT_DST",
         tmp_path / "etc-systemd-system" / "hal0-gpu-perms.service",
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_memory_engine_evidence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep the memory embedder record off the host's ``hindsight-api`` unit (#3518).
+
+    Rendering the engine environment, the embedder status route and two doctor
+    rows ask what the engine runs: ``systemctl show``, the engine's
+    ``/proc/<pid>/environ`` and ``/etc/hal0/hindsight-llm.env``. On a box with
+    hal0 installed that is the real engine, and a test would record or render
+    whatever it happens to be on. By default no engine is running, no unit is
+    known and the environment file is absent, so only hal0's own drop-in file
+    (itself redirected by the tests that write one) can name an embedder.
+
+    A test that wants evidence passes ``evidence=`` to the record functions,
+    passes its own layers (they win over these defaults), or patches
+    ``hal0.memory.embedder_record.engine_evidence`` itself.
+    """
+    from hal0.memory import embedder_record, extraction_env
+
+    real = extraction_env.effective_engine_embedder
+
+    def _no_host_engine(**kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("read_process_env", lambda _keys: None)
+        kwargs.setdefault("env_file", tmp_path / "no-hindsight-llm.env")
+        if kwargs.get("unit_env") is None and kwargs.get("show_unit_env") is None:
+            kwargs["unit_env"] = {}
+        return real(**kwargs)
+
+    monkeypatch.setattr(embedder_record, "engine_evidence", _no_host_engine)
 
 
 @pytest.fixture(scope="function")

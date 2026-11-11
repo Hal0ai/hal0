@@ -63,7 +63,24 @@ def models_cmd(
     emb = result.get("embeddings", {})
     rer = result.get("reranker", {})
     dec = result.get("decision", {})
-    t.add_row("embeddings", str(emb.get("provider", "—")), str(emb.get("model", "—")), "")
+    # #3518: the engine runs the embedder the store was built with
+    # ("recorded"), which can differ from the configured provider and model.
+    emb_provider = str(emb.get("recorded_provider") or emb.get("provider", "—"))
+    emb_model = str(emb.get("recorded") or emb.get("model", "—"))
+    emb_notes: list[str] = []
+    recorded = (emb.get("recorded_provider"), emb.get("recorded"))
+    configured = (emb.get("configured_provider"), emb.get("configured"))
+    if emb.get("recorded") and recorded != configured:
+        wanted = emb.get("configured")
+        if emb.get("recorded_provider") != emb.get("configured_provider"):
+            wanted = f"{emb.get('configured_provider')}/{wanted}"
+        emb_notes.append(f"configured: {wanted} (not applied)")
+    if emb.get("mixed"):
+        emb_notes.append("store may hold vectors from two embedders")
+    if emb.get("conflict"):
+        emb_notes.append("record and engine disagree, see hal0 doctor")
+    emb_status = f"[yellow]{'; '.join(emb_notes)}[/yellow]" if emb_notes else ""
+    t.add_row("embeddings", emb_provider, emb_model, emb_status)
     t.add_row("reranker", str(rer.get("provider", "—")), str(rer.get("model", "—")), "")
     status = "[green]reachable[/green]" if dec.get("reachable") else "[red]unreachable[/red]"
     t.add_row(

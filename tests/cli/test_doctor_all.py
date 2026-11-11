@@ -1655,11 +1655,18 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         lambda **_kw: Check("memory_engine_env", "Memory engine env", "pass", "stubbed"),
     )
 
+    # Embedder row (#3518) reads hal0.toml, the record and the engine home otherwise.
+    monkeypatch.setattr(
+        da,
+        "check_memory_embedder",
+        lambda **_kw: Check("memory_embedder", "Memory embedder", "pass", "stubbed"),
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-48:] == [
+    assert keys[-49:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1705,6 +1712,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hindsight_llm_auth",
         "memory_engine_version",
         "memory_engine_env",
+        "memory_embedder",
         "memory_extraction_throughput",
         "memory_retain_chunk",
         "memory_decision_lane",
@@ -3717,3 +3725,163 @@ def test_memory_engine_env_warns_on_leftover_legacy_drop_in() -> None:
 def test_memory_engine_env_warns_when_unit_env_unreadable() -> None:
     report = {"installed": True, "checked": False, "drift": [], "legacy_drop_in": None}
     assert da.check_memory_engine_env(report=report).status == "warn"
+
+
+# ── memory embedder: recorded against configured (#3518) ─────────────────────
+
+_BGE = "BAAI/bge-small-en-v1.5"
+_HS = "hindsight-ai/hs-embed-1"
+
+
+def _embedder(recorded: str, configured: str, *, mixed: bool = False, **extra: object) -> dict:
+    status: dict = {
+        "recorded": recorded,
+        "recorded_provider": "local",
+        "configured": configured,
+        "configured_provider": "local",
+        "mixed": mixed,
+        "source": "engine-default",
+        "recorded_at": "2026-11-10T21:00:00+00:00",
+        "effective": None,
+        "conflict": None,
+        "record_error": None,
+        "store_unavailable": None,
+        **extra,
+    }
+    status["needs_switch"] = mixed or (status["recorded_provider"], recorded) != (
+        status["configured_provider"],
+        configured,
+    )
+    return status
+
+
+def test_memory_embedder_passes_when_the_store_matches_the_config() -> None:
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE))
+    assert (check.key, check.status) == ("memory_embedder", "pass")
+    assert _BGE in check.detail
+
+
+def test_memory_embedder_passes_with_a_note_on_an_upgraded_box_at_the_default() -> None:
+    """Store on bge-small, config still at its shipped default: every upgraded
+    box. Not a warning, because no release ships a remedy yet."""
+    check = da.check_memory_embedder(status=_embedder(_BGE, _HS))
+    assert check.status == "pass"
+    assert f"built with {_BGE} and stays on it" in check.detail
+    assert f"the configured model ({_HS})" in check.detail
+    assert "only through an embedder switch, which a later release adds" in check.detail
+    # Does not name a command that does not exist.
+    assert "`hal0 memory" not in check.detail
+
+
+def test_memory_embedder_warns_when_the_operator_set_a_model_that_differs() -> None:
+    check = da.check_memory_embedder(status=_embedder(_BGE, "example-org/another-embedder"))
+    assert check.status == "warn"
+    assert f"built with {_BGE}" in check.detail
+    assert "[memory.models] asks for example-org/another-embedder" in check.detail
+    assert "no effect" in check.detail
+    # Names the way out without claiming the command exists.
+    assert "`hal0 memory embedder switch`" in check.detail
+    assert "not in this release yet" in check.detail
+
+
+def test_memory_embedder_warns_when_the_operator_set_a_provider_that_differs() -> None:
+    """Same model, a remote provider: an explicit setting that is not applied."""
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE, configured_provider="openai"))
+    assert check.status == "warn"
+    assert "the openai provider" in check.detail and "no effect" in check.detail
+
+
+def test_memory_embedder_names_a_recorded_remote_provider_when_it_passes() -> None:
+    status = _embedder(_BGE, _BGE, recorded_provider="openai", configured_provider="openai")
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "pass"
+    assert "the openai provider" in check.detail
+
+
+def test_memory_embedder_warns_on_a_mixed_store_even_when_the_models_match() -> None:
+    check = da.check_memory_embedder(status=_embedder(_HS, _HS, mixed=True))
+    assert check.status == "warn"
+    assert "two embedders" in check.detail
+    assert "`hal0 memory embedder switch`" in check.detail
+    assert "has no effect" not in check.detail
+
+
+def test_memory_embedder_warns_when_a_store_on_the_default_model_is_configured_away() -> None:
+    """Recorded hs-embed-1, operator asks for bge-small: an explicit setting that is not applied."""
+    check = da.check_memory_embedder(status=_embedder(_HS, _BGE))
+    assert check.status == "warn"
+    assert f"[memory.models] asks for {_BGE}" in check.detail
+
+
+def test_memory_embedder_warns_on_a_mixed_store_at_the_default_config() -> None:
+    """Mixed outranks the upgraded-box note."""
+    check = da.check_memory_embedder(status=_embedder(_BGE, _HS, mixed=True))
+    assert check.status == "warn"
+    assert "two embedders" in check.detail
+
+
+def test_memory_embedder_warns_naming_both_when_the_engine_disagrees_with_the_record() -> None:
+    conflict = {
+        "live": {"provider": "local", "model": _HS},
+        "on_disk": {"provider": "local", "model": _HS},
+    }
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE, conflict=conflict))
+    assert check.status == "warn"
+    assert f"record says {_BGE}" in check.detail
+    assert f"the running engine is on {_HS}" in check.detail
+    assert f"would start it on {_HS}" in check.detail
+    assert "changed neither" in check.detail
+
+
+def test_memory_embedder_warns_with_the_path_when_the_record_cannot_be_read() -> None:
+    status = _embedder(_BGE, _BGE, record_error="/var/lib/hal0/state/memory-embedder.json")
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "warn"
+    assert "/var/lib/hal0/state/memory-embedder.json cannot be read" in check.detail
+    assert "left the file as it is" in check.detail
+
+
+def test_memory_embedder_warns_when_the_store_location_is_unavailable() -> None:
+    status = _embedder(
+        _BGE,
+        _HS,
+        source="store-unavailable",
+        recorded_at=None,
+        store_unavailable="/var/lib/hal0/memory/hindsight",
+    )
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "warn"
+    assert "/var/lib/hal0/memory/hindsight, is not available" in check.detail
+    assert "nothing is recorded" in check.detail
+
+
+def test_memory_embedder_passes_on_a_box_with_no_store() -> None:
+    status = _embedder(_HS, _HS, source="configured", recorded_at=None)
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "pass"
+    assert "no memory store" in check.detail
+
+
+def test_memory_embedder_reads_this_boxs_store_by_default(tmp_path, monkeypatch) -> None:
+    """Unstubbed: an existing store and the default config is the upgraded-box note."""
+    from hal0.memory import extraction_env as ee
+    from hal0.memory.engine_upgrade import hindsight_dir
+
+    monkeypatch.setattr(ee, "SHOWCASE_DROP_IN_PATH", tmp_path / "absent" / "showcase-lanes.conf")
+    assert da.check_memory_embedder().status == "pass"  # no store yet
+
+    (hindsight_dir() / ".pg0" / "instances" / "hindsight" / "data").mkdir(parents=True)
+    check = da.check_memory_embedder()
+
+    assert check.status == "pass"
+    assert f"built with {_BGE} and stays on it" in check.detail and _HS in check.detail
+
+
+def test_memory_embedder_skips_when_the_config_is_unreadable(monkeypatch) -> None:
+    def boom(*_a: object, **_k: object) -> None:
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr("hal0.config.loader.load_hal0_config", boom)
+    check = da.check_memory_embedder()
+    assert check.status == "warn"
+    assert "unreadable" in check.detail

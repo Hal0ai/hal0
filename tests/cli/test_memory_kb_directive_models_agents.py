@@ -119,6 +119,38 @@ def test_models_bare_invocation(monkeypatch):
     assert payload["embeddings"]["provider"] == "openai"
 
 
+def test_models_table_shows_the_recorded_embedder_and_flags_a_difference(monkeypatch):
+    """#3518: the engine runs the recorded model; the configured one is named as not applied."""
+    monkeypatch.setattr("hal0.cli.memory_models_agents_commands._require_api", lambda: "http://x")
+    monkeypatch.setattr(
+        "hal0.cli.memory_models_agents_commands.api_get",
+        lambda path, **kw: {
+            "embeddings": {
+                "provider": "local",
+                "model": "hindsight-ai/hs-embed-1",
+                "recorded": "BAAI/bge-small-en-v1.5",
+                "configured": "hindsight-ai/hs-embed-1",
+                "mixed": False,
+                "needs_switch": True,
+            },
+            "reranker": {"provider": "local", "model": "hindsight-ai/hs-rerank-1"},
+            "decision": {"enabled": False, "provider": "off", "model": "x", "reachable": False},
+        },
+    )
+    # A wide console: the default one wraps the status cell at the runner's
+    # width. Height is pinned too, or rich falls back to 80x25 on a dumb terminal.
+    from rich.console import Console
+
+    monkeypatch.setattr(
+        "hal0.cli.memory_models_agents_commands.console",
+        Console(width=200, height=50, color_system=None),
+    )
+    r = runner.invoke(memory_commands.app, ["models"])
+    assert r.exit_code == 0, r.output
+    assert "BAAI/bge-small-en-v1.5" in r.output
+    assert "configured: hindsight-ai/hs-embed-1 (not applied)" in r.output
+
+
 def test_agents_install_dry_run(monkeypatch):
     monkeypatch.setattr(
         "hal0.cli.memory_models_agents_commands.api_get",
