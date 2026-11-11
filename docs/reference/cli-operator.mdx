@@ -92,37 +92,46 @@ Knowledge-base pages are documents Hindsight 1.2 synthesizes from a bank's memor
 ```sh
 hal0 memory embedder switch MODEL [--provider local] [--apply|--dry-run]
                             [--allow-pending] [--json]
-hal0 memory embedder switch --resume [--json]
+hal0 memory embedder switch --resume | --status | --clear-gate [--json]
 ```
 
-Moves the memory store to another embedding model by exporting every bank,
-restarting the engine on the new model, restoring each bank (which re-embeds
-it) under a temporary id, comparing counts, and replacing the originals. See
+Moves the memory store to another embedding model: pauses memory writes,
+exports every bank, restarts the engine on the new model, restores each bank
+(which re-embeds it) under a temporary id, compares counts, and replaces the
+originals. See
 [Change the embedding model](/docs/guides/enable-memory#change-the-embedding-model)
 for the steps and the failure behaviour.
 
 Unlike the other `hal0 memory` commands it does not call hal0-api: it runs on
-the box, as root or the `hal0` account, and talks to the engine directly.
+the box, as root or the `hal0` account, and talks to the engine directly. It
+never asks a question.
 
 | Flag | Meaning |
 |---|---|
-| `MODEL` | The embedding model to move to, for example `hindsight-ai/hs-embed-1`. Omitted with `--resume`. |
+| `MODEL` | The embedding model to move to, for example `hindsight-ai/hs-embed-1`. Omitted with `--resume`, `--status` and `--clear-gate`. |
 | `--provider` | The embeddings provider the model belongs to. Default `local`. |
-| `--apply` / `--dry-run` | Default `--dry-run`: run the preflight, print the plan, change nothing. |
-| `--allow-pending` | Go ahead while the engine has queued or running operations. What they have not written when a bank is exported is not carried over. |
+| `--apply` / `--dry-run` | Default `--dry-run`: run the preflight, print the plan, write nothing. |
+| `--allow-pending` | Go ahead while the engine has queued or running operations. What they have not written when a bank is exported is not carried over, and a bank that changes after its export is replaced with a warning. |
 | `--resume` | Finish an interrupted switch from its journal: carry a started swap forward, or undo a run that stopped before the swap. |
-| `--json` | Print the plan or the result as JSON; progress goes to stderr. |
+| `--status` | Print the journal, the write pause, the banks and temporary banks on the engine, and what `--resume` would do for each. Changes nothing. |
+| `--clear-gate` | Lift the write pause by hand. Refused while a switch is running or any journal shows an unfinished run. Checks no bank. |
+| `--json` | Print the plan, status or result as JSON; progress goes to stderr. |
 
 The preflight refuses, and the command exits 1, when: the store is already on
 that embedder and is not mixed; the engine does not answer or its environment
 cannot be read; the embedder record cannot be read or disagrees with the
 engine; the engine's export or import API is off; a bank has queued or running
-operations (without `--allow-pending`); free disk space is under 1.5 times
-the engine's data directory; the engine's `hindsight-admin` command is
-missing; an earlier switch did not finish; an engine upgrade is in progress;
-or another switch is running. An `--apply` or `--resume` also exits 1 when
-the run fails. Then it has either been undone, or, if it stopped inside the
-swap, memory writes stay paused until `--resume` completes.
+operations (without `--allow-pending`); free disk space is short on the
+engine's filesystem or the archives'; the engine's `hindsight-admin` command
+is missing, or the engine unit's `EnvironmentFile` is not readable by this
+account; memory writes are already paused, an earlier switch did not finish,
+or a bank left by one is still on the engine; an update or an engine upgrade
+is in progress; or another switch is running. An `--apply` or `--resume` also
+exits 1 when the run fails. Then it has either been undone, or, if it stopped
+inside the swap, memory writes stay paused until `--resume` completes; the
+message names the archive directory and `--status`. A finished run whose
+store had to be recorded as mixed (a bank appeared during the swap) exits 0
+and says so.
 
 ### `memory migrate unify`
 

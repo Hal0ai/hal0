@@ -58,7 +58,8 @@ Linger`) and warns when that does not match whether the Hermes gateway is instal
 - **warn** when the record and the engine disagree: the running engine, or the unit files it would start from, name a different embedder, for example a hand-written drop-in that sorts after hal0's. Both are named and hal0 changes neither; while the engine is running, hal0 keeps rendering the embedder it runs. The `memory_engine_env` row judges these two keys on the same evidence, so the two rows do not contradict each other.
 - **warn** when the record file cannot be read or parsed. hal0 leaves the file as it is, names its path, and keeps the engine on what it runs for now.
 - **warn** when the store's location is unavailable (a symlink that does not resolve, or an `/etc/fstab` mount point above it that is not mounted). Nothing is recorded until it is back.
-- **warn** when an embedder switch did not finish. Memory writes stay paused (recall still works) until `hal0 memory embedder switch --resume` has run.
+- **warn** when an embedder switch did not finish, or memory writes are paused and no switch is running. The pause outlives a killed run on purpose and nothing lifts it on a timer, so every memory write is refused (recall still works) until `hal0 memory embedder switch --resume` has run. The row names the run, its archive directory, and the `--status` and `--resume` commands.
+- **pass**, with a note, while a switch is running.
 
 `hal0 memory embedder switch <model>` re-embeds the store on another model; the warnings for a mismatch and for a mixed store name the exact line (a dry run until `--apply` is added). Setting `[memory.models]` to the recorded embedder also clears a mismatch, without re-embedding anything. See [Change the embedding model](/docs/guides/enable-memory#change-the-embedding-model).
 
