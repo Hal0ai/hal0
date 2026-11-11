@@ -103,9 +103,9 @@ test.describe('the deleted memory tools page (#memworkspace)', () => {
   for (const [from, to, tab, testId] of [
     ['#memworkspace', /#memory\/health$/, 'health', 'ma-health-summary'],
     ['#memworkspace/overview', /#memory\/health$/, 'health', 'ma-health-summary'],
-    ['#memworkspace/kb', /#memory\/knowledge$/, 'knowledge', 'ma-knowledge'],
-    ['#memworkspace/mental-models', /#memory\/knowledge$/, 'knowledge', 'ma-knowledge'],
-    ['#memworkspace/directives', /#memory\/knowledge$/, 'knowledge', 'ma-knowledge'],
+    ['#memworkspace/kb', /#memory\/knowledge(\?bank=[^&]+)?$/, 'knowledge', 'ma-knowledge'],
+    ['#memworkspace/mental-models', /#memory\/knowledge(\?bank=[^&]+)?$/, 'knowledge', 'ma-knowledge'],
+    ['#memworkspace/directives', /#memory\/knowledge(\?bank=[^&]+)?$/, 'knowledge', 'ma-knowledge'],
     ['#memworkspace/operations', /#memory\/operations$/, 'operations', 'ma-operations'],
     ['#memworkspace/agents', /#memory\/agents$/, 'agents', 'ma-agents'],
   ] as const) {
@@ -131,7 +131,8 @@ test.describe('the deleted memory tools page (#memworkspace)', () => {
     await page.evaluate(() => {
       window.location.hash = '#memworkspace/kb'
     })
-    await expect(page).toHaveURL(/#memory\/knowledge$/)
+    // Knowledge then writes the first bank into the address, in place as well.
+    await expect(page).toHaveURL(/#memory\/knowledge(\?bank=[^&]+)?$/)
     await page.goBack()
     await expect(page).toHaveURL(/#dashboard$/)
   })
