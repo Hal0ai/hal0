@@ -232,8 +232,10 @@ def model_scope_confined_to(model: Any, agent_id: str | None) -> bool:
     own = f"{AGENT_TAG_PREFIX}{agent_id}"
     trigger = model.get("trigger") if isinstance(model.get("trigger"), dict) else {}
     groups = trigger.get("tag_groups")
-    if groups:
-        # Groups are AND-ed, so one confining top-level leaf confines them all.
+    if groups is not None:
+        # The engine treats any tag_groups that is not None as authoritative,
+        # and ``[]`` as no filter at all: the whole bank. Groups are AND-ed,
+        # so one confining top-level leaf confines them all.
         return isinstance(groups, list) and any(
             isinstance(g, dict) and _leaf_confines(g.get("tags"), g.get("match", "any_strict"), own)
             for g in groups

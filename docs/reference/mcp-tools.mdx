@@ -336,7 +336,14 @@ answers as one that does not exist (`memory.document_not_found`,
 `memory.memory_not_found`; an operation answers `operation_status:
 not_found`). A mental model or knowledge page is built from every memory its
 tags admit, so while the bank holds another agent's private memory only the
-models scoped to the caller's own `agent:<id>` tag are listed. A tag that
+models scoped to the caller's own `agent:<id>` tag are listed. Updating,
+refreshing or deleting a model the caller may not read is the same 404, and
+while the bank holds another agent's private memory a model's tags or
+trigger may change only from one scope confined to the caller to another
+(`memory.mental_model_rescope_refused` otherwise). A `trigger.tag_groups`
+that is empty or not a list is refused (`memory.mental_model_scope_invalid`):
+the engine reads it as the whole bank. A listing's `total` counts only what
+the caller can see. A tag that
 appears only on other agents' private documents is left out of
 `memory_tags_list`. `memory_bank_stats` returns only its health fields, with
 `counts_withheld: true`, while the bank holds another agent's private memory.

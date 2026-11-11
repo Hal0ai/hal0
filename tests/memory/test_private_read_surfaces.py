@@ -47,6 +47,10 @@ class _Engine:
         self.pages: dict[str, dict[str, Any]] = {}
         self.ops: dict[str, dict[str, dict[str, Any]]] = {}
         self.memories: dict[str, dict[str, Any]] = {}
+        self.updated: list[str] = []
+        self.refreshed: list[str] = []
+        self.cancelled: list[str] = []
+        self.retried: list[str] = []
 
     def doc(self, bank: str, doc_id: str, tags: list[str], text: str = "body") -> None:
         self.docs.setdefault(bank, {})[doc_id] = {
@@ -84,6 +88,46 @@ class _Engine:
         if model is None:
             raise _EngineNotFound()
         return dict(model)
+
+    async def create_mental_model(self, *, bank_id, name, source_query, id=None, **kwargs):
+        mm_id = id or f"mm-{len(self.models.get(bank_id, {})) + 1}"
+        self.models.setdefault(bank_id, {})[mm_id] = {
+            "id": mm_id,
+            "name": name,
+            "tags": list(kwargs.get("tags") or []),
+            "trigger": kwargs.get("trigger") or {},
+            "content": "",
+        }
+        return {"mental_model_id": mm_id, "operation_id": "op-mm"}
+
+    async def update_mental_model(self, *, bank_id, mental_model_id, **kwargs):
+        model = self.models.get(bank_id, {}).get(mental_model_id)
+        if model is None:
+            raise _EngineNotFound()
+        for key, value in kwargs.items():
+            if value is not None:
+                model[key] = value
+        self.updated.append(mental_model_id)
+        return dict(model)
+
+    async def delete_mental_model(self, *, bank_id, mental_model_id):
+        if self.models.get(bank_id, {}).pop(mental_model_id, None) is None:
+            raise _EngineNotFound()
+        return {"success": True}
+
+    async def refresh_mental_model(self, *, bank_id, mental_model_id):
+        if mental_model_id not in self.models.get(bank_id, {}):
+            raise _EngineNotFound()
+        self.refreshed.append(mental_model_id)
+        return {"operation_id": "op-refresh"}
+
+    async def cancel_operation(self, *, bank_id, operation_id):
+        self.cancelled.append(operation_id)
+        return {"success": True}
+
+    async def retry_operation(self, *, bank_id, operation_id):
+        self.retried.append(operation_id)
+        return {"success": True}
 
     async def get_knowledge_base_tree(self, *, bank_id):
         return self.trees.get(bank_id, {"roots": []})
@@ -441,6 +485,169 @@ async def test_memory_history_of_foreign_private_memory_is_404(layout, caller):
 async def test_memory_history_owner_reads(layout):
     p, _engine, _bank = _provider(layout)
     assert (await p.memory_history("f-a", client_id="alice"))["items"]
+
+
+# ── review round: writes on hidden models, scopes, counts ─────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("caller", OTHERS)
+async def test_mental_model_writes_on_a_hidden_model_are_404(layout, caller):
+    """An update with no fields would return the model's content; re-tagging
+    it to the caller would make that content pass the read rule."""
+    p, engine, bank = _provider(layout)
+    for mm in ("mm-whole", "mm-alice"):
+        for write in (
+            p.update_mental_model(mm, client_id=caller),
+            p.update_mental_model(mm, client_id=caller, tags=[f"agent:{caller}"]),
+            p.refresh_mental_model(mm, client_id=caller),
+            p.delete_mental_model(mm, client_id=caller),
+        ):
+            with pytest.raises(NotFound) as exc:
+                await write
+            assert exc.value.code == "memory.mental_model_not_found"
+    assert engine.updated == [] and engine.refreshed == []
+    assert set(engine.models[bank]) == {"mm-whole", "mm-topic", "mm-alice"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+async def test_mental_model_writes_on_a_readable_model_work(layout):
+    p, engine, _bank = _provider(layout)
+    out = await p.update_mental_model("mm-whole", client_id="alice", name="Renamed")
+    assert out["name"] == "Renamed" and out["content"] == "all"
+    await p.refresh_mental_model("mm-whole", client_id="alice")
+    assert engine.refreshed == ["mm-whole"]
+    await p.delete_mental_model("mm-topic", client_id="alice")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+async def test_mental_model_rescope_refused_while_foreign_private_present(layout):
+    """Content written under the old scope must not reach a caller through a
+    new one: with bob's private note in the bank, alice may not widen her
+    own model, and a confined-to-confined change is still allowed."""
+    from hal0.errors import BadRequest
+
+    p, engine, bank = _provider(layout)
+    engine.doc(bank, "b-priv", ["visibility:private", "agent:bob"])
+    with pytest.raises(BadRequest) as exc:
+        await p.update_mental_model("mm-alice", client_id="alice", tags=["topic:x"])
+    assert exc.value.code == "memory.mental_model_rescope_refused"
+    with pytest.raises(BadRequest):
+        await p.update_mental_model(
+            "mm-alice", client_id="alice", trigger={"tags_match": "any", "tag_groups": None}
+        )
+    assert engine.updated == []
+    out = await p.update_mental_model(
+        "mm-alice", client_id="alice", tags=["agent:alice", "topic:x"]
+    )
+    assert out["content"] == "alice only"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+async def test_mental_model_update_answer_withholds_content_it_now_hides(layout):
+    p, _engine, _bank = _provider(layout)
+    out = await p.update_mental_model(
+        "mm-whole", client_id="alice", tags=["visibility:private", "agent:bob"]
+    )
+    assert out["id"] == "mm-whole" and "content" not in out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+async def test_empty_tag_groups_scope_is_the_whole_bank(layout):
+    """The engine treats ``tag_groups: []`` as set and filtering nothing."""
+    from hal0.errors import BadRequest
+
+    p, engine, bank = _provider(layout)
+    engine.models[bank]["mm-bob"] = {
+        "id": "mm-bob",
+        "tags": ["agent:bob"],
+        "trigger": {"tag_groups": []},
+        "content": "built from the whole bank",
+    }
+    with pytest.raises(NotFound):
+        await p.get_mental_model("mm-bob", client_id="bob")
+    for bad in ([], {}, "x"):
+        with pytest.raises(BadRequest) as exc:
+            await p.create_mental_model(
+                name="n",
+                source_query="q",
+                client_id="bob",
+                tags=["agent:bob"],
+                trigger={"tag_groups": bad},
+            )
+        assert exc.value.code == "memory.mental_model_scope_invalid"
+    assert not model_scope_confined_to(
+        {"tags": ["agent:bob"], "trigger": {"tag_groups": []}}, "bob"
+    )
+    assert not model_scope_confined_to(
+        {"tags": ["agent:bob"], "trigger": {"tag_groups": "x"}}, "bob"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("caller", OTHERS)
+async def test_listing_totals_do_not_count_hidden_rows(layout, caller):
+    """A caller-chosen filter that matches only another agent's private
+    document reads like one that matches nothing."""
+    p, _engine, _bank = _provider(layout)
+    docs = await p.list_documents(client_id=caller, tags=["topic:secret"])
+    assert docs["items"] == [] and docs["total"] == 0
+    everything = await p.list_documents(client_id=caller, limit=2)
+    assert [r["id"] for r in everything["items"]] == ["a-shared", "b-shared"]
+    assert everything["total"] == 3  # a full page, plus one
+    models = await p.list_mental_models(client_id=caller)
+    assert models.get("total", 0) == 0
+    tags = await p.list_tags(client_id=caller)
+    assert tags["total"] == len(tags["items"])
+    ops = await p.list_operations(client_id=caller)
+    assert ops["total"] == len(ops["operations"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("caller", OTHERS)
+async def test_cancel_and_retry_of_a_hidden_operation_are_404(layout, caller):
+    p, engine, _bank = _provider(layout)
+    for op_id in ("op-a", "op-batch", "op-missing"):
+        for write in (
+            p.cancel_operation(op_id, client_id=caller),
+            p.retry_operation(op_id, client_id=caller),
+        ):
+            with pytest.raises(NotFound) as exc:
+                await write
+            assert exc.value.code == "memory.operation_not_found"
+    assert engine.cancelled == [] and engine.retried == []
+    await p.cancel_operation("op-b", client_id=caller)
+    await p.retry_operation("op-c", client_id=caller)
+    assert engine.cancelled == ["op-b"] and engine.retried == ["op-c"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+async def test_bank_export_and_import_operations_are_hidden(layout):
+    """An export or import carries the whole bank's content and names no
+    owner, so it is hidden from every agent (the admin API still shows it)."""
+    p, engine, bank = _provider(layout)
+    for op_type in ("export_bank", "import_bank", "export_documents", "import_documents"):
+        engine.ops[bank][op_type] = {
+            "operation_id": op_type,
+            "task_type": op_type,
+            "status": "completed",
+        }
+    for caller in ("alice", "bob", None):
+        listed = await p.list_operations(client_id=caller)
+        assert not {o["operation_id"] for o in listed["operations"]} & {
+            "export_bank",
+            "import_bank",
+            "export_documents",
+            "import_documents",
+        }
 
 
 # ── through the MCP dispatcher ───────────────────────────────────────────────

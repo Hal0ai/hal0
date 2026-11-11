@@ -231,10 +231,11 @@ namespaces and that are not private to another agent. The consequences:
   forwarded; `limit` is at most 500. Other parameters are not forwarded.
 - When rows were left out, hal0 reads up to three more pages from the engine to fill the page,
   so a page is shorter than `limit` only when the engine has no more rows. Rows read that way can
-  appear again on the next page. `X-hal0-Filtered-Items` says how many rows were left out, and
-  `X-hal0-Listing-Incomplete: 1` marks the rare page that is short although the engine had more.
-- `total` is the engine's count for the tag filter, before hal0 left anything out: an upper
-  bound on what the client can list.
+  appear again on the next page. `X-hal0-Listing-Incomplete: 1` marks the rare page that is
+  short although the engine had more.
+- `total` counts only what the client can see: `offset` plus the rows returned, plus one when
+  the page is full. Neither the engine's count nor the number of rows left out is passed on,
+  because with a chosen `q` or `tags` either would confirm another agent's private document.
 
 `DELETE …/documents/{document_id}` looks the id up in the client's namespaces only. A document
 that is not there is `404 memory.compat_document_not_found`, whether or not something else by

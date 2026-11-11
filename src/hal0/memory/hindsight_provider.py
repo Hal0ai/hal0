@@ -490,8 +490,24 @@ _PRIVATE_SCAN_PAGES = 10
 #: Documents read per tag when deciding whether a tag that other agents'
 #: private documents carry is also on a document the caller can see.
 _TAG_CHECK_LIMIT = 50
-#: Operation types that carry memory content (a retain's submitted text).
-_CONTENT_OP_TYPES = frozenset({"retain", "batch_retain", "file_convert_retain"})
+#: Operation types that carry or produce memory content: a retain's submitted
+#: text, a document or bank import's archive, an export of one.
+_CONTENT_OP_TYPES = frozenset(
+    {
+        "retain",
+        "batch_retain",
+        "file_convert_retain",
+        "import_documents",
+        "export_documents",
+        "import_bank",
+        "export_bank",
+    }
+)
+#: Fields of a mental model that carry its generated content.
+_MODEL_CONTENT_FIELDS = frozenset({"content", "reflect_response", "structured_content"})
+#: Extra engine pages a documents listing reads to fill a page that rows the
+#: caller may not see left short.
+_LISTING_EXTRA_FETCHES = 3
 #: Bank stats fields kept when the bank holds other agents' private memory:
 #: operational health, no volume. The admin API has the full record.
 _STATS_HEALTH_FIELDS = (
@@ -503,6 +519,19 @@ _STATS_HEALTH_FIELDS = (
     "pending_consolidation",
     "failed_consolidation",
 )
+
+
+def _visible_total(offset: int | None, shown: int, limit: int | None) -> int:
+    """A listing's ``total`` that counts only rows the caller can see (#3573).
+
+    ``offset`` plus the rows shown, plus one when they fill the page (there
+    may be more). It is derived from nothing the caller cannot see: not the
+    engine's count, and not whether the engine's page was full, both of which
+    include rows left out. A page that rows left out made short can therefore
+    read as the last one.
+    """
+    full = limit is not None and limit > 0 and shown >= limit
+    return (offset or 0) + shown + (1 if full else 0)
 
 
 # ── zero-fact retain visibility (#2030) ─────────────────────────────────────
@@ -1403,23 +1432,25 @@ class HindsightProvider(MemoryProvider):
     #
     # Per tool:
     #
-    # * documents: a listing drops the rows the caller may not see (``total``
-    #   stays the engine's count, an upper bound); a get of one is 404, the
-    #   same answer as a document that does not exist.
+    # * documents: a listing drops the rows the caller may not see and counts
+    #   only what it returns, so a filter cannot confirm a hidden document;
+    #   a get of one is 404, the same answer as a document that does not
+    #   exist.
     # * mental models and knowledge pages: the content is written from every
     #   memory the model's scope admits and cannot be filtered afterwards, so
     #   a model is readable when its own tags pass the rule AND either the
     #   bank holds no private memory of another agent or the model's scope is
     #   confined to the caller (``read_scope.model_scope_confined_to``). The
-    #   rest are left out of a list or tree and are 404 on a get. This is the
-    #   reflect rule (mental models left out where others' private memory is
-    #   in the bank), applied per model.
+    #   rest are left out of a list or tree and are 404 on a get, an update, a
+    #   delete or a refresh. This is the reflect rule (mental models left out
+    #   where others' private memory is in the bank), applied per model.
     # * tags: a tag that other agents' private documents carry is listed only
     #   when a document the caller can see carries it too. Counts stay the
     #   engine's, an upper bound.
     # * operations: a retain's submitted content carries its tags; an
     #   operation over memory the caller may not see is left out of a list,
-    #   and a get answers what the engine answers for an unknown id.
+    #   a get answers what the engine answers for an unknown id, and a cancel
+    #   or retry is 404.
     # * bank stats: counts cannot be scoped, so while the bank holds another
     #   agent's private memory only the health fields are returned.
     #
@@ -2860,11 +2891,62 @@ class HindsightProvider(MemoryProvider):
     # ── mental models ─────────────────────────────────────────────────────
     #
     # Bank-scoped objects whose content the engine writes from the memories
-    # their tags admit. Reads (list, get) follow the rule in "ACL: the
+    # their scope admits. Reads (list, get) follow the rule in "ACL: the
     # bank-wide read tools" (#3573): a model built from memory the caller may
-    # not read is left out of a list and is 404 on a get. Writes still pick
-    # the bank only. The REST admin surface (``memory_admin.py``) applies no
-    # ACL here: it is the operator's.
+    # not read is left out of a list and is 404 on a get. Update, delete and
+    # refresh of such a model are 404 too, so a write cannot be used to read
+    # it or to learn that it exists. A scope (tags, trigger) the engine would
+    # read as the whole bank by accident is refused on create and update, and
+    # a scope change is refused when it could carry content written under the
+    # old scope to a caller the old scope would not have let read it. The REST
+    # admin surface (``memory_admin.py``) applies no ACL here: it is the
+    # operator's.
+
+    @staticmethod
+    def _check_model_trigger(trigger: dict[str, Any] | None) -> None:
+        """Refuse a ``trigger.tag_groups`` that is set but filters nothing.
+
+        The engine treats any ``tag_groups`` that is not None as replacing the
+        model's tags, and an empty list as no filter: the model is then built
+        from the whole bank whatever its tags say.
+        """
+        if not isinstance(trigger, dict) or "tag_groups" not in trigger:
+            return
+        groups = trigger["tag_groups"]
+        if groups is None:
+            return
+        if not isinstance(groups, list) or not groups:
+            raise BadRequest(
+                "trigger.tag_groups must be a non-empty list of tag groups; "
+                "an empty list builds the model from the whole bank",
+                code="memory.mental_model_scope_invalid",
+                details={"field": "trigger.tag_groups"},
+            )
+
+    @staticmethod
+    def _model_missing(mental_model_id: str) -> NotFound:
+        return NotFound(
+            "no such mental model",
+            code="memory.mental_model_not_found",
+            details={"id": mental_model_id},
+        )
+
+    async def _require_readable_model(
+        self, bank: str, mental_model_id: str, caller: str
+    ) -> dict[str, Any]:
+        """The model, when ``caller`` may read it; else the 404 a missing
+        model gets, so the two cannot be told apart."""
+        try:
+            model = await self._call(
+                "get_mental_model", bank_id=bank, mental_model_id=mental_model_id
+            )
+        except Exception as exc:
+            if _http_status(exc) == 404:
+                raise self._model_missing(mental_model_id) from None
+            raise
+        if not isinstance(model, dict) or not await self._readable_models(bank, [model], caller):
+            raise self._model_missing(mental_model_id)
+        return model
 
     async def list_mental_models(
         self,
@@ -2877,6 +2959,8 @@ class HindsightProvider(MemoryProvider):
         limit: int | None = None,
         offset: int | None = None,
     ) -> dict[str, Any]:
+        """The bank's mental models the caller may read. ``total`` counts
+        what is returned when anything was left out."""
         bank = self._bank_of(self._write_namespace(dataset, client_id))
         resp = await self._call(
             "list_mental_models",
@@ -2889,30 +2973,20 @@ class HindsightProvider(MemoryProvider):
         )
         if isinstance(resp, dict) and isinstance(resp.get("items"), list):
             caller = self._caller_agent(client_id)
-            resp = {**resp, "items": await self._readable_models(bank, resp["items"], caller)}
+            items = resp["items"]
+            kept = await self._readable_models(bank, items, caller)
+            resp = {**resp, "items": kept}
+            if "total" in resp:
+                resp["total"] = _visible_total(offset, len(kept), limit)
         return resp
 
     async def get_mental_model(
         self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
-        missing = NotFound(
-            "no such mental model",
-            code="memory.mental_model_not_found",
-            details={"id": mental_model_id},
+        return await self._require_readable_model(
+            bank, mental_model_id, self._caller_agent(client_id)
         )
-        try:
-            model = await self._call(
-                "get_mental_model", bank_id=bank, mental_model_id=mental_model_id
-            )
-        except Exception as exc:
-            if _http_status(exc) == 404:
-                raise missing from None
-            raise
-        caller = self._caller_agent(client_id)
-        if not isinstance(model, dict) or not await self._readable_models(bank, [model], caller):
-            raise missing
-        return model
 
     @_gated_write
     async def create_mental_model(
@@ -2927,6 +3001,7 @@ class HindsightProvider(MemoryProvider):
         max_tokens: int = 2048,
         trigger: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._check_model_trigger(trigger)
         bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "create_mental_model",
@@ -2952,8 +3027,42 @@ class HindsightProvider(MemoryProvider):
         tags: list[str] | None = None,
         trigger: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Update a model the caller may read (404 otherwise).
+
+        A model's content stays as it was until the next refresh, so a change
+        of scope (``tags`` or ``trigger``) could otherwise hand content
+        written under the old scope to whoever the new scope lets read it:
+        re-tagging a whole-bank model to ``agent:<self>`` would serve that
+        model's text, other agents' private notes included. So while the bank
+        holds another agent's private memory, a scope change is accepted only
+        when both the old and the new scope are confined to the caller
+        (``memory.mental_model_rescope_refused`` otherwise; create a new model
+        instead). The engine's answer is returned without its content when
+        the caller may not read the model under its new scope.
+        """
+        self._check_model_trigger(trigger)
         bank = self._bank_of(self._write_namespace(dataset, client_id))
-        return await self._call(
+        caller = self._caller_agent(client_id)
+        before = await self._require_readable_model(bank, mental_model_id, caller)
+        if tags is not None or trigger is not None:
+            old_trigger = before.get("trigger") if isinstance(before.get("trigger"), dict) else {}
+            after = {
+                **before,
+                "tags": list(tags) if tags is not None else before.get("tags"),
+                "trigger": {**old_trigger, **trigger} if trigger is not None else old_trigger,
+            }
+            confined = model_scope_confined_to(before, caller) and model_scope_confined_to(
+                after, caller
+            )
+            if not confined and (await self._foreign_private(bank, caller))[0]:
+                raise BadRequest(
+                    "this model's scope cannot be changed while the bank holds other "
+                    "agents' private memory: its current content was written under the "
+                    "old scope. Create a new model with the scope you want instead.",
+                    code="memory.mental_model_rescope_refused",
+                    details={"id": mental_model_id},
+                )
+        resp = await self._call(
             "update_mental_model",
             bank_id=bank,
             mental_model_id=mental_model_id,
@@ -2963,12 +3072,16 @@ class HindsightProvider(MemoryProvider):
             tags=tags,
             trigger=trigger,
         )
+        if isinstance(resp, dict) and not await self._readable_models(bank, [resp], caller):
+            resp = {k: v for k, v in resp.items() if k not in _MODEL_CONTENT_FIELDS}
+        return resp
 
     @_gated_write
     async def delete_mental_model(
         self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
+        await self._require_readable_model(bank, mental_model_id, self._caller_agent(client_id))
         return await self._call(
             "delete_mental_model", bank_id=bank, mental_model_id=mental_model_id
         )
@@ -2978,6 +3091,7 @@ class HindsightProvider(MemoryProvider):
         self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
+        await self._require_readable_model(bank, mental_model_id, self._caller_agent(client_id))
         return await self._call(
             "refresh_mental_model", bank_id=bank, mental_model_id=mental_model_id
         )
@@ -3102,7 +3216,11 @@ class HindsightProvider(MemoryProvider):
         caller = self._caller_agent(client_id)
         rows = [r for r in resp["operations"] if isinstance(r, dict)]
         verdicts = await asyncio.gather(*[self._operation_visible(bank, r, caller) for r in rows])
-        return {**resp, "operations": [r for r, ok in zip(rows, verdicts, strict=True) if ok]}
+        kept = [r for r, ok in zip(rows, verdicts, strict=True) if ok]
+        out = {**resp, "operations": kept}
+        if "total" in resp:
+            out["total"] = _visible_total(offset, len(kept), limit)
+        return out
 
     async def get_operation(
         self,
@@ -3149,11 +3267,35 @@ class HindsightProvider(MemoryProvider):
 
         return await annotate_retain_yield(op, _doc)
 
+    async def _require_visible_operation(
+        self, bank: str, operation_id: str, client_id: str | None
+    ) -> None:
+        """404 ``memory.operation_not_found`` for an operation the caller may
+        not see (#3573), the same answer as one the engine does not know."""
+        missing = NotFound(
+            "no such operation",
+            code="memory.operation_not_found",
+            details={"id": operation_id},
+        )
+        try:
+            op = await self._call(
+                "get_operation", bank_id=bank, operation_id=operation_id, include_payload=True
+            )
+        except Exception as exc:
+            if _http_status(exc) == 404:
+                raise missing from None
+            raise
+        if not isinstance(op, dict) or op.get("status") == "not_found":
+            raise missing
+        if not await self._operation_visible(bank, op, self._caller_agent(client_id)):
+            raise missing
+
     @_gated_write
     async def cancel_operation(
         self, operation_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
+        await self._require_visible_operation(bank, operation_id, client_id)
         return await self._call("cancel_operation", bank_id=bank, operation_id=operation_id)
 
     @_gated_write
@@ -3161,6 +3303,7 @@ class HindsightProvider(MemoryProvider):
         self, operation_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
+        await self._require_visible_operation(bank, operation_id, client_id)
         return await self._call("retry_operation", bank_id=bank, operation_id=operation_id)
 
     # ── tags / bank stats / consolidation ────────────────────────────────
@@ -3216,7 +3359,11 @@ class HindsightProvider(MemoryProvider):
             )
 
         verdicts = await asyncio.gather(*[_keep(r["tag"]) for r in rows])
-        return {**resp, "items": [r for r, ok in zip(rows, verdicts, strict=True) if ok]}
+        kept = [r for r, ok in zip(rows, verdicts, strict=True) if ok]
+        out = {**resp, "items": kept}
+        if "total" in resp:
+            out["total"] = _visible_total(offset, len(kept), limit)
+        return out
 
     # ── knowledge base (folders/pages — #showcase) ──────────────────────────
     #
@@ -3305,29 +3452,50 @@ class HindsightProvider(MemoryProvider):
         offset: int | None = None,
     ) -> dict[str, Any]:
         """A page of the bank's documents, less the ones private to another
-        agent (#3573). The page can come back shorter than ``limit``;
-        ``total`` stays the engine's count, an upper bound."""
+        agent (#3573).
+
+        Nothing in the answer may count the rows left out, or a caller could
+        probe ``q`` / ``tags`` for another agent's private document ids and
+        tags. So a page short of ``limit`` is filled by reading on from the
+        engine (up to :data:`_LISTING_EXTRA_FETCHES` more pages), and
+        ``total`` counts only what the caller can see: ``offset`` plus the
+        rows returned, plus one when the page is full (there may be more).
+        ``offset`` indexes the engine's rows, as before.
+        """
         bank = self._bank_of(self._write_namespace(dataset, client_id))
-        resp = await self._call(
-            "list_documents",
-            bank_id=bank,
-            q=q,
-            tags=tags,
-            tags_match=tags_match,
-            limit=limit if limit is not None else 100,
-            offset=offset if offset is not None else 0,
-        )
-        if isinstance(resp, dict) and isinstance(resp.get("items"), list):
-            caller = self._caller_agent(client_id)
-            resp = {
-                **resp,
-                "items": [
-                    r
-                    for r in resp["items"]
-                    if isinstance(r, dict) and self._is_visible_to(r, caller)
-                ],
-            }
-        return resp
+        page_size = limit if limit is not None else 100
+        start = offset if offset is not None else 0
+        caller = self._caller_agent(client_id)
+        first: Any = None
+        kept: list[dict[str, Any]] = []
+        for fetch in range(1 + _LISTING_EXTRA_FETCHES):
+            resp = await self._call(
+                "list_documents",
+                bank_id=bank,
+                q=q,
+                tags=tags,
+                tags_match=tags_match,
+                limit=page_size,
+                offset=start + fetch * page_size,
+            )
+            if fetch == 0:
+                first = resp
+            if not isinstance(resp, dict) or not isinstance(resp.get("items"), list):
+                break
+            rows = resp["items"]
+            for row in rows:
+                if len(kept) >= page_size:
+                    break
+                if isinstance(row, dict) and self._is_visible_to(row, caller):
+                    kept.append(row)
+            if len(rows) < page_size or page_size <= 0 or len(kept) >= page_size:
+                break
+        if not isinstance(first, dict) or not isinstance(first.get("items"), list):
+            return first
+        out = {**first, "items": kept}
+        if "total" in first:
+            out["total"] = _visible_total(start, len(kept), page_size)
+        return out
 
     async def get_document(
         self, document_id: str, *, dataset: str = _SHARED, client_id: str | None = None

@@ -1476,7 +1476,7 @@ def test_the_documents_listing_shows_the_callers_namespaces_under_its_own_ids(
         "offset": ["0"],
     }
     assert [d["id"] for d in resp.json()["items"]] == ["readme", "git:4f2a"]
-    assert resp.headers["X-hal0-Filtered-Items"] == "2"
+    assert "X-hal0-Filtered-Items" not in resp.headers
     assert "::" not in resp.text
 
 
@@ -1494,7 +1494,19 @@ def test_the_documents_listing_hides_another_agents_private_document(
     resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key))
     page = resp.json()
     assert [d["id"] for d in page["items"]] == ["mine", "my-private"]
-    assert resp.headers["X-hal0-Filtered-Items"] == "1"
+    assert "X-hal0-Filtered-Items" not in resp.headers
+
+
+def test_the_documents_listing_counts_nothing_the_caller_cannot_see(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    """#3573: a listing that matches only another agent's private document
+    reads exactly like one that matches nothing."""
+    _seed(engine, _doc("hal0::shared::git:x", OTHER_AGENT_PRIVATE))
+    resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key), params={"q": "git"})
+    assert resp.json()["items"] == []
+    assert resp.json()["total"] == 0
+    assert "X-hal0-Filtered-Items" not in resp.headers
 
 
 def test_a_listing_row_is_checked_even_if_the_engine_ignores_the_filter(
@@ -1558,9 +1570,9 @@ def test_a_short_page_is_filled_from_the_engine_while_it_has_more_rows(
     first = page(0)
     assert [d["id"] for d in first.json()["items"]] == ["doc-00", "doc-01", "doc-02", "doc-03"]
     assert [c.params["offset"] for c in engine.calls] == [["0"], ["4"]]
-    assert first.headers["X-hal0-Filtered-Items"] == "3"
-    # The engine's count for the tag filter: an upper bound, never too low.
-    assert first.json()["total"] == 12
+    assert "X-hal0-Filtered-Items" not in first.headers
+    # #3573: only what the caller can see is counted (a full page, plus one).
+    assert first.json()["total"] == 5
     assert (first.json()["limit"], first.json()["offset"]) == (4, 0)
     assert "X-hal0-Listing-Incomplete" not in first.headers
 
@@ -1586,7 +1598,7 @@ def test_a_listing_that_cannot_be_filled_says_so(
     assert len(engine.calls) == 4
     assert resp.json()["items"] == []
     assert resp.headers["X-hal0-Listing-Incomplete"] == "1"
-    assert resp.headers["X-hal0-Filtered-Items"] == "20"
+    assert "X-hal0-Filtered-Items" not in resp.headers
 
 
 @pytest.mark.parametrize(("asked", "sent"), [("5000", "500"), ("500", "500"), ("7", "7")])

@@ -208,7 +208,6 @@ _DEFAULT_LANES = MemoryLanesConfig()
 
 PROJECT_HEADER = "X-hal0-Project"
 IGNORED_FIELDS_HEADER = "X-hal0-Ignored-Fields"
-FILTERED_ITEMS_HEADER = "X-hal0-Filtered-Items"
 INCOMPLETE_LISTING_HEADER = "X-hal0-Listing-Incomplete"
 
 # Engine read budgets, in seconds. A reflect uses the client's own
@@ -1774,11 +1773,12 @@ async def list_documents(bank: str, request: Request, agent: str = _CALLER) -> R
     :data:`_LISTING_EXTRA_FETCHES` more pages, until the page is full or the
     engine has no more rows. Rows read that way can come back again on the
     caller's next page; ids are unique, so a caller collecting them loses
-    nothing. ``total`` is the engine's count for the tag filter, before hal0
-    left anything out: an upper bound, never an undercount.
-    ``X-hal0-Filtered-Items`` says how many rows were left out, and
-    ``X-hal0-Listing-Incomplete`` is set when the page is short although the
-    engine had more.
+    nothing. ``total`` counts only rows the caller can see: ``offset`` plus
+    the rows returned, plus one when the page is full (#3573). The engine's
+    own count, and how many rows were left out, are not passed on: with a
+    caller-chosen ``q`` or ``tags`` either would confirm another agent's
+    private document. ``X-hal0-Listing-Incomplete`` is set when the page is
+    short although the engine had more.
     """
     provider = _provider(request)
     scope = _scope(request, provider, bank, agent, request.query_params.getlist("tags"))
@@ -1793,7 +1793,6 @@ async def list_documents(bank: str, request: Request, agent: str = _CALLER) -> R
 
     first: dict[str, Any] = {}
     kept: list[dict[str, Any]] = []
-    left_out = 0
     exhausted = False
     for fetch in range(1 + _LISTING_EXTRA_FETCHES):
         out = await _forward(
@@ -1817,9 +1816,7 @@ async def list_documents(bank: str, request: Request, agent: str = _CALLER) -> R
             if len(kept) >= limit:
                 break
             shown = _listing_row(row, scope, required, visible)
-            if shown is None:
-                left_out += 1
-            else:
+            if shown is not None:
                 kept.append(shown)
         exhausted = len(rows) < limit or limit == 0
         if exhausted or len(kept) >= limit:
@@ -1827,8 +1824,7 @@ async def list_documents(bank: str, request: Request, agent: str = _CALLER) -> R
     first["items"] = kept
     first["limit"] = limit
     first["offset"] = offset
-    if left_out:
-        headers[FILTERED_ITEMS_HEADER] = str(left_out)
+    first["total"] = offset + len(kept) + (1 if limit > 0 and len(kept) >= limit else 0)
     if len(kept) < limit and not exhausted:
         headers[INCOMPLETE_LISTING_HEADER] = "1"
     return _json(first, headers)
