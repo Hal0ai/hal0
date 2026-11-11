@@ -208,7 +208,7 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   // src/hal0/api/routes/bridge.py).
   await page.route(/\/api\/agents(\?|$)/, (route) => json(route, { agents: [], count: 0 }))
   await page.route(/\/api\/bridge\/clients(\?|$)/, (route) => json(route, { items: [] }))
-  // GET /api/memory/health is answered in the bundle under the forced mock (three states, chosen
+  // GET /api/memory/health is answered in the bundle under the forced mock (eight states, chosen
   // by `window.__hal0MockMemoryHealth`; see src/api/mockFixtures.ts), so it only reaches
   // page.route when a spec names it in `__hal0MockPassthrough` or the suite runs without the
   // forced mock. The catch-all's `{}` is not the route's body, so the default here is the real

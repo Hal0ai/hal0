@@ -59,7 +59,9 @@ export type HealthView =
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
 
-const section = <T>(value: unknown): T | null => (isRecord(value) ? (value as T) : null)
+function section<T>(value: unknown): T | null {
+  return isRecord(value) ? (value as T) : null
+}
 
 /**
  * Read the health answer. Anything that is not the route's shape reads as `failed`, and a report
