@@ -37,7 +37,7 @@ The whole prefix is **BRIDGE** class, for every method: it is never open, whatev
 | A bridge key that holds the `memory` scope (`Authorization: Bearer hal0bk_…`) | Admitted. The caller's identity is the bridge client's name. |
 | The admin key, or a dashboard session | Admitted. The identity is `admin`. |
 | A bridge key without the `memory` scope | `403 memory.compat_scope_required` |
-| A bridge key whose client name hal0 has since reserved (`unknown`, `unresolved`) | `403 memory.compat_client_name_reserved` |
+| A bridge key whose client name hal0 has since reserved (`unknown`, `unresolved`, ...) | `403 bridge.client_name_reserved` (from the auth layer, on every bridge surface) |
 | The box client key | `403 auth.forbidden` |
 | Nothing, or a revoked key | `401 auth.required` |
 
@@ -329,7 +329,7 @@ A failure hal0 raises is the standard envelope `{"error": {"code", "message", "d
 | 400 | `memory.compat_document_id_reserved` | A retain in a project literally named `private`, whose stored ids the bank reserves |
 | 401 | `auth.required` | No credential, or a key that does not verify |
 | 403 | `auth.forbidden` | The box client key |
-| 403 | `memory.compat_scope_required`, `memory.compat_client_name_reserved` | A bridge key without the `memory` scope, or under a reserved name |
+| 403 | `memory.compat_scope_required`, `bridge.client_name_reserved` | A bridge key without the `memory` scope, or under a reserved name |
 | 403 | `memory.compat_document_not_owned` | Deleting a shared document another client wrote last |
 | 403 | `memory.compat_bank_delete_refused` | `DELETE` on a bank |
 | 404 | `memory.compat_document_not_found`, `memory.compat_operation_not_found` | A document or operation that is not the client's own |

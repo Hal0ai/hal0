@@ -857,3 +857,128 @@ def test_set_bridge_enabled_records_the_boot_value(monkeypatch: pytest.MonkeyPat
     assert auth_mod.bridge_enabled() is False
     auth_mod.set_bridge_enabled(True)
     assert auth_mod.bridge_enabled() is True
+
+
+# ---------------------------------------------------------------------------
+# A key under a reserved client name (#3560)
+
+#: Names no key can be minted under now, but a key minted before a name was
+#: reserved still verifies: one per entry and prefix of the reserved list.
+_RESERVED = ["unknown", "anonymous", "unresolved", "shared", "admin", "hermes", "pi"]
+_RESERVED_BY_PREFIX = ["hal0", "hal0-cli", "hermes__scout"]
+
+
+def _legacy_key(store: BridgeStore, monkeypatch: pytest.MonkeyPatch, name: str) -> str:
+    """A key minted under ``name`` before hal0 reserved it (all scopes)."""
+    from hal0.bridge import keys as bridge_keys
+
+    with monkeypatch.context() as earlier:
+        earlier.setattr(bridge_keys, "RESERVED_CLIENT_NAMES", frozenset())
+        earlier.setattr(bridge_keys, "RESERVED_CLIENT_PREFIXES", ())
+        _row, plain = store.add_client(name, created_by="t", scopes=("agents", "memory", "admin"))
+    return plain
+
+
+_BRIDGE_SURFACES = [
+    ("POST", "/mcp/memory/mcp"),
+    ("POST", "/mcp/agents/mcp"),
+    ("POST", "/mcp/admin/mcp"),
+    ("GET", "/api/bridge/me"),
+    ("POST", "/api/memory/compat/v1/default/banks/b/memories"),
+]
+
+
+@pytest.mark.parametrize("posture", ["auth_off", "auth_on"])
+@pytest.mark.parametrize("name", _RESERVED + _RESERVED_BY_PREFIX)
+def test_a_key_under_a_reserved_name_is_refused_on_every_bridge_surface(
+    store: BridgeStore,
+    monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
+    posture: str,
+    name: str,
+) -> None:
+    """``unknown`` is the identity stamped on every memory write whose caller had
+    none; a client of that name would read those notes through ``/mcp/memory``.
+    Minting refuses the name; an existing key is refused here, at every posture."""
+    request.getfixturevalue(posture)
+    with pytest.raises(Exception, match="reserved"):
+        store.add_client(name, created_by="t")
+    old_key = _legacy_key(store, monkeypatch, name)
+    assert resolve_principal(_scope(headers=bearer(old_key))).name == name  # it still verifies
+    client = _client()
+    for method, path in _BRIDGE_SURFACES:
+        resp = client.request(method, path, headers=bearer(old_key))
+        assert resp.status_code == 403, (method, path)
+        error = resp.json()["error"]
+        assert error["code"] == "bridge.client_name_reserved", (method, path)
+        assert "hal0 bridge revoke" in error["message"]
+    with (
+        pytest.raises(WebSocketDisconnect),
+        client.websocket_connect("/mcp/agents/ws", headers=bearer(old_key)) as ws,
+    ):
+        ws.receive_text()
+
+
+@pytest.mark.parametrize("posture", ["auth_off", "auth_on"])
+def test_a_key_under_an_ordinary_name_still_opens_its_surfaces(
+    key: str, request: pytest.FixtureRequest, posture: str
+) -> None:
+    request.getfixturevalue(posture)
+    client = _client()
+    for method, path in [("POST", "/mcp/memory/mcp"), ("POST", "/mcp/agents/mcp")]:
+        assert client.request(method, path, headers=bearer(key)).status_code == 200
+
+
+def test_a_reserved_key_gets_no_identity_and_is_logged_by_name(
+    store: BridgeStore, monkeypatch: pytest.MonkeyPatch, auth_off: None
+) -> None:
+    """The refusal names the client, never the key, and the MCP resolvers never
+    see the reserved name as an identity."""
+    from structlog.testing import capture_logs
+
+    old_key = _legacy_key(store, monkeypatch, "unknown")
+    with capture_logs() as logs:
+        judged = judged_request(bearer=old_key, path="/mcp/memory/mcp")
+    assert auth_mod.BRIDGE_PRINCIPAL_SCOPE_KEY not in judged.scope
+    assert client_id_resolver_under(judged) == "anonymous"
+    events = [e for e in logs if e["event"] == "hal0.auth.bridge_client_name_reserved"]
+    assert len(events) == 1
+    assert events[0]["bridge_client"] == "unknown"
+    assert events[0]["log_level"] == "warning"
+    assert all(old_key not in repr(e) for e in logs)
+
+
+def test_a_reserved_key_on_an_open_route_is_admitted_without_an_identity(
+    store: BridgeStore, monkeypatch: pytest.MonkeyPatch, auth_on: None
+) -> None:
+    """An OPEN route needs no key at all, so it is not refused, but the reserved
+    principal is never stored for a handler to act as."""
+    old_key = _legacy_key(store, monkeypatch, "unknown")
+    judged = judged_request(bearer=old_key, path="/api/health")
+    assert auth_mod.BRIDGE_PRINCIPAL_SCOPE_KEY not in judged.scope
+    assert auth_mod.judged_principal(judged).tier == "anon"
+
+
+def test_still_admitted_refuses_a_reserved_key(
+    store: BridgeStore, monkeypatch: pytest.MonkeyPatch, auth_on: None
+) -> None:
+    old_key = _legacy_key(store, monkeypatch, "unknown")
+    scope = _scope(headers=bearer(old_key), path="/mcp/memory/mcp", method="POST")
+    assert auth_mod._still_admitted(AuthClass.CLIENT, scope) is False
+
+
+def test_real_app_refuses_a_reserved_key(
+    store: BridgeStore, monkeypatch: pytest.MonkeyPatch, auth_on: None
+) -> None:
+    """End to end through ``create_app()``: the MCP mounts and the compat endpoint."""
+    from hal0.api import create_app
+
+    old_key = _legacy_key(store, monkeypatch, "unknown")
+    os.makedirs(Path(os.environ["HAL0_HOME"]) / "etc" / "hal0", exist_ok=True)
+    with TestClient(create_app()) as client:
+        for method, path in _BRIDGE_SURFACES:
+            resp = client.request(method, path, headers=bearer(old_key), json={})
+            assert (resp.status_code, resp.json()["error"]["code"]) == (
+                403,
+                "bridge.client_name_reserved",
+            ), (method, path)
