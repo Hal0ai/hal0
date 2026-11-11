@@ -127,7 +127,7 @@ test.describe('page shell', () => {
     await tab(page, 'operations').click()
     await expect(page.getByTestId('ma-operations')).toBeVisible()
     await tab(page, 'agents').click()
-    await expect(page.getByTestId('ma-agents-stub')).toBeVisible()
+    await expect(page.getByTestId('ma-agents')).toBeVisible()
   })
 
   test('Back and Forward walk the tabs', async ({ page }) => {
@@ -291,7 +291,7 @@ test.describe('narrow screen', () => {
     // The last tab can be reached.
     await tab(page, 'agents').scrollIntoViewIfNeeded()
     await tab(page, 'agents').click()
-    await expect(page.getByTestId('ma-agents-stub')).toBeVisible()
+    await expect(page.getByTestId('ma-agents')).toBeVisible()
   })
 
   test('the drawer has exactly one row named "Memory", top-level', async ({ page }) => {

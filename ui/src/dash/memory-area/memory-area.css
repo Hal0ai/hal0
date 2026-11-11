@@ -1289,3 +1289,107 @@
   min-width: 220px;
   max-width: 100%;
 }
+/* agents */
+
+/* ── Agents tab (AgentsTab.jsx, agents/) ────────────────────────────────────── */
+
+/* The tab's own column: the same 14px between cards as the page. */
+.ma-agents {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+/* The tables hold text for screen readers only (a loading cell), which is positioned out of
+   flow. The scroll box is made its containing block, so that text scrolls and clips with the
+   table and cannot widen the page. */
+.ma-agents .ma-table-region { position: relative; }
+
+/* Reads and Writes are sentences, so the columns need more room than the default table before
+   they scroll, and the cells are set in the body face. */
+.ma-agents-table { min-width: 940px; }
+.ma-agents-builtin-table { min-width: 820px; }
+.ma-agents-table tbody td {
+  font-family: var(--geist);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ma-agents-table tbody th { min-width: 120px; }
+/* One sentence, or one bank's count, per line of a cell. */
+.ma-agents-line { display: block; }
+.ma-agents-line + .ma-agents-line { margin-top: 6px; }
+/* Under a row's name: the id it writes under, or what the part is. */
+.ma-agents-id {
+  display: block;
+  margin-top: 2px;
+  color: var(--fg-2);
+  font-family: var(--geist);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+.ma-agents-id.ma-mono { font-family: var(--jbm); }
+/* The chip, then what else is known about the row's state, in words. */
+.ma-agents-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 150px;
+}
+.ma-agents-note {
+  font-size: 12px;
+  color: var(--fg-2);
+}
+/* Under the table: the coding-agent banks, and the banks whose tags did not load. */
+.ma-agents-banks {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line-soft);
+}
+.ma-agents-banks .ma-body { overflow-wrap: anywhere; }
+/* The footer is two or three sentences, one under the other. */
+.ma-agents-foot {
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.6;
+}
+.ma-agents-unknown-body,
+.ma-agents-connect-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+.ma-agents-unknown-banks {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--geist);
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--fg-2);
+}
+/* The connect card holds a select whose list opens over the card's edge, so it does not clip. */
+.ma-card.ma-agents-connect { overflow: visible; }
+.ma-agents-connect .ma-cmd {
+  align-self: stretch;
+  max-width: 880px;
+}
+.ma-agents-pick {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  max-width: 100%;
+}
+.ma-agents-pick-select {
+  flex: 0 1 auto;
+  min-width: 240px;
+  max-width: 100%;
+}
+.ma-agents-connect-body .ma-body { overflow-wrap: anywhere; }
+/* The heading is focused when the empty state sends the reader here; the ring sits inside. */
+.ma-agents-connect h2:focus-visible { outline-offset: 2px; }
