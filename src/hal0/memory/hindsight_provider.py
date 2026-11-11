@@ -646,6 +646,10 @@ class HindsightProvider(MemoryProvider):
         """The project registry writes are resolved against ([memory.projects])."""
         return self._projects
 
+    def bank_for(self, namespace: str) -> str:
+        """Engine bank id a namespace maps to (public face of :meth:`_bank_of`)."""
+        return self._bank_of(namespace)
+
     def _bank_of(self, namespace: str) -> str:
         """Hindsight bank id for a resolved namespace.
 
