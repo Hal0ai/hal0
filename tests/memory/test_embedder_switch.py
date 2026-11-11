@@ -2497,8 +2497,15 @@ async def test_a_health_answer_from_a_process_that_is_not_the_units_is_not_trust
     with pytest.raises(es.SwitchError) as err:
         await box.switch().run()
 
+    # The rollback does not take that answer for the engine either: it stays
+    # paused and resumable until the owner can be confirmed.
     assert "could not be matched to a process of hindsight-api.service" in err.value.message
+    assert "rollback" in err.value.message and err.value.resumable
     assert not any(e.startswith("export:") for e in box.events)
+    assert write_gate.read_gate() is not None
+
+    box.host.listener_says.clear()  # run as root: the owner can be read
+    await box.switch(None).resume()
     _assert_rolled_back(box)
 
 
@@ -2796,6 +2803,137 @@ async def test_status_after_the_stop_says_the_switch_stopped_the_engine(box: Box
 
     await box.switch(None).resume()  # --resume starts it again and finishes
     _assert_switched(box)
+
+
+def _foreign_answers_health(box: Box, asked: list[str]) -> None:
+    """A foreign holder on the private port that answers 2xx on /health and nothing else."""
+    real = box.engine.handler
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.port == PRIVATE_PORT and box.host.foreign.get(PRIVATE_PORT):
+            if request.url.path == "/health":
+                return httpx.Response(200, json={"status": "healthy"})
+            asked.append(request.url.path)
+            return httpx.Response(503, json={"detail": "not the engine"})
+        return await real(request)
+
+    box.engine.handler = handler  # type: ignore[method-assign]
+
+
+async def test_rollback_does_not_trust_a_foreign_holder_that_answers_health(box: Box) -> None:
+    asked: list[str] = []
+    _foreign_answers_health(box, asked)
+    box.host.foreign[PRIVATE_PORT] = "pid 4242 (python3)"
+    stop = box.host.stop_unit
+
+    def stop_then_keep_answering() -> dict[str, Any]:
+        out = stop()
+        box.engine.reachable = True  # the engine is down; the foreign process is what answers
+        return out
+
+    box.host.stop_unit = stop_then_keep_answering  # type: ignore[method-assign]
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+
+    assert "rollback_failed" not in err.value.message
+    assert "Nothing was exported; the run is undone" in err.value.message
+    assert asked == [], "the foreign holder is never asked for banks"
+    box.engine.reachable = True
+    box.engine.port = NORMAL_PORT
+    box.host.foreign.clear()
+    _assert_rolled_back(box)
+
+
+async def test_after_the_flip_a_foreign_holder_is_never_queried_for_banks(box: Box) -> None:
+    asked: list[str] = []
+    _foreign_answers_health(box, asked)
+
+    def hook(reached: str) -> None:
+        if reached == "flipped":
+            box.host.foreign[PRIVATE_PORT] = "pid 4242 (python3)"
+            raise es.SwitchError("something went wrong after the flip")
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(hook=hook).run()
+
+    assert "rollback" in err.value.message and err.value.resumable
+    assert asked == [], "the foreign holder is never asked for banks"
+    journal = es.load_journal()
+    assert journal is not None and journal.phase == es.PHASE_ROLLBACK_FAILED
+    assert write_gate.read_gate() is not None
+
+
+async def test_a_foreign_port_during_the_flip_does_not_claim_nothing_was_exported(
+    box: Box,
+) -> None:
+    def hook(reached: str) -> None:
+        if reached == "before_flip":
+            box.host.foreign[PRIVATE_PORT] = "pid 4242 (python3)"
+
+    stop = box.host.stop_unit
+
+    def stop_and_free() -> dict[str, Any]:
+        out = stop()
+        box.host.foreign.clear()  # the holder lets go before the rollback looks
+        return out
+
+    box.host.stop_unit = stop_and_free  # type: ignore[method-assign]
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(hook=hook).run()
+
+    assert "Nothing was exported" not in err.value.message
+    assert "held by pid 4242 (python3)" in err.value.message
+
+
+async def _stopped_by_the_switch_then_started_outside(box: Box) -> es.Journal:
+    await box.kill_at("deleted:alpha")
+    box.host.foreign[PRIVATE_PORT] = "pid 4242 (python3)"
+    with pytest.raises(es.SwitchError):
+        await box.switch(None).resume()
+    box.host.foreign.clear()
+    # Someone starts the unit by hand; its drop-in still names the private port.
+    box.host.unit_stopped = False
+    box.engine.reachable = True
+    box.engine.port = PRIVATE_PORT
+    journal = es.load_journal()
+    assert journal is not None and journal.engine_stopped is True
+    return journal
+
+
+async def test_status_reports_an_engine_started_outside_the_switch_as_running(box: Box) -> None:
+    await _stopped_by_the_switch_then_started_outside(box)
+
+    status = await box.switch(None).status()
+
+    engine = status["engine"]
+    assert engine["reachable"] is True and engine["running_again"] is True
+    assert engine["stopped_by_switch"] is False
+    assert {"Hal0::Beta", "gamma"} <= {b["bank"] for b in status["banks"]}
+    assert all(b["counts"] for b in status["banks"])
+
+
+async def test_ensure_engine_clears_a_stale_stopped_flag_when_the_unit_is_back(box: Box) -> None:
+    journal = await _stopped_by_the_switch_then_started_outside(box)
+
+    await box.switch(None)._ensure_engine(
+        HS, port=PRIVATE_PORT, run_id=journal.run_id, journal=journal
+    )
+
+    assert journal.engine_stopped is False
+    again = es.load_journal()
+    assert again is not None and again.engine_stopped is False
+
+
+async def test_status_says_when_the_port_owner_could_not_be_confirmed(box: Box) -> None:
+    await box.kill_at("deleted:alpha")
+    box.host.listener_says[PRIVATE_PORT] = {"owner": "unknown", "holder": "unreadable"}
+
+    status = await box.switch(None).status()
+
+    assert status["engine"]["owner_unconfirmed"] is True
+    assert status["engine"]["reachable"] is True
 
 
 def test_http_detail_is_short_single_line_and_markup_safe() -> None:

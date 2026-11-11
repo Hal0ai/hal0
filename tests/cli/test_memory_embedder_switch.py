@@ -362,6 +362,24 @@ def test_status_names_a_foreign_port_holder_and_a_stopped_engine(stub) -> None:
     assert "not answering" not in flat
 
 
+def test_status_says_when_the_port_owner_is_unconfirmed_and_when_the_engine_is_back(stub) -> None:
+    stub["outcome"] = {
+        **STATUS,
+        "engine": {
+            "reachable": True,
+            "live": {"provider": "local", "model": "bge"},
+            "private_port": 45123,
+            "owner_unconfirmed": True,
+            "running_again": True,
+            "stopped_by_switch": False,
+        },
+    }
+    flat = " ".join(runner.invoke(mec.app, ["switch", "--status"]).output.split())
+    assert "could not be confirmed (run as root to check)" in flat
+    assert "the switch had stopped it; it is running again" in flat
+    assert flat.index("could not be confirmed") < flat.index("engine: up")
+
+
 def test_clear_gate_is_loud_about_what_it_did_not_check(stub) -> None:
     stub["outcome"] = {
         "status": "cleared",

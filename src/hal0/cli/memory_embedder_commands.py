@@ -228,6 +228,12 @@ def _print_status(status: dict[str, Any]) -> None:
     )
     engine = status.get("engine") or {}
     live = engine.get("live") or {}
+    if engine.get("owner_unconfirmed"):
+        lines.append(
+            f"[yellow]who owns port {engine.get('private_port')} could not be confirmed "
+            "(run as root to check); the engine results below are not confirmed to come "
+            "from the engine's own unit[/yellow]"
+        )
     if engine.get("stopped_by_switch"):
         why = (
             f"; {escape(str(engine['error']))}"
@@ -242,6 +248,11 @@ def _print_status(status: dict[str, Any]) -> None:
     elif live:
         lines.append(
             f"engine: up, running {escape(describe_embedder(live.get('provider'), live.get('model')))}"
+            + (
+                "; the switch had stopped it; it is running again"
+                if engine.get("running_again")
+                else ""
+            )
         )
     if engine.get("private_port") is not None:
         lines.append(

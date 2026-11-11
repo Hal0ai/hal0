@@ -1990,6 +1990,11 @@ class EmbedderSwitch:
             and not (port is not None and await self._public_answers())
             and (port is None or self._listener_owner(port).get("owner") == "unit")
         ):
+            if port is not None and journal is not None and journal.engine_stopped:
+                # Started again outside the switch: the unit is healthy and holds the port.
+                journal.engine_stopped = False
+                with contextlib.suppress(OSError):
+                    self._save(journal)
             return
         self._say(
             f"putting the engine on {describe_embedder(*embedder)}, "
@@ -2710,7 +2715,11 @@ class EmbedderSwitch:
                     exc.message if isinstance(exc, SwitchError) else f"{type(exc).__name__}: {exc}"
                 )
                 await self._rollback(journal, cause)
-                if isinstance(exc, SwitchError) and "foreign_port" in exc.details:
+                if (
+                    isinstance(exc, SwitchError)
+                    and "foreign_port" in exc.details
+                    and not journal.flip_started
+                ):
                     # The unit was stopped for the foreign holder and the
                     # rollback has since put the engine back: the run is over.
                     raise SwitchError(
@@ -3259,12 +3268,15 @@ class EmbedderSwitch:
             tainted: list[str] = []
             if journal.isolated and self._isolated_port() == journal.private_port:
                 self._use_port(journal.private_port)
-                private = await self._healthy()
+                # /health on the private port proves only that something
+                # answers there; it is the engine when the unit holds the socket.
+                owner = self._listener_owner(journal.private_port or 0).get("owner")
+                private = await self._healthy() and owner == "unit"
                 taken = (
                     not private
                     and journal.engine_stopped
                     and not journal.flip_started
-                    and self._listener_owner(journal.private_port or 0).get("owner") == "other"
+                    and owner == "other"
                 )
                 if taken:
                     # Stopped for a foreign holder before anything ran on the
@@ -3427,19 +3439,26 @@ class EmbedderSwitch:
         temps = {e.temp: e for e in journal.banks} if journal is not None else {}
         present: set[str] = set()
         holder: Mapping[str, Any] | None = None
+        owner: Any = None
         if port is not None:
             # Whatever answers on the private port is the engine only if the
             # engine's own unit holds the socket (the check a resume runs).
             seen = self._listener_owner(port)
-            if seen.get("owner") == "other":
+            owner = seen.get("owner")
+            if owner == "other":
                 holder = seen
+        # The journal's flag is a note about the past; the live listener says
+        # whether the engine is asked: not when a foreign process holds the
+        # port or nothing listens on it.
         stopped = journal is not None and journal.engine_stopped
         out["engine"]["stopped_by_switch"] = stopped
+        if owner == "unknown":
+            out["engine"]["owner_unconfirmed"] = True
         out["engine"]["port_holder"] = holder.get("holder") if holder is not None else None
         if holder is not None:
             out["engine"]["error"] = f"port {port} held by {holder.get('holder')}, not by {SERVICE}"
         try:
-            if holder is not None or stopped:
+            if holder is not None or (stopped and owner == "none"):
                 raise _EngineNotAsked
             for bank in await self._bank_ids():
                 present.add(bank)
@@ -3457,6 +3476,9 @@ class EmbedderSwitch:
                     {"bank": bank, "role": role, "counts": (await self.bank_state(bank))["counts"]}
                 )
             out["engine"]["reachable"] = True
+            if stopped:
+                out["engine"]["stopped_by_switch"] = False
+                out["engine"]["running_again"] = True
         except _EngineNotAsked:
             pass
         except SwitchError as exc:
