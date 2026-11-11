@@ -283,6 +283,19 @@ def _extraction_slot_resolves(slot: str | None, available: list[str]) -> bool:
     return any(name in available for name in chain)
 
 
+def _extraction_mode(graph_cfg: MemoryGraphConfig, available: list[str]) -> str:
+    """``dedicated`` | ``shared`` | ``custom``, for graph status and memory health.
+
+    Configuration and model binding define the mode, never live readiness.
+    Custom slots/upstreams remain visible without rewriting operator intent.
+    """
+    if graph_cfg.extraction_model or graph_cfg.extraction_slot not in {"memory", "agent"}:
+        return "custom"
+    if graph_cfg.extraction_slot == "memory" and "memory" in available:
+        return "dedicated"
+    return "shared"
+
+
 #: Last warm attempt per upstream name (monotonic seconds): an offline
 #: provider is re-fetched at most once per :data:`_WARM_RETRY_S`, not on
 #: every status poll.
@@ -427,14 +440,7 @@ async def graph_status(request: Request) -> dict[str, Any]:
     # on the provider) — echo them so the dashboard's graph panel can edit
     # them without a second config fetch.
     graph_cfg = load_hal0_config().memory.graph
-    # Configuration and model binding define the mode, never live readiness.
-    # Custom slots/upstreams remain visible without rewriting operator intent.
-    if graph_cfg.extraction_model or graph_cfg.extraction_slot not in {"memory", "agent"}:
-        status["mode"] = "custom"
-    elif graph_cfg.extraction_slot == "memory" and "memory" in available:
-        status["mode"] = "dedicated"
-    else:
-        status["mode"] = "shared"
+    status["mode"] = _extraction_mode(graph_cfg, available)
     status["llm_timeout_s"] = graph_cfg.llm_timeout_s
     status["extraction_limits"] = ExtractionLimits.from_config(graph_cfg).as_dict()
     # #3347: the extraction slot's --parallel and the limits actually rendered
