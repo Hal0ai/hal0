@@ -184,6 +184,23 @@ export async function installDefaultMocks(page: Page, state: MockState) {
       last_error: null,
     }),
   )
+  // GET /api/memory/agents is not in the in-bundle mock's allow-list, so it reaches page.route.
+  // The catch-all's `{}` is not a valid body: the legacy tools page's Agents tab reads
+  // `install.harnesses` off it, and the whole view falls to the error boundary once the
+  // response lands. The default mirrors the real route (`get_agents` in
+  // src/hal0/api/routes/memory_lanes.py): no coding-agent banks, the install one-liner, the
+  // console off.
+  await page.route('**/api/memory/agents', (route) =>
+    json(route, {
+      banks: [],
+      install: {
+        harnesses: ['claude-code', 'codex', 'opencode', 'pi', 'cursor-cli', 'copilot-cli', 'qwen-code'],
+        command:
+          'npx @vectorize-io/hindsight-coding-agents@0.8.5 install <harness> --server self-hosted --api-url http://127.0.0.1:9177',
+      },
+      console_url: null,
+    }),
+  )
   await page.route('**/api/agent/approvals', (route) =>
     json(route, { approvals: state.approvals }),
   )

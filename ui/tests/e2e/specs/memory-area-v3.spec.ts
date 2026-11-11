@@ -225,6 +225,14 @@ test.describe('tabs that are not built yet', () => {
       await link.click()
       await expect(page).toHaveURL(new RegExp(`#memworkspace/${section}$`))
       await expect(page.getByTestId(`memws-tab-${section}`)).toHaveAttribute('aria-selected', 'true')
+      // The section itself, with its data: the tab row renders before the section's requests
+      // answer, so on its own it does not show that the page is still standing afterwards.
+      await expect(page.getByTestId(`memws-${section}`)).toBeVisible()
+      if (section === 'agents') {
+        await expect(page.getByTestId('memws-install-command')).toContainText('install claude-code')
+      }
+      await expect(page.getByRole('heading', { name: 'This view hit an error' })).toHaveCount(0)
+      await expect(page.getByTestId(`memws-tab-${section}`)).toHaveAttribute('aria-selected', 'true')
     })
   }
 })
