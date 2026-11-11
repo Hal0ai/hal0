@@ -2360,6 +2360,12 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
             _memory_reprobe_loop(_mem_provider, _reprobe_interval)
         )
         log.info("hal0.memory.reprobe_loop_started", interval_s=_reprobe_interval)
+        # #3518: an engine that was not up when install.sh ran never had its
+        # default banks seeded. Seed whatever is missing when the engine is
+        # swapped in; a bank that already has a retain mission is left alone.
+        from hal0.memory import bank_seed
+
+        _mem_provider.add_heal_hook(bank_seed.heal_hook(_mem_provider))
 
     async def _stop_memory_reprobe_task() -> None:
         if ctx.memory_reprobe_task is not None:

@@ -244,28 +244,28 @@ WantedBy=multi-user.target
   `showcase-lanes.conf` drop-in and the embedder record from
   `[memory.models]` before it starts the engine, so a new store is built with
   the configured embedder (`hindsight-ai/hs-embed-1` by default). That start
-  downloads the embedder and the reranker into `HF_HOME`, roughly 260 MB each
-  with the defaults. A box that has a store, or whose store location is
-  unavailable, is not touched.
+  downloads the embedder and the reranker into `HF_HOME` (about 260 MB each)
+  and is healthy after about 25 s on a good link. A box that has a store, or
+  whose store location is unavailable, is not touched.
 
-  If systemd reports that start failing (unit `failed`, or two restarts), the
-  installer tests whether the embedder is the cause: it stops the engine,
-  renders the drop-in with the engine-default embedder
-  (`BAAI/bge-small-en-v1.5`) and nothing else changed, leaves the record
-  alone, and starts again.
-  - Healthy: the embedder was the cause. The record becomes the engine
-    default (source `first-start-fallback`), with a `!!` line naming the
-    configured model.
-  - Still down: something else is wrong (no network, the reranker download, a
-    taken port). The configured drop-in is put back, the record stays, and the
-    engine keeps retrying, with a `!!` line saying it did not start. Once the
-    cause is fixed it comes up on the configured embedder.
+  The installer watches that start for up to 240 s. If the engine's process
+  exits first (about 21 s for a model id that does not exist, about 127 s
+  when the model host cannot be reached), it looks for the cause:
+  - The model host does not answer: nothing is changed. The engine keeps
+    retrying and starts on the configured embedder once the host is back.
+  - Otherwise it stops the engine, renders the drop-in with the
+    engine-default embedder (`BAAI/bge-small-en-v1.5`) and nothing else
+    changed, leaves the record alone, and starts again. Healthy: the embedder
+    was the cause, and the record becomes the engine default (source
+    `first-start-fallback`). Still down: something else is wrong, so the
+    configured drop-in is put back and the engine keeps retrying.
 
-  An engine that is only slow (first attempt still running after 120 s) is
-  left on the configured embedder. If its download fails later, the engine
-  restarts in a loop, a `.pg0` directory exists, and a re-run of the installer
-  skips this step. The `memory` row of `hal0 doctor all` warns that the engine
-  is degraded or unreachable. Fix the cause shown by
+  Each case prints a `!!` line. hal0-api seeds the default banks when the
+  engine comes up later. An engine still on its first process at 240 s is
+  left on the configured embedder; if it fails after that it restarts in a
+  loop, a `.pg0` directory exists, and a re-run of the installer skips this
+  step. The `memory` row of `hal0 doctor all` warns that the engine is
+  degraded or unreachable. Fix the cause shown by
   `journalctl -u hindsight-api -n 40`, then run
   `sudo systemctl reset-failed hindsight-api` and
   `sudo systemctl restart hindsight-api`. To give the configured embedder up

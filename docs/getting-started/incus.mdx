@@ -331,7 +331,8 @@ box without an NPU or without a fast CPU you will likely see:
 - `flm validate failed — NPU hardware may be absent`, followed by "GPU paths
   still work" — expected when you forwarded no NPU.
 - `memory bank seeding incomplete` — hal0-api had not connected to the
-  memory engine within 45 s of it starting; banks are created on first write.
+  memory engine within 45 s of it starting; hal0-api seeds the banks itself
+  once it has the engine.
 - `structured-output probe timed out after 120s` — a slow CPU-only machine,
   not a verified failure.
 - `podman system migrate (as hal0) failed` — see the next paragraph.

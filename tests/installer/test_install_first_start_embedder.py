@@ -94,6 +94,7 @@ def _step_block() -> str:
         (0, ""),
         (3, "could not start on the configured embedder"),
         (5, "did not start"),
+        (6, "could not download its models"),
         (4, "could not be set up before its first start"),
         (1, "could not be set up before its first start"),
     ],
@@ -122,6 +123,12 @@ def test_step_exit_codes_warn_and_never_abort(tmp_path: Path, rc: int, warned: s
         assert "WARN the memory engine" in res.stdout and warned in res.stdout
     else:
         assert "WARN" not in res.stdout
+    if rc != 0:
+        # Every not-healthy exit names both places to look.
+        assert "journalctl -u hindsight-api" in res.stdout and "hal0 doctor all" in res.stdout
+    if rc == 6:
+        assert "when the model host is reachable" in res.stdout
+        assert "engine default" not in res.stdout
     if rc == 5:
         # The generic line: no blame on the embedder, and both downloads named.
         assert "reranker" in res.stdout and "journalctl -u hindsight-api" in res.stdout
@@ -160,7 +167,7 @@ def test_a_failing_enable_warns_and_the_install_goes_on(tmp_path: Path, enable_r
     script = tmp_path / "drive.sh"
     script.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
-        'warn() { echo "WARN $*"; }\n'
+        'warn() { echo "WARN $*"; }\nHAL0_BIN=hal0\n'
         f"{_TEXT[start:end]}\n"
         "echo REACHED\n",
         encoding="utf-8",
@@ -247,3 +254,33 @@ def test_seeding_waits_for_the_provider_first() -> None:
     assert _TEXT.index('curl -fsS "http://127.0.0.1:9177/health"') < wait < seed
     # A timeout warns and seeding is still attempted.
     assert "|| warn" in _TEXT[wait:seed]
+
+
+def test_the_generic_not_healthy_line_names_the_downloads_and_both_checks() -> None:
+    start = _TEXT.index('warn "hindsight-api not healthy yet')
+    block = _TEXT[start : _TEXT.index("\n            fi", start)]
+    assert "embedding and reranker models" in block
+    assert "journalctl -u hindsight-api" in block and "doctor all" in block
+
+
+def test_the_failed_enable_line_names_both_checks() -> None:
+    line = next(
+        ln for ln in _TEXT.splitlines() if "could not enable and start the memory engine" in ln
+    )
+    assert "journalctl -u hindsight-api" in line and "doctor all" in line
+
+
+# ── the bank manifests have two copies; they must not drift ───────────────────
+
+
+def test_seed_manifests_match_hal0_memory_bank_seed() -> None:
+    """install.sh keeps shell literals so seeding works when the Python side is broken."""
+    import json
+    import re
+
+    from hal0.memory.bank_seed import SEED_BANKS
+
+    found = dict(re.findall(r"_seed_bank (\S+) '(\{.*?\})' ?[\\;]", _TEXT))
+    assert set(found) == set(SEED_BANKS)
+    for bank, body in found.items():
+        assert json.loads(body) == SEED_BANKS[bank], bank

@@ -30,9 +30,10 @@ class Box:
 
     The engine "runs" between a ``systemctl restart`` and a ``systemctl stop``
     and is on whatever embedder the drop-in named when it was started. It
-    answers ``/health`` only on a model in ``loads``; on any other model
-    systemd shows it restarting, unless the model is in ``slow`` (still on its
-    first attempt, never healthy).
+    answers ``/health`` only on a model in ``loads``; on any other model its
+    process has exited and systemd shows the restart, unless the model is in
+    ``slow`` (first process still running, never healthy). ``reachable`` is
+    whether the model host answers.
     """
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -54,6 +55,8 @@ class Box:
         self.loads: set[str] = {HS, BGE}
         self.slow: set[str] = set()
         self.stops = True
+        self.reachable = True
+        self.pid = 100
         self.running_on: str | None = None
         self.started_on: list[str | None] = []
         self.calls: list[list[str]] = []
@@ -76,6 +79,7 @@ class Box:
     def _run(self, argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(argv))
         if argv[:2] == ["systemctl", "restart"]:
+            self.pid += 1
             self.running_on = self.dropin_model() or BGE
             self.started_on.append(self.running_on)
         elif argv[:2] == ["systemctl", "stop"] and self.stops:
@@ -87,10 +91,10 @@ class Box:
 
     def unit_state(self) -> dict[str, Any]:
         if self.running_on is None:
-            return {"active": "inactive", "restarts": 0}
+            return {"active": "inactive", "restarts": 0, "main_pid": 0}
         if self.running_on in self.loads or self.running_on in self.slow:
-            return {"active": "active", "restarts": 0}
-        return {"active": "activating", "restarts": 2}
+            return {"active": "active", "restarts": 0, "main_pid": self.pid}
+        return {"active": "activating", "restarts": 1, "main_pid": 0}
 
     def evidence(self) -> dict[str, Any]:
         live = {"provider": "local", "model": self.running_on} if self.running_on else None
@@ -100,6 +104,13 @@ class Box:
         return {"live": live, "on_disk": on_disk, "on_disk_source": "drop-in" if on_disk else None}
 
     # ── the box ──────────────────────────────────────────────────────────────
+
+    def unit_state_after_failed_start(self) -> dict[str, Any]:
+        was, self.running_on = self.running_on, "no-such/model"
+        try:
+            return self.unit_state()
+        finally:
+            self.running_on = was
 
     def with_store(self) -> Box:
         (self.hs_dir / ".pg0" / "instances" / "hindsight" / "data").mkdir(parents=True)
@@ -127,6 +138,7 @@ class Box:
 
         kwargs.setdefault("healthy", self.healthy)
         kwargs.setdefault("unit_state", self.unit_state)
+        kwargs.setdefault("host_reachable", lambda: self.reachable)
         result = fs.run_first_start(
             seam=self.seam, sleep=sleep, monotonic=lambda: self._clock, **kwargs
         )
@@ -324,8 +336,25 @@ def test_trial_changes_only_the_embedder_lines(box: Box) -> None:
     assert box.dropin.read_text() == configured_body.replace(HS, BGE)
 
 
-def test_no_network_keeps_the_configured_embedder(box: Box) -> None:
-    """Neither model can be downloaded: the embedder is not the cause."""
+def test_an_unreachable_model_host_skips_the_trial(box: Box) -> None:
+    """Nothing can be downloaded, the engine default included: nothing is tried."""
+    box.loads, box.reachable = set(), False
+
+    result = box.run()
+
+    assert result["status"] == fs.MODELS_UNREACHABLE
+    assert (result["model"], result["source"]) == (HS, er.SOURCE_CONFIGURED)
+    assert box.dropin_model() == HS
+    saved = box.saved()
+    assert (saved["model"], saved["source"]) == (HS, er.SOURCE_CONFIGURED)
+    # Started once and left retrying: no stop, no trial on the default.
+    assert box.started_on == [HS] and box.running_on == HS
+    assert "stop hindsight-api.service" not in box.systemctl()
+    assert "could not download its models" in fs.describe(result)
+
+
+def test_reachable_host_and_both_embedders_fail_restores_the_configured_one(box: Box) -> None:
+    """The host answers but the engine starts on neither: the embedder is not the cause."""
     box.loads = set()
 
     result = box.run()
@@ -362,15 +391,41 @@ def test_a_trial_that_is_only_slow_proves_nothing(box: Box) -> None:
     assert box.started_on == [HS, BGE, HS]
 
 
-def test_one_restart_is_not_a_failing_start(box: Box) -> None:
-    polls = iter([False, False, True])
+def test_the_first_exit_is_a_failing_start(box: Box) -> None:
+    """One restart is enough: a healthy first start never has one."""
+    box.loads = {BGE}
+    assert box.unit_state_after_failed_start()["restarts"] == 1
+
+    result = box.run()
+
+    assert result["status"] == fs.FELL_BACK
+    assert box.slept == []  # seen on the first probe, not after a second restart
+
+
+def test_another_main_pid_is_a_failing_start(box: Box) -> None:
+    """The process was replaced between two probes and the counters say nothing."""
+    box.loads = {BGE}
+    pids = iter([101, 101, 102])
+
+    def unit_state() -> dict[str, Any]:
+        if box.running_on == HS:
+            return {"active": "active", "restarts": 0, "main_pid": next(pids, 102)}
+        return box.unit_state()
+
+    result = box.run(unit_state=unit_state)
+
+    assert result["status"] == fs.FELL_BACK
+    assert box.started_on == [HS, BGE]
+
+
+def test_an_unreadable_unit_is_not_a_failing_start(box: Box) -> None:
+    box.loads, box.slow = set(), {HS}
 
     result = box.run(
-        healthy=lambda: next(polls), unit_state=lambda: {"active": "active", "restarts": 1}
+        wait_s=6.0, unit_state=lambda: {"active": None, "restarts": 0, "main_pid": None}
     )
 
-    assert result["status"] == fs.STARTED
-    assert box.saved()["model"] == HS and box.started_on == [HS]
+    assert result["status"] == fs.STARTING and box.started_on == [HS]
 
 
 def test_a_slow_first_attempt_is_left_on_the_configured_embedder(box: Box) -> None:
@@ -496,10 +551,22 @@ def test_a_start_command_that_fails_is_left_to_the_installer(box: Box) -> None:
 @pytest.mark.parametrize(
     ("stdout", "rc", "expected"),
     [
-        ("ActiveState=active\nNRestarts=0\n", 0, {"active": "active", "restarts": 0}),
-        ("NRestarts=3\nActiveState=activating\n", 0, {"active": "activating", "restarts": 3}),
-        ("ActiveState=failed\nNRestarts=junk\n", 0, {"active": "failed", "restarts": 0}),
-        ("", 1, {"active": None, "restarts": 0}),
+        (
+            "ActiveState=active\nNRestarts=0\nMainPID=4242\n",
+            0,
+            {"active": "active", "restarts": 0, "main_pid": 4242},
+        ),
+        (
+            "NRestarts=3\nMainPID=0\nActiveState=activating\n",
+            0,
+            {"active": "activating", "restarts": 3, "main_pid": 0},
+        ),
+        (
+            "ActiveState=failed\nNRestarts=junk\nMainPID=junk\n",
+            0,
+            {"active": "failed", "restarts": 0, "main_pid": None},
+        ),
+        ("", 1, {"active": None, "restarts": 0, "main_pid": None}),
     ],
 )
 def test_engine_unit_state_parses_systemctl_show(
@@ -520,7 +587,81 @@ def test_engine_unit_state_without_systemd(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(fs.subprocess, "run", run)
 
-    assert fs.engine_unit_state() == {"active": None, "restarts": 0}
+    assert fs.engine_unit_state() == {"active": None, "restarts": 0, "main_pid": None}
+
+
+# ── is the model host there at all ────────────────────────────────────────────
+
+
+class _Answer:
+    def __enter__(self) -> _Answer:
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        return None
+
+
+def _host(monkeypatch: pytest.MonkeyPatch, outcome: Any, unit_env: dict[str, str]) -> list[Any]:
+    asked: list[Any] = []
+
+    def urlopen(request: Any, timeout: float) -> _Answer:
+        asked.append((request.full_url, request.get_method(), timeout))
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return _Answer()
+
+    monkeypatch.setattr(fs.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(ee, "hindsight_unit_env", lambda: unit_env)
+    return asked
+
+
+def test_model_host_reachable_asks_the_hub_once_with_a_short_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked = _host(monkeypatch, None, {})
+
+    assert fs.model_host_reachable() is True
+    assert asked == [("https://huggingface.co", "HEAD", 5.0)]
+
+
+def test_model_host_reachable_honours_the_units_hf_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked = _host(monkeypatch, None, {"HF_ENDPOINT": "https://mirror.example/"})
+
+    assert fs.model_host_reachable() is True
+    assert asked[0][0] == "https://mirror.example"
+
+
+def test_an_error_status_still_means_the_host_is_reachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import urllib.error
+
+    _host(monkeypatch, urllib.error.HTTPError("https://huggingface.co", 503, "busy", {}, None), {})
+
+    assert fs.model_host_reachable() is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        __import__("urllib.error").error.URLError("name or service not known"),
+        TimeoutError("timed out"),
+        ConnectionRefusedError("refused"),
+    ],
+)
+def test_model_host_unreachable(monkeypatch: pytest.MonkeyPatch, error: BaseException) -> None:
+    _host(monkeypatch, error, {})
+
+    assert fs.model_host_reachable() is False
+
+
+def test_a_bad_hf_endpoint_falls_back_to_the_hub(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked = _host(monkeypatch, None, {"HF_ENDPOINT": "file:///etc/passwd"})
+
+    assert fs.model_host_reachable() is True
+    assert asked[0][0] == "https://huggingface.co"
 
 
 @pytest.mark.parametrize(
@@ -532,6 +673,7 @@ def test_engine_unit_state_without_systemd(monkeypatch: pytest.MonkeyPatch) -> N
         (fs.STARTING, fs.EXIT_OK),
         (fs.FELL_BACK, fs.EXIT_FELL_BACK),
         (fs.NOT_STARTED, fs.EXIT_NOT_STARTED),
+        (fs.MODELS_UNREACHABLE, fs.EXIT_MODELS_UNREACHABLE),
         (fs.FAILED, fs.EXIT_FAILED),
     ],
 )

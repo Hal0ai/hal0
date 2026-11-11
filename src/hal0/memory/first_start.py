@@ -30,20 +30,26 @@ On a box with no store:
    no renderer. With no record that is the configured pair; with a record left
    by an earlier run it is that record's pair, so a re-run converges.
 2. When the record is the configured pair and that is not the engine default,
-   the engine is started here and watched (:func:`_watch`) until it answers
-   ``/health``, systemd reports the start failing (the unit is ``failed``, or
-   it has been restarted :data:`FAILED_START_RESTARTS` times), or the wait
-   runs out.
-3. An engine still on its first attempt when the wait runs out is left alone.
-   It is usually still downloading its models, and the configured embedder is
-   what it will come up on.
-4. A failing start is not yet a reason to give the configured embedder up: a
-   reranker that cannot be downloaded, a taken port, a database that will not
-   initialise and a box with no network all fail the same way. So the cause is
-   proved first (:func:`_prove_and_fall_back`). The engine is stopped, the
-   drop-in is rendered with the engine-default embedder and nothing else
-   changed, the record is left as it is, and the engine is started and watched
-   again.
+   the engine is started here and watched (:func:`_watch`) until the first
+   of: it answers ``/health``; its main process exits (systemd shows a
+   restart, another ``MainPID``, or a unit that is no longer ``active``); or
+   :data:`FIRST_START_WAIT_S` passes.
+3. An engine whose first process is still running when the wait runs out is
+   left alone. It is still downloading its models, and the configured embedder
+   is what it will come up on.
+4. A first exit is a failing start, but not yet a reason to give the
+   configured embedder up: a reranker that cannot be downloaded, a taken port,
+   a database that will not initialise and a box with no network all fail the
+   same way. So the cause is proved first (:func:`_prove_and_fall_back`).
+
+   If the model host cannot be reached at all (:func:`model_host_reachable`)
+   nothing is tried: the engine default could not be downloaded either. The
+   drop-in and the record stay on the configured pair and the engine is left
+   retrying (``models-unreachable``).
+
+   Otherwise the engine is stopped, the drop-in is rendered with the
+   engine-default embedder and nothing else changed, the record is left as it
+   is, and the engine is started and watched again.
 
    * It becomes healthy: the embedder was the cause. Only now is the record
      rewritten as the engine default, with the source
@@ -64,6 +70,14 @@ drop-in on disk names. Between the trial start and its verdict the two differ
 on purpose; if the drop-in cannot be put back afterwards the record is moved
 to the drop-in instead.
 
+Measured on a test container (2026-11-11, hindsight-api 1.2.0): a first start
+with the network up is healthy after about 25 s; a model id that does not
+exist makes the first process exit after about 21 s, and the trial on the
+engine default is healthy about 14 s later; with the model host unreachable
+the engine logs its startup failure at about 79 s but the process only exits
+at about 127 s, because the download retries of the other model keep it
+alive.
+
 Never raises: an install must not die here.
 """
 
@@ -72,6 +86,8 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
@@ -95,17 +111,28 @@ from hal0.system.seam import SeamTimeout, SystemCtlSeam
 
 log = structlog.get_logger(__name__)
 
-#: How long each start is watched. The same 120 s ``install.sh`` gives the
-#: engine afterwards (40 probes, 3 s apart).
-FIRST_START_WAIT_S = 120.0
+#: The longest one start is watched. A start that cannot work ends with the
+#: engine's process exiting, and the slowest such exit measured is about 127 s
+#: (model host unreachable: huggingface_hub retries each file five times with
+#: 1/2/4/8/8 s backoff before the engine gives up). 240 s is comfortably past
+#: that, so only a start that is really still working reaches the cap.
+FIRST_START_WAIT_S = 240.0
 _POLL_STEP_S = 3.0
 _SYSTEMCTL_TIMEOUT_S = 60.0
 
-#: Restarts that mean the start is failing, not merely slow. The unit is
-#: ``Restart=on-failure`` with ``RestartSec=3``, and the engine exits when a
-#: model cannot be loaded, so a start that cannot work gets here in seconds.
-#: Two, not one, so a single stray crash is not read as a verdict.
-FAILED_START_RESTARTS = 2
+#: Restarts that mean the start failed. One: the unit is
+#: ``Restart=on-failure``, so the first exit of the engine's process is
+#: already a restart, and a healthy first start never has one.
+FAILED_START_RESTARTS = 1
+
+#: ``ActiveState`` values a unit that was just started only shows once its
+#: main process has gone (``activating`` is the wait before an auto-restart).
+_EXITED_STATES = frozenset({"failed", "activating", "deactivating", "inactive"})
+
+#: Where the engine downloads its local models from unless its unit sets
+#: ``HF_ENDPOINT``.
+MODEL_HOST = "https://huggingface.co"
+_MODEL_HOST_TIMEOUT_S = 5.0
 
 #: ``status`` values of :func:`run_first_start`.
 SKIPPED = "skipped"
@@ -115,12 +142,14 @@ STARTED = "started"
 STARTING = "starting"
 FELL_BACK = "fell-back"
 NOT_STARTED = "not-started"
+MODELS_UNREACHABLE = "models-unreachable"
 
 #: Process exit codes for ``install.sh``.
 EXIT_OK = 0
 EXIT_FELL_BACK = 3
 EXIT_FAILED = 4
 EXIT_NOT_STARTED = 5
+EXIT_MODELS_UNREACHABLE = 6
 
 #: :func:`_watch` verdicts.
 _HEALTHY = "healthy"
@@ -138,22 +167,34 @@ class _Probes:
     healthy: Callable[[], bool]
     unit_state: Callable[[], UnitState]
     evidence: Callable[[], dict[str, Any]]
+    host_reachable: Callable[[], bool]
     wait_s: float
     sleep: Callable[[float], None]
     monotonic: Callable[[], float]
 
 
 def engine_unit_state() -> UnitState:
-    """``{"active", "restarts"}`` of the engine's unit, from ``systemctl show``.
+    """``{"active", "restarts", "main_pid"}`` of the engine's unit, from ``systemctl show``.
 
-    ``active`` is systemd's ``ActiveState`` (``None`` when it cannot be read)
-    and ``restarts`` its ``NRestarts`` (``0`` when it cannot be read), so an
-    unreadable unit never looks like a failed start.
+    ``active`` is systemd's ``ActiveState`` and ``main_pid`` its ``MainPID``
+    (``0`` while no process runs); both are ``None`` when they cannot be
+    read. ``restarts`` is ``NRestarts``, ``0`` when it cannot be read. An
+    unreadable unit therefore never looks like a failed start.
     """
-    state: UnitState = {"active": None, "restarts": 0}
+    state: UnitState = {"active": None, "restarts": 0, "main_pid": None}
     try:
         proc = subprocess.run(
-            ["systemctl", "show", SERVICE, "-p", "ActiveState", "-p", "NRestarts"],
+            [
+                "systemctl",
+                "show",
+                SERVICE,
+                "-p",
+                "ActiveState",
+                "-p",
+                "NRestarts",
+                "-p",
+                "MainPID",
+            ],
             capture_output=True,
             text=True,
             timeout=5.0,
@@ -174,6 +215,11 @@ def engine_unit_state() -> UnitState:
                 state["restarts"] = int(value.strip() or "0")
             except ValueError:
                 state["restarts"] = 0
+        elif key == "MainPID":
+            try:
+                state["main_pid"] = int(value.strip())
+            except ValueError:
+                state["main_pid"] = None
     return state
 
 
@@ -182,19 +228,48 @@ def engine_healthy() -> bool:
     return _http_get_json(f"{ENGINE_BASE_URL}/health", timeout=3.0) is not None
 
 
-def _start_is_failing(state: UnitState) -> bool:
-    return state.get("active") == "failed" or int(state.get("restarts") or 0) >= (
-        FAILED_START_RESTARTS
+def model_host_reachable() -> bool:
+    """True when the host the engine downloads its models from answers at all.
+
+    One HTTPS request with a 5 s timeout to ``HF_ENDPOINT`` when the engine's
+    unit sets it, else :data:`MODEL_HOST`. Any HTTP answer, an error status
+    included, means the host is reachable; a name that does not resolve, a
+    refused or timed-out connection means it is not. It is asked from this
+    process, so a proxy set only in the unit's environment is not used.
+    """
+    endpoint = str(extraction_env.hindsight_unit_env().get("HF_ENDPOINT") or "").rstrip("/")
+    if not endpoint.startswith(("https://", "http://")):
+        endpoint = MODEL_HOST
+    request = urllib.request.Request(
+        endpoint, method="HEAD", headers={"User-Agent": "hal0-installer"}
     )
+    try:
+        with urllib.request.urlopen(request, timeout=_MODEL_HOST_TIMEOUT_S):
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def _process_exited(state: UnitState, first_pid: int | None) -> bool:
+    """True when the process this start launched has gone (see :data:`_EXITED_STATES`)."""
+    if state.get("active") in _EXITED_STATES:
+        return True
+    if int(state.get("restarts") or 0) >= FAILED_START_RESTARTS:
+        return True
+    pid = state.get("main_pid")
+    return bool(first_pid) and pid is not None and pid != first_pid
 
 
 def _watch(probes: _Probes) -> str:
-    """Watch one start: healthy, failing (systemd says so) or still slow at the deadline."""
+    """Watch one start: healthy, failing (its process exited) or still slow at the cap."""
+    first_pid = probes.unit_state().get("main_pid") or None
     deadline = probes.monotonic() + probes.wait_s
     while True:
         if probes.healthy():
             return _HEALTHY
-        if _start_is_failing(probes.unit_state()):
+        if _process_exited(probes.unit_state(), first_pid):
             # One more look: it may have come up between the two probes.
             return _HEALTHY if probes.healthy() else _FAILING
         if probes.monotonic() >= deadline:
@@ -276,6 +351,10 @@ def _prove_and_fall_back(mem: Any, record: EmbedderRecord, probes: _Probes) -> d
     def not_started(reason: str) -> dict[str, Any]:
         return {"status": NOT_STARTED, "reason": reason, **_named(record)}
 
+    if not probes.host_reachable():
+        # Nothing can be downloaded, the engine default included: a trial
+        # would prove nothing. Leave the engine retrying on the configured pair.
+        return {"status": MODELS_UNREACHABLE, **_named(record)}
     if not _stopped(probes):
         # Still up on the configured drop-in, which the record names.
         return not_started("the engine did not stop")
@@ -329,6 +408,7 @@ def run_first_start(
     healthy: Callable[[], bool] | None = None,
     unit_state: Callable[[], UnitState] | None = None,
     evidence: Callable[[], dict[str, Any]] | None = None,
+    host_reachable: Callable[[], bool] | None = None,
     wait_s: float = FIRST_START_WAIT_S,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
@@ -337,13 +417,15 @@ def run_first_start(
 
     Returns ``{"status": ...}`` plus, where an embedder was settled,
     ``provider``, ``model`` and ``source``. ``healthy``, ``unit_state``,
-    ``evidence``, ``sleep`` and ``monotonic`` are test seams. Never raises.
+    ``evidence``, ``host_reachable``, ``sleep`` and ``monotonic`` are test
+    seams. Never raises.
     """
     probes = _Probes(
         seam=seam if seam is not None else SystemCtlSeam(),
         healthy=healthy if healthy is not None else engine_healthy,
         unit_state=unit_state if unit_state is not None else engine_unit_state,
         evidence=evidence if evidence is not None else embedder_record.engine_evidence,
+        host_reachable=host_reachable if host_reachable is not None else model_host_reachable,
         wait_s=wait_s,
         sleep=sleep,
         monotonic=monotonic,
@@ -422,6 +504,11 @@ def describe(result: dict[str, Any]) -> str:
             f"memory embedder: the engine does not start on {wanted}, the configured "
             f"embedder; it is on {name} instead, and that is what is recorded for this store"
         )
+    if status == MODELS_UNREACHABLE:
+        return (
+            "memory engine: it could not download its models (the model host is not "
+            f"reachable); it keeps retrying and will start on {name}, the configured embedder"
+        )
     if status == NOT_STARTED:
         return (
             f"memory engine: it did not start ({result.get('reason')}); its drop-in and "
@@ -446,6 +533,8 @@ def main() -> int:
         return EXIT_FELL_BACK
     if status == NOT_STARTED:
         return EXIT_NOT_STARTED
+    if status == MODELS_UNREACHABLE:
+        return EXIT_MODELS_UNREACHABLE
     if status == FAILED:
         return EXIT_FAILED
     return EXIT_OK
