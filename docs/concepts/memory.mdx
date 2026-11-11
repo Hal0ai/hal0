@@ -224,6 +224,8 @@ than leaving it to the tag set:
   `[["project:<slug>"]]`, one scope per project tag. Its observations carry
   that project tag and nothing else, so what is learned in one project does
   not become a belief about another.
+- A coding client's write with no project (`project:unresolved`) is sent with
+  `[["project:unresolved", "agent:<id>"]]`, a scope of its writer's own.
 - A private write in the unified bank keeps the engine's default scoping, so
   an observation built from a private note still carries `visibility:private`.
 

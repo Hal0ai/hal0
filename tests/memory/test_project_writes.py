@@ -225,9 +225,10 @@ async def test_a_coding_client_with_no_project_is_unresolved() -> None:
     await provider.add("note", client_id="claude-code", coding=True, project="atlas")
     durable, ephemeral, denied, resolved = (body["items"][0] for body in engine.bodies)
     assert durable["tags"] == ["agent:claude-code", "kind:durable", "project:unresolved"]
-    # Tagged, but scoped as any write with no project: unresolved writes get
-    # no observation scope of their own.
-    assert [item["observation_scopes"] for item in (durable, ephemeral, denied)] == ["shared"] * 3
+    # Scoped to the marker and the writer, never to the untagged scope every
+    # other caller's read admits.
+    own = [["project:unresolved", "agent:claude-code"]]
+    assert [item["observation_scopes"] for item in (durable, ephemeral, denied)] == [own] * 3
     assert resolved["observation_scopes"] == [["project:atlas"]]
     assert durable["metadata"]["project"] == "unresolved"
     assert durable["metadata"]["project_source"] == "none"
@@ -620,8 +621,8 @@ async def test_an_item_resolves_its_own_project_tag_when_the_request_named_none(
     assert d["metadata"]["project"] == "atlas,borealis"
     assert [item["observation_scopes"] for item in (a, b, c, d)] == [
         [["project:atlas"]],
-        "shared",
-        "shared",
+        [["project:unresolved", "agent:claude-code"]],
+        [["project:unresolved", "agent:claude-code"]],
         [["project:atlas"], ["project:borealis"]],
     ]
 
@@ -827,3 +828,54 @@ async def test_recall_raw_with_no_identity_reads_no_private_memory() -> None:
     }
     # The client's own default read budget.
     assert bodies[0]["read_timeout"] == 5.0
+
+
+# ── an unresolved write stays its writer's (envelope + provider + engine filter) ──
+
+
+async def test_an_unresolved_write_is_readable_by_its_writer_only() -> None:
+    """Client A writes with no project. The item the engine gets is scoped to
+    ``[project:unresolved, agent:A]``, which is what the engine writes onto
+    the observation it builds. Held to the groups a recall and a reflect give
+    the engine: A reads the fact and the observation, B reads neither, in a
+    project or out of one. Under the untagged ``shared`` scope the
+    observation had no tags, and every one of these reads admits that."""
+    from hal0.memory.read_scope import (
+        project_scope_groups,
+        tags_readable,
+        unresolved_scope_groups,
+    )
+
+    engine, provider = _wired()
+    await provider.add("the deploy key is rotated on Mondays", client_id="alpha", coding=True)
+    fact = engine.item["tags"]
+    (observation,) = engine.item["observation_scopes"]
+    assert fact == ["agent:alpha", "kind:durable", "project:unresolved"]
+    assert observation == ["project:unresolved", "agent:alpha"]
+
+    sent: list[dict[str, Any]] = []
+
+    class _Reads:
+        async def recall(self, **kwargs: Any) -> dict[str, Any]:
+            sent.append(kwargs)
+            return {"results": []}
+
+        async def reflect(self, **kwargs: Any) -> dict[str, Any]:
+            sent.append(kwargs)
+            return {"text": ""}
+
+    reader = HindsightProvider(client=_Reads(), unified_bank=True, projects=REGISTRY)
+
+    async def groups(agent: str, scope: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        sent.clear()
+        await reader.recall_raw("q", client_id=agent, tag_groups=scope)
+        await reader.reflect("q", client_id=agent, tag_groups=scope)
+        return [call["tag_groups"] for call in sent]
+
+    for read in await groups("alpha", unresolved_scope_groups("alpha")):
+        assert tags_readable(read, fact) and tags_readable(read, observation)
+    for scope in (unresolved_scope_groups("beta"), project_scope_groups("atlas")):
+        for read in await groups("beta", scope):
+            assert not tags_readable(read, fact) and not tags_readable(read, observation)
+            # What the observation used to carry: nothing, which is admitted.
+            assert tags_readable(read, [])
