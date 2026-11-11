@@ -1,55 +1,47 @@
-// Per-bank reads for the views that show every bank at once (the page's meta line, Health).
+// The reads MemoryArea holds for its tabs.
 //
-// Each fires one request per bank through `useQueries`, with the SAME query key and request as
-// the single-bank hook it mirrors (`useBankStats`, `useMentalModels`), so the two share one
-// cache entry and a bank is never fetched twice. A bank that fails stays out of the result as
-// a failure: it is never counted as zero.
+//   useMemoryHealth   GET /api/memory/health   the summary line on every tab, and all of Health
+//   useAreaEngine     GET /api/memory/engine   for the tabs that list banks
+//   useAreaBanks      GET /api/memory/banks    for the tabs that list banks
 //
-// These go when Health reads the composed `GET /api/memory/health`, which answers the same
-// questions in one call.
+// The health answer carries the engine's state, every bank and its figures, so the summary line
+// and the Health tab ask for nothing else, and nothing is asked once per bank. The engine check
+// and the bank list are for the tabs with a bank control (Facts, Operations, Knowledge, Agents);
+// they are not asked for while Health is the open tab.
+//
+// The two gated reads use the SAME query key and request as `useMemoryEngine` and
+// `useMemoryBanks` (src/api/hooks/useHindsight.ts), so every reader shares one cache entry.
 
-import { useQueries } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { apiGet } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
-import type { BankStats, MentalModel } from '@/api/hooks/useHindsight'
-import type { BankStatsEntry } from './area-pure'
-import type { MentalModelsEntry } from './health-pure'
+import type { MemoryBank, MemoryEngine } from '@/api/hooks/useHindsight'
 
-export function useAllBankStats(bankIds: string[]): BankStatsEntry[] {
-  const results = useQueries({
-    queries: bankIds.map((bank) => ({
-      queryKey: ['memory', 'banks', bank, 'stats'] as const,
-      queryFn: () => apiGet<BankStats>(ENDPOINTS.memoryBankStats(bank)),
-      staleTime: 10_000,
-      refetchInterval: 30_000,
-    })),
-  })
-  return bankIds.map((bankId, at) => ({
-    bankId,
-    stats: results[at]?.data ?? null,
-    isLoading: results[at]?.data === undefined && !results[at]?.isError,
-    isError: !!results[at]?.isError,
-  }))
+export { useMemoryHealth } from '@/api/hooks/useMemory'
+
+export interface MemoryBankList {
+  banks: MemoryBank[]
+  total?: number
+  limit?: number
+  offset?: number
 }
 
-type MentalModelList = { items: MentalModel[]; total: number }
-
-export function useAllMentalModels(bankIds: string[]): MentalModelsEntry[] {
-  const results = useQueries({
-    queries: bankIds.map((bank) => ({
-      queryKey: ['memory', 'banks', bank, 'mental-models'] as const,
-      queryFn: () =>
-        apiGet<MentalModelList>(`${ENDPOINTS.memoryBankMentalModels(bank)}?detail=content`),
-      staleTime: 10_000,
-    })),
+export function useAreaEngine(enabled: boolean) {
+  return useQuery<MemoryEngine>({
+    queryKey: ['memory', 'engine'],
+    queryFn: () => apiGet<MemoryEngine>(ENDPOINTS.memoryEngine),
+    enabled,
+    staleTime: 10_000,
+    refetchInterval: 15_000,
   })
-  return bankIds.map((bankId, at) => {
-    const items = results[at]?.data?.items
-    return {
-      bankId,
-      models: Array.isArray(items) ? items : null,
-      isLoading: results[at]?.data === undefined && !results[at]?.isError,
-      isError: !!results[at]?.isError,
-    }
+}
+
+export function useAreaBanks(enabled: boolean) {
+  return useQuery<MemoryBankList>({
+    queryKey: ['memory', 'banks'],
+    queryFn: () => apiGet<MemoryBankList>(ENDPOINTS.memoryBanks),
+    enabled,
+    staleTime: 10_000,
+    refetchInterval: 30_000,
   })
 }

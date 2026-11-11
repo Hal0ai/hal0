@@ -12,18 +12,21 @@
 //     walk through every bank that was looked at.
 //   - There is no bank control here. The tabs that are scoped to a bank carry a scope bar.
 //
-// The engine and bank reads live here because the summary line and every tab need them; a tab
-// receives them as `area` and asks for nothing twice.
+// The reads every tab shares live here; a tab receives them as `area` and asks for nothing twice.
+//   - `GET /api/memory/health` is asked on every tab. The summary line is written from it, and
+//     so is all of Health: the engine's state, every bank, and each bank's figures arrive in that
+//     one answer, so nothing is asked once per bank and changing tab asks for nothing again.
+//   - The engine check and the bank list are for the tabs with a bank control. They are not
+//     asked for while Health is open (area-data.ts).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import './memory-area.css'
-import { useMemoryBanks, useMemoryEngine } from '@/api/hooks/useHindsight'
 import { AgentsTab } from './AgentsTab.jsx'
 import { FactsTab } from './FactsTab.jsx'
 import { HealthTab } from './HealthTab.jsx'
 import { KnowledgeTab } from './KnowledgeTab.jsx'
 import { OperationsTab } from './OperationsTab.jsx'
-import { useAllBankStats } from './area-data'
-import { bankRows, bankTotals, engineState, metaLine } from './area-pure'
+import { useAreaBanks, useAreaEngine, useMemoryHealth } from './area-data'
+import { bankTotals, engineFromHealth, engineState, healthBankRows, metaLine, readHealth } from './area-pure'
 import { memoryTabHref, parseMemoryRoute, serializeMemoryRoute } from './memory-route-pure'
 
 const TABS = [
@@ -95,19 +98,27 @@ function MetaLine({ meta }) {
 export function MemoryArea({ notice = null }) {
   const [route, replaceRoute] = useMemoryRoute()
 
-  const engineQuery = useMemoryEngine()
-  const banksQuery = useMemoryBanks()
-  const engine = engineState(engineQuery)
+  const healthQuery = useMemoryHealth()
+  const { data: healthData, isError: healthErrored } = healthQuery
+  const health = useMemo(
+    () => readHealth({ data: healthData, isError: healthErrored }),
+    [healthData, healthErrored],
+  )
+  const report = health.kind === 'ready' ? health.report : null
+
+  // Health needs neither: everything it shows is in the health answer.
+  const listsBanks = route.tab !== 'health'
+  const engineQuery = useAreaEngine(listsBanks)
+  const banksQuery = useAreaBanks(listsBanks)
+  const engine = listsBanks ? engineState(engineQuery) : engineFromHealth(health)
 
   const banks = useMemo(() => banksQuery.data?.banks ?? [], [banksQuery.data])
-  const bankIds = useMemo(() => banks.map((b) => b.bank_id), [banks])
-  const stats = useAllBankStats(engine === 'reachable' ? bankIds : [])
-
   const banksLoading = banksQuery.data === undefined && !banksQuery.isError
   const banksFailed = !!banksQuery.isError && banksQuery.data === undefined
-  const statsLoading = stats.some((entry) => entry.isLoading)
-  const rows = useMemo(() => bankRows(banks, stats), [banks, stats])
-  const totals = useMemo(() => bankTotals(rows, banksQuery.data?.total), [rows, banksQuery.data])
+
+  // Every bank with its figures, from the health answer.
+  const rows = useMemo(() => healthBankRows(report), [report])
+  const totals = useMemo(() => bankTotals(rows, report?.banks?.total), [rows, report])
 
   const area = {
     route,
@@ -118,12 +129,15 @@ export function MemoryArea({ notice = null }) {
     banks,
     banksLoading,
     banksFailed,
-    statsLoading,
+    health,
+    healthQuery,
+    // The per-bank figures are loading exactly while the health answer is.
+    statsLoading: health.kind === 'loading',
     rows,
     totals,
   }
 
-  const meta = metaLine({ engine, banksLoading, banksFailed, statsLoading, totals })
+  const meta = metaLine(health)
 
   return (
     <div className="view ma" data-testid="memory-area">

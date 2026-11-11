@@ -1437,8 +1437,9 @@ function buildBigOperations(): MockOperation[] {
   return rows
 }
 
-// One bank's operations, newest first. In the `clear` health state the queue
-// has been worked through, so only the finished rows are left.
+// One bank's operations, newest first. In the `clear` health state, and in
+// every state built on it (see MOCK_HEALTH_QUEUE_WORKED_THROUGH), the queue has
+// been worked through, so only the finished rows are left.
 function operationsFor(
   bank: string,
   state: MockMemoryHealthState = mockMemoryHealthState(),
@@ -1451,7 +1452,9 @@ function operationsFor(
         : bank === 'empty'
           ? []
           : DEFAULT_OPERATIONS
-  return state === 'clear' ? all.filter((op) => op.status === 'completed') : all
+  return MOCK_HEALTH_QUEUE_WORKED_THROUGH.has(state)
+    ? all.filter((op) => op.status === 'completed')
+    : all
 }
 
 // ── Memory health (GET /api/memory/health, ADR-0058 decision 12) ────────────
@@ -1466,26 +1469,61 @@ function operationsFor(
 //   unreachable  the engine does not answer: every section but `engine` is null
 //                and the path is the engine step alone
 //
+// Five more put each later step of the path first in turn, for the Health tab.
+// Each is one change to a box that is otherwise `clear`, except `queue`:
+//
+//   queue              the `attention` queue, with its failed stores older than
+//                      the six-hour window: extraction is clear, so the queue is
+//                      the current step, alone
+//   embedder-mixed     the store may hold vectors from two embedders
+//   embedder-conflict  the running engine is on another embedder than the record
+//   knowledge          knowledge pages and mental models are stale; none failed
+//   partial            nothing is open, but two banks did not answer in time:
+//                      `partial` names the queue and banks sections, and those
+//                      banks' figures are null
+//
 // A spec picks one before `page.goto`:
 //
 //   await page.addInitScript(() => { window.__hal0MockMemoryHealth = 'clear' })
 //
-// The state reaches two other builders so the mock stays one box: `clear`
-// leaves only finished rows in every bank's operations list, and `unreachable`
-// turns the engine card to unreachable.
+// The state reaches two other builders so the mock stays one box: a state whose
+// queue has been worked through leaves only finished rows in every bank's
+// operations list, and `unreachable` turns the engine card to unreachable.
 //
 // The queue figures are counted from the operation fixtures above, as the
 // route counts them from the engine's lists, read at MOCK_HEALTH_NOW. The six
 // hour window on extraction failures is not modelled: every failed store in
-// the fixtures counts.
-export type MockMemoryHealthState = 'attention' | 'clear' | 'unreachable'
+// the fixtures counts, except in `queue`, where none does.
+export const MOCK_MEMORY_HEALTH_STATES = [
+  'attention',
+  'clear',
+  'unreachable',
+  'queue',
+  'embedder-mixed',
+  'embedder-conflict',
+  'knowledge',
+  'partial',
+] as const
+
+export type MockMemoryHealthState = (typeof MOCK_MEMORY_HEALTH_STATES)[number]
+
+/** The states whose box has nothing waiting and nothing failed. */
+const MOCK_HEALTH_QUEUE_WORKED_THROUGH: ReadonlySet<MockMemoryHealthState> = new Set([
+  'clear',
+  'embedder-mixed',
+  'embedder-conflict',
+  'knowledge',
+  'partial',
+])
 
 export function mockMemoryHealthState(): MockMemoryHealthState {
   const raw =
     typeof window !== 'undefined'
       ? (window as unknown as { __hal0MockMemoryHealth?: unknown }).__hal0MockMemoryHealth
       : undefined
-  return raw === 'clear' || raw === 'unreachable' ? raw : 'attention'
+  return (MOCK_MEMORY_HEALTH_STATES as readonly unknown[]).includes(raw)
+    ? (raw as MockMemoryHealthState)
+    : 'attention'
 }
 
 /** The moment the fixtures are read at: a few minutes after their newest row. */
@@ -1559,7 +1597,8 @@ export function memoryHealthFixture(state: MockMemoryHealthState = mockMemoryHea
     const waiting = rows.filter((op) => op.status === 'pending')
     const failed = rows.filter((op) => op.status === 'failed')
     for (const op of failed) {
-      if (!HEALTH_RETAIN_TYPES.has(op.task_type)) continue
+      // `queue`: the failed stores are older than the extraction window.
+      if (state === 'queue' || !HEALTH_RETAIN_TYPES.has(op.task_type)) continue
       failures += 1
       const key = HEALTH_ERROR_KEYS[op.error_message ?? ''] ?? op.error_message ?? ''
       if (key) errors.set(key, (errors.get(key) ?? 0) + 1)
@@ -1590,20 +1629,36 @@ export function memoryHealthFixture(state: MockMemoryHealthState = mockMemoryHea
         failed_consolidation: number
       },
   )
+  // `partial`: these banks did not answer in time. The bank list still carries
+  // their fact counts; their stats and operation reads are missing.
+  const unread = new Set(state === 'partial' ? ['big', 'hermes'] : [])
+  for (const row of byBank) {
+    if (!unread.has(row.bank_id)) continue
+    Object.assign(row, { waiting: null, failed: null, oldest_waiting_s: null })
+  }
   const banks = MEM_BANKS.map((bank, at) => ({
     bank_id: bank.bank_id,
     facts: stats[at].total_nodes,
-    documents: stats[at].total_documents,
+    documents: unread.has(bank.bank_id) ? null : stats[at].total_documents,
   }))
 
-  const clear = state === 'clear'
+  // Knowledge is behind in `attention` (with failed refreshes) and in
+  // `knowledge` (stale only); every other state has it fresh.
+  const stale = state === 'attention' || state === 'knowledge'
   const embedderId = { provider: 'local', model: 'hindsight-ai/hs-embed-1' }
+  const mixed = state === 'embedder-mixed'
+  const conflict =
+    state === 'embedder-conflict'
+      ? { live: { provider: 'local', model: 'BAAI/bge-small-en-v1.5' } }
+      : null
+  // The first reason of the route's embedder rule (src/hal0/memory/embedder_verdict.py).
+  const embedderReasons = conflict ? ['conflict'] : mixed ? ['mixed'] : []
   const knowledge = {
     pages: 15,
-    pages_stale: clear ? 0 : 5,
+    pages_stale: stale ? 5 : 0,
     models: 18,
-    models_stale: clear ? 0 : 6,
-    refresh_failed: clear ? 0 : 5,
+    models_stale: stale ? 6 : 0,
+    refresh_failed: state === 'attention' ? 5 : 0,
     last_success_at: '2026-06-10T08:00:00+00:00',
   }
 
@@ -1636,13 +1691,13 @@ export function memoryHealthFixture(state: MockMemoryHealthState = mockMemoryHea
     ],
     [
       'embedder',
-      null,
+      embedderReasons.length > 0 ? `embedder_${embedderReasons[0]}` : null,
       {
         recorded: embedderId,
         configured: embedderId,
-        mixed: false,
-        conflict: null,
-        reasons: [],
+        mixed,
+        conflict,
+        reasons: embedderReasons,
         informational: false,
       },
     ],
@@ -1665,7 +1720,7 @@ export function memoryHealthFixture(state: MockMemoryHealthState = mockMemoryHea
     enabled: true,
     verdict: steps.some((step) => step.state !== 'clear') ? 'attention' : 'clear',
     checked_at: checkedAt,
-    partial: [],
+    partial: state === 'partial' ? ['queue', 'banks'] : [],
     engine: { reachable: true, version: '0.9.2' },
     extraction: {
       slot: 'memory',
@@ -1679,9 +1734,10 @@ export function memoryHealthFixture(state: MockMemoryHealthState = mockMemoryHea
     embedder: {
       recorded: embedderId,
       configured: embedderId,
-      mixed: false,
-      needs_switch: false,
-      conflict: null,
+      mixed,
+      // The record's own rule: a mixed store always needs the switch.
+      needs_switch: mixed,
+      conflict,
       informational: false,
     },
     queue: {

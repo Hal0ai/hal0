@@ -4,17 +4,28 @@
 // how the address is read and rewritten. The hooks are replaced; the tabs are the real ones.
 import { act, createElement } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { BankStats, MemoryBank, MemoryEngine } from '@/api/hooks/useHindsight'
-import { BANKS, ENGINE, GRAPH, STATS, modelsAnswer, type FakeQuery } from './area-test-fixtures'
+import type { MemoryBank, MemoryEngine } from '@/api/hooks/useHindsight'
+import type { MemoryHealth } from '@/api/hooks/useMemory'
+import {
+  BANKS,
+  ENGINE,
+  GRAPH,
+  HEALTH_BANKS,
+  healthReport,
+  healthUnreachable,
+  modelsAnswer,
+  type FakeQuery,
+} from './area-test-fixtures'
 import { MEMORY_TABS } from './memory-route-pure'
 import { cleanup, click, mount } from './shared/test-harness'
 
 const m = vi.hoisted(() => ({
   engine: {} as unknown,
   banks: {} as unknown,
-  stats: {} as Record<string, unknown>,
-  statsLoading: false,
-  statsFor: [] as string[][],
+  health: {} as unknown,
+  /** Whether MemoryArea asked for the engine check and the bank list, render by render. */
+  engineAsked: [] as boolean[],
+  banksAsked: [] as boolean[],
 }))
 
 vi.mock('@/api/hooks/useHindsight', async () => {
@@ -32,16 +43,15 @@ vi.mock('@/api/hooks/useMemory', () => ({
   useMemoryModels: () => ({ data: modelsAnswer() }),
 }))
 vi.mock('./area-data', () => ({
-  useAllBankStats: (ids: string[]) => {
-    m.statsFor.push(ids)
-    return ids.map((bankId) => ({
-      bankId,
-      stats: m.statsLoading ? null : ((m.stats[bankId] as BankStats | undefined) ?? null),
-      isLoading: m.statsLoading,
-      isError: !m.statsLoading && !m.stats[bankId],
-    }))
+  useMemoryHealth: () => m.health,
+  useAreaEngine: (enabled: boolean) => {
+    m.engineAsked.push(enabled)
+    return enabled ? m.engine : {}
   },
-  useAllMentalModels: (ids: string[]) => ids.map((bankId) => ({ bankId, models: [] })),
+  useAreaBanks: (enabled: boolean) => {
+    m.banksAsked.push(enabled)
+    return enabled ? m.banks : {}
+  },
 }))
 // The Operations tab's requests: no answer yet. The tab's own states are in OperationsTab.test.
 vi.mock('./operations-data', () => ({
@@ -83,9 +93,9 @@ let workspaceProps: { bank: string; sel: string | null; embedded?: boolean }[] =
 beforeEach(() => {
   m.engine = { data: ENGINE } satisfies FakeQuery<MemoryEngine>
   m.banks = { data: { banks: BANKS } } satisfies FakeQuery<{ banks: MemoryBank[] }>
-  m.stats = { ...STATS }
-  m.statsLoading = false
-  m.statsFor = []
+  m.health = { data: healthReport() } satisfies FakeQuery<MemoryHealth>
+  m.engineAsked = []
+  m.banksAsked = []
   workspaceProps = []
   ;(window as unknown as { MemV2Workspace?: unknown }).MemV2Workspace = (props: (typeof workspaceProps)[number]) => {
     workspaceProps.push(props)
@@ -207,65 +217,61 @@ describe('engine settings link', () => {
 })
 
 describe('summary line', () => {
-  it('counts the facts and the banks when the engine answers', () => {
+  it('counts the facts and the banks from the health answer', () => {
     const host = render()
     expect(meta(host).dataset.state).toBe('ready')
     expect(meta(host).textContent).toBe('27,542 facts in 3 banks')
   })
 
-  it('is a skeleton, never a zero, while the engine check is out', () => {
-    m.engine = {}
+  it('is a skeleton, never a zero, while the health answer is out', () => {
+    m.health = {}
     const host = render()
     expect(meta(host).dataset.state).toBe('loading')
     expect(meta(host).querySelector('.ma-skel')).not.toBeNull()
-    expect(meta(host).textContent).not.toMatch(/\d/)
     expect(meta(host).textContent).toBe('Loading')
   })
 
-  it('is a skeleton while the bank list or any bank count is still loading', () => {
-    m.banks = {}
-    expect(meta(render()).dataset.state).toBe('loading')
-    cleanup()
-
-    m.banks = { data: { banks: BANKS } }
-    m.statsLoading = true
-    const host = render()
-    expect(meta(host).dataset.state).toBe('loading')
-    expect(meta(host).textContent).not.toMatch(/\d/)
-  })
-
   it('says the engine is unreachable, with no number', () => {
-    m.engine = { data: { ...ENGINE, reachable: false, version: null, banks_total: null } }
-    m.banks = { isError: true }
+    m.health = { data: healthUnreachable() }
     const host = render()
     expect(meta(host).textContent).toBe('Engine unreachable · no counts available')
-    expect(meta(host).textContent).not.toMatch(/\d/)
-    // No bank is asked for its stats while the engine is down.
-    expect(m.statsFor.every((ids) => ids.length === 0)).toBe(true)
   })
 
-  it('says the same when the check itself failed', () => {
-    m.engine = { isError: true }
-    m.banks = { isError: true }
-    expect(meta(render()).textContent).toBe('Engine unreachable · no counts available')
+  it('says when hal0 did not answer, and when memory is off', () => {
+    m.health = { isError: true }
+    expect(meta(render()).textContent).toBe('Memory status did not load · no counts available')
+    cleanup()
+    m.health = {
+      data: { enabled: false, reason: 'memory_disabled', checked_at: '', verdict: null, partial: [], steps: [] },
+    }
+    expect(meta(render()).textContent).toBe('Memory is turned off · no counts available')
   })
 
   it('says how many banks a partial count covers', () => {
-    delete m.stats['Hal0::Agents']
+    const list = HEALTH_BANKS!.list.map((b) => (b.bank_id === 'Hal0::Agents' ? { ...b, facts: null } : b))
+    m.health = { data: healthReport({ partial: ['banks'], banks: { ...HEALTH_BANKS!, list } }) }
     expect(meta(render()).textContent).toBe('3 banks · 3,012 facts in the 2 that reported')
   })
 
   it('gives no fact count when no bank reported one', () => {
-    m.stats = {}
+    const list = HEALTH_BANKS!.list.map((b) => ({ ...b, facts: null }))
+    m.health = { data: healthReport({ banks: { ...HEALTH_BANKS!, facts: null, list } }) }
     expect(meta(render()).textContent).toBe('3 banks · fact counts not reported')
   })
 
   it('says there are no banks, and that memory is on a fallback engine', () => {
-    m.banks = { data: { banks: [] } }
+    const base = healthReport()
+    m.health = {
+      data: healthReport({
+        banks: { layout: 'per_bank', total: 0, facts: 0, list: [] },
+        queue: { ...base.queue!, by_bank: [] },
+      }),
+    }
     expect(meta(render()).textContent).toBe('Engine reachable · no banks yet')
     cleanup()
-
-    m.engine = { data: { ...ENGINE, engine: null, reachable: false } }
+    m.health = {
+      data: { enabled: true, reason: 'engine_unsupported', checked_at: '', verdict: null, partial: [], steps: [] },
+    }
     expect(meta(render()).textContent).toBe('Fallback engine · no counts available')
   })
 
@@ -274,6 +280,21 @@ describe('summary line', () => {
       expect(meta(render(`#memory/${tab}`)).textContent).toBe('27,542 facts in 3 banks')
       cleanup()
     }
+  })
+})
+
+describe('requests', () => {
+  it('Health asks for neither the engine check nor the bank list: the health answer has both', () => {
+    render('#memory/health')
+    expect(m.engineAsked.length).toBeGreaterThan(0)
+    expect(m.engineAsked.every((asked) => asked === false)).toBe(true)
+    expect(m.banksAsked.every((asked) => asked === false)).toBe(true)
+  })
+
+  it('a tab with a bank control asks for them', () => {
+    render('#memory/facts?bank=shared')
+    expect(m.engineAsked.at(-1)).toBe(true)
+    expect(m.banksAsked.at(-1)).toBe(true)
   })
 })
 
