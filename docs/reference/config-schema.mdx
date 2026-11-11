@@ -209,6 +209,23 @@ kept, any other run turned into one `-`, at most 100 characters. An entry
 with nothing left after that is refused. hal0-api reads the table at start,
 so a change needs a restart; `hal0 doctor` reads the file each run.
 
+#### `[memory.compat]`
+
+`extra="forbid"`. The engine-compatible memory endpoint for coding agents,
+`/api/memory/compat`; see its [API reference](/docs/reference/api/memory-compat/).
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `shared_document_prefixes` | list[str] | `["git:", "gitlog:", "survey-baseline:"]` | at most 32 entries, each 1 to 64 characters of `a-z A-Z 0-9 . _ : -` with no `::`. A client's documents are stored in a namespace of its own; a document id that starts with one of these is stored in its project's shared namespace, which any client of that project may write. Setting the key replaces the default list; `[]` shares nothing |
+| `max_concurrent_reflects` | int | `2` | `1-64`. Reflects through the endpoint running at once, across all clients; one client always runs one at a time. Beyond the limit a request is `429` with `Retry-After` |
+| `max_item_bytes` | int | `16777216` | `1024-33554432`. The largest `content` of one retained item, in UTF-8 bytes. The request body is capped at 48 MiB whatever this is |
+
+The default prefixes are the document ids the Hindsight coding-agents plugin
+derives from the repository itself: one commit, the commit log and a
+codebase-survey marker. The endpoint reads the table from hal0-api's loaded
+configuration on each request: a change saved through the Settings API
+applies at once, and a hand edit of `hal0.toml` at the next restart.
+
 ### `[updates]`
 
 `extra="forbid"`.

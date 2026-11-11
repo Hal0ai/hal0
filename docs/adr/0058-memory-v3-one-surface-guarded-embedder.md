@@ -106,7 +106,12 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      scope per project, and global facts into one global scope, so a
      convention learned in one repository does not become a belief about
      another. This refines decision 4: the write is sent with a per-project
-     scope when it carries a project and `"shared"` when it is global.
+     scope when it carries a project and `"shared"` when it is global. A
+     write stamped `project:unresolved` is sent with the scope
+     `[project:unresolved, agent:<id>]`: in the untagged `"shared"` scope its
+     observation would carry no tags, and every scoped read admits an
+     untagged memory, so one client's unresolved writes would surface in
+     every other client's project.
    - *Measured.* The Memory page and `hal0 doctor` report the share of durable
      facts that carry a registered project, the `project:unresolved` count,
      and slugs seen that are not in the registry.
@@ -141,6 +146,15 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      through the endpoint sees the caller's project plus global memory, and
      never another project. An unresolved caller sees global memory plus its
      own unresolved writes.
+   - *A client's documents and operations are its own.* Every bank name is
+     one bank, so a document id is stored in the client's namespace of its
+     project (the layout is under decision 7a) and an asynchronous retain's
+     operation id is derived from the client and the id it sent. A client
+     cannot address, replace or delete another client's document, or one
+     hal0's own agents wrote, and cannot poll another client's operation; to
+     the client its own ids are all it ever sees. A write through the endpoint
+     is never global: it carries a project or `project:unresolved`, and an
+     unresolved write's observations are scoped to its writer (decision 4a).
    - *Typed routes, not a proxy.* Each route is parsed and goes through the
      provider or one scoped forwarder, so a field or route the endpoint does
      not name never reaches the engine. A bank cannot be deleted, a bank
@@ -200,6 +214,21 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
    - *It re-embeds.* The import embeds every fact with the store's recorded
      embedder, so on a box whose store is mixed the fold-in is also the
      repair, and that box does not need the switch.
+   - *It keeps a coding client's document ids reachable.* The engine upserts
+     on document id per bank, and a coding-agent client picks its ids as if it
+     owned a bank (`conversation:<session>`, `git:<sha>`, a slug of a title).
+     In the platform bank such a document is stored as
+     `<project>::<owner>::<the client's id>`: `<owner>` is the bridge client's
+     name, or `shared` for the ids every agent on a repository derives the
+     same way (`[memory.compat] shared_document_prefixes`, by default `git:`,
+     `gitlog:` and `survey-baseline:`); `<project>` is `unresolved` for a
+     client with no project (`hal0.memory.document_namespace`). The
+     engine-compatible endpoint (decision 4b) adds that prefix to every id a
+     client sends and removes it from every id it returns. The fold-in must
+     write through the same function when it moves a `coding-agent::<project>`
+     bank's documents, with the client the bank belonged to as the owner, so a
+     client moved onto the endpoint finds its old `conversation:` and `git:`
+     documents under the ids it already knows.
    - *It deletes nothing.* The legacy banks stay, read-only, after they fold
      in. Deleting them is a separate operator action, offered where their
      contents are visible, only for banks whose counts matched, and never as a

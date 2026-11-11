@@ -16,9 +16,12 @@ knowledge-base routes 404 means "this server has no pages".
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 import sys
 import types
+import uuid
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,7 +37,9 @@ from hal0.api import auth as auth_mod
 from hal0.api.auth import AuthEnforcementMiddleware
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory_compat
-from hal0.bridge.store import BridgeStore
+from hal0.api.routes.memory_compat import _engine_operation_id
+from hal0.bridge.store import BridgeStore, BridgeStoreError
+from hal0.config.schema import MemoryCompatConfig
 from hal0.errors import Hal0Error
 from hal0.memory.hindsight_client import REFLECT_TIMEOUT_S, HindsightRestClient
 from hal0.memory.hindsight_provider import HindsightProvider
@@ -88,6 +93,10 @@ class Engine:
     recall_results: list[dict[str, Any]] = field(default_factory=list)
     recall_extras: dict[str, Any] = field(default_factory=dict)
     strategies: tuple[str, ...] = ("conversation",)
+    #: Engine operation id -> fields laid over the default status record.
+    operations: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Ids the engine names itself, beside the one it was given.
+    extra_operation_ids: list[str] = field(default_factory=list)
     #: ``(method, path)`` -> a response, or an exception to raise.
     overrides: dict[tuple[str, str], Any] = field(default_factory=dict)
 
@@ -130,7 +139,15 @@ class Engine:
                 "async": bool(body.get("async", False)),
             }
             if body.get("async"):
-                answer["operation_id"] = body.get("operation_id") or "engine-chosen-id"
+                started = [
+                    body.get("operation_id") or "engine-chosen-id",
+                    *self.extra_operation_ids,
+                ]
+                answer["operation_id"] = started[0]
+                if len(started) > 1:
+                    answer["operation_ids"] = started
+                for operation_id in started:
+                    self.operations.setdefault(operation_id, {})
             return httpx.Response(200, json=answer)
         if (method, rest) == ("POST", "/reflect"):
             return httpx.Response(200, json={"text": "the lockfile was stale", "usage": {"n": 1}})
@@ -139,7 +156,14 @@ class Engine:
         if (method, rest) == ("GET", "/documents"):
             wanted = set(params.get("tags", []))
             items = [d for d in self.documents.values() if wanted <= set(d.get("tags", []))]
-            page = {"items": items, "total": len(items), "limit": 100, "offset": 0}
+            limit = int(params.get("limit", ["100"])[0])
+            offset = int(params.get("offset", ["0"])[0])
+            page = {
+                "items": items[offset : offset + limit],
+                "total": len(items),
+                "limit": limit,
+                "offset": offset,
+            }
             return httpx.Response(200, json=page)
         if rest.startswith("/documents/"):
             doc_id = rest[len("/documents/") :]
@@ -157,9 +181,18 @@ class Engine:
                 }
                 return httpx.Response(200, json=answer)
         if (method, rest) == ("GET", "/operations"):
-            return httpx.Response(200, json=OPERATIONS_PAGE)
+            rows = [
+                {**OPERATION_ROW, "id": operation_id, **fields}
+                for operation_id, fields in self.operations.items()
+            ]
+            page = {"bank_id": BANK, "total": len(rows), "limit": 20, "offset": 0}
+            return httpx.Response(200, json={**page, "operations": rows})
         if method == "GET" and rest.startswith("/operations/"):
-            return httpx.Response(200, json=OPERATION_STATUS)
+            operation_id = rest[len("/operations/") :]
+            if operation_id not in self.operations:
+                return httpx.Response(404, json={"detail": f"Operation {operation_id} not found"})
+            record = {**OPERATION_STATUS, "operation_id": operation_id, "id": operation_id}
+            return httpx.Response(200, json={**record, **self.operations[operation_id]})
         if (method, rest) == ("GET", "/config"):
             resolved = {
                 "retain_strategies": {
@@ -195,24 +228,16 @@ OPERATION_STATUS = {
     ],
 }
 
-OPERATIONS_PAGE = {
-    "bank_id": BANK,
-    "total": 1,
-    "limit": 20,
-    "offset": 0,
-    "operations": [
-        {
-            "id": "op-1",
-            "task_type": "retain",
-            "items_count": 1,
-            "document_id": "private:hermes:s-9",
-            "filename": "notes.md",
-            "created_at": "2026-11-10T09:14:02Z",
-            "status": "pending",
-            "error_message": "ANOTHER CLIENT'S ERROR",
-            "task_payload": {"contents": [{"content": "ANOTHER CLIENT'S TEXT"}]},
-        }
-    ],
+#: One row of the engine's operations list, before its id.
+OPERATION_ROW = {
+    "task_type": "retain",
+    "items_count": 1,
+    "document_id": "hal0::cc::conversation:s-1",
+    "filename": "notes.md",
+    "created_at": "2026-11-10T09:14:02Z",
+    "status": "pending",
+    "error_message": None,
+    "task_payload": {"contents": [{"content": "ANOTHER CLIENT'S TEXT"}]},
 }
 
 
@@ -292,6 +317,11 @@ def _url(path: str) -> str:
 
 def _code(resp: httpx.Response) -> str:
     return resp.json()["error"]["code"]
+
+
+def _compat_state(app: FastAPI) -> Any:
+    """The endpoint's per-app state, as a handler reaches it."""
+    return memory_compat._state(types.SimpleNamespace(app=app))
 
 
 def _item(**over: Any) -> dict[str, Any]:
@@ -427,6 +457,7 @@ def test_a_degraded_box_answers_503_and_never_the_volatile_fallback(
 
 
 def test_retain_goes_through_the_envelope(client: TestClient, engine: Engine, key: str) -> None:
+    operation = "6f1d3b52-8f0e-5c41-a7d2-3e9c4b1f0a66"
     body = {
         "items": [
             _item(
@@ -442,21 +473,28 @@ def test_retain_goes_through_the_envelope(client: TestClient, engine: Engine, ke
                     "project:someone-elses",
                     "session:s-1",
                     "source:bridge:other-client",
+                    # A write here is never global, whatever the caller asks.
+                    "scope:global",
+                    " Scope:Global ",
+                    "scope:team",
                 ],
                 strategy="conversation",
                 observation_scopes=[["agent:hermes"]],
                 timestamp="2026-11-10T09:14:02.000Z",
                 update_mode="append",
                 metadata={
+                    "source": "chat",
                     "ref_id": "conversation:s-1",
                     "harness": "claude-code",
                     "project": "someone-elses",
                     "bridge_client": "hermes",
+                    "client_source": "forged",
+                    "client_document_id": "forged",
                 },
             )
         ],
         "async": True,
-        "operation_id": "6f1d3b52-8f0e-5c41-a7d2-3e9c4b1f0a66",
+        "operation_id": operation,
     }
     # The identity header the rest of the memory API reads is not read here.
     resp = client.post(
@@ -467,20 +505,21 @@ def test_retain_goes_through_the_envelope(client: TestClient, engine: Engine, ke
 
     assert resp.status_code == 200
     assert resp.headers["X-hal0-Project"] == "hal0"
-    # The answer is the engine's own JSON.
+    # The engine's own answer, with the operation under the client's own id.
     assert resp.json() == {
         "success": True,
         "bank_id": BANK,
         "items_count": 1,
         "async": True,
-        "operation_id": "6f1d3b52-8f0e-5c41-a7d2-3e9c4b1f0a66",
+        "operation_id": operation,
     }
 
     call = engine.only("POST", "/memories")
     (item,) = call.body["items"]
-    # Caller agent, visibility and project tags are gone; the client name and
-    # the project the bank id resolved to (through the alias) are stamped; the
-    # session id left the tag space; ``harness:`` and ``source:`` stayed.
+    # Caller agent, visibility, project and scope tags are gone; the client
+    # name and the project the bank id resolved to (through the alias) are
+    # stamped; the session id left the tag space; ``harness:`` and
+    # ``source:`` stayed.
     assert item["tags"] == [
         "team:platform",
         "source:chat",
@@ -491,55 +530,83 @@ def test_retain_goes_through_the_envelope(client: TestClient, engine: Engine, ke
     ]
     # hal0 chose the observation scope; the caller's was ignored.
     assert item["observation_scopes"] == [["project:hal0"]]
+    # ``source`` is the client; what the plugin called its source is kept
+    # beside it. The keys hal0 owns cannot be set by the caller.
     assert item["metadata"] == {
         "ref_id": "conversation:s-1",
         "harness": "claude-code",
+        "client_source": "chat",
         "bridge_client": "cc",
         "source": "cc",
         "project": "hal0",
         "project_source": "bank",
         "session_id": "s-1",
     }
-    assert item["document_id"] == "conversation:s-1"
+    # Stored in this client's namespace of this project.
+    assert item["document_id"] == "hal0::cc::conversation:s-1"
     assert item["update_mode"] == "append"
     assert item["timestamp"] == "2026-11-10T09:14:02.000Z"
     assert item["context"] == "coding agent session"
     assert item["strategy"] == "conversation"
     assert item["content"] == body["items"][0]["content"]
+    assert call.body["operation_id"] == _engine_operation_id("cc", operation)
 
 
-def test_async_and_operation_id_reach_the_engine_unchanged(
-    client: TestClient, engine: Engine, key: str
+@pytest.mark.parametrize("kind", ["kind:ephemeral", "kind:durable", None])
+def test_kind_stays_the_callers_choice(
+    client: TestClient, engine: Engine, key: str, kind: str | None
 ) -> None:
-    """The plugin's resend relies on the engine seeing the same id. One engine
-    call carries both fields exactly as sent, and neither when not sent."""
-    operation_id = "B0C7F5A4-2D61-5E3A-9C18-7F4E2A6D1B90"
-    sent = {"items": [_item()], "async": True, "operation_id": operation_id}
-    assert (
-        client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json=sent).status_code == 200
+    tags = ["source:chat", *([kind] if kind else [])]
+    resp = client.post(
+        _url(URL_BANK + "/memories"), headers=_auth(key), json={"items": [_item(tags=tags)]}
     )
-    call = engine.only("POST", "/memories")
-    assert call.body["async"] is True
-    assert call.body["operation_id"] == operation_id
-    assert set(call.body) == {"items", "async", "operation_id"}
-    assert call.read_timeout == 30.0
-
-    engine.calls.clear()
-    resp = client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": [_item()]})
     assert resp.status_code == 200
-    call = engine.only("POST", "/memories")
-    assert set(call.body) == {"items"}
-    # No ``async`` means the engine's default, a synchronous retain.
-    assert call.read_timeout == 300.0
+    sent = engine.only("POST", "/memories").body["items"][0]["tags"]
+    assert [t for t in sent if t.startswith("kind:")] == [kind or "kind:durable"]
+    # Durable or not, in a project or not, it is never global.
+    assert "scope:global" not in sent
 
-    engine.calls.clear()
-    explicit = {"items": [_item()], "async": False}
-    assert (
-        client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json=explicit).status_code
-        == 200
-    )
-    call = engine.only("POST", "/memories")
-    assert call.body["async"] is False and call.read_timeout == 300.0
+
+def test_an_operation_id_is_the_clients_own_and_the_engines_is_derived(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore
+) -> None:
+    """The plugin's resend relies on one id naming one operation. The engine
+    is given an id derived from the client and the id it sent, so that still
+    holds for one client, and no id one client picks can name another's."""
+    _row, other_key = store.add_client("codex", created_by="t")
+    sent = {"items": [_item()], "async": True, "operation_id": "not-even-a-uuid"}
+
+    def engine_id(auth_key: str, body: dict[str, Any]) -> tuple[str | None, httpx.Response]:
+        engine.calls.clear()
+        resp = client.post(_url(URL_BANK + "/memories"), headers=_auth(auth_key), json=body)
+        return engine.only("POST", "/memories").body.get("operation_id"), resp
+
+    first, resp = engine_id(key, sent)
+    assert resp.json()["operation_id"] == "not-even-a-uuid"
+    assert first == _engine_operation_id("cc", "not-even-a-uuid")
+    assert str(uuid.UUID(first)) == first  # the engine requires a UUID
+    assert engine.calls[-1].read_timeout == 30.0
+
+    again, _ = engine_id(key, sent)
+    assert again == first
+    theirs, resp = engine_id(other_key, sent)
+    assert theirs != first and resp.json()["operation_id"] == "not-even-a-uuid"
+
+    # No id sent: the caller still gets one it can poll.
+    fresh, resp = engine_id(key, {"items": [_item()], "async": True})
+    given = resp.json()["operation_id"]
+    assert str(uuid.UUID(given)) == given and fresh == _engine_operation_id("cc", given)
+
+    # A synchronous retain has no operation: the engine ignores an id there,
+    # and none is sent. No ``async`` means the engine's default, synchronous.
+    for body in (
+        {"items": [_item()], "operation_id": "x"},
+        {"items": [_item()], "async": False, "operation_id": "x"},
+    ):
+        none, resp = engine_id(key, body)
+        assert none is None and resp.status_code == 200
+        assert set(engine.calls[-1].body) == {"items", *(["async"] if "async" in body else [])}
+        assert engine.calls[-1].read_timeout == 300.0
 
 
 @pytest.mark.parametrize(
@@ -547,6 +614,8 @@ def test_async_and_operation_id_reach_the_engine_unchanged(
     [
         {"items": [_item()], "async": "yes"},
         {"items": [_item()], "operation_id": 7},
+        {"items": [_item()], "operation_id": ""},
+        {"items": [_item()], "async": True, "operation_id": "x" * 201},
         {"items": []},
         {"items": "one"},
         {"items": ["just text"]},
@@ -610,7 +679,10 @@ def test_the_bank_in_the_url_carries_the_project(
     (item,) = engine.only("POST", "/memories").body["items"]
     assert [t for t in item["tags"] if t.startswith("project:")] == [project_tag]
     assert "scope:global" not in item["tags"]
-    assert item["observation_scopes"] == (scopes or [[project_tag]])
+    # A real project is its own observation scope; an unresolved write is
+    # scoped to its writer, never to the untagged scope everyone reads.
+    unresolved_scope = [["project:unresolved", "agent:cc"]]
+    assert item["observation_scopes"] == (unresolved_scope if scopes else [[project_tag]])
     assert item["metadata"]["project"] == header
     assert item["metadata"]["project_source"] == source
 
@@ -660,7 +732,7 @@ def test_several_items_are_one_engine_call(client: TestClient, engine: Engine, k
     assert resp.status_code == 200
     assert resp.json()["items_count"] == 32
     sent = engine.only("POST", "/memories").body["items"]
-    assert [item["document_id"] for item in sent] == [f"doc-{n}" for n in range(32)]
+    assert [item["document_id"] for item in sent] == [f"hal0::cc::doc-{n}" for n in range(32)]
     assert all("agent:cc" in item["tags"] and "project:hal0" in item["tags"] for item in sent)
 
 
@@ -752,100 +824,155 @@ def test_an_engine_4xx_is_passed_on_with_the_engine_body(
     assert limited.headers["Retry-After"] == "7"
 
 
-def test_a_private_document_id_is_refused(client: TestClient, engine: Engine, key: str) -> None:
-    """The unified bank keeps ``private:`` ids for private documents, which
-    this endpoint never writes."""
-    resp = client.post(
-        _url(URL_BANK + "/memories"),
-        headers=_auth(key),
-        json={"items": [_item(document_id="private:hermes:s-9")]},
-    )
-    assert resp.status_code == 400
-    assert _code(resp) == "memory.compat_document_id_reserved"
-    assert engine.calls == []
-
-
 # The engine upserts on document id, per bank, and every bank name here is one
-# bank. The plugin picks ids as if it had a bank of its own.
+# bank. The plugin picks ids as if it had a bank of its own, so each document
+# id is stored inside the caller's namespace.
+
+
+def _stored_ids(engine: Engine) -> list[str]:
+    return [item["document_id"] for item in engine.only("POST", "/memories").body["items"]]
 
 
 @pytest.mark.parametrize(
-    ("bank", "existing", "taken"),
+    ("bank", "client_id", "stored"),
     [
-        # Nothing there yet: the id is free.
-        ("coding-agent%3A%3Ahal0-mono", None, False),
-        # This project's document, whoever wrote it: an append or a rewrite.
-        ("coding-agent%3A%3Ahal0-mono", ["agent:cc", "kind:durable", "project:hal0"], False),
-        ("coding-agent%3A%3Ahal0-mono", ["agent:codex", "kind:durable", "project:hal0"], False),
-        # Another repository retained the same id.
-        ("coding-agent%3A%3Ahal0-mono", ["agent:cc", "kind:durable", "project:atlas"], True),
-        # A document one of hal0's own agents wrote.
-        ("coding-agent%3A%3Ahal0-mono", ["agent:hermes", "kind:durable", "scope:global"], True),
-        ("coding-agent%3A%3Ahal0-mono", [], True),
-        # No project: only the caller's own unresolved document.
-        ("claude-code", ["agent:cc", "kind:durable", "project:unresolved"], False),
-        ("claude-code", ["agent:codex", "kind:durable", "project:unresolved"], True),
-        ("claude-code", ["agent:cc", "kind:durable", "project:hal0"], True),
+        # A client's own documents: its namespace inside the project.
+        ("coding-agent%3A%3Ahal0-mono", "readme", "hal0::cc::readme"),
+        ("coding-agent%3A%3Aatlas", "readme", "atlas::cc::readme"),
+        ("coding-agent%3A%3Ahal0-mono", "conversation:0f3c", "hal0::cc::conversation:0f3c"),
+        # Ids every agent on a repository derives the same way are shared.
+        ("coding-agent%3A%3Ahal0-mono", "git:4f2a9c1", "hal0::shared::git:4f2a9c1"),
+        ("coding-agent%3A%3Ahal0-mono", "gitlog:hal0-mono", "hal0::shared::gitlog:hal0-mono"),
+        (
+            "coding-agent%3A%3Ahal0-mono",
+            "survey-baseline:4f2a",
+            "hal0::shared::survey-baseline:4f2a",
+        ),
+        ("coding-agent%3A%3Ahal0-mono", "gitignore-notes", "hal0::cc::gitignore-notes"),
+        # No project: a namespace of the client's own, and nothing shared.
+        ("claude-code", "readme", "unresolved::cc::readme"),
+        ("claude-code", "git:4f2a9c1", "unresolved::cc::git:4f2a9c1"),
+        # An id that looks namespaced is the client's id, whole.
+        ("coding-agent%3A%3Ahal0-mono", "atlas::codex::readme", "hal0::cc::atlas::codex::readme"),
+        ("coding-agent%3A%3Ahal0-mono", "hal0::shared::git:x", "hal0::cc::hal0::shared::git:x"),
+        ("coding-agent%3A%3Ahal0-mono", "::x", "hal0::cc::::x"),
+        # The unified bank's reserved prefix is no longer at the front.
+        ("coding-agent%3A%3Ahal0-mono", "private:hermes:s-9", "hal0::cc::private:hermes:s-9"),
     ],
 )
-def test_a_retain_cannot_replace_a_document_outside_the_callers_project(
-    client: TestClient,
-    engine: Engine,
-    key: str,
-    bank: str,
-    existing: list[str] | None,
-    taken: bool,
+def test_a_document_id_is_stored_in_the_callers_namespace(
+    client: TestClient, engine: Engine, key: str, bank: str, client_id: str, stored: str
 ) -> None:
-    if existing is not None:
-        engine.documents["readme"] = _doc("readme", existing)
     resp = client.post(
         _url(f"/v1/default/banks/{bank}/memories"),
         headers=_auth(key),
-        json={"items": [_item(document_id="readme", update_mode="append")], "async": True},
+        json={"items": [_item(document_id=client_id)]},
     )
-    posted = [line for line in engine.lines() if line.startswith("POST")]
-    if taken:
-        assert resp.status_code == 409
-        assert _code(resp) == "memory.compat_document_id_taken"
-        assert resp.json()["error"]["details"] == {"document_ids": ["readme"]}
-        assert posted == []
-    else:
-        assert resp.status_code == 200
-        assert posted == [f"POST {ENGINE_BANK}/memories"]
-    assert engine.lines()[0] == f"GET {ENGINE_BANK}/documents/readme"
+    assert resp.status_code == 200
+    assert _stored_ids(engine) == [stored]
+    # Nothing is looked up first: there is no document a client could take.
+    assert engine.lines() == [f"POST {ENGINE_BANK}/memories"]
+    assert "client_document_id" not in engine.calls[0].body["items"][0]["metadata"]
 
 
-def test_one_taken_document_id_refuses_the_whole_retain(
+def test_two_clients_and_two_projects_never_share_a_document(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore
+) -> None:
+    _row, codex = store.add_client("codex", created_by="t")
+    seen = set()
+    for auth_key in (key, codex, ADMIN_KEY):
+        for bank in ("coding-agent%3A%3Ahal0-mono", "coding-agent%3A%3Aatlas", "claude-code"):
+            engine.calls.clear()
+            client.post(
+                _url(f"/v1/default/banks/{bank}/memories"),
+                headers=_auth(auth_key),
+                json={"items": [_item(document_id="readme", update_mode="replace")]},
+            )
+            seen.update(_stored_ids(engine))
+    assert len(seen) == 9
+    assert "hal0::admin::readme" in seen and "unresolved::codex::readme" in seen
+
+
+def test_an_id_hal0_cannot_address_is_stored_as_a_digest(
     client: TestClient, engine: Engine, key: str
 ) -> None:
-    engine.documents["theirs"] = _doc("theirs", ["agent:cc", "project:atlas"])
-    items = [
-        _item(document_id="new"),
-        _item(document_id="theirs"),
-        _item(),
-        _item(document_id="new"),
-    ]
+    """hal0's own bank routes take ids of at most 256 characters from
+    ``[a-zA-Z0-9._:-]``. Anything else keeps its namespace and carries a
+    digest; the client's id goes into metadata so it can be shown back."""
+    odd = ["a title with spaces", "é", "x" * 400, "a/../b", "trailing..dots"]
+    items = [_item(document_id=client_id) for client_id in odd]
     resp = client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": items})
-    assert resp.status_code == 409
-    assert resp.json()["error"]["details"] == {"document_ids": ["theirs"]}
-    # One lookup per distinct id, none for the item that names no id.
-    assert sorted(engine.lines()) == [
-        f"GET {ENGINE_BANK}/documents/new",
-        f"GET {ENGINE_BANK}/documents/theirs",
-    ]
+    assert resp.status_code == 200
+    sent = engine.only("POST", "/memories").body["items"]
+    for client_id, item in zip(odd, sent, strict=True):
+        digest = hashlib.sha256(client_id.encode()).hexdigest()
+        assert item["document_id"] == f"hal0::cc::sha256-{digest}"
+        assert len(item["document_id"]) <= 256
+        assert item["metadata"]["client_document_id"] == client_id
 
 
-def test_a_document_lookup_that_fails_refuses_the_retain(
+def test_an_item_with_no_document_id_gets_one_in_the_namespace(
     client: TestClient, engine: Engine, key: str
 ) -> None:
-    engine.overrides[("GET", ENGINE_BANK + "/documents/readme")] = httpx.Response(500, text="boom")
+    items = [_item(), _item(metadata={"session_id": "s-1"}), _item(document_id="")]
+    client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": items})
+    stored = _stored_ids(engine)
+    assert len(set(stored)) == 3
+    assert all(re.fullmatch(r"hal0::cc::[0-9a-f]{32}", doc_id) for doc_id in stored)
+
+
+def test_an_item_naming_several_projects_is_written_as_unresolved(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    """A document has one namespace, so a write here has one project or none."""
+    resp = client.post(
+        _url("/v1/default/banks/claude-code/memories"),
+        headers=_auth(key),
+        json={"items": [_item(document_id="d", tags=["project:hal0", "project:atlas", "x"])]},
+    )
+    assert resp.headers["X-hal0-Project"] == "unresolved"
+    (item,) = engine.only("POST", "/memories").body["items"]
+    assert item["tags"] == ["x", "agent:cc", "kind:durable", "project:unresolved"]
+    assert item["document_id"] == "unresolved::cc::d"
+    assert item["observation_scopes"] == [["project:unresolved", "agent:cc"]]
+
+
+def test_the_shared_prefixes_are_the_operators_to_set(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    compat = MemoryCompatConfig(shared_document_prefixes=["adr:"])
+    app.state.hal0_config = types.SimpleNamespace(memory=types.SimpleNamespace(compat=compat))
+    items = [_item(document_id="adr:0058"), _item(document_id="git:4f2a9c1")]
+    client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": items})
+    assert _stored_ids(engine) == ["hal0::shared::adr:0058", "hal0::cc::git:4f2a9c1"]
+
+
+def test_a_project_named_private_cannot_hold_documents(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    """The unified bank keeps ``private:``-prefixed ids for private documents,
+    and a stored id starts with its project."""
+    resp = client.post(
+        _url("/v1/default/banks/claude-code/memories"),
+        headers=_auth(key),
+        json={"items": [_item(document_id="d", tags=["project:private"])]},
+    )
+    assert (resp.status_code, _code(resp)) == (400, "memory.compat_document_id_reserved")
+    assert engine.calls == []
+
+
+def test_an_engine_refusal_never_shows_a_stored_id(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    detail = {"detail": "document hal0::cc::readme cannot be appended to: hal0::shared::git:x"}
+    engine.overrides[("POST", ENGINE_BANK + "/memories")] = httpx.Response(422, json=detail)
     resp = client.post(
         _url(URL_BANK + "/memories"),
         headers=_auth(key),
         json={"items": [_item(document_id="readme")]},
     )
-    assert (resp.status_code, _code(resp)) == (502, "memory.compat_engine_error")
-    assert [line for line in engine.lines() if line.startswith("POST")] == []
+    assert resp.status_code == 422
+    assert resp.json() == {"detail": "document readme cannot be appended to: git:x"}
 
 
 def test_unknown_request_fields_never_reach_the_engine(
@@ -897,7 +1024,10 @@ def test_the_write_gate_guards_retain_and_delete_once_it_exists(
     gate.require_writes_allowed = refuse  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "hal0.memory.write_gate", gate)
     monkeypatch.setattr("hal0.memory.write_gate", gate, raising=False)
-    engine.documents["doc-1"] = {"id": "doc-1", "tags": ["agent:cc", "project:hal0"]}
+    engine.documents["hal0::cc::doc-1"] = {
+        "id": "hal0::cc::doc-1",
+        "tags": ["agent:cc", "project:hal0"],
+    }
 
     retain = client.post(
         _url(URL_BANK + "/memories"), headers=_auth(key), json={"items": [_item()]}
@@ -1283,31 +1413,45 @@ async def test_a_reflect_is_cancelled_upstream_when_the_client_disconnects(
     await asyncio.wait_for(call, timeout=5)
     assert outcome == ["cancelled"]
     assert sent[0]["status"] == 499
+    # The abandoned reflect gave both its slots back.
+    assert _compat_state(app).in_flight == {}
 
 
 # ── documents ───────────────────────────────────────────────────────────────
 
 
-def _doc(doc_id: str, tags: list[str]) -> dict[str, Any]:
-    return {"id": doc_id, "bank_id": BANK, "tags": tags, "text_length": 10}
+def _doc(doc_id: str, tags: list[str], **extra: Any) -> dict[str, Any]:
+    return {"id": doc_id, "bank_id": BANK, "tags": tags, "text_length": 10, **extra}
 
 
-def test_the_documents_listing_is_narrowed_to_the_project(
+def _seed(engine: Engine, *docs: dict[str, Any]) -> None:
+    engine.documents = {doc["id"]: doc for doc in docs}
+
+
+def test_the_documents_listing_shows_the_callers_namespaces_under_its_own_ids(
     client: TestClient, engine: Engine, key: str
 ) -> None:
-    engine.documents = {
-        "mine": _doc("mine", [*OWN_PROJECT, "source:upload"]),
-        "codex": _doc("codex", [*OTHER_AGENT_PROJECT, "source:upload"]),
-        "atlas": _doc("atlas", [*OTHER_PROJECT, "source:upload"]),
-        "global": _doc("global", [*GLOBAL, "source:upload"]),
-        "other-kind": _doc("other-kind", OWN_PROJECT),
-    }
+    upload = "source:upload"
+    _seed(
+        engine,
+        _doc("hal0::cc::readme", [*OWN_PROJECT, upload]),
+        # Shared by every client of the project, whoever wrote it.
+        _doc("hal0::shared::git:4f2a", [*OTHER_AGENT_PROJECT, upload]),
+        # Another client's own namespace, in the same project.
+        _doc("hal0::codex::readme", [*OTHER_AGENT_PROJECT, upload]),
+        # One of hal0's own agents wrote into the project under its own id.
+        _doc("hermes:s-9", ["agent:hermes", "kind:durable", "project:hal0", upload]),
+        # Another project, and this client's own unresolved namespace.
+        _doc("atlas::cc::readme", [*OTHER_PROJECT, upload]),
+        _doc("unresolved::cc::readme", [*OWN_UNRESOLVED, upload]),
+        _doc("hal0::cc::other-kind", OWN_PROJECT),
+    )
     resp = client.get(
         _url(URL_BANK + "/documents"),
         headers=_auth(key),
         # What the plugin sends, plus a project tag of its own.
         params=[
-            ("tags", "source:upload"),
+            ("tags", upload),
             ("tags", "project:someone-elses"),
             ("tags_match", "all"),
             ("limit", "500"),
@@ -1317,61 +1461,162 @@ def test_the_documents_listing_is_narrowed_to_the_project(
     )
     assert resp.status_code == 200
     assert resp.headers["X-hal0-Project"] == "hal0"
-    call = engine.only("GET", "/documents")
+    (call,) = engine.calls
     assert call.params == {
-        "tags": ["project:hal0", "source:upload"],
+        "tags": ["project:hal0", upload],
         "tags_match": ["all_strict"],
         "limit": ["500"],
         "offset": ["0"],
     }
-    assert [d["id"] for d in resp.json()["items"]] == ["mine", "codex"]
-    assert "X-hal0-Filtered-Items" not in resp.headers
+    assert [d["id"] for d in resp.json()["items"]] == ["readme", "git:4f2a"]
+    assert resp.headers["X-hal0-Filtered-Items"] == "2"
+    assert "::" not in resp.text
 
 
 def test_the_documents_listing_hides_another_agents_private_document(
     client: TestClient, engine: Engine, key: str
 ) -> None:
     """The engine's listing has no ``tag_groups``, so "not someone else's
-    private document" is applied to the returned page in hal0."""
-    engine.documents = {
-        "mine": _doc("mine", OWN_PROJECT),
-        "my-private": _doc("my-private", OWN_PRIVATE),
-        "private:hermes:s-9": _doc("private:hermes:s-9", OTHER_AGENT_PRIVATE),
-    }
+    private document" is applied to the returned rows in hal0."""
+    _seed(
+        engine,
+        _doc("hal0::cc::mine", OWN_PROJECT),
+        _doc("hal0::cc::my-private", OWN_PRIVATE),
+        _doc("hal0::shared::git:x", OTHER_AGENT_PRIVATE),
+    )
     resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key))
-    assert resp.status_code == 200
     page = resp.json()
     assert [d["id"] for d in page["items"]] == ["mine", "my-private"]
     assert resp.headers["X-hal0-Filtered-Items"] == "1"
-    # ``total`` is the engine's count, before that step.
-    assert page["total"] == 3
 
 
-def test_a_listing_page_is_checked_even_if_the_engine_ignores_the_filter(
+def test_a_listing_row_is_checked_even_if_the_engine_ignores_the_filter(
     client: TestClient, engine: Engine, key: str
 ) -> None:
-    everything = [_doc("mine", OWN_PROJECT), _doc("atlas", OTHER_PROJECT), {"id": "no-tags"}]
+    everything = [
+        _doc("hal0::cc::mine", OWN_PROJECT),
+        _doc("hal0::cc::mistagged", OTHER_PROJECT),
+        {"id": "hal0::cc::no-tags"},
+        "not a row",
+    ]
     engine.overrides[("GET", ENGINE_BANK + "/documents")] = httpx.Response(
-        200, json={"items": everything, "total": 3, "limit": 100, "offset": 0}
+        200, json={"items": everything, "total": 4, "limit": 100, "offset": 0}
     )
     resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key))
     assert [d["id"] for d in resp.json()["items"]] == ["mine"]
-    assert resp.headers["X-hal0-Filtered-Items"] == "2"
+
+
+def test_a_digested_id_is_shown_as_the_client_sent_it(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    title = "a title with spaces"
+    digest = hashlib.sha256(title.encode()).hexdigest()
+    forged = hashlib.sha256(b"something else").hexdigest()
+    _seed(
+        engine,
+        _doc(
+            f"hal0::cc::sha256-{digest}",
+            OWN_PROJECT,
+            document_metadata={"client_document_id": title},
+        ),
+        # Metadata that does not map to the stored id is not believed.
+        _doc(
+            f"hal0::cc::sha256-{forged}",
+            OWN_PROJECT,
+            document_metadata={"client_document_id": title},
+        ),
+    )
+    resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key))
+    assert [d["id"] for d in resp.json()["items"]] == [title, f"sha256-{forged}"]
+
+
+def test_a_short_page_is_filled_from_the_engine_while_it_has_more_rows(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    """The plugin stops paging at the first page shorter than ``limit``. Rows
+    hal0 leaves out must not end its loop early."""
+    mine = [_doc(f"hal0::cc::doc-{n:02d}", OWN_PROJECT) for n in range(7)]
+    theirs = [_doc(f"hal0::codex::doc-{n:02d}", OTHER_AGENT_PROJECT) for n in range(5)]
+    # Engine order: three of theirs, four of mine, two of theirs, three of mine.
+    _seed(engine, *theirs[:3], *mine[:4], *theirs[3:], *mine[4:])
+
+    def page(offset: int) -> httpx.Response:
+        engine.calls.clear()
+        return client.get(
+            _url(URL_BANK + "/documents"),
+            headers=_auth(key),
+            params={"limit": "4", "offset": str(offset)},
+        )
+
+    first = page(0)
+    assert [d["id"] for d in first.json()["items"]] == ["doc-00", "doc-01", "doc-02", "doc-03"]
+    assert [c.params["offset"] for c in engine.calls] == [["0"], ["4"]]
+    assert first.headers["X-hal0-Filtered-Items"] == "3"
+    # The engine's count for the tag filter: an upper bound, never too low.
+    assert first.json()["total"] == 12
+    assert (first.json()["limit"], first.json()["offset"]) == (4, 0)
+    assert "X-hal0-Listing-Incomplete" not in first.headers
+
+    # Collecting ids page by page, as the plugin does, finds every document.
+    ids: set[str] = set()
+    offset = 0
+    while True:
+        items = page(offset).json()["items"]
+        ids.update(d["id"] for d in items)
+        if len(items) < 4:
+            break
+        offset += 4
+    assert ids == {f"doc-{n:02d}" for n in range(7)}
+
+
+def test_a_listing_that_cannot_be_filled_says_so(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    theirs = [_doc(f"hal0::codex::doc-{n:02d}", OTHER_AGENT_PROJECT) for n in range(40)]
+    _seed(engine, *theirs, _doc("hal0::cc::last", OWN_PROJECT))
+    resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key), params={"limit": "5"})
+    # One request and three more, then it stops reading.
+    assert len(engine.calls) == 4
+    assert resp.json()["items"] == []
+    assert resp.headers["X-hal0-Listing-Incomplete"] == "1"
+    assert resp.headers["X-hal0-Filtered-Items"] == "20"
+
+
+@pytest.mark.parametrize(("asked", "sent"), [("5000", "500"), ("500", "500"), ("7", "7")])
+def test_a_documents_page_is_at_most_the_plugins_page(
+    client: TestClient, engine: Engine, key: str, asked: str, sent: str
+) -> None:
+    resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key), params={"limit": asked})
+    assert resp.status_code == 200
+    assert engine.calls[0].params["limit"] == [sent]
+    assert resp.json()["limit"] == int(sent)
+
+
+@pytest.mark.parametrize("params", [{"limit": "-1"}, {"limit": "many"}, {"offset": "1.5"}])
+def test_a_malformed_page_is_400(
+    client: TestClient, engine: Engine, key: str, params: dict[str, str]
+) -> None:
+    resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key), params=params)
+    assert resp.status_code == 400
+    assert engine.calls == []
 
 
 def test_an_unresolved_caller_lists_only_its_own_unresolved_documents(
     client: TestClient, engine: Engine, key: str
 ) -> None:
-    engine.documents = {
-        "mine": _doc("mine", OWN_UNRESOLVED),
-        "codex": _doc("codex", OTHER_UNRESOLVED),
-        "global": _doc("global", GLOBAL),
-    }
+    _seed(
+        engine,
+        _doc("unresolved::cc::mine", OWN_UNRESOLVED),
+        _doc("unresolved::codex::theirs", OTHER_UNRESOLVED),
+        _doc("hermes:s-1", GLOBAL),
+    )
     resp = client.get(_url("/v1/default/banks/claude-code/documents"), headers=_auth(key))
     assert resp.status_code == 200
-    assert engine.only("GET", "/documents").params == {
+    assert engine.calls[0].params == {
         "tags": ["project:unresolved", "agent:cc"],
         "tags_match": ["all_strict"],
+        "limit": ["100"],
+        "offset": ["0"],
     }
     assert [d["id"] for d in resp.json()["items"]] == ["mine"]
 
@@ -1394,7 +1639,7 @@ def test_a_filter_that_would_turn_the_project_into_an_alternative_is_refused(
     resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key), params=params)
     if ok:
         assert resp.status_code == 200
-        sent = engine.only("GET", "/documents").params
+        sent = engine.calls[0].params
         assert sent["tags"][0] == "project:hal0" and sent["tags_match"] == ["all_strict"]
     else:
         assert resp.status_code == 400
@@ -1402,7 +1647,7 @@ def test_a_filter_that_would_turn_the_project_into_an_alternative_is_refused(
         assert engine.calls == []
 
 
-def test_a_client_deletes_its_own_document_in_its_project(
+def test_a_client_deletes_its_own_document(
     client: TestClient, engine: Engine, key: str, app: FastAPI
 ) -> None:
     recorded: list[dict[str, Any]] = []
@@ -1412,95 +1657,138 @@ def test_a_client_deletes_its_own_document_in_its_project(
             recorded.append(row)
 
     app.state.audit = Audit()
-    doc_id = "conversation:0f3c1c1e/part 2"
-    engine.documents[doc_id] = _doc(doc_id, [*OWN_PROJECT, "source:chat"])
+    stored = "hal0::cc::conversation:0f3c1c1e"
+    _seed(engine, _doc(stored, [*OWN_PROJECT, "source:chat"]))
     resp = client.delete(
-        _url(URL_BANK + "/documents/conversation%3A0f3c1c1e%2Fpart%202"),
+        _url(URL_BANK + "/documents/conversation%3A0f3c1c1e"),
         headers={**_auth(key), "X-hal0-Agent": "hermes"},
     )
     assert resp.status_code == 200
+    # The caller's own id comes back, never the stored one.
     assert resp.json() == {
         "success": True,
-        "message": "deleted",
-        "document_id": doc_id,
+        "message": "document deleted",
+        "document_id": "conversation:0f3c1c1e",
         "memory_units_deleted": 3,
     }
     # Read first, then deleted, both on the platform bank.
     assert engine.lines() == [
-        f"GET {ENGINE_BANK}/documents/{doc_id}",
-        f"DELETE {ENGINE_BANK}/documents/{doc_id}",
+        f"GET {ENGINE_BANK}/documents/{stored}",
+        f"DELETE {ENGINE_BANK}/documents/{stored}",
     ]
     assert [c.read_timeout for c in engine.calls] == [30.0, 30.0]
     (row,) = recorded
-    assert row["action"] == "memory.document.delete" and row["target"] == doc_id
-    # The audit row names the credential, not the header.
-    assert row["actor"] == "bridge:cc"
+    # The audit row names the credential, not the header, and the stored id.
+    assert (row["action"], row["target"], row["actor"]) == (
+        "memory.document.delete",
+        stored,
+        "bridge:cc",
+    )
 
 
-@pytest.mark.parametrize(
-    "tags",
-    [
-        OTHER_AGENT_PROJECT,  # this project, another client
-        OTHER_PROJECT,  # this client, another project
-        OTHER_AGENT_PRIVATE,
-        GLOBAL,
-        OWN_UNRESOLVED,  # this client, but not this project
-        [],
-    ],
-)
-def test_a_document_that_is_not_the_callers_is_not_deleted(
-    client: TestClient, engine: Engine, key: str, tags: list[str]
-) -> None:
-    engine.documents["doc-1"] = _doc("doc-1", tags)
-    resp = client.delete(_url(URL_BANK + "/documents/doc-1"), headers=_auth(key))
-    assert resp.status_code == 403
-    assert _code(resp) == "memory.compat_document_not_owned"
-    assert engine.lines() == [f"GET {ENGINE_BANK}/documents/doc-1"]
-
-
-def test_an_unresolved_caller_deletes_only_its_own_unresolved_documents(
+def test_a_shared_document_is_deleted_only_by_the_client_that_wrote_it(
     client: TestClient, engine: Engine, key: str
 ) -> None:
-    engine.documents = {
-        "mine": _doc("mine", OWN_UNRESOLVED),
-        "codex": _doc("codex", OTHER_UNRESOLVED),
-        "in-a-project": _doc("in-a-project", OWN_PROJECT),
-    }
-    bank = "/v1/default/banks/claude-code/documents/"
-    assert client.delete(_url(bank + "mine"), headers=_auth(key)).status_code == 200
-    assert client.delete(_url(bank + "codex"), headers=_auth(key)).status_code == 403
-    assert client.delete(_url(bank + "in-a-project"), headers=_auth(key)).status_code == 403
+    _seed(
+        engine,
+        _doc("hal0::shared::git:mine", OWN_PROJECT),
+        _doc("hal0::shared::git:theirs", OTHER_AGENT_PROJECT),
+    )
+    mine = client.delete(_url(URL_BANK + "/documents/git:mine"), headers=_auth(key))
+    theirs = client.delete(_url(URL_BANK + "/documents/git:theirs"), headers=_auth(key))
+    assert mine.status_code == 200
+    assert (theirs.status_code, _code(theirs)) == (403, "memory.compat_document_not_owned")
     assert [line for line in engine.lines() if line.startswith("DELETE")] == [
-        f"DELETE {ENGINE_BANK}/documents/mine"
+        f"DELETE {ENGINE_BANK}/documents/hal0::shared::git:mine"
     ]
 
 
-def test_deleting_a_document_the_engine_does_not_have_is_the_engines_404(
+@pytest.mark.parametrize(
+    "client_id",
+    [
+        "gone",  # nothing by that id anywhere
+        "theirs",  # another client's document in this project
+        "hermes:s-9",  # one of hal0's own agents' documents
+        "hal0::codex::theirs",  # spelling out someone else's stored id
+        "atlas::cc::mine",  # this client's document in another project
+        "unresolved::cc::mine",
+    ],
+)
+def test_a_document_outside_the_callers_namespaces_does_not_exist(
+    client: TestClient, engine: Engine, key: str, client_id: str
+) -> None:
+    """One answer for "no such document" and "not yours": nothing the caller
+    sends can tell them apart, and nothing outside its namespaces is read."""
+    _seed(
+        engine,
+        _doc("hal0::codex::theirs", OTHER_AGENT_PROJECT),
+        _doc("hermes:s-9", GLOBAL),
+        _doc("atlas::cc::mine", OTHER_PROJECT),
+        _doc("unresolved::cc::mine", OWN_UNRESOLVED),
+    )
+    resp = client.delete(_url(URL_BANK + f"/documents/{client_id}"), headers=_auth(key))
+    assert resp.status_code == 404
+    assert resp.json()["error"] == {
+        "code": "memory.compat_document_not_found",
+        "message": "no such document",
+        "details": {"document_id": client_id},
+    }
+    assert engine.lines() == [f"GET {ENGINE_BANK}/documents/hal0::cc::{client_id}"]
+    assert len(engine.documents) == 4
+
+
+def test_an_unresolved_caller_deletes_only_in_its_own_namespace(
     client: TestClient, engine: Engine, key: str
 ) -> None:
-    resp = client.delete(_url(URL_BANK + "/documents/gone"), headers=_auth(key))
-    assert resp.status_code == 404
-    assert resp.json() == {"detail": "Document gone not found"}
-    assert engine.lines() == [f"GET {ENGINE_BANK}/documents/gone"]
+    _seed(
+        engine,
+        _doc("unresolved::cc::mine", OWN_UNRESOLVED),
+        _doc("unresolved::codex::theirs", OTHER_UNRESOLVED),
+        _doc("hal0::cc::in-a-project", OWN_PROJECT),
+    )
+    bank = "/v1/default/banks/claude-code/documents/"
+    assert client.delete(_url(bank + "mine"), headers=_auth(key)).status_code == 200
+    assert client.delete(_url(bank + "theirs"), headers=_auth(key)).status_code == 404
+    assert client.delete(_url(bank + "in-a-project"), headers=_auth(key)).status_code == 404
+    assert [line for line in engine.lines() if line.startswith("DELETE")] == [
+        f"DELETE {ENGINE_BANK}/documents/unresolved::cc::mine"
+    ]
 
 
 # ── operations, configuration, the bank ─────────────────────────────────────
 
 
-def test_an_operation_read_never_asks_for_or_returns_a_payload(
+def _start(client: TestClient, key: str, operation: str | None = None) -> str:
+    """One asynchronous retain; returns the operation id the caller was given."""
+    body: dict[str, Any] = {"items": [_item()], "async": True}
+    if operation is not None:
+        body["operation_id"] = operation
+    resp = client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json=body)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["operation_id"]
+
+
+def test_a_client_polls_its_own_operation_under_its_own_id(
     client: TestClient, engine: Engine, key: str
 ) -> None:
-    op = "6f1d3b52-8f0e-5c41-a7d2-3e9c4b1f0a66"
+    operation = _start(client, key, "my-op-1")
+    engine.calls.clear()
     resp = client.get(
-        _url(URL_BANK + f"/operations/{op}"), headers=_auth(key), params={"include_payload": "true"}
+        _url(URL_BANK + "/operations/my-op-1"),
+        headers=_auth(key),
+        params={"include_payload": "true"},
     )
     assert resp.status_code == 200
-    call = engine.only("GET", f"/operations/{op}")
+    engine_id = _engine_operation_id("cc", "my-op-1")
+    (call,) = engine.calls
+    assert call.line == f"GET {ENGINE_BANK}/operations/{engine_id}"
+    # The submitted payload is never asked for, whatever the caller sends.
     assert call.params == {"include_payload": ["false"]}
     assert call.read_timeout == 15.0
+    assert operation == "my-op-1"
     assert resp.json() == {
-        "id": op,
-        "operation_id": op,
+        "id": "my-op-1",
+        "operation_id": "my-op-1",
         "task_type": "retain",
         "operation_type": "retain",
         "status": "failed",
@@ -1510,35 +1798,143 @@ def test_an_operation_read_never_asks_for_or_returns_a_payload(
         "retry_count": 1,
         "error_message": "extraction model returned no JSON",
         "progress": {"stage": "extract", "at": "2026-11-10T09:14:05Z"},
-        "child_operations": [{"operation_id": "c-1", "status": "failed", "items_count": 1}],
+        # Children are counted, not named: their ids are the engine's.
+        "child_operations": [{"status": "failed", "items_count": 1}],
     }
+    assert engine_id not in resp.text
     assert "ANOTHER CLIENT" not in resp.text and "private:hermes" not in resp.text
 
 
-def test_the_operations_listing_is_statuses_only(client: TestClient, engine: Engine, key: str):
+def test_an_operation_error_is_cut_short(client: TestClient, engine: Engine, key: str) -> None:
+    _start(client, key, "my-op-1")
+    engine.operations[_engine_operation_id("cc", "my-op-1")]["error_message"] = "x" * 5000
+    resp = client.get(_url(URL_BANK + "/operations/my-op-1"), headers=_auth(key))
+    assert len(resp.json()["error_message"]) == memory_compat.MAX_ERROR_MESSAGE_LENGTH == 500
+
+
+def test_another_clients_operation_does_not_exist(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore
+) -> None:
+    """Unknown, another client's, and one of hal0's own: one answer, 404."""
+    _row, codex = store.add_client("codex", created_by="t")
+    _start(client, key, "my-op-1")
+    theirs = _engine_operation_id("cc", "my-op-1")
+    engine.operations["0d9b6c0a-41f7-4e7c-b3a8-52c1e8f97d24"] = {"status": "pending"}
+
+    answers = []
+    for asked in (
+        "my-op-1",  # the same caller-chosen id, from another client
+        theirs,  # the engine's id for it, if it leaked
+        "0d9b6c0a-41f7-4e7c-b3a8-52c1e8f97d24",  # an operation hal0's own agents started
+        "never-started",
+    ):
+        resp = client.get(_url(URL_BANK + f"/operations/{asked}"), headers=_auth(codex))
+        assert resp.status_code == 404, asked
+        error = resp.json()["error"]
+        assert error["code"] == "memory.compat_operation_not_found"
+        answers.append((error["message"], sorted(error["details"])))
+    assert len(set(map(str, answers))) == 1
+    # The owner still reads it, and cannot read it by the engine's id either.
+    assert client.get(_url(URL_BANK + "/operations/my-op-1"), headers=_auth(key)).status_code == 200
+    assert (
+        client.get(_url(URL_BANK + f"/operations/{theirs}"), headers=_auth(key)).status_code == 404
+    )
+
+
+def test_an_engine_that_answers_not_found_in_the_body_is_404(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    engine_id = _engine_operation_id("cc", "gone")
+    engine.overrides[("GET", f"{ENGINE_BANK}/operations/{engine_id}")] = httpx.Response(
+        200, json={"operation_id": engine_id, "status": "not_found"}
+    )
+    resp = client.get(_url(URL_BANK + "/operations/gone"), headers=_auth(key))
+    assert (resp.status_code, _code(resp)) == (404, "memory.compat_operation_not_found")
+
+
+def test_a_poll_needs_no_memory_of_who_started_what(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    """After a hal0-api restart the caller's own recent operations still
+    answer: the engine id is derived from the client and its id, not looked
+    up. The listing is what a restart empties."""
+    _start(client, key, "before-restart")
+    app.state.memory_compat = None  # what a restart leaves
+    assert (
+        client.get(_url(URL_BANK + "/operations/before-restart"), headers=_auth(key)).status_code
+        == 200
+    )
+    listing = client.get(_url(URL_BANK + "/operations"), headers=_auth(key))
+    assert listing.json()["operations"] == []
+
+
+def test_the_operations_listing_is_the_callers_own(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore
+) -> None:
+    _row, codex = store.add_client("codex", created_by="t")
+    _start(client, key, "mine-1")
+    _start(client, codex, "theirs-1")
+    given = _start(client, key)  # no id sent: the caller is handed one
+    engine.operations["0d9b6c0a-41f7-4e7c-b3a8-52c1e8f97d24"] = {
+        "status": "pending",
+        "document_id": "private:hermes:s-9",
+        "error_message": "ANOTHER CLIENT'S ERROR",
+    }
+    engine.calls.clear()
     resp = client.get(
         _url(URL_BANK + "/operations"),
         headers=_auth(key),
         params={"status": "pending", "limit": "50", "include_payload": "true"},
     )
     assert resp.status_code == 200
-    assert engine.only("GET", "/operations").params == {"status": ["pending"], "limit": ["50"]}
-    assert resp.json() == {
-        "bank_id": BANK,
-        "total": 1,
-        "limit": 20,
-        "offset": 0,
-        "operations": [
-            {
-                "id": "op-1",
-                "task_type": "retain",
-                "status": "pending",
-                "items_count": 1,
-                "created_at": "2026-11-10T09:14:02Z",
-            }
-        ],
-    }
-    assert "ANOTHER CLIENT" not in resp.text and "private:hermes" not in resp.text
+    (call,) = engine.calls
+    # The engine's largest page is read, then narrowed to this client.
+    assert call.params == {"status": ["pending"], "limit": ["100"]}
+    page = resp.json()
+    assert set(page) == {"bank_id", "limit", "offset", "operations"}
+    assert [op["id"] for op in page["operations"]] == ["mine-1", given]
+    assert all(
+        set(op)
+        <= {
+            "id",
+            "operation_id",
+            "task_type",
+            "status",
+            "items_count",
+            "created_at",
+            "error_message",
+        }
+        for op in page["operations"]
+    )
+    assert "theirs-1" not in resp.text and "ANOTHER CLIENT" not in resp.text
+    assert _engine_operation_id("cc", "mine-1") not in resp.text
+    assert "hal0::" not in resp.text and "private:hermes" not in resp.text
+
+    theirs = client.get(_url(URL_BANK + "/operations"), headers=_auth(codex)).json()
+    assert [op["id"] for op in theirs["operations"]] == ["theirs-1"]
+
+
+def test_an_operation_the_engine_named_itself_is_pollable_by_the_client_it_was_handed_to(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore
+) -> None:
+    """Items with different strategies start one operation each; the engine
+    names the extra ones. They are returned as they are and remembered."""
+    _row, codex = store.add_client("codex", created_by="t")
+    extra = "5a0c2f3e-91b7-4c1d-8e55-0f6a7d2b9c41"
+    engine.extra_operation_ids = [extra]
+    resp = client.post(
+        _url(URL_BANK + "/memories"),
+        headers=_auth(key),
+        json={"items": [_item(), _item()], "async": True, "operation_id": "batch-1"},
+    )
+    assert resp.json()["operation_id"] == "batch-1"
+    assert resp.json()["operation_ids"] == ["batch-1", extra]
+    assert (
+        client.get(_url(URL_BANK + f"/operations/{extra}"), headers=_auth(key)).status_code == 200
+    )
+    assert (
+        client.get(_url(URL_BANK + f"/operations/{extra}"), headers=_auth(codex)).status_code == 404
+    )
 
 
 def test_the_bank_configuration_read_returns_missions_and_nothing_else(
@@ -1676,7 +2072,8 @@ def test_an_unknown_mutation_is_405(
 
 
 def test_every_listed_route_is_really_served(client: TestClient, engine: Engine, key: str) -> None:
-    engine.documents["d"] = _doc("d", OWN_PROJECT)
+    _seed(engine, _doc("hal0::cc::d", OWN_PROJECT))
+    engine.operations[_engine_operation_id("cc", "op-1")] = {}
     unsupported = {"memory.compat_route_unsupported", "memory.compat_mutation_unsupported"}
     for line in memory_compat.SUPPORTED_ROUTES:
         method, template = line.split(" ", 1)
@@ -1724,6 +2121,291 @@ def test_the_shipped_app_serves_the_endpoint(
     assert listing.status_code != 404, listing.text
 
 
+# ── one client's unresolved writes stay its own ─────────────────────────────
+
+
+@pytest.mark.parametrize("route", ["/memories/recall", "/reflect"])
+def test_an_unresolved_write_is_not_readable_by_another_client(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore, route: str
+) -> None:
+    """Key A writes with no project. Neither the fact nor the observation the
+    engine builds from it (which carries exactly the scope's tags) is inside
+    key B's read, in a project or out of one; both are inside key A's."""
+    _row, other = store.add_client("codex", created_by="t")
+    client.post(
+        _url("/v1/default/banks/claude-code/memories"),
+        headers=_auth(key),
+        json={"items": [_item(tags=["source:chat"])]},
+    )
+    (item,) = engine.only("POST", "/memories").body["items"]
+    fact = item["tags"]
+    (observation,) = item["observation_scopes"]
+    assert observation == ["project:unresolved", "agent:cc"]
+
+    def groups(auth_key: str, bank: str) -> list[dict[str, Any]]:
+        engine.calls.clear()
+        resp = client.post(
+            _url(f"/v1/default/banks/{bank}{route}"), headers=_auth(auth_key), json={"query": "q"}
+        )
+        assert resp.status_code == 200
+        return engine.only("POST", route).body["tag_groups"]
+
+    for bank in ("claude-code", "coding-agent%3A%3Ahal0-mono", "coding-agent%3A%3Atmp"):
+        theirs = groups(other, bank)
+        assert not _readable(theirs, fact) and not _readable(theirs, observation), bank
+    assert not _readable(groups(ADMIN_KEY, "claude-code"), observation)
+    mine = groups(key, "claude-code")
+    assert _readable(mine, fact) and _readable(mine, observation)
+    # Inside a project the writer does not read its unresolved writes either.
+    in_project = groups(key, "coding-agent%3A%3Ahal0-mono")
+    assert not _readable(in_project, fact) and not _readable(in_project, observation)
+
+
+def test_recall_shows_ids_as_the_caller_knows_them(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    engine.recall_results = [
+        {
+            "id": "f-1",
+            "text": "mine",
+            "tags": OWN_PROJECT,
+            "document_id": "hal0::cc::conversation:s_1",
+            "chunk_id": "hal0:shared_hal0::cc::conversation:s~5F1_0",
+        },
+        {
+            "id": "f-2",
+            "text": "shared",
+            "tags": OTHER_AGENT_PROJECT,
+            "document_id": "hal0::shared::git:4f2a",
+            "chunk_id": "hal0:shared_hal0::shared::git:4f2a_2",
+        },
+        {
+            "id": "f-3",
+            "text": "another client's, readable because it is this project's",
+            "tags": OTHER_AGENT_PROJECT,
+            "document_id": "hal0::codex::readme",
+            "chunk_id": "hal0:shared_hal0::codex::readme_0",
+        },
+        {
+            "id": "f-4",
+            "text": "one of hal0's own agents wrote this",
+            "tags": GLOBAL,
+            "document_id": "hermes:s-9",
+            "chunk_id": "hal0:shared_hermes:s-9_0",
+        },
+    ]
+    engine.recall_extras = {
+        "chunks": {
+            "hal0:shared_hal0::cc::conversation:s~5F1_0": {"text": "chunk of mine"},
+            "hal0:shared_hal0::codex::readme_0": {"text": "chunk of theirs"},
+        }
+    }
+    resp = client.post(
+        _url(URL_BANK + "/memories/recall"),
+        headers=_auth(key),
+        json={"query": "q", "include": {"chunks": {}}},
+    )
+    results = resp.json()["results"]
+    assert [r["document_id"] for r in results] == [
+        "conversation:s_1",
+        "git:4f2a",
+        None,
+        "hermes:s-9",
+    ]
+    assert [r["chunk_id"] for r in results[:2]] == [
+        "hal0:shared_conversation:s~5F1_0",
+        "hal0:shared_git:4f2a_2",
+    ]
+    assert results[2]["chunk_id"].startswith("chunk-")
+    assert results[3]["chunk_id"] == "hal0:shared_hermes:s-9_0"
+    assert sorted(resp.json()["chunks"]) == sorted(r["chunk_id"] for r in (results[0], results[2]))
+    assert "::cc::" not in resp.text and "::codex::" not in resp.text
+    assert "::shared::" not in resp.text
+
+
+def test_a_reflect_answer_names_no_stored_document(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    engine.overrides[("POST", ENGINE_BANK + "/reflect")] = httpx.Response(
+        200,
+        json={
+            "text": "the lockfile was stale",
+            "structured_output": {"cause": "lockfile"},
+            "usage": {"n": 1},
+            "based_on": {"memories": [{"document_id": "hal0::codex::readme"}]},
+            "trace": {"tool_calls": ["search hal0::codex::readme"]},
+        },
+    )
+    resp = client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "why?"})
+    assert resp.json() == {
+        "text": "the lockfile was stale",
+        "structured_output": {"cause": "lockfile"},
+        "usage": {"n": 1},
+    }
+
+
+# ── what one request, and one client, may cost ──────────────────────────────
+
+
+def test_an_item_larger_than_the_cap_is_413(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    assert MemoryCompatConfig().max_item_bytes == 16 * 1024 * 1024
+    compat = MemoryCompatConfig(max_item_bytes=2048)
+    app.state.hal0_config = types.SimpleNamespace(memory=types.SimpleNamespace(compat=compat))
+    for content in ("x" * 2049, "é" * 1025):
+        resp = client.post(
+            _url(URL_BANK + "/memories"),
+            headers=_auth(key),
+            json={"items": [_item(), _item(content=content)]},
+        )
+        assert (resp.status_code, _code(resp)) == (413, "memory.compat_item_too_large")
+        assert resp.json()["error"]["details"] == {"index": 1, "max_bytes": 2048}
+    assert engine.calls == []
+    fits = {"items": [_item(content="x" * 2048), _item(content="é" * 1024)]}
+    assert (
+        client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json=fits).status_code == 200
+    )
+
+
+@pytest.mark.parametrize("route", ["/reflect", "/memories/recall"])
+@pytest.mark.parametrize("budget", ["max", "HIGH", "", 3, ["high"]])
+def test_a_budget_outside_the_engines_enum_is_400(
+    client: TestClient, engine: Engine, key: str, route: str, budget: Any
+) -> None:
+    resp = client.post(
+        _url(URL_BANK + route), headers=_auth(key), json={"query": "q", "budget": budget}
+    )
+    assert resp.status_code == 400
+    assert engine.calls == []
+
+
+@pytest.mark.parametrize(
+    ("route", "cap"),
+    [
+        ("/reflect", memory_compat.MAX_REFLECT_TOKENS),
+        ("/memories/recall", memory_compat.MAX_RECALL_TOKENS),
+    ],
+)
+def test_max_tokens_is_lowered_to_the_cap(
+    client: TestClient, engine: Engine, key: str, route: str, cap: int
+) -> None:
+    for asked, sent in ((10**9, cap), (cap, cap), (512, 512)):
+        engine.calls.clear()
+        resp = client.post(
+            _url(URL_BANK + route),
+            headers=_auth(key),
+            json={"query": "q", "max_tokens": asked, "budget": "high"},
+        )
+        assert resp.status_code == 200
+        assert engine.only("POST", route).body["max_tokens"] == sent
+    assert (memory_compat.MAX_REFLECT_TOKENS, memory_compat.MAX_RECALL_TOKENS) == (8192, 16384)
+
+
+def _busy(resp: httpx.Response, retry_after: str) -> None:
+    assert resp.status_code == 429, resp.text
+    assert _code(resp) == "memory.compat_busy"
+    # The plugin honours 429 with Retry-After.
+    assert resp.headers["Retry-After"] == retry_after
+    assert resp.json()["error"]["details"] == {"retry_after_s": int(retry_after)}
+
+
+def test_one_client_runs_one_reflect_at_a_time(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore, app: FastAPI
+) -> None:
+    _row, other = store.add_client("codex", created_by="t")
+    state = _compat_state(app)
+    state.in_flight[("reflect", "cc")] = 1
+    _busy(client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"}), "15")
+    assert engine.calls == []
+    # Another client is not held up by it, and the slot is given back.
+    assert (
+        client.post(
+            _url(URL_BANK + "/reflect"), headers=_auth(other), json={"query": "q"}
+        ).status_code
+        == 200
+    )
+    assert state.in_flight == {("reflect", "cc"): 1}
+
+
+def test_all_clients_together_run_a_configured_number_of_reflects(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    assert MemoryCompatConfig().max_concurrent_reflects == 2
+    state = _compat_state(app)
+    state.in_flight[("reflect", "*")] = 2
+    _busy(client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"}), "15")
+    assert engine.calls == []
+    # The refused request holds no slot of its own afterwards.
+    assert state.in_flight == {("reflect", "*"): 2}
+
+    compat = MemoryCompatConfig(max_concurrent_reflects=3)
+    app.state.hal0_config = types.SimpleNamespace(memory=types.SimpleNamespace(compat=compat))
+    assert (
+        client.post(
+            _url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"}
+        ).status_code
+        == 200
+    )
+
+
+def test_one_client_runs_a_few_retains_at_a_time(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    state = _compat_state(app)
+    state.in_flight[("retain", "cc")] = memory_compat.RETAINS_PER_CLIENT
+    body = {"items": [_item()]}
+    _busy(client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json=body), "2")
+    assert engine.calls == []
+    state.in_flight[("retain", "cc")] -= 1
+    assert (
+        client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json=body).status_code == 200
+    )
+    assert state.in_flight == {("retain", "cc"): memory_compat.RETAINS_PER_CLIENT - 1}
+    assert (memory_compat.REFLECTS_PER_CLIENT, memory_compat.RETAINS_PER_CLIENT) == (1, 4)
+
+
+def test_a_failed_request_gives_its_slot_back(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    engine.overrides[("POST", ENGINE_BANK + "/reflect")] = httpx.ReadTimeout("slow")
+    engine.overrides[("POST", ENGINE_BANK + "/memories")] = httpx.Response(500, text="boom")
+    client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"})
+    client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": [_item()]})
+    client.post(_url(URL_BANK + "/memories"), headers=_auth(key), json={"items": "bad"})
+    assert _compat_state(app).in_flight == {}
+
+
+# ── a key whose name hal0 reserves ──────────────────────────────────────────
+
+
+@pytest.mark.parametrize("name", ["unknown", "unresolved"])
+def test_a_key_minted_under_a_name_since_reserved_is_refused(
+    client: TestClient,
+    engine: Engine,
+    store: BridgeStore,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    """``unknown`` is the identity of a memory write with no caller: a client
+    of that name would read those writers' private notes. No such key can be
+    minted now; one that already exists is refused here."""
+    from hal0.bridge import keys as bridge_keys
+
+    with pytest.raises(BridgeStoreError):
+        store.add_client(name, created_by="t")
+    with monkeypatch.context() as earlier:
+        earlier.setattr(bridge_keys, "RESERVED_CLIENT_NAMES", frozenset())
+        _row, old_key = store.add_client(name, created_by="t")
+
+    for method, path in (("POST", URL_BANK + "/memories"), ("POST", URL_BANK + "/reflect")):
+        resp = client.request(
+            method, _url(path), headers=_auth(old_key), json={"items": [_item()], "query": "q"}
+        )
+        assert (resp.status_code, _code(resp)) == (403, "memory.compat_client_name_reserved")
+    assert engine.calls == []
+
+
 # ── the plugin's own requests ───────────────────────────────────────────────
 
 
@@ -1743,7 +2425,9 @@ def test_the_plugins_requests_are_served(
     """Each request the plugin makes, as it makes it: only a bearer header, the
     bank in the URL, the engine's own paths under the mount prefix."""
     engine.strategies = ("conversation", "document")
-    engine.documents["release-process"] = _doc("release-process", [*OWN_PROJECT, "source:upload"])
+    _seed(engine, _doc("hal0::cc::release-process", [*OWN_PROJECT, "source:upload"]))
+    for started in ("6f1d3b52-8f0e-5c41-a7d2-3e9c4b1f0a66", "0d9b6c0a-41f7-4e7c-b3a8-52c1e8f97d24"):
+        engine.operations[_engine_operation_id("cc", started)] = {}
     resp = client.request(
         case["method"],
         _url(case["path"]),
@@ -1757,21 +2441,31 @@ def test_the_plugins_requests_are_served(
     if expect["engine"] is None:
         assert engine.calls == []
     else:
-        assert engine.calls[-1].line == expect["engine"]
+        polled = case["path"].rsplit("/", 1)[-1]
+        expected = expect["engine"].replace(
+            "{engine operation id}", _engine_operation_id("cc", polled)
+        )
+        assert engine.calls[-1].line == expected
     # No engine call ever names the bank the plugin named.
     for call in served:
         assert call.path in ("/version", "/health") or call.path.startswith(ENGINE_BANK)
         assert "coding-agent" not in call.path
+    # And nothing the plugin gets back names a stored id.
+    assert "hal0::" not in resp.text
     if case["path"].endswith("/memories") and expect["status"] == 200:
-        for item in engine.calls[-1].body["items"]:
-            assert [t for t in item["tags"] if t.startswith("agent:")] == ["agent:cc"]
-            assert [t for t in item["tags"] if t.startswith("project:")] == ["project:hal0"]
-            assert item["metadata"]["bridge_client"] == "cc"
-            assert item["observation_scopes"] == [["project:hal0"]]
-            # The session id the plugin puts in metadata stays there, and the
-            # document id is the plugin's own.
-            sent = case["body"]["items"][0]
-            assert item["document_id"] == sent["document_id"]
-            assert item.get("strategy") == sent["strategy"]
-        assert engine.calls[-1].body.get("operation_id") == case["body"].get("operation_id")
+        sent = case["body"]["items"][0]
+        (item,) = engine.calls[-1].body["items"]
+        assert [t for t in item["tags"] if t.startswith("agent:")] == ["agent:cc"]
+        assert [t for t in item["tags"] if t.startswith("project:")] == ["project:hal0"]
+        assert item["metadata"]["bridge_client"] == "cc"
+        assert item["metadata"].get("client_source") == sent["metadata"].get("source")
+        assert item["observation_scopes"] == [["project:hal0"]]
+        # The plugin's id, inside this client's namespace of the project.
+        assert item["document_id"] == f"hal0::cc::{sent['document_id']}"
+        assert item.get("strategy") == sent["strategy"]
         assert engine.calls[-1].body["async"] is True
+        # The operation is the client's own: its id comes back, the engine
+        # was given the derived one.
+        given = resp.json()["operation_id"]
+        assert given == case["body"].get("operation_id", given)
+        assert engine.calls[-1].body["operation_id"] == _engine_operation_id("cc", given)

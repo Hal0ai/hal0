@@ -34,6 +34,16 @@ Four rules hold on every route:
   scope: the project plus global memory, or, for an unresolved caller, global
   memory plus its own unresolved writes. There is no cross-project read here.
 
+Two more follow from "every bank is one bank". A document id a client sends
+is stored inside that client's namespace of its project
+(:mod:`hal0.memory.document_namespace`) and shown back without it, so no
+client can replace, extend or delete a document it did not write. And an
+asynchronous retain's operation id is derived from the client and the id it
+sent (:func:`_engine_operation_id`), so a client can poll its own operations
+and no one else's. A write here is never global: caller ``scope:`` tags are
+dropped. What one request and one client may cost is bounded: see the
+constants below and ``[memory.compat]``.
+
 What the plugin does with a status shapes the answers. It returns a 404 to
 its caller without raising on every route, so a 404 on a retain would be
 silent data loss: an engine 404 on a retain is answered 502. Every other
@@ -47,11 +57,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import importlib
 import json
 import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+import uuid
+from collections import OrderedDict
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
@@ -64,19 +77,30 @@ from fastapi.responses import JSONResponse
 from hal0.activity import audit_action
 from hal0.api.auth import judged_principal
 from hal0.api.routes.memory import MemoryUnavailable, extraction_ctx_preflight
+from hal0.bridge.keys import is_reserved_name
+from hal0.config.schema import MemoryCompatConfig
 from hal0.errors import (
     BadRequest,
-    Conflict,
     Forbidden,
     Hal0Error,
     MemoryEngineUnavailable,
     NotFound,
     Unauthorized,
 )
+from hal0.memory.document_namespace import (
+    CLIENT_DOCUMENT_ID_KEY,
+    chunk_id_part,
+    is_digested,
+    is_namespaced,
+    readable_prefixes,
+    stored_document_id,
+    visible_document_id,
+)
 from hal0.memory.envelope import (
     AGENT_TAG_PREFIX,
     PROJECT_TAG_PREFIX,
     PROJECT_UNRESOLVED_TAG,
+    SCOPE_TAG_PREFIX,
     coerce_tags,
 )
 from hal0.memory.projects import (
@@ -103,15 +127,50 @@ MEMORY_SCOPE = "memory"
 #: take the name (``hal0.bridge.keys.RESERVED_CLIENT_NAMES``).
 ADMIN_AGENT = "admin"
 
-#: Most items one retain may carry, and the largest retain body read.
+#: Most items one retain may carry, and the largest retain body read. The
+#: body cap leaves room for one item of the largest configurable size
+#: (``[memory.compat].max_item_bytes``, at most 32 MiB) with its JSON escapes.
 MAX_RETAIN_ITEMS = 32
 MAX_RETAIN_BODY_BYTES = 48 * 1024 * 1024
 #: The largest body read on the query routes (reflect, recall).
 MAX_QUERY_BODY_BYTES = 1024 * 1024
 
+#: The engine's ``Budget`` enum, for reflect and recall.
+BUDGETS = ("low", "mid", "high")
+#: The most answer tokens a reflect, and the most result tokens a recall, may
+#: ask for. A larger ``max_tokens`` is lowered to this, not refused.
+MAX_REFLECT_TOKENS = 8192
+MAX_RECALL_TOKENS = 16384
+#: The largest documents page: the plugin's own page size.
+MAX_DOCUMENTS_LIMIT = 500
+_DEFAULT_DOCUMENTS_LIMIT = 100
+#: The longest caller-chosen ``operation_id`` and the longest
+#: ``error_message`` returned for an operation.
+MAX_OPERATION_ID_LENGTH = 200
+MAX_ERROR_MESSAGE_LENGTH = 500
+
+#: How many requests of one kind one client may have in flight. A reflect
+#: holds the engine's language model for minutes; a retain holds its body in
+#: memory. Beyond the limit the answer is 429 with ``Retry-After``, which the
+#: plugin honours. The limit across all clients' reflects is
+#: ``[memory.compat].max_concurrent_reflects``.
+REFLECTS_PER_CLIENT = 1
+RETAINS_PER_CLIENT = 4
+_REFLECT_RETRY_AFTER_S = 15
+_RETAIN_RETRY_AFTER_S = 2
+_EVERY_CLIENT = "*"
+
+#: Namespace of the engine operation ids this endpoint derives
+#: (:func:`_engine_operation_id`). Fixed: changing it orphans every operation
+#: a client is still polling.
+_OPERATION_ID_NAMESPACE = uuid.UUID("6b0f5d1e-3c8a-5e47-9d52-a1c4e7f20b93")
+
+_DEFAULT_SETTINGS = MemoryCompatConfig()
+
 PROJECT_HEADER = "X-hal0-Project"
 IGNORED_FIELDS_HEADER = "X-hal0-Ignored-Fields"
 FILTERED_ITEMS_HEADER = "X-hal0-Filtered-Items"
+INCOMPLETE_LISTING_HEADER = "X-hal0-Listing-Incomplete"
 
 # Engine read budgets, in seconds. A reflect uses the client's own
 # ``REFLECT_TIMEOUT_S`` (``HindsightRestClient.reflect``).
@@ -167,14 +226,22 @@ _ITEM_PASSTHROUGH = (
     "update_mode",
 )
 _ITEM_FIELDS = frozenset({*_ITEM_PASSTHROUGH, "metadata", "strategy", "observation_scopes"})
-#: Metadata keys hal0 writes on every retain here; a caller's value is dropped.
-_OWNED_METADATA = frozenset({"bridge_client", "project", "project_source"})
+#: Metadata keys hal0 writes on a retain here; a caller's value is dropped.
+_OWNED_METADATA = frozenset(
+    {"bridge_client", "project", "project_source", "client_source", CLIENT_DOCUMENT_ID_KEY}
+)
 #: A tag namespace the bridge's own memory tool stamps as provenance
 #: (``hal0.bridge.service``); a caller of this endpoint may not forge it.
 _BRIDGE_SOURCE_TAG_PREFIX = "source:bridge:"
-#: The document-id prefix the unified bank keeps for private documents
-#: (``HindsightProvider._retain_item``).
-_PRIVATE_DOCUMENT_PREFIX = "private:"
+
+#: How many more engine pages a documents listing reads to fill a page that
+#: hal0's own filter shortened.
+_LISTING_EXTRA_FETCHES = 3
+#: The engine's largest operations page, read whole and then narrowed to the
+#: caller's own operations.
+_OPERATION_PAGE = 100
+#: How many operation owners one process remembers.
+_OPERATIONS_REMEMBERED = 20_000
 
 _REFLECT_FIELDS = frozenset(
     {"query", "budget", "max_tokens", "response_schema", "tags", "tags_match", "tag_groups"}
@@ -219,8 +286,14 @@ _OPERATION_FIELDS = (
     "next_retry_at",
 )
 _PROGRESS_FIELDS = ("stage", "at", "processed", "total")
-_CHILD_FIELDS = ("operation_id", "status", "sub_batch_index", "items_count")
-_OPERATION_LIST_FIELDS = ("bank_id", "total", "limit", "offset")
+_CHILD_FIELDS = ("status", "sub_batch_index", "items_count")
+# ``total`` is the engine's count over every client's operations, so it is
+# not passed on.
+_OPERATION_LIST_FIELDS = ("bank_id", "limit", "offset")
+
+# A reflect answer as returned: ``based_on`` and ``trace`` name facts and
+# documents by their stored ids, are never requested, and are not passed on.
+_REFLECT_RESPONSE_FIELDS = ("text", "structured_output", "structured_output_error", "usage")
 
 # The bank configuration keys this endpoint returns: the three the plugin
 # reads to decide whether a bank already has missions.
@@ -244,6 +317,11 @@ class CompatBodyTooLarge(Hal0Error):
 
 class CompatTooManyItems(Hal0Error):
     code = "memory.compat_too_many_items"
+    status = 413
+
+
+class CompatItemTooLarge(Hal0Error):
+    code = "memory.compat_item_too_large"
     status = 413
 
 
@@ -277,7 +355,9 @@ def require_memory_bridge() -> Callable[[Request], str]:
 
     * the admin credential is admitted and acts as :data:`ADMIN_AGENT`;
     * a bridge key that holds :data:`MEMORY_SCOPE` is admitted and acts as
-      its client name;
+      its client name, unless that name is one hal0 reserves
+      (``hal0.bridge.keys``), which a key minted before the reservation
+      could carry: 403 ``memory.compat_client_name_reserved``;
     * any other bridge key, and the box client key, is refused with 403
       ``memory.compat_scope_required``;
     * no credential is 401. The middleware answers that case first, at every
@@ -293,6 +373,14 @@ def require_memory_bridge() -> Callable[[Request], str]:
         if principal.tier == "admin":
             return ADMIN_AGENT
         if principal.tier == "bridge" and principal.name and MEMORY_SCOPE in principal.scopes:
+            if is_reserved_name(principal.name):
+                # A key minted before the name was reserved. Its name is an
+                # identity hal0 uses itself (``unknown``, ``unresolved``, ...),
+                # so nothing is written or read as it here.
+                raise CompatScopeRequired(
+                    "this bridge client's name is reserved; mint a key under another name",
+                    code="memory.compat_client_name_reserved",
+                )
             return principal.name
         if principal.tier == "anon":
             raise Unauthorized("authentication required")
@@ -312,10 +400,89 @@ _CALLER = Depends(require_memory_bridge())
 
 @dataclass(slots=True)
 class _CompatState:
-    """What this router keeps per app: the strategy cache and the import log."""
+    """What this router keeps per app, in memory.
+
+    The strategy cache and the import log are conveniences. ``operations``
+    and ``in_flight`` are per process: hal0-api serves this endpoint from one
+    process, and both are rebuilt empty when it restarts (see
+    :func:`list_operations` for what that means for a listing).
+    """
 
     strategies: dict[str, tuple[float, frozenset[str]]] = field(default_factory=dict)
     import_noted: set[str] = field(default_factory=set)
+    #: Engine operation id -> ``(client, the id that client knows it by)``.
+    operations: OrderedDict[str, tuple[str, str]] = field(default_factory=OrderedDict)
+    #: ``(kind, client)`` -> requests in flight.
+    in_flight: dict[tuple[str, str], int] = field(default_factory=dict)
+
+    def remember_operation(self, engine_id: str, client: str, visible_id: str) -> None:
+        self.operations[engine_id] = (client, visible_id)
+        self.operations.move_to_end(engine_id)
+        while len(self.operations) > _OPERATIONS_REMEMBERED:
+            self.operations.popitem(last=False)
+
+
+class _Busy(Exception):
+    """A client, or the endpoint as a whole, is at its concurrency limit."""
+
+    def __init__(self, what: str, retry_after_s: int) -> None:
+        super().__init__(what)
+        self.what = what
+        self.retry_after_s = retry_after_s
+
+    def response(self, headers: dict[str, str] | None = None) -> Response:
+        """429 in the standard error envelope, with ``Retry-After``."""
+        body = {
+            "error": {
+                "code": "memory.compat_busy",
+                "message": f"too many {self.what} in flight; retry shortly",
+                "details": {"retry_after_s": self.retry_after_s},
+            }
+        }
+        return JSONResponse(
+            content=body,
+            status_code=429,
+            headers={**(headers or {}), "Retry-After": str(self.retry_after_s)},
+        )
+
+
+@contextlib.contextmanager
+def _in_flight(
+    state: _CompatState, kind: str, client: str, limit: int, retry_after_s: int
+) -> Iterator[None]:
+    """Hold one of ``client``'s ``limit`` slots of ``kind``, or raise :class:`_Busy`."""
+    key = (kind, client)
+    if state.in_flight.get(key, 0) >= limit:
+        scope = "requests" if client == _EVERY_CLIENT else "requests from this client"
+        raise _Busy(f"{kind} {scope}", retry_after_s)
+    state.in_flight[key] = state.in_flight.get(key, 0) + 1
+    try:
+        yield
+    finally:
+        left = state.in_flight.get(key, 1) - 1
+        if left > 0:
+            state.in_flight[key] = left
+        else:
+            state.in_flight.pop(key, None)
+
+
+def _settings(request: Request) -> MemoryCompatConfig:
+    """``[memory.compat]`` as hal0-api holds it, or the shipped defaults."""
+    config = getattr(request.app.state, "hal0_config", None)
+    compat = getattr(getattr(config, "memory", None), "compat", None)
+    return compat if isinstance(compat, MemoryCompatConfig) else _DEFAULT_SETTINGS
+
+
+def _engine_operation_id(client: str, caller_id: str) -> str:
+    """The engine's id for the operation ``client`` calls ``caller_id``.
+
+    A UUID (the engine requires one) derived from both, so the same client
+    resending the same id still names the same operation, which is what makes
+    the plugin's resend idempotent, while no id one client chooses can name,
+    claim in advance or probe another client's operation, or one hal0's own
+    agents started.
+    """
+    return str(uuid.uuid5(_OPERATION_ID_NAMESPACE, f"{client}\n{caller_id}"))
 
 
 def _state(request: Request) -> _CompatState:
@@ -349,6 +516,7 @@ class _Scope:
 
     agent: str
     resolution: ProjectResolution
+    shared_prefixes: tuple[str, ...] = ()
 
     @property
     def slug(self) -> str | None:
@@ -366,18 +534,20 @@ class _Scope:
     def headers(self) -> dict[str, str]:
         return {PROJECT_HEADER: self.slug or UNRESOLVED_SLUG}
 
-    def write_tags(self) -> list[str]:
-        """The tags that place a document inside this caller's project.
+    def id_prefixes(self) -> tuple[str, ...]:
+        """The stored-id prefixes this caller may list and address: its own
+        namespace and, inside a project, the shared one
+        (:mod:`hal0.memory.document_namespace`)."""
+        return readable_prefixes(self.slug, self.agent)
 
-        Every write of this request carries them: its project tag (each one,
-        when its own tags named several), or, for a caller with no project,
-        ``project:unresolved`` together with its own ``agent:`` tag, because
-        the marker alone is shared by every repository's unresolved writes.
-        """
-        slugs = self.resolution.project_slugs
-        if slugs:
-            return [f"{PROJECT_TAG_PREFIX}{slug}" for slug in slugs]
-        return [PROJECT_UNRESOLVED_TAG, self.agent_tag]
+    def stored_id(self, client_id: str) -> str:
+        """The id the engine knows a document of this caller by."""
+        return stored_document_id(self.slug, self.agent, client_id, self.shared_prefixes)
+
+    def visible_id(self, stored_id: Any, metadata: Any = None) -> str | None:
+        """The caller's own id for a stored document; ``None`` if the document
+        is in neither of its namespaces."""
+        return visible_document_id(self.slug, self.agent, stored_id, metadata)
 
     def project_groups(self) -> list[dict[str, Any]]:
         if self.slug:
@@ -389,7 +559,9 @@ class _Scope:
         return [*reflect_visibility_scope(self.agent), *self.project_groups()]
 
 
-def _scope(provider: Any, bank: str, agent: str, tags: Iterable[Any] = ()) -> _Scope:
+def _scope(
+    request: Request, provider: Any, bank: str, agent: str, tags: Iterable[Any] = ()
+) -> _Scope:
     """Resolve the request's project from the bank in the URL, then its tags.
 
     Two or more distinct projects among the tags are not one project, and a
@@ -401,7 +573,11 @@ def _scope(provider: Any, bank: str, agent: str, tags: Iterable[Any] = ()) -> _S
         coding=True,
         registry=provider.projects,
     )
-    return _Scope(agent=agent, resolution=resolution)
+    return _Scope(
+        agent=agent,
+        resolution=resolution,
+        shared_prefixes=tuple(_settings(request).shared_document_prefixes),
+    )
 
 
 # ── reading the request ──────────────────────────────────────────────────────
@@ -490,6 +666,7 @@ def _engine_failure(
     what: str,
     headers: dict[str, str] | None = None,
     not_found_is_gateway: bool = False,
+    hidden: Iterable[str] = (),
 ) -> Response:
     """Turn a failed engine call into this endpoint's answer.
 
@@ -498,7 +675,9 @@ def _engine_failure(
 
     * An engine 4xx goes to the caller with the engine's body (and its
       ``Retry-After``): a 409 on a reused operation id, a 422 on a malformed
-      field and a 429 are the caller's to act on.
+      field and a 429 are the caller's to act on. The engine names documents
+      by their stored ids in such a body, so the id prefixes in ``hidden``
+      are removed from it first.
     * An engine 401 or 403 is about hal0's own engine credential, not the
       caller's key, and a 5xx is the engine's failure: both are 502.
     * With ``not_found_is_gateway`` an engine 404 is 502 as well. The plugin
@@ -517,8 +696,15 @@ def _engine_failure(
         retry_after = exc.response.headers.get("retry-after")
         if retry_after:
             passed["Retry-After"] = retry_after
+        content = exc.response.content
+        prefixes = [prefix for prefix in dict.fromkeys(hidden) if prefix]
+        if prefixes:
+            text = content.decode("utf-8", "replace")
+            for prefix in prefixes:
+                text = text.replace(prefix, "")
+            content = text.encode("utf-8")
         return Response(
-            content=exc.response.content,
+            content=content,
             status_code=status,
             media_type=exc.response.headers.get("content-type", "application/json"),
             headers=passed,
@@ -541,6 +727,7 @@ async def _forward(
     timeout_s: float,
     params: dict[str, Any] | None = None,
     headers: dict[str, str] | None = None,
+    hidden: Iterable[str] = (),
 ) -> Any | Response:
     """The scoped forwarder: one engine call with no body, chosen by a handler.
 
@@ -552,7 +739,7 @@ async def _forward(
     try:
         return await client.request_json(method, path, params=params, timeout_s=timeout_s)
     except Exception as exc:
-        return _engine_failure(exc, what=what, headers=headers)
+        return _engine_failure(exc, what=what, headers=headers, hidden=hidden)
 
 
 class _ClientGone(Exception):
@@ -673,27 +860,46 @@ async def health(request: Request, agent: str = _CALLER) -> Response:
 # ── 2. retain ────────────────────────────────────────────────────────────────
 
 
-def _retain_item(index: int, raw: Any, agent: str, strategies: frozenset[str]) -> dict[str, Any]:
-    """One caller item, reduced to what ``HindsightProvider.retain_items`` takes."""
+def _dropped_tag(tag: str) -> bool:
+    """A caller tag this endpoint never writes.
+
+    ``scope:`` would make the write global (``scope:global`` is read by every
+    project and every unresolved caller), and ``source:bridge:`` is the
+    provenance stamp of the bridge's own memory tool. The provider and the
+    envelope drop or replace ``agent:``, ``visibility:`` and ``project:``.
+    ``kind:`` stays the caller's choice: it widens nothing.
+    """
+    folded = tag.strip().lower()
+    return folded.startswith((SCOPE_TAG_PREFIX, _BRIDGE_SOURCE_TAG_PREFIX))
+
+
+def _retain_item(
+    index: int, raw: Any, agent: str, strategies: frozenset[str], max_item_bytes: int
+) -> dict[str, Any]:
+    """One caller item, reduced to what ``HindsightProvider.retain_items`` takes.
+
+    The document id is left as the caller sent it; :func:`_namespace_item`
+    gives it its stored form once the item's project is known.
+    """
     if not isinstance(raw, dict):
         raise BadRequest(f"retain item {index} must be an object", details={"index": index})
     item = {key: raw[key] for key in _ITEM_PASSTHROUGH if raw.get(key) is not None}
+    content = item.get("content")
+    if isinstance(content, str) and (
+        len(content) > max_item_bytes
+        or (
+            len(content) * 4 > max_item_bytes
+            and len(content.encode("utf-8", "surrogatepass")) > max_item_bytes
+        )
+    ):
+        raise CompatItemTooLarge(
+            f"retain item {index} 'content' is larger than {max_item_bytes} bytes",
+            details={"index": index, "max_bytes": max_item_bytes},
+        )
     if "entities" in item and not isinstance(item["entities"], list):
         raise BadRequest(f"retain item {index} 'entities' must be a list", details={"index": index})
-    if str(item.get("document_id", "")).startswith(_PRIVATE_DOCUMENT_PREFIX):
-        # The unified bank keeps this prefix for private documents, and this
-        # endpoint never writes one.
-        raise BadRequest(
-            f"retain item {index} 'document_id' may not start with {_PRIVATE_DOCUMENT_PREFIX!r}",
-            code="memory.compat_document_id_reserved",
-            details={"index": index},
-        )
     if "tags" in item:
-        item["tags"] = [
-            tag
-            for tag in coerce_tags(item["tags"])
-            if not tag.strip().lower().startswith(_BRIDGE_SOURCE_TAG_PREFIX)
-        ]
+        item["tags"] = [tag for tag in coerce_tags(item["tags"]) if not _dropped_tag(tag)]
     strategy = raw.get("strategy")
     if isinstance(strategy, str) and strategy in strategies:
         item["strategy"] = strategy
@@ -703,59 +909,38 @@ def _retain_item(index: int, raw: Any, agent: str, strategies: frozenset[str]) -
         if isinstance(caller_metadata, dict)
         else {}
     )
+    # The provider writes the client's name as ``source``; what the caller
+    # called its source (the plugin sends ``chat``) is kept beside it.
     # ``project`` and ``project_source`` are written by the envelope from the
     # resolution, which is why a caller's own values were removed above.
+    if metadata.get("source") not in (None, ""):
+        metadata["client_source"] = metadata["source"]
     metadata["bridge_client"] = agent
     item["metadata"] = metadata
     return item
 
 
-async def _refuse_foreign_documents(
-    provider: Any, items: list[dict[str, Any]], scopes: list[_Scope]
-) -> None:
-    """Refuse a retain that would replace or extend a document outside the caller's project.
+def _namespace_item(item: dict[str, Any], scope: _Scope) -> None:
+    """Give one prepared item its stored document id, in place.
 
-    The engine upserts on document id, per bank. The plugin picks its ids
-    expecting a bank of its own (``conversation:<session>``, a slug of a
-    document's title), and here every bank name is the one platform bank. So
-    without this check two repositories that both retain ``readme`` would
-    silently replace each other's document, and any client could overwrite a
-    document hal0's own agents wrote by naming its id.
-
-    Each item that names a document id is looked up first. An id the engine
-    does not have is free. An existing document must already carry the tags
-    this write would give it (:meth:`_Scope.write_tags`); otherwise the retain
-    is refused whole with 409 ``memory.compat_document_id_taken``, which the
-    plugin raises on. Engine failures propagate to the caller's handling.
+    Every item gets an id in one of the caller's namespaces
+    (:mod:`hal0.memory.document_namespace`): the caller's own id behind the
+    prefix, or a fresh one when it named none, so that no write here can land
+    on a document outside them. An item whose own tags named several projects
+    has those tags removed and is written as unresolved: a document has one
+    namespace, so a write here has one project or none.
     """
-    wanted: dict[str, list[str]] = {}
-    for item, scope in zip(items, scopes, strict=True):
-        document_id = item.get("document_id")
-        if document_id not in (None, ""):
-            wanted.setdefault(str(document_id), scope.write_tags())
-
-    async def _taken(document_id: str, required: list[str]) -> bool:
-        path = _bank_path(provider, f"/documents/{quote(document_id, safe='')}")
-        try:
-            document = await provider.hindsight_client.request_json(
-                "GET", path, timeout_s=_DOCUMENT_TIMEOUT_S
-            )
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                return False
-            raise
-        tags = document.get("tags") if isinstance(document, dict) else None
-        return not _carries(tags, required)
-
-    verdicts = await asyncio.gather(*(_taken(doc, tags) for doc, tags in wanted.items()))
-    taken = [doc for doc, refused in zip(wanted, verdicts, strict=True) if refused]
-    if taken:
-        raise Conflict(
-            "a document with this id already exists outside this client's project; "
-            "choose another document_id",
-            code="memory.compat_document_id_taken",
-            details={"document_ids": taken[:10]},
-        )
+    if scope.resolution.slugs:
+        item["tags"] = [
+            tag
+            for tag in item.get("tags", ())
+            if not tag.strip().lower().startswith(PROJECT_TAG_PREFIX)
+        ]
+    named = item.get("document_id")
+    client_id = str(named) if named not in (None, "") else uuid.uuid4().hex
+    item["document_id"] = scope.stored_id(client_id)
+    if is_digested(scope.slug, scope.agent, client_id, scope.shared_prefixes):
+        item["metadata"][CLIENT_DOCUMENT_ID_KEY] = client_id
 
 
 @router.post(_BANK + "/memories")
@@ -765,18 +950,38 @@ async def retain(bank: str, request: Request, agent: str = _CALLER) -> Response:
     Every item goes through ``HindsightProvider.retain_items`` as a coding
     client's write to the platform bank: exactly one ``agent:<caller>`` tag,
     the resolved ``project:`` tag in place of any the caller sent
-    (``project:unresolved`` when there is none), session ids and lifecycle
-    words moved out of the tags into metadata, and an observation scope hal0
-    chooses. ``async`` and ``operation_id`` are sent to the engine as given,
-    in one call, so the plugin's idempotent resend keeps working. The answer
-    is the engine's own JSON.
+    (``project:unresolved`` when there is none, never ``scope:global``),
+    session ids and lifecycle words moved out of the tags into metadata, and
+    an observation scope hal0 chooses. All items go to the engine in one call
+    and the answer is the engine's own JSON, which names no document.
 
-    Before the retain, a document id an item names is looked up, and the
-    retain is refused if that document exists outside the caller's project
-    (:func:`_refuse_foreign_documents`).
+    The engine upserts on document id, and every bank name here is one bank,
+    so each document id is stored inside one of the caller's namespaces
+    (:func:`_namespace_item`): two repositories, or two clients, that both
+    retain ``readme`` write two documents, and no id a client sends can
+    address a document another client, or one of hal0's own agents, wrote.
+
+    An asynchronous retain is given an engine operation id derived from the
+    client and the ``operation_id`` it sent (:func:`_engine_operation_id`),
+    and the client's own id is what the answer carries. The plugin's resend
+    with the same id is therefore still one operation.
+
+    One client may have :data:`RETAINS_PER_CLIENT` retains in flight; the
+    next is 429 with ``Retry-After``.
     """
+    try:
+        with _in_flight(
+            _state(request), "retain", agent, RETAINS_PER_CLIENT, _RETAIN_RETRY_AFTER_S
+        ):
+            return await _retain(bank, request, agent)
+    except _Busy as busy:
+        return busy.response()
+
+
+async def _retain(bank: str, request: Request, agent: str) -> Response:
     _require_writes_allowed()
     provider = _provider(request)
+    settings = _settings(request)
     body = await _read_json(request, cap=MAX_RETAIN_BODY_BYTES)
     items = body.get("items")
     if not isinstance(items, list) or not items:
@@ -791,14 +996,29 @@ async def retain(bank: str, request: Request, agent: str = _CALLER) -> Response:
         if not isinstance(body["async"], bool):
             raise BadRequest("retain 'async' must be a boolean")
         request_fields["async_"] = body["async"]
-    if body.get("operation_id") is not None:
-        if not isinstance(body["operation_id"], str):
-            raise BadRequest("retain 'operation_id' must be a string")
-        request_fields["operation_id"] = body["operation_id"]
+    caller_operation = body.get("operation_id")
+    if caller_operation is not None and not (
+        isinstance(caller_operation, str) and 0 < len(caller_operation) <= MAX_OPERATION_ID_LENGTH
+    ):
+        raise BadRequest(
+            f"retain 'operation_id' must be a string of 1 to {MAX_OPERATION_ID_LENGTH} characters"
+        )
+    asynchronous = request_fields.get("async_") is True
+    visible_operation = engine_operation = ""
+    if asynchronous:
+        # The engine ignores an operation id on a synchronous retain, so one
+        # is sent only here; a caller that named none still gets one it can
+        # poll.
+        visible_operation = caller_operation or str(uuid.uuid4())
+        engine_operation = _engine_operation_id(agent, visible_operation)
+        request_fields["operation_id"] = engine_operation
 
     named_strategy = any(isinstance(i, dict) and i.get("strategy") is not None for i in items)
     strategies = await _bank_strategies(request, provider) if named_strategy else frozenset()
-    wire_items = [_retain_item(i, raw, agent, strategies) for i, raw in enumerate(items)]
+    wire_items = [
+        _retain_item(i, raw, agent, strategies, settings.max_item_bytes)
+        for i, raw in enumerate(items)
+    ]
 
     ignored = {name for name in body if name not in _RETAIN_FIELDS}
     for raw, item in zip(items, wire_items, strict=True):
@@ -807,38 +1027,100 @@ async def retain(bank: str, request: Request, agent: str = _CALLER) -> Response:
             ignored.add("items.strategy")
 
     # The bank in the URL decides the project for every item. When it names
-    # none the provider resolves each item from its own ``project:`` tags;
-    # the header then reports what all of them together resolve to.
-    bank_scope = _scope(provider, bank, agent)
+    # none the provider resolves each item from its own ``project:`` tags,
+    # exactly as the per-item scope below does; the header reports what all
+    # of them together resolve to.
+    bank_scope = _scope(request, provider, bank, agent)
     every_tag = [tag for item in wire_items for tag in item.get("tags", ())]
-    headers = {**_scope(provider, bank, agent, every_tag).headers(), **_ignored(ignored)}
+    headers = {**_scope(request, provider, bank, agent, every_tag).headers(), **_ignored(ignored)}
+    item_scopes = [
+        _scope(request, provider, bank, agent, item.get("tags", ())) for item in wire_items
+    ]
+    for item, scope in zip(wire_items, item_scopes, strict=True):
+        _namespace_item(item, scope)
 
     # The same rule every other hal0 writer runs first (#1903): an extraction
     # slot too small for the extraction prompt can never process a retain.
     await extraction_ctx_preflight(request.app, provider)
 
-    synchronous = request_fields.get("async_") is not True
-    item_scopes = [_scope(provider, bank, agent, item.get("tags", ())) for item in wire_items]
     try:
-        await _refuse_foreign_documents(provider, wire_items, item_scopes)
         out = await provider.retain_items(
             wire_items,
             agent=agent,
             project_resolution=bank_scope.resolution,
             coding=True,
-            timeout_s=_RETAIN_SYNC_TIMEOUT_S if synchronous else _RETAIN_ASYNC_TIMEOUT_S,
+            timeout_s=_RETAIN_ASYNC_TIMEOUT_S if asynchronous else _RETAIN_SYNC_TIMEOUT_S,
             **request_fields,
         )
     except ValueError as exc:
-        # The provider's own refusal of a reserved document id; a backstop to
-        # the check in :func:`_retain_item`.
-        raise BadRequest(str(exc), code="memory.compat_document_id_reserved") from exc
+        # The unified bank keeps ``private:``-prefixed document ids for private
+        # documents. A stored id here starts with its project, so only a
+        # project literally named ``private`` can reach this.
+        raise BadRequest(
+            "this project name cannot hold documents through this endpoint",
+            code="memory.compat_document_id_reserved",
+        ) from exc
     except Exception as exc:
-        return _engine_failure(exc, what="the retain", headers=headers, not_found_is_gateway=True)
-    return _json(out.get("engine_response") or {}, headers)
+        return _engine_failure(
+            exc,
+            what="the retain",
+            headers=headers,
+            not_found_is_gateway=True,
+            hidden=[prefix for scope in item_scopes for prefix in scope.id_prefixes()],
+        )
+    answer = dict(out.get("engine_response") or {})
+    if asynchronous:
+        _own_operations(answer, _state(request), agent, engine_operation, visible_operation)
+    return _json(answer, headers)
+
+
+def _own_operations(
+    answer: dict[str, Any], state: _CompatState, agent: str, engine_id: str, visible_id: str
+) -> None:
+    """Record the operations a retain started and show the caller its own id.
+
+    The engine answers with the id it was given, and with further ids of its
+    own when it split the items by strategy. Those stay as they are and are
+    remembered, so the client that was handed them can poll them.
+    """
+
+    def shown(operation_id: Any) -> Any:
+        if not isinstance(operation_id, str) or not operation_id:
+            return operation_id
+        visible = visible_id if operation_id == engine_id else operation_id
+        state.remember_operation(operation_id, agent, visible)
+        return visible
+
+    if "operation_id" in answer:
+        answer["operation_id"] = shown(answer["operation_id"])
+    if isinstance(answer.get("operation_ids"), list):
+        answer["operation_ids"] = [shown(operation_id) for operation_id in answer["operation_ids"]]
 
 
 # ── 3. reflect ───────────────────────────────────────────────────────────────
+
+
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _budget(body: dict[str, Any], what: str) -> str | None:
+    budget = body.get("budget")
+    if budget is None:
+        return None
+    if not isinstance(budget, str) or budget not in BUDGETS:
+        raise BadRequest(f"{what} 'budget' must be one of " + ", ".join(BUDGETS))
+    return budget
+
+
+def _max_tokens(body: dict[str, Any], what: str, cap: int) -> int | None:
+    """The caller's ``max_tokens``, lowered to ``cap`` when it asks for more."""
+    max_tokens = body.get("max_tokens")
+    if max_tokens is None:
+        return None
+    if not _positive_int(max_tokens):
+        raise BadRequest(f"{what} 'max_tokens' must be a positive integer")
+    return min(int(max_tokens), cap)
 
 
 @router.post(_BANK + "/reflect")
@@ -850,70 +1132,115 @@ async def reflect(bank: str, request: Request, agent: str = _CALLER) -> Response
     agents' private memory. The project scope is added to that as one more
     group, and so are the caller's own ``tags``. The engine call is cancelled
     when the client disconnects.
+
+    A reflect holds the engine's language model for minutes, so one client
+    runs one at a time and all clients together run
+    ``[memory.compat].max_concurrent_reflects``; beyond either the answer is
+    429 with ``Retry-After``. The answer is the engine's ``text``,
+    ``structured_output`` and ``usage``.
     """
     provider = _provider(request)
     body = await _read_json(request, cap=MAX_QUERY_BODY_BYTES)
     query = _query(body, "reflect")
     tags, tags_match = _caller_filter(body, "reflect")
     extra: dict[str, Any] = {}
-    if body.get("budget") is not None:
-        if not isinstance(body["budget"], str):
-            raise BadRequest("reflect 'budget' must be a string")
-        extra["budget"] = body["budget"]
-    max_tokens = body.get("max_tokens")
+    budget = _budget(body, "reflect")
+    if budget is not None:
+        extra["budget"] = budget
+    max_tokens = _max_tokens(body, "reflect", MAX_REFLECT_TOKENS)
     if max_tokens is not None:
-        if not _positive_int(max_tokens):
-            raise BadRequest("reflect 'max_tokens' must be a positive integer")
         extra["max_tokens"] = max_tokens
     if body.get("response_schema") is not None:
         if not isinstance(body["response_schema"], dict):
             raise BadRequest("reflect 'response_schema' must be an object")
         extra["response_schema"] = body["response_schema"]
 
-    scope = _scope(provider, bank, agent, tags or ())
+    scope = _scope(request, provider, bank, agent, tags or ())
     headers = {**scope.headers(), **_ignored(n for n in body if n not in _REFLECT_FIELDS)}
-    call = provider.reflect(
-        query,
-        client_id=agent,
-        tags=tags,
-        tags_match=tags_match,
-        tag_groups=[*scope.project_groups(), *_caller_groups(body, "reflect")],
-        **extra,
-    )
+    groups = [*scope.project_groups(), *_caller_groups(body, "reflect")]
+    state = _state(request)
+    everyone = _settings(request).max_concurrent_reflects
     try:
-        result = await _until_disconnect(request, call)
+        with (
+            _in_flight(state, "reflect", agent, REFLECTS_PER_CLIENT, _REFLECT_RETRY_AFTER_S),
+            _in_flight(state, "reflect", _EVERY_CLIENT, everyone, _REFLECT_RETRY_AFTER_S),
+        ):
+            call = provider.reflect(
+                query,
+                client_id=agent,
+                tags=tags,
+                tags_match=tags_match,
+                tag_groups=groups,
+                **extra,
+            )
+            result = await _until_disconnect(request, call)
+    except _Busy as busy:
+        return busy.response(headers)
     except _ClientGone:
         log.info("hal0.memory.compat.reflect_abandoned", client=agent)
         return Response(status_code=499)
     except Exception as exc:
-        return _engine_failure(exc, what="the reflect", headers=headers)
-    return _json(result if isinstance(result, dict) else {"text": str(result)}, headers)
+        return _engine_failure(exc, what="the reflect", headers=headers, hidden=scope.id_prefixes())
+    return _json(_pick(result, _REFLECT_RESPONSE_FIELDS), headers)
 
 
 # ── 4. recall ────────────────────────────────────────────────────────────────
 
-
-def _positive_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
-
-
 # The RecallRequest fields passed to the engine as sent: ``(name, shape check,
-# what the 400 says)``. The engine validates their values.
+# what the 400 says)``. The engine validates their values. ``budget`` and
+# ``max_tokens`` are checked apart.
 _RECALL_KNOBS: tuple[tuple[str, Callable[[Any], bool], str], ...] = (
     (
         "types",
         lambda v: isinstance(v, list) and all(isinstance(t, str) for t in v),
         "a list of strings",
     ),
-    ("budget", lambda v: isinstance(v, str), "a string"),
-    ("max_tokens", _positive_int, "a positive integer"),
     ("query_timestamp", lambda v: isinstance(v, str), "a string"),
     ("min_scores", lambda v: isinstance(v, dict), "an object"),
     ("prefer_observations", lambda v: isinstance(v, bool), "a boolean"),
 )
 
 
-def _scrub_recall(response: dict[str, Any], groups: list[dict[str, Any]]) -> dict[str, Any]:
+def _opaque_chunk_id(chunk_id: str) -> str:
+    return "chunk-" + hashlib.sha256(chunk_id.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+
+
+def _visible_record(
+    record: dict[str, Any], scope: _Scope, chunk_ids: dict[str, str]
+) -> dict[str, Any]:
+    """A recall result or source fact with its ids as the caller may see them.
+
+    A document in one of the caller's namespaces gets the caller's own id. A
+    namespaced id that is not the caller's (another client's document in the
+    same project) is not shown at all. An id with no namespace was chosen by
+    one of hal0's own agents and is shown as it is. The engine's chunk id has
+    the document id inside it, so it is rewritten the same way, or replaced
+    by an opaque one; ``chunk_ids`` collects old id to new id for the
+    response's ``chunks``.
+    """
+    out = dict(record)
+    stored = record.get("document_id")
+    chunk_id = record.get("chunk_id")
+    visible = scope.visible_id(stored, record.get("metadata")) if stored is not None else None
+    foreign = visible is None and is_namespaced(stored)
+    if visible is not None:
+        out["document_id"] = visible
+    elif foreign:
+        out["document_id"] = None
+    if isinstance(chunk_id, str) and chunk_id:
+        shown = chunk_id
+        if visible is not None and isinstance(stored, str):
+            shown = chunk_id.replace(chunk_id_part(stored), chunk_id_part(visible), 1)
+        if foreign or any(chunk_id_part(prefix) in shown for prefix in scope.id_prefixes()):
+            shown = _opaque_chunk_id(chunk_id)
+        chunk_ids[chunk_id] = shown
+        out["chunk_id"] = shown
+    return out
+
+
+def _scrub_recall(
+    response: dict[str, Any], groups: list[dict[str, Any]], scope: _Scope
+) -> dict[str, Any]:
     """The engine's recall answer, with what the filter cannot vouch for removed.
 
     The engine was given ``groups`` and returned only matching results; each
@@ -927,6 +1254,8 @@ def _scrub_recall(response: dict[str, Any], groups: list[dict[str, Any]]) -> dic
       own tags are inside the groups;
     * ``chunks`` are kept when a surviving result or source fact names them;
     * ``trace`` is never requested and is removed if present.
+
+    Document and chunk ids are then shown as :func:`_visible_record` says.
     """
     out = dict(response)
     raw_results = response.get("results")
@@ -935,7 +1264,6 @@ def _scrub_recall(response: dict[str, Any], groups: list[dict[str, Any]]) -> dic
         for r in (raw_results if isinstance(raw_results, list) else [])
         if isinstance(r, dict) and tags_readable(groups, r.get("tags") or [])
     ]
-    out["results"] = results
     out.pop("trace", None)
     if "entities" in out:
         out["entities"] = None
@@ -945,21 +1273,31 @@ def _scrub_recall(response: dict[str, Any], groups: list[dict[str, Any]]) -> dic
         if isinstance(r.get("source_fact_ids"), list)
         for i in r["source_fact_ids"]
     }
-    chunk_ids = {str(r["chunk_id"]) for r in results if r.get("chunk_id")}
+    chunk_ids: dict[str, str] = {}
+    out["results"] = [_visible_record(r, scope, chunk_ids) for r in results]
     source_facts = response.get("source_facts")
     if isinstance(source_facts, dict):
-        kept = {
-            key: fact
+        out["source_facts"] = {
+            key: _visible_record(fact, scope, chunk_ids)
             for key, fact in source_facts.items()
             if str(key) in named
             and isinstance(fact, dict)
             and tags_readable(groups, fact.get("tags") or [])
         }
-        out["source_facts"] = kept
-        chunk_ids.update(str(f["chunk_id"]) for f in kept.values() if f.get("chunk_id"))
     chunks = response.get("chunks")
     if isinstance(chunks, dict):
-        out["chunks"] = {key: chunk for key, chunk in chunks.items() if str(key) in chunk_ids}
+        shown_chunks: dict[str, Any] = {}
+        for key, chunk in chunks.items():
+            if str(key) not in chunk_ids:
+                continue
+            shown = chunk_ids[str(key)]
+            if isinstance(chunk, dict):
+                chunk = _visible_record(chunk, scope, {})
+                for id_field in ("id", "chunk_id"):
+                    if chunk.get(id_field) == key:
+                        chunk[id_field] = shown
+            shown_chunks[shown] = chunk
+        out["chunks"] = shown_chunks
     return out
 
 
@@ -971,7 +1309,7 @@ async def recall(bank: str, request: Request, agent: str = _CALLER) -> Response:
     items: ``HindsightProvider.recall_raw`` returns what the engine returned
     for the platform bank, filtered by the engine to the same groups a
     reflect gets. :func:`_scrub_recall` then removes what a tag filter cannot
-    vouch for.
+    vouch for and shows document ids as the caller knows them.
     """
     provider = _provider(request)
     body = await _read_json(request, cap=MAX_QUERY_BODY_BYTES)
@@ -985,6 +1323,12 @@ async def recall(bank: str, request: Request, agent: str = _CALLER) -> Response:
         if not shape(value):
             raise BadRequest(f"recall '{name}' must be {expected}")
         extra[name] = value
+    budget = _budget(body, "recall")
+    if budget is not None:
+        extra["budget"] = budget
+    max_tokens = _max_tokens(body, "recall", MAX_RECALL_TOKENS)
+    if max_tokens is not None:
+        extra["max_tokens"] = max_tokens
     include = body.get("include")
     wanted = include if isinstance(include, dict) else {}
     # Entities are on by default in the engine and are bank-wide; ``null``
@@ -994,7 +1338,7 @@ async def recall(bank: str, request: Request, agent: str = _CALLER) -> Response:
         "entities": None,
     }
 
-    scope = _scope(provider, bank, agent, tags or ())
+    scope = _scope(request, provider, bank, agent, tags or ())
     headers = {**scope.headers(), **_ignored(n for n in body if n not in _RECALL_FIELDS)}
     try:
         result = await provider.recall_raw(
@@ -1007,8 +1351,8 @@ async def recall(bank: str, request: Request, agent: str = _CALLER) -> Response:
             **extra,
         )
     except Exception as exc:
-        return _engine_failure(exc, what="the recall", headers=headers)
-    return _json(_scrub_recall(result, scope.read_groups()), headers)
+        return _engine_failure(exc, what="the recall", headers=headers, hidden=scope.id_prefixes())
+    return _json(_scrub_recall(result, scope.read_groups(), scope), headers)
 
 
 # ── 5 and 6. documents ───────────────────────────────────────────────────────
@@ -1057,108 +1401,173 @@ def _document_filter(request: Request, scope: _Scope) -> tuple[list[str], list[s
     return list(dict.fromkeys([*required, *caller])), required
 
 
+def _page_number(request: Request, name: str, default: int) -> int:
+    raw = request.query_params.get(name)
+    if raw is None:
+        return default
+    if not raw.isascii() or not raw.isdigit():
+        raise BadRequest(f"'{name}' must be a non-negative integer")
+    return int(raw)
+
+
 @router.get(_BANK + "/documents")
 async def list_documents(bank: str, request: Request, agent: str = _CALLER) -> Response:
-    """List documents: the engine's ``GET .../documents``, for this project.
+    """List documents: the engine's ``GET .../documents``, for this caller.
 
-    See :func:`_document_filter` for the filter the engine is given. What it
-    cannot express is "and not another agent's private document", so the
-    returned page is filtered in hal0 as well: an item that is
-    ``visibility:private`` to someone else, or that lacks a required tag, is
-    removed. A page can therefore hold fewer than ``limit`` items while more
-    follow, and ``total`` is the engine's count before that step;
-    ``X-hal0-Filtered-Items`` says how many were removed.
+    The engine filters by tag (:func:`_document_filter`). What it cannot
+    express is applied to each returned row in hal0: the row's stored id must
+    be in one of the caller's namespaces (its own, or the project's shared
+    one), which leaves out every document hal0's own agents or another client
+    wrote under an id of their own, and the row must not be private to
+    someone else. A kept row is returned with the caller's own id.
+
+    The plugin stops paging at the first page shorter than ``limit``. So when
+    rows were left out, the listing reads on from the engine, up to
+    :data:`_LISTING_EXTRA_FETCHES` more pages, until the page is full or the
+    engine has no more rows. Rows read that way can come back again on the
+    caller's next page; ids are unique, so a caller collecting them loses
+    nothing. ``total`` is the engine's count for the tag filter, before hal0
+    left anything out: an upper bound, never an undercount.
+    ``X-hal0-Filtered-Items`` says how many rows were left out, and
+    ``X-hal0-Listing-Incomplete`` is set when the page is short although the
+    engine had more.
     """
     provider = _provider(request)
-    scope = _scope(provider, bank, agent, request.query_params.getlist("tags"))
+    scope = _scope(request, provider, bank, agent, request.query_params.getlist("tags"))
     tags, required = _document_filter(request, scope)
-    params: dict[str, Any] = {"tags": tags, "tags_match": "all_strict"}
-    for name in ("limit", "offset", "q"):
-        value = request.query_params.get(name)
-        if value is not None:
-            params[name] = value
+    limit = min(_page_number(request, "limit", _DEFAULT_DOCUMENTS_LIMIT), MAX_DOCUMENTS_LIMIT)
+    offset = _page_number(request, "offset", 0)
+    params: dict[str, Any] = {"tags": tags, "tags_match": "all_strict", "limit": limit}
+    if request.query_params.get("q") is not None:
+        params["q"] = request.query_params["q"]
     headers = scope.headers()
-    out = await _forward(
-        request,
-        "GET",
-        _bank_path(provider, "/documents"),
-        what="the documents listing",
-        timeout_s=_DOCUMENT_TIMEOUT_S,
-        params=params,
-        headers=headers,
-    )
-    if isinstance(out, Response):
-        return out
-    page = dict(out) if isinstance(out, dict) else {}
     visible = reflect_visibility_scope(agent)
-    items = page.get("items")
-    listed: list[Any] = items if isinstance(items, list) else []
-    kept = [
-        doc
-        for doc in listed
-        if isinstance(doc, dict)
-        and _carries(doc.get("tags"), required)
-        and tags_readable(visible, doc["tags"])
-    ]
-    page["items"] = kept
-    if len(kept) != len(listed):
-        headers[FILTERED_ITEMS_HEADER] = str(len(listed) - len(kept))
-    return _json(page, headers)
+
+    first: dict[str, Any] = {}
+    kept: list[dict[str, Any]] = []
+    left_out = 0
+    exhausted = False
+    for fetch in range(1 + _LISTING_EXTRA_FETCHES):
+        out = await _forward(
+            request,
+            "GET",
+            _bank_path(provider, "/documents"),
+            what="the documents listing",
+            timeout_s=_DOCUMENT_TIMEOUT_S,
+            params={**params, "offset": offset + fetch * limit},
+            headers=headers,
+            hidden=scope.id_prefixes(),
+        )
+        if isinstance(out, Response):
+            return out
+        page = out if isinstance(out, dict) else {}
+        if fetch == 0:
+            first = dict(page)
+        items = page.get("items")
+        rows: list[Any] = items if isinstance(items, list) else []
+        for row in rows:
+            if len(kept) >= limit:
+                break
+            shown = (
+                scope.visible_id(row.get("id"), row.get("document_metadata"))
+                if isinstance(row, dict)
+                else None
+            )
+            if (
+                shown is None
+                or not _carries(row.get("tags"), required)
+                or not tags_readable(visible, row["tags"])
+            ):
+                left_out += 1
+                continue
+            kept.append({**row, "id": shown})
+        exhausted = len(rows) < limit or limit == 0
+        if exhausted or len(kept) >= limit:
+            break
+    first["items"] = kept
+    first["limit"] = limit
+    first["offset"] = offset
+    if left_out:
+        headers[FILTERED_ITEMS_HEADER] = str(left_out)
+    if len(kept) < limit and not exhausted:
+        headers[INCOMPLETE_LISTING_HEADER] = "1"
+    return _json(first, headers)
+
+
+def _document_not_found(document_id: str) -> NotFound:
+    """The one answer for a document the caller cannot address, whether the
+    engine has no such document or it is simply not in the caller's
+    namespaces: nothing a caller sends can tell the two apart."""
+    return NotFound(
+        "no such document",
+        code="memory.compat_document_not_found",
+        details={"document_id": document_id[:MAX_OPERATION_ID_LENGTH]},
+    )
 
 
 @router.delete(_BANK + "/documents/{document_id:path}")
 async def delete_document(
     bank: str, document_id: str, request: Request, agent: str = _CALLER
 ) -> Response:
-    """Delete one document, when it is the caller's own in the caller's project.
+    """Delete one of the caller's own documents.
 
-    The document is read first. It is deleted only when it carries both
-    ``agent:<caller>`` and the caller's project tag (``project:unresolved``
-    for a caller with no project); anything else is 403
-    ``memory.compat_document_not_owned``. A document the engine does not have
-    is the engine's 404.
+    The id is the caller's, and is looked up inside its namespaces only
+    (its own, or the project's shared one for a shared id), so a document
+    anywhere else does not exist as far as this route can tell: 404
+    ``memory.compat_document_not_found``. The document is read first and
+    must carry ``agent:<caller>``; a shared document another client wrote
+    last is 403 ``memory.compat_document_not_owned``.
     """
     _require_writes_allowed()
     provider = _provider(request)
-    scope = _scope(provider, bank, agent)
+    client = provider.hindsight_client
+    scope = _scope(request, provider, bank, agent)
     headers = scope.headers()
-    path = _bank_path(provider, f"/documents/{quote(document_id, safe='')}")
-    document = await _forward(
-        request,
-        "GET",
-        path,
-        what="the document read",
-        timeout_s=_DOCUMENT_TIMEOUT_S,
-        headers=headers,
-    )
-    if isinstance(document, Response):
-        return document
-    tags = document.get("tags") if isinstance(document, dict) else None
-    if not _carries(tags, (scope.agent_tag, scope.project_tag)):
-        raise Forbidden(
-            "this document was not written by this client in this project",
-            code="memory.compat_document_not_owned",
-            details={"project": scope.slug or UNRESOLVED_SLUG},
-        )
+    path = _bank_path(provider, f"/documents/{quote(scope.stored_id(document_id), safe='')}")
+
+    async def call(method: str) -> Any:
+        """One engine call on the document; its 404 is this route's 404."""
+        try:
+            return await client.request_json(method, path, timeout_s=_DOCUMENT_TIMEOUT_S)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise _document_not_found(document_id) from exc
+            raise
+
     try:
+        document = await call("GET")
+        tags = document.get("tags") if isinstance(document, dict) else None
+        if not _carries(tags, (scope.agent_tag,)):
+            raise Forbidden(
+                "this document was last written by another client",
+                code="memory.compat_document_not_owned",
+            )
         # The engine's own failure is raised inside the audit block, so the
         # row records it; it becomes this endpoint's answer outside.
-        async with _audited_delete(request, agent, document_id):
-            out = await provider.hindsight_client.request_json(
-                "DELETE", path, timeout_s=_DOCUMENT_TIMEOUT_S
-            )
+        async with _audited_delete(request, agent, scope.stored_id(document_id)):
+            out = await call("DELETE")
     except Exception as exc:
-        return _engine_failure(exc, what="the document delete", headers=headers)
-    return _json(out, headers)
+        return _engine_failure(
+            exc, what="the document delete", headers=headers, hidden=scope.id_prefixes()
+        )
+    deleted = out if isinstance(out, dict) else {}
+    answer = {
+        "success": deleted.get("success", True),
+        "message": "document deleted",
+        "document_id": document_id,
+        "memory_units_deleted": deleted.get("memory_units_deleted", 0),
+    }
+    return _json(answer, headers)
 
 
 @contextlib.asynccontextmanager
-async def _audited_delete(request: Request, agent: str, document_id: str) -> AsyncIterator[None]:
+async def _audited_delete(request: Request, agent: str, stored_id: str) -> AsyncIterator[None]:
     """Record a document delete in the audit store, with the real caller.
 
     ``hal0.api._audit.record_action`` takes the actor from ``X-hal0-Agent``,
     which this endpoint does not trust, so the row is written with the
-    credential's identity instead.
+    credential's identity instead, and with the stored id an operator can
+    find the document by.
     """
     store = getattr(request.app.state, "audit", None)
     if store is None:
@@ -1168,7 +1577,7 @@ async def _audited_delete(request: Request, agent: str, document_id: str) -> Asy
         store,
         category="memory",
         action="memory.document.delete",
-        target=document_id,
+        target=stored_id,
         actor=f"bridge:{agent}",
         message="engine-compatible memory endpoint",
         request_id=request.headers.get("X-Request-ID"),
@@ -1184,16 +1593,23 @@ def _pick(record: Any, fields: Iterable[str]) -> dict[str, Any]:
     return {key: source[key] for key in fields if key in source}
 
 
-def _operation_view(record: Any, *, with_error: bool) -> dict[str, Any]:
-    """One operation as a status poll needs it, and nothing a client submitted.
+def _operation_view(record: Any, visible_id: str) -> dict[str, Any]:
+    """One of the caller's operations as a status poll needs it.
 
-    ``error_message`` is kept only on a read by id: the caller of that read
-    chose the operation, while the list covers every client's.
+    Nothing a client submitted is returned: no payload, no result metadata,
+    no document id, no file name, and no engine id (the operation's id is the
+    one the caller knows it by; child operations are counted, not named).
+    ``error_message`` is the caller's own operation's and is cut to
+    :data:`MAX_ERROR_MESSAGE_LENGTH`.
     """
     view = _pick(record, _OPERATION_FIELDS)
     source = record if isinstance(record, dict) else {}
-    if with_error and "error_message" in source:
-        view["error_message"] = source["error_message"]
+    for id_field in ("id", "operation_id"):
+        if id_field in view:
+            view[id_field] = visible_id
+    error = source.get("error_message")
+    if "error_message" in source:
+        view["error_message"] = error[:MAX_ERROR_MESSAGE_LENGTH] if isinstance(error, str) else None
     if isinstance(source.get("progress"), dict):
         view["progress"] = _pick(source["progress"], _PROGRESS_FIELDS)
     children = source.get("child_operations")
@@ -1204,30 +1620,45 @@ def _operation_view(record: Any, *, with_error: bool) -> dict[str, Any]:
 
 @router.get(_BANK + "/operations")
 async def list_operations(bank: str, request: Request, agent: str = _CALLER) -> Response:
-    """The platform bank's operations, as statuses only."""
+    """The caller's own operations on the platform bank, as statuses.
+
+    The engine's list covers every client's operations and does not say who
+    started which, and an engine operation id cannot be turned back into the
+    client it was derived for. So the list is narrowed to the operations this
+    hal0-api process saw the caller start (:class:`_CompatState`): after a
+    restart it is empty until the caller retains again. A poll by id
+    (:func:`get_operation`) does not depend on that memory. The engine's
+    largest page is read and then narrowed, and ``total`` is not returned.
+    """
     provider = _provider(request)
-    params = {
+    params: dict[str, Any] = {
         name: request.query_params[name]
-        for name in ("status", "type", "limit", "offset", "exclude_parents")
+        for name in ("status", "type", "offset", "exclude_parents")
         if name in request.query_params
     }
-    headers = _scope(provider, bank, agent).headers()
+    params["limit"] = _OPERATION_PAGE
+    limit = min(_page_number(request, "limit", 20), _OPERATION_PAGE)
+    headers = _scope(request, provider, bank, agent).headers()
     out = await _forward(
         request,
         "GET",
         _bank_path(provider, "/operations"),
         what="the operations listing",
         timeout_s=_OPERATION_TIMEOUT_S,
-        params=params or None,
+        params=params,
         headers=headers,
     )
     if isinstance(out, Response):
         return out
-    page = _pick(out, _OPERATION_LIST_FIELDS)
+    known = _state(request).operations
     listed = out.get("operations") if isinstance(out, dict) else None
-    page["operations"] = [
-        _operation_view(op, with_error=False) for op in (listed if isinstance(listed, list) else [])
-    ]
+    mine: list[dict[str, Any]] = []
+    for row in listed if isinstance(listed, list) else []:
+        engine_id = row.get("id") or row.get("operation_id") if isinstance(row, dict) else None
+        owner = known.get(engine_id) if isinstance(engine_id, str) else None
+        if owner is not None and owner[0] == agent and len(mine) < limit:
+            mine.append(_operation_view(row, owner[1]))
+    page = {**_pick(out, _OPERATION_LIST_FIELDS), "limit": limit, "operations": mine}
     return _json(page, headers)
 
 
@@ -1235,22 +1666,45 @@ async def list_operations(bank: str, request: Request, agent: str = _CALLER) -> 
 async def get_operation(
     bank: str, operation_id: str, request: Request, agent: str = _CALLER
 ) -> Response:
-    """One operation's status. The submitted payload is never requested
-    (``include_payload=false``) and never returned."""
+    """One of the caller's own operations.
+
+    The id is the caller's: the engine is asked for the operation derived
+    from this client and that id (:func:`_engine_operation_id`), which no
+    other client's id can name. So an id the caller did not start, another
+    client's included, is 404 ``memory.compat_operation_not_found``, and this
+    needs no memory of who started what: it answers the same after a restart.
+    The exception is an id the engine chose itself and this client was handed
+    in a retain answer, which is remembered per process. The submitted
+    payload is never requested (``include_payload=false``) or returned.
+    """
     provider = _provider(request)
-    headers = _scope(provider, bank, agent).headers()
-    out = await _forward(
-        request,
-        "GET",
-        _bank_path(provider, f"/operations/{quote(operation_id, safe='')}"),
-        what="the operation read",
-        timeout_s=_OPERATION_TIMEOUT_S,
-        params={"include_payload": "false"},
-        headers=headers,
+    client = provider.hindsight_client
+    headers = _scope(request, provider, bank, agent).headers()
+    candidates = [_engine_operation_id(agent, operation_id)]
+    handed = _state(request).operations.get(operation_id)
+    if handed is not None and handed == (agent, operation_id):
+        candidates.append(operation_id)
+    for engine_id in candidates:
+        try:
+            record = await client.request_json(
+                "GET",
+                _bank_path(provider, f"/operations/{quote(engine_id, safe='')}"),
+                params={"include_payload": "false"},
+                timeout_s=_OPERATION_TIMEOUT_S,
+            )
+        except httpx.HTTPStatusError as exc:
+            if 400 <= exc.response.status_code < 500 and exc.response.status_code not in (401, 403):
+                continue
+            return _engine_failure(exc, what="the operation read", headers=headers)
+        except Exception as exc:
+            return _engine_failure(exc, what="the operation read", headers=headers)
+        if isinstance(record, dict) and record.get("status") != "not_found":
+            return _json(_operation_view(record, operation_id), headers)
+    raise NotFound(
+        "no such operation",
+        code="memory.compat_operation_not_found",
+        details={"operation_id": operation_id[:MAX_OPERATION_ID_LENGTH]},
     )
-    if isinstance(out, Response):
-        return out
-    return _json(_operation_view(out, with_error=True), headers)
 
 
 # ── 8 to 10. bank configuration and the bank itself ──────────────────────────
@@ -1266,7 +1720,7 @@ async def bank_config(bank: str, request: Request, agent: str = _CALLER) -> Resp
     ``memory`` scope has no use for the rest of the engine's configuration.
     """
     provider = _provider(request)
-    headers = _scope(provider, bank, agent).headers()
+    headers = _scope(request, provider, bank, agent).headers()
     out = await _forward(
         request,
         "GET",

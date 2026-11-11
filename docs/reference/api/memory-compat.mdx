@@ -1,6 +1,6 @@
 ---
 title: Engine-compatible memory endpoint
-description: "The /api/memory/compat routes: the subset of the memory engine's REST protocol that the Hindsight coding-agents plugin uses, served by hal0 with a bridge key, the write envelope and a project-scoped read. Auth, how the project is resolved, every route with its timeout, what is refused or ignored, and the error codes. Verified against src/hal0/api/routes/memory_compat.py."
+description: "The /api/memory/compat routes: the subset of the memory engine's REST protocol that the Hindsight coding-agents plugin uses, served by hal0 with a bridge key, the write envelope, per-client document ids and a project-scoped read. Auth, the trust model, how the project is resolved, every route with its timeout and limits, what is refused or ignored, and the error codes. Verified against src/hal0/api/routes/memory_compat.py."
 sidebar:
   order: 85
 ---
@@ -37,12 +37,32 @@ The whole prefix is **BRIDGE** class, for every method: it is never open, whatev
 | A bridge key that holds the `memory` scope (`Authorization: Bearer hal0bk_…`) | Admitted. The caller's identity is the bridge client's name. |
 | The admin key, or a dashboard session | Admitted. The identity is `admin`. |
 | A bridge key without the `memory` scope | `403 memory.compat_scope_required` |
+| A bridge key whose client name hal0 has since reserved (`unknown`, `unresolved`) | `403 memory.compat_client_name_reserved` |
 | The box client key | `403 auth.forbidden` |
 | Nothing, or a revoked key | `401 auth.required` |
 
 `hal0 bridge add <name>` mints a key with the `agents` and `memory` scopes by default
-([Agent bridge API reference](/docs/reference/api/bridge/)). The identity is stamped on every
-write as `agent:<name>`. The `X-hal0-Agent` and `X-hal0-Private` headers are not read here.
+([Agent bridge API reference](/docs/reference/api/bridge/)). The `X-hal0-Agent` and
+`X-hal0-Private` headers are not read here.
+
+## What a client can and cannot do
+
+Every client of this endpoint shares one bank with every other client and with hal0's own
+agents. These rules hold whatever a client sends:
+
+| A client… | How |
+|---|---|
+| writes only as itself | every write is tagged `agent:<client name>`; `agent:` and `visibility:` tags it sends are dropped |
+| writes into one project, or none | the project is resolved by hal0 from the bank name; `project:` tags it sends are replaced |
+| never writes global memory | `scope:` tags it sends are dropped. A write here carries a project, or `project:unresolved` |
+| cannot replace, extend or delete another client's document | [document ids](#document-ids) are stored in the client's own namespace |
+| reads one project plus global memory | [the read filter](#what-a-read-sees) is built by hal0 and can only be narrowed |
+| never reads another agent's private memory | same filter |
+| sees only its own operations | [operation ids](#operations) are derived from the client's name |
+| cannot change or delete the bank | template imports are ignored, bank deletes refused |
+
+What clients of one project do share: the project's non-private memory (all of them read it),
+and the documents whose ids start with a shared prefix (any of them may rewrite one).
 
 ## The bank, and the project it carries
 
@@ -60,10 +80,39 @@ through `[memory.projects]` ([Projects in memory](/docs/concepts/memory-projects
 | `coding-agent::widgets` | `widgets` |
 | `coding-agent::widgets-monorepo`, with the alias `widgets-monorepo = "widgets"` | `widgets` |
 | `coding-agent::tmp` (a name on the deny list) | none: the caller is *unresolved* |
-| `claude-code`, `Team::Agents`, `coding-agent::unknown` (no project part) | taken from the request's own `project:` tags; with none, *unresolved* |
+| `claude-code`, `Team::Agents`, `coding-agent::unknown` (no project part) | taken from the request's own `project:` tags; with none, or with several, *unresolved* |
 
 A response to a bank-scoped route carries `X-hal0-Project` with the resolved slug, or
 `unresolved`.
+
+## Document ids
+
+The engine replaces or extends a document when a retain names an id that already exists, and the
+plugin picks its ids as if it had a bank to itself (`conversation:<session>`, a slug of a
+document's title, `git:<sha>`). So hal0 stores a client's document under a longer id and gives
+the client its own id back:
+
+| The client sends | Stored as |
+|---|---|
+| `readme`, working in project `widgets` as client `cc` | `widgets::cc::readme` |
+| `git:4f2a9c1` (an id with a shared prefix) | `widgets::shared::git:4f2a9c1` |
+| `readme`, with no project | `unresolved::cc::readme` |
+
+- The prefix is added to every id a client sends, on a retain and on a delete, and removed from
+  every id it gets back. An id that itself contains `::` is still the client's id, whole.
+- A client can only address its own namespace and its project's shared one. Any other document,
+  another client's or one hal0's own agents wrote, does not exist as far as this endpoint can
+  tell.
+- The shared prefixes are `[memory.compat] shared_document_prefixes`
+  ([config reference](/docs/reference/config-schema/)), by default `git:`, `gitlog:` and
+  `survey-baseline:`: the ids the plugin derives from the repository itself, which a second
+  agent on the same repository should find already ingested. A client with no project has no
+  shared namespace.
+- A stored id must stay usable in hal0's own bank routes: at most 256 characters of
+  `a-z A-Z 0-9 . _ : -`, with no `..`. An id that would not fit is stored as
+  `<project>::<owner>::sha256-<hex>` and the client's id is kept in the document's metadata as
+  `client_document_id`, from which listings show it back.
+- A retained item that names no `document_id` gets a new one in the client's namespace.
 
 ## Routes
 
@@ -74,13 +123,13 @@ how long hal0 waits for the engine.
 |---|---|---|---|---|
 | GET | `/version` | forwarded | the engine's JSON | 3 s |
 | GET | `/health` | forwarded | the engine's JSON | 3 s |
-| POST | `/v1/default/banks/{bank}/memories` | [retain](#retain), through the write envelope | the engine's JSON | 30 s with `async: true`, else 300 s |
-| POST | `/v1/default/banks/{bank}/reflect` | the [read scope](#what-a-read-sees) is added as `tag_groups` | the engine's JSON | `HAL0_MEMORY_REFLECT_TIMEOUT_S` (900 s) |
+| POST | `/v1/default/banks/{bank}/memories` | [retain](#retain), through the write envelope | the engine's JSON, with the client's own operation id | 30 s with `async: true`, else 300 s |
+| POST | `/v1/default/banks/{bank}/reflect` | the [read scope](#what-a-read-sees) is added as `tag_groups` | `text`, `structured_output`, `usage` | `HAL0_MEMORY_REFLECT_TIMEOUT_S` (900 s) |
 | POST | `/v1/default/banks/{bank}/memories/recall` | the read scope is added as `tag_groups` | the engine's JSON, [scrubbed](#recall) | 60 s |
-| GET | `/v1/default/banks/{bank}/documents` | [narrowed to the project](#documents) | the engine's page, filtered | 30 s |
-| DELETE | `/v1/default/banks/{bank}/documents/{document_id}` | read first; deleted only when it is the caller's own | the engine's JSON | 30 s per call |
-| GET | `/v1/default/banks/{bank}/operations` | `status`, `type`, `limit`, `offset`, `exclude_parents` forwarded | [statuses only](#operations) | 15 s |
-| GET | `/v1/default/banks/{bank}/operations/{operation_id}` | `include_payload=false`, always | statuses only | 15 s |
+| GET | `/v1/default/banks/{bank}/documents` | [narrowed to the client's documents](#documents) | the engine's page, filtered | 30 s per engine page |
+| DELETE | `/v1/default/banks/{bank}/documents/{document_id}` | read first; deleted only when the client wrote it | `{success, message, document_id, memory_units_deleted}` | 30 s per call |
+| GET | `/v1/default/banks/{bank}/operations` | `status`, `type`, `offset`, `exclude_parents` forwarded | [the client's own, as statuses](#operations) | 15 s |
+| GET | `/v1/default/banks/{bank}/operations/{operation_id}` | the engine id is derived; `include_payload=false`, always | the client's own, as a status | 15 s |
 | GET | `/v1/default/banks/{bank}/config` | read for the platform bank | the three mission keys only | 15 s |
 | POST | `/v1/default/banks/{bank}/import` | not applied | `200 {"status": "ignored", "reason": "bank configuration is managed by hal0"}` | none |
 | DELETE | `/v1/default/banks/{bank}` | refused | `403 memory.compat_bank_delete_refused` | none |
@@ -96,21 +145,20 @@ Each item is written as a coding client's memory, by `HindsightProvider.retain_i
 
 | Item field | What happens |
 |---|---|
-| `content`, `context`, `document_id`, `timestamp`, `entities`, `update_mode` | passed to the engine as sent |
-| `tags` | normalised: any `agent:` tag is replaced by `agent:<caller>`; any `visibility:` and `source:bridge:` tag is dropped; every `project:` tag is replaced by the one resolved project tag (`project:unresolved` when there is none); a session id (`session:<id>`, a bare UUID) and a lifecycle word (`checkpoint`, `session-end`, …) move to metadata; `kind:durable` or `kind:ephemeral` is added. Everything else, `harness:` and `source:` included, is kept |
-| `metadata` | kept, plus `bridge_client` (the caller), `project` and `project_source`, which a caller cannot set. `source` is set to the caller's name |
-| `observation_scopes` | ignored. hal0 chooses: one scope per project, or `shared` for an unresolved write |
+| `content` | passed as sent; at most `[memory.compat] max_item_bytes` (16 MiB) of UTF-8, else `413 memory.compat_item_too_large` |
+| `context`, `timestamp`, `entities`, `update_mode` | passed to the engine as sent |
+| `document_id` | stored in the client's namespace, see [Document ids](#document-ids) |
+| `tags` | any `agent:` tag is replaced by `agent:<caller>`; any `visibility:`, `scope:` and `source:bridge:` tag is dropped; every `project:` tag is replaced by the one resolved project tag (`project:unresolved` when there is none); a session id (`session:<id>`, a bare UUID) and a lifecycle word (`checkpoint`, `session-end`, …) move to metadata; `kind:durable` is added unless the caller sent a `kind:` or a lifecycle word (then `kind:ephemeral`). Everything else, `harness:` and `source:` included, is kept |
+| `metadata` | kept, plus `bridge_client` (the caller), `project` and `project_source`. `source` becomes the caller's name and the value the client sent is kept as `client_source`. A client cannot set `bridge_client`, `project`, `project_source`, `client_source` or `client_document_id` |
+| `observation_scopes` | ignored. hal0 chooses: the project's scope, or for an unresolved write `[project:unresolved, agent:<caller>]`, so its observations stay the caller's own |
 | `strategy` | kept only when the platform bank defines a retain strategy of that name; otherwise dropped, and the bank's default applies. The bank's configuration is read at most every 5 minutes |
 
-`async` and `operation_id` go to the engine exactly as sent, in a single engine call, so a resend
-with the same `operation_id` is still recognised by the engine as the same operation.
-
-Every bank name here is one bank, and the engine replaces or extends a document when a retain
-names an id that already exists. So an item that names a `document_id` is checked first: the id
-must be new, or the existing document must already be in the caller's project (for an unresolved
-caller, its own unresolved document). Otherwise the whole retain is refused with
-`409 memory.compat_document_id_taken`. A `document_id` that starts with `private:` is
-`400 memory.compat_document_id_reserved`.
+`async` is passed on as sent, and all items go to the engine in one call. An asynchronous retain
+is an operation: the engine is given an operation id derived from the client's name and the
+`operation_id` the client sent, and the answer carries the client's own id. A resend with the
+same id is therefore still the same operation, and one client's id can never name another
+client's. A client that sends no `operation_id` is given one. A synchronous retain has no
+operation.
 
 ### What a read sees
 
@@ -134,50 +182,88 @@ closes its request to the engine, and the engine stops the reflect.
 
 Forwards `query`, `types`, `budget`, `max_tokens`, `query_timestamp`, `min_scores`,
 `prefer_observations`, and `chunks` / `source_facts` under `include`. The answer has the engine's
-shape (`{results, …}`), with three changes:
+shape (`{results, …}`), with these changes:
 
 - `entities` is always `null`. An entity's state is built from the whole bank.
 - `source_facts` and `chunks` are kept only where a returned result refers to them.
 - `trace` is never requested or returned.
+- A `document_id` in the client's namespaces is the client's own id. One in another client's
+  namespace is `null`. One hal0's own agents chose is unchanged. Chunk ids, which contain the
+  document id, are rewritten the same way or replaced by an opaque one.
 
 ### Documents
 
 The engine's listing takes one flat set of `tags` and one `tags_match`, not `tag_groups`, so the
 strictest filter it can express is "carries all of these". hal0 sends the caller's project tag
 (plus, for an unresolved caller, its own `agent:` tag) together with the request's own tags, with
-`tags_match=all_strict`. The consequences:
+`tags_match=all_strict`, and then keeps only the rows whose stored id is in one of the client's
+namespaces and that are not private to another agent. The consequences:
 
-- The listing shows the project's documents only. Global documents are not in it.
+- The listing shows the client's own documents and its project's shared ones, under the client's
+  ids. Documents another client or hal0's own agents wrote into the project under ids of their
+  own are not in it, and neither are global documents.
 - `tags_match` on the request must be `all` or `all_strict`, or anything over at most one tag.
   `exact`, and `any` over several tags, are `400 memory.compat_filter_unsupported`.
-- A `project:` tag in the request is replaced by the resolved one. `limit`, `offset` and `q` are
-  forwarded; other parameters are not.
+- A `project:` tag in the request is replaced by the resolved one. `q` and `offset` are
+  forwarded; `limit` is at most 500. Other parameters are not forwarded.
+- When rows were left out, hal0 reads up to three more pages from the engine to fill the page,
+  so a page is shorter than `limit` only when the engine has no more rows. Rows read that way can
+  appear again on the next page. `X-hal0-Filtered-Items` says how many rows were left out, and
+  `X-hal0-Listing-Incomplete: 1` marks the rare page that is short although the engine had more.
+- `total` is the engine's count for the tag filter, before hal0 left anything out: an upper
+  bound on what the client can list.
 
-"Not another agent's private document" cannot be put in that filter, so hal0 removes such
-documents from the returned page. A page can then hold fewer items than `limit` while more
-follow, `total` is the engine's count from before that step, and `X-hal0-Filtered-Items` says how
-many were removed.
-
-`DELETE …/documents/{document_id}` reads the document first and deletes it only when it carries
-both `agent:<caller>` and the caller's project tag (`project:unresolved` for a caller with no
-project). Anything else is `403 memory.compat_document_not_owned`; a document the engine does not
-have is the engine's `404`. A delete is recorded in the activity log with the actor
-`bridge:<caller>`.
+`DELETE …/documents/{document_id}` looks the id up in the client's namespaces only. A document
+that is not there is `404 memory.compat_document_not_found`, whether or not something else by
+that name exists elsewhere. The document must carry `agent:<caller>`; a shared document another
+client wrote last is `403 memory.compat_document_not_owned`. A delete is recorded in the activity
+log with the actor `bridge:<caller>`.
 
 ### Operations
 
-The platform bank's operations belong to every client, so both routes return statuses and nothing
-a client submitted: `id`, `operation_id`, `task_type`, `operation_type`, `status`, `items_count`,
-`created_at`, `updated_at`, `completed_at`, `retry_count`, `next_retry_at`, the `stage`, `at`,
-`processed` and `total` of `progress`, and each child operation's id, status and item count. The
-read by id also returns `error_message`. Payloads, result metadata, document ids and file names
-are not returned.
+An operation is the client's own or it does not exist:
+`GET …/operations/{operation_id}` asks the engine for the operation derived from this client and
+that id, so an id the client did not start, another client's included, is
+`404 memory.compat_operation_not_found`. This needs no bookkeeping and answers the same after
+hal0-api restarts.
+
+`GET …/operations` lists the client's own operations. The engine does not record who started an
+operation, so the list covers the operations this hal0-api process has seen the client start,
+looked up in the engine's most recent 100; after a restart it is empty until the client retains
+again. `limit` is at most 100 and `total` is not returned.
+
+Both return statuses and nothing a client submitted: `id`, `operation_id` (the client's own id),
+`task_type`, `operation_type`, `status`, `items_count`, `created_at`, `updated_at`,
+`completed_at`, `retry_count`, `next_retry_at`, `error_message` cut to 500 characters, the
+`stage`, `at`, `processed` and `total` of `progress`, and each child operation's status and item
+count. Payloads, result metadata, document ids and engine ids are not returned.
+
+## Limits
+
+| Limit | Value | Beyond it |
+|---|---|---|
+| Retain body | 48 MiB | `413 memory.compat_body_too_large` |
+| Items per retain | 32 | `413 memory.compat_too_many_items` |
+| One item's `content` | `[memory.compat] max_item_bytes`, 16 MiB | `413 memory.compat_item_too_large` |
+| Reflect or recall body | 1 MiB | `413 memory.compat_body_too_large` |
+| `budget` | `low`, `mid` or `high` | `400` |
+| `max_tokens` | 8192 on a reflect, 16384 on a recall | lowered to the limit |
+| Documents `limit` | 500 | lowered to the limit |
+| `operation_id` | 200 characters | `400` |
+| Retains in flight, per client | 4 | `429 memory.compat_busy`, `Retry-After: 2` |
+| Reflects in flight, per client | 1 | `429 memory.compat_busy`, `Retry-After: 15` |
+| Reflects in flight, all clients | `[memory.compat] max_concurrent_reflects`, 2 | `429 memory.compat_busy`, `Retry-After: 15` |
+
+The item limit is sized for the largest thing the plugin sends, a whole session transcript. The
+in-flight limits are counted in the hal0-api process.
 
 ## What is refused or ignored
 
 | Request | Answer | Why |
 |---|---|---|
 | A field the route does not name | dropped; listed in `X-hal0-Ignored-Fields` | A field hal0 has not examined never reaches the engine |
+| `scope:`, `agent:`, `visibility:`, `project:`, `source:bridge:` tags on a retain | dropped or replaced | See [What a client can and cannot do](#what-a-client-can-and-cannot-do) |
+| `observation_scopes` on a retain | ignored | hal0 chooses the scope |
 | `POST …/import` (a bank template) | `200`, not applied | hal0 owns the platform bank's missions, strategies and directives. The plugin sends its template on every configure pass and raises on a refusal |
 | `DELETE …/banks/{bank}` | `403` | Every bank name is the shared platform bank |
 | Knowledge-base routes, reads and writes | `404` | The plugin reads this as "no pages on this server" and carries on without them |
@@ -191,24 +277,25 @@ A failure hal0 raises is the standard envelope `{"error": {"code", "message", "d
 
 | Status | Code | When |
 |---|---|---|
-| 400 | `request.invalid_json`, `validation.invalid` | The body is not a JSON object, or a field has the wrong type |
-| 400 | `memory.compat_document_id_reserved` | A retain names a `document_id` starting with `private:` |
+| 400 | `request.invalid_json`, `validation.invalid` | The body is not a JSON object, or a field has the wrong type or value |
 | 400 | `memory.compat_filter_unsupported` | A documents listing with a `tags_match` that cannot be combined with the project |
+| 400 | `memory.compat_document_id_reserved` | A retain in a project literally named `private`, whose stored ids the bank reserves |
 | 401 | `auth.required` | No credential, or a key that does not verify |
 | 403 | `auth.forbidden` | The box client key |
-| 403 | `memory.compat_scope_required` | A bridge key without the `memory` scope |
-| 403 | `memory.compat_document_not_owned` | Deleting a document that is not the caller's own in its project |
+| 403 | `memory.compat_scope_required`, `memory.compat_client_name_reserved` | A bridge key without the `memory` scope, or under a reserved name |
+| 403 | `memory.compat_document_not_owned` | Deleting a shared document another client wrote last |
 | 403 | `memory.compat_bank_delete_refused` | `DELETE` on a bank |
+| 404 | `memory.compat_document_not_found`, `memory.compat_operation_not_found` | A document or operation that is not the client's own |
 | 404 | `memory.compat_knowledge_base_unsupported` | A knowledge-base route |
 | 404 | `memory.compat_route_unsupported` | A read this endpoint does not serve |
 | 405 | `memory.compat_mutation_unsupported` | A write this endpoint does not serve |
-| 409 | `memory.compat_document_id_taken` | A retain names a document that exists outside the caller's project |
-| 413 | `memory.compat_body_too_large`, `memory.compat_too_many_items` | A body over the cap (48 MiB for a retain, 1 MiB for a reflect or recall), or more than 32 items |
+| 413 | `memory.compat_body_too_large`, `memory.compat_too_many_items`, `memory.compat_item_too_large` | See [Limits](#limits) |
+| 429 | `memory.compat_busy` | Too many retains or reflects in flight; `Retry-After` says when to retry |
 | 502 | `memory.compat_engine_error` | The engine answered `5xx`, refused hal0's own credential, or answered `404` to a retain. `error.details.upstream_status` has its status |
 | 503 | `memory.engine_unavailable`, `memory.unavailable` | The engine cannot be reached, or hal0 is running on its volatile fallback store |
 | 503 | `memory.extraction_ctx_too_small` | The extraction model's context window is too small to process any retain |
 | 504 | `memory.compat_engine_timeout` | The engine did not answer within the route's timeout |
 
 Any other `4xx` from the engine is passed through with the engine's own status and body, and its
-`Retry-After` header: a `409` for an `operation_id` that belongs to another operation, a `422`
-for a value the engine rejects, a `429`.
+`Retry-After` header: a `422` for a value the engine rejects, a `429`. Stored-id prefixes are
+removed from such a body first.

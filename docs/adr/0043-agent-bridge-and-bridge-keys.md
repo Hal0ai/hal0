@@ -106,6 +106,9 @@ ADR-0035 was verified against), shapes the answer:
    client is added or its key rotated, and cannot be recovered. Because a
    client's memory identity is its bare name, the names hal0's own callers and
    namespaces use are reserved: `hermes`, `pi`, `admin`, `anonymous`, `shared`,
+   `unknown`, `unresolved` (the last two since the 2026-11-11 amendment:
+   `unknown` is the identity stamped on a memory write whose caller had none,
+   and `unresolved` is a part of a stored document id),
    every name starting `hal0`, and every name starting `hermes__`
    (`RESERVED_CLIENT_NAMES` and `RESERVED_CLIENT_PREFIXES` in
    `src/hal0/bridge/keys.py`).
@@ -402,7 +405,10 @@ identity to. That is a bridge key.
 - **Identity.** The bridge client's name, read from the principal the
   middleware judged, stamped on every write as `agent:<name>`. `X-hal0-Agent`
   and `X-hal0-Private` are not read. The admin credential acts as `admin`, a
-  name no client can take (Decision 1).
+  name no client can take (Decision 1). The name is also the client's
+  document namespace and the seed of its operation ids, so a key whose name
+  has since been reserved (`unknown`, `unresolved`) is refused here with
+  `403 memory.compat_client_name_reserved`.
 - **What it is not.** It is not a way round the scope table for the rest of
   REST: a bridge key is still refused on every other non-OPEN `/api/*` and
   `/v1/*` route, `/api/memory/*` outside this prefix included. It reaches no

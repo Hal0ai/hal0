@@ -1,13 +1,16 @@
 {
   "plugin": "@vectorize-io/hindsight-coding-agents",
   "version": "0.8.6",
-  "note": "Request shapes as the plugin's one HTTP client class sends them, transcribed by hand from its published bundle. No plugin code is vendored. Every URL is apiUrl + /v1/default/banks/ + encodeURIComponent(bank) + suffix, with Authorization: Bearer <apiToken> and no other custom header. Ids, text, the configured stamp tag and the mission and strategy bodies of the bank template are made up or abbreviated; field names and fixed values are the plugin's. 'path' is relative to apiUrl. 'expect.status' is what hal0's endpoint answers; 'expect.engine' is the engine call it makes, or null when it makes none.",
+  "note": "Request shapes as the plugin's one HTTP client class sends them, transcribed by hand from its published bundle. No plugin code is vendored. Every URL is apiUrl + /v1/default/banks/ + encodeURIComponent(bank) + suffix, with Authorization: Bearer <apiToken> and no other custom header. Ids, text, the configured stamp tag and the mission and strategy bodies of the bank template are made up or abbreviated; field names and fixed values are the plugin's. 'path' is relative to apiUrl. 'expect.status' is what hal0's endpoint answers; 'expect.engine' is the engine call it makes, or null when it makes none. In 'expect.engine', a document is named by the id hal0 stores it under for the bridge client 'cc' in project 'hal0' (<project>::<client>::<id>), and '{engine operation id}' stands for the id hal0 derives from the client and the operation id in the request.",
   "requests": [
     {
       "name": "version_probe",
       "method": "GET",
       "path": "/version",
-      "expect": {"status": 200, "engine": "GET /version"}
+      "expect": {
+        "status": 200,
+        "engine": "GET /version"
+      }
     },
     {
       "name": "retain_session_first_write",
@@ -19,7 +22,11 @@
             "content": "{\"ref\":\"conversation:0f3c1c1e-5b7a-4a52-9d0e-6c2f1a9b8e77\",\"started\":\"2026-11-10T09:14:02.000Z\"}\n{\"role\":\"user\",\"text\":\"why does the build fail\"}\n{\"role\":\"assistant\",\"text\":\"the lockfile is stale\"}",
             "context": "coding agent session",
             "document_id": "conversation:0f3c1c1e-5b7a-4a52-9d0e-6c2f1a9b8e77",
-            "tags": ["team:platform", "source:chat", "harness:claude-code"],
+            "tags": [
+              "team:platform",
+              "source:chat",
+              "harness:claude-code"
+            ],
             "strategy": "conversation",
             "observation_scopes": "shared",
             "timestamp": "2026-11-10T09:14:02.000Z",
@@ -34,7 +41,10 @@
         "async": true,
         "operation_id": "6f1d3b52-8f0e-5c41-a7d2-3e9c4b1f0a66"
       },
-      "expect": {"status": 200, "engine": "POST /v1/default/banks/hal0:shared/memories"}
+      "expect": {
+        "status": 200,
+        "engine": "POST /v1/default/banks/hal0:shared/memories"
+      }
     },
     {
       "name": "retain_session_append",
@@ -46,7 +56,11 @@
             "content": "{\"role\":\"user\",\"text\":\"regenerate it then\"}\n{\"role\":\"assistant\",\"text\":\"done, the build is green\"}",
             "context": "coding agent session",
             "document_id": "conversation:0f3c1c1e-5b7a-4a52-9d0e-6c2f1a9b8e77",
-            "tags": ["team:platform", "source:chat", "harness:claude-code"],
+            "tags": [
+              "team:platform",
+              "source:chat",
+              "harness:claude-code"
+            ],
             "strategy": "conversation",
             "observation_scopes": "shared",
             "timestamp": "2026-11-10T09:14:02.000Z",
@@ -62,7 +76,10 @@
         "async": true,
         "operation_id": "b0c7f5a4-2d61-5e3a-9c18-7f4e2a6d1b90"
       },
-      "expect": {"status": 200, "engine": "POST /v1/default/banks/hal0:shared/memories"}
+      "expect": {
+        "status": 200,
+        "engine": "POST /v1/default/banks/hal0:shared/memories"
+      }
     },
     {
       "name": "retain_ingested_document",
@@ -74,33 +91,51 @@
             "content": "# Release process\n\nCut the tag from main after the nightly passes.",
             "context": "ingested document",
             "document_id": "release-process",
-            "tags": ["team:platform", "source:upload", "harness:claude-code"],
+            "tags": [
+              "team:platform",
+              "source:upload",
+              "harness:claude-code"
+            ],
             "strategy": "document",
             "observation_scopes": "shared",
-            "metadata": {"harness": "claude-code"}
+            "metadata": {
+              "harness": "claude-code"
+            }
           }
         ],
         "async": true
       },
-      "expect": {"status": 200, "engine": "POST /v1/default/banks/hal0:shared/memories"}
+      "expect": {
+        "status": 200,
+        "engine": "POST /v1/default/banks/hal0:shared/memories"
+      }
     },
     {
       "name": "list_document_ids_by_tag",
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/documents?tags=source%3Aupload&tags_match=all&limit=500&offset=0",
-      "expect": {"status": 200, "engine": "GET /v1/default/banks/hal0:shared/documents"}
+      "expect": {
+        "status": 200,
+        "engine": "GET /v1/default/banks/hal0:shared/documents"
+      }
     },
     {
       "name": "delete_own_document",
       "method": "DELETE",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/documents/release-process",
-      "expect": {"status": 200, "engine": "DELETE /v1/default/banks/hal0:shared/documents/release-process"}
+      "expect": {
+        "status": 200,
+        "engine": "DELETE /v1/default/banks/hal0:shared/documents/hal0::cc::release-process"
+      }
     },
     {
       "name": "bank_missions_check",
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/config",
-      "expect": {"status": 200, "engine": "GET /v1/default/banks/hal0:shared/config"}
+      "expect": {
+        "status": 200,
+        "engine": "GET /v1/default/banks/hal0:shared/config"
+      }
     },
     {
       "name": "bank_template_import",
@@ -115,55 +150,87 @@
           "retain_mission": "(abbreviated)",
           "retain_extraction_mode": "verbose",
           "retain_default_strategy": "git",
-          "retain_strategies": {"git": {}, "gitlog": {}, "conversation": {}, "document": {}},
+          "retain_strategies": {
+            "git": {},
+            "gitlog": {},
+            "conversation": {},
+            "document": {}
+          },
           "entity_labels": [],
           "entities_allow_free_form": true
         }
       },
-      "expect": {"status": 200, "engine": null}
+      "expect": {
+        "status": 200,
+        "engine": null
+      }
     },
     {
       "name": "bank_reset",
       "method": "DELETE",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono",
-      "expect": {"status": 403, "engine": null}
+      "expect": {
+        "status": 403,
+        "engine": null
+      }
     },
     {
       "name": "active_operations",
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/operations",
-      "expect": {"status": 200, "engine": "GET /v1/default/banks/hal0:shared/operations"}
+      "expect": {
+        "status": 200,
+        "engine": "GET /v1/default/banks/hal0:shared/operations"
+      }
     },
     {
       "name": "drain_poll",
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/operations/6f1d3b52-8f0e-5c41-a7d2-3e9c4b1f0a66",
-      "expect": {"status": 200, "engine": "GET /v1/default/banks/hal0:shared/operations/6f1d3b52-8f0e-5c41-a7d2-3e9c4b1f0a66"}
+      "expect": {
+        "status": 200,
+        "engine": "GET /v1/default/banks/hal0:shared/operations/{engine operation id}"
+      }
     },
     {
       "name": "reflect",
       "method": "POST",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/reflect",
-      "body": {"query": "why did the build fail last week?", "budget": "high"},
-      "expect": {"status": 200, "engine": "POST /v1/default/banks/hal0:shared/reflect"}
+      "body": {
+        "query": "why did the build fail last week?",
+        "budget": "high"
+      },
+      "expect": {
+        "status": 200,
+        "engine": "POST /v1/default/banks/hal0:shared/reflect"
+      }
     },
     {
       "name": "knowledge_base_tree",
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/knowledge-base/tree",
-      "expect": {"status": 404, "engine": null}
+      "expect": {
+        "status": 404,
+        "engine": null
+      }
     },
     {
       "name": "knowledge_base_page_read",
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/knowledge-base/pages/kp-architecture",
-      "expect": {"status": 404, "engine": null}
+      "expect": {
+        "status": 404,
+        "engine": null
+      }
     },
     {
       "name": "knowledge_base_search",
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/knowledge-base/search?q=release%20process&limit=3",
-      "expect": {"status": 404, "engine": null}
+      "expect": {
+        "status": 404,
+        "engine": null
+      }
     },
     {
       "name": "knowledge_base_page_create",
@@ -172,15 +239,24 @@
       "body": {
         "name": "Architecture",
         "source_query": "How is this codebase put together?",
-        "tags": ["knowledge:architecture"],
+        "tags": [
+          "knowledge:architecture"
+        ],
         "max_tokens": 4096,
         "trigger": {
-          "fact_types": ["world", "experience", "observation"],
+          "fact_types": [
+            "world",
+            "experience",
+            "observation"
+          ],
           "tags_match": "all",
           "refresh_after_consolidation": true
         }
       },
-      "expect": {"status": 404, "engine": null}
+      "expect": {
+        "status": 404,
+        "engine": null
+      }
     },
     {
       "name": "knowledge_base_node_update",
@@ -188,16 +264,26 @@
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/knowledge-base/nodes/kp-architecture",
       "body": {
         "source_query": "How is this codebase put together today?",
-        "tags": ["knowledge:architecture"]
+        "tags": [
+          "knowledge:architecture"
+        ]
       },
-      "expect": {"status": 404, "engine": null}
+      "expect": {
+        "status": 404,
+        "engine": null
+      }
     },
     {
       "name": "knowledge_base_folder_create",
       "method": "POST",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/knowledge-base/folders",
-      "body": {"name": "Runbooks"},
-      "expect": {"status": 404, "engine": null}
+      "body": {
+        "name": "Runbooks"
+      },
+      "expect": {
+        "status": 404,
+        "engine": null
+      }
     }
   ]
 }

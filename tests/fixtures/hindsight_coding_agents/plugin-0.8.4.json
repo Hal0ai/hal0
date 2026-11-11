@@ -1,13 +1,16 @@
 {
   "plugin": "@vectorize-io/hindsight-coding-agents",
   "version": "0.8.4",
-  "note": "Request shapes this release sends that differ from 0.8.6, transcribed by hand. No plugin code is vendored. It retains without a client-chosen operation id or append mode, and it also calls recall. The recall body below uses the engine's RecallRequest field names; the release's exact recall body was not available to check against when this fixture was written. 'path' is relative to apiUrl. 'expect.status' is what hal0's endpoint answers; 'expect.engine' is the engine call it makes, or null when it makes none.",
+  "note": "Request shapes this release sends that differ from 0.8.6, transcribed by hand. No plugin code is vendored. It retains without a client-chosen operation id or append mode, and it also calls recall. The recall body below uses the engine's RecallRequest field names; the release's exact recall body was not available to check against when this fixture was written. 'path' is relative to apiUrl. 'expect.status' is what hal0's endpoint answers; 'expect.engine' is the engine call it makes, or null when it makes none. In 'expect.engine', a document is named by the id hal0 stores it under for the bridge client 'cc' in project 'hal0' (<project>::<client>::<id>), and '{engine operation id}' stands for the id hal0 derives from the client and the operation id in the request.",
   "requests": [
     {
       "name": "health_probe",
       "method": "GET",
       "path": "/health",
-      "expect": {"status": 200, "engine": "GET /health"}
+      "expect": {
+        "status": 200,
+        "engine": "GET /health"
+      }
     },
     {
       "name": "retain_session_replace",
@@ -19,7 +22,10 @@
             "content": "{\"ref\":\"conversation:7a1e9d44-3c2b-4f60-8b15-d9e0c4a7f312\"}\n{\"role\":\"user\",\"text\":\"where is the retry policy defined\"}",
             "context": "coding agent session",
             "document_id": "conversation:7a1e9d44-3c2b-4f60-8b15-d9e0c4a7f312",
-            "tags": ["source:chat", "harness:codex"],
+            "tags": [
+              "source:chat",
+              "harness:codex"
+            ],
             "strategy": "conversation",
             "observation_scopes": "shared",
             "timestamp": "2026-11-09T17:40:11.000Z",
@@ -33,27 +39,46 @@
         ],
         "async": true
       },
-      "expect": {"status": 200, "engine": "POST /v1/default/banks/hal0:shared/memories"}
+      "expect": {
+        "status": 200,
+        "engine": "POST /v1/default/banks/hal0:shared/memories"
+      }
     },
     {
       "name": "recall",
       "method": "POST",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/memories/recall",
-      "body": {"query": "retry policy", "budget": "mid", "max_tokens": 2048},
-      "expect": {"status": 200, "engine": "POST /v1/default/banks/hal0:shared/memories/recall"}
+      "body": {
+        "query": "retry policy",
+        "budget": "mid",
+        "max_tokens": 2048
+      },
+      "expect": {
+        "status": 200,
+        "engine": "POST /v1/default/banks/hal0:shared/memories/recall"
+      }
     },
     {
       "name": "reflect",
       "method": "POST",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/reflect",
-      "body": {"query": "where is the retry policy defined?", "budget": "low"},
-      "expect": {"status": 200, "engine": "POST /v1/default/banks/hal0:shared/reflect"}
+      "body": {
+        "query": "where is the retry policy defined?",
+        "budget": "low"
+      },
+      "expect": {
+        "status": 200,
+        "engine": "POST /v1/default/banks/hal0:shared/reflect"
+      }
     },
     {
       "name": "drain_poll",
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/operations/0d9b6c0a-41f7-4e7c-b3a8-52c1e8f97d24",
-      "expect": {"status": 200, "engine": "GET /v1/default/banks/hal0:shared/operations/0d9b6c0a-41f7-4e7c-b3a8-52c1e8f97d24"}
+      "expect": {
+        "status": 200,
+        "engine": "GET /v1/default/banks/hal0:shared/operations/{engine operation id}"
+      }
     }
   ]
 }
