@@ -228,7 +228,16 @@ def _print_status(status: dict[str, Any]) -> None:
     )
     engine = status.get("engine") or {}
     live = engine.get("live") or {}
-    if not engine.get("reachable"):
+    if engine.get("stopped_by_switch"):
+        why = (
+            f"; {escape(str(engine['error']))}"
+            if engine.get("port_holder")
+            else "; free the port, then run --resume"
+        )
+        lines.append(f"[yellow]engine: stopped by the switch{why}[/yellow]")
+    elif engine.get("port_holder"):
+        lines.append(f"[red]engine: {escape(str(engine.get('error')))}[/red]")
+    elif not engine.get("reachable"):
         lines.append(f"[red]engine: not answering ({escape(str(engine.get('error')))})[/red]")
     elif live:
         lines.append(

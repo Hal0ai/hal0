@@ -94,8 +94,9 @@ class MemoryWritesPaused(Hal0Error):
         reason = str(gate.get("reason") or "maintenance")
         why = _REASON_TEXT.get(reason, "memory maintenance is running")
         super().__init__(
-            f"Memory writes are paused: {why}. Nothing was written; recall still works. "
-            "Retry when it has finished.",
+            f"Memory writes are paused: {why}. Nothing was written. Writes and recall are paused "
+            "while the embedder switch runs (`hal0 memory embedder switch --status` shows "
+            "where it stands). Retry when it has finished.",
             details={
                 "reason": reason,
                 "since": gate.get("since"),

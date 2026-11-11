@@ -41,7 +41,11 @@ def _home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def _assert_paused(body: dict[str, Any]) -> None:
     error = body["error"]
     assert error["code"] == "memory.writes_paused"
-    assert "embedder" in error["message"] and "recall still works" in error["message"]
+    assert "embedder" in error["message"] and "Writes and recall are paused" in error["message"]
+    assert (
+        "embedder switch --status" in error["message"]
+        and "recall still works" not in error["message"]
+    )
     assert error["details"]["reason"] == "embedder_switch"
     assert error["details"]["retry_after_s"] == write_gate.RETRY_AFTER_S
     assert error["details"]["since"]
@@ -153,7 +157,7 @@ async def test_mcp_memory_add_returns_the_same_code_while_the_gate_is_set() -> N
     assert out["status"] == "error"
     assert out["error"]["code"] == "memory.writes_paused"
     assert out["error"]["details"]["retry_after_s"] == write_gate.RETRY_AFTER_S
-    assert "recall still works" in out["error"]["detail"]
+    assert "Writes and recall are paused" in out["error"]["detail"]
     assert provider._rows == [] and preflight_ran == [], "refused before any other preflight"
     # A read tool still answers.
     assert (await dispatch("memory_search", {"query": "x"}))["status"] == "ok"

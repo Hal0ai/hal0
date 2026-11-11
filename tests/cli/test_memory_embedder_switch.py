@@ -340,6 +340,28 @@ def test_status_prints_the_journal_the_gate_the_banks_and_what_resume_would_do(s
     assert json.loads(runner.invoke(mec.app, ["switch", "--status", "--json"]).output) == STATUS
 
 
+def test_status_names_a_foreign_port_holder_and_a_stopped_engine(stub) -> None:
+    held = "port 45123 held by pid 4242 (python3), not by hindsight-api.service"
+    stub["outcome"] = {
+        **STATUS,
+        "engine": {
+            "reachable": False,
+            "live": None,
+            "private_port": 45123,
+            "error": held,
+            "port_holder": "pid 4242 (python3)",
+            "stopped_by_switch": False,
+        },
+    }
+    flat = " ".join(runner.invoke(mec.app, ["switch", "--status"]).output.split())
+    assert f"engine: {held}" in flat and "not answering" not in flat
+
+    stub["outcome"]["engine"].update(stopped_by_switch=True, port_holder=None, error=None)
+    flat = " ".join(runner.invoke(mec.app, ["switch", "--status"]).output.split())
+    assert "engine: stopped by the switch; free the port, then run --resume" in flat
+    assert "not answering" not in flat
+
+
 def test_clear_gate_is_loud_about_what_it_did_not_check(stub) -> None:
     stub["outcome"] = {
         "status": "cleared",

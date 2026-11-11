@@ -303,6 +303,10 @@ class SwitchError(Exception):
         self.resumable = resumable
 
 
+class _EngineNotAsked(Exception):
+    """``status`` does not query an engine that is stopped or that another process answers for."""
+
+
 class SwitchRefused(SwitchError):
     """Refused before anything was changed. ``plan`` is the preflight report, when there is one."""
 
@@ -377,6 +381,10 @@ class Journal:
     private_port: int | None = None
     isolated: bool = False
     flip_started: bool = False
+    #: True while the switch itself holds the engine's unit stopped (it found
+    #: a foreign process on the private port and would otherwise have left
+    #: the unit crash-looping into it); cleared by the next successful start.
+    engine_stopped: bool = False
     banks: list[BankEntry] = field(default_factory=list)
     stray_banks: list[str] = field(default_factory=list)
     error: str | None = None
@@ -1341,6 +1349,41 @@ def loopback_listener(
     }
 
 
+def stop_engine_unit() -> dict[str, Any]:
+    """``systemctl stop`` the engine's unit. ``{"error": ...}`` when it could not be stopped."""
+    try:
+        proc = subprocess.run(
+            ["systemctl", "stop", SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    if proc.returncode != 0:
+        detail = " ".join((proc.stderr or proc.stdout or "").split())[:160]
+        return {"error": detail or f"systemctl exited {proc.returncode}"}
+    return {}
+
+
+def http_detail(text: str, limit: int = 120) -> str:
+    """A short, single-line, markup-safe summary of an HTTP error body.
+
+    A foreign server's HTML page is never echoed: it is named, not shown.
+    """
+    stripped = (text or "").lstrip()
+    if stripped[:1] == "<":
+        return "(a non-JSON page, not shown)"
+    flat = "".join(ch if ch.isprintable() else " " for ch in stripped)
+    flat = " ".join(flat.split())
+    for ch in "<>[]":
+        flat = flat.replace(ch, "")
+    if len(flat) > limit:
+        flat = flat[: limit - 1].rstrip() + "…"
+    return flat
+
+
 class EmbedderSwitch:
     """One run of the switch against one engine.
 
@@ -1377,6 +1420,7 @@ class EmbedderSwitch:
         privileged: Callable[[], bool] | None = None,
         isolate: Callable[[int, str], dict[str, Any]] | None = None,
         release: Callable[[], dict[str, Any]] | None = None,
+        stop_unit: Callable[[], dict[str, Any]] | None = None,
         isolated_port: Callable[[], int | None] | None = None,
         client_for: Callable[[str], Any] | None = None,
         listener: Callable[[int], Mapping[str, Any]] | None = None,
@@ -1393,6 +1437,7 @@ class EmbedderSwitch:
         self._private_client: Any | None = None
         self._isolate = isolate or write_isolation_dropin
         self._release = release or remove_isolation_dropin
+        self._stop_unit = stop_unit or stop_engine_unit
         self._isolated_port = isolated_port or globals()["isolated_port"]
         self._client_for = client_for or self._default_client_for
         self._listener = listener or loopback_listener
@@ -1503,7 +1548,7 @@ class EmbedderSwitch:
         except httpx.HTTPStatusError as exc:
             raise SwitchError(
                 f"{what}: the engine answered HTTP {exc.response.status_code} "
-                f"{exc.response.text[:300]}".rstrip(),
+                f"{http_detail(exc.response.text)}".rstrip(),
                 bank=bank,
             ) from exc
         except httpx.HTTPError as exc:
@@ -1705,7 +1750,7 @@ class EmbedderSwitch:
                 return
             raise SwitchError(
                 f"deleting the bank: the engine answered HTTP {exc.response.status_code} "
-                f"{exc.response.text[:300]}".rstrip(),
+                f"{http_detail(exc.response.text)}".rstrip(),
                 bank=bank,
             ) from exc
         except httpx.HTTPError as exc:
@@ -1780,12 +1825,39 @@ class EmbedderSwitch:
         except Exception as exc:  # a /proc read gone wrong is "cannot tell", not a crash
             return {"owner": "unknown", "holder": f"unreadable ({type(exc).__name__})"}
 
-    def _foreign(self, port: int, seen: Mapping[str, Any]) -> SwitchError:
+    async def _foreign(
+        self, port: int, seen: Mapping[str, Any], journal: Journal | None = None
+    ) -> SwitchError:
+        """Stop the engine's unit, leave it stopped, and say what to do.
+
+        The unit was started on a port someone else holds, so it cannot bind
+        and systemd would restart it every few seconds for ever (each boot
+        outlasts ``StartLimitIntervalSec``, so the start limit never trips).
+        The gate stays set and the journal stays; ``--resume`` starts it again.
+        """
+        stopped = await asyncio.to_thread(self._stop_unit)
+        error = stopped.get("error")
+        if journal is not None:
+            journal.engine_stopped = not error
+            with contextlib.suppress(OSError):
+                self._save(journal)
+        who = seen.get("holder") or "another process"
+        facts = {"foreign_port": port, "foreign_holder": who}
+        held = f"127.0.0.1:{port}, the engine's private port, is held by {who}, not by {SERVICE}. "
+        if error:
+            return SwitchError(
+                held + f"{SERVICE} could not be stopped ({error}), so it may be restarting into "
+                f"the taken port: run `systemctl stop {SERVICE}`, free the port, then run "
+                "`hal0 memory embedder switch --resume`. Memory writes stay paused",
+                details=facts,
+                resumable=True,
+            )
         return SwitchError(
-            f"127.0.0.1:{port}, the engine's private port for this run, is held by "
-            f"{seen.get('holder') or 'another process'}, not by {SERVICE}. Nothing was "
-            "exported; the run is undone. Stop that process (or wait for it to let the port "
-            "go) and run the switch again: it picks a new port each run"
+            held + f"{SERVICE} was stopped so it does not restart into the taken port; it stays "
+            "stopped, memory writes and recall stay paused. Free the port (stop that process), "
+            "then run `hal0 memory embedder switch --resume`",
+            details=facts,
+            resumable=True,
         )
 
     async def _confirm_version(self, where: str) -> None:
@@ -1812,7 +1884,14 @@ class EmbedderSwitch:
                 "(features on /version) after the restart"
             )
 
-    async def _start_engine(self, embedder: Embedder, *, port: int | None, run_id: str) -> None:
+    async def _start_engine(
+        self,
+        embedder: Embedder,
+        *,
+        port: int | None,
+        run_id: str,
+        journal: Journal | None = None,
+    ) -> None:
         """Restart the engine on ``embedder``, private on ``port`` or at its normal address.
 
         Writes or removes the isolation drop-in, renders the embedder drop-in,
@@ -1840,7 +1919,7 @@ class EmbedderSwitch:
                 seen = self._listener_owner(port)
                 if seen.get("owner") == "other":
                     # Something else took the port: fail now, not after the timeout.
-                    raise self._foreign(port, seen)
+                    raise await self._foreign(port, seen, journal)
             if await self._healthy():
                 break
             # Up, but where it always was: do not wait out the whole timeout.
@@ -1857,7 +1936,7 @@ class EmbedderSwitch:
             # /health on the port proves only that something answers there.
             seen = self._listener_owner(port)
             if seen.get("owner") == "other":
-                raise self._foreign(port, seen)
+                raise await self._foreign(port, seen, journal)
             if seen.get("owner") != "unit":
                 holder = seen.get("holder") or "no listener found"
                 raise SwitchError(
@@ -1884,8 +1963,19 @@ class EmbedderSwitch:
             )
         if port is not None and await self._public_answers():
             raise SwitchError(self._leak_message())
+        if journal is not None and journal.engine_stopped:
+            journal.engine_stopped = False
+            with contextlib.suppress(OSError):
+                self._save(journal)
 
-    async def _ensure_engine(self, embedder: Embedder, *, port: int | None, run_id: str) -> None:
+    async def _ensure_engine(
+        self,
+        embedder: Embedder,
+        *,
+        port: int | None,
+        run_id: str,
+        journal: Journal | None = None,
+    ) -> None:
         """Do nothing when the engine is where and what it should be; otherwise put it there.
 
         A restore embeds with whatever the engine runs at that moment, so this
@@ -1905,7 +1995,7 @@ class EmbedderSwitch:
             f"putting the engine on {describe_embedder(*embedder)}, "
             + ("isolated" if port is not None else "at its normal address")
         )
-        await self._start_engine(embedder, port=port, run_id=run_id)
+        await self._start_engine(embedder, port=port, run_id=run_id, journal=journal)
 
     # ── archives ────────────────────────────────────────────────────────
 
@@ -2122,7 +2212,9 @@ class EmbedderSwitch:
         the original by default.
         """
         assert self._target is not None
-        await self._ensure_engine(self._target, port=journal.private_port, run_id=journal.run_id)
+        await self._ensure_engine(
+            self._target, port=journal.private_port, run_id=journal.run_id, journal=journal
+        )
         url_bank = via or entry.bank
         try:
             with self._archive_dir_fd(journal) as dfd:
@@ -2139,7 +2231,7 @@ class EmbedderSwitch:
         except httpx.HTTPStatusError as exc:
             raise SwitchError(
                 f"starting the restore into {target_id}: the engine answered HTTP "
-                f"{exc.response.status_code} {exc.response.text[:300]}".rstrip(),
+                f"{exc.response.status_code} {http_detail(exc.response.text)}".rstrip(),
                 bank=entry.bank,
             ) from exc
         except (OSError, httpx.HTTPError) as exc:
@@ -2618,6 +2710,16 @@ class EmbedderSwitch:
                     exc.message if isinstance(exc, SwitchError) else f"{type(exc).__name__}: {exc}"
                 )
                 await self._rollback(journal, cause)
+                if isinstance(exc, SwitchError) and "foreign_port" in exc.details:
+                    # The unit was stopped for the foreign holder and the
+                    # rollback has since put the engine back: the run is over.
+                    raise SwitchError(
+                        f"127.0.0.1:{exc.details['foreign_port']}, the engine's private port "
+                        f"for this run, is held by {exc.details['foreign_holder']}, not by "
+                        f"{SERVICE}. Nothing was exported; the run is undone and the engine is "
+                        "back at its normal address. Stop that process (or wait for it to let "
+                        "the port go) and run the switch again: it picks a new port each run"
+                    ) from exc
                 raise
             await self._swap_all(journal, rebuild=False)
             return await self._finish(journal)
@@ -2675,7 +2777,9 @@ class EmbedderSwitch:
                     "to": journal.previous,
                 }
             try:
-                await self._ensure_engine(target, port=journal.private_port, run_id=journal.run_id)
+                await self._ensure_engine(
+                    target, port=journal.private_port, run_id=journal.run_id, journal=journal
+                )
             except SwitchError as exc:
                 journal.error = exc.message
                 self._save(journal)
@@ -2736,7 +2840,9 @@ class EmbedderSwitch:
         self._say("moving the engine to a private port; recall is unavailable until the run ends")
         journal.isolated = True
         self._save(journal)
-        await self._start_engine(previous, port=journal.private_port, run_id=journal.run_id)
+        await self._start_engine(
+            previous, port=journal.private_port, run_id=journal.run_id, journal=journal
+        )
         self._hook("isolated")
         # Whatever was accepted in the instant before the restart finishes now.
         states = await self._settle(journal)
@@ -2788,7 +2894,9 @@ class EmbedderSwitch:
                 provider=target.provider, model=target.model, source=SOURCE_SWITCH, mixed=True
             )
         )
-        await self._start_engine(target, port=journal.private_port, run_id=journal.run_id)
+        await self._start_engine(
+            target, port=journal.private_port, run_id=journal.run_id, journal=journal
+        )
         self._hook("flipped")
 
     async def _restore_all(self, journal: Journal) -> None:
@@ -3048,7 +3156,7 @@ class EmbedderSwitch:
                 )
             )
             self._say("returning the engine to its normal address")
-            await self._start_engine(target, port=None, run_id=journal.run_id)
+            await self._start_engine(target, port=None, run_id=journal.run_id, journal=journal)
         except SwitchError as exc:
             journal.error = exc.message
             self._save(journal)
@@ -3152,11 +3260,25 @@ class EmbedderSwitch:
             if journal.isolated and self._isolated_port() == journal.private_port:
                 self._use_port(journal.private_port)
                 private = await self._healthy()
-                if not private and not await self._public_answers():
+                taken = (
+                    not private
+                    and journal.engine_stopped
+                    and not journal.flip_started
+                    and self._listener_owner(journal.private_port or 0).get("owner") == "other"
+                )
+                if taken:
+                    # Stopped for a foreign holder before anything ran on the
+                    # target: nothing to check on that port. The engine goes
+                    # back to its normal address below, where the sweep runs.
+                    self._say("the private port is still held by another process; skipping it")
+                elif not private and not await self._public_answers():
                     # Not answering anywhere: bring it up where the run left
                     # it, on the previous embedder, so the cleanup is isolated.
                     await self._start_engine(
-                        previous, port=journal.private_port, run_id=journal.run_id
+                        previous,
+                        port=journal.private_port,
+                        run_id=journal.run_id,
+                        journal=journal,
                     )
                     private = True
                 # Still answering at its normal address means the isolation
@@ -3173,7 +3295,9 @@ class EmbedderSwitch:
                         if entry.step != STEP_PLANNED and await self._original_moved(entry):
                             tainted.append(entry.bank)
             if journal.isolated:
-                await self._ensure_engine(previous, port=None, run_id=journal.run_id)
+                await self._ensure_engine(
+                    previous, port=None, run_id=journal.run_id, journal=journal
+                )
                 await self._sweep(journal)
             if journal.flip_started:
                 # Only now: the engine is confirmed on the previous embedder.
@@ -3202,10 +3326,17 @@ class EmbedderSwitch:
             with contextlib.suppress(OSError):
                 self._save(journal)
             if isinstance(exc, Exception):
+                where = (
+                    f"on the journalled private port 127.0.0.1:{journal.private_port}"
+                    if journal.private_port is not None
+                    else "from the journal"
+                )
                 raise SwitchError(
-                    f"the switch failed ({cause}) and could not be undone ({detail}). Memory "
-                    "writes stay paused. Fix the cause and run "
-                    "`hal0 memory embedder switch --resume`",
+                    f"the switch failed ({cause}) and then the rollback failed too ({detail}). "
+                    f"The journal is in phase {PHASE_ROLLBACK_FAILED}; the write pause is still "
+                    "set and recall stays unavailable while the engine is isolated. Fix that, "
+                    f"then run `hal0 memory embedder switch --resume`: it retries the rollback "
+                    f"{where}. `--status` shows where things stand",
                     resumable=True,
                 ) from exc
             raise
@@ -3295,7 +3426,21 @@ class EmbedderSwitch:
         entries = {e.bank: e for e in journal.banks} if journal is not None else {}
         temps = {e.temp: e for e in journal.banks} if journal is not None else {}
         present: set[str] = set()
+        holder: Mapping[str, Any] | None = None
+        if port is not None:
+            # Whatever answers on the private port is the engine only if the
+            # engine's own unit holds the socket (the check a resume runs).
+            seen = self._listener_owner(port)
+            if seen.get("owner") == "other":
+                holder = seen
+        stopped = journal is not None and journal.engine_stopped
+        out["engine"]["stopped_by_switch"] = stopped
+        out["engine"]["port_holder"] = holder.get("holder") if holder is not None else None
+        if holder is not None:
+            out["engine"]["error"] = f"port {port} held by {holder.get('holder')}, not by {SERVICE}"
         try:
+            if holder is not None or stopped:
+                raise _EngineNotAsked
             for bank in await self._bank_ids():
                 present.add(bank)
                 if bank in entries:
@@ -3312,6 +3457,8 @@ class EmbedderSwitch:
                     {"bank": bank, "role": role, "counts": (await self.bank_state(bank))["counts"]}
                 )
             out["engine"]["reachable"] = True
+        except _EngineNotAsked:
+            pass
         except SwitchError as exc:
             out["engine"]["error"] = exc.message
         held = (

@@ -366,6 +366,8 @@ class Host:
         self.foreign: dict[int, str] = {}
         #: port -> what the listener check says, overriding everything else.
         self.listener_says: dict[int, dict[str, Any]] = {}
+        self.unit_stopped = False
+        self.stop_error: str | None = None
 
     def listener(self, port: int) -> dict[str, Any]:
         if port in self.listener_says:
@@ -394,6 +396,14 @@ class Host:
     def isolated_port(self) -> int | None:
         return self.dropin_port
 
+    def stop_unit(self) -> dict[str, Any]:
+        self.events.append("stop-unit")
+        if self.stop_error:
+            return {"error": self.stop_error}
+        self.unit_stopped = True
+        self.engine.reachable = False
+        return {}
+
     def apply_dropin(self, embedder: Embedder) -> dict[str, Any]:
         self.events.append(f"engine:{embedder.model}")
         if embedder.model in self.dropin_error:
@@ -401,6 +411,8 @@ class Host:
         if self.dropin_port is None and self.release_restart_error:
             return {"error": self.release_restart_error}
         self.live = self.override or embedder
+        self.unit_stopped = False
+        self.engine.reachable = True
         self.engine.healthy = embedder.model not in self.dead_on
         private = self.dropin_port is not None and not self.exec_start_pinned
         self.engine.port = self.dropin_port if private else NORMAL_PORT
@@ -485,6 +497,7 @@ class Box:
             rename_bank=self.host.rename,
             isolate=self.host.isolate,
             release=self.host.release,
+            stop_unit=self.host.stop_unit,
             isolated_port=self.host.isolated_port,
             client_for=self.client,
             pick_port=lambda: PRIVATE_PORT,
@@ -983,7 +996,7 @@ async def test_a_rollback_that_cannot_finish_keeps_writes_paused_until_resume(bo
     with pytest.raises(es.SwitchError) as err:
         await box.switch().run()
 
-    assert err.value.resumable and "could not be undone" in err.value.message
+    assert err.value.resumable and "the rollback failed too" in err.value.message
     assert write_gate.read_gate() is not None
     journal = es.load_journal()
     assert journal is not None and journal.phase == es.PHASE_ROLLBACK_FAILED
@@ -1593,6 +1606,8 @@ async def test_status_shows_the_journal_the_gate_the_ids_and_what_resume_would_d
         "reachable": True,
         "live": HS._asdict(),
         "private_port": PRIVATE_PORT,
+        "stopped_by_switch": False,
+        "port_holder": None,
     }
     assert f"isolated on 127.0.0.1:{PRIVATE_PORT}" in status["summary"]
     roles = {b["bank"]: b["role"] for b in status["banks"]}
@@ -2705,3 +2720,98 @@ async def test_status_says_the_engine_is_back_while_the_gate_is_still_set(box: B
     await box.switch(None).resume()
     assert "isolate" in box.events[seen:], "resume isolates the engine again first"
     _assert_switched(box)
+
+
+# ── a foreign process on the private port: stop, report, message the real phase ──
+
+
+async def test_resume_stops_the_engine_when_a_foreign_process_holds_the_port(box: Box) -> None:
+    await box.kill_at("deleted:alpha")
+    box.host.foreign[PRIVATE_PORT] = "pid 4242 (python3)"
+    box.engine.reachable = False  # the unit would crash-loop on the taken port
+    box.host.unit_stopped = False
+    box.host.dropin_port = PRIVATE_PORT
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    msg = err.value.message
+    assert err.value.resumable
+    assert "held by pid 4242 (python3)" in msg and "was stopped" in msg
+    assert "--resume" in msg and "Free the port" in msg
+    assert box.events[-1] == "stop-unit" and box.host.unit_stopped
+    assert write_gate.read_gate() is not None, "the gate stays set"
+    journal = es.load_journal()
+    assert journal is not None and journal.engine_stopped is True
+
+
+async def test_a_unit_that_cannot_be_stopped_says_so(box: Box) -> None:
+    await box.kill_at("deleted:alpha")
+    box.host.foreign[PRIVATE_PORT] = "pid 4242 (python3)"
+    box.host.stop_error = "Access denied"
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    assert "could not be stopped (Access denied)" in err.value.message
+    assert "systemctl stop hindsight-api.service" in err.value.message
+    journal = es.load_journal()
+    assert journal is not None and journal.engine_stopped is False
+
+
+async def test_status_reports_a_port_held_by_another_process_not_its_html(box: Box) -> None:
+    await box.kill_at("deleted:alpha")
+    box.host.foreign[PRIVATE_PORT] = "pid 4242 (python3)"
+    box.host.dropin_port = PRIVATE_PORT
+    real = box.engine.handler
+
+    async def html(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, text="<!DOCTYPE HTML><html><body>Error 404</body></html>")
+
+    box.engine.handler = html  # type: ignore[method-assign]
+    try:
+        status = await box.switch(None).status()
+    finally:
+        box.engine.handler = real  # type: ignore[method-assign]
+
+    engine = status["engine"]
+    assert engine["reachable"] is False
+    assert engine["error"] == (
+        f"port {PRIVATE_PORT} held by pid 4242 (python3), not by hindsight-api.service"
+    )
+    assert "DOCTYPE" not in str(status) and "<" not in engine["error"]
+
+
+async def test_status_after_the_stop_says_the_switch_stopped_the_engine(box: Box) -> None:
+    await box.kill_at("deleted:alpha")
+    box.host.foreign[PRIVATE_PORT] = "pid 4242 (python3)"
+    with pytest.raises(es.SwitchError):
+        await box.switch(None).resume()
+    box.host.foreign.clear()  # the port is free again, the unit is still stopped
+
+    status = await box.switch(None).status()
+
+    assert status["engine"]["stopped_by_switch"] is True
+    assert status["engine"]["reachable"] is False
+
+    await box.switch(None).resume()  # --resume starts it again and finishes
+    _assert_switched(box)
+
+
+def test_http_detail_is_short_single_line_and_markup_safe() -> None:
+    assert es.http_detail("<!DOCTYPE HTML><html>x</html>") == "(a non-JSON page, not shown)"
+    out = es.http_detail("line one\nline [two] <b>" + "x" * 500)
+    assert "\n" not in out and not set("<>[]") & set(out) and len(out) <= 120
+
+
+async def test_a_failed_rollback_names_its_phase_and_the_journalled_port(box: Box) -> None:
+    box.engine.restore_delta["alpha"] = {"facts": -1}
+    box.host.dropin_error[BGE.model] = "systemctl restart hindsight-api.service failed"
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+
+    msg = err.value.message
+    assert "rollback_failed" in msg and "the write pause is still set" in msg
+    assert f"127.0.0.1:{PRIVATE_PORT}" in msg and "--resume" in msg
+    assert "run the switch again" not in msg and "the run is undone" not in msg
