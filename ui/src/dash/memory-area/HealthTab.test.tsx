@@ -315,8 +315,8 @@ describe('attention: extraction current, queue and knowledge waiting', () => {
     expect(byId(host, 'ma-health-step-extraction-settings')!.getAttribute('href')).toBe('#settings/memory')
     const errors = byId(host, 'ma-health-step-extraction-errors')!
     expect([...errors.querySelectorAll('li')].map(textOf)).toEqual([
-      'Task exceeded the <n>s wall-clock limit seen 3 times',
-      'HTTP 503 from <host> seen 1 time',
+      'Task exceeded the Ns wall-clock limit seen 3 times',
+      'HTTP 503 from a host seen 1 time',
     ])
     expectNoPrimary(host)
   })

@@ -21,6 +21,7 @@ import {
   healthVerdict,
   incompleteNote,
   labelledFigures,
+  readableError,
   segmentsText,
   stepCopy,
   stepName,
@@ -915,5 +916,32 @@ describe('the forced mock, one fixture per step that can be first', () => {
     })
     expect(byId(path, 'queue').note).toBe(PARTIAL_BANKS_NOTE)
     expect(banksNote(report)).toBe(PARTIAL_BANKS_NOTE)
+  })
+})
+
+describe('readableError', () => {
+  it('turns the route placeholders into words a person reads', () => {
+    expect(readableError('Task exceeded the <n>s wall-clock limit')).toBe('Task exceeded the Ns wall-clock limit')
+    expect(readableError('HTTP 503 from <host> for <id>')).toBe('HTTP 503 from a host for ID')
+    expect(readableError('Retried <n> times, <n> left')).toBe('Retried N times, N left')
+  })
+
+  it('leaves other angle-bracket text alone', () => {
+    expect(readableError('expected <list> got <none>')).toBe('expected <list> got <none>')
+  })
+
+  it('is applied to the extraction step errors in the path', () => {
+    const report = healthReport({
+      steps: pathSteps({
+        extraction: { reason: 'extraction_recent_failures', figures: { failures: 3, window_s: 21600 } },
+      }),
+      extraction: {
+        ...healthReport().extraction!,
+        failures_6h: 3,
+        top_errors: [{ message: 'Task exceeded the <n>s wall-clock limit', count: 3 }],
+      },
+    })
+    const extraction = buildPath(report).find((step) => step.id === 'extraction')!
+    expect(extraction.errors.map((group) => group.message)).toEqual(['Task exceeded the Ns wall-clock limit'])
   })
 })

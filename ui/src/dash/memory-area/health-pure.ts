@@ -572,6 +572,18 @@ function clearLine(step: MemoryHealthStep, report: Report): Segment[] {
   return ['Nothing is open here.']
 }
 
+/**
+ * The route masks the parts of an engine error that change from one failure to the next, so
+ * that the same failure groups together: a number becomes `<n>`, an id `<id>`, a host address
+ * `<host>`. This turns each placeholder into something a person reads ("exceeded the Ns
+ * wall-clock limit", "from a host"). Text that is not a placeholder is left as it was.
+ */
+const ERROR_PLACEHOLDERS: Record<string, string> = { n: 'N', id: 'ID', host: 'a host' }
+
+export function readableError(message: string): string {
+  return message.replace(/<(n|id|host)>/g, (_, key: string) => ERROR_PLACEHOLDERS[key])
+}
+
 // ── The path ──────────────────────────────────────────────────────────────────
 
 /** Where a step's link goes. The component turns it into an address. */
@@ -725,7 +737,9 @@ export function buildPath(report: Report): PathStep[] {
       waitsOn,
       errors:
         step.id === 'extraction'
-          ? groupErrors(report.extraction?.top_errors ?? (isRecord(step.figures) ? step.figures.top_errors : null))
+          ? groupErrors(report.extraction?.top_errors ?? (isRecord(step.figures) ? step.figures.top_errors : null)).map(
+              (group) => ({ ...group, message: readableError(group.message) }),
+            )
           : [],
       figures: copy.known ? [] : labelledFigures(step.figures),
       command: stepCommand({ ...step, state }, report),
