@@ -1662,11 +1662,23 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         lambda **_kw: Check("memory_embedder", "Memory embedder", "pass", "stubbed"),
     )
 
+    # Projects row (ADR-0058 4a) reads hal0.toml and lists the bank's tags otherwise.
+    projects_kwargs: dict = {}
+    monkeypatch.setattr(
+        da,
+        "check_memory_projects",
+        lambda **kw: (
+            projects_kwargs.update(kw),
+            Check("memory_projects", "Memory projects", "pass", "stubbed"),
+        )[1],
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
+    assert set(projects_kwargs) == {"memory", "base"}
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-49:] == [
+    assert keys[-50:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1716,6 +1728,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "memory_extraction_throughput",
         "memory_retain_chunk",
         "memory_decision_lane",
+        "memory_projects",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
@@ -3112,6 +3125,195 @@ def test_retain_chunk_skips_without_a_live_engine() -> None:
         {"enabled": True, "engine": "hindsight", "reachable": False},
     ):
         assert da.check_memory_retain_chunk(memory=memory, fetch=_never).status == "pass"
+
+
+# ── memory projects (ADR-0058 decision 4a, advisory) ────────────────────────
+
+
+def _projects_row(rows, *, aliases=None, registered=(), bank="shared", read_ok=True):
+    from hal0.memory.projects import ProjectRegistry
+
+    registry = ProjectRegistry(aliases=aliases or {}, registered=frozenset(registered))
+    seen: list[tuple[object, str]] = []
+
+    def fetch(base, bank_id):
+        seen.append((base, bank_id))
+        return rows
+
+    check = da.check_memory_projects(
+        memory=_LIVE_MEMORY, base="http://api.test", fetch=fetch, config=(bank, registry, read_ok)
+    )
+    assert check.key == "memory_projects" and check.label == "Memory projects"
+    assert seen == [("http://api.test", bank)]
+    return check
+
+
+def _tag(tag: str, count: int) -> dict:
+    return {"tag": tag, "count": count}
+
+
+def test_projects_row_reports_the_registered_share() -> None:
+    check = _projects_row(
+        [_tag("project:atlas", 60), _tag("project:atlas-mono", 20), _tag("project:cirrus", 20)],
+        aliases={"atlas-mono": "atlas"},
+        registered=["atlas"],
+    )
+    assert check.status == "pass"
+    assert "80 of 100 project-tagged facts (80%)" in check.detail
+    assert "project:unresolved: 0" in check.detail
+    assert "not in the registry (1): cirrus" in check.detail
+
+
+def test_projects_row_counts_an_alias_target_as_registered() -> None:
+    check = _projects_row([_tag("project:atlas", 5)], aliases={"atlas-mono": "atlas"})
+    assert check.status == "pass" and "5 of 5" in check.detail and "100%" in check.detail
+    assert "not in the registry" not in check.detail
+
+
+def test_projects_row_warns_on_unresolved_writes() -> None:
+    check = _projects_row(
+        [_tag("project:atlas", 9), _tag("project:unresolved", 1)], registered=["atlas"]
+    )
+    assert check.status == "warn"
+    assert "9 of 10 project-tagged facts (90%)" in check.detail
+    assert "project:unresolved: 1" in check.detail
+    assert "a coding client is writing without a project" in check.detail
+    # The marker is never listed as an unregistered project.
+    assert "not in the registry" not in check.detail
+
+
+def test_projects_row_passes_with_a_handful_of_unregistered_slugs() -> None:
+    assert da.PROJECTS_UNREGISTERED_WARN_ABOVE == 5
+    rows = [_tag(f"project:repo-{n}", 10 - n) for n in range(5)]
+    check = _projects_row(rows)
+    assert check.status == "pass"
+    assert "0 of 40 project-tagged facts (0%)" in check.detail
+    # Most-used first.
+    assert "not in the registry (5): repo-0, repo-1, repo-2, repo-3, repo-4" in check.detail
+
+
+def test_projects_row_warns_past_a_handful_and_lists_ten() -> None:
+    assert da.PROJECTS_UNREGISTERED_LISTED == 10
+    rows = [_tag(f"project:repo-{n:02d}", 100 - n) for n in range(13)]
+    check = _projects_row([*rows, _tag("project:atlas", 1)], registered=["atlas"])
+    assert check.status == "warn"
+    listed = ", ".join(f"repo-{n:02d}" for n in range(10))
+    assert f"not in the registry (13): {listed} and 3 more" in check.detail
+    assert "repo-10" not in check.detail
+    assert "[memory.projects].registered" in check.detail
+    six = _projects_row([_tag(f"project:repo-{n}", 1) for n in range(6)])
+    assert six.status == "warn"
+
+
+def test_projects_row_ignores_rows_that_are_not_project_tags() -> None:
+    check = _projects_row(
+        [
+            _tag("project:atlas", 3),
+            _tag("Project:Other", 50),  # the engine's wildcard is case-insensitive
+            _tag("projects:x", 50),
+            _tag("project:", 50),
+            {"tag": "project:bad-count", "count": "many"},
+            {"tag": "project:zero", "count": 0},
+            {"tag": None, "count": 4},
+            {"count": 4},
+        ],
+        registered=["atlas"],
+    )
+    assert check.status == "pass" and "3 of 3" in check.detail
+
+
+def test_projects_row_with_no_project_tagged_facts() -> None:
+    for rows in ([], [_tag("project:atlas", 0)]):
+        check = _projects_row(rows, bank="platform-bank")
+        assert check.status == "pass"
+        assert check.detail == "no project-tagged facts in bank platform-bank yet"
+
+
+def test_projects_row_says_when_hal0_toml_could_not_be_read() -> None:
+    check = _projects_row([_tag("project:atlas", 2)], read_ok=False)
+    assert check.status == "pass"
+    assert "hal0.toml unreadable" in check.detail and "empty registry" in check.detail
+
+
+def test_projects_row_passes_with_a_note_when_there_is_nothing_to_count() -> None:
+    def _never(_base: object, _bank: str) -> None:  # pragma: no cover — a call here is the bug
+        raise AssertionError("no tags listing without a reachable memory engine")
+
+    for memory, note in (
+        (None, "status unreachable"),
+        ({"enabled": True, "engine": None}, "memory disabled"),
+        ({"enabled": False, "engine": "hindsight"}, "memory disabled"),
+        ({"enabled": True, "engine": "hindsight", "reachable": False}, "engine unreachable"),
+    ):
+        check = da.check_memory_projects(memory=memory, fetch=_never, config=("shared", None, True))
+        assert check.status == "pass" and note in check.detail
+
+    unlisted = _projects_row(None)
+    assert unlisted.status == "pass"
+    assert unlisted.detail == "could not list the tags of bank shared — nothing counted"
+
+
+def test_projects_row_lists_tags_with_the_engines_wildcard_and_pages(monkeypatch) -> None:
+    from hal0.cli import _shared
+
+    calls: list[dict] = []
+    full_page = [_tag(f"project:repo-{n}", 1) for n in range(da._PROJECT_TAGS_PAGE)]
+    pages = [
+        {"items": full_page, "total": 501},
+        {"items": [_tag("project:last", 1)], "total": 501},
+    ]
+
+    def fake_get(path, *, base=None, timeout=10.0, **kwargs):
+        calls.append({"path": path, "base": base, "timeout": timeout, **kwargs})
+        return pages[len(calls) - 1]
+
+    monkeypatch.setattr(_shared, "api_get", fake_get)
+    rows = da._fetch_project_tags("http://api.test", "platform-bank")
+    assert rows is not None and len(rows) == 501
+    assert [c["path"] for c in calls] == ["/api/memory/banks/platform-bank/tags"] * 2
+    assert [c["params"] for c in calls] == [
+        {"q": "project:*", "limit": 500, "offset": 0},
+        {"q": "project:*", "limit": 500, "offset": 500},
+    ]
+    assert {c["timeout"] for c in calls} == {da.PROJECT_TAGS_TIMEOUT_S}
+    assert {c["base"] for c in calls} == {"http://api.test"}
+
+
+def test_projects_row_tags_listing_fails_soft(monkeypatch) -> None:
+    from hal0.cli import _shared
+
+    def refuse(path, **_kw):
+        raise _shared.CliApiError("GET failed: 404")
+
+    monkeypatch.setattr(_shared, "api_get", refuse)
+    assert da._fetch_project_tags(None, "shared") is None
+    monkeypatch.setattr(_shared, "api_get", lambda path, **_kw: {"unexpected": True})
+    assert da._fetch_project_tags(None, "shared") is None
+
+
+def test_projects_row_reads_the_bank_and_registry_from_hal0_toml(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+
+    memory = MemoryConfig(
+        bank="platform-bank",
+        projects={"aliases": {"Atlas Mono": "atlas"}, "registered": ["Borealis"]},
+    )
+    monkeypatch.setattr(loader, "load_hal0_config", lambda: SimpleNamespace(memory=memory))
+    bank, registry, read_ok = da._projects_config()
+    assert (bank, read_ok) == ("platform-bank", True)
+    assert registry.is_known("atlas-mono") and registry.is_known("atlas")
+    assert registry.is_known("borealis") and not registry.is_known("cirrus")
+
+    def unreadable():
+        raise PermissionError("hal0.toml")
+
+    monkeypatch.setattr(loader, "load_hal0_config", unreadable)
+    bank, registry, read_ok = da._projects_config()
+    assert (bank, read_ok) == ("shared", False)
+    assert not registry.aliases and not registry.registered
 
 
 # ── memory decision lane (#3519, advisory) ──────────────────────────────────
