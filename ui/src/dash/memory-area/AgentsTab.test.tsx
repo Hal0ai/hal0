@@ -117,7 +117,7 @@ describe('agents from evidence', () => {
     const cells = [...byId(render(), 'ma-agents-row-hermes')!.querySelectorAll('td')].map(textOf)
     expect(cells[0]).toMatch(/^Recalls from shared memory and its own private facts/)
     expect(cells[1]).toContain('Conversation turns and checkpoints, private to Hermes.')
-    expect(cells[1]).toContain('Facts it chooses to keep, shared unless marked private.')
+    expect(cells[1]).toContain('Facts it chooses to keep, shared unless it marks them private or its profile is set to keep memory private.')
   })
 
   it('gives each status as a word: seen writing, connected, not seen', () => {
@@ -155,11 +155,11 @@ describe('agents from evidence', () => {
     m.tags['coding-agent::ultrareview-1.4'] = tags('coding-agent::ultrareview-1.4', { 'project:ultrareview': 12 })
     const host = render()
     const banks = byId(host, 'ma-agents-coding-banks')!
-    expect(textOf(banks)).toContain('Coding agents have written to 1 bank through the Hindsight plugin')
+    expect(textOf(banks)).toContain('The engine holds 1 bank named the way the Hindsight plugin names a repository')
     const link = banks.querySelector('a')!
     expect(link.textContent).toBe('coding-agent::ultrareview-1.4')
     expect(link.getAttribute('href')).toBe('#memory/facts?bank=coding-agent::ultrareview-1.4')
-    expect(textOf(byId(host, 'ma-agents-unattributed'))).toMatch(/^1 of this 1 bank holds no fact tagged with an agent's name/)
+    expect(textOf(byId(host, 'ma-agents-unattributed'))).toMatch(/^That bank holds no fact tagged with an agent's name/)
   })
 
   it('names the banks whose tags did not load, and counts nothing for them', () => {

@@ -125,6 +125,10 @@ export function BuiltInCard({ state, brain = [], openwebui = [], hasUnknown = fa
                   Saved to shared memory under the name <Mono>{BRAIN_ID}</Mono>, or kept private when its
                   profile is set to.
                 </span>
+                <span className="ma-agents-line">
+                  The Hermes profile of the same name writes under that name too, so its facts are in this
+                  count.
+                </span>
               </td>
               <td data-testid="ma-agents-builtin-brain-count">
                 <Tagged id={BRAIN_ID} sightings={brain} state={state} />
@@ -138,7 +142,10 @@ export function BuiltInCard({ state, brain = [], openwebui = [], hasUnknown = fa
               <td>
                 <span className="ma-agents-line">
                   Shared memory only, as a context source before a chat turn with a model that runs on this
-                  box.
+                  box, once hal0&apos;s filter is installed in Open WebUI.
+                </span>
+                <span className="ma-agents-line">
+                  A model there can also search memory with hal0&apos;s memory tools when it chooses to.
                 </span>
               </td>
               <td>

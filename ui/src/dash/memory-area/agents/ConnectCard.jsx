@@ -113,12 +113,13 @@ export function ConnectCard({ agents, onRecheck, rechecking = false, headingRef 
           </p>
         )}
         <p className="ma-body" data-testid="ma-agents-connect-cli">
-          On this box, <Mono>hal0 memory agents install {harness}</Mono> runs the same installer and then adds
-          the tag <Mono>agent:{harness}</Mono> to the plugin&apos;s settings for the user who ran it. That tag is
-          what the Agents table counts.
+          On this box, <Mono>hal0 memory agents install {harness}</Mono> runs the same installer, then writes the
+          plugin&apos;s settings for the user who ran it with the tag <Mono>agent:{harness}</Mono> added to what the
+          plugin tags its facts with. That tag is what the Agents table counts.
         </p>
         <p className="ma-body">
-          Hermes and Pi need no command: hal0 connects them to memory when it installs them.
+          Hermes, and Pi installed by hal0, need no command: hal0 connects them to memory when it installs
+          them.
         </p>
       </div>
     )

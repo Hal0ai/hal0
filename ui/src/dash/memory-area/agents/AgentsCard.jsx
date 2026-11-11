@@ -28,7 +28,12 @@ function readsOf(row) {
     case 'coding':
       return ['Through the Hindsight plugin, straight from the engine. hal0 does not see what it reads.']
     case 'client':
-      return ["May read shared memory and its own private facts through hal0's memory endpoint, with its key."]
+      return [
+        <>
+          May search shared memory and its own private facts through hal0&apos;s memory MCP server,{' '}
+          <Mono>/mcp/memory</Mono>, with its key.
+        </>,
+      ]
     default:
       return ['Not known.']
   }
@@ -39,12 +44,12 @@ function writesOf(row) {
     case 'hermes':
       return [
         'Conversation turns and checkpoints, private to Hermes.',
-        'Facts it chooses to keep, shared unless marked private.',
+        'Facts it chooses to keep, shared unless it marks them private or its profile is set to keep memory private.',
       ]
     case 'hermes-profile':
       return [
         'Conversation turns and checkpoints, private to this profile.',
-        'Facts it chooses to keep, shared unless marked private.',
+        'Facts it chooses to keep, shared unless it marks them private or its profile is set to keep memory private.',
       ]
     case 'pi':
       return [
@@ -66,8 +71,8 @@ function writesOf(row) {
     case 'client':
       return [
         <>
-          May write shared facts, or private ones under its own name, through the same endpoint. hal0 tags
-          them <Mono>agent:{row.id}</Mono>.
+          May save shared facts, or private ones under its own name, through the same server. hal0 tags
+          them <Mono>agent:{row.id}</Mono>, the name its key belongs to.
         </>,
       ]
     default:
@@ -141,8 +146,8 @@ function CodingBanks({ route, banks, unattributed }) {
   return (
     <div className="ma-agents-banks" data-testid="ma-agents-coding-banks">
       <p className="ma-body">
-        Coding agents have written to {formatCount(banks.length)}{' '}
-        {banks.length === 1 ? 'bank' : 'banks'} through the Hindsight plugin:{' '}
+        The engine holds {formatCount(banks.length)} {banks.length === 1 ? 'bank' : 'banks'} named the way the
+        Hindsight plugin names a repository&apos;s bank (<Mono>coding-agent::&lt;repository&gt;</Mono>):{' '}
         {banks.map((bank, at) => (
           <span key={bank}>
             {at > 0 && ', '}
@@ -155,8 +160,10 @@ function CodingBanks({ route, banks, unattributed }) {
       </p>
       {unattributed.length > 0 && (
         <p className="ma-body" data-testid="ma-agents-unattributed">
-          {formatCount(unattributed.length)} of {banks.length === 1 ? 'this 1 bank' : `these ${formatCount(banks.length)} banks`}{' '}
-          {unattributed.length === 1 ? 'holds' : 'hold'} no fact tagged with an agent&apos;s name, so no row
+          {banks.length === 1
+            ? 'That bank'
+            : `${formatCount(unattributed.length)} of these ${formatCount(banks.length)} banks`}{' '}
+          {banks.length === 1 || unattributed.length === 1 ? 'holds' : 'hold'} no fact tagged with an agent&apos;s name, so no row
           above counts {unattributed.length === 1 ? 'it' : 'them'}. The plugin tags what it writes with an
           agent&apos;s name only where that was set up; the last card on this page says how.
         </p>
