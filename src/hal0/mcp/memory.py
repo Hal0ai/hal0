@@ -2392,8 +2392,10 @@ def _memory_tool_definitions() -> dict[str, Tool]:
     @server.tool(
         name="memory_bank_stats",
         description=(
-            "Node/link/observation/operation counts for a bank. Read-only — no "
-            "destructive bank operations (delete/clear) are exposed via MCP."
+            "Node/link/observation/operation counts for a bank. While the bank "
+            "holds another agent's private memory only the health fields are "
+            "returned (counts_withheld: true). Read-only — no destructive bank "
+            "operations (delete/clear) are exposed via MCP."
         ),
         annotations=_ANNOTATIONS["memory_bank_stats"],
     )

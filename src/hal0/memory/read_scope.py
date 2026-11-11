@@ -194,8 +194,59 @@ def tags_readable(groups: list[dict[str, Any]], tags: Any) -> bool:
         return False
 
 
+#: Leaf matches under which every admitted memory carries ALL the leaf's tags
+#: (``all`` also admits an untagged memory, which is never private).
+_ALL_MATCHES = frozenset({"all", "all_strict", "exact"})
+
+
+def _leaf_confines(tags: Any, match: Any, own: str) -> bool:
+    """True when a leaf ``{tags, match}`` admits no private memory but ``own``'s.
+
+    Under an ``all`` style match every admitted memory carries ``own``. Under an
+    ``any`` style match that holds only when ``own`` is the leaf's one tag.
+    """
+    if not isinstance(tags, list) or own not in tags:
+        return False
+    if match in _ALL_MATCHES:
+        return True
+    return match in ("any", "any_strict") and set(tags) == {own}
+
+
+def model_scope_confined_to(model: Any, agent_id: str | None) -> bool:
+    """True when a mental model (or knowledge page) is built only from
+    memories ``agent_id`` may read whatever else its bank holds.
+
+    A mental model's content is written by the engine from every memory its
+    scope admits, and the content carries no trace of which memories those
+    were, so it cannot be filtered afterwards (see
+    :func:`reflect_visibility_scope`). What can be judged is the scope itself:
+    the model's ``tags`` with ``trigger.tags_match`` (default ``all_strict``
+    when the model has tags), or ``trigger.tag_groups``, which replace the
+    tags when set. The scope is confined when it requires the caller's own
+    ``agent:<id>`` tag, because every private memory carries its writer's
+    ``agent:`` tag. A model with no tags is built from the whole bank and is
+    never confined; nor is anything for a caller with no identity.
+    """
+    if not is_identified(agent_id) or not isinstance(model, dict):
+        return False
+    own = f"{AGENT_TAG_PREFIX}{agent_id}"
+    trigger = model.get("trigger") if isinstance(model.get("trigger"), dict) else {}
+    groups = trigger.get("tag_groups")
+    if groups:
+        # Groups are AND-ed, so one confining top-level leaf confines them all.
+        return isinstance(groups, list) and any(
+            isinstance(g, dict) and _leaf_confines(g.get("tags"), g.get("match", "any_strict"), own)
+            for g in groups
+        )
+    tags = model.get("tags")
+    if not tags:
+        return False
+    return _leaf_confines(tags, trigger.get("tags_match") or "all_strict", own)
+
+
 __all__ = [
     "VISIBILITY_PRIVATE_TAG",
+    "model_scope_confined_to",
     "project_scope_groups",
     "reflect_visibility_scope",
     "tags_readable",
