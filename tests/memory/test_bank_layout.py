@@ -23,6 +23,16 @@ def cfg(**raw: Any) -> MemoryConfig:
     return MemoryConfig.model_validate(raw)
 
 
+@pytest.fixture(autouse=True)
+def no_engine_unit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No engine unit on the test host: the unit-without-a-home rule says
+    nothing unless a test hands it evidence."""
+    from hal0.memory import embedder_record
+
+    monkeypatch.setattr(embedder_record, "engine_evidence", lambda **_kw: {})
+    monkeypatch.delenv(bl.ENGINE_URL_ENV, raising=False)
+
+
 @pytest.fixture
 def record(tmp_path: Path) -> Path:
     return tmp_path / "state" / "memory-layout.json"
@@ -59,8 +69,8 @@ def test_an_existing_store_is_legacy_with_the_old_defaults() -> None:
             True,
             "legacy_unified",
         ),
-        # A config save writes the new default back without anyone choosing it.
-        ({"bank": "hal0:shared"}, "shared", True, "legacy_unified"),
+        # Set in the file before this version ever saved it: the operator's.
+        ({"bank": "hal0:shared"}, "hal0:shared", True, "legacy_unified"),
         # Not a boolean: the old default.
         ({"unified_bank": "no"}, "shared", True, "legacy_unified"),
     ],
@@ -144,30 +154,105 @@ def test_a_store_hal0_cannot_see_is_not_written_down(record: Path, store: str, u
         json.dumps({"layout": "two_bank"}),
     ],
 )
-def test_an_unreadable_record_is_kept_and_read_as_legacy(record: Path, content: str) -> None:
+def test_an_unreadable_record_is_kept_and_is_an_error(record: Path, content: str) -> None:
+    """Not a guess at the old layout: a two-bank box would then read
+    ``shared`` for that run."""
     record.parent.mkdir(parents=True)
     record.write_text(content)
     with pytest.raises(bl.LayoutRecordError):
         bl.load_layout_record(record)
-    got = bl.ensure_layout_record(
-        cfg(bank="Hal0::Platform"), path=record, store=STORE_ABSENT, engine_url=""
-    )
-    assert (got.layout, got.source, got.persisted) == (
-        bl.LAYOUT_LEGACY,
-        bl.SOURCE_RECORD_UNREADABLE,
-        False,
-    )
-    assert got.legacy_platform_bank == "Hal0::Platform"
+    with pytest.raises(bl.LayoutUndecided):
+        bl.ensure_layout_record(cfg(), path=record, store=STORE_ABSENT, engine_url="")
+    with pytest.raises(bl.LayoutRecordError):
+        bl.current_layout(cfg(), path=record)
     assert record.read_text() == content
 
 
-def test_a_failed_write_still_answers(record: Path, monkeypatch) -> None:
+def _unwritable(monkeypatch) -> None:
     def boom(*_a: Any, **_k: Any) -> None:
         raise OSError("read-only file system")
 
     monkeypatch.setattr(bl.nofollow, "write_file", boom)
+
+
+def test_a_two_bank_decision_that_cannot_be_written_is_not_acted_on(record, monkeypatch) -> None:
+    """Unwritten, it would read as the old layout once the engine has
+    created a store, and the memory written meanwhile would be stranded."""
+    _unwritable(monkeypatch)
+    with pytest.raises(bl.LayoutRecordUnsaved, match="could not be written"):
+        bl.ensure_layout_record(cfg(), path=record, store=STORE_ABSENT, engine_url="")
+
+
+def test_an_old_layout_that_cannot_be_written_still_answers(record, monkeypatch) -> None:
+    """The next start decides the same: the store is still there."""
+    _unwritable(monkeypatch)
+    got = bl.ensure_layout_record(cfg(), path=record, store=STORE_EXISTS, engine_url="")
+    assert got.layout == bl.LAYOUT_LEGACY and not got.persisted
+
+
+# ── the engine hal0-api uses, read from api.env (review defect 1) ─────────────
+
+
+def test_the_engine_url_comes_from_api_env_without_the_api_environment(tmp_path) -> None:
+    env = tmp_path / "api.env"
+    env.write_text("HAL0_API_PORT=8080\nHAL0_HINDSIGHT_URL='http://192.0.2.10:9177'\n")
+    assert bl.configured_engine_url(env_file=env) == ("http://192.0.2.10:9177", True)
+    assert bl.configured_engine_url(env_file=tmp_path / "missing.env") == (None, True)
+
+
+def test_the_environment_wins_over_api_env(tmp_path, monkeypatch) -> None:
+    env = tmp_path / "api.env"
+    env.write_text("HAL0_HINDSIGHT_URL=http://192.0.2.10:9177\n")
+    monkeypatch.setenv(bl.ENGINE_URL_ENV, "http://127.0.0.1:9177")
+    assert bl.configured_engine_url(env_file=env) == ("http://127.0.0.1:9177", True)
+
+
+def test_a_remote_engine_named_only_in_api_env_is_never_two_bank(record, monkeypatch) -> None:
+    """The root-run update pass: no hal0-api environment, no local store."""
+    monkeypatch.setattr(bl, "configured_engine_url", lambda **_kw: ("http://192.0.2.10:9177", True))
+    got = bl.ensure_layout_record(cfg(), path=record, store=STORE_ABSENT)
+    assert (got.layout, got.source) == (bl.LAYOUT_LEGACY, bl.SOURCE_REMOTE_ENGINE)
+    assert not record.exists()
+
+
+def test_an_api_env_that_cannot_be_read_defers_the_decision(record, monkeypatch) -> None:
+    monkeypatch.setattr(bl, "configured_engine_url", lambda **_kw: (None, False))
+    with pytest.raises(bl.LayoutRecordUnsaved, match=r"api\.env"):
+        bl.ensure_layout_record(cfg(), path=record, store=STORE_ABSENT)
+    assert not record.exists()
+    # An existing store is the old layout whatever the engine's address.
+    assert bl.ensure_layout_record(cfg(), path=record, store=STORE_EXISTS).persisted
+
+
+def test_an_unreadable_api_env_is_unknown(tmp_path) -> None:
+    env = tmp_path / "api.env"
+    env.write_text("HAL0_HINDSIGHT_URL=http://192.0.2.10:9177\n")
+    env.chmod(0)
+    try:
+        import os
+
+        if os.geteuid() == 0:
+            pytest.skip("root reads a mode-0 file")
+        assert bl.configured_engine_url(env_file=env) == (None, False)
+    finally:
+        env.chmod(0o600)
+
+
+# ── an installed unit whose home is missing (review defect 3) ────────────────
+
+
+def test_a_unit_without_its_home_decides_nothing(record, tmp_path, monkeypatch) -> None:
+    from hal0.memory import embedder_record
+
+    monkeypatch.setattr(
+        embedder_record, "engine_evidence", lambda **_kw: {"on_disk_source": "unit"}
+    )
+    monkeypatch.setattr(
+        "hal0.memory.engine_upgrade.hindsight_dir", lambda: tmp_path / "unmounted" / "hindsight"
+    )
     got = bl.ensure_layout_record(cfg(), path=record, store=STORE_ABSENT, engine_url="")
-    assert got.two_bank and not got.persisted
+    assert (got.layout, got.source) == (bl.LAYOUT_LEGACY, bl.SOURCE_STORE_UNAVAILABLE)
+    assert not record.exists()
 
 
 def test_current_layout_never_writes(record: Path, monkeypatch) -> None:
@@ -256,6 +341,42 @@ def test_provider_from_config_builds_from_the_record(monkeypatch) -> None:
         "hal0:private",
     )
     assert fresh.layout == "two_bank"
+
+
+def test_provider_from_config_serves_no_bank_while_the_layout_is_undecided(monkeypatch) -> None:
+    from hal0 import memory
+    from hal0.config.schema import Hal0Config
+    from hal0.memory.pgvector_provider import PgVectorProvider
+
+    probed: list[Any] = []
+    monkeypatch.setattr(memory, "_build_hindsight_client", lambda _cfg: probed.append(1))
+
+    def undecided(_m: Any) -> Any:
+        raise bl.LayoutRecordUnsaved("no")
+
+    monkeypatch.setattr(bl, "ensure_layout_record", undecided)
+    provider = memory.provider_from_config(Hal0Config())
+    assert isinstance(provider, PgVectorProvider) and provider.degraded
+    assert probed == []
+
+
+def test_provider_from_config_records_the_layout_before_the_engine_answers(monkeypatch) -> None:
+    """A boot that finds no engine yet (a new install starts hal0-api
+    before the engine) still records the layout while there is no store."""
+    from hal0 import memory
+    from hal0.config.schema import Hal0Config
+
+    seen: list[Any] = []
+    monkeypatch.setattr(
+        bl, "ensure_layout_record", lambda m: seen.append(m) or bl.BankLayout("two_bank")
+    )
+
+    def down(_cfg: Any) -> Any:
+        raise ConnectionError("engine not started yet")
+
+    monkeypatch.setattr(memory, "_build_hindsight_client", down)
+    assert memory.provider_from_config(Hal0Config()).degraded
+    assert len(seen) == 1
 
 
 def test_the_update_pass_records_the_layout_before_the_config_migrations(monkeypatch) -> None:

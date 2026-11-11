@@ -47,20 +47,26 @@ once:
 `layout` is `two_bank` or `legacy` (an old layout). An old layout's record
 holds what the old config said: the bank behind `shared` and whether private
 memory shared it. The update pass writes it (`install.sh` runs that pass
-before the memory engine first starts) and hal0-api writes it at boot when it
-is missing:
+before the memory engine first starts) and hal0-api writes it when it starts
+and finds none, before it first talks to the engine:
 
 - no memory store yet, and no `unified_bank` key in `hal0.toml`: `two_bank`;
 - a store exists, or `hal0.toml` still has `unified_bank`: the old layout,
-  with `platform_bank` from `[memory] bank` when it was set (to anything but
-  `hal0:shared`), else `shared`, and `unified` from `unified_bank`, else
-  `true`;
-- the store's location cannot be seen, or hal0-api is pointed at an engine on
-  another host (`HAL0_HINDSIGHT_URL`): treated as the old layout and not
-  written down.
+  with `platform_bank` from `[memory] bank` when the file sets it (whatever
+  its value), else `shared`, and `unified` from `unified_bank`, else `true`;
+- the store's location cannot be seen (its storage is not mounted, or the
+  engine's unit is installed and its home is missing), or hal0-api is pointed
+  at an engine on another host (`HAL0_HINDSIGHT_URL`, which the update pass
+  reads from `api.env`): treated as the old layout and not written down. A
+  process that cannot read `api.env` decides nothing it would record as
+  `two_bank`, and leaves the decision to hal0-api's start.
 
-An existing record is never rewritten, and a record that cannot be read is
-left alone (the box is treated as on the old layout for that run). On a store
+An existing record is never rewritten. Two states are errors rather than
+guesses, because a guess can put new memory in banks the store does not read:
+a record that cannot be read (it is left alone), and a `two_bank` decision
+that cannot be written down. In either, hal0-api serves no memory bank (the
+degraded fallback, retried in the background) and the `memory_layout` row of
+`hal0 doctor` names the cause. On a store
 on its old layout, setting `[memory] bank` to another name still moves its
 platform bank (ADR-0052; run `hal0 memory migrate platform` first), and
 `private_bank` is not used. `GET /api/memory/health` reports the layout as

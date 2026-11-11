@@ -1655,6 +1655,13 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         lambda **_kw: Check("memory_engine_env", "Memory engine env", "pass", "stubbed"),
     )
 
+    # Layout row (ADR-0058 decision 7) reads the layout record otherwise.
+    monkeypatch.setattr(
+        da,
+        "check_memory_layout",
+        lambda **_kw: Check("memory_layout", "Memory layout", "pass", "stubbed"),
+    )
+
     # Embedder row (#3518) reads hal0.toml, the record and the engine home otherwise.
     monkeypatch.setattr(
         da,
@@ -1678,7 +1685,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     assert gtt_leak_slots == [[{"port": 8081}]]
     assert set(projects_kwargs) == {"memory", "base"}
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-50:] == [
+    assert keys[-51:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1724,6 +1731,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hindsight_llm_auth",
         "memory_engine_version",
         "memory_engine_env",
+        "memory_layout",
         "memory_embedder",
         "memory_extraction_throughput",
         "memory_retain_chunk",
@@ -4338,3 +4346,47 @@ def test_render_all_keeps_bracketed_table_names_in_row_text() -> None:
     out = buf.getvalue()
     assert "[memory.models] asks for" in out
     assert "[memory.graph].llm_timeout_s" in out
+
+
+# ── memory layout (ADR-0058 decision 7) ──────────────────────────────────────
+
+
+def test_memory_layout_row(tmp_path) -> None:
+    from hal0.memory import bank_layout as bl
+
+    record = tmp_path / "memory-layout.json"
+    missing = da.check_memory_layout(path=record)
+    assert (missing.key, missing.status) == ("memory_layout", "pass")
+    assert "no record yet" in missing.detail
+
+    bl.save_layout_record(bl.BankLayout(bl.LAYOUT_TWO_BANK), record)
+    assert "two banks" in da.check_memory_layout(path=record).detail
+
+    bl.save_layout_record(
+        bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared", legacy_unified=False),
+        record,
+    )
+    old = da.check_memory_layout(path=record)
+    assert old.status == "pass" and "old split layout, platform bank shared" in old.detail
+
+    record.write_text("{not json")
+    broken = da.check_memory_layout(path=record)
+    assert broken.status == "fail"
+    assert str(record) in broken.detail and "serves no memory bank" in broken.detail
+
+
+def test_projects_row_survives_an_unreadable_layout_record(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import bank_layout as bl
+
+    def unreadable(_cfg, **_kw):
+        raise bl.LayoutRecordError(bl.layout_record_path(), "is not JSON")
+
+    monkeypatch.setattr(bl, "current_layout", unreadable)
+    monkeypatch.setattr(
+        loader, "load_hal0_config", lambda: SimpleNamespace(memory=MemoryConfig(bank="x"))
+    )
+    assert da._projects_config()[0] == "x"

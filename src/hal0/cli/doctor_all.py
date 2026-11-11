@@ -3490,6 +3490,53 @@ def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
     return Check(name, title, _PASS, f"hindsight-api runs with the values hal0 renders{in_force}")
 
 
+def check_memory_layout(*, path: Any = None) -> Check:
+    """Which banks the memory store is laid out in (ADR-0058 decision 7).
+
+    Reads ``/var/lib/hal0/state/memory-layout.json``
+    (:mod:`hal0.memory.bank_layout`, mode 0644, so any account can read it)
+    and writes nothing. Outcomes:
+
+    * ``pass`` with the layout and its banks;
+    * ``pass`` with a note when there is no record yet: the next update or
+      hal0-api start writes it;
+    * ``fail`` when the file exists and cannot be read. hal0-api then serves
+      no memory bank at all (the degraded fallback), because guessing a
+      layout can put new memory in banks the store does not read; the detail
+      names the file and the remedy.
+    """
+    from hal0.memory.bank_layout import LayoutRecordError, layout_record_path, load_layout_record
+
+    name, title = "memory_layout", "Memory layout"
+    target = path if path is not None else layout_record_path()
+    try:
+        record = load_layout_record(target)
+    except LayoutRecordError as exc:
+        return Check(
+            name,
+            title,
+            _FAIL,
+            f"{exc.path} {exc.reason}: hal0-api serves no memory bank until it is fixed. "
+            "Restore it from a backup, or remove it to have the layout decided again "
+            "(only on a box whose banks you know: an existing store is recorded as the "
+            "old layout), then restart hal0-api",
+        )
+    if record is None:
+        return Check(
+            name, title, _PASS, "no record yet; the next update or hal0-api start writes it"
+        )
+    if record.two_bank:
+        return Check(name, title, _PASS, "two banks (hal0:shared, hal0:private, or as configured)")
+    kind = "unified" if record.legacy_unified is not False else "split"
+    return Check(
+        name,
+        title,
+        _PASS,
+        f"old {kind} layout, platform bank {record.legacy_platform_bank}; "
+        "it stays until its memory is folded in",
+    )
+
+
 def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     """The configured embedder must be the one the memory store was built with (#3518).
 
@@ -3784,14 +3831,22 @@ def _projects_config() -> tuple[str, Any, bool]:
     """
     from hal0.config.loader import ConfigError, load_hal0_config
     from hal0.config.schema import MemoryConfig
-    from hal0.memory.bank_layout import platform_bank
+    from hal0.memory.bank_layout import LayoutUndecided, platform_bank
     from hal0.memory.projects import ProjectRegistry, registry_from_config
+
+    def bank_of(memory: Any) -> str:
+        # An unreadable layout record is the memory_layout row's to report;
+        # this row counts the configured bank meanwhile.
+        try:
+            return platform_bank(memory)
+        except LayoutUndecided:
+            return str(memory.bank)
 
     try:
         memory = load_hal0_config().memory
     except (ConfigError, OSError):
-        return platform_bank(MemoryConfig()), ProjectRegistry(), False
-    return platform_bank(memory), registry_from_config(memory.projects), True
+        return bank_of(MemoryConfig()), ProjectRegistry(), False
+    return bank_of(memory), registry_from_config(memory.projects), True
 
 
 def check_memory_projects(
@@ -4251,6 +4306,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),
         check_memory_engine_env(),
+        check_memory_layout(),
         check_memory_embedder(),
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
         check_memory_retain_chunk(memory=payloads["memory"], base=base),
@@ -4353,6 +4409,7 @@ __all__ = [
     "check_memory_engine_env",
     "check_memory_engine_version",
     "check_memory_extraction_throughput",
+    "check_memory_layout",
     "check_memory_projects",
     "check_memory_retain_chunk",
     "check_model_store",
