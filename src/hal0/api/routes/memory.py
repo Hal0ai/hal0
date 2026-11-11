@@ -48,6 +48,7 @@ from hal0.memory.namespace import (
     resolve_write_dataset,
 )
 from hal0.memory.retain_chunk_guard import ChunkAudit, audit_bank_chunks
+from hal0.memory.write_gate import require_writes_allowed
 from hal0.normalize.resolver import DEFAULT_CHAINS
 
 router = APIRouter()
@@ -768,6 +769,8 @@ async def retry_failed_extractions(request: Request) -> dict[str, Any]:
     """
     import asyncio
 
+    # #3518: a retry is a write; refused while an embedder switch runs.
+    require_writes_allowed()
     provider = getattr(request.app.state, "memory_provider", None)
     client = getattr(provider, "hindsight_client", None) if provider is not None else None
     if client is None:
@@ -1374,6 +1377,10 @@ async def memory_add(request: Request) -> dict[str, Any]:
         passthrough["observation_scopes"] = observation_scopes
 
     wrapper = _wrapper(request)
+
+    # #3518: while `hal0 memory embedder switch` holds the write gate, refuse
+    # with the typed 503 before any other preflight has a say.
+    require_writes_allowed()
 
     # #1903: preflight the extraction slot's effective window against the
     # extraction prompt's own footprint BEFORE the retain is attempted. A

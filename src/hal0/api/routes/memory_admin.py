@@ -42,6 +42,7 @@ from hal0.api.routes import _memory_subgraph as _sg
 from hal0.api.routes.memory import MemoryUnavailable
 from hal0.errors import BadRequest, Hal0Error, NotFound, UnprocessableEntity
 from hal0.memory.hindsight_provider import annotate_retain_yield
+from hal0.memory.write_gate import engine_call_writes, require_writes_allowed
 
 router = APIRouter()
 
@@ -368,6 +369,7 @@ async def bank_profile_get(request: Request, bank_id: str) -> dict[str, Any]:
 
 @router.put("/banks/{bank_id}/profile")
 async def bank_profile_put(request: Request, bank_id: str) -> dict[str, Any]:
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     body = await _read_body(request)
@@ -709,6 +711,7 @@ async def _require_echoed_confirm(request: Request, client: Any, bank_id: str, w
 
 @router.delete("/banks/{bank_id}")
 async def delete_bank(request: Request, bank_id: str) -> Any:
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     await _require_echoed_confirm(request, client, bank_id, f"delete bank {bank_id}")
@@ -738,6 +741,7 @@ async def delete_bank_memories(request: Request, bank_id: str) -> Any:
     ``confirm`` is hal0's own gate and is stripped so it never reaches the
     engine as an unrecognised filter.
     """
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     await _require_echoed_confirm(
@@ -932,6 +936,7 @@ async def bank_document_transfer_export(request: Request, bank_id: str) -> Respo
 
 @router.post("/banks/{bank_id}/document-transfer")
 async def bank_document_transfer_import(request: Request, bank_id: str) -> Any:
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     on_conflict = request.query_params.get("on_conflict", "skip")
@@ -1272,8 +1277,13 @@ def _make_handler(method: str, template: str):
     if (method, template) == _CURATE_TEMPLATE:
         audit_action = _CURATE_AUDIT_ACTION
     clears_cache = (method, template) in _CACHE_CLEARING_FORWARDS
+    # #3518: every forward that changes the store is refused with
+    # ``memory.writes_paused`` while `hal0 memory embedder switch` runs.
+    is_write = engine_call_writes(method, template)
 
     async def handler(request: Request) -> Any:
+        if is_write:
+            require_writes_allowed()
         client = _client(request)
         segments = _validate_segments(dict(request.path_params))
         upstream = template.format(**segments) if segments else template

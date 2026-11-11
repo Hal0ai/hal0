@@ -84,6 +84,7 @@ from hal0.memory.namespace import (
     resolve_read_datasets,
     resolve_write_dataset,
 )
+from hal0.memory.write_gate import require_writes_allowed
 
 try:
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
@@ -1364,6 +1365,12 @@ def make_dispatcher(
             return {"status": "ok", **payload}
 
         try:
+            if tool == "memory_add":
+                # #3518: while `hal0 memory embedder switch` holds the write
+                # gate, answer with ``memory.writes_paused`` before the
+                # extraction preflight. Every other mutating tool is refused
+                # by the provider with the same code.
+                require_writes_allowed()
             if approval_queue is not None and _needs_approval(tool, args, client_id=client_id):
                 approval_id = await approval_queue.enqueue(
                     tool=tool,
