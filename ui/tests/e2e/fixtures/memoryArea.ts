@@ -73,6 +73,35 @@ export async function routeAllClear(page: Page) {
   await routeGraph(page)
 }
 
+/**
+ * The engine does not answer: its own check says so, the bank list fails, and the health answer
+ * (which the page header reads on every tab) is the bundle's `unreachable` state.
+ */
+export async function routeEngineDown(page: Page) {
+  await page.addInitScript(() => {
+    const w = window as unknown as { __hal0MockPassthrough?: unknown; __hal0MockMemoryHealth?: string }
+    w.__hal0MockPassthrough = ['/api/memory/engine', '/api/memory/banks']
+    w.__hal0MockMemoryHealth = 'unreachable'
+  })
+  await page.route('**/api/memory/engine', (route) =>
+    json(route, {
+      enabled: true,
+      engine: 'hindsight',
+      reachable: false,
+      version: null,
+      features: null,
+      banks_total: null,
+    }),
+  )
+  await page.route('**/api/memory/banks**', (route) =>
+    json(
+      route,
+      { error: { code: 'memory.engine_unreachable', message: 'hindsight-api is not responding', details: {} } },
+      503,
+    ),
+  )
+}
+
 /** Turn the memory subsystem off, as `[memory].enabled = false` does. Call before `page.goto`. */
 export async function memoryOff(page: Page) {
   await page.addInitScript(() => {
