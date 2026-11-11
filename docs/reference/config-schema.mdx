@@ -135,6 +135,7 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `graph` | table | — | see below |
 | `priority` | table | — | see below |
 | `embedding` | table | — | see below |
+| `projects` | table | — | see below |
 
 #### `[memory.graph]`
 
@@ -191,6 +192,22 @@ hold-budget setting: the later gate derives it from half the memory engine's
 | `rerank_model` | str | `"builtin.jina-reranker-v1-tiny-en-q8"` | non-empty |
 | `rerank_connect_timeout_s` | float | `1.0` | `0.05-10.0` |
 | `rerank_read_timeout_s` | float | `8.0` | `0.05-60.0` |
+
+#### `[memory.projects]`
+
+`extra="forbid"`. The project registry that memory writes are resolved
+against; see [Memory projects](/docs/concepts/memory-projects).
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `aliases` | table of str → str | `{}` | other spellings of a project: a write naming the left side is tagged as the right side. Applied before `deny`. An alias may not point at a denied name (or the reserved `unresolved`), at itself, or back at a name that leads to it |
+| `deny` | list[str] | `["tmp", "temp", "root", "home", "workdir", "work", "scratch", "scratchpad", "unknown", "default"]` | names that are never projects; a write naming one is stored with no project. Setting the key replaces the default list |
+| `registered` | list[str] | `[]` | projects you have confirmed. Not required to write; the `memory_projects` doctor row reports names in use that are neither listed here nor aliased |
+
+Every entry is normalised at load: lower case, `a-z`, `0-9`, `.`, `_` and `-`
+kept, any other run turned into one `-`, at most 100 characters. An entry
+with nothing left after that is refused. hal0-api reads the table at start,
+so a change needs a restart; `hal0 doctor` reads the file each run.
 
 ### `[updates]`
 

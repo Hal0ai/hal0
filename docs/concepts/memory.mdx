@@ -201,9 +201,12 @@ Two kinds of tag are moved out of the tag list:
 
 A metadata key the caller already set is left as the caller set it; an empty
 `session_id` counts as not set. Every other tag passes through unchanged:
-namespaced tags such as `source:`, `knowledge:`, `origin:`, `harness:` and
-`project:`, and your own bare words. A `project:<slug>` tag is kept when you
-send one; hal0 does not derive one from text or metadata.
+namespaced tags such as `source:`, `knowledge:`, `origin:` and `harness:`, and
+your own bare words.
+
+A write names its project in a `project` field, not in a tag. hal0 stamps one
+`project:<slug>` tag for it, or `scope:global` on a durable write that has no
+project. [Memory projects](/docs/concepts/memory-projects) has the rules.
 
 The reason is how the engine consolidates. It builds observations per scope,
 and by default a scope is one distinct set of tags. A tag that changes with
@@ -486,6 +489,7 @@ When enabled, memory becomes the shared brain that ties the platform together:
 ## Where to go next
 
 <CardGrid>
+  <LinkCard title="Memory projects" href="/docs/concepts/memory-projects" description="Naming a project on a write, the registry, and per-project scopes." />
   <LinkCard title="Enable memory" href="/docs/guides/enable-memory" description="Turn it on, pick an engine, configure graph extraction and reranking." />
   <LinkCard title="Browse the Bank workspace" href="/docs/guides/memory-workspace" description="The dashboard's fact list, filters, curation, and graph views." />
   <LinkCard title="Agents" href="/docs/concepts/agents" description="The agent that uses memory as its brain." />
