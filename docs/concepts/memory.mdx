@@ -135,10 +135,10 @@ two-value set: `shared` or the caller's own `private:<client_id>`
 ([ADR-0005](/docs/adr/0005-memory-namespace-shared-private)). `shared` is the
 default for every write; `private:<agent>` is for memories an agent — or the
 operator — explicitly wants scoped to one identity. Scoping *within* `shared`
-is done with tags (the agent identity cards carry `agent-identity`; project
-provenance is a `project:<id>` tag), and per-repository **coding** memory
-lives outside this grammar entirely, in `coding-agent::<repo>` engine banks
-written by the coding-agent clients. The retired `agents` and `project:<id>`
+is done with tags (the agent identity cards carry `agent-identity`; a
+project is a `project:<slug>` tag, which no read hides), and coding-agent
+clients write through `/api/memory/compat` into the same shared bank. The
+retired `agents` and `project:<id>`
 namespaces are rejected on write with a pointed remedy. A write with no
 explicit namespace defaults to `shared`. Setting the `X-hal0-Private` header over REST (or `private=true`
 over MCP) promotes the write to `private:<client_id>` and **wins over an
@@ -156,15 +156,12 @@ Callers identify themselves via the `X-hal0-Agent` header, and the same
 identity resolves the same memory namespace whether it arrives over REST or
 MCP.
 
-Namespaces map onto Hindsight **banks** — `shared` is the bank named by
-`[memory] bank` (default `shared`; ADR-0052), `private:<agent>` is the
-`private__<agent>` bank. `[memory].unified_bank`
-(default `true`) changes what a private write actually does: instead of
-forking a separate `private:<agent>` bank, the write still lands in `shared`
-but is stamped with a `visibility:private` tag plus an `agent:<id>` tag, and
-recall stays single-bank (no cross-bank fan-out). Set it `false` to restore
-the pre-unified model — real `private:<agent>` banks and fan-out recall
-across them.
+Namespaces map onto Hindsight **banks**. On a new install `shared` is
+`hal0:shared` (`[memory] bank`) and every `private:<agent>` is `hal0:private`
+(`[memory] private_bank`), one bank where the `agent:<id>` tag scopes each
+agent to its own memory. A store from before keeps its old banks until it is
+folded in. [Memory banks](/docs/concepts/memory-banks) has both layouts and
+who reads what.
 
 ## Write envelope
 
@@ -226,8 +223,10 @@ than leaving it to the tag set:
   not become a belief about another.
 - A coding client's write with no project (`project:unresolved`) is sent with
   `[["project:unresolved", "agent:<id>"]]`, a scope of its writer's own.
-- A private write in the unified bank keeps the engine's default scoping, so
-  an observation built from a private note still carries `visibility:private`.
+- A private write is sent with its writer's own scope,
+  `[["agent:<id>", "visibility:private"]]` (plus its project), on a new
+  install; on an older unified bank it keeps the engine's default scoping.
+  Either way its observations keep `visibility:private`.
 
 Pass another value in the `observation_scopes` argument of the MCP
 `memory_add` tool to override the first two. Because hal0 now always sends a
@@ -468,13 +467,10 @@ When enabled, memory becomes the shared brain that ties the platform together:
   <Card title="Hermes's durable memory, by default" icon="comment">
     Provisioning a fresh bundled agent wires it straight to this subsystem
     with no manual config, backed by Hindsight via the hal0-api REST front
-    door. Under the default `unified_bank = true`, Hermes' private writes
-    land in the single `shared` bank tagged `visibility:private` and
-    `agent:hermes` rather than forking a separate bank, and recall is
-    single-bank. Set `unified_bank = false` to give Hermes a real
-    `private:hermes` bank plus `shared`, with recall unioning both. Recalled
-    context is injected automatically every turn either way, and the agent
-    can also call the MCP tools directly.
+    door. Hermes' private writes and session captures land in
+    `hal0:private` tagged `agent:hermes`, and its recall reads `hal0:shared`
+    plus its own private memory. Recalled context is injected automatically
+    every turn, and the agent can also call the MCP tools directly.
   </Card>
   <Card title="Operator memory" icon="document">
     The dashboard's Memory area and the `/api/memory/*` routes let you add,
@@ -499,6 +495,7 @@ When enabled, memory becomes the shared brain that ties the platform together:
 
 <CardGrid>
   <LinkCard title="Memory projects" href="/docs/concepts/memory-projects" description="How project tags are resolved, the registry, and per-project scopes." />
+  <LinkCard title="Memory banks" href="/docs/concepts/memory-banks" description="hal0:shared and hal0:private, the layout record, and who reads what." />
   <LinkCard title="Enable memory" href="/docs/guides/enable-memory" description="Turn it on, pick an engine, configure graph extraction and reranking." />
   <LinkCard title="The Memory area" href="/docs/guides/memory-workspace" description="Health and its repair path, facts, knowledge, operations and agents in the dashboard." />
   <LinkCard title="Agents" href="/docs/concepts/agents" description="The agent that uses memory as its brain." />

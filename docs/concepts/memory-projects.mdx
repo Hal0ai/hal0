@@ -1,44 +1,25 @@
 ---
 title: Memory projects
-description: How hal0 files a memory under a project. hal0 resolves project names against the [memory.projects] registry, tags the write, and consolidates observations per project. Callers cannot name a project in a request yet.
+description: How hal0 files a memory under a project and reads by one. hal0 resolves project names against the [memory.projects] registry, tags the write, consolidates observations per project, and lets a read narrow to one project.
 sidebar:
   order: 51
 ---
 
 import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-A memory can belong to a project: a repository, usually. hal0 is moving the
-project from a tag each agent composes by hand to something hal0 resolves and
-stamps itself (ADR-0058, decision 4a). This page describes the part that
-exists today: the registry, how a name is resolved, what a write is tagged
-with, and what does not use the project yet.
+A memory can belong to a project: a repository, usually. hal0 resolves the
+project and stamps it itself, instead of each agent composing the tag by hand
+(ADR-0058, decision 4a). This page describes the registry, how a name is
+resolved, what a write is tagged with, and how a read narrows to a project.
 
-<Aside type="caution">
-**You cannot name a project in a request yet.** `POST /api/memory/add` and the
-MCP `memory_add` tool have no `project` field. A `project` key in the body or
-arguments, and an `X-hal0-Project` header, are ignored.
+## Naming the project of a write
 
-The reason is a read filter that is older than this work. Under the default
-`[memory].unified_bank = true`, a memory that carries a `project:` tag is not
-returned by `POST /api/memory/recall`, `POST /api/memory/search`,
-`GET /api/memory/list` or the MCP `memory_recall`, `memory_search` and
-`memory_list` tools. A client that named its project on every write would
-hide all of its own memory from those reads. The request field becomes
-available together with the change that lets shared reads see project-tagged
-memory (ADR-0058, decision 7b).
-
-The same filter applies today to a `project:<name>` tag you put in `tags`
-yourself: the write is stored, but recall, search and list do not return it.
-Reflect (`POST /api/memory/reflect`, MCP `memory_reflect`) and the bank routes
-under `/api/memory/banks/{bank}/` do. With `unified_bank = false` all of them
-do.
-</Aside>
-
-## What hal0 does with a `project:` tag today
-
-The only way a write gets a project today is a `project:<name>` tag among its
-`tags`. hal0 does not store such a tag as sent. Each one is resolved, and the
-write is tagged with what the resolver produced:
+A write names its project with a `project` field: in the body of
+`POST /api/memory/add` (or the `X-hal0-Project` header, which the body field
+wins over) and as the `project` argument of the MCP `memory_add` tool. hal0
+resolves the name and tags the write with one `project:<slug>` tag; any
+`project:` tag the caller sent is replaced. A write that names no project is
+resolved from its own `project:` tags instead:
 
 - One tag, or several that are the same project once resolved: one
   `project:<slug>` tag.
@@ -49,7 +30,9 @@ write is tagged with what the resolver produced:
   left, the write has no project.
 
 So a denied name is never stored as a project tag, and no project tag is
-stored in a spelling other than the normalised one.
+stored in a spelling other than the normalised one. A project-tagged memory
+is readable by every shared read (ADR-0058, decision 7b): `project:` is a
+scope a read may narrow by, not a wall.
 
 ## How a name is resolved
 
@@ -69,12 +52,10 @@ error. The name `unresolved` is reserved and always denied.
 Any name that survives is accepted as a project. Registration is not required
 to write; it only affects what `hal0 doctor` reports.
 
-**Sources, once requests can name a project.** hal0's write path already
-accepts a project named outside the tags, and it takes precedence: a named
-project first, then the project part of a per-repository bank id written by a
-coding-agent client, then the `project:` tags. A named project that is denied
-ends the resolution; the tags are not consulted. No REST or MCP entry point
-supplies the first two yet.
+**Sources.** A named project comes first (the `project` field), then the
+project part of a per-repository bank id a coding-agent client sends to
+`/api/memory/compat`, then the `project:` tags. A named project that is
+denied ends the resolution; the tags are not consulted.
 
 ### The registry
 
@@ -113,13 +94,12 @@ the `kind:` tags described under
 [Write envelope](/docs/concepts/memory#write-envelope).
 
 A `scope:global` tag the caller sent is kept. A `project:unresolved` tag the
-caller sent is dropped: only hal0 stamps it. No entry point marks a caller as
-a coding client yet, so nothing is tagged `project:unresolved` today.
+caller sent is dropped: only hal0 stamps it, on a write through
+`/api/memory/compat` whose client names no project.
 
 The decision is also written to the document's metadata, unless the caller
 already set the key: `project` (the slug, several slugs joined by commas, or
-`unresolved`) and `project_source` (`tag`, `denied`, and later `field` and
-`bank`).
+`unresolved`) and `project_source` (`field`, `bank`, `tag` or `denied`).
 
 <Aside type="note">
 Before this change a durable write carried `agent:<id>` and `kind:durable`
@@ -145,22 +125,36 @@ hal0 chooses the observation scope of each write from its final tags:
   scope: an observation built there carries no tags, every project's read
   admits an untagged memory, and one client's unresolved writes would then
   surface in every other client's project.
-- A private write in the unified bank keeps the engine's default scoping,
-  project or not, so its observations still carry `visibility:private`.
+- A private write is scoped to its writer: in the two-bank layout
+  `[["agent:<id>", "visibility:private", "project:<slug>"]]`, or without the
+  project when it has none ([Memory banks](/docs/concepts/memory-banks)). On
+  a store still on its old unified bank it keeps the engine's default
+  scoping, so its observations still carry `visibility:private`.
 
 ## Reading by project
 
-The project is not applied to reads yet. Recall and reflect behave as they
-did, including the filter described at the top of this page. The scope a
-project read will use is defined and tested: a read in project `widgets` sees
-memory tagged `project:widgets` or `scope:global`, and a read with no project
-sees `scope:global` only. Reading across projects will be an explicit request,
-never the fallback.
+`POST /api/memory/recall`, `POST /api/memory/search`, `POST /api/memory/reflect`
+and `GET /api/memory/list` (as `?project=`), and the MCP `memory_recall`,
+`memory_search` and `memory_reflect` tools, take an optional `project`:
 
-Both forms also admit a memory that has no tags at all. A memory that has
-tags but neither of those two, which includes every memory written through
-hal0 before `scope:global` existed, is outside a project-scoped read until
-the fold-in migration retags it.
+| `project` | What the read sees |
+|---|---|
+| absent, or `"*"` | the whole bank: every project, global memory, untagged memory |
+| a name | memory tagged `project:<slug>` or `scope:global`, and untagged memory |
+| a name that resolves to no project (denied, or nothing left of it) | `scope:global` and untagged memory |
+
+The name is resolved like a write's, through the aliases and the deny list.
+Private visibility applies on top in every case: another agent's private
+memory is never read, whatever its project.
+
+A memory that has tags but neither `project:<slug>` nor `scope:global`, which
+includes every memory written through hal0 before `scope:global` existed, is
+outside a project-narrowed read until the fold-in migration retags it. A read
+with no `project` sees it.
+
+The coding-agent endpoint, `/api/memory/compat`, is the exception: its reads
+are always held to the client's project plus global memory, and it has no
+whole-bank read.
 
 ## Measuring it
 
@@ -172,5 +166,6 @@ in use that the registry does not know. See
 
 <CardGrid>
   <LinkCard title="Memory" href="/docs/concepts/memory" description="Namespaces, banks, the write envelope and what memory powers." />
+  <LinkCard title="Memory banks" href="/docs/concepts/memory-banks" description="hal0:shared and hal0:private, the layout record, and who reads what." />
   <LinkCard title="Config schema reference" href="/docs/reference/config-schema" description="Every hal0.toml table, including [memory.projects]." />
 </CardGrid>

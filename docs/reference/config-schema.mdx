@@ -129,8 +129,8 @@ override: `HAL0_FLM_MODELS_DIR`.
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `enabled` | bool | `true` | — |
-| `unified_bank` | bool | `true` | — |
-| `bank` | str | `"shared"` | Hindsight bank behind the `shared` namespace (ADR-0052); letters, digits, `.`, `_`, `:`, `-`, max 128, must start alphanumeric; not `agents` or `private__*`. Run `hal0 memory migrate platform` before changing it; restart hal0-api |
+| `bank` | str | `"hal0:shared"` | Hindsight bank behind the `shared` namespace (ADR-0052, ADR-0058 decision 7); letters, digits, `.`, `_`, `:`, `-`, max 128, must start alphanumeric; not `agents` or `private__*`. A store from before the two-bank layout keeps its recorded bank, and there the key names a bank only when set to something other than `hal0:shared` ([Memory banks](/docs/concepts/memory-banks)). Run `hal0 memory migrate platform` before changing it; restart hal0-api |
+| `private_bank` | str | `"hal0:private"` | Hindsight bank behind every `private:<agent>` namespace in the two-bank layout; same rules as `bank`, and must differ from it. Not used by a store still on its old layout. Restart hal0-api |
 | `engine` | str | `"hindsight"` | one of `hindsight`, `mem0`, `pgvector` — `"cognee"` is explicitly rejected (retired) |
 | `graph` | table | — | see below |
 | `priority` | table | — | see below |

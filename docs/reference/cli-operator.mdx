@@ -83,9 +83,9 @@ Knowledge-base pages are documents Hindsight 1.2 synthesizes from a bank's memor
 |---|---|---|
 | `memory models show` | — | `--json` |
 | `memory agents install <harness>` | `harness` (e.g. `claude-code`, `cursor`, `codex`) | `--dry-run`, `--json` |
-| `memory spec apply` | — | `--dry-run`, `--bank BANK`, `--api URL` (default `http://127.0.0.1:9177`), `--json` |
+| `memory spec apply` | — | `--dry-run`, `--bank BANK` (a bank id, or the role `platform` or `private`), `--api URL` (default `http://127.0.0.1:9177`), `--json` |
 
-`memory models show` lists the embeddings, reranker and decision models from `[memory.models]` and `[memory.decision]`. The embeddings row shows the provider and model the memory store was built with, which is what the engine runs; when `[memory.models]` names a different provider or model, the row says that value is not applied and names `hal0 memory embedder switch`. `memory agents install` wires a coding-agent harness to `hal0-memory`; `--dry-run` prints the installer command and config merge without running or writing anything. `memory spec apply` applies the packaged bank spec (templates, `config_extra`, knowledge-base pages) through Hindsight's `/import`. It is idempotent, and `--dry-run` posts with `dry_run=true`.
+`memory models show` lists the embeddings, reranker and decision models from `[memory.models]` and `[memory.decision]`. The embeddings row shows the provider and model the memory store was built with, which is what the engine runs; when `[memory.models]` names a different provider or model, the row says that value is not applied and names `hal0 memory embedder switch`. `memory agents install` wires a coding-agent harness to `hal0-memory`; `--dry-run` prints the installer command and config merge without running or writing anything. `memory spec apply` applies the packaged bank spec (templates, `config_extra`, knowledge-base pages) through Hindsight's `/import`. The spec names roles: `platform` and `private` are this box's banks ([Memory banks](/docs/concepts/memory-banks#bank-spec-and-seeding)). It refuses the per-project observation scope on an old unified bank and the private template's mental models on `hal0:private`, and says so. It is idempotent, and `--dry-run` posts with `dry_run=true`.
 
 ### `memory embedder switch`
 
@@ -134,16 +134,6 @@ swap, the engine stays private and memory writes stay paused until `--resume`
 completes; the message names the archive directory and `--status`. A finished
 run whose store had to be recorded as mixed exits 0 and says so.
 
-### `memory migrate unify`
-
-```sh
-hal0 memory migrate unify --source BANK [--source BANK ...] [--target shared]
-                           [--apply|--dry-run] [--add-tag TAG ...]
-                           [--on-conflict skip|replace|new-id] [--skip-observations] [--json]
-```
-
-`--source` is repeatable and required. `--target` defaults to `"shared"`. Defaults to
-dry-run unless `--apply` is given. `--on-conflict` defaults to `skip`.
 
 ### `memory migrate platform`
 
@@ -153,7 +143,11 @@ hal0 memory migrate platform [--target BANK] [--source shared] [--agents-bank ag
 ```
 
 Moves the platform memory into the bank named by `[memory] bank` (ADR-0052).
-`--target` defaults to that config value. The command clones `--source`
+`--target` defaults to that config value when it is set in `hal0.toml` (and is
+not the two-bank default `hal0:shared`); otherwise pass `--target`. The
+two-bank layout's `hal0:shared` and `hal0:private` are refused as targets: a
+store moves into them through the fold-in, which splits private memory out.
+`hal0 memory migrate unify` was removed. The command clones `--source`
 (default `shared`) into `--target` with the engine's clone call, folds the
 retired `--agents-bank` (default `agents`, skipped when it does not exist) into
 the same target, and then compares fact counts, exiting 1 if the target is
