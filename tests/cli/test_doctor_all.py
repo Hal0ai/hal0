@@ -3734,15 +3734,25 @@ _HS = "hindsight-ai/hs-embed-1"
 
 
 def _embedder(recorded: str, configured: str, *, mixed: bool = False, **extra: object) -> dict:
-    return {
+    status: dict = {
         "recorded": recorded,
+        "recorded_provider": "local",
         "configured": configured,
+        "configured_provider": "local",
         "mixed": mixed,
-        "needs_switch": mixed or recorded != configured,
         "source": "engine-default",
         "recorded_at": "2026-11-10T21:00:00+00:00",
+        "effective": None,
+        "conflict": None,
+        "record_error": None,
+        "store_unavailable": None,
         **extra,
     }
+    status["needs_switch"] = mixed or (status["recorded_provider"], recorded) != (
+        status["configured_provider"],
+        configured,
+    )
+    return status
 
 
 def test_memory_embedder_passes_when_the_store_matches_the_config() -> None:
@@ -3767,11 +3777,25 @@ def test_memory_embedder_warns_when_the_operator_set_a_model_that_differs() -> N
     check = da.check_memory_embedder(status=_embedder(_BGE, "example-org/another-embedder"))
     assert check.status == "warn"
     assert f"built with {_BGE}" in check.detail
-    assert "embeddings_model is set to example-org/another-embedder" in check.detail
+    assert "[memory.models] asks for example-org/another-embedder" in check.detail
     assert "no effect" in check.detail
     # Names the way out without claiming the command exists.
     assert "`hal0 memory embedder switch`" in check.detail
     assert "not in this release yet" in check.detail
+
+
+def test_memory_embedder_warns_when_the_operator_set_a_provider_that_differs() -> None:
+    """Same model, a remote provider: an explicit setting that is not applied."""
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE, configured_provider="openai"))
+    assert check.status == "warn"
+    assert "the openai provider" in check.detail and "no effect" in check.detail
+
+
+def test_memory_embedder_names_a_recorded_remote_provider_when_it_passes() -> None:
+    status = _embedder(_BGE, _BGE, recorded_provider="openai", configured_provider="openai")
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "pass"
+    assert "the openai provider" in check.detail
 
 
 def test_memory_embedder_warns_on_a_mixed_store_even_when_the_models_match() -> None:
@@ -3786,7 +3810,7 @@ def test_memory_embedder_warns_when_a_store_on_the_default_model_is_configured_a
     """Recorded hs-embed-1, operator asks for bge-small: an explicit setting that is not applied."""
     check = da.check_memory_embedder(status=_embedder(_HS, _BGE))
     assert check.status == "warn"
-    assert f"embeddings_model is set to {_BGE}" in check.detail
+    assert f"[memory.models] asks for {_BGE}" in check.detail
 
 
 def test_memory_embedder_warns_on_a_mixed_store_at_the_default_config() -> None:
@@ -3794,6 +3818,41 @@ def test_memory_embedder_warns_on_a_mixed_store_at_the_default_config() -> None:
     check = da.check_memory_embedder(status=_embedder(_BGE, _HS, mixed=True))
     assert check.status == "warn"
     assert "two embedders" in check.detail
+
+
+def test_memory_embedder_warns_naming_both_when_the_engine_disagrees_with_the_record() -> None:
+    conflict = {
+        "live": {"provider": "local", "model": _HS},
+        "on_disk": {"provider": "local", "model": _HS},
+    }
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE, conflict=conflict))
+    assert check.status == "warn"
+    assert f"record says {_BGE}" in check.detail
+    assert f"the running engine is on {_HS}" in check.detail
+    assert f"would start it on {_HS}" in check.detail
+    assert "changed neither" in check.detail
+
+
+def test_memory_embedder_warns_with_the_path_when_the_record_cannot_be_read() -> None:
+    status = _embedder(_BGE, _BGE, record_error="/var/lib/hal0/state/memory-embedder.json")
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "warn"
+    assert "/var/lib/hal0/state/memory-embedder.json cannot be read" in check.detail
+    assert "left the file as it is" in check.detail
+
+
+def test_memory_embedder_warns_when_the_store_location_is_unavailable() -> None:
+    status = _embedder(
+        _BGE,
+        _HS,
+        source="store-unavailable",
+        recorded_at=None,
+        store_unavailable="/var/lib/hal0/memory/hindsight",
+    )
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "warn"
+    assert "/var/lib/hal0/memory/hindsight, is not available" in check.detail
+    assert "nothing is recorded" in check.detail
 
 
 def test_memory_embedder_passes_on_a_box_with_no_store() -> None:

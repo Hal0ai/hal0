@@ -107,7 +107,9 @@ def test_memory_embedder_record_first_write_adopts_owner(
     """#3518: a root-run update writes the record; the service must be able to read it."""
     from hal0.memory import embedder_record as er
 
-    saved = er.save_embedder_record(er.EmbedderRecord(model="BAAI/bge-small-en-v1.5", source="x"))
+    saved = er.save_embedder_record(
+        er.EmbedderRecord(provider="local", model="BAAI/bge-small-en-v1.5", source="x")
+    )
 
     assert er.load_embedder_record() == saved
     _adopted(as_root, "memory-embedder.json")

@@ -434,18 +434,55 @@ def test_put_settings_response_preserves_existing_top_level_shape(
     assert body["_hal0"]["apply_plan"]["unknown"] == []
 
 
-# ── #3518: [memory.models].embeddings_model is saved, not applied ────────────
+# ── #3518: the embedder keys are saved, not applied ──────────────────────────
+
+_EMBEDDER_ROW = {
+    "apply_class": "manual-restart",
+    "services": [],
+    "note": "saved; takes effect only through an embedder switch",
+}
 
 
-def test_registry_classes_the_memory_embedder_key_as_manual_restart() -> None:
-    """The existing class for "a service restart will not apply this": the
-    engine keeps the embedder its store was built with."""
-    assert REGISTRY["memory.models.embeddings_model"] == {
-        "apply_class": "manual-restart",
-        "services": [],
-    }
-    # Its neighbours in the same drop-in still apply on save.
-    assert REGISTRY["memory.models.reranker_model"]["apply_class"] == "immediate"
+@pytest.mark.parametrize(
+    "key", ["memory.models.embeddings_provider", "memory.models.embeddings_model"]
+)
+def test_registry_classes_both_embedder_keys_as_manual_restart_with_a_note(key: str) -> None:
+    """Provider and model are one fact. The class is the existing one for "a
+    service restart will not apply this"; the note says what does, because the
+    class name alone reads as "restart something"."""
+    assert REGISTRY[key] == _EMBEDDER_ROW
+    assert apply_plan([key])["manual_restart"] == [key]
+
+
+def test_the_other_model_keys_still_apply_on_save() -> None:
+    assert REGISTRY["memory.models.reranker_model"] == {"apply_class": "immediate", "services": []}
     plan = apply_plan(["memory.models.embeddings_model", "memory.models.reranker_model"])
     assert plan["manual_restart"] == ["memory.models.embeddings_model"]
     assert plan["immediate"] == ["memory.models.reranker_model"]
+
+
+def test_the_note_rides_along_wherever_the_registry_row_does(isolated_client: TestClient) -> None:
+    """The apply-plan route, the field list and a preview all carry it, and
+    only the rows that have one do."""
+    key = "memory.models.embeddings_provider"
+    assert get_registry()[key] == _EMBEDDER_ROW
+    assert "note" not in get_registry()["memory.models.reranker_model"]
+
+    registry = isolated_client.get("/api/settings/apply-plan").json()["registry"]
+    assert registry[key] == _EMBEDDER_ROW
+    assert "note" not in registry["telemetry.enabled"]
+
+    fields = {f["path"]: f for f in isolated_client.get("/api/settings/fields").json()["fields"]}
+    assert fields[key]["note"] == _EMBEDDER_ROW["note"]
+    assert fields[key]["apply_class"] == "manual-restart"
+    assert "note" not in fields["memory.models.reranker_model"]
+
+    preview = isolated_client.post(
+        "/api/settings/preview", json={"memory": {"models": {"embeddings_provider": "openai"}}}
+    ).json()
+    (change,) = preview["changeset"]["changes"]
+    assert (change["path"], change["apply_class"], change["note"]) == (
+        key,
+        "manual-restart",
+        _EMBEDDER_ROW["note"],
+    )

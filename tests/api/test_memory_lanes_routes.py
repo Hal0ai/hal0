@@ -419,9 +419,11 @@ def test_models_reports_an_upgraded_store_as_needing_a_switch(
 
     emb = client.get("/api/memory/models").json()["embeddings"]
 
-    assert emb["recorded"] == "BAAI/bge-small-en-v1.5"
-    assert emb["configured"] == "hindsight-ai/hs-embed-1"
-    assert emb["model"] == "hindsight-ai/hs-embed-1"  # unchanged: the configured value
+    assert (emb["recorded_provider"], emb["recorded"]) == ("local", "BAAI/bge-small-en-v1.5")
+    assert (emb["configured_provider"], emb["configured"]) == ("local", "hindsight-ai/hs-embed-1")
+    # Unchanged: the configured values.
+    assert (emb["provider"], emb["model"]) == ("local", "hindsight-ai/hs-embed-1")
+    assert emb["conflict"] is None and emb["record_error"] is None
     assert emb["mixed"] is False
     assert emb["needs_switch"] is True
     assert emb["source"] == "engine-default"
@@ -472,3 +474,48 @@ def test_models_reports_a_mixed_store(client: TestClient, tmp_path, monkeypatch)
     assert emb["mixed"] is True
     assert emb["needs_switch"] is True
     assert emb["source"] == "showcase-drop-in"
+
+
+def test_models_reports_a_provider_that_differs(client: TestClient, tmp_path, monkeypatch) -> None:
+    """Same model name, a remote provider configured: still a different embedder."""
+    from hal0.api.routes import memory_lanes as mod
+    from hal0.config.schema import MemoryConfig, MemoryModelsConfig
+
+    class _Cfg:
+        memory = MemoryConfig(
+            models=MemoryModelsConfig(
+                embeddings_provider="openai", embeddings_model="BAAI/bge-small-en-v1.5"
+            )
+        )
+
+    _store_and_dropin(tmp_path, monkeypatch)
+    monkeypatch.setattr(mod, "load_hal0_config", lambda: _Cfg())
+
+    emb = client.get("/api/memory/models").json()["embeddings"]
+
+    assert (emb["recorded_provider"], emb["configured_provider"]) == ("local", "openai")
+    assert emb["recorded"] == emb["configured"] == "BAAI/bge-small-en-v1.5"
+    assert emb["needs_switch"] is True
+
+
+def test_models_reports_where_the_engine_disagrees_with_the_record(
+    client: TestClient, tmp_path, monkeypatch
+) -> None:
+    from hal0.memory import embedder_record as er
+
+    _store_and_dropin(tmp_path, monkeypatch)
+    er.save_embedder_record(
+        er.EmbedderRecord(provider="local", model="BAAI/bge-small-en-v1.5", source="engine-default")
+    )
+    running = {"provider": "local", "model": "hindsight-ai/hs-embed-1"}
+    monkeypatch.setattr(
+        er,
+        "engine_evidence",
+        lambda **_kw: {"live": running, "on_disk": running, "on_disk_source": "unit"},
+    )
+
+    emb = client.get("/api/memory/models").json()["embeddings"]
+
+    assert emb["recorded"] == "BAAI/bge-small-en-v1.5"
+    assert emb["effective"] == {**running, "source": "process"}
+    assert emb["conflict"] == {"live": running, "on_disk": running}

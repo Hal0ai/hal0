@@ -85,7 +85,7 @@ Knowledge-base pages are documents Hindsight 1.2 synthesizes from a bank's memor
 | `memory agents install <harness>` | `harness` (e.g. `claude-code`, `cursor`, `codex`) | `--dry-run`, `--json` |
 | `memory spec apply` | — | `--dry-run`, `--bank BANK`, `--api URL` (default `http://127.0.0.1:9177`), `--json` |
 
-`memory models show` lists the embeddings, reranker and decision models from `[memory.models]` and `[memory.decision]`. The embeddings row shows the model the memory store was built with, which is the one the engine runs; when `[memory.models].embeddings_model` names a different one, the row says that value is not applied. `memory agents install` wires a coding-agent harness to `hal0-memory`; `--dry-run` prints the installer command and config merge without running or writing anything. `memory spec apply` applies the packaged bank spec (templates, `config_extra`, knowledge-base pages) through Hindsight's `/import`. It is idempotent, and `--dry-run` posts with `dry_run=true`.
+`memory models show` lists the embeddings, reranker and decision models from `[memory.models]` and `[memory.decision]`. The embeddings row shows the provider and model the memory store was built with, which is what the engine runs; when `[memory.models]` names a different provider or model, the row says that value is not applied. `memory agents install` wires a coding-agent harness to `hal0-memory`; `--dry-run` prints the installer command and config merge without running or writing anything. `memory spec apply` applies the packaged bank spec (templates, `config_extra`, knowledge-base pages) through Hindsight's `/import`. It is idempotent, and `--dry-run` posts with `dry_run=true`.
 
 ### `memory migrate unify`
 

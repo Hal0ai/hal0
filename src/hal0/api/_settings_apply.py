@@ -39,7 +39,7 @@ Apply-class semantics
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 # Apply-class enum. Kept as plain string literals so JSON round-trips
 # without an extra enum adapter and the type checker accepts the
@@ -81,17 +81,20 @@ SERVICE_HAL0_API: str = "hal0-api"
 #                                            plumbing, but the generic PUT
 #                                            still tags the class so the
 #                                            UI renders the right badge).
-#   * ``[memory.models].embeddings_model``  → manual-restart (#3518: the
-#                                            embedder belongs to the store.
+#   * ``[memory.models].{embeddings_provider, → manual-restart (#3518: the
+#     embeddings_model}``                    embedder belongs to the store.
 #                                            The engine environment is
 #                                            rendered from the store's
-#                                            embedder record, not this key,
+#                                            embedder record, not these keys,
 #                                            so a save is kept in hal0.toml
 #                                            and changes nothing the engine
 #                                            runs; only re-embedding the
-#                                            store moves it. Swapping the
-#                                            model under stored vectors
-#                                            degrades recall with no error).
+#                                            store moves it. Swapping either
+#                                            under stored vectors degrades
+#                                            recall with no error. The rows
+#                                            carry a ``note`` saying so,
+#                                            because "restart" is not what
+#                                            applies them).
 #   * ``[memory.embedding].{rerank_*}``     → immediate (consumed on each
 #                                            ``memory_search`` call).
 #   * ``[memory.graph].{enabled,extraction_slot}`` → immediate (ADR-0023: the
@@ -154,6 +157,11 @@ SERVICE_HAL0_API: str = "hal0-api"
 # because the registry is keyed off the path the PUT body uses. The
 # ``_KEY_TO_ENTRY`` projection below expands each dotted entry into
 # per-leaf entries so callers can pass either form.
+
+#: The ``note`` on the two embedder rows (#3518). Their class is
+#: ``manual-restart`` because that is the class for "a service restart will
+#: not apply this", but no restart of any kind applies them either.
+EMBEDDER_KEYS_NOTE = "saved; takes effect only through an embedder switch"
 
 _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # [telemetry]
@@ -246,12 +254,23 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # drop-in through the privileged seam and restarts the engine before it
     # responds (#3492, settings._apply_showcase_dropin) — so the save IS the
     # apply. A failed write/restart is reported in _hal0.showcase_dropin.
-    "memory.models.embeddings_provider": {"apply_class": "immediate", "services": []},
-    # #3518: the one showcase key a save does NOT apply. The drop-in carries
-    # the embedder the store was built with (hal0.memory.embedder_record), so
-    # this value waits in hal0.toml until the store is re-embedded:
-    # manual-restart, the class for "a service restart will not apply this".
-    "memory.models.embeddings_model": {"apply_class": "manual-restart", "services": []},
+    # #3518: the two showcase keys a save does NOT apply. Provider and model
+    # are one fact, the embedder, and the drop-in carries the pair the store
+    # was built with (hal0.memory.embedder_record). The values wait in
+    # hal0.toml until the store is re-embedded: manual-restart, the class for
+    # "a service restart will not apply this", with a note that says what does.
+    # On a box with no store the save does take effect, and PUT /api/settings
+    # reports the key under ``immediate`` for that save.
+    "memory.models.embeddings_provider": {
+        "apply_class": "manual-restart",
+        "services": [],
+        "note": EMBEDDER_KEYS_NOTE,
+    },
+    "memory.models.embeddings_model": {
+        "apply_class": "manual-restart",
+        "services": [],
+        "note": EMBEDDER_KEYS_NOTE,
+    },
     "memory.models.reranker_provider": {"apply_class": "immediate", "services": []},
     "memory.models.reranker_model": {"apply_class": "immediate", "services": []},
     "memory.models.reranker_bucket_batching": {"apply_class": "immediate", "services": []},
@@ -435,11 +454,15 @@ class ApplyPlanEntry(TypedDict):
     ``apply_class`` is one of :data:`APPLY_CLASSES`. ``services`` lists
     the services a ``service-restart`` entry needs bounced; the list
     is empty for ``immediate`` and ``manual-restart`` (those have no
-    platform-level restart the operator can fire).
+    platform-level restart the operator can fire). ``note`` is optional:
+    one line for a row whose class name does not say what applies it.
+    It rides along wherever the row does (``GET /api/settings/apply-plan``,
+    the settings field list, a changeset entry) and only when set.
     """
 
     apply_class: str
     services: list[str]
+    note: NotRequired[str]
 
 
 class ApplyPlanResult(TypedDict, total=False):
@@ -468,10 +491,13 @@ def get_registry() -> dict[str, ApplyPlanEntry]:
     round-trip. Returns a fresh dict so callers can mutate without
     corrupting the module-level constant.
     """
-    return {
-        k: {"apply_class": v["apply_class"], "services": list(v["services"])}
-        for k, v in REGISTRY.items()
-    }
+    out: dict[str, ApplyPlanEntry] = {}
+    for k, v in REGISTRY.items():
+        row: ApplyPlanEntry = {"apply_class": v["apply_class"], "services": list(v["services"])}
+        if "note" in v:
+            row["note"] = v["note"]
+        out[k] = row
+    return out
 
 
 def apply_plan(touched_keys: list[str] | tuple[str, ...]) -> ApplyPlanResult:
@@ -531,6 +557,7 @@ def apply_plan(touched_keys: list[str] | tuple[str, ...]) -> ApplyPlanResult:
 
 __all__ = [
     "APPLY_CLASSES",
+    "EMBEDDER_KEYS_NOTE",
     "REGISTRY",
     "SERVICE_HAL0_API",
     "SERVICE_SLOTS",

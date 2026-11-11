@@ -422,11 +422,11 @@ async def get_agents(request: Request) -> dict[str, Any]:
 # ── /api/memory/models ──────────────────────────────────────────────────
 
 
-def _embedder_status(configured: str) -> dict[str, Any]:
-    """Recorded against configured embedder (seam for tests; reads disk, call off the loop)."""
-    from hal0.memory.embedder_record import embedder_status
+def _embedder_status(models_cfg: Any) -> dict[str, Any]:
+    """Recorded against configured embedder (seam for tests; blocking — call off the loop)."""
+    from hal0.memory.embedder_record import configured_embedder, embedder_status
 
-    return embedder_status(configured)
+    return embedder_status(configured_embedder(models_cfg))
 
 
 @router.get("/models")
@@ -437,11 +437,13 @@ async def get_models(request: Request) -> dict[str, Any]:
 
     decision_health = await _decision_health(decision_cfg)
 
-    # #3518: ``model`` stays the configured value (existing clients read it).
-    # ``recorded`` is the model the store was built with, which is the one the
-    # engine runs; when it differs from ``configured``, or the store is
-    # ``mixed``, ``needs_switch`` is true and nothing has been changed on disk.
-    embedder = await asyncio.to_thread(_embedder_status, models_cfg.embeddings_model)
+    # #3518: ``provider`` / ``model`` stay the configured values (existing
+    # clients read them). ``recorded_provider`` / ``recorded`` are the pair the
+    # store was built with; when it differs from the configured pair, or the
+    # store is ``mixed``, ``needs_switch`` is true and nothing has been changed
+    # on disk. ``effective`` is what the engine runs (or would start on), and
+    # ``conflict`` lists where that disagrees with the record.
+    embedder = await asyncio.to_thread(_embedder_status, models_cfg)
 
     return {
         "embeddings": {

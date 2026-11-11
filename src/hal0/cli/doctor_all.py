@@ -3420,62 +3420,73 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     (:mod:`hal0.memory.embedder_record`) and renders the engine environment
     from that record, so a ``[memory.models].embeddings_model`` that differs
     changes nothing: the engine stays on the recorded model and this row says
-    so. Three outcomes:
+    so. The embedder is the pair of provider and model. Outcomes:
 
     * ``pass`` when the two match and the store is not ``mixed``;
     * ``pass`` with a note when they differ only because the config still has
       its shipped default. That is every upgraded box (its store was built
       with the engine default) and nothing the operator did, and no release
       ships a way to re-embed a store yet, so a warning would have no remedy;
-    * ``warn`` when the operator set a model of their own that differs from
-      the record, since that setting is not doing what they asked, and when
-      the store is ``mixed``: it existed before the engine was moved off its
-      default embedder and may hold vectors from two models.
+    * ``warn`` when the operator set a provider or model of their own that
+      differs from the record, since that setting is not doing what they
+      asked, and when the store is ``mixed``: it existed before the engine
+      was moved off its default embedder and may hold vectors from two;
+    * ``warn`` when the record and the engine disagree (``conflict``): the
+      running engine, or the unit files it would start from, name another
+      embedder. Both are named, neither is changed. It is the same evidence
+      the ``memory_engine_env`` row is judged on for these keys;
+    * ``warn`` when the record file cannot be read (it is left alone), or
+      the store's location is unavailable.
 
     Never ``fail``: memory keeps working, and nothing here is repaired by a
-    restart. Re-embedding the store is the way out of both warnings.
+    restart.
 
     ``status`` is the injection point for tests; by default it is read from
-    this box's ``hal0.toml``, the record and the engine's data directory.
+    this box's ``hal0.toml``, the record, the engine's environment and its
+    data directory.
     """
-    from hal0.config.schema import MemoryModelsConfig
     from hal0.memory.embedder_record import (
         SOURCE_CONFIGURED,
+        configured_embedder,
+        describe_embedder,
         embedder_notice,
         embedder_status,
+        shipped_default_embedder,
     )
 
     name, title = "memory_embedder", "Memory embedder"
-    shipped_default = MemoryModelsConfig.model_fields["embeddings_model"].default
     if status is None:
         from hal0.config.loader import load_hal0_config
 
         try:
-            configured = load_hal0_config().memory.models.embeddings_model
+            models = load_hal0_config().memory.models
         except Exception as exc:
             return Check(name, title, _WARN, f"hal0.toml unreadable — check skipped: {exc}")
-        status = embedder_status(configured)
-    recorded, configured = status.get("recorded"), status.get("configured")
+        status = embedder_status(configured_embedder(models))
+    recorded = (status.get("recorded_provider"), status.get("recorded"))
+    configured = (status.get("configured_provider"), status.get("configured"))
     differs = recorded != configured
-    if status.get("mixed") or (differs and configured != shipped_default):
+    if (
+        status.get("record_error")
+        or status.get("store_unavailable")
+        or status.get("conflict")
+        or status.get("mixed")
+        or (differs and configured != tuple(shipped_default_embedder()))
+    ):
         return Check(name, title, _WARN, embedder_notice(status) or "")
+    built_with = describe_embedder(*recorded)
     if differs:
         return Check(
             name,
             title,
             _PASS,
-            f"the memory store was built with {recorded} and stays on it; the configured "
-            f"model ({configured}) takes effect only through an embedder switch, which a "
-            "later release adds",
+            f"the memory store was built with {built_with} and stays on it; the configured "
+            f"model ({describe_embedder(*configured)}) takes effect only through an embedder "
+            "switch, which a later release adds",
         )
     if status.get("source") == SOURCE_CONFIGURED and not status.get("recorded_at"):
         return Check(name, title, _PASS, "no memory store on this box — nothing recorded yet")
-    return Check(
-        name,
-        title,
-        _PASS,
-        f"the memory store was built with {status.get('recorded')}, as configured",
-    )
+    return Check(name, title, _PASS, f"the memory store was built with {built_with}, as configured")
 
 
 #: ``POST /api/memory/graph/throughput`` may run the 30 s probe (#2353).

@@ -1685,7 +1685,10 @@ def test_engine_env_report_never_carries_a_credential(tmp_path: Path, monkeypatc
 
 _BGE = "BAAI/bge-small-en-v1.5"
 _HS = "hindsight-ai/hs-embed-1"
+_PROVIDER_LINE = "Environment=HINDSIGHT_API_EMBEDDINGS_PROVIDER="
 _EMBED_LINE = "Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL="
+_PROVIDER_KEY = "HINDSIGHT_API_EMBEDDINGS_PROVIDER"
+_MODEL_KEY = "HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL"
 
 
 def _engine_store(monkeypatch, tmp_path: Path) -> Path:
@@ -1707,9 +1710,19 @@ def _recorded() -> dict:
     return json.loads(embedder_record_path().read_text())
 
 
-def test_render_takes_the_embeddings_model_from_the_record_not_the_config(
-    monkeypatch, tmp_path: Path
-):
+def _hs():
+    from hal0.memory.embedder_record import Embedder
+
+    return Embedder("local", _HS)
+
+
+def _configured():
+    from hal0.memory.embedder_record import configured_embedder
+
+    return configured_embedder(_showcase_cfg()["models"])
+
+
+def test_render_takes_the_embedder_from_the_record_not_the_config(monkeypatch, tmp_path: Path):
     from hal0.memory import extraction_env as ee
     from hal0.memory.embedder_record import ensure_embedder_record
 
@@ -1717,22 +1730,36 @@ def test_render_takes_the_embeddings_model_from_the_record_not_the_config(
     _engine_store(monkeypatch, tmp_path)
     cfg = _showcase_cfg()
     assert cfg["models"].embeddings_model == _HS
-    ensure_embedder_record(_HS)  # existing store, no drop-in: recorded as the engine default
+    ensure_embedder_record(_configured())  # existing store, nothing names an embedder
 
     body = ee.render_showcase_env(**cfg)
 
     assert _EMBED_LINE + _BGE + "\n" in body
+    assert _PROVIDER_LINE + "local\n" in body
     assert _HS not in body
     # Every other key renders exactly as it does for a store built with the configured model.
     assert body.replace(_EMBED_LINE + _BGE, _EMBED_LINE + _HS) == ee.render_showcase_env(
-        **cfg, embeddings_model=_HS
+        **cfg, embedder=_hs()
     )
-    assert (
-        ee.expected_engine_env(_memory_cfg(), slots_dir=tmp_path)[
-            "HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL"
-        ]
-        == _BGE
-    )
+    assert ee.expected_engine_env(_memory_cfg(), slots_dir=tmp_path)[_MODEL_KEY] == _BGE
+
+
+def test_render_takes_the_provider_from_the_record_too(monkeypatch, tmp_path: Path):
+    """Provider and model are one fact: a configured remote provider is not rendered."""
+    from hal0.config.schema import MemoryModelsConfig
+    from hal0.memory import extraction_env as ee
+    from hal0.memory.embedder_record import ensure_embedder_record
+
+    _redirect_showcase(monkeypatch, tmp_path)
+    _engine_store(monkeypatch, tmp_path)
+    ensure_embedder_record(_configured())
+    cfg = _showcase_cfg()
+    cfg["models"] = MemoryModelsConfig(embeddings_provider="openai", embeddings_model=_BGE)
+
+    body = ee.render_showcase_env(**cfg)
+
+    assert _PROVIDER_LINE + "local\n" in body
+    assert "openai" not in body
 
 
 def test_an_upgraded_box_with_a_store_and_no_showcase_dropin_renders_bge_small(
@@ -1757,7 +1784,8 @@ def test_an_upgraded_box_with_a_store_and_no_showcase_dropin_renders_bge_small(
     assert "hs-embed-1" not in written
     assert "HINDSIGHT_API_RERANKER_LOCAL_MODEL=hindsight-ai/hs-rerank-1" in written
     record = _recorded()
-    assert (record["model"], record["source"], record["mixed"]) == (_BGE, "engine-default", False)
+    assert (record["provider"], record["model"], record["mixed"]) == ("local", _BGE, False)
+    assert record["source"] == "engine-default"
     # Stable: the next update is a no-op and the record is not rewritten.
     assert ee.reconcile_showcase_dropin(restart=False, seam=quiet) == {"status": "converged"}
     assert _recorded() == record
@@ -1777,7 +1805,7 @@ def test_a_box_already_moved_to_hs_embed_stays_there_and_is_recorded_mixed(
     _engine_store(monkeypatch, tmp_path)
     extraction.parent.mkdir(parents=True)
     extraction.write_text(render_drop_in(300))
-    showcase.write_text(ee.render_showcase_env(**_showcase_cfg(), ceiling=1, embeddings_model=_HS))
+    showcase.write_text(ee.render_showcase_env(**_showcase_cfg(), ceiling=1, embedder=_hs()))
     before = showcase.read_bytes()
     quiet = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
 
@@ -1790,7 +1818,7 @@ def test_a_box_already_moved_to_hs_embed_stays_there_and_is_recorded_mixed(
     assert (record["model"], record["source"], record["mixed"]) == (_HS, "showcase-drop-in", True)
 
 
-def test_apply_on_a_box_with_no_store_records_the_configured_model_with_the_dropin(
+def test_apply_on_a_box_with_no_store_records_the_configured_pair_with_the_dropin(
     monkeypatch, tmp_path: Path
 ):
     from hal0.memory.embedder_record import embedder_record_path
@@ -1806,7 +1834,8 @@ def test_apply_on_a_box_with_no_store_records_the_configured_model_with_the_drop
     assert result["written"]
     assert _EMBED_LINE + _HS + "\n" in showcase.read_text()
     record = _recorded()
-    assert (record["model"], record["source"], record["mixed"]) == (_HS, "configured", False)
+    assert (record["provider"], record["model"]) == ("local", _HS)
+    assert (record["source"], record["mixed"]) == ("configured", False)
 
 
 def test_a_refused_write_on_a_box_with_no_store_records_nothing(monkeypatch, tmp_path: Path):
@@ -1829,7 +1858,7 @@ def test_a_refused_write_on_a_box_with_no_store_records_nothing(monkeypatch, tmp
 def test_changing_the_configured_embedder_does_not_change_the_rendered_one(
     monkeypatch, tmp_path: Path
 ):
-    """Config differs from record: the drop-in keeps the recorded model."""
+    """Config differs from record, model or provider: the drop-in keeps the recorded pair."""
     from hal0.config.schema import MemoryModelsConfig
     from hal0.memory.extraction_env import apply_showcase_dropin
 
@@ -1841,8 +1870,292 @@ def test_changing_the_configured_embedder_does_not_change_the_rendered_one(
     first, record = showcase.read_bytes(), _recorded()
     assert record["model"] == _BGE
 
-    cfg["models"] = MemoryModelsConfig(embeddings_model="example-org/another-embedder")
-    apply_showcase_dropin(**cfg, restart=False, seam=seam)
+    for models in (
+        MemoryModelsConfig(embeddings_model="example-org/another-embedder"),
+        MemoryModelsConfig(embeddings_provider="openai"),
+    ):
+        cfg["models"] = models
+        apply_showcase_dropin(**cfg, restart=False, seam=seam)
+        assert showcase.read_bytes() == first
+        assert _recorded() == record
 
-    assert showcase.read_bytes() == first
+
+def test_apply_leaves_an_unreadable_record_alone_and_renders_what_the_engine_runs(
+    monkeypatch, tmp_path: Path
+):
+    from hal0.memory import embedder_record as er
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    _engine_store(monkeypatch, tmp_path)
+    er.embedder_record_path().parent.mkdir(parents=True)
+    er.embedder_record_path().write_text("{garbage")
+    monkeypatch.setattr(
+        er,
+        "engine_evidence",
+        lambda **_kw: {
+            "live": {"provider": None, "model": _HS},
+            "on_disk": {"provider": None, "model": _HS},
+            "on_disk_source": "unit",
+        },
+    )
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    result = apply_showcase_dropin(**_showcase_cfg(), restart=False, seam=seam)
+
+    assert result["written"]
+    assert _EMBED_LINE + _HS + "\n" in showcase.read_text()
+    assert er.embedder_record_path().read_text() == "{garbage"
+
+
+def test_apply_renders_the_live_embedder_when_the_record_disagrees(monkeypatch, tmp_path: Path):
+    """A record that says bge-small over an engine running hs-embed-1 (a
+    downgrade and re-upgrade): the write must not swap the running engine."""
+    from hal0.memory import embedder_record as er
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    _, showcase = _redirect_showcase(monkeypatch, tmp_path)
+    _engine_store(monkeypatch, tmp_path)
+    er.save_embedder_record(
+        er.EmbedderRecord(provider="local", model=_BGE, source="engine-default")
+    )
+    record = _recorded()
+    monkeypatch.setattr(
+        er,
+        "engine_evidence",
+        lambda **_kw: {
+            "live": {"provider": "local", "model": _HS},
+            "on_disk": {"provider": "local", "model": _HS},
+            "on_disk_source": "unit",
+        },
+    )
+    seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
+
+    apply_showcase_dropin(**_showcase_cfg(), restart=False, seam=seam)
+
+    assert _EMBED_LINE + _HS + "\n" in showcase.read_text()
     assert _recorded() == record
+
+
+# ── the engine's effective embedder: one evidence source (#3518) ─────────────
+
+
+def _evidence(tmp_path: Path, **kw):
+    from hal0.memory.extraction_env import effective_engine_embedder
+
+    kw.setdefault("env_file", tmp_path / "no-hindsight-llm.env")
+    kw.setdefault("read_process_env", lambda _keys: None)
+    kw.setdefault("showcase_path", tmp_path / "no-showcase.conf")
+    return effective_engine_embedder(**kw)
+
+
+def test_evidence_reads_the_running_engine_first(tmp_path: Path):
+    asked: list[tuple[str, ...]] = []
+
+    def process(keys):
+        asked.append(tuple(keys))
+        return {_MODEL_KEY: _HS}
+
+    out = _evidence(tmp_path, read_process_env=process, unit_env={"HOME": "/x", _MODEL_KEY: _BGE})
+
+    assert asked == [(_PROVIDER_KEY, _MODEL_KEY)]  # nothing else leaves the process reader
+    assert out["live"] == {"provider": None, "model": _HS}
+    assert out["on_disk"] == {"provider": None, "model": _BGE}
+    assert out["on_disk_source"] == "unit"
+
+
+def test_evidence_running_engine_with_no_embedder_environment(tmp_path: Path):
+    """Running, readable, neither key set: the engine is on its default."""
+    out = _evidence(tmp_path, read_process_env=lambda _k: {}, unit_env={"HOME": "/x"})
+    assert out["live"] == {"provider": None, "model": None}
+    assert out["on_disk"] == {"provider": None, "model": None}
+
+
+def test_evidence_sees_a_later_sorting_dropin_through_the_units_merged_environment(
+    tmp_path: Path,
+):
+    """systemd merges every drop-in in order; a hand-written zz-*.conf naming
+    hs-embed-1 after hal0's bge-small is what the unit's Environment= shows."""
+    merged = {"HOME": "/x", _PROVIDER_KEY: "local", _MODEL_KEY: _HS}
+    out = _evidence(tmp_path, show_unit_env=lambda: merged)
+    assert out["live"] is None
+    assert out["on_disk"] == {"provider": "local", "model": _HS}
+    assert out["on_disk_source"] == "unit"
+
+
+def test_evidence_puts_the_environment_file_on_top_of_the_unit(tmp_path: Path):
+    """EnvironmentFile= is applied after every Environment= line, drop-ins included."""
+    env_file = tmp_path / "hindsight-llm.env"
+    env_file.write_text(f"HINDSIGHT_API_LLM_API_KEY=sk-secret\n{_MODEL_KEY}={_HS}\n")
+
+    out = _evidence(
+        tmp_path, env_file=env_file, unit_env={_PROVIDER_KEY: "local", _MODEL_KEY: _BGE}
+    )
+
+    assert out["on_disk"] == {"provider": "local", "model": _HS}
+    assert out["on_disk_source"] == "unit+file"
+    assert "sk-secret" not in repr(out)
+
+
+def test_evidence_falls_back_to_hal0s_dropin_file_when_there_is_no_unit(tmp_path: Path):
+    from hal0.memory import extraction_env as ee
+
+    showcase = tmp_path / "showcase-lanes.conf"
+    assert _evidence(tmp_path, unit_env={}, showcase_path=showcase) == {
+        "live": None,
+        "on_disk": None,
+        "on_disk_source": None,
+    }
+    showcase.write_text(ee.render_showcase_env(**_showcase_cfg(), embedder=_hs()))
+
+    out = _evidence(tmp_path, unit_env={}, showcase_path=showcase)
+
+    assert out["on_disk"] == {"provider": "local", "model": _HS}
+    assert out["on_disk_source"] == "drop-in"
+
+
+def test_evidence_never_raises(tmp_path: Path):
+    def boom(_keys):
+        raise RuntimeError("proc exploded")
+
+    assert _evidence(tmp_path, read_process_env=boom)["live"] is None
+
+
+def test_the_process_reader_keeps_only_the_keys_it_is_asked_for(monkeypatch, tmp_path: Path):
+    from hal0.memory import extraction_env as ee
+
+    environ = tmp_path / "environ"
+    environ.write_bytes(
+        b"HINDSIGHT_API_LLM_API_KEY=sk-secret\0"
+        + f"{_MODEL_KEY}={_HS}".encode()
+        + b"\0HINDSIGHT_API_LLM_MODEL=hal0/memory\0"
+    )
+    monkeypatch.setattr(ee, "_engine_main_pid", lambda: 4242)
+    monkeypatch.setattr(ee, "_proc_environ_path", lambda _pid: environ)
+
+    assert ee._read_engine_process_env((_PROVIDER_KEY, _MODEL_KEY)) == {_MODEL_KEY: _HS}
+    assert ee._read_engine_process_env() == {"HINDSIGHT_API_LLM_MODEL": "hal0/memory"}
+
+
+# ── memory_embedder and memory_engine_env cannot disagree (#3518) ────────────
+
+
+def _two_rows(monkeypatch, tmp_path: Path, *, unit: dict, live=None, env_file: Path | None = None):
+    """Both doctor rows, fed from one engine: ``(embedder status, env report, checks)``."""
+    from hal0.cli import doctor_all as da
+    from hal0.memory import embedder_record as er
+    from hal0.memory import extraction_env as ee
+
+    def evidence(**_kw):
+        return ee.effective_engine_embedder(
+            unit_env=unit,
+            read_process_env=lambda _keys: live,
+            env_file=env_file if env_file is not None else tmp_path / "no-hindsight-llm.env",
+        )
+
+    monkeypatch.setattr(er, "engine_evidence", evidence)
+    mem = _memory_cfg()
+    paths = _report_paths(tmp_path)
+    paths["drop_in_path"].write_text("x")
+    paths["showcase_path"].write_text("x")
+    status = er.embedder_status(er.configured_embedder(mem.models))
+    report = ee.engine_env_report(mem, unit_env=unit, slots_dir=tmp_path, **paths)
+    return (
+        status,
+        report,
+        da.check_memory_embedder(status=status),
+        da.check_memory_engine_env(report=report),
+    )
+
+
+def _unit_as_hal0_renders_it(tmp_path: Path, model: str) -> dict:
+    """The unit's merged Environment= with hal0's two drop-ins on ``model``."""
+    from hal0.memory import extraction_env as ee
+    from hal0.memory.embedder_record import Embedder
+
+    return {
+        "HOME": "/var/lib/hal0/memory/hindsight",
+        **ee.expected_engine_env(
+            _memory_cfg(), slots_dir=tmp_path, embedder=Embedder("local", model)
+        ),
+    }
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_a_later_sorting_dropin_naming_hs_embed_is_what_both_rows_see(
+    monkeypatch, tmp_path: Path, running: bool
+):
+    """hal0's drop-in says bge-small, a zz-*.conf after it says hs-embed-1.
+    The record follows the engine, the store is mixed, and neither row claims
+    the engine is on bge-small."""
+    _engine_store(monkeypatch, tmp_path)
+    unit = {**_unit_as_hal0_renders_it(tmp_path, _BGE), _MODEL_KEY: _HS}  # zz-*.conf wins
+    live = {_PROVIDER_KEY: "local", _MODEL_KEY: _HS} if running else None
+
+    status, report, embedder_row, env_row = _two_rows(monkeypatch, tmp_path, unit=unit, live=live)
+
+    assert (status["recorded"], status["mixed"]) == (_HS, True)
+    assert status["source"] == ("engine-process" if running else "unit-files")
+    assert status["conflict"] is None
+    assert report["effective"][_MODEL_KEY] == _HS == status["effective"]["model"]
+    assert [d for d in report["drift"] if "EMBEDDINGS" in d["key"]] == []
+    assert embedder_row.status == "warn" and _HS in embedder_row.detail  # mixed
+    assert "EMBEDDINGS" not in env_row.detail
+
+
+def test_an_environment_file_naming_hs_embed_is_what_both_rows_see(monkeypatch, tmp_path: Path):
+    """The unit's Environment= says bge-small; the EnvironmentFile, applied
+    last, says hs-embed-1. `systemctl show` alone would miss it."""
+    _engine_store(monkeypatch, tmp_path)
+    env_file = tmp_path / "hindsight-llm.env"
+    env_file.write_text(f"{_MODEL_KEY}={_HS}\n")
+    unit = _unit_as_hal0_renders_it(tmp_path, _BGE)
+
+    status, report, embedder_row, env_row = _two_rows(
+        monkeypatch, tmp_path, unit=unit, env_file=env_file
+    )
+
+    assert (status["recorded"], status["mixed"], status["source"]) == (_HS, True, "unit-files")
+    assert status["effective"] == {"provider": "local", "model": _HS, "source": "unit+file"}
+    assert report["effective"][_MODEL_KEY] == _HS
+    assert [d for d in report["drift"] if "EMBEDDINGS" in d["key"]] == []
+    assert embedder_row.status == "warn"
+    assert "EMBEDDINGS" not in env_row.detail
+
+
+def test_a_record_the_environment_file_overrides_makes_both_rows_warn(monkeypatch, tmp_path: Path):
+    """Record bge-small, engine down, EnvironmentFile would start it on
+    hs-embed-1: the embedder row names the conflict and the env row the drift."""
+    from hal0.memory import embedder_record as er
+
+    _engine_store(monkeypatch, tmp_path)
+    er.save_embedder_record(
+        er.EmbedderRecord(provider="local", model=_BGE, source="engine-default")
+    )
+    env_file = tmp_path / "hindsight-llm.env"
+    env_file.write_text(f"{_MODEL_KEY}={_HS}\n")
+    unit = _unit_as_hal0_renders_it(tmp_path, _BGE)
+
+    status, report, embedder_row, env_row = _two_rows(
+        monkeypatch, tmp_path, unit=unit, env_file=env_file
+    )
+
+    assert status["recorded"] == _BGE
+    assert status["conflict"] == {"on_disk": {"provider": "local", "model": _HS}}
+    assert {"key": _MODEL_KEY, "expected": _BGE, "effective": _HS} in report["drift"]
+    assert embedder_row.status == "warn"
+    assert _BGE in embedder_row.detail and _HS in embedder_row.detail
+    assert env_row.status == "warn" and f"{_MODEL_KEY}={_HS}" in env_row.detail
+
+
+def test_a_running_engine_with_no_embedder_environment_is_not_drift(monkeypatch, tmp_path: Path):
+    """hal0 rendered bge-small and the engine has not restarted onto the
+    drop-in yet: it runs its default, which is the same embedder."""
+    _engine_store(monkeypatch, tmp_path)
+    unit = _unit_as_hal0_renders_it(tmp_path, _BGE)
+
+    status, report, embedder_row, _env_row = _two_rows(monkeypatch, tmp_path, unit=unit, live={})
+
+    assert (status["recorded"], status["mixed"], status["conflict"]) == (_BGE, False, None)
+    assert [d for d in report["drift"] if "EMBEDDINGS" in d["key"]] == []
+    assert embedder_row.status == "pass"
