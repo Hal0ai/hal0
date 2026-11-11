@@ -19,7 +19,6 @@ import asyncio
 import hashlib
 import json
 import re
-import sys
 import types
 import uuid
 from collections.abc import Callable, Iterator
@@ -1005,26 +1004,21 @@ def test_unknown_request_fields_never_reach_the_engine(
     )
 
 
-class _Paused(Hal0Error):
-    code = "memory.writes_paused"
-    status = 503
-
-
-def test_the_write_gate_guards_retain_and_delete_once_it_exists(
-    client: TestClient, engine: Engine, key: str, monkeypatch: pytest.MonkeyPatch
+def test_the_write_gate_refuses_retain_and_delete_with_the_typed_503(
+    client: TestClient,
+    engine: Engine,
+    key: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    """``hal0.memory.write_gate`` pauses writes while the store is rebuilt.
-    With that module present the two write routes consult it first; reads do
-    not. The module is injected here so the test holds on either side of its
-    arrival on main."""
+    """While ``hal0 memory embedder switch`` holds the write gate, the two
+    write routes refuse before any engine call with the same typed 503 and
+    ``Retry-After`` as ``POST /api/memory/add``; reads still answer."""
+    from hal0.memory import write_gate
 
-    def refuse() -> None:
-        raise _Paused("memory writes are paused")
-
-    gate = types.ModuleType("hal0.memory.write_gate")
-    gate.require_writes_allowed = refuse  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "hal0.memory.write_gate", gate)
-    monkeypatch.setattr("hal0.memory.write_gate", gate, raising=False)
+    gate = tmp_path / "memory-writes-paused.json"
+    monkeypatch.setattr(write_gate, "gate_path", lambda: gate)
+    write_gate.engage_gate(run_id="run-1", path=gate)
     engine.documents["hal0::cc::doc-1"] = {
         "id": "hal0::cc::doc-1",
         "tags": ["agent:cc", "project:hal0"],
@@ -1033,13 +1027,25 @@ def test_the_write_gate_guards_retain_and_delete_once_it_exists(
     retain = client.post(
         _url(URL_BANK + "/memories"), headers=_auth(key), json={"items": [_item()]}
     )
+    batch = client.post(
+        _url(URL_BANK + "/memories"),
+        headers=_auth(key),
+        json={"items": [_item(), _item()], "async": True},
+    )
     delete = client.delete(_url(URL_BANK + "/documents/doc-1"), headers=_auth(key))
-    assert (retain.status_code, _code(retain)) == (503, "memory.writes_paused")
-    assert (delete.status_code, _code(delete)) == (503, "memory.writes_paused")
+    for resp in (retain, batch, delete):
+        assert (resp.status_code, _code(resp)) == (503, "memory.writes_paused")
+        assert resp.headers["Retry-After"] == str(write_gate.RETRY_AFTER_S)
+        assert resp.json()["error"]["details"]["reason"] == write_gate.REASON_EMBEDDER_SWITCH
     assert engine.calls == []
+    assert "hal0::cc::doc-1" in engine.documents
 
     reflect = client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "why?"})
     assert reflect.status_code == 200
+
+    write_gate.lift_gate(path=gate)
+    again = client.delete(_url(URL_BANK + "/documents/doc-1"), headers=_auth(key))
+    assert again.status_code < 300
 
 
 def test_the_ignored_fields_header_echoes_only_plain_names(

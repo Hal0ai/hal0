@@ -66,7 +66,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
-import importlib
 import json
 import re
 import time
@@ -95,6 +94,7 @@ from hal0.errors import (
     NotFound,
     Unauthorized,
 )
+from hal0.memory import write_gate
 from hal0.memory.document_namespace import (
     CLIENT_DOCUMENT_ID_KEY,
     chunk_id_part,
@@ -226,9 +226,6 @@ _CONFIG_TIMEOUT_S = 15.0
 #: failed read of them is.
 _STRATEGY_TTL_S = 300.0
 _STRATEGY_FAILURE_TTL_S = 30.0
-
-#: The write gate, consulted when it exists (:func:`_require_writes_allowed`).
-_WRITE_GATE_MODULE = "hal0.memory.write_gate"
 
 #: How often a long engine call checks that its client is still there.
 _DISCONNECT_POLL_S = 1.0
@@ -890,20 +887,10 @@ def _require_writes_allowed() -> None:
     """The one place this router consults the memory write gate.
 
     ``hal0.memory.write_gate`` pauses memory writes while the store is being
-    rebuilt (ADR-0058 decision 2). It is not in the tree this module was
-    written against, so the import is optional: with the module present the
-    retain and delete routes refuse with its typed 503 exactly as
-    ``POST /api/memory/add`` does, and until then this is a no-op. Only the
-    module being absent is tolerated; one that is there and fails to import
-    is an error, not an open gate. Once the module is on main this becomes a
-    plain import.
+    rebuilt (ADR-0058 decision 2). The retain and document-delete routes call
+    this before any engine call, so they refuse with the same typed 503
+    (``memory.writes_paused``, ``Retry-After``) as ``POST /api/memory/add``.
     """
-    try:
-        write_gate = importlib.import_module(_WRITE_GATE_MODULE)
-    except ModuleNotFoundError as exc:
-        if exc.name != _WRITE_GATE_MODULE:
-            raise
-        return
     write_gate.require_writes_allowed()
 
 

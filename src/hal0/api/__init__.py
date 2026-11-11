@@ -2220,14 +2220,34 @@ async def _memory_reprobe_loop(
     TRIED spends the budget: a drain whose armed hooks were all still waiting
     on their arming boot phase (``last_drain_attempted`` False) is free, so a
     short ``HAL0_MEMORY_REPROBE_INTERVAL_S`` cannot exhaust the cap before
-    the brain lane finishes and hands its replay over (#1912 review).
+    the brain lane finishes and hands its replay over (#1912 review). A tick
+    while the memory write gate is set runs no hook and is free too: every
+    replayed write would be refused until ``hal0 memory embedder switch``
+    lifts it (#3518).
     """
+    from hal0.memory import write_gate
+
     attempts = 0
+    paused_noted = False
     while True:
         await asyncio.sleep(interval_s)
         if not await asyncio.to_thread(provider.try_heal):
             continue
         run_hooks = getattr(provider, "run_heal_hooks", None)
+        if run_hooks is not None and write_gate.read_gate() is not None:
+            # Memory writes are paused (``hal0 memory embedder switch``): the
+            # engine can be back at its normal address a moment before the
+            # gate lifts, and a replay now would only be refused. Wait for
+            # the gate without spending the retry budget, however long it
+            # stays (a run that needs ``--resume`` keeps it set).
+            if not paused_noted:
+                log.info(
+                    "hal0.memory.heal_replay_waiting_for_write_gate",
+                    detail="memory writes are paused; the boot-write replay runs once "
+                    "they are allowed again",
+                )
+                paused_noted = True
+            continue
         if run_hooks is None or await run_hooks():
             return
         if not getattr(provider, "last_drain_attempted", True):

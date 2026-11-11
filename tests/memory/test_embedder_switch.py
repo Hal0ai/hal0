@@ -33,6 +33,12 @@ from hal0.memory.hindsight_client import HindsightRestClient
 
 NORMAL_PORT = 9177
 PRIVATE_PORT = 45123
+
+#: The unit the installer ships, as ``systemctl cat`` prints it.
+SHIPPED_UNIT_PATH = Path(__file__).resolve().parents[2] / "installer/systemd/hindsight-api.service"
+SHIPPED_UNIT = "# /etc/systemd/system/hindsight-api.service\n" + SHIPPED_UNIT_PATH.read_text(
+    encoding="utf-8"
+)
 BGE = Embedder("local", "BAAI/bge-small-en-v1.5")
 HS = Embedder("local", "hindsight-ai/hs-embed-1")
 
@@ -73,6 +79,10 @@ class FakeEngine:
         self.meta: dict[str, dict[str, Any]] = {}
         self.queue: dict[str, dict[str, int]] = {}
         self.features = {"document_export_api": True, "document_import_api": True}
+        self.api_version = "1.2.0"
+        #: An exception type raised for a request to the normal port while the
+        #: engine is elsewhere: something there accepts the connection.
+        self.normal_port_raises: type[httpx.HTTPError] | None = None
         #: The one port the engine listens on. Every other port refuses the connection.
         self.port = NORMAL_PORT
         self.reachable = True
@@ -206,6 +216,12 @@ class FakeEngine:
     # ── the transport ──
 
     async def handler(self, request: httpx.Request) -> httpx.Response:
+        if (
+            self.normal_port_raises is not None
+            and request.url.port == NORMAL_PORT
+            and self.port != NORMAL_PORT
+        ):
+            raise self.normal_port_raises("accepted, then nothing", request=request)
         if not self.reachable or request.url.port != self.port:
             raise httpx.ConnectError("connection refused", request=request)
         method, path = request.method, request.url.path
@@ -217,7 +233,9 @@ class FakeEngine:
         if not self.healthy:
             return httpx.Response(503, json={"detail": "starting"})
         if path == "/version":
-            return httpx.Response(200, json={"api_version": "1.2.0", "features": self.features})
+            return httpx.Response(
+                200, json={"api_version": self.api_version, "features": self.features}
+            )
         if path == "/v1/default/banks":
             wanted = params.get("q", "")
             rows = [self._row(b) for b in self.banks if wanted.lower() in b.lower()]
@@ -342,6 +360,24 @@ class Host:
         self.isolate_error: str | None = None
         #: When set, a restart to the engine's normal address fails with this.
         self.release_restart_error: str | None = None
+        #: ``systemctl cat`` of the engine's unit.
+        self.unit: str | None = SHIPPED_UNIT
+        #: port -> the process that holds it instead of the engine.
+        self.foreign: dict[int, str] = {}
+        #: port -> what the listener check says, overriding everything else.
+        self.listener_says: dict[int, dict[str, Any]] = {}
+
+    def listener(self, port: int) -> dict[str, Any]:
+        if port in self.listener_says:
+            return self.listener_says[port]
+        if port in self.foreign:
+            return {"owner": "other", "holder": self.foreign[port], "pid": 4242}
+        if self.engine.reachable and self.engine.port == port:
+            return {"owner": "unit", "holder": "pid 100 (hindsight-api)", "pid": 100}
+        return {"owner": "none", "holder": None, "pid": None}
+
+    def unit_text(self) -> str | None:
+        return self.unit
 
     def isolate(self, port: int, run_id: str) -> dict[str, Any]:
         self.events.append("isolate")
@@ -439,6 +475,8 @@ class Box:
         ticks = iter(range(10**9))
         kw.setdefault("timeouts", FAST)
         kw.setdefault("evidence", self.host.evidence)
+        kw.setdefault("listener", self.host.listener)
+        kw.setdefault("unit_text", self.host.unit_text)
         return es.EmbedderSwitch(
             self.client(f"http://127.0.0.1:{NORMAL_PORT}"),
             target=target,
@@ -2095,7 +2133,19 @@ def test_the_isolation_drop_in_is_written_from_the_unit_and_read_back(tmp_path: 
         return subprocess.CompletedProcess(argv, 1, "", "No files found")
 
     out = es.write_isolation_dropin(45123, "x", runner=missing, path=path)
+    assert "could not read the engine's unit" in out["error"] and not path.exists()
+
+    def empty(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, "[Service]\nExecStart=\n", "")
+
+    out = es.write_isolation_dropin(45123, "x", runner=empty, path=path)
     assert "could not find an ExecStart" in out["error"] and not path.exists()
+
+    def shell(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 0, SHIPPED_UNIT + SHELL_DROPIN, "")
+
+    out = es.write_isolation_dropin(45123, "x", runner=shell, path=path)
+    assert "through a shell" in out["error"] and not path.exists()
 
 
 def test_the_private_port_is_a_free_loopback_port() -> None:
@@ -2317,3 +2367,341 @@ async def test_a_switch_away_from_the_configured_model_says_the_config_is_fine(b
     note = result["config_note"]
     assert "hal0.toml still names hindsight-ai/hs-embed-1" in note and "That is fine" in note
     assert 'embeddings_model = "BAAI/bge-small-en-v1.5"' in note
+
+
+# ── isolation proofs: the normal address, the private port, the unit ────────
+
+SHIPPED_EXEC = "/var/lib/hal0/memory/hindsight/.venv/bin/hindsight-api --host 127.0.0.1 --port 9177"
+HS_BIN = "/var/lib/hal0/memory/hindsight/.venv/bin/hindsight-api"
+SHELL_DROPIN = f"""
+# /etc/systemd/system/hindsight-api.service.d/wrap.conf
+[Service]
+ExecStart=
+ExecStart=/bin/sh -c 'exec {HS_BIN} --host 0.0.0.0 --port 9177'
+"""
+LATER_DROPIN = """
+# /etc/systemd/system/hindsight-api.service.d/zzzz-zlocal.conf
+[Service]
+ExecStart=
+ExecStart=/opt/engine/bin/hindsight-api --host 0.0.0.0 --port 9177
+"""
+
+
+@pytest.mark.parametrize(
+    ("raised", "answers"),
+    [
+        (None, False),  # the fake engine refuses: httpx.ConnectError
+        (httpx.ReadTimeout, True),
+        (httpx.ConnectTimeout, True),
+        (httpx.RemoteProtocolError, True),
+        (httpx.ReadError, True),
+    ],
+)
+async def test_only_a_refused_connection_means_nothing_answers_at_the_normal_address(
+    box: Box, raised: type[httpx.HTTPError] | None, answers: bool
+) -> None:
+    box.engine.port = PRIVATE_PORT
+    box.engine.normal_port_raises = raised
+
+    assert await box.switch()._public_answers() is answers
+
+
+async def test_a_slow_listener_at_the_normal_address_stops_the_run_before_any_export(
+    box: Box,
+) -> None:
+    """A connection accepted at the normal address and then timing out is not "isolated"."""
+    box.engine.normal_port_raises = httpx.ReadTimeout
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+
+    assert "still answers at its normal address" in err.value.message
+    assert not any(e.startswith(("export:", "restore:")) for e in box.events)
+    assert f"engine:{HS.model}" not in box.events
+    box.engine.normal_port_raises = None
+    _assert_rolled_back(box)
+
+
+async def test_resume_does_not_take_a_slow_normal_address_for_an_isolated_engine(
+    box: Box,
+) -> None:
+    await box.kill_at("deleted:alpha")
+    box.engine.normal_port_raises = httpx.ReadTimeout
+    seen = len(box.events)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    assert "still answers at its normal address" in err.value.message
+    assert not any(e.startswith(("rename:", "restore:")) for e in box.events[seen:])
+    assert write_gate.read_gate() is not None
+
+    box.engine.normal_port_raises = None
+    await box.switch(None).resume()
+    _assert_switched(box)
+
+
+async def test_a_foreign_process_on_the_private_port_fails_fast_and_is_named(box: Box) -> None:
+    box.host.foreign[PRIVATE_PORT] = "pid 4242 (python3)"
+    real = box.engine.handler
+    private_asks: list[str] = []
+
+    async def counting(request: httpx.Request) -> httpx.Response:
+        if request.url.port == PRIVATE_PORT:
+            private_asks.append(request.url.path)
+        return await real(request)
+
+    box.engine.handler = counting  # type: ignore[method-assign]
+    looked = box.host.listener
+
+    def listener(port: int) -> dict[str, Any]:
+        private_asks.append("listener")
+        return looked(port)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(listener=listener).run()
+
+    assert "127.0.0.1:45123" in err.value.message
+    assert "held by pid 4242 (python3)" in err.value.message
+    # The first thing after the restart is the look at who holds the port,
+    # and it stops there: /health on that port is first asked by the rollback.
+    assert private_asks[0] == "listener"
+    assert not any(e.startswith("export:") for e in box.events)
+    _assert_rolled_back(box)
+
+
+async def test_a_health_answer_from_a_process_that_is_not_the_units_is_not_trusted(
+    box: Box,
+) -> None:
+    """``/health`` answers JSON 200 on the private port, but no process of the unit listens there."""
+    box.host.listener_says[PRIVATE_PORT] = {
+        "owner": "unknown",
+        "holder": "a process this account cannot see (run as root)",
+    }
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+
+    assert "could not be matched to a process of hindsight-api.service" in err.value.message
+    assert not any(e.startswith("export:") for e in box.events)
+    _assert_rolled_back(box)
+
+
+async def test_the_engine_on_the_private_port_must_report_the_version_preflight_saw(
+    box: Box,
+) -> None:
+    real = box.engine.handler
+
+    async def other_version(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/version" and request.url.port == PRIVATE_PORT:
+            return httpx.Response(200, json={"api_version": "0.9.0", "features": {}})
+        return await real(request)
+
+    box.engine.handler = other_version  # type: ignore[method-assign]
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+
+    assert "reports api_version '0.9.0', not '1.2.0'" in err.value.message
+    assert not any(e.startswith("export:") for e in box.events)
+    _assert_rolled_back(box)
+
+
+def _fake_proc(tmp_path: Path, port: int, holders: dict[int, list[str]]) -> Path:
+    """A ``/proc`` with one socket listening on ``port`` (inode 777) and the given fds."""
+    proc = tmp_path / "proc"
+    (proc / "net").mkdir(parents=True)
+    header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+    listen = f"   0: 0100007F:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 777 1 0\n"
+    other = "   1: 0100007F:2385 0100007F:B0E2 01 00000000:00000000 00:00000000 00000000     0        0 778 1 0\n"
+    (proc / "net" / "tcp").write_text(header + (listen if holders is not None else "") + other)
+    (proc / "net" / "tcp6").write_text(header)
+    for pid, links in holders.items():
+        fd = proc / str(pid) / "fd"
+        fd.mkdir(parents=True)
+        (proc / str(pid) / "comm").write_text(f"proc{pid}\n")
+        for i, link in enumerate(links):
+            os.symlink(link, fd / str(i))
+    return proc
+
+
+def test_the_listener_check_reads_the_socket_owner_from_proc(tmp_path: Path) -> None:
+    proc = _fake_proc(tmp_path, 45123, {100: ["socket:[777]"], 200: ["socket:[1]", "/dev/null"]})
+    assert es.loopback_listener(45123, unit_pids=lambda: {100}, proc=proc)["owner"] == "unit"
+
+    held = es.loopback_listener(45123, unit_pids=lambda: {200}, proc=proc)
+    assert held == {"owner": "other", "holder": "pid 100 (proc100)", "pid": 100}
+
+    assert es.loopback_listener(45124, unit_pids=lambda: {100}, proc=proc)["owner"] == "none"
+
+    hidden = _fake_proc(tmp_path / "hidden", 45123, {})
+    assert es.loopback_listener(45123, unit_pids=lambda: set(), proc=hidden)["owner"] == "unknown"
+
+
+def test_the_units_processes_are_its_main_pid_and_its_control_group(tmp_path: Path) -> None:
+    group = tmp_path / "system.slice" / "hindsight-api.service"
+    group.mkdir(parents=True)
+    (group / "cgroup.procs").write_text("100\n101\n")
+
+    def runner(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
+        assert argv[:2] == ["systemctl", "show"] and argv[-1] == "hindsight-api.service"
+        out = "MainPID=100\nControlGroup=/system.slice/hindsight-api.service\n"
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    assert es._unit_pids(runner, cgroup_root=tmp_path) == {100, 101}
+
+
+def test_the_shipped_units_command_is_rewritten_word_for_word() -> None:
+    line = es.effective_exec_start(SHIPPED_UNIT)
+    assert line == SHIPPED_EXEC
+    assert es.private_exec_start(line, 45123) == SHIPPED_EXEC.replace("9177", "45123")
+    assert es.unit_refusals(SHIPPED_UNIT, NORMAL_PORT) == []
+    # An operator's LAN bind (UNIT + LAN_DROPIN, above) is rewritable too.
+    assert es.unit_refusals(UNIT + LAN_DROPIN, NORMAL_PORT) == []
+
+
+def test_a_quoted_argument_is_kept_and_a_quoted_address_is_replaced() -> None:
+    line = (
+        f'{HS_BIN} --log-config "/etc/hal0/log conf.json" --host "0.0.0.0" '
+        "--port='9177' --workers 2"
+    )
+    assert es.private_exec_start(line, 45123) == (
+        f'{HS_BIN} --log-config "/etc/hal0/log conf.json" --host 127.0.0.1 --port=45123 --workers 2'
+    )
+
+
+def test_a_kept_prefix_survives_the_rewrite() -> None:
+    assert es.private_exec_start(f"-{HS_BIN} --port 9177", 45123) == (
+        f"-{HS_BIN} --port 45123 --host 127.0.0.1"
+    )
+
+
+@pytest.mark.parametrize(
+    ("line", "why"),
+    [
+        (f"/bin/sh -c 'exec {HS_BIN} --host 0.0.0.0 --port 9177'", "through a shell"),
+        (f"/usr/bin/bash -c '{HS_BIN} --port 9177'", "through a shell"),
+        (f"@{HS_BIN} hindsight-api --port 9177", "prefix '@'"),
+        (f"+{HS_BIN} --port 9177", "prefix '+'"),
+        (f"!!{HS_BIN} --port 9177", "prefix '!!'"),
+        (f"{HS_BIN} --host 0.0.0.0 --port $PORT", "% specifier or $ variable"),
+        (f"{HS_BIN} --port=${{HINDSIGHT_PORT}}", "% specifier or $ variable"),
+        (f"{HS_BIN} --host %H --port 9177", "% specifier or $ variable"),
+        (f'{HS_BIN} --log-config "a\\"b" --port 9177', "backslash"),
+        (f"{HS_BIN} --log-config 'open --port 9177", "unterminated quote"),
+        (f"{HS_BIN} --port", "has no value"),
+    ],
+)
+def test_a_command_the_switch_cannot_rewrite_safely_is_refused(line: str, why: str) -> None:
+    with pytest.raises(es.UnsupportedExecStart, match=re.escape(why)):
+        es.private_exec_start(line, 45123)
+    message = es.exec_start_refusal(line, "/etc/systemd/system/hindsight-api.service.d/x.conf")
+    assert message is not None
+    assert line in message and "x.conf" in message and "run the switch again" in message
+
+
+async def test_a_shell_wrapped_exec_start_is_refused_before_anything_changes(box: Box) -> None:
+    box.host.unit = SHIPPED_UNIT + SHELL_DROPIN
+
+    plan = await box.switch().preflight()
+    (refusal,) = [r for r in plan["refusals"] if r["code"] == "exec_start_unsupported"]
+    assert "wrap.conf" in refusal["message"] and "through a shell" in refusal["message"]
+
+    with pytest.raises(es.SwitchRefused):
+        await box.switch().run()
+    assert box.events == [] and box.engine.writes == []
+    assert write_gate.read_gate() is None and box.host.dropin_port is None
+    assert not es.journal_path().exists()
+
+
+async def test_a_later_sorting_exec_start_drop_in_is_named_in_the_refusal(box: Box) -> None:
+    box.host.unit = SHIPPED_UNIT + LATER_DROPIN
+
+    plan = await box.switch().preflight()
+
+    (refusal,) = [r for r in plan["refusals"] if r["code"] == "exec_start_overridden"]
+    assert "/etc/systemd/system/hindsight-api.service.d/zzzz-zlocal.conf" in refusal["message"]
+    assert "/opt/engine/bin/hindsight-api --host 0.0.0.0 --port 9177" in refusal["message"]
+    assert es.ISOLATION_DROP_IN_NAME in refusal["message"]
+    with pytest.raises(es.SwitchRefused):
+        await box.switch().run()
+    assert box.events == []
+
+
+async def test_a_drop_in_that_appears_after_the_preflight_is_named_when_isolation_fails(
+    box: Box,
+) -> None:
+    def hook(point: str) -> None:
+        if point == "paused":
+            box.host.unit = SHIPPED_UNIT + LATER_DROPIN
+            box.host.exec_start_pinned = True
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(hook=hook).run()
+
+    assert "zzzz-zlocal.conf" in err.value.message
+    assert "/opt/engine/bin/hindsight-api --host 0.0.0.0 --port 9177" in err.value.message
+    assert not any(e.startswith("export:") for e in box.events)
+    _assert_rolled_back(box)
+
+
+PROBE_DROPIN = """
+# /etc/systemd/system/hindsight-api.service.d/probe.conf
+[Service]
+ExecStartPre=/bin/true
+ExecStartPost=/usr/bin/curl -fsS http://127.0.0.1:9177/health
+ExecReload=/bin/kill -HUP $MAINPID
+"""
+
+
+async def test_a_start_command_that_probes_the_normal_port_is_refused_by_name(box: Box) -> None:
+    box.host.unit = SHIPPED_UNIT + PROBE_DROPIN
+
+    plan = await box.switch().preflight()
+
+    (refusal,) = [r for r in plan["refusals"] if r["code"] == "exec_probe_normal_port"]
+    assert "probe.conf" in refusal["message"]
+    assert "ExecStartPost=`/usr/bin/curl -fsS http://127.0.0.1:9177/health`" in refusal["message"]
+
+
+def test_only_side_commands_naming_the_normal_port_count() -> None:
+    cleared = (
+        PROBE_DROPIN
+        + "\n# /etc/systemd/system/hindsight-api.service.d/undo.conf\n[Service]\nExecStartPost=\n"
+    )
+    assert es.side_commands_on_port(SHIPPED_UNIT + cleared, NORMAL_PORT) == []
+    near = "\n# /x/n.conf\n[Service]\nExecCondition=/usr/bin/test -e /run/91770\nExecStartPre=nc -z localhost 9177\n"
+    assert es.side_commands_on_port(SHIPPED_UNIT + near, NORMAL_PORT) == [
+        ("/x/n.conf", "ExecStartPre", "nc -z localhost 9177")
+    ]
+
+
+async def test_status_says_the_engine_is_back_while_the_gate_is_still_set(box: Box) -> None:
+    """The finish's last restart failed after the drop-in was removed."""
+    real = box.host.apply_dropin
+
+    def released_then_failed(embedder: Embedder) -> dict[str, Any]:
+        out = real(embedder)
+        if box.host.dropin_port is None and box.host.live == HS:
+            return {"error": "systemctl restart hindsight-api.service failed"}
+        return out
+
+    box.host.apply_dropin = released_then_failed  # type: ignore[method-assign]
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+    assert err.value.resumable
+    assert box.engine.port == NORMAL_PORT and write_gate.read_gate() is not None
+
+    status = await box.switch(None).status()
+
+    assert status["engine"]["released_early"] is True
+    assert "already gone" in status["summary"] and "normal address" in status["summary"]
+    assert "memory writes through hal0 stay paused" in status["summary"]
+    assert "--resume isolates the engine again" in status["summary"]
+    assert es.interrupted_switch()["isolated"] is True
+
+    box.host.apply_dropin = real  # type: ignore[method-assign]
+    seen = len(box.events)
+    await box.switch(None).resume()
+    assert "isolate" in box.events[seen:], "resume isolates the engine again first"
+    _assert_switched(box)

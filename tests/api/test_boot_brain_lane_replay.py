@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import types
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -387,3 +388,37 @@ async def test_volatile_write_counter_moves_on_the_real_fallback() -> None:
     before = provider.volatile_writes
     await provider.add("card", dataset="agents")
     assert provider.volatile_writes == before + 1
+
+
+@pytest.mark.asyncio
+async def test_a_replay_waits_for_the_write_gate_without_spending_its_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#3518: an embedder switch returns the engine to its normal address a
+    moment before it lifts the write gate, so a degraded hal0-api heals while
+    every replayed write would still be refused. Those ticks run no hook and
+    are free: the replay lands once the gate lifts, however long it stayed."""
+    from hal0.memory import write_gate
+
+    gate = tmp_path / "memory-writes-paused.json"
+    monkeypatch.setattr(write_gate, "gate_path", lambda: gate)
+    write_gate.engage_gate(run_id="3f9a1c2e", path=gate)
+    drains = 0
+    ticks = 0
+
+    class _Provider:
+        def try_heal(self) -> bool:
+            nonlocal ticks
+            ticks += 1
+            if ticks == 10:
+                write_gate.lift_gate(path=gate)
+            return True
+
+        async def run_heal_hooks(self) -> bool:
+            nonlocal drains
+            drains += 1
+            assert write_gate.read_gate() is None, "no replay runs under the gate"
+            return True
+
+    await asyncio.wait_for(_memory_reprobe_loop(_Provider(), 0.0, max_replay_attempts=2), 5.0)
+    assert (ticks, drains) == (10, 1)

@@ -3496,6 +3496,10 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
                     f", and the engine is isolated on a private port ({private}), so recall is "
                     "unavailable too"
                     if private is not None
+                    else ", while the engine is already back at its normal address (its "
+                    "isolation drop-in is gone; recall works and other clients reach it). "
+                    "`--resume` isolates it again before it finishes"
+                    if (left or {}).get("isolated")
                     else " (recall still works)"
                 )
                 if gate is not None

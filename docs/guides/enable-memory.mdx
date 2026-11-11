@@ -404,9 +404,33 @@ moment.
 The engine is isolated with one drop-in for its unit,
 `hindsight-api.service.d/zzzz-hal0-embedder-switch.conf`, which the switch
 writes and removes. It keeps the command your unit already runs, your own
-`ExecStart` drop-in included, and changes only the address. If the engine
-still answers at its normal address afterwards (a drop-in of yours sorts
-after that name), the run stops before it has exported anything.
+`ExecStart` drop-in included, and changes only the address. The preflight
+reads the unit with `systemctl cat hindsight-api.service` and refuses, before
+anything changes, when:
+
+- `ExecStart` is not a direct command line it can rewrite: a shell wrapper
+  (`/bin/sh -c '…'`), a prefix other than `-` or `:` (`@`, `+`, `!`, `!!`),
+  a `%` specifier or `$VAR` in the `--host` or `--port` value, or a
+  backslash escape. Make it a plain command line that names the engine's
+  binary with literal `--host` and `--port` values, run
+  `sudo systemctl daemon-reload`, and run the switch again;
+- a drop-in whose name sorts after `zzzz-hal0-embedder-switch.conf` sets
+  `ExecStart`, so it would win. The refusal names the file and its
+  `ExecStart`; rename it so it sorts earlier;
+- an `ExecStartPre`, `ExecStartPost`, `ExecCondition` or `ExecReload` line
+  names the engine's normal port (a health probe, say). It would fail at
+  every restart while the engine is private. The refusal names the line.
+
+After each restart onto the private port the switch confirms that the
+process listening there belongs to `hindsight-api.service` and that
+`/version` reports the engine version the preflight saw. Anything else on
+that port stops the run at once, naming the process. If anything still
+answers at the normal address (a refused connection is the only "nothing
+there"), the run stops before it has exported anything.
+
+Nothing else writes the engine's banks or drop-ins while a run is unfinished:
+the default banks are not seeded, a new install's first-start step skips, and
+hal0-api's replay of boot-time writes waits for the pause to lift.
 
 ### If it fails or is interrupted
 
@@ -426,6 +450,11 @@ naming the run and its archive directory.
 sudo hal0 memory embedder switch --status    # where it stands and what --resume would do
 sudo hal0 memory embedder switch --resume    # finish it
 ```
+
+If the very last restart fails, after the isolation drop-in is gone, the
+engine is back at its normal address (recall works) while writes stay paused.
+`--status` and the doctor row say exactly that, and `--resume` isolates the
+engine again before it finishes the run.
 
 `--status` changes nothing and runs the same checks a resume would. For each
 bank it says what `--resume` will do; where the switch cannot repair

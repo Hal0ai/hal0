@@ -4065,6 +4065,31 @@ def test_memory_embedder_says_when_the_engine_is_private_too(
     assert "`hal0 memory embedder switch --resume`" in check.detail
 
 
+def test_memory_embedder_says_when_the_engine_is_back_before_the_gate_lifts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finish whose last restart failed: drop-in gone, gate and journal still there."""
+    from hal0.memory import embedder_switch as es
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/backups/x")
+    monkeypatch.setattr(es, "isolated_port", lambda: None)
+    monkeypatch.setattr(
+        es,
+        "interrupted_switch",
+        lambda: {"run_id": "3f9a1c2e", "phase": "swapping", "isolated": True, "error": "boom"},
+    )
+
+    check = da.check_memory_embedder()
+
+    assert check.status == "warn"
+    assert "back at its normal address" in check.detail
+    assert "recall works" in check.detail
+    assert "`--resume` isolates it again" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
 def test_memory_embedder_reports_a_write_gate_that_no_switch_holds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

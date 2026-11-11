@@ -24,10 +24,17 @@ command the unit runs now (read with ``systemctl cat``, so an operator's own
 ``ExecStart`` drop-in, a LAN bind for instance, is what gets rewritten) with
 ``--host 127.0.0.1 --port <private>``. It sorts after every other drop-in, so
 it wins; it also turns the engine's own auto-consolidation off, so the engine
-changes nothing by itself while it is private. After the restart the run
-confirms that the engine answers on the private port and that nothing answers
-at the normal address; if something still does, the run stops before it has
-exported anything.
+changes nothing by itself while it is private. The preflight reads the unit
+(:func:`unit_refusals`) and refuses, before anything changes, an
+``ExecStart`` it cannot rewrite word for word (a shell wrapper, an unkept
+prefix, an expanded host or port), a later-sorting drop-in that would win
+over this one, and an ``ExecStartPre``/``Post``/``Condition``/``Reload`` that
+names the normal port. After each restart onto the private port the run
+confirms that a process of the engine's unit owns the listening socket
+(:func:`loopback_listener`), that ``/version`` reports the engine the
+preflight saw, and that nothing answers at the normal address: only a refused
+connection counts as nothing. Any of these failing stops the run before it
+has exported anything.
 
 Consequences, all intended: recall is unavailable for the whole run, not only
 during restarts; hal0-api sees the engine as down; ``--apply`` and
@@ -132,7 +139,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 import structlog
@@ -523,6 +530,7 @@ def interrupted_switch() -> dict[str, Any] | None:
         "error": journal.error,
         "archive_dir": journal.archive_dir,
         "source": found["source"],
+        "isolated": journal.isolated,
     }
 
 
@@ -563,6 +571,11 @@ def blocking_reason() -> str | None:
         return (
             f"memory writes are paused by an embedder switch (run {gate.get('run_id')}) that "
             "left no journal; see `hal0 memory embedder switch --status`"
+        )
+    if isolated_port() is not None:
+        return (
+            f"the memory engine is isolated by an embedder switch ({isolation_drop_in_path()} "
+            "is present); see `hal0 memory embedder switch --status`"
         )
     return None
 
@@ -813,52 +826,305 @@ def isolation_drop_in_path() -> Path:
     return extraction_env.DROP_IN_DIR / ISOLATION_DROP_IN_NAME
 
 
-def effective_exec_start(unit_text: str) -> str | None:
-    """The command the engine's unit starts, from ``systemctl cat`` output.
+def _unit_assignments(unit_text: str) -> list[tuple[str, str, str]]:
+    """``(file, key, value)`` for every assignment in ``systemctl cat`` output, in order.
 
-    The last ``ExecStart=`` wins and an empty one clears what came before, as
-    in systemd, so an operator's own drop-in that replaces ``ExecStart`` (to
-    bind the LAN, say) is what comes back. This command's own isolation
-    drop-in is skipped: the question is what the unit runs without it.
+    ``file`` is the path in the ``# /…`` header that precedes it. A line
+    ending in a backslash continues on the next, as in systemd; comments and
+    section headers are skipped.
     """
-    current: str | None = None
-    skipping = False
+    out: list[tuple[str, str, str]] = []
+    source = ""
     carried = ""
     for raw in unit_text.splitlines():
         if raw.startswith("# /"):
-            skipping = raw.strip().endswith(ISOLATION_DROP_IN_NAME)
+            source = raw[2:].strip()
             carried = ""
-            continue
-        if skipping:
             continue
         line = carried + raw.strip()
         if line.endswith("\\"):
             carried = line[:-1].rstrip() + " "
             continue
         carried = ""
-        if line.startswith("ExecStart="):
-            current = line[len("ExecStart=") :].strip() or None
+        if not line or line.startswith(("#", ";", "[")) or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        out.append((source, key.strip(), value.strip()))
+    return out
+
+
+def _is_ours(source: str) -> bool:
+    return Path(source).name == ISOLATION_DROP_IN_NAME
+
+
+def exec_start_source(unit_text: str) -> tuple[str | None, str | None]:
+    """``(command, file)``: the ``ExecStart`` the unit runs without this command's drop-in.
+
+    The last ``ExecStart=`` wins and an empty one clears what came before, as
+    in systemd, so an operator's own drop-in that replaces ``ExecStart`` (to
+    bind the LAN, say) is what comes back, with the file that set it.
+    """
+    current: tuple[str | None, str | None] = (None, None)
+    for source, key, value in _unit_assignments(unit_text):
+        if key == "ExecStart" and not _is_ours(source):
+            current = (value or None, source if value else None)
     return current
 
 
-_HOST_ARG = re.compile(r"(--host)(=|\s+)(\S+)")
-_PORT_ARG = re.compile(r"(--port)(=|\s+)(\S+)")
+def effective_exec_start(unit_text: str) -> str | None:
+    """The command the engine's unit starts, from ``systemctl cat`` output (:func:`exec_start_source`)."""
+    return exec_start_source(unit_text)[0]
+
+
+def later_exec_start_dropins(unit_text: str) -> list[tuple[str, str]]:
+    """``(file, ExecStart)`` for each drop-in that would win over :data:`ISOLATION_DROP_IN_NAME`.
+
+    systemd applies drop-ins in the order of their file names, whichever
+    directory they are in, so one whose name sorts after this command's and
+    that sets ``ExecStart`` replaces the private command: the engine would
+    come back at its normal address.
+    """
+    found: dict[str, str] = {}
+    for source, key, value in _unit_assignments(unit_text):
+        name = Path(source).name
+        if key == "ExecStart" and source.endswith(".conf") and name > ISOLATION_DROP_IN_NAME:
+            found[source] = value or found.get(source, "")
+    return sorted(found.items(), key=lambda item: Path(item[0]).name)
+
+
+class UnsupportedExecStart(ValueError):
+    """An ``ExecStart`` this command will not rewrite; the message says why and what to do."""
+
+
+#: Programs that run their arguments as a script: the address inside cannot be
+#: rewritten reliably, so a command started through one is refused.
+_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ash", "ksh", "busybox", "fish"})
+#: systemd's ``ExecStart`` prefixes. ``-`` (a failure exit is ignored) and ``:``
+#: (no environment variable expansion) leave the command line itself alone and
+#: are kept; the others change how systemd runs it or which word is the
+#: program, and are refused.
+_KEPT_PREFIXES = frozenset("-:")
+_ALL_PREFIXES = frozenset("-@+!:|")
+
+
+@dataclass(frozen=True)
+class _Word:
+    raw: str
+    value: str
+
+
+def _split_exec(line: str) -> list[_Word]:
+    """Split ``line`` into words the way systemd does, for the subset this command accepts.
+
+    Words are separated by whitespace; a word may be quoted with ``"`` or
+    ``'`` (also in part, ``--host="a"``), and the quotes are removed from its
+    value. systemd also reads C-style backslash escapes, which ``shlex`` does
+    not follow, so a backslash anywhere is refused rather than guessed at.
+    Each word keeps its original text, so a word this command does not
+    change is written back exactly as it was.
+    """
+    if "\\" in line:
+        raise UnsupportedExecStart("it contains a backslash escape")
+    words: list[_Word] = []
+    i, n = 0, len(line)
+    while i < n:
+        while i < n and line[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        start, value = i, []
+        while i < n and line[i] not in " \t":
+            if line[i] in "\"'":
+                quote, i = line[i], i + 1
+                end = line.find(quote, i)
+                if end < 0:
+                    raise UnsupportedExecStart("it has an unterminated quote")
+                value.append(line[i:end])
+                i = end + 1
+            else:
+                value.append(line[i])
+                i += 1
+        words.append(_Word(line[start:i], "".join(value)))
+    return words
 
 
 def private_exec_start(line: str, port: int) -> str:
     """``line`` with its listen address replaced by ``127.0.0.1:<port>``.
 
-    Everything else in the operator's command is kept. An address the command
-    does not name (the engine then reads it from its environment or uses its
-    default) is appended, and an argument beats the environment.
+    Everything else in the operator's command is kept word for word. An
+    address the command does not name (the engine then reads it from its
+    environment or uses its default) is appended, and an argument beats the
+    environment. Raises :class:`UnsupportedExecStart`, before anything is
+    written, for a command this cannot rewrite safely: one started through a
+    shell, one with a prefix other than ``-`` or ``:``, one whose host or port
+    argument uses a ``%`` specifier or ``$`` expansion, and one systemd quotes
+    or escapes in ways this does not follow.
     """
+    words = _split_exec(line)
+    if not words:
+        raise UnsupportedExecStart("it is empty")
+    first = words[0]
+    prefix_len = 0
+    while prefix_len < len(first.value) and first.value[prefix_len] in _ALL_PREFIXES:
+        prefix_len += 1
+    prefix = first.value[:prefix_len]
+    if set(prefix) - _KEPT_PREFIXES:
+        raise UnsupportedExecStart(
+            f"it starts with the prefix {prefix!r}, which changes how systemd runs it "
+            "(only '-' and ':' are kept)"
+        )
+    program = first.value[prefix_len:]
+    if not program:
+        raise UnsupportedExecStart("it names no program")
+    if Path(program).name in _SHELLS:
+        raise UnsupportedExecStart(
+            f"it runs the engine through a shell ({program}), so the address is inside a script"
+        )
+    out = [w.raw for w in words]
+    seen = {"--host": False, "--port": False}
+    wanted = {"--host": "127.0.0.1", "--port": str(port)}
+    i = 1
+    while i < len(words):
+        value = words[i].value
+        for flag in seen:
+            if value == flag:
+                if i + 1 >= len(words):
+                    raise UnsupportedExecStart(f"{flag} is the last word and has no value")
+                arg = words[i + 1].value
+                _check_address_value(flag, arg)
+                out[i + 1] = wanted[flag]
+                seen[flag] = True
+                i += 1
+                break
+            if value.startswith(flag + "="):
+                _check_address_value(flag, value[len(flag) + 1 :])
+                out[i] = f"{flag}={wanted[flag]}"
+                seen[flag] = True
+                break
+        i += 1
+    for flag in ("--host", "--port"):
+        if not seen[flag]:
+            out += [flag, wanted[flag]]
+    return " ".join(out)
 
-    def put(arg: re.Pattern[str], flag: str, value: str, text: str) -> str:
-        if arg.search(text):
-            return arg.sub(lambda m: f"{m.group(1)}{m.group(2)}{value}", text, count=1)
-        return f"{text} {flag} {value}"
 
-    return put(_PORT_ARG, "--port", str(port), put(_HOST_ARG, "--host", "127.0.0.1", line))
+def _check_address_value(flag: str, value: str) -> None:
+    if "%" in value or "$" in value:
+        raise UnsupportedExecStart(
+            f"its {flag} value {value!r} is expanded by systemd (a % specifier or $ variable), "
+            "so the address it binds cannot be read from the unit"
+        )
+
+
+def exec_start_refusal(line: str, source: str | None) -> str | None:
+    """Why the switch will not rewrite ``line``, with the way on, or ``None`` when it can."""
+    try:
+        private_exec_start(line, 1)
+    except UnsupportedExecStart as exc:
+        where = f" (set in {source})" if source else ""
+        return (
+            f"the engine's unit starts `{line}`{where}, which the switch cannot move to a "
+            f"private port: {exc}. Make ExecStart a direct command line that names the "
+            "engine's binary, with --host and --port as plain values (an ExecStart= drop-in "
+            "that sorts before " + ISOLATION_DROP_IN_NAME + " is fine), run "
+            "`systemctl daemon-reload`, then run the switch again"
+        )
+    return None
+
+
+#: Unit keys whose command runs around the engine's start or reload.
+_SIDE_COMMANDS = ("ExecStartPre", "ExecStartPost", "ExecCondition", "ExecReload")
+
+
+def side_commands_on_port(unit_text: str, port: int) -> list[tuple[str, str, str]]:
+    """``(file, key, command)`` for start/reload commands that name the engine's normal port.
+
+    While the engine is private such a command (a health probe, say) cannot
+    reach it, so its start would fail every time and the run would time out
+    and roll back. An empty assignment clears the list before it, as in
+    systemd; this command's own drop-in sets none.
+    """
+    mention = re.compile(rf"(?<![0-9]){port}(?![0-9])")
+    active: dict[str, list[tuple[str, str]]] = {k: [] for k in _SIDE_COMMANDS}
+    for source, key, value in _unit_assignments(unit_text):
+        if key not in active or _is_ours(source):
+            continue
+        if not value:
+            active[key] = []
+        else:
+            active[key].append((source, value))
+    return [
+        (source, key, value)
+        for key in _SIDE_COMMANDS
+        for source, value in active[key]
+        if mention.search(value)
+    ]
+
+
+def unit_refusals(unit_text: str | None, normal_port: int | None) -> list[dict[str, str]]:
+    """The preflight's look at the engine's unit: every reason it cannot be isolated safely."""
+    if unit_text is None:
+        return [
+            {
+                "code": "unit_unreadable",
+                "message": f"`systemctl cat {SERVICE}` could not be read, so the switch cannot "
+                "tell which command to move to a private port",
+            }
+        ]
+    refusals: list[dict[str, str]] = []
+    line, source = exec_start_source(unit_text)
+    if line is None:
+        refusals.append(
+            {
+                "code": "unit_unreadable",
+                "message": f"`systemctl cat {SERVICE}` names no ExecStart",
+            }
+        )
+    else:
+        why = exec_start_refusal(line, source)
+        if why:
+            refusals.append({"code": "exec_start_unsupported", "message": why})
+    for path, command in later_exec_start_dropins(unit_text):
+        refusals.append(
+            {
+                "code": "exec_start_overridden",
+                "message": f"{path} sorts after {ISOLATION_DROP_IN_NAME} and sets ExecStart "
+                f"(`{command or '(cleared)'}`), so it would win over the switch's private "
+                "command and the engine would stay reachable at its normal address. Rename it "
+                f"so it sorts before {ISOLATION_DROP_IN_NAME} (any name not starting with "
+                "'zzzz-' does), run `systemctl daemon-reload`, then run the switch again",
+            }
+        )
+    if normal_port is not None:
+        for path, key, command in side_commands_on_port(unit_text, normal_port):
+            refusals.append(
+                {
+                    "code": "exec_probe_normal_port",
+                    "message": f"{path} sets {key}=`{command}`, which names the engine's "
+                    f"normal port {normal_port}. While the switch runs, the engine listens only "
+                    "on a private port, so this command would fail at every restart. Remove it "
+                    "(or move it to a separate unit), run `systemctl daemon-reload`, then run "
+                    "the switch again",
+                }
+            )
+    return refusals
+
+
+def read_unit_text(
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> str | None:
+    """``systemctl cat`` of the engine's unit, or ``None`` when it cannot be read."""
+    try:
+        proc = runner(
+            ["systemctl", "cat", SERVICE], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout or "" if proc.returncode == 0 else None
+
+
+_HOST_ARG = re.compile(r"(--host)(=|\s+)(\S+)")
+_PORT_ARG = re.compile(r"(--port)(=|\s+)(\S+)")
 
 
 def isolation_body(exec_start: str, run_id: str) -> str:
@@ -887,23 +1153,31 @@ def write_isolation_dropin(
 
     Reads the unit as systemd sees it (``systemctl cat``), so the command it
     rewrites is the one in force, an operator's ``ExecStart`` drop-in
-    included. Returns ``{"error", "exec_start"}``; the caller reloads and
-    restarts.
+    included. Writes nothing for a unit the preflight would refuse
+    (:func:`unit_refusals`). Returns ``{"error", "exec_start"}``; the caller
+    reloads and restarts.
     """
-    try:
-        proc = runner(
-            ["systemctl", "cat", SERVICE], capture_output=True, text=True, timeout=10, check=False
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"error": f"could not read the engine's unit ({type(exc).__name__})"}
-    line = effective_exec_start(proc.stdout or "") if proc.returncode == 0 else None
+    text = read_unit_text(runner)
+    if text is None:
+        return {"error": f"could not read the engine's unit (`systemctl cat {SERVICE}`)"}
+    line, source = exec_start_source(text)
     if not line:
         return {"error": f"could not find an ExecStart in `systemctl cat {SERVICE}`"}
+    later = later_exec_start_dropins(text)
+    if later:
+        return {
+            "error": f"{later[0][0]} sorts after {ISOLATION_DROP_IN_NAME} and sets ExecStart "
+            f"(`{later[0][1] or '(cleared)'}`), so the engine cannot be isolated"
+        }
+    try:
+        private = private_exec_start(line, port)
+    except UnsupportedExecStart:
+        return {"error": exec_start_refusal(line, source)}
     target = path if path is not None else isolation_drop_in_path()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".conf.tmp")
-        tmp.write_text(isolation_body(private_exec_start(line, port), run_id), encoding="utf-8")
+        tmp.write_text(isolation_body(private, run_id), encoding="utf-8")
         os.chmod(tmp, 0o644)
         tmp.replace(target)
     except OSError as exc:
@@ -951,6 +1225,122 @@ def free_loopback_port() -> int:
         return int(sock.getsockname()[1])
 
 
+_PROC = Path("/proc")
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+#: ``/proc/net/tcp`` state of a listening socket.
+_TCP_LISTEN = "0A"
+
+
+def _listening_inodes(port: int, proc: Path = _PROC) -> set[str]:
+    """Socket inodes listening on TCP ``port`` (any local address), from ``/proc/net/tcp{,6}``."""
+    found: set[str] = set()
+    for name in ("tcp", "tcp6"):
+        try:
+            lines = (proc / "net" / name).read_text(encoding="ascii").splitlines()[1:]
+        except OSError:
+            continue
+        for row in lines:
+            fields = row.split()
+            if len(fields) < 10 or fields[3] != _TCP_LISTEN:
+                continue
+            try:
+                local_port = int(fields[1].rsplit(":", 1)[1], 16)
+            except (IndexError, ValueError):
+                continue
+            if local_port == port and fields[9] != "0":
+                found.add(fields[9])
+    return found
+
+
+def _pid_sockets(pid: int, proc: Path = _PROC) -> set[str]:
+    """Socket inodes ``pid`` holds open. Empty when its fds cannot be read."""
+    out: set[str] = set()
+    try:
+        fds = list((proc / str(pid) / "fd").iterdir())
+    except OSError:
+        return out
+    for fd in fds:
+        try:
+            target = os.readlink(fd)
+        except OSError:
+            continue
+        if target.startswith("socket:[") and target.endswith("]"):
+            out.add(target[8:-1])
+    return out
+
+
+def _comm(pid: int, proc: Path = _PROC) -> str:
+    try:
+        return (proc / str(pid) / "comm").read_text(encoding="utf-8").strip()
+    except OSError:
+        return "?"
+
+
+def _unit_pids(
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    cgroup_root: Path = _CGROUP_ROOT,
+) -> set[int]:
+    """The engine unit's processes: its ``MainPID`` and everything in its control group."""
+    try:
+        proc = runner(
+            ["systemctl", "show", "-p", "MainPID", "-p", "ControlGroup", SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    props = dict(line.split("=", 1) for line in (proc.stdout or "").splitlines() if "=" in line)
+    pids: set[int] = set()
+    main = props.get("MainPID", "0").strip()
+    if main.isdigit() and int(main) > 0:
+        pids.add(int(main))
+    group = props.get("ControlGroup", "").strip()
+    if group.startswith("/"):
+        try:
+            text = (cgroup_root / group.lstrip("/") / "cgroup.procs").read_text(encoding="ascii")
+        except OSError:
+            text = ""
+        pids.update(int(p) for p in text.split() if p.isdigit())
+    return pids
+
+
+def loopback_listener(
+    port: int,
+    *,
+    unit_pids: Callable[[], set[int]] | None = None,
+    proc: Path = _PROC,
+) -> dict[str, Any]:
+    """Who listens on TCP ``port``: ``{"owner", "holder", "pid"}``.
+
+    ``owner`` is ``"none"`` (nothing listens), ``"unit"`` (a process of the
+    engine's unit owns the listening socket), ``"other"`` (another process
+    does; ``holder`` names it) or ``"unknown"`` (a socket listens but no
+    process could be matched to it, typically for want of root). Read from
+    ``/proc/net/tcp`` and the socket inodes in ``/proc/<pid>/fd``; no new
+    dependency, and nothing is written.
+    """
+    inodes = _listening_inodes(port, proc)
+    if not inodes:
+        return {"owner": "none", "holder": None, "pid": None}
+    for pid in sorted((unit_pids or _unit_pids)()):
+        if _pid_sockets(pid, proc) & inodes:
+            return {"owner": "unit", "holder": f"pid {pid} ({_comm(pid, proc)})", "pid": pid}
+    try:
+        candidates = sorted(int(p.name) for p in proc.iterdir() if p.name.isdigit())
+    except OSError:
+        candidates = []
+    for pid in candidates:
+        if _pid_sockets(pid, proc) & inodes:
+            return {"owner": "other", "holder": f"pid {pid} ({_comm(pid, proc)})", "pid": pid}
+    return {
+        "owner": "unknown",
+        "holder": "a process this account cannot see (run as root)",
+        "pid": None,
+    }
+
+
 class EmbedderSwitch:
     """One run of the switch against one engine.
 
@@ -967,8 +1357,11 @@ class EmbedderSwitch:
     (:func:`write_isolation_dropin`, :func:`remove_isolation_dropin`; the
     restart that follows either is ``apply_dropin``'s), ``isolated_port()``
     reads it back, ``client_for(base_url)`` builds the client for the private
-    port, ``privileged()`` says whether this process may do all of that, and
-    ``hook(point)`` is the test hook described in the module docstring.
+    port, ``listener(port)`` says which process listens on a loopback port
+    (:func:`loopback_listener`), ``unit_text()`` is ``systemctl cat`` of the
+    engine's unit (:func:`read_unit_text`), ``privileged()`` says whether
+    this process may do all of that, and ``hook(point)`` is the test hook
+    described in the module docstring.
     """
 
     def __init__(
@@ -986,6 +1379,8 @@ class EmbedderSwitch:
         release: Callable[[], dict[str, Any]] | None = None,
         isolated_port: Callable[[], int | None] | None = None,
         client_for: Callable[[str], Any] | None = None,
+        listener: Callable[[int], Mapping[str, Any]] | None = None,
+        unit_text: Callable[[], str | None] | None = None,
         pick_port: Callable[[], int] = free_loopback_port,
         hs_dir: Path | None = None,
         timeouts: Timeouts | None = None,
@@ -1000,6 +1395,10 @@ class EmbedderSwitch:
         self._release = release or remove_isolation_dropin
         self._isolated_port = isolated_port or globals()["isolated_port"]
         self._client_for = client_for or self._default_client_for
+        self._listener = listener or loopback_listener
+        self._unit_text = unit_text or read_unit_text
+        #: ``api_version`` the preflight read; every restart must bring back the same.
+        self._api_version: str | None = None
         self._pick_port = pick_port
         self._target = target
         self._allow_pending = allow_pending
@@ -1334,14 +1733,84 @@ class EmbedderSwitch:
     # ── the engine: where it listens and what it runs ───────────────────
 
     async def _public_answers(self) -> bool:
-        """True when anything answers at the engine's normal address."""
+        """True when anything answers at the engine's normal address.
+
+        Only a refused connection means nothing listens there. Anything else,
+        a connection that was accepted and then timed out or was reset
+        included, means something holds the normal address, so the engine is
+        not isolated.
+        """
         try:
             await self._public_client.request_json("GET", "/health", timeout_s=3.0)
-        except httpx.TransportError:
+        except httpx.ConnectError:
             return False
         except (httpx.HTTPError, ValueError):
             return True
         return True
+
+    def _normal_port(self) -> int | None:
+        try:
+            return urlsplit(str(self._public_client.base_url)).port
+        except (AttributeError, ValueError):
+            return None
+
+    def _leak_message(self) -> str:
+        """Why the engine still answers at its normal address, naming the drop-in when one wins."""
+        text = self._unit_text()
+        later = later_exec_start_dropins(text) if text else []
+        if later:
+            path, command = later[0]
+            return (
+                f"the engine still answers at its normal address, so it is not isolated: "
+                f"{path} sorts after {ISOLATION_DROP_IN_NAME} and sets ExecStart "
+                f"(`{command or '(cleared)'}`), which replaces the switch's private command. "
+                f"Rename it so it sorts before {ISOLATION_DROP_IN_NAME}, run "
+                "`systemctl daemon-reload`, then run the switch again"
+            )
+        return (
+            "the engine still answers at its normal address, so it is not isolated: a "
+            f"drop-in that sorts after {ISOLATION_DROP_IN_NAME} replaces ExecStart, or "
+            "something else listens there. The switch does not run on an engine other "
+            "clients can reach"
+        )
+
+    def _listener_owner(self, port: int) -> Mapping[str, Any]:
+        try:
+            return self._listener(port)
+        except Exception as exc:  # a /proc read gone wrong is "cannot tell", not a crash
+            return {"owner": "unknown", "holder": f"unreadable ({type(exc).__name__})"}
+
+    def _foreign(self, port: int, seen: Mapping[str, Any]) -> SwitchError:
+        return SwitchError(
+            f"127.0.0.1:{port}, the engine's private port for this run, is held by "
+            f"{seen.get('holder') or 'another process'}, not by {SERVICE}. Nothing was "
+            "exported; the run is undone. Stop that process (or wait for it to let the port "
+            "go) and run the switch again: it picks a new port each run"
+        )
+
+    async def _confirm_version(self, where: str) -> None:
+        """``GET /version`` answers as the engine the preflight saw, with export and import on."""
+        try:
+            version = await self._client.request_json("GET", "/version", timeout_s=10.0)
+        except (httpx.HTTPError, ValueError) as exc:
+            raise SwitchError(
+                f"the process on {where} answers /health but not /version "
+                f"({type(exc).__name__}), so it is not confirmed to be the memory engine"
+            ) from exc
+        version = version if isinstance(version, dict) else {}
+        features = version.get("features") if isinstance(version.get("features"), dict) else {}
+        api = version.get("api_version")
+        if not api or (self._api_version is not None and api != self._api_version):
+            raise SwitchError(
+                f"the process on {where} reports api_version {api!r}, not "
+                f"{self._api_version or 'an engine version'!r}: it is not the engine the "
+                "switch checked before it started"
+            )
+        if not features.get("document_export_api") or not features.get("document_import_api"):
+            raise SwitchError(
+                f"the engine on {where} has its export or import API off "
+                "(features on /version) after the restart"
+            )
 
     async def _start_engine(self, embedder: Embedder, *, port: int | None, run_id: str) -> None:
         """Restart the engine on ``embedder``, private on ``port`` or at its normal address.
@@ -1365,17 +1834,18 @@ class EmbedderSwitch:
         if result.get("error"):
             raise SwitchError(f"could not restart the engine: {result['error']}")
         where = f"its private port {port}" if port is not None else "its normal address"
-        leaked = SwitchError(
-            "the engine still answers at its normal address, so it is not isolated: a "
-            f"drop-in that sorts after {ISOLATION_DROP_IN_NAME} replaces ExecStart, or "
-            "something else listens there. The switch does not run on an engine other "
-            "clients can reach"
-        )
         deadline = self._clock() + self.t.health_s
-        while not await self._healthy():
+        while True:
+            if port is not None:
+                seen = self._listener_owner(port)
+                if seen.get("owner") == "other":
+                    # Something else took the port: fail now, not after the timeout.
+                    raise self._foreign(port, seen)
+            if await self._healthy():
+                break
             # Up, but where it always was: do not wait out the whole timeout.
             if port is not None and await self._public_answers():
-                raise leaked
+                raise SwitchError(self._leak_message())
             if self._clock() >= deadline:
                 raise SwitchError(
                     f"the engine did not answer /health on {where} within {self.t.health_s:g}s "
@@ -1383,8 +1853,23 @@ class EmbedderSwitch:
                     "(see `journalctl -u hindsight-api`)"
                 )
             await self._sleep(self.t.poll_s)
+        if port is not None:
+            # /health on the port proves only that something answers there.
+            seen = self._listener_owner(port)
+            if seen.get("owner") == "other":
+                raise self._foreign(port, seen)
+            if seen.get("owner") != "unit":
+                holder = seen.get("holder") or "no listener found"
+                raise SwitchError(
+                    f"something answers on 127.0.0.1:{port}, but the listening socket could not "
+                    f"be matched to a process of {SERVICE} ({holder}), so it is not confirmed "
+                    "to be the engine. Run the switch as root"
+                )
+        await self._confirm_version(where)
         live: Embedder | None = None
         for _ in range(10):
+            # Read from the unit's main process; on a private port that is the
+            # process confirmed above to own the listening socket.
             live = _pair(self._evidence().get("live"))
             if live == embedder:
                 break
@@ -1398,7 +1883,7 @@ class EmbedderSwitch:
                 "drop-in, or the unit's EnvironmentFile, overrides the embedder"
             )
         if port is not None and await self._public_answers():
-            raise leaked
+            raise SwitchError(self._leak_message())
 
     async def _ensure_engine(self, embedder: Embedder, *, port: int | None, run_id: str) -> None:
         """Do nothing when the engine is where and what it should be; otherwise put it there.
@@ -1413,6 +1898,7 @@ class EmbedderSwitch:
             and await self._healthy()
             and _pair(self._evidence().get("live")) == embedder
             and not (port is not None and await self._public_answers())
+            and (port is None or self._listener_owner(port).get("owner") == "unit")
         ):
             return
         self._say(
@@ -1848,6 +2334,8 @@ class EmbedderSwitch:
             )
             # Look at the engine where it is, so that what it holds is in the report.
             self._use_port(private or None)
+        # The unit: what isolating the engine would rewrite, and what would fight it.
+        refusals.extend(unit_refusals(self._unit_text(), self._normal_port()))
         unreadable = admin_env_file_unreadable()
         if unreadable:
             refuse(
@@ -1927,6 +2415,8 @@ class EmbedderSwitch:
             return plan
         version = version if isinstance(version, dict) else {}
         features = version.get("features") if isinstance(version.get("features"), dict) else {}
+        if isinstance(version.get("api_version"), str) and version["api_version"]:
+            self._api_version = version["api_version"]
         plan["engine"] = {
             "reachable": True,
             "version": version.get("api_version"),
@@ -2830,6 +3320,17 @@ class EmbedderSwitch:
             if port is not None
             else ""
         )
+        if journal is not None and port is None and journal.isolated:
+            # The run released the engine (its last restart, at finish or at
+            # rollback) and stopped before it lifted the gate.
+            out["engine"]["released_early"] = True
+            held = (
+                " The engine's isolation drop-in is already gone, so the engine is at its "
+                "normal address (or returns there at its next start): other clients can reach "
+                "it and recall works, but memory writes through hal0 stay paused. --resume "
+                "isolates the engine again before it checks or changes anything, then finishes "
+                "and lifts the pause."
+            )
         if journal is None:
             if found["error"]:
                 out["summary"] = (
