@@ -340,6 +340,7 @@ A failure hal0 raises is the standard envelope `{"error": {"code", "message", "d
 | 429 | `memory.compat_busy` | Too many retains, reflects or recalls in flight, or the client's quota of unfinished retains is used up; `Retry-After` says when to retry |
 | 502 | `memory.compat_engine_error` | The engine answered `5xx`, refused hal0's own credential, or answered `404` to a retain. `error.details.upstream_status` has its status |
 | 503 | `memory.engine_unavailable`, `memory.unavailable` | The engine cannot be reached, or hal0 is running on its volatile fallback store |
+| 503 | `memory.writes_paused` | `POST .../memories` and `DELETE .../documents/{id}` while `hal0 memory embedder switch` holds the memory write gate, checked before any engine call; `Retry-After: 30`, the same answer as `POST /api/memory/add`. Reads are not gated |
 | 503 | `memory.extraction_ctx_too_small` | The extraction model's context window is too small to process any retain |
 | 504 | `memory.compat_engine_timeout` | The engine did not answer within the route's timeout |
 

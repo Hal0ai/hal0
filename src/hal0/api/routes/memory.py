@@ -48,6 +48,7 @@ from hal0.memory.namespace import (
     resolve_write_dataset,
 )
 from hal0.memory.retain_chunk_guard import ChunkAudit, audit_bank_chunks
+from hal0.memory.write_gate import require_writes_allowed
 from hal0.normalize.resolver import DEFAULT_CHAINS
 
 router = APIRouter()
@@ -768,6 +769,8 @@ async def retry_failed_extractions(request: Request) -> dict[str, Any]:
     """
     import asyncio
 
+    # #3518: a retry is a write; refused while an embedder switch runs.
+    require_writes_allowed()
     provider = getattr(request.app.state, "memory_provider", None)
     client = getattr(provider, "hindsight_client", None) if provider is not None else None
     if client is None:
@@ -1375,6 +1378,10 @@ async def memory_add(request: Request) -> dict[str, Any]:
 
     wrapper = _wrapper(request)
 
+    # #3518: while `hal0 memory embedder switch` holds the write gate, refuse
+    # with the typed 503 before any other preflight has a say.
+    require_writes_allowed()
+
     # #1903: preflight the extraction slot's effective window against the
     # extraction prompt's own footprint BEFORE the retain is attempted. A
     # slot too small to fit the prompt can never complete extraction no
@@ -1398,6 +1405,20 @@ async def memory_add(request: Request) -> dict[str, Any]:
         document_id=document_id,
         **passthrough,
     )
+
+
+async def _engine_read(call: Awaitable[Any]) -> Any:
+    """Await a memory read; an engine that cannot be reached is the typed 503.
+
+    A write already answers ``memory.engine_unavailable`` when the engine's
+    port refuses the connection. A read used to surface the raw connection
+    error as a 500. The engine is unreachable on purpose for the whole of
+    ``hal0 memory embedder switch`` (#3518), so reads say so too.
+    """
+    try:
+        return await call
+    except (ConnectionError, httpx.NetworkError, httpx.ConnectTimeout) as exc:
+        raise MemoryEngineUnavailable() from exc
 
 
 @router.post("/search")
@@ -1432,14 +1453,16 @@ async def memory_search(request: Request) -> dict[str, Any]:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
     wrapper = _wrapper(request)
-    items = await wrapper.search(
-        query=query,
-        limit=int(body.get("limit", 10)),
-        dataset=dataset,
-        tags=body.get("tags") or [],
-        before=body.get("before"),
-        after=body.get("after"),
-        client_id=agent_id if agent_id != "anonymous" else None,
+    items = await _engine_read(
+        wrapper.search(
+            query=query,
+            limit=int(body.get("limit", 10)),
+            dataset=dataset,
+            tags=body.get("tags") or [],
+            before=body.get("before"),
+            after=body.get("after"),
+            client_id=agent_id if agent_id != "anonymous" else None,
+        )
     )
     return {"items": items}
 
@@ -1480,14 +1503,16 @@ async def memory_recall(request: Request) -> dict[str, Any]:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
     wrapper = _wrapper(request)
-    items = await wrapper.recall(
-        query=query,
-        types=body.get("types"),
-        max_tokens=int(body.get("max_tokens", 4096)),
-        dataset=dataset,
-        tags=body.get("tags") or [],
-        tags_match=body.get("tags_match"),
-        client_id=agent_id if agent_id != "anonymous" else None,
+    items = await _engine_read(
+        wrapper.recall(
+            query=query,
+            types=body.get("types"),
+            max_tokens=int(body.get("max_tokens", 4096)),
+            dataset=dataset,
+            tags=body.get("tags") or [],
+            tags_match=body.get("tags_match"),
+            client_id=agent_id if agent_id != "anonymous" else None,
+        )
     )
     return {"items": items}
 
@@ -1748,11 +1773,13 @@ async def memory_list(
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
     wrapper = _wrapper(request)
-    return await wrapper.list_items(
-        dataset=resolved,
-        cursor=cursor,
-        limit=limit,
-        client_id=agent_id if agent_id != "anonymous" else None,
+    return await _engine_read(
+        wrapper.list_items(
+            dataset=resolved,
+            cursor=cursor,
+            limit=limit,
+            client_id=agent_id if agent_id != "anonymous" else None,
+        )
     )
 
 

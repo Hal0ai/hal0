@@ -29,10 +29,12 @@ Maps hal0's engine-neutral MemoryProvider contract onto the shared
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -57,6 +59,7 @@ from hal0.memory.projects import (
 )
 from hal0.memory.provider import MemoryProvider
 from hal0.memory.read_scope import VISIBILITY_PRIVATE_TAG, reflect_visibility_scope
+from hal0.memory.write_gate import read_gate, require_writes_allowed
 
 log = structlog.get_logger(__name__)
 
@@ -79,6 +82,26 @@ _AGENT_TAG_PREFIX = "agent:"
 #: lower-cased (as the bridge's ``_client_tags`` does), so ``AGENT:x``,
 #: `` agent:x`` and ``Visibility:Shared`` are reserved too.
 _RESERVED_TAG_PREFIXES = (_AGENT_TAG_PREFIX, "visibility:")
+
+
+def _gated_write(
+    method: Callable[..., Awaitable[Any]],
+) -> Callable[..., Awaitable[Any]]:
+    """Refuse a mutating provider call while memory writes are paused (#3518).
+
+    Every hal0 writer reaches the engine through one of the decorated
+    methods, so this is where ``hal0 memory embedder switch`` holds them off:
+    :func:`hal0.memory.write_gate.require_writes_allowed` raises the typed
+    ``memory.writes_paused`` 503 before anything is sent, and before the
+    write-health bookkeeping can count the refusal as a failed write.
+    """
+
+    @functools.wraps(method)
+    async def gated(self: Any, *args: Any, **kwargs: Any) -> Any:
+        require_writes_allowed()
+        return await method(self, *args, **kwargs)
+
+    return gated
 
 
 def _is_reserved_tag(tag: Any) -> bool:
@@ -1068,6 +1091,10 @@ class HindsightProvider(MemoryProvider):
         goes back to reading as genuinely FAILING, rather than retrying
         forever on every ``/api/status`` poll.
         """
+        # #3518: a retry is a write. While writes are paused it would queue
+        # work on a bank that is about to be replaced.
+        if read_gate() is not None:
+            return None
         health = await self.write_health()
         ops = health.get("operations") if isinstance(health, dict) else None
         failed = int((ops or {}).get("failed") or 0)
@@ -1569,6 +1596,7 @@ class HindsightProvider(MemoryProvider):
             out["items_count"] = items_count
         return out
 
+    @_gated_write
     async def add(
         self,
         text: str,
@@ -1614,6 +1642,7 @@ class HindsightProvider(MemoryProvider):
         out.update(self._retain_receipt(resp))
         return out
 
+    @_gated_write
     async def retain_items(
         self,
         items: list[dict[str, Any]],
@@ -2064,6 +2093,7 @@ class HindsightProvider(MemoryProvider):
                 return True
         return False
 
+    @_gated_write
     async def delete(
         self,
         ids: list[str],
@@ -2575,6 +2605,7 @@ class HindsightProvider(MemoryProvider):
         ):
             raise PermissionError(f"memory {memory_id!r} is not visible to this caller")
 
+    @_gated_write
     async def curate(
         self,
         memory_id: str,
@@ -2663,6 +2694,7 @@ class HindsightProvider(MemoryProvider):
         bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("get_mental_model", bank_id=bank, mental_model_id=mental_model_id)
 
+    @_gated_write
     async def create_mental_model(
         self,
         *,
@@ -2687,6 +2719,7 @@ class HindsightProvider(MemoryProvider):
             trigger=trigger,
         )
 
+    @_gated_write
     async def update_mental_model(
         self,
         mental_model_id: str,
@@ -2711,6 +2744,7 @@ class HindsightProvider(MemoryProvider):
             trigger=trigger,
         )
 
+    @_gated_write
     async def delete_mental_model(
         self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
@@ -2719,6 +2753,7 @@ class HindsightProvider(MemoryProvider):
             "delete_mental_model", bank_id=bank, mental_model_id=mental_model_id
         )
 
+    @_gated_write
     async def refresh_mental_model(
         self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
@@ -2759,6 +2794,7 @@ class HindsightProvider(MemoryProvider):
         bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("get_directive", bank_id=bank, directive_id=directive_id)
 
+    @_gated_write
     async def create_directive(
         self,
         *,
@@ -2781,6 +2817,7 @@ class HindsightProvider(MemoryProvider):
             tags=tags,
         )
 
+    @_gated_write
     async def update_directive(
         self,
         directive_id: str,
@@ -2805,6 +2842,7 @@ class HindsightProvider(MemoryProvider):
             tags=tags,
         )
 
+    @_gated_write
     async def delete_directive(
         self, directive_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
@@ -2858,12 +2896,14 @@ class HindsightProvider(MemoryProvider):
 
         return await annotate_retain_yield(op, _doc)
 
+    @_gated_write
     async def cancel_operation(
         self, operation_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("cancel_operation", bank_id=bank, operation_id=operation_id)
 
+    @_gated_write
     async def retry_operation(
         self, operation_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
@@ -2941,6 +2981,7 @@ class HindsightProvider(MemoryProvider):
         bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call("bank_stats", bank_id=bank, refresh=refresh)
 
+    @_gated_write
     async def consolidate(  # type: ignore[override]  — real implementation, ABC default is a stub
         self, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:

@@ -182,6 +182,11 @@ caller to retry shortly; `error.details.retry_after_s` and `Retry-After` are
 both 5 seconds. An error response from the engine is not reclassified as
 engine unavailability.
 
+Every `/api/memory/*` route that changes memory returns 503
+`memory.writes_paused` while `hal0 memory embedder switch` is rebuilding the
+store, and after an interrupted run until it has been resumed. For the same span the engine is on a private port, so `POST /api/memory/recall`, `/search` and `GET /api/memory/list` return 503 `memory.engine_unavailable`. Nothing is written; `error.details.retry_after_s` and `Retry-After`
+are 30 seconds, and recall, search and the other reads keep answering.
+
 Every prefix above is backed by at least one route confirmed directly against
 `src/hal0/api/routes/` and the mount list in `src/hal0/api/__init__.py`. This brings
 documented coverage to every `/api/*` prefix currently mounted (previously 18 of

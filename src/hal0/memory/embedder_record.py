@@ -93,6 +93,10 @@ so nothing hal0 writes can swap a running engine's embedder.
 A record file that exists but cannot be read or parsed is never overwritten.
 For that run the embedder is taken from the evidence and nothing is written.
 
+One caller replaces a record: ``hal0 memory embedder switch``
+(:mod:`hal0.memory.embedder_switch`), which re-embeds every bank on the new
+model and writes the record with :data:`SOURCE_SWITCH`.
+
 Status surfaces (:func:`embedder_status`) never write.
 """
 
@@ -148,6 +152,9 @@ SOURCE_UNAVAILABLE = "store-unavailable"
 #: A new install whose engine could not start on the configured embedder and
 #: was started on the engine default instead (:mod:`hal0.memory.first_start`).
 SOURCE_FIRST_START_FALLBACK = "first-start-fallback"
+#: Written by ``hal0 memory embedder switch`` (:mod:`hal0.memory.embedder_switch`),
+#: the one caller that replaces an existing record.
+SOURCE_SWITCH = "embedder-switch"
 
 #: Sources that describe an engine that has not run (or cannot be seen). A
 #: record from one of these is never written by :func:`ensure_embedder_record`.
@@ -702,6 +709,21 @@ def describe_embedder(provider: Any, model: Any) -> str:
     return f"the {provider} provider (local model {model})"
 
 
+def switch_command(status: Mapping[str, Any]) -> str:
+    """The ``hal0 memory embedder switch`` line that settles an :func:`embedder_status`.
+
+    Towards the configured embedder when it differs from the recorded one;
+    otherwise the store is mixed, and the repair is a switch to the embedder
+    it is already recorded on.
+    """
+    provider = status.get("configured_provider") or status.get("recorded_provider")
+    model = status.get("configured") or status.get("recorded")
+    command = f"hal0 memory embedder switch {model}"
+    if provider and provider != ENGINE_DEFAULT_PROVIDER:
+        command += f" --provider {provider}"
+    return command
+
+
 def embedder_notice(status: Mapping[str, Any]) -> str | None:
     """One operator sentence for an :func:`embedder_status`, or ``None`` when it is clean.
 
@@ -753,17 +775,24 @@ def embedder_notice(status: Mapping[str, Any]) -> str | None:
         status.get("configured_provider"),
         status.get("configured"),
     )
-    if differs and not status.get("record_error") and not status.get("store_unavailable"):
+    switched = status.get("source") == SOURCE_SWITCH
+    if differs and switched and not status.get("record_error"):
+        parts.append(
+            f"the memory store was moved to {recorded} with `hal0 memory embedder switch` and "
+            f"stays on it; [memory.models] still names {configured}, which is fine and has no "
+            "effect (set it to the store's embedder to make the two agree)"
+        )
+    elif differs and not status.get("record_error") and not status.get("store_unavailable"):
         parts.append(
             f"the memory store was built with {recorded} and the engine stays on it; "
             f"[memory.models] asks for {configured}, which has no effect"
         )
     if not parts:
         return None
-    if status.get("mixed") or differs:
+    if status.get("mixed") or (differs and not switched):
         parts.append(
-            "a store's embedder can only change by re-embedding it; "
-            "`hal0 memory embedder switch` will do that, and it is not in this release yet"
+            "a store's embedder can only change by re-embedding it: run "
+            f"`{switch_command(status)}` (a dry run; add --apply to do it)"
         )
     return "; ".join(parts)
 
@@ -779,6 +808,7 @@ __all__ = [
     "SOURCE_ENGINE_DEFAULT",
     "SOURCE_FIRST_START_FALLBACK",
     "SOURCE_PROCESS",
+    "SOURCE_SWITCH",
     "SOURCE_UNAVAILABLE",
     "SOURCE_UNIT",
     "STORE_ABSENT",
@@ -803,4 +833,5 @@ __all__ = [
     "save_embedder_record",
     "shipped_default_embedder",
     "store_state",
+    "switch_command",
 ]

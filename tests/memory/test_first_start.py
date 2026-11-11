@@ -732,3 +732,34 @@ def test_main_never_raises(
 
     assert fs.main() == fs.EXIT_FAILED
     assert "first-start step failed" in capsys.readouterr().out
+
+
+# ── an embedder switch owns the engine's drop-ins until it has finished ──────
+
+
+def test_a_switch_in_progress_is_never_written_under(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.memory import embedder_switch, write_gate
+
+    monkeypatch.setattr(embedder_switch, "isolated_port", lambda: None)
+    write_gate.engage_gate(run_id="3f9a1c2e")
+
+    result = box.run()
+
+    assert result["status"] == fs.SKIPPED
+    assert "embedder switch" in result["reason"]
+    assert not box.dropin.exists() and box.saved() is None
+    assert box.systemctl() == []
+    assert "left as it is" in fs.describe(result)
+
+
+def test_an_isolated_engine_is_left_alone(box: Box, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.memory import embedder_switch
+
+    monkeypatch.setattr(embedder_switch, "isolated_port", lambda: 45123)
+
+    result = box.run()
+
+    assert result["status"] == fs.SKIPPED and "isolated" in result["reason"]
+    assert not box.dropin.exists() and box.systemctl() == []

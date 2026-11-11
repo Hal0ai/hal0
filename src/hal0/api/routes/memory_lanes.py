@@ -32,6 +32,7 @@ from hal0.api.routes._memory_health_collect import EngineReader, bank_queue_row
 from hal0.api.routes.memory import MemoryUnavailable
 from hal0.config.loader import load_hal0_config
 from hal0.errors import BadRequest, Forbidden, Hal0Error, NotFound
+from hal0.memory.write_gate import require_engine_call_allowed
 
 router = APIRouter()
 
@@ -111,6 +112,8 @@ async def _passthrough(request: Request, path: str, method: str) -> Response:
     if not _allowed(path):
         raise NotFound(f"no such engine path: {path!r}", code="memory.engine_path_not_allowed")
     _check_method(method, path)
+    # #3518: refused with ``memory.writes_paused`` while an embedder switch runs.
+    require_engine_call_allowed(method, f"/{path}")
 
     client = _client(request)
 

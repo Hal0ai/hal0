@@ -3965,14 +3965,14 @@ def test_memory_embedder_passes_when_the_store_matches_the_config() -> None:
 
 def test_memory_embedder_passes_with_a_note_on_an_upgraded_box_at_the_default() -> None:
     """Store on bge-small, config still at its shipped default: every upgraded
-    box. Not a warning, because no release ships a remedy yet."""
+    box. Not a warning (nothing the operator did), but it names the way to
+    move the store."""
     check = da.check_memory_embedder(status=_embedder(_BGE, _HS))
     assert check.status == "pass"
     assert f"built with {_BGE} and stays on it" in check.detail
     assert f"the configured model ({_HS})" in check.detail
-    assert "only through an embedder switch, which a later release adds" in check.detail
-    # Does not name a command that does not exist.
-    assert "`hal0 memory" not in check.detail
+    assert f"only through `hal0 memory embedder switch {_HS}`" in check.detail
+    assert "re-embeds the store" in check.detail
 
 
 def test_memory_embedder_warns_when_the_operator_set_a_model_that_differs() -> None:
@@ -3981,9 +3981,151 @@ def test_memory_embedder_warns_when_the_operator_set_a_model_that_differs() -> N
     assert f"built with {_BGE}" in check.detail
     assert "[memory.models] asks for example-org/another-embedder" in check.detail
     assert "no effect" in check.detail
-    # Names the way out without claiming the command exists.
-    assert "`hal0 memory embedder switch`" in check.detail
-    assert "not in this release yet" in check.detail
+    # Names the way out, with the model it would move the store to.
+    assert "`hal0 memory embedder switch example-org/another-embedder`" in check.detail
+    assert "a dry run; add --apply" in check.detail
+
+
+def test_memory_embedder_names_the_provider_in_the_switch_command() -> None:
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE, configured_provider="openai"))
+    assert f"`hal0 memory embedder switch {_BGE} --provider openai`" in check.detail
+
+
+def test_memory_embedder_offers_the_switch_as_the_repair_for_a_mixed_store() -> None:
+    check = da.check_memory_embedder(status=_embedder(_HS, _HS, mixed=True))
+    assert check.status == "warn"
+    assert f"`hal0 memory embedder switch {_HS}`" in check.detail
+
+
+def test_memory_embedder_reports_an_interrupted_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A switch that stopped half-way leaves memory writes paused: say so first."""
+    from hal0.memory import embedder_switch as es
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    es.journal_path().parent.mkdir(parents=True)
+    es.journal_path().write_text(
+        jsonlib.dumps(
+            {
+                "version": 1,
+                "run_id": "3f9a1c2e",
+                "started_at": "2026-11-11T02:00:00+00:00",
+                "pid": 1,
+                "phase": "swapping",
+                "target": {"provider": "local", "model": _HS},
+                "previous": {"provider": "local", "model": _BGE},
+                "archive_dir": "/nowhere",
+                "error": "hindsight-admin rename-bank exited 1",
+            }
+        )
+    )
+
+    # The journal alone, its pause gone: writes may be reaching half-replaced banks.
+    check = da.check_memory_embedder()
+
+    assert (check.key, check.status) == ("memory_embedder", "warn")
+    assert "did not finish (hindsight-admin rename-bank exited 1)" in check.detail
+    assert "run 3f9a1c2e, archives in /nowhere" in check.detail
+    assert "its write pause is gone" in check.detail
+    assert "`hal0 memory embedder switch --status`" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
+def test_memory_embedder_is_informational_after_a_switch_away_from_the_config() -> None:
+    """The operator moved the store on purpose; the config naming another
+    model is then a fact to state, with the setting that makes them agree."""
+    status = _embedder(_BGE, "example-org/another-embedder", source="embedder-switch")
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "pass"
+    assert f"moved to {_BGE} with `hal0 memory embedder switch`" in check.detail
+    assert "which is fine and has no effect" in check.detail
+    assert "embeddings_model under [memory.models]" in check.detail
+
+    # The same difference without a switch behind it is still the operator's to settle.
+    plain = _embedder(_BGE, "example-org/another-embedder")
+    assert da.check_memory_embedder(status=plain).status == "warn"
+
+
+def test_memory_embedder_says_when_the_engine_is_private_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.memory import embedder_switch as es
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/backups/x")
+    monkeypatch.setattr(es, "isolated_port", lambda: 45123)
+
+    check = da.check_memory_embedder()
+
+    assert check.status == "warn"
+    assert "the engine is isolated on a private port (45123)" in check.detail
+    assert "recall is unavailable too" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
+def test_memory_embedder_says_when_the_engine_is_back_before_the_gate_lifts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finish whose last restart failed: drop-in gone, gate and journal still there."""
+    from hal0.memory import embedder_switch as es
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/backups/x")
+    monkeypatch.setattr(es, "isolated_port", lambda: None)
+    monkeypatch.setattr(
+        es,
+        "interrupted_switch",
+        lambda: {"run_id": "3f9a1c2e", "phase": "swapping", "isolated": True, "error": "boom"},
+    )
+
+    check = da.check_memory_embedder()
+
+    assert check.status == "warn"
+    assert "back at its normal address" in check.detail
+    assert "recall works" in check.detail
+    assert "`--resume` isolates it again" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
+def test_memory_embedder_reports_a_write_gate_that_no_switch_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killed switch leaves the gate set on purpose; this row is its liveness story."""
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/backups/memory-embedder-switch-x")
+
+    check = da.check_memory_embedder()
+
+    assert check.status == "warn"
+    assert "run 3f9a1c2e, archives in /backups/memory-embedder-switch-x" in check.detail
+    assert "no switch is running, so every memory write is refused" in check.detail
+    assert "`hal0 memory embedder switch --status`" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
+def test_memory_embedder_passes_while_a_switch_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    from hal0.memory import embedder_switch as es
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/x")
+    fd = os.open(es.lock_path(), os.O_RDONLY | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        check = da.check_memory_embedder()
+    finally:
+        os.close(fd)
+
+    assert check.status == "pass" and "an embedder switch is running" in check.detail
 
 
 def test_memory_embedder_warns_when_the_operator_set_a_provider_that_differs() -> None:
@@ -4004,7 +4146,7 @@ def test_memory_embedder_warns_on_a_mixed_store_even_when_the_models_match() -> 
     check = da.check_memory_embedder(status=_embedder(_HS, _HS, mixed=True))
     assert check.status == "warn"
     assert "two embedders" in check.detail
-    assert "`hal0 memory embedder switch`" in check.detail
+    assert f"`hal0 memory embedder switch {_HS}`" in check.detail
     assert "has no effect" not in check.detail
 
 

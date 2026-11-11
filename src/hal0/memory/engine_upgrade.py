@@ -384,6 +384,7 @@ def upgrade_memory_engine(
     :func:`hal0.memory.extraction_env.apply_extraction_slot`.
 
     Returns a status dict whose ``status`` is one of ``skipped``,
+    ``blocked`` (an embedder switch is running or unfinished, #3518),
     ``converged``, ``stale``, ``ahead``, ``build_failed``, ``snapshot_failed``,
     ``upgraded``, ``rolled_back``. Only genuine bugs raise.
     """
@@ -398,6 +399,18 @@ def upgrade_memory_engine(
 
     if os.environ.get("HAL0_SKIP_HINDSIGHT") == "1":
         return {"status": "skipped", "reason": "HAL0_SKIP_HINDSIGHT=1"}
+
+    if upgrade:
+        # #3518: an upgrade snapshots ``.pg0`` and may roll back to it. In the
+        # middle of an embedder switch that would put renamed banks back under
+        # their temporary ids, so the two never overlap. The switch refuses
+        # in the other direction (``.venv.new``, a queued or running update).
+        from hal0.memory.embedder_switch import blocking_reason
+
+        blocked = blocking_reason()
+        if blocked is not None:
+            log.warning("updater.memory_engine_blocked", job_id=job_id, reason=blocked)
+            return {"status": "blocked", "reason": blocked}
 
     # Mid-swap crash recovery: a previous run renamed .venv away and died
     # before renaming .venv.new in. Restore the newest .venv.old-* so the

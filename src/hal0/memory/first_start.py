@@ -437,6 +437,15 @@ def run_first_start(
     except Exception as exc:
         return {"status": SKIPPED, "reason": f"hal0.toml unreadable ({type(exc).__name__})"}
 
+    from hal0.memory.bank_seed import switch_in_progress
+
+    held = switch_in_progress()
+    if held is not None:
+        # The switch owns the engine's unit drop-ins and its restarts until it
+        # has finished; this step would write the showcase drop-in and restart
+        # the engine under it.
+        log.warning("hal0.memory.first_start_skipped_for_switch", reason=held)
+        return {"status": SKIPPED, "reason": held}
     view = embedder_record.resolve_embedder(configured_embedder(mem.models))
     if view.store != STORE_ABSENT:
         return {"status": SKIPPED, "reason": f"the memory store's state is '{view.store}'"}

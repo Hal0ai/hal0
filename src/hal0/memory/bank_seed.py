@@ -18,6 +18,9 @@ on a new one, so it writes only where there is nothing to disturb:
   documents and no facts and its configuration sets no ``retain_mission``.
 * A bank that holds anything is left alone whatever its configuration. An
   operator's bank is never reconfigured behind their back.
+* Nothing is seeded while ``hal0 memory embedder switch`` is running or
+  unfinished (:func:`switch_in_progress`); the hook reports "not done" and
+  the heal loop runs it again once the switch has finished.
 
 Banks are addressed the way hal0 addresses them, through the provider:
 
@@ -152,10 +155,34 @@ async def seed_missing_banks(client: Any, targets: dict[str, dict[str, Any]]) ->
     return out
 
 
+def switch_in_progress() -> str | None:
+    """Why the engine's banks must not be written by anything but the switch now, else ``None``.
+
+    ``hal0 memory embedder switch`` running or unfinished, its write gate set,
+    or the engine isolated on its private port. Never raises: a check that
+    cannot be made reads as "in progress", so nothing is written on a guess.
+    """
+    try:
+        from hal0.memory import embedder_switch
+
+        return embedder_switch.blocking_reason()
+    except Exception as exc:
+        return f"whether an embedder switch is running could not be checked ({exc})"
+
+
 def heal_hook(provider: Any) -> Any:
     """A heal hook for ``provider``: seed the banks, ``False`` to be run again on a failure."""
 
     async def _seed() -> bool:
+        held = switch_in_progress()
+        if held is not None:
+            # The engine can be back at its normal address a moment before an
+            # embedder switch lifts the write gate, and a bank that is half
+            # way through its swap looks missing: seeding it then would put a
+            # new bank where the switch is about to rename the rebuilt one.
+            # Not done yet: the heal loop runs this again.
+            log.info("hal0.memory.bank_seed_deferred", reason=held)
+            return False
         client = getattr(provider, "hindsight_client", None)
         targets = seed_targets(provider)
         if client is None or not targets:
@@ -165,4 +192,4 @@ def heal_hook(provider: Any) -> Any:
     return _seed
 
 
-__all__ = ["SEED_BANKS", "heal_hook", "seed_missing_banks", "seed_targets"]
+__all__ = ["SEED_BANKS", "heal_hook", "seed_missing_banks", "seed_targets", "switch_in_progress"]

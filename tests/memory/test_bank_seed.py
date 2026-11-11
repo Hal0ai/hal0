@@ -7,9 +7,11 @@ Run targeted:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 import structlog
 
 from hal0.memory import SelfHealingMemoryProvider, bank_seed
@@ -217,3 +219,51 @@ def test_the_hook_runs_when_the_degraded_provider_heals() -> None:
     assert asyncio.run(shell.run_heal_hooks()) is True
     assert list(engine.banks) == ["hal0-brain"]
     assert shell.pending_heal_hooks == 0
+
+
+# ── an embedder switch owns the banks until it has finished ──────────────────
+
+
+def test_nothing_is_seeded_while_an_embedder_switch_holds_the_store(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The engine can be back at its normal address a moment before the switch
+    lifts its gate, with a bank between its delete and its rename: that bank
+    looks missing, and seeding it would collide with the rename. The hook
+    stays armed and seeds once the switch is done."""
+    from hal0.memory import embedder_switch, write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    monkeypatch.setattr(embedder_switch, "isolated_port", lambda: None)
+    write_gate.engage_gate(run_id="3f9a1c2e")
+    engine = Engine()
+    prov = provider(engine)
+
+    assert run_hook(prov) is False
+    assert engine.calls == []
+
+    write_gate.lift_gate()
+    assert run_hook(prov) is True
+    assert engine.imports() == ["shared"]
+
+
+def test_an_isolated_engine_is_not_seeded_either(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.memory import embedder_switch
+
+    monkeypatch.setattr(embedder_switch, "blocking_reason", lambda: "isolated on 45123")
+    engine = Engine()
+
+    assert run_hook(provider(engine)) is False
+    assert engine.calls == []
+
+
+def test_a_check_that_cannot_be_made_is_treated_as_a_switch_in_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0.memory import embedder_switch
+
+    def broken() -> str | None:
+        raise OSError("state directory unreadable")
+
+    monkeypatch.setattr(embedder_switch, "blocking_reason", broken)
+    assert "could not be checked" in (bank_seed.switch_in_progress() or "")

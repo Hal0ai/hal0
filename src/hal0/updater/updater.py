@@ -2403,6 +2403,31 @@ def _is_editable_install() -> bool:
     return not _is_git_install()
 
 
+class UpdateBlockedByEmbedderSwitch(UpdateError):
+    """409: an embedder switch is running or unfinished; an update must wait (#3518)."""
+
+    code = "system.update_blocked_by_embedder_switch"
+    status = 409
+
+
+def _raise_if_embedder_switch() -> None:
+    """Refuse an update while ``hal0 memory embedder switch`` is running or unfinished.
+
+    An update restarts hal0-api and may upgrade the memory engine, whose
+    upgrade snapshots the engine's data directory and can roll back to it.
+    Either would cut across a switch that has replaced some banks and not
+    others.
+    """
+    from hal0.memory.embedder_switch import blocking_reason
+
+    reason = blocking_reason()
+    if reason is not None:
+        raise UpdateBlockedByEmbedderSwitch(
+            f"hal0 update cannot start: {reason}",
+            details={"hint": "hal0 memory embedder switch --status"},
+        )
+
+
 def _raise_if_editable_install() -> None:
     """Hard-refuse an update when hal0 runs from an editable/dev install.
 
@@ -4398,6 +4423,7 @@ class Updater:
         # the FHS layout (/usr/lib/hal0/current symlink + venv site-packages)
         # which does not exist in an editable checkout.  Continuing would
         # silently extract a tarball that is never actually loaded.
+        _raise_if_embedder_switch()
         _raise_if_editable_install()
         # #1464: prove we can reach the root-only tree (directly or through the
         # hal0-update seam) BEFORE burning a download + sha256 + cosign pass.
@@ -4423,6 +4449,7 @@ class Updater:
         Args:
             version: the version ``prepare()`` staged.
         """
+        _raise_if_embedder_switch()
         _raise_if_editable_install()
         seam = self._seam()
         seam.assert_privileges()
@@ -4614,6 +4641,7 @@ class Updater:
         # Single chokepoint: hard-refuse on editable/dev installs before any
         # download/extract work (prepare/commit re-check, so the two-phase
         # route path is covered too).
+        _raise_if_embedder_switch()
         _raise_if_editable_install()
         prepared = await self.prepare(version)
         return await self.commit(str(prepared["version"]))

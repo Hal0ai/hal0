@@ -1285,6 +1285,36 @@ def test_apply_showcase_writes_through_the_seam_verb_then_restarts():
     assert argvs[2][-2:] == ["svc-restart", "hindsight"]
 
 
+def test_apply_showcase_renders_the_embedder_a_switch_hands_it(tmp_path, monkeypatch):
+    """#3518: `hal0 memory embedder switch` is the one caller that moves a
+    running engine to another embedder. It passes the pair; the drop-in
+    carries exactly that pair, and the record stays the caller's to write."""
+    from hal0.memory import embedder_record
+    from hal0.memory.embedder_record import Embedder
+    from hal0.memory.extraction_env import apply_showcase_dropin
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+
+    def _no_resolve(*_a, **_k):  # pragma: no cover — a call here is the bug
+        raise AssertionError("an explicit embedder must not be resolved from the engine")
+
+    monkeypatch.setattr("hal0.memory.extraction_env.ensure_embedder_record", _no_resolve)
+    monkeypatch.setattr("hal0.memory.extraction_env.resolve_embedder", _no_resolve)
+    calls, run = _seam_recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: True)
+
+    result = apply_showcase_dropin(
+        **_showcase_cfg(), seam=seam, embedder=Embedder("local", "example-org/next-embedder")
+    )
+
+    assert result["error"] is None and result["restarted"]
+    body = calls[0][1]
+    assert "Environment=HINDSIGHT_API_EMBEDDINGS_PROVIDER=local\n" in body
+    assert "Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL=example-org/next-embedder\n" in body
+    assert [c[0][-1] for c in calls[:2]] == ["write-hindsight-showcase-dropin", "daemon-reload"]
+    assert not embedder_record.embedder_record_path().exists()
+
+
 def test_apply_showcase_reports_a_refused_write_and_skips_the_restart():
     from hal0.memory.extraction_env import apply_showcase_dropin
 

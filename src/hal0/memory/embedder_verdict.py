@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
-from hal0.memory.embedder_record import shipped_default_embedder
+from hal0.memory.embedder_record import SOURCE_SWITCH, shipped_default_embedder
 
 #: Reason codes, in the order they are reported. The first one names the cause
 #: to deal with first: an unreadable record or an absent store makes the other
@@ -49,8 +49,11 @@ def embedder_verdict(status: Mapping[str, Any]) -> EmbedderVerdict:
     * ``needs_switch``: the operator configured a provider or model of their
       own that differs from the record.
 
-    ``informational`` is true when record and config differ only because the
-    config is still at its shipped default and none of the reasons hold.
+    ``informational`` is true when record and config differ and none of the
+    reasons hold: the config is still at its shipped default, or the store
+    was put on its embedder by ``hal0 memory embedder switch``. In the second
+    case the operator chose the store's embedder on purpose; the config
+    naming another one is then a fact to state, not a problem.
     """
     recorded = (status.get("recorded_provider"), status.get("recorded"))
     configured = (status.get("configured_provider"), status.get("configured"))
@@ -65,7 +68,8 @@ def embedder_verdict(status: Mapping[str, Any]) -> EmbedderVerdict:
         reasons.append(CONFLICT)
     if status.get("mixed"):
         reasons.append(MIXED)
-    if differs and operator_set:
+    switched = status.get("source") == SOURCE_SWITCH
+    if differs and operator_set and not switched:
         reasons.append(NEEDS_SWITCH)
     return EmbedderVerdict(tuple(reasons), informational=differs and not reasons)
 
