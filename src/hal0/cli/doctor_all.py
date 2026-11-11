@@ -3456,6 +3456,7 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     """
     from hal0.memory.embedder_record import (
         SOURCE_CONFIGURED,
+        SOURCE_SWITCH,
         configured_embedder,
         describe_embedder,
         embedder_notice,
@@ -3467,7 +3468,11 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     name, title = "memory_embedder", "Memory embedder"
     if status is None:
         from hal0.config.loader import load_hal0_config
-        from hal0.memory.embedder_switch import interrupted_switch, lock_held
+        from hal0.memory.embedder_switch import (
+            interrupted_switch,
+            isolated_port,
+            lock_held,
+        )
         from hal0.memory.write_gate import read_gate
 
         left, gate = interrupted_switch(), read_gate()
@@ -3483,9 +3488,16 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
             run = (left or {}).get("run_id") or (gate or {}).get("run_id") or "unknown"
             archives = (left or {}).get("archive_dir") or (gate or {}).get("archive_dir")
             reason = f" ({left['error']})" if (left or {}).get("error") else ""
+            private = isolated_port()
             paused = (
                 "memory writes are paused and no switch is running, so every memory write is "
-                "refused (recall still works)"
+                "refused"
+                + (
+                    f", and the engine is isolated on a private port ({private}), so recall is "
+                    "unavailable too"
+                    if private is not None
+                    else " (recall still works)"
+                )
                 if gate is not None
                 else "its write pause is gone, so writes may be reaching banks it has not "
                 "finished replacing"
@@ -3512,6 +3524,16 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     if verdict.reasons:
         return Check(name, title, _WARN, embedder_notice(status) or "")
     built_with = describe_embedder(*recorded)
+    if verdict.informational and status.get("source") == SOURCE_SWITCH:
+        return Check(
+            name,
+            title,
+            _PASS,
+            f"the memory store was moved to {built_with} with `hal0 memory embedder switch` "
+            f"and stays on it; [memory.models] still names {describe_embedder(*configured)}, "
+            "which is fine and has no effect. To make the two agree, set embeddings_provider "
+            f"and embeddings_model under [memory.models] to {built_with}",
+        )
     if verdict.informational:
         return Check(
             name,

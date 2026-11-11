@@ -335,3 +335,47 @@ def test_spec_apply_checks_the_gate_itself(monkeypatch: pytest.MonkeyPatch) -> N
     # A dry run plans only, so it is not refused.
     CliRunner().invoke(spec.app, ["--dry-run"])
     assert applied == [True]
+
+
+# ── hal0-api while the engine is private ─────────────────────────────────────
+
+
+async def test_the_volatile_fallback_refuses_a_write_too() -> None:
+    """hal0-api restarted during a switch finds the engine down and falls back
+    to the in-memory provider. A write must be refused there as well, not
+    kept where it will be lost."""
+    from hal0.memory.pgvector_provider import PgVectorProvider
+
+    provider = PgVectorProvider()
+    write_gate.engage_gate(run_id="r1")
+
+    with pytest.raises(write_gate.MemoryWritesPaused):
+        await provider.add("remember this")
+
+    write_gate.lift_gate()
+    assert "id" in await provider.add("remember this")
+
+
+def test_recall_says_the_engine_is_unreachable_while_it_is_private() -> None:
+    class Down:
+        def __getattr__(self, name: str) -> Any:
+            async def call(**_kw: Any) -> Any:
+                raise httpx.ConnectError("connection refused")
+
+            return call
+
+    app = FastAPI()
+    error_codes.install(app)
+    app.include_router(memory_routes.router, prefix="/api/memory")
+    app.state.memory_provider = HindsightProvider(
+        client=Down(), client_id="hermes", unified_bank=True
+    )
+    write_gate.engage_gate(run_id="r1")
+    client = TestClient(app, raise_server_exceptions=False)
+
+    recall = client.post("/api/memory/recall", json={"query": "what do I know"})
+    add = client.post("/api/memory/add", json={"text": "remember this"})
+
+    assert add.status_code == 503 and add.json()["error"]["code"] == "memory.writes_paused"
+    assert recall.status_code == 503
+    assert recall.json()["error"]["code"] == "memory.engine_unavailable"

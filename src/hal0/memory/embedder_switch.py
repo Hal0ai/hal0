@@ -8,63 +8,88 @@ archive never carries embeddings, and ``transfer/import`` in ``restore`` mode
 writes the whole bank into a new id, embedding every fact with the engine's
 current model and making no LLM call.
 
-The run, in order (:meth:`EmbedderSwitch.run`):
+Isolation
+---------
+
+hal0's write gate (:mod:`hal0.memory.write_gate`) stops every write that goes
+through hal0. It cannot stop a client that talks to the engine's own port,
+and nearly every way this command could lose or mislabel data needs exactly
+such a client. So for the whole of a run the engine is taken away from them:
+it is restarted listening only on a private loopback port this run picked,
+and is returned to its normal address at the end.
+
+The mechanism is one drop-in, :data:`ISOLATION_DROP_IN_NAME`, in the engine
+unit's ``.d`` directory. It clears ``ExecStart`` and sets it again to the
+command the unit runs now (read with ``systemctl cat``, so an operator's own
+``ExecStart`` drop-in, a LAN bind for instance, is what gets rewritten) with
+``--host 127.0.0.1 --port <private>``. It sorts after every other drop-in, so
+it wins; it also turns the engine's own auto-consolidation off, so the engine
+changes nothing by itself while it is private. After the restart the run
+confirms that the engine answers on the private port and that nothing answers
+at the normal address; if something still does, the run stops before it has
+exported anything.
+
+Consequences, all intended: recall is unavailable for the whole run, not only
+during restarts; hal0-api sees the engine as down; ``--apply`` and
+``--resume`` need root, because no wrapper verb lets the service account
+replace a unit's ``ExecStart``. When a run stops in a state that needs
+``--resume``, the engine *stays* private with the gate set, and ``--status``
+and ``hal0 doctor`` say so.
+
+The run
+-------
+
+In order (:meth:`EmbedderSwitch.run`):
 
 1. **Preflight** (:meth:`EmbedderSwitch.preflight`; the whole of a dry run).
-   Refuses unless everything below holds. It writes nothing, anywhere.
-2. **Pause writes** (:mod:`hal0.memory.write_gate`) before anything is
-   exported, wait for the engine's queues to drain, then list the banks. That
-   list, taken under the pause, is the set this run rebuilds.
-3. **Export** every bank to ``<state>/backups/memory-embedder-switch-<run>/``
-   and check each archive against the bank's counts. A fingerprint of the
-   bank is taken with the counts (:meth:`EmbedderSwitch.bank_state`).
-4. **Flip**: record the target, re-render the managed drop-in from it, restart
-   the engine, wait for health, and confirm from the engine's own environment
-   that it runs the target.
-5. **Restore** every archive into ``<bank>.switch-<run>`` and compare facts,
-   observations, mental models, directives and documents with the archive.
-   Every bank is restored and compared before any original is touched.
-6. **Swap**, bank by bank: check the original once more, delete it, rename
-   the rebuilt bank into place, check the result. Then clear ``mixed`` and
-   ``conflict`` on the record and lift the pause. The archives are kept.
+   Refuses unless everything it needs holds. It writes nothing, anywhere.
+2. **Pause** writes through hal0 and let the engine's queues drain.
+3. **Isolate** the engine (restart, still on its original embedder), let the
+   queues drain again, and list the banks. That list is the set this run
+   rebuilds.
+4. **Export** every bank to ``<state>/backups/memory-embedder-switch-<run>/``.
+   The bank is read before the export is submitted and again once the archive
+   is on disk; only when both reads and the archive agree is that the
+   baseline.
+5. **Flip**: record the target, re-render the managed drop-in from it,
+   restart the engine (still private), and confirm from the engine's own
+   environment that it runs the target.
+6. **Restore** every archive into ``<bank>.switch-<run>`` and, once the engine
+   is quiet, compare with the archive. Every bank is restored and compared
+   before any original is touched.
+7. **Swap**, bank by bank: check the original once more, delete it, rename
+   the rebuilt bank into place, check the result.
+8. **Finish**: record the embedder without ``mixed``, return the engine to
+   its normal address, retire the journal, then lift the gate.
 
-Anything that fails before step 6 is undone (:meth:`EmbedderSwitch._rollback`):
-temporary banks deleted, record and drop-in put back, engine restarted on the
-original embedder, pause lifted. The originals were never touched.
+Anything that fails before step 7 is undone (:meth:`EmbedderSwitch._rollback`):
+temporary banks deleted while the engine is still private, the engine
+returned to its normal address on the original embedder, and only once it is
+confirmed running that embedder is the original record written back. The
+originals were never touched.
 
-Step 6 cannot be undone, so it is resumable instead. The journal
+Step 7 cannot be undone, so it is resumable instead. The journal
 (:func:`journal_path`, mirrored into the archive directory on every save) is
 written and synced *before* each delete and each rename, naming the step
 about to happen. ``--resume`` (:meth:`EmbedderSwitch.resume`) never trusts a
 journal step by itself: it looks at which of the two ids the engine has now
-(:func:`swap_action`) and checks what it finds against the archive. Writes
-stay paused until a resume completes.
+(:func:`swap_action`). Whatever it can repair from the original or from the
+archive it repairs, so that the same resume does not fail twice for a reason
+the switch could have fixed; for the rest ``--status`` says exactly what the
+operator does.
 
-What the pause does not cover
------------------------------
+What is still checked
+---------------------
 
-The pause stops every write that goes through hal0. A client that writes to
-the engine's own port directly (the Hindsight coding-agents plugin and the Pi
-coder's plugin do today, ADR-0058 decision 4b) is not stopped, so every
-original is compared with its export again before the first delete and again
-immediately before its own delete. Counts alone miss an edit that keeps them
-equal, so the comparison also uses a fingerprint
-(:data:`FINGERPRINT_SIGNALS`): the engine's write timestamps for the bank,
-its link and node tallies, digests of its mental models, directives and
-configuration, and its newest operation. A bank that moved before the swap
-rolls the run back; one that moved during the swap is not deleted, the run
-stops there, and ``--resume`` exports and rebuilds that bank again.
-
-The fingerprint cannot see a change that stores no memory, touches none of
-those lists and starts no operation: an edit to a document's stored text or
-metadata that the engine does not count as a write, a webhook, an entity.
-
-Bank list
----------
-
-A bank that appears after the list was taken is not in this run. Before the
-swap it stops the run (rolled back). After the swap began the run finishes
-its own banks and then records the store as ``mixed``, naming the bank.
+With the engine isolated, the comparisons are assertions: they should never
+fire, and if one does the run stops resumably. Counts compared strictly are
+facts, mental models, directives and documents (:data:`HARD_COUNTS`).
+Observations are not: the engine's consolidation moves them by itself and an
+export leaves out an observation whose source facts are gone, so a rebuilt
+bank may hold more observations than its archive, never fewer. The
+fingerprint (:data:`FINGERPRINT_SIGNALS`) is kept to what cannot move by
+itself: digests of the directives, of the config overrides and of the mental
+models' definitions, and the time a document was last ingested.
 
 Renaming
 --------
@@ -85,10 +110,7 @@ Test hook
 ---------
 
 ``hook(point)`` is called at every step boundary (:data:`HOOK_POINTS`); tests
-raise from it to stop a run exactly there. The command line maps
-``HAL0_EMBEDDER_SWITCH_KILL_AT=<point>`` onto it for live verification: the
-process sends itself ``SIGKILL`` at that point, which is what a power cut
-looks like to the journal.
+raise from it to stop a run exactly there.
 """
 
 from __future__ import annotations
@@ -138,31 +160,46 @@ JOURNAL_VERSION = 1
 COUNT_KEYS: tuple[str, ...] = ("facts", "observations", "mental_models", "directives", "documents")
 
 #: What a bank's fingerprint is made of, and where each signal comes from.
+#:
+#: The engine is isolated for the whole run (see the module docstring), so the
+#: fingerprint is an assertion, not a guard: it is kept to the signals that
+#: cannot move by themselves. Everything the engine changes on its own
+#: (consolidation and the timestamps, link tallies and operations it leaves
+#: behind, a mental model's refreshed content) is left out, because a signal
+#: that moves by itself turns a healthy run into one that can never finish.
 FINGERPRINT_SIGNALS: dict[str, str] = {
-    "memory_write": "stats.last_memory_write_at: a memory stored, edited or consolidated",
-    "consolidated": "stats.last_consolidated_at",
-    "consolidation_queue": "stats.pending_consolidation and failed_consolidation",
-    "nodes": "stats.nodes_by_fact_type",
-    "links": "stats.total_links",
-    "bank_write": "the bank list's last_write_at: a document retained or a fact stored",
-    "document": "the bank list's last_document_at",
-    "bank_updated": "the bank list's updated_at: the bank's profile or mission",
-    "mental_models": "a digest of every mental model (content, tags, refresh times)",
     "directives": "a digest of every directive, inactive ones included",
     "config": "a digest of the bank's configuration overrides",
-    "operation": "the id of the bank's newest operation that this run did not start",
+    "mental_models": "a digest of every mental model's definition (id, name, query, tags, "
+    "trigger, token budget), not its generated content",
+    "document": "the bank list's last_document_at: when a document was last ingested",
 }
 
-#: The signals that describe what a bank holds, not when it was written. A
-#: rebuilt bank is compared with itself across its rename on these alone: the
-#: rename rewrites every row, and may move a timestamp without changing content.
-#: Links are left out: the engine's own graph maintenance may still add one
-#: to a freshly restored bank.
-CONTENT_SIGNALS: tuple[str, ...] = ("nodes", "mental_models", "directives", "config")
+#: Counts only a writer can move. ``observations`` is not among them: the
+#: engine's consolidation adds and merges observations by itself, and an
+#: export leaves out an observation whose source facts are gone.
+HARD_COUNTS: tuple[str, ...] = ("facts", "mental_models", "directives", "documents")
+
+_MODEL_DEFINITION_KEYS = ("id", "name", "source_query", "tags", "trigger", "max_tokens")
 
 #: Measured on hindsight-api 1.2.0, CPU embedder, 2026-11-10 (ADR-0058 "Open
 #: questions"): a bank restore re-embeds roughly this many facts per second.
 RESTORE_FACTS_PER_S = 60.0
+
+#: What a run costs besides embedding, measured on the same engine on a test
+#: container, 2026-11-11: an engine restart took 15 to 33 s, and each export
+#: and each restore has a floor of about a second however small the bank.
+RESTART_S = 25.0
+OPERATION_FLOOR_S = 1.0
+#: A successful run restarts the engine three times: onto its private port,
+#: onto the target embedder, and back to its normal address.
+RESTARTS_PER_RUN = 3
+
+SERVICE = "hindsight-api.service"
+#: The drop-in that isolates the engine. It sorts after every hal0 drop-in and
+#: after any name an operator is likely to choose, and it replaces
+#: ``ExecStart``, so it wins over an operator's own ``ExecStart`` drop-in.
+ISOLATION_DROP_IN_NAME = "zzzz-hal0-embedder-switch.conf"
 
 #: Free space wanted on the engine's filesystem, as a multiple of its data
 #: directory: the rebuilt banks sit beside the originals until the swap.
@@ -211,6 +248,7 @@ _AFTER_DELETE = (STEP_DELETED, STEP_RENAMING)
 ACTION_SWAP = "delete the original, then rename the rebuilt bank into place"
 ACTION_RENAME = "rename the rebuilt bank into place"
 ACTION_VERIFY = "check the bank under its final id against its archive"
+ACTION_FINAL = "nothing: the bank is under its final id"
 ACTION_RECOVER = "restore the bank from its archive, then rename it into place"
 ACTION_REBUILD = "export and rebuild the bank again, then swap it"
 ACTION_RECREATED = "stop: the original id exists again beside the rebuilt bank"
@@ -218,6 +256,7 @@ ACTION_RECREATED = "stop: the original id exists again beside the rebuilt bank"
 #: Where ``hook`` is called. ``<bank>`` is the bank's own id.
 HOOK_POINTS: tuple[str, ...] = (
     "paused",
+    "isolated",
     "exported:<bank>",
     "before_flip",
     "flipped",
@@ -293,9 +332,7 @@ class BankEntry:
     """One bank's line in the journal.
 
     ``counts`` and ``fingerprint`` are the bank as its archive was taken;
-    ``restored_*`` the rebuilt bank as its restore finished. ``own_ops`` are
-    the operations this run started against the original (its export, its
-    restore), which the fingerprint's ``operation`` signal leaves out.
+    ``restored_*`` the rebuilt bank as its restore finished.
     """
 
     bank: str
@@ -307,7 +344,6 @@ class BankEntry:
     step: str = STEP_PLANNED
     restored_counts: dict[str, int] | None = None
     restored_fingerprint: dict[str, Any] | None = None
-    own_ops: list[str] = field(default_factory=list)
     #: ``{"bank", "id"}`` of a restore that may still be running.
     restore_op: dict[str, str] | None = None
     note: str | None = None
@@ -329,6 +365,10 @@ class Journal:
     previous: dict[str, Any]
     archive_dir: str
     allow_pending: bool = False
+    #: The loopback port the engine listens on while this run has it, and
+    #: whether the run has started to move it there (saved before it does).
+    private_port: int | None = None
+    isolated: bool = False
     flip_started: bool = False
     banks: list[BankEntry] = field(default_factory=list)
     stray_banks: list[str] = field(default_factory=list)
@@ -553,8 +593,13 @@ def swap_action(step: str, has_original: bool, has_rebuilt: bool) -> str:
     if not has_rebuilt and not has_original:
         return ACTION_RECOVER
     if has_original and not has_rebuilt:
-        # Either the rename already happened, or the rebuilt bank was lost
-        # before its original was ever deleted.
+        if step == STEP_RENAMED:
+            # Verified when it was renamed. It is not verified again on every
+            # resume: the bank is live once the run ends, and a check that
+            # failed here would fail the same way for ever.
+            return ACTION_FINAL
+        # Either the rename happened and the journal never said so, or the
+        # rebuilt bank was lost before its original was ever deleted.
         return ACTION_REBUILD if step in _BEFORE_DELETE else ACTION_VERIFY
     # Both ids. After a delete that answered, the original id can only be
     # back because something recreated it.
@@ -593,11 +638,22 @@ def _nearest_existing(path: Path) -> Path:
     return Path("/")
 
 
-def _diff(expected: Mapping[str, int], got: Mapping[str, int]) -> dict[str, dict[str, int]]:
+def _diff(
+    expected: Mapping[str, int], got: Mapping[str, int], *, observation_floor: bool = False
+) -> dict[str, dict[str, int]]:
+    """The counts that differ and matter (:data:`HARD_COUNTS`).
+
+    With ``observation_floor``, fewer observations than expected also counts:
+    a rebuilt bank may gain observations from the engine's own consolidation,
+    but must not have lost any its archive carried.
+    """
+    keys = list(HARD_COUNTS)
+    if observation_floor and int(got.get("observations", 0)) < int(expected.get("observations", 0)):
+        keys.append("observations")
     return {
         key: {"expected": int(expected.get(key, 0)), "got": int(got.get(key, 0))}
         for key in COUNT_KEYS
-        if int(expected.get(key, 0)) != int(got.get(key, 0))
+        if key in keys and int(expected.get(key, 0)) != int(got.get(key, 0))
     }
 
 
@@ -751,6 +807,150 @@ def run_admin_rename(
     return output
 
 
+def isolation_drop_in_path() -> Path:
+    from hal0.memory import extraction_env
+
+    return extraction_env.DROP_IN_DIR / ISOLATION_DROP_IN_NAME
+
+
+def effective_exec_start(unit_text: str) -> str | None:
+    """The command the engine's unit starts, from ``systemctl cat`` output.
+
+    The last ``ExecStart=`` wins and an empty one clears what came before, as
+    in systemd, so an operator's own drop-in that replaces ``ExecStart`` (to
+    bind the LAN, say) is what comes back. This command's own isolation
+    drop-in is skipped: the question is what the unit runs without it.
+    """
+    current: str | None = None
+    skipping = False
+    carried = ""
+    for raw in unit_text.splitlines():
+        if raw.startswith("# /"):
+            skipping = raw.strip().endswith(ISOLATION_DROP_IN_NAME)
+            carried = ""
+            continue
+        if skipping:
+            continue
+        line = carried + raw.strip()
+        if line.endswith("\\"):
+            carried = line[:-1].rstrip() + " "
+            continue
+        carried = ""
+        if line.startswith("ExecStart="):
+            current = line[len("ExecStart=") :].strip() or None
+    return current
+
+
+_HOST_ARG = re.compile(r"(--host)(=|\s+)(\S+)")
+_PORT_ARG = re.compile(r"(--port)(=|\s+)(\S+)")
+
+
+def private_exec_start(line: str, port: int) -> str:
+    """``line`` with its listen address replaced by ``127.0.0.1:<port>``.
+
+    Everything else in the operator's command is kept. An address the command
+    does not name (the engine then reads it from its environment or uses its
+    default) is appended, and an argument beats the environment.
+    """
+
+    def put(arg: re.Pattern[str], flag: str, value: str, text: str) -> str:
+        if arg.search(text):
+            return arg.sub(lambda m: f"{m.group(1)}{m.group(2)}{value}", text, count=1)
+        return f"{text} {flag} {value}"
+
+    return put(_PORT_ARG, "--port", str(port), put(_HOST_ARG, "--host", "127.0.0.1", line))
+
+
+def isolation_body(exec_start: str, run_id: str) -> str:
+    """The isolation drop-in: the unit's own command on a private port, consolidation off."""
+    return (
+        f"# Written by `hal0 memory embedder switch` (run {run_id}). While this file exists\n"
+        "# the memory engine listens only on a private loopback port, so that nothing but\n"
+        "# the switch can reach it, and does not consolidate by itself. The switch removes\n"
+        "# this file when the run ends. Do not edit or delete it by hand: run\n"
+        "# `hal0 memory embedder switch --status`.\n"
+        "[Service]\n"
+        "ExecStart=\n"
+        f"ExecStart={exec_start}\n"
+        "Environment=HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION=false\n"
+    )
+
+
+def write_isolation_dropin(
+    port: int,
+    run_id: str,
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    """Write the isolation drop-in for ``port``. Root only; never raises.
+
+    Reads the unit as systemd sees it (``systemctl cat``), so the command it
+    rewrites is the one in force, an operator's ``ExecStart`` drop-in
+    included. Returns ``{"error", "exec_start"}``; the caller reloads and
+    restarts.
+    """
+    try:
+        proc = runner(
+            ["systemctl", "cat", SERVICE], capture_output=True, text=True, timeout=10, check=False
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"error": f"could not read the engine's unit ({type(exc).__name__})"}
+    line = effective_exec_start(proc.stdout or "") if proc.returncode == 0 else None
+    if not line:
+        return {"error": f"could not find an ExecStart in `systemctl cat {SERVICE}`"}
+    target = path if path is not None else isolation_drop_in_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".conf.tmp")
+        tmp.write_text(isolation_body(private_exec_start(line, port), run_id), encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        tmp.replace(target)
+    except OSError as exc:
+        return {"error": f"could not write {target}: {exc}"}
+    return {"error": None, "exec_start": line}
+
+
+def remove_isolation_dropin(path: Path | None = None) -> dict[str, Any]:
+    """Remove the isolation drop-in. Never raises; the caller reloads and restarts."""
+    target = path if path is not None else isolation_drop_in_path()
+    try:
+        target.unlink(missing_ok=True)
+    except OSError as exc:
+        return {"error": f"could not remove {target}: {exc}"}
+    return {"error": None}
+
+
+def isolated_port(path: Path | None = None) -> int | None:
+    """The private port the isolation drop-in pins the engine to; ``None`` when there is none.
+
+    ``0`` for a drop-in that is there and names no port this can read: the
+    engine is then to be treated as isolated, on a port unknown.
+    """
+    target = path if path is not None else isolation_drop_in_path()
+    try:
+        text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError):
+        return 0
+    found = 0
+    for line in text.splitlines():
+        match = _PORT_ARG.search(line) if line.startswith("ExecStart=") else None
+        if match and match.group(3).isdigit():
+            found = int(match.group(3))
+    return found
+
+
+def free_loopback_port() -> int:
+    """A loopback port nothing listens on now, picked by the kernel."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 class EmbedderSwitch:
     """One run of the switch against one engine.
 
@@ -762,9 +962,13 @@ class EmbedderSwitch:
     thing: ``apply_dropin(embedder)`` renders the managed drop-in for that
     pair and restarts the engine (returning the ``apply_showcase_dropin``
     dict), ``evidence()`` is :func:`embedder_record.engine_evidence`,
-    ``rename_bank(old, new)`` is :func:`run_admin_rename`, ``privileged()``
-    says whether this process may do all of that, and ``hook(point)`` is the
-    test hook described in the module docstring.
+    ``rename_bank(old, new)`` is :func:`run_admin_rename`, ``isolate(port,
+    run_id)`` and ``release()`` write and remove the isolation drop-in
+    (:func:`write_isolation_dropin`, :func:`remove_isolation_dropin`; the
+    restart that follows either is ``apply_dropin``'s), ``isolated_port()``
+    reads it back, ``client_for(base_url)`` builds the client for the private
+    port, ``privileged()`` says whether this process may do all of that, and
+    ``hook(point)`` is the test hook described in the module docstring.
     """
 
     def __init__(
@@ -778,6 +982,11 @@ class EmbedderSwitch:
         evidence: Callable[[], Mapping[str, Any]] | None = None,
         rename_bank: Callable[[str, str], str] | None = None,
         privileged: Callable[[], bool] | None = None,
+        isolate: Callable[[int, str], dict[str, Any]] | None = None,
+        release: Callable[[], dict[str, Any]] | None = None,
+        isolated_port: Callable[[], int | None] | None = None,
+        client_for: Callable[[str], Any] | None = None,
+        pick_port: Callable[[], int] = free_loopback_port,
         hs_dir: Path | None = None,
         timeouts: Timeouts | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -785,7 +994,13 @@ class EmbedderSwitch:
         progress: Callable[[str], None] | None = None,
         hook: Callable[[str], None] | None = None,
     ) -> None:
-        self._client = client
+        self._public_client = client
+        self._private_client: Any | None = None
+        self._isolate = isolate or write_isolation_dropin
+        self._release = release or remove_isolation_dropin
+        self._isolated_port = isolated_port or globals()["isolated_port"]
+        self._client_for = client_for or self._default_client_for
+        self._pick_port = pick_port
         self._target = target
         self._allow_pending = allow_pending
         self._configured = configured
@@ -811,9 +1026,31 @@ class EmbedderSwitch:
 
     @staticmethod
     def _default_privileged() -> bool:
-        from hal0.system.seam import is_hal0_service_user
+        # Root only: isolating the engine writes a drop-in that replaces the
+        # unit's ExecStart, and no wrapper verb hands that to the service
+        # account (a root-side verb that accepts a command line is the kind
+        # of thing #1740 removed).
+        return os.geteuid() == 0
 
-        return os.geteuid() == 0 or is_hal0_service_user()
+    def _default_client_for(self, base_url: str) -> Any:
+        from hal0.memory.hindsight_client import HindsightRestClient
+
+        return HindsightRestClient(base_url=base_url, api_key=self._public_client.api_key)
+
+    @property
+    def _client(self) -> Any:
+        """The client for where the engine is now: its private port, else its normal address."""
+        return self._private_client if self._private_client is not None else self._public_client
+
+    def _use_port(self, port: int | None) -> None:
+        """Talk to the engine on its private ``port``, or on its normal address for ``None``."""
+        if port is None:
+            self._private_client = None
+        elif (
+            self._private_client is None
+            or self._private_client.base_url != f"http://127.0.0.1:{port}"
+        ):
+            self._private_client = self._client_for(f"http://127.0.0.1:{port}")
 
     @staticmethod
     def _default_apply_dropin(embedder: Embedder) -> dict[str, Any]:
@@ -948,14 +1185,13 @@ class EmbedderSwitch:
                 return row
         return {}
 
-    async def bank_state(self, bank: str, *, ignore_ops: list[str] | None = None) -> dict[str, Any]:
+    async def bank_state(self, bank: str) -> dict[str, Any]:
         """Counts, queue depth and fingerprint for one bank, uncached.
 
         Facts are every memory unit that is not an observation
         (``nodes_by_fact_type``); mental models include the ones that back a
         knowledge page; directives include inactive ones. The fingerprint is
-        described by :data:`FINGERPRINT_SIGNALS`. ``ignore_ops`` are operation
-        ids this run started against the bank.
+        described by :data:`FINGERPRINT_SIGNALS`.
         """
         base = _bank_path(bank)
         stats = await self._json(
@@ -987,20 +1223,10 @@ class EmbedderSwitch:
         except SwitchError:
             # The per-bank config API can be switched off (features.bank_config_api).
             config = "unavailable"
-        recent = await self._json(
-            "GET", f"{base}/operations", params={"limit": 20}, what="reading operations", bank=bank
-        )
-        recent = recent.get("operations") if isinstance(recent, dict) else None
-        own = set(ignore_ops or [])
-        newest = next(
-            (
-                str(op.get("id") or op.get("operation_id"))
-                for op in (recent if isinstance(recent, list) else [])
-                if isinstance(op, dict) and str(op.get("id") or op.get("operation_id")) not in own
-            ),
-            None,
-        )
         row = await self._bank_row(bank)
+        definitions = [
+            {k: m.get(k) for k in _MODEL_DEFINITION_KEYS} for m in models if isinstance(m, dict)
+        ]
         return {
             "counts": {
                 "facts": facts,
@@ -1012,32 +1238,45 @@ class EmbedderSwitch:
             "links": int(stats.get("total_links") or 0),
             "pending": int(ops.get("pending") or 0),
             "processing": int(ops.get("processing") or 0),
+            "pending_consolidation": int(stats.get("pending_consolidation") or 0),
             "listed_facts": row.get("fact_count"),
             "nodes_total": int(stats.get("total_nodes") or 0),
             "fingerprint": {
-                "memory_write": stats.get("last_memory_write_at"),
-                "consolidated": stats.get("last_consolidated_at"),
-                "consolidation_queue": [
-                    int(stats.get("pending_consolidation") or 0),
-                    int(stats.get("failed_consolidation") or 0),
-                ],
-                "nodes": sorted([str(k), int(v or 0)] for k, v in by_type.items()),
-                "links": int(stats.get("total_links") or 0),
-                "bank_write": row.get("last_write_at"),
-                "document": row.get("last_document_at"),
-                "bank_updated": row.get("updated_at"),
-                "mental_models": _digest(models),
                 "directives": _digest(directives),
                 "config": _digest(config),
-                "operation": newest,
+                "mental_models": _digest(definitions),
+                "document": row.get("last_document_at"),
             },
         }
+
+    async def _quiet_state(self, bank: str) -> dict[str, Any]:
+        """:meth:`bank_state` once the engine has stopped working on the bank.
+
+        Quiet is no pending or processing operation and a consolidation queue
+        that has stopped moving between two reads. Counts taken while the
+        engine is still consolidating describe a bank that is about to
+        change. Bounded: after ``quiet_s`` the last read is returned as it is,
+        and the comparisons made on it treat observations as the one count
+        the engine may still move.
+        """
+        deadline = self._clock() + self.t.quiet_s
+        last: int | None = None
+        while True:
+            state = await self.bank_state(bank)
+            busy = state["pending"] or state["processing"]
+            if (not busy and state["pending_consolidation"] == last) or self._clock() >= deadline:
+                return state
+            last = state["pending_consolidation"]
+            await self._sleep(self.t.poll_s)
 
     async def _wait_operation(
         self, bank: str, operation_id: str, *, timeout_s: float, what: str
     ) -> dict[str, Any]:
         deadline = self._clock() + timeout_s
         path = f"{_bank_path(bank)}/operations/{quote(operation_id, safe='')}"
+        # A small bank's export or restore is done in well under a second, so
+        # the first looks come quickly and only a long one settles at poll_s.
+        delay = min(0.2, self.t.poll_s)
         while True:
             op = await self._json("GET", path, what=what, bank=bank)
             op = op if isinstance(op, dict) else {}
@@ -1055,7 +1294,8 @@ class EmbedderSwitch:
                     bank=bank,
                     details={"operation_id": operation_id},
                 )
-            await self._sleep(self.t.poll_s)
+            await self._sleep(delay)
+            delay = min(self.t.poll_s, delay * 1.5)
 
     async def _delete_bank(self, bank: str) -> None:
         """Delete ``bank``. A bank that is already gone is a success."""
@@ -1091,41 +1331,95 @@ class EmbedderSwitch:
                 )
             await self._sleep(self.t.poll_s)
 
-    # ── the engine's embedder ───────────────────────────────────────────
+    # ── the engine: where it listens and what it runs ───────────────────
 
-    async def _start_engine_on(self, embedder: Embedder) -> None:
-        """Render the drop-in for ``embedder``, restart, and confirm the engine runs it."""
+    async def _public_answers(self) -> bool:
+        """True when anything answers at the engine's normal address."""
+        try:
+            await self._public_client.request_json("GET", "/health", timeout_s=3.0)
+        except httpx.TransportError:
+            return False
+        except (httpx.HTTPError, ValueError):
+            return True
+        return True
+
+    async def _start_engine(self, embedder: Embedder, *, port: int | None, run_id: str) -> None:
+        """Restart the engine on ``embedder``, private on ``port`` or at its normal address.
+
+        Writes or removes the isolation drop-in, renders the embedder drop-in,
+        reloads and restarts once, then confirms from the engine itself: it
+        answers where it should, its environment names ``embedder``, and when
+        private, nothing answers at the normal address any more.
+        """
+        if port is not None:
+            placed = await asyncio.to_thread(self._isolate, port, run_id)
+        else:
+            placed = await asyncio.to_thread(self._release)
+        if placed.get("error"):
+            raise SwitchError(
+                f"could not {'isolate' if port is not None else 'release'} the engine: "
+                f"{placed['error']}"
+            )
+        self._use_port(port)
         result = await asyncio.to_thread(self._apply_dropin, embedder)
         if result.get("error"):
-            raise SwitchError(f"could not move the engine: {result['error']}")
-        if not await self._wait_health():
-            raise SwitchError(
-                f"the engine did not answer /health within {self.t.health_s:g}s of its restart "
-                f"on {describe_embedder(*embedder)} (see `journalctl -u hindsight-api`)"
-            )
+            raise SwitchError(f"could not restart the engine: {result['error']}")
+        where = f"its private port {port}" if port is not None else "its normal address"
+        leaked = SwitchError(
+            "the engine still answers at its normal address, so it is not isolated: a "
+            f"drop-in that sorts after {ISOLATION_DROP_IN_NAME} replaces ExecStart, or "
+            "something else listens there. The switch does not run on an engine other "
+            "clients can reach"
+        )
+        deadline = self._clock() + self.t.health_s
+        while not await self._healthy():
+            # Up, but where it always was: do not wait out the whole timeout.
+            if port is not None and await self._public_answers():
+                raise leaked
+            if self._clock() >= deadline:
+                raise SwitchError(
+                    f"the engine did not answer /health on {where} within {self.t.health_s:g}s "
+                    f"of its restart on {describe_embedder(*embedder)} "
+                    "(see `journalctl -u hindsight-api`)"
+                )
+            await self._sleep(self.t.poll_s)
         live: Embedder | None = None
         for _ in range(10):
             live = _pair(self._evidence().get("live"))
             if live == embedder:
-                return
+                break
             await self._sleep(self.t.poll_s)
-        runs = describe_embedder(*live) if live is not None else "an environment hal0 cannot read"
-        raise SwitchError(
-            f"the engine is up but runs {runs}, not {describe_embedder(*embedder)}: another "
-            "drop-in, or the unit's EnvironmentFile, overrides the embedder"
-        )
+        else:
+            runs = (
+                describe_embedder(*live) if live is not None else "an environment hal0 cannot read"
+            )
+            raise SwitchError(
+                f"the engine is up but runs {runs}, not {describe_embedder(*embedder)}: another "
+                "drop-in, or the unit's EnvironmentFile, overrides the embedder"
+            )
+        if port is not None and await self._public_answers():
+            raise leaked
 
-    async def _ensure_engine_on(self, embedder: Embedder) -> None:
-        """Do nothing when the engine is up on ``embedder``; otherwise put it there.
+    async def _ensure_engine(self, embedder: Embedder, *, port: int | None, run_id: str) -> None:
+        """Do nothing when the engine is where and what it should be; otherwise put it there.
 
         A restore embeds with whatever the engine runs at that moment, so this
         is asked before every restore and at the start of every resume, from
-        the engine's live environment and not from the record.
+        the engine itself and not from the record or the journal.
         """
-        if await self._healthy() and _pair(self._evidence().get("live")) == embedder:
+        self._use_port(port)
+        if (
+            self._isolated_port() == port
+            and await self._healthy()
+            and _pair(self._evidence().get("live")) == embedder
+            and not (port is not None and await self._public_answers())
+        ):
             return
-        self._say(f"the engine is not running {describe_embedder(*embedder)}; restarting it")
-        await self._start_engine_on(embedder)
+        self._say(
+            f"putting the engine on {describe_embedder(*embedder)}, "
+            + ("isolated" if port is not None else "at its normal address")
+        )
+        await self._start_engine(embedder, port=port, run_id=run_id)
 
     # ── archives ────────────────────────────────────────────────────────
 
@@ -1163,8 +1457,6 @@ class EmbedderSwitch:
         operation_id = str((submit or {}).get("operation_id") or "")
         if not operation_id:
             raise SwitchError("the export returned no operation id", bank=bank)
-        entry.own_ops.append(operation_id)
-        self._save(journal)
         op = await self._wait_operation(
             bank, operation_id, timeout_s=self.t.export_s, what="the export"
         )
@@ -1203,6 +1495,14 @@ class EmbedderSwitch:
                         ) from exc
                     fh.flush()
                     os.fsync(fh.fileno())
+                # A bank exported again within a run (it moved, or it is
+                # being rebuilt) never overwrites its earlier archive.
+                kept = 0
+                while self._exists_in(dfd, name):
+                    kept += 1
+                    earlier = f"{name[:-4]}.earlier-{kept}.zip"
+                    if not self._exists_in(dfd, earlier):
+                        os.rename(name, earlier, src_dir_fd=dfd, dst_dir_fd=dfd)
                 os.replace(part, name, src_dir_fd=dfd, dst_dir_fd=dfd)
                 os.fsync(dfd)
             except BaseException:
@@ -1211,6 +1511,14 @@ class EmbedderSwitch:
                 raise
         entry.archive = name
         return self._archive_counts(journal, entry)
+
+    @staticmethod
+    def _exists_in(dir_fd: int, name: str) -> bool:
+        try:
+            os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return False
+        return True
 
     @staticmethod
     def _download_path(meta: Mapping[str, Any], bank: str) -> str:
@@ -1269,32 +1577,53 @@ class EmbedderSwitch:
         }
 
     async def _export_verified(self, journal: Journal, entry: BankEntry, index: int) -> None:
-        """Export ``entry`` until the archive and the bank agree.
+        """Export ``entry`` until the bank stood still for it and the archive agrees.
 
-        The agreed counts and the bank's fingerprint at that moment become
-        the baseline every later comparison uses.
+        The bank is read before the export is submitted and again once the
+        archive is on disk. Only when the two reads agree, and the archive
+        agrees with them, do the archive's counts and that fingerprint become
+        the baseline every later comparison uses. An archive may hold fewer
+        observations than the bank: the engine's export leaves out an
+        observation whose source facts are gone, and that is noted, not
+        refused.
         """
-        last: dict[str, dict[str, int]] = {}
-        for _attempt in range(2):
+        last = ""
+        for _attempt in range(3):
+            before = await self._quiet_state(entry.bank)
             archived = await self._export_bank(journal, entry, index)
-            now = await self.bank_state(entry.bank, ignore_ops=entry.own_ops)
-            last = _diff(now["counts"], archived)
-            if not last or journal.allow_pending:
-                # --allow-pending: operations may still be writing, so the
-                # archive, not the moving bank, is what the rebuilt bank must
-                # match.
-                entry.counts, entry.links = archived, now["links"]
-                entry.fingerprint = now["fingerprint"]
-                entry.step = STEP_EXPORTED
-                self._save(journal)
-                return
+            after = await self.bank_state(entry.bank)
+            moved = _diff(before["counts"], after["counts"]) or _signals_moved(
+                before["fingerprint"], after["fingerprint"]
+            )
+            differs = _diff(after["counts"], archived)
+            extra = archived["observations"] - after["counts"]["observations"]
+            if journal.allow_pending:
+                # Operations may still be writing, so the archive, not the
+                # moving bank, is what the rebuilt bank must match.
+                moved, differs, extra = {}, {}, 0
+            if moved:
+                last = "it changed while it was being exported"
+                continue
+            if differs or extra > 0:
+                shown = _diff_text(differs) or f"observations {archived['observations']}"
+                last = (
+                    f"its archive does not match it: {shown} (the archive's count, then the "
+                    "bank's). The engine's export leaves out a fact that belongs to no document"
+                )
+                continue
+            entry.counts, entry.links = archived, after["links"]
+            entry.fingerprint = after["fingerprint"]
+            entry.note = (
+                f"{-extra} observation(s) whose source facts are gone are not in the archive"
+                if extra < 0
+                else None
+            )
+            entry.step = STEP_EXPORTED
+            self._save(journal)
+            return
         raise SwitchError(
-            f"the archive of bank {entry.bank} does not match the bank: {_diff_text(last)} "
-            "(the archive's count, then the bank's). Either something is still writing to "
-            "the bank, or it holds what the engine's export leaves out: an observation whose "
-            "source facts are gone, or a fact that belongs to no document. Nothing was changed",
+            f"bank {entry.bank} could not be exported: {last}. Nothing was changed",
             bank=entry.bank,
-            details={"differs": last},
         )
 
     async def _restore(
@@ -1307,7 +1636,7 @@ class EmbedderSwitch:
         the original by default.
         """
         assert self._target is not None
-        await self._ensure_engine_on(self._target)
+        await self._ensure_engine(self._target, port=journal.private_port, run_id=journal.run_id)
         url_bank = via or entry.bank
         try:
             with self._archive_dir_fd(journal) as dfd:
@@ -1337,8 +1666,6 @@ class EmbedderSwitch:
         if not operation_id:
             raise SwitchError("the restore returned no operation id", bank=entry.bank)
         entry.restore_op = {"bank": url_bank, "id": operation_id}
-        if url_bank == entry.bank:
-            entry.own_ops.append(operation_id)
         self._save(journal)
         embedded = entry.counts.get("facts", 0) + entry.counts.get("observations", 0)
         budget = max(self.t.restore_floor_s, self.t.restore_factor * embedded / RESTORE_FACTS_PER_S)
@@ -1346,7 +1673,8 @@ class EmbedderSwitch:
             url_bank, operation_id, timeout_s=budget, what=f"the restore into {target_id}"
         )
         entry.restore_op = None
-        return await self.bank_state(target_id)
+        # Counted once the engine has stopped working on the new bank.
+        return await self._quiet_state(target_id)
 
     async def _restore_checked(
         self, journal: Journal, entry: BankEntry, *, via: str | None = None
@@ -1355,7 +1683,7 @@ class EmbedderSwitch:
         state = await self._restore(journal, entry, entry.temp, via=via)
         entry.restored_counts = state["counts"]
         entry.restored_fingerprint = state["fingerprint"]
-        differs = _diff(entry.counts, state["counts"])
+        differs = _diff(entry.counts, state["counts"], observation_floor=True)
         if differs:
             self._save(journal)
             raise SwitchError(
@@ -1377,7 +1705,10 @@ class EmbedderSwitch:
         """Close a finished run: the mirror keeps the last word, the primary goes."""
         journal.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
         text = json.dumps(journal.to_dict(), indent=2) + "\n"
-        _write_synced(Path(journal.archive_dir) / mirror_name(), text, mode=0o600)
+        # Best effort: a mirror that cannot be written (its directory was
+        # removed) must not keep a finished run looking unfinished for ever.
+        with contextlib.suppress(OSError):
+            _write_synced(Path(journal.archive_dir) / mirror_name(), text, mode=0o600)
         journal_path().unlink(missing_ok=True)
 
     @contextlib.contextmanager
@@ -1447,6 +1778,7 @@ class EmbedderSwitch:
             "totals": dict.fromkeys(COUNT_KEYS, 0),
             "disk": None,
             "estimate_s": None,
+            "estimate": None,
             "allow_pending": self._allow_pending,
             "refusals": refusals,
             "warnings": warnings,
@@ -1502,9 +1834,20 @@ class EmbedderSwitch:
         if apply and not self._privileged():
             refuse(
                 "not_privileged",
-                "run this as root (sudo) or as the hal0 service account: it rewrites the "
-                "engine's drop-in, restarts the engine and renames banks",
+                "run this as root (sudo): it moves the memory engine to a private port for "
+                "the duration, which means writing a drop-in for the engine's unit, restarting "
+                "the engine and renaming banks",
             )
+        private = self._isolated_port()
+        if private is not None:
+            refuse(
+                "engine_private",
+                f"the memory engine is already isolated on a private port ({isolation_drop_in_path()} "
+                "exists): an earlier switch left it there. See `hal0 memory embedder switch "
+                "--status`",
+            )
+            # Look at the engine where it is, so that what it holds is in the report.
+            self._use_port(private or None)
         unreadable = admin_env_file_unreadable()
         if unreadable:
             refuse(
@@ -1673,7 +2016,13 @@ class EmbedderSwitch:
         # Disk and time.
         plan["disk"] = self._disk_plan(hs_dir, refuse, warnings)
         embedded = plan["totals"]["facts"] + plan["totals"]["observations"]
-        plan["estimate_s"] = round(embedded / RESTORE_FACTS_PER_S)
+        banks = len(plan["banks"])
+        plan["estimate"] = {
+            "restarts_s": round(RESTARTS_PER_RUN * RESTART_S),
+            "per_bank_s": round(banks * 2 * OPERATION_FLOOR_S),
+            "embedding_s": round(embedded / RESTORE_FACTS_PER_S),
+        }
+        plan["estimate_s"] = sum(plan["estimate"].values())
         if target != configured:
             warnings.append(
                 f"[memory.models] asks for {describe_embedder(*configured)}; after the switch "
@@ -1764,10 +2113,12 @@ class EmbedderSwitch:
                 },
                 archive_dir=str(archive_dir),
                 allow_pending=self._allow_pending,
+                private_port=self._pick_port(),
             )
             self._save(journal)
             try:
                 await self._pause(journal)
+                await self._isolate_engine(journal)
                 await self._export_all(journal)
                 await self._flip(journal)
                 await self._restore_all(journal)
@@ -1799,12 +2150,13 @@ class EmbedderSwitch:
                         f"the switch journal is not usable ({found['error']}) and no mirror "
                         f"of it was found. {detail} Nothing was changed"
                     )
-                if write_gate.read_gate() is not None:
+                if write_gate.read_gate() is not None or self._isolated_port() is not None:
                     raise SwitchRefused(
-                        "memory writes are paused but no journal of a switch was found, so "
-                        f"there is nothing to resume from. {detail} See `hal0 memory embedder "
-                        "switch --status`; `--clear-gate` lifts the pause once the banks are "
-                        "in order"
+                        "memory writes are paused, or the engine is on a private port, but no "
+                        f"journal of a switch was found, so there is nothing to resume from. "
+                        f"{detail} See `hal0 memory embedder switch --status`; `--clear-gate` "
+                        "returns the engine to its normal address and lifts the pause once the "
+                        "banks are in order"
                     )
                 raise SwitchRefused("there is no interrupted embedder switch to resume")
             if found["error"]:
@@ -1816,15 +2168,15 @@ class EmbedderSwitch:
                     f"{describe_embedder(*self._target)}; run --resume without a model"
                 )
             if not self._privileged():
-                raise SwitchRefused("run this as root (sudo) or as the hal0 service account")
+                raise SwitchRefused("run this as root (sudo)")
             self._target = target
             self._allow_pending = journal.allow_pending
-            if journal.phase != PHASE_COMPLETE and write_gate.read_gate() is None:
+            if write_gate.read_gate() is None:
                 # Someone removed the pause by hand. Nothing below is safe
                 # with writes coming in, so it goes back first.
                 write_gate.engage_gate(run_id=journal.run_id, archive_dir=journal.archive_dir)
             self._save(journal)
-            if journal.phase not in (PHASE_SWAPPING, PHASE_COMPLETE):
+            if journal.phase != PHASE_SWAPPING:
                 await self._rollback(journal, journal.error or "the run was interrupted")
                 return {
                     "status": "rolled_back",
@@ -1833,8 +2185,10 @@ class EmbedderSwitch:
                     "to": journal.previous,
                 }
             try:
-                await self._ensure_engine_on(target)
+                await self._ensure_engine(target, port=journal.private_port, run_id=journal.run_id)
             except SwitchError as exc:
+                journal.error = exc.message
+                self._save(journal)
                 exc.resumable = True
                 raise
             await self._swap_all(journal, rebuild=True)
@@ -1842,6 +2196,7 @@ class EmbedderSwitch:
 
     async def _where_the_data_is(self) -> str:
         """One sentence naming the banks and temporary ids present, for a run with no journal."""
+        self._use_port(self._isolated_port() or None)
         try:
             ids = sorted(await self._bank_ids())
         except SwitchError:
@@ -1852,18 +2207,15 @@ class EmbedderSwitch:
             f"Banks under temporary ids from a switch: {', '.join(temps) or 'none'}."
         )
 
-    async def _pause(self, journal: Journal) -> None:
-        """Pause writes, let the queues drain, and take the list of banks this run rebuilds."""
-        self._say("pausing memory writes")
-        write_gate.engage_gate(run_id=journal.run_id, archive_dir=journal.archive_dir)
-        self._hook("paused")
+    async def _settle(self, journal: Journal) -> dict[str, dict[str, Any]]:
+        """Wait for every bank's queue to drain; returns each bank's state."""
         deadline = self._clock() + self.t.settle_s
         while True:
             ids = [b for b in await self._bank_ids() if b not in journal.own_ids()]
             states = {bank: await self.bank_state(bank) for bank in ids}
             busy = {b: s for b, s in states.items() if s["pending"] or s["processing"]}
             if not busy or journal.allow_pending:
-                break
+                return states
             if self._clock() >= deadline:
                 listing = ", ".join(
                     f"{bank} ({s['pending']} pending, {s['processing']} processing)"
@@ -1874,6 +2226,30 @@ class EmbedderSwitch:
                     f"{self.t.settle_s:g}s: {listing}"
                 )
             await self._sleep(self.t.poll_s)
+
+    async def _pause(self, journal: Journal) -> None:
+        """Pause writes through hal0 and let the queues drain before the engine is restarted."""
+        self._say("pausing memory writes")
+        write_gate.engage_gate(run_id=journal.run_id, archive_dir=journal.archive_dir)
+        self._hook("paused")
+        await self._settle(journal)
+
+    async def _isolate_engine(self, journal: Journal) -> None:
+        """Take the engine away from every other client, then list the banks this run rebuilds.
+
+        The engine comes back on a private loopback port, still on its
+        original embedder. From here to the end of the run nothing but this
+        process can reach it, so the list taken now is complete and nothing
+        can change under an export.
+        """
+        previous = Embedder(str(journal.previous["provider"]), str(journal.previous["model"]))
+        self._say("moving the engine to a private port; recall is unavailable until the run ends")
+        journal.isolated = True
+        self._save(journal)
+        await self._start_engine(previous, port=journal.private_port, run_id=journal.run_id)
+        self._hook("isolated")
+        # Whatever was accepted in the instant before the restart finishes now.
+        states = await self._settle(journal)
         journal.banks = [
             BankEntry(
                 bank=bank,
@@ -1881,7 +2257,7 @@ class EmbedderSwitch:
                 counts=states[bank]["counts"],
                 links=states[bank]["links"],
             )
-            for bank in ids
+            for bank in states
         ]
         journal.phase = PHASE_EXPORTING
         self._save(journal)
@@ -1896,6 +2272,16 @@ class EmbedderSwitch:
             self._say(f"exporting {entry.bank} ({index + 1}/{len(journal.banks)})")
             await self._export_verified(journal, entry, index)
             self._hook(f"exported:{entry.bank}")
+        # Before the embedder is flipped, while undoing the run still leaves
+        # the store exactly as it was.
+        strays = await self._stray_banks(journal)
+        if strays:
+            raise SwitchError(
+                f"bank(s) {', '.join(strays)} appeared after the switch listed the banks, "
+                "although the engine was isolated. Something on this box reaches the engine's "
+                "private port. Stop it and run the switch again",
+                details={"stray_banks": strays},
+            )
 
     async def _flip(self, journal: Journal) -> None:
         assert self._target is not None
@@ -1912,7 +2298,7 @@ class EmbedderSwitch:
                 provider=target.provider, model=target.model, source=SOURCE_SWITCH, mixed=True
             )
         )
-        await self._start_engine_on(target)
+        await self._start_engine(target, port=journal.private_port, run_id=journal.run_id)
         self._hook("flipped")
 
     async def _restore_all(self, journal: Journal) -> None:
@@ -1926,8 +2312,14 @@ class EmbedderSwitch:
             self._hook(f"restored:{entry.bank}")
 
     async def _original_moved(self, entry: BankEntry) -> str:
-        """How the original differs from what its archive was taken from; empty when it does not."""
-        state = await self.bank_state(entry.bank, ignore_ops=entry.own_ops)
+        """How the original differs from what its archive was taken from; empty when it does not.
+
+        With the engine isolated this should never be anything but empty. It
+        is read once the engine is quiet, and observations are not part of
+        it: the engine's own consolidation may add some, and the rebuilt bank
+        derives them again from the same facts.
+        """
+        state = await self._quiet_state(entry.bank)
         reasons: list[str] = []
         differs = _diff(entry.counts, state["counts"])
         if differs:
@@ -1950,9 +2342,9 @@ class EmbedderSwitch:
         strays = await self._stray_banks(journal)
         if strays:
             raise SwitchError(
-                f"bank(s) {', '.join(strays)} appeared after the switch listed the banks: a "
-                "client is writing to the engine without going through hal0. Stop it and run "
-                "the switch again, which will include them",
+                f"bank(s) {', '.join(strays)} appeared after the switch listed the banks, "
+                "although the engine was isolated. Something on this box reaches the engine's "
+                "private port. Stop it and run the switch again",
                 details={"stray_banks": strays},
             )
         for entry in journal.banks:
@@ -1964,30 +2356,43 @@ class EmbedderSwitch:
                 self._say(f"warning: {entry.bank} {entry.note}")
                 continue
             raise SwitchError(
-                f"bank {entry.bank} changed while writes were paused ({moved}): a client is "
-                "writing to the engine without going through hal0. Stop it and run the "
-                "switch again",
+                f"bank {entry.bank} changed while the engine was isolated ({moved}). Something "
+                "on this box reaches the engine's private port. Stop it and run the switch again",
                 bank=entry.bank,
             )
         self._save(journal)
 
     # ── swap ────────────────────────────────────────────────────────────
 
+    def _way_out(self, journal: Journal, bank: str) -> str:
+        """What the operator does about a bank the switch will not touch by itself."""
+        return (
+            f"look at it on the engine's private port, and if it is not wanted delete it "
+            f"(`curl -X DELETE http://127.0.0.1:{journal.private_port}{_bank_path(bank)}`); then "
+            "`hal0 memory embedder switch --resume` carries on, restoring a bank that is "
+            "missing from its archive"
+        )
+
     async def _rebuilt_differs(self, entry: BankEntry, bank_id: str) -> str:
-        """How the rebuilt bank, under ``bank_id``, differs from its archive; empty when not."""
-        state = await self.bank_state(bank_id)
+        """How the rebuilt bank, under ``bank_id``, differs from its archive; empty when not.
+
+        Read once the engine is quiet. It may hold more observations than its
+        archive (the engine consolidates what was not consolidated yet), never
+        fewer.
+        """
+        state = await self._quiet_state(bank_id)
         reasons: list[str] = []
-        differs = _diff(entry.counts, state["counts"])
+        differs = _diff(entry.counts, state["counts"], observation_floor=True)
         if differs:
             reasons.append(_diff_text(differs))
-        signals = _signals_moved(entry.restored_fingerprint, state["fingerprint"], CONTENT_SIGNALS)
+        signals = _signals_moved(entry.restored_fingerprint, state["fingerprint"])
         if signals:
             reasons.append("differs from the bank that was rebuilt in: " + ", ".join(signals))
         return "; ".join(reasons)
 
     async def _rebuild(self, journal: Journal, entry: BankEntry, index: int) -> None:
         """Take the original as it is now and rebuild its replacement from that."""
-        self._say(f"{entry.bank} moved after its export; exporting and rebuilding it again")
+        self._say(f"exporting and rebuilding {entry.bank} again")
         await self._delete_bank(entry.temp)
         entry.step = STEP_PLANNED
         entry.note = None
@@ -2023,17 +2428,22 @@ class EmbedderSwitch:
 
         What to do comes from :func:`swap_action`: the ids the engine has now,
         with the journal step as tie-breaker. Each destructive call is
-        preceded by a synced journal save naming it.
+        preceded by a synced journal save naming it. On a resume
+        (``rebuild``) anything that can be repaired from the original or from
+        the archive is repaired, so the same resume never fails twice for a
+        reason the switch could have fixed.
         """
         bank, temp = entry.bank, entry.temp
         existing = set(await self._bank_ids())
         action = swap_action(entry.step, bank in existing, temp in existing)
 
+        if action == ACTION_FINAL:
+            return
         if action == ACTION_RECREATED:
             raise SwitchError(
-                f"bank {bank} exists again after the switch deleted it: a client that bypasses "
-                f"hal0 recreated it. The rebuilt bank is {temp}. Move what the new {bank} holds "
-                f"or delete it (`hal0 memory bank delete`), then run --resume",
+                f"bank {bank} exists again after the switch deleted it, beside its rebuilt "
+                f"copy {temp}. The switch will not delete it a second time. To go on: "
+                + self._way_out(journal, bank),
                 bank=bank,
             )
         if action == ACTION_REBUILD:
@@ -2053,30 +2463,32 @@ class EmbedderSwitch:
             # Never delete an original without a whole replacement in hand,
             # and never one that is no longer what was archived.
             wrong = await self._rebuilt_differs(entry, temp)
-            if wrong:
-                raise SwitchError(
-                    f"the rebuilt bank {temp} does not match the archive of {bank} ({wrong}); "
-                    f"{bank} was not touched",
-                    bank=bank,
-                )
-            await self._wait_quiet(temp)
-            moved = await self._original_moved(entry)
+            moved = "" if wrong else await self._original_moved(entry)
             if moved and journal.allow_pending:
                 entry.note = f"changed after its export and not carried over: {moved}"
                 self._say(f"warning: {bank} {entry.note}")
-            elif moved and rebuild:
+                moved = ""
+            if (wrong or moved) and rebuild:
                 await self._rebuild(journal, entry, index)
-                await self._wait_quiet(temp)
-                moved = await self._original_moved(entry)
-            if moved and not journal.allow_pending:
+                wrong = await self._rebuilt_differs(entry, temp)
+                moved = "" if wrong or journal.allow_pending else await self._original_moved(entry)
+            if wrong:
                 raise SwitchError(
-                    f"bank {bank} changed after its archive was taken ({moved}), so it was not "
-                    "deleted: a client is writing to the engine without going through hal0. "
-                    f"{bank} and every bank after it are still on their originals; the banks "
-                    "before it are already rebuilt. Stop that client, then run --resume, which "
-                    f"exports and rebuilds {bank} again from what it holds now and carries on",
+                    f"the rebuilt bank {temp} does not match the archive of {bank} ({wrong}); "
+                    f"{bank} was not touched. Run --resume, which rebuilds it",
                     bank=bank,
                 )
+            if moved:
+                raise SwitchError(
+                    f"bank {bank} changed after its archive was taken ({moved}), so it was not "
+                    f"deleted, although the engine was isolated. {bank} and every bank after "
+                    "it are still on their originals; the banks before it are already "
+                    "rebuilt. Find what reaches the engine's private port and stop it, then "
+                    f"run --resume, which exports and rebuilds {bank} again from what it holds "
+                    "now and carries on",
+                    bank=bank,
+                )
+            await self._wait_quiet(temp)
             self._hook(f"before_delete:{bank}")
             entry.step = STEP_DELETING
             self._save(journal)
@@ -2102,8 +2514,8 @@ class EmbedderSwitch:
         if wrong:
             raise SwitchError(
                 f"bank {bank} is under its final id but does not match its archive ({wrong}). "
-                f"Nothing more was changed. Its archive is {journal.archive_dir}/{entry.archive}; "
-                "see `hal0 memory embedder switch --status` for the ids that hold data",
+                f"Nothing more was changed. Its archive is {journal.archive_dir}/{entry.archive}. "
+                "To go on: " + self._way_out(journal, bank),
                 bank=bank,
             )
         entry.step = STEP_RENAMED
@@ -2128,7 +2540,7 @@ class EmbedderSwitch:
                 raise
 
     async def _finish(self, journal: Journal) -> dict[str, Any]:
-        """Close the run: record the embedder, drop the scratch bank, lift the pause."""
+        """Close the run: record the embedder, give the engine back, then let writes in."""
         self._hook("before_finish")
         target = Embedder(journal.target["provider"], journal.target["model"])
         try:
@@ -2136,23 +2548,28 @@ class EmbedderSwitch:
             if journal.scratch in present:
                 await self._delete_bank(journal.scratch)
             strays = await self._stray_banks(journal)
+            journal.stray_banks = strays
+            embedder_record.save_embedder_record(
+                EmbedderRecord(
+                    provider=target.provider,
+                    model=target.model,
+                    source=SOURCE_SWITCH,
+                    mixed=bool(strays),
+                )
+            )
+            self._say("returning the engine to its normal address")
+            await self._start_engine(target, port=None, run_id=journal.run_id)
         except SwitchError as exc:
             journal.error = exc.message
             self._save(journal)
             exc.resumable = True
             raise
-        journal.stray_banks = strays
-        embedder_record.save_embedder_record(
-            EmbedderRecord(
-                provider=target.provider,
-                model=target.model,
-                source=SOURCE_SWITCH,
-                mixed=bool(strays),
-            )
-        )
-        write_gate.lift_gate()
+        journal.isolated = False
         journal.phase = PHASE_COMPLETE
+        # The journal first, then the gate: the other order would let writes
+        # in under a journal that still says the run is unfinished.
         self._retire_journal(journal)
+        write_gate.lift_gate()
         self._say("memory writes resumed")
         warnings = [f"{e.bank}: {e.note}" for e in journal.banks if e.note]
         if strays:
@@ -2161,6 +2578,16 @@ class EmbedderSwitch:
                 "so the store is recorded as mixed. Run `hal0 memory embedder switch "
                 f"{target.model}` again: a mixed store may be switched to the model it is on, "
                 "and that run rebuilds every bank"
+            )
+        configured = self._configured_embedder()
+        config_note = None
+        if configured != target:
+            config_note = (
+                f"hal0.toml still names {describe_embedder(*configured)} under [memory.models]. "
+                "That is fine: the engine runs the embedder the store was built with, whatever "
+                "the config says, and nothing will change it back. To make the two agree, set "
+                f'embeddings_provider = "{target.provider}" and embeddings_model = '
+                f'"{target.model}" under [memory.models]'
             )
         return {
             "status": "switched",
@@ -2174,6 +2601,7 @@ class EmbedderSwitch:
                 for e in journal.banks
             ],
             "warnings": warnings,
+            "config_note": config_note,
             "archive_dir": journal.archive_dir,
             "delete_archives": f"rm -r {journal.archive_dir}",
         }
@@ -2215,6 +2643,12 @@ class EmbedderSwitch:
     async def _rollback(self, journal: Journal, cause: str) -> None:
         """Undo a run that has not reached the swap. Safe to run again.
 
+        The run's leftovers are removed while the engine is still private.
+        The engine is then returned to its normal address on the previous
+        embedder, and only once it is confirmed running that embedder is the
+        previous record written back; until then the record keeps saying the
+        target, ``mixed``. The journal is retired before the gate is lifted.
+
         Raises :class:`SwitchError` (``resumable``) when a step cannot be
         undone; the pause then stays and ``--resume`` tries again.
         """
@@ -2224,34 +2658,52 @@ class EmbedderSwitch:
             journal.phase = PHASE_ROLLING_BACK
             journal.error = cause
             self._save(journal)
-            drifted: list[str] = []
-            if await self._healthy():
-                await self._stop_restores(journal)
+            tainted: list[str] = []
+            if journal.isolated and self._isolated_port() == journal.private_port:
+                self._use_port(journal.private_port)
+                private = await self._healthy()
+                if not private and not await self._public_answers():
+                    # Not answering anywhere: bring it up where the run left
+                    # it, on the previous embedder, so the cleanup is isolated.
+                    await self._start_engine(
+                        previous, port=journal.private_port, run_id=journal.run_id
+                    )
+                    private = True
+                # Still answering at its normal address means the isolation
+                # never took, and then nothing was ever done behind it.
+                if private:
+                    await self._stop_restores(journal)
+                    await self._sweep(journal)
+                if private and journal.flip_started and journal.banks:
+                    # The engine ran the target. A bank this run does not know,
+                    # or an original that changed meanwhile, may hold vectors
+                    # of the target model in a store going back to the old one.
+                    tainted = await self._stray_banks(journal)
+                    for entry in journal.banks:
+                        if entry.step != STEP_PLANNED and await self._original_moved(entry):
+                            tainted.append(entry.bank)
+            if journal.isolated:
+                await self._ensure_engine(previous, port=None, run_id=journal.run_id)
                 await self._sweep(journal)
             if journal.flip_started:
-                embedder_record.save_embedder_record(self._record_from(journal.previous))
-                await self._ensure_engine_on(previous)
-                await self._stop_restores(journal)
-                # Anything written while the engine ran the target was embedded
-                # with it, into banks that are staying on the old model.
-                for entry in journal.banks:
-                    if entry.step == STEP_PLANNED:
-                        continue
-                    if await self._original_moved(entry):
-                        drifted.append(entry.bank)
-                if drifted and not journal.previous.get("mixed"):
-                    embedder_record.save_embedder_record(
-                        self._record_from(journal.previous, mixed=True)
+                # Only now: the engine is confirmed on the previous embedder.
+                embedder_record.save_embedder_record(
+                    self._record_from(
+                        journal.previous,
+                        mixed=bool(journal.previous.get("mixed")) or bool(tainted),
                     )
+                )
+                if tainted and not journal.previous.get("mixed"):
                     self._say(
-                        "warning: " + ", ".join(drifted) + " changed while the engine ran the "
-                        "target embedder; the store is now recorded as mixed"
+                        "warning: " + ", ".join(tainted) + " appeared or changed while the "
+                        "engine ran the target embedder; the store is now recorded as mixed"
                     )
-            # Last, with nothing left running that could create one.
-            await self._sweep(journal)
-            write_gate.lift_gate()
+            journal.stray_banks = tainted
+            journal.isolated = False
             journal.phase = PHASE_ROLLED_BACK
+            # The journal first, then the gate.
             self._retire_journal(journal)
+            write_gate.lift_gate()
             self._say("memory writes resumed; the store is on its original embedder")
         except BaseException as exc:
             detail = exc.message if isinstance(exc, SwitchError) else f"{type(exc).__name__}: {exc}"
@@ -2270,26 +2722,86 @@ class EmbedderSwitch:
 
     # ── status and the escape hatch ─────────────────────────────────────
 
-    async def status(self) -> dict[str, Any]:
-        """Where a switch stands: journal, pause, lock, banks, and what ``--resume`` would do.
+    async def _assess(
+        self, journal: Journal, entry: BankEntry, present: set[str]
+    ) -> dict[str, Any]:
+        """What ``--resume`` would do for one bank, with the checks it would run."""
+        action = swap_action(entry.step, entry.bank in present, entry.temp in present)
+        problem: str | None = None
+        operator: str | None = None
+        try:
+            if action == ACTION_SWAP:
+                wrong = await self._rebuilt_differs(entry, entry.temp)
+                moved = "" if wrong else await self._original_moved(entry)
+                if wrong:
+                    problem = f"the rebuilt bank does not match its archive ({wrong})"
+                    operator = "nothing: --resume rebuilds it from the original"
+                elif moved:
+                    problem = f"the original changed after its archive was taken ({moved})"
+                    operator = (
+                        "nothing: --resume replaces it as archived, with a warning"
+                        if journal.allow_pending
+                        else "stop whatever writes to the engine's private port; --resume then "
+                        "exports and rebuilds it again"
+                    )
+            elif action == ACTION_VERIFY:
+                wrong = await self._rebuilt_differs(entry, entry.bank)
+                if wrong:
+                    problem = f"the bank under its final id does not match its archive ({wrong})"
+                    operator = self._way_out(journal, entry.bank)
+            elif action == ACTION_RECREATED:
+                problem = "the original id exists again beside the rebuilt bank"
+                operator = self._way_out(journal, entry.bank)
+        except SwitchError as exc:
+            problem = exc.message
+        return {
+            "bank": entry.bank,
+            "temp": entry.temp,
+            "step": entry.step,
+            "original_present": entry.bank in present,
+            "rebuilt_present": entry.temp in present,
+            "action": action,
+            "problem": problem,
+            "operator": operator,
+        }
 
-        Reads only. Works without a journal and without the engine.
+    async def status(self) -> dict[str, Any]:
+        """Where a switch stands: journal, pause, engine, banks, and what ``--resume`` would do.
+
+        Reads only. It runs the same checks a resume would, so a bank that
+        moved or does not match is reported here first. Works without a
+        journal and without the engine.
         """
         found = locate_journal()
         journal: Journal | None = found["journal"]
+        port = self._isolated_port()
         out: dict[str, Any] = {
             "journal": journal.to_dict() if journal is not None else None,
             "journal_source": found["source"],
             "journal_error": found["error"],
             "gate": write_gate.read_gate(),
             "lock_held": lock_held(),
-            "engine": {"reachable": False, "live": None},
+            "engine": {"reachable": False, "live": None, "private_port": port},
+            "record": None,
             "banks": [],
             "resume": [],
             "summary": "",
         }
         live = _pair(self._evidence().get("live"))
         out["engine"]["live"] = live._asdict() if live is not None else None
+        try:
+            record = embedder_record.load_embedder_record()
+        except embedder_record.EmbedderRecordError:
+            record = None
+        if record is not None:
+            # While a run is unfinished the record and the engine may differ;
+            # which one is right is the journal's to say, and it is shown here.
+            out["record"] = {
+                **record.embedder._asdict(),
+                "mixed": record.mixed,
+                "agrees_with_engine": live is None or live == record.embedder,
+            }
+        self._use_port(port or None)
         entries = {e.bank: e for e in journal.banks} if journal is not None else {}
         temps = {e.temp: e for e in journal.banks} if journal is not None else {}
         present: set[str] = set()
@@ -2312,16 +2824,23 @@ class EmbedderSwitch:
             out["engine"]["reachable"] = True
         except SwitchError as exc:
             out["engine"]["error"] = exc.message
+        held = (
+            f" The engine is isolated on 127.0.0.1:{port} and memory writes are paused; both "
+            "stay so until then, and recall is unavailable."
+            if port is not None
+            else ""
+        )
         if journal is None:
             if found["error"]:
                 out["summary"] = (
                     "the journal cannot be used and no mirror was found; --resume will refuse. "
-                    "The banks above are where the data is"
+                    "The banks above are where the data is." + held
                 )
-            elif out["gate"] is not None:
+            elif out["gate"] is not None or port is not None:
                 out["summary"] = (
-                    "memory writes are paused but there is no journal; nothing to resume. "
-                    "--clear-gate lifts the pause once the banks above are in order"
+                    "memory writes are paused or the engine is on a private port, but there is "
+                    "no journal: nothing to resume. --clear-gate returns the engine to its "
+                    "normal address and lifts the pause once the banks above are in order"
                 )
             else:
                 out["summary"] = "no switch is in progress"
@@ -2329,35 +2848,31 @@ class EmbedderSwitch:
         if journal.phase != PHASE_SWAPPING:
             out["summary"] = (
                 f"the run stopped in phase {journal.phase}, before any original was replaced: "
-                "--resume undoes it (temporary banks deleted, engine back on "
-                f"{journal.previous.get('model')}, pause lifted)"
+                "--resume undoes it (temporary banks deleted, engine back at its normal address "
+                f"on {journal.previous.get('model')}, pause lifted)." + held
             )
             return out
         if out["engine"]["reachable"]:
             for entry in journal.banks:
-                out["resume"].append(
-                    {
-                        "bank": entry.bank,
-                        "temp": entry.temp,
-                        "step": entry.step,
-                        "original_present": entry.bank in present,
-                        "rebuilt_present": entry.temp in present,
-                        "action": swap_action(
-                            entry.step, entry.bank in present, entry.temp in present
-                        ),
-                    }
-                )
+                out["resume"].append(await self._assess(journal, entry, present))
+        blocked = [
+            r for r in out["resume"] if r["operator"] and not r["operator"].startswith("nothing")
+        ]
         out["summary"] = (
             "the run stopped inside the swap: --resume finishes it bank by bank as listed, "
-            "then lifts the pause"
+            "then returns the engine to its normal address and lifts the pause."
+            + (f" {len(blocked)} bank(s) need the operator first, as listed." if blocked else "")
+            + held
         )
         return out
 
-    def clear_gate(self) -> dict[str, Any]:
-        """Lift the write pause by hand. Refuses while any run is unfinished or running.
+    async def clear_gate(self) -> dict[str, Any]:
+        """Lift the write pause, and return the engine to its normal address, by hand.
 
-        For the one case nothing else covers: the pause is set and no journal
-        of a run survives anywhere. It checks nothing about the banks.
+        For the one case nothing else covers: the pause is set, or the engine
+        is on a private port, and no journal of a run survives anywhere.
+        Refuses while any run is unfinished or running. It checks nothing
+        about the banks.
         """
         if lock_held():
             raise SwitchRefused("a `hal0 memory embedder switch` is running; it owns the pause")
@@ -2376,23 +2891,38 @@ class EmbedderSwitch:
                 "--status`, put the banks in order, remove that file, then run this again"
             )
         gate = write_gate.read_gate()
-        if gate is None:
-            raise SwitchRefused("memory writes are not paused")
-        write_gate.lift_gate()
-        log.warning("hal0.memory.write_gate_cleared_by_hand", run_id=gate.get("run_id"))
-        return {"status": "cleared", "gate": gate}
+        port = self._isolated_port()
+        if gate is None and port is None:
+            raise SwitchRefused(
+                "memory writes are not paused and the engine is at its normal address"
+            )
+        if port is not None:
+            if not self._privileged():
+                raise SwitchRefused("run this as root (sudo): the engine has to be restarted")
+            record = embedder_record.load_embedder_record()
+            embedder = (
+                record.embedder
+                if record is not None
+                else _pair(self._evidence().get("live")) or self._configured_embedder()
+            )
+            await self._start_engine(embedder, port=None, run_id="clear-gate")
+        if gate is not None:
+            write_gate.lift_gate()
+        log.warning("hal0.memory.write_gate_cleared_by_hand", run_id=(gate or {}).get("run_id"))
+        return {"status": "cleared", "gate": gate, "was_private_on": port}
 
 
 __all__ = [
+    "ACTION_FINAL",
     "ACTION_REBUILD",
     "ACTION_RECOVER",
     "ACTION_RECREATED",
     "ACTION_RENAME",
     "ACTION_SWAP",
     "ACTION_VERIFY",
-    "CONTENT_SIGNALS",
     "COUNT_KEYS",
     "FINGERPRINT_SIGNALS",
+    "HARD_COUNTS",
     "HOOK_POINTS",
     "RESTORE_FACTS_PER_S",
     "BankEntry",
@@ -2406,16 +2936,24 @@ __all__ = [
     "admin_environment",
     "archive_root",
     "blocking_reason",
+    "effective_exec_start",
+    "free_loopback_port",
     "interrupted_switch",
     "is_switch_temp",
+    "isolated_port",
+    "isolation_body",
+    "isolation_drop_in_path",
     "journal_path",
     "load_journal",
     "locate_journal",
     "lock_held",
     "lock_path",
+    "private_exec_start",
+    "remove_isolation_dropin",
     "run_admin_rename",
     "scratch_bank_id",
     "swap_action",
     "temp_bank_id",
     "update_in_progress",
+    "write_isolation_dropin",
 ]

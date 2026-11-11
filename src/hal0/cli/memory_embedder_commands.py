@@ -50,10 +50,13 @@ _progress = Console(stderr=True)
 _RESUME_HINT = "hal0 memory embedder switch --resume"
 _STATUS_HINT = "hal0 memory embedder switch --status"
 
-#: Live-verification aid, not an operator feature: the process kills itself
-#: (SIGKILL, so nothing is cleaned up) when the run reaches the named point
-#: (``hal0.memory.embedder_switch.HOOK_POINTS``, e.g. ``deleted:shared``).
+#: Live-verification aid, not an operator feature and not in the user docs:
+#: the process kills itself (SIGKILL, so nothing is cleaned up) when the run
+#: reaches the named point (``hal0.memory.embedder_switch.HOOK_POINTS``, e.g.
+#: ``deleted:shared``). Honoured only when :data:`TEST_HOOKS_ENV` is ``1`` as
+#: well, so that one stray variable in a service's environment cannot arm it.
 KILL_AT_ENV = "HAL0_EMBEDDER_SWITCH_KILL_AT"
+TEST_HOOKS_ENV = "HAL0_TEST_HOOKS"
 
 
 @app.callback()
@@ -72,7 +75,7 @@ def _client() -> Any:
 
 def _kill_hook() -> Callable[[str], None] | None:
     point = os.environ.get(KILL_AT_ENV)
-    if not point:
+    if not point or os.environ.get(TEST_HOOKS_ENV) != "1":
         return None
 
     def hook(reached: str) -> None:
@@ -162,9 +165,11 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
     if engine.get("reachable"):
         lines.append(f"engine: hindsight-api {engine.get('version') or '?'}")
     if plan.get("estimate_s") is not None:
+        parts = plan.get("estimate") or {}
         lines.append(
-            f"rebuild: {_minutes(plan['estimate_s'])} at the measured {RESTORE_FACTS_PER_S:g} "
-            "facts/s on CPU; the exports and an engine restart come on top"
+            f"duration: {_minutes(plan['estimate_s'])} ({parts.get('restarts_s')} s for three "
+            f"engine restarts, {parts.get('per_bank_s')} s for the exports and restores, "
+            f"{parts.get('embedding_s')} s to re-embed at {RESTORE_FACTS_PER_S:g} facts/s on CPU)"
         )
     disk = plan.get("disk")
     if disk:
@@ -174,8 +179,10 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
             f"{escape(str(disk.get('archive_root')))}"
         )
     lines.append(
-        "while it runs: memory writes are refused with 503 memory.writes_paused, from before "
-        "the first export; recall keeps working except while the engine restarts"
+        "[bold]while it runs, memory is out of service:[/bold] the engine is moved to a "
+        "private port so that nothing else can reach it. Writes are refused with 503 "
+        "memory.writes_paused and are not queued; recall, search and reflect fail until the "
+        "run ends. --apply is your consent to that"
     )
     for warning in plan.get("warnings") or []:
         lines.append(f"[yellow]note: {escape(str(warning))}[/yellow]")
@@ -227,11 +234,32 @@ def _print_status(status: dict[str, Any]) -> None:
         lines.append(
             f"engine: up, running {escape(describe_embedder(live.get('provider'), live.get('model')))}"
         )
+    if engine.get("private_port") is not None:
+        lines.append(
+            f"[yellow]the engine is isolated on 127.0.0.1:{engine['private_port']}[/yellow]: "
+            "nothing but the switch reaches it, and recall is unavailable"
+        )
+    record = status.get("record")
+    if record:
+        said = describe_embedder(record.get("provider"), record.get("model"))
+        lines.append(
+            f"record: {escape(said)}"
+            + (" (mixed)" if record.get("mixed") else "")
+            + (
+                ""
+                if record.get("agrees_with_engine")
+                else " [yellow]which is not what the engine runs; an unfinished run explains "
+                "that, and --resume settles it[/yellow]"
+            )
+        )
     for step in status.get("resume") or []:
         lines.append(
             f"  {escape(str(step['bank']))} [dim](step {step['step']})[/dim]: "
             f"{escape(str(step['action']))}"
         )
+        if step.get("problem"):
+            lines.append(f"    [red]{escape(str(step['problem']))}[/red]")
+            lines.append(f"    what to do: {escape(str(step.get('operator')))}")
     lines.append(f"[bold]{escape(str(status.get('summary')))}[/bold]")
     console.print(Panel("\n".join(lines), title="memory · embedder switch · status"))
 
@@ -305,18 +333,20 @@ def switch_cmd(
     clear_gate: bool = typer.Option(
         False,
         "--clear-gate",
-        help="DANGEROUS: lift the memory write pause by hand. Only for a pause that no "
-        "journal explains; refused while any switch is unfinished. Checks no bank.",
+        help="DANGEROUS: lift the memory write pause and return the engine to its normal "
+        "address by hand. Only for a pause that no journal explains; refused while any "
+        "switch is unfinished. Checks no bank.",
     ),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of tables."),
 ) -> None:
     """Move the memory store to another embedding model by re-embedding every bank.
 
-    Pauses memory writes, exports every bank, restarts the engine on the new
-    model, restores each bank under a temporary id, compares fact,
-    observation, mental-model, directive and document counts, and only then
-    replaces the originals. Anything that fails before the originals are
-    touched is undone. Run it on the box, as root or the hal0 account.
+    Pauses memory writes, moves the engine to a private port so nothing else
+    can reach it, exports every bank, restarts the engine on the new model,
+    restores each bank under a temporary id, compares it with its archive,
+    and only then replaces the originals. Anything that fails before the
+    originals are touched is undone. Memory is out of service while it runs.
+    Run it on the box, as root.
     """
     target = Embedder(provider, model) if model else None
     chosen = [name for name, on in (("--resume", resume), ("--status", status)) if on]
@@ -352,7 +382,13 @@ def switch_cmd(
                 gate = cleared.get("gate") or {}
                 console.print(
                     Panel(
-                        "[bold red]The memory write pause was lifted by hand.[/bold red]\n"
+                        "[bold red]The memory write pause was lifted by hand"
+                        + (
+                            ", and the engine returned to its normal address"
+                            if cleared.get("was_private_on") is not None
+                            else ""
+                        )
+                        + ".[/bold red]\n"
                         f"It was set by run {gate.get('run_id')} at {gate.get('since')}; its "
                         f"archives are in {escape(str(gate.get('archive_dir')))}.\n"
                         "Nothing was checked: if a bank is missing or still under a temporary "
@@ -432,6 +468,8 @@ def switch_cmd(
     ]
     for warning in result.get("warnings") or []:
         body.append(f"[yellow]note: {escape(str(warning))}[/yellow]")
+    if result.get("config_note"):
+        body.append(escape(str(result["config_note"])))
     console.print(Panel("\n".join(body), border_style="yellow" if mixed else "green"))
 
 

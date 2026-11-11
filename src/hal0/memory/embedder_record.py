@@ -775,14 +775,21 @@ def embedder_notice(status: Mapping[str, Any]) -> str | None:
         status.get("configured_provider"),
         status.get("configured"),
     )
-    if differs and not status.get("record_error") and not status.get("store_unavailable"):
+    switched = status.get("source") == SOURCE_SWITCH
+    if differs and switched and not status.get("record_error"):
+        parts.append(
+            f"the memory store was moved to {recorded} with `hal0 memory embedder switch` and "
+            f"stays on it; [memory.models] still names {configured}, which is fine and has no "
+            "effect (set it to the store's embedder to make the two agree)"
+        )
+    elif differs and not status.get("record_error") and not status.get("store_unavailable"):
         parts.append(
             f"the memory store was built with {recorded} and the engine stays on it; "
             f"[memory.models] asks for {configured}, which has no effect"
         )
     if not parts:
         return None
-    if status.get("mixed") or differs:
+    if status.get("mixed") or (differs and not switched):
         parts.append(
             "a store's embedder can only change by re-embedding it: run "
             f"`{switch_command(status)}` (a dry run; add --apply to do it)"

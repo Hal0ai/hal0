@@ -21,6 +21,7 @@ from typing import Any
 import structlog
 
 from hal0.memory.provider import MemoryProvider
+from hal0.memory.write_gate import require_writes_allowed
 
 log = structlog.get_logger(__name__)
 
@@ -110,6 +111,9 @@ class PgVectorProvider(MemoryProvider):
         project=None,
         coding=False,
     ):
+        # #3518: while an embedder switch runs the engine is private and looks down to
+        # hal0-api. A write must then be refused, not kept in this volatile store.
+        require_writes_allowed()
         # This fallback has no document/entity/consolidation-strategy
         # semantics — the new RetainRequest-shaped kwargs are accepted (so
         # callers built against the full ABC don't need an engine check) and

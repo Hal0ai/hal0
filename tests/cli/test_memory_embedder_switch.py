@@ -55,7 +55,8 @@ PLAN: dict[str, Any] = {
         "needed_bytes": 3 * 2**29,
         "free_bytes": 2**34,
     },
-    "estimate_s": 25,
+    "estimate_s": 104,
+    "estimate": {"restarts_s": 75, "per_bank_s": 4, "embedding_s": 25},
     "allow_pending": False,
     "refusals": [],
     "warnings": [],
@@ -141,8 +142,14 @@ def test_it_is_a_dry_run_by_default(stub) -> None:
     assert stub["calls"] == ["preflight"], "no --apply, nothing but the preflight"
     assert stub["kwargs"]["target"] == Embedder("local", HS)
     assert "dry run" in result.output and "hal0:shared" in result.output
-    assert "1200" in result.output and "about 25 s" in result.output
-    assert "503 memory.writes_paused" in result.output
+    flat = " ".join(result.output.replace("│", " ").split())
+    assert "1200" in flat and "about 2 min" in flat
+    # What the time is made of, so a small store is not promised a second.
+    assert "75 s for three engine restarts" in flat and "25 s to re-embed" in flat
+    # The cost, stated before consent: memory is out of service, recall included.
+    assert "memory is out of service" in flat and "503 memory.writes_paused" in flat
+    assert "recall, search and reflect fail until the run ends" in flat
+    assert "--apply is your consent" in flat
     assert "Re-run with --apply" in result.output
 
 
@@ -152,7 +159,7 @@ def test_the_dry_run_json_is_the_plan(stub) -> None:
     payload = json.loads(result.output)
     assert payload["applied"] is False
     assert payload["banks"][0]["counts"]["facts"] == 1200
-    assert payload["estimate_s"] == 25
+    assert payload["estimate_s"] == 104
 
 
 def test_a_refused_dry_run_exits_non_zero_and_says_why(stub) -> None:
@@ -175,6 +182,7 @@ def test_apply_runs_the_switch_and_says_where_the_archives_are(stub) -> None:
         "to": {"provider": "local", "model": HS},
         "banks": [{"bank": "hal0:shared"}],
         "warnings": [],
+        "config_note": "hal0.toml still names bge under [memory.models]. That is fine: ...",
         "archive_dir": "/var/lib/hal0/backups/memory-embedder-switch-20261111T020000Z-3f9a1c2e",
         "delete_archives": "rm -r /var/lib/hal0/backups/memory-embedder-switch-20261111T020000Z-3f9a1c2e",
     }
@@ -187,6 +195,7 @@ def test_apply_runs_the_switch_and_says_where_the_archives_are(stub) -> None:
     flat = " ".join(result.output.split())
     assert f"The memory store is on {HS}" in flat
     assert "20261111T020000Z-3f9a1c2e" in flat and "rm -r" in flat
+    assert "hal0.toml still names bge under [memory.models]. That is fine" in flat
 
 
 def test_a_failed_run_that_was_undone_exits_non_zero_naming_the_bank(stub) -> None:
@@ -271,7 +280,11 @@ STATUS: dict[str, Any] = {
     "journal_error": None,
     "gate": {"run_id": "3f9a1c2e", "since": "2026-11-11T02:00:01+00:00", "archive_dir": "/a"},
     "lock_held": False,
-    "engine": {"reachable": True, "live": {"provider": "local", "model": HS}},
+    "engine": {
+        "reachable": True,
+        "live": {"provider": "local", "model": HS},
+        "private_port": 45123,
+    },
     "banks": [
         {"bank": "shared", "role": "original or rebuilt", "counts": {"facts": 12}},
         {
@@ -281,8 +294,27 @@ STATUS: dict[str, Any] = {
         },
     ],
     "resume": [
-        {"bank": "shared", "step": "renamed", "action": "check the bank under its final id"},
-        {"bank": "agents", "step": "deleted", "action": "rename the rebuilt bank into place"},
+        {
+            "bank": "shared",
+            "step": "renamed",
+            "action": "nothing: the bank is under its final id",
+            "problem": None,
+            "operator": None,
+        },
+        {
+            "bank": "agents",
+            "step": "deleted",
+            "action": "rename the rebuilt bank into place",
+            "problem": None,
+            "operator": None,
+        },
+        {
+            "bank": "notes",
+            "step": "restored",
+            "action": "delete the original, then rename the rebuilt bank into place",
+            "problem": "the original changed after its archive was taken (facts 10 (expected 9))",
+            "operator": "stop whatever writes to the engine's private port",
+        },
     ],
     "summary": "the run stopped inside the swap: --resume finishes it bank by bank as listed",
 }
@@ -300,6 +332,10 @@ def test_status_prints_the_journal_the_gate_the_banks_and_what_resume_would_do(s
     assert "memory writes are paused" in flat and "no switch process is running" in flat
     assert "agents.switch-3f9a1c2e" in flat and "temporary (rebuilt copy of agents)" in flat
     assert "agents (step deleted): rename the rebuilt bank into place" in flat
+    assert "the engine is isolated on 127.0.0.1:45123" in flat and "recall is unavailable" in flat
+    # A bank the checks found wrong, and what to do about it.
+    assert "the original changed after its archive was taken" in flat
+    assert "what to do: stop whatever writes to the engine's private port" in flat
     assert "--resume finishes it" in flat
     assert json.loads(runner.invoke(mec.app, ["switch", "--status", "--json"]).output) == STATUS
 
@@ -337,9 +373,17 @@ def test_the_modes_do_not_combine(stub) -> None:
 def test_the_kill_point_is_only_armed_from_the_environment(monkeypatch) -> None:
     """The live-verification aid: off unless the variable names a hook point."""
     monkeypatch.delenv(mec.KILL_AT_ENV, raising=False)
+    monkeypatch.delenv(mec.TEST_HOOKS_ENV, raising=False)
     assert mec._kill_hook() is None
 
+    # One variable alone arms nothing: a stray one in a service's environment
+    # must not be able to kill a real run.
     monkeypatch.setenv(mec.KILL_AT_ENV, "deleted:shared")
+    assert mec._kill_hook() is None
+    monkeypatch.setenv(mec.TEST_HOOKS_ENV, "0")
+    assert mec._kill_hook() is None
+
+    monkeypatch.setenv(mec.TEST_HOOKS_ENV, "1")
     killed: list[tuple[int, int]] = []
     monkeypatch.setattr(mec.os, "kill", lambda pid, sig: killed.append((pid, sig)))
     hook = mec._kill_hook()

@@ -1407,6 +1407,20 @@ async def memory_add(request: Request) -> dict[str, Any]:
     )
 
 
+async def _engine_read(call: Awaitable[Any]) -> Any:
+    """Await a memory read; an engine that cannot be reached is the typed 503.
+
+    A write already answers ``memory.engine_unavailable`` when the engine's
+    port refuses the connection. A read used to surface the raw connection
+    error as a 500. The engine is unreachable on purpose for the whole of
+    ``hal0 memory embedder switch`` (#3518), so reads say so too.
+    """
+    try:
+        return await call
+    except (ConnectionError, httpx.NetworkError, httpx.ConnectTimeout) as exc:
+        raise MemoryEngineUnavailable() from exc
+
+
 @router.post("/search")
 async def memory_search(request: Request) -> dict[str, Any]:
     """Search memory. Body: ``{query, limit?, dataset?, tags?, before?, after?}``.
@@ -1439,14 +1453,16 @@ async def memory_search(request: Request) -> dict[str, Any]:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
     wrapper = _wrapper(request)
-    items = await wrapper.search(
-        query=query,
-        limit=int(body.get("limit", 10)),
-        dataset=dataset,
-        tags=body.get("tags") or [],
-        before=body.get("before"),
-        after=body.get("after"),
-        client_id=agent_id if agent_id != "anonymous" else None,
+    items = await _engine_read(
+        wrapper.search(
+            query=query,
+            limit=int(body.get("limit", 10)),
+            dataset=dataset,
+            tags=body.get("tags") or [],
+            before=body.get("before"),
+            after=body.get("after"),
+            client_id=agent_id if agent_id != "anonymous" else None,
+        )
     )
     return {"items": items}
 
@@ -1487,14 +1503,16 @@ async def memory_recall(request: Request) -> dict[str, Any]:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
     wrapper = _wrapper(request)
-    items = await wrapper.recall(
-        query=query,
-        types=body.get("types"),
-        max_tokens=int(body.get("max_tokens", 4096)),
-        dataset=dataset,
-        tags=body.get("tags") or [],
-        tags_match=body.get("tags_match"),
-        client_id=agent_id if agent_id != "anonymous" else None,
+    items = await _engine_read(
+        wrapper.recall(
+            query=query,
+            types=body.get("types"),
+            max_tokens=int(body.get("max_tokens", 4096)),
+            dataset=dataset,
+            tags=body.get("tags") or [],
+            tags_match=body.get("tags_match"),
+            client_id=agent_id if agent_id != "anonymous" else None,
+        )
     )
     return {"items": items}
 
@@ -1755,11 +1773,13 @@ async def memory_list(
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
     wrapper = _wrapper(request)
-    return await wrapper.list_items(
-        dataset=resolved,
-        cursor=cursor,
-        limit=limit,
-        client_id=agent_id if agent_id != "anonymous" else None,
+    return await _engine_read(
+        wrapper.list_items(
+            dataset=resolved,
+            cursor=cursor,
+            limit=limit,
+            client_id=agent_id if agent_id != "anonymous" else None,
+        )
     )
 
 

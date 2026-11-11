@@ -4032,6 +4032,39 @@ def test_memory_embedder_reports_an_interrupted_switch(
     assert "`hal0 memory embedder switch --resume`" in check.detail
 
 
+def test_memory_embedder_is_informational_after_a_switch_away_from_the_config() -> None:
+    """The operator moved the store on purpose; the config naming another
+    model is then a fact to state, with the setting that makes them agree."""
+    status = _embedder(_BGE, "example-org/another-embedder", source="embedder-switch")
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "pass"
+    assert f"moved to {_BGE} with `hal0 memory embedder switch`" in check.detail
+    assert "which is fine and has no effect" in check.detail
+    assert "embeddings_model under [memory.models]" in check.detail
+
+    # The same difference without a switch behind it is still the operator's to settle.
+    plain = _embedder(_BGE, "example-org/another-embedder")
+    assert da.check_memory_embedder(status=plain).status == "warn"
+
+
+def test_memory_embedder_says_when_the_engine_is_private_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.memory import embedder_switch as es
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/backups/x")
+    monkeypatch.setattr(es, "isolated_port", lambda: 45123)
+
+    check = da.check_memory_embedder()
+
+    assert check.status == "warn"
+    assert "the engine is isolated on a private port (45123)" in check.detail
+    assert "recall is unavailable too" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
 def test_memory_embedder_reports_a_write_gate_that_no_switch_holds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -354,91 +354,95 @@ sudo hal0 memory embedder switch hindsight-ai/hs-embed-1            # dry run: c
 sudo hal0 memory embedder switch hindsight-ai/hs-embed-1 --apply    # do it
 ```
 
-Run it on the box, as root or as the `hal0` account. The dry run lists every
-bank with its fact, observation, mental-model, directive and document counts,
-the free disk space, and an estimate of the rebuild time (about 60 facts per
-second on CPU). It writes nothing: no export, no pause, no file. With
-`--apply` the command:
+Run it on the box, as root. The dry run lists every bank with its fact,
+observation, mental-model, directive and document counts, the free disk
+space, and an estimate of the duration. It writes nothing: no export, no
+pause, no file.
 
-1. Pauses memory writes, before anything is exported, waits for the engine's
-   queues to drain, and lists the banks. That list is what the run rebuilds.
-2. Exports every bank to
+### Memory is out of service while it runs
+
+`--apply` is your consent to this, so read it first.
+
+- **The engine is taken away from every other client.** For the whole run it
+  listens only on a private loopback port that the switch picks. That is the
+  only way to keep a client that writes to the engine's own port (the
+  Hindsight coding-agents plugin, the Pi coder's plugin) from changing a bank
+  while it is being rebuilt. Such a client simply fails to connect.
+- **Recall does not work**, for the whole run and not only during restarts.
+  hal0 sees the engine as down: recall, search and reflect answer
+  `503 memory.engine_unavailable`.
+- **Writes are refused**: `503 memory.writes_paused` with `Retry-After: 30`.
+  Nothing queues them. The Hermes memory plugin logs a failed turn capture
+  and drops it, so conversation turns captured during the switch are lost.
+- **`hal0 update` refuses to start**, and the switch refuses while an update
+  is queued or running.
+
+A run restarts the engine three times (15 to 30 seconds each on the reference
+box), exports and restores every bank, and re-embeds at about 60 facts per
+second on CPU. A small store takes about a minute and a half. Pick a quiet
+moment.
+
+### What `--apply` does
+
+1. Pauses memory writes and waits for the engine's queues to drain.
+2. Restarts the engine on its private port, still on its original model, and
+   lists the banks. That list is what the run rebuilds.
+3. Exports every bank to
    `/var/lib/hal0/backups/memory-embedder-switch-<time>-<run>/` and checks
-   each archive against the bank's counts.
-3. Records the new embedder, rewrites the engine's managed drop-in from that
-   record, restarts the engine and confirms from its environment that it runs
-   the new model.
-4. Restores each archive into a temporary bank named `<bank>.switch-<run>`,
+   each archive against the bank.
+4. Records the new embedder, rewrites the engine's managed drop-in from that
+   record, restarts the engine (still private) and confirms from its
+   environment that it runs the new model.
+5. Restores each archive into a temporary bank named `<bank>.switch-<run>`,
    which re-embeds every fact with the new model and makes no LLM call, and
-   compares the five counts with the archive.
-5. Only when every bank matches: for each bank, checks the original one more
+   compares it with the archive.
+6. Only when every bank matches: for each bank, checks the original one more
    time, deletes it, renames its rebuilt bank into place and checks the
-   result. Then it clears the mixed flag on the record and lets writes
-   through again.
+   result.
+7. Returns the engine to its normal address and then lets writes through.
 
-### While it runs
-
-A write through hal0 (REST, MCP, the agents) gets `503 memory.writes_paused`
-with `Retry-After: 30` and is not stored. Recall keeps working, except for
-the seconds the engine takes to restart. Nothing queues the refused writes:
-the Hermes memory plugin logs a failed turn capture and drops it, so
-conversation turns captured during the switch are lost. Pick a quiet moment.
-
-`hal0 update` refuses to start while a switch is running or unfinished, and
-the switch refuses while an update is queued or running.
+The engine is isolated with one drop-in for its unit,
+`hindsight-api.service.d/zzzz-hal0-embedder-switch.conf`, which the switch
+writes and removes. It keeps the command your unit already runs, your own
+`ExecStart` drop-in included, and changes only the address. If the engine
+still answers at its normal address afterwards (a drop-in of yours sorts
+after that name), the run stops before it has exported anything.
 
 ### If it fails or is interrupted
 
-Before step 5 (an import fails, a count differs, the engine does not come up
-on the new model, Ctrl-C): the command deletes the temporary banks, puts the
-record and the drop-in back, restarts the engine on the original model, lifts
-the pause and exits non-zero naming the bank and what differs. The original
-banks were never touched.
+Before step 6 (an import fails, a count differs, the engine does not come up
+on the new model, Ctrl-C): the command deletes the temporary banks, returns
+the engine to its normal address on the original model, lifts the pause and
+exits non-zero naming the bank and what differs. The original banks were
+never touched.
 
-Step 5 cannot be undone, so it can be resumed instead. If it stops part-way,
-memory writes stay paused. That is on purpose, and nothing lifts the pause by
-itself: the banks are half replaced. The `memory_embedder` row of
-`hal0 doctor all` warns for as long as the pause is set with no switch
-running, and names the run and its archive directory.
+Step 6 cannot be undone, so it can be resumed instead. If it stops part-way,
+**the engine stays on its private port and writes stay paused**. That is on
+purpose, and nothing ends it by itself: the banks are half replaced. The
+`memory_embedder` row of `hal0 doctor all` warns for as long as that lasts,
+naming the run and its archive directory.
 
 ```sh
 sudo hal0 memory embedder switch --status    # where it stands and what --resume would do
 sudo hal0 memory embedder switch --resume    # finish it
 ```
 
-`--resume` looks at which banks the engine has now, not only at its journal,
-and checks each against its archive before it goes on. A bank it finds under
-neither name is restored from its archive. Run after a stop that happened
-before step 5, the same command undoes the run instead. The journal is kept
-in two places (`/var/lib/hal0/state/` and the archive directory), so losing
-one copy does not lose the run.
+`--status` changes nothing and runs the same checks a resume would. For each
+bank it says what `--resume` will do; where the switch cannot repair
+something by itself it says exactly what you do, down to the command.
 
-`--clear-gate` lifts the pause by hand. It is for one case only, a pause that
-no journal explains, and it is refused while any switch is unfinished. It
-checks no bank, so look at `--status` first.
+`--resume` looks at which banks the engine has now, not only at its journal.
+What it can repair it repairs: a rebuilt bank that no longer matches is
+rebuilt from the original, a bank under neither name is restored from its
+archive. Run after a stop that happened before step 6, the same command
+undoes the run instead. The journal is kept in two places
+(`/var/lib/hal0/state/` and the archive directory), so losing one copy does
+not lose the run. You never edit it by hand.
 
-### Clients that write to the engine directly
-
-The pause covers every write that goes through hal0. A client that writes to
-the engine's own port (the Hindsight coding-agents plugin and the Pi coder's
-plugin do today) is not stopped. The switch therefore compares every bank
-with its export again before the first delete and again right before that
-bank's own delete, by counts and by a fingerprint of the bank (its write
-timestamps, its mental models, directives and configuration, its newest
-operation):
-
-- A bank that changed, or a bank that appeared, before step 5: the run is
-  undone. Stop the client and run the switch again.
-- A bank that changed during step 5: it is not deleted and the run stops
-  there. Stop the client, then `--resume` exports and rebuilds that bank
-  again from what it holds now and carries on.
-- A bank that appeared during step 5: the run finishes its own banks and
-  records the store as mixed, naming the new bank. Run the switch again (a
-  mixed store may be switched to the model it is on) to rebuild every bank.
-
-The fingerprint cannot see a change that stores no memory and starts no
-operation, such as an edit to a webhook. Stopping those clients for the
-duration is the only complete answer.
+`--clear-gate` returns the engine to its normal address and lifts the pause
+by hand. It is for one case only, a pause or a private engine that no journal
+explains, and it is refused while any switch is unfinished. It checks no
+bank, so look at `--status` first.
 
 ### Before you start
 
@@ -447,11 +451,11 @@ duration is the only complete answer.
   with the old bank. Wait for them (`hal0 memory ops list` shows them) or
   cancel them (`DELETE /api/memory/banks/<bank>/operations/<id>`).
   `--allow-pending` goes ahead anyway: what those operations have not written
-  when a bank is exported is not carried over, and a bank that changes after
-  its export is replaced with a warning instead of a stop.
-- The export carries only facts that belong to a document and observations
-  whose source facts still exist. A bank holding anything else does not match
-  its archive, and the switch stops at step 2 saying so.
+  when a bank is exported is not carried over.
+- The export carries only facts that belong to a document. A bank holding any
+  other fact does not match its archive, and the switch stops at step 3
+  saying so. Observations whose source facts are gone are not exported
+  either; that is reported in the result, not refused.
 - It needs free space of about the size of the engine's data directory on
   that filesystem (the rebuilt banks sit beside the originals until the swap)
   and half of that again for the archives.
@@ -461,8 +465,11 @@ duration is the only complete answer.
 - The audit log and LLM request traces of a bank are not carried over.
 - A store flagged as mixed (it may hold vectors from two models) is repaired
   the same way: switch it to the model it is already recorded on.
-- Afterwards set `[memory.models]` `embeddings_provider` and
-  `embeddings_model` to the new pair, so the config and the store agree.
+- The switch does not edit `hal0.toml`. If `[memory.models]` names another
+  model afterwards, that is fine: the engine runs what the store was built
+  with, and `hal0 doctor all` says so without a warning. Set
+  `embeddings_provider` and `embeddings_model` there to the new pair when you
+  want the two to agree.
 
 ## Destructive ops are audited
 

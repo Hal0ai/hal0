@@ -337,7 +337,8 @@ An error response from the engine is not reclassified as engine unavailability.
 While `hal0 memory embedder switch` is rebuilding the store, `memory_add` and
 every other tool that changes memory return `status: "error"` with code
 `memory.writes_paused` and `error.details.retry_after_s: 30`. Nothing is
-written; the read tools keep working.
+written. The engine is on a private port for the same span, so the read tools
+return `memory.engine_unavailable` until the switch has finished.
 
 | Tool | Required | Returns |
 |---|---|---|

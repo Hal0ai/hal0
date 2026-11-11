@@ -75,6 +75,8 @@ key layout.
 └── .config/flm/models/       # default FLM (NPU) model cache
 ```
 
+For the length of a run, `hal0 memory embedder switch` also writes one systemd drop-in, `/etc/systemd/system/hindsight-api.service.d/zzzz-hal0-embedder-switch.conf`, which pins the memory engine to a private loopback port. The switch removes it when the run ends; an interrupted run leaves it in place until `--resume`.
+
 
 ### Hermes release tree
 

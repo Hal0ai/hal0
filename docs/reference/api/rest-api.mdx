@@ -184,7 +184,7 @@ engine unavailability.
 
 Every `/api/memory/*` route that changes memory returns 503
 `memory.writes_paused` while `hal0 memory embedder switch` is rebuilding the
-store, and after an interrupted run until it has been resumed. Nothing is written; `error.details.retry_after_s` and `Retry-After`
+store, and after an interrupted run until it has been resumed. For the same span the engine is on a private port, so `POST /api/memory/recall`, `/search` and `GET /api/memory/list` return 503 `memory.engine_unavailable`. Nothing is written; `error.details.retry_after_s` and `Retry-After`
 are 30 seconds, and recall, search and the other reads keep answering.
 
 Every prefix above is backed by at least one route confirmed directly against
