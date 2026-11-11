@@ -621,6 +621,12 @@ class HindsightProvider(MemoryProvider):
         """Engine bank id that backs the ``shared`` namespace ([memory] bank)."""
         return self._platform_bank
 
+    @property
+    def unified_bank(self) -> bool:
+        """Whether every namespace shares the platform bank ([memory] unified_bank),
+        so that bank also holds each agent's ``visibility:private`` memories."""
+        return self._unified_bank
+
     def _bank_of(self, namespace: str) -> str:
         """Hindsight bank id for a resolved namespace.
 
@@ -1466,6 +1472,12 @@ class HindsightProvider(MemoryProvider):
             raise
         document_id = resolved_id
         out: dict[str, Any] = {"id": document_id, "timestamp": _now()}
+        if update_mode is not None:
+            # The engine was sent this mode with the retain. A caller that
+            # appends to one document id over many writes waits for this
+            # before it trusts the id (an engine that ignored the mode would
+            # replace); the volatile fallback never reports it.
+            out["update_mode"] = update_mode
         resp_dict = resp if isinstance(resp, dict) else {}
         # retain is async by default on this engine — surface the operation
         # id(s) so callers (dashboard ingestion indicator, CLI, memory_operation_*

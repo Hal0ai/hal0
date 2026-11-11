@@ -147,13 +147,13 @@ def test_client_add_shared_flips_private_header(hal0_memory_module) -> None:
     assert call["headers"]["X-hal0-Private"] == "0"
 
 
-def test_sync_turn_writes_private_with_chat_tags(hal0_memory_module) -> None:
-    """``sync_turn`` persists the exchange to the hermes-private bank, tagged."""
+def test_sync_turn_writes_private_into_the_session_document(hal0_memory_module) -> None:
+    """``sync_turn`` appends the exchange to the session's private document."""
     captured: dict = {}
 
-    def _fake_add(text, *, tags=None, metadata=None, private=True):
-        captured.update(text=text, tags=tags, private=private)
-        return {"status": "ok", "id": "mem_id"}
+    def _fake_add(text, *, tags=None, metadata=None, private=True, **extra):
+        captured.update(text=text, tags=tags, metadata=metadata, private=private, **extra)
+        return {"status": "ok", "id": "mem_id", "update_mode": "append"}
 
     provider = hal0_memory_module.Hal0MemoryProvider()
     provider.initialize(session_id="s1")
@@ -163,8 +163,14 @@ def test_sync_turn_writes_private_with_chat_tags(hal0_memory_module) -> None:
 
     assert "User: hello" in captured["text"]
     assert "Assistant: world" in captured["text"]
-    assert "chat" in captured["tags"]
+    # The author tag, and no lifecycle word: the write kind is metadata.
+    assert "agent:hermes" in captured["tags"] and "chat" not in captured["tags"]
+    assert captured["metadata"]["lifecycle"] == "chat"
     assert captured["private"] is True
+    # #2017: one document per session. The id travels in the append field,
+    # never as a plain ``document_id`` (an older hal0-api would replace).
+    assert captured["append_document_id"] == "hermes-s1"
+    assert "document_id" not in captured
 
 
 def test_sync_turn_skips_non_primary_contexts(hal0_memory_module) -> None:
@@ -247,11 +253,12 @@ def test_writes_stamp_the_author_tag(hal0_memory_module) -> None:
     # Convention: tag the author (agent:<id>), bank the scope. Hermes's
     # automatic writes must carry agent:hermes so they're filterable by
     # author without giving each author its own bank.
-    for fn in (
-        hal0_memory_module.Hal0MemoryProvider.sync_turn,
-        hal0_memory_module.Hal0MemoryProvider.on_memory_write,
-    ):
-        assert '"agent:hermes"' in inspect.getsource(fn)
+    provider_mod = sys.modules[hal0_memory_module.Hal0MemoryProvider.__module__]
+    # Session captures (sync_turn and the two checkpoint hooks) share one tag set.
+    assert "agent:hermes" in provider_mod._SESSION_TAGS
+    assert '"agent:hermes"' in inspect.getsource(
+        hal0_memory_module.Hal0MemoryProvider.on_memory_write
+    )
 
 
 def test_list_and_delete_hit_documented_routes(hal0_memory_module) -> None:

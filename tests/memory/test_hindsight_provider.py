@@ -1077,6 +1077,29 @@ async def test_add_forwards_retain_shape_only_when_set():
 
 
 @pytest.mark.asyncio
+async def test_add_reports_the_update_mode_it_sent_to_the_engine():
+    """An appending caller (the Hermes plugin's session document, #2017) reads
+    this as "the append was applied". Absent when no mode was sent."""
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    plain = await p.add("plain", dataset="shared", client_id="hermes", document_id="notes")
+    assert "update_mode" not in plain
+
+    appended = await p.add(
+        "turn", dataset="shared", client_id="hermes", document_id="s1", update_mode="append"
+    )
+    assert appended["update_mode"] == "append"
+    assert fake.retained[1]["update_mode"] == "append"
+
+
+def test_unified_bank_is_readable():
+    fake = FakeHindsightClient()
+    assert HindsightProvider(client=fake, unified_bank=True).unified_bank is True
+    assert HindsightProvider(client=fake).unified_bank is False
+
+
+@pytest.mark.asyncio
 async def test_add_surfaces_items_count_and_operation_ids():
     class _MultiOpClient(FakeHindsightClient):
         async def retain(self, **kwargs):
