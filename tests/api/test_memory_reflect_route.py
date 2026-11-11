@@ -41,9 +41,9 @@ from hal0.agents.hermes.plugins.memory_hindsight._client import Hal0MemoryClient
 from hal0.agents.hermes_provision import profile_agent_id
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory as memory_routes
-from hal0.api.routes.memory import reflect_visibility_scope
 from hal0.memory.hindsight_provider import HindsightProvider
 from hal0.memory.pgvector_provider import PgVectorProvider
+from hal0.memory.read_scope import reflect_visibility_scope
 
 # ── the engine's tag-group semantics, restated for the test ────────────────
 

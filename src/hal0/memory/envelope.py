@@ -1,4 +1,4 @@
-"""The memory write envelope (ADR-0058, decision 4).
+"""The memory write envelope (ADR-0058, decisions 4 and 4a).
 
 Every write that reaches the Hindsight engine goes through
 :func:`apply_envelope` first. The envelope normalises the caller's tags; it
@@ -29,15 +29,39 @@ The rules, in the order they are applied to each caller tag:
    is durable content, so the word is an ordinary topic tag and stays.
 5. Every other tag passes through untouched. That includes the namespaces the
    system already uses (``visibility:``, ``source:``, ``knowledge:``,
-   ``origin:``, ``harness:``, ``migrated:``, ``project:``) and unknown bare
-   words, which are the user's own vocabulary.
+   ``origin:``, ``harness:``, ``migrated:``) and unknown bare words, which are
+   the user's own vocabulary.
+
+Then the project (decision 4a). The caller's project was resolved before the
+envelope runs (:func:`hal0.memory.projects.resolve_project`) and arrives as a
+``ProjectResolution``. The first rule that applies decides:
+
+6. A resolved project is stamped as exactly one ``project:<slug>`` tag, and
+   every ``project:`` tag the caller sent is dropped in its favour.
+7. A project name the deny list refused is "no project": the caller's
+   ``project:`` tags are dropped, and rules 9 to 11 decide the rest.
+8. With nothing resolved and nothing refused, ``project:`` tags the caller
+   sent pass through as sent (two or more of them name no single project),
+   and no other project or scope tag is added.
+9. A write from a coding client with no project gets ``project:unresolved``,
+   whatever its kind, and no ``scope:global``.
+10. A durable write with no project and no ``scope:`` tag of the caller's own
+    gets ``scope:global``. "No project" and "global" are then different facts:
+    the first is the absence of a tag, the second is a tag.
+11. An ephemeral write with no project gets neither.
+
+A ``scope:global`` tag the caller sent is kept, once, after the envelope's
+own tags. A ``project:unresolved`` tag the caller sent is dropped: it is the
+envelope's marker, stamped by rule 9 only. What the envelope decided is recorded in metadata as ``project`` and
+``project_source``, unless the caller already set those keys.
 
 The result always carries exactly one ``agent:<id>`` tag and exactly one of
 ``kind:durable`` / ``kind:ephemeral``.
 
 The module also chooses the observation scope a write is sent with, from its
 final tags (:func:`resolve_observation_scopes`): one scope per project when
-the write carries a ``project:`` tag, the one untagged scope when it does not.
+the write carries a ``project:`` tag (``project:unresolved`` included), the
+one untagged scope when it does not.
 
 This module is pure: no I/O, no engine client, no provider state. The
 ``visibility:private`` stamp and its read-side enforcement (ADR-0005) stay in
@@ -51,6 +75,12 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from hal0.memory.projects import (
+    PROJECT_TAG_PREFIX,
+    UNRESOLVED_SLUG,
+    ProjectResolution,
+)
+
 #: The ``agent:<id>`` a write gets when no identity could be resolved.
 UNKNOWN_AGENT = "unknown"
 
@@ -60,7 +90,15 @@ ANONYMOUS_AGENT = "anonymous"
 
 AGENT_TAG_PREFIX = "agent:"
 KIND_TAG_PREFIX = "kind:"
-PROJECT_TAG_PREFIX = "project:"
+SCOPE_TAG_PREFIX = "scope:"
+
+#: The tag of a durable write that belongs to no project.
+SCOPE_GLOBAL_TAG = f"{SCOPE_TAG_PREFIX}global"
+
+#: The tag of a write from a coding client that named no usable project. It
+#: counts as a project for observation scoping, so such writes consolidate
+#: among themselves and not into the global scope.
+PROJECT_UNRESOLVED_TAG = f"{PROJECT_TAG_PREFIX}{UNRESOLVED_SLUG}"
 
 KIND_DURABLE = "durable"
 KIND_EPHEMERAL = "ephemeral"
@@ -83,6 +121,13 @@ LIFECYCLE_WORDS = frozenset(
 SESSION_ID_KEY = "session_id"
 SESSION_IDS_KEY = "session_ids"
 LIFECYCLE_KEY = "lifecycle"
+PROJECT_KEY = "project"
+PROJECT_SOURCE_KEY = "project_source"
+
+#: ``project_source`` values the envelope writes besides the resolver's own
+#: sources (``field``, ``bank``, ``tag``, ``namespace``).
+PROJECT_SOURCE_DENIED = "denied"
+PROJECT_SOURCE_NONE = "none"
 
 #: The observation scope of a write that carries no project, unless the caller
 #: chose another. An engine ``RetainRequest`` item accepts ``"per_tag"``,
@@ -196,7 +241,9 @@ def resolve_observation_scopes(requested: Any, tags: Iterable[str]) -> Any:
 
     * a write that carries ``project:`` tags consolidates into one scope per
       project, ``[["project:<slug>"], ...]``, so what is learned in one
-      project does not become a belief about another;
+      project does not become a belief about another. ``project:unresolved``
+      is a project here: writes from a coding client that named no project
+      share one scope of their own and stay out of the global one;
     * a write with no project consolidates into the one untagged scope,
       :data:`DEFAULT_OBSERVATION_SCOPES`.
 
@@ -224,20 +271,32 @@ def resolve_observation_scopes(requested: Any, tags: Iterable[str]) -> Any:
     return [[tag] for tag in projects]
 
 
+def _is_project_tag(tag: str) -> bool:
+    return tag.strip().lower().startswith(PROJECT_TAG_PREFIX)
+
+
 def apply_envelope(
     tags: Any,
     *,
     agent: str | None,
-    project: str | None = None,
+    project_resolution: ProjectResolution | None = None,
+    coding: bool = False,
+    stamp_global: bool = True,
     metadata: Mapping[str, Any] | None = None,
 ) -> WriteEnvelope:
     """Normalise one write's tags. See the module docstring for the rules.
 
-    ``agent`` is the resolved caller identity. ``project`` is a project slug
-    the caller named in a structured field; it becomes a ``project:<slug>``
-    tag. Nothing is derived from free text, and a bare word is never rewritten
-    into a ``project:`` tag. ``metadata`` is the caller's metadata, read only
-    to avoid overwriting a key the caller already set.
+    ``agent`` is the resolved caller identity. ``project_resolution`` is the
+    resolver's decision for this write
+    (:func:`hal0.memory.projects.resolve_project`); ``None`` means no resolver
+    ran, which is the same as a resolution that named nothing. Nothing is
+    derived from free text, and a bare word is never rewritten into a
+    ``project:`` tag. ``coding`` says the caller is a coding client, which gets
+    ``project:unresolved`` when it has no project. ``stamp_global=False`` is
+    for a write whose project is carried by something other than a tag (a
+    per-project bank): it gets no ``scope:global``. ``metadata`` is the
+    caller's metadata, read only to avoid overwriting a key the caller already
+    set.
     """
     caller_metadata = metadata or {}
     caller_tags = coerce_tags(tags)
@@ -254,9 +313,19 @@ def apply_envelope(
     seen: set[str] = set()
     session_ids: list[str] = []
     lifecycle: list[str] = []
+    caller_global = False
 
     for tag in caller_tags:
         if tag.strip().lower().startswith(AGENT_TAG_PREFIX) or _kind_of(tag) is not None:
+            continue
+        if tag.strip().lower() == SCOPE_GLOBAL_TAG:
+            # Kept, but re-emitted once after the envelope's own tags, so the
+            # output is the same when the envelope is applied to it again.
+            caller_global = True
+            continue
+        if tag.strip().lower() == PROJECT_UNRESOLVED_TAG:
+            # The envelope's own marker, never a project a caller can claim:
+            # dropped here and stamped again below when it applies.
             continue
         session_id = session_id_of(tag)
         if session_id is not None:
@@ -275,16 +344,44 @@ def apply_envelope(
     ephemeral = bool(lifecycle) or KIND_EPHEMERAL in caller_kinds
     kind = KIND_EPHEMERAL if ephemeral else KIND_DURABLE
 
+    # The project. A resolved or refused name replaces whatever ``project:``
+    # tags the caller sent; with neither, the caller's tags stand.
+    slug = project_resolution.slug if project_resolution is not None else None
+    refused = project_resolution is not None and project_resolution.denied
+    if slug or refused:
+        kept = [tag for tag in kept if not _is_project_tag(tag)]
+    caller_projects = any(_is_project_tag(tag) for tag in kept)
+    caller_scoped = caller_global or any(
+        tag.strip().lower().startswith(SCOPE_TAG_PREFIX) for tag in kept
+    )
+    unresolved = coding or (project_resolution is not None and project_resolution.unresolved)
+
     kept.append(f"{AGENT_TAG_PREFIX}{resolve_agent(agent)}")
     kept.append(f"{KIND_TAG_PREFIX}{kind}")
 
-    slug = (project or "").strip()
-    if slug.lower().startswith(PROJECT_TAG_PREFIX):
-        slug = slug[len(PROJECT_TAG_PREFIX) :].strip()
-    if slug and f"{PROJECT_TAG_PREFIX}{slug}" not in kept:
+    decided: dict[str, Any] = {}
+    if project_resolution is not None and slug:
         kept.append(f"{PROJECT_TAG_PREFIX}{slug}")
+        decided = {PROJECT_KEY: slug, PROJECT_SOURCE_KEY: project_resolution.source}
+    elif caller_projects:
+        pass
+    elif unresolved:
+        kept.append(PROJECT_UNRESOLVED_TAG)
+        decided = {
+            PROJECT_KEY: UNRESOLVED_SLUG,
+            PROJECT_SOURCE_KEY: PROJECT_SOURCE_DENIED if refused else PROJECT_SOURCE_NONE,
+        }
+    else:
+        if refused:
+            decided = {PROJECT_SOURCE_KEY: PROJECT_SOURCE_DENIED}
+        if kind == KIND_DURABLE and stamp_global and not caller_scoped:
+            kept.append(SCOPE_GLOBAL_TAG)
+    if caller_global:
+        kept.append(SCOPE_GLOBAL_TAG)
 
-    additions: dict[str, Any] = {}
+    additions: dict[str, Any] = {
+        key: value for key, value in decided.items() if key not in caller_metadata
+    }
     # Truthiness, as the provider tests it when it derives the document id:
     # an empty ``session_id`` is no session id, and a tag-derived one fills it.
     existing_session = caller_metadata.get(SESSION_ID_KEY)
@@ -315,7 +412,14 @@ __all__ = [
     "KIND_TAG_PREFIX",
     "LIFECYCLE_KEY",
     "LIFECYCLE_WORDS",
+    "PROJECT_KEY",
+    "PROJECT_SOURCE_DENIED",
+    "PROJECT_SOURCE_KEY",
+    "PROJECT_SOURCE_NONE",
     "PROJECT_TAG_PREFIX",
+    "PROJECT_UNRESOLVED_TAG",
+    "SCOPE_GLOBAL_TAG",
+    "SCOPE_TAG_PREFIX",
     "SESSION_IDS_KEY",
     "SESSION_ID_KEY",
     "UNKNOWN_AGENT",

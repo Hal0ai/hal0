@@ -47,7 +47,15 @@ from hal0.memory.envelope import (
     coerce_tags,
     resolve_observation_scopes,
 )
+from hal0.memory.projects import (
+    SOURCE_NAMESPACE,
+    SOURCE_NONE,
+    ProjectRegistry,
+    ProjectResolution,
+    resolve_project,
+)
 from hal0.memory.provider import MemoryProvider
+from hal0.memory.read_scope import VISIBILITY_PRIVATE_TAG, reflect_visibility_scope
 
 log = structlog.get_logger(__name__)
 
@@ -62,8 +70,9 @@ _AGENTS = "agents"
 # Unified-bank visibility tagging (PR #1244). A write made under the
 # X-hal0-Private toggle lands in the single ``shared`` bank stamped
 # ``visibility:private`` + ``agent:<id>`` (see ``add``). Read-side enforcement
-# (below) keeps such a doc addressable only by its owning agent.
-_VISIBILITY_PRIVATE = "visibility:private"
+# (below) keeps such a doc addressable only by its owning agent. The tag is
+# owned by ``hal0.memory.read_scope``, which builds the reflect filter from it.
+_VISIBILITY_PRIVATE = VISIBILITY_PRIVATE_TAG
 _AGENT_TAG_PREFIX = "agent:"
 #: Tag namespaces the provider owns. A caller's tag is judged stripped and
 #: lower-cased (as the bridge's ``_client_tags`` does), so ``AGENT:x``,
@@ -568,8 +577,13 @@ class HindsightProvider(MemoryProvider):
         extraction_slot: str = "memory",
         unified_bank: bool = False,
         bank: str = _SHARED,
+        projects: ProjectRegistry | None = None,
     ) -> None:
         self._client = client
+        # The project registry ([memory.projects], ADR-0058 decision 4a):
+        # aliases, the deny list and the confirmed names every write's project
+        # is resolved against. Absent means the shipped defaults.
+        self._projects = projects if projects is not None else ProjectRegistry()
         # Engine bank id behind the logical ``shared`` namespace ([memory] bank,
         # ADR-0052). The namespace grammar is untouched; only this mapping
         # moves. ``private:<agent>`` / ``agents`` banks keep their own names.
@@ -626,6 +640,11 @@ class HindsightProvider(MemoryProvider):
         """Whether every namespace shares the platform bank ([memory] unified_bank),
         so that bank also holds each agent's ``visibility:private`` memories."""
         return self._unified_bank
+
+    @property
+    def projects(self) -> ProjectRegistry:
+        """The project registry writes are resolved against ([memory.projects])."""
+        return self._projects
 
     def _bank_of(self, namespace: str) -> str:
         """Hindsight bank id for a resolved namespace.
@@ -1310,11 +1329,12 @@ class HindsightProvider(MemoryProvider):
 
     # ── Core five ──────────────────────────────────────────────────────
 
-    async def add(
+    def _retain_item(
         self,
         text: str,
+        *,
         dataset: str = _SHARED,
-        tags: list[str] | None = None,
+        tags: Any = None,
         source: str | None = None,
         metadata: dict[str, Any] | None = None,
         client_id: str | None = None,
@@ -1323,8 +1343,22 @@ class HindsightProvider(MemoryProvider):
         observation_scopes: Any = None,
         strategy: str | None = None,
         update_mode: str | None = None,
-        sync: bool = False,
-    ) -> dict[str, Any]:
+        project: str | None = None,
+        project_resolution: ProjectResolution | None = None,
+        coding: bool = False,
+        context: str | None = None,
+        timestamp: str | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """Normalise one write into ``(bank id, engine retain item)``.
+
+        The one place a write is shaped, shared by :meth:`add` (one item) and
+        :meth:`retain_items` (a batch): the document id, the reserved-tag
+        strip, the project resolution, the write envelope, the
+        ``visibility:private`` stamp, the context and timestamp defaults, the
+        metadata encoding and the observation scope. The item's keys are the
+        client's ``retain`` keywords. Raises ``ValueError`` for a shared write
+        that claims a private document id.
+        """
         # ``private:<agent>`` / ``project:<id>`` still arrive from the front
         # door even in unified mode; capture that intent before the bank
         # collapses to shared, so it can survive as a tag.
@@ -1386,14 +1420,36 @@ class HindsightProvider(MemoryProvider):
         # The write envelope (ADR-0058 decision 4) then normalises what is
         # left: it stamps ``agent:`` and exactly one ``kind:`` tag, and moves
         # session ids and lifecycle words out of the tag space into metadata.
-        # #1300: the ``project:<id>`` tag is stamped only in unified mode —
-        # pre-unified multi-bank mode isolates the project by bank, so tagging
-        # there would be a second owner of the same fact (and would change
-        # existing deployments' tag sets).
+        #
+        # The project (decision 4a) is resolved first. The retired
+        # ``project:<id>`` namespace (#1300, ADR-0005) wins in unified mode
+        # and is stamped as written, because the read filter matches that
+        # namespace name against the tag verbatim. In pre-unified multi-bank
+        # mode the project is isolated by its bank, so a tag there would be a
+        # second owner of the same fact: such a write gets neither a project
+        # tag nor ``scope:global``. Every other write goes through the
+        # resolver: the caller's project field, else a single ``project:`` tag
+        # among its tags, then the registry's aliases and deny list.
+        namespace_slug = requested_project[len(_PROJECT) :].strip() if requested_project else ""
+        resolution: ProjectResolution | None
+        if namespace_slug and self._unified_bank:
+            resolution = ProjectResolution(
+                slug=namespace_slug,
+                source=SOURCE_NAMESPACE,
+                registered=self._projects.is_registered(namespace_slug),
+            )
+        elif project_resolution is not None and project_resolution.source != SOURCE_NONE:
+            resolution = project_resolution
+        else:
+            resolution = resolve_project(
+                field=project, tags=caller_tags, registry=self._projects, coding=coding
+            )
         envelope = apply_envelope(
             caller_tags,
             agent=agent,
-            project=requested_project if self._unified_bank else None,
+            project_resolution=resolution,
+            coding=coding,
+            stamp_global=not (namespace_slug and not self._unified_bank),
             metadata=meta,
         )
         out_tags = list(envelope.tags)
@@ -1406,18 +1462,42 @@ class HindsightProvider(MemoryProvider):
         meta.update(envelope.metadata)
 
         # Extraction quality suffers without a ``context`` line and a
-        # timestamp; always supply both unless the caller already did.
-        context = meta.pop("context", None) or meta.get("source") or f"{agent} conversation turn"
-        timestamp = meta.pop("timestamp", None) or _now()
+        # timestamp; always supply both unless the caller already did (as an
+        # item field, or under the metadata key of the same name).
+        context = (
+            context
+            or meta.pop("context", None)
+            or meta.get("source")
+            or f"{agent} conversation turn"
+        )
+        timestamp = timestamp or meta.pop("timestamp", None) or _now()
 
-        # Full RetainRequest item shape (entities/strategy/update_mode) + the
-        # sync/async toggle — forwarded only when the caller actually set
-        # them. ``observation_scopes`` is the exception: every write that is
-        # not private-in-the-unified-bank carries one (see below), so a client
+        # #1905: nested structures must round-trip. ``str(v)`` on a dict/list
+        # produced a Python repr (single quotes) that no JSON reader on the
+        # way back out could decode — the peer registry's
+        # ``hal0_state``/``endpoint``/``roles`` cards on upgraded boxes were
+        # written exactly that way. ``json.dumps`` keeps the value
+        # machine-readable; scalars stay ``str()`` to preserve the wire shape
+        # existing readers expect.
+        item: dict[str, Any] = {
+            "content": text,
+            "document_id": resolved_id,
+            "context": context,
+            "metadata": {
+                k: (json.dumps(v) if isinstance(v, (dict, list)) else str(v))
+                for k, v in meta.items()
+            },
+            "tags": out_tags,
+            "timestamp": timestamp,
+        }
+
+        # Full RetainRequest item shape (entities/strategy/update_mode) —
+        # forwarded only when the caller actually set them.
+        # ``observation_scopes`` is the exception: every write that is not
+        # private-in-the-unified-bank carries one (see below), so a client
         # fake must accept that keyword.
-        extra: dict[str, Any] = {}
         if entities is not None:
-            extra["entities"] = entities
+            item["entities"] = entities
         # A private note in the unified bank must not feed an observation that
         # lacks ``visibility:private``, so on a private write the caller's
         # scopes (any form) are ignored and the engine default applies.
@@ -1432,36 +1512,18 @@ class HindsightProvider(MemoryProvider):
                 _strip_reserved_scopes(observation_scopes), out_tags
             )
         if observation_scopes is not None:
-            extra["observation_scopes"] = observation_scopes
+            item["observation_scopes"] = observation_scopes
         if strategy is not None:
-            extra["strategy"] = strategy
+            item["strategy"] = strategy
         if update_mode is not None:
-            extra["update_mode"] = update_mode
-        if sync:
-            extra["sync"] = True
+            item["update_mode"] = update_mode
+        return bank, item
 
+    async def _retain(self, method: str, /, **kwargs: Any) -> Any:
+        """Send a retain through :meth:`_call`, recording a failure as
+        write-path evidence."""
         try:
-            resp = await self._call(
-                "retain",
-                bank_id=bank,
-                content=text,
-                document_id=resolved_id,
-                context=context,
-                # #1905: nested structures must round-trip. ``str(v)`` on a
-                # dict/list produced a Python repr (single quotes) that no
-                # JSON reader on the way back out could decode — the peer
-                # registry's ``hal0_state``/``endpoint``/``roles`` cards on
-                # upgraded boxes were written exactly that way. ``json.dumps``
-                # keeps the value machine-readable; scalars stay ``str()``
-                # to preserve the wire shape existing readers expect.
-                metadata={
-                    k: (json.dumps(v) if isinstance(v, (dict, list)) else str(v))
-                    for k, v in meta.items()
-                },
-                tags=out_tags,
-                timestamp=timestamp,
-                **extra,
-            )
+            return await self._call(method, **kwargs)
         except Exception as exc:
             # #1420: a raised retain is write-path evidence, distinct from the
             # daemon-reachability signal ``_call`` already updated (a 4xx means
@@ -1470,21 +1532,21 @@ class HindsightProvider(MemoryProvider):
             if isinstance(exc, (ConnectionError, httpx.NetworkError, httpx.ConnectTimeout)):
                 raise MemoryEngineUnavailable() from exc
             raise
-        document_id = resolved_id
-        out: dict[str, Any] = {"id": document_id, "timestamp": _now()}
-        if update_mode is not None:
-            # The engine was sent this mode with the retain. A caller that
-            # appends to one document id over many writes waits for this
-            # before it trusts the id (an engine that ignored the mode would
-            # replace); the volatile fallback never reports it.
-            out["update_mode"] = update_mode
+
+    @staticmethod
+    def _retain_receipt(resp: Any) -> dict[str, Any]:
+        """The engine's accounting of a retain, as hal0 reports it.
+
+        retain is async by default on this engine — surface the operation
+        id(s) so callers (dashboard ingestion indicator, CLI,
+        memory_operation_* MCP tools) can poll instead of wondering why list
+        doesn't show the item yet. ``items_count``/``operation_ids`` used to
+        be dropped on the floor entirely — surface them whenever the engine
+        reports them so a caller doing per-item accounting doesn't have to
+        guess.
+        """
         resp_dict = resp if isinstance(resp, dict) else {}
-        # retain is async by default on this engine — surface the operation
-        # id(s) so callers (dashboard ingestion indicator, CLI, memory_operation_*
-        # MCP tools) can poll instead of wondering why list doesn't show the
-        # item yet. ``items_count``/``operation_ids`` used to be dropped on the
-        # floor entirely — surface them whenever the engine reports them so a
-        # caller doing per-item accounting doesn't have to guess.
+        out: dict[str, Any] = {}
         operation_id = resp_dict.get("operation_id")
         if operation_id:
             out["operation_id"] = str(operation_id)
@@ -1494,6 +1556,132 @@ class HindsightProvider(MemoryProvider):
         items_count = resp_dict.get("items_count")
         if isinstance(items_count, int):
             out["items_count"] = items_count
+        return out
+
+    async def add(
+        self,
+        text: str,
+        dataset: str = _SHARED,
+        tags: list[str] | None = None,
+        source: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        client_id: str | None = None,
+        document_id: str | None = None,
+        entities: list[dict[str, Any]] | None = None,
+        observation_scopes: Any = None,
+        strategy: str | None = None,
+        update_mode: str | None = None,
+        sync: bool = False,
+        project: str | None = None,
+        coding: bool = False,
+    ) -> dict[str, Any]:
+        bank, item = self._retain_item(
+            text,
+            dataset=dataset,
+            tags=tags,
+            source=source,
+            metadata=metadata,
+            client_id=client_id,
+            document_id=document_id,
+            entities=entities,
+            observation_scopes=observation_scopes,
+            strategy=strategy,
+            update_mode=update_mode,
+            project=project,
+            coding=coding,
+        )
+        # The sync/async toggle is forwarded only when the caller set it.
+        toggle: dict[str, Any] = {"sync": True} if sync else {}
+        resp = await self._retain("retain", bank_id=bank, **item, **toggle)
+        out: dict[str, Any] = {"id": item["document_id"], "timestamp": _now()}
+        if update_mode is not None:
+            # The engine was sent this mode with the retain. A caller that
+            # appends to one document id over many writes waits for this
+            # before it trusts the id (an engine that ignored the mode would
+            # replace); the volatile fallback never reports it.
+            out["update_mode"] = update_mode
+        out.update(self._retain_receipt(resp))
+        return out
+
+    async def retain_items(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        agent: str | None,
+        dataset: str = _SHARED,
+        project_resolution: ProjectResolution | None = None,
+        coding: bool = False,
+        async_: bool | None = None,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Retain a batch of items with ONE engine call.
+
+        ``items`` are in the engine's ``RetainRequest`` item shape:
+        ``content`` (required), and optionally ``context``, ``document_id``,
+        ``tags``, ``metadata``, ``observation_scopes``, ``strategy``,
+        ``update_mode``, ``timestamp`` and ``entities``. Each one is
+        normalised exactly as :meth:`add` normalises its single write
+        (:meth:`_retain_item`): ``agent`` is the caller's identity for all of
+        them, ``dataset`` the namespace they are written to, and
+        ``project_resolution`` the project the request named. An item whose
+        request named no project still resolves one from a single
+        ``project:`` tag of its own.
+
+        ``async_`` and ``operation_id`` are the engine's request-level fields
+        and are forwarded exactly as given; ``None`` leaves the field out of
+        the request, so the engine's own default applies. The engine treats
+        ``operation_id`` as the identity of an async retain: a resend with the
+        same id returns the original operation and drops changed content, and
+        an id that belongs to another operation is refused with 409.
+
+        Returns ``{document_ids, timestamp}`` plus ``operation_id`` /
+        ``operation_ids`` / ``items_count`` when the engine reports them, and
+        the engine's answer verbatim as ``engine_response``.
+        """
+        if not isinstance(items, list) or not items:
+            raise BadRequest("retain_items needs at least one item")
+        bank: str | None = None
+        wire_items: list[dict[str, Any]] = []
+        for index, raw in enumerate(items):
+            content = raw.get("content") if isinstance(raw, dict) else None
+            if not isinstance(content, str) or not content:
+                raise BadRequest(
+                    f"retain_items item {index} needs 'content' (non-empty string)",
+                    details={"index": index},
+                )
+            metadata = raw.get("metadata")
+            document_id = raw.get("document_id")
+            bank, item = self._retain_item(
+                content,
+                dataset=dataset,
+                tags=raw.get("tags"),
+                source=agent,
+                metadata=dict(metadata) if isinstance(metadata, dict) else None,
+                client_id=agent,
+                document_id=str(document_id) if document_id not in (None, "") else None,
+                entities=raw.get("entities"),
+                observation_scopes=raw.get("observation_scopes"),
+                strategy=raw.get("strategy"),
+                update_mode=raw.get("update_mode"),
+                project_resolution=project_resolution,
+                coding=coding,
+                context=raw.get("context") or None,
+                timestamp=raw.get("timestamp") or None,
+            )
+            wire_items.append(item)
+        resp = await self._retain(
+            "retain_batch",
+            bank_id=bank,
+            items=wire_items,
+            async_=async_,
+            operation_id=operation_id,
+        )
+        out: dict[str, Any] = {
+            "document_ids": [item["document_id"] for item in wire_items],
+            "timestamp": _now(),
+        }
+        out.update(self._retain_receipt(resp))
+        out["engine_response"] = resp if isinstance(resp, dict) else {}
         return out
 
     async def search(
@@ -2228,8 +2416,39 @@ class HindsightProvider(MemoryProvider):
         exclude_mental_model_ids: list[str] | None = None,
         include: dict[str, Any] | None = None,
         response_schema: dict[str, Any] | None = None,
+        enforce_visibility: bool = True,
     ) -> dict[str, Any]:
+        """Ask the engine to answer ``query`` from one bank.
+
+        A reflect answer is prose, so what the caller may read has to be
+        decided before the engine writes it. With ``enforce_visibility`` (the
+        default, and what every identified caller gets: REST, both MCP mounts)
+        two rules apply, here and nowhere else:
+
+        * the engine is given ``tag_groups`` equal to the read-side visibility
+          rule (:func:`hal0.memory.read_scope.reflect_visibility_scope`): a
+          memory is readable unless it is ``visibility:private``, or when it
+          is the caller's own. The caller's ``tags`` / ``tags_match`` travel
+          inside those groups, because the engine refuses ``tags`` next to
+          ``tag_groups``; ``tag_groups`` the caller sent are appended, and
+          the engine ANDs them, so they can narrow the read and never widen
+          it;
+        * under the unified bank, which holds every agent's private memories,
+          mental models are left out (``exclude_mental_models``): a model is
+          written from the whole bank and cannot be filtered by tag.
+
+        ``enforce_visibility=False`` sends the request as given. It is for an
+        operator surface that names a bank and carries no caller identity.
+        """
         bank = self._bank_of(self._write_namespace(dataset, client_id))
+        if enforce_visibility:
+            caller = client_id or self._client_id
+            groups = reflect_visibility_scope(
+                caller if caller and caller != _ANONYMOUS else None, tags, tags_match
+            )
+            groups.extend(tag_groups or [])
+            tags, tags_match, tag_groups = None, None, groups
+            exclude_mental_models = bool(exclude_mental_models) or self._unified_bank
         return await self._call(
             "reflect",
             bank_id=bank,

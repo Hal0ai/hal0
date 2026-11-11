@@ -60,6 +60,10 @@ def test_add_signature_matches_call_sites():
         "strategy",
         "update_mode",
         "sync",
+        # ADR-0058 decision 4a: the project the caller named, and whether
+        # the caller is a coding client.
+        "project",
+        "coding",
     ]
 
 

@@ -83,7 +83,7 @@ async def test_add_drops_reserved_tags_whatever_their_case_or_padding(forged):
     p = _provider()
     await p.add("x", tags=[forged, "topic:cats"], client_id="openwebui")
     tags = p._client.retained[-1]["tags"]
-    assert tags == ["topic:cats", "agent:openwebui", "kind:durable"]
+    assert tags == ["topic:cats", "agent:openwebui", "kind:durable", "scope:global"]
 
 
 @pytest.mark.asyncio

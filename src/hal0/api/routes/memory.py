@@ -39,11 +39,7 @@ from hal0.errors import MemoryEngineUnavailable
 from hal0.memory import extraction_env as _ee
 from hal0.memory.context import build_memory_context
 from hal0.memory.extraction_env import MEMORY_ALIAS, ExtractionLimits, memory_engine_target
-from hal0.memory.hindsight_provider import (
-    _AGENT_TAG_PREFIX,
-    _VISIBILITY_PRIVATE,
-    bank_to_namespace,
-)
+from hal0.memory.hindsight_provider import bank_to_namespace
 from hal0.memory.namespace import (
     DEFAULT_DATASET,
     DOCUMENT_ID_PATTERN,
@@ -97,6 +93,9 @@ _TAGS_MATCH_MODES = ("any", "all", "any_strict", "all_strict", "exact")
 
 _AGENT_HEADER = "x-hal0-agent"
 _PRIVATE_HEADER = "x-hal0-private"
+#: The project a write belongs to, for a client that sets it once per session
+#: and not per call. The body's ``project`` field wins over it.
+_PROJECT_HEADER = "x-hal0-project"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 # Security hardening: agent identity feeds the
@@ -1229,7 +1228,14 @@ def make_add_preflight(app: Any, wrapper: Any) -> Callable[[], Awaitable[None]]:
 @router.post("/add")
 async def memory_add(request: Request) -> dict[str, Any]:
     """Add a memory item. Body: ``{text, dataset?, tags?, metadata?,
-    document_id?, update_mode?, append_document_id?, observation_scopes?}``.
+    document_id?, update_mode?, append_document_id?, observation_scopes?,
+    project?}``.
+
+    ``project`` names the project the caller is working in (a repository
+    name, say). hal0 resolves it against ``[memory.projects]`` and tags the
+    write with one ``project:<slug>``; a caller does not write that tag by
+    hand. The ``X-hal0-Project`` header carries the same value for a client
+    that sets it once; the body field wins.
 
     Returns ``{id, timestamp}`` plus ``operation_id`` when the engine
     ingests asynchronously (Hindsight retain). Reuse ``document_id``
@@ -1362,6 +1368,18 @@ async def memory_add(request: Request) -> dict[str, Any]:
                 details={"path": "/api/memory/add"},
             )
         passthrough["observation_scopes"] = observation_scopes
+    # The project the caller is working in (ADR-0058 decision 4a): the body
+    # field, else the header. The provider resolves the name; nothing is
+    # passed on when the caller named none.
+    project = body.get("project")
+    if project is not None and not isinstance(project, str):
+        raise BadRequest(
+            "memory_add 'project' must be a string",
+            details={"path": "/api/memory/add"},
+        )
+    project = (project or "").strip() or request.headers.get(_PROJECT_HEADER, "").strip()
+    if project:
+        passthrough["project"] = project
 
     wrapper = _wrapper(request)
 
@@ -1482,42 +1500,6 @@ async def memory_recall(request: Request) -> dict[str, Any]:
     return {"items": items}
 
 
-def reflect_visibility_scope(
-    agent_id: str | None, tags: list[str] | None = None, tags_match: str | None = None
-) -> list[dict[str, Any]]:
-    """Engine ``tag_groups`` that hold a reflect to what ``agent_id`` may read.
-
-    Recall filters its results after the fact
-    (``HindsightProvider._is_visible_to``); a reflect answer is prose and cannot
-    be filtered afterwards, so the same rule is given to the engine as a tag
-    filter instead: a memory is readable when it is not ``visibility:private``,
-    or when it carries the caller's own ``agent:<id>`` tag. A caller with no
-    identity reads no private memory at all.
-
-    What this covers and what it does not: the engine applies ``tag_groups``
-    to the reflect loop's fact and observation searches, where every item
-    carries the tags of the write it came from. It also filters the mental
-    model search by the MODEL's own tags, which says nothing about what the
-    model was built from: a mental model is a document the engine writes from
-    the whole bank, and hal0's seeded models carry no tags. A tag filter
-    therefore cannot keep another agent's private notes out of mental-model
-    text; :func:`memory_reflect` leaves mental models out of the loop instead
-    wherever the bank holds more than one agent's private memories.
-
-    ``tags`` / ``tags_match`` are the caller's own scoping. The engine refuses
-    ``tags`` next to ``tag_groups``, so they ride along as one more group
-    (groups are AND-ed) with the engine's top-level default, ``any``.
-    """
-    readable: dict[str, Any] = {"not": {"tags": [_VISIBILITY_PRIVATE], "match": "any_strict"}}
-    if agent_id:
-        own = {"tags": [f"{_AGENT_TAG_PREFIX}{agent_id}"], "match": "any_strict"}
-        readable = {"or": [readable, own]}
-    groups = [readable]
-    if tags:
-        groups.append({"tags": list(tags), "match": tags_match or "any"})
-    return groups
-
-
 @router.post("/reflect")
 async def memory_reflect(request: Request) -> dict[str, Any]:
     """Ask the engine to answer ``query`` from memory (LLM synthesis).
@@ -1536,8 +1518,10 @@ async def memory_reflect(request: Request) -> dict[str, Any]:
     the shared bank only, or the caller's own private bank when
     ``X-hal0-Private: 1`` is sent, never both.
 
-    Two rules keep other agents' private memories out of the answer. Facts
-    and observations are filtered by tag (:func:`reflect_visibility_scope`).
+    Two rules keep other agents' private memories out of the answer, and the
+    provider applies both (``HindsightProvider.reflect``), so the MCP
+    ``memory_reflect`` tool gets the same ones. Facts and observations are
+    filtered by tag (:func:`hal0.memory.read_scope.reflect_visibility_scope`).
     Mental models cannot be filtered that way, so under the unified bank the
     reflect runs with the engine's ``exclude_mental_models`` and uses none.
 
@@ -1579,9 +1563,12 @@ async def memory_reflect(request: Request) -> dict[str, Any]:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
     wrapper = _wrapper(request)
-    # A provider that does not say how its banks are laid out is treated as
-    # unified: leaving mental models out costs some answer quality, using one
-    # built from another agent's private notes is a leak.
+    # The provider turns the caller's identity and tags into the engine's
+    # tag filter, and leaves mental models out under the unified bank. This
+    # route also asks for that exclusion itself: a provider that does not say
+    # how its banks are laid out is treated as unified, because leaving
+    # mental models out costs some answer quality and using one built from
+    # another agent's private notes is a leak.
     shared_with_other_agents = bool(getattr(wrapper, "unified_bank", True))
     try:
         result = await wrapper.reflect(
@@ -1590,7 +1577,8 @@ async def memory_reflect(request: Request) -> dict[str, Any]:
             client_id=client_id,
             budget=budget,
             max_tokens=max_tokens,
-            tag_groups=reflect_visibility_scope(client_id, tags, tags_match),
+            tags=tags,
+            tags_match=tags_match,
             exclude_mental_models=shared_with_other_agents,
             response_schema=response_schema,
         )
