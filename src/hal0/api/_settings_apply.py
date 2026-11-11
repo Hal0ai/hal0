@@ -422,6 +422,17 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # [memory] — HindsightProvider constructor arg, built once at boot.
     "memory.unified_bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "memory.bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    # [memory.projects] — the project registry is also a HindsightProvider
+    # constructor arg (provider_from_config); the doctor row reads hal0.toml.
+    "memory.projects.aliases": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.projects.deny": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "memory.projects.registered": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [realtime] — every key is read live off app.state.hal0_config.realtime
     # on each WS connect (routes/realtime.py), which the settings PUT
     # refreshes in place, so all of them apply immediately.
