@@ -34,6 +34,7 @@ from pydantic import (
     BaseModel,
     Field,
     PrivateAttr,
+    ValidationInfo,
     field_serializer,
     field_validator,
     model_serializer,
@@ -3347,29 +3348,29 @@ class MemoryConfig(BaseModel):
             "set."
         ),
     )
-    unified_bank: bool = Field(
-        default=True,
+    bank: str = Field(
+        default="hal0:shared",
         description=(
-            "Route all memory into ONE Hindsight bank ('shared') instead of "
-            "per-agent private banks. When true, the X-hal0-Private toggle no "
-            "longer forks a private:<agent> bank — the write still lands in "
-            "'shared' but is stamped with a 'visibility:private' tag (plus an "
-            "'agent:<id>' tag), and recall is single-bank (no cross-bank "
-            "fan-out). Set false to restore the pre-unified multi-bank model "
-            "(private:<agent> / project:<id> banks + fan-out recall)."
+            "Name of the Hindsight bank behind the 'shared' namespace, where "
+            "every agent's durable memory lives (ADR-0052, ADR-0058 decision 7). "
+            "The namespace grammar ('shared' | 'private:<agent>') is unchanged; "
+            "only the bank id the provider talks to differs. A store hal0 wrote "
+            "before the two-bank layout keeps the bank it has (recorded in "
+            "/var/lib/hal0/state/memory-layout.json) until it is folded in, and "
+            "there this key names a bank only when set to something other than "
+            "'hal0:shared'. Changing it points hal0-api at a different bank, so "
+            "run 'hal0 memory migrate platform' first to clone the existing "
+            "bank's data into the new name, then restart hal0-api."
         ),
     )
-    bank: str = Field(
-        default="shared",
+    private_bank: str = Field(
+        default="hal0:private",
         description=(
-            "Name of the Hindsight bank that holds the platform's memory — the "
-            "engine bank behind the 'shared' namespace (ADR-0052). The namespace "
-            "grammar ('shared' | 'private:<agent>') is unchanged; only the bank "
-            "id the provider talks to differs. The default 'shared' leaves "
-            "existing installs untouched. Changing it points hal0-api at a "
-            "different bank, so run 'hal0 memory migrate platform' first to "
-            "clone the existing bank's data into the new name, then restart "
-            "hal0-api."
+            "Name of the Hindsight bank behind every 'private:<agent>' "
+            "namespace in the two-bank layout (ADR-0058 decision 7): one bank "
+            "for all agents, where each agent's 'agent:<id>' tag scopes it to "
+            "its own memory. Must differ from [memory] bank. Not used by a "
+            "store still on its pre-two-bank layout. Needs a hal0-api restart."
         ),
     )
     # HAL0-SUNSET: v2.0.0 — 'cognee' engine literal retired here. It is no
@@ -3391,26 +3392,37 @@ class MemoryConfig(BaseModel):
         ),
     )
 
-    @field_validator("bank")
+    @field_validator("bank", "private_bank")
     @classmethod
-    def _bank_is_addressable(cls, v: str) -> str:
+    def _bank_is_addressable(cls, v: str, info: ValidationInfo) -> str:
         # Same grammar as hal0.api.routes.memory_admin._BANK_RE: the bank id
         # travels in /api/memory/banks/{bank_id} paths, so anything that route
         # would refuse is refused here at config load instead of at first use.
         s = str(v or "").strip()
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}", s):
             raise ValueError(
-                f"memory.bank {v!r} must start with a letter or digit and use only "
-                "letters, digits, '.', '_', ':' and '-' (max 128 chars)"
+                f"memory.{info.field_name} {v!r} must start with a letter or digit and use "
+                "only letters, digits, '.', '_', ':' and '-' (max 128 chars)"
             )
         # ``private__<agent>`` is the per-agent bank family and ``agents`` the
         # retired identity-card bank (ADR-0005); a platform bank named like
         # either would alias them.
         if s.startswith("private__") or s == "agents":
             raise ValueError(
-                f"memory.bank {v!r} collides with a reserved bank name ('private__*' and 'agents')"
+                f"memory.{info.field_name} {v!r} collides with a reserved bank name "
+                "('private__*' and 'agents')"
             )
         return s
+
+    @model_validator(mode="after")
+    def _private_bank_is_its_own(self) -> MemoryConfig:
+        # One bank for both would put every agent's private memory back beside
+        # the shared memory, which is what the two-bank layout ends.
+        if self.private_bank == self.bank:
+            raise ValueError(
+                f"memory.private_bank {self.private_bank!r} must differ from memory.bank"
+            )
+        return self
 
     @field_validator("engine")
     @classmethod

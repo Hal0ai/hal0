@@ -21,7 +21,7 @@ Response::
              by_bank: [{bank_id, waiting, failed, oldest_waiting_s}], truncated},
      knowledge: {pages, pages_stale, models, models_stale, refresh_failed,
                  last_success_at},
-     banks: {layout: "per_bank", total, facts,
+     banks: {layout: "legacy_unified" | "legacy_split" | "two_bank", total, facts,
              list: [{bank_id, facts, documents}]},
      writes: null,
      steps: [{id, state: "current" | "waiting" | "clear", waits_on,

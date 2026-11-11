@@ -2006,6 +2006,15 @@ def run_post_activation_migrations(
         except Exception as exc:
             log.warning("updater.runner_conversion_rerender_failed", job_id=job_id, error=str(exc))
 
+    # ADR-0058 decision 7: write down which banks this box's memory store is
+    # laid out in before a config migration can save hal0.toml with the new
+    # [memory] defaults. install.sh runs this before the engine's first start,
+    # so a new install records the two banks and an upgraded store its old
+    # ones. Never raises.
+    from hal0.memory.bank_layout import record_memory_layout
+
+    record_memory_layout()
+
     migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id)
 
     # The hindsight-api drop-in is written only by a graph-settings save, so a

@@ -22,14 +22,15 @@ on a new one, so it writes only where there is nothing to disturb:
   unfinished (:func:`switch_in_progress`); the hook reports "not done" and
   the heal loop runs it again once the switch has finished.
 
-Banks are addressed the way hal0 addresses them, through the provider:
+Banks are addressed the way hal0 addresses them, through the provider and the
+store's bank layout (ADR-0058 decision 7, :mod:`hal0.memory.bank_layout`):
 
-* the ``shared`` namespace is the platform bank (``[memory] bank``, ADR-0052),
-  whatever that bank is called;
-* ``private:hermes`` is the provider's engine bank for that namespace
-  (``private__hermes``), and only when ``[memory] unified_bank`` is off. With
-  the unified bank, the default, private memory lives in the platform bank
-  and there is no private bank to seed.
+* two-bank: the platform bank (``[memory] bank``, ``hal0:shared`` by
+  default) with the ``shared`` manifest, and the private bank
+  (``[memory] private_bank``, ``hal0:private``) with the private one;
+* the old layout: its platform bank alone. A store on its old layout is
+  folded into the two banks by ``hal0 memory migrate fold-in``, not seeded
+  into new ones, and its per-agent private banks are left as they are.
 
 The manifests are the ones ``install.sh`` posts, keyed here by hal0 namespace.
 The installer keeps them as shell literals so its own seeding works when the
@@ -88,16 +89,17 @@ FAILED = "failed"
 def seed_targets(provider: Any) -> dict[str, dict[str, Any]]:
     """Engine bank id -> manifest, for the banks this box's provider really uses.
 
-    Empty when the provider has no platform bank to name (it is not the
-    Hindsight provider).
+    Two-bank: the platform and the private bank. Legacy: the platform bank
+    only. Empty when the provider has no platform bank to name (it is not
+    the Hindsight provider).
     """
     platform = getattr(provider, "platform_bank", None)
     if not isinstance(platform, str) or not platform:
         return {}
     targets = {platform: SEED_BANKS[_SHARED]}
-    bank_for = getattr(provider, "bank_for", None)
-    if getattr(provider, "unified_bank", True) is False and callable(bank_for):
-        targets[bank_for(_PRIVATE_HERMES)] = SEED_BANKS[_PRIVATE_HERMES]
+    private = getattr(provider, "private_bank", None)
+    if getattr(provider, "two_bank", False) is True and isinstance(private, str) and private:
+        targets[private] = SEED_BANKS[_PRIVATE_HERMES]
     return targets
 
 

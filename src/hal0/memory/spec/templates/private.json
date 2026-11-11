@@ -4,7 +4,7 @@
     "retain_mission": "Record this agent's own working context: tasks in flight, intermediate findings, commands that worked or failed, and handoff state between sessions. Skip pleasantries and verbatim tool output.",
     "observations_mission": "Maintain a concise picture of this agent's ongoing work: open threads, recent outcomes, and lessons learned. Retire threads once finished.",
     "reflect_mission": "You are this agent's private working memory. Answer from recorded evidence about prior sessions; say plainly when nothing relevant was recorded.",
-    "default_observation_scopes": "shared",
+    "default_observation_scopes": [["agent:*"]],
     "default_timezone": "America/New_York",
     "consolidation_llm_parallelism": 1,
     "mental_model_min_refresh_interval_seconds": 1800,

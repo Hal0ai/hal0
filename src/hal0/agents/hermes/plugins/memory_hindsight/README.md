@@ -84,11 +84,12 @@ From `agent/memory_provider.py`:
   historical context and not instructions, and a failure is returned as an
   error result. Against a hal0-api without the route, or an engine that
   cannot reflect, it falls back to a recall and says so in the result.
-  Reflect reads one bank. Under hal0's unified bank (the default) that is
-  shared memory plus the caller's own private notes; hal0-api filters other
-  agents' private facts and observations out and runs the reflect without
-  mental models, because a mental model is built from the whole bank. With
-  split banks (`unified_bank = false`) it reads the shared bank alone.
+  Reflect reads one bank: `hal0:shared`, or `hal0:private` for the private
+  override, where hal0-api holds it to this agent's own notes and runs it
+  without mental models, because a mental model is built from the whole bank
+  and that bank holds every agent's private notes. On a box whose memory is
+  still on its pre-two-bank layout it reads the platform bank, which (by
+  default) also holds every agent's private notes, filtered the same way.
 * `on_memory_write(action, target, content, metadata=None)` — mirrors the
   built-in memory tool's writes **privately** into hal0-memory.
 * `get_config_schema()` / `save_config(values, hermes_home)` — official setup

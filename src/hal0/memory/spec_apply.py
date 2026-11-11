@@ -7,8 +7,27 @@ the ``hal0 memory spec apply`` CLI.
 
 Layout (packaged under ``hal0.memory.spec``):
 
-    banks.json             bank -> template name, knowledge-base pages, extra config
+    banks.json             role -> template name, knowledge-base pages, extra config
     templates/<name>.json  Hindsight bank-template manifest (version "1")
+
+The spec names roles, not banks (ADR-0058 decisions 7 and 8): ``platform`` is
+the bank behind the ``shared`` namespace and ``private`` the bank behind
+``private:<agent>``. :func:`spec_targets` turns them into this box's bank ids
+from its bank layout (:mod:`hal0.memory.bank_layout`): ``[memory] bank`` and
+``[memory] private_bank`` on a two-bank store; the recorded platform bank and
+Hermes' ``private__hermes`` on a store still on its old layout.
+
+Two parts of a template are refused where they would leak a private memory,
+and the bank report says so (``refused``):
+
+* a per-project ``default_observation_scopes`` (``[["project:*"]]``) on a
+  unified platform bank of the old layout. That bank holds every agent's private facts,
+  and a private write there is sent with no scope of its own, so the bank
+  default would put a private, project-tagged fact into an observation that
+  carries only the project tag (#3547);
+* the template's mental models on the two-bank private bank. A mental model is
+  written from the whole bank, and that bank holds every agent's private
+  memory.
 
 Flow per bank: ``POST /banks/{id}/import?dry_run=true`` (plan), then (unless
 ``dry_run``) the real import, then ``PATCH /banks/{id}/config`` for
@@ -22,10 +41,84 @@ from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 DEFAULT_API = "http://127.0.0.1:9177"
+
+#: The spec's two roles (``banks.json`` keys).
+ROLE_PLATFORM = "platform"
+ROLE_PRIVATE = "private"
+#: Hermes' private bank on an old split store, the private role's target on
+#: a store still on its old layout.
+LEGACY_PRIVATE_BANK = "private__hermes"
+
+REFUSED_PROJECT_SCOPE = "default_observation_scopes"
+REFUSED_MENTAL_MODELS = "mental_models"
+
+
+@dataclass(frozen=True)
+class SpecTargets:
+    """This box's bank for each spec role, and what each bank holds.
+
+    ``banks`` maps a role to its bank id. ``platform_holds_private`` is true on
+    an old unified store, ``private_holds_every_agent`` on a two-bank store.
+    """
+
+    banks: dict[str, str]
+    platform_holds_private: bool = False
+    private_holds_every_agent: bool = False
+
+
+def spec_targets(memory_cfg: Any) -> SpecTargets:
+    """The spec's roles on this box (module docstring). Writes nothing."""
+    from hal0.memory.bank_layout import current_layout
+
+    layout = current_layout(memory_cfg)
+    banks = layout.provider_kwargs(memory_cfg)
+    if layout.two_bank:
+        return SpecTargets(
+            banks={ROLE_PLATFORM: banks["bank"], ROLE_PRIVATE: banks["private_bank"]},
+            private_holds_every_agent=True,
+        )
+    return SpecTargets(
+        banks={ROLE_PLATFORM: banks["bank"], ROLE_PRIVATE: LEGACY_PRIVATE_BANK},
+        platform_holds_private=bool(banks["unified_bank"]),
+    )
+
+
+def _per_project_scope(scopes: Any) -> bool:
+    """Whether a ``default_observation_scopes`` value scopes by project."""
+    if not isinstance(scopes, list):
+        return False
+    return any(
+        isinstance(scope, list)
+        and any(isinstance(tag, str) and tag.startswith("project:") for tag in scope)
+        for scope in scopes
+    )
+
+
+def _guarded_manifest(
+    manifest: dict[str, Any], role: str, targets: SpecTargets
+) -> tuple[dict[str, Any], list[str]]:
+    """``manifest`` without what would leak a private memory on this bank,
+    and the names of the parts left out."""
+    out = dict(manifest)
+    refused: list[str] = []
+    bank_cfg = out.get("bank")
+    if (
+        role == ROLE_PLATFORM
+        and targets.platform_holds_private
+        and isinstance(bank_cfg, dict)
+        and _per_project_scope(bank_cfg.get("default_observation_scopes"))
+    ):
+        out["bank"] = {k: v for k, v in bank_cfg.items() if k != "default_observation_scopes"}
+        refused.append(REFUSED_PROJECT_SCOPE)
+    if role == ROLE_PRIVATE and targets.private_holds_every_agent and out.get("mental_models"):
+        out.pop("mental_models")
+        refused.append(REFUSED_MENTAL_MODELS)
+    return out, refused
 
 
 def _walk(nodes: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -63,6 +156,8 @@ class BankReport:
     bank: str
     template: str
     dry_run: bool
+    role: str = ""
+    refused: list[str] = field(default_factory=list)
     plan: dict[str, Any] | None = None
     applied: dict[str, Any] | None = None
     config_updated: list[str] = field(default_factory=list)
@@ -118,6 +213,7 @@ class SpecApplyClient:
 
 def apply_spec(
     *,
+    targets: SpecTargets,
     api: str = DEFAULT_API,
     spec_dir: str | Path | None = None,
     dry_run: bool = False,
@@ -126,6 +222,10 @@ def apply_spec(
 ) -> SpecApplyReport:
     """Apply (or dry-run) the bank spec against a live Hindsight API.
 
+    ``targets`` (:func:`spec_targets`) names this box's bank for each role; a
+    role with no bank is skipped. ``bank_filter`` keeps one bank, named by
+    its id or its role.
+
     One HTTP failure for a bank is captured on its :class:`BankReport`
     (``error``) rather than aborting the whole run, so ``--bank`` isn't
     required just to work around one broken bank.
@@ -133,26 +233,32 @@ def apply_spec(
     spec = load_spec(spec_dir)
     report = SpecApplyReport(api=api, dry_run=dry_run)
     with SpecApplyClient(api, client=client) as c:
-        for bank, tname in spec["banks"].items():
-            if bank_filter and bank != bank_filter:
+        for role, tname in spec["banks"].items():
+            bank = targets.banks.get(role)
+            if not bank:
                 continue
-            br = BankReport(bank=bank, template=tname, dry_run=dry_run)
+            if bank_filter and bank_filter not in (bank, role):
+                continue
+            br = BankReport(bank=bank, template=tname, dry_run=dry_run, role=role)
             report.banks.append(br)
             try:
-                manifest = load_template(spec_dir, tname)
-                br.plan = c.call("POST", f"/{bank}/import", manifest, {"dry_run": "true"})
+                manifest, br.refused = _guarded_manifest(
+                    load_template(spec_dir, tname), role, targets
+                )
+                path = f"/{quote(bank, safe='')}"
+                br.plan = c.call("POST", f"{path}/import", manifest, {"dry_run": "true"})
                 if dry_run:
                     continue
-                br.applied = c.call("POST", f"/{bank}/import", manifest)
+                br.applied = c.call("POST", f"{path}/import", manifest)
 
-                extra = spec.get("config_extra", {}).get(bank)
+                extra = spec.get("config_extra", {}).get(role)
                 if extra:
-                    c.call("PATCH", f"/{bank}/config", {"updates": extra})
+                    c.call("PATCH", f"{path}/config", {"updates": extra})
                     br.config_updated = sorted(extra)
 
-                kb = spec.get("knowledge", {}).get(bank)
+                kb = spec.get("knowledge", {}).get(role)
                 if kb:
-                    tree = c.call("GET", f"/{bank}/knowledge-base/tree")
+                    tree = c.call("GET", f"{path}/knowledge-base/tree")
                     nodes = _walk(
                         tree.get("nodes")
                         or tree.get("roots")
@@ -170,7 +276,7 @@ def apply_spec(
                     )
                     if folder is None:
                         folder = c.call(
-                            "POST", f"/{bank}/knowledge-base/folders", {"name": kb["folder"]}
+                            "POST", f"{path}/knowledge-base/folders", {"name": kb["folder"]}
                         )
                         br.folder_created = kb["folder"]
                     pages = {n.get("name"): n for n in nodes if _kind(n) == "page"}
@@ -183,7 +289,7 @@ def apply_spec(
                             # .../pages/{id}`` (#3564).
                             c.call(
                                 "PATCH",
-                                f"/{bank}/knowledge-base/nodes/{pid}",
+                                f"{path}/knowledge-base/nodes/{pid}",
                                 {
                                     k: p[k]
                                     for k in ("source_query", "tags", "max_tokens", "trigger")
@@ -194,7 +300,7 @@ def apply_spec(
                         else:
                             c.call(
                                 "POST",
-                                f"/{bank}/knowledge-base/pages",
+                                f"{path}/knowledge-base/pages",
                                 dict(p, parent_id=folder.get("id")),
                             )
                             br.pages_created.append(p["name"])

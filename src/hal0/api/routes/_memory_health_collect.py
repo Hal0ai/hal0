@@ -46,6 +46,7 @@ from hal0.api.routes import memory as _memory
 from hal0.api.routes import memory_admin as _admin
 from hal0.config.loader import load_hal0_config
 from hal0.memory import extraction_env as _ee
+from hal0.memory.bank_layout import HEALTH_LEGACY_UNIFIED
 from hal0.memory.embedder_verdict import embedder_verdict
 from hal0.memory.health_path import EXTRACTION_FAILURE_WINDOW_S, HealthFacts
 from hal0.redaction import redact_log_line
@@ -90,7 +91,9 @@ ERROR_MESSAGE_MAX_CHARS = 160
 #: traceback-sized message.
 _ERROR_SCAN_CHARS = 2000
 
-BANK_LAYOUT_PER_BANK = "per_bank"
+#: ``banks.layout`` when the provider does not say (a provider that is not
+#: Hindsight): the layout every store had before the two banks.
+BANK_LAYOUT_DEFAULT = HEALTH_LEGACY_UNIFIED
 
 SECTION_EXTRACTION = "extraction"
 SECTION_EMBEDDER = "embedder"
@@ -727,7 +730,8 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
         },
         SECTION_KNOWLEDGE: knowledge,
         SECTION_BANKS: {
-            "layout": BANK_LAYOUT_PER_BANK,
+            # ADR-0058 decision 7: from the layout record, via the provider.
+            "layout": str(getattr(provider, "layout", None) or BANK_LAYOUT_DEFAULT),
             "total": len(banks) if listed else None,
             "facts": _known_sum([b.facts for b in banks]) if listed else None,
             "list": [

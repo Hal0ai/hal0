@@ -247,6 +247,7 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
     except Exception as exc:  # daemon down at boot → degrade ladder
         log.warning("hal0.memory.hindsight_unavailable", error=str(exc), fallback="pgvector")
         return PgVectorProvider()
+    from hal0.memory.bank_layout import ensure_layout_record
     from hal0.memory.hindsight_provider import Hal0Reranker
     from hal0.memory.projects import registry_from_config
 
@@ -261,7 +262,8 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
         reranker=reranker,
         graph_enabled=bool(graph.enabled),
         extraction_slot=str(getattr(graph, "extraction_slot", "memory")),
-        unified_bank=bool(getattr(cfg.memory, "unified_bank", True)),
-        bank=str(getattr(cfg.memory, "bank", "shared") or "shared"),
         projects=registry_from_config(getattr(cfg.memory, "projects", None)),
+        # Which banks the store is laid out in (ADR-0058 decision 7): the
+        # record, else determined and written now (hal0.memory.bank_layout).
+        **ensure_layout_record(cfg.memory).provider_kwargs(cfg.memory),
     )

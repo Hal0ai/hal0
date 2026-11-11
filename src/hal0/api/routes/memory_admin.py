@@ -772,9 +772,7 @@ async def delete_bank_memories(request: Request, bank_id: str) -> Any:
 # observations_imported). Both verbs move raw bytes, so they can't go
 # through ``_forward``/``request_json`` (JSON-only) — they reach into the
 # Hindsight client's private ``_http``/``_headers()`` rather than adding a
-# second public method to hal0.memory.hindsight_client, which is owned by a
-# parallel unified-bank effort (see PLAN note in the CLI's migrate_unify
-# docstring for the full boundary rationale).
+# second public method to hal0.memory.hindsight_client.
 #
 # Export on 0.9.x (#2155): the synchronous engine GET is a 410 tombstone
 # (``api_export_documents_removed`` in hindsight_api/api/http.py) while
@@ -1052,8 +1050,8 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         # has (no per-memory tag field on UpdateMemoryRequest) — body
         # ``{"tags": [...]}`` is a full replace that propagates to every
         # memory unit under the document and invalidates derived
-        # observations (queues re-consolidation). ``migrate unify --add-tag``
-        # relies on this: read-merge-write, never a bare overwrite.
+        # observations (queues re-consolidation). A caller that adds a tag
+        # reads, merges and writes, never a bare overwrite.
         "PATCH",
         "/banks/{bank_id}/documents/{document_id}",
         "/v1/default/banks/{bank_id}/documents/{document_id}",

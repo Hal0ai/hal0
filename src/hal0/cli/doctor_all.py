@@ -3772,20 +3772,26 @@ def _fetch_project_tags(base: str | None, bank: str) -> list[dict[str, Any]] | N
 
 
 def _projects_config() -> tuple[str, Any, bool]:
-    """``([memory] bank, the project registry, read_ok)`` from hal0.toml.
+    """``(the platform bank, the project registry, read_ok)`` from hal0.toml.
 
+    The platform bank is the one hal0-api reads: ``[memory] bank`` on a
+    two-bank store, the recorded bank on one still on its old layout
+    (:func:`hal0.memory.bank_layout.platform_bank`, which writes nothing).
     hal0.toml is ``0600``, so for anyone but the service user and root the
     read fails; the row then counts against the shipped defaults (the
-    ``shared`` bank, an empty registry) and says so.
+    layout record's bank, which any account can read, and an empty
+    registry) and says so.
     """
     from hal0.config.loader import ConfigError, load_hal0_config
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory.bank_layout import platform_bank
     from hal0.memory.projects import ProjectRegistry, registry_from_config
 
     try:
         memory = load_hal0_config().memory
     except (ConfigError, OSError):
-        return "shared", ProjectRegistry(), False
-    return str(memory.bank or "shared"), registry_from_config(memory.projects), True
+        return platform_bank(MemoryConfig()), ProjectRegistry(), False
+    return platform_bank(memory), registry_from_config(memory.projects), True
 
 
 def check_memory_projects(
