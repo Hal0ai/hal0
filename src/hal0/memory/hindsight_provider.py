@@ -45,6 +45,7 @@ from hal0.memory.envelope import (
     UNKNOWN_AGENT,
     apply_envelope,
     coerce_tags,
+    is_identified,
     resolve_observation_scopes,
 )
 from hal0.memory.projects import (
@@ -1219,8 +1220,9 @@ class HindsightProvider(MemoryProvider):
     def _caller_agent(self, client_id: str | None) -> str:
         """Resolve the reading caller's agent identity for private-visibility
         matching. Mirrors the write-path collapse in ``add``: a missing id or
-        the ``anonymous`` front-door sentinel becomes ``unknown`` so an
-        unauthenticated caller can never match another agent's private docs."""
+        the ``anonymous`` front-door sentinel becomes ``unknown``. ``unknown``
+        is the marker of an unidentified caller, and :meth:`_is_visible_to`
+        shows it no private doc at all (``agent:unknown`` notes included)."""
         cid = client_id or self._client_id or ""
         if not cid or cid == _ANONYMOUS:
             return _UNKNOWN_AGENT
@@ -1231,14 +1233,16 @@ class HindsightProvider(MemoryProvider):
         """Read-side enforcement of the ``visibility:private`` tag (PR #1244).
 
         Non-private docs are shared-readable exactly as before. A private doc
-        is returned ONLY to the agent whose id matches the doc's ``agent:<id>``
-        tag; docs missing that tag (should not happen — ``add`` always stamps
-        one) are treated as private-to-nobody and withheld (fail-closed)."""
+        is returned ONLY to the identified agent whose id matches the doc's
+        ``agent:<id>`` tag. A doc missing that tag, or owned by ``unknown``
+        (what an unidentified write is stamped with), is private-to-nobody and
+        withheld; so is every private doc for an unidentified caller
+        (fail-closed). Mirrored by ``read_scope.reflect_visibility_scope``."""
         tags = item.get("tags") or []
         if _VISIBILITY_PRIVATE not in tags:
             return True
         owner = _agent_of(tags)
-        return owner is not None and owner == caller_agent
+        return is_identified(owner) and owner == caller_agent
 
     # ── ACL: project:<id> read scoping (unified mode) ───────────────────
 
