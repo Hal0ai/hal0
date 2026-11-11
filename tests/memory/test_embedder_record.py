@@ -340,6 +340,7 @@ def test_no_store_and_nothing_naming_an_embedder_is_the_configured_pair(
     box: Box, evidence: dict[str, Any]
 ) -> None:
     """A fresh box. A unit that is installed but has never started proves nothing."""
+    box.hs_dir.mkdir(parents=True)  # install.sh makes the home before the unit
     wanted = Embedder("local", "example-org/another-embedder")
 
     view = er.resolve_embedder(wanted, evidence=evidence, **box.kw)
@@ -368,6 +369,27 @@ def test_an_unavailable_store_is_the_engine_default_and_never_the_configured_pai
     status = er.embedder_status(CONFIGURED, evidence=NOTHING, **box.kw)
     assert status["store_unavailable"] == str(box.hs_dir)
     assert "is not available" in (er.embedder_notice(status) or "")
+
+
+def test_an_installed_unit_with_no_home_directory_is_unavailable_not_fresh(box: Box) -> None:
+    """The unit is there and its home is not: the home is on storage that is
+    missing, however it is mounted. An update run now must not record the
+    configured embedder over the store that will come back."""
+    assert not box.hs_dir.exists()
+
+    view = er.ensure_embedder_record(CONFIGURED, evidence=BASE_UNIT, **box.kw)
+
+    assert view.store == er.STORE_UNAVAILABLE
+    assert (view.record.embedder, view.record.source, view.record.persisted) == (
+        DEFAULT,
+        er.SOURCE_UNAVAILABLE,
+        False,
+    )
+    assert not box.record.exists()
+    # With no unit to ask there is no engine on this box at all: fresh.
+    assert er.resolve_embedder(CONFIGURED, evidence=NOTHING, **box.kw).record.source == (
+        er.SOURCE_CONFIGURED
+    )
 
 
 # ── writing the record down ──────────────────────────────────────────────────
@@ -408,6 +430,7 @@ def test_ensure_records_a_mixed_store_with_its_provider(box: Box) -> None:
 def test_ensure_does_not_record_a_box_whose_engine_has_not_started(box: Box) -> None:
     """Nothing makes the engine use the configured pair yet, so nothing is written:
     a store built under the engine default must not sit under a record saying otherwise."""
+    (box.hs_dir / ".venv").mkdir(parents=True)
     view = er.ensure_embedder_record(CONFIGURED, evidence=BASE_UNIT, **box.kw)
 
     assert (view.record.embedder, view.record.persisted) == (CONFIGURED, False)

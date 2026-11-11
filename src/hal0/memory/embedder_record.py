@@ -52,7 +52,8 @@ First run on a box with no record
 2. The unit files name an embedder: that one.
 3. Neither, and a store exists (:func:`store_state`): the engine default.
 4. The store's location is unavailable (a symlink that does not resolve, a
-   mount point that is not mounted): the engine default, never written down.
+   mount point that is not mounted, an installed unit whose home directory
+   is missing): the engine default, never written down.
 5. No store: the configured embedder.
 
 ``mixed`` is set only on evidence: a store exists and the embedder found is
@@ -397,6 +398,8 @@ def store_state(hs_dir: Path | None = None, *, fstab: Path | None = None) -> str
     ``unavailable`` when the home is a symlink that does not resolve, or sits
     under an ``fstab`` mount point that is not mounted: the store may be on a
     disk that is not there right now, so nothing may be concluded.
+    :func:`resolve_embedder` adds one more case this function cannot see: the
+    engine's unit is installed and the home does not exist at all.
 
     ``absent`` otherwise: no home, or a home with no ``.pg0`` (or an empty one
     and no venv).
@@ -437,6 +440,23 @@ def store_state(hs_dir: Path | None = None, *, fstab: Path | None = None) -> str
     except OSError:
         return STORE_EXISTS
     return STORE_EXISTS if ".venv" in names else STORE_ABSENT
+
+
+def _unit_without_a_home(evidence: Mapping[str, Any], hs_dir: Path | None) -> bool:
+    """True when the engine's unit is installed and its home directory is not there.
+
+    ``install.sh`` creates the home before it installs the unit, so the two
+    are never apart on a healthy box. A unit with no home means the home is
+    on storage that is not there right now, however it is mounted (``fstab``
+    is only one way), so its store is unavailable, not absent.
+    """
+    if evidence.get("on_disk_source") not in _UNIT_SOURCES:
+        return False
+    if hs_dir is None:
+        from hal0.memory.engine_upgrade import hindsight_dir
+
+        hs_dir = hindsight_dir()
+    return not os.path.lexists(hs_dir)
 
 
 def engine_evidence(**kwargs: Any) -> dict[str, Any]:
@@ -524,6 +544,8 @@ def resolve_embedder(
     found = evidence if evidence is not None else engine_evidence()
     live = found.get("live")
     store = store_state(hs_dir)
+    if store == STORE_ABSENT and _unit_without_a_home(found, hs_dir):
+        store = STORE_UNAVAILABLE
     record_error: str | None = None
     try:
         record = load_embedder_record(path)
