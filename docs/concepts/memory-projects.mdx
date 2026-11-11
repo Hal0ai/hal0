@@ -1,49 +1,55 @@
 ---
 title: Memory projects
-description: How hal0 files a memory under a project. The caller names the project in a request field, hal0 resolves the name against the [memory.projects] registry and tags the write, and observations consolidate per project.
+description: How hal0 files a memory under a project. hal0 resolves project names against the [memory.projects] registry, tags the write, and consolidates observations per project. Callers cannot name a project in a request yet.
 sidebar:
   order: 51
 ---
 
 import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-A memory can belong to a project: a repository, usually. hal0 treats the
-project as a field of the write request, not as a tag the agent composes by
-hand. The caller names the project, hal0 turns the name into one slug, and the
-[write envelope](/docs/concepts/memory#write-envelope) stamps a single
-`project:<slug>` tag (ADR-0058, decision 4a). This page covers how to name a
-project, how the name is resolved, what a write ends up tagged with, and what
-does not use the project yet.
+A memory can belong to a project: a repository, usually. hal0 is moving the
+project from a tag each agent composes by hand to something hal0 resolves and
+stamps itself (ADR-0058, decision 4a). This page describes the part that
+exists today: the registry, how a name is resolved, what a write is tagged
+with, and what does not use the project yet.
 
 <Aside type="caution">
-Under the default `[memory].unified_bank = true`, a memory that carries a
-`project:` tag is not returned by `POST /api/memory/recall`,
-`POST /api/memory/search`, `GET /api/memory/list` or the MCP `memory_recall`,
-`memory_search` and `memory_list` tools. That filter is older than the
-project field and is removed together with the move to two banks. Until then,
-a write that names a project is found through reflect
-(`POST /api/memory/reflect`, MCP `memory_reflect`) and through the bank
-routes under `/api/memory/banks/{bank}/`, not through recall, search or list.
-With `unified_bank = false` those reads return it. Name a project on writes
-you will read back through recall only after that change.
+**You cannot name a project in a request yet.** `POST /api/memory/add` and the
+MCP `memory_add` tool have no `project` field. A `project` key in the body or
+arguments, and an `X-hal0-Project` header, are ignored.
+
+The reason is a read filter that is older than this work. Under the default
+`[memory].unified_bank = true`, a memory that carries a `project:` tag is not
+returned by `POST /api/memory/recall`, `POST /api/memory/search`,
+`GET /api/memory/list` or the MCP `memory_recall`, `memory_search` and
+`memory_list` tools. A client that named its project on every write would
+hide all of its own memory from those reads. The request field becomes
+available together with the change that lets shared reads see project-tagged
+memory (ADR-0058, decision 7b).
+
+The same filter applies today to a `project:<name>` tag you put in `tags`
+yourself: the write is stored, but recall, search and list do not return it.
+Reflect (`POST /api/memory/reflect`, MCP `memory_reflect`) and the bank routes
+under `/api/memory/banks/{bank}/` do. With `unified_bank = false` all of them
+do.
 </Aside>
 
-## Naming the project
+## What hal0 does with a `project:` tag today
 
-| Surface | How |
-|---|---|
-| `POST /api/memory/add` | the `project` field of the JSON body |
-| `POST /api/memory/add` | the `X-hal0-Project` header, for a client that sets it once; the body field wins when both name a project |
-| MCP `memory_add` | the `project` argument |
+The only way a write gets a project today is a `project:<name>` tag among its
+`tags`. hal0 does not store such a tag as sent. Each one is resolved, and the
+write is tagged with what the resolver produced:
 
-The value is a name as the client knows it: a repository name, a directory
-name, `My Repo`. A non-string `project` is refused with 400 on the REST route
-and `mcp.memory_schema` on the MCP tool. A blank value names nothing.
+- One tag, or several that are the same project once resolved: one
+  `project:<slug>` tag.
+- Tags that name two or more different projects: one `project:<slug>` tag for
+  each, in the order sent.
+- A tag whose name is on the deny list, or has nothing left after
+  normalising (`project:!!!`, `project:`): dropped. If no project tag is
+  left, the write has no project.
 
-A caller that sends no `project` field but exactly one `project:<name>` tag
-has named its project the old way, and the tag goes through the same
-resolution. Two or more `project:` tags name no single project; they are
-stored as sent.
+So a denied name is never stored as a project tag, and no project tag is
+stored in a spelling other than the normalised one.
 
 ## How a name is resolved
 
@@ -54,24 +60,21 @@ Two or more dots in a row count as "other", so a slug never contains `..`,
 and a path such as `acme/widgets` becomes `acme-widgets`. A character outside
 ASCII is "other" as well: `café` becomes `caf`. A slug is at most 100
 characters, the longest repository name GitHub accepts; a longer name is cut.
-A name with nothing left after this is treated as not given.
-
-**Source.** The first of these that gives a name is used:
-
-1. the request's `project` field or header;
-2. the project part of a legacy per-repository bank id (used by the
-   engine-compatible endpoint that a later release adds for coding-agent
-   clients);
-3. a single `project:` tag among the caller's tags.
 
 **Aliases, then the deny list.** The name is mapped through
 `[memory.projects].aliases`, and the result is checked against
 `[memory.projects].deny`. A denied name means "no project". It is not an
-error, and resolution stops there: a lower source is not consulted. The name
-`unresolved` is reserved and always denied.
+error. The name `unresolved` is reserved and always denied.
 
 Any name that survives is accepted as a project. Registration is not required
 to write; it only affects what `hal0 doctor` reports.
+
+**Sources, once requests can name a project.** hal0's write path already
+accepts a project named outside the tags, and it takes precedence: a named
+project first, then the project part of a per-repository bank id written by a
+coding-agent client, then the `project:` tags. A named project that is denied
+ends the resolution; the tags are not consulted. No REST or MCP entry point
+supplies the first two yet.
 
 ### The registry
 
@@ -87,8 +90,9 @@ registered = ["widgets", "handbook"]
 
 The defaults are no aliases, no registered names, and the deny list shown.
 Entries are normalised when the file is loaded. An alias that points at a
-denied name, at itself, or back at a name that leads to it is refused at
-load. Changes need a restart of `hal0-api`. See the
+denied name, or back at a name that leads to it, is refused at load. An alias
+whose two sides are the same name once normalised (`"Widgets" = "widgets"`)
+does nothing and is ignored. Changes need a restart of `hal0-api`. See the
 [config schema](/docs/reference/config-schema#memoryprojects).
 
 ## What a write is tagged with
@@ -97,9 +101,8 @@ The first row that applies decides.
 
 | The write | Project and scope tags |
 |---|---|
-| names a project that resolves | exactly one `project:<slug>`; any `project:` tag the caller sent is dropped |
-| names a project the deny list refuses | the caller's `project:` tags are dropped; then as "no project" below |
-| names nothing and carries two or more `project:` tags | those tags, as sent; nothing added |
+| resolves to one project | exactly one `project:<slug>` |
+| resolves to two or more projects (from its own tags) | one `project:<slug>` each |
 | comes from a coding client and has no project | `project:unresolved`, durable or ephemeral |
 | is durable, has no project, and carries no `scope:` tag of its own | `scope:global` |
 | is ephemeral and has no project | neither |
@@ -110,21 +113,19 @@ the `kind:` tags described under
 [Write envelope](/docs/concepts/memory#write-envelope).
 
 A `scope:global` tag the caller sent is kept. A `project:unresolved` tag the
-caller sent is dropped: only hal0 stamps it. No REST or MCP entry point marks
-a caller as a coding client yet, so `project:unresolved` first appears with
-the engine-compatible endpoint.
+caller sent is dropped: only hal0 stamps it. No entry point marks a caller as
+a coding client yet, so nothing is tagged `project:unresolved` today.
 
 The decision is also written to the document's metadata, unless the caller
-already set the key: `project` (the slug, or `unresolved`) and
-`project_source` (`field`, `bank`, `tag`, `denied`, or `none` for an
-unresolved write that named nothing).
+already set the key: `project` (the slug, several slugs joined by commas, or
+`unresolved`) and `project_source` (`tag`, `denied`, and later `field` and
+`bank`).
 
 <Aside type="note">
 Before this change a durable write carried `agent:<id>` and `kind:durable`
 and nothing else from hal0. It now also carries `scope:global` when it has no
-project. A single `project:<name>` tag you send is normalised and may be
-aliased or denied, and it is stored after hal0's own tags instead of where
-you put it.
+project. A `project:<name>` tag you send is normalised, may be aliased or
+dropped, and is stored after hal0's own tags instead of where you put it.
 </Aside>
 
 ## Observations consolidate per project
@@ -132,25 +133,26 @@ you put it.
 hal0 chooses the observation scope of each write from its final tags:
 
 - A write with a `project:<slug>` tag consolidates into that project's scope,
-  `[["project:<slug>"]]`. What is learned in one repository does not become a
-  belief about another.
-- `project:unresolved` is scoped the same way, as a project of its own, so
-  writes from a coding client that named no project do not consolidate into
-  the global scope.
+  `[["project:<slug>"]]`, one scope per project. What is learned in one
+  repository does not become a belief about another.
 - A write with no project tag consolidates into the one untagged scope
-  (`"shared"`).
+  (`"shared"`). `scope:global` does not change this: it is a tag for reads,
+  not an observation scope.
+- `project:unresolved` is not a project here. An unresolved write is scoped
+  exactly as a write with no project tag would be. It does not get a scope of
+  its own, because that scope would pool the unresolved writes of every
+  repository into one set of beliefs about none of them.
 - A private write in the unified bank keeps the engine's default scoping,
   project or not, so its observations still carry `visibility:private`.
 
 ## Reading by project
 
 The project is not applied to reads yet. Recall and reflect behave as they
-did, except for the filter described at the top of this page. The scope a
-project read will use is defined and tested, and the engine-compatible
-endpoint applies it for coding-agent clients: a read in project `widgets`
-sees memory tagged `project:widgets` or `scope:global`, and a read with no
-project sees `scope:global` only. Reading across projects is an explicit
-request, never the fallback.
+did, including the filter described at the top of this page. The scope a
+project read will use is defined and tested: a read in project `widgets` sees
+memory tagged `project:widgets` or `scope:global`, and a read with no project
+sees `scope:global` only. Reading across projects will be an explicit request,
+never the fallback.
 
 Both forms also admit a memory that has no tags at all. A memory that has
 tags but neither of those two, which includes every memory written through
