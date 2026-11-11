@@ -50,6 +50,9 @@ from hal0.model_meta import (
 from hal0.model_meta import (
     VALID_DEVICES as _VALID_DEVICES,
 )
+from hal0.project_slug import DEFAULT_DENY as _PROJECT_DEFAULT_DENY
+from hal0.project_slug import RESERVED_SLUGS as _PROJECT_RESERVED_SLUGS
+from hal0.project_slug import normalise_slug as _normalise_project_slug
 from hal0.release.policy import ReleaseKind
 
 log = logging.getLogger(__name__)
@@ -3051,13 +3054,125 @@ class MemoryConsoleConfig(BaseModel):
     )
 
 
+def _default_project_deny() -> list[str]:
+    # The default list and the spelling rule come from ``hal0.project_slug``,
+    # a leaf module, and not from ``hal0.memory.projects``: importing anything
+    # under ``hal0.memory`` runs that package's ``__init__``, which imports
+    # the memory providers, and reading the config schema must not do that.
+    return list(_PROJECT_DEFAULT_DENY)
+
+
+def _project_slug(value: Any, key: str) -> str:
+    """One ``[memory.projects]`` entry in its normalised spelling, or raise."""
+    slug = _normalise_project_slug(value) if isinstance(value, str) else None
+    if slug is None:
+        raise ValueError(
+            f"memory.projects.{key} entry {value!r} is not a project name: after "
+            "normalising (lower case, [a-z0-9._-], other runs to '-') nothing is left"
+        )
+    return slug
+
+
+class MemoryProjectsConfig(BaseModel):
+    """[memory.projects] section of hal0.toml — the project registry.
+
+    ADR-0058 decision 4a: hal0 resolves the project of a memory write to one
+    slug before it tags the write (``hal0.memory.projects.resolve_project``).
+    This table is what the resolver consults. Every entry is normalised at
+    load with the resolver's own spelling rule, so ``My Repo`` and ``my-repo``
+    are the same name.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    aliases: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Other spellings of a project: a name on the left is tagged as "
+            "the project on the right (for example a repository's directory "
+            "name that differs from the project's name). Applied before the "
+            "deny list. An alias may not point at a denied name or back at a "
+            "name that leads to it. An entry whose two sides are the same "
+            "name once normalised does nothing and is ignored."
+        ),
+    )
+    deny: list[str] = Field(
+        default_factory=_default_project_deny,
+        description=(
+            "Names that are never projects: directory names a client reports "
+            "when it is not inside a repository. A write naming one is stored "
+            "with no project. Setting this key replaces the default list."
+        ),
+    )
+    registered: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Project names the operator has confirmed. Writes are accepted "
+            "for any name; 'hal0 doctor' (memory_projects) reports names in "
+            "use that are neither listed here nor aliased."
+        ),
+    )
+
+    @field_validator("deny", "registered", mode="before")
+    @classmethod
+    def _slug_list(cls, v: Any, info: Any) -> Any:
+        if not isinstance(v, (list, tuple)):
+            return v
+        slugs = [_project_slug(item, info.field_name) for item in v]
+        return list(dict.fromkeys(slugs))
+
+    @field_validator("aliases", mode="before")
+    @classmethod
+    def _slug_aliases(cls, v: Any) -> Any:
+        if not isinstance(v, Mapping):
+            return v
+        out: dict[str, str] = {}
+        for name, target in v.items():
+            key = _project_slug(name, "aliases")
+            value = _project_slug(target, "aliases")
+            if key == value:
+                # ``{"Widgets": "widgets"}``: one name spelled twice. It maps
+                # the name to itself, which changes nothing, so it is dropped
+                # here as ``registry_from_config`` drops it.
+                continue
+            if out.get(key, value) != value:
+                raise ValueError(
+                    f"memory.projects.aliases names {key!r} twice with different targets "
+                    f"({out[key]!r} and {value!r})"
+                )
+            out[key] = value
+        return out
+
+    @model_validator(mode="after")
+    def _aliases_are_usable(self) -> MemoryProjectsConfig:
+        denied = set(self.deny) | _PROJECT_RESERVED_SLUGS
+        for name in self.aliases:
+            seen = [name]
+            target = self.aliases[name]
+            while True:
+                if target in seen:
+                    chain = " -> ".join([*seen, target])
+                    raise ValueError(f"memory.projects.aliases forms a cycle: {chain}")
+                seen.append(target)
+                if target not in self.aliases:
+                    break
+                target = self.aliases[target]
+            if target in denied:
+                raise ValueError(
+                    f"memory.projects.aliases maps {name!r} to {target!r}, which is a "
+                    "denied name (memory.projects.deny, or the reserved 'unresolved')"
+                )
+        return self
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
     Container for the per-subsystem memory tunables. Carries
     ``[memory.graph]``, ``[memory.embedding]``, ``[memory.priority]``,
-    ``[memory.models]``, ``[memory.decision]``, ``[memory.lanes]`` and
-    ``[memory.console]`` (Hindsight 1.2 showcase additions). Future memory
+    ``[memory.models]``, ``[memory.decision]``, ``[memory.lanes]``,
+    ``[memory.console]`` (Hindsight 1.2 showcase additions) and
+    ``[memory.projects]`` (the project registry, ADR-0058). Future memory
     features (retention, prune-policy, archival) land under this single
     namespace rather than scattering top-level tables.
     """
@@ -3081,6 +3196,7 @@ class MemoryConfig(BaseModel):
     decision: MemoryDecisionConfig = Field(default_factory=MemoryDecisionConfig)
     lanes: MemoryLanesConfig = Field(default_factory=MemoryLanesConfig)
     console: MemoryConsoleConfig = Field(default_factory=MemoryConsoleConfig)
+    projects: MemoryProjectsConfig = Field(default_factory=MemoryProjectsConfig)
     public_url: str | None = Field(
         default=None,
         description=(

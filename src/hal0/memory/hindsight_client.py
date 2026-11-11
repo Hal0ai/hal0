@@ -132,6 +132,40 @@ class HindsightRestClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
 
+    @staticmethod
+    def _retain_item(
+        *,
+        content: Any,
+        document_id: Any,
+        context: Any = None,
+        metadata: Any = None,
+        tags: Any = None,
+        timestamp: Any = None,
+        entities: Any = None,
+        observation_scopes: Any = None,
+        strategy: Any = None,
+        update_mode: Any = None,
+    ) -> dict[str, Any]:
+        """One ``RetainRequest`` item; an unset or empty field is left out."""
+        item: dict[str, Any] = {"content": content, "document_id": document_id}
+        if context is not None:
+            item["context"] = context
+        if metadata:
+            item["metadata"] = metadata
+        if tags:
+            item["tags"] = list(tags)
+        if timestamp is not None:
+            item["timestamp"] = timestamp
+        if entities is not None:
+            item["entities"] = list(entities)
+        if observation_scopes is not None:
+            item["observation_scopes"] = observation_scopes
+        if strategy is not None:
+            item["strategy"] = strategy
+        if update_mode is not None:
+            item["update_mode"] = update_mode
+        return item
+
     async def retain(
         self,
         *,
@@ -155,24 +189,42 @@ class HindsightRestClient:
         block for the extraction LLM call). ``sync=False`` (default) is the
         existing fire-and-forget background-ingest path.
         """
-        item: dict[str, Any] = {"content": content, "document_id": document_id}
-        if context is not None:
-            item["context"] = context
-        if metadata:
-            item["metadata"] = metadata
-        if tags:
-            item["tags"] = list(tags)
-        if timestamp is not None:
-            item["timestamp"] = timestamp
-        if entities is not None:
-            item["entities"] = list(entities)
-        if observation_scopes is not None:
-            item["observation_scopes"] = observation_scopes
-        if strategy is not None:
-            item["strategy"] = strategy
-        if update_mode is not None:
-            item["update_mode"] = update_mode
-        body: dict[str, Any] = {"items": [item], "async": not sync}
+        item = {
+            "content": content,
+            "document_id": document_id,
+            "context": context,
+            "metadata": metadata,
+            "tags": tags,
+            "timestamp": timestamp,
+            "entities": entities,
+            "observation_scopes": observation_scopes,
+            "strategy": strategy,
+            "update_mode": update_mode,
+        }
+        return await self.retain_batch(bank_id=bank_id, items=[item], async_=not sync)
+
+    async def retain_batch(
+        self,
+        *,
+        bank_id: str,
+        items: list[dict[str, Any]],
+        async_: bool | None = None,
+        operation_id: str | None = None,
+    ) -> Any:
+        """POST several items to ``/memories`` in ONE ``RetainRequest``.
+
+        Each entry of ``items`` holds the item keywords :meth:`retain` takes
+        (``content`` and ``document_id`` required). ``async_`` and
+        ``operation_id`` are the request-level ``async`` and ``operation_id``
+        fields, sent exactly as given; ``None`` leaves the field out, and the
+        engine then applies its own default (a synchronous retain, no
+        client-chosen operation identity).
+        """
+        body: dict[str, Any] = {"items": [self._retain_item(**item) for item in items]}
+        if async_ is not None:
+            body["async"] = async_
+        if operation_id is not None:
+            body["operation_id"] = operation_id
         resp = await self._http.post(
             f"/v1/default/banks/{bank_id}/memories", headers=self._headers(), json=body
         )

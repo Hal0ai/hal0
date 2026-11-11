@@ -338,6 +338,10 @@ async def _memory_add(
       - ``sync``: ``true`` waits for extraction before returning (no
         ``operation_id``, but ``items_count`` reflects the finished write);
         ``false`` (default) is the existing fire-and-forget path.
+      - ``project``: NOT an argument yet, and a ``project`` key is ignored.
+        Under the unified bank a project-tagged memory is hidden from
+        recall, search and list, so the argument arrives with the change
+        that lets shared reads see it (ADR-0058 decision 7b).
       - ``source``: NOT accepted from the caller. Server-injected from
         ``client_id`` so callers cannot lie about their identity,
         keeping the audit trail grounded.
@@ -646,6 +650,13 @@ async def _memory_reflect(
     one bank (no cross-bank merge — there is no server-side cross-bank
     reflect and merging LLM narratives wouldn't mean anything), resolved via
     the same single-namespace ACL ``memory_add`` uses for its write target.
+
+    The provider holds the reflect to what ``client_id`` may read, exactly as
+    ``POST /api/memory/reflect`` does (``HindsightProvider.reflect``): other
+    agents' ``visibility:private`` memories are filtered out by tag, the
+    caller's ``tags`` and ``tag_groups`` only narrow that, and under the
+    unified bank mental models are left out whatever ``exclude_mental_models``
+    says.
 
     Engines without a reflect capability (the PgVector degrade fallback)
     answer ``{status: "unsupported"}`` rather than erroring — the ABC default

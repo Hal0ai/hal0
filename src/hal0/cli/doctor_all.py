@@ -3583,6 +3583,159 @@ def check_memory_retain_chunk(
     )
 
 
+#: ``memory_projects`` warns past this many project slugs in use that the
+#: registry does not know. A handful is what a box looks like before its
+#: operator has confirmed anything; more means the registry is not being kept.
+PROJECTS_UNREGISTERED_WARN_ABOVE: int = 5
+
+#: How many unregistered slugs the row names.
+PROJECTS_UNREGISTERED_LISTED: int = 10
+
+#: Budget for each page of the tags listing, and the listing's page size and
+#: page cap (5,000 distinct ``project:`` tags is far past any real bank).
+PROJECT_TAGS_TIMEOUT_S: float = 10.0
+_PROJECT_TAGS_PAGE: int = 500
+_PROJECT_TAGS_MAX_PAGES: int = 10
+
+
+def _fetch_project_tags(base: str | None, bank: str) -> list[dict[str, Any]] | None:
+    """The bank's ``project:*`` tags with their fact counts, or ``None``.
+
+    One existing call, ``GET /api/memory/banks/{bank}/tags`` with the engine's
+    own wildcard filter, read page by page.
+    """
+    from hal0.cli._shared import CliApiError, api_get
+
+    items: list[dict[str, Any]] = []
+    for page in range(_PROJECT_TAGS_MAX_PAGES):
+        try:
+            payload = api_get(
+                f"/api/memory/banks/{bank}/tags",
+                base=base,
+                timeout=PROJECT_TAGS_TIMEOUT_S,
+                params={
+                    "q": "project:*",
+                    "limit": _PROJECT_TAGS_PAGE,
+                    "offset": page * _PROJECT_TAGS_PAGE,
+                },
+            )
+        except CliApiError:
+            return None
+        batch = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(batch, list):
+            return None
+        items.extend(row for row in batch if isinstance(row, dict))
+        total = payload.get("total")
+        if len(batch) < _PROJECT_TAGS_PAGE or (isinstance(total, int) and len(items) >= total):
+            break
+    return items
+
+
+def _projects_config() -> tuple[str, Any, bool]:
+    """``([memory] bank, the project registry, read_ok)`` from hal0.toml.
+
+    hal0.toml is ``0600``, so for anyone but the service user and root the
+    read fails; the row then counts against the shipped defaults (the
+    ``shared`` bank, an empty registry) and says so.
+    """
+    from hal0.config.loader import ConfigError, load_hal0_config
+    from hal0.memory.projects import ProjectRegistry, registry_from_config
+
+    try:
+        memory = load_hal0_config().memory
+    except (ConfigError, OSError):
+        return "shared", ProjectRegistry(), False
+    return str(memory.bank or "shared"), registry_from_config(memory.projects), True
+
+
+def check_memory_projects(
+    *,
+    memory: dict[str, Any] | None,
+    base: str | None = None,
+    fetch: Callable[[str | None, str], list[dict[str, Any]] | None] | None = None,
+    config: tuple[str, Any, bool] | None = None,
+) -> Check:
+    """How much project-tagged memory names a project the operator knows (ADR-0058 4a).
+
+    Read from the platform bank's tag counts: the facts carrying each
+    ``project:<slug>`` tag. Reports the share of those facts whose slug is in
+    ``[memory.projects]`` (``registered``, an alias, or the target of one),
+    the ``project:unresolved`` count, and up to
+    :data:`PROJECTS_UNREGISTERED_LISTED` slugs in use that the registry does
+    not know. A fact with two ``project:`` tags is counted once per tag.
+
+    ``warn`` in two cases only: ``project:unresolved`` is non-zero (a coding
+    client is writing without naming its project), or more than
+    :data:`PROJECTS_UNREGISTERED_WARN_ABOVE` unregistered slugs are in use.
+    Everything else passes with the figures. An engine that is off or
+    unreachable, and a listing that cannot be read (a fresh box has no
+    platform bank yet), pass with a note: this row measures, and has nothing
+    to measure.
+
+    ``fetch`` and ``config`` are the injection points for tests.
+    """
+    from hal0.memory.projects import PROJECT_TAG_PREFIX, UNRESOLVED_SLUG
+
+    name, title = "memory_projects", "Memory projects"
+    if memory is None:
+        return Check(name, title, _PASS, "memory engine status unreachable — nothing counted")
+    if memory.get("engine") in (None, "") or not memory.get("enabled", True):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    if not memory.get("reachable"):
+        return Check(name, title, _PASS, "engine unreachable — nothing counted; see the memory row")
+    bank, registry, read_ok = config if config is not None else _projects_config()
+    rows = (fetch or _fetch_project_tags)(base, bank)
+    if rows is None:
+        return Check(
+            name, title, _PASS, f"could not list the tags of bank {bank} — nothing counted"
+        )
+
+    counts: dict[str, int] = {}
+    for row in rows:
+        tag, count = row.get("tag"), row.get("count")
+        if not isinstance(tag, str) or not tag.startswith(PROJECT_TAG_PREFIX):
+            continue
+        slug = tag[len(PROJECT_TAG_PREFIX) :]
+        if slug and isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            counts[slug] = counts.get(slug, 0) + count
+    total = sum(counts.values())
+    if total == 0:
+        return Check(name, title, _PASS, f"no project-tagged facts in bank {bank} yet")
+
+    unresolved = counts.pop(UNRESOLVED_SLUG, 0)
+    known = sum(count for slug, count in counts.items() if registry.is_known(slug))
+    unregistered = sorted(
+        (slug for slug in counts if not registry.is_known(slug)),
+        key=lambda slug: (-counts[slug], slug),
+    )
+    detail = (
+        f"{known} of {total} project-tagged facts ({known * 100 // total}%) name a "
+        f"registered or aliased project; project:unresolved: {unresolved}"
+    )
+    if unregistered:
+        listed = ", ".join(unregistered[:PROJECTS_UNREGISTERED_LISTED])
+        more = len(unregistered) - PROJECTS_UNREGISTERED_LISTED
+        detail += f"; not in the registry ({len(unregistered)}): {listed}"
+        if more > 0:
+            detail += f" and {more} more"
+    if not read_ok:
+        detail += "; hal0.toml unreadable, so counted against an empty registry and bank shared"
+    if unresolved or len(unregistered) > PROJECTS_UNREGISTERED_WARN_ABOVE:
+        remedies = []
+        if unresolved:
+            remedies.append(
+                "a coding client is writing without a project: it named none, or one "
+                "that [memory.projects].deny refuses"
+            )
+        if len(unregistered) > PROJECTS_UNREGISTERED_WARN_ABOVE:
+            remedies.append(
+                "list the real projects under [memory.projects].registered, map other "
+                "spellings under aliases, and put names that are not projects in deny"
+            )
+        return Check(name, title, _WARN, f"{detail}. {'; '.join(remedies)}")
+    return Check(name, title, _PASS, detail)
+
+
 def _decision_config() -> tuple[Any, bool]:
     """``[memory.decision]`` from hal0.toml, else the shipped default.
 
@@ -3956,6 +4109,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
         check_memory_retain_chunk(memory=payloads["memory"], base=base),
         check_memory_decision_lane(memory=payloads["memory"]),
+        check_memory_projects(memory=payloads["memory"], base=base),
     ]
     return verify_rows + extra_rows
 
@@ -4052,6 +4206,7 @@ __all__ = [
     "check_memory_engine_env",
     "check_memory_engine_version",
     "check_memory_extraction_throughput",
+    "check_memory_projects",
     "check_memory_retain_chunk",
     "check_model_store",
     "check_ports",
