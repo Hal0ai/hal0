@@ -297,3 +297,23 @@ def test_gather_payloads_tolerates_api_errors(monkeypatch: pytest.MonkeyPatch) -
     payloads = dv.gather_payloads()
     assert set(payloads) == {"health", "urls", "system", "capabilities", "memory", "services"}
     assert all(v is None for v in payloads.values())
+
+
+def test_render_report_keeps_bracketed_table_names_in_row_text() -> None:
+    # #3552: row text was read as Rich markup, so a `[memory.models]` table
+    # name in a detail was taken for a style tag and dropped.
+    checks = [
+        dv.Check(
+            key="memory_embedder",
+            label="Memory [embedder]",
+            status="warn",
+            detail="the store stays on it; [memory.models] asks for hindsight-ai/x",
+        ),
+        dv.Check(
+            key="memory_graph", label="Graph", status="warn", detail="[memory.graph].llm_timeout_s"
+        ),
+    ]
+    out = _render_to_str(checks, None)
+    assert "[memory.models] asks for" in out
+    assert "[memory.graph].llm_timeout_s" in out
+    assert "Memory [embedder]" in out

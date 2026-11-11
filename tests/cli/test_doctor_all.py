@@ -3885,3 +3885,24 @@ def test_memory_embedder_skips_when_the_config_is_unreadable(monkeypatch) -> Non
     check = da.check_memory_embedder()
     assert check.status == "warn"
     assert "unreadable" in check.detail
+
+
+def test_render_all_keeps_bracketed_table_names_in_row_text() -> None:
+    # #3552: a `[memory.models]` table name in a row detail was read as Rich
+    # markup and dropped from the printed table.
+    buf = io.StringIO()
+    checks = [
+        Check(
+            key="memory_embedder",
+            label="Memory embedder",
+            status="warn",
+            detail="stays on it; [memory.models] asks for hindsight-ai/x",
+        ),
+        Check(
+            key="memory_graph", label="Graph", status="warn", detail="[memory.graph].llm_timeout_s"
+        ),
+    ]
+    da.render_all(Console(file=buf, force_terminal=False, width=200), checks)
+    out = buf.getvalue()
+    assert "[memory.models] asks for" in out
+    assert "[memory.graph].llm_timeout_s" in out

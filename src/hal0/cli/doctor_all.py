@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from hal0.cli.doctor_verify import (
     _FAIL,
@@ -3989,7 +3990,8 @@ def render_all(con: Console, checks: list[Check]) -> None:
     table.add_column("Detail")
     for c in checks:
         badge = _CRIT_BADGE if (c.status == _FAIL and c.critical) else _BADGE[c.status]
-        table.add_row(badge, c.label, c.detail)
+        # Plain text, not markup: keeps `[memory.models]`-style table names.
+        table.add_row(badge, Text(c.label), Text(c.detail))
     con.print(table)
 
 
