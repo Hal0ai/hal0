@@ -48,12 +48,9 @@ import '@fontsource/jetbrains-mono/600.css'
 import './dashboard.css'
 import './dash/engine-panes.css'
 import './dash/npu.css'
-import './dash/memory-overhaul.css'
 // Memory v2 (Bank workspace UI, task C1) — mv-*/mvi-* namespaced view
-// styles for the new units/tags/curate surface Phase C builds on top of
-// the memory-overhaul.css shell.
+// styles for the fact workspace the Memory area's Facts tab mounts.
 import './dash/memory-v2.css'
-import './dash/memory-workspace/memory-workspace.css'
 import './dash/dock/dock.css'
 import './dash/overhaul.css'
 import './dash/slot-rail.css'
@@ -108,13 +105,11 @@ import './dash/services.jsx'
 
 import './dash/extras.jsx'
 
-// AgentView is the `#agent` route shell (Overview · MCP). Memory is no longer
-// one of its tabs: it is the Memory area (dash/memory-area/, imported by
-// main.jsx). The MemoryTab bridge still installs its TanStack-Query hooks
-// onto `window.__hal0Use*` (main.jsx and the command palette read
-// `__hal0UseMemoryEnabled` from it) BEFORE memory-tab.jsx evaluates.
+// AgentView is the `#agent` route shell (Overview · MCP). Memory is not one
+// of its tabs: it is the Memory area (dash/memory-area/, imported by
+// main.jsx). This bridge installs `window.__hal0UseMemoryEnabled` and its
+// pending flag, which main.jsx and the command palette read.
 import './dash/agents/memory-tab-hook-bridge'
-import './dash/agents/memory-tab.jsx'
 // Agents Overview (the bare #agent landing tab): a card library where Hermes
 // is wired to live health + restart. The hook-bridge installs window.__hal0Use*
 // + window.__hal0AgentArt BEFORE the cards evaluate; agent-card.jsx registers
@@ -139,22 +134,15 @@ import './dash/memory-hook-bridge'
 // bridge above. Must load before any Phase C view module that reads
 // window.MemV2.
 import './dash/memory-v2-shared.jsx'
-// Memory v2 Overview (task C2) — engine panel, growth chart, bank table.
-// Publishes window.MemV2Overview; reads window.MemV2 (above) and
-// window.MemoryGraphPanel (dash/agents/memory-tab.jsx, already loaded by
-// this point) at render time. Not routed yet (C6 wires #memory).
-import './dash/memory-overview-v2.jsx'
 // Memory v2 BankBar + Add modal (task C3) — reflect, rules (directives +
 // mental models), add-fact/document/directive/model. Publishes
-// window.MemV2BankBar / window.MemV2AddModal; reads window.MemV2 and
-// window.TypeBar/window.Spark (memory-overview-v2.jsx, above) at render
-// time. Not routed yet (C6 wires #memory/bank).
+// window.MemV2BankBar / window.MemV2AddModal; reads window.MemV2 (above,
+// including its TypeBar and Spark) at render time.
 import './dash/memory-bank-bar.jsx'
 // Memory v2 Bank workspace (task C4) — list/filters/sources, inspector +
-// curation, ego focus view. Publishes window.MemV2Workspace; reads
-// window.MemV2, window.MemV2BankBar (above), and window.MemV2WebGraph
-// (C5, guarded — may not exist yet) at render time. Not routed yet
-// (task C6 wires #memory/bank).
+// curation, ego focus view. Publishes window.MemV2Workspace, which the
+// Memory area's Facts tab mounts; reads window.MemV2, window.MemV2BankBar
+// (above), and window.MemV2WebGraph (below, guarded) at render time.
 import './dash/memory-bank-workspace.jsx'
 // Memory v2 web graph (task C5) — d3-force full-graph view with link-type
 // lenses and a 120-node salience cap. Publishes window.MemV2WebGraph,
@@ -162,18 +150,6 @@ import './dash/memory-bank-workspace.jsx'
 // `typeof === 'function'` for its 'web' view tab. Uses window.__hal0D3Force
 // only — never imports d3 itself.
 import './dash/memory-web-graph.jsx'
-// Task C7: memory-graph-engine.jsx, memory-graph-structured.jsx,
-// memory-graph-ego.jsx, memory-graph.jsx, memory-tools.jsx — the pre-v2
-// graph explorer + tools panel — are deleted. Nothing outside those five
-// files consumed memory-graph-engine.jsx's globals (normalizeGraph,
-// useSize, usePanZoom, GraphDefs, MG_PALETTE, …), so it was killed
-// alongside the four files it only ever served.
-//
-// memory.jsx (window.MemoryView, the old #memory page) is no longer routed:
-// #memory renders the Memory area. It and memory-overview-v2.jsx stay loaded
-// until the old surface is deleted (the BankBar still reads the overview
-// file's window.TypeBar and window.Spark).
-import './dash/memory.jsx'
 
 // Operator Board (#board) — a hal0-skinned kanban wired to the Hermes kanban
 // backend via the audited /api/board/* proxy + a live WS + an agent-chat SSE

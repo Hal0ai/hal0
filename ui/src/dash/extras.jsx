@@ -2,7 +2,7 @@
 //
 // Phase B1: Logs reads from real hooks. v0.3 PR-8 split the
 // AgentView monolith out of this file into ui/src/dash/agents/* — see
-// agent-view.jsx and memory-tab.jsx. v0.4: BackendsView removed (the page
+// agent-view.jsx. v0.4: BackendsView removed (the page
 // duplicated Settings → Runtime + config.json).
 //
 // (#1477) This map used to also name hermes-chat-tab.jsx, personas-tab.jsx,

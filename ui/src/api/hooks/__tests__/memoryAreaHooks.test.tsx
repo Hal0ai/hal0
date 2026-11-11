@@ -43,7 +43,6 @@ vi.mock('@/api/client', async () => {
 const { ENDPOINTS } = await import('@/api/endpoints')
 const hindsight = await import('@/api/hooks/useHindsight')
 const memory = await import('@/api/hooks/useMemory')
-const workspace = await import('@/api/hooks/useMemoryWorkspace')
 const barrel = await import('@/api/hooks')
 
 // A bank id as the coding-agent plugin writes it: `::`, a dot and a dash.
@@ -465,10 +464,8 @@ describe('normalizeMentalModelHistory', () => {
   })
 })
 
-describe('the hooks moved out of useMemoryWorkspace', () => {
-  it('are one function each, reachable from the old file, the new file and the barrel', () => {
-    expect(workspace.useMemoryModels).toBe(memory.useMemoryModels)
-    expect(workspace.useMemoryWorkspaceAgents).toBe(memory.useMemoryWorkspaceAgents)
+describe('the agents and models hooks', () => {
+  it('are one function each, reachable from useMemory and the barrel', () => {
     expect(barrel.useMemoryModels).toBe(memory.useMemoryModels)
     expect(barrel.useMemoryWorkspaceAgents).toBe(memory.useMemoryWorkspaceAgents)
   })

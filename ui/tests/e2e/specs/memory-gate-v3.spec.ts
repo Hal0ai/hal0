@@ -7,13 +7,12 @@
  * /api/status `memory_enabled`. This spec pins the (still-supported) OFF
  * state.
  *
- * Memory is a top-level area (#memory/<tab>) with its own sidebar row, and
- * the older tools page (#memworkspace) has a second row; both rows follow the
- * gate. The Agents row and its sub-links never did and still do not. This
- * spec pins the UI half of that contract for the OFF state:
+ * Memory is a top-level area (#memory/<tab>) with its own sidebar row, which
+ * follows the gate. The Agents row and its sub-links never did and still do
+ * not. This spec pins the UI half of that contract for the OFF state:
  *
- *   - the sidebar has no Memory row and no "Memory (legacy tools)" row; the
- *     Agents row and its Overview and MCP sub-links stay
+ *   - the sidebar has no Memory row; the Agents row and its Overview and MCP
+ *     sub-links stay
  *   - a deep link into the area goes to the dashboard once the status check
  *     has answered (the redirect cases are in memory-redirects-v3)
  *   - the command palette offers no Memory route, and the Overview page has
@@ -49,9 +48,8 @@ test.describe('memory gate OFF ([memory].enabled=false)', () => {
     await navList.locator('[data-testid="nav-agent-toggle"]').click()
     await expect(navList.locator('[data-testid="nav-agent-overview"]')).toBeVisible()
     await expect(navList.locator('[data-testid="nav-mcp"]')).toBeVisible()
-    // ...but there is no Memory row of either kind.
+    // ...but there is no Memory row.
     await expect(navList.locator('[data-testid="nav-memory"]')).toHaveCount(0)
-    await expect(navList.locator('[data-testid="nav-memworkspace"]')).toHaveCount(0)
     await expect(navList.locator('.sb-row .lbl').filter({ hasText: /Memory/ })).toHaveCount(0)
   })
 

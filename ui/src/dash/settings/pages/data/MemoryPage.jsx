@@ -351,6 +351,23 @@ function MemoryGraphPanel() {
           Recommended memory model: lfm2.5-2.6b (about 2.87 GB Q8_0). Bind it to the memory slot explicitly; it is never assigned automatically.
         </div>
       )}
+      {/* ADR-0023 §3 and §4: what extraction sends where, and the quality caveat. Moved here
+          from the old Memory overview's engine panel (deleted with the old memory surface).
+          An upstream target says where the text goes in the Engine model row above. */}
+      <div className="s-row" data-testid="mem-graph-disclosure" style={{display: "block", fontSize: 11, color: "var(--fg-3)", lineHeight: 1.5}}>
+        {!targetIsUpstream && (
+          <p style={{margin: "0 0 6px"}} data-testid="mem-graph-disclosure-routing">
+            Graph extraction sends ingested memory text to the&nbsp;
+            <span className="mono" style={{color: "var(--fg)"}}>{target.replace(/^slot:/, "") || "memory"}</span> slot
+            {" "}for entity + relation extraction. Everything stays on-box — pick a
+            cheap local slot (e.g. <span className="mono" style={{color: "var(--fg)"}}>memory</span>)
+            to keep extraction light. Quality may vary on small models.
+          </p>
+        )}
+        <p style={{margin: 0}} data-testid="mem-graph-disclosure-quality">
+          Graph quality varies by model. We don't currently measure it for you — your results may vary.
+        </p>
+      </div>
       <ThroughputNote status={st} />
       <SRow
         k="Engine running"
@@ -364,6 +381,14 @@ function MemoryGraphPanel() {
         mono
         v={<span data-testid="mem-graph-engine-running" style={{color: running.warn ? "var(--warn)" : "var(--fg-3)"}}>{running.text}</span>}
       />
+      {/* #3388/#3389: the engine's unit env does not carry what hal0 renders (another drop-in
+          wins, or the change is not loaded). Shown on the deleted memory tools page before;
+          a save here rewrites the drop-in. */}
+      {st?.engine_env?.warning && (
+        <div className="s-row mono" role="alert" data-testid="mem-graph-engine-env-warning" style={{display: "block", fontSize: 11, color: "var(--warn)", lineHeight: 1.5}}>
+          ⚠ {st.engine_env.warning}
+        </div>
+      )}
       <SRow
         k="LLM timeout"
         sub="Seconds the Hindsight daemon waits on extraction / consolidation / reflect calls (30–3600) · covers cold slot starts"

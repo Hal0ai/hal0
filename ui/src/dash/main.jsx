@@ -30,7 +30,6 @@ import { captureUiException } from '@/sentry'
 // Benchmarks page (#benchmarks): a real ES module, imported directly rather
 // than read off a `window.BenchmarksView` global.
 import Benchmarks from './Benchmarks'
-import MemoryWorkspaceView from './memory-workspace/MemoryWorkspaceView'
 // The Memory area (#memory/<tab>, ADR-0058 decision 12): a real ES module, like Benchmarks.
 import { MemoryArea } from './memory-area/MemoryArea.jsx'
 import { legacyMemoryRedirect } from './memory-area/memory-route-pure'
@@ -64,11 +63,12 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "slots", "models", "logs", "agent", "memory", "memworkspace", "settings", "mcp", "board", "services", "benchmarks"];
+const ROUTES = ["dashboard", "slots", "models", "logs", "agent", "memory", "settings", "mcp", "board", "services", "benchmarks"];
 function parseRoute() {
-  // Memory addresses from before the Memory area (#memory, #memory/bank, #agent/memory) are
-  // rewritten in place to where they live now, so a saved link lands on the right tab and Back
-  // does not return to an address that redirects again. Remove with the next minor release.
+  // Memory addresses from before the Memory area (#memory, #memory/bank, #agent/memory and the
+  // deleted #memworkspace page) are rewritten in place to where they live now, so a saved link
+  // lands on the right tab and Back does not return to an address that redirects again.
+  // HAL0-SUNSET: v1.9.0 — remove with legacyMemoryRedirect.
   const moved = legacyMemoryRedirect(window.location.hash || "");
   if (moved) {
     try {
@@ -343,8 +343,6 @@ function App() {
       // queue over /api/benchmarks/* (hal0.bench store).
       case "benchmarks":
         return <Benchmarks param={param} />;
-      case "memworkspace":
-        return <MemoryWorkspaceView param={param} />;
       case "settings": return <SettingsShell param={param} />;
       default:         return <div className="view">Not found.</div>;
     }

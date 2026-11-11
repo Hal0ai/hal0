@@ -5,9 +5,17 @@
  *   #memory/bank?…           → #memory/facts?…   (query kept: the bank and the open fact)
  *   #agent/memory[/…][?…]    → #memory/facts?…   (the old Agents ▸ Memory tab)
  *
+ * and the sections of the deleted memory tools page:
+ *
+ *   #memworkspace[/overview]                       → #memory/health
+ *   #memworkspace/kb, /mental-models, /directives  → #memory/knowledge
+ *   #memworkspace/operations                       → #memory/operations
+ *   #memworkspace/agents                           → #memory/agents
+ *   #memworkspace/models                           → #settings/memory
+ *
  * A redirect rewrites the address in place, so Back does not return to an address that redirects
- * again. `#memworkspace/…` is NOT redirected: that page still exists. With memory off, every
- * `#memory/…` address goes to the dashboard once the status check has answered.
+ * again. With memory off, every `#memory/…` address goes to the dashboard once the status check
+ * has answered. The redirects go with the next minor release (HAL0-SUNSET: v1.9.0).
  *
  * (The deep-link, sub-tab and alias cases here were memory-v2-routing's; that spec tested the old
  * page and is gone.)
@@ -91,16 +99,46 @@ test.describe('old Memory addresses', () => {
   })
 })
 
-test.describe('addresses that are not redirected', () => {
-  for (const section of ['overview', 'kb', 'mental-models', 'directives', 'operations', 'agents', 'models']) {
-    test(`#memworkspace/${section} still opens the legacy tools page`, async ({ page }) => {
-      await page.goto(`/#memworkspace/${section}`)
-      await expect(page.getByTestId(`memws-tab-${section}`)).toHaveAttribute('aria-selected', 'true')
-      await expect(page).toHaveURL(new RegExp(`#memworkspace/${section}$`))
-      await expect(page.getByTestId('memory-area')).toHaveCount(0)
+test.describe('the deleted memory tools page (#memworkspace)', () => {
+  for (const [from, to, tab, testId] of [
+    ['#memworkspace', /#memory\/health$/, 'health', 'ma-health-summary'],
+    ['#memworkspace/overview', /#memory\/health$/, 'health', 'ma-health-summary'],
+    ['#memworkspace/kb', /#memory\/knowledge(\?bank=[^&]+)?$/, 'knowledge', 'ma-knowledge'],
+    ['#memworkspace/mental-models', /#memory\/knowledge(\?bank=[^&]+)?$/, 'knowledge', 'ma-knowledge'],
+    ['#memworkspace/directives', /#memory\/knowledge(\?bank=[^&]+)?$/, 'knowledge', 'ma-knowledge'],
+    ['#memworkspace/operations', /#memory\/operations$/, 'operations', 'ma-operations'],
+    ['#memworkspace/agents', /#memory\/agents$/, 'agents', 'ma-agents'],
+  ] as const) {
+    test(`${from} opens Memory ▸ ${tab}`, async ({ page }) => {
+      await page.goto(`/${from}`)
+      await expect(page).toHaveURL(to)
+      await expect(page.getByTestId(`ma-tab-${tab}`)).toHaveAttribute('aria-current', 'page')
+      await expect(page.getByTestId(testId)).toBeVisible()
+      await expect(page.locator('.sidebar').getByTestId('nav-memory')).toHaveAttribute('aria-current', 'page')
     })
   }
 
+  test('#memworkspace/models opens Settings ▸ Memory', async ({ page }) => {
+    await page.goto('/#memworkspace/models')
+    await expect(page).toHaveURL(/#settings\/memory$/)
+    await expect(page.getByRole('heading', { name: 'Memory', exact: true, level: 2 })).toBeVisible()
+    await expect(page.getByTestId('memory-area')).toHaveCount(0)
+  })
+
+  test('the old address is replaced: Back goes to where the operator was', async ({ page }) => {
+    await page.goto('/#dashboard')
+    await expect(page.locator('.sidebar .sb-list')).toBeVisible()
+    await page.evaluate(() => {
+      window.location.hash = '#memworkspace/kb'
+    })
+    // Knowledge then writes the first bank into the address, in place as well.
+    await expect(page).toHaveURL(/#memory\/knowledge(\?bank=[^&]+)?$/)
+    await page.goBack()
+    await expect(page).toHaveURL(/#dashboard$/)
+  })
+})
+
+test.describe('addresses that are not redirected', () => {
   test('#agent and #agent/mcp stay on the Agents page', async ({ page }) => {
     await page.goto('/#agent')
     await expect(page.getByTestId('agent-tab-nav')).toBeVisible()
@@ -122,7 +160,7 @@ test.describe('memory off ([memory].enabled = false)', () => {
     await memoryOff(page)
   })
 
-  for (const hash of ['#memory', '#memory/health', '#memory/facts?bank=primary', '#memory/bank', '#agent/memory']) {
+  for (const hash of ['#memory', '#memory/health', '#memory/facts?bank=primary', '#memory/bank', '#agent/memory', '#memworkspace/kb']) {
     test(`${hash} goes to the dashboard`, async ({ page }) => {
       await page.goto(`/${hash}`)
       await expect(page).toHaveURL(/#dashboard$/)

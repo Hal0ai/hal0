@@ -7,10 +7,8 @@
 // setTimeout-simulated reflect.
 //
 // Window-globals contract: no ES imports across dash/*.jsx — reads
-// window.MemV2 (task C1) and window.TypeBar/window.Spark (published by
-// memory-overview-v2.jsx, task C2 — reused here rather than duplicated)
-// at render time; publishes window.MemV2BankBar / window.MemV2AddModal the
-// same way.
+// window.MemV2 (task C1, which also carries TypeBar and Spark) at render
+// time; publishes window.MemV2BankBar / window.MemV2AddModal the same way.
 //
 // Expert constraint (binding): observations are NOT curatable and are not
 // a valid input fact_type — the Add-fact type picker only offers
@@ -345,8 +343,7 @@ function AddModal({ bank, tab0 = 'fact', onClose }) {
 // scope bar chooses the bank and its Knowledge tab holds directives and mental models, so the
 // bar drops its own bank <select> and its Rules tab there. Everything else is unchanged.
 function BankBar({ bank, setBank, embedded = false }) {
-  const { FACT_COLORS, fmtN, Icon, MvError } = window.MemV2
-  const Spark = window.Spark
+  const { FACT_COLORS, fmtN, Icon, MvError, TypeBar, Spark } = window.MemV2
 
   const useMemoryBanks = window.__hal0UseMemoryBanks
   const useBankStats = window.__hal0UseBankStats
@@ -622,7 +619,7 @@ function BankBar({ bank, setBank, embedded = false }) {
         )}
         <div className="cell dist">
           <span className="mv-cell-k">composition</span>
-          {window.TypeBar && <window.TypeBar b={{ world, experience, observation }} />}
+          <TypeBar b={{ world, experience, observation }} />
           <div className="mv-legend num" style={{ marginTop: 5 }}>
             <span>
               <span className="sw" style={{ background: FACT_COLORS.world }} />
