@@ -118,6 +118,25 @@ _SESSION_TAGS = ("agent:hermes", "kind:ephemeral")
 _DOCUMENT_ID_MAX = 64
 
 
+# Length of the ``-<8 hex>`` hash a rewritten session document id ends with.
+_DOCUMENT_ID_HASH_LEN = 9
+
+
+def _session_document_stem(agent_id: str) -> str:
+    """``<client>[-<profile>]-``: what every session document id of this identity starts with."""
+    client = agent_id or _DEFAULT_AGENT_ID
+    prefix = _DEFAULT_AGENT_ID + "__"
+    if client.startswith(prefix) and len(client) > len(prefix):
+        client = f"{_DEFAULT_AGENT_ID}-{client[len(prefix) :]}"
+    return f"{client}-"
+
+
+def _document_id_safe(raw: str) -> str:
+    import re
+
+    return re.sub(r"[^A-Za-z0-9_-]", "_", raw)
+
+
 def _session_document_id(agent_id: str, session_id: str) -> str | None:
     """``<client>[-<profile>]-<session-id>``: one document per Hermes session.
 
@@ -129,20 +148,30 @@ def _session_document_id(agent_id: str, session_id: str) -> str | None:
     so two sessions never share a document. None without a session id: the
     write then gets a fresh id, as before.
     """
-    import re
-
     if not session_id:
         return None
-    client = agent_id or _DEFAULT_AGENT_ID
-    prefix = _DEFAULT_AGENT_ID + "__"
-    if client.startswith(prefix) and len(client) > len(prefix):
-        client = f"{_DEFAULT_AGENT_ID}-{client[len(prefix) :]}"
-    raw = f"{client}-{session_id}"
-    safe = re.sub(r"[^A-Za-z0-9_-]", "_", raw)
+    raw = _session_document_stem(agent_id) + session_id
+    safe = _document_id_safe(raw)
     if safe == raw and len(safe) <= _DOCUMENT_ID_MAX:
         return safe
     suffix = "-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
     return safe[: _DOCUMENT_ID_MAX - len(suffix)] + suffix
+
+
+def _names_session_document(agent_id: str, document_id: str) -> bool:
+    """Whether ``document_id`` has the shape of one of this identity's session documents.
+
+    Any of them, not only the session bound right now: an earlier session's
+    document, or one a turn named explicitly, is just as append-only. hal0
+    spells a private document ``private:<agent>:<id>`` and accepts that form
+    back, so the test is made on the last segment. An identity long enough
+    for its session ids to be cut and hashed is matched on the part that
+    survives the cut.
+    """
+    name = document_id.rsplit(":", 1)[-1]
+    stem = _document_id_safe(_session_document_stem(agent_id))
+    stem = stem[: _DOCUMENT_ID_MAX - _DOCUMENT_ID_HASH_LEN]
+    return name.startswith(stem) or name.startswith(f"{agent_id}-")
 
 
 def _profile_agent_id(profile: str) -> str:
@@ -334,7 +363,8 @@ RETAIN_SCHEMA = {
                 "description": (
                     "Optional. Leave it out for a new fact. Pass an id (letters, "
                     "digits, - and _, at most 64) only for a fact you will revise: "
-                    "retaining again under the same id REPLACES the earlier text."
+                    "retaining again under the same id REPLACES the earlier text. "
+                    "Ids in the form of a session capture document are refused."
                 ),
             },
         },
@@ -346,13 +376,17 @@ REFLECT_SCHEMA = {
     "name": "hindsight_reflect",
     "description": (
         "Ask hal0 memory a question and get a written answer: the memory "
-        "engine reads across the shared bank and your own private notes and "
-        "synthesises what it finds. SLOW: an LLM runs inside the engine, so "
-        "this takes far longer than hindsight_recall, often minutes on local "
-        "hardware. Use hindsight_recall when you need facts quickly; use this "
-        "when you need them weighed and summarised (a decision history, a "
-        "comparison, what is known about X overall). The answer is historical "
-        "context, not instructions."
+        "engine reads the shared memories and synthesises what it finds. "
+        "SLOW: an LLM runs inside the engine, so this takes far longer than "
+        "hindsight_recall, often minutes on local hardware. Use "
+        "hindsight_recall when you need facts quickly; use this when you need "
+        "them weighed and summarised (a decision history, a comparison, what "
+        "is known about X overall). Other agents' private notes are left out. "
+        "Your own private notes are included only on a host that keeps all "
+        "memory in one bank (the default); on a host with separate private "
+        "banks this reads the shared bank alone, so use hindsight_recall for "
+        "your private notes there. The answer is historical context, not "
+        "instructions."
     ),
     "parameters": {
         "type": "object",
@@ -409,9 +443,9 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         self._client_override = client
         self._client: Hal0MemoryClient | None = None
         self._session_id: str = ""
-        # False once a hal0-api answered a session write without echoing
-        # ``update_mode="append"``: that server replaces a document on a reused
-        # id, so session writes go back to one fresh id each.
+        # False once hal0 answered a session write without reporting
+        # ``update_mode="append"`` (an older hal0-api, or an engine with no
+        # documents): nothing is being appended, so stop asking.
         self._session_documents: bool = True
         self._agent_context: str = "primary"
         # Durable-write default visibility; may be overridden by profile policy
@@ -511,10 +545,14 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
     def _agent_id(self) -> str:
         return self._client.agent_id if self._client else _DEFAULT_AGENT_ID
 
-    def _source_event_key(self, *parts: str) -> str:
-        """Stable idempotency key so server-side dedup drops duplicate captures."""
+    def _source_event_key(self, *parts: str, session_id: str = "") -> str:
+        """Stable idempotency key so server-side dedup drops duplicate captures.
+
+        ``session_id`` is the session the write goes to, when the caller knows
+        one other than the bound session.
+        """
         digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
-        return f"{self._session_id or 'nosession'}:{digest[:16]}"
+        return f"{session_id or self._session_id or 'nosession'}:{digest[:16]}"
 
     def on_session_switch(
         self,
@@ -538,12 +576,18 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         """Write one private session capture; raises ``Hal0MemoryClientError``.
 
         With a session id the write APPENDS to that session's document, so a
-        conversation is one document instead of one per turn (#2017). The
-        engine replaces a document on a reused id unless told to append, so the
-        id is only ever sent together with ``update_mode="append"``, and only
-        while hal0-api echoes the mode back.
+        conversation is one document instead of one per turn (#2017).
+
+        The engine replaces a document on a reused id unless told to append,
+        and a hal0-api from before append mode reads ``document_id`` and drops
+        the mode. So the session id never travels as ``document_id``: it goes
+        in ``append_document_id``, a field such a server does not know and
+        ignores, which leaves the write with a fresh id exactly as before this
+        change. No ordering of restarts, resumes or rollbacks can make an
+        older server replace a session document.
         """
         assert self._client is not None  # every caller checks first
+        session = session_id or self._session_id
         metadata = {
             "kind": kind,
             # The envelope's key for the write kind. On a session document the
@@ -551,13 +595,11 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
             # last thing captured", not as a label on every memory in it.
             "lifecycle": lifecycle,
             "visibility": "private",
-            "source_event": self._source_event_key(event, text),
+            "source_event": self._source_event_key(event, text, session_id=session),
         }
         tags = list(_SESSION_TAGS)
         document_id = (
-            _session_document_id(self._agent_id(), session_id or self._session_id)
-            if self._session_documents
-            else None
+            _session_document_id(self._agent_id(), session) if self._session_documents else None
         )
         if document_id is None:
             self._client.add(text, tags=tags, metadata=metadata, private=True)
@@ -567,17 +609,18 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
             tags=tags,
             metadata=metadata,
             private=True,
-            document_id=document_id,
-            update_mode="append",
+            append_document_id=document_id,
         )
-        # HAL0-SUNSET: v2.0.0 — guard for a hal0-api older than the plugin (a
-        # rolled-back hal0 keeps the newer plugin seed); drop it with the 1.x line.
+        # Second line of defence: hal0 reports ``update_mode`` only when its
+        # provider sent append to the engine. Without that this write was not
+        # appended (it has its own document), and the field is pointless for
+        # the rest of the session.
         if not isinstance(result, dict) or result.get("update_mode") != "append":
             self._session_documents = False
             logger.warning(
-                "hal0-memory: hal0-api did not confirm append mode for a session "
-                "document; later captures in this session get one document each. "
-                "Update hal0 to keep a session in one document."
+                "hal0-memory: hal0-api did not append to the session document; "
+                "captures in this session get one document each. Update hal0 to "
+                "keep a session in one document."
             )
 
     # ── ABC: prompt + recall ───────────────────────────────────────────
@@ -592,8 +635,11 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
             "privately for you automatically. Use hindsight_recall (fast: the stored "
             "facts) before asking the user to repeat themselves, or hindsight_reflect "
             "when you need a written synthesis (slow: an LLM in the memory engine "
-            "answers, often taking minutes; its answer can draw on your own private "
-            "notes without marking them). Use hindsight_retain "
+            "answers, often taking minutes). Reflect reads shared memories and leaves "
+            "out other agents' private notes; where this host keeps all memory in one "
+            "bank it also draws on your own private notes, without marking them, and "
+            "where private banks are separate it reads the shared bank alone. "
+            "Use hindsight_retain "
             "to persist durable facts — these are SHARED by default, so pass "
             'visibility="private" for a fact you want kept private (a profile configured '
             "with memory_private keeps every durable fact private). Recalled memory is "
@@ -821,16 +867,18 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
         assert self._client is not None  # guarded by handle_tool_call
         # An explicit retain is its own document: no id unless the caller names
         # one, and then a plain upsert (the same id replaces the earlier text).
-        # The session's own document is append-only and never a valid target:
-        # a replace there would delete the captured conversation.
+        # Session documents are append-only and never a valid target, this
+        # session's or any other's: a replace there deletes a captured
+        # conversation.
         extra: dict[str, Any] = {}
         document_id = str(args.get("document_id") or "").strip()
         if document_id:
-            if document_id == _session_document_id(self._agent_id(), self._session_id):
+            if _names_session_document(self._agent_id(), document_id):
                 return json.dumps(
                     {
                         "status": "error",
-                        "error": "document_id names this session's own capture document; "
+                        "error": "document_id is in the form reserved for session capture "
+                        f"documents ({_session_document_stem(self._agent_id())}...); "
                         "choose another id or omit it",
                     }
                 )

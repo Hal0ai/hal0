@@ -1,15 +1,21 @@
-"""``POST /api/memory/add`` carries ``update_mode`` and ``observation_scopes``
-to the provider, and from there to the engine (#2017, ADR-0058 decision 5).
+"""``POST /api/memory/add``: appending to a document, and what reaches the
+engine (#2017, ADR-0058 decision 5).
 
 The fact this file exists for: Hindsight 1.2.0 REPLACES a document when a
 retain reuses its ``document_id``, unless the retain item says
 ``update_mode: "append"`` (engine ``api/http.py``, ``MemoryItem.update_mode``:
 "'replace' (default) deletes old data and reprocesses from scratch. 'append'
 concatenates new content to the existing document text and reprocesses").
-The Hermes plugin sends one id for a whole session, so every such write must
-reach the engine marked ``append``. The last tests here run the real plugin
-against the real route and the real provider with only the engine mocked, and
-assert the mode on the engine call.
+
+The route offers the append two ways. ``document_id`` with ``update_mode``
+is the engine's own pair. ``append_document_id`` is the same thing as one
+field, for the Hermes plugin: a hal0-api from before this change reads
+``document_id``, drops ``update_mode`` and replaces, but ignores a field it
+does not know. The response carries ``update_mode`` only when the provider
+reports it sent the mode to the engine.
+
+The last tests run the real plugin against the real route and the real
+provider with only the engine mocked, and assert the mode on the engine call.
 """
 
 from __future__ import annotations
@@ -28,6 +34,9 @@ from hal0.agents.hermes_provision import profile_agent_id
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory as memory_routes
 from hal0.memory.hindsight_provider import HindsightProvider
+from hal0.memory.pgvector_provider import PgVectorProvider
+
+PRIVATE = {"X-hal0-Agent": "hermes", "X-hal0-Private": "1"}
 
 
 def _app(provider: Any) -> FastAPI:
@@ -39,7 +48,8 @@ def _app(provider: Any) -> FastAPI:
 
 
 class RecordingWrapper:
-    """Stands in for the provider and records exactly the keywords it got."""
+    """Stands in for the provider and records exactly the keywords it got.
+    Like a provider that does nothing with ``update_mode``, it reports none."""
 
     def __init__(self) -> None:
         self.add_calls: list[dict[str, Any]] = []
@@ -60,23 +70,81 @@ def http(wrapper: RecordingWrapper) -> Iterator[TestClient]:
         yield client
 
 
-# ── the route ──────────────────────────────────────────────────────────────
+def _engine() -> AsyncMock:
+    engine = AsyncMock()
+    engine.retain.return_value = {"operation_id": "op-1"}
+    return engine
 
 
-def test_add_forwards_update_mode_and_echoes_it(
+# ── append_document_id ─────────────────────────────────────────────────────
+
+
+def test_append_document_id_is_document_id_plus_append(
     http: TestClient, wrapper: RecordingWrapper
 ) -> None:
     r = http.post(
         "/api/memory/add",
-        json={"text": "turn 2", "document_id": "hermes-s1", "update_mode": "append"},
-        headers={"X-hal0-Agent": "hermes", "X-hal0-Private": "1"},
+        json={"text": "turn 2", "append_document_id": "hermes-s1"},
+        headers=PRIVATE,
     )
     assert r.status_code == 200, r.text
     (call,) = wrapper.add_calls
     assert call["document_id"] == "hermes-s1"
     assert call["update_mode"] == "append"
-    # The acknowledgement an appending caller checks before reusing the id.
-    assert r.json()["update_mode"] == "append"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"document_id": "hermes-s1"},
+        {"document_id": "another"},
+        {"update_mode": "append"},
+        {"update_mode": "replace"},
+        {"document_id": "hermes-s1", "update_mode": "append"},
+    ],
+)
+def test_append_document_id_has_exactly_one_meaning(
+    http: TestClient, wrapper: RecordingWrapper, extra: dict[str, str]
+) -> None:
+    r = http.post(
+        "/api/memory/add",
+        json={"text": "x", "append_document_id": "hermes-s1", **extra},
+        headers=PRIVATE,
+    )
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "memory.append_document_id_conflict"
+    assert wrapper.add_calls == []
+
+
+@pytest.mark.parametrize("value", ["../escape", "", 7, "x" * 65, ["hermes-s1"]])
+def test_append_document_id_follows_the_document_id_grammar(
+    http: TestClient, wrapper: RecordingWrapper, value: Any
+) -> None:
+    r = http.post("/api/memory/add", json={"text": "x", "append_document_id": value})
+    assert r.status_code == 400, r.text
+    assert wrapper.add_calls == []
+
+
+def test_a_private_append_document_id_needs_a_private_write(
+    http: TestClient, wrapper: RecordingWrapper
+) -> None:
+    body = {"text": "x", "append_document_id": "private:hermes:hermes-s1"}
+    assert http.post("/api/memory/add", json=body).status_code == 400
+    assert http.post("/api/memory/add", json=body, headers=PRIVATE).status_code == 200
+    assert wrapper.add_calls[0]["document_id"] == "private:hermes:hermes-s1"
+
+
+# ── update_mode and observation_scopes pass through ────────────────────────
+
+
+def test_add_forwards_update_mode(http: TestClient, wrapper: RecordingWrapper) -> None:
+    r = http.post(
+        "/api/memory/add",
+        json={"text": "turn 2", "document_id": "notes", "update_mode": "append"},
+    )
+    assert r.status_code == 200, r.text
+    (call,) = wrapper.add_calls
+    assert (call["document_id"], call["update_mode"]) == ("notes", "append")
 
 
 def test_add_forwards_observation_scopes_as_sent(
@@ -117,13 +185,55 @@ def test_add_rejects_malformed_fields(
     assert wrapper.add_calls == []
 
 
+# ── the acknowledgement means "applied", not "forwarded" ───────────────────
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"text": "x", "append_document_id": "hermes-s1"},
+        {"text": "x", "document_id": "notes", "update_mode": "append"},
+    ],
+)
+def test_the_route_does_not_acknowledge_on_the_providers_behalf(
+    http: TestClient, wrapper: RecordingWrapper, body: dict[str, Any]
+) -> None:
+    """The route forwarded the mode; this provider reported nothing. The
+    response must not claim the append happened."""
+    r = http.post("/api/memory/add", json=body, headers=PRIVATE)
+    assert r.status_code == 200, r.text
+    assert wrapper.add_calls[0]["update_mode"] == "append"
+    assert "update_mode" not in r.json()
+
+
+def test_the_hindsight_provider_acknowledges_what_it_sent_to_the_engine() -> None:
+    engine = _engine()
+    with TestClient(_app(HindsightProvider(client=engine, unified_bank=True))) as http:
+        appended = http.post(
+            "/api/memory/add",
+            json={"text": "x", "append_document_id": "hermes-s1"},
+            headers=PRIVATE,
+        )
+        plain = http.post("/api/memory/add", json={"text": "x", "document_id": "notes"})
+    assert appended.json()["update_mode"] == "append"
+    assert engine.retain.await_args_list[0].kwargs["update_mode"] == "append"
+    assert "update_mode" not in plain.json()
+    assert "update_mode" not in engine.retain.await_args_list[1].kwargs
+
+
+def test_the_volatile_fallback_does_not_acknowledge() -> None:
+    """The in-memory fallback has no documents and ignores the mode."""
+    with TestClient(_app(PgVectorProvider())) as http:
+        r = http.post(
+            "/api/memory/add",
+            json={"text": "x", "append_document_id": "hermes-s1"},
+            headers=PRIVATE,
+        )
+    assert r.status_code == 200, r.text
+    assert "update_mode" not in r.json()
+
+
 # ── plugin → route → provider → engine ─────────────────────────────────────
-
-
-def _engine() -> AsyncMock:
-    engine = AsyncMock()
-    engine.retain.return_value = {"operation_id": "op-1"}
-    return engine
 
 
 def _plugin(http: TestClient, *, agent_id: str, session_id: str) -> Hal0MemoryProvider:
@@ -154,11 +264,14 @@ def test_session_writes_reach_the_engine_in_append_mode(unified_bank: bool) -> N
     if unified_bank:
         expected = f"private:hermes:{expected}"
     assert {r["document_id"] for r in retains} == {expected}
-    # One tag set across all four, so the engine's re-stamp changes nothing.
-    assert len({tuple(sorted(r["tags"])) for r in retains}) == 1
-    assert "visibility:private" in retains[0]["tags"]
+    # One tag set across all four, after the write envelope has had its say,
+    # so the engine's re-stamp changes nothing.
+    tag_sets = {tuple(sorted(r["tags"])) for r in retains}
+    assert tag_sets == {("agent:hermes", "kind:ephemeral", "visibility:private")}
     assert retains[0]["content"] == "User: question 0\nAssistant: answer 0"
-    # The plugin saw the route's acknowledgement and kept the session id.
+    # The write kind reached the engine as metadata, not as a tag.
+    assert [r["metadata"]["lifecycle"] for r in retains] == ["chat"] * 3 + ["session-end"]
+    # The plugin saw the provider's acknowledgement and kept appending.
     assert plugin._session_documents is True
 
 
@@ -185,3 +298,11 @@ def test_an_explicit_retain_reaches_the_engine_with_a_fresh_id_and_no_mode() -> 
     assert first["document_id"] != second["document_id"]
     assert "hermes-s1" not in first["document_id"]
     assert "update_mode" not in first and "update_mode" not in second
+
+
+def test_on_the_volatile_fallback_the_plugin_stops_asking_to_append() -> None:
+    provider = PgVectorProvider()
+    with TestClient(_app(provider)) as http:
+        plugin = _plugin(http, agent_id="hermes", session_id="s1")
+        plugin.sync_turn("q", "a")
+        assert plugin._session_documents is False

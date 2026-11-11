@@ -13,13 +13,22 @@ prose, so the rule has to go to the engine as a tag filter. The tests below
 evaluate that filter the way the engine does (Hindsight 1.2.0,
 ``engine/search/tags.py`` ``_build_group_clause``) and hold it to
 ``HindsightProvider._is_visible_to``, the rule recall already enforces.
+
+A tag filter covers facts and observations. It does not cover mental models:
+the engine filters those by the MODEL's tags, and a model is a document the
+engine writes from the whole bank (hal0's seeded ones carry no tags at all).
+So under the unified bank the route also sends the engine's
+``exclude_mental_models`` (``ReflectRequest.exclude_mental_models``: "If true,
+exclude all mental models from the reflect loop"). ``BankDouble`` below plays
+a bank with such a model.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock
 
 import httpx
@@ -182,6 +191,8 @@ def test_reflect_reaches_the_engine_scoped_to_the_caller(
     assert sent["tag_groups"] == reflect_visibility_scope(DISCORD, ["project:hal0"], "all_strict")
     assert not _readable(sent["tag_groups"], [*WORK_PRIVATE, "project:hal0"])
     assert _readable(sent["tag_groups"], ["agent:hermes", "project:hal0"])
+    # The unified bank holds other agents' private facts: no mental models.
+    assert sent["exclude_mental_models"] is True
 
 
 def test_reflect_defaults(http: TestClient, engine: AsyncMock) -> None:
@@ -207,6 +218,110 @@ def test_private_toggle_picks_the_callers_private_bank_when_banks_are_split() ->
         )
     banks = [call.kwargs["bank_id"] for call in engine.reflect.await_args_list]
     assert banks == ["shared", "private__hermes"]
+    # Neither bank holds another agent's private facts, so their mental
+    # models are safe to use.
+    assert [c.kwargs["exclude_mental_models"] for c in engine.reflect.await_args_list] == [
+        False,
+        False,
+    ]
+
+
+# ── mental models ──────────────────────────────────────────────────────────
+
+SHARED_TEXT = "The backup window is Sunday 03:00."
+WORK_NOTE = "The work profile's client is Acme and the contract ends in March."
+DISCORD_OWN = "The discord profile keeps its moderation notes here."
+
+
+class BankDouble:
+    """A unified bank as the engine's reflect loop reads it.
+
+    Facts are found through ``tag_groups``, as ``tool_recall`` and
+    ``tool_search_observations`` do. The mental model is found the same way,
+    by ITS OWN tags, which are empty: hal0 seeds its models with ``"tags": []``
+    (``src/hal0/memory/spec/templates/shared.json``). Its text was written by
+    the engine from every fact in the bank, the work profile's private one
+    included. The loop skips mental models only when told to.
+    """
+
+    facts: ClassVar = [
+        (SHARED_TEXT, SHARED_FACT),
+        (WORK_NOTE, WORK_PRIVATE),
+        (DISCORD_OWN, [f"agent:{DISCORD}", "visibility:private"]),
+    ]
+    mental_model: ClassVar = ("User profile: works with Acme; the contract ends in March.", [])
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def reflect(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        groups = kwargs.get("tag_groups") or []
+        used = [text for text, tags in self.facts if _readable(groups, tags)]
+        model_text, model_tags = self.mental_model
+        if not kwargs.get("exclude_mental_models") and _readable(groups, model_tags):
+            used.append(model_text)
+        return {"text": " ".join(used)}
+
+
+def _reflect_as(agent_id: str, provider: Any) -> str:
+    with TestClient(_app(provider)) as http:
+        r = http.post(
+            "/api/memory/reflect",
+            json={"query": "who is the client?"},
+            headers={"X-hal0-Agent": agent_id},
+        )
+    assert r.status_code == 200, r.text
+    return r.json()["text"]
+
+
+def test_an_untagged_mental_model_built_from_anothers_private_fact_is_not_used() -> None:
+    """The leak the tag filter alone leaves open, and the route closing it."""
+    bank = BankDouble()
+    answer = _reflect_as(DISCORD, HindsightProvider(client=bank, unified_bank=True))
+    assert "Acme" not in answer
+    assert SHARED_TEXT in answer and DISCORD_OWN in answer
+    assert bank.calls[0]["exclude_mental_models"] is True
+
+    # What the same request would have produced with the tag filter alone:
+    # the private FACT is filtered, the model that quotes it is not.
+    scope = reflect_visibility_scope(DISCORD)
+    assert not _readable(scope, WORK_PRIVATE)
+    assert _readable(scope, BankDouble.mental_model[1])
+    unguarded = BankDouble()
+    leaked = asyncio.run(unguarded.reflect(tag_groups=scope))["text"]
+    assert WORK_NOTE not in leaked and "Acme" in leaked
+
+
+def test_the_owner_of_the_private_fact_gets_no_mental_model_either() -> None:
+    """All or nothing: a model mixes every agent's facts, so it is left out
+    for every caller of a unified bank, the fact's owner included."""
+    answer = _reflect_as(WORK, HindsightProvider(client=BankDouble(), unified_bank=True))
+    assert WORK_NOTE in answer
+    assert BankDouble.mental_model[0] not in answer
+
+
+def test_split_banks_keep_their_mental_models() -> None:
+    bank = BankDouble()
+    answer = _reflect_as(DISCORD, HindsightProvider(client=bank, unified_bank=False))
+    assert bank.calls[0]["exclude_mental_models"] is False
+    assert BankDouble.mental_model[0] in answer
+
+
+def test_a_provider_that_does_not_say_how_its_banks_are_laid_out_is_treated_as_unified() -> None:
+    """Fail closed: unknown layout means the bank may hold anyone's notes."""
+
+    class Opaque:
+        def __init__(self) -> None:
+            self.kwargs: dict[str, Any] = {}
+
+        async def reflect(self, **kwargs: Any) -> dict[str, Any]:
+            self.kwargs = kwargs
+            return {"text": "ok"}
+
+    provider = Opaque()
+    _reflect_as("hermes", provider)
+    assert provider.kwargs["exclude_mental_models"] is True
 
 
 @pytest.mark.parametrize(
@@ -300,6 +415,7 @@ def test_hindsight_reflect_tool_end_to_end(http: TestClient, engine: AsyncMock) 
     assert sent["budget"] == "high"
     assert sent["bank_id"] == "Hal0::Platform"
     assert not _readable(sent["tag_groups"], WORK_PRIVATE)
+    assert sent["exclude_mental_models"] is True
     engine.recall.assert_not_awaited()
 
 

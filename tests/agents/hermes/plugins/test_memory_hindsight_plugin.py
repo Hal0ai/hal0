@@ -1377,15 +1377,21 @@ def test_initialize_ignores_a_stored_default_id_on_a_profile_home(
 
 
 def test_prompt_and_retain_schema_do_not_overclaim_privacy() -> None:
-    """Private notes are filtered from other agents' recall and reflect, but a
-    reflect answer blends the caller's own private notes in unmarked."""
+    """Private notes are filtered from other agents' recall and reflect. A
+    reflect answer blends the caller's own private notes in unmarked where one
+    bank holds everything, and reads the shared bank alone where banks are split."""
     from hal0.agents.hermes.plugins.memory_hindsight import provider as prov
 
     provider = Hal0MemoryProvider(client=Mock(spec=Hal0MemoryClient))
     provider.initialize()
     block = provider.system_prompt_block()
     assert "only you" not in block and "only you" not in prov.RETAIN_SCHEMA["description"]
-    assert "your own private notes without marking them" in block
+    assert "leaves out other agents' private notes" in block
+    assert "your own private notes, without marking them" in block
+    assert "where private banks are separate it reads the shared bank alone" in block
+    reflect = prov.REFLECT_SCHEMA["description"]
+    assert "Other agents' private notes are left out" in reflect
+    assert "separate private banks this reads the shared bank alone" in reflect
 
 
 def test_a_yaml_parse_error_never_puts_the_config_text_in_the_log(tmp_path, caplog) -> None:

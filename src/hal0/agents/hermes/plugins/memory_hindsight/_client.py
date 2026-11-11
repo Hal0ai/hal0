@@ -162,17 +162,24 @@ class Hal0MemoryClient:
         metadata: dict[str, Any] | None = None,
         private: bool = True,
         document_id: str | None = None,
-        update_mode: str | None = None,
+        append_document_id: str | None = None,
         observation_scopes: Any = None,
     ) -> dict[str, Any]:
         """POST /api/memory/add. ``private=True`` → hermes-private, else shared.
 
-        ``document_id`` names the document the text belongs to. The engine
-        REPLACES a document whose id it already holds unless ``update_mode`` is
-        ``"append"``, so a caller that reuses an id across writes must send
-        ``update_mode="append"`` and check that the response echoes it: a
-        hal0-api too old to forward the mode drops the field and replaces.
+        ``document_id`` is a plain upsert: the engine REPLACES the document it
+        already holds under that id. Right for one fact revised in place, and
+        never to be used for an id that many writes share.
+
+        ``append_document_id`` is for that case: the text is added to the
+        document. It travels as its own field, and this method refuses to send
+        both, because a hal0-api from before append mode reads ``document_id``
+        and replaces, while it ignores a field it does not know and stores the
+        text under a fresh id. The response carries ``update_mode: "append"``
+        when the write really was appended.
         """
+        if document_id is not None and append_document_id is not None:
+            raise ValueError("document_id and append_document_id are mutually exclusive")
         payload: dict[str, Any] = {"text": text}
         if tags is not None:
             payload["tags"] = list(tags)
@@ -180,8 +187,8 @@ class Hal0MemoryClient:
             payload["metadata"] = dict(metadata)
         if document_id is not None:
             payload["document_id"] = document_id
-        if update_mode is not None:
-            payload["update_mode"] = update_mode
+        if append_document_id is not None:
+            payload["append_document_id"] = append_document_id
         if observation_scopes is not None:
             payload["observation_scopes"] = observation_scopes
         return self._request("POST", "/api/memory/add", json=payload, private=private)
@@ -215,7 +222,9 @@ class Hal0MemoryClient:
 
         Slow: the engine runs an agentic loop, so this waits minutes, not the
         30 s the other verbs get. Sent without the private toggle, so it reads
-        the shared namespace; hal0-api hides other agents' private notes.
+        the shared namespace: under hal0's unified bank that includes this
+        agent's own private notes (other agents' are filtered out by hal0-api);
+        with split banks it is the shared bank alone.
         """
         payload: dict[str, Any] = {
             "query": query,

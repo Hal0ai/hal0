@@ -1229,7 +1229,7 @@ def make_add_preflight(app: Any, wrapper: Any) -> Callable[[], Awaitable[None]]:
 @router.post("/add")
 async def memory_add(request: Request) -> dict[str, Any]:
     """Add a memory item. Body: ``{text, dataset?, tags?, metadata?,
-    document_id?, update_mode?, observation_scopes?}``.
+    document_id?, update_mode?, append_document_id?, observation_scopes?}``.
 
     Returns ``{id, timestamp}`` plus ``operation_id`` when the engine
     ingests asynchronously (Hindsight retain). Reuse ``document_id``
@@ -1238,13 +1238,22 @@ async def memory_add(request: Request) -> dict[str, Any]:
     ``update_mode`` says what a reused ``document_id`` does to the document
     already stored under it: ``"replace"`` (the engine's default when the
     field is absent) deletes it and stores the new text; ``"append"`` adds
-    the new text to it. A caller that sends one id for many writes (a
-    conversation, one turn at a time) must send ``"append"``, or each write
-    deletes the ones before it. The response echoes the ``update_mode`` it
-    forwarded, so such a caller can tell this server honoured it from an
-    older one that ignores the field. ``observation_scopes`` is the engine's
-    consolidation scoping, passed through as sent; when absent the provider
-    decides.
+    the new text to it.
+
+    ``append_document_id`` is the one-field form of ``document_id`` plus
+    ``update_mode: "append"``, for a caller that sends one id for many
+    writes (a conversation, one turn at a time). It exists because the pair
+    is unsafe to send to a hal0-api from before ``update_mode``: that server
+    reads ``document_id``, drops the mode, and the engine replaces the
+    document on every write. An unknown field is ignored there instead, so
+    the write gets a fresh id and nothing is lost. It has exactly one
+    meaning, and is refused beside ``document_id`` or ``update_mode``.
+
+    The response carries ``update_mode`` when the provider reports it sent
+    that mode to the engine; the route never adds it on its own. An
+    appending caller treats a response without it as "this document was not
+    appended to". ``observation_scopes`` is the engine's consolidation
+    scoping, passed through as sent; when absent the provider decides.
 
     Identity headers (issue #317):
 
@@ -1310,6 +1319,29 @@ async def memory_add(request: Request) -> dict[str, Any]:
     # lives here (the provider owns the scoping default, the engine the mode).
     passthrough: dict[str, Any] = {}
     update_mode = body.get("update_mode")
+    append_document_id = body.get("append_document_id")
+    if append_document_id is not None:
+        if document_id is not None or update_mode is not None:
+            raise BadRequest(
+                "memory_add 'append_document_id' cannot be combined with "
+                "'document_id' or 'update_mode'",
+                code="memory.append_document_id_conflict",
+                details={"path": "/api/memory/add"},
+            )
+        if not isinstance(append_document_id, str) or not DOCUMENT_ID_PATTERN.match(
+            append_document_id
+        ):
+            raise BadRequest(
+                "memory_add 'append_document_id' must match the identity grammar "
+                "(alnum/-/_ ≤64 chars)",
+                details={"path": "/api/memory/add"},
+            )
+        if append_document_id.startswith("private:") and not private:
+            raise BadRequest(
+                "memory_add a private:<agent>:<id> 'append_document_id' needs a private write",
+                details={"path": "/api/memory/add"},
+            )
+        document_id, update_mode = append_document_id, "append"
     if update_mode is not None:
         if update_mode not in _UPDATE_MODES:
             raise BadRequest(
@@ -1344,7 +1376,9 @@ async def memory_add(request: Request) -> dict[str, Any]:
     # on a healthy box just because the catalog lookup came back thin.
     await extraction_ctx_preflight(request.app, wrapper)
 
-    result = await wrapper.add(
+    # Returned as the provider built it: ``update_mode`` is in there only when
+    # the provider sent that mode to the engine (see the docstring).
+    return await wrapper.add(
         text=text,
         dataset=dataset,
         tags=body.get("tags") or [],
@@ -1354,10 +1388,6 @@ async def memory_add(request: Request) -> dict[str, Any]:
         document_id=document_id,
         **passthrough,
     )
-    if update_mode is not None and isinstance(result, dict):
-        # The acknowledgement an appending caller waits for (see the docstring).
-        result = {**result, "update_mode": update_mode}
-    return result
 
 
 @router.post("/search")
@@ -1462,8 +1492,17 @@ def reflect_visibility_scope(
     be filtered afterwards, so the same rule is given to the engine as a tag
     filter instead: a memory is readable when it is not ``visibility:private``,
     or when it carries the caller's own ``agent:<id>`` tag. A caller with no
-    identity reads no private memory at all. The engine applies ``tag_groups``
-    to the reflect loop's searches: facts, observations and mental models.
+    identity reads no private memory at all.
+
+    What this covers and what it does not: the engine applies ``tag_groups``
+    to the reflect loop's fact and observation searches, where every item
+    carries the tags of the write it came from. It also filters the mental
+    model search by the MODEL's own tags, which says nothing about what the
+    model was built from: a mental model is a document the engine writes from
+    the whole bank, and hal0's seeded models carry no tags. A tag filter
+    therefore cannot keep another agent's private notes out of mental-model
+    text; :func:`memory_reflect` leaves mental models out of the loop instead
+    wherever the bank holds more than one agent's private memories.
 
     ``tags`` / ``tags_match`` are the caller's own scoping. The engine refuses
     ``tags`` next to ``tag_groups``, so they ride along as one more group
@@ -1490,12 +1529,21 @@ async def memory_reflect(request: Request) -> dict[str, Any]:
     engine runs an agentic loop, minutes on local hardware.
 
     This is the NAMESPACE reflect, the sibling of ``/recall``: identity comes
-    from ``X-hal0-Agent``, the provider picks the bank, and other agents'
-    private memories are excluded (:func:`reflect_visibility_scope`). It
-    reads one bank, the one a write with the same headers would land in.
+    from ``X-hal0-Agent`` and the provider picks the bank. It reads ONE bank,
+    the one a write with the same headers would land in: under the unified
+    bank that is the platform bank, which holds shared memories and every
+    agent's private ones; with split banks (``unified_bank = false``) it is
+    the shared bank only, or the caller's own private bank when
+    ``X-hal0-Private: 1`` is sent, never both.
+
+    Two rules keep other agents' private memories out of the answer. Facts
+    and observations are filtered by tag (:func:`reflect_visibility_scope`).
+    Mental models cannot be filtered that way, so under the unified bank the
+    reflect runs with the engine's ``exclude_mental_models`` and uses none.
+
     The bank console's ``POST /api/memory/banks/{bank}/reflect`` is a
     different thing: a verbatim passthrough to a bank the operator names,
-    with no identity and no visibility rule.
+    with no identity and neither rule.
     """
     path = {"path": "/api/memory/reflect"}
     body = await _read_json_body(request)
@@ -1531,6 +1579,10 @@ async def memory_reflect(request: Request) -> dict[str, Any]:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
     wrapper = _wrapper(request)
+    # A provider that does not say how its banks are laid out is treated as
+    # unified: leaving mental models out costs some answer quality, using one
+    # built from another agent's private notes is a leak.
+    shared_with_other_agents = bool(getattr(wrapper, "unified_bank", True))
     try:
         result = await wrapper.reflect(
             query=query,
@@ -1539,6 +1591,7 @@ async def memory_reflect(request: Request) -> dict[str, Any]:
             budget=budget,
             max_tokens=max_tokens,
             tag_groups=reflect_visibility_scope(client_id, tags, tags_match),
+            exclude_mental_models=shared_with_other_agents,
             response_schema=response_schema,
         )
     except httpx.TimeoutException as exc:

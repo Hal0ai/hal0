@@ -84,6 +84,11 @@ From `agent/memory_provider.py`:
   historical context and not instructions, and a failure is returned as an
   error result. Against a hal0-api without the route, or an engine that
   cannot reflect, it falls back to a recall and says so in the result.
+  Reflect reads one bank. Under hal0's unified bank (the default) that is
+  shared memory plus the caller's own private notes; hal0-api filters other
+  agents' private facts and observations out and runs the reflect without
+  mental models, because a mental model is built from the whole bank. With
+  split banks (`unified_bank = false`) it reads the shared bank alone.
 * `on_memory_write(action, target, content, metadata=None)` — mirrors the
   built-in memory tool's writes **privately** into hal0-memory.
 * `get_config_schema()` / `save_config(values, hermes_home)` — official setup
@@ -109,22 +114,29 @@ construction without code change.
 ## Session documents
 
 Writes that belong to a session (turn capture, the pre-compress note, the
-session-end checkpoint) carry `document_id = <client>[-<profile>]-<session-id>`:
-`hermes-<session>` for the default profile and `hermes-<profile>-<session>`
-for a named one. The session id is Hermes's own `AIAgent.session_id`, which the
-memory manager passes to `initialize()`, to every `sync_turn()` and, when it
-rotates, to `on_session_switch()`. An id that does not fit hal0's document-id
-grammar (`[A-Za-z0-9_-]`, at most 64 characters) is rewritten and given a hash
-suffix.
+session-end checkpoint) are appended to one document,
+`<client>[-<profile>]-<session-id>`: `hermes-<session>` for the default
+profile and `hermes-<profile>-<session>` for a named one. The session id is
+Hermes's own `AIAgent.session_id`, which the memory manager passes to
+`initialize()`, to every `sync_turn()` and, when it rotates, to
+`on_session_switch()`. An id that does not fit hal0's document-id grammar
+(`[A-Za-z0-9_-]`, at most 64 characters) is rewritten and given a hash suffix.
 
-Three rules follow from how the engine treats a reused document id:
+Four rules follow from how the engine and older servers treat a reused
+document id:
 
-* The id is only ever sent with `update_mode: "append"`. Without it the engine
-  replaces the stored document, which would delete every earlier turn.
-* `POST /api/memory/add` echoes the `update_mode` it forwarded. If the echo is
-  missing (a hal0-api from before this contract) the plugin stops sending the
-  session id for the rest of the session and each write gets its own document
-  again.
+* The engine replaces a document when a retain reuses its id, unless the
+  retain says `update_mode: "append"`.
+* The session id is sent as `append_document_id`, never as `document_id`.
+  `POST /api/memory/add` turns that one field into `document_id` plus
+  `update_mode: "append"`. A hal0-api from before the field reads
+  `document_id` (and would replace) but ignores keys it does not know, so
+  there the write simply gets a fresh document, as it did before. No order of
+  restarts, resumes or rollbacks lets an older server replace a session
+  document.
+* The response carries `update_mode: "append"` when hal0's provider sent the
+  append to the engine. Without it nothing is being appended, and the plugin
+  stops sending the field for the rest of the session.
 * Every session write carries the same tags. On an append the engine re-stamps
   the retain's tags over the whole document and re-consolidates when they
   change, so the write kind (`chat`, `pre-compress`, `session-end`) is
@@ -132,4 +144,5 @@ Three rules follow from how the engine treats a reused document id:
 
 `hindsight_retain`, delegation records and the built-in memory mirror are not
 session writes: each gets a fresh document unless the model passes
-`document_id` to `hindsight_retain`, and that one is a plain upsert.
+`document_id` to `hindsight_retain`. That one is a plain upsert, so an id in
+the session-document form of this identity (`hermes-…`) is refused.

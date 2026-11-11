@@ -153,7 +153,7 @@ def test_sync_turn_writes_private_into_the_session_document(hal0_memory_module) 
 
     def _fake_add(text, *, tags=None, metadata=None, private=True, **extra):
         captured.update(text=text, tags=tags, metadata=metadata, private=private, **extra)
-        return {"status": "ok", "id": "mem_id", "update_mode": extra.get("update_mode")}
+        return {"status": "ok", "id": "mem_id", "update_mode": "append"}
 
     provider = hal0_memory_module.Hal0MemoryProvider()
     provider.initialize(session_id="s1")
@@ -167,9 +167,10 @@ def test_sync_turn_writes_private_into_the_session_document(hal0_memory_module) 
     assert "agent:hermes" in captured["tags"] and "chat" not in captured["tags"]
     assert captured["metadata"]["lifecycle"] == "chat"
     assert captured["private"] is True
-    # #2017: one document per session, and never without append mode.
-    assert captured["document_id"] == "hermes-s1"
-    assert captured["update_mode"] == "append"
+    # #2017: one document per session. The id travels in the append field,
+    # never as a plain ``document_id`` (an older hal0-api would replace).
+    assert captured["append_document_id"] == "hermes-s1"
+    assert "document_id" not in captured
 
 
 def test_sync_turn_skips_non_primary_contexts(hal0_memory_module) -> None:
