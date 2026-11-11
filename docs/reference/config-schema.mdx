@@ -201,7 +201,7 @@ against; see [Memory projects](/docs/concepts/memory-projects).
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `aliases` | table of str → str | `{}` | other spellings of a project: a write naming the left side is tagged as the right side. Applied before `deny`. An alias may not point at a denied name (or the reserved `unresolved`) or back at a name that leads to it. An entry whose two sides are the same name once normalised (`"Widgets" = "widgets"`) does nothing and is ignored |
-| `deny` | list[str] | `["tmp", "temp", "root", "home", "workdir", "work", "scratch", "scratchpad", "unknown", "default"]` | names that are never projects; a write naming one is stored with no project. Setting the key replaces the default list |
+| `deny` | list[str] | `["tmp", "temp", "root", "home", "workdir", "scratch", "scratchpad", "unknown", "default"]` | names that are never projects; a write naming one is stored with no project. Setting the key replaces the default list |
 | `registered` | list[str] | `[]` | projects you have confirmed. Not required to write; the `memory_projects` doctor row reports names in use that are neither listed here nor aliased |
 
 Every entry is normalised at load: lower case, `a-z`, `0-9`, `.`, `_` and `-`

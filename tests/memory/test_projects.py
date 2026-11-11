@@ -390,7 +390,6 @@ def test_the_default_deny_list():
         "root",
         "home",
         "workdir",
-        "work",
         "scratch",
         "scratchpad",
         "unknown",
@@ -399,6 +398,23 @@ def test_the_default_deny_list():
     assert ProjectRegistry().deny == frozenset(DEFAULT_DENY)
     assert ProjectRegistry().aliases == {}
     assert ProjectRegistry().registered == frozenset()
+
+
+def test_work_is_a_project_name_by_default():
+    """``work`` is a plausible repository name, so the shipped deny list does
+    not refuse it (``workdir`` stays refused). An operator can still deny it."""
+    assert "work" not in DEFAULT_DENY
+    resolution = resolve_project(field="work", registry=ProjectRegistry())
+    assert resolution.slug == "work" and not resolution.denied
+    from_bank = resolve_project(
+        bank_segment=strip_legacy_bank_prefix("coding-agent::work"),
+        registry=ProjectRegistry(),
+        coding=True,
+    )
+    assert from_bank.slug == "work" and not from_bank.unresolved
+    assert resolve_project(field="workdir", registry=ProjectRegistry()).denied
+    denied = resolve_project(field="work", registry=ProjectRegistry(deny=frozenset({"work"})))
+    assert denied.slug is None and denied.denied
 
 
 @pytest.mark.parametrize(
@@ -424,8 +440,8 @@ def test_unresolved_is_for_a_coding_client_that_ends_with_no_project(kwargs, unr
 def test_an_alias_can_rescue_a_denied_spelling_but_not_point_at_one():
     # Aliases run before the deny list, so a denied directory name the
     # operator mapped to a real project resolves to that project.
-    registry = ProjectRegistry(aliases={"work": "atlas"})
-    assert resolve_project(field="work", registry=registry).slug == "atlas"
+    registry = ProjectRegistry(aliases={"workdir": "atlas"})
+    assert resolve_project(field="workdir", registry=registry).slug == "atlas"
     # A registry built by hand with an alias onto a denied name still yields
     # no project: the deny list has the last word.
     bad = ProjectRegistry(aliases={"atlas": "tmp"})

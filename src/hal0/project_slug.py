@@ -30,14 +30,15 @@ UNRESOLVED_SLUG = "unresolved"
 RESERVED_SLUGS = frozenset({UNRESOLVED_SLUG})
 
 #: The shipped ``[memory.projects].deny``: directory names a client reports
-#: when it is not inside a repository at all.
+#: when it is not inside a repository at all. ``work`` is not here: it is a
+#: plausible name for a real project, and an operator whose clients do report
+#: it from outside a repository adds it to the configured list.
 DEFAULT_DENY: tuple[str, ...] = (
     "tmp",
     "temp",
     "root",
     "home",
     "workdir",
-    "work",
     "scratch",
     "scratchpad",
     "unknown",
