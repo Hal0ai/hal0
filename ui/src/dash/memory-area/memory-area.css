@@ -1,0 +1,754 @@
+/*
+ * The Memory area (ADR-0058, decision 12): the page frame (MemoryArea.jsx), the pieces every tab
+ * is built from (card, table, key and value rows, links), and the shared parts under ./shared/.
+ *
+ * Every class here starts with `.ma-`. The area's root element carries `.ma`, which scopes the
+ * few rules that restyle a global class (`.btn`, `.rsel-*`). Colours, radii and fonts come from
+ * the tokens at the top of dashboard.css; there is no colour literal in this file. Buttons are the
+ * global `.btn` (primary), `.btn.ghost` (secondary), `.btn.ghost.sm` (small) and `.btn.danger`;
+ * status chips are the global `.chip.ok|warn|err|info` plus `.ma-chip-neutral`.
+ *
+ * Two rules that hold across the area:
+ *   - Colour never carries meaning alone. A number is always `--fg`; its status is a chip beside
+ *     it, and the chip says the status as a word.
+ *   - Focus is the global `:focus-visible` ring. A control that sits inside a box that clips
+ *     (a segment, a row in a card) only moves the ring inside itself with `outline-offset: -2px`.
+ *     Nothing here removes an outline.
+ */
+
+/* ── Shared text styles ─────────────────────────────────────────────────────── */
+
+/* The one label style: card titles, stat labels, table headers, field labels. */
+.ma-eyebrow {
+  font-family: var(--jbm);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+/* Bank ids, slot names, model names, tags and commands. An id wraps; it is never cut short. */
+.ma-mono {
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+/* A figure the engine did not report: an en dash, read out as "not reported". */
+.ma-missing { color: var(--fg-3); }
+
+/* ── Disabled buttons, and the reason beside them ───────────────────────────── */
+
+/*
+ * The global `.btn[disabled]` dims the button to 40%, which takes an amber primary below
+ * readable contrast. Inside the area a disabled button of any kind gets one flat fill instead.
+ *
+ * A disabled button always says why. The reason is a `.ma-reason` paragraph the button points at:
+ *
+ *   <button class="btn" disabled aria-describedby="why">Refresh</button>
+ *   <p id="why" class="ma-reason">Waiting on the extraction connection.</p>
+ *
+ * shared/ReasonedButton.jsx renders exactly that.
+ */
+.ma .btn[disabled] {
+  opacity: 1;
+  filter: none;
+  transform: none;
+  background: var(--bg-3);
+  border-color: var(--line);
+  color: var(--fg-3);
+  cursor: not-allowed;
+}
+
+.ma-reasoned {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.ma-reason {
+  margin: 0;
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+
+/* ── StatusChip ─────────────────────────────────────────────────────────────── */
+
+/* The tone classes are the global `.chip.ok|warn|err|info`; neutral is the area's own. */
+.ma-chip { line-height: 1.5; }
+.ma-chip-neutral {
+  background: var(--bg-2);
+  border-color: var(--line);
+  color: var(--fg-2);
+}
+.ma-chip-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.ma-chip-neutral .ma-chip-dot { background: var(--fg-3); }
+
+/* ── Segmented: the one "pick one of N" control ─────────────────────────────── */
+
+.ma-seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  padding: 2px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+}
+/* On a card, which is itself `--bg-1`, the track drops to the page colour. */
+.ma-seg-inset { background: var(--bg); }
+
+/* Off. The chosen segment differs by fill, inner edge and weight, never by hue. */
+.ma-seg-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 11px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--rad-xs);
+  color: var(--fg-2);
+  font-family: var(--jbm);
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ma-seg-btn:hover { color: var(--fg); }
+.ma-seg-btn[aria-checked="true"] {
+  background: var(--bg-4);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+  color: var(--fg);
+  font-weight: 600;
+}
+.ma-seg-btn:focus-visible { outline-offset: -2px; border-radius: var(--rad-xs); }
+.ma-seg-btn[disabled] { color: var(--fg-3); cursor: not-allowed; }
+/* A count inside a segment keeps the label's colour and drops its weight. */
+.ma-seg-count { font-weight: 400; }
+
+/* ── ScopeBar ───────────────────────────────────────────────────────────────── */
+
+.ma-scope {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 22px;
+}
+.ma-scope-field {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
+  max-width: 100%;
+}
+.ma-scope-select {
+  flex: 0 1 auto;
+  min-width: 200px;
+  max-width: 100%;
+}
+/* A bank id in the open list wraps instead of ending in an ellipsis. */
+.ma-scope .rsel-option-row-main {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+}
+
+/* ── StatStrip ──────────────────────────────────────────────────────────────── */
+
+/* Cells sit 1px apart on a `--line-soft` ground, which draws the rules between them. */
+.ma-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1px;
+  margin: 0;
+  background: var(--line-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  overflow: hidden;
+}
+/* Inside a card the strip gives up its own frame. */
+.ma-stats-incard {
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
+}
+.ma-stat {
+  flex: 1 1 170px;
+  min-width: 0;
+  padding: 12px 16px;
+  background: var(--bg-1);
+}
+.ma-stat-label {
+  display: block;
+  margin: 0 0 6px;
+}
+.ma-stat-value {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0;
+  font-family: var(--jbm);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.2;
+  /* Always `--fg`. A status belongs in a chip after the value, not in the number's colour. */
+  color: var(--fg);
+  font-feature-settings: "zero" 1, "tnum" 1;
+}
+/* A name (an engine, a model) in place of a number. */
+.ma-stat-value-name {
+  align-items: center;
+  gap: 5px 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.ma-stat-unit {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--fg-2);
+}
+.ma-stat-helper {
+  display: block;
+  margin: 4px 0 0;
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  color: var(--fg-3);
+}
+/* Loading: a quiet block where the value will be. Never a zero. */
+.ma-skel {
+  display: inline-block;
+  width: 64px;
+  max-width: 100%;
+  height: 18px;
+  border-radius: var(--rad-xs);
+  background: var(--bg-4);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ma-skel { animation: none; }
+}
+
+/* ── NoticeBar ──────────────────────────────────────────────────────────────── */
+
+/* The bar is always neutral. The chip in it carries the tone. */
+.ma-notice {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+}
+/* At the top of a card: square, and only a rule below. */
+.ma-notice-incard {
+  border-width: 0 0 1px;
+  border-radius: 0;
+}
+.ma-notice-text {
+  flex: 1 1 260px;
+  min-width: 0;
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg);
+}
+
+/* ── EmptyState ─────────────────────────────────────────────────────────────── */
+
+/* Left-aligned, in place of the list or table it stands in for. */
+.ma-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 28px 18px 30px;
+}
+.ma-empty-icon { color: var(--fg-3); }
+.ma-empty-title {
+  margin: 4px 0 0;
+  font-family: var(--geist);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.ma-empty-body {
+  margin: 0;
+  max-width: 60ch;
+  font-size: 13.5px;
+  color: var(--fg-2);
+}
+.ma-empty-action { margin-top: 8px; }
+
+/* ── InlineConfirm ──────────────────────────────────────────────────────────── */
+
+/* Takes the place of the button row that opened it. Not a dialog, and nothing floats. */
+.ma-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  background: var(--bg-2);
+  border: 1px solid var(--err-line);
+  border-radius: var(--rad);
+}
+.ma-confirm-title {
+  margin: 0;
+  font-family: var(--geist);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.ma-confirm-body {
+  margin: 0;
+  max-width: 64ch;
+  font-size: 13.5px;
+  color: var(--fg-2);
+}
+.ma-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ── CommandBox ─────────────────────────────────────────────────────────────── */
+
+.ma-cmd {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+}
+.ma-cmd-prompt {
+  flex: none;
+  font-family: var(--jbm);
+  font-size: 13px;
+  color: var(--fg-3);
+  user-select: none;
+}
+.ma-cmd-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--jbm);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+}
+/* Appears only after a copy; empty until then. */
+.ma-cmd-status {
+  flex: none;
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-2);
+}
+/* Empty, it stays in the page (a live region must exist before its text does) and only gives
+   back the gap it would otherwise add. */
+.ma-cmd-status:empty { margin-left: -10px; }
+/* Icon-only button: square, and named by its aria-label. */
+.btn.ma-icon-btn {
+  flex: none;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--fg-2);
+}
+
+/* ── Page frame (MemoryArea.jsx) ────────────────────────────────────────────── */
+
+/* Cards sit 14px apart, everywhere in the area. */
+.ma-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+/* The dashboard's `.vh` header, with the summary line on the title's baseline. */
+.ma .ma-head {
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-bottom: 14px;
+}
+.ma-meta {
+  font-family: var(--jbm);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--fg-2);
+}
+
+/* ── Tab row ────────────────────────────────────────────────────────────────── */
+
+/* Tabs are links. The row scrolls sideways when it does not fit; it never wraps. */
+.ma-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: 0 4px;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.ma-tab {
+  flex: none;
+  padding: 10px 16px;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-3);
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.ma-tab:hover { color: var(--fg); }
+/* The open tab: the accent, an underline, and `aria-current`. Exactly one tab has it. */
+.ma-tab[aria-current="page"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.ma-tabs-gap { flex: 1 0 16px; }
+/* A quiet link at the end of the row. It leaves the area, so it is not a tab. */
+.ma-tabs-aside {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 2px;
+  color: var(--fg-2);
+  font-family: var(--jbm);
+  font-size: 11px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.ma-tabs-aside:hover { color: var(--fg); }
+/* The row clips, so the ring is drawn inside the control. */
+.ma-tab:focus-visible,
+.ma-tabs-aside:focus-visible { outline-offset: -2px; }
+
+/* ── Text ───────────────────────────────────────────────────────────────────── */
+
+/* The lead of a view: a verdict, a flow's title. */
+.ma-lead {
+  margin: 0 0 6px;
+  font-family: var(--jbm);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+/* The title of one item: a list entry, a step, an empty state. */
+.ma-item-title {
+  margin: 0 0 4px;
+  font-family: var(--geist);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.ma-body {
+  margin: 0;
+  max-width: 72ch;
+  font-family: var(--geist);
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+/* Emphasis is a colour step, not bold. */
+.ma-em { color: var(--fg); }
+.ma-helper {
+  margin: 0;
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.ma-eyebrow-block {
+  display: block;
+  margin-bottom: 6px;
+}
+
+/* ── Links ──────────────────────────────────────────────────────────────────── */
+
+/* A link is underlined: the underline is the cue, not the colour. */
+.ma-link {
+  color: var(--fg);
+  text-decoration: underline;
+  text-decoration-color: var(--fg-3);
+  text-underline-offset: 3px;
+}
+/* A link that stands alone and leaves the view: underlined text and an arrow (after the text to
+   go on, before it to go back). */
+.ma-go {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg);
+  font-family: var(--jbm);
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.ma-go-text {
+  text-decoration: underline;
+  text-decoration-color: var(--fg-3);
+  text-underline-offset: 3px;
+}
+.ma-link:hover,
+.ma-go:hover { color: var(--hal0-accent-hover); }
+
+/* ── Card ───────────────────────────────────────────────────────────────────── */
+
+/* The one container. Worn with the global `.card` (fill, edge, radius); this adds the clip that
+   keeps a header rule and a table inside the rounded corners. */
+.ma-card {
+  min-width: 0;
+  overflow: hidden;
+}
+.ma-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ma-card-head > h2,
+.ma-card-head > h3 { margin: 0; }
+.ma-card-gap { flex: 1 1 0; }
+.ma-card-meta {
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-2);
+}
+.ma-card-body { padding: 16px 18px; }
+.ma-card-foot {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line-soft);
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+/* A raised row inside a card: the one place a card has a second fill. */
+.ma-card-raised {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 14px 20px;
+  padding: 16px 18px;
+  background: var(--bg-2);
+  border-top: 1px solid var(--line-soft);
+}
+/* An inner box: a tile, a consent row. */
+.ma-box {
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--rad);
+}
+/* Two cards side by side, one above the other when there is no room. */
+.ma-cards {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 14px;
+}
+.ma-cards > * {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+
+/* The top of a card that leads with a sentence: the lead and its text, with a chip or a small
+   button beside them. */
+.ma-lead-row {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  padding: 18px;
+}
+.ma-lead-main {
+  flex: 1 1 420px;
+  min-width: 0;
+}
+.ma-lead-side {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.ma-cmd-wrap {
+  max-width: 420px;
+  margin-top: 12px;
+}
+
+/* ── Rows inside a card ─────────────────────────────────────────────────────── */
+
+/* Key and value rows: a short list of facts that are sentences, not numbers. A row may end in
+   one link. */
+.ma-kv {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 4px 18px 8px;
+}
+.ma-kv-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.ma-kv-row:last-child { border-bottom: 0; }
+.ma-kv-row > dt {
+  flex: 0 0 96px;
+  font-family: var(--jbm);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+/* A key that is a phrase, not one word. */
+.ma-kv-wide > .ma-kv-row > dt { flex-basis: 200px; }
+.ma-kv-row > dd {
+  flex: 1 1 220px;
+  min-width: 0;
+  margin: 0;
+  font-family: var(--geist);
+  font-size: 13.5px;
+  color: var(--fg);
+}
+/* A value that was not reported reads quieter than one that was. */
+.ma-kv-row > .ma-kv-unknown { color: var(--fg-3); }
+
+/* A plain list of sentences. */
+.ma-list {
+  margin: 0;
+  padding: 0 18px 8px;
+  list-style: none;
+}
+.ma-list-row {
+  padding: 9px 0;
+  border-top: 1px solid var(--line-soft);
+  font-family: var(--geist);
+  font-size: 13.5px;
+  color: var(--fg);
+}
+
+/* A row that opens something (a fact, an operation, a page): the whole row is one button. */
+.ma-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--fg);
+  font-family: var(--geist);
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+.ma-row:hover { background: var(--bg-2); }
+/* The open row: a fill, and the word "open" (`.ma-row-open`) in place of the chevron. */
+.ma-row[aria-current="true"] { background: var(--bg-3); }
+.ma-row-open {
+  flex: none;
+  font-family: var(--jbm);
+  font-size: 10px;
+  color: var(--fg-2);
+}
+.ma-row:focus-visible { outline-offset: -2px; }
+
+/* ── Table ──────────────────────────────────────────────────────────────────── */
+
+/* A table scrolls sideways inside its card, and the scroll box can be reached by keyboard. */
+.ma-table-region { overflow-x: auto; }
+.ma-table-region:focus-visible { outline-offset: -2px; }
+.ma-table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  font-family: var(--jbm);
+  font-size: 12.5px;
+  font-feature-settings: "zero" 1, "tnum" 1;
+}
+.ma-table thead th {
+  padding: 9px 14px 8px;
+  border-bottom: 1px solid var(--line);
+  color: var(--fg-3);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-align: left;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.ma-table tbody th,
+.ma-table tbody td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  vertical-align: top;
+}
+.ma-table tbody tr:last-child > * { border-bottom: 0; }
+/* The row's name. An id wraps; it is never cut short. */
+.ma-table tbody th {
+  color: var(--fg);
+  font-weight: 500;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.ma-table tbody td { color: var(--fg-2); }
+/* A numeric column, header and cells: right-aligned. The unit is in the header. */
+.ma-table .ma-num {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ── Loading ────────────────────────────────────────────────────────────────── */
+
+/* Sizes of the `.ma-skel` block for a line of text, the summary line and a table cell. */
+.ma-skel-line {
+  display: block;
+  width: min(420px, 80%);
+  height: 14px;
+}
+.ma-skel-line + .ma-skel-line { margin-top: 10px; }
+.ma-skel-meta {
+  width: 220px;
+  height: 11px;
+  vertical-align: middle;
+}
+.ma-skel-cell {
+  width: 36px;
+  height: 12px;
+  vertical-align: middle;
+}
+
+/* A notice that is information, not a state: no chip, and quieter text. */
+.ma-notice-quiet { color: var(--fg-2); }

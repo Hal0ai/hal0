@@ -68,49 +68,20 @@ export function useMemoryLanes() {
   })
 }
 
-// ── Agents ───────────────────────────────────────────────────────────────
+// ── Agents / Models ──────────────────────────────────────────────────────
+//
+// `useMemoryWorkspaceAgents` and `useMemoryModels` (and their types) live in
+// `./useMemory` now, with the other hal0-level memory hooks, so the Memory
+// area can use them without importing this file. Re-exported here so the
+// workspace's own imports keep working unchanged.
 
-export interface MemoryAgentsInstall {
-  harnesses: string[]
-  command: string
-}
-
-export interface MemoryAgents {
-  banks: string[]
-  install: MemoryAgentsInstall
-  /** Hindsight Control Plane console URL from [memory.console]; null when
-   * disabled. Absent entirely on older backends that predate this field —
-   * callers should fall back to the fixed-port default in that case. */
-  console_url?: string | null
-}
-
-export function useMemoryWorkspaceAgents() {
-  return useQuery({
-    queryKey: ['memory', 'agents'],
-    queryFn: () => apiGet<MemoryAgents>(ENDPOINTS.memoryAgents),
-  })
-}
-
-// ── Models ───────────────────────────────────────────────────────────────
-
-export interface MemoryModelInfo {
-  model: string
-  enabled?: boolean
-  [key: string]: unknown
-}
-
-export interface MemoryModels {
-  embeddings: MemoryModelInfo
-  reranker: MemoryModelInfo
-  decision: MemoryModelInfo
-}
-
-export function useMemoryModels() {
-  return useQuery({
-    queryKey: ['memory', 'models'],
-    queryFn: () => apiGet<MemoryModels>(ENDPOINTS.memoryModels),
-  })
-}
+export { useMemoryModels, useMemoryWorkspaceAgents } from './useMemory'
+export type {
+  MemoryAgents,
+  MemoryAgentsInstall,
+  MemoryModelInfo,
+  MemoryModels,
+} from './useMemory'
 
 // ── Engine passthrough ───────────────────────────────────────────────────
 //

@@ -108,13 +108,11 @@ import './dash/services.jsx'
 
 import './dash/extras.jsx'
 
-// AgentView is the `#agent` route shell. v0.4 reduced it to the Memory
-// capability only — the web-chat (HermesChatTab) surface plus the
-// Personas / Skills / Plugins tabs were removed (web chat is abandoned in
-// favour of the `hermes chat` TUI; the other tabs showed fixtures rather
-// than live data). The MemoryTab bridge installs its TanStack-Query
-// hooks onto `window.__hal0Use*` BEFORE memory-tab.jsx evaluates, and
-// memory-tab.jsx registers on window BEFORE agent-view.jsx mounts.
+// AgentView is the `#agent` route shell (Overview · MCP). Memory is no longer
+// one of its tabs: it is the Memory area (dash/memory-area/, imported by
+// main.jsx). The MemoryTab bridge still installs its TanStack-Query hooks
+// onto `window.__hal0Use*` (main.jsx and the command palette read
+// `__hal0UseMemoryEnabled` from it) BEFORE memory-tab.jsx evaluates.
 import './dash/agents/memory-tab-hook-bridge'
 import './dash/agents/memory-tab.jsx'
 // Agents Overview (the bare #agent landing tab): a card library where Hermes
@@ -131,8 +129,10 @@ import './dash/agents/bridge-clients-card.jsx'
 import './dash/agents/agents-overview.jsx'
 import './dash/agents/agent-view.jsx'
 
-// Hindsight Memory view (#memory) — bridge installs the TanStack-Query
-// hooks on window.__hal0Use* BEFORE memory.jsx evaluates.
+// The fact workspace (window.MemV2Workspace, mounted by the Memory area's
+// Facts tab at #memory/facts) and the modules it is built from. The bridge
+// installs the TanStack-Query hooks on window.__hal0Use* BEFORE they
+// evaluate.
 import './dash/memory-hook-bridge'
 // Memory v2 (Bank workspace UI, task C1) — self-contained shared
 // constants/Icon (window.MemV2), no dependency on chrome.jsx or the hook
@@ -168,6 +168,11 @@ import './dash/memory-web-graph.jsx'
 // files consumed memory-graph-engine.jsx's globals (normalizeGraph,
 // useSize, usePanZoom, GraphDefs, MG_PALETTE, …), so it was killed
 // alongside the four files it only ever served.
+//
+// memory.jsx (window.MemoryView, the old #memory page) is no longer routed:
+// #memory renders the Memory area. It and memory-overview-v2.jsx stay loaded
+// until the old surface is deleted (the BankBar still reads the overview
+// file's window.TypeBar and window.Spark).
 import './dash/memory.jsx'
 
 // Operator Board (#board) — a hal0-skinned kanban wired to the Hermes kanban

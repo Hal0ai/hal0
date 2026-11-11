@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { BankStats } from '@/api/hooks/useHindsight'
-import { bankFigures, chosenBank } from '../memory-pure'
+import { bankFigures, chosenBank, memoryCardTarget } from '../memory-pure'
 
 const stats = (over: Partial<BankStats> = {}): BankStats => ({
   bank_id: 'hal0-mono',
@@ -22,22 +22,41 @@ const stats = (over: Partial<BankStats> = {}): BankStats => ({
 describe('chosenBank', () => {
   const banks = ['alpha', 'hal0-mono', 'zeta']
   it('stored bank wins when it exists', () => {
-    expect(chosenBank(banks, 'zeta', '#memory/alpha')).toBe('zeta')
+    expect(chosenBank(banks, 'zeta', '#memory/facts?bank=alpha')).toBe('zeta')
   })
   it('ignores a stored bank that is not in the list', () => {
-    expect(chosenBank(banks, 'gone', '#memory/hal0-mono')).toBe('hal0-mono')
+    expect(chosenBank(banks, 'gone', '#memory/facts?bank=hal0-mono')).toBe('hal0-mono')
   })
-  it('hash wins over the first bank', () => {
-    expect(chosenBank(banks, null, '#memory/hal0-mono')).toBe('hal0-mono')
+  it('the bank a Memory address names wins over the first bank', () => {
+    expect(chosenBank(banks, null, '#memory/facts?bank=hal0-mono')).toBe('hal0-mono')
+    expect(chosenBank(banks, null, '#memory/operations?bank=zeta&page=2')).toBe('zeta')
   })
-  it('reads the ?bank= deep link the memory pane writes', () => {
-    expect(chosenBank(banks, null, '#memory/bank?bank=zeta')).toBe('zeta')
+  it('reads a bank id with colons and dots, escaped or not', () => {
+    const ids = ['coding-agent::ultrareview-1.4', 'alpha']
+    expect(chosenBank(ids.slice().reverse(), null, '#memory/facts?bank=coding-agent::ultrareview-1.4')).toBe(ids[0])
+    expect(chosenBank(ids.slice().reverse(), null, '#memory/facts?bank=coding-agent%3A%3Aultrareview-1.4')).toBe(ids[0])
+  })
+  it('ignores a bank named by an address outside the Memory area', () => {
+    expect(chosenBank(banks, null, '#logs?bank=zeta')).toBe('alpha')
+  })
+  it('does not read a tab name as a bank', () => {
+    expect(chosenBank(['facts', 'alpha'].reverse(), null, '#memory/facts')).toBe('alpha')
   })
   it('falls back to the first bank', () => {
     expect(chosenBank(banks, null, '#overview')).toBe('alpha')
   })
   it('is null with no banks', () => {
-    expect(chosenBank([], 'alpha', '#memory/alpha')).toBeNull()
+    expect(chosenBank([], 'alpha', '#memory/facts?bank=alpha')).toBeNull()
+  })
+})
+
+describe('memoryCardTarget', () => {
+  it("opens the chosen bank's facts", () => {
+    expect(memoryCardTarget('hal0-mono')).toBe('memory/facts?bank=hal0-mono')
+    expect(memoryCardTarget('coding-agent::ultrareview-1.4')).toBe('memory/facts?bank=coding-agent::ultrareview-1.4')
+  })
+  it('opens the Memory area when there is no bank', () => {
+    expect(memoryCardTarget(null)).toBe('memory/health')
   })
 })
 

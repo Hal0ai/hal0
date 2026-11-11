@@ -3,9 +3,9 @@
  * workspace (`window.MemV2Workspace`, task C4: list/filters/sources,
  * inspector + curation, ego focus view — all three commits of that task).
  *
- * Unskipped by task C6: `#memory/bank?bank=primary` now renders
- * `MemoryView`'s Bank sub-tab, which mounts `window.MemV2Workspace`
- * directly (memory.jsx). Runs against the default forced-mock dataset
+ * `#memory/facts?bank=primary` renders the Memory area's Facts tab
+ * (dash/memory-area/FactsTab.jsx), which mounts `window.MemV2Workspace`
+ * under the scope bar. Runs against the default forced-mock dataset
  * (26-fact MEM_FACTS set, f9/f20 pre-invalidated) — curation mutations
  * (PATCH/POST/DELETE) use `page.route` overrides since the GET-only
  * forced-mock never substitutes them.
@@ -14,7 +14,7 @@ import { test, expect } from '../fixtures/apiMock'
 
 test.describe('memory-v2 Bank workspace', () => {
   test('list renders mock units for the primary bank', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await expect(page.getByTestId('mv-workspace')).toBeVisible()
     // buildBankUnits() mock: 24 valid units by default for primary (26
     // total, f9/f20 pre-invalidated).
@@ -23,7 +23,7 @@ test.describe('memory-v2 Bank workspace', () => {
   })
 
   test('search narrows the list', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-search').fill('undervolt')
     // f15 — "Applied −30mV undervolt via ryzenadj" — is the only fact
     // mentioning "undervolt".
@@ -32,7 +32,7 @@ test.describe('memory-v2 Bank workspace', () => {
   })
 
   test('a tag chip filters the list and shows a count', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-tag-chip-performance').click()
     // performance topic: f13, f14, f15, f16 — all valid.
     for (const id of ['f13', 'f14', 'f15', 'f16']) {
@@ -42,7 +42,7 @@ test.describe('memory-v2 Bank workspace', () => {
   })
 
   test('focusing a source filters the list by documentId', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-source-row-doc-thermal-notes').click()
     // doc-thermal-notes maps from the performance topic — same 4 facts.
     for (const id of ['f13', 'f14', 'f15', 'f16']) {
@@ -52,7 +52,7 @@ test.describe('memory-v2 Bank workspace', () => {
   })
 
   test('sort=most-connected reorders the list by salience', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await expect(page.locator('[data-testid^="mv-fact-row-"]').first()).toBeVisible()
     const recentOrder = await page.locator('[data-testid^="mv-fact-row-"]').allTextContents()
     await page.getByTestId('mv-sort').selectOption('salience')
@@ -67,7 +67,7 @@ test.describe('memory-v2 Bank workspace', () => {
   })
 
   test('pagination — mv-fact-page-next advances the page', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     const label = page.locator('.mini.num').first()
     await expect(label).toContainText('1–10')
     await page.getByTestId('mv-fact-page-next').click()
@@ -100,7 +100,7 @@ test.describe('memory-v2 Bank workspace', () => {
         },
       })
     })
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-search').fill('undervolt')
     await page.getByTestId('mv-fact-row-f15').click()
     await expect(page.getByTestId('mv-inspector')).toBeVisible()
@@ -117,7 +117,7 @@ test.describe('memory-v2 Bank workspace', () => {
   test('history renders for an observation fact; the tab is absent for a non-observation fact', async ({
     page,
   }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     // f6 — "Prefers terse technical answers" — is fact_type: observation.
     // Isolated via search (not on page 1 under the default recency sort).
     await page.getByTestId('mv-search').fill('terse')
@@ -142,7 +142,7 @@ test.describe('memory-v2 Bank workspace', () => {
   })
 
   test('ego view renders for the current selection; depth slider updates', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await expect(page.locator('[data-testid^="mv-fact-row-"]').first()).toBeVisible()
     await page.locator('[data-testid^="mv-fact-row-"]').first().click()
     await page.getByTestId('mv-view-graph').click()
@@ -153,7 +153,7 @@ test.describe('memory-v2 Bank workspace', () => {
   })
 
   test('Esc closes the inspector', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await expect(page.locator('[data-testid^="mv-fact-row-"]').first()).toBeVisible()
     await page.locator('[data-testid^="mv-fact-row-"]').first().click()
     await expect(page.getByTestId('mv-inspector')).toBeVisible()
@@ -163,7 +163,7 @@ test.describe('memory-v2 Bank workspace', () => {
   })
 
   test('↑/↓ moves list selection', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await expect(page.locator('[data-testid^="mv-fact-row-"]').first()).toBeVisible()
     await expect(page.locator('.mv-fact.on')).toHaveCount(0)
     await page.keyboard.press('ArrowDown')
@@ -178,7 +178,7 @@ test.describe('memory-v2 Bank workspace', () => {
   test('a genuinely empty bank shows an "add your first fact" empty-state, not "clear a filter"', async ({
     page,
   }) => {
-    await page.goto('/#memory/bank?bank=empty')
+    await page.goto('/#memory/facts?bank=empty')
     await expect(page.getByTestId('mv-workspace')).toBeVisible()
     const empty = page.getByTestId('mv-units-empty-bank')
     await expect(empty).toBeVisible()

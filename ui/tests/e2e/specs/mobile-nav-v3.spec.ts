@@ -34,7 +34,7 @@ test.describe('Mobile nav drawer (≤720px)', () => {
     // full nav — including the destinations the dead bottom tabs never reached.
     // v0.5 nav: "Dashboard" relabelled "Overview"; Connections dissolved into
     // the Slots ▸ Endpoints + Agent ▸ MCP sub-links.
-    for (const label of ['Overview', 'Slots', 'Models', 'Agents', 'Logs', 'Settings']) {
+    for (const label of ['Overview', 'Slots', 'Models', 'Agents', 'Memory', 'Logs', 'Settings']) {
       await expect(
         drawer.locator('.sb-row', { has: page.locator('.lbl') }).filter({ hasText: label }).first(),
       ).toBeVisible()
@@ -50,8 +50,14 @@ test.describe('Mobile nav drawer (≤720px)', () => {
     await expect(drawer.locator('[data-testid="nav-drawer-slots-endpoints"]')).toBeVisible()
     await expect(drawer.locator('[data-testid="nav-drawer-slots-runner-images"]')).toBeVisible()
     await expect(drawer.locator('[data-testid="nav-drawer-models-profiles"]')).toBeVisible()
-    await expect(drawer.locator('[data-testid="nav-drawer-memory"]')).toBeVisible()
     await expect(drawer.locator('[data-testid="nav-drawer-mcp"]')).toBeVisible()
+    // Memory is its own top-level row (the Memory area), not a sub-link of
+    // Agents, and it is the only row with that name.
+    const memory = drawer.locator('[data-testid="nav-drawer-memory"]')
+    await expect(memory).toBeVisible()
+    await expect(memory).not.toHaveClass(/sb-sub/)
+    await expect(drawer.locator('.sb-row .lbl').filter({ hasText: /^Memory$/ })).toHaveCount(1)
+    await expect(drawer.locator('[data-testid="nav-drawer-memworkspace"] .lbl')).toHaveText('Memory (legacy tools)')
     // the removed top-level items are gone from the drawer too.
     await expect(drawer.locator('.sb-row .lbl', { hasText: 'Connections' })).toHaveCount(0)
     // command palette folded into the drawer on mobile

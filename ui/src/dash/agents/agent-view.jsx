@@ -1,75 +1,46 @@
 // hal0 — AgentView shell (#agent route), labelled "Agents".
 //
-// v0.5 nav: the Agents page is a tabbed shell. Clicking "Agents" lands on the
-// Overview (the agent-card library); Memory + MCP are additional tabs:
+// The Agents page is a tabbed shell. Clicking "Agents" lands on the Overview
+// (the agent-card library); MCP is the other tab:
 //   - Overview — the collectible agent cards (window.AgentsOverview). Hermes is
 //                the live `serving` foil wired to real health + restart; the
 //                rest of the library are roadmap cards behind a grey mask.
 //                This is the default landing — always present, ungated.
-//   - Memory — the full Hindsight memory page (window.MemoryView), moved in
-//              from the standalone #memory route. Gated on the memory
-//              subsystem ([memory].enabled) via the window bridge.
 //   - MCP    — the bundled FastMCP servers (window.McpServersPanel), moved in
 //              from the dissolved Connections page, and under them the bridge
 //              clients that reach hal0 over MCP (window.BridgeClientsCard).
 //
-// Hash routes (resolved here from window.location.hash):
-//   #agent                  → Overview tab (the cards landing; default)
-//   #agent/memory[/section] → Memory tab  (also reached via #memory[/section])
-//   #agent/mcp              → MCP tab      (also reached via #mcp)
+// Memory is no longer a tab here: it is its own top-level area (#memory/<tab>,
+// dash/memory-area/). main.jsx redirects the old #agent/memory address there.
 //
-// MemoryView keeps its own Overview·Graph·Tools sub-tabs, which navigate via
-// #memory/<section>; main.jsx rewrites those to #agent/memory/<section> so
-// they resolve back here with the section preserved.
+// Hash routes (resolved here from window.location.hash):
+//   #agent      → Overview tab (the cards landing; default)
+//   #agent/mcp  → MCP tab      (also reached via #mcp)
 //
 // Window-globals build shim: components register on `window` and read each
 // other via the same. Don't add ES module imports across dash/* — main.tsx's
 // load order is the contract.
 
-const AGENT_TAB_DEFS = [
-  { id: "overview", label: "Overview", needsMemory: false },
-  { id: "memory",   label: "Memory",   needsMemory: true },
-  { id: "mcp",      label: "MCP",       needsMemory: false },
+const AGENT_TABS = [
+  { id: "overview", label: "Overview" },
+  { id: "mcp",      label: "MCP" },
 ];
 
-function _agentTabs(memoryEnabled) {
-  return AGENT_TAB_DEFS.filter((t) => !t.needsMemory || memoryEnabled);
-}
-
-// Resolve the active tab + (for Memory) its sub-section from the current hash.
-function _agentRoute(memoryEnabled) {
+// Resolve the active tab from the current hash.
+function _agentTab() {
   const raw = (window.location.hash || "").replace(/^#/, "");
-  const path = raw.split("?")[0];
-  const parts = path.split("/");
-  const head = parts[0];
-
-  if (head === "mcp" || (head === "agent" && parts[1] === "mcp")) {
-    return { tab: "mcp", section: null };
-  }
-  if (head === "memory" || (head === "agent" && parts[1] === "memory")) {
-    if (!memoryEnabled) return { tab: "overview", section: null };
-    const section = head === "memory" ? parts[1] || null : parts[2] || null;
-    return { tab: "memory", section };
-  }
+  const parts = raw.split("?")[0].split("/");
+  if (parts[0] === "mcp" || (parts[0] === "agent" && parts[1] === "mcp")) return "mcp";
   // bare #agent (or #agent/overview) → the cards Overview landing
-  return { tab: "overview", section: null };
+  return "overview";
 }
 
 function AgentView() {
-  // Memory gate — read through the window bridge like main.jsx does, so this
-  // strict no-ES-imports module stays within the dash/*.jsx contract.
-  const useMemEnabled = (typeof window !== "undefined" && window.__hal0UseMemoryEnabled) || null;
-  const memoryEnabled = useMemEnabled ? useMemEnabled() : false;
+  const tab = _agentTab();
 
-  const tabs = _agentTabs(memoryEnabled);
-  const { tab, section } = _agentRoute(memoryEnabled);
-
-  // Memory tab is canonically reached via #memory (so MemoryView's internal
-  // #memory/<section> nav round-trips); Overview is the bare #agent landing;
-  // MCP rides the #agent/mcp sub-path.
+  // Overview is the bare #agent landing; MCP rides the #agent/mcp sub-path.
   const goTab = (id) => {
-    window.location.hash =
-      id === "memory" ? "#memory" : id === "overview" ? "#agent" : "#agent/" + id;
+    window.location.hash = id === "overview" ? "#agent" : "#agent/" + id;
   };
 
   return (
@@ -84,7 +55,7 @@ function AgentView() {
         data-testid="agent-tab-nav"
         style={{ display: "flex", gap: 0, borderBottom: "1px solid var(--line)", marginBottom: 18 }}
       >
-        {tabs.map((t) => (
+        {AGENT_TABS.map((t) => (
           <button
             key={t.id}
             data-testid={"agent-tab-" + t.id}
@@ -105,7 +76,6 @@ function AgentView() {
       </div>
 
       {tab === "overview" && window.AgentsOverview && <window.AgentsOverview />}
-      {tab === "memory" && window.MemoryView && <window.MemoryView param={section} />}
       {tab === "mcp" && (
         <div className="conn">
           {window.McpServersPanel ? <window.McpServersPanel /> : null}

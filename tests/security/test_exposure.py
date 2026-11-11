@@ -220,6 +220,8 @@ def test_representative_admin_routes_are_admin() -> None:
         ("GET", "/api/settings"),
         ("POST", "/api/secrets/{name}"),
         ("GET", "/api/secrets"),
+        # Not the OPEN liveness route: /api/health matches exactly (ADR-0058).
+        ("GET", "/api/memory/health"),
         ("POST", "/api/auth/rotate"),
         ("GET", "/api/oauth/providers"),
         ("POST", "/api/oauth/{provider_id}/start"),

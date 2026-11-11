@@ -116,6 +116,9 @@ from hal0.api.routes import (
     memory_admin as memory_admin_routes,
 )
 from hal0.api.routes import (
+    memory_health as memory_health_routes,
+)
+from hal0.api.routes import (
     memory_lanes as memory_lanes_routes,
 )
 from hal0.api.routes import (
@@ -3116,6 +3119,13 @@ def create_app() -> FastAPI:
     # status board, coding-agent install helper, models summary.
     app.include_router(
         memory_lanes_routes.router,
+        prefix="/api/memory",
+        tags=["memory"],
+    )
+    # Memory health: the ordered repair path behind the Memory area's Health
+    # tab (ADR-0058, decision 12). ADMIN by the /api/memory prefix rule.
+    app.include_router(
+        memory_health_routes.router,
         prefix="/api/memory",
         tags=["memory"],
     )

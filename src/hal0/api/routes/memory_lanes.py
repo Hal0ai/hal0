@@ -22,13 +22,13 @@ import asyncio
 import logging
 import re
 import time
-from datetime import UTC
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Request, Response
 
+from hal0.api.routes._memory_health_collect import EngineReader, bank_queue_row
 from hal0.api.routes.memory import MemoryUnavailable
 from hal0.config.loader import load_hal0_config
 from hal0.errors import BadRequest, Forbidden, Hal0Error, NotFound
@@ -190,47 +190,6 @@ def _lane_op(op_cfg: Any, lanes_cfg: Any) -> dict[str, Any]:
     }
 
 
-def _bank_queue_row(bank_id: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
-    pending = 0
-    processing = 0
-    failed = 0
-    oldest_pending_age_s: float | None = None
-    now = time.time()
-    for op in operations:
-        status = str(op.get("status", "")).lower()
-        if status in ("pending", "queued"):
-            pending += 1
-            created_at = op.get("created_at")
-            age = _age_s(created_at, now)
-            if age is not None and (oldest_pending_age_s is None or age > oldest_pending_age_s):
-                oldest_pending_age_s = age
-        elif status in ("processing", "running", "in_progress"):
-            processing += 1
-        elif status in ("failed", "error"):
-            failed += 1
-    return {
-        "bank_id": bank_id,
-        "pending": pending,
-        "processing": processing,
-        "failed": failed,
-        "oldest_pending_age_s": oldest_pending_age_s,
-    }
-
-
-def _age_s(created_at: Any, now: float) -> float | None:
-    if not created_at:
-        return None
-    try:
-        from datetime import datetime
-
-        ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
-        return max(0.0, now - ts.timestamp())
-    except Exception:
-        return None
-
-
 def _engine_env_report(memory_cfg: Any) -> dict[str, Any]:
     """The unit-env comparison (seam for tests; blocking — call off the loop)."""
     from hal0.memory.extraction_env import engine_env_report
@@ -317,18 +276,16 @@ async def get_lanes(request: Request) -> dict[str, Any]:
                 b.get("bank_id") or b.get("id")
                 for b in (bank_resp.get("banks") or bank_resp.get("items") or [])
             ]
-            for bank_id in bank_ids:
-                if not bank_id:
-                    continue
-                try:
-                    ops_resp = await client.request_json(
-                        "GET", f"/v1/default/banks/{bank_id}/operations"
-                    )
-                    ops = ops_resp.get("operations") or ops_resp.get("items") or []
-                except Exception as exc:
-                    banks.append({"bank_id": bank_id, "error": str(exc)})
-                    continue
-                banks.append(_bank_queue_row(bank_id, ops))
+            # Counts are the engine's totals and the oldest age is read from
+            # the end of the list (the first page alone is the newest 20,
+            # never the oldest), by the reader GET /api/memory/health uses.
+            reader = EngineReader(client)
+            now = time.time()
+            banks = list(
+                await asyncio.gather(
+                    *(bank_queue_row(reader, str(b), now=now) for b in bank_ids if b)
+                )
+            )
         except Exception:
             banks = []
 

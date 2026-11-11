@@ -1297,13 +1297,10 @@ function buildUnitHistory(_url: string, match: RegExpMatchArray) {
   return [{ state: unit.state, at: unit.occurred_start, reason: null }]
 }
 
+// The list. The rows are MEM_MENTAL_MODELS (below, with the detail and
+// history builders), unchanged.
 function buildMentalModels() {
-  const items = [
-    { id: 'mm-power-resilience', name: 'Power resilience posture', source_query: 'how does the box handle power loss?', content: 'Since the May 3 outage the operator runs a CyberPower 1500VA UPS (~22min idle runtime) with the NUT daemon set to gracefully shut down at 20% battery. Inference queues are now the main loss surface, not cold boots.', tags: ['reliability'], is_stale: false, last_refreshed_at: '2026-06-10T08:00:00.000Z' },
-    { id: 'mm-thermal-envelope', name: 'iGPU thermal envelope', source_query: 'what are the iGPU thermal limits?', content: 'Sustained ComfyUI load used to push the Radeon 8060S to 95C and throttle img throughput ~30%. A -30mV ryzenadj undervolt (now in the boot unit) holds peak at ~84C with baseline throughput.', tags: ['performance'], is_stale: false, last_refreshed_at: '2026-06-09T19:30:00.000Z' },
-    { id: 'mm-operator-style', name: 'Operator interaction style', source_query: 'how should I talk to the operator?', content: 'Terse, technical, lowercase. Inline citations expected — traceability over prose. Active 20:00–01:00; mornings are safe for heavy maintenance.', tags: ['operator'], is_stale: true, last_refreshed_at: '2026-05-28T23:00:00.000Z' },
-  ]
-  return { items, total: items.length }
+  return { items: MEM_MENTAL_MODELS, total: MEM_MENTAL_MODELS.length }
 }
 
 function buildDirectives() {
@@ -1316,26 +1313,270 @@ function buildDirectives() {
   return { items, total: items.length }
 }
 
-// Real hindsight-api 0.8.4 envelope: {bank_id, total, limit, offset,
-// operations: [{id, task_type, status, ...}]} — NOT {items, operation_id,
-// operation_type} (#1645).
-function buildBankOperations(_url: string, match: RegExpMatchArray) {
-  const bank = bankFrom(match)
-  if (bank === 'ingest') {
-    const operations = [
-      { id: 'op-ing-9012', task_type: 'document_ingest', status: 'processing', created_at: '2026-06-12T22:14:00.000Z', error_message: null, retry_count: 0 },
-      { id: 'op-ing-9011', task_type: 'document_ingest', status: 'pending', created_at: '2026-06-12T22:13:30.000Z', error_message: null, retry_count: 0 },
-      { id: 'op-ing-8990', task_type: 'consolidation', status: 'failed', created_at: '2026-06-12T19:02:00.000Z', error_message: 'embedding backend timed out after 30s', retry_count: 2 },
-      { id: 'op-ing-8975', task_type: 'document_ingest', status: 'completed', created_at: '2026-06-12T18:40:00.000Z', error_message: null, retry_count: 0 },
-    ]
-    return { bank_id: bank, total: operations.length, limit: 50, offset: 0, operations }
+// The engine's envelope: {bank_id, total, limit, offset, operations: [...]} —
+// NOT the {items, total} of the other list routes (#1645). Every row carries
+// the sixteen fields of MockOperation below; that is the shape a 1.x engine
+// returns. On the rows seen so far `id` and `operation_id` are the same value,
+// `operation_type` repeats `task_type`, and `progress`, `details` and
+// `filename` are null, so the fixtures follow that.
+//
+// `status`, `limit` and `offset` are honoured the way the engine honours
+// them: `total` counts the rows that match `status`, and the page is cut
+// from those. A read with no query string returns what it always did for the
+// `ingest` bank and the default banks.
+//
+// States by bank, for the Memory area's Operations tab:
+//   ingest   one row each of processing (running), pending (waiting), failed
+//            (with its error message) and completed (done)
+//   big      a queue longer than one page: 137 rows, three failure messages
+//   empty    no operations at all
+//   others   the three-row default
+type MockOperation = {
+  id: string
+  operation_id: string
+  operation_type: string
+  task_type: string
+  status: string
+  created_at: string
+  updated_at: string
+  error_message: string | null
+  retry_count: number
+  next_retry_at: string | null
+  items_count: number
+  document_id: string | null
+  mental_model_id: string | null
+  progress: unknown
+  details: unknown
+  filename: string | null
+}
+
+// One row in the engine's full shape, from the fields a fixture cares about.
+function mockOperation(
+  row: Pick<MockOperation, 'id' | 'task_type' | 'status' | 'created_at'> & Partial<MockOperation>,
+): MockOperation {
+  return {
+    operation_id: row.id,
+    operation_type: row.task_type,
+    updated_at: row.created_at,
+    error_message: null,
+    retry_count: 0,
+    next_retry_at: null,
+    items_count: 0,
+    document_id: null,
+    mental_model_id: null,
+    progress: null,
+    details: null,
+    filename: null,
+    ...row,
   }
-  const operations = [
-    { id: 'op-7741', task_type: 'consolidation', status: 'completed', created_at: '2026-06-12T04:30:00.000Z', error_message: null, retry_count: 0 },
-    { id: 'op-7742', task_type: 'observation_extract', status: 'pending', created_at: '2026-06-12T22:06:00.000Z', error_message: null, retry_count: 0 },
-    { id: 'op-7710', task_type: 'document_ingest', status: 'completed', created_at: '2026-06-05T11:21:00.000Z', error_message: null, retry_count: 0 },
-  ]
-  return { bank_id: bank, total: operations.length, limit: 50, offset: 0, operations }
+}
+
+const INGEST_OPERATIONS: MockOperation[] = [
+  mockOperation({ id: 'op-ing-9012', task_type: 'document_ingest', status: 'processing', created_at: '2026-06-12T22:14:00.000Z', updated_at: '2026-06-12T22:14:20.000Z', items_count: 1, document_id: 'doc-ing-9012' }),
+  mockOperation({ id: 'op-ing-9011', task_type: 'document_ingest', status: 'pending', created_at: '2026-06-12T22:13:30.000Z', items_count: 1, document_id: 'doc-ing-9011' }),
+  mockOperation({ id: 'op-ing-8990', task_type: 'consolidation', status: 'failed', created_at: '2026-06-12T19:02:00.000Z', updated_at: '2026-06-12T19:08:00.000Z', error_message: 'embedding backend timed out after 30s', retry_count: 2 }),
+  mockOperation({ id: 'op-ing-8975', task_type: 'document_ingest', status: 'completed', created_at: '2026-06-12T18:40:00.000Z', updated_at: '2026-06-12T18:41:10.000Z', items_count: 1, document_id: 'doc-ing-8975' }),
+]
+
+const DEFAULT_OPERATIONS: MockOperation[] = [
+  mockOperation({ id: 'op-7741', task_type: 'consolidation', status: 'completed', created_at: '2026-06-12T04:30:00.000Z', updated_at: '2026-06-12T04:30:01.000Z' }),
+  mockOperation({ id: 'op-7742', task_type: 'observation_extract', status: 'pending', created_at: '2026-06-12T22:06:00.000Z' }),
+  mockOperation({ id: 'op-7710', task_type: 'document_ingest', status: 'completed', created_at: '2026-06-05T11:21:00.000Z', updated_at: '2026-06-05T11:22:00.000Z', items_count: 1, document_id: 'doc-7710' }),
+]
+
+// Both messages are the engine's own wording for a failed `batch_retain`
+// (the second seen verbatim on a 1.x engine). `refresh_mental_model` as the task
+// type of a refresh is the name hal0's CLI help uses for it
+// (cli/memory_ops_commands.py); a refresh row has not been seen on an engine yet.
+const BIG_OPERATION_ERRORS = [
+  'APIConnectionError: Connection error.',
+  "Task exceeded the 14400s wall-clock limit for 'batch_retain' (stage=llm.openai.retain_extract_facts+structured.queued) and was cancelled. Raise HINDSIGHT_API_RETAIN_WALL_TIMEOUT if this is a legitimately long operation, or set it to 0 to disable the limit.",
+]
+
+function buildBigOperations(): MockOperation[] {
+  const newest = Date.parse('2026-06-12T22:00:00.000Z')
+  const rows: MockOperation[] = []
+  // Newest first, as the engine lists them: 2 running, 96 waiting, 9 failed,
+  // 30 done. One row every four minutes, so the oldest is about 9 h old.
+  for (let i = 0; i < 137; i++) {
+    const status = i < 2 ? 'processing' : i < 98 ? 'pending' : i < 107 ? 'failed' : 'completed'
+    const refresh = status === 'failed' && i >= 105
+    const taskType = refresh ? 'refresh_mental_model' : i % 12 === 0 ? 'consolidation' : 'batch_retain'
+    const createdAt = new Date(newest - i * 4 * 60_000).toISOString()
+    rows.push(
+      mockOperation({
+        id: `op-big-${String(9000 - i)}`,
+        task_type: taskType,
+        status,
+        created_at: createdAt,
+        // A waiting row has not been touched since it was queued.
+        updated_at: status === 'pending' ? createdAt : new Date(newest - i * 4 * 60_000 + 90_000).toISOString(),
+        error_message: status !== 'failed' ? null : BIG_OPERATION_ERRORS[i === 104 ? 1 : 0],
+        retry_count: status === 'failed' ? 3 : 0,
+        items_count: taskType === 'batch_retain' ? 4 : 0,
+        mental_model_id: refresh ? 'mm-operator-style' : null,
+      }),
+    )
+  }
+  return rows
+}
+
+function buildBankOperations(url: string, match: RegExpMatchArray) {
+  const bank = bankFrom(match)
+  const all =
+    bank === 'ingest'
+      ? INGEST_OPERATIONS
+      : bank === 'big'
+        ? buildBigOperations()
+        : bank === 'empty'
+          ? []
+          : DEFAULT_OPERATIONS
+  let params = new URLSearchParams()
+  try {
+    params = new URL(url, 'http://x').searchParams
+  } catch {
+    /* path-only — no query */
+  }
+  const status = params.get('status')
+  const matched = status ? all.filter((op) => op.status === status) : all
+  const limit = Math.max(1, Number(params.get('limit')) || 50)
+  const offset = Math.max(0, Number(params.get('offset')) || 0)
+  return {
+    bank_id: bank,
+    total: matched.length,
+    limit,
+    offset,
+    operations: matched.slice(offset, offset + limit),
+  }
+}
+
+// ── Memory area (ADR-0058): knowledge base, mental-model detail + history ──
+//
+// The shapes a 1.x engine returns:
+//   - The tree is `{roots: [...]}`. Every node, folder or page, carries the
+//     thirteen fields of MockKnowledgeNode below. `kind` is "page" or
+//     "folder". A node has `is_stale` and `last_refresh_failed_at` but no
+//     `last_refreshed_at`: that comes from the mental-models list, by the
+//     node's `mental_model_id`.
+//   - A mental model's history is a bare JSON list of revisions, newest
+//     first.
+// A page's own detail (`GET .../pages/{id}`) is still the set of fields the
+// dashboard reads from it; it has not been compared with an engine's answer.
+//
+// States: two fresh pages; one stale page whose last refresh failed after
+// its last success (`kb-operator-style`); a model with three revisions
+// (`mm-power-resilience`); models with none; an empty tree (bank `empty`).
+const MEM_MENTAL_MODELS = [
+  { id: 'mm-power-resilience', name: 'Power resilience posture', source_query: 'how does the box handle power loss?', content: 'Since the May 3 outage the operator runs a CyberPower 1500VA UPS (~22min idle runtime) with the NUT daemon set to gracefully shut down at 20% battery. Inference queues are now the main loss surface, not cold boots.', tags: ['reliability'], is_stale: false, last_refreshed_at: '2026-06-10T08:00:00.000Z' },
+  { id: 'mm-thermal-envelope', name: 'iGPU thermal envelope', source_query: 'what are the iGPU thermal limits?', content: 'Sustained ComfyUI load used to push the Radeon 8060S to 95C and throttle img throughput ~30%. A -30mV ryzenadj undervolt (now in the boot unit) holds peak at ~84C with baseline throughput.', tags: ['performance'], is_stale: false, last_refreshed_at: '2026-06-09T19:30:00.000Z' },
+  { id: 'mm-operator-style', name: 'Operator interaction style', source_query: 'how should I talk to the operator?', content: 'Terse, technical, lowercase. Inline citations expected — traceability over prose. Active 20:00–01:00; mornings are safe for heavy maintenance.', tags: ['operator'], is_stale: true, last_refreshed_at: '2026-05-28T23:00:00.000Z' },
+]
+
+// The one refresh that failed: later than the model's last success, so it
+// reads as a fault and not as a stale hint.
+const MEM_REFRESH_FAILED_AT: Record<string, string> = {
+  'mm-operator-style': '2026-06-11T08:00:00.000Z',
+}
+
+const MEM_MODEL_HISTORY: Record<string, { updated_at: string; content: string }[]> = {
+  'mm-power-resilience': [
+    { updated_at: '2026-06-10T08:00:00.000Z', content: 'Since the May 3 outage the operator runs a CyberPower 1500VA UPS (~22min idle runtime) with the NUT daemon set to gracefully shut down at 20% battery. Inference queues are now the main loss surface, not cold boots.' },
+    { updated_at: '2026-05-20T08:00:00.000Z', content: 'The operator bought a CyberPower 1500VA UPS after the May 3 outage. Graceful shutdown is not wired yet.' },
+    { updated_at: '2026-05-04T08:00:00.000Z', content: 'The box has no power protection. A grid drop on May 3 hard-stopped it mid-generation.' },
+  ],
+}
+
+function buildMentalModel(_url: string, match: RegExpMatchArray) {
+  const id = decodeURIComponent(match[2] ?? '')
+  const model = MEM_MENTAL_MODELS.find((m) => m.id === id)
+  if (!model) return null // → 404, as for an unknown id on the engine
+  return { ...model, last_refresh_failed_at: MEM_REFRESH_FAILED_AT[id] ?? null }
+}
+
+function buildMentalModelHistory(_url: string, match: RegExpMatchArray) {
+  const id = decodeURIComponent(match[2] ?? '')
+  if (!MEM_MENTAL_MODELS.some((m) => m.id === id)) return null
+  // A bare list, as the engine sends it (not `{items: [...]}`).
+  return MEM_MODEL_HISTORY[id] ?? []
+}
+
+const MEM_KNOWLEDGE_PAGES = MEM_MENTAL_MODELS.map((m) => ({
+  id: m.id.replace(/^mm-/, 'kb-'),
+  name: m.name,
+  content: m.content,
+  source_query: m.source_query,
+  tags: m.tags,
+  trigger: null,
+  max_tokens: null,
+  mental_model_id: m.id,
+  is_stale: m.is_stale,
+  last_refreshed_at: m.last_refreshed_at,
+  last_refresh_failed_at: MEM_REFRESH_FAILED_AT[m.id] ?? null,
+}))
+
+type MockKnowledgeNode = {
+  id: string
+  kind: 'page' | 'folder'
+  name: string
+  parent_id: string | null
+  children: MockKnowledgeNode[]
+  description: string | null
+  tags: string[]
+  managed: boolean
+  mental_model_id: string | null
+  timestamp: string | null
+  trigger: string | null
+  is_stale: boolean
+  last_refresh_failed_at: string | null
+}
+
+function buildKnowledgeTree(_url: string, match: RegExpMatchArray) {
+  if (bankFrom(match) === 'empty') return { roots: [] }
+  const page = (id: string, parentId: string): MockKnowledgeNode => {
+    const p = MEM_KNOWLEDGE_PAGES.find((x) => x.id === id)
+    return {
+      id,
+      kind: 'page',
+      name: p?.name ?? id,
+      parent_id: parentId,
+      children: [],
+      description: null,
+      tags: p?.tags ?? [],
+      managed: true,
+      mental_model_id: p?.mental_model_id ?? null,
+      timestamp: p?.last_refreshed_at ?? null,
+      trigger: null,
+      is_stale: p?.is_stale ?? false,
+      last_refresh_failed_at: p?.last_refresh_failed_at ?? null,
+    }
+  }
+  const folder = (id: string, name: string, pages: string[]): MockKnowledgeNode => ({
+    id,
+    kind: 'folder',
+    name,
+    parent_id: null,
+    children: pages.map((pageId) => page(pageId, id)),
+    description: null,
+    tags: [],
+    managed: true,
+    mental_model_id: null,
+    timestamp: null,
+    trigger: null,
+    is_stale: false,
+    last_refresh_failed_at: null,
+  })
+  return {
+    roots: [
+      folder('kbf-box', 'The box', ['kb-power-resilience', 'kb-thermal-envelope']),
+      folder('kbf-operator', 'The operator', ['kb-operator-style']),
+    ],
+  }
+}
+
+function buildKnowledgePage(_url: string, match: RegExpMatchArray) {
+  if (bankFrom(match) === 'empty') return null
+  const id = decodeURIComponent(match[2] ?? '')
+  return MEM_KNOWLEDGE_PAGES.find((p) => p.id === id) ?? null
 }
 
 // Route wrappers: the allowlist passes the query-stripped path as the first
@@ -1583,6 +1824,10 @@ export const MOCK_BUILDERS: Record<string, Builder> = {
   bankGraph: buildMemFactGraphRoute,
   bankDocuments: buildBankDocuments,
   bankMentalModels: buildMentalModels,
+  mentalModel: buildMentalModel,
+  mentalModelHistory: buildMentalModelHistory,
+  knowledgeTree: buildKnowledgeTree,
+  knowledgePage: buildKnowledgePage,
   bankDirectives: buildDirectives,
   bankOperations: buildBankOperations,
   bankRecall: buildBankRecall,

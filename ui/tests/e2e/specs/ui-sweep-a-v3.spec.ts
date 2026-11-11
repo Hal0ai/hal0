@@ -336,7 +336,7 @@ test.describe('Dashboard Now band', () => {
 // ─── 8. Agent route redirect when memory disabled ───────────────────────
 
 test.describe('Agent route — memory disabled fallback', () => {
-  test('#agent falls back to the MCP tab when memory is disabled (no redirect)', async ({ page }) => {
+  test('#agent stays usable when memory is disabled (no redirect, no Memory tab)', async ({ page }) => {
     // Use window seam documented in mock.ts to flip memory to disabled
     await page.addInitScript(() => {
       ;(window as any).__hal0MockMemoryEnabled = false
@@ -347,9 +347,12 @@ test.describe('Agent route — memory disabled fallback', () => {
       'The memory surface is disabled',
       { timeout: FIVE_S }
     )
-    // v0.5 nav: Agent is a tabbed shell; memory off → default MCP tab, the
-    // Memory tab is hidden, and there is NO redirect away from #agent.
-    await expect(page.locator('[data-testid="agent-tab-mcp"]')).toBeVisible({ timeout: FIVE_S })
+    // Agents is a tabbed shell (Overview · MCP). It has no Memory tab with
+    // memory on or off, and there is NO redirect away from #agent: only the
+    // Memory area's own #memory/* addresses redirect when memory is off.
+    await expect(page.locator('[data-testid="agent-tab-overview"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(page.locator('[data-testid="agent-tab-mcp"]')).toBeVisible()
     await expect(page.locator('[data-testid="agent-tab-memory"]')).toHaveCount(0)
+    await expect(page).toHaveURL(/#agent$/)
   })
 })

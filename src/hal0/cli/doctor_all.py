@@ -3451,8 +3451,8 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
         describe_embedder,
         embedder_notice,
         embedder_status,
-        shipped_default_embedder,
     )
+    from hal0.memory.embedder_verdict import embedder_verdict
 
     name, title = "memory_embedder", "Memory embedder"
     if status is None:
@@ -3465,17 +3465,12 @@ def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
         status = embedder_status(configured_embedder(models))
     recorded = (status.get("recorded_provider"), status.get("recorded"))
     configured = (status.get("configured_provider"), status.get("configured"))
-    differs = recorded != configured
-    if (
-        status.get("record_error")
-        or status.get("store_unavailable")
-        or status.get("conflict")
-        or status.get("mixed")
-        or (differs and configured != tuple(shipped_default_embedder()))
-    ):
+    # The rule is shared with the Memory health path, so the two cannot disagree.
+    verdict = embedder_verdict(status)
+    if verdict.reasons:
         return Check(name, title, _WARN, embedder_notice(status) or "")
     built_with = describe_embedder(*recorded)
-    if differs:
+    if verdict.informational:
         return Check(
             name,
             title,
