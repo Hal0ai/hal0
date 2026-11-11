@@ -153,7 +153,7 @@ names an upstream model id as `hal0 memory graph status` lists it under
 advertises. That list is filled right after a `hal0-api` restart: the
 status call fetches each provider's catalog when its cache is empty, and
 retries a provider that is offline at most once a minute. The dashboard's **Engine model** picker (Settings → Data →
-Memory, and the agents Memory tab) offers the same two groups. On a box
+Memory) offers the same two groups. On a box
 upgraded from an earlier release the first save repoints `hindsight-api`
 at `hal0/memory` once (one drop-in write and restart); until then the
 **Engine running** row says the engine is still pinned to the old slot id.
@@ -263,7 +263,7 @@ engine's own `/profile` endpoint answers `410 Gone` from Hindsight 0.10.0 on;
 hal0's `/api/memory/banks/<bank>/profile` keeps working by composing the same
 answer from the bank list and the bank config.
 
-`--reflect-mission` is the text the Memory workspace shows under the bank picker as the bank's description. You can also edit it there in place; see [The bank bar](/docs/guides/memory-workspace#the-bank-bar).
+`--reflect-mission` is the text the Memory area's Facts tab shows in the bank bar as the bank's description. You can also edit it there in place; see [The bank bar](/docs/guides/memory-workspace#the-bank-bar).
 
 ## Async operations and mental models
 
@@ -351,8 +351,8 @@ wipe is attributable after the fact.
 
 - [Memory](/docs/concepts/memory) — what the subsystem is, namespaces,
   fact types, directives, and mental models.
-- [Browse the Bank workspace](/docs/guides/memory-workspace) — the
-  dashboard's fact browser, filters, curation, and graph views.
+- [The Memory area](/docs/guides/memory-workspace) — the dashboard's
+  Health, Facts, Knowledge, Operations and Agents tabs.
 - [Run agents](/docs/guides/run-agents) — agents are the main consumer of
   the memory store.
 - [Connect MCP servers](/docs/guides/connect-mcp) — the `memory_*` tool

@@ -40,7 +40,7 @@ This page covers `memory` and the remaining sub-apps, the slot lifecycle timeout
 | `bank delete <bank>` | `bank` | `--confirm` (required, must equal the bank id), `--json` |
 | `bank consolidate <bank>` | `bank` | `--scope` (repeatable), `--json` |
 
-`bank profile set --reflect-mission` writes the same per-bank config override as the description editor in the dashboard's Memory workspace: the text under the bank picker is the bank's Hindsight `reflect_mission`, and clicking it edits it in place. A bank id may contain dots as well as colons (`coding-agent::ultrareview-1.4`); a leading dot, a dot-only segment and any `..` are refused with `invalid bank_id`.
+`bank profile set --reflect-mission` writes the same per-bank config override as the description editor on the dashboard's Memory ▸ Facts tab: the description in the bank bar is the bank's Hindsight `reflect_mission`, and clicking it edits it in place. A bank id may contain dots as well as colons (`coding-agent::ultrareview-1.4`); a leading dot, a dot-only segment and any `..` are refused with `invalid bank_id`.
 
 ### `memory ops`
 

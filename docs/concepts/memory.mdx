@@ -14,10 +14,10 @@ completely absent when it's off. A fresh install turns it on for you; it stays
 a conscious, revertible choice rather than something that silently accumulates
 data on an existing box.
 
-Memory was rebuilt for v1.0 ("memory v2"): a redesigned dashboard workspace
-(ranked fact list, curate, history, a force-directed graph) sits behind the
-same engine-neutral backend described on this page. See
-[Browse the Bank workspace](/docs/guides/memory-workspace) for the UI tour.
+The dashboard shows memory in one place, the Memory area (Health, Facts,
+Knowledge, Operations and Agents), over the same engine-neutral backend
+described on this page. See [The Memory area](/docs/guides/memory-workspace)
+for the UI tour.
 
 ## What memory is
 
@@ -75,7 +75,7 @@ schema lives in [MCP tools](/docs/reference/mcp-tools) — this page covers the
 concepts those tools operate on.
 
 ![Memory interface showing stored facts and recall](/screenshots/memory-view.png)
-*The dashboard's Memory view (Bank workspace, list mode)*
+*The fact workspace on the Memory area's Facts tab (list mode)*
 
 The engine is **Hindsight** — a memory service that powers the shared operator
 and agent "brain." When configured, hal0 builds a Hindsight client and wraps
@@ -431,8 +431,8 @@ on any save. The write and restart go through hal0's privileged-operation seam
 rather than hal0-api (which runs unprivileged) touching `/etc/systemd`
 directly.
 
-Pick the engine model under **Engine model** on Settings → Data → Memory or on the
-agents Memory tab (Local slots / Upstream models), or from the CLI with
+Pick the engine model under **Engine model** on Settings → Data → Memory
+(Local slots / Upstream models), or from the CLI with
 `hal0 memory graph enable --model <id>`; `--local` returns to the local
 `extraction_slot`, and `--model` cannot be combined with `--slot` or
 `--local`. `GET /api/memory/graph/status` reports `target`, `available_models`
@@ -470,10 +470,10 @@ When enabled, memory becomes the shared brain that ties the platform together:
     can also call the MCP tools directly.
   </Card>
   <Card title="Operator memory" icon="document">
-    The dashboard's Memory view (Overview + Bank workspace) and the
-    `/api/memory/*` routes let you add, search, browse the graph, and curate
-    facts directly — across banks, documents, mental models, and directives.
-    See [Browse the Bank workspace](/docs/guides/memory-workspace).
+    The dashboard's Memory area and the `/api/memory/*` routes let you add,
+    search, browse the graph, and curate facts directly — across banks,
+    documents, mental models, and directives.
+    See [The Memory area](/docs/guides/memory-workspace).
   </Card>
   <Card title="Namespaced writes" icon="setting">
     Callers identify themselves (via the `X-hal0-Agent` header), so private
@@ -493,7 +493,7 @@ When enabled, memory becomes the shared brain that ties the platform together:
 <CardGrid>
   <LinkCard title="Memory projects" href="/docs/concepts/memory-projects" description="How project tags are resolved, the registry, and per-project scopes." />
   <LinkCard title="Enable memory" href="/docs/guides/enable-memory" description="Turn it on, pick an engine, configure graph extraction and reranking." />
-  <LinkCard title="Browse the Bank workspace" href="/docs/guides/memory-workspace" description="The dashboard's fact list, filters, curation, and graph views." />
+  <LinkCard title="The Memory area" href="/docs/guides/memory-workspace" description="Health and its repair path, facts, knowledge, operations and agents in the dashboard." />
   <LinkCard title="Agents" href="/docs/concepts/agents" description="The agent that uses memory as its brain." />
   <LinkCard title="Security" href="/docs/concepts/security" description="Identity, namespaces, and the auth layer." />
 </CardGrid>
