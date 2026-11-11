@@ -56,9 +56,12 @@ First run on a box with no record
    is missing): the engine default, never written down.
 5. No store: the configured embedder.
 
-``mixed`` is set only on evidence: a store exists and the embedder found is
-not the engine default. Every installer to date starts a new engine on the
-base unit, so such a store was created under the default.
+``mixed`` is set only on evidence: a store exists, it has no record, and the
+embedder found is not the engine default. Every installer that did not write a
+record started a new engine on the base unit, so such a store was created
+under the default. (An installer that starts a new engine on the configured
+embedder writes the record first, :mod:`hal0.memory.first_start`, so its store
+never reaches this rule.)
 
 One invariant keeps the record truthful: it never names an embedder the engine
 was not started with. Cases 1 to 3 describe an engine that has run, so the
@@ -68,8 +71,16 @@ Case 5 describes an engine that has not started, so it is written only by
 the drop-in carrying it is on disk. Recorded any earlier, a box whose engine
 then started without the drop-in would build its store with the engine
 default under a record that says otherwise, and the next render would swap
-the embedder: #3518 again. ``install.sh`` is such a caller today: it runs the
-update migrations and then starts a new engine on the base unit.
+the embedder: #3518 again. ``install.sh`` is such a caller: it runs the
+update migrations long before the engine's unit exists. The drop-in and the
+record of a new install are written later, immediately before the engine's
+first start, by :mod:`hal0.memory.first_start`.
+
+One writer replaces a record: when that first start fails on the configured
+embedder, ``first_start`` rewrites it as the engine default with the source
+``first-start-fallback`` before it starts the engine on the default. The
+engine never answered a request, so no vector was made with the pair being
+replaced.
 
 When a record exists
 --------------------
@@ -134,6 +145,9 @@ SOURCE_DROPIN = "showcase-drop-in"
 SOURCE_ENGINE_DEFAULT = "engine-default"
 SOURCE_CONFIGURED = "configured"
 SOURCE_UNAVAILABLE = "store-unavailable"
+#: A new install whose engine could not start on the configured embedder and
+#: was started on the engine default instead (:mod:`hal0.memory.first_start`).
+SOURCE_FIRST_START_FALLBACK = "first-start-fallback"
 
 #: Sources that describe an engine that has not run (or cannot be seen). A
 #: record from one of these is never written by :func:`ensure_embedder_record`.
@@ -763,6 +777,7 @@ __all__ = [
     "SOURCE_CONFIGURED",
     "SOURCE_DROPIN",
     "SOURCE_ENGINE_DEFAULT",
+    "SOURCE_FIRST_START_FALLBACK",
     "SOURCE_PROCESS",
     "SOURCE_UNAVAILABLE",
     "SOURCE_UNIT",

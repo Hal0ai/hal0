@@ -344,8 +344,10 @@ unprivileged CT with the GPU and NPU forwarded finished with three:
   when a model is pulled.
 - `podman system migrate (as hal0) failed` — see the rootless podman note in
   §3.
-- `memory bank seeding incomplete` — the memory engine had only just
-  started; banks are created on first write.
+- `memory bank seeding incomplete` — hal0-api had not yet connected to the
+  memory engine, which starts after it on a new install. The installer now
+  waits up to 45 s for that before seeding; if you still see the line, banks
+  are created on first write.
 
 `hal0 doctor all` on the same box reported 31 passes, 5 warnings and no
 failures. The five warnings were: no capability slots active, the open-on-LAN

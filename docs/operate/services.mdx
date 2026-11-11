@@ -240,6 +240,18 @@ WantedBy=multi-user.target
   differ, or the engine runs something other than the record,
   `GET /api/memory/models` and the `memory_embedder` row of `hal0 doctor all`
   say so and nothing is rewritten.
+- **First start** — on a box with no memory store, the installer writes the
+  `showcase-lanes.conf` drop-in and the embedder record from
+  `[memory.models]` before it starts the engine, so a new store is built with
+  the configured embedder (`hindsight-ai/hs-embed-1` unless you changed it).
+  The engine downloads its local models into `HF_HOME` on that start. If
+  systemd reports the start failing (the unit is `failed`, or has restarted
+  twice), the installer stops the engine, records the engine default
+  (`BAAI/bge-small-en-v1.5`, source `first-start-fallback`), renders the
+  drop-in from that record and starts the engine again, with a `!!` line in
+  the install log. An engine that is only slow (still downloading) is left on
+  the configured embedder. A box that already has a store, or whose store
+  location is unavailable, is not touched by this step.
 
 ### Config files it reads
 
