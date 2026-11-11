@@ -308,3 +308,29 @@ def test_admin_reads_stay_open(
 
     assert resp.status_code == 200
     assert len(seen) == 1
+
+
+# ── `hal0 memory spec apply` writes to the engine directly ───────────────────
+
+
+def test_spec_apply_checks_the_gate_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    from typer.testing import CliRunner
+
+    from hal0.cli import memory_spec_commands as spec
+
+    applied: list[bool] = []
+
+    def fake_apply(**kwargs: Any) -> Any:
+        applied.append(kwargs["dry_run"])
+        raise SystemExit(0)
+
+    monkeypatch.setattr(spec, "apply_spec", fake_apply)
+    write_gate.engage_gate()
+
+    result = CliRunner().invoke(spec.app, [])
+
+    assert result.exit_code == 1 and applied == []
+    assert "Memory writes are paused" in " ".join(result.output.split())
+    # A dry run plans only, so it is not refused.
+    CliRunner().invoke(spec.app, ["--dry-run"])
+    assert applied == [True]

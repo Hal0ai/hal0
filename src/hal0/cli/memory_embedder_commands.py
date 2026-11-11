@@ -133,7 +133,7 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
     if plan.get("estimate_s") is not None:
         lines.append(
             f"rebuild: {_minutes(plan['estimate_s'])} at the measured {RESTORE_FACTS_PER_S:g} "
-            "facts/s on CPU; exports and two engine restarts come on top"
+            "facts/s on CPU; the exports and an engine restart come on top"
         )
     disk = plan.get("disk")
     if disk:
@@ -143,7 +143,7 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
         )
     lines.append(
         "while it runs: memory writes are refused with 503 memory.writes_paused; "
-        "recall keeps working except during the two engine restarts"
+        "recall keeps working except while the engine restarts"
     )
     for warning in plan.get("warnings") or []:
         lines.append(f"[yellow]note: {escape(str(warning))}[/yellow]")
