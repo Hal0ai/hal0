@@ -181,6 +181,7 @@ class _Client:
 
 WRITES: list[tuple[str, dict[str, Any]]] = [
     ("add", {"text": "x"}),
+    ("retain_items", {"items": [{"content": "x"}], "agent": "hermes"}),
     ("delete", {"ids": ["d1"]}),
     ("curate", {"memory_id": "m1", "text": "y"}),
     ("create_mental_model", {"name": "n", "source_query": "q"}),
