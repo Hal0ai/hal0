@@ -752,3 +752,118 @@
 
 /* A notice that is information, not a state: no chip, and quieter text. */
 .ma-notice-quiet { color: var(--fg-2); }
+
+/* operations */
+
+/* ── Operations tab (OperationsTab.jsx, operations/) ────────────────────────── */
+
+/* The tab's own column: the same 14px between cards as the page. */
+.ma-ops {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+/* Under the cause's sentence: the engine's own words for the failure, then the link. */
+.ma-ops-reason {
+  margin-top: 8px;
+  line-height: 1.6;
+}
+.ma-ops-lead-link { margin-top: 10px; }
+
+/* Failed operations: the count and its sentence, the two actions, and what a run says. */
+.ma-ops-failed {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.ma-ops-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px 12px;
+}
+.ma-ops-run {
+  margin: 0;
+  max-width: 72ch;
+  font-family: var(--geist);
+  font-size: 13.5px;
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+/* Empty until a run starts. It stays in the page (a live region must exist before its text
+   does) and only gives back the gap it would otherwise add. */
+.ma-ops-run:empty { margin-top: -14px; }
+
+/* The tab's tables hold text for screen readers only (a column heading, an empty cell), which is
+   positioned out of flow. The scroll box is made its containing block, so that text scrolls and
+   clips with the table and cannot widen the page. */
+.ma-ops .ma-table-region { position: relative; }
+
+/* The list. Five columns need more room than the default table before they scroll. */
+.ma-ops-table { min-width: 720px; }
+.ma-ops-table td.ma-ops-bank { overflow-wrap: anywhere; }
+.ma-ops-table td.ma-ops-when { white-space: nowrap; }
+.ma-ops-table td.ma-ops-act {
+  text-align: right;
+  white-space: nowrap;
+}
+/* The chip, then what else is known about the row's state, in words. */
+.ma-ops-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.ma-ops-note {
+  font-size: 11px;
+  color: var(--fg-2);
+}
+/* A failed row's message: one line, or all of it once opened. It wraps; it is never cut by the
+   cell. */
+.ma-ops-error {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 6px;
+}
+.ma-ops-error-text {
+  flex: 1 1 240px;
+  min-width: 0;
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* What a row's retry said. */
+.ma-ops-rownote {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--fg);
+}
+/* Why the rows' retry buttons are disabled: said once, above the table they sit in. */
+.ma-ops-blocked {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+/* Page controls: where the page is in the list, then Previous and Next. */
+.ma-ops-pages { justify-content: space-between; }
+.ma-ops-pages-buttons {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* The consolidation row: its sentence takes the room, the button and its outcome follow. */
+.ma-ops-consolidate { align-items: flex-start; }
+.ma-ops-foot-text {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.ma-ops-consolidate-status {
+  flex: 1 1 100%;
+  color: var(--fg);
+}
+/* Empty until the button is used; it gives back the row gap it would otherwise add. */
+.ma-ops-consolidate-status:empty { margin-top: -6px; }

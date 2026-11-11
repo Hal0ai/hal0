@@ -1,12 +1,11 @@
 // @vitest-environment happy-dom
 //
-// The three tabs that are not built yet: each says so under its own heading and links to where
-// its capability lives today.
+// The tabs that are not built yet: each says so under its own heading and links to where its
+// capability lives today.
 import { createElement } from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AgentsTab } from './AgentsTab.jsx'
 import { KnowledgeTab } from './KnowledgeTab.jsx'
-import { OperationsTab } from './OperationsTab.jsx'
 import { cleanup, mount } from './shared/test-harness'
 
 afterEach(cleanup)
@@ -15,7 +14,6 @@ const textOf = (el: Element | null) => (el?.textContent ?? '').replace(/\s+/g, '
 
 describe.each([
   { name: 'Knowledge', tab: KnowledgeTab, testId: 'ma-knowledge', href: '#memworkspace/kb' },
-  { name: 'Operations', tab: OperationsTab, testId: 'ma-operations', href: '#memworkspace/operations' },
   { name: 'Agents', tab: AgentsTab, testId: 'ma-agents', href: '#memworkspace/agents' },
 ])('$name stub', ({ name, tab, testId, href }) => {
   it('has the tab heading, and is named by it', () => {

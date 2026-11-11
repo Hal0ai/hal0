@@ -949,6 +949,18 @@ const MEM_BANKS = [
 ]
 
 function buildMemoryEngine() {
+  // The `unreachable` health state is an engine that does not answer, so the
+  // engine card says the same thing (see mockMemoryHealthState below).
+  if (mockMemoryHealthState() === 'unreachable') {
+    return {
+      enabled: true,
+      engine: 'hindsight',
+      reachable: false,
+      version: null,
+      features: null,
+      banks_total: null,
+    }
+  }
   return {
     enabled: true,
     engine: 'hindsight',
@@ -1421,8 +1433,12 @@ function buildBigOperations(): MockOperation[] {
   return rows
 }
 
-function buildBankOperations(url: string, match: RegExpMatchArray) {
-  const bank = bankFrom(match)
+// One bank's operations, newest first. In the `clear` health state the queue
+// has been worked through, so only the finished rows are left.
+function operationsFor(
+  bank: string,
+  state: MockMemoryHealthState = mockMemoryHealthState(),
+): MockOperation[] {
   const all =
     bank === 'ingest'
       ? INGEST_OPERATIONS
@@ -1431,6 +1447,267 @@ function buildBankOperations(url: string, match: RegExpMatchArray) {
         : bank === 'empty'
           ? []
           : DEFAULT_OPERATIONS
+  return state === 'clear' ? all.filter((op) => op.status === 'completed') : all
+}
+
+// ── Memory health (GET /api/memory/health, ADR-0058 decision 12) ────────────
+//
+// The body is the route's, field for field (src/hal0/api/routes/memory_health.py
+// and its collector). Three states, so every branch of a view that reads it can
+// be reached under the forced mock, where `page.route` never sees the request:
+//
+//   attention    (default) extraction is the current step: seven stores failed,
+//                two grouped messages; the queue step waits on it
+//   clear        nothing waiting, nothing failed, every step clear
+//   unreachable  the engine does not answer: every section but `engine` is null
+//                and the path is the engine step alone
+//
+// A spec picks one before `page.goto`:
+//
+//   await page.addInitScript(() => { window.__hal0MockMemoryHealth = 'clear' })
+//
+// The state reaches two other builders so the mock stays one box: `clear`
+// leaves only finished rows in every bank's operations list, and `unreachable`
+// turns the engine card to unreachable.
+//
+// The queue figures are counted from the operation fixtures above, as the
+// route counts them from the engine's lists, read at MOCK_HEALTH_NOW. The six
+// hour window on extraction failures is not modelled: every failed store in
+// the fixtures counts.
+export type MockMemoryHealthState = 'attention' | 'clear' | 'unreachable'
+
+export function mockMemoryHealthState(): MockMemoryHealthState {
+  const raw =
+    typeof window !== 'undefined'
+      ? (window as unknown as { __hal0MockMemoryHealth?: unknown }).__hal0MockMemoryHealth
+      : undefined
+  return raw === 'clear' || raw === 'unreachable' ? raw : 'attention'
+}
+
+/** The moment the fixtures are read at: a few minutes after their newest row. */
+export const MOCK_HEALTH_NOW = '2026-06-12T22:20:00.000Z'
+
+const HEALTH_RETAIN_TYPES = new Set(['retain', 'batch_retain', 'file_convert_retain'])
+const HEALTH_EXTRACTION_WINDOW_S = 6 * 60 * 60
+const HEALTH_QUEUE_MAX_AGE_S = 30 * 60
+
+// What the route's `normalise_error` makes of the two failure messages above:
+// numbers become `<n>`, and the result is cut at 160 characters.
+const HEALTH_ERROR_KEYS: Record<string, string> = {
+  [BIG_OPERATION_ERRORS[0]]: 'APIConnectionError: Connection error.',
+  [BIG_OPERATION_ERRORS[1]]:
+    "Task exceeded the <n>s wall-clock limit for 'batch_retain' (stage=llm.openai.retain_extract_facts+structured.queued) and was cancelled. Raise HINDSIGHT_API_RET…",
+}
+
+type HealthStepCheck = [id: string, reason: string | null, figures: Record<string, unknown>]
+
+// The route's own rule (src/hal0/memory/health_path.py): the first open step is
+// `current`, a later open one is `waiting` and names the open step before it.
+function healthSteps(checks: HealthStepCheck[]) {
+  let blocker: string | null = null
+  return checks.map(([id, reason, figures]) => {
+    if (reason === null) return { id, state: 'clear', waits_on: null, reason_code: null, figures }
+    const step = {
+      id,
+      state: blocker === null ? 'current' : 'waiting',
+      waits_on: blocker,
+      reason_code: reason,
+      figures,
+    }
+    blocker = id
+    return step
+  })
+}
+
+export function memoryHealthFixture(state: MockMemoryHealthState = mockMemoryHealthState()) {
+  // As the route writes it: seconds, and an explicit UTC offset.
+  const checkedAt = `${new Date().toISOString().slice(0, 19)}+00:00`
+  if (state === 'unreachable') {
+    return {
+      enabled: true,
+      verdict: 'unreachable',
+      checked_at: checkedAt,
+      partial: [],
+      engine: { reachable: false, version: null },
+      extraction: null,
+      embedder: null,
+      queue: null,
+      knowledge: null,
+      banks: null,
+      writes: null,
+      steps: [
+        {
+          id: 'engine',
+          state: 'current',
+          waits_on: null,
+          reason_code: 'engine_unreachable',
+          figures: { reachable: false },
+        },
+      ],
+    }
+  }
+
+  const now = Date.parse(MOCK_HEALTH_NOW)
+  const errors = new Map<string, number>()
+  let failures = 0
+  const byBank = MEM_BANKS.map((bank) => {
+    const rows = operationsFor(bank.bank_id, state)
+    const waiting = rows.filter((op) => op.status === 'pending')
+    const failed = rows.filter((op) => op.status === 'failed')
+    for (const op of failed) {
+      if (!HEALTH_RETAIN_TYPES.has(op.task_type)) continue
+      failures += 1
+      const key = HEALTH_ERROR_KEYS[op.error_message ?? ''] ?? op.error_message ?? ''
+      if (key) errors.set(key, (errors.get(key) ?? 0) + 1)
+    }
+    const ages = waiting.map((op) => Math.max(0, (now - Date.parse(op.created_at)) / 1000))
+    return {
+      bank_id: bank.bank_id,
+      waiting: waiting.length,
+      failed: failed.length,
+      oldest_waiting_s: ages.length > 0 ? Math.max(...ages) : null,
+    }
+  })
+  const topErrors = [...errors.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 5)
+    .map(([message, count]) => ({ message, count }))
+  const waitingTotal = byBank.reduce((sum, b) => sum + b.waiting, 0)
+  const failedTotal = byBank.reduce((sum, b) => sum + b.failed, 0)
+  const oldest = byBank.map((b) => b.oldest_waiting_s).filter((s): s is number => s !== null)
+  const oldestWaiting = oldest.length > 0 ? Math.max(...oldest) : null
+
+  const stats = MEM_BANKS.map(
+    (bank) =>
+      buildBankStats('', ['', encodeURIComponent(bank.bank_id)] as unknown as RegExpMatchArray) as {
+        total_nodes: number
+        total_documents: number
+        pending_consolidation: number
+        failed_consolidation: number
+      },
+  )
+  const banks = MEM_BANKS.map((bank, at) => ({
+    bank_id: bank.bank_id,
+    facts: stats[at].total_nodes,
+    documents: stats[at].total_documents,
+  }))
+
+  const clear = state === 'clear'
+  const embedderId = { provider: 'local', model: 'hindsight-ai/hs-embed-1' }
+  const knowledge = {
+    pages: 15,
+    pages_stale: clear ? 0 : 5,
+    models: 18,
+    models_stale: clear ? 0 : 6,
+    refresh_failed: clear ? 0 : 5,
+    last_success_at: '2026-06-10T08:00:00+00:00',
+  }
+
+  const steps = healthSteps([
+    ['engine', null, { reachable: true }],
+    [
+      'extraction',
+      failures > 0 ? 'extraction_recent_failures' : null,
+      {
+        slot_resolves: true,
+        llm_reachable: true,
+        failures,
+        window_s: HEALTH_EXTRACTION_WINDOW_S,
+        top_errors: topErrors,
+      },
+    ],
+    [
+      'queue',
+      failedTotal > 0
+        ? 'queue_operations_failed'
+        : oldestWaiting !== null && oldestWaiting > HEALTH_QUEUE_MAX_AGE_S
+          ? 'queue_waiting_too_long'
+          : null,
+      {
+        failed: failedTotal,
+        waiting: waitingTotal,
+        oldest_waiting_s: oldestWaiting,
+        max_waiting_age_s: HEALTH_QUEUE_MAX_AGE_S,
+      },
+    ],
+    [
+      'embedder',
+      null,
+      {
+        recorded: embedderId,
+        configured: embedderId,
+        mixed: false,
+        conflict: null,
+        reasons: [],
+        informational: false,
+      },
+    ],
+    [
+      'knowledge',
+      knowledge.refresh_failed > 0
+        ? 'knowledge_refresh_failed'
+        : knowledge.pages_stale > 0 || knowledge.models_stale > 0
+          ? 'knowledge_stale'
+          : null,
+      {
+        pages_stale: knowledge.pages_stale,
+        models_stale: knowledge.models_stale,
+        refresh_failed: knowledge.refresh_failed,
+      },
+    ],
+  ])
+
+  return {
+    enabled: true,
+    verdict: steps.some((step) => step.state !== 'clear') ? 'attention' : 'clear',
+    checked_at: checkedAt,
+    partial: [],
+    engine: { reachable: true, version: '0.9.2' },
+    extraction: {
+      slot: 'memory',
+      mode: 'dedicated',
+      slot_resolves: true,
+      llm_reachable: true,
+      concurrency: 2,
+      failures_6h: failures,
+      top_errors: topErrors,
+    },
+    embedder: {
+      recorded: embedderId,
+      configured: embedderId,
+      mixed: false,
+      needs_switch: false,
+      conflict: null,
+      informational: false,
+    },
+    queue: {
+      waiting: waitingTotal,
+      failed: failedTotal,
+      oldest_waiting_s: oldestWaiting,
+      consolidation_pending: stats.reduce((sum, s) => sum + s.pending_consolidation, 0),
+      consolidation_failed: stats.reduce((sum, s) => sum + s.failed_consolidation, 0),
+      by_bank: byBank,
+      truncated: false,
+    },
+    knowledge,
+    banks: {
+      layout: 'per_bank',
+      total: banks.length,
+      facts: banks.reduce((sum, b) => sum + b.facts, 0),
+      list: banks,
+    },
+    writes: null,
+    steps,
+  }
+}
+
+function buildMemoryHealth() {
+  return memoryHealthFixture()
+}
+
+function buildBankOperations(url: string, match: RegExpMatchArray) {
+  const bank = bankFrom(match)
+  const all = operationsFor(bank)
   let params = new URLSearchParams()
   try {
     params = new URL(url, 'http://x').searchParams
@@ -1816,6 +2093,7 @@ export const MOCK_BUILDERS: Record<string, Builder> = {
   runnerImagesDownloaded: buildRunnerImagesDownloaded,
   runnerImagesPulls: buildRunnerImagesPulls,
   memoryEngine: buildMemoryEngine,
+  memoryHealth: buildMemoryHealth,
   memoryBanks: buildMemoryBanks,
   bankTimeseries: buildBankTimeseries,
   bankStats: buildBankStats,

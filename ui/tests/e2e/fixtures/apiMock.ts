@@ -201,6 +201,64 @@ export async function installDefaultMocks(page: Page, state: MockState) {
       console_url: null,
     }),
   )
+  // GET /api/memory/health is answered in the bundle under the forced mock (three states, chosen
+  // by `window.__hal0MockMemoryHealth`; see src/api/mockFixtures.ts), so it only reaches
+  // page.route when a spec names it in `__hal0MockPassthrough` or the suite runs without the
+  // forced mock. The catch-all's `{}` is not the route's body, so the default here is the real
+  // shape (src/hal0/api/routes/memory_health.py) for a box where every step is clear and no bank
+  // has anything waiting or failed.
+  await page.route('**/api/memory/health', (route) =>
+    json(route, {
+      enabled: true,
+      verdict: 'clear',
+      checked_at: '2026-06-12T22:20:00+00:00',
+      partial: [],
+      engine: { reachable: true, version: '0.9.2' },
+      extraction: {
+        slot: 'memory',
+        mode: 'dedicated',
+        slot_resolves: true,
+        llm_reachable: true,
+        concurrency: 2,
+        failures_6h: 0,
+        top_errors: [],
+      },
+      embedder: {
+        recorded: { provider: 'local', model: 'hindsight-ai/hs-embed-1' },
+        configured: { provider: 'local', model: 'hindsight-ai/hs-embed-1' },
+        mixed: false,
+        needs_switch: false,
+        conflict: null,
+        informational: false,
+      },
+      queue: {
+        waiting: 0,
+        failed: 0,
+        oldest_waiting_s: null,
+        consolidation_pending: 0,
+        consolidation_failed: 0,
+        by_bank: [],
+        truncated: false,
+      },
+      knowledge: {
+        pages: 0,
+        pages_stale: 0,
+        models: 0,
+        models_stale: 0,
+        refresh_failed: 0,
+        last_success_at: null,
+      },
+      banks: { layout: 'per_bank', total: 0, facts: 0, list: [] },
+      writes: null,
+      steps: ['engine', 'extraction', 'queue', 'embedder', 'knowledge'].map((id) => ({
+        id,
+        state: 'clear',
+        waits_on: null,
+        reason_code: null,
+        figures: {},
+      })),
+    }),
+  )
   await page.route('**/api/agent/approvals', (route) =>
     json(route, { approvals: state.approvals }),
   )

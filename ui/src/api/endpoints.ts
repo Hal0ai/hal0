@@ -594,4 +594,8 @@ export const ENDPOINTS = {
   memoryAgents: '/api/memory/agents',
   // Embedding / reranker / decision model identities.
   memoryModels: '/api/memory/models',
+  // Does memory need the operator, and what first: the ordered repair path
+  // and the figures behind each step (queue, extraction failures, knowledge).
+  // Answers 200 whatever state the engine is in (routes/memory_health.py).
+  memoryHealth: '/api/memory/health',
 } as const
