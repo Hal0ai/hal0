@@ -35,6 +35,7 @@ from fastapi.testclient import TestClient
 from hal0.api import create_app
 from hal0.security import exposure
 from hal0.security.exposure import (
+    COMPAT_MEMORY_PREFIX,
     DESTRUCTIVE_MEMORY_ROUTES,
     OPEN_ALLOWLIST,
     AuthClass,
@@ -100,7 +101,8 @@ def test_destructive_memory_routes_tracks_the_live_route_table(
     live_destructive = {
         (method, path)
         for method, path in memory_routes
-        if method == "DELETE" or (method == "POST" and path.endswith("/delete"))
+        if not _is_compat(path)
+        and (method == "DELETE" or (method == "POST" and path.endswith("/delete")))
     }
     assert live_destructive == DESTRUCTIVE_MEMORY_ROUTES, (
         "the destructive /api/memory surface drifted from "
@@ -108,6 +110,33 @@ def test_destructive_memory_routes_tracks_the_live_route_table(
         f"Live but unpinned: {sorted(live_destructive - DESTRUCTIVE_MEMORY_ROUTES)}\n"
         f"Pinned but gone:   {sorted(DESTRUCTIVE_MEMORY_ROUTES - live_destructive)}"
     )
+
+
+def _is_compat(path: str) -> bool:
+    """A route of the engine-compatible memory endpoint (ADR-0058 decision 4b).
+
+    That endpoint is BRIDGE, not ADMIN, and is held by its own tests below, so
+    it is left out of the ADMIN ratchet above. Its handlers refuse a bank
+    delete and delete a document only for its owner
+    (``tests/api/test_memory_compat_routes.py``).
+    """
+    return path == COMPAT_MEMORY_PREFIX or path.startswith(COMPAT_MEMORY_PREFIX + "/")
+
+
+def test_every_compat_memory_route_is_bridge_class(memory_routes: set[tuple[str, str]]) -> None:
+    """Every method the app serves under the compat prefix is BRIDGE, DELETE included.
+
+    A DELETE there would be ADMIN if the compat rule sat below the pinned
+    ``any DELETE`` row, and then no bridge key could delete its own document.
+    """
+    compat = {(method, path) for method, path in memory_routes if _is_compat(path)}
+    assert {method for method, _ in compat} >= {"GET", "POST", "PUT", "PATCH", "DELETE"}
+    for method, path in sorted(compat):
+        rule = match_rule(method, path)
+        assert rule is not None and rule.auth_class is AuthClass.BRIDGE, (method, path)
+        assert rule.label == "memory compat endpoint (bridge key, memory scope)"
+        assert (method, path) not in OPEN_ALLOWLIST
+        assert (method, path) not in DESTRUCTIVE_MEMORY_ROUTES
 
 
 # ── 2. classification ────────────────────────────────────────────────────────
@@ -175,6 +204,12 @@ def test_destructive_routes_survive_a_memory_reads_are_client_widening(
             f"{method} {path} was downgraded to "
             f"{classify(method, path).value} by a memory-read widening"
         )
+
+    # The compat endpoint sits above the whole group too: the same edit must
+    # not turn its routes into CLIENT ones, which a box client key would open.
+    for method in ("GET", "POST", "DELETE"):
+        path = f"{COMPAT_MEMORY_PREFIX}/v1/default/banks/b/documents/d"
+        assert classify(method, path) is AuthClass.BRIDGE
 
 
 # ── 3. the real gate, armed ──────────────────────────────────────────────────
@@ -254,6 +289,30 @@ def test_destructive_memory_route_403s_for_a_client_key(
     )
     assert resp.status_code == 403, f"{method} {url} -> {resp.status_code}: {resp.text}"
     assert resp.json()["error"]["code"] == "auth.forbidden"
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("DELETE", "/v1/default/banks/shared"),
+        ("DELETE", "/v1/default/banks/shared/documents/doc-1"),
+        ("POST", "/v1/default/banks/shared/memories"),
+        ("GET", "/v1/default/banks/shared/documents"),
+    ],
+)
+def test_compat_memory_routes_refuse_everything_but_a_bridge_or_admin_credential(
+    armed_client: TestClient, method: str, path: str
+) -> None:
+    """The real gate on the compat prefix: no credential 401, the box client key 403."""
+    url = COMPAT_MEMORY_PREFIX + path
+    anonymous = armed_client.request(method, url, json={})
+    assert anonymous.status_code == 401, anonymous.text
+    assert anonymous.json()["error"]["code"] == "auth.required"
+    with_client_key = armed_client.request(
+        method, url, headers={"Authorization": f"Bearer {CLIENT_KEY}"}, json={}
+    )
+    assert with_client_key.status_code == 403, with_client_key.text
+    assert with_client_key.json()["error"]["code"] == "auth.forbidden"
 
 
 def test_mcp_memory_mount_401s_without_credentials(armed_client: TestClient) -> None:

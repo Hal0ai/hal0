@@ -75,8 +75,9 @@ def test_normalize_scopes_rejects_unknown_scope() -> None:
 
 def test_reserved_names_cover_the_built_in_identities() -> None:
     """A client named like a bundled agent would alias that agent's memory namespace."""
-    assert frozenset({"hermes", "pi", "admin", "anonymous", "shared"}) == (
-        keys.RESERVED_CLIENT_NAMES
+    assert (
+        frozenset({"hermes", "pi", "admin", "anonymous", "shared", "unknown", "unresolved"})
+        == keys.RESERVED_CLIENT_NAMES
     )
     # Every ``hal0*`` name is hal0's own caller (hal0, hal0-cli, hal0-doctor, ...).
     assert keys.RESERVED_CLIENT_PREFIXES == ("hermes__", "hal0")
@@ -92,6 +93,13 @@ def test_reserved_names_cover_the_built_in_identities() -> None:
         ("hal0-doctor", True),
         ("hal0_bot", True),
         ("shared", True),
+        # ``unknown`` is the identity of a memory write with no caller, and
+        # ``unresolved`` a part of a stored document id.
+        ("unknown", True),
+        ("unresolved", True),
+        ("admin", True),
+        ("anonymous", True),
+        ("unknown2", False),
         ("myhal0", False),
         ("hermes2", False),
         ("hermes_scout", False),

@@ -433,6 +433,15 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
     },
+    # [memory.compat] — read off app.state.hal0_config on every request to the
+    # engine-compatible endpoint (routes/memory_compat.py, ``_settings``),
+    # which the settings PUT refreshes in place.
+    "memory.compat.shared_document_prefixes": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_concurrent_reflects": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_concurrent_recalls": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_outstanding_operations": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_outstanding_bytes": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_item_bytes": {"apply_class": "immediate", "services": []},
     # [realtime] — every key is read live off app.state.hal0_config.realtime
     # on each WS connect (routes/realtime.py), which the settings PUT
     # refreshes in place, so all of them apply immediately.

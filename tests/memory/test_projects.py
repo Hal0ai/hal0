@@ -144,6 +144,55 @@ def test_normalise_slug_is_idempotent(text):
     assert normalise_slug(once) == once
 
 
+def test_normalise_slug_agrees_with_its_one_pattern_definition():
+    """The rule was first written as one substitution, ``-*(?:run-*)+`` to
+    ``-``. It is now a split plus a strip, to stay linear. Same answers, held
+    here against that original pattern on many short strings."""
+    import random
+    import re
+
+    original = re.compile(r"-*(?:(?:[^a-z0-9._-]|\.{2,})-*)+")
+
+    def reference(text: str) -> str | None:
+        slug = original.sub("-", text.strip().lower()).strip("-._")
+        if len(slug) > MAX_SLUG_LENGTH:
+            slug = slug[:MAX_SLUG_LENGTH].rstrip("-._")
+        return slug or None
+
+    rng = random.Random(3558)
+    for alphabet in ("ab-._ /!", "a-.", "-!.", "A é_-/.", "ab"):
+        for _ in range(6000):
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 16)))
+            assert normalise_slug(text) == reference(text), repr(text)
+    long = "a" + "-!." * 60 + "b" * 120
+    assert normalise_slug(long) == reference(long)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "-" * 200_000,
+        "-" * 200_000 + "!",
+        "a" + "-" * 200_000 + "b",
+        "." * 200_000,
+        "-." * 100_000,
+        "!-" * 100_000,
+        " " * 100_000 + "x" + "/" * 100_000,
+    ],
+)
+def test_normalise_slug_takes_linear_time_on_a_hostile_name(text):
+    """The name comes from a request: a bank id in a URL, a tag in a body. A
+    long run of hyphens used to cost quadratic time (about three seconds at
+    twenty thousand characters, minutes at this size). Linear is a few
+    milliseconds; the bound here is loose on purpose."""
+    import time
+
+    started = time.perf_counter()
+    slug = normalise_slug(text)
+    assert time.perf_counter() - started < 5.0
+    assert slug is None or len(slug) <= MAX_SLUG_LENGTH
+
+
 # ── strip_legacy_bank_prefix ────────────────────────────────────────────────
 
 
@@ -390,7 +439,6 @@ def test_the_default_deny_list():
         "root",
         "home",
         "workdir",
-        "work",
         "scratch",
         "scratchpad",
         "unknown",
@@ -399,6 +447,23 @@ def test_the_default_deny_list():
     assert ProjectRegistry().deny == frozenset(DEFAULT_DENY)
     assert ProjectRegistry().aliases == {}
     assert ProjectRegistry().registered == frozenset()
+
+
+def test_work_is_a_project_name_by_default():
+    """``work`` is a plausible repository name, so the shipped deny list does
+    not refuse it (``workdir`` stays refused). An operator can still deny it."""
+    assert "work" not in DEFAULT_DENY
+    resolution = resolve_project(field="work", registry=ProjectRegistry())
+    assert resolution.slug == "work" and not resolution.denied
+    from_bank = resolve_project(
+        bank_segment=strip_legacy_bank_prefix("coding-agent::work"),
+        registry=ProjectRegistry(),
+        coding=True,
+    )
+    assert from_bank.slug == "work" and not from_bank.unresolved
+    assert resolve_project(field="workdir", registry=ProjectRegistry()).denied
+    denied = resolve_project(field="work", registry=ProjectRegistry(deny=frozenset({"work"})))
+    assert denied.slug is None and denied.denied
 
 
 @pytest.mark.parametrize(
@@ -424,8 +489,8 @@ def test_unresolved_is_for_a_coding_client_that_ends_with_no_project(kwargs, unr
 def test_an_alias_can_rescue_a_denied_spelling_but_not_point_at_one():
     # Aliases run before the deny list, so a denied directory name the
     # operator mapped to a real project resolves to that project.
-    registry = ProjectRegistry(aliases={"work": "atlas"})
-    assert resolve_project(field="work", registry=registry).slug == "atlas"
+    registry = ProjectRegistry(aliases={"workdir": "atlas"})
+    assert resolve_project(field="workdir", registry=registry).slug == "atlas"
     # A registry built by hand with an alias onto a denied name still yields
     # no project: the deny list has the last word.
     bad = ProjectRegistry(aliases={"atlas": "tmp"})

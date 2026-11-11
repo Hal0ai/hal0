@@ -26,7 +26,6 @@ def test_the_shipped_defaults():
         "root",
         "home",
         "workdir",
-        "work",
         "scratch",
         "scratchpad",
         "unknown",
@@ -168,8 +167,8 @@ def test_valid_alias_shapes():
     same = MemoryProjectsConfig(aliases={"Atlas Mono": "atlas", "atlas-mono": "Atlas"})
     assert same.aliases == {"atlas-mono": "atlas"}
     # A denied directory name may be aliased TO a real project.
-    rescued = MemoryProjectsConfig(aliases={"work": "atlas"})
-    assert resolve_project(field="work", registry=registry_from_config(rescued)).slug == "atlas"
+    rescued = MemoryProjectsConfig(aliases={"workdir": "atlas"})
+    assert resolve_project(field="workdir", registry=registry_from_config(rescued)).slug == "atlas"
     # An empty deny list is allowed: the operator turned the list off.
     assert MemoryProjectsConfig(deny=[]).deny == []
 

@@ -1620,6 +1620,7 @@ class HindsightProvider(MemoryProvider):
         coding: bool = False,
         async_: bool | None = None,
         operation_id: str | None = None,
+        timeout_s: float | None = None,
     ) -> dict[str, Any]:
         """Retain a batch of items with ONE engine call.
 
@@ -1639,6 +1640,8 @@ class HindsightProvider(MemoryProvider):
         ``operation_id`` as the identity of an async retain: a resend with the
         same id returns the original operation and drops changed content, and
         an id that belongs to another operation is refused with 409.
+        ``timeout_s`` is the read budget for the engine call; ``None`` keeps
+        the client's own.
 
         Returns ``{document_ids, timestamp}`` plus ``operation_id`` /
         ``operation_ids`` / ``items_count`` when the engine reports them, and
@@ -1675,12 +1678,16 @@ class HindsightProvider(MemoryProvider):
                 timestamp=raw.get("timestamp") or None,
             )
             wire_items.append(item)
+        # Forwarded only when set, so a client fake built against the older
+        # signature stays compatible.
+        budget: dict[str, Any] = {"timeout_s": timeout_s} if timeout_s is not None else {}
         resp = await self._retain(
             "retain_batch",
             bank_id=bank,
             items=wire_items,
             async_=async_,
             operation_id=operation_id,
+            **budget,
         )
         out: dict[str, Any] = {
             "document_ids": [item["document_id"] for item in wire_items],
@@ -2470,6 +2477,69 @@ class HindsightProvider(MemoryProvider):
             include=include,
             response_schema=response_schema,
         )
+
+    async def recall_raw(
+        self,
+        query: str,
+        *,
+        dataset: str = _SHARED,
+        client_id: str | None = None,
+        types: list[str] | None = None,
+        max_tokens: int = 4096,
+        budget: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: str | None = None,
+        tag_groups: list[dict[str, Any]] | None = None,
+        prefer_observations: bool | None = None,
+        include: dict[str, Any] | None = None,
+        query_timestamp: str | None = None,
+        min_scores: dict[str, float] | None = None,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """The engine's own recall answer for ONE bank, in the engine's shape.
+
+        :meth:`recall` fans out, reranks, budgets and returns hal0's items.
+        This is for a caller that speaks the engine's protocol and needs the
+        engine's response (``{results, entities, chunks, ...}``) as it came.
+        The bank is the one a write with the same ``dataset`` would land in.
+
+        What the caller may read is enforced the way :meth:`reflect` enforces
+        it, which is why this method sits beside it: the engine is given
+        ``tag_groups`` equal to the read-side visibility rule
+        (:func:`hal0.memory.read_scope.reflect_visibility_scope`), with the
+        caller's ``tags`` / ``tags_match`` folded in as one more group, and
+        the ``tag_groups`` passed here (a project scope) appended. The engine
+        ANDs the groups, so they narrow the read and never widen it, and no
+        ``tags`` key is sent beside them.
+
+        The response-level ``entities``, ``chunks`` and ``source_facts`` come
+        back as the engine built them. An entity's state is bank-wide, so a
+        caller that passes this response on decides what to do with those.
+        """
+        bank = self._bank_of(self._write_namespace(dataset, client_id))
+        caller = client_id or self._client_id
+        groups = reflect_visibility_scope(
+            caller if caller and caller != _ANONYMOUS else None, tags, tags_match
+        )
+        groups.extend(tag_groups or [])
+        kwargs: dict[str, Any] = {
+            "bank_id": bank,
+            "query": query,
+            "max_tokens": max_tokens,
+            "tag_groups": groups,
+        }
+        optional = {
+            "types": types,
+            "budget": budget,
+            "prefer_observations": prefer_observations,
+            "include": include,
+            "query_timestamp": query_timestamp,
+            "min_scores": min_scores,
+            "timeout_s": timeout_s,
+        }
+        kwargs.update({key: value for key, value in optional.items() if value is not None})
+        resp = await self._call("recall", **kwargs)
+        return resp if isinstance(resp, dict) else {}
 
     # ── single-memory curation (non-destructive "this is wrong" path) ───
 

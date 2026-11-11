@@ -3054,6 +3054,11 @@ class MemoryConsoleConfig(BaseModel):
     )
 
 
+# One [memory.compat].shared_document_prefixes entry: what a document id may
+# start with, and never the separator of a stored id (``::``).
+_SHARED_DOCUMENT_PREFIX_RE = re.compile(r"[a-zA-Z0-9._:-]{1,64}")
+
+
 def _default_project_deny() -> list[str]:
     # The default list and the spelling rule come from ``hal0.project_slug``,
     # a leaf module, and not from ``hal0.memory.projects``: importing anything
@@ -3165,6 +3170,122 @@ class MemoryProjectsConfig(BaseModel):
         return self
 
 
+def _default_shared_document_prefixes() -> list[str]:
+    return ["git:", "gitlog:", "survey-baseline:"]
+
+
+class MemoryCompatConfig(BaseModel):
+    """[memory.compat] section of hal0.toml.
+
+    The engine-compatible memory endpoint for coding agents,
+    ``/api/memory/compat`` (ADR-0058 decision 4b).
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    shared_document_prefixes: list[str] = Field(
+        default_factory=_default_shared_document_prefixes,
+        max_length=32,
+        description=(
+            "Document-id prefixes whose documents every client of a project "
+            "shares. A client's documents are otherwise stored in a namespace "
+            "of its own, so one client cannot replace another's. An id that "
+            "starts with one of these is stored in the project's shared "
+            "namespace instead and any client of that project may write it. "
+            "The default is the ids the Hindsight coding-agents plugin "
+            "derives from the repository itself: one commit (git:), the "
+            "commit log (gitlog:) and a codebase-survey marker "
+            "(survey-baseline:). Setting this key replaces the default list; "
+            "an empty list shares nothing."
+        ),
+    )
+    max_concurrent_reflects: int = Field(
+        default=2,
+        ge=1,
+        le=64,
+        description=(
+            "How many reflects through the endpoint may run at once, across "
+            "all clients. A reflect holds the memory engine's language model "
+            "for minutes; this keeps coding agents from starving hal0's own "
+            "agents of it. One client is always limited to one at a time, "
+            "and the endpoint never runs more than one fewer than "
+            "[memory.lanes] lets the engine run (one, when the engine runs "
+            "one). A request over the limit is answered 429 with Retry-After."
+        ),
+    )
+    max_concurrent_recalls: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        description=(
+            "How many recalls through the endpoint may run at once, across "
+            "all clients. One client is always limited to two. A request "
+            "over the limit is answered 429 with Retry-After."
+        ),
+    )
+    max_outstanding_operations: int = Field(
+        default=64,
+        ge=1,
+        le=10000,
+        description=(
+            "How many asynchronous retains one client may have submitted "
+            "that the engine has not finished. An async retain is accepted "
+            "at once and extracted later, so without this one client could "
+            "fill the engine's queue. A session submits one retain per turn "
+            "and the plugin polls ten at a time; a first-time repository "
+            "ingest (the plugin's default is 300 commits) is slowed by this "
+            "limit, not refused: the next retain is answered 429 with "
+            "Retry-After until earlier ones finish."
+        ),
+    )
+    max_outstanding_bytes: int = Field(
+        default=256 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=16 * 1024 * 1024 * 1024,
+        description=(
+            "The most bytes of unfinished asynchronous retains one client "
+            "may have submitted. A single retain is always accepted when "
+            "the client has nothing outstanding."
+        ),
+    )
+    max_item_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=1024,
+        le=32 * 1024 * 1024,
+        description=(
+            "The largest 'content' of one retained item, in UTF-8 bytes. The "
+            "largest thing the plugin sends is a whole session transcript. "
+            "The request body is capped at 48 MiB whatever this is set to."
+        ),
+    )
+
+    @field_validator("shared_document_prefixes", mode="before")
+    @classmethod
+    def _prefixes(cls, v: Any) -> Any:
+        if not isinstance(v, (list, tuple)):
+            return v
+        out: list[str] = []
+        for item in v:
+            if (
+                not isinstance(item, str)
+                or "::" in item
+                or len(item) < 3
+                or not item.endswith(":")
+                or not _SHARED_DOCUMENT_PREFIX_RE.fullmatch(item)
+            ):
+                # A short or open-ended entry (``g``, ``sha``) would sweep
+                # ordinary ids, and the digest form of a long one, into the
+                # namespace every client of a project may write.
+                raise ValueError(
+                    "memory.compat.shared_document_prefixes entries must be 3 to 64 "
+                    "characters of [a-zA-Z0-9._:-], end with ':' and hold no '::': "
+                    f"{item!r}"
+                )
+            if item not in out:
+                out.append(item)
+        return out
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
@@ -3197,6 +3318,7 @@ class MemoryConfig(BaseModel):
     lanes: MemoryLanesConfig = Field(default_factory=MemoryLanesConfig)
     console: MemoryConsoleConfig = Field(default_factory=MemoryConsoleConfig)
     projects: MemoryProjectsConfig = Field(default_factory=MemoryProjectsConfig)
+    compat: MemoryCompatConfig = Field(default_factory=MemoryCompatConfig)
     public_url: str | None = Field(
         default=None,
         description=(

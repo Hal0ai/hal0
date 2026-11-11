@@ -133,6 +133,18 @@ class HindsightRestClient:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
 
     @staticmethod
+    def _timeout(timeout_s: float | None) -> Any:
+        """The per-request timeout for ``timeout_s`` seconds of read budget.
+
+        ``None`` keeps the client-wide default. httpx treats an explicit
+        ``timeout=None`` as "no timeout at all", so the sentinel is returned
+        instead.
+        """
+        if timeout_s is None:
+            return httpx.USE_CLIENT_DEFAULT
+        return httpx.Timeout(timeout_s, connect=3.0)
+
+    @staticmethod
     def _retain_item(
         *,
         content: Any,
@@ -210,6 +222,7 @@ class HindsightRestClient:
         items: list[dict[str, Any]],
         async_: bool | None = None,
         operation_id: str | None = None,
+        timeout_s: float | None = None,
     ) -> Any:
         """POST several items to ``/memories`` in ONE ``RetainRequest``.
 
@@ -218,7 +231,8 @@ class HindsightRestClient:
         ``operation_id`` are the request-level ``async`` and ``operation_id``
         fields, sent exactly as given; ``None`` leaves the field out, and the
         engine then applies its own default (a synchronous retain, no
-        client-chosen operation identity).
+        client-chosen operation identity). ``timeout_s`` overrides the
+        client-wide read budget for this call.
         """
         body: dict[str, Any] = {"items": [self._retain_item(**item) for item in items]}
         if async_ is not None:
@@ -226,7 +240,10 @@ class HindsightRestClient:
         if operation_id is not None:
             body["operation_id"] = operation_id
         resp = await self._http.post(
-            f"/v1/default/banks/{bank_id}/memories", headers=self._headers(), json=body
+            f"/v1/default/banks/{bank_id}/memories",
+            headers=self._headers(),
+            json=body,
+            timeout=self._timeout(timeout_s),
         )
         resp.raise_for_status()
         return resp.json()
@@ -246,6 +263,7 @@ class HindsightRestClient:
         include=None,
         query_timestamp=None,
         min_scores=None,
+        timeout_s=None,
     ):
         body: dict[str, Any] = {"query": query, "max_tokens": max_tokens}
         if types:
@@ -267,7 +285,10 @@ class HindsightRestClient:
         if min_scores is not None:
             body["min_scores"] = min_scores
         resp = await self._http.post(
-            f"/v1/default/banks/{bank_id}/memories/recall", headers=self._headers(), json=body
+            f"/v1/default/banks/{bank_id}/memories/recall",
+            headers=self._headers(),
+            json=body,
+            timeout=self._timeout(timeout_s),
         )
         resp.raise_for_status()
         return resp.json()
@@ -667,13 +688,7 @@ class HindsightRestClient:
             headers=self._headers(),
             params=params,
             json=json_body,
-            timeout=(
-                httpx.Timeout(timeout_s, connect=3.0)
-                if timeout_s is not None
-                # httpx treats an explicit ``timeout=None`` as "no timeout at
-                # all"; the sentinel keeps the client-wide default instead.
-                else httpx.USE_CLIENT_DEFAULT
-            ),
+            timeout=self._timeout(timeout_s),
         )
         resp.raise_for_status()
         if not resp.content:

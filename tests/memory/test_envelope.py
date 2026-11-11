@@ -840,15 +840,64 @@ def test_the_scope_constants_are_engine_modes():
         ["project", "agent:pi", "kind:durable"],
         ["Project:hal0", "agent:pi", "kind:durable"],
         ["my-project:hal0", "agent:pi", "kind:durable"],
-        # project:unresolved is a marker, not a project: the write is scoped
-        # as a write with no project tag would be, durable or ephemeral.
-        ["agent:pi", "kind:durable", "project:unresolved"],
-        ["agent:pi", "kind:ephemeral", "project:unresolved"],
-        ["agent:pi", "kind:durable", "project:unresolved", "scope:global"],
     ],
 )
 def test_a_write_with_no_project_gets_the_shared_scope(tags):
     assert resolve_observation_scopes(None, tags) == "shared"
+
+
+@pytest.mark.parametrize(
+    "tags",
+    [
+        ["agent:pi", "kind:durable", "project:unresolved"],
+        ["agent:pi", "kind:ephemeral", "project:unresolved"],
+        ["source:chat", "agent:pi", "kind:durable", "project:unresolved", "scope:global"],
+    ],
+)
+def test_an_unresolved_write_is_scoped_to_its_writer(tags):
+    """``project:unresolved`` is a marker every repository's unresolved writes
+    carry, so it is never a scope alone. It is not the untagged scope either:
+    an observation built there has no tags, and every scoped read admits an
+    untagged memory, so one client's unresolved writes would surface in every
+    other client's project. The scope is the marker and the writer."""
+    assert resolve_observation_scopes(None, tags) == [["project:unresolved", "agent:pi"]]
+
+
+def test_the_observation_of_an_unresolved_write_is_readable_by_its_writer_only():
+    """The engine writes an explicit scope's tags onto the observation
+    verbatim. Held to the read groups (as the engine evaluates them): the
+    writer reads it, no other caller does, in a project or out of one."""
+    from hal0.memory.read_scope import (
+        project_scope_groups,
+        reflect_visibility_scope,
+        tags_readable,
+        unresolved_scope_groups,
+    )
+
+    write = apply_envelope(["source:chat"], agent="pi", coding=True)
+    (observation,) = resolve_observation_scopes(None, write.tags)
+    assert observation == ["project:unresolved", "agent:pi"]
+
+    def reads(agent, project_groups):
+        return tags_readable([*reflect_visibility_scope(agent), *project_groups], observation)
+
+    assert reads("pi", unresolved_scope_groups("pi"))
+    assert not reads("codex", unresolved_scope_groups("codex"))
+    assert not reads("codex", project_scope_groups("atlas"))
+    assert not reads("pi", project_scope_groups("atlas"))
+    assert not reads(None, project_scope_groups(None))
+    # The untagged scope it used to get is what every one of those admits.
+    assert reads("codex", project_scope_groups("atlas")) is False
+    assert tags_readable(project_scope_groups("atlas"), [])
+
+
+def test_an_unresolved_write_whose_writer_cannot_be_named_keeps_all_its_tags():
+    """The engine reads ``*`` in a scope entry as a glob, and a write with no
+    ``agent:`` tag has no writer to name: both fall back to ``combined``,
+    which leaves every tag of the write on the observation. Tagged, so still
+    outside every other caller's read."""
+    assert resolve_observation_scopes(None, ["agent:a*", "project:unresolved"]) == "combined"
+    assert resolve_observation_scopes(None, ["project:unresolved"]) == "combined"
 
 
 @pytest.mark.parametrize(
@@ -860,7 +909,10 @@ def test_a_write_with_no_project_gets_the_shared_scope(tags):
             ["agent:pi", "kind:durable", "project:atlas", "project:borealis"],
             [["project:atlas"], ["project:borealis"]],
         ),
-        (["agent:pi", "kind:ephemeral", "project:unresolved"], "shared"),
+        (
+            ["agent:pi", "kind:ephemeral", "project:unresolved"],
+            [["project:unresolved", "agent:pi"]],
+        ),
     ],
 )
 def test_scope_global_does_not_change_the_scope_chosen(tags, scopes):
@@ -872,10 +924,7 @@ def test_scope_global_does_not_change_the_scope_chosen(tags, scopes):
     assert resolve_observation_scopes(None, [*tags, "scope:team"]) == scopes
 
 
-def test_an_unresolved_write_never_gets_a_scope_of_its_own():
-    """Every repository's unresolved writes would otherwise consolidate into
-    one set of beliefs. Beside a real project, the real project decides."""
-    assert resolve_observation_scopes(None, ["project:unresolved"]) == "shared"
+def test_beside_a_real_project_the_real_project_decides():
     mixed = ["project:unresolved", "project:atlas"]
     assert resolve_observation_scopes(None, mixed) == [["project:atlas"]]
     # A caller's explicit choice still stands, as for any write.
@@ -942,7 +991,7 @@ def test_the_scope_follows_the_envelopes_own_output():
     assert resolve_observation_scopes(None, plain.tags) == "shared"
     assert resolve_observation_scopes(None, durable.tags) == "shared"
     assert "project:unresolved" in unresolved.tags
-    assert resolve_observation_scopes(None, unresolved.tags) == "shared"
+    assert resolve_observation_scopes(None, unresolved.tags) == [["project:unresolved", "agent:pi"]]
     several = apply_envelope(["project:Atlas", "project:borealis"], agent="pi")
     assert resolve_observation_scopes(None, several.tags) == [
         ["project:atlas"],

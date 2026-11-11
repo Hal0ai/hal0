@@ -200,7 +200,7 @@ claude mcp add --transport http hal0-admin http://<host>:8080/mcp/admin/mcp --he
 
 `bridge runs` lists the runs bridge clients have delegated to Hermes, newest first, as a table of `run_id`, `client`, `agent`, `status`, `started` and `updated`. The last two are ages (`45s`, `5m`, `2h`, `3d`). `--client` shows one client's runs, `--status` one status (for example `running` or `completed`). Pass a `run_id` to the `agent_run_status` tool of the [`hal0-agents`](/docs/reference/mcp-tools-agents) server to read a run.
 
-A failed command prints the API's `error.message` and exits 1: a name that is taken, malformed or reserved (`hermes` and `pi`, the bundled agents' names, plus `admin`, `anonymous`, `shared`, and any name starting `hal0`, such as `hal0-cli`, or `hermes__`, such as `hermes__scout`), an unknown scope, a client that does not exist, `rotate` on a revoked client. While `[bridge].enabled` is `false`, no bridge key works and `bridge add`, `bridge rotate` and `bridge scopes` and `bridge runs` exit 1 with:
+A failed command prints the API's `error.message` and exits 1: a name that is taken, malformed or reserved (`hermes` and `pi`, the bundled agents' names, plus `admin`, `anonymous`, `shared`, `unknown`, `unresolved`, and any name starting `hal0`, such as `hal0-cli`, or `hermes__`, such as `hermes__scout`), an unknown scope, a client that does not exist, `rotate` on a revoked client. While `[bridge].enabled` is `false`, no bridge key works and `bridge add`, `bridge rotate` and `bridge scopes` and `bridge runs` exit 1 with:
 
 ```text
 The agent bridge is disabled: set [bridge] enabled = true in /etc/hal0/hal0.toml and restart hal0-api.

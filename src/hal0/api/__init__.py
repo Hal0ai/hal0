@@ -116,6 +116,9 @@ from hal0.api.routes import (
     memory_admin as memory_admin_routes,
 )
 from hal0.api.routes import (
+    memory_compat as memory_compat_routes,
+)
+from hal0.api.routes import (
     memory_health as memory_health_routes,
 )
 from hal0.api.routes import (
@@ -167,6 +170,7 @@ from hal0.registry.discover import _collect_referenced_model_ids, scan_and_regis
 from hal0.registry.model import _BLESSED_PREFIX
 from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.store import ModelRegistry
+from hal0.security.exposure import COMPAT_MEMORY_PREFIX
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.huggingface import hf_token_from_env
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
@@ -3127,6 +3131,16 @@ def create_app() -> FastAPI:
     app.include_router(
         memory_health_routes.router,
         prefix="/api/memory",
+        tags=["memory"],
+    )
+    # The engine-compatible memory endpoint for coding agents (ADR-0058
+    # decision 4b): the Hindsight coding-agents plugin is pointed here instead
+    # of at the engine's own port. BRIDGE-class, with the ``memory`` scope
+    # checked by its handlers. It ends in a catch-all, which only sees paths
+    # under its own prefix.
+    app.include_router(
+        memory_compat_routes.router,
+        prefix=COMPAT_MEMORY_PREFIX,
         tags=["memory"],
     )
 

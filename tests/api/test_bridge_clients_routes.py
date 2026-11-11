@@ -224,6 +224,8 @@ def test_unknown_scope_is_the_bridge_422_not_the_pydantic_shape(admin_client: Te
         "hal0-cli",
         "hal0-doctor",
         "shared",
+        "unknown",
+        "unresolved",
         "hermes__scout",
     ],
 )

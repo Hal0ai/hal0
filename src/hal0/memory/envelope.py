@@ -64,8 +64,8 @@ The result always carries exactly one ``agent:<id>`` tag and exactly one of
 
 The module also chooses the observation scope a write is sent with, from its
 final tags (:func:`resolve_observation_scopes`): one scope per project when
-the write carries a real ``project:`` tag, the one untagged scope when it does
-not. ``project:unresolved`` is not a project there.
+the write carries a real ``project:`` tag, a scope of the writer's own when it
+carries ``project:unresolved``, and the one untagged scope otherwise.
 
 This module is pure: no I/O, no engine client, no provider state. The
 ``visibility:private`` stamp and its read-side enforcement (ADR-0005) stay in
@@ -102,9 +102,10 @@ SCOPE_TAG_PREFIX = "scope:"
 SCOPE_GLOBAL_TAG = f"{SCOPE_TAG_PREFIX}global"
 
 #: The tag of a write from a coding client that named no usable project. It
-#: marks the write and nothing more: it is not a project for observation
-#: scoping, because every repository's unresolved writes would then
-#: consolidate into one set of beliefs about no repository in particular.
+#: marks the write and nothing more: it is not a project, and every
+#: repository's unresolved writes carry it. For observation scoping it is
+#: therefore always paired with the writer's ``agent:`` tag
+#: (:func:`resolve_observation_scopes`).
 PROJECT_UNRESOLVED_TAG = f"{PROJECT_TAG_PREFIX}{UNRESOLVED_SLUG}"
 
 KIND_DURABLE = "durable"
@@ -249,20 +250,27 @@ def resolve_observation_scopes(requested: Any, tags: Iterable[str]) -> Any:
     * a write that carries ``project:`` tags consolidates into one scope per
       project, ``[["project:<slug>"], ...]``, so what is learned in one
       project does not become a belief about another;
-    * a write with no project consolidates into the one untagged scope,
+    * a write that carries ``project:unresolved`` consolidates into a scope of
+      its writer's own, ``[["project:unresolved", "agent:<id>"]]``;
+    * any other write consolidates into the one untagged scope,
       :data:`DEFAULT_OBSERVATION_SCOPES`.
 
-    ``project:unresolved`` is not a project here. A write that carries it is
-    scoped exactly as a write with no project tag would be: a scope of its own
-    would pool the unresolved writes of every repository into one set of
-    observations about none of them.
+    ``project:unresolved`` is not a project, and every repository's unresolved
+    writes carry it, so it is never a scope by itself. It must not fall into
+    the untagged scope either: an observation built there carries no tags,
+    and every scoped read admits an untagged memory
+    (:func:`hal0.memory.read_scope.project_scope_groups`), so one client's
+    unresolved writes would surface, as observations, in every other
+    client's project. Paired with the writer's ``agent:`` tag the observation
+    is readable only through that writer's own unresolved read group
+    (:func:`hal0.memory.read_scope.unresolved_scope_groups`).
 
     The engine writes an explicit scope verbatim: the observation carries
     exactly the scope's tags, whatever other tags the write has. It reads a
-    ``*`` in a scope entry as a glob, though, so a project tag containing one
-    cannot be named literally; such a write falls back to
-    :data:`COMBINED_OBSERVATION_SCOPES`, which keeps the project tag on the
-    observation along with the write's other tags.
+    ``*`` in a scope entry as a glob, though, so a tag containing one cannot
+    be named literally; such a write falls back to
+    :data:`COMBINED_OBSERVATION_SCOPES`, which keeps every one of the write's
+    tags on the observation.
 
     A ``project:`` tag is recognised exactly as the read filter recognises it:
     a string that starts with the lower-case prefix.
@@ -278,11 +286,17 @@ def resolve_observation_scopes(requested: Any, tags: Iterable[str]) -> Any:
             and tag != PROJECT_UNRESOLVED_TAG
         )
     )
-    if not projects:
+    if projects:
+        if any("*" in tag for tag in projects):
+            return COMBINED_OBSERVATION_SCOPES
+        return [[tag] for tag in projects]
+    tag_list = [tag for tag in tags if isinstance(tag, str)]
+    if PROJECT_UNRESOLVED_TAG not in tag_list:
         return DEFAULT_OBSERVATION_SCOPES
-    if any("*" in tag for tag in projects):
+    writer = next((tag for tag in tag_list if tag.startswith(AGENT_TAG_PREFIX)), None)
+    if writer is None or "*" in writer:
         return COMBINED_OBSERVATION_SCOPES
-    return [[tag] for tag in projects]
+    return [[PROJECT_UNRESOLVED_TAG, writer]]
 
 
 def _is_project_tag(tag: str) -> bool:

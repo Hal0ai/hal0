@@ -83,7 +83,7 @@ supplies the first two yet.
 # Other spellings of a project: left is tagged as right.
 aliases = { "widgets-monorepo" = "widgets" }
 # Names that are never projects. Setting this replaces the default list.
-deny = ["tmp", "temp", "root", "home", "workdir", "work", "scratch", "scratchpad", "unknown", "default"]
+deny = ["tmp", "temp", "root", "home", "workdir", "scratch", "scratchpad", "unknown", "default"]
 # Projects you have confirmed.
 registered = ["widgets", "handbook"]
 ```
@@ -138,10 +138,13 @@ hal0 chooses the observation scope of each write from its final tags:
 - A write with no project tag consolidates into the one untagged scope
   (`"shared"`). `scope:global` does not change this: it is a tag for reads,
   not an observation scope.
-- `project:unresolved` is not a project here. An unresolved write is scoped
-  exactly as a write with no project tag would be. It does not get a scope of
-  its own, because that scope would pool the unresolved writes of every
-  repository into one set of beliefs about none of them.
+- `project:unresolved` is not a project, and every repository's unresolved
+  writes carry it, so it is never a scope alone. An unresolved write
+  consolidates into a scope of its writer's own,
+  `[["project:unresolved", "agent:<id>"]]`. It does not go into the untagged
+  scope: an observation built there carries no tags, every project's read
+  admits an untagged memory, and one client's unresolved writes would then
+  surface in every other client's project.
 - A private write in the unified bank keeps the engine's default scoping,
   project or not, so its observations still carry `visibility:private`.
 
