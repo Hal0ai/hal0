@@ -1160,4 +1160,33 @@ def test_pin_override_and_hermes_state_rows_declare_service_owner(tmp_hal0_home:
         assert (row.owner, row.group) == ("hal0", "hal0")
         assert row.child_mode == 0o644
         assert row.optional
-    assert by_glob[(hermes, "provision.json")].mode == 0o755
+    # #3545: 2755, not 0755. The dir is born under the setgid 2775 skeleton, so
+    # it inherits setgid; the hal0 group on its files is wanted, and setgid
+    # widens nothing. Expecting 0755 failed every fresh install.
+    assert by_glob[(hermes, "provision.json")].mode == 0o2755
+    assert by_glob[(hermes, "venv.pin")].mode == 0o2755
+
+
+def test_hermes_state_dir_born_setgid_is_not_drift(tmp_path: Path) -> None:
+    """#3545: a setgid 2755 dir (what mkdir under the 2775 skeleton births) audits clean,
+    and a bare 0755 one is repaired to 2755."""
+    import grp
+    import pwd
+
+    d = tmp_path / "hermes"
+    d.mkdir()
+    (d / "venv.pin").write_text("x")
+    owner = pwd.getpwuid(os.getuid()).pw_name
+    group = grp.getgrgid(os.getgid()).gr_name
+    row = perms.PermRow(
+        d, owner, group, 0o2755, glob="venv.pin", child_mode=0o644, role="state/agents/hermes"
+    )
+    os.chmod(d, 0o2755)
+    os.chmod(d / "venv.pin", 0o644)
+    assert not perms.plan([row]).drifted
+    os.chmod(d, 0o755)
+    pl = perms.plan([row])
+    assert [x.path for x in pl.drifted] == [d]
+    perms.commit(pl)
+    assert (d.stat().st_mode & 0o7777) == 0o2755
+    assert not perms.plan([row]).drifted
