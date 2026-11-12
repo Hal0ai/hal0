@@ -9,7 +9,7 @@ import { makeArea, type FakeQuery } from './area-test-fixtures'
 import { cleanup, click, mount, settle } from './shared/test-harness'
 
 const COMMAND = 'hal0 memory agents install <harness> --bridge-key-file hal0-memory.key'
-const MINT = 'hal0 bridge add <harness> --scope memory'
+const MINT = 'hal0 bridge add <client> --scope memory'
 const HARNESSES = ['claude-code', 'codex', 'opencode', 'pi', 'cursor-cli', 'copilot-cli', 'qwen-code']
 
 const m = vi.hoisted(() => ({
@@ -49,7 +49,7 @@ const tags = (bankId: string, counts: Record<string, number>): BankTagsEntry => 
   items: Object.entries(counts).map(([tag, count]) => ({ tag, count })),
 })
 const agentsAnswer = (over: Record<string, unknown> = {}) => ({
-  data: { banks: [], install: { harnesses: HARNESSES, command: COMMAND, mint_command: MINT, key_file: 'hal0-memory.key' }, console_url: null, ...over },
+  data: { banks: [], install: { harnesses: HARNESSES, command: COMMAND, mint_command: MINT, key_file: 'hal0-memory.key', clients: { pi: 'pi-memory' } }, console_url: null, ...over },
   refetch: () => {
     m.refetched += 1
   },
@@ -232,6 +232,15 @@ describe('connect a coding agent', () => {
     const host = render()
     expect(command(host)).toBe(COMMAND.replace('<harness>', 'claude-code'))
     expect(textOf(combobox(host))).toContain('Claude Code')
+  })
+
+  it('names a usable bridge client for an agent whose own name is reserved', () => {
+    const host = render()
+    click(combobox(host))
+    const options = [...host.querySelectorAll<HTMLElement>('[role="option"]')]
+    click(options[HARNESSES.indexOf('pi')])
+    expect(textOf(byId(host, 'ma-agents-mint-command'))).toContain('hal0 bridge add pi-memory --scope memory')
+    expect(command(host)).toBe(COMMAND.replace('<harness>', 'pi'))
   })
 
   it('changes the command when another agent is picked', () => {

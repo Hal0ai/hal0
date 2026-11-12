@@ -279,15 +279,28 @@ export function installCommandFor(template: string | null | undefined, harness: 
   return template.replace('<harness>', harness)
 }
 
+/** The bridge-key command for one coding agent: the route's template with its `<client>` filled in
+ * from the route's per-harness client names (a harness whose own name is reserved, such as `pi`,
+ * gets another), falling back to the harness name. */
+export function mintCommandFor(
+  template: string | null | undefined,
+  harness: string,
+  clients: Record<string, string> | null | undefined,
+): string {
+  if (!template || !harness) return ''
+  const client = clients?.[harness] || harness
+  return template.replace('<client>', client).replace('<harness>', harness)
+}
+
 /** The agents route's answer, read defensively: a body of another shape is "failed", not a crash. */
 export function readAgentsRoute(
   query: { data?: unknown; isError?: boolean } | null | undefined,
 ):
   | { kind: 'loading' }
   | { kind: 'failed' }
-  | { kind: 'ready'; banks: string[]; harnesses: string[]; command: string; mintCommand: string; keyFile: string } {
+  | { kind: 'ready'; banks: string[]; harnesses: string[]; command: string; mintCommand: string; keyFile: string; clients: Record<string, string> } {
   const data = query?.data as
-    | { banks?: unknown; install?: { harnesses?: unknown; command?: unknown; mint_command?: unknown; key_file?: unknown } }
+    | { banks?: unknown; install?: { harnesses?: unknown; command?: unknown; mint_command?: unknown; key_file?: unknown; clients?: unknown } }
     | null
     | undefined
   if (data === undefined || data === null) return query?.isError ? { kind: 'failed' } : { kind: 'loading' }
@@ -302,5 +315,13 @@ export function readAgentsRoute(
     command: install.command,
     mintCommand: typeof install.mint_command === 'string' ? install.mint_command : '',
     keyFile: typeof install.key_file === 'string' ? install.key_file : '',
+    clients:
+      install.clients && typeof install.clients === 'object' && !Array.isArray(install.clients)
+        ? Object.fromEntries(
+            Object.entries(install.clients as Record<string, unknown>).filter(
+              (e): e is [string, string] => typeof e[1] === 'string' && e[1] !== '',
+            ),
+          )
+        : {},
   }
 }

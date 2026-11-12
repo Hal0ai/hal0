@@ -74,6 +74,25 @@ def is_reserved_name(name: str) -> bool:
     return name in RESERVED_CLIENT_NAMES or name.startswith(RESERVED_CLIENT_PREFIXES)
 
 
+def client_name_for(label: str) -> str | None:
+    """A bridge client name for ``label`` (a coding-agent harness name).
+
+    ``label`` itself when it is a valid name that is not reserved; otherwise
+    ``<label>-memory`` or ``agent-<label>`` built from its lowercased
+    letters, digits, ``-`` and ``_`` (``pi`` gives ``pi-memory``); ``None``
+    when neither is usable."""
+
+    def usable(name: str) -> bool:
+        return valid_name(name) and not is_reserved_name(name)
+
+    if usable(label):
+        return label
+    base = "".join(c if c.isalnum() or c in "_-" else "-" for c in label.lower()).strip("-_")
+    if not base:
+        return None
+    return next((n for n in (f"{base}-memory"[:32], f"agent-{base}"[:32]) if usable(n)), None)
+
+
 def hash_key(key: str) -> str:
     """Return the sha256 hex digest of the whole key string."""
     return hashlib.sha256(key.encode()).hexdigest()

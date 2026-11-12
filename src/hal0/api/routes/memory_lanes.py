@@ -30,6 +30,7 @@ from fastapi import APIRouter, Request, Response
 
 from hal0.api.routes._memory_health_collect import EngineReader, bank_queue_row
 from hal0.api.routes.memory import MemoryUnavailable
+from hal0.bridge.keys import client_name_for
 from hal0.config.loader import load_hal0_config
 from hal0.errors import BadRequest, Forbidden, Hal0Error, NotFound
 from hal0.memory.write_gate import require_engine_call_allowed
@@ -319,7 +320,9 @@ _HARNESSES = [
 
 
 _KEY_FILE = "hal0-memory.key"
-_MINT_COMMAND = "hal0 bridge add <harness> --scope memory"
+# ``<client>`` is the bridge client name for the chosen harness (``clients``):
+# the harness itself, unless that name is reserved (``pi``) or invalid.
+_MINT_COMMAND = "hal0 bridge add <client> --scope memory"
 _INSTALL_COMMAND = f"hal0 memory agents install <harness> --bridge-key-file {_KEY_FILE}"
 
 
@@ -373,6 +376,7 @@ async def get_agents(request: Request) -> dict[str, Any]:
             "harnesses": _HARNESSES,
             "command": _INSTALL_COMMAND,
             "mint_command": _MINT_COMMAND,
+            "clients": {h: client_name_for(h) for h in _HARNESSES},
             "key_file": _KEY_FILE,
         },
         "console_url": _console_url(request, cfg),

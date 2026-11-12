@@ -151,10 +151,9 @@ def _bridge_client_hint(harness: str) -> str:
             f"run `hal0 bridge add {harness} --scope memory` (or `hal0 bridge rotate "
             f"{harness}` if that client exists) {tail}"
         )
-    base = "".join(c if c.isalnum() or c in "_-" else "-" for c in harness.lower()).strip("-_")
-    suggestion = next(
-        (n for n in (f"{base}-memory"[:32], f"agent-{base}"[:32]) if base and usable(n)), None
-    )
+    from hal0.bridge.keys import client_name_for
+
+    suggestion = client_name_for(harness)
     why = (
         "is reserved for hal0's own identities"
         if valid_name(harness) and is_reserved_name(harness)

@@ -6,7 +6,7 @@
 import { useId, useState } from 'react'
 import '../memory-area.css'
 import { RichSelect } from '../../rich-select'
-import { harnessName, installCommandFor } from '../agents-pure'
+import { harnessName, installCommandFor, mintCommandFor } from '../agents-pure'
 import { CommandBox } from '../shared/CommandBox.jsx'
 import { EmptyState } from '../shared/EmptyState.jsx'
 
@@ -58,7 +58,7 @@ export function ConnectCard({ agents, onRecheck, rechecking = false, headingRef 
     const harness = picked && agents.harnesses.includes(picked) ? picked : agents.harnesses[0]
     const name = harnessName(harness)
     const command = installCommandFor(agents.command, harness)
-    const mintCommand = installCommandFor(agents.mintCommand, harness)
+    const mintCommand = mintCommandFor(agents.mintCommand, harness, agents.clients)
     const keyFile = agents.keyFile || 'the key file'
     body = (
       <div className="ma-card-body ma-agents-connect-body">

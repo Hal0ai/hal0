@@ -349,7 +349,10 @@ def test_agents_filters_coding_agent_banks(client: TestClient, recorder: _Record
     assert body["install"]["command"] == (
         "hal0 memory agents install <harness> --bridge-key-file hal0-memory.key"
     )
-    assert body["install"]["mint_command"] == "hal0 bridge add <harness> --scope memory"
+    assert body["install"]["mint_command"] == "hal0 bridge add <client> --scope memory"
+    # `pi` is a reserved bridge client name, so its key goes under another one.
+    assert body["install"]["clients"]["pi"] == "pi-memory"
+    assert body["install"]["clients"]["claude-code"] == "claude-code"
     assert body["install"]["key_file"] == "hal0-memory.key"
     assert "--api-url" not in body["install"]["command"]
     assert "--server" not in body["install"]["command"]
@@ -525,3 +528,13 @@ def test_models_reports_where_the_engine_disagrees_with_the_record(
     assert emb["recorded"] == "BAAI/bge-small-en-v1.5"
     assert emb["effective"] == {**running, "source": "process"}
     assert emb["conflict"] == {"live": running, "on_disk": running}
+
+
+def test_client_name_for_keeps_usable_names_and_renames_reserved_ones() -> None:
+    from hal0.bridge.keys import client_name_for
+
+    assert client_name_for("codex") == "codex"
+    assert client_name_for("pi") == "pi-memory"
+    assert client_name_for("hal0-cli") == "agent-hal0-cli"
+    assert client_name_for("Claude Code") == "claude-code-memory"
+    assert client_name_for("---") is None

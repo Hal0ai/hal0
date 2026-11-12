@@ -8,6 +8,7 @@ import {
   builtInSightings,
   harnessName,
   installCommandFor,
+  mintCommandFor,
   memoryClients,
   readAgentsRoute,
   rowsSummary,
@@ -261,6 +262,7 @@ describe('readAgentsRoute', () => {
       command: 'hal0 x <harness>',
       mintCommand: 'hal0 y <harness>',
       keyFile: 'k.key',
+      clients: {},
     })
   })
 
@@ -271,5 +273,14 @@ describe('readAgentsRoute', () => {
 
   it('keeps the last good answer while a refetch fails', () => {
     expect(readAgentsRoute({ data: body, isError: true }).kind).toBe('ready')
+  })
+})
+
+describe('mintCommandFor', () => {
+  it('fills the client name for the harness, falling back to the harness', () => {
+    const t = 'hal0 bridge add <client> --scope memory'
+    expect(mintCommandFor(t, 'pi', { pi: 'pi-memory' })).toBe('hal0 bridge add pi-memory --scope memory')
+    expect(mintCommandFor(t, 'codex', { pi: 'pi-memory' })).toBe('hal0 bridge add codex --scope memory')
+    expect(mintCommandFor('', 'codex', {})).toBe('')
   })
 })
