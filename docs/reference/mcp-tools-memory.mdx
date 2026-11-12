@@ -46,6 +46,11 @@ same verdict, belt and braces).
 | `memory_documents_list` | none | a bank's retained documents; filter with `q`, `tags`, `tags_match`, page with `limit`/`offset` |
 | `memory_documents_get` | `document_id` | one retained document |
 
+On the two-bank layout's private bank (`private:<agent>`), directives are
+their writer's: `memory_directive_create` stamps `agent:<id>` and
+`visibility:private`, and the directive tools see and change only the
+caller's own ([Memory banks](/docs/concepts/memory-banks#directives-on-hal0private)).
+
 These read tools apply the same private-memory rule as `memory_recall`: a
 memory tagged `visibility:private` is readable only by the agent named in its
 `agent:<id>` tag, and a caller with no identity reads none. A document,

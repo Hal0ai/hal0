@@ -108,7 +108,19 @@ observations per project (`[["project:*"]]`) and `hal0:private` per agent
 private memory: the per-project scope on an old unified bank, which also
 holds private facts (#3547), and the private template's mental models on
 `hal0:private`, which holds every agent's private memory. A new box seeds
-both of its banks; a box on an old layout seeds only its platform bank.
+both of its banks (the installer and hal0-api name them from the layout); a
+box on an old layout seeds only its platform bank.
+
+## Directives on hal0:private
+
+A directive written to `private:<agent>` lands in `hal0:private` stamped
+`agent:<id>` and `visibility:private`, whatever tags were sent, and needs an
+identified agent. Listing, reading, changing and deleting directives there
+see only the caller's own; any other answers `memory.directive_not_found`. A
+private reflect loads only untagged directives and the caller's own, since
+the engine holds a reflect's directives to its tag filter. An untagged
+directive on `hal0:private` (only the bank spec or the admin API can create
+one) applies to every agent's private reflect and is listed to none.
 
 <CardGrid>
   <LinkCard title="Memory" href="/docs/concepts/memory" description="Namespaces, the write envelope and what memory powers." />
