@@ -80,6 +80,12 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "MemoryLaneOpConfig": "ignore",
     "MemoryLanesConfig": "ignore",
     "MemoryConsoleConfig": "ignore",
+    # The project registry (ADR-0058 decision 4a): three declared keys, so a
+    # typo fails the load naming itself.
+    "MemoryProjectsConfig": "forbid",
+    # The engine-compatible endpoint's three tunables (ADR-0058 decision 4b):
+    # a typo must not silently leave a limit at its default.
+    "MemoryCompatConfig": "forbid",
     # Leaf tunables / entries with no legitimate unknown key -> forbid
     "NpuConfig": "forbid",
     # [xdna] table (ggml-xdna NPU runner): pmode/env/host_xrt only; the

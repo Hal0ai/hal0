@@ -16,7 +16,6 @@
 .mv-card{background:var(--bg-1,#111);border:1px solid var(--line);border-radius:10px}
 .mv-card .hd{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--line-soft,#1C1C1C)}
 .mv-card .hd .sp{flex:1}
-.mv-card .bd{padding:12px 14px}
 .mono{font-family:var(--jbm)}
 .num{font-feature-settings:"zero" 1,"tnum" 1}
 
@@ -43,16 +42,6 @@
 /* overview grid */
 .mv-ovgrid{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px;align-items:start}
 @media (max-width:1100px){.mv-ovgrid{grid-template-columns:minmax(0,1fr)}}
-.mv-banks{display:flex;flex-direction:column}
-.mv-bankrow{display:grid;grid-template-columns:minmax(120px,170px) minmax(0,1fr) minmax(0,150px) 120px 96px 28px;gap:14px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line-soft,#1C1C1C);cursor:pointer;transition:background .12s}
-@media (max-width:1100px){.mv-bankrow{grid-template-columns:minmax(120px,170px) minmax(0,1fr) minmax(0,150px) 96px 28px}.mv-bankrow>div:nth-child(4){display:none}}
-.mv-banks.compact .mv-bankrow{grid-template-columns:minmax(96px,140px) minmax(0,1fr) minmax(0,120px) 88px 22px;gap:12px;padding:11px 14px}
-.mv-bankrow:last-child{border-bottom:0}
-.mv-bankrow:hover{background:var(--bg-2)}
-.mv-bankrow .nm{font:600 13px var(--jbm);color:var(--fg)}
-.mv-bankrow .nm .doc{font:400 10.5px var(--jbm);color:var(--fg-4);display:block;margin-top:3px}
-.mv-bankrow .arrow{color:var(--fg-4);opacity:0;transition:opacity .12s}
-.mv-bankrow:hover .arrow{opacity:1;color:var(--accent)}
 .mv-typebar{height:6px;border-radius:3px;overflow:hidden;display:flex;background:var(--bg-3);margin-top:6px}
 .mv-typebar i{display:block;height:100%}
 .mv-legend{display:flex;gap:10px;font:400 10.5px var(--jbm);color:var(--fg-3);flex-wrap:wrap}
@@ -62,12 +51,10 @@
 .mv-cell-v{font:600 13px var(--jbm);color:var(--fg-1,var(--fg))}
 .mv-cell-v small{font:400 10.5px var(--jbm);color:var(--fg-3)}
 
-/* growth chart */
-.mv-growth svg{display:block;width:100%}
+/* range tabs */
 .mv-rangetabs{display:flex;gap:2px;border:1px solid var(--line);border-radius:5px;padding:2px}
 .mv-rangetabs button{font:500 11px var(--jbm);color:var(--fg-3);background:transparent;border:0;border-radius:3px;padding:2px 9px;cursor:pointer}
 .mv-rangetabs button.on{background:var(--bg-3);color:var(--fg)}
-.mv-axis{font:400 9.5px var(--jbm);fill:var(--fg-4)}
 
 /* explore layout */
 .mv-explore{display:grid;grid-template-columns:236px minmax(0,1fr) minmax(300px,400px);gap:14px;align-items:start}
@@ -233,11 +220,8 @@
 .mv-toolsgrid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(320px,1fr);gap:14px;align-items:start}
 @media (max-width:1100px){.mv-toolsgrid{grid-template-columns:minmax(0,1fr)}}
 .mv-bankbar .row{display:flex;align-items:center;gap:20px;padding:12px 14px;flex-wrap:wrap}
-/* .pick: the bank-picker <select> look. Was scoped to `.mv-bankbar .pick`
-   only; broadened to a plain top-level rule (2026-08-22) so the Overview's
-   own bank-selector card (memory-overview-v2.jsx) can reuse the identical
-   style instead of a bespoke one — same class, same look, wherever a bank
-   picker <select> appears. */
+/* .pick: the bank-picker <select> look, a plain top-level rule so the same
+   class gives the same look wherever a bank picker <select> appears. */
 .pick{font:600 13px var(--jbm);background:var(--bg-2);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:7px 10px;cursor:pointer;flex:none}
 .pick:hover{border-color:var(--line-strong,#3A3A3A)}
 .mv-bankbar .pers{font:400 11.5px var(--geist,sans-serif);color:var(--fg-4);flex:1;min-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:1.4}
@@ -310,24 +294,8 @@ body{background:var(--bg,#0A0A0A)}
 .agent-tabs button{padding:10px 16px;background:transparent;border:none;border-bottom:2px solid transparent;color:var(--fg-3);font:500 12.5px var(--jbm);cursor:pointer}
 .agent-tabs button:hover{color:var(--fg-2)}
 .agent-tabs button.on{color:var(--accent);border-bottom-color:var(--accent)}
-.mv-page .mem-tabs{display:flex;gap:6px;margin-bottom:14px}
-.mv-page .mem-tabs .btn{font:500 12px var(--jbm);color:var(--fg-2);background:var(--bg-1,#111);border:1px solid var(--line);border-radius:6px;padding:6px 14px;cursor:pointer;transition:border-color .12s,color .12s}
-.mv-page .mem-tabs .btn:hover{border-color:var(--line-strong,#3A3A3A)}
-.mv-page .mem-tabs .btn.active{color:var(--accent);border-color:var(--accent)}
 @media (max-width:1000px){.mv-rail{grid-column:1 / -1;position:static;display:grid;grid-template-columns:1fr 1fr;gap:14px}}
 
-/* overview split + engine stat grid */
-.mv-ovsplit{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;align-items:stretch}
-@media (max-width:1100px){.mv-ovsplit{grid-template-columns:minmax(0,1fr)}}
-.mv-ovsplit>*{display:flex;flex-direction:column}
-.mv-ovsplit .mv-growth .bd{flex:1;display:flex;flex-direction:column;justify-content:center}
-.mv-engrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-bottom:1px solid var(--line-soft,#1C1C1C)}
-.mv-engrid>div{padding:12px 14px;border-right:1px solid var(--line-soft,#1C1C1C);border-bottom:1px solid var(--line-soft,#1C1C1C);min-width:0}
-.mv-engrid>div:nth-child(3n){border-right:0}
-.mv-engrid>div:nth-child(n+4){border-bottom:0}
-.mv-engrid .k{display:block;font:600 9.5px var(--jbm);letter-spacing:0.1em;text-transform:uppercase;color:var(--fg-4);margin-bottom:4px}
-.mv-engrid b{display:block;font:600 21px var(--jbm);color:var(--fg);line-height:1}
-.mv-engrid .s{display:block;font:400 10px var(--jbm);color:var(--fg-5);margin-top:4px}
 
 /* variant B: config drawer */
 .mv-scrim{position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:40}
@@ -396,10 +364,8 @@ body{background:var(--bg,#0A0A0A)}
   .mv-docrow .when{display:none}
   .mv-seg button{padding:4px 8px}
   .agent-tabs{overflow-x:auto}
-  .mem-tabs{flex-wrap:wrap}
-  .mv-engrid b{font-size:17px}
   .mv-xrow{gap:7px}
-  .mv-workgrid,.mv-ovsplit{gap:12px}
+  .mv-workgrid{gap:12px}
 }
 @media (max-width:560px){
   .mv-bankbar .cell{min-width:calc(33% - 14px)}

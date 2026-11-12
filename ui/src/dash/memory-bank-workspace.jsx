@@ -1063,7 +1063,9 @@ function Inspector({ bank, sel, setSel, unitsPage }) {
   )
 }
 
-function BankWorkspace({ bank, setBank, sel, setSel }) {
+// `embedded` is passed through to the BankBar (see memory-bank-bar.jsx): inside the Memory
+// area the bar has no bank <select> and no Rules tab.
+function BankWorkspace({ bank, setBank, sel, setSel, embedded = false }) {
   const { FACT_COLORS } = window.MemV2
 
   const [q, setQ] = useStateWorkspace('')
@@ -1217,7 +1219,7 @@ function BankWorkspace({ bank, setBank, sel, setSel }) {
 
   return (
     <div className="mv-page" data-testid="mv-workspace">
-      {window.MemV2BankBar && <window.MemV2BankBar bank={bank} setBank={switchBank} />}
+      {window.MemV2BankBar && <window.MemV2BankBar bank={bank} setBank={switchBank} embedded={embedded} />}
       <div className="mv-workgrid">
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14, minWidth: 0 }}>
           <div className="mv-card">

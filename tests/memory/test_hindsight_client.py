@@ -171,6 +171,76 @@ async def test_retain_defaults_stay_async_and_omit_unset_fields():
     assert "observation_scopes" not in item
     assert "strategy" not in item
     assert "update_mode" not in item
+    assert body == {"items": [{"content": "x", "document_id": "d1"}], "async": True}
+
+
+# ── retain_batch: several items, one RetainRequest ──────────────────────────
+
+_OPERATION = "0b9f6c1e-2d3a-4b5c-8d7e-9f0a1b2c3d4e"
+
+
+async def _retain_batch(**kwargs) -> list[httpx.Request]:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"success": True, "bank_id": "shared", "items_count": 2})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:9177") as http:
+        client = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+        out = await client.retain_batch(bank_id="shared", **kwargs)
+    assert out["items_count"] == 2
+    return requests
+
+
+@pytest.mark.asyncio
+async def test_retain_batch_posts_every_item_in_one_request():
+    items = [
+        {
+            "content": "a",
+            "document_id": "d1",
+            "context": "ctx",
+            "metadata": {"k": "v"},
+            "tags": ["t"],
+            "timestamp": "2026-01-02T03:04:05+00:00",
+            "entities": [{"text": "Alice"}],
+            "observation_scopes": [["project:atlas"]],
+            "strategy": "fast",
+            "update_mode": "append",
+        },
+        # Unset and empty fields are left out, as for a single retain.
+        {"content": "b", "document_id": "d2", "metadata": {}, "tags": [], "context": None},
+    ]
+    (request,) = await _retain_batch(items=items, async_=True, operation_id=_OPERATION)
+    assert request.method == "POST"
+    assert request.url.path == "/v1/default/banks/shared/memories"
+    body = __import__("json").loads(request.content)
+    assert body == {
+        "items": [items[0], {"content": "b", "document_id": "d2"}],
+        "async": True,
+        "operation_id": _OPERATION,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("async_", "operation_id", "expected"),
+    [
+        (None, None, {}),
+        (True, None, {"async": True}),
+        (False, None, {"async": False}),
+        (None, _OPERATION, {"operation_id": _OPERATION}),
+        (False, "not-a-uuid", {"async": False, "operation_id": "not-a-uuid"}),
+    ],
+)
+async def test_retain_batch_sends_async_and_operation_id_as_given(async_, operation_id, expected):
+    items = [{"content": "a", "document_id": "d1"}, {"content": "b", "document_id": "d2"}]
+    (request,) = await _retain_batch(items=items, async_=async_, operation_id=operation_id)
+    body = __import__("json").loads(request.content)
+    assert body == {"items": items, **expected}
+    if operation_id is not None:
+        assert f'"operation_id":"{operation_id}"'.encode() in request.content
 
 
 @pytest.mark.asyncio
@@ -423,3 +493,36 @@ async def test_tags_stats_and_consolidate_hit_expected_paths():
     assert ("GET", "/v1/default/banks/shared/tags") in seen
     assert ("GET", "/v1/default/banks/shared/stats") in seen
     assert ("POST", "/v1/default/banks/shared/consolidate") in seen
+
+
+# ── per-call read budgets ────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_retain_batch_and_recall_take_a_read_budget_of_their_own():
+    """Both used the client-wide read budget only. A caller that knows what it
+    is waiting for (an async retain, a recall) can now say so; without one the
+    client default still applies."""
+    seen: list[tuple[str, float]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.extensions["timeout"]["read"]))
+        return httpx.Response(200, json={"results": []})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://127.0.0.1:9177", timeout=httpx.Timeout(120.0)
+    ) as http:
+        client = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+        items = [{"content": "x", "document_id": "d"}]
+        await client.retain_batch(bank_id="shared", items=items, timeout_s=30.0)
+        await client.retain_batch(bank_id="shared", items=items)
+        await client.recall(bank_id="shared", query="q", timeout_s=60.0)
+        await client.recall(bank_id="shared", query="q")
+
+    assert seen == [
+        ("/v1/default/banks/shared/memories", 30.0),
+        ("/v1/default/banks/shared/memories", 120.0),
+        ("/v1/default/banks/shared/memories/recall", 60.0),
+        ("/v1/default/banks/shared/memories/recall", 120.0),
+    ]

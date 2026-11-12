@@ -243,6 +243,8 @@ def build_settings_fields(cfg: Hal0Config) -> list[dict[str, Any]]:
                 "apply_class": entry["apply_class"] if entry else None,
                 "services": list(entry["services"]) if entry else [],
                 "secret": row.secret,
+                # Only on a row whose class name does not say what applies it.
+                **({"note": entry["note"]} if entry and "note" in entry else {}),
             }
         )
     return out

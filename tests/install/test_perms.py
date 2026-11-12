@@ -1152,6 +1152,7 @@ def test_pin_override_and_hermes_state_rows_declare_service_owner(tmp_hal0_home:
     by_glob = {(r.target, r.glob): r for r in table if r.glob is not None}
     for key in (
         (state, "*.pin-override"),
+        (state, "memory-embedder.json"),  # #3518
         (hermes, "provision.json"),
         (hermes, "venv.pin"),
     ):

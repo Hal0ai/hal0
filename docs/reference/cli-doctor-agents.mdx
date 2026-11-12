@@ -41,7 +41,7 @@ prompt and 32 decode tokens, capped at 30 s) when the slot's metrics carry no re
 `migrations`, `ui-dist`, `api-env-entries`, `ports`, `port_dnat`, `netns`, `box`, `hal0_target`, `secret-modes`,
 `hardware_freshness`, `gtt_leak`, `seed_context_envelope`, `agent-uid`, `api-journal`, `stt-weights`, `seams`,
 `mcp_mounts`, `hermes-api`, `hermes_mcp_auth`, `hermes_profiles_mcp`, `hermes_default_memory`, `hermes_brain_memory`, `hermes_generation`, `hermes_command_approvals`, `hermes_delegation_slot`, `hermes-gateway-unit`, `hermes_anchor_window`, `hermes_model_choice`,
-`hal0_linger`, `hindsight_llm_auth`, `memory_engine_version`, `memory_extraction_throughput`, `memory_retain_chunk`, `memory_decision_lane`.
+`hal0_linger`, `hindsight_llm_auth`, `memory_engine_version`, `memory_engine_env`, `memory_embedder`, `memory_extraction_throughput`, `memory_retain_chunk`, `memory_decision_lane`, `memory_projects`.
 `hal0_linger` reads whether systemd linger is on for the `hal0` user (`loginctl show-user hal0 -p
 Linger`) and warns when that does not match whether the Hermes gateway is installed.
 
@@ -49,7 +49,31 @@ Linger`) and warns when that does not match whether the Hermes gateway is instal
 
 `gtt_leak` warns of unexplained GPU memory and never refuses a load.
 
+`memory_embedder` ("Memory embedder") is advisory. The embedder is the pair of `[memory.models].embeddings_provider` and `embeddings_model`. hal0 records the pair a memory store was built with in `/var/lib/hal0/state/memory-embedder.json` and starts the engine on it, whatever `[memory.models]` says, because stored vectors are not re-embedded and a different embedder would degrade recall over them with no error. On a box with no record, hal0 takes the embedder from what the engine runs: the running engine's own environment, else what its unit files would start it on (every drop-in in systemd's order, then `/etc/hal0/hindsight-llm.env`), else `BAAI/bge-small-en-v1.5` with the `local` provider, the engine's default, when a store exists. The row has these outcomes:
+
+- **pass** when the recorded and configured embedders match, naming the recorded one.
+- **pass, with a note** when the store was put on its embedder by `hal0 memory embedder switch` and `[memory.models]` names another one. The store's embedder governs; the note names the setting that makes the two agree.
+- **pass, with a note** when they differ only because `[memory.models]` is still at its defaults (`local`, `hindsight-ai/hs-embed-1`). That is every box upgraded with an existing store. The note says the store was built with the recorded model, stays on it, and names the `hal0 memory embedder switch <model>` line that moves it to the configured one.
+- **warn** when you have set a provider or model of your own that differs from the recorded one. Both are named, and nothing is changed.
+- **warn** when the record is marked mixed: the store existed before the engine was moved off its default embedder and may hold vectors from both.
+- **warn** when the record and the engine disagree: the running engine, or the unit files it would start from, name a different embedder, for example a hand-written drop-in that sorts after hal0's. Both are named and hal0 changes neither; while the engine is running, hal0 keeps rendering the embedder it runs. The `memory_engine_env` row judges these two keys on the same evidence, so the two rows do not contradict each other.
+- **warn** when the record file cannot be read or parsed. hal0 leaves the file as it is, names its path, and keeps the engine on what it runs for now.
+- **warn** when the store's location is unavailable (a symlink that does not resolve, or an `/etc/fstab` mount point above it that is not mounted). Nothing is recorded until it is back.
+- **warn** when an embedder switch did not finish, or memory writes are paused and no switch is running. The pause outlives a killed run on purpose and nothing lifts it on a timer, so every memory write is refused until `hal0 memory embedder switch --resume` has run. The row names the run, its archive directory, and the `--status` and `--resume` commands, and says when the engine is still on its private port, in which case recall is unavailable too.
+- **pass**, with a note, while a switch is running.
+
+`hal0 memory embedder switch <model>` re-embeds the store on another model; the warnings for a mismatch and for a mixed store name the exact line (a dry run until `--apply` is added). Setting `[memory.models]` to the recorded embedder also clears a mismatch, without re-embedding anything. See [Change the embedding model](/docs/guides/enable-memory#change-the-embedding-model).
+
 `memory_decision_lane` ("Memory decision lane") is advisory. With `[memory.decision]` enabled it passes when the decision server answers `/health`, and warns when it does not, or when `provider = "local"` but the `hal0-hs-decide` unit is not installed. The installer does not lay that unit down yet, so on most boxes the memory engine runs without a decision model and sends decision-gated calls to its LLM lane; hal0 leaves the decision settings out of the engine's environment until the unit exists. Set `[memory.decision].provider = "off"` to silence the row. The hosted `hindsight-cloud` provider is not probed.
+
+`memory_projects` ("Memory projects") is advisory and measures how memory is filed under projects (see [Memory projects](/docs/concepts/memory-projects)). It lists the `project:*` tags of the platform bank (`[memory] bank`) with their fact counts, through `GET /api/memory/banks/{bank}/tags`, with a 10 s budget per page of 500 tags. It reports three figures: how many of the project-tagged facts name a project that `[memory.projects]` knows (listed under `registered`, an alias, or the target of an alias), as a count and a percentage; the number of facts tagged `project:unresolved`; and the projects in use that the registry does not know, most-used first, up to ten by name. A fact that carries two `project:` tags is counted once for each. The row has these outcomes:
+
+- **pass** with the figures in every case not listed below, including when no fact carries a project tag yet.
+- **warn** when the `project:unresolved` count is not zero: a coding client is writing without naming its project.
+- **warn** when more than five projects in use are missing from the registry. List the real ones under `registered`, map other spellings under `aliases`, and put names that are not projects in `deny`.
+- **pass, with a note** when memory is off, the engine is unreachable, or the tags cannot be listed (a fresh box has no platform bank until the first write). Nothing is counted.
+
+Run as a user that cannot read `hal0.toml`, the row counts against the `shared` bank and an empty registry, and says so.
 
 `api-journal` ("API journal read") warns until `hal0-api.service` carries `SupplementaryGroups=systemd-journal`. `hal0 update` does not rewrite that unit, so the fix is to re-run the installer once; until then the Logs page and `hal0 slot logs --follow` report that the journal cannot be read.
 

@@ -305,6 +305,38 @@ const MvError = ({ query, what, testid }) => {
   )
 }
 
+// ─── TypeBar + Spark — the BankBar's fact-mix bar and retain sparkline ─────
+// Moved here from memory-overview-v2.jsx (the old Memory overview, deleted with
+// the old memory surface) so the BankBar keeps them.
+
+// b: {world, experience, observation} counts; draws the three as one bar.
+function TypeBar({ b, h = 6 }) {
+  const tot = b.world + b.experience + b.observation || 1
+  return (
+    <div className="mv-typebar" style={{ height: h }}>
+      <i style={{ width: (b.world / tot) * 100 + '%', background: FACT_COLORS.world }} />
+      <i style={{ width: (b.experience / tot) * 100 + '%', background: FACT_COLORS.experience }} />
+      <i style={{ width: (b.observation / tot) * 100 + '%', background: FACT_COLORS.observation }} />
+    </div>
+  )
+}
+
+// series: TimeseriesBucket[] ({time, world, experience, observation}), as
+// useBankTimeseries returns it.
+function Spark({ series, w = 96, h = 26 }) {
+  const ts = series || []
+  const vals = ts.map((d) => d.world + d.experience + d.observation)
+  const max = Math.max(1, ...vals)
+  const pts = vals
+    .map((v, i) => `${(i / Math.max(1, vals.length - 1)) * w},${h - 2 - (v / max) * (h - 4)}`)
+    .join(' ')
+  return (
+    <svg width={w} height={h}>
+      <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth="1.25" opacity="0.85" />
+    </svg>
+  )
+}
+
 const MemV2 = {
   FACT_COLORS,
   FACT_DESC,
@@ -317,6 +349,8 @@ const MemV2 = {
   Icon,
   MvError,
   isUuidLike,
+  TypeBar,
+  Spark,
 }
 
 // Named exports alongside the window-globals publish, purely so the pure

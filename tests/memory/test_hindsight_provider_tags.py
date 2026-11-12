@@ -83,7 +83,7 @@ async def test_add_drops_reserved_tags_whatever_their_case_or_padding(forged):
     p = _provider()
     await p.add("x", tags=[forged, "topic:cats"], client_id="openwebui")
     tags = p._client.retained[-1]["tags"]
-    assert tags == ["topic:cats", "agent:openwebui"]
+    assert tags == ["topic:cats", "agent:openwebui", "kind:durable", "scope:global"]
 
 
 @pytest.mark.asyncio
@@ -116,11 +116,13 @@ async def test_list_observation_scopes_cannot_name_reserved_tags():
 
 @pytest.mark.asyncio
 async def test_observation_scopes_reduced_to_nothing_fall_back_to_the_default():
+    """Nothing the caller named survives, so the write gets the envelope's
+    default scope (ADR-0058) exactly as if no scope had been passed."""
     p = _provider()
     await p.add(
         "x", client_id="openwebui", observation_scopes=[["agent:victim", "visibility:private"]]
     )
-    assert "observation_scopes" not in p._client.retained[-1]
+    assert p._client.retained[-1]["observation_scopes"] == "shared"
 
 
 @pytest.mark.asyncio

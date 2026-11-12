@@ -16,7 +16,8 @@ def test_xdna_knobs_returns_pmodes_env_and_host_xrt(client: TestClient) -> None:
 
     assert {e["name"] for e in body["env"]} == set(XDNA_ENV_DOCS)
     for entry in body["env"]:
-        assert set(entry) == {"name", "default", "doc"}
+        assert set(entry) == {"name", "default", "doc", "fixed"}
+        assert entry["fixed"] is (entry["name"] == "GGML_XDNA_PGEMM_GLU_A")
         assert entry["doc"] == XDNA_ENV_DOCS[entry["name"]]
 
     assert isinstance(body["host_xrt"]["doc"], str)

@@ -5,6 +5,7 @@
 // "the profile's value". The block is controlled: `value` is the staged tune
 // object (`{}` = no overrides) and `onChange` receives the next one. The parent
 // owns Save, validation of the numbers (tuneErrors) and the profile drawer.
+import { isXdnaSlot } from '@/lib/slotModelFit'
 import React from 'react'
 import { flagPairs, tokenizeFlags } from './flags-tune.js'
 import { TUNE_KEYS, effectiveProfileName, overrideCount, profileValueLabel, tuneErrors } from './tune-state.js'
@@ -173,9 +174,13 @@ function TuneRow({ k, tune, profile, tuneEffective, runtimeFamily, reason, error
   )
 }
 
-/** Whether the Tune block applies to this slot at all. */
+/**
+ * Whether the Tune block applies to this slot at all. An NPU slot takes it only
+ * on the xdna runner, which is a llama-server launch; FastFlowLM has no tune.
+ */
 export function tuneApplies(slot) {
-  return !!slot && slot.type === 'llm' && slot.device !== 'npu'
+  if (!slot || slot.type !== 'llm') return false
+  return slot.device !== 'npu' || isXdnaSlot(slot)
 }
 
 export function TuneBlock({

@@ -219,8 +219,18 @@ class FakeHindsightClient:
     ):
         self.list_documents_calls.append(bank_id)
         docs = list(self._documents_by_bank.get(bank_id, {}).values())
+        if tags:
+            # The engine's listing rows carry tags and honour a tag filter.
+            docs = [d for d in docs if set(tags) <= set(d.get("tags") or [])]
         page = docs[offset : offset + limit]
-        items = [{"id": d["id"], "text_length": len(d.get("original_text") or "")} for d in page]
+        items = [
+            {
+                "id": d["id"],
+                "text_length": len(d.get("original_text") or ""),
+                "tags": list(d.get("tags") or []),
+            }
+            for d in page
+        ]
         return {"items": items, "total": len(docs), "limit": limit, "offset": offset}
 
     async def get_document(self, *, bank_id, document_id):
@@ -1053,8 +1063,10 @@ async def test_add_forwards_retain_shape_only_when_set():
 
     await p.add("plain", dataset="shared", client_id="hermes")
     rec = fake.retained[0]
-    for key in ("entities", "observation_scopes", "strategy", "update_mode", "sync"):
+    for key in ("entities", "strategy", "update_mode", "sync"):
         assert key not in rec
+    # ADR-0058: the write envelope sends a default scope on every such write.
+    assert rec["observation_scopes"] == "shared"
 
     await p.add(
         "rich",
@@ -1072,6 +1084,29 @@ async def test_add_forwards_retain_shape_only_when_set():
     assert rec["strategy"] == "fast"
     assert rec["update_mode"] == "append"
     assert rec["sync"] is True
+
+
+@pytest.mark.asyncio
+async def test_add_reports_the_update_mode_it_sent_to_the_engine():
+    """An appending caller (the Hermes plugin's session document, #2017) reads
+    this as "the append was applied". Absent when no mode was sent."""
+    fake = FakeHindsightClient()
+    p = HindsightProvider(client=fake, client_id="hermes")
+
+    plain = await p.add("plain", dataset="shared", client_id="hermes", document_id="notes")
+    assert "update_mode" not in plain
+
+    appended = await p.add(
+        "turn", dataset="shared", client_id="hermes", document_id="s1", update_mode="append"
+    )
+    assert appended["update_mode"] == "append"
+    assert fake.retained[1]["update_mode"] == "append"
+
+
+def test_unified_bank_is_readable():
+    fake = FakeHindsightClient()
+    assert HindsightProvider(client=fake, unified_bank=True).unified_bank is True
+    assert HindsightProvider(client=fake).unified_bank is False
 
 
 @pytest.mark.asyncio

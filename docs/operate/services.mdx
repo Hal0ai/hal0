@@ -232,6 +232,50 @@ WantedBy=multi-user.target
 - **Data root** — embedded Postgres at `/var/lib/hal0/memory/hindsight/.pg0`,
   pinned via the unit's `HOME=` env (Hindsight has no dedicated data-dir
   variable of its own).
+- **Embedder** — hal0 records the embeddings provider and model the store was
+  built with in `/var/lib/hal0/state/memory-embedder.json` and starts the
+  engine on that pair. `[memory.models].embeddings_provider` and
+  `embeddings_model` do not change it: a save is kept and reported as "saved;
+  takes effect only through an embedder switch". When config and record
+  differ, or the engine runs something other than the record,
+  `GET /api/memory/models` and the `memory_embedder` row of `hal0 doctor all`
+  say so and nothing is rewritten. `hal0 memory embedder switch <model>` is
+  the one way to change it; see
+  [Change the embedding model](/docs/guides/enable-memory#change-the-embedding-model).
+- **First start** — on a box with no memory store, the installer writes the
+  `showcase-lanes.conf` drop-in and the embedder record from
+  `[memory.models]` before it starts the engine, so a new store is built with
+  the configured embedder (`hindsight-ai/hs-embed-1` by default). That start
+  downloads the embedder and the reranker into `HF_HOME` (about 260 MB each)
+  and is healthy after about 25 s on a good link. A box that has a store, or
+  whose store location is unavailable, is not touched.
+
+  The installer watches that start for up to 240 s. If the engine's process
+  exits first (about 21 s for a model id that does not exist, about 127 s
+  when the model host cannot be reached), it looks for the cause:
+  - The model host does not answer: nothing is changed. The engine keeps
+    retrying and starts on the configured embedder once the host is back.
+  - Otherwise it stops the engine, renders the drop-in with the
+    engine-default embedder (`BAAI/bge-small-en-v1.5`) and nothing else
+    changed, leaves the record alone, and starts again. Healthy: the embedder
+    was the cause, and the record becomes the engine default (source
+    `first-start-fallback`). Still down: something else is wrong, so the
+    configured drop-in is put back and the engine keeps retrying.
+
+  Each case prints a `!!` line. hal0-api seeds the default banks when the
+  engine comes up later. An engine still on its first process at 240 s is
+  left on the configured embedder; if it fails after that it restarts in a
+  loop, a `.pg0` directory exists, and a re-run of the installer skips this
+  step. The `memory` row of `hal0 doctor all` warns that the engine is
+  degraded or unreachable. Fix the cause shown by
+  `journalctl -u hindsight-api -n 40`, then run
+  `sudo systemctl reset-failed hindsight-api` and
+  `sudo systemctl restart hindsight-api`. To give the configured embedder up
+  instead, only where the engine has never been healthy (the store is empty):
+  stop `hindsight-api`, remove `/var/lib/hal0/memory/hindsight/.pg0`,
+  `/var/lib/hal0/state/memory-embedder.json` and
+  `hindsight-api.service.d/showcase-lanes.conf`, set
+  `[memory.models].embeddings_model`, and re-run the installer.
 
 ### Config files it reads
 

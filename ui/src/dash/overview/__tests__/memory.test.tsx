@@ -120,12 +120,12 @@ describe('OvMemory', () => {
     expect(host.textContent).not.toContain('null banks')
   })
 
-  it('Open memory calls onGo("memory")', () => {
+  it("Open memory goes to the shown bank's facts in the Memory area", () => {
     mount()
     const btn = [...host.querySelectorAll('button')].find((b) => /Open memory/.test(b.textContent || ''))!
     act(() => {
       btn.dispatchEvent(new MouseEvent('click', { bubbles: true }))
     })
-    expect(went).toEqual(['memory'])
+    expect(went).toEqual(['memory/facts?bank=hal0-mono'])
   })
 })

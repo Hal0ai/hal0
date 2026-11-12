@@ -39,11 +39,16 @@ def _cfg_effective_backend(cfg: Any) -> str | None:
     rewrites ``device``).
 
     Returns the normalized token ``rocm`` | ``vulkan`` | ``cpu`` |
-    ``flm`` (NPU → ``flm``), or ``None`` when neither ``device`` nor a
+    ``flm`` (NPU → ``flm``; an xdna slot → ``npu``, its runner's backend), or ``None`` when neither ``device`` nor a
     legacy ``backend`` is set so callers can fall through to "unknown".
     Pure/synchronous — safe on the status hot path.
     """
     d = _cfg_to_dict(cfg)
+    from hal0.slots.activation import is_xdna_slot
+
+    if is_xdna_slot(d):
+        # The xdna runner's backend (ADR-0057): on the NPU, but not FLM.
+        return "npu"
     device = d.get("device")
     if not device:
         # An unconverted TOML may carry only ``backend`` (the profile-centric
@@ -345,11 +350,19 @@ def slot_is_flm(cfg: Any) -> bool:
     ``BACKEND_TO_DEVICE`` so an old ``backend``-era token still counts, or an
     explicit ``provider = "flm"``) rather than a profile lookup: this runs on
     the write path, which must not resolve (and possibly persist) a profile.
+    A slot on the xdna runner (``binary = "xdna"``, ADR-0057) sits on the NPU
+    but runs llama-server on plain GGUF, so it is not an FLM slot.
     """
     from hal0.model_meta import BACKEND_TO_DEVICE
     from hal0.slot_config import slot_scalar_table
+    from hal0.slots.activation import is_xdna_slot
 
-    scalars = slot_scalar_table(_cfg_to_dict(cfg))
+    raw = _cfg_to_dict(cfg)
+    # The whole dict, not the scalar table: is_xdna_slot applies the loader's
+    # "[slot] wins, root still counts" rule, which the table alone would drop.
+    if is_xdna_slot(raw):
+        return False
+    scalars = slot_scalar_table(raw)
     device = str(scalars.get("device") or "").strip().lower()
     if BACKEND_TO_DEVICE.get(device, device) == "npu":
         return True
@@ -751,7 +764,7 @@ def guard_and_normalize_xdna(merged: dict[str, Any], updates: dict[str, Any]) ->
             details={"slot": slot_name, "binary": binary},
         )
 
-    from hal0.runners.knobs import screen_xdna_env, validate_xdna_pmode
+    from hal0.runners.knobs import refuse_xdna_pinned_env, screen_xdna_env, validate_xdna_pmode
 
     pmode = xdna_update.get("pmode")
     validate_xdna_pmode(pmode)
@@ -771,6 +784,7 @@ def guard_and_normalize_xdna(merged: dict[str, Any], updates: dict[str, Any]) ->
                     details={"key": key},
                 )
     screen_xdna_env(env)
+    refuse_xdna_pinned_env(env)
 
     host_xrt = xdna_update.get("host_xrt")
     if host_xrt is not None:
@@ -802,6 +816,79 @@ def guard_and_normalize_xdna(merged: dict[str, Any], updates: dict[str, Any]) ->
         merged["xdna"] = normalized
     else:
         merged.pop("xdna", None)
+
+
+def guard_xdna_slot_shape(merged: dict[str, Any], changed_keys: set[str] | None = None) -> None:
+    """Refuse an xdna slot write that pins nothing hal0 keeps pinned, or is not chat.
+
+    Two checks on the merged config of a slot whose ``binary`` is xdna:
+
+      - ``[server].env`` setting a pinned xdna variable
+        (:data:`hal0.runners.knobs.XDNA_PINNED_ENV`, i.e.
+        ``GGML_XDNA_PGEMM_GLU_A``) to another value: the same 400 as the
+        ``[xdna].env`` route, because the launch merges both into one env;
+      - a ``type`` other than ``llm``: xdna is a llama-server chat runner, and
+        an xdna ``transcription``/``embedding`` slot would read as an FLM trio
+        shadow (``slot.xdna_not_supported``).
+
+    ``changed_keys`` limits the check to writes that move ``server``,
+    ``binary`` or ``type`` (an unrelated edit did not create a state already
+    on disk); ``None`` (create) always checks.
+
+    Raises:
+        hal0.errors.BadRequest: either check fails.
+    """
+    from hal0.slots.activation import is_xdna_slot
+
+    if not is_xdna_slot(merged):
+        return
+    if changed_keys is not None and not changed_keys & {"server", "binary", "type"}:
+        return
+    from hal0.runners.knobs import refuse_xdna_pinned_env
+
+    refuse_xdna_non_llm(merged)
+    server = merged.get("server")
+    env = server.get("env") if isinstance(server, dict) else None
+    if isinstance(env, dict):
+        refuse_xdna_pinned_env(env)
+    if changed_keys is None or "binary" in changed_keys:
+        # An [npu] table is FLM's modality switch; on an xdna slot it is inert,
+        # and a leftover one from before a binary flip would advertise FLM
+        # ASR/embed tags. Drop it as the slot becomes xdna.
+        merged.pop("npu", None)
+
+
+def refuse_xdna_non_llm(cfg: dict[str, Any]) -> None:
+    """Refuse an xdna slot whose ``type`` is not ``llm`` (``slot.xdna_not_supported``).
+
+    The xdna runner serves chat only. Shared by the write seam
+    (:func:`guard_xdna_slot_shape`) and the launch seam
+    (``ContainerProvider.check_load``), which catches a hand-edited file.
+    """
+    from hal0.errors import BadRequest
+    from hal0.slot_config import slot_scalar_table
+    from hal0.slots.activation import is_xdna_slot
+
+    if not is_xdna_slot(cfg):
+        return
+    slot_type = str(slot_scalar_table(cfg).get("type") or cfg.get("type") or "llm")
+    if slot_type != "llm":
+        slot_name = cfg.get("name") or (cfg.get("slot") or {}).get("name") or "?"
+        raise BadRequest(
+            f"slot {slot_name!r} is type {slot_type!r}, but the xdna runner serves "
+            "chat (type llm) only; pick another runtime for this slot",
+            code="slot.xdna_not_supported",
+            details={"slot": slot_name, "type": slot_type, "binary": "xdna"},
+        )
+
+
+def _changed_scalar_keys(updates: dict[str, Any]) -> set[str]:
+    """The keys a write moves, with a nested ``[slot]`` table's keys hoisted."""
+    keys = set(updates.keys())
+    slot_tbl = updates.get("slot")
+    if isinstance(slot_tbl, dict):
+        keys |= set(slot_tbl.keys())
+    return keys
 
 
 def reconcile_and_guard_slot_config(
@@ -837,6 +924,7 @@ def reconcile_and_guard_slot_config(
     check_runner_family(merged, set(updates.keys()))
     guard_and_normalize_tune(merged, _tune_updates_for_profile_switch(merged, updates))
     guard_and_normalize_xdna(merged, updates)
+    guard_xdna_slot_shape(merged, _changed_scalar_keys(updates))
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
     # Only the keys this apply actually carries drive the SC-4 guard — an
     # unrelated stack field must not be blocked by a stale duplicate-default
@@ -864,8 +952,10 @@ __all__ = [
     "guard_and_normalize_tune",
     "guard_and_normalize_xdna",
     "guard_slot_write_payload",
+    "guard_xdna_slot_shape",
     "model_is_flm",
     "reconcile_and_guard_slot_config",
     "reconcile_slot_updates",
+    "refuse_xdna_non_llm",
     "slot_is_flm",
 ]

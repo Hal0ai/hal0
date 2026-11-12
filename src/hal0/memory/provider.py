@@ -145,6 +145,8 @@ class MemoryProvider(ABC):
         strategy: str | None = None,
         update_mode: str | None = None,
         sync: bool = False,
+        project: str | None = None,
+        coding: bool = False,
     ) -> dict[str, Any]:
         """Add a memory item. Returns ``{id, timestamp}`` plus
         ``operation_id``/``operation_ids``/``items_count`` when the engine
@@ -165,7 +167,10 @@ class MemoryProvider(ABC):
         ``observation_scopes``
             How to scope observations during consolidation
             (``"per_tag"|"combined"|"all_combinations"|"shared"`` or a list
-            of tag-lists).
+            of tag-lists). ``None`` lets the engine provider choose: the
+            Hindsight provider sends one scope per ``project:`` tag, or
+            ``"shared"`` when the write carries none (ADR-0058), except on
+            a private write in the unified bank.
         ``strategy``
             Named retain strategy overriding the bank default for this item.
         ``update_mode``
@@ -174,7 +179,19 @@ class MemoryProvider(ABC):
         ``sync``
             ``True`` waits for extraction to complete before returning
             (no ``operation_id``); ``False`` (default) ingests in the
-            background."""
+            background.
+        ``project``
+            The project the caller is working in, as the caller named it
+            (ADR-0058 decision 4a). The Hindsight provider resolves it
+            against the ``[memory.projects]`` registry and stamps one
+            ``project:<slug>`` tag; an engine without the write envelope
+            ignores it. No REST or MCP entry point passes it yet: under the
+            unified bank a project-tagged memory is hidden from recall,
+            search and list until decision 7b lands.
+        ``coding``
+            ``True`` when the caller is a coding client, which is expected
+            to work inside a project: a write of its with no project is
+            tagged ``project:unresolved``."""
 
     @abstractmethod
     async def search(
@@ -285,9 +302,13 @@ class MemoryProvider(ABC):
         exclude_mental_model_ids: list[str] | None = None,
         include: dict[str, Any] | None = None,
         response_schema: dict[str, Any] | None = None,
+        enforce_visibility: bool = True,
     ) -> dict[str, Any]:
         """Trigger LLM-backed reflection/synthesis over memory. No-op default
-        (``{"status": "unsupported"}``) for engines without the capability."""
+        (``{"status": "unsupported"}``) for engines without the capability.
+
+        ``enforce_visibility`` (default on) holds the reflect to what
+        ``client_id`` may read; see ``HindsightProvider.reflect``."""
         return {"status": "unsupported"}
 
     async def consolidate(

@@ -44,6 +44,7 @@ from hal0.cli._shared import (
 )
 from hal0.cli.memory_bank_commands import app as bank_app
 from hal0.cli.memory_directive_commands import app as directive_app
+from hal0.cli.memory_embedder_commands import app as embedder_app
 from hal0.cli.memory_kb_commands import app as kb_app
 from hal0.cli.memory_migrate_commands import app as migrate_app
 from hal0.cli.memory_mm_commands import app as mm_app
@@ -71,6 +72,9 @@ app.add_typer(spec_app, name="spec")
 app.add_typer(kb_app, name="kb")
 app.add_typer(directive_app, name="directive")
 app.add_typer(models_app, name="models")
+# ``embedder switch`` (#3518): the one command here that works on the box
+# itself instead of calling hal0-api.
+app.add_typer(embedder_app, name="embedder")
 app.add_typer(agents_app, name="agents")
 app.command("recall")(recall_cmd)
 

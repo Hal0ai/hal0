@@ -56,7 +56,9 @@ from hal0.slots.activation import (
     autoload_enabled,
     claims_npu_anchor,
     effective_npu_table,
+    is_xdna_slot,
     npu_modality_active,
+    slot_binary,
 )
 from hal0.slots.naming import slot_instance_token, slot_unit_name
 from hal0.slots.reaper import eviction_priority
@@ -337,8 +339,7 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # env-override warning).
         threads_val = cfg.get("threads")
         entry["threads"] = threads_val if isinstance(threads_val, int) else None
-        binary_val = cfg.get("binary")
-        entry["binary"] = binary_val if isinstance(binary_val, str) and binary_val else None
+        entry["binary"] = slot_binary(cfg) or None
         entry["image_pin"] = cfg.get("image_pin")
         # METRICS (#1810) — completes the HW-grid lift: SlotConfig.metrics
         # controls whether --metrics reaches llama-server's argv. Surface it
@@ -369,6 +370,9 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # configured ``device`` so the UI renders a stable backend chip.
         _recipe, _llamacpp = device_to_backend(cfg.get("device"))
         declared_backend = _llamacpp or (_recipe if _recipe == "flm" else None)
+        if _is_xdna_cfg(cfg):
+            # The xdna runner's own backend token (ADR-0057), not FLM's.
+            declared_backend = "npu"
         if declared_backend:
             entry["declared_backend"] = declared_backend
 
@@ -389,7 +393,7 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # Membership requires only a live anchor: the shadows are records for
         # that one process and carry placeholder models, so per-shadow
         # membership was never independently meaningful (#1369).
-        if cfg.get("device") == "npu" and trio_active:
+        if cfg.get("device") == "npu" and trio_active and not _is_xdna_cfg(cfg):
             entry["coresident_group"] = "npu-flm-trio"
 
         out[name] = entry
@@ -412,7 +416,7 @@ def _is_xdna_cfg(cfg: Mapping[str, Any]) -> bool:
     checking the raw field (no Runner resolution) is sufficient and keeps
     this module import-light.
     """
-    return str(cfg.get("binary") or "") == "xdna"
+    return is_xdna_slot(dict(cfg))
 
 
 def _npu_holder_names(configs: list[dict[str, Any]], *, exclude: str) -> list[str]:
@@ -583,9 +587,12 @@ def resolve_tune_effective(cfg: Any) -> dict[str, Any] | None:
     Computed from the launch resolver's own scalars
     (:func:`hal0.providers.container.tune_effective_for_slot`) so the view and
     the launch cannot drift. ``None`` for a slot a ``[tune]`` cannot apply to
-    (not an llm slot, or on the NPU) and for one whose profile does not resolve.
+    (not an llm slot, or on the NPU off the xdna runner) and for one whose
+    profile does not resolve.
     """
-    if str(cfg.get("type") or "llm") != "llm" or str(cfg.get("device") or "") == "npu":
+    if str(cfg.get("type") or "llm") != "llm":
+        return None
+    if str(cfg.get("device") or "") == "npu" and not _is_xdna_cfg(cfg):
         return None
     try:
         from hal0.providers.container import tune_effective_for_slot

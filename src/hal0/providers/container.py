@@ -98,14 +98,18 @@ from hal0.runners import (
     llama_build_from_tag,
     runner_supports_reasoning_effort,
 )
-from hal0.runners.knobs import HALOGEN_NATIVE_CTX, HALOGEN_TUNE_UNAVAILABLE
+from hal0.runners.knobs import (
+    HALOGEN_NATIVE_CTX,
+    HALOGEN_TUNE_UNAVAILABLE,
+    XDNA_TUNE_UNAVAILABLE,
+)
 from hal0.slot_lifecycle_budget import (
     HEALTH_TIMEOUT_S,
     TEARDOWN_MARGIN_S,
     UNIT_ADMIN_CALLS_ALLOWANCE_S,
     UNIT_START_TIMEOUT_S,
 )
-from hal0.slots.activation import autoload_enabled
+from hal0.slots.activation import autoload_enabled, is_xdna_slot
 from hal0.slots.argv import ResolvedArgv, deny_llama_env, resolve_argv
 from hal0.slots.model_fit import model_runtime_mismatch
 from hal0.slots.naming import (
@@ -1312,7 +1316,12 @@ def runner_family_mismatch(slot_cfg: Mapping[str, Any]) -> RunnerFamilyMismatch 
     A dispatch that cannot answer is not this check's to report.
     """
     runner = _binary_runner(slot_cfg)
-    if runner is None or runner.runtime_family == "llama-server":
+    if runner is None:
+        return None
+    # xdna is a llama-server runner, but it only runs on the NPU and is the
+    # slot's whole point there: a non-llama provider (an FLM profile) would
+    # launch FastFlowLM in its place, so that pairing is a mismatch too.
+    if runner.runtime_family == "llama-server" and runner.key != "xdna":
         return None
     try:
         provider = _spec_provider_for(dict(slot_cfg))
@@ -1352,9 +1361,11 @@ def _refuse_foreign_runner(slot_cfg: Mapping[str, Any], spec_provider: Any | Non
     The llama path takes its image from ``binary``, so a non-llama runner there would
     launch with llama-server argv and exit. The write seam refuses this state, which
     leaves a hand edit. Only this path: a dispatched provider launches its own image,
-    so a stale ``binary`` beside one is inert and that slot keeps loading.
+    so a stale ``binary`` beside one is inert and that slot keeps loading. The one
+    exception is xdna: an xdna slot that dispatches anywhere but the llama path (an
+    FLM-family profile) would launch FastFlowLM in its place, so it is refused too.
     """
-    if spec_provider is None:
+    if spec_provider is None or is_xdna_slot(dict(slot_cfg)):
         mismatch = runner_family_mismatch(slot_cfg)
         if mismatch is not None:
             raise mismatch
@@ -1427,7 +1438,10 @@ def _provider_for_family(slot_cfg: dict[str, Any], family: str | None) -> Any | 
     slot_type = str(slot_cfg.get("type", ""))
     provider = str(slot_cfg.get("provider", ""))
 
-    if family == "flm" or device == "npu":
+    # ``device == "npu"`` is FLM's profile-less fallback, but not for a slot
+    # on the xdna runner (ADR-0057): that is a llama-server launch on the NPU,
+    # and its ``binary`` picks the image on the llama path below.
+    if family == "flm" or (device == "npu" and not is_xdna_slot(slot_cfg)):
         from hal0.providers.flm import FLMProvider
 
         return FLMProvider()
@@ -1562,9 +1576,10 @@ def slot_effective_context(
     ``"fallback"``). An FLM trio shadow (``served_by`` its anchor)
     runs no process of its own: it reports its anchor's window.
     """
-    if str(slot_cfg.get("device") or "") == "npu" and slot_cfg.get("type") in (
-        "transcription",
-        "embedding",
+    if (
+        str(slot_cfg.get("device") or "") == "npu"
+        and slot_cfg.get("type") in ("transcription", "embedding")
+        and not is_xdna_slot(dict(slot_cfg))
     ):
         anchor = str(slot_cfg.get("served_by") or "flm")
         anchor_cfg = _served_by_anchor_cfg(anchor)
@@ -1574,7 +1589,7 @@ def slot_effective_context(
         profile = resolve_slot_profile(slot_cfg)
     except Hal0Error:
         return None, None
-    if str(slot_cfg.get("device") or "") == "npu":
+    if str(slot_cfg.get("device") or "") == "npu" and not is_xdna_slot(dict(slot_cfg)):
         ctx_size = getattr(profile, "ctx_size", None)
         return (int(ctx_size), "profile") if ctx_size else (_FLM_DEFAULT_CTX, "fallback")
     profile = effective_tune(slot_cfg, profile)
@@ -1644,6 +1659,8 @@ def _served_by_anchor_cfg(name: str) -> dict[str, Any] | None:
         return None
     if cfg.get("device") != "npu" or cfg.get("type") in ("transcription", "embedding"):
         return None
+    if is_xdna_slot(cfg):
+        return None  # an xdna slot runs its own llama-server, never an FLM trio anchor
     return cfg
 
 
@@ -1869,9 +1886,12 @@ def _resolve_llama_scalars(
         "tune_effective": {
             **tune.as_dict(),
             "reasoning_effort_unavailable": effort_unavailable,
-            # llama-server takes every tune value; the key is always present so a
+            # llama-server takes every tune value except on the xdna runner,
+            # which has no speculative path; the key is always present so a
             # reader never has to tell "none" from "this engine does not say".
-            "tune_unavailable": {},
+            "tune_unavailable": (
+                dict(XDNA_TUNE_UNAVAILABLE) if getattr(runner, "key", None) == "xdna" else {}
+            ),
         },
         "lane_device": lane_device(effective_backend),
         "draft_device": (
@@ -2036,7 +2056,7 @@ class ContainerProvider(Provider):
         server_env = scalars["server_env"] or {}
         merged_env = {**vis_env, **server_env}
         if runner_key == "xdna":
-            from hal0.runners.knobs import screen_xdna_env, xdna_env_defaults
+            from hal0.runners.knobs import XDNA_PINNED_ENV, screen_xdna_env, xdna_env_defaults
 
             # Defaults first, then whatever's already resolved (visibility +
             # [server].env, which includes any operator GGML_XDNA_*/pmode/
@@ -2057,6 +2077,20 @@ class ContainerProvider(Provider):
                 if isinstance(host_xrt, str) and host_xrt:
                     extra_mounts.append(model_store_module.mount_for(host_xrt, read_only=True))
                     merged_env["HAL0_XDNA_HOST_XRT"] = host_xrt
+            # Pinned correctness env goes on LAST, over [server].env and
+            # [xdna].env alike: the write seam refuses another value, and this
+            # catches a hand-edited TOML (GLU_A=1 corrupts prefill logits).
+            for name, pinned in XDNA_PINNED_ENV.items():
+                if merged_env.get(name, pinned) != pinned:
+                    log.warning(
+                        "slot.xdna_pinned_env_overridden",
+                        extra={
+                            "slot": slot_cfg.get("name"),
+                            "key": name,
+                            "value": merged_env[name],
+                        },
+                    )
+                merged_env[name] = pinned
 
         plan = _llama_launch_plan(
             image=scalars["image"],
@@ -2381,6 +2415,9 @@ class ContainerProvider(Provider):
           no other runtime pays for the sysfs walk. Raises whatever it refuses with
           (a ``SlotConfigError``).
         """
+        from hal0.slots.config_write import refuse_xdna_non_llm
+
+        refuse_xdna_non_llm(dict(slot_cfg))
         spec_provider = _spec_provider_for(slot_cfg)
         _refuse_foreign_runner(slot_cfg, spec_provider)
         slot_label = str(slot_cfg.get("name", "") or slot_instance_token(slot_cfg))

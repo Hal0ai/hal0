@@ -64,6 +64,16 @@ from hal0.agents.anchor_window import (
     AnchorWindow,
     resolve_anchor_window,
 )
+from hal0.memory import embedder_record
+from hal0.memory.embedder_record import (
+    EMBEDDINGS_MODEL_ENV,
+    EMBEDDINGS_PROVIDER_ENV,
+    Embedder,
+    configured_embedder,
+    ensure_embedder_record,
+    persist_embedder_record,
+    resolve_embedder,
+)
 from hal0.system.seam import HINDSIGHT_LEGACY_CAP_DROPIN_NAME, SeamTimeout, SystemCtlSeam
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -325,8 +335,19 @@ def render_showcase_env(
     lanes: MemoryLanesConfig,
     ceiling: int | None = None,
     decision_unit_installed: bool | None = None,
+    embedder: Embedder | None = None,
 ) -> str:
     """Render the Hindsight 1.2 showcase env block (PLAN.md section 2).
+
+    The embeddings provider and model are the pair the store was built with,
+    never ``models.embeddings_provider`` / ``models.embeddings_model``
+    (#3518): ``embedder`` when the caller already holds it, else resolved
+    here (:func:`hal0.memory.embedder_record.resolve_embedder`: the live
+    engine's pair while it runs, the record otherwise, and what the unit
+    files and disk say on a box with no record). Swapping the embedder under
+    an existing store degrades recall with no error, so a config value that
+    differs is reported, not rendered. Every other key below renders from
+    config as before.
 
     ``ceiling`` (#3492) is the extraction drop-in's effective concurrency —
     ``[memory.graph]`` held to the memory slot's ``--parallel``
@@ -353,14 +374,16 @@ def render_showcase_env(
     entirely so hindsight-api falls back to its configured LLM/reranker path
     (#3519).
     """
+    if embedder is None:
+        embedder = resolve_embedder(configured_embedder(models)).render
     lines: list[str] = [
         "# Managed by hal0 ([memory.models]/[memory.decision]/[memory.lanes] in",
         "# hal0.toml, Hindsight 1.2 showcase — see PLAN.md section 2). Do not edit",
         "# by hand; this file is fully rewritten on every apply. Retires any",
         "# hand-maintained zz-h0-98-llm-global-cap.conf drop-in.",
         "[Service]",
-        f"Environment=HINDSIGHT_API_EMBEDDINGS_PROVIDER={models.embeddings_provider}",
-        f"Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL={models.embeddings_model}",
+        f"Environment={EMBEDDINGS_PROVIDER_ENV}={embedder.provider}",
+        f"Environment={EMBEDDINGS_MODEL_ENV}={embedder.model}",
         f"Environment=HINDSIGHT_API_RERANKER_PROVIDER={models.reranker_provider}",
         f"Environment=HINDSIGHT_API_RERANKER_LOCAL_MODEL={models.reranker_model}",
         "Environment=HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING="
@@ -701,8 +724,10 @@ def _proc_environ_path(pid: int) -> Path:
     return Path(f"/proc/{pid}/environ")
 
 
-def _read_engine_process_env() -> dict[str, str] | None:
-    """The three LLM target keys from the RUNNING engine's environment.
+def _read_engine_process_env(
+    keys: Sequence[str] = _LLM_TARGET_KEYS,
+) -> dict[str, str] | None:
+    """``keys`` (the three LLM target keys by default) from the RUNNING engine's environment.
 
     hindsight-api runs as the same ``hal0`` uid as hal0-api, so its
     ``/proc/<pid>/environ`` is readable without opening
@@ -710,7 +735,7 @@ def _read_engine_process_env() -> dict[str, str] | None:
     the engine actually loaded, after every ``Environment=`` and
     ``EnvironmentFile=``.
 
-    The raw buffer is parsed in memory and only :data:`_LLM_TARGET_KEYS` are
+    The raw buffer is parsed in memory and only ``keys`` are
     kept: the credential and every other variable are dropped before
     anything leaves this function, and no failure carries the buffer or the
     OS error text (which can echo it) into a log, an exception or the
@@ -725,7 +750,7 @@ def _read_engine_process_env() -> dict[str, str] | None:
     except Exception:  # never surface the error text
         log.debug("hal0.memory.engine_environ_unreadable", pid=pid)
         return None
-    wanted = set(_LLM_TARGET_KEYS)
+    wanted = set(keys)
     out: dict[str, str] = {}
     for entry in raw.split(b"\0"):
         key, sep, value = entry.partition(b"=")
@@ -809,14 +834,93 @@ def effective_engine_llm(
     return _shape(merged, bool(keys), keys, bool(keys), "unit+file" if path.exists() else "unit")
 
 
+#: The two keys that decide which embedder the engine runs (#3518).
+_EMBEDDER_KEYS: tuple[str, ...] = (EMBEDDINGS_PROVIDER_ENV, EMBEDDINGS_MODEL_ENV)
+
+
+def effective_engine_embedder(
+    *,
+    env_file: Path | None = None,
+    unit_env: Mapping[str, str] | None = None,
+    show_unit_env: Callable[[], Mapping[str, str]] | None = None,
+    read_process_env: Callable[[Sequence[str]], Mapping[str, str] | None] | None = None,
+    showcase_path: Path | None = None,
+) -> dict[str, Any]:
+    """The embedder hindsight-api runs, and the one its unit files would start it on (#3518).
+
+    The embedder counterpart of :func:`effective_engine_llm`, over the same
+    three readers, so the embedder record, the lanes route and the
+    ``memory_engine_env`` doctor row cannot see different environments.
+    Returns::
+
+        {"live": {"provider", "model"} | None,     # the running engine's own environment
+         "on_disk": {"provider", "model"} | None,  # what a start would load
+         "on_disk_source": "unit+file" | "unit" | "drop-in" | None}
+
+    Each value is the raw one, ``None`` where the environment leaves the key
+    unset (the engine then uses its default).
+
+    * ``live`` comes from ``read_process_env`` (``/proc/<MainPID>/environ``):
+      what the engine loaded, after every ``Environment=`` and
+      ``EnvironmentFile=``. ``None`` when it is not running or cannot be read.
+    * ``on_disk`` is the unit's merged ``Environment=`` (``unit_env`` when
+      given, else ``show_unit_env()``: base unit plus every drop-in, a
+      later-sorting operator one included, in systemd's order) with the two
+      keys from ``env_file`` on top, which is what systemd does at start.
+    * Where there is no unit to ask (systemd absent, unit unknown), hal0's
+      own showcase drop-in file is read instead (``"drop-in"``), and
+      ``on_disk`` is ``None`` when that is missing too.
+
+    Never raises: this feeds status routes and ``hal0 doctor``.
+    """
+    env_file = env_file if env_file is not None else HINDSIGHT_LLM_ENV_PATH
+    read_process = read_process_env if read_process_env is not None else _read_engine_process_env
+    out: dict[str, Any] = {"live": None, "on_disk": None, "on_disk_source": None}
+
+    def _pair(values: Mapping[str, str]) -> dict[str, str | None]:
+        return {
+            "provider": values.get(EMBEDDINGS_PROVIDER_ENV) or None,
+            "model": values.get(EMBEDDINGS_MODEL_ENV) or None,
+        }
+
+    try:
+        process = read_process(_EMBEDDER_KEYS)
+        if process is not None:
+            out["live"] = _pair(process)
+        if unit_env is not None:
+            unit = dict(unit_env)
+        else:
+            unit = dict((show_unit_env or _systemctl_show_environment)() or {})
+        if unit:
+            file_env = _read_env_file(Path(env_file))
+            from_file = {k: file_env[k] for k in _EMBEDDER_KEYS if file_env.get(k)}
+            out["on_disk"] = _pair({**unit, **from_file})
+            out["on_disk_source"] = "unit+file" if from_file else "unit"
+            return out
+        showcase = showcase_path if showcase_path is not None else SHOWCASE_DROP_IN_PATH
+        try:
+            body = showcase.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return out
+        out["on_disk"] = _pair(_env_from_body(body))
+        out["on_disk_source"] = "drop-in"
+    except Exception as exc:  # status surface: degrade, never raise
+        log.debug("hal0.memory.engine_embedder_evidence_failed", error=str(exc))
+    return out
+
+
 def expected_engine_env(
     memory: MemoryConfig,
     *,
     include_extraction: bool = True,
     include_showcase: bool = True,
     slots_dir: Path = SLOTS_DIR,
+    embedder: Embedder | None = None,
 ) -> dict[str, str]:
     """The ``HINDSIGHT_API_*`` values hal0's drop-ins render for ``memory``.
+
+    ``embedder`` is the pair the showcase drop-in carries, resolved from the
+    embedder record when not given (see :func:`render_showcase_env`).
 
     Both renderers merged in systemd's lexical order — ``extraction-model.conf``
     first, ``showcase-lanes.conf`` after it, last ``Environment=`` wins — so a
@@ -836,6 +940,7 @@ def expected_engine_env(
                     decision=memory.decision,
                     lanes=memory.lanes,
                     ceiling=limits.max_concurrent,
+                    embedder=embedder,
                 )
             )
         )
@@ -884,16 +989,34 @@ def engine_env_report(
         report["installed"] = drop_in.exists()
         if not report["installed"]:
             return report
+        unit = dict(unit_env) if unit_env is not None else dict(show_unit_env() or {})
+        # #3518: the two embedder keys are judged on the evidence the embedder
+        # record uses (the running engine first, then the unit files with the
+        # EnvironmentFile on top), so this report and the memory_embedder
+        # doctor row cannot disagree about which embedder the engine is on.
+        # A key the engine leaves unset is its default, not a missing value.
+        view = resolve_embedder(
+            configured_embedder(memory.models),
+            evidence=embedder_record.engine_evidence(unit_env=unit, showcase_path=showcase),
+        )
+        running = view.live
+        if running is None and view.effective_source in ("unit", "unit+file"):
+            running = view.on_disk
+        if unit and running is not None:
+            unit[EMBEDDINGS_PROVIDER_ENV] = running.provider
+            unit[EMBEDDINGS_MODEL_ENV] = running.model
         # Credential keys are never compared: an operator drop-in carrying a
         # real key would otherwise put it into a status payload.
         expected = {
             k: v
             for k, v in expected_engine_env(
-                memory, include_showcase=showcase.exists(), slots_dir=slots_dir
+                memory,
+                include_showcase=showcase.exists(),
+                slots_dir=slots_dir,
+                embedder=view.render,
             ).items()
             if not k.endswith("_API_KEY")
         }
-        unit = dict(unit_env) if unit_env is not None else dict(show_unit_env() or {})
     except Exception as exc:  # status surface: degrade, never raise
         log.debug("hal0.memory.engine_env_report_failed", error=str(exc))
         return report
@@ -1196,6 +1319,7 @@ def apply_showcase_dropin(
     graph: MemoryGraphConfig | None = None,
     restart: bool = True,
     seam: SystemCtlSeam | None = None,
+    embedder: Embedder | None = None,
 ) -> dict[str, Any]:
     """Write the showcase drop-in and (best-effort) restart hindsight-api (#3492).
 
@@ -1207,6 +1331,23 @@ def apply_showcase_dropin(
     — the engine reads these env vars only at start. Never raises; returns
     ``{"drop_in", "written", "daemon_reloaded", "restarted", "error"}``.
     Blocking: event-loop callers must hop a thread.
+
+    The embeddings provider and model come from the store's embedder record
+    (#3518), or from the running engine when it is on something else, so this
+    write never swaps a running engine's embedder. A box whose engine has
+    already run gets its record written before the render; a box with no
+    store yet is recorded as the configured pair only after the drop-in
+    carrying it is on disk, so the record cannot name an embedder the engine
+    was never started with. A record file that cannot be read is left alone.
+
+    ``embedder`` renders that pair instead and leaves the record exactly as
+    it is: the record is the caller's to write. It has two callers.
+    :mod:`hal0.memory.first_start` uses it to try a new install's engine on
+    the engine default before any store exists and then either records that
+    pair or puts the drop-in back. ``hal0 memory embedder switch``
+    (:mod:`hal0.memory.embedder_switch`) uses it for the one restart that is
+    meant to move an existing store's engine to another embedder. Used
+    anywhere else it would swap the embedder under a store.
     """
     seam = seam if seam is not None else SystemCtlSeam()
     result: dict[str, Any] = {
@@ -1216,14 +1357,21 @@ def apply_showcase_dropin(
         "restarted": False,
         "error": None,
     }
+    view = ensure_embedder_record(configured_embedder(models)) if embedder is None else None
     try:
         body = render_showcase_env(
-            models=models, decision=decision, lanes=lanes, ceiling=showcase_ceiling(graph)
+            models=models,
+            decision=decision,
+            lanes=lanes,
+            ceiling=showcase_ceiling(graph),
+            embedder=view.render if view is not None else embedder,
         )
         seam.write_hindsight_showcase_dropin(
             body, path=SHOWCASE_DROP_IN_PATH, timeout=_SYSTEMCTL_TIMEOUT_S
         )
         result["written"] = True
+        if view is not None and view.record_error is None and not view.record.persisted:
+            persist_embedder_record(view.record)
         # #3520: the write also retires the hand-maintained H0-98 drop-in;
         # say so if it survived (e.g. a pre-#3520 seam wrapper on the box).
         result["legacy_drop_in_present"] = LEGACY_LLM_CAP_DROP_IN_PATH.exists()

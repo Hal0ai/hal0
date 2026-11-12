@@ -42,6 +42,7 @@ from hal0.api.routes import _memory_subgraph as _sg
 from hal0.api.routes.memory import MemoryUnavailable
 from hal0.errors import BadRequest, Hal0Error, NotFound, UnprocessableEntity
 from hal0.memory.hindsight_provider import annotate_retain_yield
+from hal0.memory.write_gate import engine_call_writes, require_writes_allowed
 
 router = APIRouter()
 
@@ -368,6 +369,7 @@ async def bank_profile_get(request: Request, bank_id: str) -> dict[str, Any]:
 
 @router.put("/banks/{bank_id}/profile")
 async def bank_profile_put(request: Request, bank_id: str) -> dict[str, Any]:
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     body = await _read_body(request)
@@ -709,6 +711,7 @@ async def _require_echoed_confirm(request: Request, client: Any, bank_id: str, w
 
 @router.delete("/banks/{bank_id}")
 async def delete_bank(request: Request, bank_id: str) -> Any:
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     await _require_echoed_confirm(request, client, bank_id, f"delete bank {bank_id}")
@@ -738,6 +741,7 @@ async def delete_bank_memories(request: Request, bank_id: str) -> Any:
     ``confirm`` is hal0's own gate and is stripped so it never reaches the
     engine as an unrecognised filter.
     """
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     await _require_echoed_confirm(
@@ -932,6 +936,7 @@ async def bank_document_transfer_export(request: Request, bank_id: str) -> Respo
 
 @router.post("/banks/{bank_id}/document-transfer")
 async def bank_document_transfer_import(request: Request, bank_id: str) -> Any:
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     on_conflict = request.query_params.get("on_conflict", "skip")
@@ -1102,7 +1107,14 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/mental-models/{model_id}/history",
         "/v1/default/banks/{bank_id}/mental-models/{model_id}/history",
     ),
-    # knowledge base (folders/pages tree, per-page read/refresh — #showcase)
+    # knowledge base (folders/pages tree, per-page read — #showcase)
+    #
+    # A 1.x engine serves no ``PATCH .../knowledge-base/pages/{id}`` and no
+    # ``POST .../knowledge-base/pages/{id}/refresh`` (#3564), so neither is
+    # forwarded. A page is generated from the mental model its tree node names
+    # in ``mental_model_id`` (a different id from the page's own): refresh it
+    # with ``POST /banks/{bank_id}/mental-models/{model_id}/refresh`` above, and
+    # edit its question, tags and trigger with ``PATCH .../mental-models/{id}``.
     (
         "GET",
         "/banks/{bank_id}/knowledge-base/tree",
@@ -1122,16 +1134,6 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "GET",
         "/banks/{bank_id}/knowledge-base/pages/{page_id}",
         "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}",
-    ),
-    (
-        "PATCH",
-        "/banks/{bank_id}/knowledge-base/pages/{page_id}",
-        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}",
-    ),
-    (
-        "POST",
-        "/banks/{bank_id}/knowledge-base/pages/{page_id}/refresh",
-        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}/refresh",
     ),
     # directives
     ("GET", "/banks/{bank_id}/directives", "/v1/default/banks/{bank_id}/directives"),
@@ -1272,8 +1274,13 @@ def _make_handler(method: str, template: str):
     if (method, template) == _CURATE_TEMPLATE:
         audit_action = _CURATE_AUDIT_ACTION
     clears_cache = (method, template) in _CACHE_CLEARING_FORWARDS
+    # #3518: every forward that changes the store is refused with
+    # ``memory.writes_paused`` while `hal0 memory embedder switch` runs.
+    is_write = engine_call_writes(method, template)
 
     async def handler(request: Request) -> Any:
+        if is_write:
+            require_writes_allowed()
         client = _client(request)
         segments = _validate_segments(dict(request.path_params))
         upstream = template.format(**segments) if segments else template

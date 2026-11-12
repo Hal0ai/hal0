@@ -347,6 +347,21 @@ class RunnerFamilyMismatch(SlotConfigError):
     status = 409
 
 
+class XdnaInFlmPortGroup(SlotConfigError):
+    """An xdna slot whose identity row sits in the FLM trio's shared port group.
+
+    A slot made xdna (``binary = "xdna"``, ADR-0057) before the launch fix
+    could be stamped into ``npu-flm-trio``, so the port authority shares FLM's
+    port with it. hal0 does not migrate that claim: the write that would make
+    such a slot xdna is refused, and so is its load. The fix is to delete the
+    slot and create a new xdna slot, which gets a port of its own. 409: the
+    stored identity conflicts with the requested runner.
+    """
+
+    code = "slot.xdna_in_flm_port_group"
+    status = 409
+
+
 class SlotModelRuntimeMismatch(SlotConfigError):
     """The model and the slot's runtime cannot run together (halogen <-> the rest).
 
@@ -552,6 +567,7 @@ __all__ = [
     "SlotStallCeiling",
     "SlotState",
     "SlotStateRecord",
+    "XdnaInFlmPortGroup",
     "is_dispatchable_state",
     "is_transition_legal",
     "provider_registry_miss_is_expected",

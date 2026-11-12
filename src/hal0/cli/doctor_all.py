@@ -2618,6 +2618,10 @@ def check_bridge_store(
       shuts out): WARN "cannot read", the ``hermes-api`` row's wording.
     * Schema older than this build ships, or never applied: WARN. hal0-api
       applies migrations at start, so a restart brings it current.
+    * A live client under a name hal0 reserves (:func:`hal0.bridge.keys.is_reserved_name`),
+      minted before the name was reserved: WARN, naming it and how to revoke
+      it and mint a replacement. hal0-api refuses its key on every surface
+      (#3560), so the agent using it is cut off until then.
 
     ADVISORY (never critical): a broken store only stops bridge keys from
     authenticating, and the admin key still works.
@@ -2684,6 +2688,12 @@ def check_bridge_store(
                 "SELECT COUNT(*) FILTER (WHERE revoked_at IS NULL), "
                 "COUNT(*) FILTER (WHERE revoked_at IS NOT NULL) FROM clients"
             ).fetchone()
+            live_names = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM clients WHERE revoked_at IS NULL ORDER BY name"
+                )
+            ]
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -2694,6 +2704,28 @@ def check_bridge_store(
         )
     counted = f"{live} client{'' if live == 1 else 's'}"
     detail = f"{counted}, schema v{version}" + (f" ({revoked} revoked)" if revoked else "")
+    from hal0.bridge.keys import is_reserved_name
+
+    reserved = [name for name in live_names if is_reserved_name(name)]
+    if reserved:
+        listed = ", ".join(repr(name) for name in reserved)
+        return Check(
+            key,
+            label,
+            _WARN,
+            "; ".join(
+                [
+                    *problems,
+                    detail,
+                    f"bridge client{'' if len(reserved) == 1 else 's'} {listed} "
+                    f"{'has a name' if len(reserved) == 1 else 'have names'} hal0 now reserves, "
+                    "so hal0-api refuses the key everywhere (bridge.client_name_reserved); "
+                    "revoke it with `hal0 bridge revoke <name>` and mint a replacement under "
+                    "another name with `hal0 bridge add <new-name>`",
+                ]
+            )
+            + (fix if problems else ""),
+        )
     if problems:
         return _warn(detail)
     return Check(key, label, _PASS, detail)
@@ -3413,6 +3445,145 @@ def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
     return Check(name, title, _PASS, "hindsight-api runs with the values hal0 renders")
 
 
+def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
+    """The configured embedder must be the one the memory store was built with (#3518).
+
+    hal0 records the embedder a store was built with
+    (:mod:`hal0.memory.embedder_record`) and renders the engine environment
+    from that record, so a ``[memory.models].embeddings_model`` that differs
+    changes nothing: the engine stays on the recorded model and this row says
+    so. The embedder is the pair of provider and model. Outcomes:
+
+    * ``pass`` when the two match and the store is not ``mixed``;
+    * ``pass`` with a note when they differ only because the config still has
+      its shipped default. That is every upgraded box (its store was built
+      with the engine default) and nothing the operator did; the note names
+      ``hal0 memory embedder switch``, the way to move the store when the
+      operator wants to;
+    * ``warn`` when the operator set a provider or model of their own that
+      differs from the record, since that setting is not doing what they
+      asked, and when the store is ``mixed``: it existed before the engine
+      was moved off its default embedder and may hold vectors from two;
+    * ``warn`` when the record and the engine disagree (``conflict``): the
+      running engine, or the unit files it would start from, name another
+      embedder. Both are named, neither is changed. It is the same evidence
+      the ``memory_engine_env`` row is judged on for these keys;
+    * ``warn`` when the record file cannot be read (it is left alone), or
+      the store's location is unavailable;
+    * ``warn`` when an embedder switch was interrupted
+      (:func:`hal0.memory.embedder_switch.interrupted_switch`), or the memory
+      write gate is set and no switch process holds the lock: every memory
+      write is refused until ``hal0 memory embedder switch --resume`` has
+      run. The gate outlives a killed run on purpose, so this row is where a
+      forgotten one shows up; it names the run, its archive directory and
+      the ``--status`` and ``--resume`` commands. While a switch is running
+      the row passes and says so.
+
+    Never ``fail``: recall keeps working, and nothing here is repaired by a
+    restart.
+
+    ``status`` is the injection point for tests; by default it is read from
+    this box's ``hal0.toml``, the record, the engine's environment and its
+    data directory.
+    """
+    from hal0.memory.embedder_record import (
+        SOURCE_CONFIGURED,
+        SOURCE_SWITCH,
+        configured_embedder,
+        describe_embedder,
+        embedder_notice,
+        embedder_status,
+        switch_command,
+    )
+    from hal0.memory.embedder_verdict import embedder_verdict
+
+    name, title = "memory_embedder", "Memory embedder"
+    if status is None:
+        from hal0.config.loader import load_hal0_config
+        from hal0.memory.embedder_switch import (
+            interrupted_switch,
+            isolated_port,
+            lock_held,
+        )
+        from hal0.memory.write_gate import read_gate
+
+        left, gate = interrupted_switch(), read_gate()
+        if lock_held():
+            return Check(
+                name,
+                title,
+                _PASS,
+                "an embedder switch is running; memory writes are paused until it finishes "
+                "(`hal0 memory embedder switch --status` shows where it stands)",
+            )
+        if left is not None or gate is not None:
+            run = (left or {}).get("run_id") or (gate or {}).get("run_id") or "unknown"
+            archives = (left or {}).get("archive_dir") or (gate or {}).get("archive_dir")
+            reason = f" ({left['error']})" if (left or {}).get("error") else ""
+            private = isolated_port()
+            paused = (
+                "memory writes are paused and no switch is running, so every memory write is "
+                "refused"
+                + (
+                    f", and the engine is isolated on a private port ({private}), so recall is "
+                    "unavailable too"
+                    if private is not None
+                    else ", while the engine is already back at its normal address (its "
+                    "isolation drop-in is gone; recall works and other clients reach it). "
+                    "`--resume` isolates it again before it finishes"
+                    if (left or {}).get("isolated")
+                    else " (recall still works)"
+                )
+                if gate is not None
+                else "its write pause is gone, so writes may be reaching banks it has not "
+                "finished replacing"
+            )
+            return Check(
+                name,
+                title,
+                _WARN,
+                f"an embedder switch did not finish{reason}: run {run}, archives in "
+                f"{archives or 'an unknown directory'}; {paused}. Run "
+                "`hal0 memory embedder switch --status` to see where it stands, then "
+                "`hal0 memory embedder switch --resume`",
+            )
+
+        try:
+            models = load_hal0_config().memory.models
+        except Exception as exc:
+            return Check(name, title, _WARN, f"hal0.toml unreadable — check skipped: {exc}")
+        status = embedder_status(configured_embedder(models))
+    recorded = (status.get("recorded_provider"), status.get("recorded"))
+    configured = (status.get("configured_provider"), status.get("configured"))
+    # The rule is shared with the Memory health path, so the two cannot disagree.
+    verdict = embedder_verdict(status)
+    if verdict.reasons:
+        return Check(name, title, _WARN, embedder_notice(status) or "")
+    built_with = describe_embedder(*recorded)
+    if verdict.informational and status.get("source") == SOURCE_SWITCH:
+        return Check(
+            name,
+            title,
+            _PASS,
+            f"the memory store was moved to {built_with} with `hal0 memory embedder switch` "
+            f"and stays on it; [memory.models] still names {describe_embedder(*configured)}, "
+            "which is fine and has no effect. To make the two agree, set embeddings_provider "
+            f"and embeddings_model under [memory.models] to {built_with}",
+        )
+    if verdict.informational:
+        return Check(
+            name,
+            title,
+            _PASS,
+            f"the memory store was built with {built_with} and stays on it; the configured "
+            f"model ({describe_embedder(*configured)}) takes effect only through "
+            f"`{switch_command(status)}` (a dry run; add --apply), which re-embeds the store",
+        )
+    if status.get("source") == SOURCE_CONFIGURED and not status.get("recorded_at"):
+        return Check(name, title, _PASS, "no memory store on this box — nothing recorded yet")
+    return Check(name, title, _PASS, f"the memory store was built with {built_with}, as configured")
+
+
 #: ``POST /api/memory/graph/throughput`` may run the 30 s probe (#2353).
 THROUGHPUT_PROBE_TIMEOUT_S: float = 45.0
 
@@ -3505,6 +3676,159 @@ def check_memory_retain_chunk(
         _PASS,
         f"extraction_max_tokens = {audit.get('max_tokens')} clears {audit.get('checked')} bank(s)",
     )
+
+
+#: ``memory_projects`` warns past this many project slugs in use that the
+#: registry does not know. A handful is what a box looks like before its
+#: operator has confirmed anything; more means the registry is not being kept.
+PROJECTS_UNREGISTERED_WARN_ABOVE: int = 5
+
+#: How many unregistered slugs the row names.
+PROJECTS_UNREGISTERED_LISTED: int = 10
+
+#: Budget for each page of the tags listing, and the listing's page size and
+#: page cap (5,000 distinct ``project:`` tags is far past any real bank).
+PROJECT_TAGS_TIMEOUT_S: float = 10.0
+_PROJECT_TAGS_PAGE: int = 500
+_PROJECT_TAGS_MAX_PAGES: int = 10
+
+
+def _fetch_project_tags(base: str | None, bank: str) -> list[dict[str, Any]] | None:
+    """The bank's ``project:*`` tags with their fact counts, or ``None``.
+
+    One existing call, ``GET /api/memory/banks/{bank}/tags`` with the engine's
+    own wildcard filter, read page by page.
+    """
+    from hal0.cli._shared import CliApiError, api_get
+
+    items: list[dict[str, Any]] = []
+    for page in range(_PROJECT_TAGS_MAX_PAGES):
+        try:
+            payload = api_get(
+                f"/api/memory/banks/{bank}/tags",
+                base=base,
+                timeout=PROJECT_TAGS_TIMEOUT_S,
+                params={
+                    "q": "project:*",
+                    "limit": _PROJECT_TAGS_PAGE,
+                    "offset": page * _PROJECT_TAGS_PAGE,
+                },
+            )
+        except CliApiError:
+            return None
+        batch = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(batch, list):
+            return None
+        items.extend(row for row in batch if isinstance(row, dict))
+        total = payload.get("total")
+        if len(batch) < _PROJECT_TAGS_PAGE or (isinstance(total, int) and len(items) >= total):
+            break
+    return items
+
+
+def _projects_config() -> tuple[str, Any, bool]:
+    """``([memory] bank, the project registry, read_ok)`` from hal0.toml.
+
+    hal0.toml is ``0600``, so for anyone but the service user and root the
+    read fails; the row then counts against the shipped defaults (the
+    ``shared`` bank, an empty registry) and says so.
+    """
+    from hal0.config.loader import ConfigError, load_hal0_config
+    from hal0.memory.projects import ProjectRegistry, registry_from_config
+
+    try:
+        memory = load_hal0_config().memory
+    except (ConfigError, OSError):
+        return "shared", ProjectRegistry(), False
+    return str(memory.bank or "shared"), registry_from_config(memory.projects), True
+
+
+def check_memory_projects(
+    *,
+    memory: dict[str, Any] | None,
+    base: str | None = None,
+    fetch: Callable[[str | None, str], list[dict[str, Any]] | None] | None = None,
+    config: tuple[str, Any, bool] | None = None,
+) -> Check:
+    """How much project-tagged memory names a project the operator knows (ADR-0058 4a).
+
+    Read from the platform bank's tag counts: the facts carrying each
+    ``project:<slug>`` tag. Reports the share of those facts whose slug is in
+    ``[memory.projects]`` (``registered``, an alias, or the target of one),
+    the ``project:unresolved`` count, and up to
+    :data:`PROJECTS_UNREGISTERED_LISTED` slugs in use that the registry does
+    not know. A fact with two ``project:`` tags is counted once per tag.
+
+    ``warn`` in two cases only: ``project:unresolved`` is non-zero (a coding
+    client is writing without naming its project), or more than
+    :data:`PROJECTS_UNREGISTERED_WARN_ABOVE` unregistered slugs are in use.
+    Everything else passes with the figures. An engine that is off or
+    unreachable, and a listing that cannot be read (a fresh box has no
+    platform bank yet), pass with a note: this row measures, and has nothing
+    to measure.
+
+    ``fetch`` and ``config`` are the injection points for tests.
+    """
+    from hal0.memory.projects import PROJECT_TAG_PREFIX, UNRESOLVED_SLUG
+
+    name, title = "memory_projects", "Memory projects"
+    if memory is None:
+        return Check(name, title, _PASS, "memory engine status unreachable — nothing counted")
+    if memory.get("engine") in (None, "") or not memory.get("enabled", True):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    if not memory.get("reachable"):
+        return Check(name, title, _PASS, "engine unreachable — nothing counted; see the memory row")
+    bank, registry, read_ok = config if config is not None else _projects_config()
+    rows = (fetch or _fetch_project_tags)(base, bank)
+    if rows is None:
+        return Check(
+            name, title, _PASS, f"could not list the tags of bank {bank} — nothing counted"
+        )
+
+    counts: dict[str, int] = {}
+    for row in rows:
+        tag, count = row.get("tag"), row.get("count")
+        if not isinstance(tag, str) or not tag.startswith(PROJECT_TAG_PREFIX):
+            continue
+        slug = tag[len(PROJECT_TAG_PREFIX) :]
+        if slug and isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            counts[slug] = counts.get(slug, 0) + count
+    total = sum(counts.values())
+    if total == 0:
+        return Check(name, title, _PASS, f"no project-tagged facts in bank {bank} yet")
+
+    unresolved = counts.pop(UNRESOLVED_SLUG, 0)
+    known = sum(count for slug, count in counts.items() if registry.is_known(slug))
+    unregistered = sorted(
+        (slug for slug in counts if not registry.is_known(slug)),
+        key=lambda slug: (-counts[slug], slug),
+    )
+    detail = (
+        f"{known} of {total} project-tagged facts ({known * 100 // total}%) name a "
+        f"registered or aliased project; project:unresolved: {unresolved}"
+    )
+    if unregistered:
+        listed = ", ".join(unregistered[:PROJECTS_UNREGISTERED_LISTED])
+        more = len(unregistered) - PROJECTS_UNREGISTERED_LISTED
+        detail += f"; not in the registry ({len(unregistered)}): {listed}"
+        if more > 0:
+            detail += f" and {more} more"
+    if not read_ok:
+        detail += "; hal0.toml unreadable, so counted against an empty registry and bank shared"
+    if unresolved or len(unregistered) > PROJECTS_UNREGISTERED_WARN_ABOVE:
+        remedies = []
+        if unresolved:
+            remedies.append(
+                "a coding client is writing without a project: it named none, or one "
+                "that [memory.projects].deny refuses"
+            )
+        if len(unregistered) > PROJECTS_UNREGISTERED_WARN_ABOVE:
+            remedies.append(
+                "list the real projects under [memory.projects].registered, map other "
+                "spellings under aliases, and put names that are not projects in deny"
+            )
+        return Check(name, title, _WARN, f"{detail}. {'; '.join(remedies)}")
+    return Check(name, title, _PASS, detail)
 
 
 def _decision_config() -> tuple[Any, bool]:
@@ -3876,9 +4200,11 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),
         check_memory_engine_env(),
+        check_memory_embedder(),
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
         check_memory_retain_chunk(memory=payloads["memory"], base=base),
         check_memory_decision_lane(memory=payloads["memory"]),
+        check_memory_projects(memory=payloads["memory"], base=base),
     ]
     return verify_rows + extra_rows
 
@@ -3971,9 +4297,11 @@ __all__ = [
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
     "check_memory_decision_lane",
+    "check_memory_embedder",
     "check_memory_engine_env",
     "check_memory_engine_version",
     "check_memory_extraction_throughput",
+    "check_memory_projects",
     "check_memory_retain_chunk",
     "check_model_store",
     "check_ports",

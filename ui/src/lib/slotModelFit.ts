@@ -36,6 +36,17 @@ export interface SlotEngineLike {
   runner?: string | null
   /** Slot's runtime family (e.g. 'flm', 'llama-server'). */
   runtime_family?: string | null
+  /** Slot's `binary` (RUNNER_IMAGES key) as the slot API serves it. */
+  binary?: string | null
+}
+
+/** True when the slot runs the xdna runner (ADR-0057).
+ *
+ * The slot API serves the runner key as `binary` (no `runner` field), and the
+ * server matches it exactly (hal0.slots.activation.is_xdna_slot), so this
+ * does too. */
+export function isXdnaSlot(slot: SlotEngineLike | null | undefined): boolean {
+  return !!slot && slot.binary === 'xdna'
 }
 
 const FLM_TAGS = new Set(['flm', 'npu'])
@@ -74,7 +85,7 @@ export function isFlmSlot(slot: SlotEngineLike | null | undefined): boolean {
   if (!slot) return false
   const runner = String(slot.runner || '').toLowerCase()
   const family = String(slot.runtime_family || '').toLowerCase()
-  if (NON_FLM_NPU_RUNNERS.has(runner) || family === 'llama-server') return false
+  if (isXdnaSlot(slot) || NON_FLM_NPU_RUNNERS.has(runner) || family === 'llama-server') return false
   if (runner === 'flm' || family === 'flm') return true
   return (
     devKind(slot.device) === 'npu' ||

@@ -116,6 +116,12 @@ from hal0.api.routes import (
     memory_admin as memory_admin_routes,
 )
 from hal0.api.routes import (
+    memory_compat as memory_compat_routes,
+)
+from hal0.api.routes import (
+    memory_health as memory_health_routes,
+)
+from hal0.api.routes import (
     memory_lanes as memory_lanes_routes,
 )
 from hal0.api.routes import (
@@ -164,6 +170,7 @@ from hal0.registry.discover import _collect_referenced_model_ids, scan_and_regis
 from hal0.registry.model import _BLESSED_PREFIX
 from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.store import ModelRegistry
+from hal0.security.exposure import COMPAT_MEMORY_PREFIX
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.huggingface import hf_token_from_env
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
@@ -575,7 +582,12 @@ async def hal0_llm_slot_views(
         # (``gemma4-it:e2b``), not hal0's ``-FLM`` catalog id — otherwise
         # ``hal0/utility``/``hal0/npu`` never match the slot and fall through
         # to the chat slot. Translate via the same map as the FLM provider.
-        if (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm":
+        from hal0.slots.activation import is_xdna_slot, slot_binary
+
+        xdna = is_xdna_slot(cfg)
+        if not xdna and (
+            (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm"
+        ):
             from hal0.providers.flm import flm_id_to_tag_async
 
             # A cold catalog is probed off the event loop (#2334).
@@ -586,6 +598,7 @@ async def hal0_llm_slot_views(
             {
                 "name": name,
                 "device": (cfg.get("device") or "").strip(),
+                "binary": slot_binary(cfg),
                 "model_id": model_id,
                 "context_length": int(_slot_ctx_size(cfg, model_registry, model_id) or 0),
             }
@@ -771,6 +784,12 @@ def _flm_multiplex_tags(cfg: dict[str, Any]) -> list[str]:
     the pre-#733 ``[defaults] load_*`` legacy keys.
     """
     if not cfg.get("name"):
+        return []
+    from hal0.slots.activation import is_xdna_slot
+
+    # An xdna slot (ADR-0057) is on the NPU but is not FLM: a leftover [npu]
+    # table from before a binary flip must not advertise FLM ASR/embed tags.
+    if is_xdna_slot(cfg):
         return []
     # An FLM slot is named by its NPU device (the launch dispatch's signal and
     # the only one a converted slot keeps: ADR-0029's conversion drops the
@@ -2201,14 +2220,34 @@ async def _memory_reprobe_loop(
     TRIED spends the budget: a drain whose armed hooks were all still waiting
     on their arming boot phase (``last_drain_attempted`` False) is free, so a
     short ``HAL0_MEMORY_REPROBE_INTERVAL_S`` cannot exhaust the cap before
-    the brain lane finishes and hands its replay over (#1912 review).
+    the brain lane finishes and hands its replay over (#1912 review). A tick
+    while the memory write gate is set runs no hook and is free too: every
+    replayed write would be refused until ``hal0 memory embedder switch``
+    lifts it (#3518).
     """
+    from hal0.memory import write_gate
+
     attempts = 0
+    paused_noted = False
     while True:
         await asyncio.sleep(interval_s)
         if not await asyncio.to_thread(provider.try_heal):
             continue
         run_hooks = getattr(provider, "run_heal_hooks", None)
+        if run_hooks is not None and write_gate.read_gate() is not None:
+            # Memory writes are paused (``hal0 memory embedder switch``): the
+            # engine can be back at its normal address a moment before the
+            # gate lifts, and a replay now would only be refused. Wait for
+            # the gate without spending the retry budget, however long it
+            # stays (a run that needs ``--resume`` keeps it set).
+            if not paused_noted:
+                log.info(
+                    "hal0.memory.heal_replay_waiting_for_write_gate",
+                    detail="memory writes are paused; the boot-write replay runs once "
+                    "they are allowed again",
+                )
+                paused_noted = True
+            continue
         if run_hooks is None or await run_hooks():
             return
         if not getattr(provider, "last_drain_attempted", True):
@@ -2348,6 +2387,12 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
             _memory_reprobe_loop(_mem_provider, _reprobe_interval)
         )
         log.info("hal0.memory.reprobe_loop_started", interval_s=_reprobe_interval)
+        # #3518: an engine that was not up when install.sh ran never had its
+        # default banks seeded. Seed whatever is missing when the engine is
+        # swapped in; a bank that already has a retain mission is left alone.
+        from hal0.memory import bank_seed
+
+        _mem_provider.add_heal_hook(bank_seed.heal_hook(_mem_provider))
 
     async def _stop_memory_reprobe_task() -> None:
         if ctx.memory_reprobe_task is not None:
@@ -3099,6 +3144,23 @@ def create_app() -> FastAPI:
     app.include_router(
         memory_lanes_routes.router,
         prefix="/api/memory",
+        tags=["memory"],
+    )
+    # Memory health: the ordered repair path behind the Memory area's Health
+    # tab (ADR-0058, decision 12). ADMIN by the /api/memory prefix rule.
+    app.include_router(
+        memory_health_routes.router,
+        prefix="/api/memory",
+        tags=["memory"],
+    )
+    # The engine-compatible memory endpoint for coding agents (ADR-0058
+    # decision 4b): the Hindsight coding-agents plugin is pointed here instead
+    # of at the engine's own port. BRIDGE-class, with the ``memory`` scope
+    # checked by its handlers. It ends in a catch-all, which only sees paths
+    # under its own prefix.
+    app.include_router(
+        memory_compat_routes.router,
+        prefix=COMPAT_MEMORY_PREFIX,
         tags=["memory"],
     )
 

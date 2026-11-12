@@ -1,17 +1,12 @@
 // Memory v2 BankBar + Add modal (task C3) — mount smoke test.
 //
-// Same rationale/pattern as memoryOverviewV2.smoke.test.tsx (task C2):
-// neither component is routed at #memory yet (C6 wires #memory/bank), and
-// the brief forbids touching memory.jsx/agent-view.jsx to force a route
-// just for this spec — so the Playwright coverage
-// (../../../tests/e2e/specs/memory-v2-bankbar.spec.ts) is written but
-// `.skip`-ed with a "C6 unskips" note, and this vitest smoke test instead
-// proves `window.MemV2BankBar` and `window.MemV2AddModal` mount under a
+// Proves `window.MemV2BankBar` and `window.MemV2AddModal` mount under a
 // real QueryClientProvider with the real hook globals installed (via
-// memory-hook-bridge + memory-v2-shared + memory-overview-v2, exactly as
-// main.tsx wires them) without throwing.
+// memory-hook-bridge + memory-v2-shared, exactly as main.tsx wires them)
+// without throwing. The Playwright coverage is
+// ../../../tests/e2e/specs/memory-v2-bankbar.spec.ts.
 //
-// `fetch` is stubbed to a never-settling promise, same as C2's smoke test —
+// `fetch` is stubbed to a never-settling promise —
 // this is a mount/crash check (queries sit in `isLoading`), not a
 // data-rendering assertion.
 import React from 'react'
@@ -29,7 +24,6 @@ vi.stubGlobal(
 
 await import('../memory-hook-bridge')
 await import('../memory-v2-shared.jsx')
-await import('../memory-overview-v2.jsx') // publishes window.TypeBar / window.Spark, reused by BankBar
 await import('../memory-bank-bar.jsx')
 
 function mount(el: React.ReactElement) {

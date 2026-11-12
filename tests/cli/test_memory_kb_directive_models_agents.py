@@ -51,16 +51,59 @@ def test_kb_show(monkeypatch):
     assert "hello" in r.output
 
 
-def test_kb_refresh(monkeypatch):
-    calls = []
+_TREE = {
+    "roots": [
+        {
+            "id": "kf-1",
+            "kind": "folder",
+            "name": "Showcase",
+            "mental_model_id": None,
+            "children": [
+                {
+                    "id": "kp-1",
+                    "kind": "page",
+                    "name": "Overview",
+                    "mental_model_id": "mm-1",
+                    "children": [],
+                }
+            ],
+        }
+    ]
+}
+
+
+def test_kb_refresh_goes_through_the_pages_mental_model(monkeypatch):
+    """#3564: the engine refreshes a page through its mental model, a different id."""
+    gets, posts = [], []
+    monkeypatch.setattr(
+        "hal0.cli.memory_kb_commands.api_get",
+        lambda path, **kw: gets.append(path) or _TREE,
+    )
     monkeypatch.setattr(
         "hal0.cli.memory_kb_commands.api_post",
-        lambda path, **kw: calls.append(path) or {"queued": True},
+        lambda path, **kw: posts.append(path) or {"operation_id": "op-1"},
     )
-    r = runner.invoke(memory_commands.app, ["kb", "refresh", "shared", "p1", "--json"])
-    assert r.exit_code == 0
-    assert calls == ["/api/memory/banks/shared/knowledge-base/pages/p1/refresh"]
-    assert json.loads(r.output) == {"queued": True}
+    r = runner.invoke(memory_commands.app, ["kb", "refresh", "shared", "kp-1", "--json"])
+    assert r.exit_code == 0, r.output
+    assert gets == ["/api/memory/banks/shared/knowledge-base/tree"]
+    assert posts == ["/api/memory/banks/shared/mental-models/mm-1/refresh"]
+    assert json.loads(r.output) == {"operation_id": "op-1"}
+
+
+@pytest.mark.parametrize(
+    ("node_id", "said"),
+    [("kf-1", "is a folder, not a page"), ("kp-missing", "is not in the knowledge base")],
+)
+def test_kb_refresh_refuses_what_is_not_a_page(monkeypatch, node_id, said):
+    posts = []
+    monkeypatch.setattr("hal0.cli.memory_kb_commands.api_get", lambda path, **kw: _TREE)
+    monkeypatch.setattr(
+        "hal0.cli.memory_kb_commands.api_post", lambda path, **kw: posts.append(path)
+    )
+    r = runner.invoke(memory_commands.app, ["kb", "refresh", "shared", node_id])
+    assert r.exit_code == 1
+    assert said in " ".join(r.output.split())
+    assert posts == []
 
 
 def test_directive_list(monkeypatch):
@@ -117,6 +160,40 @@ def test_models_bare_invocation(monkeypatch):
     assert r.exit_code == 0
     payload = json.loads(r.output)
     assert payload["embeddings"]["provider"] == "openai"
+
+
+def test_models_table_shows_the_recorded_embedder_and_flags_a_difference(monkeypatch):
+    """#3518: the engine runs the recorded model; the configured one is named as not applied."""
+    monkeypatch.setattr("hal0.cli.memory_models_agents_commands._require_api", lambda: "http://x")
+    monkeypatch.setattr(
+        "hal0.cli.memory_models_agents_commands.api_get",
+        lambda path, **kw: {
+            "embeddings": {
+                "provider": "local",
+                "model": "hindsight-ai/hs-embed-1",
+                "recorded": "BAAI/bge-small-en-v1.5",
+                "configured": "hindsight-ai/hs-embed-1",
+                "mixed": False,
+                "needs_switch": True,
+            },
+            "reranker": {"provider": "local", "model": "hindsight-ai/hs-rerank-1"},
+            "decision": {"enabled": False, "provider": "off", "model": "x", "reachable": False},
+        },
+    )
+    # A wide console: the default one wraps the status cell at the runner's
+    # width. Height is pinned too, or rich falls back to 80x25 on a dumb terminal.
+    from rich.console import Console
+
+    monkeypatch.setattr(
+        "hal0.cli.memory_models_agents_commands.console",
+        Console(width=200, height=50, color_system=None),
+    )
+    r = runner.invoke(memory_commands.app, ["models"])
+    assert r.exit_code == 0, r.output
+    assert "BAAI/bge-small-en-v1.5" in r.output
+    assert "configured: hindsight-ai/hs-embed-1 (not applied;" in r.output
+    # #3518: the row names the command that moves the store.
+    assert "`hal0 memory embedder switch` moves the store" in r.output
 
 
 def test_agents_install_dry_run(monkeypatch):

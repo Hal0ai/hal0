@@ -72,8 +72,13 @@ def _config_claims(slots_dir: Path) -> list[PortClaim]:
             continue
         name = str(cfg.get("name") or f.stem)
         # device=npu slots co-reside in one FLM process and share its port
-        # by design — same derivation as slot_view's coresident marker.
-        group = "npu-flm-trio" if cfg.get("device") == "npu" else None
+        # by design — same derivation as slot_view's coresident marker. An
+        # xdna slot runs its own llama-server on its own port (ADR-0057).
+        from hal0.slot_config import slot_scalar_table
+        from hal0.slots.activation import is_xdna_slot
+
+        device = slot_scalar_table(cfg).get("device", cfg.get("device"))
+        group = "npu-flm-trio" if device == "npu" and not is_xdna_slot(cfg) else None
         for value in (
             cfg.get("port"),
             (cfg.get("server") or {}).get("port") if isinstance(cfg.get("server"), dict) else None,

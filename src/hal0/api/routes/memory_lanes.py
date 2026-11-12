@@ -12,7 +12,8 @@ Four endpoints backing the memory-showcase UI branch:
 * ``GET /api/memory/agents`` — coding-agent banks + the hindsight
   coding-agents installer one-liner.
 * ``GET /api/memory/models`` — the configured embeddings/reranker/decision
-  models, with live decision-server reachability.
+  models, with live decision-server reachability and the embedder the store
+  was built with (#3518).
 """
 
 from __future__ import annotations
@@ -21,16 +22,17 @@ import asyncio
 import logging
 import re
 import time
-from datetime import UTC
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from fastapi import APIRouter, Request, Response
 
+from hal0.api.routes._memory_health_collect import EngineReader, bank_queue_row
 from hal0.api.routes.memory import MemoryUnavailable
 from hal0.config.loader import load_hal0_config
 from hal0.errors import BadRequest, Forbidden, Hal0Error, NotFound
+from hal0.memory.write_gate import require_engine_call_allowed
 
 router = APIRouter()
 
@@ -110,6 +112,8 @@ async def _passthrough(request: Request, path: str, method: str) -> Response:
     if not _allowed(path):
         raise NotFound(f"no such engine path: {path!r}", code="memory.engine_path_not_allowed")
     _check_method(method, path)
+    # #3518: refused with ``memory.writes_paused`` while an embedder switch runs.
+    require_engine_call_allowed(method, f"/{path}")
 
     client = _client(request)
 
@@ -187,47 +191,6 @@ def _lane_op(op_cfg: Any, lanes_cfg: Any) -> dict[str, Any]:
         "max_concurrent": op_cfg.max_concurrent or lanes_cfg.llm_max_concurrent,
         "model": op_cfg.virtual_model or "hal0/memory",
     }
-
-
-def _bank_queue_row(bank_id: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
-    pending = 0
-    processing = 0
-    failed = 0
-    oldest_pending_age_s: float | None = None
-    now = time.time()
-    for op in operations:
-        status = str(op.get("status", "")).lower()
-        if status in ("pending", "queued"):
-            pending += 1
-            created_at = op.get("created_at")
-            age = _age_s(created_at, now)
-            if age is not None and (oldest_pending_age_s is None or age > oldest_pending_age_s):
-                oldest_pending_age_s = age
-        elif status in ("processing", "running", "in_progress"):
-            processing += 1
-        elif status in ("failed", "error"):
-            failed += 1
-    return {
-        "bank_id": bank_id,
-        "pending": pending,
-        "processing": processing,
-        "failed": failed,
-        "oldest_pending_age_s": oldest_pending_age_s,
-    }
-
-
-def _age_s(created_at: Any, now: float) -> float | None:
-    if not created_at:
-        return None
-    try:
-        from datetime import datetime
-
-        ts = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=UTC)
-        return max(0.0, now - ts.timestamp())
-    except Exception:
-        return None
 
 
 def _engine_env_report(memory_cfg: Any) -> dict[str, Any]:
@@ -316,18 +279,16 @@ async def get_lanes(request: Request) -> dict[str, Any]:
                 b.get("bank_id") or b.get("id")
                 for b in (bank_resp.get("banks") or bank_resp.get("items") or [])
             ]
-            for bank_id in bank_ids:
-                if not bank_id:
-                    continue
-                try:
-                    ops_resp = await client.request_json(
-                        "GET", f"/v1/default/banks/{bank_id}/operations"
-                    )
-                    ops = ops_resp.get("operations") or ops_resp.get("items") or []
-                except Exception as exc:
-                    banks.append({"bank_id": bank_id, "error": str(exc)})
-                    continue
-                banks.append(_bank_queue_row(bank_id, ops))
+            # Counts are the engine's totals and the oldest age is read from
+            # the end of the list (the first page alone is the newest 20,
+            # never the oldest), by the reader GET /api/memory/health uses.
+            reader = EngineReader(client)
+            now = time.time()
+            banks = list(
+                await asyncio.gather(
+                    *(bank_queue_row(reader, str(b), now=now) for b in bank_ids if b)
+                )
+            )
         except Exception:
             banks = []
 
@@ -421,6 +382,13 @@ async def get_agents(request: Request) -> dict[str, Any]:
 # ── /api/memory/models ──────────────────────────────────────────────────
 
 
+def _embedder_status(models_cfg: Any) -> dict[str, Any]:
+    """Recorded against configured embedder (seam for tests; blocking — call off the loop)."""
+    from hal0.memory.embedder_record import configured_embedder, embedder_status
+
+    return embedder_status(configured_embedder(models_cfg))
+
+
 @router.get("/models")
 async def get_models(request: Request) -> dict[str, Any]:
     cfg = load_hal0_config()
@@ -429,10 +397,19 @@ async def get_models(request: Request) -> dict[str, Any]:
 
     decision_health = await _decision_health(decision_cfg)
 
+    # #3518: ``provider`` / ``model`` stay the configured values (existing
+    # clients read them). ``recorded_provider`` / ``recorded`` are the pair the
+    # store was built with; when it differs from the configured pair, or the
+    # store is ``mixed``, ``needs_switch`` is true and nothing has been changed
+    # on disk. ``effective`` is what the engine runs (or would start on), and
+    # ``conflict`` lists where that disagrees with the record.
+    embedder = await asyncio.to_thread(_embedder_status, models_cfg)
+
     return {
         "embeddings": {
             "provider": models_cfg.embeddings_provider,
             "model": models_cfg.embeddings_model,
+            **embedder,
         },
         "reranker": {
             "provider": models_cfg.reranker_provider,

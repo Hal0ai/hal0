@@ -6603,6 +6603,7 @@ def _slots_serving_model(
             device=_slot_row_device(row),
             model_id=_slot_row_model(row),
             context_length=0,
+            binary=str(row.get("binary") or ""),
         )
         for row in bound
     ]

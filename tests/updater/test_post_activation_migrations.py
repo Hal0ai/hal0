@@ -458,3 +458,34 @@ def test_a_failed_slot_scan_never_fails_the_migrations(
     monkeypatch.setattr("hal0.slot_view.unconverted_slot_files", _boom)
 
     assert run_post_activation_migrations().conversion_blockers == []
+
+
+def test_the_store_embedder_is_recorded_before_the_showcase_dropin_is_rendered(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """#3518: the render reads the embedder record, so the record of what an
+    upgraded store was built with has to exist first."""
+    order: list[str] = []
+    monkeypatch.setattr(
+        "hal0.memory.embedder_record.record_store_embedder",
+        lambda: order.append("record_embedder"),
+    )
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reconcile_showcase_dropin",
+        lambda **_k: order.append("showcase_dropin") or {"status": "converged"},
+    )
+    run_post_activation_migrations(job_id="j1")
+    assert order == ["record_embedder", "showcase_dropin"]
+
+
+def test_the_boot_time_pass_neither_records_nor_renders_the_embedder(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """Same gate as the drop-in reconcile: an actual update or install only."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        "hal0.memory.embedder_record.record_store_embedder", lambda: seen.append("record")
+    )
+    run_post_activation_migrations(job_id="j1", upgrade_memory_engine_venv=False)
+    assert seen == []
+    assert _stub_every_pass["showcase_dropin"] == []

@@ -14,10 +14,10 @@ completely absent when it's off. A fresh install turns it on for you; it stays
 a conscious, revertible choice rather than something that silently accumulates
 data on an existing box.
 
-Memory was rebuilt for v1.0 ("memory v2"): a redesigned dashboard workspace
-(ranked fact list, curate, history, a force-directed graph) sits behind the
-same engine-neutral backend described on this page. See
-[Browse the Bank workspace](/docs/guides/memory-workspace) for the UI tour.
+The dashboard shows memory in one place, the Memory area (Health, Facts,
+Knowledge, Operations and Agents), over the same engine-neutral backend
+described on this page. See [The Memory area](/docs/guides/memory-workspace)
+for the UI tour.
 
 ## What memory is
 
@@ -71,11 +71,11 @@ approval-gate pattern as `memory_add`/`memory_delete` — `memory_curate`'s
 `state` toggle is reversible so it stays autonomous, while
 `memory_mental_model_delete` and `memory_directive_delete` gate for operator
 approval the same way a bulk `memory_delete` does. The full tool-by-tool
-schema lives in [MCP tools](/docs/reference/mcp-tools) — this page covers the
+schema lives in [MCP tools: hal0-memory](/docs/reference/mcp-tools-memory) — this page covers the
 concepts those tools operate on.
 
 ![Memory interface showing stored facts and recall](/screenshots/memory-view.png)
-*The dashboard's Memory view (Bank workspace, list mode)*
+*The fact workspace on the Memory area's Facts tab (list mode)*
 
 The engine is **Hindsight** — a memory service that powers the shared operator
 and agent "brain." When configured, hal0 builds a Hindsight client and wraps
@@ -165,6 +165,78 @@ but is stamped with a `visibility:private` tag plus an `agent:<id>` tag, and
 recall stays single-bank (no cross-bank fan-out). Set it `false` to restore
 the pre-unified model — real `private:<agent>` banks and fan-out recall
 across them.
+
+## Write envelope
+
+A write bound for the Hindsight engine is normalised on its way there,
+whichever surface it came through: REST, MCP, the Hermes memory plugin or Hal0
+Brain (ADR-0058). The envelope never rejects a write. It rewrites the tag list
+and moves a few values into the document's metadata. The volatile `pgvector`
+fallback does not apply it: a write that provider accepts keeps its tags as
+given.
+
+Two tags are required, and hal0 adds them when the caller did not:
+
+- `agent:<id>`, the caller's resolved identity. A caller-supplied `agent:`
+  tag is replaced. A write with no identity is tagged `agent:unknown`.
+- Exactly one of `kind:durable` or `kind:ephemeral`. The default is
+  `kind:durable`. A caller can send either tag to choose, and an explicit
+  choice wins; if both are sent, `kind:ephemeral` wins.
+
+Two kinds of tag are moved out of the tag list:
+
+- **Session ids** go to metadata as `session_id`, or as the list
+  `session_ids` when a write carries several. A tag counts as a session id
+  when it is `session:<id>` (also `session_id:`, `session-id:` or
+  `sessionid:`) or a bare UUID in the 8-4-4-4-12 form. Any bare UUID is
+  moved, whatever it identifies. A bare run of hexadecimal digits, such as an
+  MD5 checksum, a commit hash or a digest, stays a tag. A session id taken
+  from a tag does not change the document id.
+- **Lifecycle words** go to metadata as `lifecycle` (comma-separated when a
+  write carries several). The words are `checkpoint`, `session-end`,
+  `pre-compress`, `continuity`, `bootstrap` and `chat`, matched as whole
+  tags. A write that sends no kind and carries one becomes `kind:ephemeral`.
+  A write you mark `kind:durable` keeps these words as ordinary tags: you
+  have said it is durable content, so `chat` there is a topic.
+
+A metadata key the caller already set is left as the caller set it; an empty
+`session_id` counts as not set. Every other tag passes through unchanged:
+namespaced tags such as `source:`, `knowledge:`, `origin:` and `harness:`, and
+your own bare words.
+
+A `project:<name>` tag is not stored as sent: hal0 normalises it and drops a
+denied name, and a durable write with no project gets `scope:global`.
+[Memory projects](/docs/concepts/memory-projects) has the rules.
+
+The reason is how the engine consolidates. It builds observations per scope,
+and by default a scope is one distinct set of tags. A tag that changes with
+every session gives each session a scope of its own, so related facts never
+consolidate together and anything that reads by tag sees very little. With
+session ids and lifecycle words out of the tag list, the tag sets stay few and
+stable.
+
+For the same reason, hal0 chooses the observation scope of each write rather
+than leaving it to the tag set:
+
+- A write with no `project:` tag is sent with `observation_scopes: "shared"`,
+  which consolidates it into one untagged scope whatever its tags are.
+- A write that carries a `project:<slug>` tag is sent with the explicit scope
+  `[["project:<slug>"]]`, one scope per project tag. Its observations carry
+  that project tag and nothing else, so what is learned in one project does
+  not become a belief about another.
+- A coding client's write with no project (`project:unresolved`) is sent with
+  `[["project:unresolved", "agent:<id>"]]`, a scope of its writer's own.
+- A private write in the unified bank keeps the engine's default scoping, so
+  an observation built from a private note still carries `visibility:private`.
+
+Pass another value in the `observation_scopes` argument of the MCP
+`memory_add` tool to override the first two. Because hal0 now always sends a
+scope on a non-private write, a bank-level default observation scope
+(`default_observation_scopes` in the bank's config) no longer applies to those
+writes; it still applies to private writes in the unified bank.
+
+The envelope applies to new writes. Memories stored before it keep the tags
+they were written with.
 
 ## Fact types: world, experience, observation
 
@@ -359,8 +431,8 @@ on any save. The write and restart go through hal0's privileged-operation seam
 rather than hal0-api (which runs unprivileged) touching `/etc/systemd`
 directly.
 
-Pick the engine model under **Engine model** on Settings → Data → Memory or on the
-agents Memory tab (Local slots / Upstream models), or from the CLI with
+Pick the engine model under **Engine model** on Settings → Data → Memory
+(Local slots / Upstream models), or from the CLI with
 `hal0 memory graph enable --model <id>`; `--local` returns to the local
 `extraction_slot`, and `--model` cannot be combined with `--slot` or
 `--local`. `GET /api/memory/graph/status` reports `target`, `available_models`
@@ -398,10 +470,10 @@ When enabled, memory becomes the shared brain that ties the platform together:
     can also call the MCP tools directly.
   </Card>
   <Card title="Operator memory" icon="document">
-    The dashboard's Memory view (Overview + Bank workspace) and the
-    `/api/memory/*` routes let you add, search, browse the graph, and curate
-    facts directly — across banks, documents, mental models, and directives.
-    See [Browse the Bank workspace](/docs/guides/memory-workspace).
+    The dashboard's Memory area and the `/api/memory/*` routes let you add,
+    search, browse the graph, and curate facts directly — across banks,
+    documents, mental models, and directives.
+    See [The Memory area](/docs/guides/memory-workspace).
   </Card>
   <Card title="Namespaced writes" icon="setting">
     Callers identify themselves (via the `X-hal0-Agent` header), so private
@@ -419,8 +491,9 @@ When enabled, memory becomes the shared brain that ties the platform together:
 ## Where to go next
 
 <CardGrid>
+  <LinkCard title="Memory projects" href="/docs/concepts/memory-projects" description="How project tags are resolved, the registry, and per-project scopes." />
   <LinkCard title="Enable memory" href="/docs/guides/enable-memory" description="Turn it on, pick an engine, configure graph extraction and reranking." />
-  <LinkCard title="Browse the Bank workspace" href="/docs/guides/memory-workspace" description="The dashboard's fact list, filters, curation, and graph views." />
+  <LinkCard title="The Memory area" href="/docs/guides/memory-workspace" description="Health and its repair path, facts, knowledge, operations and agents in the dashboard." />
   <LinkCard title="Agents" href="/docs/concepts/agents" description="The agent that uses memory as its brain." />
   <LinkCard title="Security" href="/docs/concepts/security" description="Identity, namespaces, and the auth layer." />
 </CardGrid>

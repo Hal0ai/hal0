@@ -1,47 +1,23 @@
-// hal0 dashboard — window-globals bridge for memory-graph hooks.
+// hal0 dashboard — window-globals bridge for the memory gate.
 //
-// MemoryTab is a .jsx prototype file (no ES imports across dash/*).
-// This bridge republishes the TanStack-Query memory hooks under
-// `window.__hal0Use*` so memory-tab.jsx finds them at runtime.
+// main.jsx and command-palette.jsx are window-globals prototype files (no ES
+// imports across dash/*). This bridge republishes the memory-enabled hook and
+// its pending flag under `window.__hal0Use*` so they find them at runtime.
+// Imported in main.tsx before either evaluates.
+//
+// It once also published the graph, list and stats hooks for the Agents ▸
+// Memory tab (memory-tab.jsx); that tab is gone and nothing reads them.
 
-import {
-  useAgentMemoryStats,
-  useMemoryEnabled,
-  useMemoryEnabledPending,
-  useMemoryGraphStatus,
-  useMemoryList,
-  useUpdateMemoryGraph,
-} from '@/api/hooks/useMemory'
-import { useFeatures } from '@/api/hooks/useFeatures'
+import { useMemoryEnabled, useMemoryEnabledPending } from '@/api/hooks/useMemory'
 
-;(window as unknown as {
-  __hal0UseMemoryGraphStatus?: typeof useMemoryGraphStatus
-  __hal0UseUpdateMemoryGraph?: typeof useUpdateMemoryGraph
-  __hal0UseMemoryList?: typeof useMemoryList
-  __hal0UseAgentMemoryStats?: typeof useAgentMemoryStats
-  __hal0UseMemoryEnabled?: typeof useMemoryEnabled
-}).__hal0UseMemoryGraphStatus = useMemoryGraphStatus
-;(window as unknown as {
-  __hal0UseUpdateMemoryGraph?: typeof useUpdateMemoryGraph
-}).__hal0UseUpdateMemoryGraph = useUpdateMemoryGraph
-;(window as unknown as {
-  __hal0UseMemoryList?: typeof useMemoryList
-}).__hal0UseMemoryList = useMemoryList
-;(window as unknown as {
-  __hal0UseAgentMemoryStats?: typeof useAgentMemoryStats
-}).__hal0UseAgentMemoryStats = useAgentMemoryStats
-// 0.4 gate: main.jsx (strict no-ES-imports prototype file) reads this to
-// drop the Agent route when the memory subsystem is disabled.
+// main.jsx drops the #memory route, and the palette its Memory entry, when
+// the memory subsystem is disabled.
 ;(window as unknown as {
   __hal0UseMemoryEnabled?: typeof useMemoryEnabled
 }).__hal0UseMemoryEnabled = useMemoryEnabled
-// Companion pending-flag — allows main.jsx to distinguish "loading"
-// from "settled disabled" so the #agent→#dashboard redirect only fires
-// after the status query resolves (not during the transient loading window).
+// Companion pending flag — lets main.jsx tell "loading" from "settled
+// disabled", so the #memory → #dashboard redirect fires only after the status
+// query resolves (not during the transient loading window).
 ;(window as unknown as {
   __hal0UseMemoryEnabledPending?: typeof useMemoryEnabledPending
 }).__hal0UseMemoryEnabledPending = useMemoryEnabledPending
-// /api/features — memory_engine is the live engine name for the tab label.
-;(window as unknown as {
-  __hal0UseFeatures?: typeof useFeatures
-}).__hal0UseFeatures = useFeatures

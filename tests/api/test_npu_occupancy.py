@@ -387,3 +387,28 @@ def test_occupancy_single_tenant_true_for_one_holder(client: TestClient, monkeyp
     body = client.get("/api/npu/occupancy").json()
     assert body["single_tenant"] is True
     assert body["slots"][0]["engine"] == "xdna"
+
+
+def test_occupancy_engine_reads_the_xdna_binary_from_config(client: TestClient, monkeypatch):
+    """A stale ``flm`` backend mirror on an xdna slot still reports ``engine: xdna``."""
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(npu_columns, "cached_aie_columns", AsyncMock(return_value=None))
+    _wire(
+        client,
+        [
+            _FakeSlot("flm", SlotState.READY, model_id="gemma3:4b", backend="flm"),
+            _FakeSlot("xdna-qwen", SlotState.READY, model_id="qwen3-xdna", backend="flm"),
+        ],
+    )
+    sm = client.app.state.slot_manager
+    sm.iter_configs = AsyncMock(
+        return_value=[
+            {"name": "flm", "device": "npu", "type": "llm"},
+            {"name": "xdna-qwen", "device": "npu", "type": "llm", "binary": "xdna"},
+        ]
+    )
+
+    body = client.get("/api/npu/occupancy").json()
+    by_name = {s["name"]: s for s in body["slots"]}
+    assert by_name["flm"]["engine"] == "flm"
+    assert by_name["xdna-qwen"]["engine"] == "xdna"

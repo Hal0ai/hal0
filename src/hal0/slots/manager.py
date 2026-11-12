@@ -53,6 +53,7 @@ from hal0.slots._cfg_helpers import (
     heal_missing_llm_type,
 )
 from hal0.slots.abandon import abandon_probe, is_abandoned, wait_for_load
+from hal0.slots.activation import is_xdna_slot
 from hal0.slots.config_write import (
     _cfg_effective_backend,
     _cfg_effective_provider,
@@ -64,6 +65,7 @@ from hal0.slots.config_write import (
     guard_and_normalize_tune,
     guard_and_normalize_xdna,
     guard_slot_write_payload,
+    guard_xdna_slot_shape,
     reconcile_and_guard_slot_config,
     reconcile_slot_updates,
 )
@@ -109,6 +111,7 @@ from hal0.slots.state import (
     SlotState,
     SlotStateRecord,
     SlotTerminateTimeout,
+    XdnaInFlmPortGroup,
     is_transition_legal,
     provider_registry_miss_is_expected,
     provider_requires_model,
@@ -138,6 +141,9 @@ _READY_STATES = (SlotState.READY, SlotState.SERVING, SlotState.IDLE)
 _UNIT_WATCH_INTERVAL_S = 5.0
 
 log = logging.getLogger(__name__)
+
+#: The FLM trio's coresident port group (identity rows + port claims).
+_FLM_TRIO_GROUP = "npu-flm-trio"
 
 
 def _snapshot_model_id(
@@ -1037,7 +1043,8 @@ class SlotManager:
         device = str(cfg.get("device") or "")
         # device=npu slots co-reside in one FLM process and share its port —
         # same derivation as the harvester's coresident marker (hal0.ports).
-        coresident_group = "npu-flm-trio" if device == "npu" else None
+        # An xdna slot runs its own llama-server on its own port (ADR-0057).
+        coresident_group = _FLM_TRIO_GROUP if device == "npu" and not is_xdna_slot(cfg) else None
         try:
             is_seed = name in self.seeded_slots()
         except Exception:
@@ -1089,6 +1096,33 @@ class SlotManager:
         if row is not None:
             self._bind_key(canonical, int(row.id))
         return row
+
+    def _xdna_in_flm_port_group(self, name: str, cfg: Any) -> bool:
+        """True when ``cfg`` is an xdna slot whose stored identity row is in FLM's group.
+
+        Only a slot made xdna before ADR-0057's launch fix can be here: its row
+        was stamped ``npu-flm-trio``, so the port authority shares FLM's port
+        with it. hal0 does not migrate that claim; the write and the load
+        refuse (:meth:`_refuse_xdna_in_flm_port_group`) and the fix is to delete
+        and recreate the slot. Never raises; no identity store reads as False.
+        """
+        if self._identity is None or not is_xdna_slot(_cfg_to_dict(cfg)):
+            return False
+        try:
+            row = self._identity.get_by_name(self._resolve_alias(name))
+        except Exception:
+            return False
+        return row is not None and getattr(row, "coresident_group", None) == _FLM_TRIO_GROUP
+
+    def _refuse_xdna_in_flm_port_group(self, name: str, cfg: Any) -> None:
+        """Raise :class:`XdnaInFlmPortGroup` for :meth:`_xdna_in_flm_port_group`."""
+        if self._xdna_in_flm_port_group(name, cfg):
+            raise XdnaInFlmPortGroup(
+                f"slot {name!r} is registered in the FLM trio's shared port group, "
+                "so as an xdna slot it would launch on FLM's port; delete the slot "
+                "and create a new xdna slot, which gets a port of its own",
+                details={"slot": name, "coresident_group": _FLM_TRIO_GROUP},
+            )
 
     def _stamp_id(self, slot: Slot) -> Slot:
         """Populate ``slot.slot_id`` from the identity store, best-effort."""
@@ -1170,6 +1204,17 @@ class SlotManager:
             if row is None:
                 continue
             count += 1
+            if self._xdna_in_flm_port_group(name, cfg):
+                # Changes nothing (no claim, TOML or group): the load refuses
+                # with the same error, and the operator recreates the slot.
+                log.error(
+                    "slot.xdna_in_flm_port_group",
+                    extra={
+                        "slot": name,
+                        "hint": "delete this slot and create a new xdna slot",
+                    },
+                )
+                continue
             if self._port_authority is None:
                 continue
             port = _cfg_port(cfg)
@@ -3046,6 +3091,7 @@ class SlotManager:
                 model_id, provider=_cfg_effective_provider(slot_cfg)
             )
 
+        self._refuse_xdna_in_flm_port_group(slot_name, slot_cfg)
         cfg = _launch_cfg(slot_cfg, model_id)
 
         # Container path: write + start the podman systemd unit.
@@ -3066,6 +3112,8 @@ class SlotManager:
     ) -> None:
         """Run the container seam's refusals on the config ``_spawn_locked`` will launch."""
         from hal0.providers.container import container_provider
+
+        self._refuse_xdna_in_flm_port_group(str(_cfg_to_dict(slot_cfg).get("name") or ""), slot_cfg)
 
         check = getattr(container_provider(), "check_load", None)
         if check is None:
@@ -3455,6 +3503,8 @@ class SlotManager:
             guard_and_normalize_tune(cfg_dict, {"tune": cfg_dict["tune"]})
         if "xdna" in cfg_dict:
             guard_and_normalize_xdna(cfg_dict, {"xdna": cfg_dict["xdna"]})
+        guard_xdna_slot_shape(cfg_dict)
+        self._refuse_xdna_in_flm_port_group(slot_name, cfg_dict)
         await self._check_npu_exclusivity(slot_name, cfg_dict)
         # SC-4, first-of-type: the create modal no longer asks "make this the
         # default?" — the FIRST slot of a type silently becomes that type's
@@ -3726,6 +3776,13 @@ class SlotManager:
             # two-defaults-on-disk state is not rejected for a conflict it did
             # not create). Returns a fresh dict — rebind ``cfg_dict``.
             cfg_dict = reconcile_and_guard_slot_config(slot_name, cfg_dict, updates)
+            # A write that makes the slot xdna while its identity row is still
+            # in FLM's port group would launch on FLM's port: refused.
+            changed = set(updates) | set(
+                updates["slot"] if isinstance(updates.get("slot"), dict) else ()
+            )
+            if changed & {"binary", "device"}:
+                self._refuse_xdna_in_flm_port_group(slot_name, cfg_dict)
 
             try:
                 write_slot_toml(cfg_path, cfg_dict)
@@ -3769,7 +3826,7 @@ class SlotManager:
             # change can also move the effective backend now (it re-derives
             # ``device`` via _reconcile_device_profile), so refresh the mirror
             # for either trigger off the reconciled cfg.
-            if "device" in updates or "profile" in updates:
+            if "device" in updates or "profile" in updates or "binary" in updates:
                 eff = _cfg_effective_backend(cfg_dict)
                 if eff is not None:
                     new_extra["backend"] = eff
@@ -4419,8 +4476,7 @@ class SlotManager:
             return 1
         # The ggml-xdna runner (ADR-0057) launches llama-server with a fixed
         # ``-np 1``: another serial backend, so it gets the same default cap.
-        binary = str(cfg.get("binary") or (cfg.get("slot") or {}).get("binary") or "").lower()
-        return 1 if binary == "xdna" else None
+        return 1 if is_xdna_slot(cfg) else None
 
     # ── private helpers ──────────────────────────────────────────────────────
 

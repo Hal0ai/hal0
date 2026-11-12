@@ -161,6 +161,8 @@ def test_list_and_as_dict(store: BridgeStore) -> None:
         "hal0-cli",
         "hal0-doctor",
         "shared",
+        "unknown",
+        "unresolved",
         "hermes__scout",
     ],
 )

@@ -2014,11 +2014,19 @@ def run_post_activation_migrations(
     # surprise memory outage, the same reason the engine pass is skipped there.
     if upgrade_memory_engine_venv:
         try:
+            from hal0.memory.embedder_record import record_store_embedder
             from hal0.memory.extraction_env import (
                 reconcile_extraction_dropin,
                 reconcile_showcase_dropin,
                 reload_and_restart_hindsight,
             )
+
+            # #3518: write down the embedder this box's store was built with
+            # before the showcase drop-in is rendered. The render reads the
+            # record, so an upgraded store stays on its own model instead of
+            # moving to the [memory.models] default. A box with no store has
+            # nothing to record here.
+            record_store_embedder()
 
             # #3492: write the showcase drop-in first without a restart, so a
             # box where both drifted pays for one engine restart, not two.
@@ -2393,6 +2401,31 @@ def _is_editable_install() -> bool:
     # Git-tracked FHS installs: code lives in a versioned dir under
     # /usr/lib/hal0/ — not truly editable (maintainer-only dev layout).
     return not _is_git_install()
+
+
+class UpdateBlockedByEmbedderSwitch(UpdateError):
+    """409: an embedder switch is running or unfinished; an update must wait (#3518)."""
+
+    code = "system.update_blocked_by_embedder_switch"
+    status = 409
+
+
+def _raise_if_embedder_switch() -> None:
+    """Refuse an update while ``hal0 memory embedder switch`` is running or unfinished.
+
+    An update restarts hal0-api and may upgrade the memory engine, whose
+    upgrade snapshots the engine's data directory and can roll back to it.
+    Either would cut across a switch that has replaced some banks and not
+    others.
+    """
+    from hal0.memory.embedder_switch import blocking_reason
+
+    reason = blocking_reason()
+    if reason is not None:
+        raise UpdateBlockedByEmbedderSwitch(
+            f"hal0 update cannot start: {reason}",
+            details={"hint": "hal0 memory embedder switch --status"},
+        )
 
 
 def _raise_if_editable_install() -> None:
@@ -4390,6 +4423,7 @@ class Updater:
         # the FHS layout (/usr/lib/hal0/current symlink + venv site-packages)
         # which does not exist in an editable checkout.  Continuing would
         # silently extract a tarball that is never actually loaded.
+        _raise_if_embedder_switch()
         _raise_if_editable_install()
         # #1464: prove we can reach the root-only tree (directly or through the
         # hal0-update seam) BEFORE burning a download + sha256 + cosign pass.
@@ -4415,6 +4449,7 @@ class Updater:
         Args:
             version: the version ``prepare()`` staged.
         """
+        _raise_if_embedder_switch()
         _raise_if_editable_install()
         seam = self._seam()
         seam.assert_privileges()
@@ -4606,6 +4641,7 @@ class Updater:
         # Single chokepoint: hard-refuse on editable/dev installs before any
         # download/extract work (prepare/commit re-check, so the two-phase
         # route path is covered too).
+        _raise_if_embedder_switch()
         _raise_if_editable_install()
         prepared = await self.prepare(version)
         return await self.commit(str(prepared["version"]))

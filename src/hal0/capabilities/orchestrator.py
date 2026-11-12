@@ -1197,8 +1197,10 @@ class CapabilityOrchestrator:
             configs = await self._slot_manager.iter_configs()
         except Exception:
             configs = []
+        from hal0.slots.activation import is_xdna_slot
+
         for cfg in configs:
-            if cfg.get("type") != "llm" or cfg.get("device") != "npu":
+            if cfg.get("type") != "llm" or cfg.get("device") != "npu" or is_xdna_slot(cfg):
                 continue
             name = str(cfg.get("name", "")).strip()
             if not name:

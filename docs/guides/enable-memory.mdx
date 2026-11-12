@@ -153,7 +153,7 @@ names an upstream model id as `hal0 memory graph status` lists it under
 advertises. That list is filled right after a `hal0-api` restart: the
 status call fetches each provider's catalog when its cache is empty, and
 retries a provider that is offline at most once a minute. The dashboard's **Engine model** picker (Settings → Data →
-Memory, and the agents Memory tab) offers the same two groups. On a box
+Memory) offers the same two groups. On a box
 upgraded from an earlier release the first save repoints `hindsight-api`
 at `hal0/memory` once (one drop-in write and restart); until then the
 **Engine running** row says the engine is still pinned to the old slot id.
@@ -263,7 +263,7 @@ engine's own `/profile` endpoint answers `410 Gone` from Hindsight 0.10.0 on;
 hal0's `/api/memory/banks/<bank>/profile` keeps working by composing the same
 answer from the bank list and the bank config.
 
-`--reflect-mission` is the text the Memory workspace shows under the bank picker as the bank's description. You can also edit it there in place; see [The bank bar](/docs/guides/memory-workspace#the-bank-bar).
+`--reflect-mission` is the text the Memory area's Facts tab shows in the bank bar as the bank's description. You can also edit it there in place; see [The bank bar](/docs/guides/memory-workspace#the-bank-bar).
 
 ## Async operations and mental models
 
@@ -340,6 +340,166 @@ a Cognee migration path — there is no CLI command for migrating a
 Cognee-era store. See the engine note above.
 </Aside>
 
+## Change the embedding model
+
+The embedding model belongs to the store, not to the config. hal0 records the
+provider and model a store was built with and keeps the engine on that pair,
+because the engine does not re-embed stored vectors: started on another model
+it raises no error and recall over older memories quietly gets worse. Editing
+`[memory.models]` therefore changes nothing by itself. One command moves a
+store:
+
+```sh
+sudo hal0 memory embedder switch hindsight-ai/hs-embed-1            # dry run: checks and the plan
+sudo hal0 memory embedder switch hindsight-ai/hs-embed-1 --apply    # do it
+```
+
+Run it on the box, as root. The dry run lists every bank with its fact,
+observation, mental-model, directive and document counts, the free disk
+space, and an estimate of the duration. It writes nothing: no export, no
+pause, no file.
+
+### Memory is out of service while it runs
+
+`--apply` is your consent to this, so read it first.
+
+- **The engine is taken away from every other client.** For the whole run it
+  listens only on a private loopback port that the switch picks. That is the
+  only way to keep a client that writes to the engine's own port (the
+  Hindsight coding-agents plugin, the Pi coder's plugin) from changing a bank
+  while it is being rebuilt. Such a client simply fails to connect.
+- **Recall does not work**, for the whole run and not only during restarts.
+  hal0 sees the engine as down: recall, search and reflect answer
+  `503 memory.engine_unavailable`.
+- **Writes are refused**: `503 memory.writes_paused` with `Retry-After: 30`.
+  Nothing queues them. The Hermes memory plugin logs a failed turn capture
+  and drops it, so conversation turns captured during the switch are lost.
+- **`hal0 update` refuses to start**, and the switch refuses while an update
+  is queued or running.
+
+A run restarts the engine three times (15 to 30 seconds each on the reference
+box), exports and restores every bank, and re-embeds at about 60 facts per
+second on CPU. A small store takes about a minute and a half. Pick a quiet
+moment.
+
+### What `--apply` does
+
+1. Pauses memory writes and waits for the engine's queues to drain.
+2. Restarts the engine on its private port, still on its original model, and
+   lists the banks. That list is what the run rebuilds.
+3. Exports every bank to
+   `/var/lib/hal0/backups/memory-embedder-switch-<time>-<run>/` and checks
+   each archive against the bank.
+4. Records the new embedder, rewrites the engine's managed drop-in from that
+   record, restarts the engine (still private) and confirms from its
+   environment that it runs the new model.
+5. Restores each archive into a temporary bank named `<bank>.switch-<run>`,
+   which re-embeds every fact with the new model and makes no LLM call, and
+   compares it with the archive.
+6. Only when every bank matches: for each bank, checks the original one more
+   time, deletes it, renames its rebuilt bank into place and checks the
+   result.
+7. Returns the engine to its normal address and then lets writes through.
+
+The engine is isolated with one drop-in for its unit,
+`hindsight-api.service.d/zzzz-hal0-embedder-switch.conf`, which the switch
+writes and removes. It keeps the command your unit already runs, your own
+`ExecStart` drop-in included, and changes only the address. The preflight
+reads the unit with `systemctl cat hindsight-api.service` and refuses, before
+anything changes, when:
+
+- `ExecStart` is not a direct command line it can rewrite: a shell wrapper
+  (`/bin/sh -c '…'`), a prefix other than `-` or `:` (`@`, `+`, `!`, `!!`),
+  a `%` specifier or `$VAR` in the `--host` or `--port` value, or a
+  backslash escape. Make it a plain command line that names the engine's
+  binary with literal `--host` and `--port` values, run
+  `sudo systemctl daemon-reload`, and run the switch again;
+- a drop-in whose name sorts after `zzzz-hal0-embedder-switch.conf` sets
+  `ExecStart`, so it would win. The refusal names the file and its
+  `ExecStart`; rename it so it sorts earlier;
+- an `ExecStartPre`, `ExecStartPost`, `ExecCondition` or `ExecReload` line
+  names the engine's normal port (a health probe, say). It would fail at
+  every restart while the engine is private. The refusal names the line.
+
+After each restart onto the private port the switch confirms that the
+process listening there belongs to `hindsight-api.service` and that
+`/version` reports the engine version the preflight saw. Anything else on
+that port stops the run at once, naming the process. If anything still
+answers at the normal address (a refused connection is the only "nothing
+there"), the run stops before it has exported anything.
+
+Nothing else writes the engine's banks or drop-ins while a run is unfinished:
+the default banks are not seeded, a new install's first-start step skips, and
+hal0-api's replay of boot-time writes waits for the pause to lift.
+
+### If it fails or is interrupted
+
+Before step 6 (an import fails, a count differs, the engine does not come up
+on the new model, Ctrl-C): the command deletes the temporary banks, returns
+the engine to its normal address on the original model, lifts the pause and
+exits non-zero naming the bank and what differs. The original banks were
+never touched.
+
+Step 6 cannot be undone, so it can be resumed instead. If it stops part-way,
+**the engine stays on its private port and writes stay paused**. That is on
+purpose, and nothing ends it by itself: the banks are half replaced. The
+`memory_embedder` row of `hal0 doctor all` warns for as long as that lasts,
+naming the run and its archive directory.
+
+```sh
+sudo hal0 memory embedder switch --status    # where it stands and what --resume would do
+sudo hal0 memory embedder switch --resume    # finish it
+```
+
+If the very last restart fails, after the isolation drop-in is gone, the
+engine is back at its normal address (recall works) while writes stay paused.
+`--status` and the doctor row say exactly that, and `--resume` isolates the
+engine again before it finishes the run.
+
+`--status` changes nothing and runs the same checks a resume would. For each
+bank it says what `--resume` will do; where the switch cannot repair
+something by itself it says exactly what you do, down to the command.
+
+`--resume` looks at which banks the engine has now, not only at its journal.
+What it can repair it repairs: a rebuilt bank that no longer matches is
+rebuilt from the original, a bank under neither name is restored from its
+archive. Run after a stop that happened before step 6, the same command
+undoes the run instead. The journal is kept in two places
+(`/var/lib/hal0/state/` and the archive directory), so losing one copy does
+not lose the run. You never edit it by hand.
+
+`--clear-gate` returns the engine to its normal address and lifts the pause
+by hand. It is for one case only, a pause or a private engine that no journal
+explains, and it is refused while any switch is unfinished. It checks no
+bank, so look at `--status` first.
+
+### Before you start
+
+- The preflight refuses while any bank has queued or running operations.
+  The engine's export does not carry them, so a queued retain would be lost
+  with the old bank. Wait for them (`hal0 memory ops list` shows them) or
+  cancel them (`DELETE /api/memory/banks/<bank>/operations/<id>`).
+  `--allow-pending` goes ahead anyway: what those operations have not written
+  when a bank is exported is not carried over.
+- The export carries only facts that belong to a document. A bank holding any
+  other fact does not match its archive, and the switch stops at step 3
+  saying so. Observations whose source facts are gone are not exported
+  either; that is reported in the result, not refused.
+- It needs free space of about the size of the engine's data directory on
+  that filesystem (the rebuilt banks sit beside the originals until the swap)
+  and half of that again for the archives.
+- The archives are kept. The command prints their directory and the `rm -r`
+  line that deletes them. They hold your memories in plain text; the
+  directory is `0700`.
+- The audit log and LLM request traces of a bank are not carried over.
+- A store flagged as mixed (it may hold vectors from two models) is repaired
+  the same way: switch it to the model it is already recorded on.
+- The switch does not edit `hal0.toml`. If `[memory.models]` names another
+  model afterwards, that is fine: the engine runs what the store was built
+  with, and `hal0 doctor all` says so without a warning. Set
+  `embeddings_provider` and `embeddings_model` there to the new pair when you
+  want the two to agree.
+
 ## Destructive ops are audited
 
 Every destructive call under `/api/memory/*` — bank delete, and the
@@ -351,8 +511,8 @@ wipe is attributable after the fact.
 
 - [Memory](/docs/concepts/memory) — what the subsystem is, namespaces,
   fact types, directives, and mental models.
-- [Browse the Bank workspace](/docs/guides/memory-workspace) — the
-  dashboard's fact browser, filters, curation, and graph views.
+- [The Memory area](/docs/guides/memory-workspace) — the dashboard's
+  Health, Facts, Knowledge, Operations and Agents tabs.
 - [Run agents](/docs/guides/run-agents) — agents are the main consumer of
   the memory store.
 - [Connect MCP servers](/docs/guides/connect-mcp) — the `memory_*` tool

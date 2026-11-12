@@ -26,6 +26,7 @@ from hal0.config.schema import (
     SlotTuneConfig,
 )
 from hal0.errors import BadRequest
+from hal0.slots.activation import is_xdna_slot
 from hal0.slots.argv import _split_pairs
 
 log = logging.getLogger(__name__)
@@ -235,14 +236,20 @@ def guard_tune_write(
     skips the flag-pin check and the engine-family checks (a halogen slot has no
     n-gram drafter, so ``speculation = "ngram"`` is refused there, and a context
     past its native window needs ``HALOGEN_ROPE_YARN`` in the profile's flags).
+    An NPU slot is refused unless it runs the xdna runner, which also refuses
+    ``speculation = "ngram"``.
     """
     if "tune" not in updates or updates["tune"] is None:
         return
     merged_type = updates.get("type", base_cfg.get("type")) or "llm"
     merged_device = updates.get("device", base_cfg.get("device"))
-    if merged_type != "llm" or merged_device == "npu":
+    # An xdna slot (ADR-0057) sits on the NPU but is a llama-server launch, so
+    # the llama-side tune keys apply to it; only FastFlowLM has nothing to tune.
+    xdna = is_xdna_slot({**base_cfg, **{k: v for k, v in updates.items() if k != "tune"}})
+    if merged_type != "llm" or (merged_device == "npu" and not xdna):
         raise BadRequest(
             "per-slot [tune] overrides apply only to llm slots on a non-NPU device "
+            "or the xdna runner "
             f"(type={merged_type!r}, device={merged_device!r})",
             code="slot.tune_not_supported",
             details={"type": merged_type, "device": merged_device},
@@ -251,6 +258,15 @@ def guard_tune_write(
     wants_speculation = (
         tune.get("speculation") if isinstance(tune, Mapping) else getattr(tune, "speculation", None)
     )
+    if xdna and wants_speculation == "ngram":
+        # The xdna launch runs one sequence (-np 1) on the NPU fork, which has
+        # no tested speculative path; auto already resolves to none there
+        # (no MTP, no drafter kinds), so only an explicit ngram is refused.
+        raise BadRequest(
+            "speculation 'ngram' is not available on the xdna runner (it takes auto or off)",
+            code="slot.tune_unsupported_value",
+            details={"key": "speculation", "value": "ngram", "runner": "xdna"},
+        )
     runtime_family = getattr(profile, "runtime_family", None)
     if runtime_family == "halogen" and wants_speculation == "ngram":
         raise BadRequest(

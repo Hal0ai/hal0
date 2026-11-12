@@ -501,6 +501,7 @@ async def _normalize_slot_views(request: Request) -> list:
             device=r.get("device", ""),
             model_id=r["model_id"],
             context_length=int(r.get("context_length") or 0),
+            binary=str(r.get("binary") or ""),
         )
         for r in rows
     ]

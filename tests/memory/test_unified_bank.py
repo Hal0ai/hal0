@@ -31,6 +31,7 @@ class RecordingClient:
         metadata=None,
         tags=None,
         timestamp=None,
+        **extra,
     ):
         self.retained.append(
             {
@@ -41,6 +42,7 @@ class RecordingClient:
                 "metadata": dict(metadata or {}),
                 "tags": list(tags or []),
                 "timestamp": timestamp,
+                **extra,
             }
         )
         self._facts_by_bank.setdefault(bank_id, []).append(
@@ -462,3 +464,72 @@ def test_config_default_unified_bank_true():
     from hal0.config.schema import MemoryConfig
 
     assert MemoryConfig().unified_bank is True
+
+
+# ── Private notes owned by no identified agent are visible to nobody (#3560) ──
+
+
+async def _seed_unknown_private() -> HindsightProvider:
+    """A bank holding one shared note and one private ``agent:unknown`` note
+    (what a ``private:`` write with no client id is stamped with)."""
+    p = HindsightProvider(client=RecordingClient(), unified_bank=True)
+    await p.add("orphan secret", dataset="private:ghost")  # no id → agent:unknown
+    await p.add("public note", dataset="shared", client_id="hermes")
+    stored = p._client._facts_by_bank["shared"]
+    orphan = next(f for f in stored if f["text"] == "orphan secret")
+    assert "agent:unknown" in orphan["tags"] and "visibility:private" in orphan["tags"]
+    return p
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cid", [None, "anonymous", "unknown"])
+async def test_unidentified_caller_reads_no_private_unknown_note(cid):
+    p = await _seed_unknown_private()
+    recalled = {i["text"] for i in await p.recall("note", dataset="shared", client_id=cid)}
+    assert recalled == {"public note"}
+    listed = {i["text"] for i in (await p.list_items(dataset="shared", client_id=cid))["items"]}
+    assert listed == {"public note"}
+
+
+@pytest.mark.asyncio
+async def test_identified_agent_does_not_see_private_unknown_note():
+    p = await _seed_unknown_private()
+    recalled = {i["text"] for i in await p.recall("note", dataset="shared", client_id="hermes")}
+    assert recalled == {"public note"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cid", [None, "anonymous", "unknown"])
+async def test_unidentified_caller_reflect_scope_admits_no_private_note(cid):
+    from hal0.memory.read_scope import reflect_visibility_scope, tags_readable
+
+    groups = reflect_visibility_scope(cid)
+    assert not tags_readable(groups, ["agent:unknown", "visibility:private"])
+    assert tags_readable(groups, ["agent:hermes"])
+
+
+@pytest.mark.asyncio
+async def test_real_agent_still_sees_only_its_own_private_notes():
+    p = _unified(client_id="hermes")
+    await p.add("hermes note", dataset="private:hermes", client_id="hermes")
+    await p.add("scribe note", dataset="private:scribe", client_id="scribe")
+    got = {i["text"] for i in await p.recall("note", dataset="shared", client_id="hermes")}
+    assert got == {"hermes note"}
+
+
+def test_provider_rule_and_engine_scope_agree_for_unidentified_callers():
+    from hal0.memory.read_scope import reflect_visibility_scope, tags_readable
+
+    for caller in (None, "", "anonymous", "unknown", "hermes"):
+        for tags in (
+            ["agent:unknown", "visibility:private"],
+            ["visibility:private"],
+            ["agent:hermes", "visibility:private"],
+            ["agent:unknown"],
+        ):
+            asked = HindsightProvider._caller_agent(
+                HindsightProvider(client=RecordingClient(), unified_bank=True), caller
+            )
+            assert tags_readable(reflect_visibility_scope(caller), tags) is (
+                HindsightProvider._is_visible_to({"tags": tags}, asked)
+            ), (caller, tags)
