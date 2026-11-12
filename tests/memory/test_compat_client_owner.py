@@ -102,7 +102,7 @@ def test_root_refuses_a_root_home_with_a_directory_someone_else_owns(
     dropped = _as_root_in(monkeypatch, home_owner=(0, 0))
     cfg = home / ".hindsight" / "coding-agent.json"
 
-    with pytest.raises(cc.UnsafeConfigPath, match=r"symlink|root-owned directory|outside"):
+    with pytest.raises(cc.UnsafeConfigPath, match="symlink root does not own"):
         cc.write_client_config(cfg, {}, home=home)
 
     assert dropped == [] and not (home / "dotfiles" / "coding-agent.json").exists()
