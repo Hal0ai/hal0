@@ -348,6 +348,10 @@ LANE_OP_ENV_PREFIX = {
 #: Ops whose Hindsight 1.2.0 env accepts ``*_MAX_COMPLETION_TOKENS`` (#3596).
 _COMPLETION_CAP_OPS = frozenset({"consolidation", "reflect"})
 
+#: Cap rendered when ``[memory.lanes.<op>].max_completion_tokens`` is unset.
+#: Resolved here, not in the schema, so a partial table keeps it (#3596).
+DEFAULT_OP_COMPLETION_TOKENS = 8192
+
 
 def render_showcase_env(
     *,
@@ -462,11 +466,14 @@ def render_showcase_env(
         # reflect only (config.py ENV_CONSOLIDATION_/ENV_REFLECT_MAX_COMPLETION_TOKENS,
         # engine default None = uncapped). Retain has its own cap; mental-model
         # refresh runs through reflect. 0 = operator opted out of the cap.
-        if op in _COMPLETION_CAP_OPS and op_cfg.max_completion_tokens:
-            lines.append(
-                f"Environment=HINDSIGHT_API_{prefix}_MAX_COMPLETION_TOKENS="
-                f"{op_cfg.max_completion_tokens}"
+        if op in _COMPLETION_CAP_OPS:
+            cap = (
+                DEFAULT_OP_COMPLETION_TOKENS
+                if op_cfg.max_completion_tokens is None
+                else op_cfg.max_completion_tokens
             )
+            if cap:
+                lines.append(f"Environment=HINDSIGHT_API_{prefix}_MAX_COMPLETION_TOKENS={cap}")
 
     return "\n".join(lines) + "\n"
 

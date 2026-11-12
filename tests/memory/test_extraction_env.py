@@ -2325,14 +2325,13 @@ def test_completion_cap_rejected_where_engine_has_no_var(op):
         MemoryLanesConfig(**{op: MemoryLaneOpConfig(max_completion_tokens=4096)})
 
 
-def test_seed_memory_profile_ships_the_dry_repetition_guard():
-    from hal0.config.schema import SEED_PROFILES
+def test_partial_lane_tables_keep_the_default_cap():
+    """#3596 review: a tuned box with [memory.lanes.consolidation] set must stay capped."""
+    from hal0.config.schema import MemoryLanesConfig
 
-    flags = SEED_PROFILES["memory"]["flags"]
-    for token in (
-        "--dry-multiplier 0.8",
-        "--dry-base 1.75",
-        "--dry-allowed-length 4",
-        "--dry-penalty-last-n 4096",
-    ):
-        assert token in flags
+    lanes = MemoryLanesConfig.model_validate(
+        {"consolidation": {"max_concurrent": 2}, "reflect": {"timeout_s": 900}}
+    )
+    env = _showcase_env_map(lanes)
+    assert env["HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS"] == "8192"
+    assert env["HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS"] == "8192"

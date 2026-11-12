@@ -3001,8 +3001,8 @@ class MemoryLaneOpConfig(BaseModel):
             "Hard cap on one LLM call's output tokens (#3596): "
             "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS for consolidation, "
             "HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS for reflect (which also "
-            "bounds mental-model refresh, a reflect call). 0 leaves the engine "
-            "uncapped. Valid only on consolidation and reflect; retain is capped "
+            "bounds mental-model refresh, a reflect call). Unset means 8192 for "
+            "consolidation and reflect; 0 leaves the engine uncapped. Valid only on consolidation and reflect; retain is capped "
             "by [memory.graph].extraction_max_tokens, and Hindsight has no "
             "separate mental-model-refresh cap."
         ),
@@ -3050,12 +3050,8 @@ class MemoryLanesConfig(BaseModel):
     reasoning_effort: str = Field(default="none", description="HINDSIGHT_API_LLM_REASONING_EFFORT.")
     strict_schema: bool = Field(default=False, description="HINDSIGHT_API_LLM_STRICT_SCHEMA.")
     retain: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
-    consolidation: MemoryLaneOpConfig = Field(
-        default_factory=lambda: MemoryLaneOpConfig(max_completion_tokens=8192)
-    )
-    reflect: MemoryLaneOpConfig = Field(
-        default_factory=lambda: MemoryLaneOpConfig(max_completion_tokens=8192)
-    )
+    consolidation: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    reflect: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
     mental_model_refresh: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
 
     @field_validator("reasoning_effort")
