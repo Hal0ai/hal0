@@ -1216,7 +1216,7 @@ async def test_engine_work_seen_on_an_original_after_the_flip_is_kept_for_the_ro
 
     switch = box.switch(hook=hook)
 
-    async def no_rows(_bank: str, _since: Any, _until: Any = None) -> list[dict[str, Any]]:
+    async def no_rows(_bank: str, _since: Any) -> list[dict[str, Any]]:
         return []
 
     switch._engine_work_since = no_rows  # type: ignore[method-assign]
@@ -1327,6 +1327,41 @@ async def test_a_journal_from_before_the_engine_work_record_counts_from_the_runs
     await box.kill_at("restored:alpha")
     _strip_journal("engine_work", top=("flipped_at",))
     box.engine.engine_op("gamma", "op-refresh-8", seconds=1)
+
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "rolled_back"
+    assert _final_journal()["stray_banks"] == ["gamma"]
+    assert box.record().mixed is True
+
+
+async def test_a_journal_carrying_reverted_at_still_loads_and_resumes(box: Box) -> None:
+    # Written by an earlier build of #3604, which saved when a rollback put the
+    # engine back on the previous model. The key is dropped on load.
+    await box.kill_at("restored:alpha")
+    path = es.journal_path()
+    data = json.loads(path.read_text())
+    data["reverted_at"] = datetime.now(UTC).isoformat()
+    path.write_text(json.dumps(data))
+    loaded = es.load_journal()
+    assert loaded is not None and not hasattr(loaded, "reverted_at")
+    assert "reverted_at" not in loaded.to_dict()
+
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "rolled_back"
+    _assert_rolled_back(box)
+    assert "reverted_at" not in _final_journal()
+
+
+async def test_a_refresh_after_an_old_journals_reverted_at_still_marks(box: Box) -> None:
+    # reverted_at no longer narrows anything: a row touched after it marks.
+    await box.kill_at("restored:alpha")
+    path = es.journal_path()
+    data = json.loads(path.read_text())
+    data["reverted_at"] = datetime.now(UTC).isoformat()
+    path.write_text(json.dumps(data))
+    box.engine.engine_op("gamma", "op-after-revert", seconds=1)
 
     result = await box.switch(None).resume()
 
@@ -4061,14 +4096,20 @@ async def test_a_refresh_parked_past_the_budget_refuses_at_once_and_names_when_i
     assert box.record().embedder == BGE and not es.journal_path().exists()
 
 
-async def test_a_dry_run_says_when_parked_work_lets_the_switch_run(box: Box) -> None:
+async def test_a_dry_run_refuses_parked_work_the_way_apply_would(box: Box) -> None:
     box.engine.engine_op("gamma", "op-park-2", seconds=None, parked_s=1700)
 
     plan = await box.switch().preflight()
 
-    assert plan["refusals"] == []
     due = _due(box, "gamma", "op-park-2")
-    assert any(f"parked its own work on gamma until {due}" in w for w in plan["warnings"])
+    assert _codes(plan) == ["engine_operation_parked"], "not an OK plan --apply would refuse"
+    message = plan["refusals"][0]["message"]
+    assert message.startswith("--apply would refuse: ")
+    assert f"refresh_mental_model on gamma (operation op-park-2), due at {due}" in message
+    assert f"Run `hal0 memory embedder switch` again after {due}" in message
+    assert [op["id"] for op in plan["engine_operations"]] == ["op-park-2"]
+    assert not any("The switch waits up to" in w for w in plan["warnings"])
+    assert box.sleeps == 0 and box.events == []
 
 
 async def test_a_refresh_parked_until_inside_the_budget_is_waited_for(box: Box) -> None:
@@ -4101,11 +4142,12 @@ async def test_work_parked_when_the_pause_settles_fails_at_once_and_names_when_i
     assert box.record().mixed is False, "nothing ran on the target"
 
 
-async def test_work_parked_on_an_original_after_the_flip_does_not_mark_a_rollback(
+async def test_work_parked_on_an_original_after_the_flip_marks_a_rollback(
     box: Box,
 ) -> None:
-    # Parked before it started: it has not run on the target, and the
-    # rollback does not wait the budget out for it either.
+    # Its row moved after the flip; whether it wrote before it was parked
+    # cannot be read from the row, so it counts. The rollback still does not
+    # wait the budget out for it.
     hook = _fail_at(
         "restored:gamma",
         then=lambda: box.engine.engine_op("alpha", "op-park-5", seconds=None, parked_s=1700),
@@ -4116,9 +4158,8 @@ async def test_work_parked_on_an_original_after_the_flip_does_not_mark_a_rollbac
 
     final = _final_journal()
     assert final["phase"] == es.PHASE_ROLLED_BACK
-    assert final["stray_banks"] == []
-    assert all(b["engine_work"] == [] for b in final["banks"])
-    assert box.record().mixed is False
+    assert final["stray_banks"] == ["alpha"]
+    assert box.record().mixed is True
 
 
 # ── which of the engine's work marks a rollback ─────────────────────────────
@@ -4145,12 +4186,11 @@ async def test_maintenance_that_embeds_nothing_is_waited_for_but_does_not_mark_a
     assert box.record().mixed is False
 
 
-async def test_a_queued_or_failed_refresh_after_the_flip_marks_as_its_row_says(
+async def test_a_queued_or_failed_refresh_after_the_flip_both_mark(
     box: Box,
 ) -> None:
     def after_flip() -> None:
-        # Only queued: it has not run. A failed consolidation may have
-        # committed sub-batches before it failed, so it counts.
+        # A row's status does not show whether it wrote: both count.
         box.engine.engine_op("alpha", "op-queued", status="pending", seconds=None)
         box.engine.engine_op("gamma", "op-failed", kind="consolidation", status="failed")
 
@@ -4161,22 +4201,49 @@ async def test_a_queued_or_failed_refresh_after_the_flip_marks_as_its_row_says(
         await switch.run()
 
     final = _final_journal()
-    assert "gamma" in final["stray_banks"]
+    assert sorted(final["stray_banks"]) == ["alpha", "gamma"]
     gamma = next(b for b in final["banks"] if b["bank"] == "gamma")
     assert [r["id"] for r in gamma["engine_work"]] == ["op-failed"]
     alpha = next(b for b in final["banks"] if b["bank"] == "alpha")
-    assert all(r["id"] != "op-queued" for r in alpha["engine_work"])
+    assert [r["id"] for r in alpha["engine_work"]] == ["op-queued"]
     assert box.record().mixed is True
 
 
-async def test_work_after_the_rollback_restarts_the_engine_on_the_previous_model_does_not_mark(
+async def test_a_consolidation_deferred_after_the_flip_with_no_retry_marks_the_bank(
+    box: Box,
+) -> None:
+    """A quota reset or store backpressure defers it after sub-batches committed.
+
+    hindsight-api 1.2.0 then leaves the row ``pending`` with ``retry_count``
+    0 and ``next_retry_at`` set, the same as a row that never started. It
+    may have written observations with the target model, so it marks.
+    """
+
+    def after_flip() -> None:
+        box.engine.engine_op(
+            "Hal0::Beta", "op-deferred", kind="consolidation", seconds=None, parked_s=1700
+        )
+
+    with pytest.raises(es.SwitchError, match="failed at restored:gamma"):
+        await box.switch(hook=_fail_at("restored:gamma", then=after_flip)).run()
+
+    row = box.engine.engine_ops["Hal0::Beta"][0]
+    assert (row["status"], row["retry_count"]) == ("pending", 0)
+    final = _final_journal()
+    assert final["stray_banks"] == ["Hal0::Beta"]
+    beta = next(b for b in final["banks"] if b["bank"] == "Hal0::Beta")
+    assert [r["id"] for r in beta["engine_work"]] == ["op-deferred"]
+    assert box.record().mixed is True
+
+
+async def test_work_after_the_rollback_restarts_the_engine_on_the_previous_model_still_marks(
     box: Box,
 ) -> None:
     """The engine died on the target; the rollback brings it back on the previous model.
 
-    A refresh that completed on the target before that marks its bank. Work
-    the engine runs after the restart is on the previous model and does not,
-    unless it is one the engine's recovery requeued from before the restart.
+    Rows are not told apart by when the engine was put back: a refresh that
+    completed on the target, a consolidation the engine requeued, and work it
+    queued after the restart all mark their banks.
     """
     restart = box.host.apply_dropin
 
@@ -4189,12 +4256,9 @@ async def test_work_after_the_rollback_restarts_the_engine_on_the_previous_model
         result = restart(embedder)
         journal = es.load_journal()
         if embedder == BGE and journal is not None and journal.flip_started:
-            # On the previous model now. The engine recovers the consolidation
-            # its death interrupted (retry_count up), and queues new work.
             killed = box.engine.engine_ops["Hal0::Beta"][0]
             killed |= {
                 "status": "pending",
-                "retry_count": 1,
                 "updated_at": datetime.now(UTC).isoformat(),
                 "ends_at": box.engine.now + 1,
             }
@@ -4208,8 +4272,6 @@ async def test_work_after_the_rollback_restarts_the_engine_on_the_previous_model
     assert "engine-op-done:alpha:op-after" in box.events
     final = _final_journal()
     assert final["phase"] == es.PHASE_ROLLED_BACK
-    assert final["reverted_at"] is not None and final["reverted_at"] >= final["flipped_at"]
-    assert sorted(final["stray_banks"]) == ["Hal0::Beta", "gamma"], "not alpha"
-    alpha = next(b for b in final["banks"] if b["bank"] == "alpha")
-    assert alpha["engine_work"] == []
+    assert "reverted_at" not in final
+    assert sorted(final["stray_banks"]) == ["Hal0::Beta", "alpha", "gamma"]
     assert box.record().mixed is True

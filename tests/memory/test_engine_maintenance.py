@@ -216,27 +216,6 @@ def test_a_parked_operation_is_due_at_its_next_retry_at() -> None:
     assert em.parked_until({"status": "pending", "next_retry_at": "soon"}) is None
 
 
-@pytest.mark.parametrize(
-    ("row", "wrote"),
-    [
-        ({"status": "completed"}, True),
-        ({"status": "processing"}, True),
-        # Consolidation commits each sub-batch before it fails or sees a cancel.
-        ({"status": "failed"}, True),
-        ({"status": "cancelled"}, True),
-        # Queued, or parked before it started: retry_count stays 0.
-        ({"status": "pending", "retry_count": 0}, False),
-        ({"status": "pending", "next_retry_at": "2026-11-12T10:30:00+00:00"}, False),
-        # An attempt raised or its worker died: it may have written first.
-        ({"status": "pending", "retry_count": 1}, True),
-        ({"status": "pending", "retry_count": "x"}, True),
-        ({"status": "superseded"}, True),
-    ],
-)
-def test_which_engine_rows_may_have_written(row: dict[str, Any], wrote: bool) -> None:
-    assert em.may_have_written(row) is wrote
-
-
 def test_an_operation_is_named_by_type_bank_id_and_status() -> None:
     # The list endpoint carries both names for the type and the id.
     listed = {

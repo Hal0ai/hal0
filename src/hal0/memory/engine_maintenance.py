@@ -539,38 +539,6 @@ def parked_until(op: Mapping[str, Any]) -> datetime | None:
     return _iso_time(op.get("next_retry_at"))
 
 
-def _retries(op: Mapping[str, Any]) -> int:
-    """An operation row's ``retry_count``; one when it does not read as a number."""
-    try:
-        return int(op.get("retry_count") or 0)
-    except (TypeError, ValueError):
-        return 1
-
-
-def may_have_written(op: Mapping[str, Any]) -> bool:
-    """Whether an engine operation row may have written to its bank.
-
-    Read against hindsight-api 1.2.0. ``completed`` and ``processing`` may.
-    So may ``failed`` and ``cancelled``: consolidation commits each LLM
-    sub-batch in its own transaction (``consolidator.py`` ~2093) and looks
-    for a cancel only after a batch has committed (~2247), so a consolidation
-    that fails or is cancelled part way keeps the observations it wrote; a
-    cancel only flips the row while the worker runs on, and a task that
-    finishes past it stays ``cancelled`` (``memory_engine.py``
-    ``cancel_operation``); and the poller's wall-clock ceiling marks a task
-    ``failed`` at whatever stage it reached (``poller.py`` ~1322), a
-    refresh's embedded page write included. A ``pending`` row may only when
-    its ``retry_count`` is above zero: the engine counts a retry when an
-    attempt raised or its worker died mid-run (``poller.py``
-    ``recover_own_tasks``), not when it parks a row it has not started
-    (``_defer_operation``) or a row is merely queued. Any other status is
-    counted, since it cannot be shown to have done nothing.
-    """
-    if op.get("status") == "pending":
-        return _retries(op) > 0
-    return True
-
-
 def operations_text(bank: str, ops: list[Mapping[str, Any]]) -> str:
     """Each operation by type, bank, id and status, for a message."""
     return ", ".join(
@@ -1524,25 +1492,21 @@ class EngineMaintenance:
             )
         return [r for r in rows if isinstance(r, dict) and r.get("status") in _OP_LIVE]
 
-    async def _engine_work_since(
-        self, bank: str, since: datetime | None, until: datetime | None = None
-    ) -> list[dict[str, Any]]:
-        """The engine's own embedding work on ``bank`` that may have run between ``since`` and ``until``.
+    async def _engine_work_since(self, bank: str, since: datetime | None) -> list[dict[str, Any]]:
+        """The engine's own embedding work on ``bank`` that may have run since ``since``.
 
-        Rows of each :data:`ENGINE_EMBEDDING_TYPES` type that may have
-        written (:func:`may_have_written`: not a row that is only queued or
-        parked) and whose time (:func:`operation_time`) is at or after
-        ``since`` (``None``: any time), or that is still ``processing``, or
-        whose time cannot be read. The engine keeps a finished operation's
-        row with the time it ended, so work that started and ended between
-        two looks at the bank is found here too.
-
-        ``until`` is when the engine was restarted on another embedder:
-        work whose row last moved after it ran there, and is not counted,
-        unless the row was created before it and has been retried (its first
-        attempt may have run before the restart and been requeued by the
-        engine's recovery, ``retry_count`` going up). Raises when the listing
-        cannot be read.
+        Every row of each :data:`ENGINE_EMBEDDING_TYPES` type, whatever its
+        status, whose ``created_at`` or ``updated_at`` (:func:`operation_time`)
+        is at or after ``since`` (``None``: any time), or that is still
+        ``processing``, or whose time cannot be read. The status is not
+        narrowed on purpose: a row cannot say whether its work wrote before
+        it was deferred (hindsight-api 1.2.0 resets a deferred row to
+        ``pending`` with ``retry_count`` unchanged and no ``error_message``,
+        ``worker/poller.py`` ``_defer_operation``, while a consolidation has
+        already committed the sub-batches it finished). The engine keeps a
+        finished operation's row with the time it ended, so work that started
+        and ended between two looks at the bank is found here too. Raises
+        when the listing cannot be read.
         """
         found: list[dict[str, Any]] = []
         for kind in ENGINE_EMBEDDING_TYPES:
@@ -1556,18 +1520,13 @@ class EngineMaintenance:
             for row in rows:
                 if not isinstance(row, dict) or operation_type(row) != kind:
                     continue
-                if not may_have_written(row):
-                    continue
                 when = operation_time(row)
-                if when is None:
-                    found.append(row)
-                    continue
-                if until is not None and when >= until:
-                    created = _iso_time(row.get("created_at"))
-                    if created is not None and created < until and _retries(row) > 0:
-                        found.append(row)
-                    continue
-                if since is None or when >= since or row.get("status") == "processing":
+                if (
+                    when is None
+                    or since is None
+                    or when >= since
+                    or row.get("status") == "processing"
+                ):
                     found.append(row)
         return found
 
@@ -2462,7 +2421,6 @@ __all__ = [
     "lock_held",
     "lock_path",
     "loopback_listener",
-    "may_have_written",
     "nearest_existing",
     "operation_ref",
     "operation_time",
