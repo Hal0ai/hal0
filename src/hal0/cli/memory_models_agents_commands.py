@@ -127,26 +127,63 @@ def _harness_section(data: dict[str, Any], harness: str) -> dict[str, Any]:
     return section
 
 
+def _bridge_client_hint(harness: str) -> str:
+    """What to run for a key, naming a client the bridge will accept.
+
+    ``hal0 bridge add <harness>`` only works when ``<harness>`` is a valid
+    client name (:data:`hal0.bridge.keys.NAME_RE`) that is not reserved
+    (:func:`hal0.bridge.keys.is_reserved_name`); otherwise the hint suggests a
+    name that is, or asks for one.
+    """
+    from hal0.bridge.keys import is_reserved_name, valid_name
+
+    def usable(name: str) -> bool:
+        return valid_name(name) and not is_reserved_name(name)
+
+    tail = "and pass the key it prints with --bridge-key-file (or --bridge-key)"
+    if usable(harness):
+        return (
+            f"run `hal0 bridge add {harness} --scope memory` (or `hal0 bridge rotate "
+            f"{harness}` if that client exists) {tail}"
+        )
+    base = "".join(c if c.isalnum() or c in "_-" else "-" for c in harness.lower()).strip("-_")
+    suggestion = next(
+        (n for n in (f"{base}-memory"[:32], f"agent-{base}"[:32]) if base and usable(n)), None
+    )
+    why = (
+        "is reserved for hal0's own identities"
+        if valid_name(harness) and is_reserved_name(harness)
+        else "is not a valid bridge client name (lowercase letters, digits, '-' or '_', "
+        "at most 32 characters)"
+    )
+    pick = (
+        f"e.g. `hal0 bridge add {suggestion} --scope memory`"
+        if suggestion
+        else "`hal0 bridge add <name> --scope memory` with a name of your choosing"
+    )
+    return f"{harness!r} {why}, so add a client under another name: {pick}, {tail}"
+
+
 def _resolve_bridge_key(
     section: dict[str, Any], url: str, harness: str, bridge_key: str | None
 ) -> str:
     """The key the harness presents to ``url``. Raises :class:`_NoBridgeKey`.
 
-    ``--bridge-key`` wins (refused only when the endpoint rejects it). Else a
+    A key passed in wins (refused only when the endpoint rejects it). Else a
     token already in the harness's section is reused when it points at this
-    endpoint and the endpoint accepts it. This command never mints a key.
+    endpoint and the endpoint accepts it. This command never mints or rotates
+    a key, so an HTTP answer can at worst stop it, never cost a working key.
     """
     from hal0.memory.compat_client import compat_accepts
 
-    how_to = (
-        f"run `hal0 bridge add {harness} --scope memory` (or `hal0 bridge rotate {harness}` "
-        f"if that client exists) and pass the key it prints with --bridge-key"
-    )
+    how_to = _bridge_client_hint(harness)
     if bridge_key:
         if compat_accepts(url, bridge_key) is False:
             raise _NoBridgeKey(
-                f"{url} rejected the key passed with --bridge-key: it needs a bridge key "
-                f"with the 'memory' scope; {how_to}"
+                f"{url} rejected the key passed in: it needs a bridge key with the 'memory' "
+                "scope. (hal0-api also answers 401 when it cannot read its bridge store, or "
+                "was started before [bridge] enabled was switched on: restart it and retry "
+                f"if the key is right.) Otherwise {how_to}"
             )
         return bridge_key
     token = section.get("apiToken")
@@ -160,33 +197,33 @@ def _resolve_bridge_key(
     raise _NoBridgeKey(f"no working bridge key for {harness!r} on {url}: {how_to}")
 
 
+def _read_bridge_key_file(path: str) -> str:
+    """The key in ``path`` (``-``: stdin), stripped. Raises ``ValueError``."""
+    import sys
+
+    try:
+        text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"cannot read --bridge-key-file {path}: {exc}") from exc
+    key = text.strip()
+    if not key or any(c.isspace() for c in key):
+        raise ValueError(f"--bridge-key-file {path} does not hold a single key")
+    return key
+
+
 def _write_private_json(path: Path, data: dict[str, Any]) -> None:
     """Write the shared client config atomically, at most 0600 (it holds a key).
 
-    Writes through a symlink, keeps the owner and never widens an existing
-    mode."""
-    import contextlib
-    import os
-    import stat
+    :func:`hal0.memory.compat_client.write_client_config`: writes through a
+    symlink that stays in the home, refuses one leaving it, never follows a
+    symlinked temporary file, keeps the owner and never widens a mode. The
+    keys keep their order."""
+    from hal0.memory.compat_client import write_client_config
 
-    target = path.resolve() if path.is_symlink() else path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        st: os.stat_result | None = target.stat()
-    except FileNotFoundError:
-        st = None
-    mode = 0o600 if st is None else stat.S_IMODE(st.st_mode) & 0o600
-    tmp = target.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, (jsonlib.dumps(data, indent=2, sort_keys=True) + "\n").encode())
-        os.fchmod(fd, mode)
-        if st is not None:
-            with contextlib.suppress(PermissionError):
-                os.fchown(fd, st.st_uid, st.st_gid)
-    finally:
-        os.close(fd)
-    tmp.replace(target)
+    write_client_config(path, data, home=Path.home(), max_mode=0o600)
+
+
+_FLAT_SERVER_KEYS = ("serverMode", "apiUrl", "apiToken", "apiPort")
 
 
 def _merge_coding_agent_config(
@@ -213,13 +250,16 @@ def _merge_coding_agent_config(
     return {**data, "harnesses": harnesses}
 
 
-def _redacted(merged: dict[str, Any], harness: str) -> dict[str, Any]:
+def _redacted(merged: dict[str, Any]) -> dict[str, Any]:
+    """``merged`` with every token masked: the flat one and each harness's,
+    not only the section this run wrote (the file holds other tools' keys)."""
     shown = jsonlib.loads(jsonlib.dumps(merged))
-    section = shown.get("harnesses", {}).get(harness, {})
-    if section.get("apiToken"):
-        section["apiToken"] = "***"
     if isinstance(shown.get("apiToken"), str):
         shown["apiToken"] = "***"
+    harnesses = shown.get("harnesses")
+    for section in harnesses.values() if isinstance(harnesses, dict) else ():
+        if isinstance(section, dict) and section.get("apiToken"):
+            section["apiToken"] = "***"
     return shown
 
 
@@ -232,7 +272,14 @@ def agents_install_cmd(
         None,
         "--bridge-key",
         help="Bridge key (hal0bk_...) with the 'memory' scope the harness presents to "
-        "/api/memory/compat. From `hal0 bridge add <name> --scope memory`.",
+        "/api/memory/compat. From `hal0 bridge add <name> --scope memory`. Visible to "
+        "every user in the process list while this runs: prefer --bridge-key-file.",
+    ),
+    bridge_key_file: str | None = typer.Option(
+        None,
+        "--bridge-key-file",
+        help="Read the bridge key from this file, or from stdin when it is '-' "
+        "(`hal0 bridge add ... | hal0 memory agents install <harness> --bridge-key-file -`).",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -248,8 +295,9 @@ def agents_install_cmd(
     and ``apiToken`` = a bridge key, so its memory goes through hal0's write
     envelope and project-scoped reads instead of straight to the engine. The
     flat keys and the other harnesses are left alone. The key is
-    ``--bridge-key``, or one already in that section that the endpoint
-    accepts; this command never mints one.
+    ``--bridge-key-file`` (``-`` reads stdin) or ``--bridge-key``, or one
+    already in that section that the endpoint accepts; this command never
+    mints or rotates one.
     """
     from hal0.memory.compat_client import compat_url
 
@@ -279,8 +327,13 @@ def agents_install_cmd(
             )
         return
 
+    if bridge_key and bridge_key_file:
+        die("pass --bridge-key or --bridge-key-file, not both")
+        return
     # The key is settled before anything runs, so a missing one changes nothing.
     try:
+        if bridge_key_file:
+            bridge_key = _read_bridge_key_file(bridge_key_file)
         data = _read_config(config_path)
         key = _resolve_bridge_key(_harness_section(data, harness), url, harness, bridge_key)
     except (ValueError, _NoBridgeKey) as exc:
@@ -288,7 +341,16 @@ def agents_install_cmd(
         return
 
     try:
-        proc = subprocess.run(shlex.split(command), capture_output=True, text=True, check=False)
+        # stdin from /dev/null: with stdout captured the installer never prompts
+        # (it asks only when fds 0 and 1 are both terminals), and a closed stdin
+        # keeps it that way under a pty wrapper too.
+        proc = subprocess.run(
+            shlex.split(command),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     except OSError as exc:
         die(f"failed to run installer: {exc}")
         return
@@ -296,14 +358,25 @@ def agents_install_cmd(
         die(f"installer exited {proc.returncode}: {proc.stderr.strip() or proc.stdout.strip()}")
         return
 
-    # Re-read: the upstream installer may have written the file.
+    # Re-read: the upstream installer may have written the file. Given no
+    # --server and a file with no flat serverMode/apiUrl, it may carry an old
+    # per-harness plugin's endpoint into the flat keys; say so, since every
+    # harness without its own section reads them.
     try:
-        merged = _merge_coding_agent_config(_read_config(config_path), harness, url=url, key=key)
+        after = _read_config(config_path)
+        carried = [k for k in _FLAT_SERVER_KEYS if after.get(k) != data.get(k)]
+        if carried:
+            typer.echo(
+                f"note: the upstream installer changed the flat {', '.join(carried)} in "
+                f"{config_path}; harnesses.{harness} is pointed at hal0 either way",
+                err=True,
+            )
+        merged = _merge_coding_agent_config(after, harness, url=url, key=key)
         _write_private_json(config_path, merged)
     except (ValueError, OSError) as exc:
         die(f"could not write {config_path}: {exc}")
         return
-    shown = _redacted(merged, harness)
+    shown = _redacted(merged)
     if json_out:
         typer.echo(
             jsonlib.dumps(

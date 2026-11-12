@@ -207,7 +207,9 @@ def agents_box(monkeypatch, tmp_path):
     ``accepts["value"]`` to what the endpoint says of a key."""
     monkeypatch.setattr(f"{_M}._HINDSIGHT_COMMAND", "echo")
     monkeypatch.delenv("HAL0_API_URL", raising=False)
-    config_path = tmp_path / "coding-agent.json"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    config_path = tmp_path / ".hindsight" / "coding-agent.json"
+    config_path.parent.mkdir()
     monkeypatch.setattr(f"{_M}._hindsight_config_path", lambda: config_path)
     accepts: dict[str, object] = {"value": True, "seen": []}
 
@@ -323,3 +325,91 @@ def test_agents_install_dry_run_names_the_endpoint_and_writes_nothing(agents_box
     assert payload["command"] == "echo install codex"
     assert "--api-url" not in payload["command"] and "--server" not in payload["command"]
     assert not config_path.exists()
+
+
+def test_agents_install_reads_the_key_from_a_file_or_stdin(agents_box, tmp_path):
+    config_path, _ = agents_box
+    key_file = tmp_path / "key"
+    key_file.write_text("hal0bk_codex.fromfile\n")
+    r = runner.invoke(
+        memory_commands.app, ["agents", "install", "codex", "--bridge-key-file", str(key_file)]
+    )
+    assert r.exit_code == 0, r.output
+    assert json.loads(config_path.read_text())["harnesses"]["codex"]["apiToken"] == (
+        "hal0bk_codex.fromfile"
+    )
+    r = runner.invoke(
+        memory_commands.app,
+        ["agents", "install", "cursor", "--bridge-key-file", "-"],
+        input="hal0bk_cursor.fromstdin\n",
+    )
+    assert r.exit_code == 0, r.output
+    assert json.loads(config_path.read_text())["harnesses"]["cursor"]["apiToken"] == (
+        "hal0bk_cursor.fromstdin"
+    )
+    assert "hal0bk_" not in r.output
+
+
+def test_agents_install_refuses_both_key_options(agents_box, tmp_path):
+    key_file = tmp_path / "key"
+    key_file.write_text("hal0bk_codex.k")
+    r = runner.invoke(
+        memory_commands.app,
+        ["agents", "install", "codex", "--bridge-key", "x", "--bridge-key-file", str(key_file)],
+    )
+    assert r.exit_code != 0 and "not both" in r.output
+
+
+def test_agents_install_bridge_key_help_warns_about_the_process_list():
+    r = runner.invoke(memory_commands.app, ["agents", "install", "--help"])
+    assert "process list" in " ".join(r.output.split())
+
+
+def test_agents_install_runs_the_installer_with_stdin_closed(agents_box, monkeypatch):
+    import subprocess as sp
+
+    seen: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(kwargs)
+        return sp.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(f"{_M}.subprocess.run", fake_run)
+    r = runner.invoke(
+        memory_commands.app, ["agents", "install", "codex", "--bridge-key", "hal0bk_codex.k"]
+    )
+    assert r.exit_code == 0, r.output
+    assert seen["stdin"] is sp.DEVNULL
+
+
+@pytest.mark.parametrize(
+    ("harness", "expected", "absent"),
+    [
+        ("pi", "hal0 bridge add pi-memory --scope memory", "hal0 bridge add pi "),
+        ("hermes", "hal0 bridge add hermes-memory --scope memory", "hal0 bridge add hermes "),
+        ("hal0-cli", "hal0 bridge add agent-hal0-cli --scope", "hal0 bridge add hal0-cli "),
+        ("Claude Code", "hal0 bridge add claude-code-memory", "hal0 bridge add Claude"),
+    ],
+)
+def test_the_refusal_never_suggests_a_client_name_the_bridge_refuses(
+    agents_box, harness, expected, absent
+):
+    r = runner.invoke(memory_commands.app, ["agents", "install", harness])
+    assert r.exit_code != 0
+    out = " ".join(r.output.split())
+    assert expected in out and absent not in out
+
+
+def test_a_symlinked_config_leaving_the_home_is_refused(agents_box, tmp_path):
+    config_path, _ = agents_box
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.json"
+    outside.write_text("{}")
+    config_path.symlink_to(outside)
+    try:
+        r = runner.invoke(
+            memory_commands.app, ["agents", "install", "codex", "--bridge-key", "hal0bk_codex.k"]
+        )
+        assert r.exit_code != 0 and "outside" in " ".join(r.output.split())
+        assert outside.read_text() == "{}"
+    finally:
+        outside.unlink()
