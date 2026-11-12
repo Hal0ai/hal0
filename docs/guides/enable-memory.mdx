@@ -480,9 +480,12 @@ deleting an original and that original is still there (the delete may have
 taken part of it), and when the journal was written by a different hal0
 version. Both messages name the archive directory.
 
-`--status` changes nothing and runs the same checks a resume would. For each
-bank it says what `--resume` will do; where the switch cannot repair
-something by itself it says exactly what you do, down to the command.
+`--status` changes nothing, never waits, and runs the same checks a resume
+would, each on one read of the bank. For each bank it says what `--resume`
+will do; where the switch cannot repair something by itself it says exactly
+what you do, down to the command. It lists the operations running on each
+bank by type, bank and id (also in `--json`), and a check made while the
+engine was still working on a bank says so: `--resume` waits for that work.
 
 `--resume` looks at which banks the engine has now, not only at its journal.
 What it can repair it repairs: a rebuilt bank that no longer matches is
@@ -508,10 +511,13 @@ bank, so look at `--status` first.
   when a bank is exported is not carried over.
 - The engine's own work is waited for, not refused: a mental-model refresh
   (which the engine queues after a restore or a restart) or a consolidation.
-  Before the run starts, and each time it compares or deletes a bank, the
-  switch waits up to 15 minutes for that work to finish. If it does not, the
-  switch stops and names the operation by type, bank and id. A dry run lists
-  such work as a warning.
+  Before the run starts the switch waits up to 15 minutes for it, for all
+  banks together, and each time it compares or deletes a bank, up to 15
+  minutes for that bank. If it does not finish, the switch stops and names
+  the operation by type, bank and id. A dry run lists such work as a warning.
+- Such work on an original bank while the engine runs the new model embeds
+  with the new model. If the run is then undone, the store is recorded as
+  mixed (see below), as it is when the undo cannot check an original bank.
 - The export carries only facts that belong to a document. A bank holding any
   other fact does not match its archive, and the switch stops at step 3
   saying so. Observations whose source facts are gone are not exported
