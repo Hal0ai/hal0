@@ -58,20 +58,19 @@ just logs a warning and runs Hindsight anyway. The dashboard's engine
 picker only offers `hindsight`/`pgvector` for this reason. The legacy
 `cognee` engine is **retired as of v1.0.0** and fails config validation
 outright. There is no automated migration path off a Cognee-era store —
-Cognee has been dark since v0.4; `hal0 memory migrate unify` (below) folds
-Hindsight banks together and has nothing to do with Cognee.
+Cognee has been dark since v0.4.
 </Aside>
 
-## One shared bank, or per-agent private banks
+## Two banks: hal0:shared and hal0:private
 
-`[memory].unified_bank` (default `true`) routes all memory into one
-shared Hindsight bank instead of splitting it per agent into private
-banks. When true, a private write still lands in `shared` but is tagged
-`visibility:private` + `agent:<id>` rather than forking a separate bank; set
-it `false` to restore real per-agent `private:<agent>` banks and
-cross-bank fan-out recall. This is a config-level policy decision, not
-something you toggle per request — see [MCP servers](/docs/guides/connect-mcp)
-for how `X-hal0-Private` interacts with it at write time.
+A new install keeps all of hal0's memory in two Hindsight banks:
+`hal0:shared` for every agent's durable memory and `hal0:private` for private
+notes and raw session captures, where each agent's `agent:<id>` tag scopes it
+to its own. `[memory] bank` and `[memory] private_bank` name them. A box
+upgraded from before keeps the banks it has (`shared`, and `private__<agent>`
+if it ran with `unified_bank = false`) until its memory is folded in. Which
+layout a box is on is recorded in `/var/lib/hal0/state/memory-layout.json`;
+see [Memory banks](/docs/concepts/memory-banks).
 
 ## The dashboard's Settings → Memory page
 
@@ -286,30 +285,13 @@ same namespace-scoped recall path an agent uses at runtime (not the admin
 bank console) — use it to see exactly what an agent would get back for a
 query.
 
-## Fold banks together
-
-```sh
-hal0 memory migrate unify --source <bank> [--source <bank> ...] --target <bank> [--apply]
-```
-
-Folds one or more source banks into a target bank (default target
-`shared`), tagging each migrated document with its provenance
-(`agent:<id>`, `visibility:private` for a former private bank, plus any
-`--add-tag` you pass). Default is `--dry-run` — it reports the plan
-(fact counts, tags to add) without writing anything; pass `--apply` to
-actually run it. Requires the running hindsight-api to advertise the
-document-transfer API (`features.document_export_api`/
-`document_import_api` on `/version`) — the command checks this and refuses
-loudly if it's missing rather than guessing. It never deletes the source
-banks; that's always a separate, explicit `hal0 memory bank delete <bank>
---confirm <bank>`.
-
 ## Move the platform memory to a named bank
 
-By default hal0's platform memory (the `shared` namespace) lives in the
-Hindsight bank `shared`. `[memory] bank` in `hal0.toml` names a different bank
-(for example `Hal0::Platform`). The namespaces callers use do not change, only
-the engine bank behind `shared`. To move an existing install:
+`[memory] bank` in `hal0.toml` names the Hindsight bank behind the `shared`
+namespace (for example `Hal0::Platform`). The namespaces callers use do not
+change, only the engine bank behind `shared`. A box from before the two-bank
+layout uses the bank its store already had, `shared` unless the key was set.
+To move it to a named bank:
 
 ```sh
 hal0 memory migrate platform --target Hal0::Platform            # dry run: the plan

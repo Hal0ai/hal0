@@ -22,14 +22,15 @@ on a new one, so it writes only where there is nothing to disturb:
   unfinished (:func:`switch_in_progress`); the hook reports "not done" and
   the heal loop runs it again once the switch has finished.
 
-Banks are addressed the way hal0 addresses them, through the provider:
+Banks are addressed the way hal0 addresses them, through the provider and the
+store's bank layout (ADR-0058 decision 7, :mod:`hal0.memory.bank_layout`):
 
-* the ``shared`` namespace is the platform bank (``[memory] bank``, ADR-0052),
-  whatever that bank is called;
-* ``private:hermes`` is the provider's engine bank for that namespace
-  (``private__hermes``), and only when ``[memory] unified_bank`` is off. With
-  the unified bank, the default, private memory lives in the platform bank
-  and there is no private bank to seed.
+* two-bank: the platform bank (``[memory] bank``, ``hal0:shared`` by
+  default) with the ``shared`` manifest, and the private bank
+  (``[memory] private_bank``, ``hal0:private``) with the private one;
+* the old layout: its platform bank alone. A store on its old layout is
+  folded into the two banks by ``hal0 memory migrate fold-in``, not seeded
+  into new ones, and its per-agent private banks are left as they are.
 
 The manifests are the ones ``install.sh`` posts, keyed here by hal0 namespace.
 The installer keeps them as shell literals so its own seeding works when the
@@ -39,6 +40,7 @@ holds the two copies in lockstep.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import httpx
@@ -88,17 +90,97 @@ FAILED = "failed"
 def seed_targets(provider: Any) -> dict[str, dict[str, Any]]:
     """Engine bank id -> manifest, for the banks this box's provider really uses.
 
-    Empty when the provider has no platform bank to name (it is not the
-    Hindsight provider).
+    Two-bank: the platform and the private bank. Legacy: the platform bank
+    only. Empty when the provider has no platform bank to name (it is not
+    the Hindsight provider).
     """
     platform = getattr(provider, "platform_bank", None)
     if not isinstance(platform, str) or not platform:
         return {}
     targets = {platform: SEED_BANKS[_SHARED]}
-    bank_for = getattr(provider, "bank_for", None)
-    if getattr(provider, "unified_bank", True) is False and callable(bank_for):
-        targets[bank_for(_PRIVATE_HERMES)] = SEED_BANKS[_PRIVATE_HERMES]
+    private = getattr(provider, "private_bank", None)
+    if getattr(provider, "two_bank", False) is True and isinstance(private, str) and private:
+        targets[private] = SEED_BANKS[_PRIVATE_HERMES]
     return targets
+
+
+def engine_bank_for(namespace: str, memory_cfg: Any, *, layout_path: Any = None) -> str | None:
+    """The engine bank a seed manifest keyed by ``namespace`` goes to on this
+    box, or ``None`` when its layout seeds no bank for it.
+
+    The same banks :func:`seed_targets` names, from the layout record and
+    ``[memory]`` without a provider: two-bank, ``shared`` is ``[memory] bank``
+    and ``private:hermes`` is ``[memory] private_bank``; the old layout seeds
+    its platform bank only. ``layout_path`` is the layout record (the state
+    directory's, by default). Raises
+    :class:`hal0.memory.bank_layout.LayoutUndecided` when the layout cannot be
+    told here.
+    """
+    from hal0.memory.bank_layout import current_layout
+
+    banks = current_layout(memory_cfg, path=layout_path).provider_kwargs(memory_cfg)
+    if namespace == _SHARED:
+        return str(banks["bank"])
+    if namespace == _PRIVATE_HERMES and banks.get("two_bank"):
+        return str(banks["private_bank"])
+    return None
+
+
+async def _bank_wants_seeding(bank: str, client: Any = None) -> bool:
+    """:func:`_wants_seeding` against the engine on this box (or ``client``)."""
+    own = client is None
+    if own:
+        from hal0.memory.hindsight_client import HindsightRestClient
+
+        client = HindsightRestClient.from_env()
+    try:
+        return await _wants_seeding(client, bank)
+    finally:
+        if own:
+            await client.aclose()
+
+
+def seed_target_main(argv: list[str], *, client: Any = None) -> int:
+    """``install.sh``'s seeding helper: print ``bank=<id>`` when that bank is to be seeded.
+
+    ``argv`` is ``[namespace, hal0.toml, state directory]``; the two paths are
+    the ones the installer uses, so a ``--dev`` prefix is honoured. The bank
+    is the one this box's layout keeps the namespace in
+    (:func:`engine_bank_for`), and it is printed only when the same guard the
+    heal hook uses lets it be seeded (:func:`_wants_seeding`: missing, or empty
+    with no retain mission), and no embedder switch is in progress. So a
+    re-run of the installer never reconfigures a bank that holds anything.
+
+    Prints nothing (exit 0) when there is nothing to seed. Exits 1, printing
+    nothing, when ``hal0.toml`` cannot be read, the layout is undecided or the
+    engine cannot be asked: the installer then seeds nothing, and hal0-api
+    seeds the right banks once it has the engine (:func:`heal_hook`).
+    """
+    if len(argv) not in (1, 3) or argv[0] not in SEED_BANKS:
+        return 2
+    import asyncio
+    from pathlib import Path
+
+    toml_path = Path(argv[1]) if len(argv) == 3 else None
+    layout_path = Path(argv[2]) / "memory-layout.json" if len(argv) == 3 else None
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        memory_cfg = load_hal0_config(toml_path).memory
+        bank = engine_bank_for(argv[0], memory_cfg, layout_path=layout_path)
+        if not bank:
+            return 0
+        if switch_in_progress() is not None:
+            return 0
+        if not asyncio.run(_bank_wants_seeding(bank, client)):
+            return 0
+    except Exception as exc:
+        # stderr, never the log: the installer reads stdout as the bank id.
+        print(f"cannot decide whether to seed {argv[0]}: {exc}", file=sys.stderr)
+        return 1
+    # Marked, so a log line on stdout can never be read as a bank id.
+    print(f"bank={bank}")
+    return 0
 
 
 async def _get(client: Any, path: str, **kwargs: Any) -> Any | None:
@@ -192,4 +274,12 @@ def heal_hook(provider: Any) -> Any:
     return _seed
 
 
-__all__ = ["SEED_BANKS", "heal_hook", "seed_missing_banks", "seed_targets", "switch_in_progress"]
+__all__ = [
+    "SEED_BANKS",
+    "engine_bank_for",
+    "heal_hook",
+    "seed_missing_banks",
+    "seed_target_main",
+    "seed_targets",
+    "switch_in_progress",
+]

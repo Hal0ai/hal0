@@ -62,7 +62,7 @@ graph_app = typer.Typer(help="Graph-extraction settings (ADR-0023).")
 app.add_typer(graph_app, name="graph")
 
 # Beefier Hindsight bank-admin CLI: bank/ops/mm sub-apps, a debug ``recall``,
-# and ``migrate`` (``migrate unify``). Implementations live in
+# and ``migrate`` (``migrate platform``). Implementations live in
 # hal0/cli/memory_{bank,ops,mm,recall,migrate}_commands.py so this file only
 # needs this import block + the add_typer/command calls below.
 app.add_typer(bank_app, name="bank")
@@ -530,7 +530,7 @@ def graph_disable_cmd(
     )
 
 
-# ── ``hal0 memory migrate`` / ``migrate unify`` ────────────────────────────────
+# ── ``hal0 memory migrate`` (``migrate platform``) ─────────────────────────────
 app.add_typer(migrate_app, name="migrate")
 
 

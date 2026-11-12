@@ -309,8 +309,8 @@ async def test_split_banks_stamp_a_named_project_too() -> None:
 
 
 async def test_a_project_namespace_write_keeps_its_tag_verbatim_and_readable() -> None:
-    """The unified read filter matches the namespace name against the tag
-    verbatim, so the namespace's id is stamped as written, not normalised."""
+    """The namespace's id is stamped as written, not normalised: it is the
+    one spelling of that project, and a shared read returns it."""
     engine, provider = _wired()
     await provider.add(
         "note",
@@ -323,7 +323,7 @@ async def test_a_project_namespace_write_keeps_its_tag_verbatim_and_readable() -
     assert item["tags"] == ["agent:pi", "kind:durable", "project:Apollo"]
     assert item["metadata"]["project_source"] == "namespace"
     assert item["observation_scopes"] == [["project:Apollo"]]
-    assert provider._is_in_scope({"tags": item["tags"]}, {"project:Apollo"}, False)
+    assert provider._filter_visible([{"tags": item["tags"]}], "someone-else", bank="shared")
 
 
 async def test_a_project_bank_write_gets_no_project_tag_and_no_global_stamp() -> None:
@@ -335,13 +335,11 @@ async def test_a_project_bank_write_gets_no_project_tag_and_no_global_stamp() ->
     assert engine.item["tags"] == ["topic:cats", "agent:pi", "kind:durable"]
 
 
-# ── the entry points do not take a project yet ─────────────────────────────
+# ── the entry points take a project (ADR-0058 decisions 4a and 7b) ────────
 #
-# Under the unified bank a project-tagged memory is hidden from recall, search
-# and list (``HindsightProvider._is_in_scope``), so a caller that could name a
-# project on REST or MCP would hide its own writes. Until shared reads see
-# project-tagged memory (ADR-0058 decision 7b), both entry points ignore a
-# ``project`` key and the ``X-hal0-Project`` header.
+# A shared read sees project-tagged memory, so a caller that names its project
+# on REST or MCP no longer hides its own writes, and both entry points pass
+# the ``project`` field (and the ``X-hal0-Project`` header) on again.
 
 
 async def _rest_add(
@@ -367,50 +365,54 @@ def _mcp(provider: Any, *, private: bool = False):
     )
 
 
+async def test_rest_add_with_a_project_field() -> None:
+    engine, provider = _wired()
+    response = await _rest_add(
+        provider, {"text": "note", "tags": ["slots", "project:stale"], "project": "Atlas Mono"}
+    )
+    assert response.status_code == 200, response.text
+    assert engine.item["tags"] == ["slots", "agent:pi", "kind:durable", "project:atlas"]
+    assert engine.item["observation_scopes"] == [["project:atlas"]]
+    assert engine.item["metadata"]["project_source"] == "field"
+
+
+async def test_rest_add_without_a_project() -> None:
+    engine, provider = _wired()
+    response = await _rest_add(provider, {"text": "note", "tags": ["slots"]})
+    assert response.status_code == 200, response.text
+    assert engine.item["tags"] == ["slots", "agent:pi", "kind:durable", "scope:global"]
+    assert engine.item["observation_scopes"] == "shared"
+
+
 @pytest.mark.parametrize(
-    ("body", "headers"),
+    ("body", "headers", "project_tag"),
     [
-        ({"project": "atlas"}, {}),
-        ({"project": "Atlas Mono"}, {}),
-        ({}, {"X-hal0-Project": "atlas"}),
-        ({}, {"x-hal0-project": "atlas"}),
-        ({"project": "borealis"}, {"X-hal0-Project": "atlas"}),
-        # Not validated either: the key is not part of the request.
-        ({"project": 7}, {}),
-        ({"project": ["atlas"]}, {}),
-        ({"project": {"name": "atlas"}}, {}),
-        ({"project": None}, {"X-hal0-Project": "   "}),
+        ({}, {"X-hal0-Project": "atlas"}, "project:atlas"),
+        ({}, {"x-hal0-project": "  Atlas Mono  "}, "project:atlas"),
+        # The body field wins over the header.
+        ({"project": "borealis"}, {"X-hal0-Project": "atlas"}, "project:borealis"),
+        # A blank field names nothing, so the header stands.
+        ({"project": "   "}, {"X-hal0-Project": "atlas"}, "project:atlas"),
+        ({"project": ""}, {"X-hal0-Project": "atlas"}, "project:atlas"),
+        ({"project": None}, {"X-hal0-Project": "atlas"}, "project:atlas"),
+        ({}, {"X-hal0-Project": "tmp"}, "scope:global"),
+        ({}, {"X-hal0-Project": "   "}, "scope:global"),
     ],
 )
-async def test_rest_add_ignores_a_project_key_and_header(body, headers) -> None:
+async def test_rest_add_project_header(body, headers, project_tag) -> None:
     engine, provider = _wired()
-    response = await _rest_add(provider, {"text": "note", "tags": ["slots"], **body}, headers)
+    response = await _rest_add(provider, {"text": "note", **body}, headers)
     assert response.status_code == 200, response.text
-    item = engine.item
-    assert item["tags"] == ["slots", "agent:pi", "kind:durable", "scope:global"]
-    assert item["observation_scopes"] == "shared"
-    assert "project" not in item["metadata"] and "project_source" not in item["metadata"]
+    assert engine.item["tags"] == ["agent:pi", "kind:durable", project_tag]
 
 
-@pytest.mark.parametrize(
-    "project", ["atlas", "Atlas Mono", "tmp", 7, ["atlas"], {"name": "atlas"}, None]
-)
-async def test_mcp_add_ignores_a_project_key(project) -> None:
+@pytest.mark.parametrize("project", [7, ["atlas"], {"name": "atlas"}, True])
+async def test_rest_add_refuses_a_project_that_is_not_a_string(project) -> None:
     engine, provider = _wired()
-    out = await _mcp(provider)(
-        "memory_add", {"text": "note", "tags": ["slots"], "project": project}
-    )
-    assert out["status"] == "ok", out
-    item = engine.item
-    assert item["tags"] == ["slots", "agent:pi-coder", "kind:durable", "scope:global"]
-    assert item["observation_scopes"] == "shared"
-    assert "project" not in item["metadata"] and "project_source" not in item["metadata"]
-
-
-def test_the_mcp_tool_does_not_advertise_a_project_parameter() -> None:
-    tool = memory_mcp._memory_tool_definitions()["memory_add"]
-    assert "project" not in tool.parameters["properties"]
-    assert "project" not in tool.description.lower()
+    response = await _rest_add(provider, {"text": "note", "project": project})
+    assert response.status_code == 400
+    assert "'project' must be a string" in response.text
+    assert engine.bodies == []
 
 
 class _KeywordRecorder:
@@ -424,27 +426,77 @@ class _KeywordRecorder:
         return {"id": "doc-1", "timestamp": "2026-01-01T00:00:00+00:00"}
 
 
-async def test_no_entry_point_hands_the_provider_a_project_or_the_coding_flag() -> None:
-    """Whatever the caller sends, neither entry point passes ``project`` or
-    ``coding`` on, so a write cannot be hidden from recall by accident."""
+async def test_the_project_is_passed_on_only_when_the_caller_named_one() -> None:
+    """A provider that predates the field is never handed it by a caller that
+    named no project, on either entry point."""
     provider = _KeywordRecorder()
-    named = {"text": "note", "project": "atlas", "coding": True}
-    header = {"X-hal0-Project": "atlas"}
     assert (await _rest_add(provider, {"text": "note"})).status_code == 200
-    assert (await _rest_add(provider, named, header)).status_code == 200
     assert (await _mcp(provider)("memory_add", {"text": "note"}))["status"] == "ok"
-    assert (await _mcp(provider)("memory_add", named))["status"] == "ok"
-    assert len(provider.calls) == 4
-    assert not any("project" in call or "coding" in call for call in provider.calls)
+    assert (await _rest_add(provider, {"text": "note", "project": "atlas"})).status_code == 200
+    out = await _mcp(provider)("memory_add", {"text": "note", "project": "atlas"})
+    assert out["status"] == "ok"
+    rest_plain, mcp_plain, rest_named, mcp_named = provider.calls
+    assert "project" not in rest_plain and "project" not in mcp_plain
+    assert rest_named["project"] == "atlas" and mcp_named["project"] == "atlas"
+    # No entry point sets the coding flag; the provider default applies.
+    assert not any("coding" in call for call in provider.calls)
 
 
-async def test_a_write_through_the_entry_points_stays_readable_by_recall() -> None:
-    """The reason the field is held back, as a round trip: what REST and MCP
-    write with a ``project`` key is still returned by a shared recall, while
-    the same write made with the provider's ``project`` argument is not."""
-    from .test_unified_bank import RecordingClient
+async def test_mcp_add_with_a_project() -> None:
+    engine, provider = _wired()
+    out = await _mcp(provider)(
+        "memory_add",
+        {"text": "note", "tags": ["slots", "project:stale"], "project": "Atlas Mono"},
+    )
+    assert out["status"] == "ok", out
+    assert engine.item["tags"] == ["slots", "agent:pi-coder", "kind:durable", "project:atlas"]
+    assert engine.item["observation_scopes"] == [["project:atlas"]]
+    assert engine.item["metadata"]["project"] == "atlas"
 
-    provider = HindsightProvider(client=RecordingClient(), unified_bank=True, projects=REGISTRY)
+
+async def test_mcp_add_without_a_project() -> None:
+    engine, provider = _wired()
+    out = await _mcp(provider)("memory_add", {"text": "note", "project": "   "})
+    assert out["status"] == "ok", out
+    assert engine.item["tags"] == ["agent:pi-coder", "kind:durable", "scope:global"]
+
+
+async def test_mcp_private_add_with_a_project_in_the_legacy_unified_bank() -> None:
+    engine, provider = _wired()
+    out = await _mcp(provider, private=True)("memory_add", {"text": "note", "project": "atlas"})
+    assert out["status"] == "ok", out
+    assert engine.item["tags"] == [
+        "agent:pi-coder",
+        "kind:durable",
+        "project:atlas",
+        "visibility:private",
+    ]
+    # Legacy unified: the engine default applies, exactly as before.
+    assert "observation_scopes" not in engine.item
+
+
+async def test_mcp_add_refuses_a_project_that_is_not_a_string() -> None:
+    engine, provider = _wired()
+    out = await _mcp(provider)("memory_add", {"text": "note", "project": ["atlas"]})
+    assert out["status"] == "error" and out["error"]["code"] == "mcp.memory_schema"
+    assert engine.bodies == []
+
+
+def test_the_mcp_tool_advertises_the_project_parameter() -> None:
+    tool = memory_mcp._memory_tool_definitions()["memory_add"]
+    assert "project" in tool.parameters["properties"]
+    assert "project" not in tool.parameters.get("required", [])
+
+
+async def test_a_project_write_through_the_entry_points_is_readable_by_a_shared_recall() -> None:
+    """The reason the field was held back, as a round trip: what REST, MCP and
+    the provider write under a project is returned by a shared recall
+    (ADR-0058 decision 7b)."""
+    from .test_unified_bank import RecordingClient, legacy_record
+
+    provider = HindsightProvider(
+        client=RecordingClient(), projects=REGISTRY, **legacy_record(unified=True)
+    )
     response = await _rest_add(provider, {"text": "via rest", "project": "atlas"})
     assert response.status_code == 200, response.text
     out = await _mcp(provider)("memory_add", {"text": "via mcp", "project": "atlas"})
@@ -452,7 +504,7 @@ async def test_a_write_through_the_entry_points_stays_readable_by_recall() -> No
     await provider.add("via provider", client_id="pi", project="atlas")
 
     recalled = {item["text"] for item in await provider.recall("x", client_id="pi")}
-    assert recalled == {"via rest", "via mcp"}
+    assert recalled == {"via rest", "via mcp", "via provider"}
 
 
 # ── HindsightProvider.retain_items ──────────────────────────────────────────

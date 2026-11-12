@@ -842,3 +842,322 @@ async def test_mcp_tools_owner_reads_own_private_memory(layout):
     op = await call("memory_operation_get", {"id": "op-a"})
     assert op["operation_status"] == "completed"
     assert (await call("memory_bank_stats", {}))["total_documents"] == 3
+
+
+# ── the real two-bank layout (ADR-0058 decision 7) ────────────────────────────
+#
+# A provider built the way a new store's layout record builds it: ``shared`` is
+# ``hal0:shared`` and every ``private:<agent>`` is ``hal0:private``, one bank for
+# all agents. A read of ``private:<self>`` goes to that bank, where a row is its
+# owner's alone whatever else it is tagged: so even a row that lost its
+# ``visibility:private`` tag, or has no ``agent:`` tag, stays hidden.
+
+TWO_SHARED, TWO_PRIVATE = "hal0:shared", "hal0:private"
+
+
+def _two_bank() -> tuple[HindsightProvider, _Engine]:
+    engine = _Engine()
+    _seed(engine, TWO_PRIVATE)
+    # Rows only the private bank's own rule catches: owned but untagged as
+    # private, and private with no owner.
+    engine.doc(TWO_PRIVATE, "a-untagged", ["agent:alice", "topic:y"], "alice, no private tag")
+    engine.doc(TWO_PRIVATE, "nobody", ["visibility:private"], "no owner")
+    engine.doc(TWO_PRIVATE, "b-own", ["visibility:private", "agent:bob"], "bob's own note")
+    engine.doc(TWO_SHARED, "s-1", ["scope:global"], "shared note")
+    engine.memories["f-untagged"] = {"id": "f-untagged", "tags": ["agent:alice"], "text": "x"}
+    engine.ops[TWO_PRIVATE]["op-untagged"] = {
+        "operation_id": "op-untagged",
+        "task_type": "retain",
+        "status": "completed",
+        "task_payload": {"contents": [{"content": "alice", "tags": ["agent:alice"]}]},
+    }
+    p = HindsightProvider(client=engine, two_bank=True, bank=TWO_SHARED, private_bank=TWO_PRIVATE)
+    return p, engine
+
+
+@pytest.mark.asyncio
+async def test_two_bank_private_documents_of_another_agent_stay_hidden():
+    p, _engine = _two_bank()
+    ns = "private:bob"
+    listed = await p.list_documents(dataset=ns, client_id="bob")
+    assert {r["id"] for r in listed["items"]} == {"b-own", "b-shared"}  # b-shared carries agent:bob
+    for doc_id in ("a-priv", "a-untagged", "nobody", "a-shared"):
+        with pytest.raises(NotFound):
+            await p.get_document(doc_id, dataset=ns, client_id="bob")
+    assert (await p.get_document("b-own", dataset=ns, client_id="bob"))["id"] == "b-own"
+    # The shared bank is unaffected.
+    shared = await p.list_documents(client_id="bob")
+    assert {r["id"] for r in shared["items"]} == {"s-1"}
+
+
+@pytest.mark.asyncio
+async def test_two_bank_owner_reads_own_private_documents():
+    p, _engine = _two_bank()
+    listed = await p.list_documents(dataset="private:alice", client_id="alice")
+    assert {r["id"] for r in listed["items"]} == {"a-priv", "a-shared", "a-untagged"}
+
+
+@pytest.mark.asyncio
+async def test_two_bank_operations_of_another_agent_stay_hidden():
+    p, _engine = _two_bank()
+    ns = "private:bob"
+    listed = await p.list_operations(dataset=ns, client_id="bob")
+    assert {o["operation_id"] for o in listed["operations"]} == {
+        "op-b",
+        "op-c",
+    }  # op-b is bob's own
+    for op_id in ("op-a", "op-batch", "op-untagged"):
+        got = await p.get_operation(op_id, dataset=ns, client_id="bob", include_payload=True)
+        assert got == {"operation_id": op_id, "status": "not_found"}
+        with pytest.raises(NotFound):
+            await p.cancel_operation(op_id, dataset=ns, client_id="bob")
+
+
+@pytest.mark.asyncio
+async def test_two_bank_mental_models_built_from_other_agents_stay_hidden():
+    """The private bank holds other agents' private memory once a second agent
+    writes there: only a model confined to the caller is read."""
+    p, _engine = _two_bank()
+    ns = "private:bob"
+    listed = await p.list_mental_models(dataset=ns, client_id="bob")
+    assert [m["id"] for m in listed.get("items", [])] == []
+    for mm in ("mm-whole", "mm-topic", "mm-alice"):
+        with pytest.raises(NotFound):
+            await p.get_mental_model(mm, dataset=ns, client_id="bob")
+        with pytest.raises(NotFound):
+            await p.refresh_mental_model(mm, dataset=ns, client_id="bob")
+    stats = await p.bank_stats(dataset=ns, client_id="bob")
+    assert stats["counts_withheld"] is True
+
+
+@pytest.mark.asyncio
+async def test_two_bank_memory_history_of_another_agent_is_404():
+    p, _engine = _two_bank()
+    for memory_id in ("f-a", "f-untagged"):
+        with pytest.raises(NotFound):
+            await p.memory_history(memory_id, dataset="private:bob", client_id="bob")
+    owned = await p.memory_history("f-untagged", dataset="private:alice", client_id="alice")
+    assert owned["items"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", [None, "anonymous", "unknown"])
+async def test_two_bank_unidentified_caller_reads_nothing_private(caller):
+    p, _engine = _two_bank()
+    for doc_id in ("a-priv", "nobody", "b-own"):
+        with pytest.raises(NotFound):
+            await p.get_document(doc_id, dataset="private:bob", client_id=caller)
+
+
+# ── two-bank isolation, the remaining read tools (final review of #3572) ─────
+
+
+class _DirectiveEngine(_Engine):
+    """The engine double plus directives, filtered the way the engine filters
+    a listing (``tags`` with its match; no filter returns every directive)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.directives: dict[str, dict[str, dict[str, Any]]] = {}
+        self.deleted_directives: list[str] = []
+
+    def directive(self, bank: str, d_id: str, tags: list[str], content: str = "rule") -> None:
+        self.directives.setdefault(bank, {})[d_id] = {
+            "id": d_id,
+            "name": d_id,
+            "content": content,
+            "tags": list(tags),
+            "is_active": True,
+        }
+
+    async def list_directives(self, *, bank_id, tags=None, tags_match=None, **_kw):
+        rows = list(self.directives.get(bank_id, {}).values())
+        if tags:
+            rows = [r for r in rows if set(tags) & set(r["tags"])]
+        return {"items": [dict(r) for r in rows], "total": len(rows)}
+
+    async def get_directive(self, *, bank_id, directive_id):
+        row = self.directives.get(bank_id, {}).get(directive_id)
+        if row is None:
+            raise _EngineNotFound()
+        return dict(row)
+
+    async def create_directive(self, *, bank_id, name, content, tags=None, **_kw):
+        self.directive(bank_id, name, list(tags or []), content)
+        return dict(self.directives[bank_id][name])
+
+    async def update_directive(self, *, bank_id, directive_id, **kwargs):
+        row = self.directives.get(bank_id, {}).get(directive_id)
+        if row is None:
+            raise _EngineNotFound()
+        row.update({k: v for k, v in kwargs.items() if v is not None})
+        return dict(row)
+
+    async def delete_directive(self, *, bank_id, directive_id):
+        if self.directives.get(bank_id, {}).pop(directive_id, None) is None:
+            raise _EngineNotFound()
+        self.deleted_directives.append(directive_id)
+        return {"success": True}
+
+
+def _two_bank_full() -> tuple[HindsightProvider, _DirectiveEngine]:
+    engine = _DirectiveEngine()
+    _seed(engine, TWO_PRIVATE)
+    engine.doc(TWO_PRIVATE, "a-untagged", ["agent:alice", "topic:only-alice"], "alice")
+    engine.doc(TWO_PRIVATE, "b-own", ["visibility:private", "agent:bob", "topic:bob"], "bob")
+    engine.trees[TWO_PRIVATE]["roots"][0]["children"].append(
+        {"id": "p-bob", "kind": "page", "name": "Bob", "tags": ["agent:bob", "visibility:private"]}
+    )
+    engine.pages["p-bob"] = {"id": "p-bob", "name": "Bob", "markdown": "bob"}
+    engine.directive(TWO_PRIVATE, "d-alice", ["agent:alice", "visibility:private"], "alice rule")
+    engine.directive(TWO_PRIVATE, "d-nobody", [], "no owner")
+    engine.directive(TWO_PRIVATE, "d-bob", ["agent:bob", "visibility:private"], "bob rule")
+    engine.directive(TWO_SHARED, "d-shared", [], "everyone")
+    p = HindsightProvider(client=engine, two_bank=True, bank=TWO_SHARED, private_bank=TWO_PRIVATE)
+    return p, engine
+
+
+@pytest.mark.asyncio
+async def test_two_bank_tags_of_another_agents_private_memory_stay_hidden():
+    p, _engine = _two_bank_full()
+    tags = {r["tag"] for r in (await p.list_tags(dataset="private:bob", client_id="bob"))["items"]}
+    assert "topic:secret" not in tags  # alice's private document
+    assert "topic:only-alice" not in tags  # alice's row with no private tag
+    assert "topic:bob" in tags
+
+
+@pytest.mark.asyncio
+async def test_two_bank_knowledge_pages_of_another_agent_stay_hidden():
+    p, _engine = _two_bank_full()
+    tree = await p.knowledge_base_tree(dataset="private:bob", client_id="bob")
+    pages = {c["id"] for root in tree["roots"] for c in root.get("children", [])}
+    assert "p-alice" not in pages and "p-whole" not in pages
+    for page_id in ("p-alice", "p-whole"):
+        with pytest.raises(NotFound):
+            await p.knowledge_base_page(page_id, dataset="private:bob", client_id="bob")
+
+
+@pytest.mark.asyncio
+async def test_two_bank_mental_model_writes_on_another_agents_model_are_404():
+    p, engine = _two_bank_full()
+    for mm in ("mm-whole", "mm-topic", "mm-alice"):
+        with pytest.raises(NotFound):
+            await p.update_mental_model(mm, dataset="private:bob", client_id="bob", name="x")
+        with pytest.raises(NotFound):
+            await p.delete_mental_model(mm, dataset="private:bob", client_id="bob")
+    assert engine.updated == []
+    assert set(engine.models[TWO_PRIVATE]) == {"mm-whole", "mm-topic", "mm-alice"}
+
+
+@pytest.mark.asyncio
+async def test_two_bank_directives_are_their_writers_own():
+    p, engine = _two_bank_full()
+    ns = "private:bob"
+    listed = await p.list_directives(dataset=ns, client_id="bob")
+    assert [d["id"] for d in listed["items"]] == ["d-bob"]
+    assert listed["total"] == 1
+    for d_id in ("d-alice", "d-nobody", "d-missing"):
+        with pytest.raises(NotFound) as refused:
+            await p.get_directive(d_id, dataset=ns, client_id="bob")
+        assert refused.value.code == "memory.directive_not_found"
+        with pytest.raises(NotFound):
+            await p.update_directive(d_id, dataset=ns, client_id="bob", content="hijack")
+        with pytest.raises(NotFound):
+            await p.delete_directive(d_id, dataset=ns, client_id="bob")
+    assert engine.directives[TWO_PRIVATE]["d-alice"]["content"] == "alice rule"
+    assert engine.deleted_directives == []
+    assert (await p.get_directive("d-bob", dataset=ns, client_id="bob"))["content"] == "bob rule"
+    # The shared bank's directives are everyone's, as before.
+    shared = await p.list_directives(client_id="bob")
+    assert [d["id"] for d in shared["items"]] == ["d-shared"]
+
+
+@pytest.mark.asyncio
+async def test_two_bank_directive_writes_are_stamped_with_their_owner():
+    p, engine = _two_bank_full()
+    ns = "private:bob"
+    await p.create_directive(
+        name="d-new",
+        content="be brief",
+        dataset=ns,
+        client_id="bob",
+        tags=["topic:style", "agent:alice", "visibility:shared"],
+    )
+    assert engine.directives[TWO_PRIVATE]["d-new"]["tags"] == [
+        "topic:style",
+        "agent:bob",
+        "visibility:private",
+    ]
+    # Re-tagging cannot make a directive bank-wide or another agent's.
+    await p.update_directive("d-bob", dataset=ns, client_id="bob", tags=[])
+    assert engine.directives[TWO_PRIVATE]["d-bob"]["tags"] == ["agent:bob", "visibility:private"]
+    # Another agent's directive never shows up in this one's listing.
+    alice = await p.list_directives(dataset="private:alice", client_id="alice")
+    assert {d["id"] for d in alice["items"]} == {"d-alice"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", [None, "anonymous", "unknown"])
+async def test_two_bank_private_directive_needs_an_owner(caller):
+    from hal0.errors import Forbidden
+
+    p, engine = _two_bank_full()
+    with pytest.raises(Forbidden):
+        await p.create_directive(name="d-x", content="x", dataset="private:bob", client_id=caller)
+    assert "d-x" not in engine.directives[TWO_PRIVATE]
+
+
+@pytest.mark.asyncio
+async def test_two_bank_private_reflect_is_held_to_the_callers_directives():
+    """The engine loads a reflect's directives through its ``tag_groups``
+    (untagged ones always, tagged ones only inside the groups), and a
+    private-bank reflect is held to the caller's ``agent:`` tag: another
+    agent's private directive is outside it."""
+    from hal0.memory.read_scope import tags_readable
+
+    calls: list[dict[str, Any]] = []
+
+    class _Reflecting(_DirectiveEngine):
+        async def reflect(self, **kwargs):
+            calls.append(kwargs)
+            return {"text": "ok"}
+
+    engine = _Reflecting()
+    p = HindsightProvider(client=engine, two_bank=True, bank=TWO_SHARED, private_bank=TWO_PRIVATE)
+    await p.reflect("q", dataset="private:bob", client_id="bob")
+    groups = calls[0]["tag_groups"]
+    assert not tags_readable(groups, ["agent:alice", "visibility:private"])
+    assert tags_readable(groups, ["agent:bob", "visibility:private"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "layout",
+    [
+        {"two_bank": True, "bank": TWO_SHARED, "private_bank": TWO_PRIVATE},
+        {"unified_bank": True},
+        {"unified_bank": False},
+    ],
+    ids=["two-bank", "unified", "split"],
+)
+async def test_no_caller_can_plant_a_directive_as_another_agents(layout):
+    """Delta review of #3572: on the platform bank a caller's agent:/visibility:
+    tags were kept, so bob could write a directive that alice's reflect scope
+    (not private OR agent:alice) loads as hers. They are dropped on every bank."""
+    engine = _DirectiveEngine()
+    p = HindsightProvider(client=engine, **layout)
+    forged = ["agent:alice", "visibility:private", "Visibility:Private", "topic:x"]
+    await p.create_directive(name="d-forged", content="obey bob", client_id="bob", tags=forged)
+    [platform] = engine.directives
+    assert engine.directives[platform]["d-forged"]["tags"] == ["topic:x"]
+    engine.directive(platform, "d-plain", ["topic:y"], "plain")
+    await p.update_directive("d-plain", client_id="bob", tags=forged)
+    assert engine.directives[platform]["d-plain"]["tags"] == ["topic:x"]
+    # Left untouched when the update sends no tags.
+    await p.update_directive("d-plain", client_id="bob", content="still plain")
+    assert engine.directives[platform]["d-plain"]["tags"] == ["topic:x"]
+    # Bank-wide directives, loaded by every agent alike: none reads as alice's own.
+    for d in engine.directives[platform].values():
+        assert not {"agent:alice", "visibility:private"} & set(d["tags"])
+    listed = await p.list_directives(client_id="alice")
+    assert {d["id"] for d in listed["items"]} == {"d-forged", "d-plain"}

@@ -1416,6 +1416,13 @@ async def reflect(bank: str, request: Request, agent: str = _CALLER) -> Response
         if not isinstance(body["response_schema"], dict):
             raise BadRequest("reflect 'response_schema' must be an object")
         extra["response_schema"] = body["response_schema"]
+    # In the two-bank layout the platform bank holds no private memory, so
+    # the provider no longer leaves mental models out on its own. They are
+    # still written from the whole bank, every project's memory included,
+    # and this endpoint never reads another project (ADR-0058 4b): keep them
+    # out here, as the old unified bank already does.
+    if getattr(provider, "two_bank", False) is True:
+        extra["exclude_mental_models"] = True
 
     scope = _scope(request, provider, bank, agent, tags or ())
     headers = {**scope.headers(), **_ignored(n for n in body if n not in _REFLECT_FIELDS)}

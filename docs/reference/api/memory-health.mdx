@@ -43,7 +43,7 @@ in the [REST API index](/docs/reference/api/rest-api/).
     "refresh_failed": 1, "last_success_at": "2026-11-10T21:35:56+00:00"
   },
   "banks": {
-    "layout": "per_bank", "total": 1, "facts": 1335,
+    "layout": "legacy_unified", "total": 1, "facts": 1335,
     "list": [{ "bank_id": "shared", "facts": 1335, "documents": 253 }]
   },
   "writes": null,
@@ -78,7 +78,7 @@ in the [REST API index](/docs/reference/api/rest-api/).
 | `queue.consolidation_pending`, `.consolidation_failed` | Source memories still to be consolidated into observations, and those whose consolidation failed, summed from the bank stats. |
 | `queue.truncated` | `true` when a bank holds more failed operations than the 2,000 that are read. Counts stay exact (they are the engine's totals); `failures_6h` and `top_errors` are then a floor. |
 | `knowledge` | Knowledge pages and mental models across banks, how many are stale, how many have a failed last refresh, and when a refresh last finished. A page or model that was created and never refreshed does not count as a finished refresh. |
-| `banks` | `layout` is `per_bank`. `facts` and `documents` per bank, and the totals. |
+| `banks` | `layout` is the store's bank layout from its layout record: `two_bank`, `legacy_unified` or `legacy_split` ([Memory banks](/docs/concepts/memory-banks)). `facts` and `documents` per bank, and the totals. |
 
 A row in `queue.by_bank` or `banks.list` holds `null` for a figure that could not be
 read; its section is then named in `partial`.

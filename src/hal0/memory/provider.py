@@ -169,8 +169,9 @@ class MemoryProvider(ABC):
             (``"per_tag"|"combined"|"all_combinations"|"shared"`` or a list
             of tag-lists). ``None`` lets the engine provider choose: the
             Hindsight provider sends one scope per ``project:`` tag, or
-            ``"shared"`` when the write carries none (ADR-0058), except on
-            a private write in the unified bank.
+            ``"shared"`` when the write carries none (ADR-0058); a private
+            write gets its writer's own scope in the two-bank layout and the
+            engine default in the old unified bank.
         ``strategy``
             Named retain strategy overriding the bank default for this item.
         ``update_mode``
@@ -185,9 +186,8 @@ class MemoryProvider(ABC):
             (ADR-0058 decision 4a). The Hindsight provider resolves it
             against the ``[memory.projects]`` registry and stamps one
             ``project:<slug>`` tag; an engine without the write envelope
-            ignores it. No REST or MCP entry point passes it yet: under the
-            unified bank a project-tagged memory is hidden from recall,
-            search and list until decision 7b lands.
+            ignores it. ``POST /api/memory/add`` and the MCP ``memory_add``
+            tool pass it.
         ``coding``
             ``True`` when the caller is a coding client, which is expected
             to work inside a project: a write of its with no project is
@@ -206,12 +206,15 @@ class MemoryProvider(ABC):
         client_id: str | None = None,
         tag_groups: list[dict[str, Any]] | None = None,
         min_scores: dict[str, float] | None = None,
+        project: str | None = None,
     ) -> list[dict[str, Any]]:
         """Vector + filter search. Returns a list of MemoryItem dicts.
 
         ``tag_groups``/``min_scores`` are optional engine-native recall
         filters (boolean tag expressions / per-stage score floors); an
-        engine without them ignores both."""
+        engine without them ignores both. ``project`` narrows the read to
+        one project plus global memory (``"*"`` or ``None``: every project,
+        ADR-0058 decision 7b); an engine without projects ignores it."""
 
     @abstractmethod
     async def list_items(
@@ -220,8 +223,10 @@ class MemoryProvider(ABC):
         cursor: str | None = None,
         limit: int = 50,
         client_id: str | None = None,
+        project: str | None = None,
     ) -> dict[str, Any]:
-        """Paginated list. Returns ``{items, next_cursor}``."""
+        """Paginated list. Returns ``{items, next_cursor}``. ``project`` as
+        for :meth:`search`."""
 
     @abstractmethod
     async def delete(
@@ -270,6 +275,7 @@ class MemoryProvider(ABC):
         query_timestamp: str | None = None,
         min_scores: dict[str, float] | None = None,
         client_id: str | None = None,
+        project: str | None = None,
     ) -> list[dict[str, Any]]:
         """Token-budgeted recall. Default delegates to ``search`` so an
         engine without a richer recall surface still answers the route.
@@ -284,6 +290,7 @@ class MemoryProvider(ABC):
             dataset=dataset,
             tags=tags,
             client_id=client_id,
+            project=project,
         )
 
     async def reflect(
@@ -303,6 +310,7 @@ class MemoryProvider(ABC):
         include: dict[str, Any] | None = None,
         response_schema: dict[str, Any] | None = None,
         enforce_visibility: bool = True,
+        project: str | None = None,
     ) -> dict[str, Any]:
         """Trigger LLM-backed reflection/synthesis over memory. No-op default
         (``{"status": "unsupported"}``) for engines without the capability.

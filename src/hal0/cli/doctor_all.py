@@ -3490,6 +3490,67 @@ def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
     return Check(name, title, _PASS, f"hindsight-api runs with the values hal0 renders{in_force}")
 
 
+def check_memory_layout(*, path: Any = None, memory: dict[str, Any] | None = None) -> Check:
+    """Which banks the memory store is laid out in (ADR-0058 decision 7).
+
+    Reads ``/var/lib/hal0/state/memory-layout.json``
+    (:mod:`hal0.memory.bank_layout`, mode 0644, so any account can read it)
+    and writes nothing. Outcomes:
+
+    * ``pass`` with the layout and its banks;
+    * ``pass`` with a note when there is no record yet: the next update or
+      hal0-api start writes it;
+    * ``warn`` with hal0-api's reason when there is no record and hal0-api
+      reports the layout undecided (``layout_undecided`` in
+      ``GET /api/memory/engine``, the ``memory`` payload): a two-bank decision
+      it could not write down. Memory writes are refused meanwhile;
+    * ``fail`` when the file exists and cannot be read. hal0-api then serves
+      no memory bank at all (the degraded fallback), because guessing a
+      layout can put new memory in banks the store does not read; the detail
+      names the file and the remedy.
+    """
+    from hal0.memory.bank_layout import LayoutRecordError, layout_record_path, load_layout_record
+
+    name, title = "memory_layout", "Memory layout"
+    target = path if path is not None else layout_record_path()
+    try:
+        record = load_layout_record(target)
+    except LayoutRecordError as exc:
+        return Check(
+            name,
+            title,
+            _FAIL,
+            f"{exc.path} {exc.reason}: hal0-api serves no memory bank until it is fixed. "
+            "Restore it from a backup, or remove it to have the layout decided again "
+            "(only on a box whose banks you know: an existing store is recorded as the "
+            "old layout), then restart hal0-api",
+        )
+    undecided = (memory or {}).get("layout_undecided")
+    if record is None and isinstance(undecided, str) and undecided:
+        return Check(
+            name,
+            title,
+            _WARN,
+            f"hal0-api serves no memory bank and refuses memory writes: {undecided}. "
+            "Fix the cause (usually the state directory is not writable), then restart "
+            "hal0-api",
+        )
+    if record is None:
+        return Check(
+            name, title, _PASS, "no record yet; the next update or hal0-api start writes it"
+        )
+    if record.two_bank:
+        return Check(name, title, _PASS, "two banks (hal0:shared, hal0:private, or as configured)")
+    kind = "unified" if record.legacy_unified is not False else "split"
+    return Check(
+        name,
+        title,
+        _PASS,
+        f"old {kind} layout, platform bank {record.legacy_platform_bank}; "
+        "it stays until its memory is folded in",
+    )
+
+
 def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
     """The configured embedder must be the one the memory store was built with (#3518).
 
@@ -3772,20 +3833,28 @@ def _fetch_project_tags(base: str | None, bank: str) -> list[dict[str, Any]] | N
 
 
 def _projects_config() -> tuple[str, Any, bool]:
-    """``([memory] bank, the project registry, read_ok)`` from hal0.toml.
+    """``(the platform bank, the project registry, read_ok)`` from hal0.toml.
 
+    The platform bank is the one hal0-api reads: ``[memory] bank`` on a
+    two-bank store, the recorded bank on one still on its old layout
+    (:func:`hal0.memory.bank_layout.platform_bank`, which writes nothing).
     hal0.toml is ``0600``, so for anyone but the service user and root the
     read fails; the row then counts against the shipped defaults (the
-    ``shared`` bank, an empty registry) and says so.
+    layout record's bank, which any account can read, and an empty
+    registry) and says so.
     """
     from hal0.config.loader import ConfigError, load_hal0_config
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory.bank_layout import platform_bank
     from hal0.memory.projects import ProjectRegistry, registry_from_config
 
+    # Raises LayoutUndecided when the layout cannot be told here (an
+    # unreadable record; no record and no api.env to read): the caller says so.
     try:
         memory = load_hal0_config().memory
     except (ConfigError, OSError):
-        return "shared", ProjectRegistry(), False
-    return str(memory.bank or "shared"), registry_from_config(memory.projects), True
+        return platform_bank(MemoryConfig()), ProjectRegistry(), False
+    return platform_bank(memory), registry_from_config(memory.projects), True
 
 
 def check_memory_projects(
@@ -3823,7 +3892,14 @@ def check_memory_projects(
         return Check(name, title, _PASS, "memory disabled — nothing to check")
     if not memory.get("reachable"):
         return Check(name, title, _PASS, "engine unreachable — nothing counted; see the memory row")
-    bank, registry, read_ok = config if config is not None else _projects_config()
+    from hal0.memory.bank_layout import LayoutUndecided
+
+    try:
+        bank, registry, read_ok = config if config is not None else _projects_config()
+    except LayoutUndecided as exc:
+        return Check(
+            name, title, _PASS, f"the memory bank layout is undecided ({exc}) — nothing counted"
+        )
     rows = (fetch or _fetch_project_tags)(base, bank)
     if rows is None:
         return Check(
@@ -4245,6 +4321,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),
         check_memory_engine_env(),
+        check_memory_layout(memory=payloads["memory"]),
         check_memory_embedder(),
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
         check_memory_retain_chunk(memory=payloads["memory"], base=base),
@@ -4347,6 +4424,7 @@ __all__ = [
     "check_memory_engine_env",
     "check_memory_engine_version",
     "check_memory_extraction_throughput",
+    "check_memory_layout",
     "check_memory_projects",
     "check_memory_retain_chunk",
     "check_model_store",

@@ -1,6 +1,6 @@
 """Tests for ``/api/memory/banks/{bank}/document-transfer`` (GET export ZIP,
 POST multipart import) — the hindsight-api>=0.8.0 cross-bank transfer
-surface ``hal0 memory migrate unify`` drives.
+surface ``hal0 memory migrate platform`` drives to fold the ``agents`` bank.
 
 These two routes move raw bytes (a ZIP export, a multipart upload) instead
 of JSON, so they're hand-rolled rather than table-driven like the rest of

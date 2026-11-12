@@ -129,7 +129,7 @@ See [Config schema](/docs/reference/config-schema/) for the `[metrics]` TOML tab
 | `HAL0_MEMORY_SPOOL` | unset | Directory for the memory plugin's retry spool (writes that failed to reach Hindsight get queued here instead of dropped). |
 | `HAL0_MEMORY_REFLECT_TIMEOUT_S` | `900` | Timeout (seconds) for the Hindsight `reflect` call. |
 | `HAL0_MEMORY_REPROBE_INTERVAL_S` | `30` | Minimum interval (seconds) between the API's re-probes of a previously-unreachable Hindsight engine. |
-| `HAL0_HINDSIGHT_URL` | `http://127.0.0.1:9177` | Hindsight engine base URL. |
+| `HAL0_HINDSIGHT_URL` | `http://127.0.0.1:9177` | Hindsight engine base URL. Set it in `/etc/hal0/api.env`, the only supported place: the update pass reads that file to tell whether the engine is on another host before it records the memory bank layout ([Memory banks](/docs/concepts/memory-banks#the-layout-record)), and a value set in a systemd drop-in is not seen there. |
 | `HAL0_HINDSIGHT_PROBE_TIMEOUT_S` | `2.0` | Timeout for the Hindsight reachability health check. |
 | `HINDSIGHT_API_TENANT_API_KEY` | `hal0-local-noauth` | — |
 

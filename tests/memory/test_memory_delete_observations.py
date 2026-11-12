@@ -329,7 +329,10 @@ async def test_observation_whose_source_is_missing_is_withheld() -> None:
 
 
 @pytest.mark.asyncio
-async def test_project_scoped_delete_cannot_reach_a_source_outside_the_project() -> None:
+async def test_an_observation_across_two_projects_is_a_multi_source_delete() -> None:
+    """A ``project:`` tag hides nothing (ADR-0058 decision 7b), so both
+    sources resolve, and a single id that reaches two documents is refused
+    before anything is deleted (#2747)."""
     client = EngineShapeClient(
         [
             _world(WORLD_A, DOC_A, ["project:alpha"]),
@@ -338,7 +341,8 @@ async def test_project_scoped_delete_cannot_reach_a_source_outside_the_project()
         ]
     )
     p = _provider(client)
-    assert await p.delete([OBS], client_id="rvskeptic", dataset="project:alpha") == {"deleted": 0}
+    with pytest.raises(ObservationMultiSourceDelete):
+        await p.delete([OBS], client_id="rvskeptic", dataset="project:alpha")
     assert client.deleted == []
 
 

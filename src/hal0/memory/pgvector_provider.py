@@ -166,11 +166,12 @@ class PgVectorProvider(MemoryProvider):
         client_id=None,
         tag_groups=None,
         min_scores=None,
+        project=None,
     ):
-        # No boolean tag-expression engine and no scored ranking here — this
-        # fallback is plain substring/tag matching, so both are accepted (ABC
-        # compliance) and ignored.
-        del tag_groups, min_scores
+        # No boolean tag-expression engine, no scored ranking and no project
+        # registry here — this fallback is plain substring/tag matching, so
+        # all three are accepted (ABC compliance) and ignored.
+        del tag_groups, min_scores, project
         allowed = self._allowed(dataset, client_id)
         tags = tags or []
         out = []
@@ -188,7 +189,10 @@ class PgVectorProvider(MemoryProvider):
                 break
         return out
 
-    async def list_items(self, dataset=_SHARED, cursor=None, limit=50, client_id=None):
+    async def list_items(
+        self, dataset=_SHARED, cursor=None, limit=50, client_id=None, project=None
+    ):
+        del project  # no project registry in the volatile fallback (see search)
         allowed = self._allowed(dataset, client_id)
         return {
             "items": [dict(r) for r in self._rows if r["dataset"] in allowed][:limit],

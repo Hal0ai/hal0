@@ -17,9 +17,32 @@ def _provider(**kw) -> HindsightProvider:
     return HindsightProvider(client=RecordingClient(), client_id="hermes", unified_bank=True, **kw)
 
 
-def test_default_bank_is_shared() -> None:
-    assert MemoryConfig().bank == "shared"
+def test_default_banks_are_the_two_bank_layout() -> None:
+    """ADR-0058 decision 7: a new store's banks. A provider built without a
+    layout keeps ``shared`` (what a legacy store's record gives it)."""
+    assert MemoryConfig().bank == "hal0:shared"
+    assert MemoryConfig().private_bank == "hal0:private"
     assert _provider().platform_bank == "shared"
+
+
+@pytest.mark.parametrize("bad", ["", "-x", "a/b", "private__hermes", "agents"])
+def test_invalid_or_reserved_private_bank_names_are_rejected(bad: str) -> None:
+    with pytest.raises(ValidationError, match="private_bank"):
+        MemoryConfig(private_bank=bad)
+
+
+def test_the_private_bank_must_differ_from_the_platform_bank() -> None:
+    with pytest.raises(ValidationError, match="must differ"):
+        MemoryConfig(bank="one", private_bank="one")
+    assert MemoryConfig(bank="one", private_bank="two").private_bank == "two"
+
+
+def test_an_old_toml_with_unified_bank_still_loads() -> None:
+    """The key left the schema; ``extra: allow`` keeps an old file loading and
+    the layout capture is its only reader."""
+    cfg = MemoryConfig.model_validate({"unified_bank": False, "bank": "shared"})
+    assert cfg.model_extra == {"unified_bank": False}
+    assert "unified_bank" not in MemoryConfig.model_fields
 
 
 @pytest.mark.parametrize("bad", ["", "  ", "-x", "a b", "a/b", "private__hermes", "agents"])

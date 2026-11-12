@@ -499,6 +499,17 @@ def ownership_table(
             child_mode=0o644,
             role="state/ (+ memory-embedder.json)",
         ),
+        # The memory store's bank layout record (ADR-0058 decision 7): written
+        # by a root-run update (install.sh runs one) or by the service at boot.
+        PermRow(
+            var_lib / "state",
+            state_owner,
+            service_group,
+            SHARED_DIR_MODE,
+            glob="memory-layout.json",
+            child_mode=0o644,
+            role="state/ (+ memory-layout.json)",
+        ),
         # Hermes last-run report and venv stamp, same class (#3260). The dir
         # is declared at 2755 (#3545): install-time mkdir under the setgid 2775
         # state skeleton births it setgid, umask 022 drops group write, so the

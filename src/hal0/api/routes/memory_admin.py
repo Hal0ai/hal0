@@ -208,12 +208,13 @@ async def engine_status(request: Request) -> dict[str, Any]:
           "version":     "0.7.2" | null,
           "features":    {...} | null, # 0.7.x feature flags (observations, mcp, …)
           "banks_total": int | null,
+          "layout_undecided": str,    # only while the bank layout is unsettled
         }
     """
     provider = getattr(request.app.state, "memory_provider", None)
     client = getattr(provider, "hindsight_client", None) if provider is not None else None
     if client is None:
-        return {
+        out: dict[str, Any] = {
             "enabled": provider is not None,
             "engine": None,
             "reachable": False,
@@ -221,6 +222,12 @@ async def engine_status(request: Request) -> dict[str, Any]:
             "features": None,
             "banks_total": None,
         }
+        # ADR-0058 decision 7: memory is degraded because the store's bank
+        # layout is not settled, not because the engine is down.
+        undecided = getattr(provider, "layout_undecided", None)
+        if isinstance(undecided, str) and undecided:
+            out["layout_undecided"] = undecided
+        return out
     version, banks = await asyncio.gather(
         _probe(client, "/version"), _probe(client, "/v1/default/banks")
     )
@@ -772,9 +779,7 @@ async def delete_bank_memories(request: Request, bank_id: str) -> Any:
 # observations_imported). Both verbs move raw bytes, so they can't go
 # through ``_forward``/``request_json`` (JSON-only) — they reach into the
 # Hindsight client's private ``_http``/``_headers()`` rather than adding a
-# second public method to hal0.memory.hindsight_client, which is owned by a
-# parallel unified-bank effort (see PLAN note in the CLI's migrate_unify
-# docstring for the full boundary rationale).
+# second public method to hal0.memory.hindsight_client.
 #
 # Export on 0.9.x (#2155): the synchronous engine GET is a 410 tombstone
 # (``api_export_documents_removed`` in hindsight_api/api/http.py) while
@@ -1052,8 +1057,8 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         # has (no per-memory tag field on UpdateMemoryRequest) — body
         # ``{"tags": [...]}`` is a full replace that propagates to every
         # memory unit under the document and invalidates derived
-        # observations (queues re-consolidation). ``migrate unify --add-tag``
-        # relies on this: read-merge-write, never a bare overwrite.
+        # observations (queues re-consolidation). A caller that adds a tag
+        # reads, merges and writes, never a bare overwrite.
         "PATCH",
         "/banks/{bank_id}/documents/{document_id}",
         "/v1/default/banks/{bank_id}/documents/{document_id}",

@@ -284,3 +284,18 @@ def test_seed_manifests_match_hal0_memory_bank_seed() -> None:
     assert set(found) == set(SEED_BANKS)
     for bank, body in found.items():
         assert json.loads(body) == SEED_BANKS[bank], bank
+
+
+def test_seeding_posts_to_the_bank_the_layout_names_not_the_namespace() -> None:
+    """ADR-0058 decision 7: a two-bank install has hal0:shared and hal0:private
+    and no stray engine bank called ``shared`` or ``private:hermes``."""
+    start = _TEXT.index("_seed_bank() {")
+    body = _TEXT[start : _TEXT.index("\n                }", start)]
+    assert "hal0.memory.bank_seed import seed_target_main" in body
+    # The installer's own paths, so a --dev prefix is honoured.
+    assert '"$1" "${HAL0_TOML}" "${VAR_DIR}/state"' in body
+    assert 'HAL0_HOME="${HAL0_HOME_FOR_OWUI}"' in body
+    assert "/api/memory/banks/${bank}/import" in body
+    assert "/api/memory/banks/$1/import" not in _TEXT
+    # A namespace the layout seeds no bank for is skipped, not posted.
+    assert '[[ -n "${bank}" ]] || return 0' in body

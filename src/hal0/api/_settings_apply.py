@@ -139,7 +139,7 @@ SERVICE_HAL0_API: str = "hal0-api"
 #   * ``[dispatcher].{stream_total_timeout_s, → service-restart[hal0-api]
 #     stream_idle_timeout_s}``                (stall-guard bounds, same
 #                                            create_app-time wiring).
-#   * ``[memory].{unified_bank,bank}``      → service-restart[hal0-api]
+#   * ``[memory].{bank,private_bank}``      → service-restart[hal0-api]
 #                                            (constructor arg to
 #                                            HindsightProvider, built once
 #                                            at create_app time — same
@@ -421,7 +421,7 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "services": [SERVICE_HAL0_API],
     },
     # [memory] — HindsightProvider constructor arg, built once at boot.
-    "memory.unified_bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "memory.private_bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "memory.bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     # [memory.projects] — the project registry is also a HindsightProvider
     # constructor arg (provider_from_config); the doctor row reads hal0.toml.

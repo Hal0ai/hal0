@@ -94,6 +94,9 @@ _TAGS_MATCH_MODES = ("any", "all", "any_strict", "all_strict", "exact")
 
 _AGENT_HEADER = "x-hal0-agent"
 _PRIVATE_HEADER = "x-hal0-private"
+#: The project a write belongs to, for a client that sets it once per session
+#: and not per call. The body's ``project`` field wins over it.
+_PROJECT_HEADER = "x-hal0-project"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 # Security hardening: agent identity feeds the
@@ -390,6 +393,24 @@ async def _available_upstream_models(request: Request) -> list[dict[str, str]]:
         return []
     rows.sort(key=lambda row: (row["owned_by"], row["id"]))
     return rows
+
+
+def _read_project(value: Any, path: str) -> dict[str, Any]:
+    """The ``project`` keyword a read passes to the provider, or nothing.
+
+    A read's ``project`` (ADR-0058 decision 7b) narrows it to that project
+    plus global memory; ``"*"`` or no field reads every project. It is
+    passed on only when the caller sent one, so a provider without projects
+    is not handed a keyword it does not know.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, str):
+        raise BadRequest(
+            "'project' must be a string, or '*' for every project", details={"path": path}
+        )
+    value = value.strip()
+    return {"project": value} if value else {}
 
 
 def _wrapper(request: Request) -> Any:
@@ -1234,15 +1255,15 @@ def make_add_preflight(app: Any, wrapper: Any) -> Callable[[], Awaitable[None]]:
 @router.post("/add")
 async def memory_add(request: Request) -> dict[str, Any]:
     """Add a memory item. Body: ``{text, dataset?, tags?, metadata?,
-    document_id?, update_mode?, append_document_id?, observation_scopes?}``.
+    document_id?, update_mode?, append_document_id?, observation_scopes?,
+    project?}``.
 
-    There is no ``project`` field yet, and a ``project`` key or an
-    ``X-hal0-Project`` header is ignored. Under the unified bank a
-    project-tagged memory is hidden from recall, search and list, so naming a
-    project here would hide the caller's own writes; the field arrives with
-    the change that lets shared reads see project-tagged memory (ADR-0058
-    decision 7b). The provider already takes the project
-    (``HindsightProvider.add(project=...)``).
+    ``project`` names the project the caller is working in (a repository
+    name, say). hal0 resolves it against ``[memory.projects]`` and tags the
+    write with one ``project:<slug>``; a caller does not write that tag by
+    hand. The ``X-hal0-Project`` header carries the same value for a client
+    that sets it once; the body field wins. A project-tagged memory is
+    readable by every shared read (ADR-0058 decision 7b).
 
     Returns ``{id, timestamp}`` plus ``operation_id`` when the engine
     ingests asynchronously (Hindsight retain). Reuse ``document_id``
@@ -1375,6 +1396,18 @@ async def memory_add(request: Request) -> dict[str, Any]:
                 details={"path": "/api/memory/add"},
             )
         passthrough["observation_scopes"] = observation_scopes
+    # The project the caller is working in (ADR-0058 decision 4a): the body
+    # field, else the header. The provider resolves the name; nothing is
+    # passed on when the caller named none.
+    project = body.get("project")
+    if project is not None and not isinstance(project, str):
+        raise BadRequest(
+            "memory_add 'project' must be a string",
+            details={"path": "/api/memory/add"},
+        )
+    project = (project or "").strip() or request.headers.get(_PROJECT_HEADER, "").strip()
+    if project:
+        passthrough["project"] = project
 
     wrapper = _wrapper(request)
 
@@ -1423,12 +1456,16 @@ async def _engine_read(call: Awaitable[Any]) -> Any:
 
 @router.post("/search")
 async def memory_search(request: Request) -> dict[str, Any]:
-    """Search memory. Body: ``{query, limit?, dataset?, tags?, before?, after?}``.
+    """Search memory. Body: ``{query, limit?, dataset?, tags?, before?, after?,
+    project?}``.
 
     Identity headers behave like ``/add`` — ``X-hal0-Private: 1``
     expands a default-empty ``dataset`` to ``[shared, private:<agent>]``
     so a private-mode caller sees both their own scoped
     items + the shared bucket without per-call opt-in.
+
+    ``project`` narrows the read to one project plus global memory; with
+    none, or ``"*"``, every project is read (ADR-0058 decision 7b).
 
     Returns ``{items: [MemoryRecord, ...]}`` — wrapped in an envelope so
     we can add ``next_cursor`` / counters later without breaking clients.
@@ -1452,6 +1489,7 @@ async def memory_search(request: Request) -> dict[str, Any]:
     except MemoryNamespaceError as exc:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
+    project = _read_project(body.get("project"), "/api/memory/search")
     wrapper = _wrapper(request)
     items = await _engine_read(
         wrapper.search(
@@ -1462,6 +1500,7 @@ async def memory_search(request: Request) -> dict[str, Any]:
             before=body.get("before"),
             after=body.get("after"),
             client_id=agent_id if agent_id != "anonymous" else None,
+            **project,
         )
     )
     return {"items": items}
@@ -1471,10 +1510,10 @@ async def memory_search(request: Request) -> dict[str, Any]:
 async def memory_recall(request: Request) -> dict[str, Any]:
     """Token-budgeted recall (Hindsight's preferred path).
 
-    Body: ``{query, max_tokens?, types?, dataset?, tags?}``. Identity +
-    namespace resolution behave like ``/search`` (X-hal0-Agent +
-    X-hal0-Private). Returns ``{items: [MemoryItem, ...]}`` ordered by
-    relevance (no numeric score — Hindsight recall returns none).
+    Body: ``{query, max_tokens?, types?, dataset?, tags?, project?}``.
+    Identity + namespace resolution behave like ``/search`` (X-hal0-Agent +
+    X-hal0-Private), and so does ``project``. Returns
+    ``{items: [MemoryItem, ...]}`` ordered by relevance.
 
     Falls back to ``search`` semantics on engines without a richer recall
     (the ABC default), so this route is safe regardless of active engine.
@@ -1502,6 +1541,7 @@ async def memory_recall(request: Request) -> dict[str, Any]:
     except MemoryNamespaceError as exc:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
+    project = _read_project(body.get("project"), "/api/memory/recall")
     wrapper = _wrapper(request)
     items = await _engine_read(
         wrapper.recall(
@@ -1512,6 +1552,7 @@ async def memory_recall(request: Request) -> dict[str, Any]:
             tags=body.get("tags") or [],
             tags_match=body.get("tags_match"),
             client_id=agent_id if agent_id != "anonymous" else None,
+            **project,
         )
     )
     return {"items": items}
@@ -1522,25 +1563,27 @@ async def memory_reflect(request: Request) -> dict[str, Any]:
     """Ask the engine to answer ``query`` from memory (LLM synthesis).
 
     Body: ``{query, budget?, max_tokens?, tags?, tags_match?,
-    response_schema?, dataset?}``. Returns the engine's answer,
+    response_schema?, dataset?, project?}``. Returns the engine's answer,
     ``{text, structured_output?, usage?, ...}``, or ``{status:
     "unsupported"}`` on an engine that cannot reflect. Slow by nature: the
     engine runs an agentic loop, minutes on local hardware.
 
     This is the NAMESPACE reflect, the sibling of ``/recall``: identity comes
     from ``X-hal0-Agent`` and the provider picks the bank. It reads ONE bank,
-    the one a write with the same headers would land in: under the unified
-    bank that is the platform bank, which holds shared memories and every
-    agent's private ones; with split banks (``unified_bank = false``) it is
-    the shared bank only, or the caller's own private bank when
-    ``X-hal0-Private: 1`` is sent, never both.
+    the one a write with the same headers would land in: in the two-bank
+    layout ``hal0:shared``, or ``hal0:private`` when ``X-hal0-Private: 1``
+    is sent; on a store still on its old layout the platform bank (which,
+    unified, also holds every agent's private memories) or, split, the
+    caller's own private bank. ``project`` narrows it as it narrows
+    ``/recall``.
 
     Two rules keep other agents' private memories out of the answer, and the
     provider applies both (``HindsightProvider.reflect``), so the MCP
     ``memory_reflect`` tool gets the same ones. Facts and observations are
-    filtered by tag (:func:`hal0.memory.read_scope.reflect_visibility_scope`).
-    Mental models cannot be filtered that way, so under the unified bank the
-    reflect runs with the engine's ``exclude_mental_models`` and uses none.
+    filtered by tag (the visibility rule, or the caller's own ``agent:`` tag
+    on ``hal0:private``). Mental models cannot be filtered that way, so on a
+    bank that holds other agents' private memories the reflect runs with the
+    engine's ``exclude_mental_models`` and uses none.
 
     The bank console's ``POST /api/memory/banks/{bank}/reflect`` is a
     different thing: a verbatim passthrough to a bank the operator names,
@@ -1579,14 +1622,17 @@ async def memory_reflect(request: Request) -> dict[str, Any]:
     except MemoryNamespaceError as exc:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
+    project = _read_project(body.get("project"), path["path"])
     wrapper = _wrapper(request)
     # The provider turns the caller's identity and tags into the engine's
-    # tag filter, and leaves mental models out under the unified bank. This
-    # route also asks for that exclusion itself: a provider that does not say
-    # how its banks are laid out is treated as unified, because leaving
-    # mental models out costs some answer quality and using one built from
-    # another agent's private notes is a leak.
-    shared_with_other_agents = bool(getattr(wrapper, "unified_bank", True))
+    # tag filter, and leaves mental models out where the bank it reads holds
+    # other agents' private memories. This route also asks for that
+    # exclusion itself, from the bank this reflect actually reads: a provider
+    # that cannot say is treated as sharing one, because leaving mental
+    # models out costs some answer quality and using one built from another
+    # agent's private notes is a leak.
+    holds_others = getattr(wrapper, "holds_other_agents_private", None)
+    shared_with_other_agents = bool(holds_others(dataset)) if callable(holds_others) else True
     try:
         result = await wrapper.reflect(
             query=query,
@@ -1598,6 +1644,7 @@ async def memory_reflect(request: Request) -> dict[str, Any]:
             tags_match=tags_match,
             exclude_mental_models=shared_with_other_agents,
             response_schema=response_schema,
+            **project,
         )
     except httpx.TimeoutException as exc:
         err = MemoryReflectFailed("the memory engine did not finish the reflect in time")
@@ -1714,8 +1761,12 @@ async def memory_list(
     bank: str | None = None,
     cursor: str | None = None,
     limit: int = 50,
+    project: str | None = None,
 ) -> dict[str, Any]:
     """Paginated list. Returns ``{items: [...], next_cursor: str | null}``.
+
+    ``?project=`` keeps one project plus global memory, as ``/search``
+    does; with none, or ``*``, every project.
 
     Identity rules mirror ``/search``: this is a READ route, so it resolves
     through :func:`resolve_read_datasets` like ``/search``/``/recall`` do —
@@ -1727,10 +1778,11 @@ async def memory_list(
     private-mode case to the private bucket alone, unlike ``/search``.)
 
     ``?bank=`` is a convenience alias for the dashboard's Hindsight bank
-    browser: a bank id (``private__hermes``, or the platform bank's own name)
-    is translated to the matching
-    dataset namespace (``private:hermes``) when no explicit ``?dataset=`` is
-    given. If both are supplied and conflict, the explicit ``dataset`` wins.
+    browser: a bank id (``private__hermes``, the platform bank's own name, or
+    the two-bank private bank, which answers for the caller's own
+    ``private:<agent>``) is translated to the matching dataset namespace
+    (``private:hermes``) when no explicit ``?dataset=`` is given. If both are
+    supplied and conflict, the explicit ``dataset`` wins.
 
     Like every namespace resolution in this module, the alias is still
     bound by the closed-set rule (module docstring in
@@ -1743,14 +1795,22 @@ async def memory_list(
     alias is sugar for spelling your own bank id, never a door into another
     agent's.
     """
+    agent_id = _agent_id(request)
     if bank is not None:
         # The platform bank ([memory] bank, ADR-0052) answers for ``shared``
-        # whatever the operator named it; any other bank id keeps the
-        # ``private__<agent>`` -> ``private:<agent>`` spelling.
-        platform_bank = getattr(
-            getattr(request.app.state, "memory_provider", None), "platform_bank", "shared"
-        )
-        bank_dataset = "shared" if bank == platform_bank else bank_to_namespace(bank)
+        # whatever the operator named it, and the two-bank private bank
+        # ([memory] private_bank) for the caller's own ``private:<agent>``;
+        # any other bank id keeps the ``private__<agent>`` ->
+        # ``private:<agent>`` spelling.
+        provider = getattr(request.app.state, "memory_provider", None)
+        platform_bank = getattr(provider, "platform_bank", "shared")
+        private_bank = getattr(provider, "private_bank", None)
+        if bank == platform_bank:
+            bank_dataset = "shared"
+        elif isinstance(private_bank, str) and bank == private_bank:
+            bank_dataset = f"private:{agent_id}"
+        else:
+            bank_dataset = bank_to_namespace(bank)
         if dataset is None:
             dataset = bank_dataset
         elif dataset != bank_dataset:
@@ -1761,7 +1821,6 @@ async def memory_list(
                 bank_dataset,
             )
 
-    agent_id = _agent_id(request)
     private = _is_private(request)
     try:
         resolved = resolve_read_datasets(
@@ -1772,6 +1831,7 @@ async def memory_list(
     except MemoryNamespaceError as exc:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
+    scope = _read_project(project, "/api/memory/list")
     wrapper = _wrapper(request)
     return await _engine_read(
         wrapper.list_items(
@@ -1779,6 +1839,7 @@ async def memory_list(
             cursor=cursor,
             limit=limit,
             client_id=agent_id if agent_id != "anonymous" else None,
+            **scope,
         )
     )
 

@@ -271,6 +271,16 @@ def _resolve_read_dataset(
         raise MemorySchemaError(str(exc)) from exc
 
 
+def _read_project(args: dict[str, Any]) -> dict[str, Any]:
+    """The ``project`` keyword a read tool passes to the provider, or nothing.
+
+    A string names one project (read with global memory), ``"*"`` every
+    project (ADR-0058 decision 7b). Passed on only when the caller sent one.
+    """
+    project = (_optional(args, "project", str) or "").strip()
+    return {"project": project} if project else {}
+
+
 def _iso_now() -> str:
     return datetime.now(tz=UTC).isoformat()
 
@@ -312,7 +322,7 @@ async def _memory_add(
     provenance: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """memory_add(text, dataset?, tags?, metadata?, document_id?, entities?,
-    observation_scopes?, strategy?, update_mode?, sync?)
+    observation_scopes?, strategy?, update_mode?, sync?, project?)
     → {id, timestamp, operation_id?, operation_ids?, items_count?}.
 
     Schema:
@@ -340,10 +350,10 @@ async def _memory_add(
       - ``sync``: ``true`` waits for extraction before returning (no
         ``operation_id``, but ``items_count`` reflects the finished write);
         ``false`` (default) is the existing fire-and-forget path.
-      - ``project``: NOT an argument yet, and a ``project`` key is ignored.
-        Under the unified bank a project-tagged memory is hidden from
-        recall, search and list, so the argument arrives with the change
-        that lets shared reads see it (ADR-0058 decision 7b).
+      - ``project``: optional name of the project the caller is working in.
+        The provider resolves it against ``[memory.projects]`` and stamps
+        one ``project:<slug>`` tag (ADR-0058 decision 4a). Shared reads see
+        project-tagged memory (decision 7b).
       - ``source``: NOT accepted from the caller. Server-injected from
         ``client_id`` so callers cannot lie about their identity,
         keeping the audit trail grounded.
@@ -395,6 +405,9 @@ async def _memory_add(
     if update_mode is not None and update_mode not in ("replace", "append"):
         raise MemorySchemaError("update_mode must be 'replace' or 'append'")
     sync = _optional_bool(args, "sync", default=False)
+    # Passed on only when the caller named one, like the REST route does.
+    project = (_optional(args, "project", str) or "").strip()
+    named_project: dict[str, Any] = {"project": project} if project else {}
     source = client_id or "anonymous"
     if provenance:
         user = provenance.get("user")
@@ -418,6 +431,7 @@ async def _memory_add(
         strategy=strategy,
         update_mode=update_mode,
         sync=bool(sync),
+        **named_project,
     )
     out = {
         "id": result["id"],
@@ -440,7 +454,8 @@ async def _memory_search(
     private: bool,
 ) -> dict[str, Any]:
     """memory_search(query, limit=10, dataset="shared"|list, tags=[],
-                     before=null, after=null, tag_groups=null, min_scores=null)
+                     before=null, after=null, tag_groups=null, min_scores=null,
+                     project=null)
     → {results}.
 
     MemoryProvider contract::
@@ -452,7 +467,9 @@ async def _memory_search(
     ``shared`` + their own ``private:<client_id>``. ``tag_groups``/
     ``min_scores`` are Hindsight-native recall filters (boolean tag
     expressions / per-stage score floors) forwarded verbatim; engines
-    without them ignore both.
+    without them ignore both. ``project`` narrows the read to one project
+    plus global memory; with none, or ``"*"``, every project is read
+    (ADR-0058 decision 7b).
     """
     query = _require(args, "query", str)
     if not query.strip():
@@ -481,6 +498,7 @@ async def _memory_search(
         tag_groups=tag_groups,
         min_scores=min_scores,
         client_id=client_id,
+        **_read_project(args),
     )
     return {"results": list(results)}
 
@@ -573,7 +591,7 @@ async def _memory_recall(
 ) -> dict[str, Any]:
     """memory_recall(query, max_tokens=4096, types?, dataset?, tags?,
     tags_match?, tag_groups?, budget?, prefer_observations?, include?,
-    query_timestamp?, min_scores?) → {results, entities?, chunks?,
+    query_timestamp?, min_scores?, project?) → {results, entities?, chunks?,
     source_facts?}.
 
     The Hindsight-preferred retrieval path: token-budgeted, observation
@@ -623,6 +641,7 @@ async def _memory_recall(
         query_timestamp=query_timestamp,
         min_scores=min_scores,
         client_id=client_id,
+        **_read_project(args),
     )
     out: dict[str, Any] = {"results": list(results)}
     entities = getattr(results, "entities", None)
@@ -645,7 +664,7 @@ async def _memory_reflect(
 ) -> dict[str, Any]:
     """memory_reflect(query, dataset?, budget?, max_tokens?, fact_types?,
     tags?, tags_match?, tag_groups?, exclude_mental_models?,
-    exclude_mental_model_ids?, include?, response_schema?)
+    exclude_mental_model_ids?, include?, response_schema?, project?)
     → {text, based_on?, structured_output?, usage?, trace?}.
 
     LLM-backed synthesis over the bank's memory. Reflect operates on exactly
@@ -656,9 +675,11 @@ async def _memory_reflect(
     The provider holds the reflect to what ``client_id`` may read, exactly as
     ``POST /api/memory/reflect`` does (``HindsightProvider.reflect``): other
     agents' ``visibility:private`` memories are filtered out by tag, the
-    caller's ``tags`` and ``tag_groups`` only narrow that, and under the
-    unified bank mental models are left out whatever ``exclude_mental_models``
-    says.
+    caller's ``tags`` and ``tag_groups`` only narrow that, and on a bank
+    that holds other agents' private memories (the old unified bank, the
+    two-bank ``hal0:private``) mental models are left out whatever
+    ``exclude_mental_models`` says. ``project`` narrows the reflect as it
+    narrows ``memory_recall``.
 
     Engines without a reflect capability (the PgVector degrade fallback)
     answer ``{status: "unsupported"}`` rather than erroring — the ABC default
@@ -698,6 +719,7 @@ async def _memory_reflect(
         exclude_mental_model_ids=exclude_mental_model_ids,
         include=include,
         response_schema=response_schema,
+        **_read_project(args),
     )
     return dict(result) if isinstance(result, dict) else {"text": str(result)}
 
@@ -1690,7 +1712,9 @@ def _memory_tool_definitions() -> dict[str, Tool]:
             "a conversation). sync=true waits for extraction instead of the "
             "default fire-and-forget background ingest. Writes are shared by "
             "default; private=true keeps this one write in your own private "
-            "bank (it can only make a write more private)."
+            "bank (it can only make a write more private). project names the "
+            "project you are working in (a repository name); hal0 tags the "
+            "write with it, so do not add a project: tag yourself."
         ),
         annotations=_ANNOTATIONS["memory_add"],
     )
@@ -1706,6 +1730,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         update_mode: str | None = None,
         sync: bool | None = None,
         private: bool | None = None,
+        project: str | None = None,
         args: dict[str, Any] | None = None,
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
@@ -1725,6 +1750,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
                 update_mode=update_mode,
                 sync=sync,
                 private=private,
+                project=project,
             ),
         )
 
@@ -1733,7 +1759,9 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         description=(
             "Search long-term memory. Returns {results: [...]}. tag_groups/"
             "min_scores are Hindsight-native filters (boolean tag expressions / "
-            "per-stage score floors) — ignored by engines without them."
+            "per-stage score floors) — ignored by engines without them. "
+            "project narrows the search to one project plus global memory; "
+            "without it ('*' says so explicitly) every project is searched."
         ),
         annotations=_ANNOTATIONS["memory_search"],
     )
@@ -1746,6 +1774,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         after: str | None = None,
         tag_groups: list[dict[str, Any]] | None = None,
         min_scores: dict[str, float] | None = None,
+        project: str | None = None,
         args: dict[str, Any] | None = None,
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
@@ -1762,6 +1791,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
                 after=after,
                 tag_groups=tag_groups,
                 min_scores=min_scores,
+                project=project,
             ),
         )
 
@@ -1812,7 +1842,9 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         name="memory_recall",
         description=(
             "Recall token-budgeted, consolidated memory (preferred over search). "
-            "types defaults to world+experience+observation."
+            "types defaults to world+experience+observation. project narrows "
+            "the recall to one project plus global memory; without it ('*' "
+            "says so explicitly) every project is read."
         ),
         annotations=_ANNOTATIONS["memory_recall"],
     )
@@ -1829,6 +1861,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         include: dict[str, Any] | None = None,
         query_timestamp: str | None = None,
         min_scores: dict[str, float] | None = None,
+        project: str | None = None,
         args: dict[str, Any] | None = None,
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
@@ -1849,6 +1882,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
                 include=include,
                 query_timestamp=query_timestamp,
                 min_scores=min_scores,
+                project=project,
             ),
         )
 
@@ -1858,7 +1892,9 @@ def _memory_tool_definitions() -> dict[str, Tool]:
             "LLM-backed synthesis over memory — ask a question and get a "
             "written-out answer grounded in recalled facts, not a raw fact "
             "list. Single-bank (dataset resolves to one namespace, default "
-            "shared). Returns {status: unsupported} on engines without this "
+            "shared). project narrows it to one project plus global memory; "
+            "without it ('*' says so explicitly) every project is read. "
+            "Returns {status: unsupported} on engines without this "
             "capability instead of erroring."
         ),
         annotations=_ANNOTATIONS["memory_reflect"],
@@ -1876,6 +1912,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         exclude_mental_model_ids: list[str] | None = None,
         include: dict[str, Any] | None = None,
         response_schema: dict[str, Any] | None = None,
+        project: str | None = None,
         args: dict[str, Any] | None = None,
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
@@ -1896,6 +1933,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
                 exclude_mental_model_ids=exclude_mental_model_ids,
                 include=include,
                 response_schema=response_schema,
+                project=project,
             ),
         )
 

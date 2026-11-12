@@ -65,8 +65,14 @@ def bank(documents: int = 0, facts: int = 0, **overrides: Any) -> dict[str, Any]
 
 
 def provider(engine: Engine, **kwargs: Any) -> HindsightProvider:
-    kwargs.setdefault("unified_bank", True)  # the shipped default
+    kwargs.setdefault("unified_bank", True)  # a legacy unified store
     return HindsightProvider(client=engine, **kwargs)
+
+
+def two_bank(engine: Engine, **kwargs: Any) -> HindsightProvider:
+    """A new store's provider (ADR-0058 decision 7)."""
+    kwargs.setdefault("bank", "hal0:shared")
+    return HindsightProvider(client=engine, two_bank=True, **kwargs)
 
 
 def run_hook(prov: Any) -> bool:
@@ -76,7 +82,7 @@ def run_hook(prov: Any) -> bool:
 # ── which banks ───────────────────────────────────────────────────────────────
 
 
-def test_default_box_seeds_only_the_platform_bank() -> None:
+def test_a_legacy_unified_box_seeds_only_the_platform_bank() -> None:
     """Unified bank: private memory lives in the platform bank, so no private bank."""
     engine = Engine()
 
@@ -95,13 +101,29 @@ def test_a_renamed_platform_bank_is_the_one_seeded() -> None:
     assert not any("/banks/shared/" in path for _, path in engine.calls)
 
 
-def test_without_the_unified_bank_the_private_bank_is_the_providers_engine_bank() -> None:
+def test_a_legacy_split_box_seeds_only_the_platform_bank() -> None:
+    """A store on its old layout is folded into the two banks, not seeded into
+    new ones, and its per-agent banks are left as they are."""
     engine = Engine()
 
     assert run_hook(provider(engine, unified_bank=False)) is True
-    assert engine.imports() == ["shared", "private__hermes"]
-    assert engine.banks["private__hermes"]["overrides"] == PRIVATE["bank"]
-    assert "private:hermes" not in engine.banks
+    assert engine.imports() == ["shared"]
+    assert "private__hermes" not in engine.banks
+
+
+def test_a_two_bank_box_seeds_both_banks() -> None:
+    engine = Engine()
+
+    assert run_hook(two_bank(engine)) is True
+    assert engine.imports() == ["hal0:shared", "hal0:private"]
+    assert engine.banks["hal0:shared"]["overrides"] == SHARED["bank"]
+    assert engine.banks["hal0:private"]["overrides"] == PRIVATE["bank"]
+    assert "shared" not in engine.banks and "private__hermes" not in engine.banks
+
+
+def test_two_bank_targets_follow_the_configured_names() -> None:
+    prov = two_bank(Engine(), bank="a:shared", private_bank="a:private")
+    assert bank_seed.seed_targets(prov) == {"a:shared": SHARED, "a:private": PRIVATE}
 
 
 def test_targets_are_empty_for_a_provider_that_is_not_hindsight() -> None:
@@ -180,18 +202,18 @@ def test_a_second_run_writes_nothing() -> None:
 
 def test_one_failed_bank_does_not_stop_the_other_and_rearms_the_hook() -> None:
     engine = Engine()
-    engine.fail_import = {"shared"}
-    prov = provider(engine, unified_bank=False)
+    engine.fail_import = {"hal0:shared"}
+    prov = two_bank(engine)
 
     assert run_hook(prov) is False
-    assert "private__hermes" in engine.banks
+    assert "hal0:private" in engine.banks
     engine.fail_import = set()
     assert run_hook(prov) is True
 
 
 def test_logs_once_when_it_seeds_and_nothing_when_it_skips() -> None:
     engine = Engine()
-    prov = provider(engine, unified_bank=False)
+    prov = two_bank(engine)
 
     with structlog.testing.capture_logs() as first:
         run_hook(prov)
@@ -199,7 +221,7 @@ def test_logs_once_when_it_seeds_and_nothing_when_it_skips() -> None:
         run_hook(prov)
 
     assert [(e["event"], e["log_level"], e["banks"]) for e in first] == [
-        ("hal0.memory.banks_seeded", "info", ["shared", "private__hermes"])
+        ("hal0.memory.banks_seeded", "info", ["hal0:shared", "hal0:private"])
     ]
     assert second == []
 
@@ -267,3 +289,137 @@ def test_a_check_that_cannot_be_made_is_treated_as_a_switch_in_progress(
 
     monkeypatch.setattr(embedder_switch, "blocking_reason", broken)
     assert "could not be checked" in (bank_seed.switch_in_progress() or "")
+
+
+# ── the installer's helper: namespace -> this box's engine bank ──────────────
+
+
+def _layout(monkeypatch, layout) -> None:
+    from hal0.memory import bank_layout as bl
+
+    monkeypatch.setattr(bl, "current_layout", lambda _cfg, **_kw: layout)
+
+
+def test_the_installer_seeds_the_two_banks_on_a_two_bank_box(monkeypatch) -> None:
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import bank_layout as bl
+
+    _layout(monkeypatch, bl.BankLayout(bl.LAYOUT_TWO_BANK))
+    cfg = MemoryConfig()
+    assert bank_seed.engine_bank_for("shared", cfg) == "hal0:shared"
+    assert bank_seed.engine_bank_for("private:hermes", cfg) == "hal0:private"
+
+
+def test_the_installer_seeds_only_the_platform_bank_on_an_old_layout(monkeypatch) -> None:
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import bank_layout as bl
+
+    _layout(monkeypatch, bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared"))
+    cfg = MemoryConfig()
+    assert bank_seed.engine_bank_for("shared", cfg) == "shared"
+    assert bank_seed.engine_bank_for("private:hermes", cfg) is None
+
+
+def _main_box(monkeypatch, layout) -> None:
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+
+    monkeypatch.setattr(
+        loader, "load_hal0_config", lambda _path=None: SimpleNamespace(memory=MemoryConfig())
+    )
+    monkeypatch.setattr(bank_seed, "switch_in_progress", lambda: None)
+    _layout(monkeypatch, layout)
+
+
+def test_seed_target_main_names_a_missing_bank_and_nothing_else(monkeypatch, capsys) -> None:
+    from hal0.memory import bank_layout as bl
+
+    _main_box(monkeypatch, bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared"))
+    engine = Engine()
+    assert bank_seed.seed_target_main(["shared"], client=engine) == 0
+    assert capsys.readouterr().out == "bank=shared\n"
+    assert bank_seed.seed_target_main(["private:hermes"], client=engine) == 0
+    assert capsys.readouterr().out == ""
+    assert bank_seed.seed_target_main(["nope"], client=engine) == 2
+
+
+@pytest.mark.parametrize(
+    ("row", "seeded"),
+    [
+        (bank(documents=3, facts=40, retain_mission="theirs"), False),
+        (bank(documents=1, facts=0), False),
+        (bank(retain_mission="the operator's"), False),
+        (bank(), True),
+    ],
+)
+def test_an_installer_re_run_never_reconfigures_a_bank_that_holds_anything(
+    monkeypatch, capsys, row, seeded
+) -> None:
+    """A re-run used to POST /import to the box's live banks and reset their
+    mission. It now goes through the heal hook's guard (_wants_seeding)."""
+    from hal0.memory import bank_layout as bl
+
+    _main_box(monkeypatch, bl.BankLayout(bl.LAYOUT_TWO_BANK))
+    engine = Engine({"hal0:shared": row})
+    assert bank_seed.seed_target_main(["shared"], client=engine) == 0
+    assert capsys.readouterr().out == ("bank=hal0:shared\n" if seeded else "")
+    assert engine.imports() == []  # the helper only decides; nothing is written
+
+
+def test_seed_target_main_seeds_nothing_during_an_embedder_switch(monkeypatch, capsys) -> None:
+    from hal0.memory import bank_layout as bl
+
+    _main_box(monkeypatch, bl.BankLayout(bl.LAYOUT_TWO_BANK))
+    monkeypatch.setattr(bank_seed, "switch_in_progress", lambda: "the switch is running")
+    assert bank_seed.seed_target_main(["shared"], client=Engine()) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_seed_target_main_fails_closed_when_undecided_or_unreachable(monkeypatch, capsys) -> None:
+    from hal0.memory import bank_layout as bl
+
+    _main_box(monkeypatch, bl.BankLayout(bl.LAYOUT_TWO_BANK))
+
+    class _Down(Engine):
+        async def request_json(self, method, path, **kwargs):
+            raise ConnectionError("engine down")
+
+    assert bank_seed.seed_target_main(["shared"], client=_Down()) == 1
+    assert capsys.readouterr().out == ""
+
+    def undecided(_cfg, **_kw):
+        raise bl.LayoutRecordUnsaved("no")
+
+    monkeypatch.setattr(bl, "current_layout", undecided)
+    assert bank_seed.seed_target_main(["shared"], client=Engine()) == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_seed_target_main_reads_the_installers_paths(monkeypatch, tmp_path) -> None:
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import bank_layout as bl
+
+    seen: dict[str, object] = {}
+
+    def load(path=None):
+        seen["toml"] = path
+        return SimpleNamespace(memory=MemoryConfig())
+
+    def layout(_cfg, path=None):
+        seen["layout"] = path
+        return bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared")
+
+    monkeypatch.setattr(loader, "load_hal0_config", load)
+    monkeypatch.setattr(bl, "current_layout", layout)
+    monkeypatch.setattr(bank_seed, "switch_in_progress", lambda: None)
+    argv = ["private:hermes", str(tmp_path / "hal0.toml"), str(tmp_path / "state")]
+    assert bank_seed.seed_target_main(argv, client=Engine()) == 0
+    assert seen == {
+        "toml": tmp_path / "hal0.toml",
+        "layout": tmp_path / "state" / "memory-layout.json",
+    }

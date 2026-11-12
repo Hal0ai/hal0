@@ -280,7 +280,9 @@ def engine() -> Engine:
     return Engine()
 
 
-def build_app(engine_handler: Callable[..., Any], *, unified_bank: bool = True) -> FastAPI:
+def build_app(
+    engine_handler: Callable[..., Any], *, unified_bank: bool = True, two_bank: bool = False
+) -> FastAPI:
     app = FastAPI()
     error_codes.install(app)
     app.include_router(memory_compat.router, prefix=COMPAT_MEMORY_PREFIX)
@@ -290,6 +292,7 @@ def build_app(engine_handler: Callable[..., Any], *, unified_bank: bool = True) 
     app.state.memory_provider = HindsightProvider(
         client=HindsightRestClient(base_url="http://engine.test", http_client=http),
         unified_bank=unified_bank,
+        two_bank=two_bank,
         bank=BANK,
         projects=ProjectRegistry(aliases={"hal0-mono": "hal0"}),
     )
@@ -1208,6 +1211,26 @@ def test_reflect_passes_its_three_knobs_and_leaves_mental_models_out(
     }
     assert call.read_timeout == REFLECT_TIMEOUT_S
     assert resp.headers["X-hal0-Ignored-Fields"] == "context,exclude_mental_models,include"
+
+
+def test_two_bank_reads_stay_scoped_to_the_callers_project(engine: Engine, key: str) -> None:
+    """ADR-0058 decision 7: the platform bank holds no private memory in the
+    two-bank layout, but a mental model is still written from every project
+    in it, and this endpoint never reads another project (decision 4b). The
+    read groups are the ones the legacy layout sends."""
+    client = TestClient(
+        AuthEnforcementMiddleware(build_app(engine.handler, unified_bank=False, two_bank=True)),
+        client=("127.0.0.1", 50000),
+    )
+    resp = client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "why?"})
+    assert resp.status_code == 200, resp.text
+    call = engine.only("POST", "/reflect")
+    assert call.path == f"/v1/default/banks/{BANK}/reflect"
+    assert call.body["exclude_mental_models"] is True
+    assert call.body["tag_groups"] == [
+        *reflect_visibility_scope("cc"),
+        *project_scope_groups("hal0"),
+    ]
 
 
 def test_the_plugins_reflect_body_is_enough(client: TestClient, engine: Engine, key: str) -> None:
@@ -3092,3 +3115,52 @@ def test_the_plugins_requests_are_served(
         given = resp.json()["operation_id"]
         assert given == case["body"].get("operation_id", given)
         assert engine.calls[-1].body["operation_id"] == _engine_operation_id("cc", given)
+
+
+# ── the two-bank layout (final review of #3572) ───────────────────────────────
+
+
+def _two_bank_client(engine: Engine) -> TestClient:
+    return TestClient(
+        AuthEnforcementMiddleware(build_app(engine.handler, unified_bank=False, two_bank=True)),
+        client=("127.0.0.1", 50000),
+    )
+
+
+def test_two_bank_compat_recall_reads_the_shared_bank_and_only_the_callers_scope(
+    engine: Engine, key: str
+) -> None:
+    """Isolation, not call shape: whatever the engine returns, the answer
+    holds only the caller's project and global memory, and the private bank
+    is never read."""
+    engine.recall_results = [
+        {"id": "f-1", "text": "mine", "tags": OWN_PROJECT},
+        {"id": "f-2", "text": "private to hermes", "tags": OTHER_AGENT_PRIVATE},
+        {"id": "f-3", "text": "private, global", "tags": OTHER_AGENT_PRIVATE_GLOBAL},
+        {"id": "f-4", "text": "another repository", "tags": OTHER_PROJECT},
+        {"id": "f-5", "text": "global", "tags": GLOBAL},
+    ]
+    client = _two_bank_client(engine)
+    resp = client.post(_url(URL_BANK + "/memories/recall"), headers=_auth(key), json={"query": "q"})
+    assert resp.status_code == 200
+    assert [r["id"] for r in resp.json()["results"]] == ["f-1", "f-5"]
+    assert engine.calls and all(c.path.startswith(ENGINE_BANK) for c in engine.calls)
+    assert all("hal0:private" not in c.path for c in engine.calls)
+
+
+def test_two_bank_compat_listing_holds_back_other_agents_and_other_projects(
+    engine: Engine, key: str
+) -> None:
+    _seed(
+        engine,
+        _doc("hal0::cc::mine", OWN_PROJECT),
+        _doc("hal0::shared::git:x", OTHER_AGENT_PRIVATE),
+        _doc("atlas::cc::readme", OTHER_PROJECT),
+        _doc("hal0::codex::notes", OTHER_AGENT_PROJECT),
+    )
+    client = _two_bank_client(engine)
+    resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key))
+    assert resp.status_code == 200
+    ids = [d["id"] for d in resp.json()["items"]]
+    assert ids == ["mine"]
+    assert all("hal0:private" not in c.path for c in engine.calls)
