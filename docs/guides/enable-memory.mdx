@@ -515,7 +515,8 @@ bank, so look at `--status` first.
   waits up to 15 minutes for it, for all banks together, and each time it
   compares or deletes a bank, up to 15 minutes for that bank. If it does not
   finish, the switch stops and names the operation by type, bank and id. A
-  dry run lists such work as a warning.
+  dry run lists such work as a warning, and refuses parked work the way
+  `--apply` would (below).
 - The engine can park its own work: an automatic mental-model refresh due
   within the model's minimum refresh interval (30 minutes in hal0's seed
   banks) waits, queued, until that interval is over. When parked work is due
@@ -523,11 +524,13 @@ bank, so look at `--status` first.
   once, names the operation and when it is due, and tells you to run it
   again after that time.
 - A refresh or a consolidation on an original bank while the engine runs the
-  new model embeds with the new model. If the run is then undone, the store
-  is recorded as mixed (see below), as it is when the undo cannot check an
-  original bank. Work that only waited in the queue does not count, and
-  neither does work the engine ran after the undo restarted it on the old
-  model. Vector-index and graph maintenance embed nothing and never count.
+  new model embeds with the new model. If the run is then undone, any refresh
+  or consolidation activity on an original after the switch to the new model,
+  whether it finished, failed, was cancelled or is still queued, records the
+  store as mixed (see below), as does an original bank the undo cannot check.
+  The engine's records cannot show whether such work wrote anything, so the
+  switch counts it all. The only cost of a mixed record is running the switch
+  again. Vector-index and graph maintenance embed nothing and never count.
 - The export carries only facts that belong to a document. A bank holding any
   other fact does not match its archive, and the switch stops at step 3
   saying so. Observations whose source facts are gone are not exported
