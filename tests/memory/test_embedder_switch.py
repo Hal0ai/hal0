@@ -1286,7 +1286,11 @@ async def test_an_operations_listing_that_never_settles_in_the_rollback_marks_th
     assert "rollback failed" not in err.value.message
     final = _final_journal()
     assert final["phase"] == es.PHASE_ROLLED_BACK
-    assert final["stray_banks"] == ["Hal0::Beta"]
+    # Hal0::Beta by its own check; then the last look cannot read its
+    # operations either, which marks every other original too (fail closed).
+    assert sorted(final["stray_banks"]) == ["Hal0::Beta", "alpha", "gamma"]
+    beta = next(b for b in final["banks"] if b["bank"] == "Hal0::Beta")
+    assert "last read" not in beta["taint"]["reason"], "marked by its own check first"
     _assert_public(box)
     assert box.record().mixed is True
     assert write_gate.read_gate() is None
@@ -1368,6 +1372,169 @@ async def test_a_refresh_after_an_old_journals_reverted_at_still_marks(box: Box)
     assert result["status"] == "rolled_back"
     assert _final_journal()["stray_banks"] == ["gamma"]
     assert box.record().mixed is True
+
+
+# ── a rollback's verdicts survive it failing, and a last look after it ──────
+
+
+def _verdicts(journal: dict[str, Any]) -> dict[str, Any]:
+    return {b["bank"]: b["taint"] for b in journal["banks"]}
+
+
+async def test_a_clean_rollback_saves_a_clean_verdict_for_every_original(box: Box) -> None:
+    with pytest.raises(es.SwitchError, match="failed at restored:gamma"):
+        await box.switch(hook=_fail_at("restored:gamma")).run()
+
+    _assert_rolled_back(box)
+    final = _final_journal()
+    assert final["stray_banks"] == []
+    assert {b: v["mixed"] for b, v in _verdicts(final).items()} == dict.fromkeys(ORIGINALS, False)
+
+
+async def test_a_verdict_survives_a_rollback_that_fails_after_the_engine_left_its_port(
+    box: Box,
+) -> None:
+    """The check ran on the private port; then the restart at the normal address failed.
+
+    The isolation drop-in is gone by then, so ``--resume`` cannot check on
+    the private port again. The verdict saved by the first attempt decides,
+    even when the engine has dropped the row since.
+    """
+
+    def hook(point: str) -> None:
+        if point == "restored:alpha":
+            box.engine.engine_op("alpha", "op-refresh-9", seconds=1)
+        if point == "restored:gamma":
+            box.host.release_restart_error = "systemctl restart hindsight-api.service failed"
+            raise es.SwitchError("failed at restored:gamma")
+
+    with pytest.raises(es.SwitchError, match="the rollback failed too"):
+        await box.switch(hook=hook).run()
+
+    journal = es.load_journal()
+    assert journal is not None and journal.phase == es.PHASE_ROLLBACK_FAILED
+    assert box.host.dropin_port is None, "the drop-in was released before the restart failed"
+    verdicts = {e.bank: e.taint for e in journal.banks}
+    assert verdicts["alpha"] is not None and verdicts["alpha"]["mixed"] is True
+    assert "op-refresh-9" in verdicts["alpha"]["reason"]
+    assert all(v == {"mixed": False, "reason": ""} for b, v in verdicts.items() if b != "alpha")
+
+    box.engine.engine_ops.clear()  # the engine no longer shows the row
+    box.host.release_restart_error = None
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "rolled_back"
+    _assert_public(box)
+    assert _final_journal()["stray_banks"] == ["alpha"]
+    assert box.record().mixed is True
+    assert write_gate.read_gate() is None
+
+
+async def test_a_rollback_killed_inside_its_check_marks_the_banks_it_never_checked(
+    box: Box,
+) -> None:
+    """Killed while checking the second original; the engine then left the private port.
+
+    ``--resume`` cannot check there any more: the originals without a saved
+    verdict count against the store, the one found clean does not.
+    """
+    switch = box.switch(hook=_fail_at("restored:gamma"))
+    taint = switch._taint
+    checked: list[str] = []
+    at_kill: dict[str, Any] = {}
+
+    async def killed_on_the_second(journal: es.Journal, entry: es.BankEntry) -> str:
+        if checked:
+            # What a SIGKILL here would leave on disk.
+            on_disk = es.load_journal()
+            assert on_disk is not None
+            at_kill.update({e.bank: e.taint for e in on_disk.banks})
+            raise Killed
+        checked.append(entry.bank)
+        return await taint(journal, entry)
+
+    switch._taint = killed_on_the_second  # type: ignore[method-assign]
+    with pytest.raises(Killed):
+        await switch.run()
+
+    journal = es.load_journal()
+    assert journal is not None and journal.phase == es.PHASE_ROLLBACK_FAILED
+    first = checked[0]
+    expected = {b: ({"mixed": False, "reason": ""} if b == first else None) for b in ORIGINALS}
+    assert at_kill == expected, "each verdict is on disk as soon as it is reached"
+    assert {e.bank: e.taint for e in journal.banks} == expected
+    # The engine comes back at its normal address outside the run.
+    box.host.release()
+    box.host.apply_dropin(BGE)
+
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "rolled_back"
+    final = _final_journal()
+    unchecked = sorted(b for b in ORIGINALS if b != first)
+    assert sorted(final["stray_banks"]) == unchecked
+    assert all("could not check it" in _verdicts(final)[b]["reason"] for b in unchecked)
+    assert box.record().mixed is True
+
+
+async def test_work_on_a_bank_already_checked_is_caught_by_the_last_look(box: Box) -> None:
+    """A refresh on the first original found clean, while the next one is checked."""
+    switch = box.switch(hook=_fail_at("restored:gamma"))
+    taint = switch._taint
+    checked: list[str] = []
+
+    async def refresh_behind(journal: es.Journal, entry: es.BankEntry) -> str:
+        if len(checked) == 1:
+            box.engine.engine_op(checked[0], "op-behind", seconds=1)
+        checked.append(entry.bank)
+        return await taint(journal, entry)
+
+    switch._taint = refresh_behind  # type: ignore[method-assign]
+    with pytest.raises(es.SwitchError, match="failed at restored:gamma"):
+        await switch.run()
+
+    final = _final_journal()
+    assert final["phase"] == es.PHASE_ROLLED_BACK
+    assert final["stray_banks"] == [checked[0]]
+    assert "op-behind" in _verdicts(final)[checked[0]]["reason"]
+    assert box.record().mixed is True
+
+
+async def test_a_last_look_that_cannot_read_the_operations_marks_every_original(
+    box: Box,
+) -> None:
+    switch = box.switch(hook=_fail_at("restored:gamma"))
+    since = switch._engine_work_since
+
+    async def fails_at_the_normal_address(bank: str, when: Any) -> list[dict[str, Any]]:
+        if box.engine.port == NORMAL_PORT:
+            raise es.SwitchError("listing operations: the engine answered HTTP 500")
+        return await since(bank, when)
+
+    switch._engine_work_since = fails_at_the_normal_address  # type: ignore[method-assign]
+    with pytest.raises(es.SwitchError, match="failed at restored:gamma"):
+        await switch.run()
+
+    final = _final_journal()
+    assert final["phase"] == es.PHASE_ROLLED_BACK
+    assert sorted(final["stray_banks"]) == sorted(ORIGINALS)
+    assert all("HTTP 500" in v["reason"] for v in _verdicts(final).values())
+    _assert_public(box)
+    assert box.record().mixed is True
+
+
+async def test_a_journal_from_before_the_saved_verdicts_still_loads_and_resumes(
+    box: Box,
+) -> None:
+    await box.kill_at("restored:alpha")
+    _strip_journal("taint")
+    loaded = es.load_journal()
+    assert loaded is not None and all(e.taint is None for e in loaded.banks)
+
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "rolled_back"
+    _assert_rolled_back(box)
 
 
 def _usage(free: int) -> Any:

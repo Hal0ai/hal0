@@ -405,6 +405,12 @@ class BankEntry:
     #: bank.
     #: Absent from a journal written before #3604 and then empty.
     engine_work: list[dict[str, Any]] = field(default_factory=list)
+    #: A rollback's verdict on the original, saved as soon as it is reached
+    #: (:meth:`EmbedderSwitch._rollback`): ``{"mixed": bool, "reason": str}``,
+    #: where ``mixed`` means it may hold vectors of the target model. ``None``
+    #: until its check has run; a later look can only turn ``mixed`` on.
+    #: Absent from a journal written before it existed and then ``None``.
+    taint: dict[str, Any] | None = None
 
 
 @dataclass
@@ -551,6 +557,18 @@ def _parse_time(value: str | None) -> datetime | None:
     except ValueError:
         return None
     return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
+def _mark(entry: BankEntry, reason: str, *, mixed: bool = True) -> None:
+    """Record a rollback's verdict on ``entry``. A verdict already ``mixed`` stays so."""
+    before = entry.taint or {}
+    if before.get("mixed") and not mixed:
+        return
+    if before.get("mixed") and before.get("reason"):
+        if not reason or reason in before["reason"]:
+            return
+        reason = f"{before['reason']}; {reason}"
+    entry.taint = {"mixed": bool(before.get("mixed")) or mixed, "reason": reason}
 
 
 def _finished(journal: Journal) -> bool:
@@ -1746,6 +1764,46 @@ class EmbedderSwitch(em.EngineMaintenance):
             )
         return moved
 
+    @staticmethod
+    def _originals(journal: Journal) -> list[BankEntry]:
+        """The banks a rollback hands back as they are: every one exported."""
+        return [e for e in journal.banks if e.step != STEP_PLANNED]
+
+    async def _last_look(self, journal: Journal) -> None:
+        """Read every original's operations once more, after the engine is back on the old model.
+
+        The per-bank check (:meth:`_taint`) takes the banks one at a time and
+        each may wait for its bank to go quiet, so a refresh or consolidation
+        can still run on a bank already found clean while a later one is
+        checked, on the target. This one read of every original, wherever
+        the engine now answers, marks a bank with any such row since
+        ``journal.flipped_at`` (``started_at`` for an older journal). It
+        over-counts on purpose: work the engine did after the rollback put it
+        back on the previous embedder has a row too and marks as well, which
+        costs only a second run of the switch. When the read fails, every
+        original not marked yet is marked (fail closed) with the reason.
+        Each verdict is saved.
+        """
+        since = _parse_time(journal.flipped_at or journal.started_at)
+        originals = self._originals(journal)
+        for entry in originals:
+            try:
+                ran = await self._engine_work_since(entry.bank, since)
+            except SwitchError as exc:
+                why = f"the rollback's last read of its operations failed ({exc.message})"
+                for other in originals:
+                    if not (other.taint or {}).get("mixed"):
+                        _mark(other, why)
+                self._save(journal)
+                return
+            if ran:
+                _mark(
+                    entry,
+                    "the engine's own work on it may have run after the flip: "
+                    + em.operations_text(entry.bank, ran),
+                )
+        self._save(journal)
+
     async def _check_before_swap(self, journal: Journal) -> None:
         """The last look before anything is deleted.
 
@@ -2207,20 +2265,35 @@ class EmbedderSwitch(em.EngineMaintenance):
                     # The engine ran the target. A bank this run does not know,
                     # or an original that changed meanwhile, may hold vectors
                     # of the target model in a store going back to the old one.
-                    tainted = await self._stray_banks(journal)
+                    # Each verdict is saved as it is reached: the engine leaves
+                    # this port below, and a resume cannot check here again.
+                    strays = await self._stray_banks(journal)
+                    if strays:
+                        journal.stray_banks = list(dict.fromkeys([*journal.stray_banks, *strays]))
+                        self._save(journal)
                     for entry in journal.banks:
-                        if entry.step == STEP_PLANNED:
+                        if entry.step == STEP_PLANNED or entry.taint is not None:
                             continue
                         why = await self._taint(journal, entry)
-                        if why:
-                            tainted.append(entry.bank)
-                            reasons.append(f"{entry.bank}: {why}")
+                        _mark(entry, why, mixed=bool(why))
+                        self._save(journal)
+            if journal.flip_started:
+                # An original whose check never completed, here or in an
+                # earlier attempt, counts against the store: fail closed.
+                for entry in self._originals(journal):
+                    if entry.taint is None:
+                        _mark(entry, "the rollback could not check it on the engine's private port")
+                self._save(journal)
             if journal.isolated:
                 await self._ensure_engine(
                     previous, port=None, run_id=journal.run_id, journal=journal
                 )
                 await self._sweep(journal)
             if journal.flip_started:
+                await self._last_look(journal)
+                marked = [e for e in self._originals(journal) if (e.taint or {}).get("mixed")]
+                tainted = list(dict.fromkeys([*journal.stray_banks, *(e.bank for e in marked)]))
+                reasons = [f"{e.bank}: {e.taint['reason']}" for e in marked if e.taint["reason"]]
                 # Only now: the engine is confirmed on the previous embedder.
                 embedder_record.save_embedder_record(
                     self._record_from(
