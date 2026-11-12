@@ -1697,7 +1697,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     assert set(projects_kwargs) == {"memory", "base"}
     assert set(owners_kwargs) == {"memory", "base"}
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-51:] == [
+    assert keys[-52:] == [
         "auth",
         "models",
         "registry-toml",
