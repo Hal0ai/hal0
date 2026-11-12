@@ -82,6 +82,11 @@ Environment=HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=16384
 Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=1
 Environment=HINDSIGHT_API_WORKER_MAX_RETRIES=2
 Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS=120
+# Worker slots (#3534): Hindsight's own default is 10 concurrent queued tasks,
+# which took the engine past the memory cgroup on an 11 GiB box. 4 = the two
+# slots Hindsight reserves for consolidation plus two for retain; mirrors
+# [memory.graph].extraction_worker_slots, whose drop-in line overrides this one.
+Environment=HINDSIGHT_API_WORKER_MAX_SLOTS=4
 # Skip the blocking startup LLM verification. On a fresh box no model is loaded
 # yet, so verifying hal0/memory would hang application startup (the daemon never
 # binds :9177) until the timeout. The LLM is only needed for extraction/reflection,

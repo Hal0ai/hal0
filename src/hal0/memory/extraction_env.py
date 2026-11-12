@@ -165,6 +165,15 @@ class ExtractionLimits:
     * ``retry_backoff_s`` -> ``HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS``:
       wait before a requeue. Worker-wide likewise.
 
+    * ``worker_slots`` -> ``HINDSIGHT_API_WORKER_MAX_SLOTS``: how many queued
+      tasks (retain, consolidation, mental-model refresh) the engine runs at
+      once. Independent of the LLM caps above: Hindsight's own default is 10,
+      and ten concurrent tasks (chunking, embedding, graph writes) took the
+      engine to several GiB resident and into the memory cgroup's OOM killer
+      on an 11 GiB box (#3534). Held at or above
+      :data:`WORKER_SLOTS_FLOOR` by the schema: Hindsight reserves two slots
+      for consolidation, so a bound at or below that leaves retain none.
+
     ``HINDSIGHT_API_RETAIN_WALL_TIMEOUT`` is not a field: it is derived from
     ``llm_timeout_s`` and ``llm_retries`` by :func:`retain_wall_timeout_s`.
     """
@@ -174,6 +183,7 @@ class ExtractionLimits:
     llm_retries: int = 1
     task_retries: int = 2
     retry_backoff_s: int = 120
+    worker_slots: int = 4
 
     @classmethod
     def from_config(cls, cfg: MemoryGraphConfig) -> ExtractionLimits:
@@ -183,11 +193,17 @@ class ExtractionLimits:
             llm_retries=cfg.extraction_llm_retries,
             task_retries=cfg.extraction_task_retries,
             retry_backoff_s=cfg.extraction_retry_backoff_s,
+            worker_slots=cfg.extraction_worker_slots,
         )
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)
 
+
+#: Smallest ``worker_slots`` hal0 renders. Hindsight reserves 2 worker slots for
+#: consolidation (``WORKER_SLOT_TYPE_DEFAULTS`` in its config); the rest form
+#: the shared pool retain draws from, so 2 would leave retain no slot at all.
+WORKER_SLOTS_FLOOR = 3
 
 #: Floor for the retain wall limit: hindsight-api's own default (1 h). hal0 never
 #: lowers the limit below what the engine would have used.
@@ -243,6 +259,7 @@ _DROP_IN_TEMPLATE = (
     "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES={llm_retries}\n"
     "Environment=HINDSIGHT_API_WORKER_MAX_RETRIES={task_retries}\n"
     "Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS={retry_backoff_s}\n"
+    "Environment=HINDSIGHT_API_WORKER_MAX_SLOTS={worker_slots}\n"
     "Environment=HINDSIGHT_API_RETAIN_WALL_TIMEOUT={wall_timeout_s}\n"
 )
 
@@ -551,6 +568,7 @@ def render_drop_in(
         llm_retries=int(lim.llm_retries),
         task_retries=int(lim.task_retries),
         retry_backoff_s=int(lim.retry_backoff_s),
+        worker_slots=int(lim.worker_slots),
         wall_timeout_s=retain_wall_timeout_s(timeout_s, lim.llm_retries),
     )
 

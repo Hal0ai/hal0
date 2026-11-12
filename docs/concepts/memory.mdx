@@ -375,7 +375,8 @@ even on a fresh install, under `[memory.graph]`:
 - the extraction limits — `extraction_max_concurrent` (default `1`),
   `extraction_max_tokens` (default `16384`), `extraction_llm_retries`
   (default `1`), `extraction_task_retries` (default `2`) and
-  `extraction_retry_backoff_s` (default `120`). The extraction slot is a
+  `extraction_retry_backoff_s` (default `120`) and `extraction_worker_slots`
+  (default `4`). The extraction slot is a
   shared inference slot, usually one llama-server serving one request at a
   time; Hindsight's own defaults (32 concurrent calls, 64000 completion
   tokens, three retries at each of two layers) let one slow extraction
@@ -400,6 +401,12 @@ even on a fresh install, under `[memory.graph]`:
   `extraction_retry_backoff_s` are Hindsight's worker-wide settings: every
   queued memory operation (consolidation and mental-model refresh too)
   shares them, since the engine has no retain-only task retry.
+  `extraction_worker_slots` bounds how many of those queued tasks run at once
+  (`HINDSIGHT_API_WORKER_MAX_SLOTS`). Hindsight's own default of 10 can push
+  the engine past the memory limit of a small box and get it OOM-killed, so
+  hal0 renders 4: the two slots Hindsight reserves for consolidation plus two
+  for retain. Raise it only on a box with memory to spare; it cannot go below
+  3. `hal0 doctor` shows the value in force.
 
   `extraction_max_tokens` must stay strictly above the retain chunk size of
   every bank: the engine refuses each retain into a bank whose chunk size is

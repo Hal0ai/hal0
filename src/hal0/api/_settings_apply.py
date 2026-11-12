@@ -249,6 +249,7 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.graph.extraction_llm_retries": {"apply_class": "immediate", "services": []},
     "memory.graph.extraction_task_retries": {"apply_class": "immediate", "services": []},
     "memory.graph.extraction_retry_backoff_s": {"apply_class": "immediate", "services": []},
+    "memory.graph.extraction_worker_slots": {"apply_class": "immediate", "services": []},
     # [memory.models] / [memory.decision] / [memory.lanes] — Hindsight 1.2
     # showcase. PUT /api/settings re-renders hindsight-api's showcase-lanes.conf
     # drop-in through the privileged seam and restarts the engine before it

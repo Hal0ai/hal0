@@ -619,6 +619,7 @@ def test_graph_status_echoes_the_extraction_limits(
         "llm_retries": 1,
         "task_retries": 2,
         "retry_backoff_s": 120,
+        "worker_slots": 4,
     }
 
 

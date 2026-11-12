@@ -158,6 +158,7 @@ def test_extraction_limits_defaults_are_conservative():
     assert limits.llm_retries == 1
     assert limits.task_retries == 2
     assert limits.retry_backoff_s == 120
+    assert limits.worker_slots == 4
 
 
 def test_render_drop_in_carries_the_extraction_limits():
@@ -170,9 +171,16 @@ def test_render_drop_in_carries_the_extraction_limits():
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=1" in out
     assert "HINDSIGHT_API_WORKER_MAX_RETRIES=2" in out
     assert "HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS=120" in out
+    # #3534: Hindsight 1.2 defaults this to 10 and OOM-killed an 11 GiB box.
+    assert "Environment=HINDSIGHT_API_WORKER_MAX_SLOTS=4\n" in out
 
     tuned = ExtractionLimits(
-        max_concurrent=2, max_tokens=8192, llm_retries=0, task_retries=5, retry_backoff_s=30
+        max_concurrent=2,
+        max_tokens=8192,
+        llm_retries=0,
+        task_retries=5,
+        retry_backoff_s=30,
+        worker_slots=6,
     )
     out = render_drop_in(limits=tuned)
     assert "Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT=2\n" in out
@@ -181,6 +189,7 @@ def test_render_drop_in_carries_the_extraction_limits():
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=0" in out
     assert "HINDSIGHT_API_WORKER_MAX_RETRIES=5" in out
     assert "HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS=30" in out
+    assert "Environment=HINDSIGHT_API_WORKER_MAX_SLOTS=6\n" in out
 
 
 def test_extraction_limits_from_config_mirrors_the_schema():
@@ -193,9 +202,15 @@ def test_extraction_limits_from_config_mirrors_the_schema():
         extraction_llm_retries=2,
         extraction_task_retries=1,
         extraction_retry_backoff_s=45,
+        extraction_worker_slots=5,
     )
     assert ExtractionLimits.from_config(cfg) == ExtractionLimits(
-        max_concurrent=3, max_tokens=6000, llm_retries=2, task_retries=1, retry_backoff_s=45
+        max_concurrent=3,
+        max_tokens=6000,
+        llm_retries=2,
+        task_retries=1,
+        retry_backoff_s=45,
+        worker_slots=5,
     )
     assert ExtractionLimits.from_config(MemoryGraphConfig()) == ExtractionLimits()
 
@@ -246,6 +261,7 @@ def test_apply_threads_limits_into_drop_in_and_status(monkeypatch, tmp_path: Pat
         "llm_retries": 1,
         "task_retries": 2,
         "retry_backoff_s": 120,
+        "worker_slots": 4,
     }
     text = drop_in.read_text()
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=2" in text
@@ -2189,3 +2205,40 @@ def test_a_running_engine_with_no_embedder_environment_is_not_drift(monkeypatch,
     assert (status["recorded"], status["mixed"], status["conflict"]) == (_BGE, False, None)
     assert [d for d in report["drift"] if "EMBEDDINGS" in d["key"]] == []
     assert embedder_row.status == "pass"
+
+
+def test_engine_env_report_flags_a_worker_slot_override(tmp_path: Path):
+    """#3534: the worker-slot bound is a managed key, so a unit still running
+    Hindsight's default of 10 (stale unit, or an override) reads as drift."""
+    from hal0.memory import extraction_env as ee
+
+    paths = _report_paths(tmp_path)
+    mem = _memory_cfg()
+    paths["drop_in_path"].write_text("x")
+    expected = ee.expected_engine_env(mem, include_showcase=False, slots_dir=tmp_path)
+    assert expected["HINDSIGHT_API_WORKER_MAX_SLOTS"] == "4"
+    unit = {**expected, "HINDSIGHT_API_WORKER_MAX_SLOTS": "10"}
+
+    report = ee.engine_env_report(mem, unit_env=unit, slots_dir=tmp_path, **paths)
+
+    assert report["drift"] == [
+        {"key": "HINDSIGHT_API_WORKER_MAX_SLOTS", "expected": "4", "effective": "10"}
+    ]
+    warning = ee.engine_env_warning(report)
+    assert warning is not None and "HINDSIGHT_API_WORKER_MAX_SLOTS=10" in warning
+
+
+def test_a_pre_3534_drop_in_reads_as_drift_so_update_rerenders_it(tmp_path: Path, monkeypatch):
+    """`hal0 update` re-renders via reconcile_extraction_dropin, which acts on
+    drop_in_matches(): a drop-in written before the worker-slot line existed
+    must not match."""
+    from hal0.memory import extraction_env as ee
+
+    old = ee.render_drop_in().replace("Environment=HINDSIGHT_API_WORKER_MAX_SLOTS=4\n", "")
+    assert "WORKER_MAX_SLOTS" not in old
+    path = tmp_path / "extraction-model.conf"
+    path.write_text(old, encoding="utf-8")
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+    assert ee.drop_in_matches() is False
+    path.write_text(ee.render_drop_in(), encoding="utf-8")
+    assert ee.drop_in_matches() is True

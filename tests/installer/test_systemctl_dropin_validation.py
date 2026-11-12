@@ -94,10 +94,20 @@ def test_live_hindsight_body_is_accepted_byte_for_byte() -> None:
     [
         ExtractionLimits(),
         ExtractionLimits(
-            max_concurrent=8, max_tokens=32768, llm_retries=5, task_retries=10, retry_backoff_s=3600
+            max_concurrent=8,
+            max_tokens=32768,
+            llm_retries=5,
+            task_retries=10,
+            retry_backoff_s=3600,
+            worker_slots=32,
         ),
         ExtractionLimits(
-            max_concurrent=2, max_tokens=3072, llm_retries=0, task_retries=0, retry_backoff_s=10
+            max_concurrent=2,
+            max_tokens=3072,
+            llm_retries=0,
+            task_retries=0,
+            retry_backoff_s=10,
+            worker_slots=3,
         ),
     ],
     ids=["defaults", "ceilings", "floors"],

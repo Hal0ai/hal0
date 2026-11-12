@@ -12,7 +12,7 @@ import {
 } from '../extractionLimits.js'
 
 const STATUS = {
-  extraction_limits: { max_concurrent: 1, max_tokens: 4096, llm_retries: 1, task_retries: 2, retry_backoff_s: 120 },
+  extraction_limits: { max_concurrent: 1, max_tokens: 4096, llm_retries: 1, task_retries: 2, retry_backoff_s: 120, worker_slots: 4 },
 }
 
 describe('extraction limits form', () => {
@@ -23,14 +23,15 @@ describe('extraction limits form', () => {
     expect(byKey.llm_retries).toMatchObject({ min: 0, max: 5, fallback: 1 })
     expect(byKey.task_retries).toMatchObject({ min: 0, max: 10, fallback: 2 })
     expect(byKey.retry_backoff_s).toMatchObject({ min: 10, max: 3600, fallback: 120 })
+    expect(byKey.worker_slots).toMatchObject({ min: 3, max: 32, fallback: 4, putKey: 'extraction_worker_slots' })
   })
 
   it('seeds the form from status, falling back to defaults for an older API', () => {
     expect(limitsFormFromStatus(STATUS)).toEqual({
-      max_concurrent: '1', max_tokens: '4096', llm_retries: '1', task_retries: '2', retry_backoff_s: '120',
+      max_concurrent: '1', max_tokens: '4096', llm_retries: '1', task_retries: '2', retry_backoff_s: '120', worker_slots: '4',
     })
     expect(limitsFormFromStatus({})).toEqual({
-      max_concurrent: '1', max_tokens: '4096', llm_retries: '1', task_retries: '2', retry_backoff_s: '120',
+      max_concurrent: '1', max_tokens: '4096', llm_retries: '1', task_retries: '2', retry_backoff_s: '120', worker_slots: '4',
     })
     expect(limitsFormFromStatus(undefined).max_tokens).toBe('4096')
   })
