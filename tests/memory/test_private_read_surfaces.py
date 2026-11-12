@@ -15,6 +15,7 @@ with the real provider, the way both MCP mounts reach it.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -51,6 +52,9 @@ class _Engine:
         self.refreshed: list[str] = []
         self.cancelled: list[str] = []
         self.retried: list[str] = []
+        self.model_gets = 0
+        self.gets_in_flight = 0
+        self.max_gets_in_flight = 0
 
     def doc(self, bank: str, doc_id: str, tags: list[str], text: str = "body") -> None:
         self.docs.setdefault(bank, {})[doc_id] = {
@@ -80,14 +84,26 @@ class _Engine:
             raise _EngineNotFound()
         return dict(doc)
 
-    async def list_mental_models(self, *, bank_id, **_kwargs):
-        return {"items": [dict(m) for m in self.models.get(bank_id, {}).values()]}
+    async def list_mental_models(self, *, bank_id, detail=None, **_kwargs):
+        rows = [dict(m) for m in self.models.get(bank_id, {}).values()]
+        if detail in (None, "metadata"):
+            # Hindsight 1.2.0 lists every model with ``trigger: null`` (and no
+            # content) at its default ``metadata`` detail (#3584).
+            rows = [{**r, "trigger": None, "content": None} for r in rows]
+        return {"items": rows}
 
     async def get_mental_model(self, *, bank_id, mental_model_id):
-        model = self.models.get(bank_id, {}).get(mental_model_id)
-        if model is None:
-            raise _EngineNotFound()
-        return dict(model)
+        self.model_gets += 1
+        self.gets_in_flight += 1
+        self.max_gets_in_flight = max(self.max_gets_in_flight, self.gets_in_flight)
+        try:
+            await asyncio.sleep(0)
+            model = self.models.get(bank_id, {}).get(mental_model_id)
+            if model is None:
+                raise _EngineNotFound()
+            return dict(model)
+        finally:
+            self.gets_in_flight -= 1
 
     async def create_mental_model(self, *, bank_id, name, source_query, id=None, **kwargs):
         mm_id = id or f"mm-{len(self.models.get(bank_id, {})) + 1}"
@@ -327,6 +343,66 @@ async def test_mental_model_confined_to_owner_survives_foreign_private(layout):
     engine.doc(bank, "b-priv", ["visibility:private", "agent:bob"])
     listed = await p.list_mental_models(client_id="alice")
     assert {m["id"] for m in listed["items"]} == {"mm-alice"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+async def test_metadata_listing_judges_each_model_on_its_stored_trigger(layout):
+    """#3584: the engine lists ``trigger: null`` at its default detail. The
+    owner's flagged model is judged on its stored trigger, the listing keeps
+    the caller's detail (no content), and a whole-bank model stays hidden
+    whatever its trigger says."""
+    p, engine, bank = _provider(layout)
+    engine.doc(bank, "b-priv", ["visibility:private", "agent:bob"])
+    engine.models[bank]["mm-whole"]["trigger"] = {"exclude_mental_models": True}
+    listed = await p.list_mental_models(client_id="alice", detail="metadata")
+    assert [m["id"] for m in listed["items"]] == ["mm-alice"]
+    row = listed["items"][0]
+    assert row["content"] is None
+    assert row["trigger"] == {"exclude_mental_models": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+async def test_metadata_listing_reads_triggers_with_bounded_concurrency(layout):
+    p, engine, bank = _provider(layout)
+    engine.doc(bank, "b-priv", ["visibility:private", "agent:bob"])
+    for i in range(40):
+        engine.models[bank][f"mm-a{i}"] = {
+            "id": f"mm-a{i}",
+            "name": f"A{i}",
+            "tags": ["agent:alice"],
+            "trigger": {"exclude_mental_models": True},
+            "content": "mine",
+        }
+    listed = await p.list_mental_models(client_id="alice")
+    assert len(listed["items"]) == 41  # mm-alice plus the forty
+    assert 1 < engine.max_gets_in_flight <= 8
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+async def test_metadata_listing_reads_no_trigger_without_foreign_private(layout):
+    p, engine, _bank = _provider(layout)
+    listed = await p.list_mental_models(client_id="alice")
+    assert {m["id"] for m in listed["items"]} == {"mm-whole", "mm-topic", "mm-alice"}
+    assert engine.model_gets == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
+async def test_metadata_listing_drops_a_model_deleted_while_listing(layout):
+    p, engine, bank = _provider(layout)
+    engine.doc(bank, "b-priv", ["visibility:private", "agent:bob"])
+    real = engine.list_mental_models
+
+    async def listing_then_delete(**kw):
+        out = await real(**kw)
+        del engine.models[bank]["mm-alice"]
+        return out
+
+    engine.list_mental_models = listing_then_delete
+    assert (await p.list_mental_models(client_id="alice"))["items"] == []
 
 
 @pytest.mark.asyncio
