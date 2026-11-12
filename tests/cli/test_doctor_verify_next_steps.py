@@ -36,7 +36,7 @@ def test_check_dns_unresolved_offers_manual_and_doc(monkeypatch) -> None:
     c = dv.check_dns({"api": "http://hal0.local:8080"})
     kinds = [s.kind for s in c.next_steps]
     assert kinds == ["manual", "doc"]
-    assert c.next_steps[1].target == "/docs/operate/services/#mdns-discovery-toggle"
+    assert c.next_steps[1].target == "/docs/operate/companion-services/#mdns-discovery-toggle"
 
 
 def test_check_dns_pass_has_no_steps(monkeypatch) -> None:

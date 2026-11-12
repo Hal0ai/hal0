@@ -77,9 +77,9 @@ describe('openDocTarget', () => {
   })
 
   it('resolves a docs-site path against hal0.dev', () => {
-    openDocTarget('/docs/operate/services/#mdns-discovery-toggle')
+    openDocTarget('/docs/operate/companion-services/#mdns-discovery-toggle')
     expect(openSpy).toHaveBeenCalledWith(
-      'https://hal0.dev/docs/operate/services/#mdns-discovery-toggle',
+      'https://hal0.dev/docs/operate/companion-services/#mdns-discovery-toggle',
       '_blank',
       'noopener',
     )

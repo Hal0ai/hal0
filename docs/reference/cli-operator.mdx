@@ -306,7 +306,7 @@ Edits `hal0.toml` `[network]` through the API, never `api.env`, so the values
 survive an installer re-run. `public-url set|clear` use `PUT /api/settings`.
 `origins add|remove` use `POST /api/settings/network`, which applies the one
 entry to the list on disk, so a concurrent edit elsewhere is never lost.
-Changes apply on the next request, with no restart. See [Allow the public URL](/docs/operate/auth#allow-the-public-url).
+Changes apply on the next request, with no restart. See [Allow the public URL](/docs/operate/tls-and-listeners/#allow-the-public-url).
 
 | Command | Args | Flags |
 |---|---|---|
