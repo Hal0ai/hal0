@@ -279,34 +279,15 @@ export function installCommandFor(template: string | null | undefined, harness: 
   return template.replace('<harness>', harness)
 }
 
-/** The address the command points the plugin at (`--api-url`), or null when it names none. */
-export function commandApiUrl(command: string | null | undefined): string | null {
-  const match = /--api-url\s+(\S+)/.exec(command ?? '')
-  return match ? match[1] : null
-}
-
-/** True when `url` can only be reached from the machine it names: the box itself. */
-export function isLoopbackUrl(url: string | null | undefined): boolean {
-  if (!url) return false
-  let host: string
-  try {
-    host = new URL(url).hostname
-  } catch {
-    return false
-  }
-  host = host.replace(/^\[|\]$/g, '').toLowerCase()
-  return host === 'localhost' || host === '::1' || host.endsWith('.localhost') || /^127(\.\d{1,3}){3}$/.test(host)
-}
-
 /** The agents route's answer, read defensively: a body of another shape is "failed", not a crash. */
 export function readAgentsRoute(
   query: { data?: unknown; isError?: boolean } | null | undefined,
 ):
   | { kind: 'loading' }
   | { kind: 'failed' }
-  | { kind: 'ready'; banks: string[]; harnesses: string[]; command: string } {
+  | { kind: 'ready'; banks: string[]; harnesses: string[]; command: string; mintCommand: string; keyFile: string } {
   const data = query?.data as
-    | { banks?: unknown; install?: { harnesses?: unknown; command?: unknown } }
+    | { banks?: unknown; install?: { harnesses?: unknown; command?: unknown; mint_command?: unknown; key_file?: unknown } }
     | null
     | undefined
   if (data === undefined || data === null) return query?.isError ? { kind: 'failed' } : { kind: 'loading' }
@@ -319,5 +300,7 @@ export function readAgentsRoute(
     banks: Array.isArray(data.banks) ? data.banks.filter((b): b is string => typeof b === 'string') : [],
     harnesses: install.harnesses.filter((h): h is string => typeof h === 'string' && h !== ''),
     command: install.command,
+    mintCommand: typeof install.mint_command === 'string' ? install.mint_command : '',
+    keyFile: typeof install.key_file === 'string' ? install.key_file : '',
   }
 }

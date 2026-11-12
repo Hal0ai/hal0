@@ -260,12 +260,12 @@ another agent.
 - **No known writer** — shown only when facts tagged `agent:unknown` exist:
   how many, and on which banks.
 - **Connect a coding agent** — pick an agent (Claude Code, Codex, OpenCode,
-  Pi, Cursor CLI, Copilot CLI, Qwen Code), copy the install command, and
-  read what it does: it installs the Hindsight plugin for that agent and
-  points it at this box's memory engine, which the plugin then talks to
-  directly.
+  Pi, Cursor CLI, Copilot CLI, Qwen Code) and follow three steps: mint a
+  bridge key with `hal0 bridge add <harness> --scope memory`, save the key
+  alone to a file, and run `hal0 memory agents install <harness>
+  --bridge-key-file <file>`. Both commands are shown ready to copy.
 
-`hal0 memory agents install <harness> --bridge-key-file <path>` runs the
+`hal0 memory agents install <harness> --bridge-key-file <path>` is that last step. It runs the
 plugin's installer and points that harness at hal0's `/api/memory/compat`
 instead, so its memory goes through hal0's write envelope and project-scoped
 reads. Mint the key with `hal0 bridge add <harness> --scope memory` and save

@@ -346,7 +346,13 @@ def test_agents_filters_coding_agent_banks(client: TestClient, recorder: _Record
         "copilot-cli",
         "qwen-code",
     ]
-    assert "hindsight-coding-agents@0.8.5" in body["install"]["command"]
+    assert body["install"]["command"] == (
+        "hal0 memory agents install <harness> --bridge-key-file hal0-memory.key"
+    )
+    assert body["install"]["mint_command"] == "hal0 bridge add <harness> --scope memory"
+    assert body["install"]["key_file"] == "hal0-memory.key"
+    assert "--api-url" not in body["install"]["command"]
+    assert "--server" not in body["install"]["command"]
     assert body["console_url"] is None
 
 

@@ -8,8 +8,8 @@ import type { BankTagsEntry, MemoryClient } from './agents-pure'
 import { makeArea, type FakeQuery } from './area-test-fixtures'
 import { cleanup, click, mount, settle } from './shared/test-harness'
 
-const COMMAND =
-  'npx @vectorize-io/hindsight-coding-agents@0.8.5 install <harness> --server self-hosted --api-url http://127.0.0.1:9177'
+const COMMAND = 'hal0 memory agents install <harness> --bridge-key-file hal0-memory.key'
+const MINT = 'hal0 bridge add <harness> --scope memory'
 const HARNESSES = ['claude-code', 'codex', 'opencode', 'pi', 'cursor-cli', 'copilot-cli', 'qwen-code']
 
 const m = vi.hoisted(() => ({
@@ -49,7 +49,7 @@ const tags = (bankId: string, counts: Record<string, number>): BankTagsEntry => 
   items: Object.entries(counts).map(([tag, count]) => ({ tag, count })),
 })
 const agentsAnswer = (over: Record<string, unknown> = {}) => ({
-  data: { banks: [], install: { harnesses: HARNESSES, command: COMMAND }, console_url: null, ...over },
+  data: { banks: [], install: { harnesses: HARNESSES, command: COMMAND, mint_command: MINT, key_file: 'hal0-memory.key' }, console_url: null, ...over },
   refetch: () => {
     m.refetched += 1
   },
@@ -241,8 +241,9 @@ describe('connect a coding agent', () => {
     expect(options).toHaveLength(HARNESSES.length)
     click(options[1])
     expect(command(host)).toBe(COMMAND.replace('<harness>', 'codex'))
-    expect(textOf(byId(host, 'ma-agents-connect-cli'))).toContain('hal0 memory agents install codex')
-    expect(textOf(byId(host, 'ma-agents-connect-what'))).toContain('adds the Hindsight memory plugin to Codex')
+    expect(textOf(byId(host, 'ma-agents-mint-command'))).toContain('hal0 bridge add codex --scope memory')
+    expect(textOf(byId(host, 'ma-agents-connect-cli'))).toContain('agent:codex')
+    expect(textOf(byId(host, 'ma-agents-connect-what'))).toContain('installs the Hindsight memory plugin for Codex')
   })
 
   it('copies the command, and says so only afterwards', async () => {
@@ -260,25 +261,20 @@ describe('connect a coding agent', () => {
 
   it('says what the command does, where it points, and which bank it writes', () => {
     const what = textOf(byId(render(), 'ma-agents-connect-what'))
-    expect(what).toContain('runs the Hindsight coding-agents installer')
-    expect(what).toContain("points it at this box's memory engine at http://127.0.0.1:9177")
-    expect(what).toContain('talks to the engine directly, not through hal0')
+    expect(what).toContain('installs the Hindsight memory plugin for Claude Code')
+    expect(what).toContain("hal0's /api/memory/compat")
     expect(what).toContain('one bank per repository, named coding-agent::<repository>')
+    expect(what).not.toContain('directly')
   })
 
-  it('says a loopback address only works from this box', () => {
-    const reach = byId(render(), 'ma-agents-connect-reach')!
-    expect(reach.dataset.loopback).toBe('true')
-    expect(textOf(reach)).toContain('an agent on another machine cannot use the command as it is')
-  })
-
-  it('says a network address has to be reachable from the other machine', () => {
-    m.agents = agentsAnswer({
-      install: { harnesses: HARNESSES, command: COMMAND.replace('http://127.0.0.1:9177', 'http://192.0.2.10:9177') },
-    })
-    const reach = byId(render(), 'ma-agents-connect-reach')!
-    expect(reach.dataset.loopback).toBe('false')
-    expect(textOf(reach)).toBe('An agent on another machine must be able to reach that address for the plugin to work.')
+  it('shows the key command, the key file and the install command, never the engine address', () => {
+    const host = render()
+    expect(textOf(byId(host, 'ma-agents-mint-command'))).toContain('hal0 bridge add claude-code --scope memory')
+    expect(textOf(byId(host, 'ma-agents-connect-save'))).toContain('hal0-memory.key')
+    expect(textOf(byId(host, 'ma-agents-command'))).toContain(
+      'hal0 memory agents install claude-code --bridge-key-file hal0-memory.key',
+    )
+    expect(textOf(host)).not.toContain('--api-url')
   })
 
   it('has no primary button anywhere on the tab', () => {
