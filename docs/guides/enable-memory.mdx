@@ -480,9 +480,12 @@ deleting an original and that original is still there (the delete may have
 taken part of it), and when the journal was written by a different hal0
 version. Both messages name the archive directory.
 
-`--status` changes nothing and runs the same checks a resume would. For each
-bank it says what `--resume` will do; where the switch cannot repair
-something by itself it says exactly what you do, down to the command.
+`--status` changes nothing, never waits, and runs the same checks a resume
+would, each on one read of the bank. For each bank it says what `--resume`
+will do; where the switch cannot repair something by itself it says exactly
+what you do, down to the command. It lists the operations running on each
+bank by type, bank and id (also in `--json`), and a check made while the
+engine was still working on a bank says so: `--resume` waits for that work.
 
 `--resume` looks at which banks the engine has now, not only at its journal.
 What it can repair it repairs: a rebuilt bank that no longer matches is
@@ -506,6 +509,30 @@ bank, so look at `--status` first.
   cancel them (`DELETE /api/memory/banks/<bank>/operations/<id>`).
   `--allow-pending` goes ahead anyway: what those operations have not written
   when a bank is exported is not carried over.
+- The engine's own work is waited for, not refused: a mental-model refresh
+  (which the engine queues after a restore or a restart), a consolidation,
+  or vector-index or graph maintenance. Before the run starts the switch
+  waits up to 15 minutes for it, for all banks together, and each time it
+  compares or deletes a bank, up to 15 minutes for that bank. If it does not
+  finish, the switch stops and names the operation by type, bank and id. A
+  dry run lists such work as a warning, and refuses parked work the way
+  `--apply` would (below).
+- The engine can park its own work: an automatic mental-model refresh due
+  within the model's minimum refresh interval (30 minutes in hal0's seed
+  banks) waits, queued, until that interval is over. When parked work is due
+  later than the switch would wait, the switch does not wait: it stops at
+  once, names the operation and when it is due, and tells you to run it
+  again after that time.
+- A refresh or a consolidation on an original bank while the engine runs the
+  new model embeds with the new model. If the run is then undone, any refresh
+  or consolidation activity on an original after the switch to the new model,
+  whether it finished, failed, was cancelled or is still queued, records the
+  store as mixed (see below), as does an original bank the undo cannot check,
+  including one an interrupted undo never reached. This holds across
+  `--resume`, and activity after the undo returns the engine to the old model
+  counts too. The engine's records cannot show whether such work wrote anything, so the
+  switch counts it all. The only cost of a mixed record is running the switch
+  again. Vector-index and graph maintenance embed nothing and never count.
 - The export carries only facts that belong to a document. A bank holding any
   other fact does not match its archive, and the switch stops at step 3
   saying so. Observations whose source facts are gone are not exported

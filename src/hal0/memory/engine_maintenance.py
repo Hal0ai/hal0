@@ -35,7 +35,8 @@ What a command gets from here:
 * **One engine session** (:class:`EngineMaintenance`), which a command
   subclasses: the engine's HTTP API with paging and errors written for the
   operator, bank state and queue waits (``_quiet_state``, ``_wait_quiet``,
-  ``_settle``, ``_wait_operation``), the restart onto the private port or back
+  ``_settle``, ``_wait_operation``; each waits longer for the engine's own
+  refreshes and consolidations, :data:`ENGINE_OPERATION_TYPES`), the restart onto the private port or back
   with its identity checks (the listening socket belongs to the unit,
   ``/version`` is the engine the preflight saw, the embedder is the one asked
   for, nothing answers at the normal address), the write gate engaged
@@ -127,7 +128,48 @@ RESTORE_FACTS_PER_S = 60.0
 
 _OP_LIVE = ("pending", "processing")
 _OP_FAILED = ("failed", "cancelled", "not_found")
+
+#: The operation types the engine queues by itself, as hindsight-api 1.2.0
+#: stores them (``async_operations.operation_type``, listed as ``task_type``
+#: and ``operation_type``): a mental-model refresh after a restore, after
+#: consolidation, or when its start-up recovery requeues a ``processing`` row;
+#: consolidation of new facts; the vector-index reconcile that consolidation
+#: and retain queue after they grow a bank (``memory_engine.py`` ~4728,
+#: ~7305); and graph maintenance, which chains its own follow-up job when work
+#: is left (``graph_maintenance.py`` ~280, ~331). Nothing a client sends while
+#: the engine is isolated, and nothing a run can hold back, so a run waits for
+#: them to end (bounded by :attr:`Timeouts.engine_ops_s`) instead of reading
+#: them as a change to the bank (#3604).
+ENGINE_OPERATION_TYPES: tuple[str, ...] = (
+    "refresh_mental_model",
+    "consolidation",
+    "vector_index_maintenance",
+    "graph_maintenance",
+)
+#: The :data:`ENGINE_OPERATION_TYPES` that write vectors with the engine's
+#: embedder: a refresh embeds the mental model's page it writes, and
+#: consolidation embeds every observation it creates or rewrites. The other
+#: two do not embed: the vector-index reconcile builds and drops indexes over
+#: the vectors already stored (``vector_index_health.py``), and graph
+#: maintenance drains link queues. Only these types count towards a bank
+#: having been touched by the target embedder.
+ENGINE_EMBEDDING_TYPES: tuple[str, ...] = ("refresh_mental_model", "consolidation")
 _PAGE = 100
+#: How many times a paged listing is read again when its rows do not add up
+#: to its ``total``. hindsight-api 1.2.0 counts and selects in two statements
+#: outside a transaction (``list_operations``), so a listing read while the
+#: engine queues or ends work can disagree with itself once and then not.
+LIST_TRIES = 3
+
+
+def operation_ref(bank: str, op: Mapping[str, Any]) -> dict[str, Any]:
+    """An operation row as a message's details name it: ``{"bank", "type", "id", "status"}``."""
+    return {
+        "bank": bank,
+        "type": operation_type(op),
+        "id": op.get("operation_id") or op.get("id"),
+        "status": op.get("status"),
+    }
 
 
 @dataclass(frozen=True)
@@ -205,6 +247,10 @@ class Timeouts:
     restore_factor: float = 6.0
     #: A bank's queue going quiet before it is counted or deleted.
     quiet_s: float = 120.0
+    #: The engine's own work on a bank (:data:`ENGINE_OPERATION_TYPES`)
+    #: ending, when it is all that keeps the bank busy. A mental-model
+    #: refresh is an LLM call over the bank, minutes on a slow local model.
+    engine_ops_s: float = 900.0
     delete_s: float = 3600.0
     http_s: float = 120.0
 
@@ -449,6 +495,57 @@ def digest(value: Any) -> str:
         value = sorted(json.dumps(_strip(v), sort_keys=True, default=str) for v in value)
     text = json.dumps(_strip(value), sort_keys=True, default=str)
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def operation_type(op: Mapping[str, Any]) -> str:
+    """An operation row's type, under either name the engine lists it by."""
+    return str(op.get("operation_type") or op.get("task_type") or "unknown")
+
+
+def operation_time(op: Mapping[str, Any]) -> datetime | None:
+    """When an operation row last moved: the later of its ``created_at`` and ``updated_at``.
+
+    ``None`` when neither reads as an ISO time. A time without a zone is
+    taken as UTC, which is what the engine stores.
+    """
+    seen = [w for w in (_iso_time(op.get(k)) for k in ("created_at", "updated_at")) if w]
+    return max(seen) if seen else None
+
+
+def _iso_time(raw: Any) -> datetime | None:
+    """An ISO time from an operation row, zoned (UTC when it has no zone); ``None`` when absent."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        when = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
+def parked_until(op: Mapping[str, Any]) -> datetime | None:
+    """When a pending operation the engine has parked becomes due; ``None`` when it is not parked.
+
+    hindsight-api 1.2.0 parks an operation by leaving it ``pending`` with
+    ``next_retry_at`` set (``DeferOperation``, ``worker/poller.py``
+    ``_defer_operation``); its poller claims no row whose ``next_retry_at`` is
+    still ahead. An automatic mental-model refresh that comes due within the
+    model's ``min_refresh_interval_seconds`` is parked this way until the
+    window closes (``memory_engine.py`` ``_defer_refresh_within_min_interval``).
+    The column is a ``TIMESTAMPTZ`` and is listed with its offset.
+    """
+    if op.get("status") != "pending":
+        return None
+    return _iso_time(op.get("next_retry_at"))
+
+
+def operations_text(bank: str, ops: list[Mapping[str, Any]]) -> str:
+    """Each operation by type, bank, id and status, for a message."""
+    return ", ".join(
+        f"{operation_type(op)} on {bank} (operation {op.get('operation_id') or op.get('id')}, "
+        f"{op.get('status')})"
+        for op in ops
+    )
 
 
 def evidence_pair(raw: Mapping[str, Any] | None) -> Embedder | None:
@@ -1078,6 +1175,9 @@ class EngineMaintenance:
 
     #: What every failure in this class is raised as.
     _error_type: type[MaintenanceError] = MaintenanceError
+    #: True for a read-only report (a command's ``--status``): every look at
+    #: a bank is one read, and nothing waits for the engine to go quiet.
+    _no_wait: bool = False
 
     def __init__(
         self,
@@ -1097,6 +1197,7 @@ class EngineMaintenance:
         timeouts: Timeouts | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] | None = None,
         progress: Callable[[str], None] | None = None,
         hook: Callable[[str], None] | None = None,
     ) -> None:
@@ -1118,6 +1219,8 @@ class EngineMaintenance:
         self.t = timeouts or Timeouts()
         self._sleep = sleep
         self._clock = clock
+        #: The wall clock (UTC), which an operation's ``next_retry_at`` is read against.
+        self._now = now or (lambda: datetime.now(UTC))
         self._progress = progress or (lambda _msg: None)
         self._hook = hook or (lambda _point: None)
 
@@ -1208,33 +1311,35 @@ class EngineMaintenance:
 
         Pages until the engine's own ``total`` is reached or a page comes back
         empty; a short page is never taken for the end. When the engine gives
-        a total, the rows collected must add up to it.
+        a total, the rows collected must add up to it: a listing that does
+        not is read again from the start, up to :data:`LIST_TRIES` times.
         """
-        rows: list[Any] = []
-        total: int | None = None
-        while True:
-            page = await self._json(
-                "GET",
-                path,
-                params={**(params or {}), "limit": page_size, "offset": len(rows)},
-                what=what,
-                bank=bank,
-            )
-            page = page if isinstance(page, dict) else {}
-            if isinstance(page.get("total"), int):
-                total = page["total"]
-            chunk = page.get(key)
-            chunk = chunk if isinstance(chunk, list) else []
-            rows.extend(chunk)
-            if not chunk or (total is not None and len(rows) >= total):
-                break
-        if total is not None and len(rows) != total:
-            raise self._error_type(
-                f"{what}: the engine reports {total} but listed {len(rows)}; the listing "
-                "changed while it was read",
-                bank=bank,
-            )
-        return rows
+        for _attempt in range(LIST_TRIES):
+            rows: list[Any] = []
+            total: int | None = None
+            while True:
+                page = await self._json(
+                    "GET",
+                    path,
+                    params={**(params or {}), "limit": page_size, "offset": len(rows)},
+                    what=what,
+                    bank=bank,
+                )
+                page = page if isinstance(page, dict) else {}
+                if isinstance(page.get("total"), int):
+                    total = page["total"]
+                chunk = page.get(key)
+                chunk = chunk if isinstance(chunk, list) else []
+                rows.extend(chunk)
+                if not chunk or (total is not None and len(rows) >= total):
+                    break
+            if total is None or len(rows) == total:
+                return rows
+        raise self._error_type(
+            f"{what}: the engine reports {total} but listed {len(rows)}, {LIST_TRIES} reads "
+            "in a row; the listing changed while it was read",
+            bank=bank,
+        )
 
     async def _bank_rows(self) -> list[dict[str, Any]]:
         rows = await self._list_all("/v1/default/banks", key="banks", what="listing banks")
@@ -1327,7 +1432,7 @@ class EngineMaintenance:
             },
         }
 
-    async def _quiet_state(self, bank: str) -> dict[str, Any]:
+    async def _quiet_state(self, bank: str, *, parked_ok: bool = False) -> dict[str, Any]:
         """:meth:`bank_state` once the engine has stopped working on the bank.
 
         Quiet is no pending or processing operation and a consolidation queue
@@ -1335,17 +1440,197 @@ class EngineMaintenance:
         engine is still consolidating describe a bank that is about to
         change. Bounded: after ``quiet_s`` the last read is returned as it is,
         and the comparisons made on it treat observations as the one count
-        the engine may still move.
+        the engine may still move. With :attr:`_no_wait` the first read is
+        returned, quiet or not.
+
+        The engine's own work it has parked past ``engine_ops_s``
+        (:func:`parked_until`) is not waited for: it raises
+        :meth:`_parked_error` at once, or with ``parked_ok`` the read is
+        returned with those operations under ``"parked"``. A parked row has
+        not started, so it cannot have moved the bank since it was parked.
         """
-        deadline = self._clock() + self.t.quiet_s
+        if self._no_wait:
+            return await self.bank_state(bank)
+        start = self._clock()
+        deadline = start + self.t.quiet_s
         last: int | None = None
         while True:
             state = await self.bank_state(bank)
             busy = state["pending"] or state["processing"]
-            if (not busy and state["pending_consolidation"] == last) or self._clock() >= deadline:
+            if not busy and state["pending_consolidation"] == last:
+                return state
+            # The engine's own refresh or consolidation is waited for longer,
+            # and never returned as if it were a change to the bank. One the
+            # engine has parked past that wait is not waited for at all.
+            own = await self._engine_work(bank, state)
+            now = self._clock()
+            if own:
+                parked = self._parked_past(own, start + self.t.engine_ops_s)
+                if parked and parked_ok:
+                    # Wait on for the rest of the engine's work, not for this.
+                    if len(parked) == len(own):
+                        return state | {"parked": [op for op, _due in parked]}
+                elif parked:
+                    raise self._parked_error(bank, parked, start + self.t.engine_ops_s)
+                if now >= start + self.t.engine_ops_s:
+                    raise self._engine_work_error(bank, own)
+            elif now >= deadline:
                 return state
             last = state["pending_consolidation"]
             await self._sleep(self.t.poll_s)
+
+    async def _live_operations(self, bank: str) -> list[dict[str, Any]]:
+        """Every pending and processing operation on ``bank``, as the engine lists them."""
+        rows: list[Any] = []
+        for status in _OP_LIVE:
+            rows += await self._list_all(
+                f"{bank_path(bank)}/operations",
+                {"status": status},
+                key="operations",
+                what="listing operations",
+                bank=bank,
+            )
+        return [r for r in rows if isinstance(r, dict) and r.get("status") in _OP_LIVE]
+
+    async def _engine_work_since(self, bank: str, since: datetime | None) -> list[dict[str, Any]]:
+        """The engine's own embedding work on ``bank`` that may have run since ``since``.
+
+        Every row of each :data:`ENGINE_EMBEDDING_TYPES` type, whatever its
+        status, whose ``created_at`` or ``updated_at`` (:func:`operation_time`)
+        is at or after ``since`` (``None``: any time), or that is still
+        ``processing``, or whose time cannot be read. The status is not
+        narrowed on purpose: a row cannot say whether its work wrote before
+        it was deferred (hindsight-api 1.2.0 resets a deferred row to
+        ``pending`` with ``retry_count`` unchanged and no ``error_message``,
+        ``worker/poller.py`` ``_defer_operation``, while a consolidation has
+        already committed the sub-batches it finished). The engine keeps a
+        finished operation's row with the time it ended, so work that started
+        and ended between two looks at the bank is found here too. Raises
+        when the listing cannot be read.
+        """
+        found: list[dict[str, Any]] = []
+        for kind in ENGINE_EMBEDDING_TYPES:
+            rows = await self._list_all(
+                f"{bank_path(bank)}/operations",
+                {"type": kind},
+                key="operations",
+                what="listing operations",
+                bank=bank,
+            )
+            for row in rows:
+                if not isinstance(row, dict) or operation_type(row) != kind:
+                    continue
+                when = operation_time(row)
+                if (
+                    when is None
+                    or since is None
+                    or when >= since
+                    or row.get("status") == "processing"
+                ):
+                    found.append(row)
+        return found
+
+    async def _engine_work(self, bank: str, state: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """The engine's own live operations on ``bank`` when they are all that keeps it busy.
+
+        Empty when the bank is idle, and when anything else is pending or
+        processing (a retain, an export, an operation the listing does not
+        show): that is not the engine's to finish, and the caller treats the
+        bank as busy the way it always has.
+        """
+        busy = int(state["pending"] or 0) + int(state["processing"] or 0)
+        if not busy:
+            return []
+        live = await self._live_operations(bank)
+        if len(live) < busy or any(operation_type(op) not in ENGINE_OPERATION_TYPES for op in live):
+            return []
+        return live
+
+    async def _await_engine_work(
+        self, bank: str, state: Mapping[str, Any], *, deadline: float | None = None
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Wait while the engine's own work is all that keeps ``bank`` busy.
+
+        Returns the bank's last state and whatever of that work is still
+        live: empty once it has ended, or when other work is queued (which is
+        not waited for here). Bounded by ``deadline`` on :attr:`_clock`, which
+        a caller looking at several banks shares between them, else by
+        ``engine_ops_s`` from now. Work the engine has parked until after
+        ``deadline`` (:func:`parked_until`) raises :meth:`_parked_error` at
+        once instead of being waited for.
+        """
+        if deadline is None:
+            deadline = self._clock() + self.t.engine_ops_s
+        current = dict(state)
+        while True:
+            own = await self._engine_work(bank, current)
+            if own:
+                self._raise_if_parked(bank, own, deadline)
+            if not own or self._clock() >= deadline:
+                return current, own
+            await self._sleep(self.t.poll_s)
+            current = await self.bank_state(bank)
+
+    def _parked_past(
+        self, own: list[dict[str, Any]], deadline: float
+    ) -> list[tuple[dict[str, Any], datetime]]:
+        """Each of ``own`` the engine has parked until after ``deadline`` (on :attr:`_clock`), with when it is due."""
+        left = max(0.0, deadline - self._clock())
+        horizon = self._now().timestamp() + left
+        out: list[tuple[dict[str, Any], datetime]] = []
+        for op in own:
+            due = parked_until(op)
+            if due is not None and due.timestamp() > horizon:
+                out.append((op, due))
+        return out
+
+    def _raise_if_parked(self, bank: str, own: list[dict[str, Any]], deadline: float) -> None:
+        """Raise :meth:`_parked_error` when any of ``own`` is parked past ``deadline``.
+
+        Waiting would only spend the whole budget and then fail: the engine
+        does not claim a parked row before it is due (#3604).
+        """
+        parked = self._parked_past(own, deadline)
+        if parked:
+            raise self._parked_error(bank, parked, deadline)
+
+    def _parked_error(
+        self, bank: str, parked: list[tuple[dict[str, Any], datetime]], deadline: float
+    ) -> MaintenanceError:
+        left = max(0.0, deadline - self._clock())
+        latest = max(due for _op, due in parked)
+        listing = ", ".join(
+            f"{operation_type(op)} on {bank} (operation {op.get('operation_id') or op.get('id')}), "
+            f"due at {due.astimezone(UTC).isoformat(timespec='seconds')}"
+            for op, due in parked
+        )
+        return self._error_type(
+            f"the engine has parked its own {listing}. It deferred the work and will not start it "
+            "before then (an automatic mental-model refresh waits out the model's minimum refresh "
+            f"interval), which is after the {left:.0f}s {self.names.actor} would still wait, so "
+            f"{self.names.actor} does not wait for it, and never cancels it. Run "
+            f"`{self.names.command}` again after "
+            f"{latest.astimezone(UTC).isoformat(timespec='seconds')}",
+            bank=bank,
+            details={
+                "parked_operations": [
+                    operation_ref(bank, op) | {"due_at": due.astimezone(UTC).isoformat()}
+                    for op, due in parked
+                ]
+            },
+        )
+
+    def _engine_work_error(self, bank: str, own: list[dict[str, Any]]) -> MaintenanceError:
+        return self._error_type(
+            f"the engine's own {operations_text(bank, own)} did not finish within "
+            f"{self.t.engine_ops_s:g}s. The engine queues this work by itself (a mental-model "
+            "refresh after a restore or a restart, consolidation of new facts); "
+            f"{self.names.actor} waits for it rather than read it as a change to the bank, and "
+            f"never cancels it. Let it finish (`hal0 memory ops list --bank {bank}` shows it), "
+            "then try again",
+            bank=bank,
+            details={"engine_operations": [operation_ref(bank, op) for op in own]},
+        )
 
     async def _wait_operation(
         self, bank: str, operation_id: str, *, timeout_s: float, what: str
@@ -1394,13 +1679,24 @@ class EngineMaintenance:
             ) from exc
 
     async def _wait_quiet(self, bank: str) -> None:
-        """Wait until ``bank`` has no pending or processing operation, before it is deleted."""
-        deadline = self._clock() + self.t.quiet_s
+        """Wait until ``bank`` has no pending or processing operation, before it is deleted.
+
+        The engine's own work (:data:`ENGINE_OPERATION_TYPES`) is waited for
+        up to ``engine_ops_s``, and named when it does not end; work it has
+        parked past that raises at once, naming when it is due.
+        """
+        start = self._clock()
+        deadline = start + self.t.quiet_s
         while True:
             state = await self.bank_state(bank)
             if not state["pending"] and not state["processing"]:
                 return
-            if self._clock() >= deadline:
+            own = await self._engine_work(bank, state)
+            if own:
+                self._raise_if_parked(bank, own, start + self.t.engine_ops_s)
+                if self._clock() >= start + self.t.engine_ops_s:
+                    raise self._engine_work_error(bank, own)
+            elif self._clock() >= deadline:
                 raise self._error_type(
                     f"bank {bank} still has {state['pending']} pending and {state['processing']} "
                     f"processing operations after {self.t.quiet_s:g}s; it is not deleted "
@@ -1964,22 +2260,41 @@ class EngineMaintenance:
             os.close(fd)
 
     async def _settle(self, journal: MaintenanceJournal) -> dict[str, dict[str, Any]]:
-        """Wait for every bank's queue to drain; returns each bank's state."""
-        deadline = self._clock() + self.t.settle_s
+        """Wait for every bank's queue to drain; returns each bank's state.
+
+        Bounded by ``settle_s``, or by ``engine_ops_s`` while the engine's own
+        work (:data:`ENGINE_OPERATION_TYPES`) is all that is left. The engine's
+        own work parked past ``engine_ops_s`` raises at once, naming when it
+        is due (:meth:`_parked_error`).
+        """
+        start = self._clock()
         while True:
             ids = [b for b in await self._bank_ids() if b not in journal.own_ids()]
             states = {bank: await self.bank_state(bank) for bank in ids}
             busy = {b: s for b, s in states.items() if s["pending"] or s["processing"]}
             if not busy or journal.allow_pending:
                 return states
-            if self._clock() >= deadline:
+            own = {b: await self._engine_work(b, s) for b, s in busy.items()}
+            for b, ops in own.items():
+                if ops:
+                    self._raise_if_parked(b, ops, start + self.t.engine_ops_s)
+            engine_only = all(own.values())
+            limit = self.t.engine_ops_s if engine_only else self.t.settle_s
+            if self._clock() >= start + limit:
                 listing = ", ".join(
-                    f"{bank} ({s['pending']} pending, {s['processing']} processing)"
+                    f"{bank} ({s['pending']} pending, {s['processing']} processing"
+                    + (f": {operations_text(bank, own[bank])}" if own[bank] else "")
+                    + ")"
                     for bank, s in busy.items()
                 )
                 raise self._error_type(
-                    f"operations queued before the pause did not finish within "
-                    f"{self.t.settle_s:g}s: {listing}"
+                    f"operations queued before the pause did not finish within {limit:g}s: "
+                    f"{listing}",
+                    details={
+                        "engine_operations": [
+                            operation_ref(b, op) for b, ops in own.items() for op in ops
+                        ]
+                    },
                 )
             await self._sleep(self.t.poll_s)
 
@@ -2068,8 +2383,11 @@ class EngineMaintenance:
 
 __all__ = [
     "COUNT_KEYS",
+    "ENGINE_EMBEDDING_TYPES",
+    "ENGINE_OPERATION_TYPES",
     "FINGERPRINT_SIGNALS",
     "HARD_COUNTS",
+    "LIST_TRIES",
     "PG_DIR",
     "RESTORE_FACTS_PER_S",
     "SERVICE",
@@ -2104,6 +2422,11 @@ __all__ = [
     "lock_path",
     "loopback_listener",
     "nearest_existing",
+    "operation_ref",
+    "operation_time",
+    "operation_type",
+    "operations_text",
+    "parked_until",
     "private_exec_start",
     "read_journal_file",
     "read_unit_text",
