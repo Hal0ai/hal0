@@ -842,3 +842,108 @@ async def test_mcp_tools_owner_reads_own_private_memory(layout):
     op = await call("memory_operation_get", {"id": "op-a"})
     assert op["operation_status"] == "completed"
     assert (await call("memory_bank_stats", {}))["total_documents"] == 3
+
+
+# ── the real two-bank layout (ADR-0058 decision 7) ────────────────────────────
+#
+# A provider built the way a new store's layout record builds it: ``shared`` is
+# ``hal0:shared`` and every ``private:<agent>`` is ``hal0:private``, one bank for
+# all agents. A read of ``private:<self>`` goes to that bank, where a row is its
+# owner's alone whatever else it is tagged: so even a row that lost its
+# ``visibility:private`` tag, or has no ``agent:`` tag, stays hidden.
+
+TWO_SHARED, TWO_PRIVATE = "hal0:shared", "hal0:private"
+
+
+def _two_bank() -> tuple[HindsightProvider, _Engine]:
+    engine = _Engine()
+    _seed(engine, TWO_PRIVATE)
+    # Rows only the private bank's own rule catches: owned but untagged as
+    # private, and private with no owner.
+    engine.doc(TWO_PRIVATE, "a-untagged", ["agent:alice", "topic:y"], "alice, no private tag")
+    engine.doc(TWO_PRIVATE, "nobody", ["visibility:private"], "no owner")
+    engine.doc(TWO_PRIVATE, "b-own", ["visibility:private", "agent:bob"], "bob's own note")
+    engine.doc(TWO_SHARED, "s-1", ["scope:global"], "shared note")
+    engine.memories["f-untagged"] = {"id": "f-untagged", "tags": ["agent:alice"], "text": "x"}
+    engine.ops[TWO_PRIVATE]["op-untagged"] = {
+        "operation_id": "op-untagged",
+        "task_type": "retain",
+        "status": "completed",
+        "task_payload": {"contents": [{"content": "alice", "tags": ["agent:alice"]}]},
+    }
+    p = HindsightProvider(client=engine, two_bank=True, bank=TWO_SHARED, private_bank=TWO_PRIVATE)
+    return p, engine
+
+
+@pytest.mark.asyncio
+async def test_two_bank_private_documents_of_another_agent_stay_hidden():
+    p, _engine = _two_bank()
+    ns = "private:bob"
+    listed = await p.list_documents(dataset=ns, client_id="bob")
+    assert {r["id"] for r in listed["items"]} == {"b-own", "b-shared"}  # b-shared carries agent:bob
+    for doc_id in ("a-priv", "a-untagged", "nobody", "a-shared"):
+        with pytest.raises(NotFound):
+            await p.get_document(doc_id, dataset=ns, client_id="bob")
+    assert (await p.get_document("b-own", dataset=ns, client_id="bob"))["id"] == "b-own"
+    # The shared bank is unaffected.
+    shared = await p.list_documents(client_id="bob")
+    assert {r["id"] for r in shared["items"]} == {"s-1"}
+
+
+@pytest.mark.asyncio
+async def test_two_bank_owner_reads_own_private_documents():
+    p, _engine = _two_bank()
+    listed = await p.list_documents(dataset="private:alice", client_id="alice")
+    assert {r["id"] for r in listed["items"]} == {"a-priv", "a-shared", "a-untagged"}
+
+
+@pytest.mark.asyncio
+async def test_two_bank_operations_of_another_agent_stay_hidden():
+    p, _engine = _two_bank()
+    ns = "private:bob"
+    listed = await p.list_operations(dataset=ns, client_id="bob")
+    assert {o["operation_id"] for o in listed["operations"]} == {
+        "op-b",
+        "op-c",
+    }  # op-b is bob's own
+    for op_id in ("op-a", "op-batch", "op-untagged"):
+        got = await p.get_operation(op_id, dataset=ns, client_id="bob", include_payload=True)
+        assert got == {"operation_id": op_id, "status": "not_found"}
+        with pytest.raises(NotFound):
+            await p.cancel_operation(op_id, dataset=ns, client_id="bob")
+
+
+@pytest.mark.asyncio
+async def test_two_bank_mental_models_built_from_other_agents_stay_hidden():
+    """The private bank holds other agents' private memory once a second agent
+    writes there: only a model confined to the caller is read."""
+    p, _engine = _two_bank()
+    ns = "private:bob"
+    listed = await p.list_mental_models(dataset=ns, client_id="bob")
+    assert [m["id"] for m in listed.get("items", [])] == []
+    for mm in ("mm-whole", "mm-topic", "mm-alice"):
+        with pytest.raises(NotFound):
+            await p.get_mental_model(mm, dataset=ns, client_id="bob")
+        with pytest.raises(NotFound):
+            await p.refresh_mental_model(mm, dataset=ns, client_id="bob")
+    stats = await p.bank_stats(dataset=ns, client_id="bob")
+    assert stats["counts_withheld"] is True
+
+
+@pytest.mark.asyncio
+async def test_two_bank_memory_history_of_another_agent_is_404():
+    p, _engine = _two_bank()
+    for memory_id in ("f-a", "f-untagged"):
+        with pytest.raises(NotFound):
+            await p.memory_history(memory_id, dataset="private:bob", client_id="bob")
+    owned = await p.memory_history("f-untagged", dataset="private:alice", client_id="alice")
+    assert owned["items"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", [None, "anonymous", "unknown"])
+async def test_two_bank_unidentified_caller_reads_nothing_private(caller):
+    p, _engine = _two_bank()
+    for doc_id in ("a-priv", "nobody", "b-own"):
+        with pytest.raises(NotFound):
+            await p.get_document(doc_id, dataset="private:bob", client_id=caller)
