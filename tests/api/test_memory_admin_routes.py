@@ -909,3 +909,26 @@ def test_bank_stats_placeholder_for_an_alias_is_not_a_404(
     )
     r = client.get("/api/memory/banks/household/stats")
     assert r.status_code == 200, r.text
+
+
+def test_admin_surface_reads_private_documents_in_full(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    """#3573: the agent read tools hold back other agents' private memory; the
+    operator's admin surface does not, and is not routed through them."""
+    private = {"id": "a-priv", "tags": ["visibility:private", "agent:alice"]}
+    recorder.respond(
+        "GET", "/v1/default/banks/shared/documents", 200, {"items": [private], "total": 1}
+    )
+    recorder.respond(
+        "GET",
+        "/v1/default/banks/shared/documents/a-priv",
+        200,
+        {**private, "original_text": "alice's secret"},
+    )
+    listed = client.get("/api/memory/banks/shared/documents")
+    assert listed.status_code == 200
+    assert [r["id"] for r in listed.json()["items"]] == ["a-priv"]
+    doc = client.get("/api/memory/banks/shared/documents/a-priv")
+    assert doc.status_code == 200
+    assert doc.json()["original_text"] == "alice's secret"

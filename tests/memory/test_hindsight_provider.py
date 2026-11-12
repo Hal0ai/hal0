@@ -219,8 +219,18 @@ class FakeHindsightClient:
     ):
         self.list_documents_calls.append(bank_id)
         docs = list(self._documents_by_bank.get(bank_id, {}).values())
+        if tags:
+            # The engine's listing rows carry tags and honour a tag filter.
+            docs = [d for d in docs if set(tags) <= set(d.get("tags") or [])]
         page = docs[offset : offset + limit]
-        items = [{"id": d["id"], "text_length": len(d.get("original_text") or "")} for d in page]
+        items = [
+            {
+                "id": d["id"],
+                "text_length": len(d.get("original_text") or ""),
+                "tags": list(d.get("tags") or []),
+            }
+            for d in page
+        ]
         return {"items": items, "total": len(docs), "limit": limit, "offset": offset}
 
     async def get_document(self, *, bank_id, document_id):

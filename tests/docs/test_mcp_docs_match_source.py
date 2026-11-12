@@ -34,6 +34,9 @@ from hal0.mcp.admin import (
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONNECT_MD = _REPO_ROOT / "docs" / "guides" / "connect-mcp.mdx"
 _TOOLS_MD = _REPO_ROOT / "docs" / "reference" / "mcp-tools.mdx"
+# The hal0-memory section moved to its own page to keep both under the
+# Discourse post size cap (#3573).
+_MEMORY_TOOLS_MD = _REPO_ROOT / "docs" / "reference" / "mcp-tools-memory.mdx"
 
 # Every @server.tool(name="...") registration in hal0.mcp.memory (the
 # module doesn't export its own frozenset of tool names, so this test
@@ -152,7 +155,8 @@ def test_memory_tool_tables_match_registrations_per_tier() -> None:
     """The three hal0-memory sub-tables must name exactly the registered
     ``@server.tool``s, each in the table matching its admin-frozenset tier."""
     memory_tools = _memory_tool_names()
-    mem = _section(_tools_text(), "## `hal0-memory`", "\n## ")
+    assert _MEMORY_TOOLS_MD.exists(), f"missing {_MEMORY_TOOLS_MD}"
+    mem = _section(_MEMORY_TOOLS_MD.read_text(encoding="utf-8"), "## `hal0-memory`", "\n## ")
     tiers = {
         "Autonomous — read": memory_tools & AUTONOMOUS_READ_TOOLS,
         "Autonomous — write": memory_tools & AUTONOMOUS_WRITE_TOOLS,
