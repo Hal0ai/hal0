@@ -388,7 +388,7 @@ def test_agents_install_runs_the_installer_with_stdin_closed(agents_box, monkeyp
         ("pi", "hal0 bridge add pi-memory --scope memory", "hal0 bridge add pi "),
         ("hermes", "hal0 bridge add hermes-memory --scope memory", "hal0 bridge add hermes "),
         ("hal0-cli", "hal0 bridge add agent-hal0-cli --scope", "hal0 bridge add hal0-cli "),
-        ("Claude Code", "hal0 bridge add claude-code-memory", "hal0 bridge add Claude"),
+        ("Claude.Code", "hal0 bridge add claude-code-memory", "hal0 bridge add Claude"),
     ],
 )
 def test_the_refusal_never_suggests_a_client_name_the_bridge_refuses(
@@ -413,3 +413,74 @@ def test_a_symlinked_config_leaving_the_home_is_refused(agents_box, tmp_path):
         assert outside.read_text() == "{}"
     finally:
         outside.unlink()
+
+
+@pytest.mark.parametrize("how", ["flag", "file"])
+def test_agents_install_refuses_a_key_that_is_not_a_bridge_key(agents_box, tmp_path, how):
+    # The endpoint answers 200 for the admin key too: shape decides, before any probe.
+    config_path, accepts = agents_box
+    key_file = tmp_path / "key"
+    key_file.write_text("the-admin-key\n")
+    opt = (
+        ["--bridge-key", "the-admin-key"] if how == "flag" else ["--bridge-key-file", str(key_file)]
+    )
+    r = runner.invoke(memory_commands.app, ["agents", "install", "codex", *opt])
+    assert r.exit_code != 0 and "not a bridge key" in " ".join(r.output.split())
+    assert accepts["seen"] == [] and not config_path.exists()
+
+
+def test_agents_install_does_not_reuse_an_admin_key_in_the_section(agents_box):
+    config_path, accepts = agents_box
+    text = json.dumps({"harnesses": {"codex": {"apiUrl": _COMPAT, "apiToken": "admin"}}})
+    config_path.write_text(text)
+    r = runner.invoke(memory_commands.app, ["agents", "install", "codex"])
+    assert r.exit_code != 0 and accepts["seen"] == [] and config_path.read_text() == text
+
+
+def test_agents_install_refuses_both_key_options_even_with_dry_run(agents_box, tmp_path):
+    key_file = tmp_path / "key"
+    key_file.write_text("hal0bk_codex.k")
+    r = runner.invoke(
+        memory_commands.app,
+        [
+            "agents",
+            "install",
+            "codex",
+            "--dry-run",
+            "--bridge-key",
+            "hal0bk_codex.k",
+            "--bridge-key-file",
+            str(key_file),
+        ],
+    )
+    assert r.exit_code != 0 and "not both" in r.output
+
+
+@pytest.mark.parametrize("name", ["-rf", "--help-me", "a b", "a/b", "x;y", "", "é"])
+def test_agents_install_refuses_an_unsafe_harness_name(agents_box, monkeypatch, name):
+    ran: list[object] = []
+    monkeypatch.setattr(f"{_M}.subprocess.run", lambda *a, **k: ran.append(a))
+    r = runner.invoke(
+        memory_commands.app, ["agents", "install", "--bridge-key", "hal0bk_x.k", "--", name]
+    )
+    assert r.exit_code != 0 and ran == []
+
+
+def test_agents_install_masks_keys_in_the_installer_output(agents_box, monkeypatch):
+    config_path, _ = agents_box
+    config_path.write_text(json.dumps({"apiToken": "flat-secret"}))
+
+    class _Done:
+        returncode = 0
+        stdout = "wrote hal0bk_codex.k and flat-secret and hal0bk_other.zz9\n"
+        stderr = ""
+
+    monkeypatch.setattr(f"{_M}.subprocess.run", lambda *a, **k: _Done())
+    for extra in ([], ["--json"]):
+        r = runner.invoke(
+            memory_commands.app,
+            ["agents", "install", "codex", "--bridge-key", "hal0bk_codex.k", *extra],
+        )
+        assert r.exit_code == 0, r.output
+        assert "hal0bk_" not in r.output and "flat-secret" not in r.output
+        assert "***" in r.output

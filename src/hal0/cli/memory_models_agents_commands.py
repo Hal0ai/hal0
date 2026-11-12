@@ -12,6 +12,7 @@ after-consolidation``, ``observationScopes: shared``, ``retainTags:
 from __future__ import annotations
 
 import json as jsonlib
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -19,6 +20,7 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -140,7 +142,10 @@ def _bridge_client_hint(harness: str) -> str:
     def usable(name: str) -> bool:
         return valid_name(name) and not is_reserved_name(name)
 
-    tail = "and pass the key it prints with --bridge-key-file (or --bridge-key)"
+    tail = (
+        "then save the key it prints, alone, to a file and pass it with --bridge-key-file "
+        "(or --bridge-key)"
+    )
     if usable(harness):
         return (
             f"run `hal0 bridge add {harness} --scope memory` (or `hal0 bridge rotate "
@@ -169,15 +174,24 @@ def _resolve_bridge_key(
 ) -> str:
     """The key the harness presents to ``url``. Raises :class:`_NoBridgeKey`.
 
-    A key passed in wins (refused only when the endpoint rejects it). Else a
-    token already in the harness's section is reused when it points at this
-    endpoint and the endpoint accepts it. This command never mints or rotates
-    a key, so an HTTP answer can at worst stop it, never cost a working key.
+    A key passed in wins (refused when it is not a bridge key, or when the
+    endpoint rejects it). Else a token already in the harness's section is
+    reused when it is a bridge key, points at this endpoint and the endpoint
+    accepts it. Only the shape ``hal0bk_<name>.<token>`` counts: the endpoint
+    also answers 200 for the admin key, which must never be written into a
+    file every harness reads. This command never mints or rotates a key, so an
+    HTTP answer can at worst stop it, never cost a working key.
     """
+    from hal0.bridge.keys import name_of
     from hal0.memory.compat_client import compat_accepts
 
     how_to = _bridge_client_hint(harness)
     if bridge_key:
+        if name_of(bridge_key) is None:
+            raise _NoBridgeKey(
+                "the key passed in is not a bridge key (hal0bk_<name>.<token>); the admin "
+                f"key or any other credential is never written here. {how_to}"
+            )
         if compat_accepts(url, bridge_key) is False:
             raise _NoBridgeKey(
                 f"{url} rejected the key passed in: it needs a bridge key with the 'memory' "
@@ -190,6 +204,7 @@ def _resolve_bridge_key(
     if (
         isinstance(token, str)
         and token
+        and name_of(token) is not None
         and section.get("apiUrl") == url
         and compat_accepts(url, token) is True
     ):
@@ -250,6 +265,26 @@ def _merge_coding_agent_config(
     return {**data, "harnesses": harnesses}
 
 
+_BRIDGE_KEY_RE = re.compile(r"hal0bk_[A-Za-z0-9_-]+\.[A-Za-z0-9_.~+/=-]+")
+
+
+def _masked_text(text: str, merged: dict[str, Any]) -> str:
+    """``text`` (the upstream installer's output) with every token in
+    ``merged`` and anything shaped like a bridge key replaced by ``***``."""
+    tokens = [merged.get("apiToken")]
+    harnesses = merged.get("harnesses")
+    for section in harnesses.values() if isinstance(harnesses, dict) else ():
+        if isinstance(section, dict):
+            tokens.append(section.get("apiToken"))
+    for token in sorted({t for t in tokens if isinstance(t, str) and t}, key=len, reverse=True):
+        text = text.replace(token, "***")
+    return _BRIDGE_KEY_RE.sub("***", text)
+
+
+#: A harness name the upstream installer takes as one plain argument.
+_HARNESS_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
 def _redacted(merged: dict[str, Any]) -> dict[str, Any]:
     """``merged`` with every token masked: the flat one and each harness's,
     not only the section this run wrote (the file holds other tools' keys)."""
@@ -278,8 +313,8 @@ def agents_install_cmd(
     bridge_key_file: str | None = typer.Option(
         None,
         "--bridge-key-file",
-        help="Read the bridge key from this file, or from stdin when it is '-' "
-        "(`hal0 bridge add ... | hal0 memory agents install <harness> --bridge-key-file -`).",
+        help="Read the bridge key from this file, or from stdin when it is '-'. The "
+        "file holds only the key (hal0bk_...), nothing else.",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -295,12 +330,22 @@ def agents_install_cmd(
     and ``apiToken`` = a bridge key, so its memory goes through hal0's write
     envelope and project-scoped reads instead of straight to the engine. The
     flat keys and the other harnesses are left alone. The key is
-    ``--bridge-key-file`` (``-`` reads stdin) or ``--bridge-key``, or one
+    ``--bridge-key-file`` (``-`` reads stdin; it holds only the key) or
+    ``--bridge-key``, or one
     already in that section that the endpoint accepts; this command never
     mints or rotates one.
     """
     from hal0.memory.compat_client import compat_url
 
+    if not _HARNESS_RE.fullmatch(harness):
+        die(
+            f"{harness!r} is not a harness name: use letters, digits, '.', '_' or '-', "
+            "starting with a letter or digit, at most 64 characters"
+        )
+        return
+    if bridge_key and bridge_key_file:
+        die("pass --bridge-key or --bridge-key-file, not both")
+        return
     api = _require_api()
     # No --server / --api-url: given those, the upstream installer writes the
     # engine's address into the flat ``apiUrl`` every harness reads. The
@@ -327,9 +372,6 @@ def agents_install_cmd(
             )
         return
 
-    if bridge_key and bridge_key_file:
-        die("pass --bridge-key or --bridge-key-file, not both")
-        return
     # The key is settled before anything runs, so a missing one changes nothing.
     try:
         if bridge_key_file:
@@ -355,7 +397,8 @@ def agents_install_cmd(
         die(f"failed to run installer: {exc}")
         return
     if proc.returncode != 0:
-        die(f"installer exited {proc.returncode}: {proc.stderr.strip() or proc.stdout.strip()}")
+        out = _masked_text(proc.stderr.strip() or proc.stdout.strip(), data)
+        die(f"installer exited {proc.returncode}: {_masked_text(out, {'apiToken': key})}")
         return
 
     # Re-read: the upstream installer may have written the file. Given no
@@ -377,6 +420,7 @@ def agents_install_cmd(
         die(f"could not write {config_path}: {exc}")
         return
     shown = _redacted(merged)
+    installer_out = _masked_text(proc.stdout or "", merged)
     if json_out:
         typer.echo(
             jsonlib.dumps(
@@ -384,14 +428,18 @@ def agents_install_cmd(
                     "command": command,
                     "config_path": str(config_path),
                     "config": shown,
-                    "stdout": proc.stdout,
+                    "stdout": installer_out,
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
         return
-    console.print(Panel(proc.stdout or "[dim](no output)[/dim]", title=f"installer · {harness}"))
+    console.print(
+        Panel(
+            rich_escape(installer_out) or "[dim](no output)[/dim]", title=f"installer · {harness}"
+        )
+    )
     console.print(
         Panel(jsonlib.dumps(shown, indent=2, sort_keys=True), title=f"wrote {config_path}")
     )
