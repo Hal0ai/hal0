@@ -16,10 +16,23 @@ on that agent's ``agent:<id>`` tag, and its own tags let that agent read it.
 Whole-bank, project-wide and shared models never qualify and are never
 written. A flagged model no longer qualifies, so a second run finds nothing.
 
-Setting the flag changes what the model's next refresh reads, not the content
-it has now. That content was written by a refresh that could also read the
-bank's other mental models, so the repair queues a refresh of every model it
-flags: the content the owner then reads is rebuilt under the confined scope.
+A model is skipped, and reported, when another agent's private document in
+its bank also carries the owner's ``agent:<id>`` tag (written before the
+write envelope stamped one owner, or straight to the engine): the owner's
+scope would admit that document, so flagging would not confine the model.
+
+The content a model has now was written by refreshes that could also read
+the bank's other mental models, and a delta refresh keeps unchanged sections
+as they are. So, per model, in this order:
+
+1. a model its owner cannot read now (``hidden``) is emptied first
+   (``POST .../clear``), while it is still hidden, so the flag never exposes
+   the old content;
+2. the flag is set (``PATCH`` of ``trigger.exclude_mental_models`` alone; the
+   engine, pinned at 1.2.0, merges a trigger patch over the stored one);
+3. a full refresh is queued (``{"mode": "full"}``; the stored mode is kept),
+   so nothing of the old content survives. If it fails, a cleared model
+   stays empty, not stale.
 
 Everything goes through hal0-api's admin memory routes
 (``/api/memory/banks/...``), which forward to the engine without the agent
@@ -31,6 +44,7 @@ from ``hal0 update``. The operator runs the command.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -67,15 +81,18 @@ class Finding:
     name: str
     owner: str
     hidden: bool
-    trigger: dict[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
 
 @dataclass
 class Survey:
     findings: list[Finding] = field(default_factory=list)
+    #: Models that would qualify but are left alone, with the reason.
+    skipped: list[tuple[Finding, str]] = field(default_factory=list)
     #: ``(bank, message)`` for every bank that could not be read.
     errors: list[tuple[str, str]] = field(default_factory=list)
     banks: int = 0
+    #: The survey stopped at its deadline; what it found is a lower bound.
+    incomplete: bool = False
 
     @property
     def hidden(self) -> int:
@@ -87,6 +104,17 @@ class Result:
     finding: Finding
     error: str | None = None
     operation_id: str | None = None
+    #: What was done before ``error``, if anything.
+    cleared: bool = False
+    flagged: bool = False
+
+
+class _TooMany(Exception):
+    pass
+
+
+class _Deadline(Exception):
+    pass
 
 
 def _agent_of(tags: Any) -> str | None:
@@ -107,6 +135,11 @@ def _readable_by(tags: Any, agent: str) -> bool:
     return is_identified(owner) and owner == agent
 
 
+def _trigger(model: dict[str, Any]) -> dict[str, Any]:
+    trigger = model.get("trigger")
+    return dict(trigger) if isinstance(trigger, dict) else {}
+
+
 def _candidate_agents(model: dict[str, Any], trigger: dict[str, Any]) -> set[str]:
     tags: list[Any] = list(model.get("tags") or []) if isinstance(model.get("tags"), list) else []
     groups = trigger.get("tag_groups")
@@ -118,11 +151,6 @@ def _candidate_agents(model: dict[str, Any], trigger: dict[str, Any]) -> set[str
         for t in tags
         if isinstance(t, str) and t.startswith(AGENT_TAG_PREFIX)
     }
-
-
-def _trigger(model: dict[str, Any]) -> dict[str, Any]:
-    trigger = model.get("trigger")
-    return dict(trigger) if isinstance(trigger, dict) else {}
 
 
 def model_owner(model: Any) -> str | None:
@@ -156,40 +184,61 @@ def _bank_path(bank: str) -> str:
     return f"{_ADMIN}/{quote(bank, safe='')}"
 
 
-def _paged(request: Request, path: str, key: str, params: dict[str, Any], cap: int) -> list[Any]:
-    """Every row of a paged listing; :class:`_TooMany` past ``cap`` pages.
-
-    Reads on from the rows collected so far until a page comes back empty or
-    the listing's own ``total`` is reached, so a server that caps its page
-    below :data:`_PAGE` is still read to the end.
-    """
-    rows: list[Any] = []
-    for _ in range(cap):
-        resp = request("GET", path, params={**params, "limit": _PAGE, "offset": len(rows)})
-        chunk = resp.get(key) if isinstance(resp, dict) else None
-        chunk = chunk if isinstance(chunk, list) else []
-        rows.extend(chunk)
-        total = resp.get("total") if isinstance(resp, dict) else None
-        if not chunk or (isinstance(total, int) and len(rows) >= total):
-            return rows
-    raise _TooMany
+def _model_path(bank: str, model_id: str) -> str:
+    return f"{_bank_path(bank)}/mental-models/{quote(model_id, safe='')}"
 
 
-class _TooMany(Exception):
-    pass
+class _Reader:
+    """The survey's reads, each checked against an optional deadline."""
+
+    def __init__(
+        self, request: Request, deadline: float | None, clock: Callable[[], float]
+    ) -> None:
+        self._request, self._deadline, self._clock = request, deadline, clock
+
+    def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        if self._deadline is not None and self._clock() >= self._deadline:
+            raise _Deadline
+        return self._request("GET", path, params=params)
+
+    def paged(self, path: str, key: str, params: dict[str, Any], cap: int) -> list[Any]:
+        """Every row of a paged listing; :class:`_TooMany` past ``cap`` pages.
+
+        Reads on from the rows collected so far until a page comes back empty
+        or the listing's own ``total`` is reached, so a server that caps its
+        page below :data:`_PAGE` is still read to the end.
+        """
+        rows: list[Any] = []
+        for _ in range(cap):
+            resp = self.get(path, {**params, "limit": _PAGE, "offset": len(rows)})
+            chunk = resp.get(key) if isinstance(resp, dict) else None
+            chunk = chunk if isinstance(chunk, list) else []
+            rows.extend(chunk)
+            total = resp.get("total") if isinstance(resp, dict) else None
+            if not chunk or (isinstance(total, int) and len(rows) >= total):
+                return rows
+        raise _TooMany
+
+    def with_trigger(self, bank: str, model: dict[str, Any]) -> dict[str, Any]:
+        """``model`` with its stored trigger.
+
+        The listing is read at the engine's default ``metadata`` detail,
+        which carries no content and gives ``trigger: null`` (Hindsight
+        1.2.0). A null trigger would read as "no flag, all defaults", so such
+        a row is read on its own; if that has no trigger either, none is
+        stored.
+        """
+        if isinstance(model.get("trigger"), dict):
+            return model
+        one = self.get(_model_path(bank, str(model.get("id"))))
+        return one if isinstance(one, dict) else model
 
 
-def _bank_ids(request: Request) -> list[str]:
-    rows = _paged(request, _ADMIN, "banks", {}, _LIST_PAGES)
-    return [str(r["bank_id"]) for r in rows if isinstance(r, dict) and r.get("bank_id")]
-
-
-def _private_owners(request: Request, bank: str) -> set[str | None] | None:
-    """Owners of the bank's private documents (``None`` for one with no
-    readable owner), or ``None`` when the scan hit its cap."""
+def _private_docs(reader: _Reader, bank: str) -> list[tuple[str, list[str]]] | None:
+    """``(id, tags)`` of the bank's private documents, or ``None`` when the
+    scan hit its cap."""
     try:
-        rows = _paged(
-            request,
+        rows = reader.paged(
             f"{_bank_path(bank)}/documents",
             "items",
             {"tags": [VISIBILITY_PRIVATE_TAG], "tags_match": "all_strict"},
@@ -197,107 +246,153 @@ def _private_owners(request: Request, bank: str) -> set[str | None] | None:
         )
     except _TooMany:
         return None
-    owners: set[str | None] = set()
+    out: list[tuple[str, list[str]]] = []
     for row in rows:
-        tags = row.get("tags") if isinstance(row, dict) else None
-        owner = _agent_of(tags) if isinstance(tags, list) else None
-        owners.add(owner if is_identified(owner) else None)
-    return owners
+        if not isinstance(row, dict):
+            continue
+        tags = row.get("tags")
+        out.append(
+            (
+                str(row.get("id")),
+                [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else [],
+            )
+        )
+    return out
 
 
-def _hidden_from(owners: set[str | None] | None, agent: str) -> bool:
-    return owners is None or any(owner != agent for owner in owners)
+def _foreign(docs: list[tuple[str, list[str]]], agent: str) -> list[tuple[str, list[str]]]:
+    """The private documents ``agent`` may not read (one with no identified
+    owner counts as another agent's)."""
+    out = []
+    for doc_id, tags in docs:
+        owner = _agent_of(tags)
+        if not (is_identified(owner) and owner == agent):
+            out.append((doc_id, tags))
+    return out
 
 
-def _with_trigger(request: Request, bank: str, model: dict[str, Any]) -> dict[str, Any]:
-    """``model`` with its stored trigger.
-
-    At its default ``metadata`` detail the engine lists every model with
-    ``trigger: null`` (Hindsight 1.2.0), which would read as "no flag, all
-    defaults": a flagged model would be listed again, and a ``tags_match:
-    any`` model would look confined. The survey lists at ``content`` detail,
-    which carries the trigger; a row that still has none is read on its own,
-    and if that has none either, none is stored.
-    """
-    if isinstance(model.get("trigger"), dict):
-        return model
-    mid = quote(str(model.get("id")), safe="")
-    one = request("GET", f"{_bank_path(bank)}/mental-models/{mid}")
-    return one if isinstance(one, dict) else model
-
-
-def survey(request: Request, banks: Iterable[str] | None = None) -> Survey:
+def survey(
+    request: Request,
+    banks: Iterable[str] | None = None,
+    *,
+    private_banks_only: bool = False,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> Survey:
     """Every model that needs the flag, in ``banks`` (default: every bank).
 
     Reads only. A bank that cannot be read is listed in ``errors`` and the
-    rest are still surveyed; when the bank list itself cannot be read the
-    error is raised.
+    rest are still surveyed. With ``private_banks_only`` a bank holding no
+    private memory at all is not listed (none of its models can be hidden);
+    the doctor row uses it. Past ``deadline`` (a ``clock`` reading) the survey
+    stops and says it is ``incomplete``.
     """
     report = Survey()
-    for bank in list(banks) if banks is not None else _bank_ids(request):
-        report.banks += 1
-        try:
-            models = [
-                _with_trigger(request, bank, m)
-                for m in _paged(
-                    request,
-                    f"{_bank_path(bank)}/mental-models",
-                    "items",
-                    {"detail": "content"},
-                    _LIST_PAGES,
-                )
-                if isinstance(m, dict)
+    reader = _Reader(request, deadline, clock)
+    try:
+        bank_ids = (
+            list(banks)
+            if banks is not None
+            else [
+                str(r["bank_id"])
+                for r in reader.paged(_ADMIN, "banks", {}, _LIST_PAGES)
+                if isinstance(r, dict) and r.get("bank_id")
             ]
-            todo = [(m, owner) for m in models if isinstance(m, dict) for owner in [_needs_flag(m)]]
-            todo = [(m, owner) for m, owner in todo if owner is not None]
-            owners = _private_owners(request, bank) if todo else set()
+        )
+    except _Deadline:
+        report.incomplete = True
+        return report
+    except _TooMany:
+        report.errors.append(("*", "too many banks to list"))
+        return report
+    for bank in bank_ids:
+        try:
+            docs = _private_docs(reader, bank)
+            if private_banks_only and docs == []:
+                report.banks += 1
+                continue
+            listed = reader.paged(f"{_bank_path(bank)}/mental-models", "items", {}, _LIST_PAGES)
+            todo: list[tuple[dict[str, Any], str]] = []
+            for row in listed:
+                if not isinstance(row, dict):
+                    continue
+                model = reader.with_trigger(bank, row)
+                owner = _needs_flag(model)
+                if owner is not None:
+                    todo.append((model, owner))
+        except _Deadline:
+            report.incomplete = True
+            return report
         except _TooMany:
             report.errors.append((bank, "too many mental models to list"))
             continue
         except Exception as exc:  # one bank's failure must not hide the rest
             report.errors.append((bank, str(exc) or type(exc).__name__))
             continue
+        report.banks += 1
         for model, owner in todo:
-            report.findings.append(
-                Finding(
-                    bank=bank,
-                    model_id=str(model.get("id")),
-                    name=str(model.get("name") or ""),
-                    owner=owner,
-                    hidden=_hidden_from(owners, owner),
-                    trigger=_trigger(model),
-                )
+            foreign = None if docs is None else _foreign(docs, owner)
+            finding = Finding(
+                bank=bank,
+                model_id=str(model.get("id")),
+                name=str(model.get("name") or ""),
+                owner=owner,
+                hidden=foreign is None or bool(foreign),
             )
+            if foreign is None:
+                report.skipped.append((finding, "too many private documents in the bank to check"))
+                continue
+            own_tag = f"{AGENT_TAG_PREFIX}{owner}"
+            clash = [doc_id for doc_id, tags in foreign if own_tag in tags]
+            if clash:
+                report.skipped.append(
+                    (
+                        finding,
+                        f"another agent's private document also carries {own_tag} "
+                        f"({', '.join(clash[:3])}{', …' if len(clash) > 3 else ''})",
+                    )
+                )
+                continue
+            report.findings.append(finding)
     return report
 
 
 def apply_repairs(
     request: Request, findings: Iterable[Finding], *, refresh: bool = True
 ) -> list[Result]:
-    """Set ``exclude_mental_models`` on each finding's model, then (with
-    ``refresh``) queue a refresh so its content is rebuilt under the confined
-    scope. The trigger sent is the model's current one with the flag set, so
-    an engine that replaces the trigger instead of patching it keeps the rest.
-    A failure is recorded and the next model is still repaired.
+    """Repair each finding: clear it if hidden, set the flag, then (with
+    ``refresh``) queue a full refresh. See the module docstring for why in
+    that order. A failure is recorded with what was already done, and the
+    next model is still repaired.
     """
     results: list[Result] = []
     for finding in findings:
-        path = f"{_bank_path(finding.bank)}/mental-models/{quote(finding.model_id, safe='')}"
-        trigger = {**finding.trigger, "exclude_mental_models": True}
+        path = _model_path(finding.bank, finding.model_id)
+        cleared = False
         try:
-            request("PATCH", path, json={"trigger": trigger})
+            if finding.hidden:
+                request("POST", f"{path}/clear")
+                cleared = True
+            request("PATCH", path, json={"trigger": {"exclude_mental_models": True}})
         except Exception as exc:
-            results.append(Result(finding, error=str(exc) or type(exc).__name__))
+            results.append(Result(finding, error=str(exc) or type(exc).__name__, cleared=cleared))
             continue
         op_id: str | None = None
         if refresh:
             try:
-                resp = request("POST", f"{path}/refresh")
+                resp = request("POST", f"{path}/refresh", json={"mode": "full"})
             except Exception as exc:
-                results.append(Result(finding, error=f"flag set; refresh failed: {exc}"))
+                results.append(
+                    Result(
+                        finding,
+                        error=f"refresh failed: {str(exc) or type(exc).__name__}",
+                        cleared=cleared,
+                        flagged=True,
+                    )
+                )
                 continue
             op_id = resp.get("operation_id") if isinstance(resp, dict) else None
-        results.append(Result(finding, operation_id=op_id))
+        results.append(Result(finding, operation_id=op_id, cleared=cleared, flagged=True))
     return results
 
 

@@ -142,8 +142,8 @@ def mm_repair_cmd(
     refresh: bool = typer.Option(
         True,
         "--refresh/--no-refresh",
-        help="With --apply, queue a refresh of each repaired model so its content is "
-        "rebuilt under the confined scope (default).",
+        help="With --apply, queue a full refresh of each repaired model so its content is "
+        "rebuilt under the confined scope (default). A hidden model is emptied first either way.",
     ),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of lines."),
 ) -> None:
@@ -151,8 +151,10 @@ def mm_repair_cmd(
 
     Sets ``trigger.exclude_mental_models`` on every model whose scope is
     otherwise confined to one agent's ``agent:<id>`` tag, so that agent can
-    read it while its bank holds another agent's private memory. Shared,
-    project-wide and whole-bank models are never touched. Safe to run again.
+    read it while its bank holds another agent's private memory. A model its
+    owner cannot read now is emptied first, and every repaired model gets a
+    full refresh. Shared, project-wide and whole-bank models are never
+    touched. Safe to run again.
     """
     from hal0.memory.model_owner_repair import apply_repairs, survey
 
@@ -163,8 +165,8 @@ def mm_repair_cmd(
         die(f"could not list the memory banks: {exc}")
         return
     results = apply_repairs(_admin_request, report.findings, refresh=refresh) if apply else []
-    failed = {(r.finding.bank, r.finding.model_id): r.error for r in results if r.error}
-    ops = {(r.finding.bank, r.finding.model_id): r.operation_id for r in results}
+    by_key = {(r.finding.bank, r.finding.model_id): r for r in results}
+    failed = [r for r in results if r.error]
 
     if json_out:
         rows = []
@@ -176,13 +178,22 @@ def mm_repair_cmd(
                 "owner": f.owner,
                 "hidden": f.hidden,
             }
-            if apply:
-                row["error"] = failed.get((f.bank, f.model_id))
-                row["operation_id"] = ops.get((f.bank, f.model_id))
+            r = by_key.get((f.bank, f.model_id))
+            if r is not None:
+                row.update(
+                    error=r.error,
+                    operation_id=r.operation_id,
+                    cleared=r.cleared,
+                    flagged=r.flagged,
+                )
             rows.append(row)
         payload = {
             "applied": apply,
             "models": rows,
+            "skipped": [
+                {"bank": f.bank, "id": f.model_id, "owner": f.owner, "reason": why}
+                for f, why in report.skipped
+            ],
             "errors": [{"bank": b, "error": e} for b, e in report.errors],
         }
         typer.echo(jsonlib.dumps(payload, indent=2, sort_keys=True))
@@ -190,19 +201,30 @@ def mm_repair_cmd(
         for b, err in report.errors:
             console.print(f"[red]could not read bank {escape(b)}:[/red] {escape(err)}")
         for f in report.findings:
-            key = (f.bank, f.model_id)
             where = (
                 f"{escape(f.bank)} {escape(f.model_id)} ({escape(f.name)}) owner {escape(f.owner)}"
             )
             hidden = " [yellow]hidden from its owner now[/yellow]" if f.hidden else ""
-            if not apply:
-                verb = "would set exclude_mental_models on"
-            elif key in failed:
-                verb = f"[red]failed[/red] ({escape(str(failed[key]))}):"
+            r = by_key.get((f.bank, f.model_id))
+            if r is None:
+                verb = (
+                    "would " + ("clear and " if f.hidden else "") + "set exclude_mental_models on"
+                )
+            elif r.error and r.flagged:
+                done = "flagged and cleared" if r.cleared else "flagged"
+                verb = f"[red]{done}, but the refresh failed[/red] ({escape(r.error)}):"
+            elif r.error:
+                done = "cleared, but setting the flag failed" if r.cleared else "failed"
+                verb = f"[red]{done}[/red] ({escape(r.error)}):"
             else:
-                verb = "set exclude_mental_models on"
-                hidden += f" refresh queued {ops[key]}" if ops.get(key) else ""
+                verb = ("cleared and " if r.cleared else "") + "set exclude_mental_models on"
+                hidden += f" full refresh queued {r.operation_id}" if r.operation_id else ""
             console.print(f"{verb} {where}{hidden}")
+        for f, why in report.skipped:
+            console.print(
+                f"[yellow]skipped[/yellow] {escape(f.bank)} {escape(f.model_id)} "
+                f"owner {escape(f.owner)}: {escape(why)}"
+            )
         if not report.findings:
             console.print(f"Nothing to repair in {report.banks} bank(s).")
         elif not apply:

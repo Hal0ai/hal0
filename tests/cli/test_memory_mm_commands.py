@@ -85,9 +85,16 @@ def repair_api(monkeypatch: pytest.MonkeyPatch):
         if path == "/api/memory/banks":
             return {"banks": [{"bank_id": "shared"}], "total": 1}
         if path == "/api/memory/banks/shared/mental-models":
-            return {"items": [dict(m) for m in models.values()], "total": len(models)}
+            # Engine 1.2.0 at its default metadata detail: trigger is null.
+            rows = [{**m, "trigger": None} for m in models.values()]
+            return {"items": rows, "total": len(models)}
+        if path.startswith("/api/memory/banks/shared/mental-models/"):
+            return dict(models[path.rsplit("/", 1)[1]])
         if path == "/api/memory/banks/shared/documents":
-            return {"items": [{"id": "d", "tags": ["visibility:private", "agent:alice"]}]}
+            return {
+                "items": [{"id": "d", "tags": ["visibility:private", "agent:alice"]}],
+                "total": 1,
+            }
         raise AssertionError(f"unexpected GET {path}")
 
     def fake_patch(path: str, *, json: Any = None, **kw: Any) -> Any:
@@ -106,38 +113,40 @@ def repair_api(monkeypatch: pytest.MonkeyPatch):
     return writes
 
 
+BOB = "/api/memory/banks/shared/mental-models/bob-own"
+
+
 def test_mm_repair_dry_run_writes_nothing_and_names_each_model(repair_api) -> None:
     result = runner.invoke(mmc.app, ["repair"])
     assert result.exit_code == 0, result.output
     assert repair_api == []
     lines = [ln for ln in result.output.splitlines() if "bob-own" in ln]
-    assert len(lines) == 1 and "owner bob" in lines[0] and "would set" in lines[0]
+    assert len(lines) == 1 and "owner bob" in lines[0]
+    assert "would clear and set" in lines[0]
     assert "whole" not in result.output.lower()
     assert "--apply" in result.output
 
 
-def test_mm_repair_apply_flags_and_refreshes(repair_api) -> None:
+def test_mm_repair_apply_clears_flags_and_fully_refreshes(repair_api) -> None:
     result = runner.invoke(mmc.app, ["repair", "--apply"])
     assert result.exit_code == 0, result.output
     assert repair_api == [
-        (
-            "PATCH",
-            "/api/memory/banks/shared/mental-models/bob-own",
-            {"trigger": {"exclude_mental_models": True}},
-        ),
-        ("POST", "/api/memory/banks/shared/mental-models/bob-own/refresh", None),
+        ("POST", f"{BOB}/clear", None),
+        ("PATCH", BOB, {"trigger": {"exclude_mental_models": True}}),
+        ("POST", f"{BOB}/refresh", {"mode": "full"}),
     ]
+    assert "cleared and set" in result.output and "full refresh queued op-1" in result.output
     # Idempotent: a second run has nothing to do.
     again = runner.invoke(mmc.app, ["repair", "--apply"])
     assert again.exit_code == 0, again.output
-    assert len(repair_api) == 2
+    assert len(repair_api) == 3
     assert "nothing to repair" in again.output.lower()
 
 
-def test_mm_repair_no_refresh(repair_api) -> None:
+def test_mm_repair_no_refresh_still_clears(repair_api) -> None:
     result = runner.invoke(mmc.app, ["repair", "--apply", "--no-refresh"])
     assert result.exit_code == 0, result.output
-    assert [w[0] for w in repair_api] == ["PATCH"]
+    assert [(m, p) for m, p, _j in repair_api] == [("POST", f"{BOB}/clear"), ("PATCH", BOB)]
 
 
 def test_mm_repair_json(repair_api) -> None:
@@ -148,7 +157,7 @@ def test_mm_repair_json(repair_api) -> None:
     assert payload["models"] == [
         {"bank": "shared", "id": "bob-own", "name": "Bob", "owner": "bob", "hidden": True}
     ]
-    assert payload["errors"] == []
+    assert payload["errors"] == [] and payload["skipped"] == []
 
 
 def test_mm_repair_failed_write_exits_nonzero(repair_api, monkeypatch) -> None:
@@ -158,4 +167,38 @@ def test_mm_repair_failed_write_exits_nonzero(repair_api, monkeypatch) -> None:
     monkeypatch.setattr(mmc, "api_patch", broken_patch)
     result = runner.invoke(mmc.app, ["repair", "--apply"])
     assert result.exit_code == 1, result.output
-    assert "busy" in result.output
+    assert "cleared, but setting the flag failed" in result.output and "busy" in result.output
+
+
+def test_mm_repair_failed_refresh_says_flagged_and_cleared(repair_api, monkeypatch) -> None:
+    real_post = mmc.api_post
+
+    def no_refresh(path: str, **kw: Any) -> Any:
+        if path.endswith("/refresh"):
+            raise mmc.CliApiError("engine busy", status=503)
+        return real_post(path, **kw)
+
+    monkeypatch.setattr(mmc, "api_post", no_refresh)
+    result = runner.invoke(mmc.app, ["repair", "--apply"])
+    assert result.exit_code == 1, result.output
+    out = " ".join(result.output.split())
+    assert "flagged and cleared, but the refresh failed" in out and "engine busy" in out
+
+
+def test_mm_repair_reports_a_skipped_model(repair_api, monkeypatch) -> None:
+    real_get = mmc.api_get
+
+    def clashing_docs(path: str, **kw: Any) -> Any:
+        if path.endswith("/documents"):
+            return {
+                "items": [{"id": "d9", "tags": ["visibility:private", "agent:alice", "agent:bob"]}],
+                "total": 1,
+            }
+        return real_get(path, **kw)
+
+    monkeypatch.setattr(mmc, "api_get", clashing_docs)
+    result = runner.invoke(mmc.app, ["repair", "--apply"])
+    assert result.exit_code == 0, result.output
+    assert repair_api == []
+    out = " ".join(result.output.split())
+    assert "skipped shared bob-own owner bob" in out and "agent:bob" in out

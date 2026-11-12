@@ -3243,6 +3243,45 @@ def test_model_owners_unreadable_is_a_warn() -> None:
     assert check.status == "warn" and "shared" in check.detail
 
 
+def test_model_owners_warns_when_the_survey_ran_out_of_time() -> None:
+    report = _owners_survey()
+    report.incomplete = True
+    check = da.check_memory_model_owners(memory=_LIVE_MEMORY, fetch=lambda _b: report)
+    assert check.status == "warn" and "survey incomplete" in check.detail
+
+
+def test_model_owners_names_skipped_models() -> None:
+    from hal0.memory.model_owner_repair import Finding
+
+    report = _owners_survey()
+    report.skipped = [(Finding("shared", "m", "", "bob", True), "clash")]
+    check = da.check_memory_model_owners(memory=_LIVE_MEMORY, fetch=lambda _b: report)
+    assert check.status == "warn" and "1 mental model(s)" in check.detail
+    assert "cannot repair" in check.detail
+
+
+def test_model_owners_survey_is_bounded_and_skips_banks_without_private_memory(
+    monkeypatch,
+) -> None:
+    """F5: the row runs on every `doctor all`: metadata listings only, banks
+    with no private memory are not listed, and the whole survey has a deadline."""
+    import hal0.memory.model_owner_repair as mor
+
+    seen: dict = {}
+
+    def fake_survey(request, banks=None, **kw):
+        seen.update(kw)
+        return _owners_survey()
+
+    monkeypatch.setattr(mor, "survey", fake_survey)
+    da._survey_model_owners(None)
+    assert seen["private_banks_only"] is True
+    assert seen["deadline"] is not None
+    import time
+
+    assert 15 <= seen["deadline"] - time.monotonic() <= 21
+
+
 def test_model_owners_skips_without_a_live_engine() -> None:
     def _never(_b: object) -> None:  # pragma: no cover - a call here is the bug
         raise AssertionError("no fetch without a reachable memory engine")
