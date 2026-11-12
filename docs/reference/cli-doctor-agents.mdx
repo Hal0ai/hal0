@@ -41,7 +41,7 @@ prompt and 32 decode tokens, capped at 30 s) when the slot's metrics carry no re
 `migrations`, `ui-dist`, `api-env-entries`, `ports`, `port_dnat`, `netns`, `box`, `hal0_target`, `secret-modes`,
 `hardware_freshness`, `gtt_leak`, `seed_context_envelope`, `agent-uid`, `api-journal`, `stt-weights`, `seams`,
 `mcp_mounts`, `hermes-api`, `hermes_mcp_auth`, `hermes_profiles_mcp`, `hermes_default_memory`, `hermes_brain_memory`, `hermes_generation`, `hermes_command_approvals`, `hermes_delegation_slot`, `hermes-gateway-unit`, `hermes_anchor_window`, `hermes_model_choice`,
-`hal0_linger`, `hindsight_llm_auth`, `memory_engine_version`, `memory_engine_env`, `memory_layout`, `memory_embedder`, `memory_extraction_throughput`, `memory_retain_chunk`, `memory_decision_lane`, `memory_projects`.
+`hal0_linger`, `hindsight_llm_auth`, `memory_engine_version`, `memory_engine_env`, `memory_layout`, `memory_embedder`, `memory_extraction_throughput`, `memory_retain_chunk`, `memory_decision_lane`, `memory_projects`, `memory_model_owners`.
 `hal0_linger` reads whether systemd linger is on for the `hal0` user (`loginctl show-user hal0 -p
 Linger`) and warns when that does not match whether the Hermes gateway is installed.
 
@@ -76,6 +76,8 @@ Linger`) and warns when that does not match whether the Hermes gateway is instal
 - **pass, with a note** when memory is off, the engine is unreachable, or the tags cannot be listed (a fresh box has no platform bank until the first write). Nothing is counted.
 
 Run as a user that cannot read `hal0.toml`, the row counts against the `shared` bank and an empty registry, and says so.
+
+`memory_model_owners` ("Memory model owners") is advisory. It lists every bank's mental models through hal0-api's admin memory routes and finds the ones an agent owns that lack `trigger.exclude_mental_models`: their scope strictly requires one agent's `agent:<id>` tag, so they would be that agent's to read once flagged. It **warns** with the number of those that are hidden from their owner now, because their bank holds another agent's private memory, and names `hal0 memory mm repair` (see [memory mm](/docs/reference/cli-operator/#memory-mm-mental-models)). It **passes, with a note** when such models exist but none is hidden yet, and **warns** when a bank cannot be read. It changes nothing.
 
 `api-journal` ("API journal read") warns until `hal0-api.service` carries `SupplementaryGroups=systemd-journal`. `hal0 update` does not rewrite that unit, so the fix is to re-run the installer once; until then the Logs page and `hal0 slot logs --follow` report that the journal cannot be read.
 
