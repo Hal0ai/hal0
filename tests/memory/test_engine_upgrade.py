@@ -455,3 +455,79 @@ def test_restore_marker_is_down_before_the_copy_and_gone_after_success(hs):
     assert result["status"] == "rolled_back"
     assert seen == [True]  # a crash mid-copy would leave the marker
     assert not (hs / ".pg0.restore-failed").exists()
+
+
+# ── #3533: dependency constraints ──────────────────────────────────────────
+
+
+def _dateparser_runner(state: dict[str, str], *, pip_rc: int = 0):
+    """At-pin engine whose dateparser version is ``state['dp']``."""
+    inner = FakeRunner()
+    calls: list[list[str]] = []
+
+    def runner(args, **kwargs):
+        args = [str(a) for a in args]
+        calls.append(args)
+        if len(args) >= 3 and args[1] == "-c" and "importlib.metadata" in args[2]:
+            if "dateparser" in args[2]:
+                return subprocess.CompletedProcess(args, 0, f"{state['dp']}\n", "")
+            return subprocess.CompletedProcess(args, 0, f"{HINDSIGHT_API_PIN}\n", "")
+        if "pip" in Path(args[0]).name and "install" in args:
+            if pip_rc == 0:
+                state["dp"] = "1.4.3"
+            return subprocess.CompletedProcess(args, pip_rc, "", "no")
+        return inner(args, **kwargs)
+
+    runner.calls = calls  # type: ignore[attr-defined]
+    return runner
+
+
+def test_constraint_is_rendered_and_is_a_real_specifier():
+    from packaging.requirements import Requirement
+
+    from hal0.memory.engine_upgrade import ENGINE_DEP_CONSTRAINTS
+
+    assert ENGINE_DEP_CONSTRAINTS == ("dateparser<1.5",)
+    spec = Requirement(ENGINE_DEP_CONSTRAINTS[0]).specifier
+    assert spec.contains("1.4.3") and not spec.contains("1.5.0")
+
+
+def test_rebuild_installs_constraints_with_the_pin(hs):
+    runner = FakeRunner()
+    upgrade_memory_engine(seam=FakeSeam(), runner=runner, http_get=_healthy, hs_dir=hs)
+    installs = [c for c in runner.calls if "pip" in Path(c[0]).name and "wheel" not in c]
+    assert installs
+    assert installs[0][2:4] == [f"hindsight-api=={HINDSIGHT_API_PIN}", "dateparser<1.5"]
+
+
+def test_at_pin_engine_with_bad_dateparser_is_repaired_and_restarted(hs):
+    runner, seam = _dateparser_runner({"dp": "1.5.0"}), FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, hs_dir=hs)
+    assert result["status"] == "converged"
+    assert result["constraints"] == "repaired"
+    assert any(c[2:] == ["dateparser<1.5", "-q"] for c in runner.calls)
+    assert seam.verbs == ["restart"]
+
+
+def test_at_pin_engine_with_good_dateparser_is_untouched(hs):
+    runner, seam = _dateparser_runner({"dp": "1.4.3"}), FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, hs_dir=hs)
+    assert result == {"status": "converged", "version": HINDSIGHT_API_PIN}
+    assert seam.calls == []
+    assert not any("pip" in Path(c[0]).name for c in runner.calls)
+
+
+def test_failed_repair_never_restarts_the_engine(hs):
+    runner, seam = _dateparser_runner({"dp": "1.5.0"}, pip_rc=1), FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, hs_dir=hs)
+    assert result["status"] == "converged"
+    assert result["constraints"] == "failed"
+    assert seam.calls == []
+
+
+def test_boot_mode_only_reports_bad_dateparser(hs):
+    runner, seam = _dateparser_runner({"dp": "1.5.0"}), FakeSeam()
+    result = upgrade_memory_engine(upgrade=False, seam=seam, runner=runner, hs_dir=hs)
+    assert result == {"status": "converged", "version": HINDSIGHT_API_PIN}
+    assert seam.calls == []
+    assert not any("pip" in Path(c[0]).name for c in runner.calls)

@@ -4012,6 +4012,10 @@ else
     # shell literal (not read from the venv) so the fresh-install branch works
     # even when the python side is broken.
     HINDSIGHT_PIN="1.2.0"
+    # Space-separated pip requirements installed beside the pin; must match
+    # hal0.memory.engine_upgrade.ENGINE_DEP_CONSTRAINTS (#3533: dateparser 1.5.0
+    # breaks the engine's temporal query analysis).
+    HINDSIGHT_DEP_CONSTRAINTS="dateparser<1.5"
     HS_DIR="${VAR_DIR}/memory/hindsight"
     HINDSIGHT_UNIT_SRC="${REPO_ROOT}/installer/systemd/hindsight-api.service"
     if [[ "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 && -f "${HINDSIGHT_UNIT_SRC}" ]]; then
@@ -4033,7 +4037,7 @@ else
             # half-built venv so the next run retries cleanly, and let the
             # `-x hindsight-api` guard below skip the unit/health steps.
             hs_pyver="$("${HS_DIR}/.venv/bin/python" -I -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
-            if ! "${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}" -q; then
+            if ! "${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}" ${HINDSIGHT_DEP_CONSTRAINTS} -q; then
                 warn "hindsight-api==${HINDSIGHT_PIN} failed to install on Python ${hs_pyver} — memory engine will be unavailable"
                 warn "  set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.11-3.14) and re-run, or set HAL0_SKIP_HINDSIGHT=1"
                 rm -rf "${HS_DIR}/.venv"
