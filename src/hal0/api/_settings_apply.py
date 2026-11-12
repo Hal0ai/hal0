@@ -293,6 +293,7 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.lanes.retain.timeout_s": {"apply_class": "immediate", "services": []},
     "memory.lanes.retain.reasoning_effort": {"apply_class": "immediate", "services": []},
     "memory.lanes.retain.strict_schema": {"apply_class": "immediate", "services": []},
+    "memory.lanes.retain.max_completion_tokens": {"apply_class": "immediate", "services": []},
     "memory.lanes.consolidation.max_concurrent": {"apply_class": "immediate", "services": []},
     "memory.lanes.consolidation.virtual_model": {"apply_class": "immediate", "services": []},
     "memory.lanes.consolidation.timeout_s": {"apply_class": "immediate", "services": []},
@@ -301,11 +302,16 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "services": [],
     },
     "memory.lanes.consolidation.strict_schema": {"apply_class": "immediate", "services": []},
+    "memory.lanes.consolidation.max_completion_tokens": {
+        "apply_class": "immediate",
+        "services": [],
+    },
     "memory.lanes.reflect.max_concurrent": {"apply_class": "immediate", "services": []},
     "memory.lanes.reflect.virtual_model": {"apply_class": "immediate", "services": []},
     "memory.lanes.reflect.timeout_s": {"apply_class": "immediate", "services": []},
     "memory.lanes.reflect.reasoning_effort": {"apply_class": "immediate", "services": []},
     "memory.lanes.reflect.strict_schema": {"apply_class": "immediate", "services": []},
+    "memory.lanes.reflect.max_completion_tokens": {"apply_class": "immediate", "services": []},
     "memory.lanes.mental_model_refresh.max_concurrent": {
         "apply_class": "manual-restart",
         "services": [],
@@ -323,6 +329,10 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "services": [],
     },
     "memory.lanes.mental_model_refresh.strict_schema": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.mental_model_refresh.max_completion_tokens": {
         "apply_class": "manual-restart",
         "services": [],
     },

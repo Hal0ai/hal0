@@ -2274,3 +2274,64 @@ def test_engine_env_warning_names_a_missing_key_as_unset_with_update_remedy():
     assert "None" not in warning
     assert "unset (engine default 10; hal0 renders 4)" in warning
     assert "hal0 update" in warning and "daemon-reload" not in warning
+
+
+def _showcase_env_map(lanes) -> dict[str, str]:
+    from hal0.config.schema import MemoryDecisionConfig, MemoryModelsConfig
+    from hal0.memory.extraction_env import render_showcase_env
+
+    body = render_showcase_env(
+        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=lanes
+    )
+    return dict(
+        line.removeprefix("Environment=").split("=", 1)
+        for line in body.splitlines()
+        if line.startswith("Environment=")
+    )
+
+
+def test_showcase_caps_consolidation_and_reflect_by_default():
+    """#3596: Hindsight 1.2.0 sends no cap for these ops unless the env is set."""
+    from hal0.config.schema import MemoryLanesConfig
+
+    env = _showcase_env_map(MemoryLanesConfig())
+    assert env["HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS"] == "8192"
+    assert env["HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS"] == "8192"
+    # Retain is capped by [memory.graph]; the engine has no per-refresh var.
+    assert "HINDSIGHT_API_MENTAL_MODEL_REFRESH_MAX_COMPLETION_TOKENS" not in env
+    assert "HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS" not in env
+
+
+def test_showcase_completion_cap_override_and_opt_out():
+    from hal0.config.schema import MemoryLaneOpConfig, MemoryLanesConfig
+
+    env = _showcase_env_map(
+        MemoryLanesConfig(
+            consolidation=MemoryLaneOpConfig(max_completion_tokens=4096),
+            reflect=MemoryLaneOpConfig(max_completion_tokens=0),
+        )
+    )
+    assert env["HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS"] == "4096"
+    assert "HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS" not in env
+
+
+@pytest.mark.parametrize("op", ["retain", "mental_model_refresh"])
+def test_completion_cap_rejected_where_engine_has_no_var(op):
+    from pydantic import ValidationError
+
+    from hal0.config.schema import MemoryLaneOpConfig, MemoryLanesConfig
+
+    with pytest.raises(ValidationError, match="max_completion_tokens is not supported"):
+        MemoryLanesConfig(**{op: MemoryLaneOpConfig(max_completion_tokens=4096)})
+
+
+def test_partial_lane_tables_keep_the_default_cap():
+    """#3596 review: a tuned box with [memory.lanes.consolidation] set must stay capped."""
+    from hal0.config.schema import MemoryLanesConfig
+
+    lanes = MemoryLanesConfig.model_validate(
+        {"consolidation": {"max_concurrent": 2}, "reflect": {"timeout_s": 900}}
+    )
+    env = _showcase_env_map(lanes)
+    assert env["HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS"] == "8192"
+    assert env["HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS"] == "8192"

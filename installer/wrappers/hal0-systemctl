@@ -276,6 +276,11 @@ validate_dropin_directive() {  # args: kind, "Key=Value" line
         HINDSIGHT_API_REFLECT_LLM_TIMEOUT|HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_TIMEOUT)
           [[ "$evalue" =~ ^[0-9]{1,9}$ ]] \
             || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        # The engine reads 0 as a cap of 0 tokens, which breaks every call;
+        # hal0 omits the line instead of rendering 0 (#3596).
+        HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS|HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS)
+          [[ "$evalue" =~ ^[1-9][0-9]{0,8}$ ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
         HINDSIGHT_API_LLM_REASONING_EFFORT|HINDSIGHT_API_RETAIN_LLM_REASONING_EFFORT|\
         HINDSIGHT_API_CONSOLIDATION_LLM_REASONING_EFFORT|HINDSIGHT_API_REFLECT_LLM_REASONING_EFFORT|\
         HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_REASONING_EFFORT)

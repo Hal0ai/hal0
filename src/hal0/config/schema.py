@@ -2993,6 +2993,20 @@ class MemoryLaneOpConfig(BaseModel):
         default=None,
         description="Per-op HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA override.",
     )
+    max_completion_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        le=131072,
+        description=(
+            "Hard cap on one LLM call's output tokens (#3596): "
+            "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS for consolidation, "
+            "HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS for reflect (which also "
+            "bounds mental-model refresh, a reflect call). Unset means 8192 for "
+            "consolidation and reflect; 0 leaves the engine uncapped. Valid only on consolidation and reflect; retain is capped "
+            "by [memory.graph].extraction_max_tokens, and Hindsight has no "
+            "separate mental-model-refresh cap."
+        ),
+    )
 
     @field_validator("virtual_model")
     @classmethod
@@ -3044,6 +3058,17 @@ class MemoryLanesConfig(BaseModel):
     @classmethod
     def _effort_shape(cls, v: str) -> str:
         return _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
+
+    @model_validator(mode="after")
+    def _completion_cap_only_where_engine_accepts(self) -> MemoryLanesConfig:
+        for op in ("retain", "mental_model_refresh"):
+            if getattr(self, op).max_completion_tokens is not None:
+                raise ValueError(
+                    f"memory.lanes.{op}.max_completion_tokens is not supported: "
+                    "set [memory.graph].extraction_max_tokens for retain, and "
+                    "[memory.lanes.reflect].max_completion_tokens for mental-model refresh"
+                )
+        return self
 
 
 class MemoryConsoleConfig(BaseModel):

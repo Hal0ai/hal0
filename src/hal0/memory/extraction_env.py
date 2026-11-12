@@ -345,6 +345,14 @@ LANE_OP_ENV_PREFIX = {
 }
 
 
+#: Ops whose Hindsight 1.2.0 env accepts ``*_MAX_COMPLETION_TOKENS`` (#3596).
+_COMPLETION_CAP_OPS = frozenset({"consolidation", "reflect"})
+
+#: Cap rendered when ``[memory.lanes.<op>].max_completion_tokens`` is unset.
+#: Resolved here, not in the schema, so a partial table keeps it (#3596).
+DEFAULT_OP_COMPLETION_TOKENS = 8192
+
+
 def render_showcase_env(
     *,
     models: MemoryModelsConfig,
@@ -454,6 +462,18 @@ def render_showcase_env(
                 f"Environment=HINDSIGHT_API_{prefix}_LLM_STRICT_SCHEMA="
                 + ("true" if op_cfg.strict_schema else "false")
             )
+        # #3596: Hindsight 1.2.0 reads a completion cap for consolidation and
+        # reflect only (config.py ENV_CONSOLIDATION_/ENV_REFLECT_MAX_COMPLETION_TOKENS,
+        # engine default None = uncapped). Retain has its own cap; mental-model
+        # refresh runs through reflect. 0 = operator opted out of the cap.
+        if op in _COMPLETION_CAP_OPS:
+            cap = (
+                DEFAULT_OP_COMPLETION_TOKENS
+                if op_cfg.max_completion_tokens is None
+                else op_cfg.max_completion_tokens
+            )
+            if cap:
+                lines.append(f"Environment=HINDSIGHT_API_{prefix}_MAX_COMPLETION_TOKENS={cap}")
 
     return "\n".join(lines) + "\n"
 
@@ -1052,7 +1072,11 @@ def engine_env_report(
 
 
 #: What an unset managed key means to the engine, for the doctor sentence.
-_UNSET_NOTES = {"HINDSIGHT_API_WORKER_MAX_SLOTS": "engine default 10"}
+_UNSET_NOTES = {
+    "HINDSIGHT_API_WORKER_MAX_SLOTS": "engine default 10",
+    "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS": "engine default uncapped",
+    "HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS": "engine default uncapped",
+}
 
 
 def engine_env_warning(report: Mapping[str, Any]) -> str | None:
