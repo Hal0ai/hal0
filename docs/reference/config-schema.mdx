@@ -240,6 +240,14 @@ codebase-survey marker. The endpoint reads the table from hal0-api's loaded
 configuration on each request: a change saved through the Settings API
 applies at once, and a hand edit of `hal0.toml` at the next restart.
 
+#### `[memory.lanes.<op>]` output caps
+
+`<op>` is one of `retain`, `consolidation`, `reflect`, `mental_model_refresh`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `max_completion_tokens` | int | `8192` for `consolidation` and `reflect`, unset elsewhere | `0-131072`; `0` leaves the engine uncapped. Rendered as `HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS` or `HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS`. Mental-model refresh runs through reflect, so the reflect cap bounds it. Setting it on `retain` (use `[memory.graph].extraction_max_tokens`) or on `mental_model_refresh` is refused |
+
 ### `[updates]`
 
 `extra="forbid"`.

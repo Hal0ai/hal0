@@ -390,6 +390,11 @@ even on a fresh install, under `[memory.graph]`:
   so consolidation, reflect and mental-model refresh share the concurrency
   budget too. With the default single permit, a long reflect or consolidation
   can delay queued retains until that call finishes or reaches `llm_timeout_s`.
+  Consolidation and reflect (which also runs mental-model refresh) are capped
+  at 8192 output tokens each through `[memory.lanes.consolidation]` and
+  `[memory.lanes.reflect]` `max_completion_tokens`; `0` leaves the engine
+  uncapped. The bundled `memory` profile also adds llama.cpp's DRY repetition
+  guard, so a small extraction model that starts to loop is cut off.
   hal0 holds the value rendered into the drop-in to the extraction slot's
   `--parallel`; calls beyond it queue inside llama-server, and that wait counts
   against the read timeout. `hal0.toml` keeps what you set; saving graph settings

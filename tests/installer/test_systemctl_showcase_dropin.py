@@ -126,6 +126,9 @@ _HEAD = "[Service]\n"
         "Environment=HINDSIGHT_API_LLM_STRICT_SCHEMA=yes",
         "Environment=HINDSIGHT_API_LLM_REASONING_EFFORT=$(id)",
         "Environment=HINDSIGHT_API_LLM_REASONING_EFFORT=High",
+        "Environment=HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS=-1",
+        "Environment=HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS=8k",
+        "Environment=HINDSIGHT_API_MENTAL_MODEL_REFRESH_MAX_COMPLETION_TOKENS=8192",
         "Environment=HINDSIGHT_API_RETAIN_LLM_MODEL=gpt-4o",
         "Environment=HINDSIGHT_API_RETAIN_LLM_MODEL=hal0/x HINDSIGHT_API_LLM_API_KEY=y",
     ],
@@ -167,3 +170,11 @@ def test_write_arm_retires_only_the_literal_legacy_cap_drop_in() -> None:
     # No other arm deletes it, and the arm takes no positional argument.
     assert text.count("$HINDSIGHT_LEGACY_CAP_DROPIN_FILE") == 1
     assert "$1" not in arm and "${1" not in arm
+
+
+def test_default_body_carries_the_completion_caps_and_is_accepted() -> None:
+    """#3596: the shipped consolidation + reflect caps pass the allow-list."""
+    body = _body()
+    assert "Environment=HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS=8192\n" in body
+    assert "Environment=HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS=8192\n" in body
+    _accepts(body)

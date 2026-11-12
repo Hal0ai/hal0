@@ -66,7 +66,12 @@ intent = "Utility workload · 64K ctx"
 
 [profile.memory]
 # Dedicated Hindsight extraction; remains available even while the slot is cold.
-flags = "-fa auto -b 2048 -ub 512 --parallel 1"
+# The DRY sampler (#3596) is the repetition guard: Hindsight's consolidation and
+# reflect calls run at temperature 0, where a small model can loop to tens of
+# thousands of tokens and hold a sequence for minutes. DRY penalises a repeated
+# 4+ token run over the last 4096 tokens; a live run stopped the runaways with
+# no JSON parse errors. The output caps in [memory.lanes] are the hard bound.
+flags = "-fa auto -b 2048 -ub 512 --parallel 1 --dry-multiplier 0.8 --dry-base 1.75 --dry-allowed-length 4 --dry-penalty-last-n 4096"
 ctx_size = 32768
 enable_thinking = false
 vision = "off"
