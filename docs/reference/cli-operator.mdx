@@ -56,6 +56,44 @@ This page covers `memory` and the remaining sub-apps, the slot lifecycle timeout
 | `mm list <bank>` | `bank` | `--json` |
 | `mm refresh <bank> <model_id>` | `bank`, `model_id` | `--json` |
 | `mm history <bank> <model_id>` | `bank`, `model_id` | `--json` |
+| `mm repair` | — | `--bank` (repeatable; omit = every bank), `--apply`/`--dry-run` (default `--dry-run`), `--refresh`/`--no-refresh` (default `--refresh`), `--json` |
+
+`mm repair` gives agents back their own mental models and knowledge pages.
+An agent reads a model while its bank holds another agent's private memory
+only when the model's scope strictly requires that agent's `agent:<id>` tag
+and its trigger sets `exclude_mental_models`, which hal0 sets on every model
+an agent creates through it (see
+[MCP tools: hal0-memory](/docs/reference/mcp-tools-memory/)). A model made
+before hal0 set the flag, or written straight to the engine, answers 404 to
+its own agent on every route, and the agent cannot add the flag itself.
+
+The command lists, one line per model, every model that lacks the flag and
+whose scope would then be confined to exactly one agent: tags or
+`trigger.tag_groups` on that agent's tag under `all_strict`, `exact`, or
+`any_strict` over that one tag. Whole-bank, project-wide and shared models are
+never listed or written. A line marked `hidden from its owner now` is one
+that agent cannot read today. With `--apply`, for each model in turn:
+
+1. a model hidden from its owner is emptied first (the engine's
+   `POST .../mental-models/{id}/clear`), while it is still hidden, so the
+   flag never shows its owner content written from other agents' memory
+   (the engine keeps the model's `reflect_response`; hal0 returns it to
+   agents as `null` while a model's content is empty);
+2. `exclude_mental_models: true` is set (only that field is sent; the engine
+   keeps the rest of the trigger);
+3. a full refresh is queued (`{"mode": "full"}`; a delta-mode model keeps its
+   mode), so nothing of the old content survives.
+
+`--no-refresh` skips step 3, and the model stays empty until its next
+refresh. If the refresh fails, the line says the model is flagged and
+cleared and the refresh failed; it stays empty, not stale. A model is
+skipped, with the reason, when another agent's private document in its bank
+also carries the owner's `agent:<id>` tag: the owner's scope would read it.
+A repaired model is not listed again, so running it twice changes nothing.
+It goes through hal0-api's admin memory routes and exits `1` when a bank
+cannot be read or a write fails. Nothing runs it for you, `hal0 update`
+included. The `memory_model_owners` row of `hal0 doctor all` counts the
+models hidden from their owner and names this command.
 
 ### `memory directive` (bank directives)
 

@@ -363,6 +363,29 @@ def test_knowledge_page_refresh_and_edit_go_through_engine_routes(
     assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/mental-models/mm-1"
 
 
+def test_mental_model_clear_and_full_refresh_forward(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    """#3576: the repair empties a hidden model, then refreshes it in full."""
+    recorder.respond(
+        "POST", "/v1/default/banks/shared/mental-models/mm-1/clear", 200, {"id": "mm-1"}
+    )
+    r = client.post("/api/memory/banks/shared/mental-models/mm-1/clear")
+    assert r.status_code == 200
+    assert recorder.requests[-1]["method"] == "POST"
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/mental-models/mm-1/clear"
+
+    recorder.respond(
+        "POST",
+        "/v1/default/banks/shared/mental-models/mm-1/refresh",
+        200,
+        {"operation_id": "op-1"},
+    )
+    r = client.post("/api/memory/banks/shared/mental-models/mm-1/refresh", json={"mode": "full"})
+    assert r.status_code == 200
+    assert '"mode"' in recorder.requests[-1]["body"] and '"full"' in recorder.requests[-1]["body"]
+
+
 def test_bank_create_put_and_delete_forward(client: TestClient, recorder: _Recorder) -> None:
     r = client.put("/api/memory/banks/scratch", json={"retain_extraction_mode": "concise"})
     assert r.status_code == 200

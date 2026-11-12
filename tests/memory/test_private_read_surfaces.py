@@ -336,6 +336,34 @@ async def test_mental_models_owner_reads_all_when_only_own_private(layout):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("layout", LAYOUTS)
+async def test_cleared_model_keeps_no_reflect_response_for_agents(layout):
+    """#3576: the engine's clear empties ``content`` and leaves
+    ``reflect_response`` (the old text and its sources). Until a refresh
+    writes new content, an agent read carries no reflect_response; that is
+    what keeps a model the repair has cleared and flagged from showing its
+    owner what it was built from before."""
+    p, engine, bank = _provider(layout)
+    engine.doc(bank, "b-priv", ["visibility:private", "agent:bob"])
+    model = engine.models[bank]["mm-alice"]
+    model["content"] = ""
+    model["structured_content"] = None
+    model["reflect_response"] = {"text": "bob's secret", "based_on": {"world": [{"id": "f"}]}}
+    got = await p.get_mental_model("mm-alice", client_id="alice")
+    assert got["content"] == "" and got["reflect_response"] is None
+    listed = await p.list_mental_models(client_id="alice", detail="full")
+    assert [m["reflect_response"] for m in listed["items"]] == [None]
+    updated = await p.update_mental_model("mm-alice", client_id="alice", name="renamed")
+    assert updated.get("reflect_response") is None
+
+    # Once a refresh has written content, its reflect_response is its own.
+    model["content"] = "alice only"
+    model["reflect_response"] = {"text": "alice only"}
+    got = await p.get_mental_model("mm-alice", client_id="alice")
+    assert got["reflect_response"] == {"text": "alice only"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", LAYOUTS)
 async def test_mental_model_confined_to_owner_survives_foreign_private(layout):
     """Another agent's private note in the bank: alice keeps the model scoped
     to her own tag and loses the whole-bank ones."""
