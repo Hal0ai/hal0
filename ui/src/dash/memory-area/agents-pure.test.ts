@@ -6,10 +6,9 @@ import {
   OPENWEBUI_ID,
   agentRows,
   builtInSightings,
-  commandApiUrl,
   harnessName,
   installCommandFor,
-  isLoopbackUrl,
+  mintCommandFor,
   memoryClients,
   readAgentsRoute,
   rowsSummary,
@@ -230,35 +229,14 @@ describe('memoryClients', () => {
 })
 
 describe('the install command', () => {
-  const template =
-    'npx @vectorize-io/hindsight-coding-agents@0.8.5 install <harness> --server self-hosted --api-url http://127.0.0.1:9177'
+  const template = 'hal0 memory agents install <harness> --bridge-key-file hal0-memory.key'
 
   it('puts the agent in place of the slot, and changes nothing else', () => {
     expect(installCommandFor(template, 'codex')).toBe(
-      'npx @vectorize-io/hindsight-coding-agents@0.8.5 install codex --server self-hosted --api-url http://127.0.0.1:9177',
+      'hal0 memory agents install codex --bridge-key-file hal0-memory.key',
     )
     expect(installCommandFor('', 'codex')).toBe('')
     expect(installCommandFor(template, '')).toBe('')
-  })
-
-  it('reads the address the command points at', () => {
-    expect(commandApiUrl(template)).toBe('http://127.0.0.1:9177')
-    expect(commandApiUrl('npx thing install codex')).toBeNull()
-    expect(commandApiUrl(null)).toBeNull()
-  })
-
-  it.each([
-    ['http://127.0.0.1:9177', true],
-    ['http://localhost:9177', true],
-    ['http://[::1]:9177', true],
-    ['http://127.8.9.1:9177', true],
-    ['http://192.0.2.10:9177', false],
-    ['https://memory.example.test', false],
-    ['http://127.example.test:9177', false],
-    ['not a url', false],
-    [null, false],
-  ])('knows whether %s reaches only the box itself', (url, expected) => {
-    expect(isLoopbackUrl(url)).toBe(expected)
   })
 
   it('names the coding agents it knows, and shows the id of one it does not', () => {
@@ -268,7 +246,7 @@ describe('the install command', () => {
 })
 
 describe('readAgentsRoute', () => {
-  const body = { banks: ['coding-agent::hal0', 7], install: { harnesses: ['codex', '', 3], command: 'npx x <harness>' } }
+  const body = { banks: ['coding-agent::hal0', 7], install: { harnesses: ['codex', '', 3], command: 'hal0 x <harness>', mint_command: 'hal0 y <harness>', key_file: 'k.key' } }
 
   it('is loading with no answer, and failed after an error', () => {
     expect(readAgentsRoute({})).toEqual({ kind: 'loading' })
@@ -281,7 +259,10 @@ describe('readAgentsRoute', () => {
       kind: 'ready',
       banks: ['coding-agent::hal0'],
       harnesses: ['codex'],
-      command: 'npx x <harness>',
+      command: 'hal0 x <harness>',
+      mintCommand: 'hal0 y <harness>',
+      keyFile: 'k.key',
+      clients: {},
     })
   })
 
@@ -292,5 +273,14 @@ describe('readAgentsRoute', () => {
 
   it('keeps the last good answer while a refetch fails', () => {
     expect(readAgentsRoute({ data: body, isError: true }).kind).toBe('ready')
+  })
+})
+
+describe('mintCommandFor', () => {
+  it('fills the client name for the harness, falling back to the harness', () => {
+    const t = 'hal0 bridge add <client> --scope memory'
+    expect(mintCommandFor(t, 'pi', { pi: 'pi-memory' })).toBe('hal0 bridge add pi-memory --scope memory')
+    expect(mintCommandFor(t, 'codex', { pi: 'pi-memory' })).toBe('hal0 bridge add codex --scope memory')
+    expect(mintCommandFor('', 'codex', {})).toBe('')
   })
 })

@@ -195,8 +195,10 @@ export async function installDefaultMocks(page: Page, state: MockState) {
       banks: [],
       install: {
         harnesses: ['claude-code', 'codex', 'opencode', 'pi', 'cursor-cli', 'copilot-cli', 'qwen-code'],
-        command:
-          'npx @vectorize-io/hindsight-coding-agents@0.8.5 install <harness> --server self-hosted --api-url http://127.0.0.1:9177',
+        command: 'hal0 memory agents install <harness> --bridge-key-file hal0-memory.key',
+        mint_command: 'hal0 bridge add <client> --scope memory',
+        key_file: 'hal0-memory.key',
+        clients: { pi: 'pi-memory' },
       },
       console_url: null,
     }),

@@ -1,13 +1,12 @@
 // "Connect a coding agent": pick the agent, copy the command, and read what the command does.
 //
-// The command is the one `GET /api/memory/agents` builds, with the chosen agent's name put in
-// place of its `<harness>` slot. Nothing about it is assembled here. The sentences under it say
-// what running it does today: it installs the Hindsight plugin for that agent and points the
-// plugin at this box's memory engine, which the plugin then talks to directly.
+// The commands are the ones `GET /api/memory/agents` builds, with the chosen agent's name put in
+// place of their `<harness>` slot. Nothing about them is assembled here. Two steps: mint a bridge
+// key for the agent, then install the plugin pointed at hal0's memory endpoint with that key.
 import { useId, useState } from 'react'
 import '../memory-area.css'
 import { RichSelect } from '../../rich-select'
-import { commandApiUrl, harnessName, installCommandFor, isLoopbackUrl } from '../agents-pure'
+import { harnessName, installCommandFor, mintCommandFor } from '../agents-pure'
 import { CommandBox } from '../shared/CommandBox.jsx'
 import { EmptyState } from '../shared/EmptyState.jsx'
 
@@ -59,8 +58,8 @@ export function ConnectCard({ agents, onRecheck, rechecking = false, headingRef 
     const harness = picked && agents.harnesses.includes(picked) ? picked : agents.harnesses[0]
     const name = harnessName(harness)
     const command = installCommandFor(agents.command, harness)
-    const apiUrl = commandApiUrl(command)
-    const loopback = isLoopbackUrl(apiUrl)
+    const mintCommand = mintCommandFor(agents.mintCommand, harness, agents.clients)
+    const keyFile = agents.keyFile || 'the key file'
     body = (
       <div className="ma-card-body ma-agents-connect-body">
         <p className="ma-body">
@@ -85,37 +84,34 @@ export function ConnectCard({ agents, onRecheck, rechecking = false, headingRef 
             />
           </div>
         </div>
+        {mintCommand && (
+          <>
+            <p className="ma-body">
+              1. Mint a bridge key for <span className="ma-em">{name}</span>. The command prints it once.
+            </p>
+            <CommandBox
+              command={mintCommand}
+              copyLabel={`Copy the key command for ${name}`}
+              data-testid="ma-agents-mint-command"
+            />
+          </>
+        )}
+        <p className="ma-body" data-testid="ma-agents-connect-save">
+          2. Save the key, and nothing else, to <Mono>{keyFile}</Mono> on the machine where {name} runs.
+        </p>
+        <p className="ma-body">3. Install the plugin with that file.</p>
         <CommandBox command={command} copyLabel={`Copy the command for ${name}`} data-testid="ma-agents-command" />
         <p className="ma-body" data-testid="ma-agents-connect-what">
-          The command runs the Hindsight coding-agents installer, which adds the Hindsight memory plugin to{' '}
-          <span className="ma-em">{name}</span>
-          {apiUrl ? (
-            <>
-              {' '}
-              and points it at this box&apos;s memory engine at <Mono>{apiUrl}</Mono>
-            </>
-          ) : (
-            " and points it at this box's memory engine"
-          )}
-          . From then on the plugin talks to the engine directly, not through hal0, and keeps what it writes
-          in one bank per repository, named <Mono>coding-agent::&lt;repository&gt;</Mono>.
+          The command installs the Hindsight memory plugin for <span className="ma-em">{name}</span> and points it
+          at hal0&apos;s <Mono>/api/memory/compat</Mono> with the key, so what it writes goes through hal0&apos;s
+          write envelope and is read back by project. It keeps what it writes in one bank per repository, named{' '}
+          <Mono>coding-agent::&lt;repository&gt;</Mono>.
         </p>
-        {apiUrl && (
-          <p className="ma-body" data-testid="ma-agents-connect-reach" data-loopback={loopback ? 'true' : 'false'}>
-            {loopback ? (
-              <>
-                That address is the box&apos;s own loopback address. It reaches the engine only from this box, so
-                an agent on another machine cannot use the command as it is.
-              </>
-            ) : (
-              <>An agent on another machine must be able to reach that address for the plugin to work.</>
-            )}
-          </p>
-        )}
         <p className="ma-body" data-testid="ma-agents-connect-cli">
-          On this box, <Mono>hal0 memory agents install {harness}</Mono> runs the same installer, then writes the
-          plugin&apos;s settings for the user who ran it with the tag <Mono>agent:{harness}</Mono> added to what the
-          plugin tags its facts with. That tag is what the Agents table counts.
+          The command runs where <Mono>hal0</Mono> can reach this box, as the user who runs the agent. It writes the
+          plugin&apos;s settings for that user with the tag <Mono>agent:{harness}</Mono> added to what the plugin tags
+          its facts with. That tag is what the Agents table counts. The key also carries the agents scope, so it can
+          start Hermes runs: keep the file private.
         </p>
         <p className="ma-body">
           Hermes, and Pi installed by hal0, need no command: hal0 connects them to memory when it installs

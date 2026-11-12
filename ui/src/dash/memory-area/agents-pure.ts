@@ -279,23 +279,17 @@ export function installCommandFor(template: string | null | undefined, harness: 
   return template.replace('<harness>', harness)
 }
 
-/** The address the command points the plugin at (`--api-url`), or null when it names none. */
-export function commandApiUrl(command: string | null | undefined): string | null {
-  const match = /--api-url\s+(\S+)/.exec(command ?? '')
-  return match ? match[1] : null
-}
-
-/** True when `url` can only be reached from the machine it names: the box itself. */
-export function isLoopbackUrl(url: string | null | undefined): boolean {
-  if (!url) return false
-  let host: string
-  try {
-    host = new URL(url).hostname
-  } catch {
-    return false
-  }
-  host = host.replace(/^\[|\]$/g, '').toLowerCase()
-  return host === 'localhost' || host === '::1' || host.endsWith('.localhost') || /^127(\.\d{1,3}){3}$/.test(host)
+/** The bridge-key command for one coding agent: the route's template with its `<client>` filled in
+ * from the route's per-harness client names (a harness whose own name is reserved, such as `pi`,
+ * gets another), falling back to the harness name. */
+export function mintCommandFor(
+  template: string | null | undefined,
+  harness: string,
+  clients: Record<string, string> | null | undefined,
+): string {
+  if (!template || !harness) return ''
+  const client = clients?.[harness] || harness
+  return template.replace('<client>', client).replace('<harness>', harness)
 }
 
 /** The agents route's answer, read defensively: a body of another shape is "failed", not a crash. */
@@ -304,9 +298,9 @@ export function readAgentsRoute(
 ):
   | { kind: 'loading' }
   | { kind: 'failed' }
-  | { kind: 'ready'; banks: string[]; harnesses: string[]; command: string } {
+  | { kind: 'ready'; banks: string[]; harnesses: string[]; command: string; mintCommand: string; keyFile: string; clients: Record<string, string> } {
   const data = query?.data as
-    | { banks?: unknown; install?: { harnesses?: unknown; command?: unknown } }
+    | { banks?: unknown; install?: { harnesses?: unknown; command?: unknown; mint_command?: unknown; key_file?: unknown; clients?: unknown } }
     | null
     | undefined
   if (data === undefined || data === null) return query?.isError ? { kind: 'failed' } : { kind: 'loading' }
@@ -319,5 +313,15 @@ export function readAgentsRoute(
     banks: Array.isArray(data.banks) ? data.banks.filter((b): b is string => typeof b === 'string') : [],
     harnesses: install.harnesses.filter((h): h is string => typeof h === 'string' && h !== ''),
     command: install.command,
+    mintCommand: typeof install.mint_command === 'string' ? install.mint_command : '',
+    keyFile: typeof install.key_file === 'string' ? install.key_file : '',
+    clients:
+      install.clients && typeof install.clients === 'object' && !Array.isArray(install.clients)
+        ? Object.fromEntries(
+            Object.entries(install.clients as Record<string, unknown>).filter(
+              (e): e is [string, string] => typeof e[1] === 'string' && e[1] !== '',
+            ),
+          )
+        : {},
   }
 }

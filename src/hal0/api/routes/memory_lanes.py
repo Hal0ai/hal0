@@ -30,6 +30,7 @@ from fastapi import APIRouter, Request, Response
 
 from hal0.api.routes._memory_health_collect import EngineReader, bank_queue_row
 from hal0.api.routes.memory import MemoryUnavailable
+from hal0.bridge.keys import client_name_for
 from hal0.config.loader import load_hal0_config
 from hal0.errors import BadRequest, Forbidden, Hal0Error, NotFound
 from hal0.memory.write_gate import require_engine_call_allowed
@@ -318,12 +319,11 @@ _HARNESSES = [
 ]
 
 
-def _public_hindsight_url(request: Request, cfg: Any) -> str:
-    public_url = getattr(cfg.memory, "public_url", None)
-    if public_url:
-        return str(public_url)
-    host = request.url.hostname or "127.0.0.1"
-    return f"http://{host}:9177"
+_KEY_FILE = "hal0-memory.key"
+# ``<client>`` is the bridge client name for the chosen harness (``clients``):
+# the harness itself, unless that name is reserved (``pi``) or invalid.
+_MINT_COMMAND = "hal0 bridge add <client> --scope memory"
+_INSTALL_COMMAND = f"hal0 memory agents install <harness> --bridge-key-file {_KEY_FILE}"
 
 
 def _console_url(request: Request, cfg: Any) -> str | None:
@@ -367,14 +367,18 @@ async def get_agents(request: Request) -> dict[str, Any]:
         except Exception:
             bank_ids = []
 
-    url = _public_hindsight_url(request, cfg)
-    command = (
-        "npx @vectorize-io/hindsight-coding-agents@0.8.5 install <harness> "
-        f"--server self-hosted --api-url {url}"
-    )
+    # Coding agents reach memory through hal0's /api/memory/compat with a bridge
+    # key, not the engine's own port. ``command`` is the last step; ``mint_command``
+    # is the first. The key is saved, alone, to the file the last step reads.
     return {
         "banks": bank_ids,
-        "install": {"harnesses": _HARNESSES, "command": command},
+        "install": {
+            "harnesses": _HARNESSES,
+            "command": _INSTALL_COMMAND,
+            "mint_command": _MINT_COMMAND,
+            "clients": {h: client_name_for(h) for h in _HARNESSES},
+            "key_file": _KEY_FILE,
+        },
         "console_url": _console_url(request, cfg),
     }
 

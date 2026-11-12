@@ -22,8 +22,8 @@ import { pickRichOption } from '../fixtures/richSelect'
 
 const SHOTS = 'test-results/memory-area'
 const HARNESSES = ['claude-code', 'codex', 'opencode', 'pi', 'cursor-cli', 'copilot-cli', 'qwen-code']
-const COMMAND =
-  'npx @vectorize-io/hindsight-coding-agents@0.8.5 install <harness> --server self-hosted --api-url http://127.0.0.1:9177'
+const COMMAND = 'hal0 memory agents install <harness> --bridge-key-file hal0-memory.key'
+const MINT = 'hal0 bridge add <client> --scope memory'
 
 type Tags = Record<string, Record<string, number>>
 
@@ -89,7 +89,13 @@ async function routeEvidence(
   await page.route('**/api/memory/agents', (route) =>
     json(route, {
       banks: over.codingBanks ?? ['coding-agent::hal0'],
-      install: { harnesses: HARNESSES, command: over.command ?? COMMAND },
+      install: {
+        harnesses: HARNESSES,
+        command: over.command ?? COMMAND,
+        mint_command: MINT,
+        key_file: 'hal0-memory.key',
+        clients: { pi: 'pi-memory' },
+      },
       console_url: null,
     }),
   )
@@ -210,22 +216,22 @@ test.describe('Memory ▸ Agents', () => {
     await pickRichOption(picker, 'codex')
     await expect(code).toHaveText(COMMAND.replace('<harness>', 'codex'))
     await expect(picker).toContainText('Codex')
-    await expect(page.getByTestId('ma-agents-connect-cli')).toContainText('hal0 memory agents install codex')
-    await expect(page.getByTestId('ma-agents-connect-what')).toContainText(
-      "points it at this box's memory engine at http://127.0.0.1:9177",
+    await expect(page.getByTestId('ma-agents-mint-command').locator('code')).toHaveText(
+      'hal0 bridge add codex --scope memory',
     )
-    await expect(page.getByTestId('ma-agents-connect-reach')).toContainText(
-      'an agent on another machine cannot use the command as it is',
-    )
+    await expect(page.getByTestId('ma-agents-connect-cli')).toContainText('agent:codex')
+    await expect(page.getByTestId('ma-agents-connect-what')).toContainText('/api/memory/compat')
     await noBoundary(page)
   })
 
-  test('says a network address must be reachable from the other machine', async ({ page }) => {
-    await routeEvidence(page, { command: COMMAND.replace('http://127.0.0.1:9177', 'http://192.0.2.10:9177') })
+  test('names another bridge client for an agent whose own name is reserved', async ({ page }) => {
+    await routeEvidence(page)
     await open(page)
-    await expect(page.getByTestId('ma-agents-connect-reach')).toHaveText(
-      'An agent on another machine must be able to reach that address for the plugin to work.',
+    await pickRichOption(page.getByRole('combobox', { name: 'Coding agent' }), 'pi')
+    await expect(page.getByTestId('ma-agents-mint-command').locator('code')).toHaveText(
+      'hal0 bridge add pi-memory --scope memory',
     )
+    await expect(page.getByTestId('ma-agents-command').locator('code')).toHaveText(COMMAND.replace('<harness>', 'pi'))
     await noBoundary(page)
   })
 
