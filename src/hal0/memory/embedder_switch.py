@@ -84,7 +84,14 @@ journal step by itself: it looks at which of the two ids the engine has now
 (:func:`swap_action`). Whatever it can repair from the original or from the
 archive it repairs, so that the same resume does not fail twice for a reason
 the switch could have fixed; for the rest ``--status`` says exactly what the
-operator does.
+operator does. A journal of another version, or with a phase or step this
+code does not know, is refused, never guessed at (:data:`JOURNAL_VERSION`).
+
+A restore is never cancelled. Hindsight 1.2.0 marks a cancelled operation
+``cancelled`` at once, but a bank restore does not stop for it and the
+status it writes when it does end is suppressed, so a cancel would make a
+restore that is still writing look finished. A restore a resume finds
+running is waited for (:meth:`EmbedderSwitch._await_restore`).
 
 What is still checked
 ---------------------
@@ -119,8 +126,12 @@ HTTP API (``create_knowledge_page`` and ``create_directive`` mint their
 own). The restore into ``<bank>.switch-<run>`` is therefore the check, made
 before any original is touched, and the bank that stays is a second restore
 of the same archive into the bank's own id, made after the original is
-deleted and compared with the original as it was exported, fingerprint
-included. Mental-model ids are bank-scoped and survive either restore.
+deleted and compared with the original as it was exported: its counts,
+its fingerprint (directive and knowledge-node ids included), and the content
+checks of :data:`CONTENT_SIGNALS`, which a restore that came back lossy with
+the right counts fails: every document id with its content hash, every
+fact's text and tags, and each mental model's generated content.
+Mental-model ids are bank-scoped and survive either restore.
 
 Fact ids are the one thing no restore keeps: the engine replays every fact
 and gives it a new id (it remaps the mental models' evidence itself). The
@@ -178,7 +189,11 @@ from hal0.security import nofollow
 
 log = structlog.get_logger(__name__)
 
-JOURNAL_VERSION = 1
+#: Version 2 is the delete-and-restore swap that keeps ids (#3597). A
+#: version 1 journal was written by the rename-based swap before it, whose
+#: steps (``renaming``, ``renamed``) mean nothing to this one: it is refused,
+#: never guessed at.
+JOURNAL_VERSION = 2
 
 #: The counts a restored bank must match, in the order they are reported.
 COUNT_KEYS: tuple[str, ...] = ("facts", "observations", "mental_models", "directives", "documents")
@@ -199,6 +214,17 @@ FINGERPRINT_SIGNALS: dict[str, str] = {
     "document": "the bank list's last_document_at: when a document was last ingested",
     "knowledge": "a digest of the knowledge-base tree: every folder and page with its id, "
     "kind, name, parent and backing mental model",
+}
+
+#: What the bank restored into its own id is checked by besides its counts
+#: and :data:`FINGERPRINT_SIGNALS`, against its original once it was exported
+#: (#3597). Each is exact: a lossy restore with the right counts fails it.
+CONTENT_SIGNALS: dict[str, str] = {
+    "documents": "a digest of every document id with its content hash",
+    "facts": "a digest of every world and experience fact's text, tags, type and document "
+    "(observations are left out: the engine consolidates them by itself)",
+    "mental-model content": "each mental model's generated content, while its "
+    "last_refreshed_at is the original's",
 }
 
 #: What a knowledge-base node is compared by: its place in the tree, not its
@@ -235,10 +261,21 @@ IDS_ACROSS_SWITCH: dict[str, Any] = {
         "document ids",
     ],
     "changed": ["fact ids: the engine gives every restored fact a new id"],
-    "note": "each bank is restored into its own id once its original is deleted, so links "
-    "and agents that hold a page or directive id keep working. A fact id written down "
+    "verified": [
+        "facts, mental models, directives and documents by count, observations at least "
+        "as many as archived",
+        "knowledge-base folder and page ids, directive ids and text, mental-model ids and "
+        "definitions, and the bank's config, by digest",
+        "document ids with their content hashes, and every world and experience fact's "
+        "text and tags, by digest",
+        "each mental model's generated content, unless the engine refreshed it after the restore",
+    ],
+    "note": "each bank is restored into its own id once its original is deleted, and is "
+    "compared with the original as it was exported before its rebuilt copy is deleted, so "
+    "links and agents that hold a page or directive id keep working. A fact id written down "
     "before the switch (a dashboard fact link, an id kept for memory_delete) no longer "
-    "resolves after it",
+    "resolves after it. With --allow-pending the document, fact and mental-model content "
+    "checks are skipped: the bank was still being written when it was exported",
 }
 
 #: A successful run restarts the engine three times: onto its private port,
@@ -292,7 +329,8 @@ STEP_DELETING = "deleting"
 STEP_DELETED = "deleted"
 STEP_PLACING = "placing"
 STEP_PLACED = "placed"
-_BEFORE_DELETE = (STEP_PLANNED, STEP_EXPORTED, STEP_RESTORED, STEP_DELETING)
+_BEFORE_DELETE = (STEP_PLANNED, STEP_EXPORTED, STEP_RESTORED)
+_STEPS = (*_BEFORE_DELETE, STEP_DELETING, STEP_DELETED, STEP_PLACING, STEP_PLACED)
 
 # What :func:`swap_action` can answer.
 ACTION_SWAP = "delete the original, then restore its archive into its own id"
@@ -306,6 +344,7 @@ ACTION_VERIFY = "check the bank under its final id against its archive"
 ACTION_FINAL = "nothing: the bank is under its final id"
 ACTION_REBUILD = "export and rebuild the bank again, then swap it"
 ACTION_RECREATED = "stop: the original id exists again beside the rebuilt bank"
+ACTION_DELETE_SENT = "stop: the original may be partly deleted"
 
 #: Where ``hook`` is called. ``<bank>`` is the bank's own id.
 HOOK_POINTS: tuple[str, ...] = (
@@ -326,6 +365,10 @@ HOOK_POINTS: tuple[str, ...] = (
 _OP_LIVE = ("pending", "processing")
 _OP_FAILED = ("failed", "cancelled", "not_found")
 _PAGE = 100
+#: Page size for the content listings read only for a bank restored into its
+#: own id: documents and facts can run to thousands, and the engine's list
+#: routes take any limit.
+_CONTENT_PAGE = 500
 
 
 class SwitchError(Exception):
@@ -375,8 +418,8 @@ class Timeouts:
     #: new embedder may download its weights.
     health_s: float = 600.0
     #: A restore is given this long, or ``restore_factor`` times its estimate
-    #: at :data:`RESTORE_FACTS_PER_S`, whichever is more. A cancelled restore
-    #: is given the same floor to really stop.
+    #: at :data:`RESTORE_FACTS_PER_S`, whichever is more. A restore found
+    #: still running on a resume is waited for twice that, never cancelled.
     restore_floor_s: float = 900.0
     restore_factor: float = 6.0
     #: A bank's queue going quiet before it is counted or deleted.
@@ -402,8 +445,13 @@ class BankEntry:
     step: str = STEP_PLANNED
     restored_counts: dict[str, int] | None = None
     restored_fingerprint: dict[str, Any] | None = None
-    #: ``{"bank", "id"}`` of a restore that may still be running.
-    restore_op: dict[str, str] | None = None
+    #: The original's :meth:`EmbedderSwitch.content_state` once it was
+    #: exported; ``None`` for a run with ``--allow-pending``.
+    contents: dict[str, Any] | None = None
+    #: ``{"bank", "id", "target", "engine_pid"}`` of a restore that may still
+    #: be running: the bank it is recorded against, its operation id, the
+    #: bank it writes, and the engine process it was sent to.
+    restore_op: dict[str, Any] | None = None
     note: str | None = None
 
 
@@ -496,10 +544,44 @@ def is_switch_temp(bank: str) -> bool:
     return bool(_TEMP_RE.search(bank))
 
 
+_PHASES = (
+    PHASE_PAUSED,
+    PHASE_EXPORTING,
+    PHASE_FLIPPING,
+    PHASE_RESTORING,
+    PHASE_SWAPPING,
+    PHASE_ROLLING_BACK,
+    PHASE_ROLLBACK_FAILED,
+    *_FINISHED_PHASES,
+)
+
+
 def _parse_journal(raw: str) -> Journal:
+    """A journal this switch knows how to carry on. Raises :class:`ValueError` otherwise.
+
+    Anything it was not written to understand, an older or newer version, a
+    phase or a bank step it does not know, is refused rather than guessed at:
+    a guess in the swap can delete a bank.
+    """
     data = json.loads(raw)
-    if not isinstance(data, dict) or data.get("version") != JOURNAL_VERSION:
-        raise ValueError("not a version 1 switch journal")
+    if not isinstance(data, dict):
+        raise ValueError("not a switch journal")
+    where = data.get("archive_dir")
+    archives = f"; its archives are in {where}" if isinstance(where, str) and where else ""
+    version = data.get("version")
+    if version != JOURNAL_VERSION:
+        raise ValueError(
+            f"journal version {version!r}, written by a different hal0; this one carries on "
+            f"only version {JOURNAL_VERSION} and will not guess at another{archives}. Check "
+            "every bank against its archive by hand before lifting the pause"
+        )
+    if data.get("phase") not in _PHASES:
+        raise ValueError(f"unknown phase {data.get('phase')!r}{archives}")
+    for bank in data.get("banks") or []:
+        step = bank.get("step", STEP_PLANNED) if isinstance(bank, dict) else None
+        if step not in _STEPS:
+            name = bank.get("bank") if isinstance(bank, dict) else bank
+            raise ValueError(f"bank {name!r} is at unknown step {step!r}{archives}")
     return Journal.from_dict(data)
 
 
@@ -669,6 +751,10 @@ def swap_action(step: str, has_original: bool, has_rebuilt: bool) -> str:
         # The journal said ``placing`` before the restore into the own id was
         # sent, so a bank under that id is this run's, whole or not.
         return ACTION_CHECK_PLACED if has_original else ACTION_PLACE
+    if step == STEP_DELETING and has_original:
+        # The delete may have been sent and may have taken part of the bank:
+        # it is neither deleted again nor exported again without a person.
+        return ACTION_DELETE_SENT
     if not has_original:
         # Deleted (or lost) with or without its rebuilt copy: the archive
         # puts it back under its own id either way.
@@ -759,6 +845,25 @@ def _signals_moved(
     if not before:
         return []
     return [k for k in (keys or tuple(FINGERPRINT_SIGNALS)) if before.get(k) != now.get(k)]
+
+
+def _contents_moved(before: Mapping[str, Any], now: Mapping[str, Any]) -> list[str]:
+    """Names of the :data:`CONTENT_SIGNALS` that differ.
+
+    A mental model's content is compared only while its ``last_refreshed_at``
+    is the original's: the engine regenerates content by itself, and a model
+    it refreshed after the restore was not lost by it.
+    """
+    moved = [k for k in ("documents", "facts") if before.get(k) != now.get(k)]
+    then, current = before.get("model_content") or {}, now.get("model_content") or {}
+    if any(
+        mid in current
+        and current[mid].get("refreshed") == old.get("refreshed")
+        and current[mid].get("content") != old.get("content")
+        for mid, old in then.items()
+    ):
+        moved.append("mental-model content")
+    return moved
 
 
 def _strip(value: Any) -> Any:
@@ -1544,6 +1649,7 @@ class EmbedderSwitch:
         key: str,
         what: str,
         bank: str | None = None,
+        page_size: int = _PAGE,
     ) -> list[Any]:
         """Every row of a paged engine list.
 
@@ -1557,7 +1663,7 @@ class EmbedderSwitch:
             page = await self._json(
                 "GET",
                 path,
-                params={**(params or {}), "limit": _PAGE, "offset": len(rows)},
+                params={**(params or {}), "limit": page_size, "offset": len(rows)},
                 what=what,
                 bank=bank,
             )
@@ -1665,6 +1771,69 @@ class EmbedderSwitch:
                 "mental_models": _digest(definitions),
                 "document": row.get("last_document_at"),
                 "knowledge": _digest(knowledge),
+            },
+        }
+
+    async def content_state(self, bank: str) -> dict[str, Any]:
+        """What ``bank`` holds, digested, as :data:`CONTENT_SIGNALS` describes.
+
+        Read only for a bank's original once it is exported and for the bank
+        restored into its own id: unlike :meth:`bank_state` it lists every
+        document and fact, which a bank of a thousand documents answers in a
+        few dozen requests.
+        """
+        base = _bank_path(bank)
+        documents = await self._list_all(
+            f"{base}/documents",
+            key="items",
+            what="listing documents",
+            bank=bank,
+            page_size=_CONTENT_PAGE,
+        )
+        facts: list[Any] = []
+        for kind in ("world", "experience"):
+            facts += await self._list_all(
+                f"{base}/memories/list",
+                {"type": kind},
+                key="items",
+                what=f"listing {kind} facts",
+                bank=bank,
+                page_size=_CONTENT_PAGE,
+            )
+        models = await self._list_all(
+            f"{base}/mental-models",
+            {"detail": "content"},
+            key="items",
+            what="reading mental models",
+            bank=bank,
+        )
+        return {
+            "documents": _digest(
+                [
+                    {"id": d.get("id"), "hash": d.get("content_hash")}
+                    for d in documents
+                    if isinstance(d, dict)
+                ]
+            ),
+            "facts": _digest(
+                [
+                    {
+                        "type": f.get("fact_type"),
+                        "document": f.get("document_id"),
+                        "text": f.get("text"),
+                        "tags": sorted(str(t) for t in (f.get("tags") or [])),
+                    }
+                    for f in facts
+                    if isinstance(f, dict)
+                ]
+            ),
+            "model_content": {
+                str(m.get("id")): {
+                    "refreshed": m.get("last_refreshed_at"),
+                    "content": _digest(m.get("content")),
+                }
+                for m in models
+                if isinstance(m, dict)
             },
         }
 
@@ -2169,6 +2338,9 @@ class EmbedderSwitch:
                 continue
             entry.counts, entry.links = archived, after["links"]
             entry.fingerprint = after["fingerprint"]
+            # With operations still writing, the bank as it is now is not what
+            # the archive holds, so there is nothing exact to compare with.
+            entry.contents = None if journal.allow_pending else await self.content_state(entry.bank)
             entry.note = (
                 f"{-extra} observation(s) whose source facts are gone are not in the archive"
                 if extra < 0
@@ -2223,10 +2395,14 @@ class EmbedderSwitch:
         operation_id = str((body or {}).get("operation_id") or "")
         if not operation_id:
             raise SwitchError("the restore returned no operation id", bank=entry.bank)
-        entry.restore_op = {"bank": url_bank, "id": operation_id}
+        entry.restore_op = {
+            "bank": url_bank,
+            "id": operation_id,
+            "target": target_id,
+            "engine_pid": self._engine_pid(journal),
+        }
         self._save(journal)
-        embedded = entry.counts.get("facts", 0) + entry.counts.get("observations", 0)
-        budget = max(self.t.restore_floor_s, self.t.restore_factor * embedded / RESTORE_FACTS_PER_S)
+        budget = self._restore_budget(entry)
         try:
             await self._wait_operation(
                 url_bank, operation_id, timeout_s=budget, what=f"the restore into {target_id}"
@@ -2239,6 +2415,18 @@ class EmbedderSwitch:
         entry.restore_op = None
         # Counted once the engine has stopped working on the new bank.
         return await self._quiet_state(target_id)
+
+    def _restore_budget(self, entry: BankEntry) -> float:
+        embedded = entry.counts.get("facts", 0) + entry.counts.get("observations", 0)
+        return max(self.t.restore_floor_s, self.t.restore_factor * embedded / RESTORE_FACTS_PER_S)
+
+    def _engine_pid(self, journal: Journal) -> int | None:
+        """The process that holds the engine's private port, when it is the engine's unit."""
+        if journal.private_port is None:
+            return None
+        seen = self._listener_owner(journal.private_port)
+        pid = seen.get("pid")
+        return pid if seen.get("owner") == "unit" and isinstance(pid, int) else None
 
     async def _restore_checked(
         self, journal: Journal, entry: BankEntry, *, via: str | None = None
@@ -2717,8 +2905,8 @@ class EmbedderSwitch:
                 detail = await self._where_the_data_is()
                 if found["error"]:
                     raise SwitchError(
-                        f"the switch journal is not usable ({found['error']}) and no mirror "
-                        f"of it was found. {detail} Nothing was changed"
+                        f"the switch journal is not usable ({found['error']}) and no usable "
+                        f"mirror of it was found. {detail} Nothing was changed"
                     )
                 if write_gate.read_gate() is not None or self._isolated_port() is not None:
                     raise SwitchRefused(
@@ -2993,6 +3181,8 @@ class EmbedderSwitch:
         if differs:
             reasons.append(_diff_text(differs))
         signals = _signals_moved(entry.fingerprint, state["fingerprint"])
+        if entry.contents:
+            signals += _contents_moved(entry.contents, await self.content_state(entry.bank))
         if signals:
             reasons.append("differs from the original as it was archived: " + ", ".join(signals))
         return "; ".join(reasons)
@@ -3017,38 +3207,75 @@ class EmbedderSwitch:
 
         The step is saved as ``placing`` before the restore is sent, so a bank
         found under that id later is known to be this run's. A restore this
-        run sent earlier and never saw finish is stopped first: two restores
-        must not write the same bank.
+        run sent earlier and never saw finish is waited for first, never
+        cancelled: two restores must not write the same bank.
         """
-        await self._stop_restore(entry)
+        await self._await_restore(journal, entry)
         await self._ensure_scratch(journal)
         self._hook(f"before_place:{entry.bank}")
         entry.step = STEP_PLACING
         self._save(journal)
         await self._restore(journal, entry, entry.bank, via=journal.scratch)
 
-    async def _stop_restore(self, entry: BankEntry) -> None:
-        """Cancel ``entry``'s restore if one may still run, and wait until it has really ended."""
+    async def _await_restore(self, journal: Journal, entry: BankEntry) -> None:
+        """Wait until ``entry``'s restore, if one may still run, has ended. Never cancel it.
+
+        Hindsight 1.2.0 cancels cooperatively: ``DELETE`` on an operation flips
+        it to ``cancelled`` at once, but a bank restore never looks at that, so
+        its worker goes on writing, and the ``completed`` or ``failed`` it
+        writes at the end is suppressed once the row says ``cancelled``
+        (``cancel_operation`` and ``_mark_operation_*`` in ``memory_engine.py``).
+        A cancelled restore therefore looks ended while it still writes, and
+        nothing the engine reports says when it really stops. So the switch
+        never cancels a restore; it waits for ``completed`` or ``failed``, the
+        worker's own last word. A restore found ``cancelled`` (by someone
+        else) or gone from the engine is believed ended only when the engine
+        process it was sent to is gone: a restart of the unit ends its worker,
+        and the engine's start-up recovery requeues only ``processing`` rows.
+        Anything else is refused, and nothing is deleted or restored again.
+        """
         op = entry.restore_op
         if not op:
             return
         path = f"{_bank_path(op['bank'])}/operations/{quote(op['id'], safe='')}"
-        with contextlib.suppress(SwitchError):
-            await self._json("DELETE", path, what="cancelling the restore", bank=entry.bank)
-        deadline = self._clock() + self.t.restore_floor_s
+        target = op.get("target") or entry.bank
+        budget = 2 * self._restore_budget(entry)
+        deadline = self._clock() + budget
+        delay = min(0.2, self.t.poll_s)
         while True:
             found = await self._json("GET", path, what="reading the restore", bank=entry.bank)
             status = found.get("status") if isinstance(found, dict) else None
-            if status not in _OP_LIVE:
+            if status in ("completed", "failed"):
                 break
+            if status not in _OP_LIVE:
+                sent_to, now = op.get("engine_pid"), self._engine_pid(journal)
+                if sent_to is not None and now is not None and now != sent_to:
+                    break
+                raise SwitchError(
+                    f"the restore of {entry.bank} into {target} (operation {op['id']}) is "
+                    f"recorded as {status or 'unknown'}. Hindsight lets a cancelled restore "
+                    "go on writing and never reports when it stops, so the switch cannot "
+                    f"tell whether {target} is still being written; nothing was deleted or "
+                    "restored again. Restart the engine (`systemctl restart "
+                    f"{SERVICE}`), which ends that restore, then run "
+                    "`hal0 memory embedder switch --resume`",
+                    bank=entry.bank,
+                    details={"operation_id": op["id"], "status": status},
+                )
             if self._clock() >= deadline:
                 raise SwitchError(
-                    f"the restore of {entry.bank} was cancelled but is still {status} after "
-                    f"{self.t.restore_floor_s:g}s; the bank it writes could still change",
+                    f"the restore of {entry.bank} into {target} (operation {op['id']}) is "
+                    f"still {status} after {budget:g}s. The switch does not cancel a restore "
+                    "(Hindsight would mark it cancelled and let it go on writing), and "
+                    f"nothing was deleted or restored again. Let it finish (`journalctl -u "
+                    f"{SERVICE}`), then run `hal0 memory embedder switch --resume` again",
                     bank=entry.bank,
+                    details={"operation_id": op["id"], "status": status},
                 )
-            await self._sleep(self.t.poll_s)
+            await self._sleep(delay)
+            delay = min(self.t.poll_s, delay * 1.5)
         entry.restore_op = None
+        self._save(journal)
 
     async def _swap_one(
         self, journal: Journal, entry: BankEntry, index: int, *, rebuild: bool
@@ -3073,6 +3300,15 @@ class EmbedderSwitch:
             raise SwitchError(
                 f"bank {bank} exists again after the switch deleted it, beside its rebuilt "
                 f"copy {temp}. The switch will not delete it a second time. To go on: "
+                + self._way_out(journal, bank),
+                bank=bank,
+            )
+        if action == ACTION_DELETE_SENT:
+            raise SwitchError(
+                f"the run stopped while deleting bank {bank}, and {bank} is still there: the "
+                "delete may have been sent and may have removed part of it, so the switch will "
+                "neither delete it again nor export it again. Its archive, taken before the "
+                f"delete, is {journal.archive_dir}/{entry.archive}. To go on: "
                 + self._way_out(journal, bank),
                 bank=bank,
             )
@@ -3127,8 +3363,7 @@ class EmbedderSwitch:
         if action == ACTION_CHECK_PLACED:
             # A restore into the own id that this run sent and did not see
             # through: let it end, then keep the bank only if it is whole.
-            await self._stop_restore(entry)
-            self._save(journal)
+            await self._await_restore(journal, entry)
             wrong = await self._placed_differs(entry)
             if wrong:
                 self._say(f"{bank} under its own id is not whole ({wrong}); restoring it again")
@@ -3261,12 +3496,10 @@ class EmbedderSwitch:
 
     # ── rollback ────────────────────────────────────────────────────────
 
-    async def _stop_restores(self, journal: Journal) -> None:
-        """Cancel every restore that may still run and wait until each has really ended."""
+    async def _await_restores(self, journal: Journal) -> None:
+        """Wait until every restore that may still run has ended (see :meth:`_await_restore`)."""
         for entry in journal.banks:
-            if entry.restore_op:
-                await self._stop_restore(entry)
-                self._save(journal)
+            await self._await_restore(journal, entry)
 
     async def _sweep(self, journal: Journal) -> None:
         """Delete every id this run created that the engine still has."""
@@ -3324,7 +3557,7 @@ class EmbedderSwitch:
                 # Still answering at its normal address means the isolation
                 # never took, and then nothing was ever done behind it.
                 if private:
-                    await self._stop_restores(journal)
+                    await self._await_restores(journal)
                     await self._sweep(journal)
                 if private and journal.flip_started and journal.banks:
                     # The engine ran the target. A bank this run does not know,
@@ -3417,6 +3650,9 @@ class EmbedderSwitch:
                     operator = "nothing: --resume deletes it and restores it again"
             elif action == ACTION_RECREATED:
                 problem = "the original id exists again beside the rebuilt bank"
+                operator = self._way_out(journal, entry.bank)
+            elif action == ACTION_DELETE_SENT:
+                problem = "the run stopped while deleting the original, which is still there"
                 operator = self._way_out(journal, entry.bank)
         except SwitchError as exc:
             problem = exc.message
@@ -3617,6 +3853,7 @@ class EmbedderSwitch:
 
 __all__ = [
     "ACTION_CHECK_PLACED",
+    "ACTION_DELETE_SENT",
     "ACTION_DROP_COPY",
     "ACTION_FINAL",
     "ACTION_PLACE",
@@ -3624,6 +3861,7 @@ __all__ = [
     "ACTION_RECREATED",
     "ACTION_SWAP",
     "ACTION_VERIFY",
+    "CONTENT_SIGNALS",
     "COUNT_KEYS",
     "FINGERPRINT_SIGNALS",
     "HARD_COUNTS",

@@ -4215,7 +4215,7 @@ def test_memory_embedder_reports_an_interrupted_switch(
     es.journal_path().write_text(
         jsonlib.dumps(
             {
-                "version": 1,
+                "version": es.JOURNAL_VERSION,
                 "run_id": "3f9a1c2e",
                 "started_at": "2026-11-11T02:00:00+00:00",
                 "pid": 1,
@@ -4223,7 +4223,7 @@ def test_memory_embedder_reports_an_interrupted_switch(
                 "target": {"provider": "local", "model": _HS},
                 "previous": {"provider": "local", "model": _BGE},
                 "archive_dir": "/nowhere",
-                "error": "hindsight-admin rename-bank exited 1",
+                "error": "deleting the bank: the engine answered HTTP 500",
             }
         )
     )
@@ -4232,7 +4232,7 @@ def test_memory_embedder_reports_an_interrupted_switch(
     check = da.check_memory_embedder()
 
     assert (check.key, check.status) == ("memory_embedder", "warn")
-    assert "did not finish (hindsight-admin rename-bank exited 1)" in check.detail
+    assert "did not finish (deleting the bank: the engine answered HTTP 500)" in check.detail
     assert "run 3f9a1c2e, archives in /nowhere" in check.detail
     assert "its write pause is gone" in check.detail
     assert "`hal0 memory embedder switch --status`" in check.detail

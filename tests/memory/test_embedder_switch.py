@@ -101,10 +101,15 @@ class FakeEngine:
         self.on_restore: Any = None
         #: Set to make a restore hang until released.
         self.hold_restore: asyncio.Event | None = None
-        #: Banks whose restore never finishes by itself.
+        #: Banks whose restore does not finish at once: it stays ``processing``
+        #: for ``stuck_polls`` reads of its operation (``None``: until a test
+        #: calls :meth:`finish`), then writes its bank.
         self.stuck_restore: set[str] = set()
-        #: How many more reads a cancelled operation stays ``processing`` for.
-        self.cancel_lag = 0
+        self.stuck_polls: int | None = None
+        #: Banks whose restore writes the right counts but the wrong content.
+        self.lossy_restore: set[str] = set()
+        #: Engine restarts so far; the process holding the port changes with each.
+        self.restarts = 0
         self.writes: list[tuple[str, str]] = []
 
     # ── what a test does to the engine behind the switch's back ──
@@ -112,7 +117,16 @@ class FakeEngine:
     def m(self, bank: str) -> dict[str, Any]:
         return self.meta.setdefault(
             bank,
-            {"rev": 0, "mm": "", "dir": "", "config": {}, "ops": [], "profile": 0, "ids": bank},
+            {
+                "rev": 0,
+                "mm": "",
+                "dir": "",
+                "config": {},
+                "ops": [],
+                "profile": 0,
+                "ids": bank,
+                "text": bank,
+            },
         )
 
     def ids(self, bank: str) -> dict[str, list[str]]:
@@ -141,6 +155,26 @@ class FakeEngine:
         self.banks[new] = self.banks.pop(old)
         if old in self.meta:
             self.meta[new] = self.meta.pop(old)
+
+    def finish(self, op_id: str, status: str = "completed") -> None:
+        """A running restore's worker reaches its end and writes its bank.
+
+        Its last status write is suppressed when the row says ``cancelled``,
+        as hindsight-api 1.2.0 guards every worker status write.
+        """
+        op = self.ops[op_id]
+        op.pop("land")()
+        op.pop("polls_left", None)
+        if op["status"] != "cancelled":
+            op["status"] = status
+
+    def restart(self) -> None:
+        """The unit restarts: a cancelled restore's worker dies with it."""
+        self.restarts += 1
+        for op in self.ops.values():
+            if op.get("status") == "cancelled" and "land" in op:
+                op.pop("land")
+                op.pop("polls_left", None)
 
     # ── helpers ──
 
@@ -171,7 +205,14 @@ class FakeEngine:
             # What the rows carry verbatim: definitions, directive text, config, and ids.
             m = self.m(bank)
             zf.writestr(
-                "fake_rows.json", json.dumps({k: m[k] for k in ("mm", "dir", "config", "ids")})
+                "fake_rows.json",
+                json.dumps(
+                    {
+                        **{k: m[k] for k in ("mm", "dir", "config", "ids", "text")},
+                        "mm_content": m.get("mm_content", ""),
+                        "mm_refreshed": m.get("mm_refreshed"),
+                    }
+                ),
             )
         return buf.getvalue()
 
@@ -268,20 +309,25 @@ class FakeEngine:
         assert m, f"unexpected {method} {path}"
         bank, rest = m.group(1), m.group(2) or ""
         if rest.startswith("/operations/"):
-            op = self.ops.get(rest.rsplit("/", 1)[-1])
+            op_id = rest.rsplit("/", 1)[-1]
+            op = self.ops.get(op_id)
             if method == "DELETE":
+                # Like hindsight-api 1.2.0: the row says cancelled at once, but
+                # a restore never checks it, so its worker goes on writing.
                 self.events.append(f"cancel:{bank}")
                 if op is not None and op["status"] in ("pending", "processing"):
-                    op["cancelled"] = self.cancel_lag
+                    op["status"] = "cancelled"
                 return httpx.Response(200, json={"success": True})
             if op is not None and op.get("held") and self.hold_restore is not None:
                 await self.hold_restore.wait()
-            if op is not None and "cancelled" in op:
-                self.events.append(f"poll-cancelled:{bank}")
-                if op["cancelled"] <= 0:
-                    op["status"] = "cancelled"
-                op["cancelled"] -= 1
-            return httpx.Response(200, json=op or {"status": "not_found"})
+            if op is not None and "land" in op:
+                self.events.append(f"poll-running:{bank}")
+                if op["polls_left"] is not None:
+                    op["polls_left"] -= 1
+                    if op["polls_left"] <= 0:
+                        self.finish(op_id)
+            public = {k: v for k, v in (op or {}).items() if k not in ("land", "polls_left")}
+            return httpx.Response(200, json=public or {"status": "not_found"})
         if rest == "" and method == "PUT":
             self.events.append(f"create:{bank}")
             self.banks.setdefault(bank, _counts(0, docs=0))
@@ -301,13 +347,11 @@ class FakeEngine:
             for key, delta in self.restore_delta.get(source, {}).items():
                 counts[key] += delta
             op_id = f"imp{len(self.ops)}"
-            stuck = source in self.stuck_restore
-            self.ops[op_id] = {
-                "status": "processing" if stuck else "completed",
-                "held": self.hold_restore is not None,
-            }
-            self.m(bank)["ops"].insert(0, op_id)
-            if not stuck:
+            # Lossy only into the bank's own id: the rebuilt copy is checked
+            # by counts and fingerprint alone, the bank that stays by content too.
+            lossy = source in self.lossy_restore and target == source
+
+            def land() -> None:
                 self.banks[target] = counts
                 # Knowledge-node ids are unique across the schema and directive
                 # ids are dropped for another bank id, so they survive only a
@@ -315,8 +359,21 @@ class FakeEngine:
                 held = {meta["ids"] for b, meta in self.meta.items() if b != target}
                 keep = target == source and rows["ids"] not in held
                 restored = self.m(target)
-                restored.update({k: rows[k] for k in ("mm", "dir", "config")})
+                restored.update({k: rows[k] for k in ("mm", "dir", "config", "mm_refreshed")})
+                restored["mm_content"] = "lost" if lossy else rows["mm_content"]
+                restored["text"] = f"lost-{rows['text']}" if lossy else rows["text"]
                 restored["ids"] = rows["ids"] if keep else f"new-{op_id}"
+
+            stuck = source in self.stuck_restore
+            self.ops[op_id] = {
+                "status": "processing" if stuck else "completed",
+                "held": self.hold_restore is not None,
+            }
+            self.m(bank)["ops"].insert(0, op_id)
+            if stuck:
+                self.ops[op_id].update(land=land, polls_left=self.stuck_polls)
+            else:
+                land()
             return httpx.Response(202, json={"operation_id": op_id})
         if bank not in self.banks:
             return httpx.Response(404, json={"detail": "bank not found"})
@@ -353,6 +410,27 @@ class FakeEngine:
                     "is_stale": True,
                 }
                 for i in range(self.banks[bank]["mental_models"])
+            ]
+            return self._page("items", rows, params)
+        if rest == "/documents":
+            rows = [
+                {"id": f"doc-{i}", "bank_id": bank, "content_hash": f"h-{i}-{self.m(bank)['text']}"}
+                for i in range(self.banks[bank]["documents"])
+            ]
+            return self._page("items", rows, params)
+        if rest == "/memories/list":
+            c, text = self.banks[bank], self.m(bank)["text"]
+            world = c["facts"] // 2
+            n = world if params["type"] == "world" else c["facts"] - world
+            rows = [
+                {
+                    "id": f"{params['type']}-{i}-{self.m(bank)['rev']}",
+                    "text": f"fact {i} of {text}",
+                    "fact_type": params["type"],
+                    "document_id": "doc-0",
+                    "tags": ["b", "a"],
+                }
+                for i in range(n)
             ]
             return self._page("items", rows, params)
         if rest == "/directives":
@@ -412,7 +490,8 @@ class Host:
         if port in self.foreign:
             return {"owner": "other", "holder": self.foreign[port], "pid": 4242}
         if self.engine.reachable and self.engine.port == port:
-            return {"owner": "unit", "holder": "pid 100 (hindsight-api)", "pid": 100}
+            pid = 100 + self.engine.restarts
+            return {"owner": "unit", "holder": f"pid {pid} (hindsight-api)", "pid": pid}
         return {"owner": "none", "holder": None, "pid": None}
 
     def unit_text(self) -> str | None:
@@ -448,6 +527,7 @@ class Host:
         if self.dropin_port is None and self.release_restart_error:
             return {"error": self.release_restart_error}
         self.live = self.override or embedder
+        self.engine.restart()
         self.unit_stopped = False
         self.engine.reachable = True
         self.engine.healthy = embedder.model not in self.dead_on
@@ -1041,33 +1121,47 @@ async def test_an_interrupt_before_the_swap_undoes_the_run_and_lifts_the_gate(bo
     _assert_rolled_back(box)
 
 
-async def test_rollback_waits_for_a_cancelled_restore_to_really_end(box: Box) -> None:
-    """A restore that was cancelled but is still running could create its bank later."""
+async def test_rollback_waits_for_a_running_restore_and_never_cancels_it(box: Box) -> None:
+    """A cancel would mark the restore ended while its worker still writes its bank."""
     box.engine.stuck_restore.add("alpha")
-    box.engine.cancel_lag = 3
+    box.engine.stuck_polls = 10  # outlives the restore's own budget, ends in the rollback's
 
     with pytest.raises(es.SwitchError) as err:
         await box.switch().run()
 
     assert "did not finish within" in err.value.message
-    cancel = box.events.index("cancel:alpha")
-    polls = [i for i, e in enumerate(box.events) if e == "poll-cancelled:alpha"]
-    assert len(polls) == 4 and polls[0] > cancel, "polled until the engine said cancelled"
-    back = max(i for i, e in enumerate(box.events) if e == f"engine:{BGE.model}")
-    assert back > polls[-1], "and only then moved on"
+    assert not any(e.startswith("cancel:") for e in box.events), "a restore is never cancelled"
+    polls = [i for i, e in enumerate(box.events) if e == "poll-running:alpha"]
+    assert len(polls) == 10
+    temp = next(e.split(":", 1)[1] for e in box.events if e.startswith("delete:alpha.switch-"))
+    assert box.events.index(f"delete:{temp}") > polls[-1], "swept only once it had ended"
     _assert_rolled_back(box)
 
 
-async def test_a_restore_that_will_not_stop_keeps_the_pause(box: Box) -> None:
+async def test_a_restore_that_does_not_end_keeps_the_pause_and_resume_waits_again(
+    box: Box,
+) -> None:
     box.engine.stuck_restore.add("alpha")
-    box.engine.cancel_lag = 10**6
 
     with pytest.raises(es.SwitchError) as err:
         await box.switch().run()
 
-    assert err.value.resumable and "the bank it writes could still change" in err.value.message
+    assert err.value.resumable and "is still processing after" in err.value.message
+    assert "does not cancel a restore" in err.value.message
+    assert "--resume` again" in err.value.message
+    assert not any(e.startswith(("cancel:", "delete:")) for e in box.events)
     assert write_gate.read_gate() is not None
-    assert es.load_journal().phase == es.PHASE_ROLLBACK_FAILED  # type: ignore[union-attr]
+    journal = es.load_journal()
+    assert journal is not None and journal.phase == es.PHASE_ROLLBACK_FAILED
+    op = journal.banks[0].restore_op
+    assert op is not None and op["target"] == journal.banks[0].temp
+
+    # The worker gets to its end; the next resume finds it ended and finishes the rollback.
+    box.engine.finish(op["id"])
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "rolled_back"
+    _assert_rolled_back(box)
 
 
 async def test_a_rollback_that_cannot_finish_keeps_writes_paused_until_resume(box: Box) -> None:
@@ -1350,7 +1444,8 @@ async def test_a_kill_inside_the_swap_is_finished_by_resume(box: Box, point: str
     assert box.events[-1] == "gate:off"
 
 
-async def test_a_failure_in_the_middle_of_the_swap_is_finished_by_resume(box: Box) -> None:
+async def _stuck_placing_beta(box: Box) -> es.Journal:
+    """A run whose restore of Hal0::Beta into its own id is still running when it stops."""
     box.engine.stuck_restore.add("Hal0::Beta")
     real_restore = box.engine.on_restore
     calls: list[str] = []
@@ -1371,30 +1466,37 @@ async def test_a_failure_in_the_middle_of_the_swap_is_finished_by_resume(box: Bo
         await box.switch().run()
 
     assert err.value.resumable and err.value.bank == "Hal0::Beta"
+    box.engine.stuck_restore.clear()
+    box.engine.on_restore = real_restore
     journal = es.load_journal()
-    assert journal is not None and journal.phase == es.PHASE_SWAPPING
+    assert journal is not None
+    return journal
+
+
+async def test_a_failure_in_the_middle_of_the_swap_is_finished_by_resume(box: Box) -> None:
+    journal = await _stuck_placing_beta(box)
+    assert journal.phase == es.PHASE_SWAPPING
     assert {b.bank: b.step for b in journal.banks} == {
         "alpha": es.STEP_PLACED,
         "Hal0::Beta": es.STEP_PLACING,
         "gamma": es.STEP_RESTORED,
     }
     beta, gamma = journal.banks[1], journal.banks[2]
+    assert beta.restore_op is not None and beta.restore_op["target"] == "Hal0::Beta"
     assert beta.temp in box.engine.banks, "the rebuilt copy is kept while its bank is missing"
     assert write_gate.read_gate() is not None and "gate:off" not in box.events
     assert box.host.live == HS
     assert box.engine.port == PRIVATE_PORT, "the engine stays private while the run is resumable"
     assert "delete:gamma" not in box.events, "the swap stops at the first failure"
+    assert not any(e.startswith("cancel:") for e in box.events)
 
-    box.engine.stuck_restore.clear()
-    box.engine.on_restore = real_restore
+    # The restore the run gave up on gets to its end and writes Hal0::Beta.
+    box.engine.finish(beta.restore_op["id"])
     before = len(box.events)
     result = await box.switch(None).resume()
 
     scratch = es.scratch_bank_id(journal.run_id)
     assert box.events[before:] == [
-        f"cancel:{scratch}",
-        f"poll-cancelled:{scratch}",
-        f"restore:Hal0::Beta->Hal0::Beta via {scratch}",
         f"delete:{beta.temp}",
         "delete:gamma",
         f"restore:gamma->gamma via {scratch}",
@@ -1406,6 +1508,59 @@ async def test_a_failure_in_the_middle_of_the_swap_is_finished_by_resume(box: Bo
     ]
     assert box.engine.port == NORMAL_PORT
     assert result["status"] == "switched"
+    _assert_switched(box)
+
+
+async def test_resume_waits_for_a_restore_into_the_own_id_that_still_runs(box: Box) -> None:
+    """The race the old cancel made: a second restore into the id the first still writes."""
+    journal = await _stuck_placing_beta(box)
+    op = journal.banks[1].restore_op
+    assert op is not None
+    before = len(box.events)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    assert err.value.resumable and err.value.bank == "Hal0::Beta"
+    assert f"operation {op['id']}) is still processing" in err.value.message
+    assert not any(e.startswith(("cancel:", "delete:", "restore:")) for e in box.events[before:]), (
+        "nothing is cancelled, deleted or restored while it runs"
+    )
+    assert es.load_journal().banks[1].restore_op == op  # type: ignore[union-attr]
+
+    box.engine.finish(op["id"])
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "switched"
+    restores = [e for e in box.events if e.startswith("restore:Hal0::Beta->Hal0::Beta via ")]
+    assert len(restores) == 1, "the restore that was running is the one kept"
+    _assert_switched(box)
+
+
+async def test_a_restore_someone_else_cancelled_is_trusted_ended_only_after_a_restart(
+    box: Box,
+) -> None:
+    journal = await _stuck_placing_beta(box)
+    op = journal.banks[1].restore_op
+    assert op is not None
+    scratch = es.scratch_bank_id(journal.run_id)
+    # An operator cancels it by hand: the row says cancelled, the worker goes on.
+    async with box.http(f"http://127.0.0.1:{PRIVATE_PORT}") as http:
+        await http.delete(f"/v1/default/banks/{scratch}/operations/{op['id']}")
+    before = len(box.events)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    assert "recorded as cancelled" in err.value.message
+    assert "systemctl restart hindsight-api.service" in err.value.message
+    assert not any(e.startswith(("delete:", "restore:")) for e in box.events[before:])
+
+    box.host.apply_dropin(HS)  # the operator restarts the engine: that worker is gone
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "switched"
+    assert "restore:Hal0::Beta->Hal0::Beta via " + scratch in box.events[before:]
     _assert_switched(box)
 
 
@@ -1923,7 +2078,9 @@ async def test_queued_work_that_never_drains_stops_the_run_before_any_export(box
     ("step", "original", "rebuilt", "action"),
     [
         (es.STEP_RESTORED, True, True, es.ACTION_SWAP),
-        (es.STEP_DELETING, True, True, es.ACTION_SWAP),
+        # The delete may have been sent: never deleted again, never exported again.
+        (es.STEP_DELETING, True, True, es.ACTION_DELETE_SENT),
+        (es.STEP_DELETING, True, False, es.ACTION_DELETE_SENT),
         (es.STEP_RESTORED, True, False, es.ACTION_REBUILD),
         # The original is gone: its archive puts it back under its own id.
         (es.STEP_DELETING, False, True, es.ACTION_PLACE),
@@ -2052,7 +2209,7 @@ async def test_nothing_but_the_switch_reaches_the_engine_from_isolation_to_the_e
 
     assert where.pop("paused") == NORMAL_PORT, "the queues drain before the engine is restarted"
     assert set(where) == {p.split(":")[0] for p in es.HOOK_POINTS} - {"paused"}
-    assert set(where.values()) == {PRIVATE_PORT}, "private from the bank list to the last rename"
+    assert set(where.values()) == {PRIVATE_PORT}, "private from the bank list to the last restore"
     _assert_public(box)
 
 
@@ -2981,3 +3138,141 @@ async def test_a_failed_rollback_names_its_phase_and_the_journalled_port(box: Bo
     assert "rollback_failed" in msg and "the write pause is still set" in msg
     assert f"127.0.0.1:{PRIVATE_PORT}" in msg and "--resume" in msg
     assert "run the switch again" not in msg and "the run is undone" not in msg
+
+
+# ── #3602 review: journal version, a delete that may have been sent, lossy restores ──
+
+
+async def test_a_journal_from_the_rename_based_switch_is_refused_not_guessed_at(
+    box: Box,
+) -> None:
+    """Version 1 steps (``renaming``, ``renamed``) fell through to a rebuild that deleted the copy."""
+    journal = await box.kill_at("before_delete:alpha")
+    data = journal.to_dict()
+    data["version"] = 1
+    data["banks"][0]["step"] = "renaming"
+    text = json.dumps(data)
+    es.journal_path().write_text(text)
+    (Path(journal.archive_dir) / es.mirror_name()).write_text(text)
+    before = len(box.events)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    assert "journal version 1" in err.value.message
+    assert f"its archives are in {journal.archive_dir}" in err.value.message
+    assert "Nothing was changed" in err.value.message
+    assert box.events[before:] == [], "no delete, no export, no restore"
+    assert es.interrupted_switch()["phase"] == "unreadable"  # type: ignore[index]
+    assert es.blocking_reason() is not None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "said"),
+    [
+        ("step", "renamed", "unknown step 'renamed'"),
+        ("phase", "renaming", "unknown phase 'renaming'"),
+    ],
+)
+async def test_a_journal_with_a_step_or_phase_this_code_does_not_know_is_refused(
+    box: Box, field: str, value: str, said: str
+) -> None:
+    journal = await box.kill_at("before_delete:alpha")
+    data = journal.to_dict()
+    if field == "step":
+        data["banks"][0]["step"] = value
+    else:
+        data["phase"] = value
+    text = json.dumps(data)
+    es.journal_path().write_text(text)
+    (Path(journal.archive_dir) / es.mirror_name()).write_text(text)
+    before = len(box.events)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    assert said in err.value.message and journal.archive_dir in err.value.message
+    assert box.events[before:] == []
+
+
+async def test_a_bank_still_there_after_a_delete_that_may_have_been_sent_is_left_alone(
+    box: Box,
+) -> None:
+    journal = await box.kill_at("before_delete:alpha")
+    journal.banks[0].step = es.STEP_DELETING  # saved, then killed before the delete answered
+    box.switch()._save(journal)
+    before = len(box.events)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    assert err.value.resumable and err.value.bank == "alpha"
+    assert "may have removed part of it" in err.value.message
+    assert f"{journal.archive_dir}/{journal.banks[0].archive}" in err.value.message
+    assert not any(e.startswith(("delete:", "export:", "restore:")) for e in box.events[before:])
+    status = await box.switch(None).status()
+    alpha = next(r for r in status["resume"] if r["bank"] == "alpha")
+    assert alpha["action"] == es.ACTION_DELETE_SENT and "curl -X DELETE" in alpha["operator"]
+
+    # The operator deletes what is left: the archive puts it back under its own id.
+    box.engine.drop("alpha")
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "switched"
+    _assert_switched(box)
+
+
+async def test_a_kill_after_the_delete_answered_is_finished_by_resume(box: Box) -> None:
+    journal = await box.kill_at("deleted:alpha")
+    assert journal.banks[0].step == es.STEP_DELETED and "alpha" not in box.engine.banks
+
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "switched"
+    _assert_switched(box)
+
+
+async def test_a_restore_into_the_own_id_with_the_right_counts_but_lost_content_is_caught(
+    box: Box,
+) -> None:
+    box.engine.m("alpha")["mm_content"] = "what alpha knows"
+    box.engine.m("alpha")["mm_refreshed"] = "2026-11-01"
+    box.engine.lossy_restore.add("alpha")
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+
+    assert err.value.resumable and err.value.bank == "alpha"
+    message = err.value.message
+    assert "restored into its own id, does not match the original" in message
+    assert "documents" in message and "facts" in message and "mental-model content" in message
+    journal = es.load_journal()
+    assert journal is not None and journal.banks[0].temp in box.engine.banks, "copy kept"
+    assert journal.banks[0].contents is not None
+
+
+async def test_the_own_id_check_compares_document_fact_and_model_content() -> None:
+    before = {
+        "documents": "d1",
+        "facts": "f1",
+        "model_content": {
+            "mm-0": {"refreshed": "t1", "content": "c1"},
+            "mm-1": {"refreshed": "t1", "content": "c1"},
+        },
+    }
+    same = json.loads(json.dumps(before))
+    assert es._contents_moved(before, same) == []
+    # Refreshed by the engine after the restore: regenerated, not lost.
+    refreshed = json.loads(json.dumps(before))
+    refreshed["model_content"]["mm-0"] = {"refreshed": "t2", "content": "c2"}
+    assert es._contents_moved(before, refreshed) == []
+    lost = json.loads(json.dumps(before))
+    lost["model_content"]["mm-1"]["content"] = "c0"
+    lost["documents"] = "d0"
+    assert es._contents_moved(before, lost) == ["documents", "mental-model content"]
+
+
+async def test_allow_pending_skips_the_content_checks_it_cannot_make(box: Box) -> None:
+    journal = await box.kill_at("before_swap", allow_pending=True)
+    assert all(entry.contents is None for entry in journal.banks)
+    assert "content checks are skipped" in es.IDS_ACROSS_SWITCH["note"]
