@@ -265,11 +265,14 @@ another agent.
   points it at this box's memory engine, which the plugin then talks to
   directly.
 
-`hal0 memory agents install <harness> --bridge-key <key>` runs the plugin's
-installer and points that harness at hal0's `/api/memory/compat` instead,
-so its memory goes through hal0's write envelope and project-scoped reads.
-Mint the key with `hal0 bridge add <harness> --scope memory`. `--dry-run`
-prints what it would do and changes nothing.
+`hal0 memory agents install <harness> --bridge-key-file <path>` runs the
+plugin's installer and points that harness at hal0's `/api/memory/compat`
+instead, so its memory goes through hal0's write envelope and project-scoped
+reads. Mint the key with `hal0 bridge add <harness> --scope memory`; a path
+of `-` reads the key from stdin. `--bridge-key <key>` also works, but puts the
+key in the process list. The key carries the `agents` scope too, so it can
+start Hermes runs as well as reach memory. `--dry-run` prints what it would do
+and changes nothing.
 
 ## Old addresses
 
