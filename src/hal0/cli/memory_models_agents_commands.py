@@ -230,7 +230,8 @@ def _write_private_json(path: Path, data: dict[str, Any]) -> None:
     """Write the shared client config atomically, at most 0600 (it holds a key).
 
     :func:`hal0.memory.compat_client.write_client_config`: writes through a
-    symlink that stays in the home, refuses one leaving it, never follows a
+    symlink that stays in the home (as root in its own home, only a link root
+    owns in directories only root can write), refuses one leaving it, never follows a
     symlinked temporary file, keeps the owner and never widens a mode. The
     keys keep their order."""
     from hal0.memory.compat_client import write_client_config

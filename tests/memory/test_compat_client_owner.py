@@ -102,7 +102,7 @@ def test_root_refuses_a_root_home_with_a_directory_someone_else_owns(
     dropped = _as_root_in(monkeypatch, home_owner=(0, 0))
     cfg = home / ".hindsight" / "coding-agent.json"
 
-    with pytest.raises(cc.UnsafeConfigPath, match=r"symlink|root-owned directory"):
+    with pytest.raises(cc.UnsafeConfigPath, match=r"symlink|root-owned directory|outside"):
         cc.write_client_config(cfg, {}, home=home)
 
     assert dropped == [] and not (home / "dotfiles" / "coding-agent.json").exists()
@@ -186,42 +186,76 @@ def test_is_managed_section() -> None:
     assert not cc.is_managed_section({"apiToken": "hal0bk_someone.x"}, "pi-coder")
 
 
-def test_root_in_its_own_home_refuses_a_symlinked_config(
+class _RootStat:
+    """An lstat result reported as root's (the suite cannot run as root)."""
+
+    def __init__(self, st: os.stat_result, uid: int = 0) -> None:
+        self._st, self._uid = st, uid
+
+    def __getattr__(self, name: str) -> object:
+        return self._uid if name == "st_uid" else getattr(self._st, name)
+
+
+def _owned_by(monkeypatch: pytest.MonkeyPatch, others: set[Path]) -> None:
+    """Every path is root's except ``others``, which belong to uid 1234."""
+    real_lstat = os.lstat
+    owned = {os.path.abspath(p) for p in others}
+    monkeypatch.setattr(
+        cc.os,
+        "lstat",
+        lambda p, **kw: _RootStat(real_lstat(p, **kw), 1234 if os.path.abspath(p) in owned else 0),
+    )
+
+
+def test_root_follows_its_own_dotfiles_link_in_its_own_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Root works by path in its own home, so a link anywhere on the way (here
-    the file itself, pointing into a directory someone else could repoint) is
-    refused rather than checked once and then followed again."""
+    """A stow-style link that root owns, in a directory only root can write,
+    still works: the config is written through it."""
     home = tmp_path / "root"
-    (home / ".hindsight").mkdir(parents=True)
-    elsewhere = tmp_path / "dotfiles"
-    elsewhere.mkdir()
-    real = elsewhere / "coding-agent.json"
-    real.write_text("{}")
-    cfg = home / ".hindsight" / "coding-agent.json"
-    cfg.symlink_to(real)
+    (home / "dotfiles" / "hs").mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    (home / ".hindsight").symlink_to(Path("dotfiles") / "hs")
     _as_root_in(monkeypatch, home_owner=(0, 0))
-    monkeypatch.setattr(cc, "_require_root_tree", lambda home, directory: None)
+    _owned_by(monkeypatch, set())
 
-    with pytest.raises(cc.UnsafeConfigPath, match="symlink"):
-        cc.write_client_config(cfg, {"a": 1}, home=home)
-    assert real.read_text() == "{}"
+    cc.write_client_config(home / ".hindsight" / "coding-agent.json", {"a": 1}, home=home)
+
+    assert json.loads((home / "dotfiles" / "hs" / "coding-agent.json").read_text()) == {"a": 1}
 
 
-def test_root_in_its_own_home_refuses_a_symlinked_directory(
+def test_root_refuses_a_link_inside_its_home_held_by_another_users_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The link stays inside the home, so the resolved path looks root-only;
+    but the directory holding the link is someone else's, and they could
+    repoint it between the check and the write."""
     home = tmp_path / "root"
-    home.mkdir()
-    target_dir = tmp_path / "elsewhere"
-    target_dir.mkdir()
-    (home / ".hindsight").symlink_to(target_dir)
+    (home / "safe").mkdir(parents=True, mode=0o700)
+    (home / "shared").mkdir(mode=0o700)
+    home.chmod(0o700)
+    (home / "shared" / "hs").symlink_to(Path("..") / "safe")
+    (home / ".hindsight").symlink_to(Path("shared") / "hs")
     _as_root_in(monkeypatch, home_owner=(0, 0))
-    monkeypatch.setattr(cc, "_require_root_tree", lambda home, directory: None)
+    _owned_by(monkeypatch, {home / "shared"})
 
-    with pytest.raises(cc.UnsafeConfigPath, match="symlink"):
+    with pytest.raises(cc.UnsafeConfigPath, match="root-owned directory"):
         cc.write_client_config(home / ".hindsight" / "coding-agent.json", {"a": 1}, home=home)
-    assert not (target_dir / "coding-agent.json").exists()
+    assert not (home / "safe" / "coding-agent.json").exists()
+
+
+def test_root_refuses_a_link_it_does_not_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "root"
+    (home / "safe").mkdir(parents=True, mode=0o700)
+    home.chmod(0o700)
+    (home / ".hindsight").symlink_to("safe")
+    _as_root_in(monkeypatch, home_owner=(0, 0))
+    _owned_by(monkeypatch, {home / ".hindsight"})
+
+    with pytest.raises(cc.UnsafeConfigPath, match="symlink root does not own"):
+        cc.write_client_config(home / ".hindsight" / "coding-agent.json", {"a": 1}, home=home)
 
 
 def test_home_owner_uses_the_accounts_own_group(

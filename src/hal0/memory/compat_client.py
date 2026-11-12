@@ -235,43 +235,78 @@ def _require_root_tree(home: Path, directory: Path) -> None:
             )
 
 
-def _require_no_symlink(home: Path, path: Path) -> None:
-    """Refuse (:class:`UnsafeConfigPath`) when any existing component from
-    ``home`` down to ``path``, the file included, is a symlink. Root in its own
-    home works by path, so a link anywhere in the chain could be repointed by
-    whoever controls the directory it leads through between the check and the
-    write. Neither path is resolved."""
+def _require_root_links(home: Path, path: Path) -> None:
+    """Refuse (:class:`UnsafeConfigPath`) unless nobody but root can change
+    where ``path`` leads, walking it from ``home`` one component at a time.
+
+    Root in its own home works by path, so the path must not change between
+    this check and the write. A symlink is followed only when root owns it and
+    every directory it was found in, or is walked through, is root's and
+    writable by nobody else; a link into a dotfiles checkout that root owns is
+    fine, one in or through a directory another user can write is not. Paths
+    are not resolved up front: the directory holding each link is what is
+    checked, which a resolved path no longer shows."""
     base = Path(os.path.abspath(home))
-    current = base
     try:
-        parts = Path(os.path.abspath(path)).relative_to(base).parts
+        pending = list(Path(os.path.abspath(path)).relative_to(base).parts)
     except ValueError:
         raise UnsafeConfigPath(f"{path} is outside {base}; not used") from None
-    for part in parts:
-        current = current / part
+
+    def refuse(where: Path, why: str) -> UnsafeConfigPath:
+        return UnsafeConfigPath(
+            f"{where} {why}; root does not use a path another user could change. Not used"
+        )
+
+    current = base
+    hops = 0
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            current = current.parent
+            continue
+        nxt = current / part
         try:
-            st = os.lstat(current)
+            st = os.lstat(nxt)
         except FileNotFoundError:
-            return
+            return  # created later, by root, in ``current``: already checked
         if stat.S_ISLNK(st.st_mode):
-            raise UnsafeConfigPath(
-                f"{current} is a symlink; root does not read or write its client "
-                "config through a link; not used"
-            )
+            hops += 1
+            if hops > 40:
+                raise refuse(nxt, "is part of a symlink loop")
+            if st.st_uid != 0:
+                raise refuse(nxt, "is a symlink root does not own")
+            target = Path(os.readlink(nxt))
+            if target.is_absolute():
+                current = Path(target.anchor)
+                pending = list(target.parts[1:]) + pending
+            else:
+                pending = list(target.parts) + pending
+            continue
+        if not pending:
+            return  # the file itself: checked_config_path checks its type and owner
+        if (
+            not stat.S_ISDIR(st.st_mode)
+            or st.st_uid != 0
+            or stat.S_IMODE(st.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise refuse(nxt, "is not a root-owned directory only root can write")
+        current = nxt
 
 
 def _as_home_owner(home: Path, path: Path, fn: Callable[[], bytes]) -> bytes:
     """``fn()`` where it is safe for this process to touch ``path``: directly
     unless this is root in a home owned by someone else, where it runs as that
-    owner (:func:`_run_as_owner`). Root in a root-owned home also needs no
-    symlink on the way (:func:`_require_no_symlink`) and a root-only tree
+    owner (:func:`_run_as_owner`). Root in a root-owned home also needs a
+    path only root can change (:func:`_require_root_links`) and a root-only tree
     (:func:`_require_root_tree`), so nobody else can change the path it uses."""
     if not _is_root():
         return fn()
     uid, gid = _home_owner(home)
     if uid != 0:
         return _run_as_owner(uid, gid, fn)
-    _require_no_symlink(home, path)
+    _require_root_links(home, path)
     target = checked_config_path(path, home)
     _require_root_tree(home.resolve(), target.parent)
     return fn()
@@ -327,7 +362,7 @@ def write_client_config(
     """Write the shared client config atomically. Raises ``OSError``.
 
     The target is :func:`checked_config_path`; a symlink is written through
-    (the link stays), except by root in its own home, which refuses any link. The temporary file beside it is created with
+    (the link stays); root in its own home follows only links it owns, in directories only it can write. The temporary file beside it is created with
     ``O_CREAT | O_EXCL | O_NOFOLLOW`` at 0600 and fsynced before the rename,
     after removing a stale one only when it is a regular file of an allowed
     owner. An existing file keeps its mode (narrowed to ``max_mode`` when

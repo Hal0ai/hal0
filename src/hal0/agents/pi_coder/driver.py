@@ -1095,7 +1095,8 @@ class PiDriver(AgentDriver):
     ) -> None:
         """Rewrite the shared client config in place. Keeps the file's mode and
         owner and writes through a symlink that stays in the home (a
-        dotfiles-managed file); refuses one leaving it, or a file owned by
+        dotfiles-managed file; for root in its own home, only a link root owns
+        in directories only root can write); refuses one leaving it, or a file owned by
         someone other than this user or the home's owner. ``max_mode`` narrows
         the mode (never widens it), for a write that puts a key in the file.
         Raises ``OSError`` (:func:`~hal0.memory.compat_client.write_client_config`)."""
