@@ -3428,47 +3428,56 @@ class HindsightProvider(MemoryProvider):
     # ── directives ───────────────────────────────────────────────────────
     #
     # A directive is a standing instruction the engine injects into a
-    # reflect's prompt. On the two-bank private bank a directive is its
-    # writer's, like everything else there (#3573, ADR-0058 decision 7):
+    # reflect's prompt. Through this provider (both MCP mounts, so every
+    # agent) a directive is its writer's, on every bank and in every layout
+    # (#3573, #3600):
     #
     # * create stamps ``agent:<caller>`` and ``visibility:private`` (the
     #   caller's own ``agent:``/``visibility:`` tags are dropped), and an
-    #   unidentified caller cannot create one;
-    # * update re-stamps them when it changes the tags, so a directive cannot
-    #   be made untagged (bank-wide) or another agent's;
-    # * list and get return only what :meth:`_private_readable` admits, so a
-    #   directive with no owner is nobody's; update and delete of any other
-    #   are 404, the same answer as a directive that does not exist.
+    #   unidentified caller cannot create one (403
+    #   ``memory.directive_owner_required``);
+    # * update and delete need an identified caller too, and reach only the
+    #   caller's own directive: one the caller may not read (another agent's
+    #   private directive, an ownerless one on the two-bank private bank) is
+    #   404, the same answer as a directive that does not exist; a bank-wide
+    #   one is 403 ``memory.directive_operator_managed``;
+    # * update re-stamps the owner when it changes the tags, so a directive
+    #   cannot be made untagged (bank-wide) or another agent's;
+    # * list and get return only what :meth:`_private_readable` admits.
     #
     # The engine applies a reflect's ``tag_groups`` to the directives it
     # loads (``list_directives(isolation_mode=True)``: untagged directives
-    # always apply, tagged ones only inside the groups). A private-bank
-    # reflect is held to the caller's ``agent:`` tag, so another agent's
-    # directive never steers it; an untagged one, which only the operator's
-    # admin API or the bank spec can create, still applies to every agent.
-    # On any other bank the read rule is the visibility rule, which an
-    # untagged or shared directive passes, as before.
+    # always apply, tagged ones only inside the groups). Every reflect is
+    # held to ``not private OR agent:<caller>`` (on the two-bank private bank,
+    # to the caller's ``agent:`` tag), so another agent's directive never
+    # steers it. A bank-wide directive (untagged, or tagged without
+    # ``visibility:private``) applies to every agent's reflect, which is why
+    # only the operator manages them: the bank spec, the admin REST routes
+    # under ``/api/memory/banks/{bank}/directives`` and ``hal0 memory
+    # directive`` (ADR-0058 decision 8).
 
-    def _directive_tags(self, bank: str, client_id: str | None, tags: Any) -> list[str] | None:
-        """The tags a directive is written with on ``bank``.
+    def _directive_tags(self, client_id: str | None, tags: Any) -> list[str]:
+        """The tags a directive is written with: the caller's own tags, less
+        the reserved ``agent:``/``visibility:`` ones, plus the caller as owner.
 
-        On every bank the provider owns the ``agent:`` and ``visibility:``
-        tags, as it does on memory writes (#3136): a caller's are dropped,
-        so no caller can plant a directive that another agent's reflect scope
-        (``not private OR agent:<them>``) loads as that agent's own. The
-        owner is stamped only on the two-bank private bank, the one place a
-        directive is private.
+        The provider owns the reserved tags, as it does on memory writes
+        (#3136), so no caller can plant a directive that another agent's
+        reflect scope (``not private OR agent:<them>``) loads as that agent's
+        own, nor one with no owner, which every agent's reflect loads.
         """
-        kept = None if tags is None else [t for t in coerce_tags(tags) if not _is_reserved_tag(t)]
-        if not (self._two_bank and bank == self._private_bank):
-            return kept
+        caller = self._require_directive_writer(client_id)
+        kept = [t for t in coerce_tags(tags) if not _is_reserved_tag(t)]
+        return [*kept, f"{_AGENT_TAG_PREFIX}{caller}", _VISIBILITY_PRIVATE]
+
+    def _require_directive_writer(self, client_id: str | None) -> str:
+        """The caller's agent id, or 403 when the caller is unidentified."""
         caller = self._caller_agent(client_id)
         if not is_identified(caller):
             raise Forbidden(
-                "a private directive needs an identified agent",
+                "a directive needs an identified agent",
                 code="memory.directive_owner_required",
             )
-        return [*(kept or []), f"{_AGENT_TAG_PREFIX}{caller}", _VISIBILITY_PRIVATE]
+        return caller
 
     async def _require_readable_directive(
         self, bank: str, directive_id: str, caller: str
@@ -3488,6 +3497,33 @@ class HindsightProvider(MemoryProvider):
         if not isinstance(directive, dict) or not self._private_readable(directive, caller, bank):
             raise missing
         return directive
+
+    async def _require_own_directive(
+        self, bank: str, directive_id: str, client_id: str | None
+    ) -> None:
+        """Pass when the caller may change the directive: it is the caller's own.
+
+        403 for an unidentified caller; 404 for a directive the caller may not
+        read; 403 for a bank-wide one. A directive the caller can read is its
+        own when it is private and owned by the caller; on the two-bank
+        private bank when it is owned by the caller at all, since there the
+        ``agent:`` tag alone is what a reflect is held to; and under the split
+        layout whenever it sits in the caller's own ``private__<id>`` bank,
+        which no other agent reflects on.
+        """
+        caller = self._require_directive_writer(client_id)
+        directive = await self._require_readable_directive(bank, directive_id, caller)
+        tags = directive.get("tags") or []
+        if not self._acl_enforced and bank == self._bank_of(f"{_PRIVATE}{caller}"):
+            return
+        private = _VISIBILITY_PRIVATE in tags or (self._two_bank and bank == self._private_bank)
+        if not (private and _agent_of(tags) == caller):
+            raise Forbidden(
+                "a bank-wide directive applies to every agent and is managed by the "
+                "operator (the bank spec or the admin API)",
+                code="memory.directive_operator_managed",
+                details={"id": directive_id},
+            )
 
     async def list_directives(
         self,
@@ -3553,7 +3589,7 @@ class HindsightProvider(MemoryProvider):
             content=content,
             priority=priority,
             is_active=is_active,
-            tags=self._directive_tags(bank, client_id, tags),
+            tags=self._directive_tags(client_id, tags),
         )
 
     @_gated_write
@@ -3570,7 +3606,7 @@ class HindsightProvider(MemoryProvider):
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
-        await self._require_readable_directive(bank, directive_id, self._caller_agent(client_id))
+        await self._require_own_directive(bank, directive_id, client_id)
         return await self._call(
             "update_directive",
             bank_id=bank,
@@ -3579,7 +3615,7 @@ class HindsightProvider(MemoryProvider):
             content=content,
             priority=priority,
             is_active=is_active,
-            tags=self._directive_tags(bank, client_id, tags) if tags is not None else None,
+            tags=self._directive_tags(client_id, tags) if tags is not None else None,
         )
 
     @_gated_write
@@ -3587,7 +3623,7 @@ class HindsightProvider(MemoryProvider):
         self, directive_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
-        await self._require_readable_directive(bank, directive_id, self._caller_agent(client_id))
+        await self._require_own_directive(bank, directive_id, client_id)
         return await self._call("delete_directive", bank_id=bank, directive_id=directive_id)
 
     # ── async operations (so retain/refresh/consolidate are pollable) ───
