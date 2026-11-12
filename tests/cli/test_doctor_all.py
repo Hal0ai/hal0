@@ -1680,10 +1680,22 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         )[1],
     )
 
+    # Model-owners row (#3576) lists every bank's mental models otherwise.
+    owners_kwargs: dict = {}
+    monkeypatch.setattr(
+        da,
+        "check_memory_model_owners",
+        lambda **kw: (
+            owners_kwargs.update(kw),
+            Check("memory_model_owners", "Memory model owners", "pass", "stubbed"),
+        )[1],
+    )
+
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
     assert set(projects_kwargs) == {"memory", "base"}
+    assert set(owners_kwargs) == {"memory", "base"}
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
     assert keys[-51:] == [
         "auth",
@@ -1737,6 +1749,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "memory_retain_chunk",
         "memory_decision_lane",
         "memory_projects",
+        "memory_model_owners",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
@@ -3182,6 +3195,65 @@ def test_retain_chunk_skips_without_a_live_engine() -> None:
         {"enabled": True, "engine": "hindsight", "reachable": False},
     ):
         assert da.check_memory_retain_chunk(memory=memory, fetch=_never).status == "pass"
+
+
+# ── memory model owners (#3576, advisory) ───────────────────────────────────
+
+
+def _owners_survey(*, hidden: int = 0, unflagged: int = 0, errors=()):
+    from hal0.memory.model_owner_repair import Finding, Survey
+
+    findings = [
+        Finding(bank="shared", model_id=f"h{i}", name="", owner="bob", hidden=True)
+        for i in range(hidden)
+    ] + [
+        Finding(bank="shared", model_id=f"u{i}", name="", owner="bob", hidden=False)
+        for i in range(unflagged)
+    ]
+    return Survey(findings=findings, errors=list(errors), banks=2)
+
+
+def test_model_owners_warns_and_names_the_repair_when_a_model_is_hidden() -> None:
+    check = da.check_memory_model_owners(
+        memory=_LIVE_MEMORY, fetch=lambda _b: _owners_survey(hidden=2, unflagged=1)
+    )
+    assert check.key == "memory_model_owners" and check.label == "Memory model owners"
+    assert check.status == "warn"
+    assert "2 mental model(s)" in check.detail
+    assert "hal0 memory mm repair" in check.detail
+
+
+def test_model_owners_passes_with_a_note_when_models_lack_the_flag_but_are_readable() -> None:
+    check = da.check_memory_model_owners(
+        memory=_LIVE_MEMORY, fetch=lambda _b: _owners_survey(unflagged=3)
+    )
+    assert check.status == "pass"
+    assert "3" in check.detail and "hal0 memory mm repair" in check.detail
+
+
+def test_model_owners_passes_when_nothing_needs_the_flag() -> None:
+    check = da.check_memory_model_owners(memory=_LIVE_MEMORY, fetch=lambda _b: _owners_survey())
+    assert check.status == "pass" and "2 bank(s)" in check.detail
+
+
+def test_model_owners_unreadable_is_a_warn() -> None:
+    assert da.check_memory_model_owners(memory=_LIVE_MEMORY, fetch=lambda _b: None).status == "warn"
+    partial = _owners_survey(errors=[("shared", "boom")])
+    check = da.check_memory_model_owners(memory=_LIVE_MEMORY, fetch=lambda _b: partial)
+    assert check.status == "warn" and "shared" in check.detail
+
+
+def test_model_owners_skips_without_a_live_engine() -> None:
+    def _never(_b: object) -> None:  # pragma: no cover - a call here is the bug
+        raise AssertionError("no fetch without a reachable memory engine")
+
+    for memory in (
+        {"enabled": True, "engine": None},
+        {"enabled": False, "engine": "hindsight"},
+        {"enabled": True, "engine": "hindsight", "reachable": False},
+    ):
+        assert da.check_memory_model_owners(memory=memory, fetch=_never).status == "pass"
+    assert da.check_memory_model_owners(memory=None, fetch=_never).status == "warn"
 
 
 # ── memory projects (ADR-0058 decision 4a, advisory) ────────────────────────

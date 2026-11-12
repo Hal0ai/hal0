@@ -3985,6 +3985,80 @@ def _decision_health_ok(url: str) -> bool:
     return resp.is_success
 
 
+def _survey_model_owners(base: str | None) -> Any:
+    """Every bank's mental models that lack the owner flag, or ``None``."""
+    from hal0.cli._shared import CliApiError, api_get
+    from hal0.memory.model_owner_repair import survey
+
+    def request(method: str, path: str, *, params: Any = None, json: Any = None) -> Any:
+        if method != "GET":  # pragma: no cover - the survey only reads
+            raise ValueError("doctor reads only")
+        return api_get(path, base=base, timeout=PROJECT_TAGS_TIMEOUT_S, params=params)
+
+    try:
+        return survey(request)
+    except CliApiError:
+        return None
+
+
+def check_memory_model_owners(
+    *,
+    memory: dict[str, Any] | None,
+    base: str | None = None,
+    fetch: Callable[[str | None], Any] | None = None,
+) -> Check:
+    """Mental models hidden from the agent that owns them (#3576).
+
+    Since #3575 an agent reads its own mental model (or knowledge page) while
+    the bank holds another agent's private memory only when the model's
+    trigger sets ``exclude_mental_models``. A model made before that, or
+    written straight to the engine, is 404 to its own agent on every route.
+    ``warn`` counts those and names ``hal0 memory mm repair``; models that
+    lack the flag but are readable for now (no other agent's private memory
+    in their bank) pass with a note. Reads only, through hal0-api's admin
+    memory routes (:func:`hal0.memory.model_owner_repair.survey`).
+    """
+    from hal0.memory.model_owner_repair import REPAIR_COMMAND
+
+    name, title = "memory_model_owners", "Memory model owners"
+    if memory is None:
+        return Check(name, title, _WARN, "memory engine status unreachable")
+    if memory.get("engine") in (None, "") or not memory.get("enabled", True):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    if not memory.get("reachable"):
+        return Check(name, title, _PASS, "engine unreachable — see the memory row")
+    report = (fetch or _survey_model_owners)(base)
+    if report is None:
+        return Check(name, title, _WARN, "could not list the banks' mental models")
+    unread = ""
+    if report.errors:
+        unread = "; could not read bank(s) " + ", ".join(bank for bank, _ in report.errors)
+    if report.hidden:
+        return Check(
+            name,
+            title,
+            _WARN,
+            f"{report.hidden} mental model(s) are hidden from the agent that owns them "
+            f"(no exclude_mental_models while the bank holds another agent's private "
+            f"memory); `{REPAIR_COMMAND}` lists them, `{REPAIR_COMMAND} --apply` "
+            f"repairs them{unread}",
+        )
+    if report.errors:
+        return Check(name, title, _WARN, unread.removeprefix("; "))
+    if report.findings:
+        return Check(
+            name,
+            title,
+            _PASS,
+            f"{len(report.findings)} agent-owned mental model(s) lack exclude_mental_models "
+            "and will be hidden from their owner once the bank holds another agent's "
+            f"private memory; `{REPAIR_COMMAND} --apply` sets it",
+        )
+    return Check(
+        name, title, _PASS, f"every agent's own mental models are readable ({report.banks} bank(s))"
+    )
+
+
 def check_memory_decision_lane(
     *,
     memory: dict[str, Any] | None,
@@ -4327,6 +4401,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_memory_retain_chunk(memory=payloads["memory"], base=base),
         check_memory_decision_lane(memory=payloads["memory"]),
         check_memory_projects(memory=payloads["memory"], base=base),
+        check_memory_model_owners(memory=payloads["memory"], base=base),
     ]
     return verify_rows + extra_rows
 
