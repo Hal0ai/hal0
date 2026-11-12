@@ -50,7 +50,9 @@ from typing import Any
 import httpx
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
+from rich.text import Text
 
 import hal0
 from hal0.agents.hermes_doctor import (
@@ -212,14 +214,14 @@ def _print_hermes_sqlite_row(row: dict[str, str]) -> None:
     if row["status"] == "absent":
         return
     mark = "[green]✓[/green]" if row["status"] == "ok" else "[yellow]⚠[/yellow]"
-    console.print(f"{mark}  hermes interpreter: {row['detail']}")
+    console.print(f"{mark}  hermes interpreter: {escape(row['detail'])}")
 
 
 def _print_hermes_plugins_row(row: dict[str, str]) -> None:
     if row["status"] == "absent":
         return
     mark = "[green]✓[/green]" if row["status"] == "ok" else "[yellow]⚠[/yellow]"
-    console.print(f"{mark}  hermes plugins: {row['detail']}")
+    console.print(f"{mark}  hermes plugins: {escape(row['detail'])}")
 
 
 # ── hal0 doctor verify ──────────────────────────────────────────────────────
@@ -676,7 +678,7 @@ def _render_audit(title: str, rows: list[dict[str, str]]) -> None:
     table.add_column("Status")
     table.add_column("Detail")
     for r in rows:
-        table.add_row(r["label"], badge[r["status"]], r["detail"])
+        table.add_row(Text(r["label"]), badge[r["status"]], Text(r["detail"]))
     console.print(table)
 
 
