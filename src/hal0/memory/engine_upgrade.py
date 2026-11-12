@@ -74,6 +74,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
+from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import InvalidVersion, Version
 
 from hal0.config.paths import var_lib
@@ -85,6 +86,16 @@ log = structlog.get_logger(__name__)
 #: install.sh's ``HINDSIGHT_PIN`` shell variable must match
 #: (tests/installer/test_hindsight_pin_lockstep.py enforces it).
 HINDSIGHT_API_PIN = "1.2.0"
+
+#: Extra pip requirements installed alongside the engine pin. hindsight-api
+#: 1.2.0 unpacks each dateparser ``search_dates`` hit as ``(text, date)``;
+#: dateparser 1.5.0 returns three-tuples for absolute-date text, so temporal
+#: query analysis raises ``ValueError`` and date-bounded recall silently stops
+#: filtering (#3533). 1.2.2 through 1.4.x were verified clean. Single source of
+#: truth — install.sh's ``HINDSIGHT_DEP_CONSTRAINTS`` shell variable must match
+#: (tests/installer/test_hindsight_pin_lockstep.py enforces it). Drop an entry
+#: once the pinned engine handles the newer release.
+ENGINE_DEP_CONSTRAINTS: tuple[str, ...] = ("dateparser<1.5",)
 
 #: Full unit name — must key into ``COMPANION_SERVICE_UNITS`` so the seam
 #: routes to the wrapper's ``svc-stop/svc-start hindsight`` arms (a bare
@@ -218,6 +229,147 @@ def _installed_version(runner: Runner, venv: Path) -> str | None:
         return None
     version = (proc.stdout or "").strip()
     return version or None
+
+
+def _dist_version(runner: Runner, venv: Path, dist: str) -> str | None:
+    """Version of ``dist`` inside ``venv``, or ``None`` when absent/unreadable."""
+    try:
+        proc = _run(
+            runner,
+            [
+                str(venv / "bin" / "python"),
+                "-c",
+                f"import importlib.metadata as m; print(m.version({dist!r}))",
+            ],
+            timeout=_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return (proc.stdout or "").strip() or None
+
+
+def _violated_constraints(runner: Runner, venv: Path) -> list[str]:
+    """The :data:`ENGINE_DEP_CONSTRAINTS` the venv's installed dists break.
+
+    A dist that is absent or unreadable is not a violation (nothing to fix).
+    """
+    broken: list[str] = []
+    for spec in ENGINE_DEP_CONSTRAINTS:
+        try:
+            req = Requirement(spec)
+        except InvalidRequirement:
+            continue
+        have = _dist_version(runner, venv, req.name)
+        if have is None:
+            continue
+        try:
+            if not req.specifier.contains(have, prereleases=True):
+                broken.append(spec)
+        except InvalidVersion:
+            continue
+    return broken
+
+
+def _engine_importable(runner: Runner, venv: Path) -> bool:
+    """True when the venv's own interpreter can ``import hindsight_api``."""
+    try:
+        proc = _run(
+            runner,
+            [str(venv / "bin" / "python"), "-I", "-c", "import hindsight_api"],
+            timeout=_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _engine_active(seam: SystemCtlSeam) -> bool:
+    try:
+        proc = seam.systemctl("systemctl", "is-active", SERVICE, check=False, timeout=30.0)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _reconcile_constraints(
+    seam: SystemCtlSeam,
+    runner: Runner,
+    http_get: Callable[[str], dict | None],
+    venv: Path,
+    *,
+    job_id: str | None,
+) -> dict[str, Any]:
+    """Pull an at-pin engine back inside :data:`ENGINE_DEP_CONSTRAINTS`.
+
+    The version pin alone leaves a box that already runs hindsight-api at the
+    pin untouched, so a dependency that drifted past its constraint (#3533)
+    would never be repaired. Installs the constrained requirement in place and
+    proves it with the venv's own probes (constraint satisfied, dist present,
+    ``import hindsight_api`` works). Only then is the engine try-restarted, and
+    only when it is running: a unit the operator stopped on purpose stays
+    stopped. The pip result and the restart result are reported separately,
+    because a re-run finds no violation and would never retry the restart.
+    Best effort: failures are logged and reported, never raised.
+
+    ``constraints`` is ``repaired`` | ``failed`` (the venv is not provably
+    fixed) | ``restart_failed`` (venv fixed, engine not healthy afterwards).
+    """
+    broken = _violated_constraints(runner, venv)
+    if not broken:
+        return {}
+    pip = str(venv / "bin" / "pip")
+    try:
+        proc = _run(runner, [pip, "install", *broken, "-q"], timeout=_PIP_TIMEOUT_S)
+        if proc.returncode != 0:
+            raise subprocess.SubprocessError(proc.stderr or "pip install failed")
+        _chown_tree(venv)
+        still = _violated_constraints(runner, venv)
+        if still:
+            raise subprocess.SubprocessError(f"still violates {still}")
+        for spec in ENGINE_DEP_CONSTRAINTS:
+            name = Requirement(spec).name
+            if _dist_version(runner, venv, name) is None:
+                raise subprocess.SubprocessError(f"{name} missing after the repair")
+        if not _engine_importable(runner, venv):
+            raise subprocess.SubprocessError("import hindsight_api fails after the repair")
+    except (OSError, subprocess.SubprocessError) as exc:
+        _chown_tree(venv)
+        log.warning(
+            "updater.memory_engine_constraints_failed",
+            job_id=job_id,
+            constraints=broken,
+            error=str(exc),
+            remedy="re-run 'hal0 update' when the cause (network, disk) is fixed",
+        )
+        return {"constraints": "failed", "constraints_error": str(exc)}
+
+    result: dict[str, Any] = {"constraints": "repaired", "repaired": broken}
+    if not _engine_active(seam):
+        log.info("updater.memory_engine_constraints_repaired", job_id=job_id, restarted=False)
+        return {**result, "restarted": False}
+    try:
+        seam.systemctl(
+            "systemctl", "try-restart", SERVICE, check=True, timeout=_SYSTEMCTL_TIMEOUT_S
+        )
+        healthy = _poll_health(http_get, _HEALTH_POLL_TOTAL_S)
+        error = None if healthy else f"/health not up within {_HEALTH_POLL_TOTAL_S}s"
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = str(exc)
+    if error is not None:
+        remedy = "systemctl restart hindsight-api"
+        log.warning(
+            "updater.memory_engine_restart_failed", job_id=job_id, error=error, remedy=remedy
+        )
+        return {
+            **result,
+            "constraints": "restart_failed",
+            "restart_error": error,
+            "remedy": remedy,
+        }
+    log.info("updater.memory_engine_constraints_repaired", job_id=job_id, restarted=True)
+    return {**result, "restarted": True}
 
 
 def _is_newer_than_pin(installed: str) -> bool:
@@ -435,7 +587,17 @@ def upgrade_memory_engine(
     if installed == HINDSIGHT_API_PIN:
         _prune_keep_newest(hs, ".venv.old-*")
         _prune_keep_newest(hs, ".pg0.pre-*")
-        return {"status": "converged", "version": installed}
+        extra: dict[str, Any] = {}
+        if upgrade:
+            extra = _reconcile_constraints(seam, runner, http_get, venv, job_id=job_id)
+        elif _violated_constraints(runner, venv):
+            log.warning(
+                "updater.memory_engine_constraints_stale",
+                job_id=job_id,
+                constraints=list(ENGINE_DEP_CONSTRAINTS),
+                remedy="run 'hal0 update' or re-run install.sh",
+            )
+        return {"status": "converged", "version": installed, **extra}
 
     if _is_newer_than_pin(installed):
         # A rolled-back (older-pinned) hal0 tree. Converging would downgrade
@@ -488,7 +650,9 @@ def upgrade_memory_engine(
         pip = str(venv_new / "bin" / "pip")
         _run(runner, [pip, "install", "--upgrade", "pip", "wheel", "-q"], timeout=_PIP_TIMEOUT_S)
         spec = f"hindsight-api=={HINDSIGHT_API_PIN}"
-        proc = _run(runner, [pip, "install", spec, "-q"], timeout=_PIP_TIMEOUT_S)
+        proc = _run(
+            runner, [pip, "install", spec, *ENGINE_DEP_CONSTRAINTS, "-q"], timeout=_PIP_TIMEOUT_S
+        )
         if proc.returncode != 0:
             raise subprocess.SubprocessError(proc.stderr or "pip install failed")
         built = _installed_version(runner, venv_new)

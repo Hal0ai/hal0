@@ -47,3 +47,13 @@ def test_install_sh_has_no_stray_hardcoded_pins() -> None:
         "install.sh hard-codes a hindsight-api version instead of using "
         f"${{HINDSIGHT_PIN}}: {stray}"
     )
+
+
+def test_install_sh_dep_constraints_match_python_constant() -> None:
+    from hal0.memory.engine_upgrade import ENGINE_DEP_CONSTRAINTS
+
+    text = _INSTALL_SH.read_text(encoding="utf-8")
+    match = re.search(r'^\s*HINDSIGHT_DEP_CONSTRAINTS="([^"]*)"', text, flags=re.MULTILINE)
+    assert match, "installer/install.sh no longer declares HINDSIGHT_DEP_CONSTRAINTS"
+    assert match.group(1).split() == list(ENGINE_DEP_CONSTRAINTS)
+    assert "${HINDSIGHT_DEP_CONSTRAINTS} -q" in text, "the fresh-install pip call must use it"

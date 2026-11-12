@@ -26,15 +26,18 @@ OLD_VERSION = "0.8.4"
 class FakeSeam:
     """Record every systemctl verb; optionally fail a specific one."""
 
-    def __init__(self, fail_verbs: set[str] | None = None):
+    def __init__(self, fail_verbs: set[str] | None = None, *, active: bool = True):
         self.calls: list[tuple[str, ...]] = []
         self.fail_verbs = fail_verbs or set()
+        self.active = active
 
     def systemctl(self, *args: str, check: bool = True, timeout: float | None = None):
         self.calls.append(args)
         verb = args[1]
         if verb in self.fail_verbs and check:
             raise subprocess.CalledProcessError(1, list(args))
+        if verb == "is-active":
+            return subprocess.CompletedProcess(list(args), 0 if self.active else 3, "", "")
         return subprocess.CompletedProcess(list(args), 0, "", "")
 
     @property
@@ -455,3 +458,184 @@ def test_restore_marker_is_down_before_the_copy_and_gone_after_success(hs):
     assert result["status"] == "rolled_back"
     assert seen == [True]  # a crash mid-copy would leave the marker
     assert not (hs / ".pg0.restore-failed").exists()
+
+
+# ── #3533: dependency constraints ──────────────────────────────────────────
+
+
+def _dateparser_runner(
+    state: dict[str, str | None],
+    *,
+    pip_rc: int = 0,
+    after: str | None = "1.4.3",
+    import_rc: int = 0,
+    order: list[str] | None = None,
+):
+    """At-pin engine whose dateparser version is ``state['dp']``.
+
+    A successful pip install moves it to ``after`` (``None`` models an
+    interrupted uninstall-then-install: the dist is gone).
+    """
+    inner = FakeRunner()
+    calls: list[list[str]] = []
+
+    def runner(args, **kwargs):
+        args = [str(a) for a in args]
+        calls.append(args)
+        if len(args) >= 3 and args[1] == "-c" and "importlib.metadata" in args[2]:
+            if "dateparser" in args[2]:
+                dp = state["dp"]
+                if dp is None:
+                    return subprocess.CompletedProcess(args, 1, "", "not found")
+                return subprocess.CompletedProcess(args, 0, f"{dp}\n", "")
+            return subprocess.CompletedProcess(args, 0, f"{HINDSIGHT_API_PIN}\n", "")
+        if args[1:3] == ["-I", "-c"] and "import hindsight_api" in args[3]:
+            return subprocess.CompletedProcess(args, import_rc, "", "")
+        if "pip" in Path(args[0]).name and "install" in args:
+            if order is not None:
+                order.append("pip")
+            if pip_rc == 0:
+                state["dp"] = after
+            return subprocess.CompletedProcess(args, pip_rc, "", "no")
+        return inner(args, **kwargs)
+
+    runner.calls = calls  # type: ignore[attr-defined]
+    return runner
+
+
+def _pips(runner) -> list[list[str]]:
+    return [c for c in runner.calls if "pip" in Path(c[0]).name]
+
+
+def test_constraint_is_rendered_and_is_a_real_specifier():
+    from packaging.requirements import Requirement
+
+    from hal0.memory.engine_upgrade import ENGINE_DEP_CONSTRAINTS
+
+    assert ENGINE_DEP_CONSTRAINTS == ("dateparser<1.5",)
+    spec = Requirement(ENGINE_DEP_CONSTRAINTS[0]).specifier
+    assert spec.contains("1.4.3") and not spec.contains("1.5.0")
+
+
+def test_rebuild_installs_constraints_with_the_pin(hs):
+    runner = FakeRunner()
+    upgrade_memory_engine(seam=FakeSeam(), runner=runner, http_get=_healthy, hs_dir=hs)
+    installs = [c for c in runner.calls if "pip" in Path(c[0]).name and "wheel" not in c]
+    assert installs
+    assert installs[0][2:4] == [f"hindsight-api=={HINDSIGHT_API_PIN}", "dateparser<1.5"]
+
+
+def test_at_pin_engine_with_bad_dateparser_is_repaired_and_try_restarted(hs):
+    order: list[str] = []
+    runner = _dateparser_runner({"dp": "1.5.0"}, order=order)
+
+    class OrderedSeam(FakeSeam):
+        def systemctl(self, *args, **kwargs):
+            order.append(args[1])
+            return super().systemctl(*args, **kwargs)
+
+    seam = OrderedSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
+    assert result["status"] == "converged"
+    assert result["constraints"] == "repaired"
+    assert result["restarted"] is True
+    assert any(c[2:] == ["dateparser<1.5", "-q"] for c in _pips(runner))
+    # try-restart, never restart (a stopped unit must not be started), and
+    # only after pip finished.
+    assert "restart" not in seam.verbs and "start" not in seam.verbs
+    assert order.index("pip") < order.index("try-restart")
+
+
+def test_stopped_unit_is_repaired_but_never_started(hs):
+    runner, seam = _dateparser_runner({"dp": "1.5.0"}), FakeSeam(active=False)
+    result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
+    assert result["constraints"] == "repaired"
+    assert result["restarted"] is False
+    assert seam.verbs == ["is-active"]
+
+
+def test_second_run_after_repair_is_idempotent(hs):
+    state: dict[str, str | None] = {"dp": "1.5.0"}
+    runner, seam = _dateparser_runner(state), FakeSeam()
+    upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
+    seam2 = FakeSeam()
+    before = len(_pips(runner))
+    again = upgrade_memory_engine(seam=seam2, runner=runner, http_get=_healthy, hs_dir=hs)
+    assert again == {"status": "converged", "version": HINDSIGHT_API_PIN}
+    assert seam2.calls == []
+    assert len(_pips(runner)) == before
+
+
+def test_at_pin_engine_with_good_dateparser_is_untouched(hs):
+    runner, seam = _dateparser_runner({"dp": "1.4.3"}), FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, hs_dir=hs)
+    assert result == {"status": "converged", "version": HINDSIGHT_API_PIN}
+    assert seam.calls == []
+    assert not _pips(runner)
+
+
+def test_failed_pip_never_restarts_the_engine(hs):
+    runner, seam = _dateparser_runner({"dp": "1.5.0"}, pip_rc=1), FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
+    assert result["status"] == "converged"
+    assert result["constraints"] == "failed"
+    assert seam.calls == []
+
+
+def test_pip_ok_but_still_violating_is_a_failure(hs):
+    runner, seam = _dateparser_runner({"dp": "1.5.0"}, after="1.5.0"), FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
+    assert result["constraints"] == "failed"
+    assert "still violates" in result["constraints_error"]
+    assert seam.calls == []
+
+
+def test_dateparser_missing_after_repair_is_a_failure(hs):
+    runner, seam = _dateparser_runner({"dp": "1.5.0"}, after=None), FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
+    assert result["constraints"] == "failed"
+    assert "missing" in result["constraints_error"]
+    assert seam.calls == []
+
+
+def test_engine_not_importable_after_repair_is_a_failure(hs):
+    runner, seam = _dateparser_runner({"dp": "1.5.0"}, import_rc=1), FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
+    assert result["constraints"] == "failed"
+    assert "import hindsight_api" in result["constraints_error"]
+    assert seam.calls == []
+
+
+def test_restart_raising_is_its_own_status_with_the_manual_remedy(hs):
+    runner = _dateparser_runner({"dp": "1.5.0"})
+    seam = FakeSeam(fail_verbs={"try-restart"})
+    result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
+    assert result["status"] == "converged"
+    assert result["constraints"] == "restart_failed"
+    assert result["repaired"] == ["dateparser<1.5"]
+    assert result["remedy"] == "systemctl restart hindsight-api"
+
+
+def test_restart_unhealthy_is_restart_failed(hs, monkeypatch):
+    monkeypatch.setattr("hal0.memory.engine_upgrade._HEALTH_POLL_TOTAL_S", 0)
+    runner, seam = _dateparser_runner({"dp": "1.5.0"}), FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, http_get=lambda url: None, hs_dir=hs)
+    assert result["constraints"] == "restart_failed"
+    assert "/health" in result["restart_error"]
+
+
+def test_root_repair_chowns_the_venv(hs, monkeypatch):
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    chowned: list[Path] = []
+    monkeypatch.setattr(shutil, "chown", lambda p, user=None, group=None: chowned.append(Path(p)))
+    runner = _dateparser_runner({"dp": "1.5.0"})
+    upgrade_memory_engine(seam=FakeSeam(), runner=runner, http_get=_healthy, hs_dir=hs)
+    assert hs / ".venv" in chowned and hs / ".venv" / "bin" / "python" in chowned
+
+
+def test_boot_mode_only_reports_bad_dateparser(hs):
+    runner, seam = _dateparser_runner({"dp": "1.5.0"}), FakeSeam()
+    result = upgrade_memory_engine(upgrade=False, seam=seam, runner=runner, hs_dir=hs)
+    assert result == {"status": "converged", "version": HINDSIGHT_API_PIN}
+    assert seam.calls == []
+    assert not _pips(runner)
