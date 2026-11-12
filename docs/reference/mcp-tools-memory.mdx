@@ -50,6 +50,9 @@ On the two-bank layout's private bank (`private:<agent>`), directives are
 their writer's: `memory_directive_create` stamps `agent:<id>` and
 `visibility:private`, and the directive tools see and change only the
 caller's own ([Memory banks](/docs/concepts/memory-banks#directives-on-hal0private)).
+On any other bank a directive is bank-wide, and the `agent:` and
+`visibility:` tags sent to `memory_directive_create` or
+`memory_directive_update` are dropped.
 
 These read tools apply the same private-memory rule as `memory_recall`: a
 memory tagged `visibility:private` is readable only by the agent named in its

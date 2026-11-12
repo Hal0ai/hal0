@@ -3433,17 +3433,25 @@ class HindsightProvider(MemoryProvider):
     # untagged or shared directive passes, as before.
 
     def _directive_tags(self, bank: str, client_id: str | None, tags: Any) -> list[str] | None:
-        """The tags a directive is written with on ``bank``."""
+        """The tags a directive is written with on ``bank``.
+
+        On every bank the provider owns the ``agent:`` and ``visibility:``
+        tags, as it does on memory writes (#3136): a caller's are dropped,
+        so no caller can plant a directive that another agent's reflect scope
+        (``not private OR agent:<them>``) loads as that agent's own. The
+        owner is stamped only on the two-bank private bank, the one place a
+        directive is private.
+        """
+        kept = None if tags is None else [t for t in coerce_tags(tags) if not _is_reserved_tag(t)]
         if not (self._two_bank and bank == self._private_bank):
-            return tags
+            return kept
         caller = self._caller_agent(client_id)
         if not is_identified(caller):
             raise Forbidden(
                 "a private directive needs an identified agent",
                 code="memory.directive_owner_required",
             )
-        kept = [t for t in coerce_tags(tags) if not _is_reserved_tag(t)]
-        return [*kept, f"{_AGENT_TAG_PREFIX}{caller}", _VISIBILITY_PRIVATE]
+        return [*(kept or []), f"{_AGENT_TAG_PREFIX}{caller}", _VISIBILITY_PRIVATE]
 
     async def _require_readable_directive(
         self, bank: str, directive_id: str, caller: str
