@@ -2,7 +2,7 @@
 
 A maintenance command is one that rebuilds the memory store with nothing
 else touching it: ``hal0 memory embedder switch`` today
-(:mod:`hal0.memory.embedder_switch`), and the fold-in of the legacy banks
+(:mod:`hal0.memory.embedder_switch`), and the fold-in of the old per-agent banks
 next. Each needs the same machinery, and this module holds it; the command
 keeps its own plan, its own sequence and its own journal format.
 
