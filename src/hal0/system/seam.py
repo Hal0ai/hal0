@@ -246,11 +246,13 @@ def as_hal0_argv(argv: Sequence[str]) -> list[str]:
     """``argv`` wrapped to run as the ``hal0`` service user from a root process.
 
     ``runuser``, else ``setpriv``, else ``sudo``, the order
-    ``installer/lib/run-as-hal0.sh`` uses, behind an ``env`` that sets
-    ``HOME`` to hal0's home so all three tools leave the same environment.
+    ``installer/lib/run-as-hal0.sh`` uses, behind an ``env`` that drops an
+    inherited ``HERMES_HOME`` and sets ``HOME`` to hal0's home, as that script
+    does, so all three tools leave the same environment. ``-u`` comes before
+    the assignment: after it, ``env`` would run ``-u`` as the command.
     The caller guarantees ``euid == 0`` and that the account exists.
     """
-    env_argv = ["env", f"HOME={hal0_service_home()}", *argv]
+    env_argv = ["env", "-u", "HERMES_HOME", f"HOME={hal0_service_home()}", *argv]
     if shutil.which("runuser"):
         return ["runuser", "-u", "hal0", "--", *env_argv]
     if shutil.which("setpriv"):

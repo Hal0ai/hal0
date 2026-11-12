@@ -40,11 +40,11 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # real). Tests for the binary-missing branch override this.
     monkeypatch.setattr(driver_mod, "_pi_binary_on_path", lambda: True)
     # The memory-endpoint wiring must not reach a real hal0-api or bridge store.
-    monkeypatch.setattr(driver_mod, "_compat_accepts", lambda url, token: None)
+    monkeypatch.setattr(driver_mod, "_known_homes", lambda: [])
     monkeypatch.setattr(
         PiDriver,
         "_managed_compat_key",
-        lambda self: {"status": "minted", "key": "hal0bk_pi-coder.test"},
+        lambda self, candidates: {"status": "minted", "key": "hal0bk_pi-coder.test"},
     )
     monkeypatch.delenv("HAL0_API_URL", raising=False)
     return tmp_path

@@ -1314,7 +1314,7 @@ def _update_pi() -> None:
         return
     record_component_result("pi", converge_pi())
     compat = result.get("memory_compat")
-    if compat in ("minted", "rotated"):
+    if compat in ("minted", "rotated", "reused"):
         console.print(
             f"Pi's memory client now uses hal0's /api/memory/compat (bridge key {compat})"
         )
