@@ -261,14 +261,16 @@ another agent.
   how many, and on which banks.
 - **Connect a coding agent** — pick an agent (Claude Code, Codex, OpenCode,
   Pi, Cursor CLI, Copilot CLI, Qwen Code) and follow three steps: mint a
-  bridge key with `hal0 bridge add <harness> --scope memory`, save the key
-  alone to a file, and run `hal0 memory agents install <harness>
+  bridge key with `hal0 bridge add <client> --scope memory` (the client is
+  the agent's own name, except Pi's, which is `pi-memory` because `pi` is
+  reserved), save the key alone to a file, and run `hal0 memory agents install <harness>
   --bridge-key-file <file>`. Both commands are shown ready to copy.
 
 `hal0 memory agents install <harness> --bridge-key-file <path>` is that last step. It runs the
 plugin's installer and points that harness at hal0's `/api/memory/compat`
 instead, so its memory goes through hal0's write envelope and project-scoped
-reads. Mint the key with `hal0 bridge add <harness> --scope memory` and save
+reads. Mint the key with `hal0 bridge add <client> --scope memory` (see above
+for the client name) and save
 it, alone, to a file (a path of `-` reads that key from stdin; `bridge add`
 prints a panel, so do not pipe it). `--bridge-key <key>` also works, but puts the
 key in the process list. The key carries the `agents` scope too, so it can
