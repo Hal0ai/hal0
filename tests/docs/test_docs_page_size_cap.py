@@ -17,6 +17,5 @@ def test_every_mdx_page_is_under_the_cap() -> None:
         if (n := len(p.read_text(encoding="utf-8"))) >= CAP
     }
     assert not over, (
-        f"docs pages must be under {CAP} characters; split these along a "
-        f"section boundary: {over}"
+        f"docs pages must be under {CAP} characters; split these along a section boundary: {over}"
     )
