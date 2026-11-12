@@ -4145,13 +4145,17 @@ else
                 # seeds only a bank that is missing, or empty with no retain
                 # mission. The installer's own paths are passed so a --dev
                 # prefix is honoured. A failure only warns: hal0-api seeds the
-                # same banks once it has the engine.
-                if HAL0_HOME="${HAL0_HOME_FOR_OWUI}" "${HAL0_BIN}" memory bank seed \
-                    --config "${HAL0_TOML}" --state-dir "${VAR_DIR}/state"; then
-                    info "seeded the memory banks this box's layout names"
-                else
-                    warn "memory bank seeding incomplete — hal0-api seeds them once it has the engine"
-                fi
+                # same banks once it has the engine. Its exit code tells a
+                # seed (0) from nothing to seed (3) and a deferred seed (4).
+                seed_rc=0
+                HAL0_HOME="${HAL0_HOME_FOR_OWUI}" "${HAL0_BIN}" memory bank seed \
+                    --config "${HAL0_TOML}" --state-dir "${VAR_DIR}/state" || seed_rc=$?
+                case "${seed_rc}" in
+                    0) info "seeded the memory banks this box's layout names" ;;
+                    3) info "memory banks already set up; nothing to seed" ;;
+                    4) info "memory bank seeding deferred while an embedder switch runs; hal0-api seeds them after it" ;;
+                    *) warn "memory bank seeding incomplete — hal0-api seeds them once it has the engine" ;;
+                esac
                 # #2353: say up front when the extraction slot cannot finish one
                 # extraction inside [memory.graph].llm_timeout_s, instead of the
                 # operator finding out from an empty bank once the retries run

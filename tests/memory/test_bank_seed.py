@@ -7,6 +7,7 @@ Run targeted:
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 
@@ -490,5 +491,14 @@ def test_cli_seed_exits_1_when_undecided(monkeypatch) -> None:
 def test_cli_seed_during_a_switch_is_not_a_failure(monkeypatch) -> None:
     runner, app, _ = _cli(monkeypatch, ({}, "the switch is running"))
     res = runner.invoke(app, ["seed"])
-    assert res.exit_code == 0
+    assert res.exit_code == 4
     assert "not seeding now: the switch is running" in res.output
+
+
+@pytest.mark.parametrize("results", [{"hal0:shared": "skipped", "hal0:private": "skipped"}, {}])
+def test_cli_seed_with_nothing_seeded_exits_3(monkeypatch, results) -> None:
+    """The installer must not say "seeded" when every bank was already set up."""
+    runner, app, _ = _cli(monkeypatch, (results, None))
+    res = runner.invoke(app, ["seed", "--json"])
+    assert res.exit_code == 3
+    assert json.loads(res.output)["banks"] == results

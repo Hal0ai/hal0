@@ -329,6 +329,10 @@ def bank_import_cmd(
 
 # ── ``hal0 memory bank seed`` ───────────────────────────────────────────────
 
+#: ``bank seed`` exit codes besides 0 (seeded) and 1 (failed or undecided).
+SEED_EXIT_NOTHING = 3
+SEED_EXIT_DEFERRED = 4
+
 
 @app.command("seed")
 def bank_seed_cmd(
@@ -351,10 +355,14 @@ def bank_seed_cmd(
     that holds anything, or already has a retain mission, is left alone, so a
     re-run is safe. Nothing is written while an embedder switch is running.
 
-    Exits 1 when the banks cannot be told or a bank could not be seeded;
-    hal0-api seeds the same banks once it has the engine.
+    Exit codes, which ``install.sh`` reads so it never reports a seed that
+    did not happen: 0 when at least one bank was seeded and none failed;
+    :data:`SEED_EXIT_NOTHING` (3) when every bank was already set up, or the
+    layout names none; :data:`SEED_EXIT_DEFERRED` (4) when an embedder switch
+    held the seed back; 1 when the banks cannot be told or a bank could not
+    be seeded. hal0-api seeds the same banks once it has the engine.
     """
-    from hal0.memory.bank_seed import FAILED, SeedUndecided, seed_box
+    from hal0.memory.bank_seed import FAILED, SEEDED, SeedUndecided, seed_box
 
     try:
         results, deferred = seed_box(toml_path=config, state_dir=state_dir)
@@ -376,6 +384,10 @@ def bank_seed_cmd(
             typer.echo(f"{bank}: {status}")
     if failed:
         raise typer.Exit(1)
+    if deferred is not None:
+        raise typer.Exit(SEED_EXIT_DEFERRED)
+    if SEEDED not in results.values():
+        raise typer.Exit(SEED_EXIT_NOTHING)
 
 
 # ── ``hal0 memory bank delete`` ─────────────────────────────────────────────

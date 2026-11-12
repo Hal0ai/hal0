@@ -209,7 +209,7 @@ def test_the_failed_enable_line_names_both_checks() -> None:
 
 def _seed_block() -> str:
     start = _TEXT.index('"${HAL0_BIN}" memory bank seed')
-    return _TEXT[start : _TEXT.index("\n                fi", start)]
+    return _TEXT[start : _TEXT.index("\n                esac", start)]
 
 
 def test_seeding_runs_the_cli_with_the_installers_paths() -> None:
@@ -232,7 +232,19 @@ def test_seeding_names_no_bank_and_posts_no_manifest() -> None:
 
 def test_seeding_failure_warns_and_the_install_carries_on() -> None:
     block = _seed_block()
-    assert 'warn "memory bank seeding incomplete' in block
+    assert "|| seed_rc=$?" in block
+    assert '*) warn "memory bank seeding incomplete' in block
+
+
+def test_seeding_says_seeded_only_on_exit_0() -> None:
+    """Exit 3 (nothing to seed) and 4 (deferred) are not reported as a seed."""
+    from hal0.cli.memory_bank_commands import SEED_EXIT_DEFERRED, SEED_EXIT_NOTHING
+
+    block = _seed_block()
+    assert '0) info "seeded the memory banks' in block
+    assert f'{SEED_EXIT_NOTHING}) info "memory banks already set up' in block
+    assert f'{SEED_EXIT_DEFERRED}) info "memory bank seeding deferred' in block
+    assert block.count("seeded the memory banks") == 1
 
 
 def test_seeding_runs_after_the_engine_answers_and_after_the_layout_is_recorded() -> None:
