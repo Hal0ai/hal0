@@ -1664,6 +1664,25 @@ def test_engine_env_report_clean_and_unreadable(tmp_path: Path):
     assert unreadable["checked"] is False and unreadable["drift"] == []
 
 
+def test_engine_env_report_checks_a_showcase_only_box(tmp_path: Path):
+    """#3550: a fresh install carries only showcase-lanes.conf. The report must
+    check the showcase keys, and must not demand the extraction drop-in's."""
+    from hal0.memory import extraction_env as ee
+
+    paths = _report_paths(tmp_path)
+    mem = _memory_cfg()
+    paths["showcase_path"].write_text("x")
+    expected = ee.expected_engine_env(mem, include_extraction=False, slots_dir=tmp_path)
+
+    clean = ee.engine_env_report(mem, unit_env=expected, slots_dir=tmp_path, **paths)
+    assert clean["installed"] is True and clean["checked"] is True
+    assert clean["drift"] == []
+
+    drifted = {**expected, "HINDSIGHT_API_LLM_MAX_CONCURRENT": "99"}
+    report = ee.engine_env_report(mem, unit_env=drifted, slots_dir=tmp_path, **paths)
+    assert [d["key"] for d in report["drift"]] == ["HINDSIGHT_API_LLM_MAX_CONCURRENT"]
+
+
 def test_engine_env_report_never_raises(tmp_path: Path):
     from hal0.memory import extraction_env as ee
 

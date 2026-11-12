@@ -966,7 +966,7 @@ def engine_env_report(
     rendered change has not been loaded yet (no ``daemon-reload`` + restart;
     a stale ``--parallel`` clamp shows up here too). Returns::
 
-        {"installed": bool,             # hal0's extraction drop-in exists
+        {"installed": bool,             # any hal0-managed drop-in exists
          "checked": bool,               # a unit env was available to compare
          "drift": [{"key", "expected", "effective"}],
          "legacy_drop_in": str | None,  # zz-h0-98 file still present
@@ -986,7 +986,11 @@ def engine_env_report(
     }
     try:
         report["legacy_drop_in"] = str(leftover) if leftover.exists() else None
-        report["installed"] = drop_in.exists()
+        extraction_present = drop_in.exists()
+        showcase_present = showcase.exists()
+        # Every managed drop-in counts (#3550): a fresh install carries only
+        # the showcase drop-in until the first graph-settings save.
+        report["installed"] = extraction_present or showcase_present
         if not report["installed"]:
             return report
         unit = dict(unit_env) if unit_env is not None else dict(show_unit_env() or {})
@@ -1011,7 +1015,8 @@ def engine_env_report(
             k: v
             for k, v in expected_engine_env(
                 memory,
-                include_showcase=showcase.exists(),
+                include_extraction=extraction_present,
+                include_showcase=showcase_present,
                 slots_dir=slots_dir,
                 embedder=view.render,
             ).items()
