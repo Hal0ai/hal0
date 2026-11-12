@@ -360,9 +360,9 @@ pause, no file.
   is queued or running.
 
 A run restarts the engine three times (15 to 30 seconds each on the reference
-box), exports and restores every bank, and re-embeds at about 60 facts per
-second on CPU. A small store takes about a minute and a half. Pick a quiet
-moment.
+box), exports every bank and restores it twice, and re-embeds at about 60
+facts per second on CPU, so every fact is embedded twice. A small store takes
+about two minutes. Pick a quiet moment.
 
 ### What `--apply` does
 
@@ -377,10 +377,15 @@ moment.
    environment that it runs the new model.
 5. Restores each archive into a temporary bank named `<bank>.switch-<run>`,
    which re-embeds every fact with the new model and makes no LLM call, and
-   compares it with the archive.
-6. Only when every bank matches: for each bank, checks the original one more
-   time, deletes it, renames its rebuilt bank into place and checks the
-   result.
+   compares it with the original as it was archived: its counts, every
+   document id and the length of its stored text, every fact's text and
+   tags, and each mental model's content. A restore that loses content is
+   found here, while every original is still untouched.
+6. Only when every bank matches: for each bank, checks the original and its
+   rebuilt copy one more time, deletes the original, restores its archive
+   again into the bank's own id, checks that the same way (its
+   knowledge-page and directive ids too), and only then deletes the rebuilt
+   copy.
 7. Returns the engine to its normal address and then lets writes through.
 
 The engine is isolated with one drop-in for its unit,
@@ -414,6 +419,21 @@ Nothing else writes the engine's banks or drop-ins while a run is unfinished:
 the default banks are not seeded, a new install's first-start step skips, and
 hal0-api's replay of boot-time writes waits for the pause to lift.
 
+### Ids after the switch
+
+Each bank keeps its knowledge-base folder and page ids (`kf-…`, `kp-…`), its
+directive ids, its mental-model ids and its document ids. That is why step 6
+restores a second time: the engine keeps those ids only on a restore into the
+bank's own id once the original is gone, never on the rebuilt copy beside it.
+Agents that hold a page id (the coding-agents plugin's
+`relates_to_page_id` and its initiative markers), Memory page links to a
+knowledge page, and bindings to a mental model keep working.
+
+Fact ids are not kept: the engine gives every restored fact a new id. A fact
+id written down before the switch, such as a link to an open fact on the
+Memory page or an id saved for `memory_delete`, no longer resolves. The dry
+run says this too.
+
 ### If it fails or is interrupted
 
 Before step 6 (an import fails, a count differs, the engine does not come up
@@ -438,14 +458,37 @@ engine is back at its normal address (recall works) while writes stay paused.
 `--status` and the doctor row say exactly that, and `--resume` isolates the
 engine again before it finishes the run.
 
+`--resume` never cancels a restore. The engine marks a cancelled restore
+as cancelled straight away but lets it go on writing, so a resume that finds
+one still running waits for it, and if it is still running after twice its
+expected time, stops without deleting or restoring anything and asks you to
+run `--resume` again later. A restore that someone else cancelled stops the
+resume until the engine has been restarted, which ends it. The switch tells a
+restart by the engine's process and by the unit's systemd `InvocationID`; if
+it can read neither, the message says so, and stopping the engine
+(`sudo systemctl stop hindsight-api.service`) before `--resume` works: the
+resume starts it again itself.
+
+If a bank restored into its own id fails its check, `--resume` restores it
+once more. If that fails the same way, the switch stops retrying and tells
+you to stop running `--resume`: it will not delete or restore that bank
+again. Its rebuilt copy, which matched before the original was deleted, and
+its archive are kept. Report it with the output of `--status`.
+
+`--resume` also stops, changing nothing, when the run stopped while it was
+deleting an original and that original is still there (the delete may have
+taken part of it), and when the journal was written by a different hal0
+version. Both messages name the archive directory.
+
 `--status` changes nothing and runs the same checks a resume would. For each
 bank it says what `--resume` will do; where the switch cannot repair
 something by itself it says exactly what you do, down to the command.
 
 `--resume` looks at which banks the engine has now, not only at its journal.
 What it can repair it repairs: a rebuilt bank that no longer matches is
-rebuilt from the original, a bank under neither name is restored from its
-archive. Run after a stop that happened before step 6, the same command
+rebuilt from the original, a bank missing from its own id is restored from
+its archive, and a restore into the own id that was cut short is deleted and
+done again. Run after a stop that happened before step 6, the same command
 undoes the run instead. The journal is kept in two places
 (`/var/lib/hal0/state/` and the archive directory), so losing one copy does
 not lose the run. You never edit it by hand.

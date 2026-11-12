@@ -57,6 +57,7 @@ PLAN: dict[str, Any] = {
     },
     "estimate_s": 104,
     "estimate": {"restarts_s": 75, "per_bank_s": 4, "embedding_s": 25},
+    "ids": es.IDS_ACROSS_SWITCH,
     "allow_pending": False,
     "refusals": [],
     "warnings": [],
@@ -145,7 +146,10 @@ def test_it_is_a_dry_run_by_default(stub) -> None:
     flat = " ".join(result.output.replace("│", " ").split())
     assert "1200" in flat and "about 2 min" in flat
     # What the time is made of, so a small store is not promised a second.
-    assert "75 s for three engine restarts" in flat and "25 s to re-embed" in flat
+    assert "75 s for three engine restarts" in flat and "25 s to re-embed every bank twice" in flat
+    # Which ids survive, stated before consent (#3597).
+    assert "ids kept: knowledge-base folder and page ids" in flat and "directive ids" in flat
+    assert "ids changed: fact ids" in flat
     # The cost, stated before consent: memory is out of service, recall included.
     assert "memory is out of service" in flat and "503 memory.writes_paused" in flat
     assert "recall, search and reflect fail until the run ends" in flat
@@ -219,7 +223,7 @@ def test_a_run_that_stopped_in_the_swap_points_at_resume(stub) -> None:
     es.journal_path().write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": es.JOURNAL_VERSION,
                 "run_id": "3f9a1c2e",
                 "started_at": "t",
                 "pid": 1,
@@ -230,7 +234,9 @@ def test_a_run_that_stopped_in_the_swap_points_at_resume(stub) -> None:
             }
         )
     )
-    stub["outcome"] = es.SwitchError("hindsight-admin rename-bank exited 1", resumable=True)
+    stub["outcome"] = es.SwitchError(
+        "deleting the bank: the engine answered HTTP 500", resumable=True
+    )
 
     result = runner.invoke(mec.app, ["switch", HS, "--apply"])
 
@@ -274,7 +280,7 @@ STATUS: dict[str, Any] = {
         "target": {"provider": "local", "model": HS},
         "started_at": "2026-11-11T02:00:00+00:00",
         "archive_dir": "/var/lib/hal0/backups/memory-embedder-switch-x-3f9a1c2e",
-        "error": "hindsight-admin rename-bank exited 1",
+        "error": "deleting the bank: the engine answered HTTP 500",
     },
     "journal_source": "/var/lib/hal0/state/memory-embedder-switch.json",
     "journal_error": None,
@@ -296,7 +302,7 @@ STATUS: dict[str, Any] = {
     "resume": [
         {
             "bank": "shared",
-            "step": "renamed",
+            "step": "placed",
             "action": "nothing: the bank is under its final id",
             "problem": None,
             "operator": None,
@@ -304,14 +310,14 @@ STATUS: dict[str, Any] = {
         {
             "bank": "agents",
             "step": "deleted",
-            "action": "rename the rebuilt bank into place",
+            "action": "restore the bank from its archive into its own id, keeping its ids",
             "problem": None,
             "operator": None,
         },
         {
             "bank": "notes",
             "step": "restored",
-            "action": "delete the original, then rename the rebuilt bank into place",
+            "action": "delete the original, then restore its archive into its own id",
             "problem": "the original changed after its archive was taken (facts 10 (expected 9))",
             "operator": "stop whatever writes to the engine's private port",
         },
@@ -331,7 +337,10 @@ def test_status_prints_the_journal_the_gate_the_banks_and_what_resume_would_do(s
     assert "run 3f9a1c2e, phase swapping" in flat
     assert "memory writes are paused" in flat and "no switch process is running" in flat
     assert "agents.switch-3f9a1c2e" in flat and "temporary (rebuilt copy of agents)" in flat
-    assert "agents (step deleted): rename the rebuilt bank into place" in flat
+    assert (
+        "agents (step deleted): restore the bank from its archive into its own id, keeping its ids"
+        in flat
+    )
     assert "the engine is isolated on 127.0.0.1:45123" in flat and "recall is unavailable" in flat
     # A bank the checks found wrong, and what to do about it.
     assert "the original changed after its archive was taken" in flat

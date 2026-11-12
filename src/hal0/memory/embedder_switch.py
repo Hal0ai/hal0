@@ -64,8 +64,9 @@ In order (:meth:`EmbedderSwitch.run`):
 6. **Restore** every archive into ``<bank>.switch-<run>`` and, once the engine
    is quiet, compare with the archive. Every bank is restored and compared
    before any original is touched.
-7. **Swap**, bank by bank: check the original once more, delete it, rename
-   the rebuilt bank into place, check the result.
+7. **Swap**, bank by bank: check the original once more, delete it, restore
+   its archive again, this time into the bank's own id, check the result
+   against the original, and only then delete the rebuilt copy.
 8. **Finish**: record the embedder without ``mixed``, return the engine to
    its normal address, retire the journal, then lift the gate.
 
@@ -77,13 +78,20 @@ originals were never touched.
 
 Step 7 cannot be undone, so it is resumable instead. The journal
 (:func:`journal_path`, mirrored into the archive directory on every save) is
-written and synced *before* each delete and each rename, naming the step
-about to happen. ``--resume`` (:meth:`EmbedderSwitch.resume`) never trusts a
+written and synced *before* each delete and each restore into a bank's own
+id, naming the step about to happen. ``--resume`` (:meth:`EmbedderSwitch.resume`) never trusts a
 journal step by itself: it looks at which of the two ids the engine has now
 (:func:`swap_action`). Whatever it can repair from the original or from the
 archive it repairs, so that the same resume does not fail twice for a reason
 the switch could have fixed; for the rest ``--status`` says exactly what the
-operator does.
+operator does. A journal of another version, or with a phase or step this
+code does not know, is refused, never guessed at (:data:`JOURNAL_VERSION`).
+
+A restore is never cancelled. Hindsight 1.2.0 marks a cancelled operation
+``cancelled`` at once, but a bank restore does not stop for it and the
+status it writes when it does end is suppressed, so a cancel would make a
+restore that is still writing look finished. A restore a resume finds
+running is waited for (:meth:`EmbedderSwitch._await_restore`).
 
 What is still checked
 ---------------------
@@ -98,20 +106,40 @@ fingerprint (:data:`FINGERPRINT_SIGNALS`) is kept to what cannot move by
 itself: digests of the directives, of the config overrides and of the mental
 models' definitions, and the time a document was last ingested.
 
-Renaming
---------
+Keeping ids
+-----------
 
-hindsight-api 1.2.0 has no HTTP rename (its OpenAPI has ``PUT``, ``PATCH`` and
-``DELETE`` on ``/v1/default/banks/{bank_id}``, none of which changes the id,
-and an alias API that adds a second name without changing the first). The
-rename is the engine's own admin command, run from the engine's venv with the
-engine unit's environment and as the account that owns the engine home::
+A bank keeps its ids across the switch: its knowledge-base folders and
+pages (``kf-``/``kp-``), its directives, its mental models and its
+documents. Agents and the Hindsight coding-agents plugin hold page ids
+(``relates_to_page_id``, the ``[[page:kp-...]]`` initiative markers they
+retain), and the dashboard links to a page by its id, so a switch that
+changed them would break all of those without a word (#3597).
 
-    <engine home>/.venv/bin/hindsight-admin rename-bank --from <temp> --to <bank>
+hindsight-api 1.2.0 keeps them only on a restore into the bank's own id
+once that bank is gone (``engine/transfer/importer.py``): knowledge-node ids
+are unique across the whole schema, so ``_restore_knowledge_pages`` gives a
+node a fresh UUID when its id is still held by another bank, and
+``_restore_bank`` drops every directive id (``_drop_ids``) when the target
+id is not the archive's own. Neither id can be set on create through the
+HTTP API (``create_knowledge_page`` and ``create_directive`` mint their
+own). The restore into ``<bank>.switch-<run>`` is therefore the check, made
+before any original is touched, and the bank that stays is a second restore
+of the same archive into the bank's own id, made after the original is
+deleted and compared with the original as it was exported: its counts,
+its fingerprint (directive and knowledge-node ids included), and the content
+checks of :data:`CONTENT_SIGNALS`, which a restore that came back lossy with
+the right counts fails: every document id with its content hash, every
+fact's text and tags, and each mental model's generated content.
+Mental-model ids are bank-scoped and survive either restore.
 
-It moves every row in one transaction and refuses a bank with pending or
-processing operations, which is why the swap waits for the rebuilt bank's
-queue before it deletes the original.
+Fact ids are the one thing no restore keeps: the engine replays every fact
+and gives it a new id (it remaps the mental models' evidence itself). The
+dry run says so.
+
+The price is a second embedding pass per bank. The rebuilt copy stays until
+the bank under its own id matches, so at no point is a bank held only by
+its archive.
 
 Test hook
 ---------
@@ -161,7 +189,11 @@ from hal0.security import nofollow
 
 log = structlog.get_logger(__name__)
 
-JOURNAL_VERSION = 1
+#: Version 2 is the delete-and-restore swap that keeps ids (#3597). A
+#: version 1 journal was written by the rename-based swap before it, whose
+#: steps (``renaming``, ``renamed``) mean nothing to this one: it is refused,
+#: never guessed at.
+JOURNAL_VERSION = 2
 
 #: The counts a restored bank must match, in the order they are reported.
 COUNT_KEYS: tuple[str, ...] = ("facts", "observations", "mental_models", "directives", "documents")
@@ -180,7 +212,35 @@ FINGERPRINT_SIGNALS: dict[str, str] = {
     "mental_models": "a digest of every mental model's definition (id, name, query, tags, "
     "trigger, token budget), not its generated content",
     "document": "the bank list's last_document_at: when a document was last ingested",
+    "knowledge": "a digest of the knowledge-base tree: every folder and page with its id, "
+    "kind, name, parent and backing mental model",
 }
+
+#: What a restored bank is checked by besides its counts and
+#: :data:`FINGERPRINT_SIGNALS`, against its original once it was exported
+#: (#3597): the rebuilt copy as soon as its restore ends and again before the
+#: original is deleted, and the bank restored into its own id. Each is exact:
+#: a lossy restore with the right counts fails it, and a failure names the
+#: documents and mental models that differ.
+#:
+#: The engine's own ``content_hash`` is not compared: a restore recomputes it
+#: from the text it stores (``importer.py``), so a bank with
+#: ``store_document_text`` off, whose rows keep the hash of a text they do
+#: not hold, would never match. The document listing carries no text, only
+#: its length (``LENGTH(original_text)``, 0 when none is stored), and that is
+#: what is compared.
+CONTENT_SIGNALS: dict[str, str] = {
+    "documents": "every document id with the length of its stored text (0 when the bank "
+    "does not store document text); the text itself is not in the engine's listing",
+    "facts": "per document, a digest of every world and experience fact's text, tags and "
+    "type (observations are left out: the engine consolidates them by itself)",
+    "mental-model content": "each mental model's generated content, while its "
+    "last_refreshed_at is the original's",
+}
+
+#: What a knowledge-base node is compared by: its place in the tree, not its
+#: generated content or its timestamps.
+_KNOWLEDGE_NODE_KEYS = ("id", "kind", "name", "parent_id", "mental_model_id")
 
 #: Counts only a writer can move. ``observations`` is not among them: the
 #: engine's consolidation adds and merges observations by itself, and an
@@ -198,6 +258,38 @@ RESTORE_FACTS_PER_S = 60.0
 #: and each restore has a floor of about a second however small the bank.
 RESTART_S = 25.0
 OPERATION_FLOOR_S = 1.0
+#: Each bank is restored twice: into its rebuilt copy, the check made before
+#: any original is touched, and then into its own id once the original is
+#: deleted, the only restore that keeps its ids (see "Keeping ids" above).
+RESTORES_PER_BANK = 2
+
+#: What the switch keeps and what it cannot, stated in every plan (#3597).
+IDS_ACROSS_SWITCH: dict[str, Any] = {
+    "kept": [
+        "knowledge-base folder and page ids (kf-..., kp-...)",
+        "directive ids",
+        "mental-model ids",
+        "document ids",
+    ],
+    "changed": ["fact ids: the engine gives every restored fact a new id"],
+    "verified": [
+        "facts, mental models, directives and documents by count, observations at least "
+        "as many as archived",
+        "knowledge-base folder and page ids, directive ids and text, mental-model ids and "
+        "definitions, and the bank's config, by digest",
+        "document ids with the length of their stored text, and every world and "
+        "experience fact's text and tags, by digest per document",
+        "each mental model's generated content, unless the engine refreshed it after the restore",
+    ],
+    "note": "each bank's rebuilt copy is compared with the original as it was exported, "
+    "content included, before the original is deleted; the bank is then restored into its "
+    "own id and compared again before its rebuilt copy is deleted, so "
+    "links and agents that hold a page or directive id keep working. A fact id written down "
+    "before the switch (a dashboard fact link, an id kept for memory_delete) no longer "
+    "resolves after it. With --allow-pending the document, fact and mental-model content "
+    "checks are skipped: the bank was still being written when it was exported",
+}
+
 #: A successful run restarts the engine three times: onto its private port,
 #: onto the target embedder, and back to its normal address.
 RESTARTS_PER_RUN = 3
@@ -219,12 +311,12 @@ ARCHIVE_FREE_FACTOR = 0.5
 _BANK_ID_MAX = 128
 
 #: Every id this command ever creates: ``<bank>.switch-<run>``, the digest
-#: form of it, and the scratch bank a recovery restore is recorded against.
+#: form of it, and the scratch bank a restore into a bank's own id is
+#: recorded against.
 _TEMP_RE = re.compile(
     r"(?:\.switch-[0-9a-f]{8}$)|(?:^switch-[0-9a-f]{8}-(?:scratch|[0-9a-f]{16})$)"
 )
 
-_ADMIN_BIN = "hindsight-admin"
 _PG_DIR = ".pg0"
 
 # Journal phases, in the order a run passes through them.
@@ -239,26 +331,32 @@ PHASE_ROLLED_BACK = "rolled_back"
 PHASE_COMPLETE = "complete"
 _FINISHED_PHASES = (PHASE_ROLLED_BACK, PHASE_COMPLETE)
 
-# Per-bank steps. ``deleting`` and ``renaming`` are saved before the call
-# they name; ``deleted`` and ``renamed`` after it answered.
+# Per-bank steps. ``deleting`` and ``placing`` are saved before the call
+# they name; ``deleted`` after it answered, and ``placed`` once the bank
+# under its own id was found to match.
 STEP_PLANNED = "planned"
 STEP_EXPORTED = "exported"
 STEP_RESTORED = "restored"
 STEP_DELETING = "deleting"
 STEP_DELETED = "deleted"
-STEP_RENAMING = "renaming"
-STEP_RENAMED = "renamed"
-_BEFORE_DELETE = (STEP_PLANNED, STEP_EXPORTED, STEP_RESTORED, STEP_DELETING)
-_AFTER_DELETE = (STEP_DELETED, STEP_RENAMING)
+STEP_PLACING = "placing"
+STEP_PLACED = "placed"
+_BEFORE_DELETE = (STEP_PLANNED, STEP_EXPORTED, STEP_RESTORED)
+_STEPS = (*_BEFORE_DELETE, STEP_DELETING, STEP_DELETED, STEP_PLACING, STEP_PLACED)
 
 # What :func:`swap_action` can answer.
-ACTION_SWAP = "delete the original, then rename the rebuilt bank into place"
-ACTION_RENAME = "rename the rebuilt bank into place"
+ACTION_SWAP = "delete the original, then restore its archive into its own id"
+ACTION_PLACE = "restore the bank from its archive into its own id, keeping its ids"
+ACTION_CHECK_PLACED = (
+    "check the bank restored into its own id against its archive, restoring it again if it "
+    "does not match"
+)
+ACTION_DROP_COPY = "delete the rebuilt copy: the bank under its own id matched"
 ACTION_VERIFY = "check the bank under its final id against its archive"
 ACTION_FINAL = "nothing: the bank is under its final id"
-ACTION_RECOVER = "restore the bank from its archive, then rename it into place"
 ACTION_REBUILD = "export and rebuild the bank again, then swap it"
 ACTION_RECREATED = "stop: the original id exists again beside the rebuilt bank"
+ACTION_DELETE_SENT = "stop: the original may be partly deleted"
 
 #: Where ``hook`` is called. ``<bank>`` is the bank's own id.
 HOOK_POINTS: tuple[str, ...] = (
@@ -271,14 +369,18 @@ HOOK_POINTS: tuple[str, ...] = (
     "before_swap",
     "before_delete:<bank>",
     "deleted:<bank>",
-    "before_rename:<bank>",
-    "renamed:<bank>",
+    "before_place:<bank>",
+    "placed:<bank>",
     "before_finish",
 )
 
 _OP_LIVE = ("pending", "processing")
 _OP_FAILED = ("failed", "cancelled", "not_found")
 _PAGE = 100
+#: Page size for the content listings read only for a bank restored into its
+#: own id: documents and facts can run to thousands, and the engine's list
+#: routes take any limit.
+_CONTENT_PAGE = 500
 
 
 class SwitchError(Exception):
@@ -328,13 +430,13 @@ class Timeouts:
     #: new embedder may download its weights.
     health_s: float = 600.0
     #: A restore is given this long, or ``restore_factor`` times its estimate
-    #: at :data:`RESTORE_FACTS_PER_S`, whichever is more. A cancelled restore
-    #: is given the same floor to really stop.
+    #: at :data:`RESTORE_FACTS_PER_S`, whichever is more. A restore found
+    #: still running on a resume is waited for twice that, never cancelled.
     restore_floor_s: float = 900.0
     restore_factor: float = 6.0
-    #: The temporary bank's queue going quiet before its rename.
+    #: A bank's queue going quiet before it is counted or deleted.
     quiet_s: float = 120.0
-    rename_s: float = 3600.0
+    delete_s: float = 3600.0
     http_s: float = 120.0
 
 
@@ -355,9 +457,19 @@ class BankEntry:
     step: str = STEP_PLANNED
     restored_counts: dict[str, int] | None = None
     restored_fingerprint: dict[str, Any] | None = None
-    #: ``{"bank", "id"}`` of a restore that may still be running.
-    restore_op: dict[str, str] | None = None
+    #: The original's :meth:`EmbedderSwitch.content_state` once it was
+    #: exported; ``None`` for a run with ``--allow-pending``.
+    contents: dict[str, Any] | None = None
+    #: ``{"bank", "id", "target", "engine_pid", "engine_invocation"}`` of a
+    #: restore that may still be running: the bank it is recorded against,
+    #: its operation id, the bank it writes, and the engine process and unit
+    #: invocation (systemd's ``InvocationID``) it was sent to.
+    restore_op: dict[str, Any] | None = None
     note: str | None = None
+    #: How the last restore into the bank's own id failed its check, and how
+    #: many restores in a row failed it the same way.
+    place_wrong: str | None = None
+    place_repeats: int = 0
 
 
 @dataclass
@@ -440,7 +552,7 @@ def temp_bank_id(bank: str, run_id: str) -> str:
 
 
 def scratch_bank_id(run_id: str) -> str:
-    """An empty bank a recovery restore is recorded against (see ``_recover``)."""
+    """An empty bank a restore into a bank's own id is recorded against (see ``_place``)."""
     return f"switch-{run_id}-scratch"
 
 
@@ -449,10 +561,44 @@ def is_switch_temp(bank: str) -> bool:
     return bool(_TEMP_RE.search(bank))
 
 
+_PHASES = (
+    PHASE_PAUSED,
+    PHASE_EXPORTING,
+    PHASE_FLIPPING,
+    PHASE_RESTORING,
+    PHASE_SWAPPING,
+    PHASE_ROLLING_BACK,
+    PHASE_ROLLBACK_FAILED,
+    *_FINISHED_PHASES,
+)
+
+
 def _parse_journal(raw: str) -> Journal:
+    """A journal this switch knows how to carry on. Raises :class:`ValueError` otherwise.
+
+    Anything it was not written to understand, an older or newer version, a
+    phase or a bank step it does not know, is refused rather than guessed at:
+    a guess in the swap can delete a bank.
+    """
     data = json.loads(raw)
-    if not isinstance(data, dict) or data.get("version") != JOURNAL_VERSION:
-        raise ValueError("not a version 1 switch journal")
+    if not isinstance(data, dict):
+        raise ValueError("not a switch journal")
+    where = data.get("archive_dir")
+    archives = f"; its archives are in {where}" if isinstance(where, str) and where else ""
+    version = data.get("version")
+    if version != JOURNAL_VERSION:
+        raise ValueError(
+            f"journal version {version!r}, written by a different hal0; this one carries on "
+            f"only version {JOURNAL_VERSION} and will not guess at another{archives}. Check "
+            "every bank against its archive by hand before lifting the pause"
+        )
+    if data.get("phase") not in _PHASES:
+        raise ValueError(f"unknown phase {data.get('phase')!r}{archives}")
+    for bank in data.get("banks") or []:
+        step = bank.get("step", STEP_PLANNED) if isinstance(bank, dict) else None
+        if step not in _STEPS:
+            name = bank.get("bank") if isinstance(bank, dict) else bank
+            raise ValueError(f"bank {name!r} is at unknown step {step!r}{archives}")
     return Journal.from_dict(data)
 
 
@@ -564,7 +710,7 @@ def blocking_reason() -> str | None:
 
     For ``hal0 update`` and the engine upgrade: an upgrade snapshots the
     engine's data directory and may roll back to it, which in the middle of a
-    switch would put renamed banks back under their temporary ids.
+    switch would bring back originals the switch had already deleted.
     """
     if lock_held():
         return "`hal0 memory embedder switch` is running on this box"
@@ -607,24 +753,36 @@ def update_in_progress() -> str | None:
 def swap_action(step: str, has_original: bool, has_rebuilt: bool) -> str:
     """What the swap does for one bank, from its journal step and the ids the engine has now.
 
-    The ids decide; the step only tells two otherwise identical pictures apart.
+    ``has_original`` is whether the bank's own id exists, ``has_rebuilt``
+    whether its rebuilt copy (``<bank>.switch-<run>``) does. The ids decide;
+    the step only tells two otherwise identical pictures apart.
     """
-    if has_rebuilt and not has_original:
-        return ACTION_RENAME
-    if not has_rebuilt and not has_original:
-        return ACTION_RECOVER
-    if has_original and not has_rebuilt:
-        if step == STEP_RENAMED:
-            # Verified when it was renamed. It is not verified again on every
+    if step == STEP_PLACED:
+        if has_original:
+            # Verified when it was placed. It is not verified again on every
             # resume: the bank is live once the run ends, and a check that
             # failed here would fail the same way for ever.
-            return ACTION_FINAL
-        # Either the rename happened and the journal never said so, or the
-        # rebuilt bank was lost before its original was ever deleted.
+            return ACTION_DROP_COPY if has_rebuilt else ACTION_FINAL
+        return ACTION_PLACE
+    if step == STEP_PLACING:
+        # The journal said ``placing`` before the restore into the own id was
+        # sent, so a bank under that id is this run's, whole or not.
+        return ACTION_CHECK_PLACED if has_original else ACTION_PLACE
+    if step == STEP_DELETING and has_original:
+        # The delete may have been sent and may have taken part of the bank:
+        # it is neither deleted again nor exported again without a person.
+        return ACTION_DELETE_SENT
+    if not has_original:
+        # Deleted (or lost) with or without its rebuilt copy: the archive
+        # puts it back under its own id either way.
+        return ACTION_PLACE
+    if not has_rebuilt:
+        # Before the delete: the rebuilt copy was lost while the original
+        # stood. After it: something put a bank under the original id.
         return ACTION_REBUILD if step in _BEFORE_DELETE else ACTION_VERIFY
     # Both ids. After a delete that answered, the original id can only be
     # back because something recreated it.
-    return ACTION_RECREATED if step in _AFTER_DELETE else ACTION_SWAP
+    return ACTION_RECREATED if step == STEP_DELETED else ACTION_SWAP
 
 
 def _bank_path(bank: str) -> str:
@@ -659,6 +817,19 @@ def _nearest_existing(path: Path) -> Path:
     return Path("/")
 
 
+def _knowledge_nodes(tree: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Every folder and page in a ``knowledge-base/tree`` answer, flattened."""
+    out: list[dict[str, Any]] = []
+    stack = list(tree.get("roots") or tree.get("nodes") or [])
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        out.append({k: node.get(k) for k in _KNOWLEDGE_NODE_KEYS})
+        stack.extend(node.get("children") or [])
+    return out
+
+
 def _diff(
     expected: Mapping[str, int], got: Mapping[str, int], *, observation_floor: bool = False
 ) -> dict[str, dict[str, int]]:
@@ -691,6 +862,75 @@ def _signals_moved(
     if not before:
         return []
     return [k for k in (keys or tuple(FINGERPRINT_SIGNALS)) if before.get(k) != now.get(k)]
+
+
+#: How many ids a content difference names per kind before it says "and N more".
+_SHOWN_IDS = 3
+
+
+def _ids_text(ids: list[str]) -> str:
+    shown = ", ".join(ids[:_SHOWN_IDS])
+    return shown + (f" and {len(ids) - _SHOWN_IDS} more" if len(ids) > _SHOWN_IDS else "")
+
+
+def _keyed_moved(name: str, before: Any, now: Any, *, changed: str) -> str | None:
+    """How two ``{id: value}`` maps differ, naming a few ids of each kind; ``None`` when equal.
+
+    A side that is not a map was recorded in a form this build does not
+    read, and is reported as a difference, never assumed equal.
+    """
+    if not isinstance(before, dict) or not isinstance(now, dict):
+        return None if before == now else f"{name} (recorded in a form this build cannot compare)"
+    missing = sorted(str(k) for k in before.keys() - now.keys())
+    extra = sorted(str(k) for k in now.keys() - before.keys())
+    differ = sorted(str(k) for k in before.keys() & now.keys() if before[k] != now[k])
+    parts = [
+        f"{label} {_ids_text(ids)}"
+        for label, ids in (("missing", missing), ("not in the original", extra), (changed, differ))
+        if ids
+    ]
+    return f"{name} ({'; '.join(parts)})" if parts else None
+
+
+def _contents_moved(before: Mapping[str, Any], now: Mapping[str, Any]) -> list[str]:
+    """The :data:`CONTENT_SIGNALS` that differ, each naming a few of the ids that do.
+
+    Documents are named by id. Facts get a new id on every restore, so they
+    are named by the document they belong to (``(no document)`` for those
+    that belong to none). A mental model's content is compared only while
+    its ``last_refreshed_at`` is the original's: the engine regenerates
+    content by itself, and a model it refreshed after the restore was not
+    lost by it.
+    """
+    moved = [
+        text
+        for text in (
+            _keyed_moved(
+                "documents",
+                before.get("documents"),
+                now.get("documents"),
+                changed="text length differs for",
+            ),
+            _keyed_moved(
+                "facts",
+                before.get("facts"),
+                now.get("facts"),
+                changed="differ for document",
+            ),
+        )
+        if text
+    ]
+    then, current = before.get("model_content") or {}, now.get("model_content") or {}
+    lost = sorted(
+        str(mid)
+        for mid, old in then.items()
+        if mid in current
+        and current[mid].get("refreshed") == old.get("refreshed")
+        and current[mid].get("content") != old.get("content")
+    )
+    if lost:
+        moved.append(f"mental-model content (differs for {_ids_text(lost)})")
+    return moved
 
 
 def _strip(value: Any) -> Any:
@@ -728,104 +968,6 @@ def _write_synced(path: Path, text: str, *, mode: int) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-
-
-def _safe_output(text: str, limit: int = 400) -> str:
-    """Tool output fit to show: secrets and URL credentials masked, then capped."""
-    from hal0.redaction import redact_log_line
-
-    lines = [redact_log_line(line) for line in text.strip().splitlines()]
-    cleaned = " | ".join(line.strip() for line in lines if line.strip())
-    return cleaned[-limit:] if cleaned else "no output"
-
-
-def admin_command(hs_dir: Path, old: str, new: str) -> list[str]:
-    """argv of the engine's own bank rename (``hindsight_api/admin/cli.py``, 1.2.0)."""
-    return [str(hs_dir / ".venv" / "bin" / _ADMIN_BIN), "rename-bank", "--from", old, "--to", new]
-
-
-def admin_env_file_unreadable() -> str | None:
-    """The unit's ``EnvironmentFile`` when it exists and this account cannot read it."""
-    from hal0.memory import extraction_env
-
-    path = extraction_env.HINDSIGHT_LLM_ENV_PATH
-    try:
-        if path.exists() and not os.access(path, os.R_OK):
-            return str(path)
-    except OSError:
-        return str(path)
-    return None
-
-
-def admin_environment(hs_dir: Path) -> dict[str, str]:
-    """The environment the engine's unit would start it with, for the admin command.
-
-    The admin command must find the same database the engine uses. On a hal0
-    box that is the embedded Postgres under ``$HOME/.pg0``, selected by the
-    unit's ``HOME=``; an operator who pointed the engine at another database
-    did it with ``HINDSIGHT_API_*`` lines in a drop-in or in the unit's
-    ``EnvironmentFile``, and both layers are read here in systemd's order.
-    The values go to the child's environment only, never to argv or a log.
-    """
-    from hal0.memory import extraction_env
-
-    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")}
-    env.update(extraction_env.hindsight_unit_env())
-    env.update(extraction_env._read_env_file(extraction_env.HINDSIGHT_LLM_ENV_PATH))
-    env.setdefault("HOME", str(hs_dir))
-    return env
-
-
-def run_admin_rename(
-    hs_dir: Path,
-    old: str,
-    new: str,
-    *,
-    timeout_s: float,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    euid: Callable[[], int] = os.geteuid,
-) -> str:
-    """Rename bank ``old`` to ``new`` with ``hindsight-admin``; returns its output, made safe.
-
-    A root caller runs it as the account that owns the engine home: the
-    embedded Postgres belongs to that account and refuses root. Raises
-    :class:`SwitchError` on a non-zero exit. The tool's output can quote a
-    database URL, so it is never passed on raw (:func:`_safe_output`).
-    """
-    unreadable = admin_env_file_unreadable()
-    if unreadable:
-        raise SwitchError(
-            f"{unreadable} (the engine unit's EnvironmentFile) is not readable by this account, "
-            f"so {_ADMIN_BIN} would not see the engine's settings; run the switch as root",
-            bank=new,
-        )
-    kwargs: dict[str, Any] = {}
-    if euid() == 0:
-        owner = os.stat(hs_dir)
-        if owner.st_uid != 0:
-            kwargs.update(user=owner.st_uid, group=owner.st_gid, extra_groups=[])
-    try:
-        proc = runner(
-            admin_command(hs_dir, old, new),
-            env=admin_environment(hs_dir),
-            cwd=str(hs_dir),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-            **kwargs,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise SwitchError(
-            f"could not run {_ADMIN_BIN} rename-bank ({type(exc).__name__})", bank=new
-        ) from None
-    output = _safe_output("\n".join(part for part in (proc.stdout, proc.stderr) if part))
-    if proc.returncode != 0:
-        raise SwitchError(
-            f"{_ADMIN_BIN} rename-bank --from {old} --to {new} exited {proc.returncode}: {output}",
-            bank=new,
-        )
-    return output
 
 
 def isolation_drop_in_path() -> Path:
@@ -1367,6 +1509,22 @@ def stop_engine_unit() -> dict[str, Any]:
     return {}
 
 
+def engine_invocation_id() -> str | None:
+    """systemd's ``InvocationID`` of the engine's unit: new on every start, ``None`` when unknown."""
+    try:
+        proc = subprocess.run(
+            ["systemctl", "show", "-p", "InvocationID", "--value", SERVICE],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = (proc.stdout or "").strip()
+    return value if proc.returncode == 0 and value else None
+
+
 def http_detail(text: str, limit: int = 120) -> str:
     """A short, single-line, markup-safe summary of an HTTP error body.
 
@@ -1395,14 +1553,14 @@ class EmbedderSwitch:
     thing: ``apply_dropin(embedder)`` renders the managed drop-in for that
     pair and restarts the engine (returning the ``apply_showcase_dropin``
     dict), ``evidence()`` is :func:`embedder_record.engine_evidence`,
-    ``rename_bank(old, new)`` is :func:`run_admin_rename`, ``isolate(port,
-    run_id)`` and ``release()`` write and remove the isolation drop-in
+    ``isolate(port, run_id)`` and ``release()`` write and remove the isolation drop-in
     (:func:`write_isolation_dropin`, :func:`remove_isolation_dropin`; the
     restart that follows either is ``apply_dropin``'s), ``isolated_port()``
     reads it back, ``client_for(base_url)`` builds the client for the private
     port, ``listener(port)`` says which process listens on a loopback port
     (:func:`loopback_listener`), ``unit_text()`` is ``systemctl cat`` of the
-    engine's unit (:func:`read_unit_text`), ``privileged()`` says whether
+    engine's unit (:func:`read_unit_text`), ``unit_invocation()`` is its
+    systemd ``InvocationID`` (:func:`engine_invocation_id`), ``privileged()`` says whether
     this process may do all of that, and ``hook(point)`` is the test hook
     described in the module docstring.
     """
@@ -1416,7 +1574,6 @@ class EmbedderSwitch:
         configured: Embedder | None = None,
         apply_dropin: Callable[[Embedder], dict[str, Any]] | None = None,
         evidence: Callable[[], Mapping[str, Any]] | None = None,
-        rename_bank: Callable[[str, str], str] | None = None,
         privileged: Callable[[], bool] | None = None,
         isolate: Callable[[int, str], dict[str, Any]] | None = None,
         release: Callable[[], dict[str, Any]] | None = None,
@@ -1425,6 +1582,7 @@ class EmbedderSwitch:
         client_for: Callable[[str], Any] | None = None,
         listener: Callable[[int], Mapping[str, Any]] | None = None,
         unit_text: Callable[[], str | None] | None = None,
+        unit_invocation: Callable[[], str | None] | None = None,
         pick_port: Callable[[], int] = free_loopback_port,
         hs_dir: Path | None = None,
         timeouts: Timeouts | None = None,
@@ -1442,6 +1600,7 @@ class EmbedderSwitch:
         self._client_for = client_for or self._default_client_for
         self._listener = listener or loopback_listener
         self._unit_text = unit_text or read_unit_text
+        self._unit_invocation = unit_invocation or engine_invocation_id
         #: ``api_version`` the preflight read; every restart must bring back the same.
         self._api_version: str | None = None
         self._pick_port = pick_port
@@ -1450,7 +1609,6 @@ class EmbedderSwitch:
         self._configured = configured
         self._apply_dropin = apply_dropin or self._default_apply_dropin
         self._evidence = evidence or embedder_record.engine_evidence
-        self._rename_bank = rename_bank or self._default_rename_bank
         self._privileged = privileged or self._default_privileged
         self._hs_dir = hs_dir
         self.t = timeouts or Timeouts()
@@ -1510,9 +1668,6 @@ class EmbedderSwitch:
             restart=True,
             embedder=embedder,
         )
-
-    def _default_rename_bank(self, old: str, new: str) -> str:
-        return run_admin_rename(self._engine_home(), old, new, timeout_s=self.t.rename_s)
 
     def _configured_embedder(self) -> Embedder:
         if self._configured is None:
@@ -1580,6 +1735,7 @@ class EmbedderSwitch:
         key: str,
         what: str,
         bank: str | None = None,
+        page_size: int = _PAGE,
     ) -> list[Any]:
         """Every row of a paged engine list.
 
@@ -1593,7 +1749,7 @@ class EmbedderSwitch:
             page = await self._json(
                 "GET",
                 path,
-                params={**(params or {}), "limit": _PAGE, "offset": len(rows)},
+                params={**(params or {}), "limit": page_size, "offset": len(rows)},
                 what=what,
                 bank=bank,
             )
@@ -1667,6 +1823,16 @@ class EmbedderSwitch:
         except SwitchError:
             # The per-bank config API can be switched off (features.bank_config_api).
             config = "unavailable"
+        try:
+            tree = await self._json(
+                "GET", f"{base}/knowledge-base/tree", what="reading the knowledge base", bank=bank
+            )
+            knowledge: Any = sorted(
+                (_knowledge_nodes(tree if isinstance(tree, dict) else {})),
+                key=lambda n: str(n.get("id")),
+            )
+        except SwitchError:
+            knowledge = "unavailable"
         row = await self._bank_row(bank)
         definitions = [
             {k: m.get(k) for k in _MODEL_DEFINITION_KEYS} for m in models if isinstance(m, dict)
@@ -1690,6 +1856,70 @@ class EmbedderSwitch:
                 "config": _digest(config),
                 "mental_models": _digest(definitions),
                 "document": row.get("last_document_at"),
+                "knowledge": _digest(knowledge),
+            },
+        }
+
+    async def content_state(self, bank: str) -> dict[str, Any]:
+        """What ``bank`` holds, by id, as :data:`CONTENT_SIGNALS` describes.
+
+        ``documents`` maps each document id to its stored-text length,
+        ``facts`` each document id to a digest of its facts, and
+        ``model_content`` each mental-model id to its refresh time and a
+        digest of its content. Read for a bank's original once it is
+        exported and for each bank restored from it: unlike :meth:`bank_state` it lists every
+        document and fact, which a bank of a thousand documents answers in a
+        few dozen requests.
+        """
+        base = _bank_path(bank)
+        documents = await self._list_all(
+            f"{base}/documents",
+            key="items",
+            what="listing documents",
+            bank=bank,
+            page_size=_CONTENT_PAGE,
+        )
+        facts: list[Any] = []
+        for kind in ("world", "experience"):
+            facts += await self._list_all(
+                f"{base}/memories/list",
+                {"type": kind},
+                key="items",
+                what=f"listing {kind} facts",
+                bank=bank,
+                page_size=_CONTENT_PAGE,
+            )
+        models = await self._list_all(
+            f"{base}/mental-models",
+            {"detail": "content"},
+            key="items",
+            what="reading mental models",
+            bank=bank,
+        )
+        by_document: dict[str, list[dict[str, Any]]] = {}
+        for f in facts:
+            if isinstance(f, dict):
+                by_document.setdefault(str(f.get("document_id") or "(no document)"), []).append(
+                    {
+                        "type": f.get("fact_type"),
+                        "text": f.get("text"),
+                        "tags": sorted(str(t) for t in (f.get("tags") or [])),
+                    }
+                )
+        return {
+            # Not the engine's content_hash: a restore recomputes it (see
+            # CONTENT_SIGNALS). The listing's text_length is LENGTH(original_text).
+            "documents": {
+                str(d.get("id")): d.get("text_length") for d in documents if isinstance(d, dict)
+            },
+            "facts": {doc: _digest(rows) for doc, rows in by_document.items()},
+            "model_content": {
+                str(m.get("id")): {
+                    "refreshed": m.get("last_refreshed_at"),
+                    "content": _digest(m.get("content")),
+                }
+                for m in models
+                if isinstance(m, dict)
             },
         }
 
@@ -1744,7 +1974,7 @@ class EmbedderSwitch:
     async def _delete_bank(self, bank: str) -> None:
         """Delete ``bank``. A bank that is already gone is a success."""
         try:
-            await self._client.request_json("DELETE", _bank_path(bank), timeout_s=self.t.rename_s)
+            await self._client.request_json("DELETE", _bank_path(bank), timeout_s=self.t.delete_s)
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return
@@ -1760,7 +1990,7 @@ class EmbedderSwitch:
             ) from exc
 
     async def _wait_quiet(self, bank: str) -> None:
-        """Wait until ``bank`` has no pending or processing operation (the rename refuses one)."""
+        """Wait until ``bank`` has no pending or processing operation, before it is deleted."""
         deadline = self._clock() + self.t.quiet_s
         while True:
             state = await self.bank_state(bank)
@@ -1769,7 +1999,7 @@ class EmbedderSwitch:
             if self._clock() >= deadline:
                 raise SwitchError(
                     f"bank {bank} still has {state['pending']} pending and {state['processing']} "
-                    f"processing operations after {self.t.quiet_s:g}s; it cannot be renamed "
+                    f"processing operations after {self.t.quiet_s:g}s; it is not deleted "
                     "until they finish",
                     bank=bank,
                 )
@@ -1912,6 +2142,17 @@ class EmbedderSwitch:
         result = await asyncio.to_thread(self._apply_dropin, embedder)
         if result.get("error"):
             raise SwitchError(f"could not restart the engine: {result['error']}")
+        if (
+            result.get("restarted") is True
+            and journal is not None
+            and any(e.restore_op for e in journal.banks)
+        ):
+            # The unit was restarted, which ends every worker it ran: a restore
+            # sent before this can no longer be writing.
+            for e in journal.banks:
+                if e.restore_op:
+                    e.restore_op["restarted"] = True
+            self._save(journal)
         where = f"its private port {port}" if port is not None else "its normal address"
         deadline = self._clock() + self.t.health_s
         while True:
@@ -2194,6 +2435,9 @@ class EmbedderSwitch:
                 continue
             entry.counts, entry.links = archived, after["links"]
             entry.fingerprint = after["fingerprint"]
+            # With operations still writing, the bank as it is now is not what
+            # the archive holds, so there is nothing exact to compare with.
+            entry.contents = None if journal.allow_pending else await self.content_state(entry.bank)
             entry.note = (
                 f"{-extra} observation(s) whose source facts are gone are not in the archive"
                 if extra < 0
@@ -2248,16 +2492,70 @@ class EmbedderSwitch:
         operation_id = str((body or {}).get("operation_id") or "")
         if not operation_id:
             raise SwitchError("the restore returned no operation id", bank=entry.bank)
-        entry.restore_op = {"bank": url_bank, "id": operation_id}
+        entry.restore_op = {
+            "bank": url_bank,
+            "id": operation_id,
+            "target": target_id,
+            "engine_pid": self._engine_pid(journal),
+            "engine_invocation": self._invocation(),
+        }
         self._save(journal)
-        embedded = entry.counts.get("facts", 0) + entry.counts.get("observations", 0)
-        budget = max(self.t.restore_floor_s, self.t.restore_factor * embedded / RESTORE_FACTS_PER_S)
-        await self._wait_operation(
-            url_bank, operation_id, timeout_s=budget, what=f"the restore into {target_id}"
-        )
+        budget = self._restore_budget(entry)
+        try:
+            await self._wait_operation(
+                url_bank, operation_id, timeout_s=budget, what=f"the restore into {target_id}"
+            )
+        except SwitchError as exc:
+            # Recorded against the scratch bank for a restore into the own
+            # id; it is still this bank's failure.
+            exc.bank = entry.bank
+            raise
         entry.restore_op = None
+        self._save(journal)
         # Counted once the engine has stopped working on the new bank.
         return await self._quiet_state(target_id)
+
+    def _restore_budget(self, entry: BankEntry) -> float:
+        embedded = entry.counts.get("facts", 0) + entry.counts.get("observations", 0)
+        return max(self.t.restore_floor_s, self.t.restore_factor * embedded / RESTORE_FACTS_PER_S)
+
+    def _engine_pid(self, journal: Journal) -> int | None:
+        """The process that holds the engine's private port, when it is the engine's unit."""
+        if journal.private_port is None:
+            return None
+        seen = self._listener_owner(journal.private_port)
+        pid = seen.get("pid")
+        return pid if seen.get("owner") == "unit" and isinstance(pid, int) else None
+
+    def _invocation(self) -> str | None:
+        """The engine unit's current ``InvocationID``; ``None`` when it cannot be read."""
+        try:
+            value = self._unit_invocation()
+        except Exception:  # cannot tell is not a crash
+            return None
+        return value if isinstance(value, str) and value else None
+
+    def _engine_restarted_since(self, journal: Journal, op: Mapping[str, Any]) -> bool | None:
+        """Whether the engine restarted since ``op`` was sent; ``None`` when it cannot be told.
+
+        Either signal is enough: the process on the private port is another
+        one, or the unit's ``InvocationID`` (new on every start, an automatic
+        restart included) is another one. Each is compared only when it was
+        recorded at the send and can be read now. A restart the switch made
+        itself is marked on the operation (``restarted``) and is enough alone.
+        """
+        if op.get("restarted"):
+            return True
+        known = False
+        for then, now in (
+            (op.get("engine_pid"), self._engine_pid(journal)),
+            (op.get("engine_invocation"), self._invocation()),
+        ):
+            if then is not None and now is not None:
+                if then != now:
+                    return True
+                known = True
+        return False if known else None
 
     async def _restore_checked(
         self, journal: Journal, entry: BankEntry, *, via: str | None = None
@@ -2273,6 +2571,22 @@ class EmbedderSwitch:
                 f"bank {entry.bank} did not come back whole: {_diff_text(differs)}",
                 bank=entry.bank,
                 details={"differs": differs},
+            )
+        # The copy keeps the original's document and mental-model ids, so its
+        # content is compared now, long before the original is deleted.
+        lost = (
+            _contents_moved(entry.contents, await self.content_state(entry.temp))
+            if entry.contents
+            else []
+        )
+        if lost:
+            self._save(journal)
+            raise SwitchError(
+                f"bank {entry.bank} did not come back whole: its rebuilt copy {entry.temp} "
+                f"differs from the original as it was archived: {'; '.join(lost)}. "
+                f"{entry.bank} was not touched",
+                bank=entry.bank,
+                details={"contents": lost},
             )
 
     # ── journal, lock, record ───────────────────────────────────────────
@@ -2362,6 +2676,7 @@ class EmbedderSwitch:
             "disk": None,
             "estimate_s": None,
             "estimate": None,
+            "ids": IDS_ACROSS_SWITCH,
             "allow_pending": self._allow_pending,
             "refusals": refusals,
             "warnings": warnings,
@@ -2419,7 +2734,7 @@ class EmbedderSwitch:
                 "not_privileged",
                 "run this as root (sudo): it moves the memory engine to a private port for "
                 "the duration, which means writing a drop-in for the engine's unit, restarting "
-                "the engine and renaming banks",
+                "the engine and replacing banks",
             )
         private = self._isolated_port()
         if private is not None:
@@ -2433,13 +2748,6 @@ class EmbedderSwitch:
             self._use_port(private or None)
         # The unit: what isolating the engine would rewrite, and what would fight it.
         refusals.extend(unit_refusals(self._unit_text(), self._normal_port()))
-        unreadable = admin_env_file_unreadable()
-        if unreadable:
-            refuse(
-                "env_file_unreadable",
-                f"{unreadable} (the engine unit's EnvironmentFile) is not readable by this "
-                f"account, so {_ADMIN_BIN} would not see the engine's settings; run this as root",
-            )
 
         # The record and the engine's environment. Read only: a run writes the
         # record down after every refusal has been evaluated.
@@ -2535,12 +2843,6 @@ class EmbedderSwitch:
                 "remove HINDSIGHT_API_ENABLE_DOCUMENT_IMPORT_API=false from its environment "
                 "and restart it",
             )
-        if not os.access(hs_dir / ".venv" / "bin" / _ADMIN_BIN, os.X_OK):
-            refuse(
-                "rename_tool_missing",
-                f"{hs_dir}/.venv/bin/{_ADMIN_BIN} is missing or not executable; the switch "
-                "renames each rebuilt bank into place with it",
-            )
 
         # The banks.
         try:
@@ -2606,8 +2908,8 @@ class EmbedderSwitch:
         banks = len(plan["banks"])
         plan["estimate"] = {
             "restarts_s": round(RESTARTS_PER_RUN * RESTART_S),
-            "per_bank_s": round(banks * 2 * OPERATION_FLOOR_S),
-            "embedding_s": round(embedded / RESTORE_FACTS_PER_S),
+            "per_bank_s": round(banks * (1 + RESTORES_PER_BANK) * OPERATION_FLOOR_S),
+            "embedding_s": round(RESTORES_PER_BANK * embedded / RESTORE_FACTS_PER_S),
         }
         plan["estimate_s"] = sum(plan["estimate"].values())
         if target != configured:
@@ -2748,8 +3050,8 @@ class EmbedderSwitch:
                 detail = await self._where_the_data_is()
                 if found["error"]:
                     raise SwitchError(
-                        f"the switch journal is not usable ({found['error']}) and no mirror "
-                        f"of it was found. {detail} Nothing was changed"
+                        f"the switch journal is not usable ({found['error']}) and no usable "
+                        f"mirror of it was found. {detail} Nothing was changed"
                     )
                 if write_gate.read_gate() is not None or self._isolated_port() is not None:
                     raise SwitchRefused(
@@ -2974,10 +3276,10 @@ class EmbedderSwitch:
     def _way_out(self, journal: Journal, bank: str) -> str:
         """What the operator does about a bank the switch will not touch by itself."""
         return (
-            f"look at it on the engine's private port, and if it is not wanted delete it "
-            f"(`curl -X DELETE http://127.0.0.1:{journal.private_port}{_bank_path(bank)}`); then "
-            "`hal0 memory embedder switch --resume` carries on, restoring a bank that is "
-            "missing from its archive"
+            "look at it on the engine's private port, then delete the remains of the original "
+            f"(`curl -X DELETE http://127.0.0.1:{journal.private_port}{_bank_path(bank)}`); "
+            "`hal0 memory embedder switch --resume` then restores the already-verified "
+            "archive in its place"
         )
 
     async def _rebuilt_differs(self, entry: BankEntry, bank_id: str) -> str:
@@ -2985,7 +3287,10 @@ class EmbedderSwitch:
 
         Read once the engine is quiet. It may hold more observations than its
         archive (the engine consolidates what was not consolidated yet), never
-        fewer.
+        fewer. Its content (:data:`CONTENT_SIGNALS`) is compared with the
+        original as it was exported: the copy keeps the original's document
+        and mental-model ids, so a restore that loses content is found here,
+        before the original is deleted, and not only once it is gone.
         """
         state = await self._quiet_state(bank_id)
         reasons: list[str] = []
@@ -2995,6 +3300,10 @@ class EmbedderSwitch:
         signals = _signals_moved(entry.restored_fingerprint, state["fingerprint"])
         if signals:
             reasons.append("differs from the bank that was rebuilt in: " + ", ".join(signals))
+        if entry.contents:
+            lost = _contents_moved(entry.contents, await self.content_state(bank_id))
+            if lost:
+                reasons.append("differs from the original as it was archived: " + "; ".join(lost))
         return "; ".join(reasons)
 
     async def _rebuild(self, journal: Journal, entry: BankEntry, index: int) -> None:
@@ -3005,19 +3314,66 @@ class EmbedderSwitch:
         entry.note = None
         self._save(journal)
         await self._export_verified(journal, entry, index)
-        await self._restore_checked(journal, entry)
+        try:
+            await self._restore_checked(journal, entry)
+        except SwitchError as exc:
+            if "contents" in exc.details:
+                # Rebuilt from the original as it is now, and still short:
+                # the restore itself drops this, and another resume will too.
+                exc.message += (
+                    ". It was exported and rebuilt again just now, so the restore itself "
+                    "gives this result: if --resume reports it again, stop running it. "
+                    f"{entry.bank} still holds everything and nothing will delete it; keep the "
+                    "journal and the pause and report this with the output of "
+                    "`hal0 memory embedder switch --status`"
+                )
+                exc.args = (exc.message,)
+            raise
         entry.step = STEP_RESTORED
         self._save(journal)
 
-    async def _recover(self, journal: Journal, entry: BankEntry) -> None:
-        """Bring back a bank that exists under neither id, into its temporary id.
+    async def _placed_differs(self, entry: BankEntry) -> str:
+        """How the bank under its own id differs from its original as archived; empty when not.
 
-        The engine records a restore against the bank in the URL and refuses a
-        target that exists, so the URL cannot be the bank being restored: the
-        restore goes through an empty scratch bank this run creates, into the
-        temporary id, and the ordinary rename follows.
+        Unlike the rebuilt copy, the bank restored into its own id must come
+        back as the original was, ids included: every fingerprint signal is
+        compared with the original's at its export, the knowledge-base tree
+        and the directives (both digested with their ids) among them. Read
+        once the engine is quiet.
         """
-        self._say(f"{entry.bank} exists under neither id; restoring it from its archive")
+        state = await self._quiet_state(entry.bank)
+        reasons: list[str] = []
+        differs = _diff(entry.counts, state["counts"], observation_floor=True)
+        if differs:
+            reasons.append(_diff_text(differs))
+        signals = _signals_moved(entry.fingerprint, state["fingerprint"])
+        if entry.contents:
+            signals += _contents_moved(entry.contents, await self.content_state(entry.bank))
+        if signals:
+            reasons.append("differs from the original as it was archived: " + ", ".join(signals))
+        return "; ".join(reasons)
+
+    def _place_repeats_message(self, journal: Journal, entry: BankEntry, wrong: str) -> str:
+        """What the operator is told once restores into the own id keep failing the same way."""
+        return (
+            f"bank {entry.bank} was restored into its own id {entry.place_repeats} times and "
+            f"failed its check the same way each time ({wrong}), although its rebuilt copy "
+            "matched the original, content included, before the original was deleted. "
+            "Restoring it again gives the same result, so the switch will not delete or "
+            f"restore {entry.bank} again: stop running --resume. What it holds of the bank: "
+            f"{entry.bank} as the engine last restored it; the rebuilt copy {entry.temp}, "
+            "kept if it is still listed; and the archive "
+            f"{journal.archive_dir}/{entry.archive}, taken before anything was deleted. "
+            "Writes stay paused. Keep the journal as it is and report this with the output "
+            "of `hal0 memory embedder switch --status`"
+        )
+
+    async def _ensure_scratch(self, journal: Journal) -> None:
+        """Create the empty bank a restore into a bank's own id is recorded against.
+
+        The engine records a restore against the bank in the URL and refuses
+        a target that exists, so the URL cannot be the bank being restored.
+        """
         if journal.scratch not in set(await self._bank_ids()):
             await self._json(
                 "PUT",
@@ -3026,19 +3382,106 @@ class EmbedderSwitch:
                 what="creating the scratch bank",
                 bank=journal.scratch,
             )
-        await self._restore_checked(journal, entry, via=journal.scratch)
+
+    async def _place(self, journal: Journal, entry: BankEntry) -> None:
+        """Restore ``entry``'s archive into the bank's own id, which must not exist.
+
+        The step is saved as ``placing`` before the restore is sent, so a bank
+        found under that id later is known to be this run's. A restore this
+        run sent earlier and never saw finish is waited for first, never
+        cancelled: two restores must not write the same bank.
+        """
+        await self._await_restore(journal, entry)
+        await self._ensure_scratch(journal)
+        self._hook(f"before_place:{entry.bank}")
+        entry.step = STEP_PLACING
+        self._save(journal)
+        await self._restore(journal, entry, entry.bank, via=journal.scratch)
+
+    async def _await_restore(self, journal: Journal, entry: BankEntry) -> None:
+        """Wait until ``entry``'s restore, if one may still run, has ended. Never cancel it.
+
+        Hindsight 1.2.0 cancels cooperatively: ``DELETE`` on an operation flips
+        it to ``cancelled`` at once, but a bank restore never looks at that, so
+        its worker goes on writing, and the ``completed`` or ``failed`` it
+        writes at the end is suppressed once the row says ``cancelled``
+        (``cancel_operation`` and ``_mark_operation_*`` in ``memory_engine.py``).
+        A cancelled restore therefore looks ended while it still writes, and
+        nothing the engine reports says when it really stops. So the switch
+        never cancels a restore; it waits for ``completed`` or ``failed``, the
+        worker's own last word. A restore found ``cancelled`` (by someone
+        else) or gone from the engine is believed ended only when the engine
+        has restarted since it was sent (:meth:`_engine_restarted_since`): a
+        restart of the unit ends its worker, and the engine's start-up recovery
+        requeues only ``processing`` rows. Anything else is refused, and
+        nothing is deleted or restored again.
+        """
+        op = entry.restore_op
+        if not op:
+            return
+        path = f"{_bank_path(op['bank'])}/operations/{quote(op['id'], safe='')}"
+        target = op.get("target") or entry.bank
+        budget = 2 * self._restore_budget(entry)
+        deadline = self._clock() + budget
+        delay = min(0.2, self.t.poll_s)
+        while True:
+            found = await self._json("GET", path, what="reading the restore", bank=entry.bank)
+            status = found.get("status") if isinstance(found, dict) else None
+            if status in ("completed", "failed"):
+                break
+            if status not in _OP_LIVE:
+                restarted = self._engine_restarted_since(journal, op)
+                if restarted:
+                    break
+                blind = (
+                    ""
+                    if restarted is not None
+                    else " If this message comes back after the restart, the switch cannot "
+                    "see the engine's process: no process of the unit holds "
+                    f"127.0.0.1:{journal.private_port} as far as it can tell, or `systemctl "
+                    f"show -p InvocationID {SERVICE}` gives nothing, or the restore was "
+                    "recorded by a build that wrote neither down. Then stop the engine "
+                    f"(`systemctl stop {SERVICE}`), which ends every restore, and run "
+                    "--resume: it starts the engine again and records it"
+                )
+                raise SwitchError(
+                    f"the restore of {entry.bank} into {target} (operation {op['id']}) is "
+                    f"recorded as {status or 'unknown'}. Hindsight lets a cancelled restore "
+                    "go on writing and never reports when it stops, so the switch cannot "
+                    f"tell whether {target} is still being written; nothing was deleted or "
+                    "restored again. Restart the engine (`systemctl restart "
+                    f"{SERVICE}`), which ends that restore, then run "
+                    "`hal0 memory embedder switch --resume`." + blind,
+                    bank=entry.bank,
+                    details={"operation_id": op["id"], "status": status},
+                )
+            if self._clock() >= deadline:
+                raise SwitchError(
+                    f"the restore of {entry.bank} into {target} (operation {op['id']}) is "
+                    f"still {status} after {budget:g}s. The switch does not cancel a restore "
+                    "(Hindsight would mark it cancelled and let it go on writing), and "
+                    f"nothing was deleted or restored again. Let it finish (`journalctl -u "
+                    f"{SERVICE}`), then run `hal0 memory embedder switch --resume` again",
+                    bank=entry.bank,
+                    details={"operation_id": op["id"], "status": status},
+                )
+            await self._sleep(delay)
+            delay = min(self.t.poll_s, delay * 1.5)
+        entry.restore_op = None
+        self._save(journal)
 
     async def _swap_one(
         self, journal: Journal, entry: BankEntry, index: int, *, rebuild: bool
     ) -> None:
-        """Put the rebuilt bank in the original's place. Safe to run again after any stop.
+        """Put the bank back under its own id, with its ids. Safe to run again after any stop.
 
         What to do comes from :func:`swap_action`: the ids the engine has now,
         with the journal step as tie-breaker. Each destructive call is
-        preceded by a synced journal save naming it. On a resume
-        (``rebuild``) anything that can be repaired from the original or from
-        the archive is repaired, so the same resume never fails twice for a
-        reason the switch could have fixed.
+        preceded by a synced journal save naming it. The rebuilt copy is
+        deleted only once the bank under its own id matches the original as
+        archived. On a resume (``rebuild``) anything that can be repaired from
+        the original or from the archive is repaired, so the same resume never
+        fails twice for a reason the switch could have fixed.
         """
         bank, temp = entry.bank, entry.temp
         existing = set(await self._bank_ids())
@@ -3053,6 +3496,15 @@ class EmbedderSwitch:
                 + self._way_out(journal, bank),
                 bank=bank,
             )
+        if action == ACTION_DELETE_SENT:
+            raise SwitchError(
+                f"the run stopped while deleting bank {bank}, and {bank} is still there: the "
+                "delete may have been sent and may have removed part of it, so the switch will "
+                "neither delete it again nor export it again. Its archive, taken before the "
+                f"delete, is {journal.archive_dir}/{entry.archive}. To go on: "
+                + self._way_out(journal, bank),
+                bank=bank,
+            )
         if action == ACTION_REBUILD:
             if not rebuild:
                 raise SwitchError(
@@ -3062,9 +3514,6 @@ class EmbedderSwitch:
                 )
             await self._rebuild(journal, entry, index)
             action = ACTION_SWAP
-        if action == ACTION_RECOVER:
-            await self._recover(journal, entry)
-            action = ACTION_RENAME
 
         if action == ACTION_SWAP:
             # Never delete an original without a whole replacement in hand,
@@ -3080,9 +3529,18 @@ class EmbedderSwitch:
                 wrong = await self._rebuilt_differs(entry, temp)
                 moved = "" if wrong or journal.allow_pending else await self._original_moved(entry)
             if wrong:
+                again = (
+                    "It was rebuilt again just now and still does not match, so the restore "
+                    "itself gives this result: stop running --resume, which would only rebuild "
+                    f"it once more. {bank} is untouched and still holds everything; nothing "
+                    "will delete it. Keep the journal and the pause as they are and report "
+                    "this with the output of `hal0 memory embedder switch --status`"
+                    if rebuild
+                    else "Run --resume, which rebuilds it"
+                )
                 raise SwitchError(
                     f"the rebuilt bank {temp} does not match the archive of {bank} ({wrong}); "
-                    f"{bank} was not touched. Run --resume, which rebuilds it",
+                    f"{bank} was not touched. {again}",
                     bank=bank,
                 )
             if moved:
@@ -3095,7 +3553,6 @@ class EmbedderSwitch:
                     "now and carries on",
                     bank=bank,
                 )
-            await self._wait_quiet(temp)
             self._hook(f"before_delete:{bank}")
             entry.step = STEP_DELETING
             self._save(journal)
@@ -3103,30 +3560,65 @@ class EmbedderSwitch:
             entry.step = STEP_DELETED
             self._save(journal)
             self._hook(f"deleted:{bank}")
-            action = ACTION_RENAME
+            action = ACTION_PLACE
 
-        if action == ACTION_RENAME:
-            await self._wait_quiet(temp)
-            self._hook(f"before_rename:{bank}")
-            entry.step = STEP_RENAMING
+        if action == ACTION_CHECK_PLACED:
+            # A restore into the own id that this run sent and did not see
+            # through: let it end, then keep the bank only if it is whole.
+            await self._await_restore(journal, entry)
+            wrong = await self._placed_differs(entry)
+            if wrong and entry.place_repeats >= 2 and wrong == entry.place_wrong:
+                raise SwitchError(self._place_repeats_message(journal, entry, wrong), bank=bank)
+            if wrong:
+                self._say(f"{bank} under its own id is not whole ({wrong}); restoring it again")
+                await self._delete_bank(bank)
+                action = ACTION_PLACE
+
+        if action == ACTION_PLACE:
+            self._say(f"restoring {bank} into its own id")
+            await self._place(journal, entry)
+            wrong = await self._placed_differs(entry)
+            if wrong:
+                if wrong == entry.place_wrong:
+                    entry.place_repeats += 1
+                else:
+                    entry.place_wrong, entry.place_repeats = wrong, 1
+                self._save(journal)
+                if entry.place_repeats >= 2:
+                    raise SwitchError(self._place_repeats_message(journal, entry, wrong), bank=bank)
+                kept = (
+                    f"its rebuilt copy {temp} is kept"
+                    if temp in set(await self._bank_ids())
+                    else "it has no rebuilt copy"
+                )
+                raise SwitchError(
+                    f"bank {bank}, restored into its own id, does not match the original as it "
+                    f"was archived ({wrong}); {kept}, and its archive is "
+                    f"{journal.archive_dir}/{entry.archive}. Run --resume, which restores it "
+                    "again once; if it fails the same way, the switch stops trying",
+                    bank=bank,
+                )
+        elif action == ACTION_VERIFY:
+            # A bank under the own id after its original was deleted, which
+            # this run did not put there.
+            wrong = await self._placed_differs(entry)
+            if wrong:
+                raise SwitchError(
+                    f"bank {bank} is under its final id but does not match its archive "
+                    f"({wrong}). Nothing more was changed. Its archive is "
+                    f"{journal.archive_dir}/{entry.archive}. To go on: "
+                    + self._way_out(journal, bank),
+                    bank=bank,
+                )
+
+        if entry.step != STEP_PLACED:
+            entry.step = STEP_PLACED
             self._save(journal)
-            output = await asyncio.to_thread(self._rename_bank, temp, bank)
-            if "could not be rebuilt" in output or " failed" in output:
-                entry.note = output
-            self._hook(f"renamed:{bank}")
-
-        # ACTION_VERIFY, and the end of every other path: the bank must be
-        # under its own id and match its archive before the journal says so.
-        wrong = await self._rebuilt_differs(entry, bank)
-        if wrong:
-            raise SwitchError(
-                f"bank {bank} is under its final id but does not match its archive ({wrong}). "
-                f"Nothing more was changed. Its archive is {journal.archive_dir}/{entry.archive}. "
-                "To go on: " + self._way_out(journal, bank),
-                bank=bank,
-            )
-        entry.step = STEP_RENAMED
-        self._save(journal)
+            self._hook(f"placed:{bank}")
+        # The bank is under its own id and matched: its rebuilt copy has done its job.
+        if temp in set(await self._bank_ids()):
+            await self._wait_quiet(temp)
+            await self._delete_bank(temp)
 
     async def _swap_all(self, journal: Journal, *, rebuild: bool) -> None:
         # The journal of per-bank swaps goes to disk before any original is touched.
@@ -3137,7 +3629,7 @@ class EmbedderSwitch:
         for index, entry in enumerate(journal.banks):
             self._say(f"swapping {entry.bank} into place ({index + 1}/{len(journal.banks)})")
             try:
-                # A bank journalled as renamed goes through this too: the step
+                # A bank journalled as placed goes through this too: the step
                 # is only believed once the engine agrees.
                 await self._swap_one(journal, entry, index, rebuild=rebuild)
             except SwitchError as exc:
@@ -3215,30 +3707,10 @@ class EmbedderSwitch:
 
     # ── rollback ────────────────────────────────────────────────────────
 
-    async def _stop_restores(self, journal: Journal) -> None:
-        """Cancel every restore that may still run and wait until each has really ended."""
+    async def _await_restores(self, journal: Journal) -> None:
+        """Wait until every restore that may still run has ended (see :meth:`_await_restore`)."""
         for entry in journal.banks:
-            op = entry.restore_op
-            if not op:
-                continue
-            path = f"{_bank_path(op['bank'])}/operations/{quote(op['id'], safe='')}"
-            with contextlib.suppress(SwitchError):
-                await self._json("DELETE", path, what="cancelling the restore", bank=entry.bank)
-            deadline = self._clock() + self.t.restore_floor_s
-            while True:
-                found = await self._json("GET", path, what="reading the restore", bank=entry.bank)
-                status = found.get("status") if isinstance(found, dict) else None
-                if status not in _OP_LIVE:
-                    break
-                if self._clock() >= deadline:
-                    raise SwitchError(
-                        f"the restore of {entry.bank} was cancelled but is still {status} after "
-                        f"{self.t.restore_floor_s:g}s; its temporary bank could still appear",
-                        bank=entry.bank,
-                    )
-                await self._sleep(self.t.poll_s)
-            entry.restore_op = None
-            self._save(journal)
+            await self._await_restore(journal, entry)
 
     async def _sweep(self, journal: Journal) -> None:
         """Delete every id this run created that the engine still has."""
@@ -3296,7 +3768,7 @@ class EmbedderSwitch:
                 # Still answering at its normal address means the isolation
                 # never took, and then nothing was ever done behind it.
                 if private:
-                    await self._stop_restores(journal)
+                    await self._await_restores(journal)
                     await self._sweep(journal)
                 if private and journal.flip_started and journal.banks:
                     # The engine ran the target. A bank this run does not know,
@@ -3378,12 +3850,24 @@ class EmbedderSwitch:
                         "exports and rebuilds it again"
                     )
             elif action == ACTION_VERIFY:
-                wrong = await self._rebuilt_differs(entry, entry.bank)
+                wrong = await self._placed_differs(entry)
                 if wrong:
                     problem = f"the bank under its final id does not match its archive ({wrong})"
                     operator = self._way_out(journal, entry.bank)
+            elif action == ACTION_CHECK_PLACED:
+                wrong = await self._placed_differs(entry)
+                if wrong:
+                    problem = f"the bank under its own id is not whole yet ({wrong})"
+                    operator = (
+                        self._place_repeats_message(journal, entry, wrong)
+                        if entry.place_repeats >= 2 and wrong == entry.place_wrong
+                        else "nothing: --resume deletes it and restores it again"
+                    )
             elif action == ACTION_RECREATED:
                 problem = "the original id exists again beside the rebuilt bank"
+                operator = self._way_out(journal, entry.bank)
+            elif action == ACTION_DELETE_SENT:
+                problem = "the run stopped while deleting the original, which is still there"
                 operator = self._way_out(journal, entry.bank)
         except SwitchError as exc:
             problem = exc.message
@@ -3583,17 +4067,22 @@ class EmbedderSwitch:
 
 
 __all__ = [
+    "ACTION_CHECK_PLACED",
+    "ACTION_DELETE_SENT",
+    "ACTION_DROP_COPY",
     "ACTION_FINAL",
+    "ACTION_PLACE",
     "ACTION_REBUILD",
-    "ACTION_RECOVER",
     "ACTION_RECREATED",
-    "ACTION_RENAME",
     "ACTION_SWAP",
     "ACTION_VERIFY",
+    "CONTENT_SIGNALS",
     "COUNT_KEYS",
     "FINGERPRINT_SIGNALS",
     "HARD_COUNTS",
     "HOOK_POINTS",
+    "IDS_ACROSS_SWITCH",
+    "RESTORES_PER_BANK",
     "RESTORE_FACTS_PER_S",
     "BankEntry",
     "EmbedderSwitch",
@@ -3601,9 +4090,6 @@ __all__ = [
     "SwitchError",
     "SwitchRefused",
     "Timeouts",
-    "admin_command",
-    "admin_env_file_unreadable",
-    "admin_environment",
     "archive_root",
     "blocking_reason",
     "effective_exec_start",
@@ -3620,7 +4106,6 @@ __all__ = [
     "lock_path",
     "private_exec_start",
     "remove_isolation_dropin",
-    "run_admin_rename",
     "scratch_bank_id",
     "swap_action",
     "temp_bank_id",

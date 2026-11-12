@@ -6,6 +6,11 @@
 2026-11-10. Decisions 1, 4, 5 and 6 are on main (#3540, #3541, #3542); the
 rest are in progress or planned in the order given under Consequences.
 
+Decision 2 amended 2026-11-12 (#3597): the bank that replaces an original is
+a second restore of its archive into the original's own id, not the rebuilt
+copy renamed into place, because only that restore keeps knowledge-page and
+directive ids.
+
 Amends ADR-0005 (tag scoping gains a required envelope; decision 7 replaces
 both `unified_bank` layouts) and ADR-0023 (the engine's environment has one
 managed drop-in, not two). ADR-0052 and ADR-0056 stand. Tracking issues:
@@ -58,7 +63,10 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
   configured model and rebuilds links, with no LLM call. `restore` mode writes
   a whole bank (observations, mental models, knowledge pages, directives) into
   a bank id that must not exist; `merge` mode folds documents into an existing
-  bank. `hindsight-api admin rename-bank` renames a bank in place.
+  bank. A `restore` keeps knowledge-page and directive ids only when it
+  writes into the archive's own bank id and no other bank holds those ids
+  (`engine/transfer/importer.py`), so a bank keeps its ids only if its
+  original is deleted and its archive restored under the same id.
 
 ## Decision
 
@@ -72,8 +80,12 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
    exports every bank, stops writes, flips the recorded embedder, restarts the
    engine, restores each bank under a temporary id, compares fact, observation,
    mental-model and directive counts, and only then deletes the old bank and
-   renames the new one into place. It is a dry run by default. A failed
-   comparison leaves the old bank untouched and flips the record back.
+   restores the archive again into the bank's own id, which keeps its
+   knowledge-page and directive ids (a rename of the copy would not; see the
+   amendment under Status). That bank is compared with the original as
+   exported, ids and content included, before the temporary copy is deleted.
+   It is a dry run by default. A failed comparison leaves the old bank
+   untouched and flips the record back.
 3. **Both embedders are supported; the defaults differ by install age.** A
    fresh install records `hs-embed-1`. An upgraded store with no record is
    recorded as `bge-small-en-v1.5`, which is what built it, and stays there
