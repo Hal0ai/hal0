@@ -14,10 +14,10 @@ completely absent when it's off. A fresh install turns it on for you; it stays
 a conscious, revertible choice rather than something that silently accumulates
 data on an existing box.
 
-Memory was rebuilt for v1.0 ("memory v2"): a redesigned dashboard workspace
-(ranked fact list, curate, history, a force-directed graph) sits behind the
-same engine-neutral backend described on this page. See
-[Browse the Bank workspace](/docs/guides/memory-workspace) for the UI tour.
+The dashboard shows memory in one place, the Memory area (Health, Facts,
+Knowledge, Operations and Agents), over the same engine-neutral backend
+described on this page. See [The Memory area](/docs/guides/memory-workspace)
+for the UI tour.
 
 ## What memory is
 
@@ -71,11 +71,11 @@ approval-gate pattern as `memory_add`/`memory_delete` — `memory_curate`'s
 `state` toggle is reversible so it stays autonomous, while
 `memory_mental_model_delete` and `memory_directive_delete` gate for operator
 approval the same way a bulk `memory_delete` does. The full tool-by-tool
-schema lives in [MCP tools](/docs/reference/mcp-tools) — this page covers the
+schema lives in [MCP tools: hal0-memory](/docs/reference/mcp-tools-memory) — this page covers the
 concepts those tools operate on.
 
 ![Memory interface showing stored facts and recall](/screenshots/memory-view.png)
-*The dashboard's Memory view (Bank workspace, list mode)*
+*The fact workspace on the Memory area's Facts tab (list mode)*
 
 The engine is **Hindsight** — a memory service that powers the shared operator
 and agent "brain." When configured, hal0 builds a Hindsight client and wraps
@@ -201,9 +201,12 @@ Two kinds of tag are moved out of the tag list:
 
 A metadata key the caller already set is left as the caller set it; an empty
 `session_id` counts as not set. Every other tag passes through unchanged:
-namespaced tags such as `source:`, `knowledge:`, `origin:`, `harness:` and
-`project:`, and your own bare words. A `project:<slug>` tag is kept when you
-send one; hal0 does not derive one from text or metadata.
+namespaced tags such as `source:`, `knowledge:`, `origin:` and `harness:`, and
+your own bare words.
+
+A `project:<name>` tag is not stored as sent: hal0 normalises it and drops a
+denied name, and a durable write with no project gets `scope:global`.
+[Memory projects](/docs/concepts/memory-projects) has the rules.
 
 The reason is how the engine consolidates. It builds observations per scope,
 and by default a scope is one distinct set of tags. A tag that changes with
@@ -221,6 +224,8 @@ than leaving it to the tag set:
   `[["project:<slug>"]]`, one scope per project tag. Its observations carry
   that project tag and nothing else, so what is learned in one project does
   not become a belief about another.
+- A coding client's write with no project (`project:unresolved`) is sent with
+  `[["project:unresolved", "agent:<id>"]]`, a scope of its writer's own.
 - A private write in the unified bank keeps the engine's default scoping, so
   an observation built from a private note still carries `visibility:private`.
 
@@ -426,8 +431,8 @@ on any save. The write and restart go through hal0's privileged-operation seam
 rather than hal0-api (which runs unprivileged) touching `/etc/systemd`
 directly.
 
-Pick the engine model under **Engine model** on Settings → Data → Memory or on the
-agents Memory tab (Local slots / Upstream models), or from the CLI with
+Pick the engine model under **Engine model** on Settings → Data → Memory
+(Local slots / Upstream models), or from the CLI with
 `hal0 memory graph enable --model <id>`; `--local` returns to the local
 `extraction_slot`, and `--model` cannot be combined with `--slot` or
 `--local`. `GET /api/memory/graph/status` reports `target`, `available_models`
@@ -465,10 +470,10 @@ When enabled, memory becomes the shared brain that ties the platform together:
     can also call the MCP tools directly.
   </Card>
   <Card title="Operator memory" icon="document">
-    The dashboard's Memory view (Overview + Bank workspace) and the
-    `/api/memory/*` routes let you add, search, browse the graph, and curate
-    facts directly — across banks, documents, mental models, and directives.
-    See [Browse the Bank workspace](/docs/guides/memory-workspace).
+    The dashboard's Memory area and the `/api/memory/*` routes let you add,
+    search, browse the graph, and curate facts directly — across banks,
+    documents, mental models, and directives.
+    See [The Memory area](/docs/guides/memory-workspace).
   </Card>
   <Card title="Namespaced writes" icon="setting">
     Callers identify themselves (via the `X-hal0-Agent` header), so private
@@ -486,8 +491,9 @@ When enabled, memory becomes the shared brain that ties the platform together:
 ## Where to go next
 
 <CardGrid>
+  <LinkCard title="Memory projects" href="/docs/concepts/memory-projects" description="How project tags are resolved, the registry, and per-project scopes." />
   <LinkCard title="Enable memory" href="/docs/guides/enable-memory" description="Turn it on, pick an engine, configure graph extraction and reranking." />
-  <LinkCard title="Browse the Bank workspace" href="/docs/guides/memory-workspace" description="The dashboard's fact list, filters, curation, and graph views." />
+  <LinkCard title="The Memory area" href="/docs/guides/memory-workspace" description="Health and its repair path, facts, knowledge, operations and agents in the dashboard." />
   <LinkCard title="Agents" href="/docs/concepts/agents" description="The agent that uses memory as its brain." />
   <LinkCard title="Security" href="/docs/concepts/security" description="Identity, namespaces, and the auth layer." />
 </CardGrid>

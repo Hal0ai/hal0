@@ -18,6 +18,13 @@ operator's say-so) the first time it starts with the bridge on, renders its
 key into `openwebui.env` as MCP tool-server connections, and re-renders on
 rotate, re-scope and revoke. See "Managed client for Open WebUI" below.
 
+**Amended (2026-11-11).** The BRIDGE class covers a third surface: the
+engine-compatible memory endpoint under `/api/memory/compat` (ADR-0058,
+decision 4b), which the Hindsight coding-agents plugin is pointed at. It is
+the first REST surface a bridge key opens besides `GET /api/bridge/me`, and
+the `memory` scope is checked by its handlers, not by the class. See
+"Engine-compatible memory endpoint" below.
+
 The first change under this record ships the keys, the store, the credential
 tier, the REST and CLI surface, the config section and a doctor row. The
 second ships Decisions 8 and 9, the `hal0-agents` server and its run tools;
@@ -99,9 +106,18 @@ ADR-0035 was verified against), shapes the answer:
    client is added or its key rotated, and cannot be recovered. Because a
    client's memory identity is its bare name, the names hal0's own callers and
    namespaces use are reserved: `hermes`, `pi`, `admin`, `anonymous`, `shared`,
+   `unknown`, `unresolved` (the last two since the 2026-11-11 amendment:
+   `unknown` is the identity stamped on a memory write whose caller had none,
+   and `unresolved` is a part of a stored document id),
    every name starting `hal0`, and every name starting `hermes__`
    (`RESERVED_CLIENT_NAMES` and `RESERVED_CLIENT_PREFIXES` in
-   `src/hal0/bridge/keys.py`).
+   `src/hal0/bridge/keys.py`). Minting refuses a reserved name, and a key
+   minted before its name was reserved is refused where the auth middleware
+   judges a bridge principal (`reserved_bridge_principal` in
+   `src/hal0/api/auth.py`): `403 bridge.client_name_reserved` on every
+   non-OPEN path, every MCP mount and `/api/memory/compat` included (#3560).
+   The `bridge-store` doctor row names such a client and says to revoke it
+   (`hal0 bridge revoke <name>`) and mint a replacement under another name.
 2. **The store is `bridge.db`, a separate SQLite file.**
    `/var/lib/hal0/bridge.db`, `hal0:hal0` mode `0600`, with the `-wal` and
    `-shm` siblings listed as permission rows in `install/perms.py` so
@@ -125,7 +141,8 @@ ADR-0035 was verified against), shapes the answer:
    `Principal(tier="bridge", name=<client>)` for a bearer that starts with
    `hal0bk_` and whose hash matches an unrevoked row; other bearers are never
    hashed against the store. The exposure table gains `AuthClass.BRIDGE`, used
-   by `/mcp/agents` and `GET /api/bridge/me` and nothing else. A BRIDGE route
+   by `/mcp/agents` and `GET /api/bridge/me` and nothing else (since the
+   2026-11-11 amendment, also by `/api/memory/compat`). A BRIDGE route
    admits a `bridge` or an `admin` principal, always: with `[security]
    require_auth` off, and from loopback. This is the precedent of ADR-0040
    (the ComfyUI gate's own credential) applied to a surface that must not
@@ -156,7 +173,9 @@ ADR-0035 was verified against), shapes the answer:
    `GET /v1/models` admit it as they admit a caller with no key. The one
    exception is `GET /api/bridge/me`, which accepts the bridge
    key itself and returns the caller's name and its created and last-seen
-   times, so onboarding is verifiable with one `curl`.
+   times, so onboarding is verifiable with one `curl`. (The 2026-11-11
+   amendment adds a second: `/api/memory/compat`, for a key that holds
+   `memory`.)
 5. **The operator surface is one CLI over one REST group.** REST, all ADMIN:
    `GET` and `POST /api/bridge/clients`, `DELETE /api/bridge/clients/{name}`
    (revoke), `POST /api/bridge/clients/{name}/rotate`, and
@@ -365,6 +384,43 @@ the client rather than asking the operator to (`hal0.bridge.managed`).
   for the shared one, while Hermes's own notes and Open WebUI's `memory_add`
   are shared by default (ADR-0035 decision 9). The two are different writers
   with different defaults on purpose.
+
+### Engine-compatible memory endpoint
+
+ADR-0058 decision 4b points the Hindsight coding-agents plugin at hal0
+instead of at the memory engine's own port. The plugin speaks the engine's
+REST protocol, sends one `Authorization: Bearer` header and has no option for
+any other, so the credential it presents has to be one hal0 can bind an
+identity to. That is a bridge key.
+
+- **The class.** One exposure rule, `/api/memory/compat` and everything under
+  it, `AuthClass.BRIDGE`, every method (`COMPAT_MEMORY_PREFIX` and the rule in
+  `src/hal0/security/exposure.py`). Like the other two BRIDGE surfaces it
+  admits a `bridge` or an `admin` principal at every auth posture and never
+  rides the dev-open bypass. The rule is placed above the pinned
+  `memory destructive (any DELETE)` row: a plugin deletes its own documents
+  here, and under that row the call would be ADMIN.
+- **The scope is the handler's to check.** The middleware holds a bridge
+  principal to its scopes only outside OPEN and BRIDGE paths (`_verdict` in
+  `src/hal0/api/auth.py`), so on a BRIDGE path any bridge key is admitted. The
+  endpoint's handlers therefore all depend on `require_memory_bridge`
+  (`src/hal0/api/routes/memory_compat.py`): the admin credential, or a bridge
+  key that holds `memory`; any other key is `403
+  memory.compat_scope_required`. A new BRIDGE surface that is scoped must do
+  the same.
+- **Identity.** The bridge client's name, read from the principal the
+  middleware judged, stamped on every write as `agent:<name>`. `X-hal0-Agent`
+  and `X-hal0-Private` are not read. The admin credential acts as `admin`, a
+  name no client can take (Decision 1). The name is also the client's
+  document namespace and the seed of its operation ids, so a key whose name
+  has since been reserved (`unknown`, `unresolved`) is refused, by the auth
+  middleware before any handler runs, with `403 bridge.client_name_reserved`
+  (Decision 1).
+- **What it is not.** It is not a way round the scope table for the rest of
+  REST: a bridge key is still refused on every other non-OPEN `/api/*` and
+  `/v1/*` route, `/api/memory/*` outside this prefix included. It reaches no
+  bank-scoped delete; the handlers refuse a `DELETE` on a bank and delete a
+  document only for the client that wrote it.
 
 ### Implementation decisions (second change)
 

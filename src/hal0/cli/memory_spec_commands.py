@@ -12,10 +12,12 @@ import json as jsonlib
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
 from hal0.memory.spec_apply import DEFAULT_API, apply_spec
+from hal0.memory.write_gate import MemoryWritesPaused, require_writes_allowed
 
 app = typer.Typer(help="Apply the packaged Hindsight bank spec (templates + knowledge-base pages).")
 console = Console()
@@ -35,6 +37,15 @@ def spec_apply_cmd(
     ),
 ) -> None:
     """Apply (or dry-run) the bank spec: templates, config_extra, knowledge-base pages."""
+    if not dry_run:
+        # #3518: this command writes to the engine directly, so it checks the
+        # write gate itself: a spec applied while `hal0 memory embedder switch`
+        # runs would land in a bank that is about to be replaced.
+        try:
+            require_writes_allowed()
+        except MemoryWritesPaused as exc:
+            console.print(Panel(f"[red]{escape(exc.message)}[/red]", border_style="red"))
+            raise typer.Exit(1) from exc
     report = apply_spec(api=api, dry_run=dry_run, bank_filter=bank)
     if json_out:
         typer.echo(jsonlib.dumps(report.to_dict(), indent=2, sort_keys=True))

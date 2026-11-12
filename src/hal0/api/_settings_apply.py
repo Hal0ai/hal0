@@ -422,6 +422,26 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # [memory] — HindsightProvider constructor arg, built once at boot.
     "memory.unified_bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     "memory.bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    # [memory.projects] — the project registry is also a HindsightProvider
+    # constructor arg (provider_from_config); the doctor row reads hal0.toml.
+    "memory.projects.aliases": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.projects.deny": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "memory.projects.registered": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    # [memory.compat] — read off app.state.hal0_config on every request to the
+    # engine-compatible endpoint (routes/memory_compat.py, ``_settings``),
+    # which the settings PUT refreshes in place.
+    "memory.compat.shared_document_prefixes": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_concurrent_reflects": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_concurrent_recalls": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_outstanding_operations": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_outstanding_bytes": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_item_bytes": {"apply_class": "immediate", "services": []},
     # [realtime] — every key is read live off app.state.hal0_config.realtime
     # on each WS connect (routes/realtime.py), which the settings PUT
     # refreshes in place, so all of them apply immediately.

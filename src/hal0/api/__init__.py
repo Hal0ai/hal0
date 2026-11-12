@@ -116,6 +116,12 @@ from hal0.api.routes import (
     memory_admin as memory_admin_routes,
 )
 from hal0.api.routes import (
+    memory_compat as memory_compat_routes,
+)
+from hal0.api.routes import (
+    memory_health as memory_health_routes,
+)
+from hal0.api.routes import (
     memory_lanes as memory_lanes_routes,
 )
 from hal0.api.routes import (
@@ -164,6 +170,7 @@ from hal0.registry.discover import _collect_referenced_model_ids, scan_and_regis
 from hal0.registry.model import _BLESSED_PREFIX
 from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.store import ModelRegistry
+from hal0.security.exposure import COMPAT_MEMORY_PREFIX
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.huggingface import hf_token_from_env
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
@@ -2213,14 +2220,34 @@ async def _memory_reprobe_loop(
     TRIED spends the budget: a drain whose armed hooks were all still waiting
     on their arming boot phase (``last_drain_attempted`` False) is free, so a
     short ``HAL0_MEMORY_REPROBE_INTERVAL_S`` cannot exhaust the cap before
-    the brain lane finishes and hands its replay over (#1912 review).
+    the brain lane finishes and hands its replay over (#1912 review). A tick
+    while the memory write gate is set runs no hook and is free too: every
+    replayed write would be refused until ``hal0 memory embedder switch``
+    lifts it (#3518).
     """
+    from hal0.memory import write_gate
+
     attempts = 0
+    paused_noted = False
     while True:
         await asyncio.sleep(interval_s)
         if not await asyncio.to_thread(provider.try_heal):
             continue
         run_hooks = getattr(provider, "run_heal_hooks", None)
+        if run_hooks is not None and write_gate.read_gate() is not None:
+            # Memory writes are paused (``hal0 memory embedder switch``): the
+            # engine can be back at its normal address a moment before the
+            # gate lifts, and a replay now would only be refused. Wait for
+            # the gate without spending the retry budget, however long it
+            # stays (a run that needs ``--resume`` keeps it set).
+            if not paused_noted:
+                log.info(
+                    "hal0.memory.heal_replay_waiting_for_write_gate",
+                    detail="memory writes are paused; the boot-write replay runs once "
+                    "they are allowed again",
+                )
+                paused_noted = True
+            continue
         if run_hooks is None or await run_hooks():
             return
         if not getattr(provider, "last_drain_attempted", True):
@@ -2360,6 +2387,12 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
             _memory_reprobe_loop(_mem_provider, _reprobe_interval)
         )
         log.info("hal0.memory.reprobe_loop_started", interval_s=_reprobe_interval)
+        # #3518: an engine that was not up when install.sh ran never had its
+        # default banks seeded. Seed whatever is missing when the engine is
+        # swapped in; a bank that already has a retain mission is left alone.
+        from hal0.memory import bank_seed
+
+        _mem_provider.add_heal_hook(bank_seed.heal_hook(_mem_provider))
 
     async def _stop_memory_reprobe_task() -> None:
         if ctx.memory_reprobe_task is not None:
@@ -3111,6 +3144,23 @@ def create_app() -> FastAPI:
     app.include_router(
         memory_lanes_routes.router,
         prefix="/api/memory",
+        tags=["memory"],
+    )
+    # Memory health: the ordered repair path behind the Memory area's Health
+    # tab (ADR-0058, decision 12). ADMIN by the /api/memory prefix rule.
+    app.include_router(
+        memory_health_routes.router,
+        prefix="/api/memory",
+        tags=["memory"],
+    )
+    # The engine-compatible memory endpoint for coding agents (ADR-0058
+    # decision 4b): the Hindsight coding-agents plugin is pointed here instead
+    # of at the engine's own port. BRIDGE-class, with the ``memory`` scope
+    # checked by its handlers. It ends in a catch-all, which only sees paths
+    # under its own prefix.
+    app.include_router(
+        memory_compat_routes.router,
+        prefix=COMPAT_MEMORY_PREFIX,
         tags=["memory"],
     )
 

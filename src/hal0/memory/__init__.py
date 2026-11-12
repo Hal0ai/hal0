@@ -248,6 +248,7 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
         log.warning("hal0.memory.hindsight_unavailable", error=str(exc), fallback="pgvector")
         return PgVectorProvider()
     from hal0.memory.hindsight_provider import Hal0Reranker
+    from hal0.memory.projects import registry_from_config
 
     reranker = Hal0Reranker(
         base_url=str(embed.rerank_gateway_url),
@@ -262,4 +263,5 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
         extraction_slot=str(getattr(graph, "extraction_slot", "memory")),
         unified_bank=bool(getattr(cfg.memory, "unified_bank", True)),
         bank=str(getattr(cfg.memory, "bank", "shared") or "shared"),
+        projects=registry_from_config(getattr(cfg.memory, "projects", None)),
     )

@@ -220,6 +220,8 @@ def test_representative_admin_routes_are_admin() -> None:
         ("GET", "/api/settings"),
         ("POST", "/api/secrets/{name}"),
         ("GET", "/api/secrets"),
+        # Not the OPEN liveness route: /api/health matches exactly (ADR-0058).
+        ("GET", "/api/memory/health"),
         ("POST", "/api/auth/rotate"),
         ("GET", "/api/oauth/providers"),
         ("POST", "/api/oauth/{provider_id}/start"),
@@ -365,6 +367,17 @@ def test_mcp_mount_tiers() -> None:
         ("POST", "/mcp/agents2/mcp", AuthClass.ADMIN),
         ("POST", "/mcp/memory/mcp", AuthClass.CLIENT),
         ("POST", "/mcp/admin/mcp", AuthClass.ADMIN),
+        # The engine-compatible memory endpoint (ADR-0058 decision 4b): BRIDGE
+        # for every method, DELETE included, and only under its own prefix.
+        ("GET", "/api/memory/compat/version", AuthClass.BRIDGE),
+        ("POST", "/api/memory/compat/v1/default/banks/b/memories", AuthClass.BRIDGE),
+        ("DELETE", "/api/memory/compat/v1/default/banks/b/documents/d", AuthClass.BRIDGE),
+        ("DELETE", "/api/memory/compat/v1/default/banks/b", AuthClass.BRIDGE),
+        ("PATCH", "/api/memory/compat/v1/default/banks/b/knowledge-base/nodes/n", AuthClass.BRIDGE),
+        ("GET", "/api/memory/compat", AuthClass.BRIDGE),
+        ("DELETE", "/api/memory/compat2/v1/default/banks/b", AuthClass.ADMIN),
+        ("GET", "/api/memory/compatible", AuthClass.ADMIN),
+        ("DELETE", "/api/memory/banks/b", AuthClass.ADMIN),
     ],
 )
 def test_bridge_rules(method: str, path: str, cls: AuthClass) -> None:

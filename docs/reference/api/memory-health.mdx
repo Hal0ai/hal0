@@ -1,0 +1,146 @@
+---
+title: Memory health API reference
+description: "GET /api/memory/health — whether memory needs the operator and what to do first, as an ordered list of steps with the figures behind each — verified against src/hal0/api/routes/memory_health.py, src/hal0/api/routes/_memory_health_collect.py and src/hal0/memory/health_path.py."
+sidebar:
+  order: 65
+---
+
+`GET /api/memory/health` (ADMIN, by the `/api/memory` prefix rule) answers one
+question: does memory need the operator, and what first? It reports an ordered
+repair path, not a list of alarms
+([ADR-0058](/docs/adr/0058-memory-v3-one-surface-guarded-embedder), decision 12).
+The route only reads. It answers 200 whatever state the memory engine is in; an
+engine that is down is a verdict, not an error. The rest of the prefix is indexed
+in the [REST API index](/docs/reference/api/rest-api/).
+
+## Response shape
+
+```json
+{
+  "enabled": true,
+  "verdict": "attention",
+  "checked_at": "2026-11-11T03:12:17+00:00",
+  "partial": [],
+  "engine": { "reachable": true, "version": "1.2.0" },
+  "extraction": {
+    "slot": "memory", "mode": "dedicated", "slot_resolves": true,
+    "llm_reachable": true, "concurrency": 1, "failures_6h": 3,
+    "top_errors": [{ "message": "Task exceeded the <n>s wall-clock limit", "count": 3 }]
+  },
+  "embedder": {
+    "recorded": { "provider": "local", "model": "BAAI/bge-small-en-v1.5" },
+    "configured": { "provider": "local", "model": "hindsight-ai/hs-embed-1" },
+    "mixed": false, "needs_switch": true, "conflict": null, "informational": true
+  },
+  "queue": {
+    "waiting": 52, "failed": 3, "oldest_waiting_s": 5400.0,
+    "consolidation_pending": 0, "consolidation_failed": 0,
+    "by_bank": [{ "bank_id": "shared", "waiting": 52, "failed": 3, "oldest_waiting_s": 5400.0 }],
+    "truncated": false
+  },
+  "knowledge": {
+    "pages": 29, "pages_stale": 4, "models": 5, "models_stale": 0,
+    "refresh_failed": 1, "last_success_at": "2026-11-10T21:35:56+00:00"
+  },
+  "banks": {
+    "layout": "per_bank", "total": 1, "facts": 1335,
+    "list": [{ "bank_id": "shared", "facts": 1335, "documents": 253 }]
+  },
+  "writes": null,
+  "steps": [
+    { "id": "engine", "state": "clear", "waits_on": null, "reason_code": null, "figures": { "reachable": true } },
+    { "id": "extraction", "state": "current", "waits_on": null, "reason_code": "extraction_recent_failures", "figures": {} },
+    { "id": "queue", "state": "waiting", "waits_on": "extraction", "reason_code": "queue_operations_failed", "figures": {} },
+    { "id": "embedder", "state": "clear", "waits_on": null, "reason_code": null, "figures": {} },
+    { "id": "knowledge", "state": "waiting", "waits_on": "queue", "reason_code": "knowledge_refresh_failed", "figures": {} }
+  ]
+}
+```
+
+`figures` is shortened to `{}` above; each step's are listed under
+[Steps](#steps). `writes` is always `null` for now.
+
+| Field | Meaning |
+|---|---|
+| `verdict` | `clear` (no step is open), `attention` (at least one is) or `unreachable` (the engine does not answer). |
+| `checked_at` | When the figures were read. A cached answer keeps the time of its read. |
+| `partial` | Names of the sections whose reads did not all finish: any of `extraction`, `embedder`, `queue`, `knowledge`, `banks`. Their figures are what was read, and the verdict is decided from them. |
+| `engine` | `reachable` and `version`, by the rule `GET /api/memory/engine` uses. |
+| `extraction.slot`, `.mode` | The extraction slot and `dedicated`, `shared` or `custom`, as `GET /api/memory/graph/status` reports them. |
+| `extraction.slot_resolves` | Whether that slot has a model. `null` when no slot is in play: the engine runs on an upstream model, or its environment file points its LLM elsewhere. |
+| `extraction.llm_reachable` | Whether the engine's LLM endpoint accepts a TCP connection. `null` when the engine's environment names no base URL. No request is sent and no credential is used. |
+| `extraction.concurrency` | The LLM concurrency hal0 renders for the engine: `[memory.graph].extraction_max_concurrent` held to the slot's `--parallel`. |
+| `extraction.failures_6h` | Retain operations that failed in the last 6 hours, by the time of their last update. |
+| `extraction.top_errors` | Up to 5 groups of those failures' messages, most frequent first. See [Error messages](#error-messages). |
+| `embedder` | The embedder the store was built with against the configured one (`GET /api/memory/models` has the full record). `informational` is `true` when the two differ only because `[memory.models]` still holds its shipped default: the ordinary upgraded box, which needs nothing. |
+| `queue.waiting`, `.failed` | Operations in the engine's `pending` and `failed` states, across banks. A batch that was split into child operations is counted by its children, so these are lower than the bank stats' `pending_operations` and `failed_operations`, which count both. |
+| `queue.oldest_waiting_s` | Age in seconds of the oldest waiting operation that is due. An operation the engine put off (its `next_retry_at` is still ahead) is not counted as stuck. |
+| `queue.consolidation_pending`, `.consolidation_failed` | Source memories still to be consolidated into observations, and those whose consolidation failed, summed from the bank stats. |
+| `queue.truncated` | `true` when a bank holds more failed operations than the 2,000 that are read. Counts stay exact (they are the engine's totals); `failures_6h` and `top_errors` are then a floor. |
+| `knowledge` | Knowledge pages and mental models across banks, how many are stale, how many have a failed last refresh, and when a refresh last finished. A page or model that was created and never refreshed does not count as a finished refresh. |
+| `banks` | `layout` is `per_bank`. `facts` and `documents` per bank, and the totals. |
+
+A row in `queue.by_bank` or `banks.list` holds `null` for a figure that could not be
+read; its section is then named in `partial`.
+
+### When there is no path
+
+With the engine unreachable, every section except `engine` is `null`, `partial` is
+empty, and `steps` holds the `engine` step alone.
+
+With memory off (`[memory].enabled = false`) the body is:
+
+```json
+{ "enabled": false, "reason": "memory_disabled", "checked_at": "...", "verdict": null, "partial": [], "steps": [] }
+```
+
+With `[memory].engine = "pgvector"` it is the same body with `"enabled": true` and
+`"reason": "engine_unsupported"`: that engine has no banks, operations or knowledge
+pages to report on.
+
+## Steps
+
+The steps are one dependency chain, always in this order: `engine`, `extraction`,
+`queue`, `embedder`, `knowledge`. A step that is not fine is open. The first open
+step is `current`: the cause to deal with first, and the one place to offer an
+action. A later open step is `waiting`, and `waits_on` names the nearest open step
+before it, because acting on it first would fail or be undone. Every other step is
+`clear`, with `reason_code: null`.
+
+| Step | Open when | `reason_code` (first that holds) | `figures` |
+|---|---|---|---|
+| `engine` | The engine does not answer. | `engine_unreachable` | `reachable` |
+| `extraction` | The slot has no model, the LLM endpoint refuses a connection, or a retain failed in the last 6 hours. | `extraction_slot_unresolved`, `extraction_llm_unreachable`, `extraction_recent_failures` | `slot_resolves`, `llm_reachable`, `failures`, `window_s`, `top_errors` |
+| `queue` | Any operation is failed, or the oldest waiting one is older than 30 minutes. | `queue_operations_failed`, `queue_waiting_too_long` | `failed`, `waiting`, `oldest_waiting_s`, `max_waiting_age_s` |
+| `embedder` | The `memory_embedder` row of `hal0 doctor` would warn. Both read one rule. | `embedder_record_unreadable`, `embedder_store_unavailable`, `embedder_conflict`, `embedder_mixed`, `embedder_needs_switch` | `recorded`, `configured`, `mixed`, `conflict`, `reasons`, `informational` |
+| `knowledge` | A knowledge page or mental model is stale, or its last refresh failed. | `knowledge_refresh_failed`, `knowledge_stale` | `pages_stale`, `models_stale`, `refresh_failed` |
+
+A fact that is not known (`null`) never opens a step. The two thresholds travel in
+the figures (`window_s`, `max_waiting_age_s`), so a client does not hard-code them.
+
+A sixth step id, `fold_in`, is defined and takes the `embedder` step's place while
+banks are waiting to be folded into the two-bank layout (reason code
+`fold_in_pending`, figure `banks`). Nothing reports such banks yet, so the step
+does not appear.
+
+## Error messages
+
+`top_errors` groups the engine's error text after reducing each message to a key
+that is safe to show: the first line only; secrets masked by the same redactor the
+log tail uses; everything from the start of a structured payload on removed, and
+everything after a word that names a credential; ids, host addresses and numbers
+replaced by `<id>`, `<host>` and `<n>` (an HTTP status after `status`, `code`,
+`error` or `HTTP` is kept); at most 160 characters.
+
+## Cost
+
+The answer is cached in the hal0-api process for 10 seconds, and one read runs at a
+time. A read makes at most 8 engine requests at once and stops after 8 seconds;
+whatever did not finish is reported as `partial`. Per bank it costs one request for
+stats, one for mental models and knowledge pages, one for failed operations per 100
+of them (up to 2,000), and normally one or two for waiting operations however deep
+the queue is, since the engine returns the total and lists newest first. A quiet
+box with 20 banks costs 83 requests.
+
+`GET /api/memory/lanes` takes its per-bank `pending`, `processing`, `failed` and
+`oldest_pending_age_s` from the same reads.

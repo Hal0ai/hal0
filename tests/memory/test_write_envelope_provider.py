@@ -63,7 +63,7 @@ async def test_a_plain_write_is_durable_and_gains_only_the_required_tags() -> No
     p = _unified()
     await p.add("x", tags=["hal0", "H0-229"], client_id="hermes")
     rec = p._client.retained[-1]
-    assert rec["tags"] == ["hal0", "H0-229", "agent:hermes", "kind:durable"]
+    assert rec["tags"] == ["hal0", "H0-229", "agent:hermes", "kind:durable", "scope:global"]
     assert rec["metadata"] == {}
 
 
@@ -71,7 +71,7 @@ async def test_a_plain_write_is_durable_and_gains_only_the_required_tags() -> No
 async def test_a_write_with_no_tags_still_carries_the_required_pair() -> None:
     p = _unified()
     await p.add("x", client_id="hermes")
-    assert p._client.retained[-1]["tags"] == ["agent:hermes", "kind:durable"]
+    assert p._client.retained[-1]["tags"] == ["agent:hermes", "kind:durable", "scope:global"]
 
 
 @pytest.mark.asyncio
@@ -79,7 +79,7 @@ async def test_a_write_with_no_tags_still_carries_the_required_pair() -> None:
 async def test_an_unresolved_identity_keeps_the_unknown_fallback(client_id) -> None:
     p = _unified()
     await p.add("x", tags=["agent:brain"], client_id=client_id)
-    assert p._client.retained[-1]["tags"] == ["agent:unknown", "kind:durable"]
+    assert p._client.retained[-1]["tags"] == ["agent:unknown", "kind:durable", "scope:global"]
 
 
 @pytest.mark.asyncio
@@ -87,7 +87,7 @@ async def test_several_session_tags_land_under_one_metadata_key() -> None:
     p = _unified()
     await p.add("x", tags=[SESSION, f"session:{OTHER_SESSION}"], client_id="codex")
     rec = p._client.retained[-1]
-    assert rec["tags"] == ["agent:codex", "kind:durable"]
+    assert rec["tags"] == ["agent:codex", "kind:durable", "scope:global"]
     assert "session_id" not in rec["metadata"]
     assert json.loads(rec["metadata"]["session_ids"]) == [SESSION, OTHER_SESSION]
 
@@ -105,10 +105,12 @@ async def test_an_explicit_durable_keeps_a_lifecycle_word_as_a_topic_tag() -> No
     lifecycle marker: it stays a tag and nothing is moved to metadata."""
     p = _unified()
     await p.add(
-        "the chat panel needs a retry button", tags=["chat", "kind:durable"], client_id="pi"
+        "the chat panel needs a retry button",
+        tags=["chat", "kind:durable", "scope:global"],
+        client_id="pi",
     )
     rec = p._client.retained[-1]
-    assert rec["tags"] == ["chat", "agent:pi", "kind:durable"]
+    assert rec["tags"] == ["chat", "agent:pi", "kind:durable", "scope:global"]
     assert "lifecycle" not in rec["metadata"]
 
 
@@ -130,7 +132,7 @@ async def test_a_uuid_tag_that_is_not_a_session_id_is_still_moved() -> None:
     p = _unified()
     await p.add("x", tags=[document_uuid, "design-doc"], client_id="pi")
     rec = p._client.retained[-1]
-    assert rec["tags"] == ["design-doc", "agent:pi", "kind:durable"]
+    assert rec["tags"] == ["design-doc", "agent:pi", "kind:durable", "scope:global"]
     assert rec["metadata"]["session_id"] == document_uuid
 
 
@@ -139,7 +141,12 @@ async def test_an_md5_tag_stays_a_tag() -> None:
     p = _unified()
     await p.add("x", tags=["d41d8cd98f00b204e9800998ecf8427e"], client_id="pi")
     rec = p._client.retained[-1]
-    assert rec["tags"] == ["d41d8cd98f00b204e9800998ecf8427e", "agent:pi", "kind:durable"]
+    assert rec["tags"] == [
+        "d41d8cd98f00b204e9800998ecf8427e",
+        "agent:pi",
+        "kind:durable",
+        "scope:global",
+    ]
     assert rec["metadata"] == {}
 
 
@@ -147,24 +154,29 @@ async def test_an_md5_tag_stays_a_tag() -> None:
 async def test_a_bare_string_of_tags_is_one_tag() -> None:
     p = _unified()
     await p.add("x", tags="hal0", client_id="hermes")  # type: ignore[arg-type]
-    assert p._client.retained[-1]["tags"] == ["hal0", "agent:hermes", "kind:durable"]
+    assert p._client.retained[-1]["tags"] == [
+        "hal0",
+        "agent:hermes",
+        "kind:durable",
+        "scope:global",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_private_stamp_and_project_tag_are_unchanged() -> None:
+async def test_private_stamp_and_project_namespace_tag_are_kept() -> None:
     p = _unified()
     await p.add("x", dataset="private:alice", tags=["chat"], client_id="alice")
     await p.add("y", dataset="project:apollo", tags=["project:apollo"], client_id="alice")
     private, project = p._client.retained
     assert private["tags"] == ["agent:alice", "kind:ephemeral", "visibility:private"]
-    assert project["tags"] == ["project:apollo", "agent:alice", "kind:durable"]
+    assert project["tags"] == ["agent:alice", "kind:durable", "project:apollo"]
 
 
 @pytest.mark.asyncio
 async def test_metadata_naming_a_repo_does_not_become_a_project_tag() -> None:
     p = _unified()
     await p.add("x", tags=["hal0"], client_id="pi", metadata={"repo": "hal0", "project": "hal0"})
-    assert p._client.retained[-1]["tags"] == ["hal0", "agent:pi", "kind:durable"]
+    assert p._client.retained[-1]["tags"] == ["hal0", "agent:pi", "kind:durable", "scope:global"]
 
 
 # ── Provider: the document id is not derived from a tag ─────────────────────
@@ -224,7 +236,7 @@ async def test_a_write_with_a_project_tag_gets_that_projects_scope(make) -> None
     p = make()
     await p.add("x", tags=["project:hal0", "checkpoint", "slots"], client_id="pi")
     rec = p._client.retained[-1]
-    assert rec["tags"] == ["project:hal0", "slots", "agent:pi", "kind:ephemeral"]
+    assert rec["tags"] == ["slots", "agent:pi", "kind:ephemeral", "project:hal0"]
     assert rec["observation_scopes"] == [["project:hal0"]]
 
 
@@ -295,9 +307,9 @@ async def test_a_private_project_write_stays_hidden_from_another_agent_in_that_p
     )
     await p.add("apollo note", dataset="project:apollo", client_id="alice")
     assert p._client.retained[0]["tags"] == [
-        "project:apollo",
         "agent:alice",
         "kind:durable",
+        "project:apollo",
         "visibility:private",
     ]
 
@@ -382,7 +394,7 @@ async def test_rest_add_with_a_project_tag_reaches_the_engine_project_scoped() -
     )
     assert response.status_code == 200, response.text
     item = engine.item
-    assert item["tags"] == ["project:hal0", "slots", "agent:pi", "kind:durable"]
+    assert item["tags"] == ["slots", "agent:pi", "kind:durable", "project:hal0"]
     assert item["observation_scopes"] == [["project:hal0"]]
 
 
@@ -391,7 +403,7 @@ async def test_rest_add_without_identity_is_tagged_unknown() -> None:
     engine, provider = _wired()
     response = await _rest_add(provider, {"text": "note"}, {})
     assert response.status_code == 200, response.text
-    assert engine.item["tags"] == ["agent:unknown", "kind:durable"]
+    assert engine.item["tags"] == ["agent:unknown", "kind:durable", "scope:global"]
     assert engine.item["observation_scopes"] == "shared"
 
 
@@ -439,7 +451,7 @@ async def test_mcp_add_with_a_project_tag_reaches_the_engine_project_scoped() ->
     out = await _mcp(provider)("memory_add", {"text": "note", "tags": ["project:hal0", "slots"]})
     assert out["status"] == "ok", out
     item = engine.item
-    assert item["tags"] == ["project:hal0", "slots", "agent:pi-coder", "kind:durable"]
+    assert item["tags"] == ["slots", "agent:pi-coder", "kind:durable", "project:hal0"]
     assert item["observation_scopes"] == [["project:hal0"]]
 
 
@@ -450,7 +462,7 @@ async def test_mcp_add_forwards_an_explicit_observation_scope() -> None:
         "memory_add", {"text": "note", "tags": ["hal0"], "observation_scopes": "per_tag"}
     )
     assert out["status"] == "ok", out
-    assert engine.item["tags"] == ["hal0", "agent:pi-coder", "kind:durable"]
+    assert engine.item["tags"] == ["hal0", "agent:pi-coder", "kind:durable", "scope:global"]
     assert engine.item["observation_scopes"] == "per_tag"
 
 

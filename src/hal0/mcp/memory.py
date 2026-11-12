@@ -75,15 +75,17 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import structlog
 
-from hal0.errors import Hal0Error
+from hal0.errors import Hal0Error, MemoryEngineUnavailable
 from hal0.memory.namespace import (
     DOCUMENT_ID_PATTERN,
     MemoryNamespaceError,
     resolve_read_datasets,
     resolve_write_dataset,
 )
+from hal0.memory.write_gate import require_writes_allowed
 
 try:
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
@@ -338,6 +340,10 @@ async def _memory_add(
       - ``sync``: ``true`` waits for extraction before returning (no
         ``operation_id``, but ``items_count`` reflects the finished write);
         ``false`` (default) is the existing fire-and-forget path.
+      - ``project``: NOT an argument yet, and a ``project`` key is ignored.
+        Under the unified bank a project-tagged memory is hidden from
+        recall, search and list, so the argument arrives with the change
+        that lets shared reads see it (ADR-0058 decision 7b).
       - ``source``: NOT accepted from the caller. Server-injected from
         ``client_id`` so callers cannot lie about their identity,
         keeping the audit trail grounded.
@@ -646,6 +652,13 @@ async def _memory_reflect(
     one bank (no cross-bank merge — there is no server-side cross-bank
     reflect and merging LLM narratives wouldn't mean anything), resolved via
     the same single-namespace ACL ``memory_add`` uses for its write target.
+
+    The provider holds the reflect to what ``client_id`` may read, exactly as
+    ``POST /api/memory/reflect`` does (``HindsightProvider.reflect``): other
+    agents' ``visibility:private`` memories are filtered out by tag, the
+    caller's ``tags`` and ``tag_groups`` only narrow that, and under the
+    unified bank mental models are left out whatever ``exclude_mental_models``
+    says.
 
     Engines without a reflect capability (the PgVector degrade fallback)
     answer ``{status: "unsupported"}`` rather than erroring — the ABC default
@@ -1353,6 +1366,12 @@ def make_dispatcher(
             return {"status": "ok", **payload}
 
         try:
+            if tool == "memory_add":
+                # #3518: while `hal0 memory embedder switch` holds the write
+                # gate, answer with ``memory.writes_paused`` before the
+                # extraction preflight. Every other mutating tool is refused
+                # by the provider with the same code.
+                require_writes_allowed()
             if approval_queue is not None and _needs_approval(tool, args, client_id=client_id):
                 approval_id = await approval_queue.enqueue(
                     tool=tool,
@@ -1385,6 +1404,20 @@ def make_dispatcher(
             return {
                 "status": "error",
                 "error": {"code": exc.code, "detail": exc.message, "details": exc.details},
+            }
+        except (ConnectionError, httpx.NetworkError, httpx.ConnectTimeout) as exc:
+            # The engine's port refused the connection: the same typed answer
+            # the REST routes give, for reads as well as writes (#3518: the
+            # engine is unreachable on purpose while an embedder switch runs).
+            log.warning("mcp.memory.engine_unavailable", tool=tool, error=type(exc).__name__)
+            unavailable = MemoryEngineUnavailable()
+            return {
+                "status": "error",
+                "error": {
+                    "code": unavailable.code,
+                    "detail": unavailable.message,
+                    "details": unavailable.details,
+                },
             }
         except Exception as exc:
             log.warning("mcp.memory.failed", tool=tool, error=str(exc))
@@ -2359,8 +2392,10 @@ def _memory_tool_definitions() -> dict[str, Tool]:
     @server.tool(
         name="memory_bank_stats",
         description=(
-            "Node/link/observation/operation counts for a bank. Read-only — no "
-            "destructive bank operations (delete/clear) are exposed via MCP."
+            "Node/link/observation/operation counts for a bank. While the bank "
+            "holds another agent's private memory only the health fields are "
+            "returned (counts_withheld: true). Read-only — no destructive bank "
+            "operations (delete/clear) are exposed via MCP."
         ),
         annotations=_ANNOTATIONS["memory_bank_stats"],
     )

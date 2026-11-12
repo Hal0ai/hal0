@@ -27,6 +27,16 @@ def _nodes(tree: dict[str, Any]) -> list[dict[str, Any]]:
     return tree.get("nodes") or tree.get("roots") or tree.get("children") or tree.get("items") or []
 
 
+def _find_node(nodes: list[dict[str, Any]], node_id: str) -> dict[str, Any] | None:
+    for n in nodes:
+        if n.get("id") == node_id:
+            return n
+        found = _find_node(n.get("children") or [], node_id)
+        if found is not None:
+            return found
+    return None
+
+
 def _add_nodes(rich_tree: Tree, nodes: list[dict[str, Any]]) -> None:
     for n in nodes:
         kind = n.get("type", n.get("kind", "?"))
@@ -90,8 +100,23 @@ def kb_refresh_cmd(
 ) -> None:
     """Trigger an async refresh of one knowledge-base page."""
     _require_api()
+    # A page is refreshed through the mental model it is generated from: a 1.x
+    # engine serves ``POST .../mental-models/{id}/refresh`` and no page refresh
+    # route (#3564). The page's tree node names that model in
+    # ``mental_model_id``, which is a different id from the page's own.
     try:
-        result = api_post(f"/api/memory/banks/{bank}/knowledge-base/pages/{page_id}/refresh")
+        tree = api_get(f"/api/memory/banks/{bank}/knowledge-base/tree")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    node = _find_node(_nodes(tree if isinstance(tree, dict) else {}), page_id)
+    model_id = node.get("mental_model_id") if node is not None else None
+    if not model_id:
+        what = "is a folder, not a page" if node is not None else "is not in the knowledge base"
+        die(f"{page_id} {what} of bank {bank}. List the pages with: hal0 memory kb tree {bank}")
+        return
+    try:
+        result = api_post(f"/api/memory/banks/{bank}/mental-models/{model_id}/refresh")
     except CliApiError as exc:
         die(str(exc))
         return

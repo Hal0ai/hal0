@@ -125,6 +125,72 @@ def test_apply_spec_updates_existing_page(tmp_path):
     assert br.folder_created is None
 
 
+def test_apply_spec_updates_existing_page_through_its_node(tmp_path):
+    """#3564: a 1.x engine changes a page with PATCH .../knowledge-base/nodes/{node_id}.
+
+    The tree is the engine's own shape (``roots``, ``kind``, the page's node id
+    distinct from its ``mental_model_id``); the PATCH goes to the node id with
+    only UpdateNodeRequest fields.
+    """
+    page = {
+        "name": "Overview",
+        "source_query": "showcase",
+        "tags": ["showcase"],
+        "max_tokens": 1024,
+        "trigger": {"refresh_after_consolidation": True},
+    }
+    d = _spec_dir(tmp_path, knowledge={"shared": {"folder": "Showcase", "pages": [page]}})
+    writes: list[tuple[str, str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/knowledge-base/tree"):
+            return httpx.Response(
+                200,
+                json={
+                    "roots": [
+                        {
+                            "id": "kf-1",
+                            "kind": "folder",
+                            "name": "Showcase",
+                            "mental_model_id": None,
+                            "children": [
+                                {
+                                    "id": "kp-1",
+                                    "kind": "page",
+                                    "name": "Overview",
+                                    "mental_model_id": "mm-1",
+                                    "children": [],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+        if "/knowledge-base/" in request.url.path:
+            writes.append(
+                (request.method, request.url.path, json.loads(request.content or b"null"))
+            )
+        return httpx.Response(200, json={"ok": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    report = sa.apply_spec(api="http://x", spec_dir=d, dry_run=False, client=client)
+    br = report.banks[0]
+    assert br.error is None
+    assert br.pages_updated == ["Overview"]
+    assert writes == [
+        (
+            "PATCH",
+            "/v1/default/banks/shared/knowledge-base/nodes/kp-1",
+            {
+                "source_query": "showcase",
+                "tags": ["showcase"],
+                "max_tokens": 1024,
+                "trigger": {"refresh_after_consolidation": True},
+            },
+        )
+    ]
+
+
 def test_apply_spec_bank_filter(tmp_path):
     d = _spec_dir(tmp_path, banks={"shared": "shared", "private": "shared"})
     calls: list[tuple[str, str]] = []

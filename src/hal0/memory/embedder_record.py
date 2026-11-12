@@ -56,9 +56,12 @@ First run on a box with no record
    is missing): the engine default, never written down.
 5. No store: the configured embedder.
 
-``mixed`` is set only on evidence: a store exists and the embedder found is
-not the engine default. Every installer to date starts a new engine on the
-base unit, so such a store was created under the default.
+``mixed`` is set only on evidence: a store exists, it has no record, and the
+embedder found is not the engine default. Every installer that did not write a
+record started a new engine on the base unit, so such a store was created
+under the default. (An installer that starts a new engine on the configured
+embedder writes the record first, :mod:`hal0.memory.first_start`, so its store
+never reaches this rule.)
 
 One invariant keeps the record truthful: it never names an embedder the engine
 was not started with. Cases 1 to 3 describe an engine that has run, so the
@@ -68,8 +71,16 @@ Case 5 describes an engine that has not started, so it is written only by
 the drop-in carrying it is on disk. Recorded any earlier, a box whose engine
 then started without the drop-in would build its store with the engine
 default under a record that says otherwise, and the next render would swap
-the embedder: #3518 again. ``install.sh`` is such a caller today: it runs the
-update migrations and then starts a new engine on the base unit.
+the embedder: #3518 again. ``install.sh`` is such a caller: it runs the
+update migrations long before the engine's unit exists. The drop-in and the
+record of a new install are written later, immediately before the engine's
+first start, by :mod:`hal0.memory.first_start`.
+
+One writer replaces a record: when that first start fails on the configured
+embedder and a trial start on the engine default then comes up healthy,
+``first_start`` rewrites it as the engine default with the source
+``first-start-fallback``. The engine never answered a request on the
+configured pair, so no vector was made with the pair being replaced.
 
 When a record exists
 --------------------
@@ -81,6 +92,10 @@ so nothing hal0 writes can swap a running engine's embedder.
 
 A record file that exists but cannot be read or parsed is never overwritten.
 For that run the embedder is taken from the evidence and nothing is written.
+
+One caller replaces a record: ``hal0 memory embedder switch``
+(:mod:`hal0.memory.embedder_switch`), which re-embeds every bank on the new
+model and writes the record with :data:`SOURCE_SWITCH`.
 
 Status surfaces (:func:`embedder_status`) never write.
 """
@@ -134,6 +149,12 @@ SOURCE_DROPIN = "showcase-drop-in"
 SOURCE_ENGINE_DEFAULT = "engine-default"
 SOURCE_CONFIGURED = "configured"
 SOURCE_UNAVAILABLE = "store-unavailable"
+#: A new install whose engine could not start on the configured embedder and
+#: was started on the engine default instead (:mod:`hal0.memory.first_start`).
+SOURCE_FIRST_START_FALLBACK = "first-start-fallback"
+#: Written by ``hal0 memory embedder switch`` (:mod:`hal0.memory.embedder_switch`),
+#: the one caller that replaces an existing record.
+SOURCE_SWITCH = "embedder-switch"
 
 #: Sources that describe an engine that has not run (or cannot be seen). A
 #: record from one of these is never written by :func:`ensure_embedder_record`.
@@ -688,6 +709,21 @@ def describe_embedder(provider: Any, model: Any) -> str:
     return f"the {provider} provider (local model {model})"
 
 
+def switch_command(status: Mapping[str, Any]) -> str:
+    """The ``hal0 memory embedder switch`` line that settles an :func:`embedder_status`.
+
+    Towards the configured embedder when it differs from the recorded one;
+    otherwise the store is mixed, and the repair is a switch to the embedder
+    it is already recorded on.
+    """
+    provider = status.get("configured_provider") or status.get("recorded_provider")
+    model = status.get("configured") or status.get("recorded")
+    command = f"hal0 memory embedder switch {model}"
+    if provider and provider != ENGINE_DEFAULT_PROVIDER:
+        command += f" --provider {provider}"
+    return command
+
+
 def embedder_notice(status: Mapping[str, Any]) -> str | None:
     """One operator sentence for an :func:`embedder_status`, or ``None`` when it is clean.
 
@@ -739,17 +775,24 @@ def embedder_notice(status: Mapping[str, Any]) -> str | None:
         status.get("configured_provider"),
         status.get("configured"),
     )
-    if differs and not status.get("record_error") and not status.get("store_unavailable"):
+    switched = status.get("source") == SOURCE_SWITCH
+    if differs and switched and not status.get("record_error"):
+        parts.append(
+            f"the memory store was moved to {recorded} with `hal0 memory embedder switch` and "
+            f"stays on it; [memory.models] still names {configured}, which is fine and has no "
+            "effect (set it to the store's embedder to make the two agree)"
+        )
+    elif differs and not status.get("record_error") and not status.get("store_unavailable"):
         parts.append(
             f"the memory store was built with {recorded} and the engine stays on it; "
             f"[memory.models] asks for {configured}, which has no effect"
         )
     if not parts:
         return None
-    if status.get("mixed") or differs:
+    if status.get("mixed") or (differs and not switched):
         parts.append(
-            "a store's embedder can only change by re-embedding it; "
-            "`hal0 memory embedder switch` will do that, and it is not in this release yet"
+            "a store's embedder can only change by re-embedding it: run "
+            f"`{switch_command(status)}` (a dry run; add --apply to do it)"
         )
     return "; ".join(parts)
 
@@ -763,7 +806,9 @@ __all__ = [
     "SOURCE_CONFIGURED",
     "SOURCE_DROPIN",
     "SOURCE_ENGINE_DEFAULT",
+    "SOURCE_FIRST_START_FALLBACK",
     "SOURCE_PROCESS",
+    "SOURCE_SWITCH",
     "SOURCE_UNAVAILABLE",
     "SOURCE_UNIT",
     "STORE_ABSENT",
@@ -788,4 +833,5 @@ __all__ = [
     "save_embedder_record",
     "shipped_default_embedder",
     "store_state",
+    "switch_command",
 ]

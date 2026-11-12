@@ -6,8 +6,10 @@
  * follows `GET /api/agents/{name}/overview` and falls back to the
  * `/api/agents` record: agents-overview.jsx + agent-phase.ts) with a console
  * on the back; the rest of the library are roadmap entries behind a grey
- * "coming soon" mask. Memory (full Hindsight page, gated) and MCP remain as
- * tabs. The per-phase faces are pinned in agent-cards-phases-v3, the upgrade
+ * "coming soon" mask. MCP is the other tab. Memory is no longer a tab here:
+ * it is its own top-level area (#memory/<tab>, see memory-area-v3), and the
+ * old #agent/memory address redirects there (memory-redirects-v3).
+ * The per-phase faces are pinned in agent-cards-phases-v3, the upgrade
  * and repair jobs in agent-jobs-v3; this spec pins the shell around them:
  *   - bare #agent lands on the Overview tab (selected), cards render
  *   - an installed Hermes card flips to a Restart button wired to
@@ -15,12 +17,13 @@
  *   - an installed Pi card (a CLI tool with no systemd unit) flips to copyable
  *     commands and has no Restart/Persona/Logs actions
  *   - the locked roadmap cards render behind the coming-soon mask
- *   - Overview · Memory · MCP tabs are present; the long-removed surfaces
- *     (chat / personas / skills / plugins / inbox / peers) stay ABSENT
+ *   - Overview · MCP are the only tabs; Memory and the long-removed
+ *     surfaces (chat / personas / skills / plugins / inbox / peers) stay
+ *     ABSENT
  *   - the header no longer carries the `hermes chat` terminal hint (copy-only
  *     removal, 2026-08-22 — web chat is still replaced by the TUI; only the
  *     visible reminder string was dropped, not the underlying behavior)
- *   - hash route #agent/memory lands on the Memory tab
+ *   - hash route #agent/memory leaves this page for the Memory area
  */
 import { test, expect, json } from '../fixtures/apiMock'
 
@@ -44,7 +47,7 @@ const PI_RECORD = {
 
 test.describe('Agents shell v0.5 (#agent — Overview default)', () => {
   test.beforeEach(async ({ page }) => {
-    // Stub the live endpoints the Memory tab hits so the spec is hermetic.
+    // Stub the memory endpoints the redirect target reads so the spec is hermetic.
     await page.route('**/api/memory/graph/status', (route) =>
       json(route, { enabled: false, route: 'upstream' }),
     )
@@ -62,9 +65,11 @@ test.describe('Agents shell v0.5 (#agent — Overview default)', () => {
     await expect(overviewTabBtn).toHaveText('Overview')
     await expect(page.locator('[data-testid="agents-overview"]')).toBeVisible()
 
-    // Memory + MCP remain as tabs (Memory follows the gate but is present in
-    // the default mock, which enables the subsystem).
+    // Overview and MCP are the only two tabs. Memory is not one of them, even
+    // with the memory subsystem enabled (the default mock enables it).
     await expect(page.locator('[data-testid="agent-tab-mcp"]')).toBeVisible()
+    await expect(nav.locator('button')).toHaveText(['Overview', 'MCP'])
+    await expect(page.locator('[data-testid="agent-tab-memory"]')).toHaveCount(0)
 
     // The live Hermes + Pi foils, and the locked roadmap cards, are present.
     await expect(page.locator('[data-testid="agent-card-hermes"]')).toBeVisible()
@@ -76,7 +81,7 @@ test.describe('Agents shell v0.5 (#agent — Overview default)', () => {
     )
 
     // The long-removed surfaces must stay gone.
-    for (const id of ['chat', 'personas', 'skills', 'plugins', 'inbox', 'peers']) {
+    for (const id of ['memory', 'chat', 'personas', 'skills', 'plugins', 'inbox', 'peers']) {
       await expect(page.locator(`[data-testid="agent-tab-${id}"]`)).toHaveCount(0)
     }
     await expect(nav).not.toContainText('Chat')
@@ -153,8 +158,20 @@ test.describe('Agents shell v0.5 (#agent — Overview default)', () => {
     await expect(page.locator('.view .vh .hint')).toHaveCount(0)
   })
 
-  test('#agent/memory hash routes to the Memory tab', async ({ page }) => {
+  test('#agent/memory leaves the Agents page for the Memory area', async ({ page }) => {
     await page.goto('/#agent/memory')
-    await expect(page.locator('[data-testid="mem-tab-overview"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(page).toHaveURL(/#memory\/facts/)
+    await expect(page.locator('[data-testid="memory-area"]')).toBeVisible({ timeout: FIVE_S })
+    await expect(page.locator('[data-testid="agent-tab-nav"]')).toHaveCount(0)
+    // The old page's own sub-tabs are gone with it.
+    await expect(page.locator('[data-testid="mem-tab-overview"]')).toHaveCount(0)
+  })
+
+  test('the MCP tab still opens from #agent/mcp and from #mcp', async ({ page }) => {
+    for (const hash of ['#agent/mcp', '#mcp']) {
+      await page.goto(`/${hash}`)
+      await expect(page.locator('[data-testid="agent-tab-nav"]')).toBeVisible({ timeout: FIVE_S })
+      await expect(page.locator('.view .conn')).toBeVisible()
+    }
   })
 })

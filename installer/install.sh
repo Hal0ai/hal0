@@ -142,6 +142,24 @@ wait_http_ready() {
     return 1
 }
 
+# Poll hal0-api until its memory provider is the Hindsight engine, for up to
+# `timeout` seconds. hal0-api starts before the engine does on a new install,
+# so it boots on its fallback provider and re-probes the engine every 30 s
+# (HAL0_MEMORY_REPROBE_INTERVAL_S). Until that swap /api/memory/banks/* has no
+# engine behind it, and bank seeding sent straight after the engine's /health
+# failed with "memory bank seeding incomplete" on every new install.
+wait_memory_provider_ready() {
+    local timeout="${1:-45}"
+    local deadline=$((SECONDS+timeout))
+    local resp
+    while (( SECONDS < deadline )); do
+        resp="$(curl -fsS -m 3 "http://127.0.0.1:${HAL0_PORT}/api/memory/engine" 2>/dev/null || true)"
+        [[ "${resp// /}" == *'"engine":"hindsight"'* ]] && return 0
+        sleep 1
+    done
+    return 1
+}
+
 # Print systemd's enablement state for `unit` (enabled, disabled, masked,
 # masked-runtime, static, ...), or `not-found` when systemd doesn't know it
 # (a fresh install). Callers MUST capture this BEFORE anything lays down or
@@ -4076,8 +4094,46 @@ else
                     > /etc/hal0/hindsight-llm.env )
                 chown root:hal0 /etc/hal0/hindsight-llm.env 2>/dev/null || true
             fi
+            # #3518 (ADR-0058 decision 3): a new install builds its store with
+            # the configured embedder ([memory.models]). The base unit names
+            # none, so before the engine's FIRST start hal0 writes its managed
+            # drop-in and the embedder record, starts the engine on them, and
+            # moves it to the engine default only when that start fails and a
+            # start on the default then works. It acts only on a box with no
+            # memory store; on any other box (an upgrade, a re-run, a store
+            # whose disk is missing) it changes nothing. All of it is
+            # hal0.memory.first_start; exit 3 = fell back to the default,
+            # 5 = the engine starts on neither embedder, 6 = the model host
+            # is unreachable, anything else = the step itself failed.
+            hs_first_rc=0
+            "${VENV_DIR}/bin/python" -I -m hal0.memory.first_start || hs_first_rc=$?
+            case "${hs_first_rc}" in
+                0) ;;
+                3)
+                    warn "the memory engine could not start on the configured embedder; it runs on the engine default instead (see the line above)"
+                    warn "  check 'journalctl -u hindsight-api -n 40' for the cause; '${HAL0_BIN} doctor all' shows the recorded embedder"
+                    ;;
+                5)
+                    warn "the memory engine did not start (see the line above); it stays on the configured embedder and keeps retrying"
+                    warn "  its first start downloads the embedding and the reranker model; check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'"
+                    ;;
+                6)
+                    warn "the memory engine could not download its models; it keeps retrying and will start on the configured embedder when the model host is reachable"
+                    warn "  check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'"
+                    ;;
+                *)
+                    warn "the memory engine's embedder could not be set up before its first start (see the line above)"
+                    warn "  check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'"
+                    ;;
+            esac
             systemctl daemon-reload
-            systemctl enable --now hindsight-api
+            # A unit that reached its start limit (a first start that kept
+            # failing above) is refused by `enable --now`, and this file runs
+            # under `set -e`: clear the failed state first, and treat a start
+            # that still fails like the not-yet-healthy engine below (warn).
+            systemctl reset-failed hindsight-api 2>/dev/null || true
+            systemctl enable --now hindsight-api \
+                || warn "could not enable and start the memory engine; check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'"
             if [[ "${hs_unit_changed}" -eq 1 && "${hs_was_active}" -eq 1 ]]; then
                 info "hindsight-api unit changed — restarting the running engine so it reads the new unit"
                 systemctl restart hindsight-api || warn "hindsight-api restart failed; restart it by hand to apply the new unit"
@@ -4096,12 +4152,20 @@ else
                 # = hermes' private store (the server derives it from the agent-id
                 # via PRIVATE_PREFIX="private:", so the seed name must match exactly).
                 # Other private/project banks lazy-create.
+                # The two manifests below are mirrored in hal0.memory.bank_seed,
+                # which hal0-api runs when an engine that was not up here
+                # comes up later; a test holds the two copies in lockstep.
                 _seed_bank() {
                     curl -fsS -m 20 -X POST \
                         "http://127.0.0.1:${HAL0_PORT}/api/memory/banks/$1/import" \
                         -H "Content-Type: application/json" -H "X-hal0-Agent: installer" \
                         -d "$2" >/dev/null 2>&1
                 }
+                # hal0-api may still be on its boot-time fallback provider (it
+                # started before the engine on a new install); seed once it
+                # has the engine, or the imports below have nothing to reach.
+                wait_memory_provider_ready 45 \
+                    || warn "hal0-api has not picked up the memory engine yet; bank seeding may be incomplete"
                 if _seed_bank shared '{"version":"1","bank":{"retain_mission":"Extract technical decisions and rationale, gotchas and fixes, PRs and status changes, conventions, commands, endpoints, flags, incidents and resolutions, and cross-session coordination facts. Ignore routine edits, transient state, secrets, and anything already in git.","enable_observations":true,"disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":1}}' \
                     && _seed_bank private:hermes '{"version":"1","bank":{"retain_mission":"This agent private working notes, scratch decisions, and per-task state. Never store shared facts here.","disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":2}}'; then
                     info "seeded memory banks: shared (global) + private:hermes"
@@ -4119,7 +4183,8 @@ else
                 "${HAL0_BIN}" memory graph check \
                     || warn "could not check the extraction slot's throughput; run '${HAL0_BIN} memory graph check' once a model is loaded"
             else
-                warn "hindsight-api not healthy yet; check 'journalctl -u hindsight-api -n 40'"
+                warn "hindsight-api not healthy yet: on its first start the engine downloads its embedding and reranker models"
+                warn "  check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'; hal0-api seeds the memory banks once the engine is up"
             fi
         fi
     fi

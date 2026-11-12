@@ -3,10 +3,13 @@
  * BankBar + Add modal (`window.MemV2BankBar` / `window.MemV2AddModal`,
  * task C3).
  *
- * Unskipped by task C6: `#memory/bank?bank=primary` now renders
- * `MemoryView`'s Bank sub-tab (memory-bank-workspace.jsx), which embeds
- * `window.MemV2BankBar` at the top. Mutations the GET-only forced-mock
- * can't serve (add-fact POST) use `page.route` overrides.
+ * `#memory/facts?bank=primary` renders the Memory area's Facts tab, whose
+ * workspace (memory-bank-workspace.jsx) embeds `window.MemV2BankBar` at the
+ * top. Inside the area the bar is `embedded`: the scope bar above it chooses
+ * the bank, and directives and mental models belong to the Knowledge tab, so
+ * the bar's own bank <select> and its Rules tab are not drawn. Mutations the
+ * GET-only forced-mock can't serve (add-fact POST) use `page.route`
+ * overrides.
  */
 import { test, expect } from '../fixtures/apiMock'
 
@@ -26,7 +29,7 @@ test.describe('memory-v2 BankBar + Add modal', () => {
         },
       })
     })
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-reflect-tab').click()
     await page.getByTestId('mv-reflect-q').fill('why is extraction lagging?')
     await page.getByTestId('mv-reflect-run').click()
@@ -41,33 +44,48 @@ test.describe('memory-v2 BankBar + Add modal', () => {
     expect(postBody).not.toHaveProperty('text')
   })
 
-  test('the bank-select dropdown actually switches banks (regression, live-reproduced 2026-08-22)', async ({
+  test('the scope bar switches banks, and the switch holds (regression, live-reproduced 2026-08-22)', async ({
     page,
   }) => {
-    // Live bug: picking a different bank from the dropdown briefly fetched
-    // the new bank's data (network requests fired) then immediately
-    // snapped the hash and the dropdown's value back to the old bank —
-    // stuck. Root cause: BankWorkspace's `switchBank` called `setSel(null)`
-    // right after `setBank(id)`; memory.jsx's `setSel` closes over its own
-    // (stale, not-yet-updated-this-render) `bankId` when it rewrites the
-    // hash, clobbering the bank `setBank` had just written. Pins both the
-    // URL and the select element's own value actually landing on the new
-    // bank, not just a transient fetch.
-    await page.goto('/#memory/bank?bank=primary')
-    await expect(page.getByTestId('mv-bank-select')).toHaveValue('primary')
+    // Live bug, on the bar's old <select>: picking a different bank briefly
+    // fetched the new bank's data then snapped the hash and the control
+    // back to the old bank — a second write, made in the same handler from
+    // a stale copy of the address, undid the first. The bank is now chosen
+    // in the scope bar and written by MemoryArea's `replaceRoute`, which
+    // merges into the address that is current. Pins the address, the
+    // control and the bar all landing on the new bank and staying there.
+    await page.goto('/#memory/facts?bank=primary&fact=f26')
+    const banks = page.getByTestId('ma-scope-bank')
+    await expect(banks.getByRole('radio', { name: 'primary' })).toHaveAttribute('aria-checked', 'true')
+    await expect(page.getByTestId('mv-bank-mission')).toContainText('strix-halo-01')
 
-    await page.getByTestId('mv-bank-select').selectOption('scratch')
+    await banks.getByRole('radio', { name: 'scratch' }).click()
 
-    await expect(page).toHaveURL(/#memory\/bank\?bank=scratch/)
-    await expect(page.getByTestId('mv-bank-select')).toHaveValue('scratch')
+    // The open fact belonged to the bank that was left, so it is gone from
+    // the address with it.
+    await expect(page).toHaveURL(/#memory\/facts\?bank=scratch$/)
+    await expect(banks.getByRole('radio', { name: 'scratch' })).toHaveAttribute('aria-checked', 'true')
+    await expect(banks.getByRole('radio', { name: 'primary' })).toHaveAttribute('aria-checked', 'false')
+    await expect(page.getByTestId('mv-bank-mission')).toContainText('ephemeral working memory')
+    await expect(page.getByTestId('mv-inspector')).toHaveCount(0)
+    // Holds — not a transient state that reverts on the next render.
+    await page.waitForTimeout(300)
+    await expect(page).toHaveURL(/#memory\/facts\?bank=scratch$/)
+    await expect(banks.getByRole('radio', { name: 'scratch' })).toHaveAttribute('aria-checked', 'true')
   })
 
-  test('rules tab lists directives and mental models from the mock', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
-    await page.getByTestId('mv-rules-tab').click()
-    // buildDirectives()/buildMentalModels() mock rows — at least one
-    // mv-rule-row-{id} renders (shared testid pattern for both sub-lists).
-    await expect(page.locator('[data-testid^="mv-rule-row-"]').first()).toBeVisible()
+  test('inside the area the bar has no bank <select> and no Rules tab', async ({ page }) => {
+    await page.goto('/#memory/facts?bank=primary')
+    await expect(page.getByTestId('mv-bankbar')).toBeVisible()
+    // The scope bar is the one bank control on the page.
+    await expect(page.getByTestId('mv-bank-select')).toHaveCount(0)
+    await expect(page.getByTestId('memory-area').locator('select.pick')).toHaveCount(0)
+    await expect(page.getByRole('group', { name: 'Scope' })).toBeVisible()
+    // Directives and mental models are Knowledge's; reflect stays here.
+    await expect(page.getByTestId('mv-rules-tab')).toHaveCount(0)
+    await expect(page.locator('[data-testid^="mv-rule-row-"]')).toHaveCount(0)
+    await expect(page.getByTestId('mv-reflect-tab')).toBeVisible()
+    await expect(page.getByTestId('mv-reflect-q')).toBeVisible()
   })
 
   // Live screenshot feedback (2026-08-22): the "…" button next to + Add had
@@ -80,7 +98,7 @@ test.describe('memory-v2 BankBar + Add modal', () => {
       posted = true
       return route.fulfill({ json: { queued: true } })
     })
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-consolidate-now').click()
     await expect.poll(() => posted).toBe(true)
     await expect(page.getByText('Consolidation queued')).toBeVisible()
@@ -91,7 +109,7 @@ test.describe('memory-v2 BankBar + Add modal', () => {
     await page.route('**/api/memory/add', (route) =>
       route.fulfill({ json: { id: 'm-test', timestamp: new Date().toISOString() } }),
     )
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-add-open').click()
     await expect(page.getByTestId('mv-add-modal')).toBeVisible()
     await page.getByTestId('mv-add-fact-text').fill('a new fact to remember')
@@ -117,7 +135,7 @@ test.describe('memory-v2 BankBar + Add modal', () => {
         await route.fulfill({ json: { status: 'deleted' } })
       },
     )
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-bank-delete').click()
     await expect(page.getByText('Delete bank "primary"?')).toBeVisible()
     // Blast radius names what dies with the bank.

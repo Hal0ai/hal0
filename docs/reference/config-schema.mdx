@@ -135,6 +135,7 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `graph` | table | — | see below |
 | `priority` | table | — | see below |
 | `embedding` | table | — | see below |
+| `projects` | table | — | see below |
 
 #### `[memory.graph]`
 
@@ -191,6 +192,42 @@ hold-budget setting: the later gate derives it from half the memory engine's
 | `rerank_model` | str | `"builtin.jina-reranker-v1-tiny-en-q8"` | non-empty |
 | `rerank_connect_timeout_s` | float | `1.0` | `0.05-10.0` |
 | `rerank_read_timeout_s` | float | `8.0` | `0.05-60.0` |
+
+#### `[memory.projects]`
+
+`extra="forbid"`. The project registry that memory writes are resolved
+against; see [Memory projects](/docs/concepts/memory-projects).
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `aliases` | table of str → str | `{}` | other spellings of a project: a write naming the left side is tagged as the right side. Applied before `deny`. An alias may not point at a denied name (or the reserved `unresolved`) or back at a name that leads to it. An entry whose two sides are the same name once normalised (`"Widgets" = "widgets"`) does nothing and is ignored |
+| `deny` | list[str] | `["tmp", "temp", "root", "home", "workdir", "scratch", "scratchpad", "unknown", "default"]` | names that are never projects; a write naming one is stored with no project. Setting the key replaces the default list |
+| `registered` | list[str] | `[]` | projects you have confirmed. Not required to write; the `memory_projects` doctor row reports names in use that are neither listed here nor aliased |
+
+Every entry is normalised at load: lower case, `a-z`, `0-9`, `.`, `_` and `-`
+kept, any other run turned into one `-`, at most 100 characters. An entry
+with nothing left after that is refused. hal0-api reads the table at start,
+so a change needs a restart; `hal0 doctor` reads the file each run.
+
+#### `[memory.compat]`
+
+`extra="forbid"`. The engine-compatible memory endpoint for coding agents,
+`/api/memory/compat`; see its [API reference](/docs/reference/api/memory-compat/).
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `shared_document_prefixes` | list[str] | `["git:", "gitlog:", "survey-baseline:"]` | at most 32 entries, each 3 to 64 characters of `a-z A-Z 0-9 . _ : -`, ending with `:` and with no `::`. A client's documents are stored in a namespace of its own; a document id that starts with one of these is stored in its project's shared namespace, which any client of that project may write. Setting the key replaces the default list; `[]` shares nothing |
+| `max_concurrent_reflects` | int | `2` | `1-64`. Reflects through the endpoint running at once, across all clients; one client always runs one at a time. Never more than one fewer than `[memory.lanes]` lets the engine run, so with the shipped lanes the effective value is `1`. Beyond the limit a request is `429` with `Retry-After` |
+| `max_concurrent_recalls` | int | `4` | `1-64`. Recalls through the endpoint running at once, across all clients; one client runs at most two. Beyond the limit a request is `429` with `Retry-After` |
+| `max_outstanding_operations` | int | `64` | `1-10000`. Asynchronous retains one client may have unfinished in the engine. Beyond it an asynchronous retain is `429` with `Retry-After` until earlier ones finish. Counted in the hal0-api process; operations from before a restart are not counted |
+| `max_outstanding_bytes` | int | `268435456` | `1048576-17179869184`. Total request-body size of one client's unfinished asynchronous retains. A single retain is accepted whatever its size while the client has none outstanding |
+| `max_item_bytes` | int | `16777216` | `1024-33554432`. The largest `content` of one retained item, in UTF-8 bytes. The request body is capped at 48 MiB whatever this is |
+
+The default prefixes are the document ids the Hindsight coding-agents plugin
+derives from the repository itself: one commit, the commit log and a
+codebase-survey marker. The endpoint reads the table from hal0-api's loaded
+configuration on each request: a change saved through the Settings API
+applies at once, and a hand edit of `hal0.toml` at the next restart.
 
 ### `[updates]`
 

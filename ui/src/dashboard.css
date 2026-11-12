@@ -103,9 +103,8 @@
   --rad-lg: 10px;
   --rad-xl: 14px;
   --rad-pill: 999px;
-  /* task C7: migrated from memory-overhaul.css (which is being trimmed
-     toward eventual removal) — the only two of its six :root tokens that
-     weren't already defined here. */
+  /* task C7: one of the two :root tokens migrated from the (since deleted)
+     memory-overhaul.css that weren't already defined here. */
   --rad-xs: 3px;
 
   /* Operator Board — motion + surface tokens (ported from the kanban
@@ -118,7 +117,7 @@
   --dur-slow:      .22s;
   --shadow-drawer: -24px 0 80px -20px rgba(0, 0, 0, 0.7);
   --shadow-toast:  0 12px 36px -12px rgba(0, 0, 0, 0.6);
-  /* task C7: migrated from memory-overhaul.css. */
+  /* task C7: migrated from the (since deleted) memory-overhaul.css. */
   --shadow-menu:   0 8px 24px rgba(0, 0, 0, 0.45);
 
   /* Layout */
@@ -3891,18 +3890,8 @@ button.pf-state:disabled { cursor: default; opacity: 0.65; }
   .pf-card:hover { transform: none; }
 }
 
-/* ── Memory view (Hindsight engine surface) ─────────────────────────────── */
-/* #2107: the pre-v2 MemoryView styles that used to live here (.mem-top,
-   .mem-engine*, .mem-ts*, .mem-grid/.mem-bank-card*, .mem-ops/.mem-op-*,
-   .mem-confirm/.mem-danger, legend/swatch bits) were pruned with the dead
-   memory.jsx components they styled. Only the still-rendered new-bank form
-   pieces remain. */
-.mem-new-bank { margin-top: 16px; padding: 14px 16px; }
-.mem-detail-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
-
 /* ── Memory graph explorer ──────────────────────────────────────────────── */
-.mem-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
-.mem-tabs .btn.active, .mem-graph-sources .btn.active { color: var(--hal0-accent); border-color: var(--hal0-accent); }
+.mem-graph-sources .btn.active { color: var(--hal0-accent); border-color: var(--hal0-accent); }
 .mem-graph-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .mem-graph-sources { display: flex; gap: 4px; }
 .mem-graph-select { width: auto; min-width: 120px; font-size: 11px; }
