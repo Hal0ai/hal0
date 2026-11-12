@@ -490,6 +490,8 @@ _PRIVATE_SCAN_PAGES = 10
 #: Documents read per tag when deciding whether a tag that other agents'
 #: private documents carry is also on a document the caller can see.
 _TAG_CHECK_LIMIT = 50
+#: Engine reads at a time when a model listing's rows need their trigger.
+_TRIGGER_READS = 8
 #: Operation types that carry or produce memory content: a retain's submitted
 #: text, a document or bank import's archive, an export of one.
 _CONTENT_OP_TYPES = frozenset(
@@ -1498,19 +1500,54 @@ class HindsightProvider(MemoryProvider):
         return True, None
 
     async def _readable_models(
-        self, bank: str, models: list[Any], caller: str
+        self, bank: str, models: list[Any], caller: str, *, listed: bool = False
     ) -> list[dict[str, Any]]:
         """The mental models (or knowledge-page nodes) ``caller`` may read.
 
         See the section comment above. The bank is scanned only when some
-        model's scope is not confined to the caller.
+        model's scope is not confined to the caller. ``listed`` marks rows
+        from the engine's model listing, which at its default ``metadata``
+        detail carries ``trigger: null`` (Hindsight 1.2.0, #3584): once the
+        scan finds another agent's private memory, such a row is judged on
+        the trigger a GET of the model returns, and dropped if it is gone.
         """
         kept = [m for m in models if isinstance(m, dict) and self._is_visible_to(m, caller)]
         if any(not model_scope_confined_to(m, caller) for m in kept):
             present, _ = await self._foreign_private(bank, caller)
             if present:
+                if listed:
+                    kept = await self._with_stored_triggers(bank, kept)
                 kept = [m for m in kept if model_scope_confined_to(m, caller)]
         return kept
+
+    async def _with_stored_triggers(
+        self, bank: str, models: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """``models`` with each missing ``trigger`` read from the engine, at
+        most :data:`_TRIGGER_READS` at a time. Only the trigger is taken, so a
+        row keeps the detail it was listed at. A model that is 404 by now is
+        dropped."""
+        import asyncio
+
+        sem = asyncio.Semaphore(_TRIGGER_READS)
+
+        async def _fill(model: dict[str, Any]) -> dict[str, Any] | None:
+            if isinstance(model.get("trigger"), dict):
+                return model
+            async with sem:
+                try:
+                    one = await self._call(
+                        "get_mental_model", bank_id=bank, mental_model_id=model.get("id")
+                    )
+                except Exception as exc:
+                    if _http_status(exc) == 404:
+                        return None
+                    raise
+            trigger = one.get("trigger") if isinstance(one, dict) else None
+            return {**model, "trigger": trigger}
+
+        filled = await asyncio.gather(*[_fill(m) for m in models])
+        return [m for m in filled if m is not None]
 
     async def _operation_visible(
         self, bank: str, op: dict[str, Any], caller: str, *, depth: int = 0
@@ -2982,7 +3019,7 @@ class HindsightProvider(MemoryProvider):
         if isinstance(resp, dict) and isinstance(resp.get("items"), list):
             caller = self._caller_agent(client_id)
             items = resp["items"]
-            kept = await self._readable_models(bank, items, caller)
+            kept = await self._readable_models(bank, items, caller, listed=True)
             resp = {**resp, "items": kept}
             if "total" in resp:
                 resp["total"] = _visible_total(offset, len(kept), limit)
