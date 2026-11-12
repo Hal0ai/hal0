@@ -83,7 +83,7 @@ trigger may change only from one scope confined to the caller to another
 without `exclude_mental_models` (before hal0 set it, or written straight to
 the engine) is hidden from that agent too, and the agent cannot add the flag
 itself; the operator does, with
-[`hal0 memory mm repair --apply`](/docs/reference/cli-operator/#memory-mm-mental-models),
+[`hal0 memory mm repair --apply`](/docs/reference/cli-memory/#memory-mm-mental-models),
 and the `memory_model_owners` row of `hal0 doctor all` counts them. A `trigger.tag_groups`
 that is empty or not a list is refused (`memory.mental_model_scope_invalid`):
 the engine reads it as the whole bank. A listing's `total` counts only what

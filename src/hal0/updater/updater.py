@@ -733,7 +733,7 @@ def _enforce_upgrade_floor(
             "hint": (
                 "upgrade to a release inside the supported window first, or "
                 "reinstall; see 'Upgrading from an older release' in "
-                "docs/guides/update-and-rollback.mdx"
+                "docs/guides/update-and-rollback-release-notes.mdx"
             ),
         },
     )
