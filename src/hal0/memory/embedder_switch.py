@@ -1196,10 +1196,19 @@ class EmbedderSwitch(em.EngineMaintenance):
                 "and restart it",
             )
 
-        # The banks.
+        # The banks. The engine's own refreshes and consolidations are not a
+        # reason to refuse: a run waits for them (#3604). A dry run names them.
+        engine_work: dict[str, list[dict[str, Any]]] = {}
         try:
             for bank in await self._bank_ids():
                 state = await self.bank_state(bank)
+                if not self._allow_pending and (state["pending"] or state["processing"]):
+                    if apply:
+                        state, own = await self._await_engine_work(bank, state)
+                    else:
+                        own = await self._engine_work(bank, state)
+                    if own:
+                        engine_work[bank] = own
                 plan["banks"].append(
                     {k: state[k] for k in ("counts", "links", "pending", "processing")}
                     | {"bank": bank}
@@ -1231,7 +1240,27 @@ class EmbedderSwitch(em.EngineMaintenance):
                 + ". They may hold the only copy of a bank. See `hal0 memory embedder switch "
                 "--status`; delete them only once every bank exists under its own id",
             )
-        busy = [b for b in plan["banks"] if b["pending"] or b["processing"]]
+        if engine_work:
+            listing = "; ".join(em.operations_text(b, ops) for b, ops in engine_work.items())
+            if apply:
+                refuse(
+                    "engine_operations",
+                    f"the engine's own work did not finish within {self.t.engine_ops_s:g}s: "
+                    f"{listing}. The engine queues this by itself (a mental-model refresh "
+                    "after a restore or a restart, consolidation of new facts), and the "
+                    "switch waits for it before it starts. Let it finish (`hal0 memory ops "
+                    "list` shows it), then run the switch again",
+                )
+            else:
+                warnings.append(
+                    f"the engine is running its own work: {listing}. The switch waits up to "
+                    f"{self.t.engine_ops_s:g}s for it before it starts"
+                )
+        busy = [
+            b
+            for b in plan["banks"]
+            if (b["pending"] or b["processing"]) and b["bank"] not in engine_work
+        ]
         if busy:
             listing = ", ".join(
                 f"{b['bank']} ({b['pending']} pending, {b['processing']} processing)" for b in busy
@@ -1566,6 +1595,19 @@ class EmbedderSwitch(em.EngineMaintenance):
                 f"{state['pending']} pending and {state['processing']} processing operations"
             )
         return "; ".join(reasons)
+
+    async def _moved_or_busy(self, entry: BankEntry) -> str:
+        """:meth:`_original_moved`, with the engine's own work that never ended counted as a move.
+
+        For the rollback, which must finish: a bank the engine is still
+        working on is recorded as possibly holding the target's vectors.
+        """
+        try:
+            return await self._original_moved(entry)
+        except SwitchError as exc:
+            if not exc.details.get("engine_operations"):
+                raise
+            return exc.message
 
     async def _check_before_swap(self, journal: Journal) -> None:
         """The last look before anything is deleted.
@@ -2029,7 +2071,7 @@ class EmbedderSwitch(em.EngineMaintenance):
                     # of the target model in a store going back to the old one.
                     tainted = await self._stray_banks(journal)
                     for entry in journal.banks:
-                        if entry.step != STEP_PLANNED and await self._original_moved(entry):
+                        if entry.step != STEP_PLANNED and await self._moved_or_busy(entry):
                             tainted.append(entry.bank)
             if journal.isolated:
                 await self._ensure_engine(

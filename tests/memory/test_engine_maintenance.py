@@ -186,3 +186,28 @@ def test_the_drop_in_of_one_command_is_not_taken_for_the_units_command() -> None
     assert em.effective_exec_start(OTHER, ours) == f"{HS} --host 127.0.0.1 --port 9177"
     # To another command it is just a later-sorting drop-in that sets ExecStart.
     assert em.effective_exec_start(es.NAMES, ours) == "/x --port 4"
+
+
+def test_the_engine_queues_refreshes_and_consolidation_by_itself() -> None:
+    # The operation_type strings hindsight-api 1.2.0 stores (#3604).
+    assert em.ENGINE_OPERATION_TYPES == ("refresh_mental_model", "consolidation")
+    assert em.Timeouts().engine_ops_s > em.Timeouts().quiet_s
+
+
+def test_an_operation_is_named_by_type_bank_id_and_status() -> None:
+    # The list endpoint carries both names for the type and the id.
+    listed = {
+        "id": "a1",
+        "operation_id": "a1",
+        "task_type": "refresh_mental_model",
+        "operation_type": "refresh_mental_model",
+        "status": "processing",
+    }
+    older = {"id": "b2", "task_type": "consolidation", "status": "pending"}
+    assert em.operation_type(listed) == "refresh_mental_model"
+    assert em.operation_type(older) == "consolidation"
+    assert em.operation_type({}) == "unknown"
+    assert em.operations_text("shared", [listed, older]) == (
+        "refresh_mental_model on shared (operation a1, processing), "
+        "consolidation on shared (operation b2, pending)"
+    )

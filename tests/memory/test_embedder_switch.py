@@ -54,6 +54,7 @@ FAST = em.Timeouts(
     restore_floor_s=6.0,
     restore_factor=1.0,
     quiet_s=3.0,
+    engine_ops_s=6.0,
     delete_s=5.0,
     http_s=5.0,
 )
@@ -82,6 +83,10 @@ class FakeEngine:
         #: Per bank: write revision, model/directive text, config, operation ids (newest first).
         self.meta: dict[str, dict[str, Any]] = {}
         self.queue: dict[str, dict[str, int]] = {}
+        #: Per bank: operations the engine queued by itself, as its listing
+        #: shows them. Each stays live for ``reads_left`` listings of it
+        #: (``None``: until a test removes it), then completes.
+        self.engine_ops: dict[str, list[dict[str, Any]]] = {}
         self.features = {"document_export_api": True, "document_import_api": True}
         self.api_version = "1.2.0"
         #: An exception type raised for a request to the normal port while the
@@ -170,6 +175,27 @@ class FakeEngine:
         if op["status"] != "cancelled":
             op["status"] = status
 
+    def engine_op(
+        self,
+        bank: str,
+        op_id: str,
+        *,
+        kind: str = "refresh_mental_model",
+        status: str = "processing",
+        reads: int | None = 2,
+    ) -> None:
+        """The engine queues work of its own on ``bank`` (hindsight-api 1.2.0 field names)."""
+        self.engine_ops.setdefault(bank, []).append(
+            {
+                "id": op_id,
+                "operation_id": op_id,
+                "task_type": kind,
+                "operation_type": kind,
+                "status": status,
+                "reads_left": reads,
+            }
+        )
+
     def restart(self) -> None:
         """The unit restarts: a cancelled restore's worker dies with it."""
         self.restarts += 1
@@ -257,10 +283,35 @@ class FakeEngine:
             "failed_consolidation": 0,
             "operations_by_status": {
                 "completed": len(m["ops"]),
-                "pending": q.get("pending", 0),
-                "processing": q.get("processing", 0),
+                "pending": q.get("pending", 0) + self._engine_count(bank, "pending"),
+                "processing": q.get("processing", 0) + self._engine_count(bank, "processing"),
             },
         }
+
+    def _engine_count(self, bank: str, status: str) -> int:
+        return sum(1 for op in self.engine_ops.get(bank, []) if op["status"] == status)
+
+    def _operations(self, bank: str, params: dict[str, str]) -> httpx.Response:
+        """``GET .../operations``: filtered by ``status`` and ``type`` like hindsight-api 1.2.0."""
+        live = self.engine_ops.get(bank, [])
+        rows = [
+            {"id": op, "operation_id": op, "task_type": "transfer", "status": "completed"}
+            for op in self.m(bank)["ops"]
+        ] + [{k: v for k, v in op.items() if k != "reads_left"} for op in live]
+        if "status" in params:
+            rows = [r for r in rows if r["status"] == params["status"]]
+        if "type" in params:
+            rows = [r for r in rows if r["task_type"] == params["type"]]
+        response = self._page("operations", rows, params)
+        for op in list(live):
+            if op["reads_left"] is not None and (
+                "status" not in params or op["status"] == params["status"]
+            ):
+                op["reads_left"] -= 1
+                if op["reads_left"] <= 0:
+                    live.remove(op)
+                    self.events.append(f"engine-op-done:{bank}:{op['id']}")
+        return response
 
     def _row(self, bank: str) -> dict[str, Any]:
         c, m = self.banks[bank], self.m(bank)
@@ -472,8 +523,7 @@ class FakeEngine:
         if rest == "/config":
             return httpx.Response(200, json={"bank_id": bank, "overrides": self.m(bank)["config"]})
         if rest == "/operations":
-            rows = [{"id": op} for op in self.m(bank)["ops"]]
-            return httpx.Response(200, json={"operations": rows[: int(params["limit"])]})
+            return self._operations(bank, params)
         raise AssertionError(f"unexpected {method} {path}")
 
 
@@ -848,6 +898,124 @@ async def test_allow_pending_turns_the_refusal_into_a_warning(box: Box) -> None:
     plan = await box.switch(allow_pending=True).preflight()
     assert plan["refusals"] == []
     assert any("not carried over" in w for w in plan["warnings"])
+
+
+# ── the engine's own work (#3604) ────────────────────────────────────────────
+
+
+async def test_a_refresh_the_engine_runs_at_preflight_is_waited_for_then_the_run_goes_on(
+    box: Box,
+) -> None:
+    box.engine.engine_op("alpha", "op-refresh-1", status="processing", reads=3)
+
+    plan = await box.switch().preflight()
+    assert plan["refusals"] == [], "a dry run does not refuse the engine's own work"
+    assert any(
+        "refresh_mental_model on alpha (operation op-refresh-1, processing)" in w
+        for w in plan["warnings"]
+    )
+
+    result = await box.switch().run()
+
+    assert result["status"] == "switched"
+    assert box.events.index("engine-op-done:alpha:op-refresh-1") < box.events.index("gate:on"), (
+        "the refresh ended before anything was paused or exported"
+    )
+    _assert_switched(box)
+
+
+async def test_a_refresh_that_never_ends_refuses_the_run_and_names_it(box: Box) -> None:
+    box.engine.engine_op("Hal0::Beta", "op-refresh-9", status="pending", reads=None)
+
+    with pytest.raises(es.SwitchRefused) as err:
+        await box.switch().run()
+
+    assert _codes(err.value.plan) == ["engine_operations"]
+    assert (
+        "refresh_mental_model on Hal0::Beta (operation op-refresh-9, pending)" in err.value.message
+    )
+    assert "within 6s" in err.value.message
+    assert box.events == [], "nothing paused, nothing exported"
+    assert box.record().embedder == BGE and not es.journal_path().exists()
+
+
+async def test_engine_work_beside_a_queued_retain_is_still_refused_as_queued_work(
+    box: Box,
+) -> None:
+    box.engine.engine_op("alpha", "op-cons-1", kind="consolidation", reads=None)
+    box.engine.queue["alpha"] = {"pending": 1, "processing": 0}
+
+    plan = await box.switch().preflight(apply=True)
+
+    assert _codes(plan) == ["pending_operations"]
+    assert "alpha (1 pending, 1 processing)" in plan["refusals"][0]["message"]
+
+
+async def test_a_refresh_queued_after_the_rebuild_is_waited_for_before_the_swap(
+    box: Box,
+) -> None:
+    """A restore makes the engine refresh mental models of its own accord.
+
+    Seen on a test box: the refresh was still running on the original when the
+    switch compared it, and the run rolled back as if a client had written.
+    """
+
+    def hook(point: str) -> None:
+        if point == "restored:alpha":
+            box.engine.engine_op("alpha", "op-refresh-2", status="pending", reads=4)
+            box.engine.engine_op(
+                es.temp_bank_id("alpha", journal_run_id()), "op-refresh-3", reads=2
+            )
+
+    def journal_run_id() -> str:
+        journal = es.load_journal()
+        assert journal is not None
+        return journal.run_id
+
+    result = await box.switch(hook=hook).run()
+
+    assert result["status"] == "switched" and result["warnings"] == []
+    done = box.events.index("engine-op-done:alpha:op-refresh-2")
+    assert done < box.events.index("delete:alpha"), "the original was quiet before its delete"
+    assert any(e.startswith("engine-op-done:") and "op-refresh-3" in e for e in box.events)
+    _assert_switched(box)
+
+
+async def test_a_refresh_after_the_rebuild_that_never_ends_rolls_back_and_names_it(
+    box: Box,
+) -> None:
+    def hook(point: str) -> None:
+        if point == "restored:gamma":
+            box.engine.engine_op("gamma", "op-refresh-4", reads=None)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(hook=hook).run()
+
+    message = err.value.message
+    assert "refresh_mental_model on gamma (operation op-refresh-4, processing)" in message
+    assert "did not finish within 6s" in message
+    assert "reaches the engine's private port" not in message, "not blamed on a client"
+    _assert_public(box)
+    assert box.engine.banks == START, "originals intact, no temporary bank"
+    assert "delete:gamma" not in box.events
+    record = box.record()
+    assert (record.embedder, record.mixed) == (BGE, True), "a bank still being worked on"
+    assert write_gate.read_gate() is None and not es.journal_path().exists()
+
+
+async def test_engine_work_left_when_the_pause_settles_is_named(box: Box) -> None:
+    def hook(point: str) -> None:
+        if point == "paused":
+            box.engine.engine_op("alpha", "op-cons-2", kind="consolidation", reads=None)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(hook=hook).run()
+
+    assert "did not finish within 6s" in err.value.message
+    assert "consolidation on alpha (operation op-cons-2, processing)" in err.value.message
+    assert err.value.details["engine_operations"] == [
+        {"bank": "alpha", "type": "consolidation", "id": "op-cons-2", "status": "processing"}
+    ]
 
 
 def _usage(free: int) -> Any:

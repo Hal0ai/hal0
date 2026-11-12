@@ -506,6 +506,12 @@ bank, so look at `--status` first.
   cancel them (`DELETE /api/memory/banks/<bank>/operations/<id>`).
   `--allow-pending` goes ahead anyway: what those operations have not written
   when a bank is exported is not carried over.
+- The engine's own work is waited for, not refused: a mental-model refresh
+  (which the engine queues after a restore or a restart) or a consolidation.
+  Before the run starts, and each time it compares or deletes a bank, the
+  switch waits up to 15 minutes for that work to finish. If it does not, the
+  switch stops and names the operation by type, bank and id. A dry run lists
+  such work as a warning.
 - The export carries only facts that belong to a document. A bank holding any
   other fact does not match its archive, and the switch stops at step 3
   saying so. Observations whose source facts are gone are not exported
