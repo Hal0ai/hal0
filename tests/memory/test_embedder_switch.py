@@ -3,8 +3,11 @@
 The engine is an ``httpx.MockTransport`` behind the real
 ``HindsightRestClient``; it keeps banks in memory and answers the routes the
 switch uses the way hindsight-api 1.2.0 does (shapes read from its OpenAPI).
-The host side (drop-in write and restart, the engine's live environment, the
-admin rename) is injected, and every step lands in one ordered event list.
+Its restore keeps knowledge-node and directive ids exactly when the real one
+does (``engine/transfer/importer.py``): into the archive's own bank id, with
+no other bank holding them (#3597). The host side (drop-in write and restart,
+the engine's live environment) is injected, and every step lands in one
+ordered event list.
 
 A run is stopped at an exact point through the switch's own ``hook``.
 """
@@ -50,7 +53,7 @@ FAST = es.Timeouts(
     restore_floor_s=6.0,
     restore_factor=1.0,
     quiet_s=3.0,
-    rename_s=5.0,
+    delete_s=5.0,
     http_s=5.0,
 )
 
@@ -108,8 +111,17 @@ class FakeEngine:
 
     def m(self, bank: str) -> dict[str, Any]:
         return self.meta.setdefault(
-            bank, {"rev": 0, "mm": "", "dir": "", "config": {}, "ops": [], "profile": 0}
+            bank,
+            {"rev": 0, "mm": "", "dir": "", "config": {}, "ops": [], "profile": 0, "ids": bank},
         )
+
+    def ids(self, bank: str) -> dict[str, list[str]]:
+        """The knowledge-node and directive ids the engine shows for ``bank``."""
+        token, c = self.m(bank)["ids"], self.banks[bank]
+        return {
+            "knowledge": [f"kp-{i}-{token}" for i in range(c["mental_models"])],
+            "directives": [f"d-{i}-{token}" for i in range(c["directives"])],
+        }
 
     def direct_write(self, bank: str, facts: int = 1) -> None:
         """A retain that reached the engine without going through hal0."""
@@ -156,21 +168,31 @@ class FakeEngine:
                 ),
             )
             zf.writestr("mental_models.json", json.dumps([{}] * counts["mental_models"]))
+            # What the rows carry verbatim: definitions, directive text, config, and ids.
+            m = self.m(bank)
+            zf.writestr(
+                "fake_rows.json", json.dumps({k: m[k] for k in ("mm", "dir", "config", "ids")})
+            )
         return buf.getvalue()
 
     @staticmethod
-    def _unzip(body: bytes) -> tuple[str, dict[str, int]]:
-        """Source bank and counts of the archive inside a multipart upload."""
+    def _unzip(body: bytes) -> tuple[str, dict[str, Any], dict[str, int]]:
+        """Source bank, verbatim rows and counts of the archive inside a multipart upload."""
         with zipfile.ZipFile(io.BytesIO(body)) as zf:
             manifest = json.loads(zf.read("manifest.json"))
             models = len(json.loads(zf.read("mental_models.json")))
-        return manifest["source_bank_id"], {
-            "facts": manifest["fact_count"],
-            "observations": manifest["observation_count"],
-            "mental_models": models,
-            "directives": manifest["directive_count"],
-            "documents": manifest["document_count"],
-        }
+            rows = json.loads(zf.read("fake_rows.json"))
+        return (
+            manifest["source_bank_id"],
+            rows,
+            {
+                "facts": manifest["fact_count"],
+                "observations": manifest["observation_count"],
+                "mental_models": models,
+                "directives": manifest["directive_count"],
+                "documents": manifest["document_count"],
+            },
+        )
 
     def _stats(self, bank: str) -> dict[str, Any]:
         c, q, m = self.banks[bank], self.queue.get(bank, {}), self.m(bank)
@@ -267,7 +289,7 @@ class FakeEngine:
         if rest == "/transfer/import" and method == "POST":
             assert params["mode"] == "restore"
             target = params["target_bank_id"]
-            source, counts = self._unzip(request.content)
+            source, rows, counts = self._unzip(request.content)
             assert bank in self.banks, "the engine records a restore against an existing bank"
             if target in self.banks:
                 return httpx.Response(409, json={"detail": "bank exists"})
@@ -287,6 +309,14 @@ class FakeEngine:
             self.m(bank)["ops"].insert(0, op_id)
             if not stuck:
                 self.banks[target] = counts
+                # Knowledge-node ids are unique across the schema and directive
+                # ids are dropped for another bank id, so they survive only a
+                # restore into the archive's own id that nothing else holds.
+                held = {meta["ids"] for b, meta in self.meta.items() if b != target}
+                keep = target == source and rows["ids"] not in held
+                restored = self.m(target)
+                restored.update({k: rows[k] for k in ("mm", "dir", "config")})
+                restored["ids"] = rows["ids"] if keep else f"new-{op_id}"
             return httpx.Response(202, json={"operation_id": op_id})
         if bank not in self.banks:
             return httpx.Response(404, json={"detail": "bank not found"})
@@ -328,10 +358,18 @@ class FakeEngine:
         if rest == "/directives":
             assert params.get("active_only") == "false", "inactive directives count too"
             rows = [
-                {"id": f"d-{i}", "bank_id": bank, "content": self.m(bank)["dir"]}
-                for i in range(self.banks[bank]["directives"])
+                {"id": did, "bank_id": bank, "content": self.m(bank)["dir"]}
+                for did in self.ids(bank)["directives"]
             ]
             return self._page("items", rows, params)
+        if rest == "/knowledge-base/tree":
+            folder = f"kf-{self.m(bank)['ids']}"
+            pages = [
+                {"id": pid, "kind": "page", "name": f"page {pid[:4]}", "parent_id": folder}
+                for pid in self.ids(bank)["knowledge"]
+            ]
+            roots = [{"id": folder, "kind": "folder", "name": "F", "children": pages}]
+            return httpx.Response(200, json={"roots": roots if pages else []})
         if rest == "/config":
             return httpx.Response(200, json={"bank_id": bank, "overrides": self.m(bank)["config"]})
         if rest == "/operations":
@@ -352,7 +390,6 @@ class Host:
         #: When set, a restart does not change what the engine runs.
         self.override: Embedder | None = None
         self.dropin_error: dict[str, str] = {}
-        self.rename_fails: set[str] = set()
         #: The port in the isolation drop-in, as written; read at the next restart.
         self.dropin_port: int | None = None
         #: A drop-in that sorts after hal0's and replaces ExecStart: isolation does not take.
@@ -422,13 +459,6 @@ class Host:
         pair = self.live._asdict()
         return {"live": pair, "on_disk": pair, "on_disk_source": "unit"}
 
-    def rename(self, old: str, new: str) -> str:
-        self.events.append(f"rename:{old}->{new}")
-        if new in self.rename_fails:
-            raise es.SwitchError(f"hindsight-admin rename-bank exited 1: boom ({new})", bank=new)
-        self.engine.move(old, new)
-        return "Renamed"
-
 
 class Box:
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -494,7 +524,6 @@ class Box:
             target=target,
             configured=HS,
             apply_dropin=self.host.apply_dropin,
-            rename_bank=self.host.rename,
             isolate=self.host.isolate,
             release=self.host.release,
             stop_unit=self.host.stop_unit,
@@ -600,10 +629,15 @@ async def test_a_dry_run_reports_the_plan_and_writes_nothing_at_all(
     assert [b["bank"] for b in plan["banks"]] == list(ORIGINALS)
     assert plan["banks"][0]["counts"] == _counts(120, 40, 2, 1, 6)
     assert plan["totals"]["facts"] == 189 and plan["totals"]["observations"] == 50
-    # What a run costs: three engine restarts, an export and a restore per
-    # bank, and (189 facts + 50 observations) at the measured 60 per second.
-    assert plan["estimate"] == {"restarts_s": 75, "per_bank_s": 6, "embedding_s": 4}
-    assert plan["estimate_s"] == 85
+    # What a run costs: three engine restarts, an export and two restores per
+    # bank, and (189 facts + 50 observations) embedded twice at the measured
+    # 60 per second.
+    assert plan["estimate"] == {"restarts_s": 75, "per_bank_s": 9, "embedding_s": 8}
+    assert plan["estimate_s"] == 92
+    # It says which ids the switch keeps and which it cannot (#3597).
+    assert "knowledge-base folder and page ids (kf-..., kp-...)" in plan["ids"]["kept"]
+    assert "directive ids" in plan["ids"]["kept"]
+    assert plan["ids"]["changed"] == ["fact ids: the engine gives every restored fact a new id"]
     assert plan["recorded"]["model"] == BGE.model and plan["target"] == HS._asdict()
     # No engine write (so no export), no restart, and not one file created or
     # changed: no gate, no journal, no lock, no archive directory, no record.
@@ -739,20 +773,6 @@ async def test_the_engine_filesystem_and_the_archive_filesystem_are_checked_apar
     assert plan["disk"]["store_needed_bytes"] == 4096
 
 
-async def test_refuses_without_the_engine_rename_command(box: Box) -> None:
-    (box.hs / ".venv" / "bin" / "hindsight-admin").unlink()
-    assert _codes(await box.switch().preflight()) == ["rename_tool_missing"]
-
-
-async def test_refuses_when_the_units_environment_file_cannot_be_read(
-    box: Box, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(es, "admin_env_file_unreadable", lambda: "/etc/hal0/hindsight-llm.env")
-    plan = await box.switch().preflight()
-    assert _codes(plan) == ["env_file_unreadable"]
-    assert "run this as root" in plan["refusals"][0]["message"]
-
-
 async def test_refuses_during_an_engine_upgrade(box: Box) -> None:
     (box.hs / ".venv.new").mkdir()
     assert _codes(await box.switch().preflight()) == ["engine_upgrade"]
@@ -791,6 +811,7 @@ async def test_the_switch_isolates_the_engine_and_runs_its_steps_in_order(box: B
     result = await box.switch().run()
 
     temps = {b: es.temp_bank_id(b, result["run_id"]) for b in ORIGINALS}
+    scratch = es.scratch_bank_id(result["run_id"])
     assert box.events == [
         # Writes are paused, then the engine is taken off its normal address,
         # still on its original embedder, before anything is listed or exported.
@@ -802,7 +823,19 @@ async def test_the_switch_isolates_the_engine_and_runs_its_steps_in_order(box: B
         f"engine:{HS.model}",
         *(f"restore:{b}->{temps[b]}" for b in ORIGINALS),
         # Every bank is rebuilt and compared before the first original goes.
-        *(e for b in ORIGINALS for e in (f"delete:{b}", f"rename:{temps[b]}->{b}")),
+        # Then each original is deleted and its archive restored again, into
+        # its own id (the one restore that keeps its ids), and the rebuilt
+        # copy goes only once that matches.
+        "delete:alpha",
+        f"create:{scratch}",
+        f"restore:alpha->alpha via {scratch}",
+        f"delete:{temps['alpha']}",
+        *(
+            e
+            for b in ORIGINALS[1:]
+            for e in (f"delete:{b}", f"restore:{b}->{b} via {scratch}", f"delete:{temps[b]}")
+        ),
+        f"delete:{scratch}",
         # The engine goes back to its normal address before writes are let in.
         "release",
         f"engine:{HS.model}",
@@ -837,7 +870,55 @@ async def test_the_archives_are_kept_private_and_reported(box: Box, tmp_path: Pa
     # The journal's mirror stays beside the archives, with the last word.
     done = json.loads((run_dir / "journal.json").read_text())
     assert done["phase"] == es.PHASE_COMPLETE
-    assert [b["step"] for b in done["banks"]] == [es.STEP_RENAMED] * 3
+    assert [b["step"] for b in done["banks"]] == [es.STEP_PLACED] * 3
+
+
+async def test_every_knowledge_page_and_directive_keeps_its_id(box: Box) -> None:
+    """#3597: agents, the coding-agents plugin and dashboard links hold these ids."""
+    before = {b: box.engine.ids(b) for b in ORIGINALS}
+    assert before["alpha"]["knowledge"] and before["Hal0::Beta"]["directives"]
+
+    result = await box.switch().run()
+
+    assert {b: box.engine.ids(b) for b in ORIGINALS} == before
+    assert result["status"] == "switched" and not box.temps()
+
+
+async def test_the_rebuilt_copy_does_not_keep_the_ids_which_is_why_it_is_not_kept(
+    box: Box,
+) -> None:
+    """The engine mints new knowledge-node and directive ids for a copy beside its original."""
+    journal = await box.kill_at("before_swap")
+    alpha, beta = journal.banks[0], journal.banks[1]
+    copy, original = box.engine.ids(alpha.temp), box.engine.ids(alpha.bank)
+    assert set(copy["knowledge"]).isdisjoint(original["knowledge"])
+    copy, original = box.engine.ids(beta.temp), box.engine.ids(beta.bank)
+    assert set(copy["directives"]).isdisjoint(original["directives"])
+
+
+async def test_a_bank_that_comes_back_with_other_ids_is_not_accepted(box: Box) -> None:
+    """An engine that remapped ids on the restore into the own id: stop, keep the copy."""
+    real = box.engine.handler
+
+    async def remapping(request: httpx.Request) -> httpx.Response:
+        resp = await real(request)
+        target = dict(request.url.params).get("target_bank_id")
+        if request.url.path.endswith("/transfer/import") and target == "Hal0::Beta":
+            box.engine.m(target)["ids"] = "remapped"
+        return resp
+
+    box.engine.handler = remapping  # type: ignore[method-assign]
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+
+    assert err.value.resumable
+    assert "differs from the original as it was archived: directives" in err.value.message
+    journal = es.load_journal()
+    assert journal is not None
+    beta = journal.banks[1]
+    assert beta.step == es.STEP_PLACING and beta.temp in box.engine.banks, "the copy is kept"
+    assert write_gate.read_gate() is not None, "writes stay paused"
 
 
 async def test_a_mixed_store_is_repaired_by_a_switch_to_its_own_embedder(box: Box) -> None:
@@ -984,7 +1065,7 @@ async def test_a_restore_that_will_not_stop_keeps_the_pause(box: Box) -> None:
     with pytest.raises(es.SwitchError) as err:
         await box.switch().run()
 
-    assert err.value.resumable and "could still appear" in err.value.message
+    assert err.value.resumable and "the bank it writes could still change" in err.value.message
     assert write_gate.read_gate() is not None
     assert es.load_journal().phase == es.PHASE_ROLLBACK_FAILED  # type: ignore[union-attr]
 
@@ -1135,7 +1216,7 @@ async def test_a_direct_write_to_the_next_bank_while_one_swaps_stops_before_its_
     journal = es.load_journal()
     assert journal is not None and journal.phase == es.PHASE_SWAPPING
     assert [b.step for b in journal.banks] == [
-        es.STEP_RENAMED,
+        es.STEP_PLACED,
         es.STEP_RESTORED,
         es.STEP_RESTORED,
     ]
@@ -1146,12 +1227,14 @@ async def test_a_direct_write_to_the_next_bank_while_one_swaps_stops_before_its_
     result = await box.switch(None).resume()
 
     beta = journal.banks[1].temp
-    assert box.events[before:][:5] == [
+    scratch = es.scratch_bank_id(journal.run_id)
+    assert box.events[before:][:6] == [
         f"delete:{beta}",
         "export:Hal0::Beta",
         f"restore:Hal0::Beta->{beta}",
         "delete:Hal0::Beta",
-        f"rename:{beta}->Hal0::Beta",
+        f"restore:Hal0::Beta->Hal0::Beta via {scratch}",
+        f"delete:{beta}",
     ]
     assert result["status"] == "switched"
     beta_now = {**START["Hal0::Beta"], "facts": 61, "documents": 5}
@@ -1198,28 +1281,31 @@ async def test_the_journal_names_each_destructive_step_before_it_happens(box: Bo
 
     switch = box.switch(hook=hook)
     switch._delete_bank = delete.__get__(switch)  # type: ignore[method-assign]
-    real_rename = box.host.rename
+    real_restore = es.EmbedderSwitch._restore
 
-    def rename(old: str, new: str) -> str:
-        if new == "alpha":
-            seen["at_rename"] = es.load_journal().banks[0].step  # type: ignore[union-attr]
-        return real_rename(old, new)
+    async def restore(
+        self: es.EmbedderSwitch, journal: es.Journal, entry: es.BankEntry, target: str, **kw: Any
+    ) -> dict[str, Any]:
+        if target == "alpha":
+            seen["at_place"] = es.load_journal().banks[0].step  # type: ignore[union-attr]
+        return await real_restore(self, journal, entry, target, **kw)
 
-    switch._rename_bank = rename
+    switch._restore = restore.__get__(switch)  # type: ignore[method-assign]
 
     await switch.run()
 
     assert seen["at_delete"] == es.STEP_DELETING and seen["mirror_at_delete"] == es.STEP_DELETING
     assert seen["deleted:alpha"] == es.STEP_DELETED
-    assert seen["at_rename"] == es.STEP_RENAMING
+    assert seen["at_place"] == es.STEP_PLACING
+    assert seen["placed:alpha"] == es.STEP_PLACED
 
 
 SWAP_POINTS = [
     "before_swap",
     "before_delete:Hal0::Beta",
     "deleted:Hal0::Beta",
-    "before_rename:Hal0::Beta",
-    "renamed:Hal0::Beta",
+    "before_place:Hal0::Beta",
+    "placed:Hal0::Beta",
     "before_finish",
 ]
 EARLY_POINTS = [
@@ -1265,7 +1351,21 @@ async def test_a_kill_inside_the_swap_is_finished_by_resume(box: Box, point: str
 
 
 async def test_a_failure_in_the_middle_of_the_swap_is_finished_by_resume(box: Box) -> None:
-    box.host.rename_fails.add("Hal0::Beta")
+    box.engine.stuck_restore.add("Hal0::Beta")
+    real_restore = box.engine.on_restore
+    calls: list[str] = []
+
+    def count(source: str) -> None:
+        calls.append(source)
+        if source == "Hal0::Beta" and calls.count(source) == 1:
+            # The rebuilt copy goes through; the restore into the own id hangs.
+            box.engine.stuck_restore.discard(source)
+        elif source == "Hal0::Beta":
+            box.engine.stuck_restore.add(source)
+        if real_restore is not None:
+            real_restore(source)
+
+    box.engine.on_restore = count
 
     with pytest.raises(es.SwitchError) as err:
         await box.switch().run()
@@ -1274,30 +1374,59 @@ async def test_a_failure_in_the_middle_of_the_swap_is_finished_by_resume(box: Bo
     journal = es.load_journal()
     assert journal is not None and journal.phase == es.PHASE_SWAPPING
     assert {b.bank: b.step for b in journal.banks} == {
-        "alpha": es.STEP_RENAMED,
-        "Hal0::Beta": es.STEP_RENAMING,
+        "alpha": es.STEP_PLACED,
+        "Hal0::Beta": es.STEP_PLACING,
         "gamma": es.STEP_RESTORED,
     }
+    beta, gamma = journal.banks[1], journal.banks[2]
+    assert beta.temp in box.engine.banks, "the rebuilt copy is kept while its bank is missing"
     assert write_gate.read_gate() is not None and "gate:off" not in box.events
     assert box.host.live == HS
     assert box.engine.port == PRIVATE_PORT, "the engine stays private while the run is resumable"
     assert "delete:gamma" not in box.events, "the swap stops at the first failure"
 
-    box.host.rename_fails.clear()
+    box.engine.stuck_restore.clear()
+    box.engine.on_restore = real_restore
     before = len(box.events)
     result = await box.switch(None).resume()
 
-    beta, gamma = journal.banks[1], journal.banks[2]
+    scratch = es.scratch_bank_id(journal.run_id)
     assert box.events[before:] == [
-        f"rename:{beta.temp}->Hal0::Beta",
+        f"cancel:{scratch}",
+        f"poll-cancelled:{scratch}",
+        f"restore:Hal0::Beta->Hal0::Beta via {scratch}",
+        f"delete:{beta.temp}",
         "delete:gamma",
-        f"rename:{gamma.temp}->gamma",
+        f"restore:gamma->gamma via {scratch}",
+        f"delete:{gamma.temp}",
+        f"delete:{scratch}",
         "release",
         f"engine:{HS.model}",
         "gate:off",
     ]
     assert box.engine.port == NORMAL_PORT
     assert result["status"] == "switched"
+    _assert_switched(box)
+
+
+async def test_a_half_finished_restore_into_the_own_id_is_done_again(box: Box) -> None:
+    """Killed while the bank was being restored into its own id: what is there is not trusted."""
+    journal = await box.kill_at("before_place:alpha")
+    alpha = journal.banks[0]
+    box.engine.create("alpha", _counts(30))  # the engine had written part of it
+    box.engine.m("alpha")["ids"] = alpha.bank
+    journal.banks[0].step = es.STEP_PLACING
+    box.switch()._save(journal)
+    before = len(box.events)
+
+    await box.switch(None).resume()
+
+    scratch = es.scratch_bank_id(journal.run_id)
+    assert box.events[before:][:3] == [
+        "delete:alpha",
+        f"restore:alpha->alpha via {scratch}",
+        f"delete:{alpha.temp}",
+    ]
     _assert_switched(box)
 
 
@@ -1328,14 +1457,17 @@ async def test_resume_stops_when_the_engine_cannot_be_put_on_the_target(box: Box
         await box.switch(None).resume()
 
     assert err.value.resumable and "overrides the embedder" in err.value.message
-    assert not any(e.startswith(("restore:", "delete:", "rename:")) for e in box.events[before:])
+    assert not any(e.startswith(("restore:", "delete:")) for e in box.events[before:])
     assert write_gate.read_gate() is not None
 
 
 async def test_the_engine_is_checked_again_before_every_restore(box: Box) -> None:
     def drift(source: str) -> None:
-        if source == "alpha":
+        if source == "alpha" and not seen:
+            seen.append(source)
             box.host.live = BGE  # moved under the run after the first restore
+
+    seen: list[str] = []
 
     box.engine.on_restore = drift
 
@@ -1362,37 +1494,31 @@ async def test_a_bank_under_neither_id_is_restored_through_a_scratch_bank(box: B
 
     scratch = es.scratch_bank_id(journal.run_id)
     after = box.events[before:]
-    # Never restored straight into its own id: the engine records the restore
-    # against the URL bank, which must exist, while the target must not.
-    assert after[:3] == [
-        f"create:{scratch}",
-        f"restore:alpha->{alpha.temp} via {scratch}",
-        f"rename:{alpha.temp}->alpha",
-    ]
+    # The engine records the restore against the URL bank, which must exist,
+    # while the target must not: the URL is a scratch bank.
+    assert after[:2] == [f"create:{scratch}", f"restore:alpha->alpha via {scratch}"]
     assert f"delete:{scratch}" in after, "the scratch bank does not outlive the run"
     _assert_switched(box)
 
 
-async def test_a_bank_journalled_as_renamed_but_still_under_its_temporary_id_is_renamed_again(
-    box: Box,
-) -> None:
-    """An engine rollback to an older snapshot undid a rename the journal recorded."""
+async def test_a_bank_journalled_as_placed_but_missing_is_restored_again(box: Box) -> None:
+    """An engine rollback to an older snapshot undid a placement the journal recorded."""
     journal = await box.kill_at("before_finish")
     alpha = journal.banks[0]
-    assert alpha.step == es.STEP_RENAMED
-    box.engine.move("alpha", alpha.temp)
+    assert alpha.step == es.STEP_PLACED
+    box.engine.drop("alpha")
     before = len(box.events)
 
     await box.switch(None).resume()
 
-    assert box.events[before] == f"rename:{alpha.temp}->alpha"
+    assert f"restore:alpha->alpha via {es.scratch_bank_id(journal.run_id)}" in box.events[before:]
     _assert_switched(box)
 
 
 async def test_a_bank_that_is_already_final_is_not_verified_again_on_resume(box: Box) -> None:
-    """Renamed, under its own id, no temporary id left: checked for existence only.
+    """Placed, under its own id, no temporary id left: checked for existence only.
 
-    It was verified when it was renamed. Checking it again on every resume
+    It was verified when it was placed. Checking it again on every resume
     would make a resume fail the same way for ever once anything about the
     bank moved, with the gate set and no way forward."""
     await box.kill_at("before_finish")
@@ -1406,7 +1532,7 @@ async def test_a_bank_that_is_already_final_is_not_verified_again_on_resume(box:
 
 
 async def test_an_original_id_found_alone_after_a_delete_is_checked_not_assumed(box: Box) -> None:
-    """Step ``deleted``, rebuilt bank gone, original id present: renamed, or an empty impostor?"""
+    """Step ``deleted``, rebuilt bank gone, original id present: whose is it?"""
     journal = await box.kill_at("deleted:alpha")
     alpha = journal.banks[0]
     del box.engine.banks[alpha.temp]
@@ -1422,14 +1548,17 @@ async def test_an_original_id_found_alone_after_a_delete_is_checked_not_assumed(
     assert write_gate.read_gate() is not None and es.journal_path().exists()
 
 
-async def test_a_rename_that_finished_before_the_journal_said_so_is_accepted(box: Box) -> None:
-    journal = await box.kill_at("before_rename:alpha")
-    box.engine.move(journal.banks[0].temp, "alpha")
+async def test_a_placement_that_finished_before_the_journal_said_so_is_accepted(
+    box: Box,
+) -> None:
+    journal = await box.kill_at("placed:alpha")
+    journal.banks[0].step = es.STEP_PLACING  # killed before the save that said so
+    box.switch()._save(journal)
     before = len(box.events)
 
     await box.switch(None).resume()
 
-    assert not any(e.endswith("->alpha") for e in box.events[before:])
+    assert not any(e.endswith("->alpha") or e == "delete:alpha" for e in box.events[before:])
     _assert_switched(box)
 
 
@@ -1447,7 +1576,7 @@ async def test_resume_will_not_delete_a_bank_a_bypassing_writer_recreated(box: B
         err.value.message
     )
     assert "--resume" in err.value.message
-    assert not any(e.startswith(("delete:", "rename:")) for e in box.events[before:])
+    assert not any(e.startswith(("delete:", "restore:")) for e in box.events[before:])
     assert journal.banks[0].temp in box.engine.banks
     assert write_gate.read_gate() is not None
 
@@ -1459,7 +1588,7 @@ async def test_resume_puts_back_a_pause_that_was_removed_by_hand(box: Box) -> No
 
     await box.switch(None).resume()
 
-    assert box.events[before] == "gate:on", "paused again before the first delete or rename"
+    assert box.events[before] == "gate:on", "paused again before the first delete or restore"
     assert box.events[-1] == "gate:off" and write_gate.read_gate() is None
 
 
@@ -1493,12 +1622,12 @@ async def test_a_corrupt_journal_is_read_from_its_mirror(box: Box) -> None:
 
 
 async def test_a_deleted_journal_is_found_again_through_the_gate(box: Box) -> None:
-    journal = await box.kill_at("renamed:alpha")
+    journal = await box.kill_at("placed:alpha")
     es.journal_path().unlink()
 
     found = es.locate_journal()
     assert found["journal"] is not None and found["journal"].run_id == journal.run_id
-    assert found["journal"].banks[0].step == es.STEP_RENAMING
+    assert found["journal"].banks[0].step == es.STEP_PLACED
     # A new run does not start beside it.
     refused = _codes(await box.switch().preflight())
     assert {"interrupted_switch", "gate_set", "leftover_banks"} <= set(refused)
@@ -1528,7 +1657,7 @@ async def _lose_every_copy(box: Box, point: str) -> es.Journal:
 
 
 async def test_with_no_journal_anywhere_resume_says_which_ids_hold_the_data(box: Box) -> None:
-    """Entries at ``deleted`` and ``renamed`` when every copy of the journal is gone."""
+    """Entries at ``deleted`` and ``placed`` when every copy of the journal is gone."""
     journal = await _lose_every_copy(box, "deleted:Hal0::Beta")
     es.journal_path().unlink()
     beta, gamma = journal.banks[1].temp, journal.banks[2].temp
@@ -1540,7 +1669,8 @@ async def test_with_no_journal_anywhere_resume_says_which_ids_hold_the_data(box:
     message = err.value.message
     assert "but no journal of a switch was found" in message
     assert "Banks on the engine: alpha, gamma." in message
-    assert f"temporary ids from a switch: {beta}, {gamma}." in message
+    scratch = es.scratch_bank_id(journal.run_id)
+    assert f"temporary ids from a switch: {beta}, {gamma}, {scratch}." in message
     assert "--status" in message and "--clear-gate" in message
     assert box.events[before:] == [] and write_gate.read_gate() is not None
 
@@ -1616,7 +1746,7 @@ async def test_status_shows_the_journal_the_gate_the_ids_and_what_resume_would_d
     plan = {r["bank"]: r["action"] for r in status["resume"]}
     assert plan == {
         "alpha": es.ACTION_FINAL,
-        "Hal0::Beta": es.ACTION_RENAME,
+        "Hal0::Beta": es.ACTION_PLACE,
         "gamma": es.ACTION_SWAP,
     }
     assert all(r["problem"] is None for r in status["resume"])
@@ -1795,19 +1925,24 @@ async def test_queued_work_that_never_drains_stops_the_run_before_any_export(box
         (es.STEP_RESTORED, True, True, es.ACTION_SWAP),
         (es.STEP_DELETING, True, True, es.ACTION_SWAP),
         (es.STEP_RESTORED, True, False, es.ACTION_REBUILD),
-        (es.STEP_DELETING, False, True, es.ACTION_RENAME),
-        (es.STEP_DELETED, False, True, es.ACTION_RENAME),
-        (es.STEP_RENAMING, False, True, es.ACTION_RENAME),
-        (es.STEP_RENAMING, True, False, es.ACTION_VERIFY),
+        # The original is gone: its archive puts it back under its own id.
+        (es.STEP_DELETING, False, True, es.ACTION_PLACE),
+        (es.STEP_DELETED, False, True, es.ACTION_PLACE),
+        (es.STEP_RESTORED, False, False, es.ACTION_PLACE),
+        (es.STEP_DELETED, False, False, es.ACTION_PLACE),
+        # ``placing`` is saved before the restore is sent: a bank under the own
+        # id is this run's, whole or not.
+        (es.STEP_PLACING, True, True, es.ACTION_CHECK_PLACED),
+        (es.STEP_PLACING, True, False, es.ACTION_CHECK_PLACED),
+        (es.STEP_PLACING, False, True, es.ACTION_PLACE),
+        (es.STEP_PLACING, False, False, es.ACTION_PLACE),
         (es.STEP_DELETED, True, False, es.ACTION_VERIFY),
         (es.STEP_DELETED, True, True, es.ACTION_RECREATED),
-        (es.STEP_RENAMED, True, False, es.ACTION_FINAL),
+        (es.STEP_PLACED, True, True, es.ACTION_DROP_COPY),
+        (es.STEP_PLACED, True, False, es.ACTION_FINAL),
         # A journal ahead of the engine (the engine went back to an older snapshot).
-        (es.STEP_RENAMED, False, True, es.ACTION_RENAME),
-        (es.STEP_RENAMED, True, True, es.ACTION_SWAP),
-        (es.STEP_RESTORED, False, False, es.ACTION_RECOVER),
-        (es.STEP_DELETED, False, False, es.ACTION_RECOVER),
-        (es.STEP_RENAMED, False, False, es.ACTION_RECOVER),
+        (es.STEP_PLACED, False, True, es.ACTION_PLACE),
+        (es.STEP_PLACED, False, False, es.ACTION_PLACE),
     ],
 )
 def test_the_ids_present_decide_what_the_swap_does(
@@ -1892,113 +2027,6 @@ async def test_the_bank_list_is_cross_checked_against_the_stats(box: Box) -> Non
     plan = await box.switch().preflight()
     assert plan["refusals"] == []
     assert any("the bank list says 1 memories, its stats say 160" in w for w in plan["warnings"])
-
-
-def _admin_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unit: dict[str, str]) -> Path:
-    from hal0.memory import extraction_env
-
-    monkeypatch.setattr(extraction_env, "hindsight_unit_env", lambda: unit)
-    env_file = tmp_path / "hindsight-llm.env"
-    monkeypatch.setattr(extraction_env, "HINDSIGHT_LLM_ENV_PATH", env_file)
-    return env_file
-
-
-def test_the_rename_runs_the_engine_admin_command_in_the_engine_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    env_file = _admin_env(
-        monkeypatch, tmp_path, {"HOME": "/engine/home", "HINDSIGHT_API_DATABASE_SCHEMA": "public"}
-    )
-    env_file.write_text("HINDSIGHT_API_LLM_API_KEY=sk-secret\n")
-    seen: dict[str, Any] = {}
-
-    def runner(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
-        seen.update(argv=argv, **kw)
-        return subprocess.CompletedProcess(argv, 0, "Renamed: 12 row(s) moved.\n", "")
-
-    out = es.run_admin_rename(
-        tmp_path,
-        "Hal0::Agents.switch-ab12cd34",
-        "Hal0::Agents",
-        timeout_s=9,
-        runner=runner,
-        euid=lambda: 1000,
-    )
-
-    assert out == "Renamed: 12 row(s) moved."
-    assert seen["argv"] == [
-        str(tmp_path / ".venv" / "bin" / "hindsight-admin"),
-        "rename-bank",
-        "--from",
-        "Hal0::Agents.switch-ab12cd34",
-        "--to",
-        "Hal0::Agents",
-    ]
-    assert seen["env"]["HOME"] == "/engine/home"
-    assert seen["env"]["HINDSIGHT_API_DATABASE_SCHEMA"] == "public"
-    # The unit's EnvironmentFile is layered on top, in the child's environment only.
-    assert seen["env"]["HINDSIGHT_API_LLM_API_KEY"] == "sk-secret"
-    assert "sk-secret" not in " ".join(seen["argv"])
-    assert seen["cwd"] == str(tmp_path) and seen["timeout"] == 9
-    assert "user" not in seen, "an unprivileged caller runs it as itself"
-
-
-def test_a_root_caller_runs_the_rename_as_the_owner_of_the_engine_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _admin_env(monkeypatch, tmp_path, {})
-    seen: dict[str, Any] = {}
-
-    def runner(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
-        seen.update(kw)
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    es.run_admin_rename(tmp_path, "a", "b", timeout_s=1, runner=runner, euid=lambda: 0)
-
-    owner = tmp_path.stat()
-    assert (seen["user"], seen["group"]) == (owner.st_uid, owner.st_gid)
-    assert seen["env"]["HOME"] == str(tmp_path), "pg0 lives under the engine home"
-
-
-def test_a_failed_rename_never_passes_raw_tool_output_on(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _admin_env(monkeypatch, tmp_path, {})
-    noise = "x" * 3000
-
-    def runner(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            argv,
-            1,
-            noise,
-            "could not connect to postgresql://hindsight:s3cr3t-pw@db.internal:5432/hindsight\n"
-            "Error: bank 'a' has 2 pending or processing operation(s)\n",
-        )
-
-    with pytest.raises(es.SwitchError) as err:
-        es.run_admin_rename(tmp_path, "a", "b", timeout_s=1, runner=runner, euid=lambda: 1000)
-
-    message = err.value.message
-    assert "exited 1" in message and "2 pending or processing" in message
-    assert "s3cr3t-pw" not in message, "URL credentials are masked"
-    assert len(message) < 600, "and the output is capped"
-
-
-def test_the_rename_fails_early_when_the_environment_file_cannot_be_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    env_file = _admin_env(monkeypatch, tmp_path, {})
-    env_file.write_text("HINDSIGHT_API_DATABASE_URL=postgresql://x\n")
-    monkeypatch.setattr(es.os, "access", lambda p, mode: str(p) != str(env_file))
-    ran: list[Any] = []
-
-    with pytest.raises(es.SwitchError) as err:
-        es.run_admin_rename(
-            tmp_path, "a", "b", timeout_s=1, runner=lambda *a, **k: ran.append(a), euid=lambda: 1000
-        )
-
-    assert str(env_file) in err.value.message and "as root" in err.value.message
-    assert ran == [], "the tool is not run with half an environment"
 
 
 def test_an_unreadable_journal_is_reported_not_ignored(box: Box) -> None:

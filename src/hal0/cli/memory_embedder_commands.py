@@ -4,7 +4,7 @@ Unlike the rest of ``hal0 memory``, this is not a thin client of hal0-api. It
 runs in this process, on the box, as root or the ``hal0`` service account:
 it talks to the engine directly (its own imports and deletes must not meet
 the write pause it sets), rewrites the engine's managed drop-in, restarts the
-engine and renames banks. The work is :mod:`hal0.memory.embedder_switch`;
+engine and replaces banks. The work is :mod:`hal0.memory.embedder_switch`;
 this module parses the flags and prints.
 
 A dry run by default, like ``hal0 memory migrate``: ``--apply`` does it.
@@ -169,7 +169,18 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
         lines.append(
             f"duration: {_minutes(plan['estimate_s'])} ({parts.get('restarts_s')} s for three "
             f"engine restarts, {parts.get('per_bank_s')} s for the exports and restores, "
-            f"{parts.get('embedding_s')} s to re-embed at {RESTORE_FACTS_PER_S:g} facts/s on CPU)"
+            f"{parts.get('embedding_s')} s to re-embed every bank twice at "
+            f"{RESTORE_FACTS_PER_S:g} facts/s on CPU: once into a copy that is checked before "
+            "any original is deleted, once into the bank's own id)"
+        )
+    ids = plan.get("ids") or {}
+    if ids:
+        lines.append(
+            "ids kept: " + ", ".join(escape(str(i)) for i in ids.get("kept") or []) + ". "
+            "[yellow]ids changed: "
+            + ", ".join(escape(str(i)) for i in ids.get("changed") or [])
+            + "[/yellow]. "
+            + escape(str(ids.get("note") or ""))
         )
     disk = plan.get("disk")
     if disk:
@@ -364,9 +375,10 @@ def switch_cmd(
     Pauses memory writes, moves the engine to a private port so nothing else
     can reach it, exports every bank, restarts the engine on the new model,
     restores each bank under a temporary id, compares it with its archive,
-    and only then replaces the originals. Anything that fails before the
-    originals are touched is undone. Memory is out of service while it runs.
-    Run it on the box, as root.
+    and only then replaces each original with a second restore into its own id,
+    so knowledge-page, directive and mental-model ids are kept (fact ids are
+    not). Anything that fails before the originals are touched is undone.
+    Memory is out of service while it runs. Run it on the box, as root.
     """
     target = Embedder(provider, model) if model else None
     chosen = [name for name, on in (("--resume", resume), ("--status", status)) if on]

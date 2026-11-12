@@ -360,9 +360,9 @@ pause, no file.
   is queued or running.
 
 A run restarts the engine three times (15 to 30 seconds each on the reference
-box), exports and restores every bank, and re-embeds at about 60 facts per
-second on CPU. A small store takes about a minute and a half. Pick a quiet
-moment.
+box), exports every bank and restores it twice, and re-embeds at about 60
+facts per second on CPU, so every fact is embedded twice. A small store takes
+about two minutes. Pick a quiet moment.
 
 ### What `--apply` does
 
@@ -379,8 +379,9 @@ moment.
    which re-embeds every fact with the new model and makes no LLM call, and
    compares it with the archive.
 6. Only when every bank matches: for each bank, checks the original one more
-   time, deletes it, renames its rebuilt bank into place and checks the
-   result.
+   time, deletes it, restores its archive again into the bank's own id,
+   checks that against the original as it was archived, and only then
+   deletes the rebuilt copy.
 7. Returns the engine to its normal address and then lets writes through.
 
 The engine is isolated with one drop-in for its unit,
@@ -414,6 +415,21 @@ Nothing else writes the engine's banks or drop-ins while a run is unfinished:
 the default banks are not seeded, a new install's first-start step skips, and
 hal0-api's replay of boot-time writes waits for the pause to lift.
 
+### Ids after the switch
+
+Each bank keeps its knowledge-base folder and page ids (`kf-…`, `kp-…`), its
+directive ids, its mental-model ids and its document ids. That is why step 6
+restores a second time: the engine keeps those ids only on a restore into the
+bank's own id once the original is gone, never on the rebuilt copy beside it.
+Agents that hold a page id (the coding-agents plugin's
+`relates_to_page_id` and its initiative markers), Memory page links to a
+knowledge page, and bindings to a mental model keep working.
+
+Fact ids are not kept: the engine gives every restored fact a new id. A fact
+id written down before the switch, such as a link to an open fact on the
+Memory page or an id saved for `memory_delete`, no longer resolves. The dry
+run says this too.
+
 ### If it fails or is interrupted
 
 Before step 6 (an import fails, a count differs, the engine does not come up
@@ -444,8 +460,9 @@ something by itself it says exactly what you do, down to the command.
 
 `--resume` looks at which banks the engine has now, not only at its journal.
 What it can repair it repairs: a rebuilt bank that no longer matches is
-rebuilt from the original, a bank under neither name is restored from its
-archive. Run after a stop that happened before step 6, the same command
+rebuilt from the original, a bank missing from its own id is restored from
+its archive, and a restore into the own id that was cut short is deleted and
+done again. Run after a stop that happened before step 6, the same command
 undoes the run instead. The journal is kept in two places
 (`/var/lib/hal0/state/` and the archive directory), so losing one copy does
 not lose the run. You never edit it by hand.

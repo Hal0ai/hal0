@@ -6,6 +6,11 @@
 2026-11-10. Decisions 1, 4, 5 and 6 are on main (#3540, #3541, #3542); the
 rest are in progress or planned in the order given under Consequences.
 
+Decision 2 amended 2026-11-12 (#3597): the bank that replaces an original is
+a second restore of its archive into the original's own id, not the rebuilt
+copy renamed into place, because only that restore keeps knowledge-page and
+directive ids.
+
 Amends ADR-0005 (tag scoping gains a required envelope; decision 7 replaces
 both `unified_bank` layouts) and ADR-0023 (the engine's environment has one
 managed drop-in, not two). ADR-0052 and ADR-0056 stand. Tracking issues:
@@ -72,7 +77,9 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
    exports every bank, stops writes, flips the recorded embedder, restarts the
    engine, restores each bank under a temporary id, compares fact, observation,
    mental-model and directive counts, and only then deletes the old bank and
-   renames the new one into place. It is a dry run by default. A failed
+   restores the archive again into the bank's own id, which keeps its
+   knowledge-page and directive ids (a rename of the copy would not; see the
+   amendment under Status). It is a dry run by default. A failed
    comparison leaves the old bank untouched and flips the record back.
 3. **Both embedders are supported; the defaults differ by install age.** A
    fresh install records `hs-embed-1`. An upgraded store with no record is

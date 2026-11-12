@@ -57,6 +57,7 @@ PLAN: dict[str, Any] = {
     },
     "estimate_s": 104,
     "estimate": {"restarts_s": 75, "per_bank_s": 4, "embedding_s": 25},
+    "ids": es.IDS_ACROSS_SWITCH,
     "allow_pending": False,
     "refusals": [],
     "warnings": [],
@@ -145,7 +146,10 @@ def test_it_is_a_dry_run_by_default(stub) -> None:
     flat = " ".join(result.output.replace("│", " ").split())
     assert "1200" in flat and "about 2 min" in flat
     # What the time is made of, so a small store is not promised a second.
-    assert "75 s for three engine restarts" in flat and "25 s to re-embed" in flat
+    assert "75 s for three engine restarts" in flat and "25 s to re-embed every bank twice" in flat
+    # Which ids survive, stated before consent (#3597).
+    assert "ids kept: knowledge-base folder and page ids" in flat and "directive ids" in flat
+    assert "ids changed: fact ids" in flat
     # The cost, stated before consent: memory is out of service, recall included.
     assert "memory is out of service" in flat and "503 memory.writes_paused" in flat
     assert "recall, search and reflect fail until the run ends" in flat

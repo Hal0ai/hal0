@@ -137,7 +137,9 @@ Moves the memory store to another embedding model: pauses memory writes,
 moves the engine to a private port so that nothing else can reach it, exports
 every bank, restarts the engine on the new model, restores each bank (which
 re-embeds it) under a temporary id, compares it with its archive, replaces
-the originals, and returns the engine to its normal address. Memory is out of
+each original with a second restore into its own id, and returns the engine
+to its normal address. Knowledge-page, directive, mental-model and document
+ids are kept; fact ids are not, and the dry run says so. Memory is out of
 service while it runs, recall included. See
 [Change the embedding model](/docs/guides/enable-memory#change-the-embedding-model)
 for the steps and the failure behaviour.
@@ -161,9 +163,7 @@ that embedder and is not mixed; the engine does not answer or its environment
 cannot be read; the embedder record cannot be read or disagrees with the
 engine; the engine's export or import API is off; a bank has queued or running
 operations (without `--allow-pending`); free disk space is short on the
-engine's filesystem or the archives'; the engine's `hindsight-admin` command
-is missing, or the engine unit's `EnvironmentFile` is not readable; memory
-writes are already paused, the engine is already on a private port, an
+engine's filesystem or the archives'; memory writes are already paused, the engine is already on a private port, an
 earlier switch did not finish, or a bank left by one is still on the engine;
 an update or an engine upgrade is in progress; another switch is running; or
 `--apply` is not run as root. An `--apply` or `--resume` also exits 1 when
