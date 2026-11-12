@@ -72,15 +72,26 @@ whose scope would then be confined to exactly one agent: tags or
 `trigger.tag_groups` on that agent's tag under `all_strict`, `exact`, or
 `any_strict` over that one tag. Whole-bank, project-wide and shared models are
 never listed or written. A line marked `hidden from its owner now` is one
-that agent cannot read today. With `--apply` it sets
-`exclude_mental_models: true` on each, keeping the rest of the trigger, and
-queues a refresh, so the content the agent then reads is rebuilt without
-other mental models; `--no-refresh` skips that. A repaired model is not
-listed again, so running it twice changes nothing. It goes through hal0-api's
-admin memory routes and exits `1` when a bank cannot be read or a write fails.
-Nothing runs it for you, `hal0 update` included. The `memory_model_owners` row
-of `hal0 doctor all` counts the models hidden from their owner and names this
-command.
+that agent cannot read today. With `--apply`, for each model in turn:
+
+1. a model hidden from its owner is emptied first (the engine's
+   `POST .../mental-models/{id}/clear`), while it is still hidden, so the
+   flag never shows its owner content written from other agents' memory;
+2. `exclude_mental_models: true` is set (only that field is sent; the engine
+   keeps the rest of the trigger);
+3. a full refresh is queued (`{"mode": "full"}`; a delta-mode model keeps its
+   mode), so nothing of the old content survives.
+
+`--no-refresh` skips step 3, and the model stays empty until its next
+refresh. If the refresh fails, the line says the model is flagged and
+cleared and the refresh failed; it stays empty, not stale. A model is
+skipped, with the reason, when another agent's private document in its bank
+also carries the owner's `agent:<id>` tag: the owner's scope would read it.
+A repaired model is not listed again, so running it twice changes nothing.
+It goes through hal0-api's admin memory routes and exits `1` when a bank
+cannot be read or a write fails. Nothing runs it for you, `hal0 update`
+included. The `memory_model_owners` row of `hal0 doctor all` counts the
+models hidden from their owner and names this command.
 
 ### `memory directive` (bank directives)
 
