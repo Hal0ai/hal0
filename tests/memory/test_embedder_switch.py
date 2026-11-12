@@ -1237,6 +1237,46 @@ async def test_engine_work_seen_on_an_original_after_the_flip_is_kept_for_the_ro
     assert box.record().mixed is True
 
 
+async def test_engine_work_in_the_journal_marks_a_bank_whose_row_is_gone(box: Box) -> None:
+    """A verdict of clean, then engine work recorded in the journal: the rollback
+    still marks the bank, though no operation row is left to show it."""
+
+    def hook(point: str) -> None:
+        if point == "restored:gamma":
+            box.engine.direct_write("gamma")
+
+    switch = box.switch(hook=hook)
+
+    async def no_rows(_bank: str, _since: Any) -> list[dict[str, Any]]:
+        return []
+
+    real_taint = switch._taint
+
+    async def taint_then_record(journal: Any, entry: Any) -> str:
+        why = await real_taint(journal, entry)
+        if entry.bank == "Hal0::Beta":
+            entry.engine_work.append(
+                {
+                    "bank": entry.bank,
+                    "type": "consolidation",
+                    "id": "op-gone",
+                    "status": "completed",
+                }
+            )
+        return why
+
+    switch._engine_work_since = no_rows  # type: ignore[method-assign]
+    switch._taint = taint_then_record  # type: ignore[method-assign]
+    with pytest.raises(es.SwitchError, match="gamma changed while the engine was isolated"):
+        await switch.run()
+
+    final = _final_journal()
+    beta = next(b for b in final["banks"] if b["bank"] == "Hal0::Beta")
+    assert beta["taint"]["mixed"] is True
+    assert "seen on it after the flip" in beta["taint"]["reason"]
+    assert box.record().mixed is True
+
+
 async def test_engine_work_ended_before_the_flip_does_not_mark_a_rollback_mixed(
     box: Box,
 ) -> None:

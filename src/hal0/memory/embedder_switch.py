@@ -2291,6 +2291,12 @@ class EmbedderSwitch(em.EngineMaintenance):
                 await self._sweep(journal)
             if journal.flip_started:
                 await self._last_look(journal)
+                # Work the journal saw on an original after the flip counts even
+                # when the engine no longer lists its row.
+                for entry in self._originals(journal):
+                    if entry.engine_work:
+                        _mark(entry, "the engine's own work was seen on it after the flip")
+                self._save(journal)
                 marked = [e for e in self._originals(journal) if (e.taint or {}).get("mixed")]
                 tainted = list(dict.fromkeys([*journal.stray_banks, *(e.bank for e in marked)]))
                 reasons = [f"{e.bank}: {e.taint['reason']}" for e in marked if e.taint["reason"]]
