@@ -44,7 +44,7 @@ from typing import Any
 import httpx
 import structlog
 
-from hal0.errors import BadRequest, MemoryEngineUnavailable, NotFound
+from hal0.errors import BadRequest, Forbidden, MemoryEngineUnavailable, NotFound
 from hal0.memory.bank_layout import (
     HEALTH_LEGACY_SPLIT,
     HEALTH_LEGACY_UNIFIED,
@@ -1656,14 +1656,19 @@ class HindsightProvider(MemoryProvider):
         """
         tags: set[str] = set()
         present = False
+        # On the two-bank private bank every row is somebody's private memory,
+        # tagged so or not: the scan reads them all.
+        whole_bank = self._two_bank and bank == self._private_bank
+        scan_filter: dict[str, Any] = (
+            {} if whole_bank else {"tags": [_VISIBILITY_PRIVATE], "tags_match": "all_strict"}
+        )
         for page in range(_PRIVATE_SCAN_PAGES):
             resp = await self._call(
                 "list_documents",
                 bank_id=bank,
-                tags=[_VISIBILITY_PRIVATE],
-                tags_match="all_strict",
                 limit=_PRIVATE_SCAN_PAGE,
                 offset=page * _PRIVATE_SCAN_PAGE,
+                **scan_filter,
             )
             items = resp.get("items") if isinstance(resp, dict) else None
             rows = [r for r in items or [] if isinstance(r, dict)]
@@ -3405,7 +3410,59 @@ class HindsightProvider(MemoryProvider):
 
     # ── directives ───────────────────────────────────────────────────────
     #
-    # Same bank-scoped-configuration posture as mental models (see above).
+    # A directive is a standing instruction the engine injects into a
+    # reflect's prompt. On the two-bank private bank a directive is its
+    # writer's, like everything else there (#3573, ADR-0058 decision 7):
+    #
+    # * create stamps ``agent:<caller>`` and ``visibility:private`` (the
+    #   caller's own ``agent:``/``visibility:`` tags are dropped), and an
+    #   unidentified caller cannot create one;
+    # * update re-stamps them when it changes the tags, so a directive cannot
+    #   be made untagged (bank-wide) or another agent's;
+    # * list and get return only what :meth:`_private_readable` admits, so a
+    #   directive with no owner is nobody's; update and delete of any other
+    #   are 404, the same answer as a directive that does not exist.
+    #
+    # The engine applies a reflect's ``tag_groups`` to the directives it
+    # loads (``list_directives(isolation_mode=True)``: untagged directives
+    # always apply, tagged ones only inside the groups). A private-bank
+    # reflect is held to the caller's ``agent:`` tag, so another agent's
+    # directive never steers it; an untagged one, which only the operator's
+    # admin API or the bank spec can create, still applies to every agent.
+    # On any other bank the read rule is the visibility rule, which an
+    # untagged or shared directive passes, as before.
+
+    def _directive_tags(self, bank: str, client_id: str | None, tags: Any) -> list[str] | None:
+        """The tags a directive is written with on ``bank``."""
+        if not (self._two_bank and bank == self._private_bank):
+            return tags
+        caller = self._caller_agent(client_id)
+        if not is_identified(caller):
+            raise Forbidden(
+                "a private directive needs an identified agent",
+                code="memory.directive_owner_required",
+            )
+        kept = [t for t in coerce_tags(tags) if not _is_reserved_tag(t)]
+        return [*kept, f"{_AGENT_TAG_PREFIX}{caller}", _VISIBILITY_PRIVATE]
+
+    async def _require_readable_directive(
+        self, bank: str, directive_id: str, caller: str
+    ) -> dict[str, Any]:
+        """The directive, or 404 when it does not exist or the caller may not read it."""
+        missing = NotFound(
+            "no such directive",
+            code="memory.directive_not_found",
+            details={"id": directive_id},
+        )
+        try:
+            directive = await self._call("get_directive", bank_id=bank, directive_id=directive_id)
+        except Exception as exc:
+            if _http_status(exc) == 404:
+                raise missing from None
+            raise
+        if not isinstance(directive, dict) or not self._private_readable(directive, caller, bank):
+            raise missing
+        return directive
 
     async def list_directives(
         self,
@@ -3419,7 +3476,7 @@ class HindsightProvider(MemoryProvider):
         offset: int | None = None,
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
-        return await self._call(
+        resp = await self._call(
             "list_directives",
             bank_id=bank,
             tags=tags,
@@ -3428,12 +3485,28 @@ class HindsightProvider(MemoryProvider):
             limit=limit,
             offset=offset,
         )
+        if not isinstance(resp, dict):
+            return resp
+        key = "items" if isinstance(resp.get("items"), list) else "directives"
+        rows = resp.get(key)
+        if not isinstance(rows, list):
+            return resp
+        caller = self._caller_agent(client_id)
+        kept = [r for r in rows if isinstance(r, dict) and self._private_readable(r, caller, bank)]
+        if len(kept) == len(rows):
+            return resp
+        out = {**resp, key: kept}
+        if "total" in resp:
+            out["total"] = _visible_total(offset, len(kept), limit)
+        return out
 
     async def get_directive(
         self, directive_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
-        return await self._call("get_directive", bank_id=bank, directive_id=directive_id)
+        return await self._require_readable_directive(
+            bank, directive_id, self._caller_agent(client_id)
+        )
 
     @_gated_write
     async def create_directive(
@@ -3455,7 +3528,7 @@ class HindsightProvider(MemoryProvider):
             content=content,
             priority=priority,
             is_active=is_active,
-            tags=tags,
+            tags=self._directive_tags(bank, client_id, tags),
         )
 
     @_gated_write
@@ -3472,6 +3545,7 @@ class HindsightProvider(MemoryProvider):
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
+        await self._require_readable_directive(bank, directive_id, self._caller_agent(client_id))
         return await self._call(
             "update_directive",
             bank_id=bank,
@@ -3480,7 +3554,7 @@ class HindsightProvider(MemoryProvider):
             content=content,
             priority=priority,
             is_active=is_active,
-            tags=tags,
+            tags=self._directive_tags(bank, client_id, tags) if tags is not None else None,
         )
 
     @_gated_write
@@ -3488,6 +3562,7 @@ class HindsightProvider(MemoryProvider):
         self, directive_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
+        await self._require_readable_directive(bank, directive_id, self._caller_agent(client_id))
         return await self._call("delete_directive", bank_id=bank, directive_id=directive_id)
 
     # ── async operations (so retain/refresh/consolidate are pollable) ───

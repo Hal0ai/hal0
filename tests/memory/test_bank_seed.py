@@ -289,3 +289,57 @@ def test_a_check_that_cannot_be_made_is_treated_as_a_switch_in_progress(
 
     monkeypatch.setattr(embedder_switch, "blocking_reason", broken)
     assert "could not be checked" in (bank_seed.switch_in_progress() or "")
+
+
+# ── the installer's helper: namespace -> this box's engine bank ──────────────
+
+
+def _layout(monkeypatch, layout) -> None:
+    from hal0.memory import bank_layout as bl
+
+    monkeypatch.setattr(bl, "current_layout", lambda _cfg, **_kw: layout)
+
+
+def test_the_installer_seeds_the_two_banks_on_a_two_bank_box(monkeypatch) -> None:
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import bank_layout as bl
+
+    _layout(monkeypatch, bl.BankLayout(bl.LAYOUT_TWO_BANK))
+    cfg = MemoryConfig()
+    assert bank_seed.engine_bank_for("shared", cfg) == "hal0:shared"
+    assert bank_seed.engine_bank_for("private:hermes", cfg) == "hal0:private"
+
+
+def test_the_installer_seeds_only_the_platform_bank_on_an_old_layout(monkeypatch) -> None:
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import bank_layout as bl
+
+    _layout(monkeypatch, bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared"))
+    cfg = MemoryConfig()
+    assert bank_seed.engine_bank_for("shared", cfg) == "shared"
+    assert bank_seed.engine_bank_for("private:hermes", cfg) is None
+
+
+def test_engine_bank_main_prints_the_bank_or_nothing_and_fails_when_undecided(
+    monkeypatch, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import bank_layout as bl
+
+    monkeypatch.setattr(loader, "load_hal0_config", lambda: SimpleNamespace(memory=MemoryConfig()))
+    _layout(monkeypatch, bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared"))
+    assert bank_seed.engine_bank_main(["shared"]) == 0
+    assert capsys.readouterr().out == "bank=shared\n"
+    assert bank_seed.engine_bank_main(["private:hermes"]) == 0
+    assert capsys.readouterr().out == ""
+    assert bank_seed.engine_bank_main(["nope"]) == 2
+
+    def undecided(_cfg, **_kw):
+        raise bl.LayoutRecordUnsaved("no")
+
+    monkeypatch.setattr(bl, "current_layout", undecided)
+    assert bank_seed.engine_bank_main(["shared"]) == 1
+    assert capsys.readouterr().out == ""

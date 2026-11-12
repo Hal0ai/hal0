@@ -3115,3 +3115,52 @@ def test_the_plugins_requests_are_served(
         given = resp.json()["operation_id"]
         assert given == case["body"].get("operation_id", given)
         assert engine.calls[-1].body["operation_id"] == _engine_operation_id("cc", given)
+
+
+# ── the two-bank layout (final review of #3572) ───────────────────────────────
+
+
+def _two_bank_client(engine: Engine) -> TestClient:
+    return TestClient(
+        AuthEnforcementMiddleware(build_app(engine.handler, unified_bank=False, two_bank=True)),
+        client=("127.0.0.1", 50000),
+    )
+
+
+def test_two_bank_compat_recall_reads_the_shared_bank_and_only_the_callers_scope(
+    engine: Engine, key: str
+) -> None:
+    """Isolation, not call shape: whatever the engine returns, the answer
+    holds only the caller's project and global memory, and the private bank
+    is never read."""
+    engine.recall_results = [
+        {"id": "f-1", "text": "mine", "tags": OWN_PROJECT},
+        {"id": "f-2", "text": "private to hermes", "tags": OTHER_AGENT_PRIVATE},
+        {"id": "f-3", "text": "private, global", "tags": OTHER_AGENT_PRIVATE_GLOBAL},
+        {"id": "f-4", "text": "another repository", "tags": OTHER_PROJECT},
+        {"id": "f-5", "text": "global", "tags": GLOBAL},
+    ]
+    client = _two_bank_client(engine)
+    resp = client.post(_url(URL_BANK + "/memories/recall"), headers=_auth(key), json={"query": "q"})
+    assert resp.status_code == 200
+    assert [r["id"] for r in resp.json()["results"]] == ["f-1", "f-5"]
+    assert engine.calls and all(c.path.startswith(ENGINE_BANK) for c in engine.calls)
+    assert all("hal0:private" not in c.path for c in engine.calls)
+
+
+def test_two_bank_compat_listing_holds_back_other_agents_and_other_projects(
+    engine: Engine, key: str
+) -> None:
+    _seed(
+        engine,
+        _doc("hal0::cc::mine", OWN_PROJECT),
+        _doc("hal0::shared::git:x", OTHER_AGENT_PRIVATE),
+        _doc("atlas::cc::readme", OTHER_PROJECT),
+        _doc("hal0::codex::notes", OTHER_AGENT_PROJECT),
+    )
+    client = _two_bank_client(engine)
+    resp = client.get(_url(URL_BANK + "/documents"), headers=_auth(key))
+    assert resp.status_code == 200
+    ids = [d["id"] for d in resp.json()["items"]]
+    assert ids == ["mine"]
+    assert all("hal0:private" not in c.path for c in engine.calls)

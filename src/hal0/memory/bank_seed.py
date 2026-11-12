@@ -40,6 +40,7 @@ holds the two copies in lockstep.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import httpx
@@ -101,6 +102,51 @@ def seed_targets(provider: Any) -> dict[str, dict[str, Any]]:
     if getattr(provider, "two_bank", False) is True and isinstance(private, str) and private:
         targets[private] = SEED_BANKS[_PRIVATE_HERMES]
     return targets
+
+
+def engine_bank_for(namespace: str, memory_cfg: Any) -> str | None:
+    """The engine bank a seed manifest keyed by ``namespace`` goes to on this
+    box, or ``None`` when its layout seeds no bank for it.
+
+    The same banks :func:`seed_targets` names, from the layout record and
+    ``[memory]`` without a provider: two-bank, ``shared`` is ``[memory] bank``
+    and ``private:hermes`` is ``[memory] private_bank``; the old layout seeds
+    its platform bank only. Raises
+    :class:`hal0.memory.bank_layout.LayoutUndecided` when the layout cannot be
+    told here.
+    """
+    from hal0.memory.bank_layout import current_layout
+
+    banks = current_layout(memory_cfg).provider_kwargs(memory_cfg)
+    if namespace == _SHARED:
+        return str(banks["bank"])
+    if namespace == _PRIVATE_HERMES and banks.get("two_bank"):
+        return str(banks["private_bank"])
+    return None
+
+
+def engine_bank_main(argv: list[str]) -> int:
+    """``install.sh``'s seeding helper: print ``bank=<id>`` for one namespace.
+
+    Prints nothing (exit 0) when the layout seeds no bank for it, and exits 1
+    when ``hal0.toml`` cannot be read or the layout is undecided, so the
+    installer seeds nothing rather than a bank the store does not use; hal0-api
+    seeds the right banks once it has the engine (:func:`heal_hook`).
+    """
+    if len(argv) != 1 or argv[0] not in SEED_BANKS:
+        return 2
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        bank = engine_bank_for(argv[0], load_hal0_config().memory)
+    except Exception as exc:
+        # stderr, never the log: the installer reads stdout as the bank id.
+        print(f"cannot name the bank for {argv[0]}: {exc}", file=sys.stderr)
+        return 1
+    if bank:
+        # Marked, so a log line on stdout can never be read as a bank id.
+        print(f"bank={bank}")
+    return 0
 
 
 async def _get(client: Any, path: str, **kwargs: Any) -> Any | None:
@@ -194,4 +240,12 @@ def heal_hook(provider: Any) -> Any:
     return _seed
 
 
-__all__ = ["SEED_BANKS", "heal_hook", "seed_missing_banks", "seed_targets", "switch_in_progress"]
+__all__ = [
+    "SEED_BANKS",
+    "engine_bank_for",
+    "engine_bank_main",
+    "heal_hook",
+    "seed_missing_banks",
+    "seed_targets",
+    "switch_in_progress",
+]

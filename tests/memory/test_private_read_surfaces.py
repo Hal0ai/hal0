@@ -947,3 +947,184 @@ async def test_two_bank_unidentified_caller_reads_nothing_private(caller):
     for doc_id in ("a-priv", "nobody", "b-own"):
         with pytest.raises(NotFound):
             await p.get_document(doc_id, dataset="private:bob", client_id=caller)
+
+
+# ── two-bank isolation, the remaining read tools (final review of #3572) ─────
+
+
+class _DirectiveEngine(_Engine):
+    """The engine double plus directives, filtered the way the engine filters
+    a listing (``tags`` with its match; no filter returns every directive)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.directives: dict[str, dict[str, dict[str, Any]]] = {}
+        self.deleted_directives: list[str] = []
+
+    def directive(self, bank: str, d_id: str, tags: list[str], content: str = "rule") -> None:
+        self.directives.setdefault(bank, {})[d_id] = {
+            "id": d_id,
+            "name": d_id,
+            "content": content,
+            "tags": list(tags),
+            "is_active": True,
+        }
+
+    async def list_directives(self, *, bank_id, tags=None, tags_match=None, **_kw):
+        rows = list(self.directives.get(bank_id, {}).values())
+        if tags:
+            rows = [r for r in rows if set(tags) & set(r["tags"])]
+        return {"items": [dict(r) for r in rows], "total": len(rows)}
+
+    async def get_directive(self, *, bank_id, directive_id):
+        row = self.directives.get(bank_id, {}).get(directive_id)
+        if row is None:
+            raise _EngineNotFound()
+        return dict(row)
+
+    async def create_directive(self, *, bank_id, name, content, tags=None, **_kw):
+        self.directive(bank_id, name, list(tags or []), content)
+        return dict(self.directives[bank_id][name])
+
+    async def update_directive(self, *, bank_id, directive_id, **kwargs):
+        row = self.directives.get(bank_id, {}).get(directive_id)
+        if row is None:
+            raise _EngineNotFound()
+        row.update({k: v for k, v in kwargs.items() if v is not None})
+        return dict(row)
+
+    async def delete_directive(self, *, bank_id, directive_id):
+        if self.directives.get(bank_id, {}).pop(directive_id, None) is None:
+            raise _EngineNotFound()
+        self.deleted_directives.append(directive_id)
+        return {"success": True}
+
+
+def _two_bank_full() -> tuple[HindsightProvider, _DirectiveEngine]:
+    engine = _DirectiveEngine()
+    _seed(engine, TWO_PRIVATE)
+    engine.doc(TWO_PRIVATE, "a-untagged", ["agent:alice", "topic:only-alice"], "alice")
+    engine.doc(TWO_PRIVATE, "b-own", ["visibility:private", "agent:bob", "topic:bob"], "bob")
+    engine.trees[TWO_PRIVATE]["roots"][0]["children"].append(
+        {"id": "p-bob", "kind": "page", "name": "Bob", "tags": ["agent:bob", "visibility:private"]}
+    )
+    engine.pages["p-bob"] = {"id": "p-bob", "name": "Bob", "markdown": "bob"}
+    engine.directive(TWO_PRIVATE, "d-alice", ["agent:alice", "visibility:private"], "alice rule")
+    engine.directive(TWO_PRIVATE, "d-nobody", [], "no owner")
+    engine.directive(TWO_PRIVATE, "d-bob", ["agent:bob", "visibility:private"], "bob rule")
+    engine.directive(TWO_SHARED, "d-shared", [], "everyone")
+    p = HindsightProvider(client=engine, two_bank=True, bank=TWO_SHARED, private_bank=TWO_PRIVATE)
+    return p, engine
+
+
+@pytest.mark.asyncio
+async def test_two_bank_tags_of_another_agents_private_memory_stay_hidden():
+    p, _engine = _two_bank_full()
+    tags = {r["tag"] for r in (await p.list_tags(dataset="private:bob", client_id="bob"))["items"]}
+    assert "topic:secret" not in tags  # alice's private document
+    assert "topic:only-alice" not in tags  # alice's row with no private tag
+    assert "topic:bob" in tags
+
+
+@pytest.mark.asyncio
+async def test_two_bank_knowledge_pages_of_another_agent_stay_hidden():
+    p, _engine = _two_bank_full()
+    tree = await p.knowledge_base_tree(dataset="private:bob", client_id="bob")
+    pages = {c["id"] for root in tree["roots"] for c in root.get("children", [])}
+    assert "p-alice" not in pages and "p-whole" not in pages
+    for page_id in ("p-alice", "p-whole"):
+        with pytest.raises(NotFound):
+            await p.knowledge_base_page(page_id, dataset="private:bob", client_id="bob")
+
+
+@pytest.mark.asyncio
+async def test_two_bank_mental_model_writes_on_another_agents_model_are_404():
+    p, engine = _two_bank_full()
+    for mm in ("mm-whole", "mm-topic", "mm-alice"):
+        with pytest.raises(NotFound):
+            await p.update_mental_model(mm, dataset="private:bob", client_id="bob", name="x")
+        with pytest.raises(NotFound):
+            await p.delete_mental_model(mm, dataset="private:bob", client_id="bob")
+    assert engine.updated == []
+    assert set(engine.models[TWO_PRIVATE]) == {"mm-whole", "mm-topic", "mm-alice"}
+
+
+@pytest.mark.asyncio
+async def test_two_bank_directives_are_their_writers_own():
+    p, engine = _two_bank_full()
+    ns = "private:bob"
+    listed = await p.list_directives(dataset=ns, client_id="bob")
+    assert [d["id"] for d in listed["items"]] == ["d-bob"]
+    assert listed["total"] == 1
+    for d_id in ("d-alice", "d-nobody", "d-missing"):
+        with pytest.raises(NotFound) as refused:
+            await p.get_directive(d_id, dataset=ns, client_id="bob")
+        assert refused.value.code == "memory.directive_not_found"
+        with pytest.raises(NotFound):
+            await p.update_directive(d_id, dataset=ns, client_id="bob", content="hijack")
+        with pytest.raises(NotFound):
+            await p.delete_directive(d_id, dataset=ns, client_id="bob")
+    assert engine.directives[TWO_PRIVATE]["d-alice"]["content"] == "alice rule"
+    assert engine.deleted_directives == []
+    assert (await p.get_directive("d-bob", dataset=ns, client_id="bob"))["content"] == "bob rule"
+    # The shared bank's directives are everyone's, as before.
+    shared = await p.list_directives(client_id="bob")
+    assert [d["id"] for d in shared["items"]] == ["d-shared"]
+
+
+@pytest.mark.asyncio
+async def test_two_bank_directive_writes_are_stamped_with_their_owner():
+    p, engine = _two_bank_full()
+    ns = "private:bob"
+    await p.create_directive(
+        name="d-new",
+        content="be brief",
+        dataset=ns,
+        client_id="bob",
+        tags=["topic:style", "agent:alice", "visibility:shared"],
+    )
+    assert engine.directives[TWO_PRIVATE]["d-new"]["tags"] == [
+        "topic:style",
+        "agent:bob",
+        "visibility:private",
+    ]
+    # Re-tagging cannot make a directive bank-wide or another agent's.
+    await p.update_directive("d-bob", dataset=ns, client_id="bob", tags=[])
+    assert engine.directives[TWO_PRIVATE]["d-bob"]["tags"] == ["agent:bob", "visibility:private"]
+    # Another agent's directive never shows up in this one's listing.
+    alice = await p.list_directives(dataset="private:alice", client_id="alice")
+    assert {d["id"] for d in alice["items"]} == {"d-alice"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caller", [None, "anonymous", "unknown"])
+async def test_two_bank_private_directive_needs_an_owner(caller):
+    from hal0.errors import Forbidden
+
+    p, engine = _two_bank_full()
+    with pytest.raises(Forbidden):
+        await p.create_directive(name="d-x", content="x", dataset="private:bob", client_id=caller)
+    assert "d-x" not in engine.directives[TWO_PRIVATE]
+
+
+@pytest.mark.asyncio
+async def test_two_bank_private_reflect_is_held_to_the_callers_directives():
+    """The engine loads a reflect's directives through its ``tag_groups``
+    (untagged ones always, tagged ones only inside the groups), and a
+    private-bank reflect is held to the caller's ``agent:`` tag: another
+    agent's private directive is outside it."""
+    from hal0.memory.read_scope import tags_readable
+
+    calls: list[dict[str, Any]] = []
+
+    class _Reflecting(_DirectiveEngine):
+        async def reflect(self, **kwargs):
+            calls.append(kwargs)
+            return {"text": "ok"}
+
+    engine = _Reflecting()
+    p = HindsightProvider(client=engine, two_bank=True, bank=TWO_SHARED, private_bank=TWO_PRIVATE)
+    await p.reflect("q", dataset="private:bob", client_id="bob")
+    groups = calls[0]["tag_groups"]
+    assert not tags_readable(groups, ["agent:alice", "visibility:private"])
+    assert tags_readable(groups, ["agent:bob", "visibility:private"])

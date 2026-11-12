@@ -4151,17 +4151,22 @@ else
             done
             if [[ "${hs_up}" -eq 1 ]]; then
                 info "hindsight-api is running (memory engine on 127.0.0.1:9177)"
-                # Seed banks through hal0-api (idempotent import, config-by-field):
-                # `shared` = the global cross-agent brain; `private:hermes`
-                # = hermes' private store (the server derives it from the agent-id
-                # via PRIVATE_PREFIX="private:", so the seed name must match exactly).
-                # Other private/project banks lazy-create.
+                # Seed banks through hal0-api (idempotent import, config-by-field).
+                # Each manifest is keyed by the namespace it is for (`shared`,
+                # `private:hermes`); hal0.memory.bank_seed names the engine bank
+                # this box's layout keeps it in (ADR-0058 decision 7):
+                # hal0:shared and hal0:private on a new store, the platform bank
+                # alone on an older one. No other bank is created here.
                 # The two manifests below are mirrored in hal0.memory.bank_seed,
                 # which hal0-api runs when an engine that was not up here
                 # comes up later; a test holds the two copies in lockstep.
                 _seed_bank() {
+                    local bank
+                    bank="$("${VENV_DIR}/bin/python" -I -c 'import sys; from hal0.memory.bank_seed import engine_bank_main; raise SystemExit(engine_bank_main(sys.argv[1:]))' "$1" 2>/dev/null)" || return 1
+                    bank="$(printf '%s\n' "${bank}" | sed -n 's/^bank=//p' | tail -n 1)"
+                    [[ -n "${bank}" ]] || return 0
                     curl -fsS -m 20 -X POST \
-                        "http://127.0.0.1:${HAL0_PORT}/api/memory/banks/$1/import" \
+                        "http://127.0.0.1:${HAL0_PORT}/api/memory/banks/${bank}/import" \
                         -H "Content-Type: application/json" -H "X-hal0-Agent: installer" \
                         -d "$2" >/dev/null 2>&1
                 }
@@ -4172,9 +4177,9 @@ else
                     || warn "hal0-api has not picked up the memory engine yet; bank seeding may be incomplete"
                 if _seed_bank shared '{"version":"1","bank":{"retain_mission":"Extract technical decisions and rationale, gotchas and fixes, PRs and status changes, conventions, commands, endpoints, flags, incidents and resolutions, and cross-session coordination facts. Ignore routine edits, transient state, secrets, and anything already in git.","enable_observations":true,"disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":1}}' \
                     && _seed_bank private:hermes '{"version":"1","bank":{"retain_mission":"This agent private working notes, scratch decisions, and per-task state. Never store shared facts here.","disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":2}}'; then
-                    info "seeded memory banks: shared (global) + private:hermes"
+                    info "seeded the memory banks of the shared and private namespaces"
                 else
-                    warn "memory bank seeding incomplete — banks also lazy-create on first write"
+                    warn "memory bank seeding incomplete — hal0-api seeds them once it has the engine"
                 fi
                 # #2353: say up front when the extraction slot cannot finish one
                 # extraction inside [memory.graph].llm_timeout_s, instead of the
