@@ -114,20 +114,27 @@ while it is missing, or empty with no retain mission, and never during an
 embedder switch, so re-running the installer leaves a bank that holds
 anything as it is.
 
-## Directives on hal0:private
+## Directives
 
-A directive written to `private:<agent>` lands in `hal0:private` stamped
-`agent:<id>` and `visibility:private`, whatever tags were sent, and needs an
-identified agent. Listing, reading, changing and deleting directives there
-see only the caller's own; any other answers `memory.directive_not_found`. A
-private reflect loads only untagged directives and the caller's own, since
-the engine holds a reflect's directives to its tag filter. An untagged
-directive on `hal0:private` (only the bank spec or the admin API can create
-one) applies to every agent's private reflect and is listed to none.
+A directive an agent writes (the `hal0-memory` and `hal0-admin` MCP tools) is
+its own, in every layout and on every bank. It is stamped `agent:<id>` and
+`visibility:private`, whatever tags were sent, and needs an identified agent:
+an anonymous create, update or delete answers 403
+`memory.directive_owner_required`. An agent sees its own directives and the
+bank-wide ones; reading, changing or deleting another agent's answers
+`memory.directive_not_found`. A reflect loads untagged directives and the
+caller's own, since the engine holds a reflect's directives to its tag
+filter, so no agent's directive steers another agent's reflect.
 
-On every other bank, `hal0:shared` included, a directive is bank-wide: the
-`agent:` and `visibility:` tags a caller sends with it are dropped, so no
-agent can write a directive that another agent's reflect loads as its own.
+A bank-wide directive (untagged, or tagged without `visibility:private`)
+applies to every agent that reflects on the bank, so only the operator
+manages it: the bank spec, the admin routes under
+`/api/memory/banks/{bank}/directives`, the Memory page and
+`hal0 memory directive`. An agent's update or delete of one answers 403
+`memory.directive_operator_managed`. On `hal0:private` an untagged directive
+applies to every agent's private reflect and is listed to none, and one
+tagged `agent:<id>` alone is that agent's. Under the old split layout every
+directive in an agent's own `private__<agent>` bank is that agent's.
 
 <CardGrid>
   <LinkCard title="Memory" href="/docs/concepts/memory" description="Namespaces, the write envelope and what memory powers." />

@@ -143,7 +143,13 @@ class FakeHindsightClient:
 
     async def create_directive(self, *, bank_id, name, content, **kwargs):
         d_id = f"dir-{len(self.directives) + 1}"
-        self.directives[d_id] = {"id": d_id, "bank_id": bank_id, "name": name, "content": content}
+        self.directives[d_id] = {
+            "id": d_id,
+            "bank_id": bank_id,
+            "name": name,
+            "content": content,
+            "tags": list(kwargs.get("tags") or []),
+        }
         return dict(self.directives[d_id])
 
     async def update_directive(self, *, bank_id, directive_id, **kwargs):

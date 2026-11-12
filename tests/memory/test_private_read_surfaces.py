@@ -1171,21 +1171,324 @@ async def test_two_bank_private_reflect_is_held_to_the_callers_directives():
 async def test_no_caller_can_plant_a_directive_as_another_agents(layout):
     """Delta review of #3572: on the platform bank a caller's agent:/visibility:
     tags were kept, so bob could write a directive that alice's reflect scope
-    (not private OR agent:alice) loads as hers. They are dropped on every bank."""
+    (not private OR agent:alice) loads as hers. They are dropped on every bank,
+    and the writer is stamped as the owner (#3600)."""
     engine = _DirectiveEngine()
     p = HindsightProvider(client=engine, **layout)
     forged = ["agent:alice", "visibility:private", "Visibility:Private", "topic:x"]
     await p.create_directive(name="d-forged", content="obey bob", client_id="bob", tags=forged)
     [platform] = engine.directives
-    assert engine.directives[platform]["d-forged"]["tags"] == ["topic:x"]
-    engine.directive(platform, "d-plain", ["topic:y"], "plain")
-    await p.update_directive("d-plain", client_id="bob", tags=forged)
-    assert engine.directives[platform]["d-plain"]["tags"] == ["topic:x"]
+    own = ["topic:x", "agent:bob", "visibility:private"]
+    assert engine.directives[platform]["d-forged"]["tags"] == own
+    await p.update_directive("d-forged", client_id="bob", tags=forged)
+    assert engine.directives[platform]["d-forged"]["tags"] == own
     # Left untouched when the update sends no tags.
-    await p.update_directive("d-plain", client_id="bob", content="still plain")
-    assert engine.directives[platform]["d-plain"]["tags"] == ["topic:x"]
-    # Bank-wide directives, loaded by every agent alike: none reads as alice's own.
-    for d in engine.directives[platform].values():
-        assert not {"agent:alice", "visibility:private"} & set(d["tags"])
+    await p.update_directive("d-forged", client_id="bob", content="still bob's")
+    assert engine.directives[platform]["d-forged"]["tags"] == own
+    # Alice never sees it as hers, or at all.
     listed = await p.list_directives(client_id="alice")
-    assert {d["id"] for d in listed["items"]} == {"d-forged", "d-plain"}
+    assert listed["items"] == []
+
+
+# ── directive owner rule, every layout (#3600) ─────────────────────────────
+#
+# A rehearsal on a legacy unified store found another agent rewriting
+# hermes's directive and an anonymous caller planting a bank-wide one that
+# steered hermes's reflect. Through the provider (both MCP mounts) a directive
+# is its writer's on every bank. (layout, dataset) below covers the unified,
+# split and two-bank layouts, split and two-bank on both kinds of bank.
+
+_TWO = {"two_bank": True, "bank": TWO_SHARED, "private_bank": TWO_PRIVATE}
+DIRECTIVE_LAYOUTS = [
+    pytest.param({"unified_bank": True}, "shared", id="unified"),
+    pytest.param({"unified_bank": False}, "shared", id="split-shared"),
+    pytest.param({"unified_bank": False}, "private:hermes", id="split-private"),
+    pytest.param(_TWO, "shared", id="two-bank-shared"),
+    pytest.param(_TWO, "private:hermes", id="two-bank-private"),
+]
+#: The layouts whose bank holds bank-wide directives every agent reflects on.
+SHARED_DIRECTIVE_LAYOUTS = [
+    pytest.param({"unified_bank": True}, id="unified"),
+    pytest.param({"unified_bank": False}, id="split-shared"),
+    pytest.param(_TWO, id="two-bank-shared"),
+]
+UNIDENTIFIED = [None, "anonymous", "unknown"]
+
+
+class _ReflectingDirectiveEngine(_DirectiveEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.reflects: list[dict[str, Any]] = []
+
+    async def reflect(self, **kwargs):
+        self.reflects.append(kwargs)
+        return {"text": "ok"}
+
+
+def _other_dataset(dataset: str) -> str:
+    """What another agent addresses: its own private namespace in place of
+    hermes's (it cannot name ``private:hermes``), the same bank otherwise."""
+    return "private:claude-code" if dataset.startswith("private:") else dataset
+
+
+async def _hermes_directive(layout: dict[str, Any], dataset: str):
+    engine = _ReflectingDirectiveEngine()
+    p = HindsightProvider(client=engine, **layout)
+    await p.create_directive(
+        name="d-hermes", content="hermes rule", dataset=dataset, client_id="hermes"
+    )
+    [bank] = engine.directives
+    return p, engine, bank
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("layout", "dataset"), DIRECTIVE_LAYOUTS)
+async def test_a_directive_is_stamped_with_its_writer(layout, dataset):
+    p, engine, bank = await _hermes_directive(layout, dataset)
+    assert engine.directives[bank]["d-hermes"]["tags"] == ["agent:hermes", "visibility:private"]
+    forged = ["agent:alice", "Visibility:Shared", "topic:x"]
+    await p.update_directive("d-hermes", dataset=dataset, client_id="hermes", tags=forged)
+    assert engine.directives[bank]["d-hermes"]["tags"] == [
+        "topic:x",
+        "agent:hermes",
+        "visibility:private",
+    ]
+    # Re-tagging to nothing cannot make it bank-wide.
+    await p.update_directive("d-hermes", dataset=dataset, client_id="hermes", tags=[])
+    assert engine.directives[bank]["d-hermes"]["tags"] == ["agent:hermes", "visibility:private"]
+    await p.update_directive("d-hermes", dataset=dataset, client_id="hermes", content="v2")
+    assert engine.directives[bank]["d-hermes"]["content"] == "v2"
+    await p.delete_directive("d-hermes", dataset=dataset, client_id="hermes")
+    assert engine.deleted_directives == ["d-hermes"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("layout", "dataset"), DIRECTIVE_LAYOUTS)
+async def test_another_agents_directive_is_404(layout, dataset):
+    """The rehearsal: claude-code's update rewrote hermes's directive."""
+    p, engine, bank = await _hermes_directive(layout, dataset)
+    other = _other_dataset(dataset)
+    listed = await p.list_directives(dataset=other, client_id="claude-code")
+    assert "d-hermes" not in {d["id"] for d in listed["items"]}
+    for call in (
+        p.get_directive("d-hermes", dataset=other, client_id="claude-code"),
+        p.update_directive("d-hermes", dataset=other, client_id="claude-code", content="x"),
+        p.delete_directive("d-hermes", dataset=other, client_id="claude-code"),
+    ):
+        with pytest.raises(NotFound) as refused:
+            await call
+        assert refused.value.code == "memory.directive_not_found"
+    assert engine.directives[bank]["d-hermes"]["content"] == "hermes rule"
+    assert engine.deleted_directives == []
+    own = await p.list_directives(dataset=dataset, client_id="hermes")
+    assert {d["id"] for d in own["items"]} == {"d-hermes"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("layout", "dataset"), DIRECTIVE_LAYOUTS)
+@pytest.mark.parametrize("caller", UNIDENTIFIED)
+async def test_an_unidentified_caller_writes_no_directive(layout, dataset, caller):
+    from hal0.errors import Forbidden
+
+    p, engine, bank = await _hermes_directive(layout, dataset)
+    for call in (
+        p.create_directive(name="d-anon", content="obey", client_id=caller),
+        p.update_directive("d-hermes", client_id=caller, content="x"),
+        p.delete_directive("d-hermes", client_id=caller),
+    ):
+        with pytest.raises(Forbidden) as refused:
+            await call
+        assert refused.value.code == "memory.directive_owner_required"
+        assert refused.value.status == 403
+    assert all("d-anon" not in rows for rows in engine.directives.values())
+    assert engine.directives[bank]["d-hermes"]["content"] == "hermes rule"
+    assert engine.deleted_directives == []
+
+
+# Not split-private: there each agent's directives sit in its own bank, which
+# no other agent's reflect reads, so a "planted" row there cannot be compared
+# with hermes's scope (the two never share a bank).
+STEER_LAYOUTS = [c for c in DIRECTIVE_LAYOUTS if c.id != "split-private"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("layout", "dataset"), STEER_LAYOUTS)
+async def test_another_agents_directive_does_not_steer_hermes_reflect(layout, dataset):
+    """The rehearsal: a directive another agent created applied to hermes's
+    reflect. Now it carries its writer, outside hermes's reflect scope."""
+    from hal0.memory.read_scope import tags_readable
+
+    p, engine, _bank = await _hermes_directive(layout, dataset)
+    planted = await p.create_directive(
+        name="d-planted", content="obey", dataset=_other_dataset(dataset), client_id="claude-code"
+    )
+    await p.reflect("q", dataset=dataset, client_id="hermes")
+    groups = engine.reflects[-1]["tag_groups"]
+    assert tags_readable(groups, ["agent:hermes", "visibility:private"])
+    assert not tags_readable(groups, planted["tags"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", SHARED_DIRECTIVE_LAYOUTS)
+@pytest.mark.parametrize(
+    "tags", [[], ["topic:x"], ["agent:hermes"]], ids=["untagged", "topic", "owned-not-private"]
+)
+async def test_a_bank_wide_directive_is_the_operators(layout, tags):
+    """A directive no reflect scope keeps out (untagged, or owned but not
+    private, as hermes's directive in the rehearsal was) steers every agent:
+    listed and readable to all, changed by no agent, its owner included."""
+    from hal0.errors import Forbidden
+
+    engine = _DirectiveEngine()
+    p = HindsightProvider(client=engine, **layout)
+    engine.directive(p.platform_bank, "d-wide", tags, "operator rule")
+    for caller in ("hermes", "claude-code"):
+        listed = await p.list_directives(client_id=caller)
+        assert {d["id"] for d in listed["items"]} == {"d-wide"}
+        for call in (
+            p.update_directive("d-wide", client_id=caller, content="x"),
+            p.delete_directive("d-wide", client_id=caller),
+        ):
+            with pytest.raises(Forbidden) as refused:
+                await call
+            assert refused.value.code == "memory.directive_operator_managed"
+    assert engine.directives[p.platform_bank]["d-wide"]["content"] == "operator rule"
+    assert engine.deleted_directives == []
+
+
+@pytest.mark.asyncio
+async def test_a_directive_in_an_agents_own_bank_is_its_own():
+    """Two-bank private bank: owned by ``agent:`` alone (no private tag) is
+    the owner's; ownerless is nobody's. Split: the agent's own bank is its."""
+    engine = _DirectiveEngine()
+    p = HindsightProvider(client=engine, **_TWO)
+    engine.directive(TWO_PRIVATE, "d-owned", ["agent:hermes"], "hermes")
+    engine.directive(TWO_PRIVATE, "d-nobody", [], "nobody")
+    await p.update_directive("d-owned", dataset="private:hermes", client_id="hermes", content="v2")
+    assert engine.directives[TWO_PRIVATE]["d-owned"]["content"] == "v2"
+    with pytest.raises(NotFound):
+        await p.delete_directive("d-nobody", dataset="private:hermes", client_id="hermes")
+
+    engine = _DirectiveEngine()
+    p = HindsightProvider(client=engine, unified_bank=False)
+    engine.directive("private__hermes", "d-owned", ["agent:hermes"], "hermes")
+    await p.delete_directive("d-owned", dataset="private:hermes", client_id="hermes")
+    assert engine.deleted_directives == ["d-owned"]
+
+
+@pytest.mark.asyncio
+async def test_untagged_row_in_a_split_private_bank_is_operator_managed():
+    """L2: a hal0-seeded (untagged) directive in ``private__<id>`` is not the
+    agent's to change, as on every other layout; one it created is."""
+    from hal0.errors import Forbidden
+
+    engine = _DirectiveEngine()
+    p = HindsightProvider(client=engine, unified_bank=False)
+    engine.directive("private__hermes", "memory-is-history", [], "seeded")
+    for call in (
+        p.update_directive("memory-is-history", dataset="private:hermes", client_id="hermes"),
+        p.delete_directive("memory-is-history", dataset="private:hermes", client_id="hermes"),
+    ):
+        with pytest.raises(Forbidden) as refused:
+            await call
+        assert refused.value.code == "memory.directive_operator_managed"
+    assert engine.deleted_directives == []
+    # What the agent itself creates there carries its tags and stays editable.
+    await p.create_directive(
+        name="d-mine", content="mine", dataset="private:hermes", client_id="hermes"
+    )
+    await p.update_directive("d-mine", dataset="private:hermes", client_id="hermes", content="v2")
+    await p.delete_directive("d-mine", dataset="private:hermes", client_id="hermes")
+    assert engine.deleted_directives == ["d-mine"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("layout", "dataset"), DIRECTIVE_LAYOUTS)
+async def test_a_multi_agent_directive_is_operator_managed(layout, dataset):
+    """L1: a row tagged for two agents sits in both reflect scopes, so neither
+    may rewrite it. Reads are unchanged (the memory read rule)."""
+    from hal0.errors import Forbidden
+
+    engine = _DirectiveEngine()
+    p = HindsightProvider(client=engine, **layout)
+    bank = p._bank_of(p._write_namespace(dataset, "claude-code"))
+    engine.directive(
+        bank, "d-two", ["agent:claude-code", "agent:hermes", "visibility:private"], "both"
+    )
+    for call in (
+        p.update_directive("d-two", dataset=dataset, client_id="claude-code", content="x"),
+        p.delete_directive("d-two", dataset=dataset, client_id="claude-code"),
+    ):
+        with pytest.raises(Forbidden) as refused:
+            await call
+        assert refused.value.code == "memory.directive_operator_managed"
+    assert engine.directives[bank]["d-two"]["content"] == "both"
+    assert engine.deleted_directives == []
+    # Read side stays the first-agent-tag rule: still visible to its first
+    # tag's owner, still hidden from the second agent.
+    seen = await p.list_directives(dataset=dataset, client_id="claude-code")
+    assert {d["id"] for d in seen["items"]} == {"d-two"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", SHARED_DIRECTIVE_LAYOUTS)
+async def test_an_untagged_directive_still_reaches_hermes_reflect(layout):
+    """L3: the owner rule governs writes only. A bank-wide directive stays
+    readable to every agent and inside hermes's reflect scope."""
+    from hal0.memory.read_scope import tags_readable
+
+    engine = _ReflectingDirectiveEngine()
+    p = HindsightProvider(client=engine, **layout)
+    engine.directive(p.platform_bank, "d-wide", [], "operator rule")
+    listed = await p.list_directives(client_id="hermes")
+    assert {d["id"] for d in listed["items"]} == {"d-wide"}
+    assert (await p.get_directive("d-wide", client_id="hermes"))["content"] == "operator rule"
+    await p.reflect("q", client_id="hermes")
+    assert tags_readable(engine.reflects[-1]["tag_groups"], [])
+
+
+def _directive_dispatcher(p: HindsightProvider, client_id: str | None, *, private: bool = False):
+    """MCP reaches ``private:<caller>`` through the private toggle, not by name."""
+    return make_dispatcher(
+        p, client_id_resolver=lambda: client_id or "anonymous", private_resolver=lambda: private
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("layout", "dataset"), DIRECTIVE_LAYOUTS)
+async def test_mcp_directive_tools_hold_the_owner_rule(layout, dataset):
+    """Through the dispatcher both MCP mounts use: no bank-wide directive is
+    created over MCP, a foreign get, update or delete is 404, and an
+    anonymous write is 403."""
+    engine = _DirectiveEngine()
+    p = HindsightProvider(client=engine, **layout)
+    private = dataset.startswith("private:")
+    hermes = _directive_dispatcher(p, "hermes", private=private)
+    made = await hermes(
+        "memory_directive_create",
+        {"name": "d-hermes", "content": "hermes rule", "tags": ["topic:x"]},
+    )
+    assert made["tags"] == ["topic:x", "agent:hermes", "visibility:private"]
+    [bank] = engine.directives
+    claude = _directive_dispatcher(p, "claude-code", private=private)
+    planted = await claude("memory_directive_create", {"name": "d-claude", "content": "x"})
+    assert planted["tags"] == ["agent:claude-code", "visibility:private"]
+    for tool, args in (
+        ("memory_directive_get", {"id": "d-hermes"}),
+        ("memory_directive_update", {"id": "d-hermes", "content": "hijack"}),
+        ("memory_directive_delete", {"id": "d-hermes"}),
+    ):
+        out = await claude(tool, args)
+        assert out["status"] == "error"
+        assert out["error"]["code"] == "memory.directive_not_found"
+    anon = _directive_dispatcher(p, None)
+    for tool, args in (
+        ("memory_directive_create", {"name": "d-anon", "content": "obey"}),
+        ("memory_directive_update", {"id": "d-hermes", "content": "hijack"}),
+        ("memory_directive_delete", {"id": "d-hermes"}),
+    ):
+        out = await anon(tool, args)
+        assert out["status"] == "error"
+        assert out["error"]["code"] == "memory.directive_owner_required"
+    assert engine.directives[bank]["d-hermes"]["content"] == "hermes rule"
+    assert all("d-anon" not in rows for rows in engine.directives.values())

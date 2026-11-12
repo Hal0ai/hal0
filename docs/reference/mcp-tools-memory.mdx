@@ -46,13 +46,22 @@ same verdict, belt and braces).
 | `memory_documents_list` | none | a bank's retained documents; filter with `q`, `tags`, `tags_match`, page with `limit`/`offset` |
 | `memory_documents_get` | `document_id` | one retained document |
 
-On the two-bank layout's private bank (`private:<agent>`), directives are
-their writer's: `memory_directive_create` stamps `agent:<id>` and
-`visibility:private`, and the directive tools see and change only the
-caller's own ([Memory banks](/docs/concepts/memory-banks#directives-on-hal0private)).
-On any other bank a directive is bank-wide, and the `agent:` and
-`visibility:` tags sent to `memory_directive_create` or
-`memory_directive_update` are dropped.
+A directive written over MCP is its writer's, on every bank and in every
+layout ([Memory banks](/docs/concepts/memory-banks#directives)):
+
+- `memory_directive_create` stamps `agent:<id>` and `visibility:private`; the
+  `agent:` and `visibility:` tags a caller sends are dropped. An `update` that
+  sends `tags` is re-stamped the same way.
+- A caller with no identity cannot create, update or delete a directive: 403
+  `memory.directive_owner_required`.
+- `list` and `get` return the caller's own directives and the bank-wide ones.
+  `get`, `update` and `delete` of another agent's directive answer
+  `memory.directive_not_found`, the same as a directive that does not exist.
+- A bank-wide directive (untagged, or tagged without `visibility:private`)
+  applies to every agent's reflect, so no agent changes it over MCP:
+  `update` and `delete` answer 403 `memory.directive_operator_managed`. The
+  operator manages them with the bank spec, the admin routes under
+  `/api/memory/banks/{bank}/directives` and `hal0 memory directive`.
 
 These read tools apply the same private-memory rule as `memory_recall`: a
 memory tagged `visibility:private` is readable only by the agent named in its
