@@ -3411,6 +3411,15 @@ def check_memory_engine_version(
             config_enabled = _memory_enabled_in_config()
         if config_enabled is False:
             return Check(name, title, _PASS, "memory disabled in config — nothing to check")
+        if config_enabled is None:
+            # hal0.toml is 0600: a non-root doctor cannot read it, and then
+            # neither "disabled" nor "unreachable" can be claimed.
+            return Check(
+                name,
+                title,
+                _PASS,
+                "config unreadable — cannot tell disabled from unreachable (run as root)",
+            )
         return Check(
             name,
             title,

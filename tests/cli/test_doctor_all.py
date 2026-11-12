@@ -1915,6 +1915,43 @@ def test_memory_engine_version_distinguishes_disabled_from_down() -> None:
     assert "[memory] enabled" in outage.detail
 
 
+def _stub_memory_config(monkeypatch: pytest.MonkeyPatch, *, enabled: bool | None) -> None:
+    """Make ``load_hal0_config`` return ``[memory] enabled`` or raise (unreadable)."""
+    from types import SimpleNamespace
+
+    import hal0.config.loader as loader
+
+    def _load() -> object:
+        if enabled is None:
+            raise PermissionError("hal0.toml")
+        return SimpleNamespace(memory=SimpleNamespace(enabled=enabled))
+
+    monkeypatch.setattr(loader, "load_hal0_config", _load)
+
+
+@pytest.mark.parametrize("enabled", [True, False, None])
+def test_memory_enabled_in_config(monkeypatch: pytest.MonkeyPatch, enabled: bool | None) -> None:
+    _stub_memory_config(monkeypatch, enabled=enabled)
+    assert da._memory_enabled_in_config() is enabled
+
+
+def test_memory_engine_version_row_text_follows_the_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    down = {"enabled": False, "engine": None, "reachable": False}
+    _stub_memory_config(monkeypatch, enabled=False)
+    assert "disabled in config" in da.check_memory_engine_version(memory=down).detail
+    _stub_memory_config(monkeypatch, enabled=True)
+    assert (
+        "enabled but the engine is unreachable"
+        in da.check_memory_engine_version(memory=down).detail
+    )
+    _stub_memory_config(monkeypatch, enabled=None)
+    detail = da.check_memory_engine_version(memory=down).detail
+    assert "config unreadable" in detail and "run as root" in detail
+    assert "enabled but" not in detail and "disabled in config" not in detail
+
+
 # ── memory extraction speed (#2353, advisory) ───────────────────────────────
 
 _LIVE_MEMORY = {"enabled": True, "engine": "hindsight", "reachable": True}
