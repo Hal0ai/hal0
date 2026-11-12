@@ -1,0 +1,152 @@
+---
+title: TLS proxy and listeners
+description: Putting a TLS-terminating reverse proxy in front of hal0, allowing the public URL through origin protection, and securing OpenWebUI's second listener on :3001.
+sidebar:
+  order: 11
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+This page continues [Authentication](/docs/operate/auth): the proxy, public-URL and OpenWebUI listener sections that used to sit at the end of it.
+
+## TLS still needs a proxy
+
+hal0 doesn't terminate TLS or manage certificates — the admin-key/session
+model above governs *who* can call the API, not *how* the connection is
+encrypted. If you're reaching hal0 over anything other than a trusted LAN,
+put a reverse proxy in front that owns TLS:
+
+<Tabs>
+<TabItem label="Caddy">
+
+```txt
+hal0.example.com {
+    reverse_proxy 127.0.0.1:8080
+}
+```
+
+Caddy obtains and renews the certificate automatically via ACME as long as
+port 80/443 are reachable for the challenge.
+
+</TabItem>
+<TabItem label="Traefik">
+
+```yaml
+http:
+  routers:
+    hal0:
+      rule: "Host(`hal0.example.com`)"
+      service: hal0
+      tls:
+        certResolver: letsencrypt
+  services:
+    hal0:
+      loadBalancer:
+        servers:
+          - url: "http://127.0.0.1:8080"
+```
+
+</TabItem>
+<TabItem label="nginx">
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name hal0.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/hal0.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/hal0.example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+</TabItem>
+</Tabs>
+
+If your proxy forwards `X-Forwarded-For`, set `HAL0_TRUST_FORWARDED_FOR=true`
+(see the Rate limiting section above) once you've confirmed the proxy itself
+strips any client-supplied value — otherwise treat hal0's own admin-key auth
+as the access control and skip proxy-level basic auth entirely.
+
+### Allow the public URL
+
+A browser on `https://hal0.example.com` sends that as its `Origin`, and the
+[origin check](/docs/operate/auth#origin-protection) refuses state-changing requests and
+WebSocket upgrades from an origin it doesn't know. Tell hal0 the URL once:
+
+```sh
+hal0 network public-url set https://hal0.example.com
+```
+
+This writes `public_url` to `hal0.toml`'s `[network]` table (Settings ▸
+Network writes the same key). Its origin joins the allowlist on
+the next request, with no restart. For any other name you reach hal0 by,
+such as a second proxy, a MagicDNS name or `http://box.lan:8080`, add the
+origin itself:
+
+```sh
+hal0 network origins add http://box.lan:8080
+hal0 network origins list
+```
+
+Each entry is `scheme://host[:port]` with no path. Hosts must be a DNS name,
+an IPv4 address or a bracketed IPv6 address; an internationalised name is
+stored in its punycode form, which is what browsers send. hal0 rejects
+anything else when you save it. `hal0 network origins remove <origin>` and
+`hal0 network public-url clear` revoke an origin the same way, on the next
+request.
+
+This is the one way to allow an extra origin. Don't add origins to
+`HAL0_ALLOWED_ORIGINS` in `/etc/hal0/api.env` by hand. That line sits inside
+the installer-managed block, which every installer run rewrites, so a
+hand-added origin disappears on the next re-run. The `[network]` keys sit in
+`hal0.toml` and survive it, because hal0 adds them on top of
+`HAL0_ALLOWED_ORIGINS` at runtime. An installer run with `HAL0_PUBLIC_URL` set
+saves the URL as `public_url` if one isn't set yet. It never replaces one that
+is.
+
+## The second listener: OpenWebUI on :3001
+
+If `hal0-openwebui` is installed, it publishes a complete chat UI on port
+`3001` with `WEBUI_AUTH=False` — no login page. Anyone who can reach it can
+talk to your models and read every stored conversation
+(`/var/lib/hal0/openwebui`). It sits entirely outside hal0's own auth model:
+enabling enforcement and hardening `:8080`, then stopping there, leaves it
+open.
+
+Two knobs, both in `/etc/hal0/openwebui.env`. Hand edits to that file are
+preserved across install and upgrade runs, so editing it is a supported way
+to set them; `systemctl restart hal0-openwebui` to apply.
+
+**Bind address.** `HAL0_OWUI_BIND_HOST` is what the unit publishes on. The
+installer seeds it from the same `HAL0_BIND_HOST` choice that drives
+`hal0-api`, so binding hal0 to loopback takes both surfaces off the LAN:
+
+```ini
+# /etc/hal0/openwebui.env
+HAL0_OWUI_BIND_HOST=127.0.0.1
+```
+
+**Trusted-header SSO.** If your proxy authenticates users and injects their
+address as a header, OpenWebUI can consume it. Set the header name — that
+alone turns its auth on and wires it up:
+
+```ini
+# /etc/hal0/openwebui.env
+WEBUI_AUTH=True
+WEBUI_AUTH_TRUSTED_EMAIL_HEADER=X-Forwarded-Email
+```
+
+or, at install time, `HAL0_OWUI_TRUSTED_EMAIL_HEADER=X-Forwarded-Email`
+in the installer's environment.
+
+<Aside type="caution">
+Trusted-header auth is only as good as the proxy in front of it. If the port
+is still reachable directly, a client can send the header itself and pick any
+identity. Bind to loopback (or firewall the port) whenever you enable it.
+</Aside>

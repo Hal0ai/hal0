@@ -151,7 +151,7 @@ def check_dns(urls: dict[str, Any] | None) -> Check:
                 NextStep(
                     kind="doc",
                     label="mDNS discovery",
-                    target="/docs/operate/services/#mdns-discovery-toggle",
+                    target="/docs/operate/companion-services/#mdns-discovery-toggle",
                 ),
             ),
         )
