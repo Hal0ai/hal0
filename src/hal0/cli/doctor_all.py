@@ -3371,7 +3371,19 @@ def check_hindsight_llm_auth(
     return Check(name, title, _PASS, "memory engine carries a current client-tier LLM key")
 
 
-def check_memory_engine_version(*, memory: dict[str, Any] | None) -> Check:
+def _memory_enabled_in_config() -> bool | None:
+    """``[memory] enabled`` from ``hal0.toml``; ``None`` when it cannot be read."""
+    from hal0.config.loader import load_hal0_config
+
+    try:
+        return bool(load_hal0_config().memory.enabled)
+    except Exception:
+        return None
+
+
+def check_memory_engine_version(
+    *, memory: dict[str, Any] | None, config_enabled: bool | None = None
+) -> Check:
     """The engine should be at the pinned version — staleness signal only.
 
     Both upgrade paths converge the engine venv via the post-activation
@@ -3383,6 +3395,11 @@ def check_memory_engine_version(*, memory: dict[str, Any] | None) -> Check:
 
     ``memory`` is the ``GET /api/memory/engine`` payload the roll-up already
     fetched — one probe, two rows.
+
+    An empty engine payload means either memory is off in ``hal0.toml`` or it
+    is on and the engine never came up (#3551); ``config_enabled`` (read from
+    ``hal0.toml`` when omitted) tells the two apart so an outage is not
+    reported as "disabled".
     """
     from hal0.memory.engine_upgrade import HINDSIGHT_API_PIN
 
@@ -3390,7 +3407,17 @@ def check_memory_engine_version(*, memory: dict[str, Any] | None) -> Check:
     if memory is None:
         return Check(name, title, _WARN, "engine status unreachable — is hal0-api up?")
     if memory.get("engine") in (None, "") or not memory.get("enabled", True):
-        return Check(name, title, _PASS, "memory disabled — nothing to check")
+        if config_enabled is None:
+            config_enabled = _memory_enabled_in_config()
+        if config_enabled is False:
+            return Check(name, title, _PASS, "memory disabled in config — nothing to check")
+        return Check(
+            name,
+            title,
+            _PASS,
+            "[memory] enabled but the engine is unreachable — nothing to compare; "
+            "see the memory row and the hindsight-api unit",
+        )
     if not memory.get("reachable"):
         # check_memory (the shared classifier) already reports reachability;
         # a second row saying the same thing would be noise.

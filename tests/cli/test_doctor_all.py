@@ -1903,6 +1903,18 @@ def test_memory_engine_version_passes_when_memory_disabled_or_unreachable() -> N
     assert da.check_memory_engine_version(memory=None).status == "warn"
 
 
+def test_memory_engine_version_distinguishes_disabled_from_down() -> None:
+    """#3551: engine payload empty + config enabled is an outage, not 'disabled'."""
+    down = {"enabled": False, "engine": None, "reachable": False}
+    off = da.check_memory_engine_version(memory=down, config_enabled=False)
+    assert off.status == "pass"
+    assert "disabled" in off.detail
+    outage = da.check_memory_engine_version(memory=down, config_enabled=True)
+    assert "disabled" not in outage.detail
+    assert "unreachable" in outage.detail
+    assert "[memory] enabled" in outage.detail
+
+
 # ── memory extraction speed (#2353, advisory) ───────────────────────────────
 
 _LIVE_MEMORY = {"enabled": True, "engine": "hindsight", "reachable": True}
