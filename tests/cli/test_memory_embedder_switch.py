@@ -349,6 +349,18 @@ def test_status_prints_the_journal_the_gate_the_banks_and_what_resume_would_do(s
     assert json.loads(runner.invoke(mec.app, ["switch", "--status", "--json"]).output) == STATUS
 
 
+def test_status_lists_the_operations_live_on_the_engine(stub) -> None:
+    ref = {"bank": "shared", "type": "refresh_mental_model", "id": "op-1", "status": "processing"}
+    stub["outcome"] = {**STATUS, "live_operations": [ref]}
+
+    flat = " ".join(runner.invoke(mec.app, ["switch", "--status"]).output.split())
+
+    assert "operations live on the engine (--status does not wait for them;" in flat
+    assert "refresh_mental_model on shared (operation op-1, processing)" in flat
+    payload = json.loads(runner.invoke(mec.app, ["switch", "--status", "--json"]).output)
+    assert payload["live_operations"] == [ref]
+
+
 def test_status_names_a_foreign_port_holder_and_a_stopped_engine(stub) -> None:
     held = "port 45123 held by pid 4242 (python3), not by hindsight-api.service"
     stub["outcome"] = {

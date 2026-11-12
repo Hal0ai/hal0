@@ -2219,9 +2219,20 @@ class EmbedderSwitch(em.EngineMaintenance):
     # ── status and the escape hatch ─────────────────────────────────────
 
     async def _assess(
-        self, journal: Journal, entry: BankEntry, present: set[str]
+        self,
+        journal: Journal,
+        entry: BankEntry,
+        present: set[str],
+        live: Mapping[str, list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
-        """What ``--resume`` would do for one bank, with the checks it would run."""
+        """What ``--resume`` would do for one bank, with the checks it would run.
+
+        Each check reads the bank once and does not wait for the engine
+        (``status`` runs it with :attr:`_no_wait`). ``live`` is every live
+        operation by bank, as ``status`` listed them: a problem found on a
+        bank the engine is still working on says so, since ``--resume`` waits
+        for the engine's own work before it checks.
+        """
         action = swap_action(entry.step, entry.bank in present, entry.temp in present)
         problem: str | None = None
         operator: str | None = None
@@ -2262,10 +2273,29 @@ class EmbedderSwitch(em.EngineMaintenance):
                 operator = self._way_out(journal, entry.bank)
         except SwitchError as exc:
             problem = exc.message
+        working = [r for b in (entry.bank, entry.temp) for r in (live or {}).get(b, [])]
+        own = [r for r in working if r["type"] in em.ENGINE_OPERATION_TYPES]
+        if problem and working:
+            problem += (
+                " (read while "
+                + ", ".join(
+                    f"{r['type']} on {r['bank']} (operation {r['id']}, {r['status']})"
+                    for r in working
+                )
+                + " was live"
+                + (
+                    f"; --resume waits up to {self.t.engine_ops_s:g}s for the engine's own work "
+                    "to end before it checks"
+                    if own
+                    else ""
+                )
+                + ")"
+            )
         return {
             "bank": entry.bank,
             "temp": entry.temp,
             "step": entry.step,
+            "operations": working,
             "original_present": entry.bank in present,
             "rebuilt_present": entry.temp in present,
             "action": action,
@@ -2276,10 +2306,20 @@ class EmbedderSwitch(em.EngineMaintenance):
     async def status(self) -> dict[str, Any]:
         """Where a switch stands: journal, pause, engine, banks, and what ``--resume`` would do.
 
-        Reads only. It runs the same checks a resume would, so a bank that
-        moved or does not match is reported here first. Works without a
-        journal and without the engine.
+        Reads only, and never waits: each bank is read once, quiet or not, and
+        the operations live on it (the engine's own refreshes and
+        consolidations among them) are listed in ``live_operations`` and per
+        bank rather than waited for. It runs the same checks a resume would,
+        so a bank that moved or does not match is reported here first. Works
+        without a journal and without the engine.
         """
+        self._no_wait = True
+        try:
+            return await self._status()
+        finally:
+            self._no_wait = False
+
+    async def _status(self) -> dict[str, Any]:
         found = locate_journal()
         journal: Journal | None = found["journal"]
         port = self._isolated_port()
@@ -2292,6 +2332,7 @@ class EmbedderSwitch(em.EngineMaintenance):
             "engine": {"reachable": False, "live": None, "private_port": port},
             "record": None,
             "banks": [],
+            "live_operations": [],
             "resume": [],
             "summary": "",
         }
@@ -2313,6 +2354,7 @@ class EmbedderSwitch(em.EngineMaintenance):
         entries = {e.bank: e for e in journal.banks} if journal is not None else {}
         temps = {e.temp: e for e in journal.banks} if journal is not None else {}
         present: set[str] = set()
+        live_ops: dict[str, list[dict[str, Any]]] = {}
         holder: Mapping[str, Any] | None = None
         owner: Any = None
         if port is not None:
@@ -2349,8 +2391,22 @@ class EmbedderSwitch(em.EngineMaintenance):
                     role = "temporary (not from the journalled run)"
                 else:
                     role = "not in the journal" if journal is not None else "bank"
+                try:
+                    ops: list[dict[str, Any]] | None = [
+                        em.operation_ref(bank, op) for op in await self._live_operations(bank)
+                    ]
+                except SwitchError:
+                    ops = None
+                if ops:
+                    live_ops[bank] = ops
+                    out["live_operations"] += ops
                 out["banks"].append(
-                    {"bank": bank, "role": role, "counts": (await self.bank_state(bank))["counts"]}
+                    {
+                        "bank": bank,
+                        "role": role,
+                        "counts": (await self.bank_state(bank))["counts"],
+                        "operations": ops,
+                    }
                 )
             out["engine"]["reachable"] = True
             if stopped:
@@ -2401,7 +2457,7 @@ class EmbedderSwitch(em.EngineMaintenance):
             return out
         if out["engine"]["reachable"]:
             for entry in journal.banks:
-                out["resume"].append(await self._assess(journal, entry, present))
+                out["resume"].append(await self._assess(journal, entry, present, live_ops))
         blocked = [
             r for r in out["resume"] if r["operator"] and not r["operator"].startswith("nothing")
         ]

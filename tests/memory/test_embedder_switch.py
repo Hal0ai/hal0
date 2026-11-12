@@ -688,6 +688,8 @@ class Box:
         (self.hs / ".pg0" / "data").write_bytes(b"x" * 4096)
         er.save_embedder_record(EmbedderRecord(*BGE, source=er.SOURCE_ENGINE_DEFAULT))
         self.privileged = True
+        #: Every wait the switch sleeps through, in any of its loops.
+        self.sleeps = 0
         self._http = self.http(f"http://127.0.0.1:{NORMAL_PORT}")
         real_engage, real_lift = write_gate.engage_gate, write_gate.lift_gate
 
@@ -718,6 +720,7 @@ class Box:
 
     def switch(self, target: Embedder | None = HS, **kw: Any) -> es.EmbedderSwitch:
         async def no_sleep(_s: float) -> None:
+            self.sleeps += 1
             await asyncio.sleep(0)
 
         def clock() -> float:
@@ -3016,6 +3019,56 @@ async def test_status_runs_the_checks_a_resume_would_and_reports_a_bank_that_mov
     assert "facts 10 (expected 9)" in gamma["problem"]
     assert "--resume then exports and rebuilds it again" in gamma["operator"]
     assert (list(box.events), len(box.engine.writes)) == before
+
+
+async def test_status_never_waits_for_live_engine_work_and_lists_it(box: Box) -> None:
+    """``--status`` reads; a refresh live on a bank is reported, not waited for (#3604).
+
+    Its checks are the ones a resume runs, and those wait up to engine_ops_s
+    for the engine's own work: a status that waited would not come back for
+    as long as a refresh on a slow model runs.
+    """
+    await box.kill_at("deleted:alpha")
+    box.engine.engine_op("gamma", "op-refresh-s", seconds=5)
+    box.engine.direct_write("gamma")
+    box.sleeps, clock_before = 0, box.engine.now
+
+    status = await box.switch(None).status()
+
+    assert box.sleeps == 0, "nothing waited"
+    assert box.engine.now - clock_before < FAST.engine_ops_s
+    ref = {
+        "bank": "gamma",
+        "type": "refresh_mental_model",
+        "id": "op-refresh-s",
+        "status": "processing",
+    }
+    assert status["live_operations"] == [ref]
+    assert next(b for b in status["banks"] if b["bank"] == "gamma")["operations"] == [ref]
+    assert next(b for b in status["banks"] if b["bank"] == "Hal0::Beta")["operations"] == []
+    gamma = next(r for r in status["resume"] if r["bank"] == "gamma")
+    assert gamma["operations"] == [ref]
+    assert "facts 10 (expected 9)" in gamma["problem"]
+    assert (
+        "read while refresh_mental_model on gamma (operation op-refresh-s, processing) was "
+        "live; --resume waits up to 6s for the engine's own work to end before it checks"
+    ) in gamma["problem"]
+    assert box.engine.engine_ops["gamma"][0]["status"] == "processing", "still running"
+
+
+async def test_resume_still_waits_for_the_engine_work_status_only_reported(box: Box) -> None:
+    await box.kill_at("restored:gamma")
+    box.engine.engine_op("alpha", "op-refresh-r", seconds=4)
+    assert (await box.switch(None).status())["live_operations"][0]["id"] == "op-refresh-r"
+    # A run killed inside the swap would be carried forward; this one, before
+    # it, is undone, and the undo waits for the engine before it judges alpha.
+    box.sleeps = 0
+
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "rolled_back"
+    assert box.sleeps > 0 and "engine-op-done:alpha:op-refresh-r" in box.events
+    assert _final_journal()["stray_banks"] == ["alpha"], "it ran on the target embedder"
 
 
 async def test_status_says_exactly_what_to_do_when_the_switch_cannot_repair_a_bank(

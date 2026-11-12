@@ -1141,6 +1141,9 @@ class EngineMaintenance:
 
     #: What every failure in this class is raised as.
     _error_type: type[MaintenanceError] = MaintenanceError
+    #: True for a read-only report (a command's ``--status``): every look at
+    #: a bank is one read, and nothing waits for the engine to go quiet.
+    _no_wait: bool = False
 
     def __init__(
         self,
@@ -1400,8 +1403,11 @@ class EngineMaintenance:
         engine is still consolidating describe a bank that is about to
         change. Bounded: after ``quiet_s`` the last read is returned as it is,
         and the comparisons made on it treat observations as the one count
-        the engine may still move.
+        the engine may still move. With :attr:`_no_wait` the first read is
+        returned, quiet or not.
         """
+        if self._no_wait:
+            return await self.bank_state(bank)
         start = self._clock()
         deadline = start + self.t.quiet_s
         last: int | None = None

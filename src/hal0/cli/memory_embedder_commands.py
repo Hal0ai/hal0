@@ -282,6 +282,17 @@ def _print_status(status: dict[str, Any]) -> None:
                 "that, and --resume settles it[/yellow]"
             )
         )
+    live_ops = status.get("live_operations") or []
+    if live_ops:
+        lines.append(
+            "[yellow]operations live on the engine[/yellow] (--status does not wait for them; "
+            "a run or --resume waits for the engine's own refreshes and consolidations):"
+        )
+        lines.extend(
+            f"  {escape(str(op.get('type')))} on {escape(str(op.get('bank')))} "
+            f"(operation {escape(str(op.get('id')))}, {escape(str(op.get('status')))})"
+            for op in live_ops
+        )
     for step in status.get("resume") or []:
         lines.append(
             f"  {escape(str(step['bank']))} [dim](step {step['step']})[/dim]: "
