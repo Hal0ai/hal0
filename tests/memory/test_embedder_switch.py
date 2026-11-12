@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -82,11 +83,23 @@ class FakeEngine:
         self.banks: dict[str, dict[str, int]] = {k: dict(v) for k, v in banks.items()}
         #: Per bank: write revision, model/directive text, config, operation ids (newest first).
         self.meta: dict[str, dict[str, Any]] = {}
+        #: Per bank: retains still queued, ``{"pending": n, "processing": n}``.
+        #: Counted in the stats and listed as ``retain`` operations, as
+        #: hindsight-api 1.2.0 does.
         self.queue: dict[str, dict[str, int]] = {}
-        #: Per bank: operations the engine queued by itself, as its listing
-        #: shows them. Each stays live for ``reads_left`` listings of it
-        #: (``None``: until a test removes it), then completes.
+        #: Per bank: live operations the stats count but the listing does not show.
+        self.unlisted: dict[str, dict[str, int]] = {}
+        #: Per bank: operations the engine queued by itself, live and ended,
+        #: as its listing shows them. Each ends ``seconds`` after it was
+        #: queued on :attr:`now` (``None``: never), and stays listed as
+        #: ``completed``, timestamps and all, the way the real table keeps it.
         self.engine_ops: dict[str, list[dict[str, Any]]] = {}
+        #: The switch's clock: every look at it is one second later (see ``Box.switch``).
+        self.now = 0.0
+        #: Per bank: how many more operation listings report a ``total`` one
+        #: higher than the rows they list, as a listing read while the engine
+        #: queues work does (it counts and selects in two statements).
+        self.churn: dict[str, int] = {}
         self.features = {"document_export_api": True, "document_import_api": True}
         self.api_version = "1.2.0"
         #: An exception type raised for a request to the normal port while the
@@ -182,9 +195,13 @@ class FakeEngine:
         *,
         kind: str = "refresh_mental_model",
         status: str = "processing",
-        reads: int | None = 2,
+        seconds: float | None = 2,
     ) -> None:
-        """The engine queues work of its own on ``bank`` (hindsight-api 1.2.0 field names)."""
+        """The engine queues work of its own on ``bank`` (hindsight-api 1.2.0 field names).
+
+        It ends ``seconds`` later on the switch's clock (``None``: never).
+        """
+        stamp = datetime.now(UTC).isoformat()
         self.engine_ops.setdefault(bank, []).append(
             {
                 "id": op_id,
@@ -192,9 +209,22 @@ class FakeEngine:
                 "task_type": kind,
                 "operation_type": kind,
                 "status": status,
-                "reads_left": reads,
+                "created_at": stamp,
+                "updated_at": stamp,
+                "ends_at": None if seconds is None else self.now + seconds,
             }
         )
+
+    def end_engine_ops(self) -> None:
+        """The engine's own work whose time has come ends, and says so in its row."""
+        for bank, ops in self.engine_ops.items():
+            for op in ops:
+                if op["status"] in ("pending", "processing") and (
+                    op["ends_at"] is not None and self.now >= op["ends_at"]
+                ):
+                    op["status"] = "completed"
+                    op["updated_at"] = datetime.now(UTC).isoformat()
+                    self.events.append(f"engine-op-done:{bank}:{op['id']}")
 
     def restart(self) -> None:
         """The unit restarts: a cancelled restore's worker dies with it."""
@@ -283,8 +313,12 @@ class FakeEngine:
             "failed_consolidation": 0,
             "operations_by_status": {
                 "completed": len(m["ops"]),
-                "pending": q.get("pending", 0) + self._engine_count(bank, "pending"),
-                "processing": q.get("processing", 0) + self._engine_count(bank, "processing"),
+                **{
+                    status: q.get(status, 0)
+                    + self.unlisted.get(bank, {}).get(status, 0)
+                    + self._engine_count(bank, status)
+                    for status in ("pending", "processing")
+                },
             },
         }
 
@@ -293,24 +327,37 @@ class FakeEngine:
 
     def _operations(self, bank: str, params: dict[str, str]) -> httpx.Response:
         """``GET .../operations``: filtered by ``status`` and ``type`` like hindsight-api 1.2.0."""
-        live = self.engine_ops.get(bank, [])
-        rows = [
-            {"id": op, "operation_id": op, "task_type": "transfer", "status": "completed"}
-            for op in self.m(bank)["ops"]
-        ] + [{k: v for k, v in op.items() if k != "reads_left"} for op in live]
+        q = self.queue.get(bank, {})
+        rows = (
+            [
+                {"id": op, "operation_id": op, "task_type": "transfer", "status": "completed"}
+                for op in self.m(bank)["ops"]
+            ]
+            + [
+                {
+                    "id": f"retain-{status}-{i}",
+                    "operation_id": f"retain-{status}-{i}",
+                    "task_type": "retain",
+                    "operation_type": "retain",
+                    "status": status,
+                }
+                for status in ("pending", "processing")
+                for i in range(q.get(status, 0))
+            ]
+            + [
+                {k: v for k, v in op.items() if k != "ends_at"}
+                for op in self.engine_ops.get(bank, [])
+            ]
+        )
         if "status" in params:
             rows = [r for r in rows if r["status"] == params["status"]]
         if "type" in params:
             rows = [r for r in rows if r["task_type"] == params["type"]]
         response = self._page("operations", rows, params)
-        for op in list(live):
-            if op["reads_left"] is not None and (
-                "status" not in params or op["status"] == params["status"]
-            ):
-                op["reads_left"] -= 1
-                if op["reads_left"] <= 0:
-                    live.remove(op)
-                    self.events.append(f"engine-op-done:{bank}:{op['id']}")
+        if self.churn.get(bank):
+            self.churn[bank] -= 1
+            body = response.json()
+            response = httpx.Response(200, json={**body, "total": body["total"] + 1})
         return response
 
     def _row(self, bank: str) -> dict[str, Any]:
@@ -343,6 +390,7 @@ class FakeEngine:
             raise httpx.ConnectError("connection refused", request=request)
         method, path = request.method, request.url.path
         params = dict(request.url.params)
+        self.end_engine_ops()
         if method != "GET":
             self.writes.append((method, path))
         if path == "/health":
@@ -672,7 +720,12 @@ class Box:
         async def no_sleep(_s: float) -> None:
             await asyncio.sleep(0)
 
-        ticks = iter(range(10**9))
+        def clock() -> float:
+            # Shared with the engine, whose own work ends on it.
+            now = self.engine.now
+            self.engine.now += 1
+            return now
+
         kw.setdefault("timeouts", FAST)
         kw.setdefault("evidence", self.host.evidence)
         kw.setdefault("listener", self.host.listener)
@@ -694,7 +747,7 @@ class Box:
             sleep=no_sleep,
             # Every look at the clock is one second later: a wait that polls
             # forever runs into its timeout instead of hanging the test.
-            clock=lambda: float(next(ticks)),
+            clock=clock,
             **kw,
         )
 
@@ -906,7 +959,7 @@ async def test_allow_pending_turns_the_refusal_into_a_warning(box: Box) -> None:
 async def test_a_refresh_the_engine_runs_at_preflight_is_waited_for_then_the_run_goes_on(
     box: Box,
 ) -> None:
-    box.engine.engine_op("alpha", "op-refresh-1", status="processing", reads=3)
+    box.engine.engine_op("alpha", "op-refresh-1", status="processing", seconds=3)
 
     plan = await box.switch().preflight()
     assert plan["refusals"] == [], "a dry run does not refuse the engine's own work"
@@ -925,7 +978,7 @@ async def test_a_refresh_the_engine_runs_at_preflight_is_waited_for_then_the_run
 
 
 async def test_a_refresh_that_never_ends_refuses_the_run_and_names_it(box: Box) -> None:
-    box.engine.engine_op("Hal0::Beta", "op-refresh-9", status="pending", reads=None)
+    box.engine.engine_op("Hal0::Beta", "op-refresh-9", status="pending", seconds=None)
 
     with pytest.raises(es.SwitchRefused) as err:
         await box.switch().run()
@@ -942,8 +995,23 @@ async def test_a_refresh_that_never_ends_refuses_the_run_and_names_it(box: Box) 
 async def test_engine_work_beside_a_queued_retain_is_still_refused_as_queued_work(
     box: Box,
 ) -> None:
-    box.engine.engine_op("alpha", "op-cons-1", kind="consolidation", reads=None)
+    box.engine.engine_op("alpha", "op-cons-1", kind="consolidation", seconds=None)
     box.engine.queue["alpha"] = {"pending": 1, "processing": 0}
+
+    plan = await box.switch().preflight(apply=True)
+
+    assert _codes(plan) == ["pending_operations"]
+    assert "alpha (1 pending, 1 processing)" in plan["refusals"][0]["message"]
+    assert box.engine.engine_ops["alpha"][0]["status"] == "processing", "and not waited for"
+
+
+async def test_engine_work_beside_an_operation_the_listing_does_not_show_is_refused(
+    box: Box,
+) -> None:
+    # The stats count one more live operation than the listing shows: what it
+    # is cannot be told, so it is not taken for the engine's own work.
+    box.engine.engine_op("alpha", "op-cons-3", kind="consolidation", seconds=None)
+    box.engine.unlisted["alpha"] = {"pending": 1}
 
     plan = await box.switch().preflight(apply=True)
 
@@ -962,9 +1030,9 @@ async def test_a_refresh_queued_after_the_rebuild_is_waited_for_before_the_swap(
 
     def hook(point: str) -> None:
         if point == "restored:alpha":
-            box.engine.engine_op("alpha", "op-refresh-2", status="pending", reads=4)
+            box.engine.engine_op("alpha", "op-refresh-2", status="pending", seconds=4)
             box.engine.engine_op(
-                es.temp_bank_id("alpha", journal_run_id()), "op-refresh-3", reads=2
+                es.temp_bank_id("alpha", journal_run_id()), "op-refresh-3", seconds=2
             )
 
     def journal_run_id() -> str:
@@ -986,7 +1054,7 @@ async def test_a_refresh_after_the_rebuild_that_never_ends_rolls_back_and_names_
 ) -> None:
     def hook(point: str) -> None:
         if point == "restored:gamma":
-            box.engine.engine_op("gamma", "op-refresh-4", reads=None)
+            box.engine.engine_op("gamma", "op-refresh-4", seconds=None)
 
     with pytest.raises(es.SwitchError) as err:
         await box.switch(hook=hook).run()
@@ -1006,7 +1074,7 @@ async def test_a_refresh_after_the_rebuild_that_never_ends_rolls_back_and_names_
 async def test_engine_work_left_when_the_pause_settles_is_named(box: Box) -> None:
     def hook(point: str) -> None:
         if point == "paused":
-            box.engine.engine_op("alpha", "op-cons-2", kind="consolidation", reads=None)
+            box.engine.engine_op("alpha", "op-cons-2", kind="consolidation", seconds=None)
 
     with pytest.raises(es.SwitchError) as err:
         await box.switch(hook=hook).run()
