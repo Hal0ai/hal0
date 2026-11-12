@@ -42,10 +42,11 @@ from hal0.cli.main import app
 
 # Repo root: tests/cli/this_file.py -> parents[2] is the repo root.
 _CLI_MDX = Path(__file__).resolve().parents[2] / "docs" / "reference" / "cli.mdx"
-# The CLI reference is split across three pages to stay under the Discourse post
+# The CLI reference is split across four pages to stay under the Discourse post
 # limit; a command is documented if any page carries it.
 _CLI_MDX_OPERATOR = _CLI_MDX.with_name("cli-operator.mdx")
 _CLI_MDX_DOCTOR_AGENTS = _CLI_MDX.with_name("cli-doctor-agents.mdx")
+_CLI_MDX_MEMORY = _CLI_MDX.with_name("cli-memory.mdx")
 
 # Commands that are real but intentionally not given their own line in the
 # grouped command sections. Each entry needs a reason so the exemption is a
@@ -122,7 +123,7 @@ def _documented(term: str, text: str) -> bool:
 def test_cli_mdx_documents_every_command() -> None:
     text = "\n".join(
         page.read_text(encoding="utf-8")
-        for page in (_CLI_MDX, _CLI_MDX_OPERATOR, _CLI_MDX_DOCTOR_AGENTS)
+        for page in (_CLI_MDX, _CLI_MDX_OPERATOR, _CLI_MDX_DOCTOR_AGENTS, _CLI_MDX_MEMORY)
     )
     missing: list[str] = []
     for path in sorted(set(_walk(app))):
