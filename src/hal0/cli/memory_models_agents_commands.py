@@ -2,10 +2,11 @@
 parity for ``/api/memory/models`` and ``/api/memory/agents``.
 
 ``agents install`` runs the upstream ``hindsight-coding-agents`` installer and
-then writes/merges ``~/.hindsight/coding-agent.json`` with the showcase
-defaults (``pageTriggerType: after-consolidation``, ``observationScopes:
-shared``, ``retainTags: [agent:<harness>]``) — matching
-``work/notes/memory-showcase/spec/templates/coding-agent.json``.
+then sets the harness's own section of ``~/.hindsight/coding-agent.json``
+(``harnesses.<harness>``): hal0's ``/api/memory/compat`` and a bridge key
+(ADR-0058 decision 4b), plus the showcase defaults (``pageTriggerType:
+after-consolidation``, ``observationScopes: shared``, ``retainTags:
+[agent:<harness>]``). The flat keys and other harnesses are left alone.
 """
 
 from __future__ import annotations
@@ -100,30 +101,138 @@ def _hindsight_config_path() -> Path:
     return Path.home() / ".hindsight" / "coding-agent.json"
 
 
-def _merge_coding_agent_config(path: Path, harness: str) -> dict[str, Any]:
-    existing: dict[str, Any] = {}
-    if path.exists():
-        try:
-            existing = jsonlib.loads(path.read_text())
-        except (jsonlib.JSONDecodeError, OSError):
-            existing = {}
-    retain_tags = set(existing.get("retainTags") or [])
+class _NoBridgeKey(Exception):
+    """No usable key for the harness: the message says what to run."""
+
+
+def _read_config(path: Path) -> dict[str, Any]:
+    """The shared client config, ``{}`` when absent. Raises ``ValueError`` for a
+    file that is not a JSON object (it is shared state: never replaced)."""
+    try:
+        data = jsonlib.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    except (jsonlib.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"{path} cannot be read as JSON ({exc})") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not a JSON object")
+    return data
+
+
+def _harness_section(data: dict[str, Any], harness: str) -> dict[str, Any]:
+    harnesses = data.get("harnesses", {})
+    section = harnesses.get(harness, {}) if isinstance(harnesses, dict) else None
+    if not isinstance(harnesses, dict) or not isinstance(section, dict):
+        raise ValueError(f"'harnesses.{harness}' in the client config is not an object")
+    return section
+
+
+def _resolve_bridge_key(
+    section: dict[str, Any], url: str, harness: str, bridge_key: str | None
+) -> str:
+    """The key the harness presents to ``url``. Raises :class:`_NoBridgeKey`.
+
+    ``--bridge-key`` wins (refused only when the endpoint rejects it). Else a
+    token already in the harness's section is reused when it points at this
+    endpoint and the endpoint accepts it. This command never mints a key.
+    """
+    from hal0.memory.compat_client import compat_accepts
+
+    how_to = (
+        f"run `hal0 bridge add {harness} --scope memory` (or `hal0 bridge rotate {harness}` "
+        f"if that client exists) and pass the key it prints with --bridge-key"
+    )
+    if bridge_key:
+        if compat_accepts(url, bridge_key) is False:
+            raise _NoBridgeKey(
+                f"{url} rejected the key passed with --bridge-key: it needs a bridge key "
+                f"with the 'memory' scope; {how_to}"
+            )
+        return bridge_key
+    token = section.get("apiToken")
+    if (
+        isinstance(token, str)
+        and token
+        and section.get("apiUrl") == url
+        and compat_accepts(url, token) is True
+    ):
+        return token
+    raise _NoBridgeKey(f"no working bridge key for {harness!r} on {url}: {how_to}")
+
+
+def _write_private_json(path: Path, data: dict[str, Any]) -> None:
+    """Write the shared client config atomically, at most 0600 (it holds a key).
+
+    Writes through a symlink, keeps the owner and never widens an existing
+    mode."""
+    import contextlib
+    import os
+    import stat
+
+    target = path.resolve() if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        st: os.stat_result | None = target.stat()
+    except FileNotFoundError:
+        st = None
+    mode = 0o600 if st is None else stat.S_IMODE(st.st_mode) & 0o600
+    tmp = target.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (jsonlib.dumps(data, indent=2, sort_keys=True) + "\n").encode())
+        os.fchmod(fd, mode)
+        if st is not None:
+            with contextlib.suppress(PermissionError):
+                os.fchown(fd, st.st_uid, st.st_gid)
+    finally:
+        os.close(fd)
+    tmp.replace(target)
+
+
+def _merge_coding_agent_config(
+    data: dict[str, Any], harness: str, *, url: str, key: str
+) -> dict[str, Any]:
+    """``data`` with the harness's own section set: the showcase defaults and
+    hal0's memory endpoint with its key. The flat keys and every other
+    harness's section are left as they are (the file is shared)."""
+    harnesses = dict(data.get("harnesses") or {})
+    section = dict(harnesses.get(harness) or {})
+    retain_tags = set(section.get("retainTags") or [])
     retain_tags.add(f"agent:{harness}")
-    merged = {
-        **existing,
-        "pageTriggerType": "after-consolidation",
-        "observationScopes": "shared",
-        "retainTags": sorted(retain_tags),
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(jsonlib.dumps(merged, indent=2, sort_keys=True) + "\n")
-    return merged
+    section.update(
+        {
+            "serverMode": "self-hosted",
+            "apiUrl": url,
+            "apiToken": key,
+            "pageTriggerType": "after-consolidation",
+            "observationScopes": "shared",
+            "retainTags": sorted(retain_tags),
+        }
+    )
+    harnesses[harness] = section
+    return {**data, "harnesses": harnesses}
+
+
+def _redacted(merged: dict[str, Any], harness: str) -> dict[str, Any]:
+    shown = jsonlib.loads(jsonlib.dumps(merged))
+    section = shown.get("harnesses", {}).get(harness, {})
+    if section.get("apiToken"):
+        section["apiToken"] = "***"
+    if isinstance(shown.get("apiToken"), str):
+        shown["apiToken"] = "***"
+    return shown
 
 
 @agents_app.command("install")
 def agents_install_cmd(
     harness: str = typer.Argument(
         ..., help="Coding-agent harness name (e.g. claude-code, cursor, codex)."
+    ),
+    bridge_key: str | None = typer.Option(
+        None,
+        "--bridge-key",
+        help="Bridge key (hal0bk_...) with the 'memory' scope the harness presents to "
+        "/api/memory/compat. From `hal0 bridge add <name> --scope memory`.",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -132,31 +241,50 @@ def agents_install_cmd(
     ),
     json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of a panel."),
 ) -> None:
-    """Install a coding-agent's Hindsight memory integration (showcase defaults)."""
-    _require_api()
-    try:
-        agents = api_get("/api/memory/agents")
-    except CliApiError as exc:
-        die(str(exc))
-        return
-    install = agents.get("install", {}) if isinstance(agents, dict) else {}
-    command = (
-        install.get("command") or f"{_HINDSIGHT_COMMAND} install {harness} --server self-hosted"
-    )
-    # The template command carries a literal "<harness>" placeholder.
-    command = command.replace("<harness>", harness)
+    """Install a coding-agent's Hindsight memory integration, pointed at hal0.
+
+    The harness's section of ``~/.hindsight/coding-agent.json``
+    (``harnesses.<harness>``) gets ``apiUrl`` = hal0's ``/api/memory/compat``
+    and ``apiToken`` = a bridge key, so its memory goes through hal0's write
+    envelope and project-scoped reads instead of straight to the engine. The
+    flat keys and the other harnesses are left alone. The key is
+    ``--bridge-key``, or one already in that section that the endpoint
+    accepts; this command never mints one.
+    """
+    from hal0.memory.compat_client import compat_url
+
+    api = _require_api()
+    # No --server / --api-url: given those, the upstream installer writes the
+    # engine's address into the flat ``apiUrl`` every harness reads. The
+    # harness's address is set below, in its own section.
+    command = f"{_HINDSIGHT_COMMAND} install {shlex.quote(harness)}"
 
     config_path = _hindsight_config_path()
+    url = compat_url(api)
     if dry_run:
-        payload = {"command": command, "config_path": str(config_path), "dry_run": True}
+        payload = {
+            "command": command,
+            "config_path": str(config_path),
+            "api_url": url,
+            "dry_run": True,
+        }
         if json_out:
             typer.echo(jsonlib.dumps(payload, indent=2, sort_keys=True))
         else:
             console.print(
                 Panel(
-                    f"[yellow]Would run:[/yellow] {command}\n[yellow]Would write:[/yellow] {config_path}"
+                    f"[yellow]Would run:[/yellow] {command}\n[yellow]Would write:[/yellow] "
+                    f"{config_path} (harnesses.{harness}.apiUrl = {url})"
                 )
             )
+        return
+
+    # The key is settled before anything runs, so a missing one changes nothing.
+    try:
+        data = _read_config(config_path)
+        key = _resolve_bridge_key(_harness_section(data, harness), url, harness, bridge_key)
+    except (ValueError, _NoBridgeKey) as exc:
+        die(str(exc))
         return
 
     try:
@@ -168,14 +296,21 @@ def agents_install_cmd(
         die(f"installer exited {proc.returncode}: {proc.stderr.strip() or proc.stdout.strip()}")
         return
 
-    merged = _merge_coding_agent_config(config_path, harness)
+    # Re-read: the upstream installer may have written the file.
+    try:
+        merged = _merge_coding_agent_config(_read_config(config_path), harness, url=url, key=key)
+        _write_private_json(config_path, merged)
+    except (ValueError, OSError) as exc:
+        die(f"could not write {config_path}: {exc}")
+        return
+    shown = _redacted(merged, harness)
     if json_out:
         typer.echo(
             jsonlib.dumps(
                 {
                     "command": command,
                     "config_path": str(config_path),
-                    "config": merged,
+                    "config": shown,
                     "stdout": proc.stdout,
                 },
                 indent=2,
@@ -185,7 +320,7 @@ def agents_install_cmd(
         return
     console.print(Panel(proc.stdout or "[dim](no output)[/dim]", title=f"installer · {harness}"))
     console.print(
-        Panel(jsonlib.dumps(merged, indent=2, sort_keys=True), title=f"wrote {config_path}")
+        Panel(jsonlib.dumps(shown, indent=2, sort_keys=True), title=f"wrote {config_path}")
     )
 
 

@@ -196,62 +196,130 @@ def test_models_table_shows_the_recorded_embedder_and_flags_a_difference(monkeyp
     assert "`hal0 memory embedder switch` moves the store" in r.output
 
 
-def test_agents_install_dry_run(monkeypatch):
-    monkeypatch.setattr(
-        "hal0.cli.memory_models_agents_commands.api_get",
-        lambda path, **kw: {
-            "install": {
-                "harnesses": ["claude-code"],
-                "command": "npx @vectorize-io/hindsight-coding-agents@0.8.5 install <harness> --server self-hosted --api-url http://x:9177",
-            }
-        },
-    )
+_M = "hal0.cli.memory_models_agents_commands"
+_COMPAT = "http://127.0.0.1:8080/api/memory/compat"
+
+
+@pytest.fixture
+def agents_box(monkeypatch, tmp_path):
+    """``agents install`` against a temp config, an ``echo`` installer and a
+    stubbed endpoint check. Returns ``(config_path, accepts)``: set
+    ``accepts["value"]`` to what the endpoint says of a key."""
+    monkeypatch.setattr(f"{_M}._HINDSIGHT_COMMAND", "echo")
+    monkeypatch.delenv("HAL0_API_URL", raising=False)
+    config_path = tmp_path / "coding-agent.json"
+    monkeypatch.setattr(f"{_M}._hindsight_config_path", lambda: config_path)
+    accepts: dict[str, object] = {"value": True, "seen": []}
+
+    def check(url, token, **kw):
+        accepts["seen"].append((url, token))
+        return accepts["value"]
+
+    monkeypatch.setattr("hal0.memory.compat_client.compat_accepts", check)
+    return config_path, accepts
+
+
+def test_agents_install_writes_the_harness_section_with_the_key(agents_box):
+    config_path, _ = agents_box
     r = runner.invoke(
-        memory_commands.app, ["agents", "install", "claude-code", "--dry-run", "--json"]
+        memory_commands.app,
+        ["agents", "install", "claude-code", "--bridge-key", "hal0bk_claude-code.k", "--json"],
     )
+    assert r.exit_code == 0, r.output
+    cfg = json.loads(config_path.read_text())
+    section = cfg["harnesses"]["claude-code"]
+    assert section["serverMode"] == "self-hosted"
+    assert section["apiUrl"] == _COMPAT
+    assert section["apiToken"] == "hal0bk_claude-code.k"
+    assert section["pageTriggerType"] == "after-consolidation"
+    assert section["observationScopes"] == "shared"
+    assert section["retainTags"] == ["agent:claude-code"]
+    assert oct(config_path.stat().st_mode & 0o777) == oct(0o600)
+    # The key is never echoed back.
+    assert "hal0bk_claude-code.k" not in r.output
+
+
+def test_agents_install_leaves_the_flat_keys_and_other_harnesses_alone(agents_box):
+    config_path, _ = agents_box
+    original = {
+        "apiUrl": "http://127.0.0.1:9177",
+        "apiToken": "flat-token",
+        "retainTags": ["agent:cursor"],
+        "other": "kept",
+        "harnesses": {"pi": {"apiUrl": "http://x/api/memory/compat", "apiToken": "pi-key"}},
+    }
+    config_path.write_text(json.dumps(original))
+    r = runner.invoke(
+        memory_commands.app, ["agents", "install", "codex", "--bridge-key", "hal0bk_codex.k"]
+    )
+    assert r.exit_code == 0, r.output
+    cfg = json.loads(config_path.read_text())
+    assert {k: v for k, v in cfg.items() if k != "harnesses"} == {
+        k: v for k, v in original.items() if k != "harnesses"
+    }
+    assert cfg["harnesses"]["pi"] == original["harnesses"]["pi"]
+    assert cfg["harnesses"]["codex"]["retainTags"] == ["agent:codex"]
+
+
+def test_agents_install_reuses_a_working_token_already_on_the_endpoint(agents_box):
+    config_path, accepts = agents_box
+    config_path.write_text(
+        json.dumps({"harnesses": {"codex": {"apiUrl": _COMPAT, "apiToken": "hal0bk_codex.old"}}})
+    )
+    r = runner.invoke(memory_commands.app, ["agents", "install", "codex"])
+    assert r.exit_code == 0, r.output
+    assert accepts["seen"] == [(_COMPAT, "hal0bk_codex.old")]
+    assert json.loads(config_path.read_text())["harnesses"]["codex"]["apiToken"] == (
+        "hal0bk_codex.old"
+    )
+
+
+@pytest.mark.parametrize(
+    ("section", "verdict"),
+    [
+        ({}, True),  # no token at all
+        ({"apiUrl": _COMPAT, "apiToken": "hal0bk_codex.old"}, False),  # rejected
+        ({"apiUrl": _COMPAT, "apiToken": "hal0bk_codex.old"}, None),  # cannot be checked
+        ({"apiUrl": "http://127.0.0.1:9177", "apiToken": "engine"}, True),  # not the endpoint
+    ],
+)
+def test_agents_install_without_a_working_key_stops_before_running_anything(
+    agents_box, monkeypatch, section, verdict
+):
+    config_path, accepts = agents_box
+    accepts["value"] = verdict
+    text = json.dumps({"harnesses": {"codex": section}})
+    config_path.write_text(text)
+    ran: list[object] = []
+    monkeypatch.setattr(f"{_M}.subprocess.run", lambda *a, **k: ran.append(a))
+
+    r = runner.invoke(memory_commands.app, ["agents", "install", "codex"])
+
+    assert r.exit_code != 0
+    out = " ".join(r.output.split())  # the error panel wraps lines
+    assert "hal0 bridge add codex --scope memory" in out
+    assert "--bridge-key" in out and "hal0 bridge rotate codex" in out
+    assert ran == [] and config_path.read_text() == text
+
+
+def test_agents_install_refuses_a_bridge_key_the_endpoint_rejects(agents_box):
+    config_path, accepts = agents_box
+    accepts["value"] = False
+    r = runner.invoke(
+        memory_commands.app, ["agents", "install", "codex", "--bridge-key", "hal0bk_codex.bad"]
+    )
+    assert r.exit_code != 0 and "rejected" in r.output
+    assert not config_path.exists()
+
+
+def test_agents_install_dry_run_names_the_endpoint_and_writes_nothing(agents_box):
+    config_path, _ = agents_box
+    r = runner.invoke(memory_commands.app, ["agents", "install", "codex", "--dry-run", "--json"])
     assert r.exit_code == 0
     payload = json.loads(r.output)
-    assert "install claude-code" in payload["command"]
-    assert payload["dry_run"] is True
-
-
-def test_agents_install_runs_and_merges_config(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "hal0.cli.memory_models_agents_commands.api_get",
-        lambda path, **kw: {
-            "install": {
-                "harnesses": ["claude-code"],
-                "command": "echo installed-ok",
-            }
-        },
-    )
-    config_path = tmp_path / "coding-agent.json"
-    monkeypatch.setattr(
-        "hal0.cli.memory_models_agents_commands._hindsight_config_path", lambda: config_path
-    )
-
-    r = runner.invoke(memory_commands.app, ["agents", "install", "claude-code", "--json"])
-    assert r.exit_code == 0
-    assert config_path.exists()
-    cfg = json.loads(config_path.read_text())
-    assert cfg["pageTriggerType"] == "after-consolidation"
-    assert cfg["observationScopes"] == "shared"
-    assert cfg["retainTags"] == ["agent:claude-code"]
-
-
-def test_agents_install_merges_existing_retain_tags(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "hal0.cli.memory_models_agents_commands.api_get",
-        lambda path, **kw: {"install": {"command": "echo ok"}},
-    )
-    config_path = tmp_path / "coding-agent.json"
-    config_path.write_text(json.dumps({"retainTags": ["agent:cursor"], "other": "kept"}))
-    monkeypatch.setattr(
-        "hal0.cli.memory_models_agents_commands._hindsight_config_path", lambda: config_path
-    )
-
-    r = runner.invoke(memory_commands.app, ["agents", "install", "codex", "--json"])
-    assert r.exit_code == 0
-    cfg = json.loads(config_path.read_text())
-    assert sorted(cfg["retainTags"]) == ["agent:codex", "agent:cursor"]
-    assert cfg["other"] == "kept"
+    assert payload["api_url"] == _COMPAT and payload["dry_run"] is True
+    # The upstream installer is not told an address: given one, it writes the
+    # flat apiUrl every harness reads.
+    assert payload["command"] == "echo install codex"
+    assert "--api-url" not in payload["command"] and "--server" not in payload["command"]
+    assert not config_path.exists()
