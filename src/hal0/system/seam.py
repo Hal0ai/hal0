@@ -631,6 +631,13 @@ class SystemCtlSeam:
         verb = args[1] if len(args) > 1 else ""
         if verb == "daemon-reload":
             return _exec(self._seam_argv("daemon-reload"))
+        if verb == "try-restart" and len(args) > 2:
+            # No-op on an inactive unit (#1882): a companion the operator
+            # stopped on purpose stays stopped. Companion keys only; the
+            # wrapper's svc-try-restart arm shares the closed key map.
+            svc_key = COMPANION_SERVICE_UNITS.get(args[2])
+            if svc_key is not None:
+                return _exec(self._seam_argv("svc-try-restart", svc_key))
         if verb in _UNIT_VERBS and len(args) > 2:
             slot_id = _slot_id_from_unit(args[2])
             if slot_id is not None:

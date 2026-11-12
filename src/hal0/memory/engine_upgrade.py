@@ -272,17 +272,49 @@ def _violated_constraints(runner: Runner, venv: Path) -> list[str]:
     return broken
 
 
+def _engine_importable(runner: Runner, venv: Path) -> bool:
+    """True when the venv's own interpreter can ``import hindsight_api``."""
+    try:
+        proc = _run(
+            runner,
+            [str(venv / "bin" / "python"), "-I", "-c", "import hindsight_api"],
+            timeout=_PROBE_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _engine_active(seam: SystemCtlSeam) -> bool:
+    try:
+        proc = seam.systemctl("systemctl", "is-active", SERVICE, check=False, timeout=30.0)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def _reconcile_constraints(
-    seam: SystemCtlSeam, runner: Runner, venv: Path, *, job_id: str | None
+    seam: SystemCtlSeam,
+    runner: Runner,
+    http_get: Callable[[str], dict | None],
+    venv: Path,
+    *,
+    job_id: str | None,
 ) -> dict[str, Any]:
     """Pull an at-pin engine back inside :data:`ENGINE_DEP_CONSTRAINTS`.
 
     The version pin alone leaves a box that already runs hindsight-api at the
     pin untouched, so a dependency that drifted past its constraint (#3533)
-    would never be repaired. Installs the constrained requirement in place,
-    verifies it with the venv's own probe, then restarts the engine so it loads
-    the module. Best effort: a failure is logged and reported, never raised, and
-    the engine is only restarted after a verified install.
+    would never be repaired. Installs the constrained requirement in place and
+    proves it with the venv's own probes (constraint satisfied, dist present,
+    ``import hindsight_api`` works). Only then is the engine try-restarted, and
+    only when it is running: a unit the operator stopped on purpose stays
+    stopped. The pip result and the restart result are reported separately,
+    because a re-run finds no violation and would never retry the restart.
+    Best effort: failures are logged and reported, never raised.
+
+    ``constraints`` is ``repaired`` | ``failed`` (the venv is not provably
+    fixed) | ``restart_failed`` (venv fixed, engine not healthy afterwards).
     """
     broken = _violated_constraints(runner, venv)
     if not broken:
@@ -292,11 +324,18 @@ def _reconcile_constraints(
         proc = _run(runner, [pip, "install", *broken, "-q"], timeout=_PIP_TIMEOUT_S)
         if proc.returncode != 0:
             raise subprocess.SubprocessError(proc.stderr or "pip install failed")
+        _chown_tree(venv)
         still = _violated_constraints(runner, venv)
         if still:
             raise subprocess.SubprocessError(f"still violates {still}")
-        _svc(seam, "restart")
+        for spec in ENGINE_DEP_CONSTRAINTS:
+            name = Requirement(spec).name
+            if _dist_version(runner, venv, name) is None:
+                raise subprocess.SubprocessError(f"{name} missing after the repair")
+        if not _engine_importable(runner, venv):
+            raise subprocess.SubprocessError("import hindsight_api fails after the repair")
     except (OSError, subprocess.SubprocessError) as exc:
+        _chown_tree(venv)
         log.warning(
             "updater.memory_engine_constraints_failed",
             job_id=job_id,
@@ -305,8 +344,32 @@ def _reconcile_constraints(
             remedy="re-run 'hal0 update' when the cause (network, disk) is fixed",
         )
         return {"constraints": "failed", "constraints_error": str(exc)}
-    log.info("updater.memory_engine_constraints_repaired", job_id=job_id, constraints=broken)
-    return {"constraints": "repaired", "repaired": broken}
+
+    result: dict[str, Any] = {"constraints": "repaired", "repaired": broken}
+    if not _engine_active(seam):
+        log.info("updater.memory_engine_constraints_repaired", job_id=job_id, restarted=False)
+        return {**result, "restarted": False}
+    try:
+        seam.systemctl(
+            "systemctl", "try-restart", SERVICE, check=True, timeout=_SYSTEMCTL_TIMEOUT_S
+        )
+        healthy = _poll_health(http_get, _HEALTH_POLL_TOTAL_S)
+        error = None if healthy else f"/health not up within {_HEALTH_POLL_TOTAL_S}s"
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = str(exc)
+    if error is not None:
+        remedy = "systemctl restart hindsight-api"
+        log.warning(
+            "updater.memory_engine_restart_failed", job_id=job_id, error=error, remedy=remedy
+        )
+        return {
+            **result,
+            "constraints": "restart_failed",
+            "restart_error": error,
+            "remedy": remedy,
+        }
+    log.info("updater.memory_engine_constraints_repaired", job_id=job_id, restarted=True)
+    return {**result, "restarted": True}
 
 
 def _is_newer_than_pin(installed: str) -> bool:
@@ -526,7 +589,7 @@ def upgrade_memory_engine(
         _prune_keep_newest(hs, ".pg0.pre-*")
         extra: dict[str, Any] = {}
         if upgrade:
-            extra = _reconcile_constraints(seam, runner, venv, job_id=job_id)
+            extra = _reconcile_constraints(seam, runner, http_get, venv, job_id=job_id)
         elif _violated_constraints(runner, venv):
             log.warning(
                 "updater.memory_engine_constraints_stale",
