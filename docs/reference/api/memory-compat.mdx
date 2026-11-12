@@ -16,9 +16,11 @@ It is not a proxy. hal0 answers a fixed list of routes, parses each request, and
 the fields it names. Everything else is refused or ignored as described under
 [What is refused or ignored](#what-is-refused-or-ignored).
 
-No hal0 command configures a client for this endpoint yet: `hal0 memory agents install` does not
-write this address. Until that changes, the endpoint is reached only by a plugin whose `apiUrl`
-was set by hand.
+Two hal0 commands point a client here, each in that harness's own section of
+`~/.hindsight/coding-agent.json` (`harnesses.<harness>.apiUrl` and `apiToken`, which the plugin
+lays over the file's flat keys): `hal0 agent install pi` and `sudo hal0 update component pi`, with
+the hal0-managed bridge client `pi-coder`, and `hal0 memory agents install <harness>
+--bridge-key-file <path>` for the other harnesses ([CLI reference](/docs/reference/cli-operator/)).
 
 ## Base URL and auth
 

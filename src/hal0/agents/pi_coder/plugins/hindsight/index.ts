@@ -49,7 +49,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import hindsightPiExtension from "@vectorize-io/hindsight-coding-agents/dist/pi.js";
 
 export default async function (pi: ExtensionAPI) {
-  // Fail-open: a dead hindsight-api (9177), a misconfigured bank, or any
+  // Fail-open: an unreachable memory endpoint (hal0-api /api/memory/compat
+  // or the engine behind it), a rejected key, a misconfigured bank, or any
   // other setup-time throw from the upstream extension must never block Pi
   // from starting. Unlike this file's session-scoped hooks, the upstream
   // `extension` function performs its (synchronous) RuntimeCore construction

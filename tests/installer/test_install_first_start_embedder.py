@@ -7,9 +7,9 @@ engine's first start. These are static checks over the script text plus a
 driven copy of the two shell pieces, the pattern the other installer tests use
 (there is no systemd harness for install.sh).
 
-Also here: bank seeding waits for hal0-api to pick the engine up. hal0-api
-starts before the engine on a new install and seeding raced its 30 s re-probe,
-which is what "memory bank seeding incomplete" was on every new box.
+Also here: bank seeding goes through ``hal0 memory bank seed`` (#3557), which
+names the banks from the layout record and ``[memory]`` and talks to the
+engine directly, so it neither names a bank in shell nor waits for hal0-api.
 """
 
 from __future__ import annotations
@@ -190,72 +190,6 @@ def test_a_failing_enable_warns_and_the_install_goes_on(tmp_path: Path, enable_r
     ]
 
 
-# ── bank seeding waits for hal0-api to have the engine ────────────────────────
-
-
-def _extract(func_name: str) -> str:
-    start = _TEXT.index(f"{func_name}()")
-    end = _TEXT.index("\n}\n", start) + 3
-    return _TEXT[start:end]
-
-
-def _drive_wait(tmp_path: Path, curl_body: str, timeout: int) -> subprocess.CompletedProcess[str]:
-    curl = tmp_path / "curl"
-    curl.write_text(f"#!/usr/bin/env bash\n{curl_body}\n", encoding="utf-8")
-    curl.chmod(curl.stat().st_mode | stat.S_IEXEC)
-    script = tmp_path / "drive.sh"
-    script.write_text(
-        "#!/usr/bin/env bash\nset -euo pipefail\nHAL0_PORT=8080\n"
-        f"{_extract('wait_memory_provider_ready')}\n"
-        f"wait_memory_provider_ready {timeout}\n",
-        encoding="utf-8",
-    )
-    return subprocess.run(
-        ["bash", str(script)],
-        env={"PATH": f"{tmp_path}:/usr/bin:/bin", "HOME": str(tmp_path)},
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
-
-
-def test_seed_wait_returns_once_hal0_api_has_the_engine(tmp_path: Path) -> None:
-    """The fallback provider answers ``engine: null`` until the re-probe swaps it."""
-    count = tmp_path / "n"
-    body = (
-        f'n=$(cat "{count}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{count}"\n'
-        '[[ "$*" == *"/api/memory/engine"* ]] || exit 2\n'
-        "if [ $n -ge 3 ]; then\n"
-        """  echo '{"enabled":true,"engine":"hindsight","reachable":true}'\n"""
-        "else\n"
-        """  echo '{"enabled":true,"engine":null,"reachable":false}'\n"""
-        "fi"
-    )
-    res = _drive_wait(tmp_path, body, 10)
-
-    assert res.returncode == 0, res.stderr
-    assert int(count.read_text()) == 3
-
-
-def test_seed_wait_accepts_spaced_json(tmp_path: Path) -> None:
-    res = _drive_wait(tmp_path, """echo '{"enabled": true, "engine": "hindsight"}'""", 5)
-    assert res.returncode == 0, res.stderr
-
-
-def test_seed_wait_times_out_when_hal0_api_is_down(tmp_path: Path) -> None:
-    res = _drive_wait(tmp_path, "exit 7", 1)
-    assert res.returncode == 1
-
-
-def test_seeding_waits_for_the_provider_first() -> None:
-    wait = _TEXT.index("wait_memory_provider_ready 45")
-    seed = _TEXT.index("if _seed_bank shared ")
-    assert _TEXT.index('curl -fsS "http://127.0.0.1:9177/health"') < wait < seed
-    # A timeout warns and seeding is still attempted.
-    assert "|| warn" in _TEXT[wait:seed]
-
-
 def test_the_generic_not_healthy_line_names_the_downloads_and_both_checks() -> None:
     start = _TEXT.index('warn "hindsight-api not healthy yet')
     block = _TEXT[start : _TEXT.index("\n            fi", start)]
@@ -270,32 +204,51 @@ def test_the_failed_enable_line_names_both_checks() -> None:
     assert "journalctl -u hindsight-api" in line and "doctor all" in line
 
 
-# ── the bank manifests have two copies; they must not drift ───────────────────
+# ── the installer seeds through hal0, never names a bank (#3557) ──────────────
 
 
-def test_seed_manifests_match_hal0_memory_bank_seed() -> None:
-    """install.sh keeps shell literals so seeding works when the Python side is broken."""
-    import json
-    import re
-
-    from hal0.memory.bank_seed import SEED_BANKS
-
-    found = dict(re.findall(r"_seed_bank (\S+) '(\{.*?\})' ?[\\;]", _TEXT))
-    assert set(found) == set(SEED_BANKS)
-    for bank, body in found.items():
-        assert json.loads(body) == SEED_BANKS[bank], bank
+def _seed_block() -> str:
+    start = _TEXT.index('"${HAL0_BIN}" memory bank seed')
+    return _TEXT[start : _TEXT.index("\n                esac", start)]
 
 
-def test_seeding_posts_to_the_bank_the_layout_names_not_the_namespace() -> None:
-    """ADR-0058 decision 7: a two-bank install has hal0:shared and hal0:private
-    and no stray engine bank called ``shared`` or ``private:hermes``."""
-    start = _TEXT.index("_seed_bank() {")
-    body = _TEXT[start : _TEXT.index("\n                }", start)]
-    assert "hal0.memory.bank_seed import seed_target_main" in body
-    # The installer's own paths, so a --dev prefix is honoured.
-    assert '"$1" "${HAL0_TOML}" "${VAR_DIR}/state"' in body
-    assert 'HAL0_HOME="${HAL0_HOME_FOR_OWUI}"' in body
-    assert "/api/memory/banks/${bank}/import" in body
-    assert "/api/memory/banks/$1/import" not in _TEXT
-    # A namespace the layout seeds no bank for is skipped, not posted.
-    assert '[[ -n "${bank}" ]] || return 0' in body
+def test_seeding_runs_the_cli_with_the_installers_paths() -> None:
+    """ADR-0058 decision 7: the banks come from the layout and [memory], so a
+    two-bank install has hal0:shared and hal0:private and no stray bank."""
+    assert _TEXT.count('"${HAL0_BIN}" memory bank seed') == 1
+    line_start = _TEXT.rindex("\n", 0, _TEXT.index('"${HAL0_BIN}" memory bank seed'))
+    block = _TEXT[line_start : line_start + 400]
+    assert 'HAL0_HOME="${HAL0_HOME_FOR_OWUI}"' in block
+    assert '--config "${HAL0_TOML}" --state-dir "${VAR_DIR}/state"' in block
+
+
+def test_seeding_names_no_bank_and_posts_no_manifest() -> None:
+    assert "/api/memory/banks/" not in _TEXT
+    assert "private:hermes" not in _TEXT
+    assert "retain_mission" not in _TEXT
+    assert "seed_target_main" not in _TEXT
+    assert "wait_memory_provider_ready" not in _TEXT
+
+
+def test_seeding_failure_warns_and_the_install_carries_on() -> None:
+    block = _seed_block()
+    assert "|| seed_rc=$?" in block
+    assert '*) warn "memory bank seeding incomplete' in block
+
+
+def test_seeding_says_seeded_only_on_exit_0() -> None:
+    """Exit 3 (nothing to seed) and 4 (deferred) are not reported as a seed."""
+    from hal0.cli.memory_bank_commands import SEED_EXIT_DEFERRED, SEED_EXIT_NOTHING
+
+    block = _seed_block()
+    assert '0) info "seeded the memory banks' in block
+    assert f'{SEED_EXIT_NOTHING}) info "memory banks already set up' in block
+    assert f'{SEED_EXIT_DEFERRED}) info "memory bank seeding deferred' in block
+    assert block.count("seeded the memory banks") == 1
+
+
+def test_seeding_runs_after_the_engine_answers_and_after_the_layout_is_recorded() -> None:
+    seed = _TEXT.index('"${HAL0_BIN}" memory bank seed')
+    assert _TEXT.index('curl -fsS "http://127.0.0.1:9177/health"') < seed
+    # run_post_activation_migrations writes memory-layout.json.
+    assert _TEXT.index(_MIGRATIONS) < seed

@@ -108,7 +108,8 @@ observations per project (`[["project:*"]]`) and `hal0:private` per agent
 private memory: the per-project scope on an old unified bank, which also
 holds private facts (#3547), and the private template's mental models on
 `hal0:private`, which holds every agent's private memory. A new box seeds
-both of its banks (the installer and hal0-api name them from the layout); a
+both of its banks (the installer through `hal0 memory bank seed`, and hal0-api
+once it has the engine, both name them from the layout); a
 box on an old layout seeds only its platform bank. A bank is seeded only
 while it is missing, or empty with no retain mission, and never during an
 embedder switch, so re-running the installer leaves a bank that holds

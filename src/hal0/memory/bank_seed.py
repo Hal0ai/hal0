@@ -32,15 +32,13 @@ store's bank layout (ADR-0058 decision 7, :mod:`hal0.memory.bank_layout`):
   folded into the two banks by ``hal0 memory migrate fold-in``, not seeded
   into new ones, and its per-agent private banks are left as they are.
 
-The manifests are the ones ``install.sh`` posts, keyed here by hal0 namespace.
-The installer keeps them as shell literals so its own seeding works when the
-Python side is broken, and ``tests/installer/test_install_first_start_embedder.py``
-holds the two copies in lockstep.
+The manifests are keyed here by hal0 namespace. ``install.sh`` seeds through
+``hal0 memory bank seed`` (:func:`seed_box`), so this module is their only
+copy and the installer never names a bank (#3557).
 """
 
 from __future__ import annotations
 
-import sys
 from typing import Any
 
 import httpx
@@ -126,61 +124,70 @@ def engine_bank_for(namespace: str, memory_cfg: Any, *, layout_path: Any = None)
     return None
 
 
-async def _bank_wants_seeding(bank: str, client: Any = None) -> bool:
-    """:func:`_wants_seeding` against the engine on this box (or ``client``)."""
-    own = client is None
-    if own:
-        from hal0.memory.hindsight_client import HindsightRestClient
-
-        client = HindsightRestClient.from_env()
-    try:
-        return await _wants_seeding(client, bank)
-    finally:
-        if own:
-            await client.aclose()
+class SeedUndecided(Exception):
+    """The banks to seed cannot be told: ``hal0.toml`` or the layout cannot be
+    read, or the layout is undecided. Nothing was written."""
 
 
-def seed_target_main(argv: list[str], *, client: Any = None) -> int:
-    """``install.sh``'s seeding helper: print ``bank=<id>`` when that bank is to be seeded.
+def seed_box(
+    *,
+    toml_path: Any = None,
+    state_dir: Any = None,
+    client: Any = None,
+) -> tuple[dict[str, str], str | None]:
+    """``hal0 memory bank seed``: seed this box's banks once, straight to the engine.
 
-    ``argv`` is ``[namespace, hal0.toml, state directory]``; the two paths are
-    the ones the installer uses, so a ``--dev`` prefix is honoured. The bank
-    is the one this box's layout keeps the namespace in
-    (:func:`engine_bank_for`), and it is printed only when the same guard the
-    heal hook uses lets it be seeded (:func:`_wants_seeding`: missing, or empty
-    with no retain mission), and no embedder switch is in progress. So a
-    re-run of the installer never reconfigures a bank that holds anything.
+    The banks are the ones :func:`engine_bank_for` names for each manifest in
+    :data:`SEED_BANKS` from the layout record and ``[memory]``: on a two-bank
+    store ``[memory] bank`` and ``[memory] private_bank``, on the old layout
+    its platform bank alone. Each goes through :func:`seed_missing_banks`, the
+    heal hook's own guard, so a bank that holds anything is never
+    reconfigured and a re-run seeds only a bank that is missing or empty with
+    no retain mission.
 
-    Prints nothing (exit 0) when there is nothing to seed. Exits 1, printing
-    nothing, when ``hal0.toml`` cannot be read, the layout is undecided or the
-    engine cannot be asked: the installer then seeds nothing, and hal0-api
-    seeds the right banks once it has the engine (:func:`heal_hook`).
+    ``toml_path`` and ``state_dir`` are the installer's own paths (so a
+    ``--dev`` prefix is honoured; the layout record is
+    ``<state_dir>/memory-layout.json``); ``None`` uses this box's.
+
+    Returns ``({bank: "seeded" | "skipped" | "failed"}, deferred)``.
+    ``deferred`` is why nothing was attempted (an embedder switch is running
+    or unfinished), else ``None``. Raises :class:`SeedUndecided` when the
+    banks cannot be told; hal0-api then seeds them once it has the engine
+    (:func:`heal_hook`).
     """
-    if len(argv) not in (1, 3) or argv[0] not in SEED_BANKS:
-        return 2
     import asyncio
     from pathlib import Path
 
-    toml_path = Path(argv[1]) if len(argv) == 3 else None
-    layout_path = Path(argv[2]) / "memory-layout.json" if len(argv) == 3 else None
+    layout_path = Path(state_dir) / "memory-layout.json" if state_dir is not None else None
     try:
         from hal0.config.loader import load_hal0_config
 
-        memory_cfg = load_hal0_config(toml_path).memory
-        bank = engine_bank_for(argv[0], memory_cfg, layout_path=layout_path)
-        if not bank:
-            return 0
-        if switch_in_progress() is not None:
-            return 0
-        if not asyncio.run(_bank_wants_seeding(bank, client)):
-            return 0
+        memory_cfg = load_hal0_config(Path(toml_path) if toml_path is not None else None).memory
+        targets: dict[str, dict[str, Any]] = {}
+        for namespace, manifest in SEED_BANKS.items():
+            bank = engine_bank_for(namespace, memory_cfg, layout_path=layout_path)
+            if bank:
+                targets[bank] = manifest
     except Exception as exc:
-        # stderr, never the log: the installer reads stdout as the bank id.
-        print(f"cannot decide whether to seed {argv[0]}: {exc}", file=sys.stderr)
-        return 1
-    # Marked, so a log line on stdout can never be read as a bank id.
-    print(f"bank={bank}")
-    return 0
+        raise SeedUndecided(str(exc)) from exc
+    held = switch_in_progress()
+    if held is not None:
+        return {}, held
+
+    async def _run() -> dict[str, str]:
+        own = client is None
+        engine = client
+        if own:
+            from hal0.memory.hindsight_client import HindsightRestClient
+
+            engine = HindsightRestClient.from_env()
+        try:
+            return await seed_missing_banks(engine, targets)
+        finally:
+            if own:
+                await engine.aclose()
+
+    return asyncio.run(_run()), None
 
 
 async def _get(client: Any, path: str, **kwargs: Any) -> Any | None:
@@ -277,10 +284,11 @@ def heal_hook(provider: Any) -> Any:
 
 __all__ = [
     "SEED_BANKS",
+    "SeedUndecided",
     "engine_bank_for",
     "heal_hook",
+    "seed_box",
     "seed_missing_banks",
-    "seed_target_main",
     "seed_targets",
     "switch_in_progress",
 ]
