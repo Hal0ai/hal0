@@ -20,6 +20,7 @@ def test_defaults_cap_a_shared_slot():
     assert cfg.extraction_llm_retries == 1
     assert cfg.extraction_task_retries == 2
     assert cfg.extraction_retry_backoff_s == 120
+    assert cfg.extraction_worker_slots == 4
 
 
 @pytest.mark.parametrize(
@@ -37,6 +38,9 @@ def test_defaults_cap_a_shared_slot():
         ("extraction_task_retries", 11),
         ("extraction_retry_backoff_s", 5),
         ("extraction_retry_backoff_s", 4000),
+        # Hindsight reserves 2 slots for consolidation: 2 would starve retain.
+        ("extraction_worker_slots", 2),
+        ("extraction_worker_slots", 33),
     ],
 )
 def test_out_of_range_values_are_rejected(field: str, value: int):
@@ -51,5 +55,6 @@ def test_in_range_values_round_trip():
         extraction_llm_retries=0,
         extraction_task_retries=0,
         extraction_retry_backoff_s=10,
+        extraction_worker_slots=32,
     )
     assert cfg.model_dump()["extraction_max_tokens"] == 3072

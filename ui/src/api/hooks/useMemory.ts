@@ -316,6 +316,7 @@ export interface MemoryExtractionLimits {
   llm_retries: number
   task_retries: number
   retry_backoff_s: number
+  worker_slots: number
 }
 
 // #2353: ExtractionThroughput.as_dict() (hal0/memory/extraction_env.py) — what
@@ -349,6 +350,7 @@ export interface MemoryGraphUpdate {
   extraction_llm_retries?: number
   extraction_task_retries?: number
   extraction_retry_backoff_s?: number
+  extraction_worker_slots?: number
 }
 
 // ADR-0023 §3: when the extraction slot changes, the PUT response carries a

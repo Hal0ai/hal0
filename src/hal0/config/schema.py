@@ -2330,6 +2330,25 @@ class MemoryGraphConfig(BaseModel):
             "daemon restarts to pick it up."
         ),
     )
+    extraction_worker_slots: int = Field(
+        default=4,
+        ge=3,
+        le=32,
+        description=(
+            "How many queued memory tasks (retain, consolidation, mental-model "
+            "refresh) the engine runs at once (HINDSIGHT_API_WORKER_MAX_SLOTS). "
+            "Independent of extraction_max_concurrent, which caps LLM calls: "
+            "each running task also holds its chunks, embeddings and graph "
+            "writes in memory. Hindsight's own default of 10 took the engine to "
+            "several GiB resident and into the OOM killer on an 11 GiB box, so "
+            "hal0 renders 4. The floor is 3: Hindsight reserves 2 slots for "
+            "consolidation, so a lower bound leaves retain none. Worker-wide "
+            "like extraction_task_retries. Applied via the hindsight-api "
+            "drop-in; the daemon restarts to pick it up. An operator-set "
+            "HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS greater than or "
+            "equal to this value makes Hindsight refuse to start."
+        ),
+    )
 
     @field_validator("extraction_slot")
     @classmethod

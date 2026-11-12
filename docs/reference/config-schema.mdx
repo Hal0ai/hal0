@@ -152,6 +152,7 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `extraction_llm_retries` | int | `1` | `0-5` |
 | `extraction_task_retries` | int | `2` | `0-10` |
 | `extraction_retry_backoff_s` | int | `120` | `10-3600` |
+| `extraction_worker_slots` | int | `4` | `3-32` |
 
 `hindsight-api` always calls one virtual model id, `hal0/memory`, which the `extraction-model.conf` systemd drop-in sets. hal0's `/v1` resolves it on every call to `hal0/<extraction_slot>`, or to `extraction_model` when that is set. Changing `extraction_slot` or `extraction_model` therefore applies at once and does not restart the engine. hal0 clamps `extraction_max_concurrent` to the extraction slot's `--parallel`. `hal0/memory` reads use `llm_timeout_s` when it exceeds `[dispatcher].direct_read_timeout_s`. Changing `llm_timeout_s` or one of the `extraction_*` limits rewrites the drop-in and restarts hindsight-api, as does the first save after an upgrade when the drop-in is missing or stale. An `extraction_model` that no configured upstream advertises is rejected (422 `config.memory_graph_model_invalid`, listing the pickable ids) and the config is left as it was. A `HINDSIGHT_API_LLM_PROVIDER`, `HINDSIGHT_API_LLM_BASE_URL` or `HINDSIGHT_API_LLM_MODEL` line in `/etc/hal0/hindsight-llm.env` overrides both settings; see [Services](/docs/operate/services/#hindsight-apiservice).
 
@@ -166,6 +167,16 @@ limit covers consolidation, reflect and mental-model refresh as well as retain;
 these operations share the LLM concurrency budget. A long reflect or
 consolidation can hold the default single permit and delay queued retains until
 the call finishes or reaches `llm_timeout_s`.
+
+`extraction_worker_slots` sets `HINDSIGHT_API_WORKER_MAX_SLOTS`, how many queued
+memory tasks (retain, consolidation, mental-model refresh) the engine runs at
+once. It is separate from `extraction_max_concurrent`: that caps LLM calls,
+while each running task also holds its chunks, embeddings and graph writes in
+memory. Hindsight 1.2 defaults to 10 slots, which took the engine past the
+memory limit on an 11 GiB box and got it OOM-killed repeatedly, so hal0 renders
+4. The minimum is 3 because Hindsight reserves 2 slots for consolidation; a
+lower bound would leave retain none. `hal0 doctor` (row `memory_engine_env`)
+shows the value in force and warns if the running engine differs from it.
 
 #### `[memory.priority]`
 

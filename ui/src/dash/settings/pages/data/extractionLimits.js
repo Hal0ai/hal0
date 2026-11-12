@@ -1,6 +1,6 @@
 // Settings ▸ Data ▸ Memory — extraction limits (#1834), the pure part.
 //
-// The five [memory.graph].extraction_* knobs cap how hard Hindsight may drive
+// The six [memory.graph].extraction_* knobs cap how hard Hindsight may drive
 // the shared extraction slot. This module holds what the panel needs that is
 // not React: the field table (status key ↔ PUT key, bounds, copy) and the
 // validation / diff logic, so both are unit-tested without a DOM. Bounds
@@ -52,6 +52,15 @@ export const EXTRACTION_LIMIT_FIELDS = [
     max: 3600,
     fallback: 120,
     sub: 'Seconds a failed queued task waits before it is requeued (10–3600), so a retry does not land on a slot still busy with the attempt that timed out. Worker-wide',
+  },
+  {
+    key: 'worker_slots',
+    putKey: 'extraction_worker_slots',
+    label: 'Worker slots',
+    min: 3,
+    max: 32,
+    fallback: 4,
+    sub: 'Queued memory tasks the engine runs at once (3–32). Each holds chunks and embeddings in memory, so a high value can exhaust RAM on a small box; the engine reserves 2 slots for consolidation',
   },
 ]
 

@@ -2073,6 +2073,7 @@ function buildMemoryGraphStatus() {
       llm_retries: 1,
       task_retries: 2,
       retry_backoff_s: 120,
+      worker_slots: 4,
     },
     in_flight: 0,
     builds_ok: 0,

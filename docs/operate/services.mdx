@@ -193,15 +193,13 @@ WantedBy=multi-user.target
   limits (`HINDSIGHT_API_LLM_MAX_CONCURRENT`, `HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT`,
   `HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS`,
   `HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES`, `HINDSIGHT_API_WORKER_MAX_RETRIES`,
-  `HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS`, and the derived
+  `HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS`, `HINDSIGHT_API_WORKER_MAX_SLOTS`, and the derived
   `HINDSIGHT_API_RETAIN_WALL_TIMEOUT`). Both concurrency keys use the same
   rendered `extraction_max_concurrent`, bounding consolidation, reflect and
   mental-model refresh along with retain. At the default of one, a long
   reflect or consolidation can delay retains until it finishes or reaches
-  `llm_timeout_s`. Changing one of those
-  rewrites the file and restarts hindsight-api, and the first save after
-  upgrading from a release that pinned a slot id there repairs the drop-in the
-  same way. That drop-in lives under `/etc/systemd/system`
+  `llm_timeout_s`. Changing one rewrites the file and restarts hindsight-api, as does the first save after
+  upgrading from a release that pinned a slot id there. That drop-in lives under `/etc/systemd/system`
   and hal0-api runs unprivileged, so the write and the follow-up restart both
   route through the `hal0-systemctl` wrapper
   (`write-hindsight-dropin` + `svc-restart hindsight`). If the wrapper or its

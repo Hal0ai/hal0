@@ -3481,7 +3481,13 @@ def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
         return Check(name, title, _WARN, warning)
     if not report.get("checked"):
         return Check(name, title, _WARN, "could not read the hindsight-api unit environment")
-    return Check(name, title, _PASS, "hindsight-api runs with the values hal0 renders")
+    slots = (report.get("effective") or {}).get("HINDSIGHT_API_WORKER_MAX_SLOTS")
+    llm = (report.get("effective") or {}).get("HINDSIGHT_API_LLM_MAX_CONCURRENT")
+    in_force = ""
+    if slots is not None:
+        in_force = f" (worker slots {slots}"
+        in_force += f", LLM concurrency {llm})" if llm is not None else ")"
+    return Check(name, title, _PASS, f"hindsight-api runs with the values hal0 renders{in_force}")
 
 
 def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
