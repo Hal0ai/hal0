@@ -3436,7 +3436,9 @@ def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
     from hal0.memory.extraction_env import engine_env_warning
 
     if not report.get("installed"):
-        return Check(name, title, _PASS, "memory engine drop-in not installed — nothing to check")
+        return Check(
+            name, title, _PASS, "no hal0-managed memory engine drop-in installed — nothing to check"
+        )
     warning = engine_env_warning(report)
     if warning:
         return Check(name, title, _WARN, warning)
