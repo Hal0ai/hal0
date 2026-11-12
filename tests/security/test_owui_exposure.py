@@ -45,6 +45,8 @@ from hal0.openwebui.env_writer import default_openwebui_env
 REPO_ROOT = Path(__file__).resolve().parents[2]
 UNIT = REPO_ROOT / "packaging" / "systemd" / "hal0-openwebui.service"
 AUTH_DOC = REPO_ROOT / "docs" / "operate" / "auth.mdx"
+# The OpenWebUI listener section moved off auth.mdx to keep it under the docs page cap.
+LISTENERS_DOC = REPO_ROOT / "docs" / "operate" / "tls-and-listeners.mdx"
 INSTALL_SH = REPO_ROOT / "installer" / "install.sh"
 
 BIND_VAR = "HAL0_OWUI_BIND_HOST"
@@ -186,6 +188,6 @@ def test_auth_doc_documents_the_openwebui_port() -> None:
 def test_auth_doc_names_the_bind_and_header_knobs() -> None:
     """A callout that says "this is open" without saying what to do about it
     sends the operator back to the code."""
-    text = AUTH_DOC.read_text(encoding="utf-8")
+    text = LISTENERS_DOC.read_text(encoding="utf-8")
     assert BIND_VAR in text
     assert "HAL0_OWUI_TRUSTED_EMAIL_HEADER" in text
