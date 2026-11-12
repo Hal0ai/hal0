@@ -76,7 +76,9 @@ that agent cannot read today. With `--apply`, for each model in turn:
 
 1. a model hidden from its owner is emptied first (the engine's
    `POST .../mental-models/{id}/clear`), while it is still hidden, so the
-   flag never shows its owner content written from other agents' memory;
+   flag never shows its owner content written from other agents' memory
+   (the engine keeps the model's `reflect_response`; hal0 returns it to
+   agents as `null` while a model's content is empty);
 2. `exclude_mental_models: true` is set (only that field is sent; the engine
    keeps the rest of the trigger);
 3. a full refresh is queued (`{"mode": "full"}`; a delta-mode model keeps its

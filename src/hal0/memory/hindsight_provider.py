@@ -566,6 +566,23 @@ _CONTENT_OP_TYPES = frozenset(
 )
 #: Fields of a mental model that carry its generated content.
 _MODEL_CONTENT_FIELDS = frozenset({"content", "reflect_response", "structured_content"})
+
+
+def _drop_stale_reflect(model: Any) -> Any:
+    """``model`` without a ``reflect_response`` its content no longer matches.
+
+    The engine's clear empties ``content`` and ``structured_content`` but
+    keeps ``reflect_response``: the old text and the facts it was built from.
+    ``hal0 memory mm repair`` (#3576) clears a model its owner could not read
+    and then flags it, so until a refresh writes new content that leftover is
+    the old content under another field. An agent read of a model with empty
+    content gets ``reflect_response: null``.
+    """
+    if isinstance(model, dict) and not model.get("content") and model.get("reflect_response"):
+        return {**model, "reflect_response": None}
+    return model
+
+
 #: Extra engine pages a documents listing reads to fill a page that rows the
 #: caller may not see left short.
 _LISTING_EXTRA_FETCHES = 3
@@ -3282,7 +3299,7 @@ class HindsightProvider(MemoryProvider):
             caller = self._caller_agent(client_id)
             items = resp["items"]
             kept = await self._readable_models(bank, items, caller, listed=True)
-            resp = {**resp, "items": kept}
+            resp = {**resp, "items": [_drop_stale_reflect(m) for m in kept]}
             if "total" in resp:
                 resp["total"] = _visible_total(offset, len(kept), limit)
         return resp
@@ -3291,8 +3308,8 @@ class HindsightProvider(MemoryProvider):
         self, mental_model_id: str, *, dataset: str = _SHARED, client_id: str | None = None
     ) -> dict[str, Any]:
         bank = self._bank_of(self._write_namespace(dataset, client_id))
-        return await self._require_readable_model(
-            bank, mental_model_id, self._caller_agent(client_id)
+        return _drop_stale_reflect(
+            await self._require_readable_model(bank, mental_model_id, self._caller_agent(client_id))
         )
 
     @_gated_write
@@ -3386,7 +3403,7 @@ class HindsightProvider(MemoryProvider):
         )
         if isinstance(resp, dict) and not await self._readable_models(bank, [resp], caller):
             resp = {k: v for k, v in resp.items() if k not in _MODEL_CONTENT_FIELDS}
-        return resp
+        return _drop_stale_reflect(resp)
 
     @_gated_write
     async def delete_mental_model(
