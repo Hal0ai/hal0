@@ -377,12 +377,15 @@ about two minutes. Pick a quiet moment.
    environment that it runs the new model.
 5. Restores each archive into a temporary bank named `<bank>.switch-<run>`,
    which re-embeds every fact with the new model and makes no LLM call, and
-   compares it with the archive.
-6. Only when every bank matches: for each bank, checks the original one more
-   time, deletes it, restores its archive again into the bank's own id,
-   checks that against the original as it was archived (its counts, its
-   knowledge-page and directive ids, every document id and fact text, and
-   each mental model's content), and only then deletes the rebuilt copy.
+   compares it with the original as it was archived: its counts, every
+   document id and the length of its stored text, every fact's text and
+   tags, and each mental model's content. A restore that loses content is
+   found here, while every original is still untouched.
+6. Only when every bank matches: for each bank, checks the original and its
+   rebuilt copy one more time, deletes the original, restores its archive
+   again into the bank's own id, checks that the same way (its
+   knowledge-page and directive ids too), and only then deletes the rebuilt
+   copy.
 7. Returns the engine to its normal address and then lets writes through.
 
 The engine is isolated with one drop-in for its unit,
@@ -460,7 +463,17 @@ as cancelled straight away but lets it go on writing, so a resume that finds
 one still running waits for it, and if it is still running after twice its
 expected time, stops without deleting or restoring anything and asks you to
 run `--resume` again later. A restore that someone else cancelled stops the
-resume until the engine has been restarted, which ends it.
+resume until the engine has been restarted, which ends it. The switch tells a
+restart by the engine's process and by the unit's systemd `InvocationID`; if
+it can read neither, the message says so, and stopping the engine
+(`sudo systemctl stop hindsight-api.service`) before `--resume` works: the
+resume starts it again itself.
+
+If a bank restored into its own id fails its check, `--resume` restores it
+once more. If that fails the same way, the switch stops retrying and tells
+you to stop running `--resume`: it will not delete or restore that bank
+again. Its rebuilt copy, which matched before the original was deleted, and
+its archive are kept. Report it with the output of `--status`.
 
 `--resume` also stops, changing nothing, when the run stopped while it was
 deleting an original and that original is still there (the delete may have
