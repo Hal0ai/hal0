@@ -20,6 +20,7 @@ import base64
 import contextlib
 import json
 import os
+import pwd
 import stat
 from collections.abc import Callable
 from pathlib import Path
@@ -133,19 +134,35 @@ def _is_root() -> bool:
 
 
 def _home_owner(home: Path) -> tuple[int, int]:
-    st = os.stat(home)
-    return st.st_uid, st.st_gid
+    """The home's owner and that account's own primary gid.
+
+    Not the home directory's group: an admin may have given a home a group its
+    owner is not in, and a child running with that group could be steered into
+    any directory the group can write."""
+    uid = os.stat(home).st_uid
+    try:
+        return uid, pwd.getpwuid(uid).pw_gid
+    except KeyError:
+        raise UnsafeConfigPath(
+            f"{home} belongs to uid {uid}, which has no account; not written"
+        ) from None
 
 
 def _run_as_owner(uid: int, gid: int, fn: Callable[[], bytes]) -> bytes:
     """``fn()`` run in a forked child dropped to ``uid``/``gid``; its bytes.
 
-    The child sheds root's supplementary groups, then the gid, then the uid,
+    The child takes the owner's own supplementary groups, then the gid, then the uid,
     runs ``fn`` and exits; the parent reads the answer from a pipe and waits.
     An ``OSError`` in the child is raised here with the same errno (as
     :class:`UnsafeConfigPath` when it was one); anything else as ``OSError``.
     Nothing is imported in the child: another thread may hold the import lock.
     Module-level seam for tests."""
+    # The owner's own supplementary groups, looked up here: the child imports
+    # and resolves nothing.
+    try:
+        groups = os.getgrouplist(pwd.getpwuid(uid).pw_name, gid)
+    except KeyError:
+        groups = [gid]
     rfd, wfd = os.pipe()
     pid = os.fork()
     if pid == 0:  # pragma: no cover - the child's coverage is not collected
@@ -154,7 +171,7 @@ def _run_as_owner(uid: int, gid: int, fn: Callable[[], bytes]) -> bytes:
             os.close(rfd)
             try:
                 if os.geteuid() == 0:
-                    os.setgroups([])
+                    os.setgroups(groups)
                 os.setgid(gid)
                 os.setuid(uid)
                 out = {"ok": True, "data": base64.b64encode(fn()).decode("ascii")}
@@ -218,16 +235,43 @@ def _require_root_tree(home: Path, directory: Path) -> None:
             )
 
 
+def _require_no_symlink(home: Path, path: Path) -> None:
+    """Refuse (:class:`UnsafeConfigPath`) when any existing component from
+    ``home`` down to ``path``, the file included, is a symlink. Root in its own
+    home works by path, so a link anywhere in the chain could be repointed by
+    whoever controls the directory it leads through between the check and the
+    write. Neither path is resolved."""
+    base = Path(os.path.abspath(home))
+    current = base
+    try:
+        parts = Path(os.path.abspath(path)).relative_to(base).parts
+    except ValueError:
+        raise UnsafeConfigPath(f"{path} is outside {base}; not used") from None
+    for part in parts:
+        current = current / part
+        try:
+            st = os.lstat(current)
+        except FileNotFoundError:
+            return
+        if stat.S_ISLNK(st.st_mode):
+            raise UnsafeConfigPath(
+                f"{current} is a symlink; root does not read or write its client "
+                "config through a link; not used"
+            )
+
+
 def _as_home_owner(home: Path, path: Path, fn: Callable[[], bytes]) -> bytes:
     """``fn()`` where it is safe for this process to touch ``path``: directly
     unless this is root in a home owned by someone else, where it runs as that
-    owner (:func:`_run_as_owner`). Root in a root-owned home also needs a
-    root-only tree (:func:`_require_root_tree`)."""
+    owner (:func:`_run_as_owner`). Root in a root-owned home also needs no
+    symlink on the way (:func:`_require_no_symlink`) and a root-only tree
+    (:func:`_require_root_tree`), so nobody else can change the path it uses."""
     if not _is_root():
         return fn()
     uid, gid = _home_owner(home)
     if uid != 0:
         return _run_as_owner(uid, gid, fn)
+    _require_no_symlink(home, path)
     target = checked_config_path(path, home)
     _require_root_tree(home.resolve(), target.parent)
     return fn()
@@ -283,7 +327,7 @@ def write_client_config(
     """Write the shared client config atomically. Raises ``OSError``.
 
     The target is :func:`checked_config_path`; a symlink is written through
-    (the link stays). The temporary file beside it is created with
+    (the link stays), except by root in its own home, which refuses any link. The temporary file beside it is created with
     ``O_CREAT | O_EXCL | O_NOFOLLOW`` at 0600 and fsynced before the rename,
     after removing a stale one only when it is a regular file of an allowed
     owner. An existing file keeps its mode (narrowed to ``max_mode`` when

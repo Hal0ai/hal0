@@ -102,7 +102,7 @@ def test_root_refuses_a_root_home_with_a_directory_someone_else_owns(
     dropped = _as_root_in(monkeypatch, home_owner=(0, 0))
     cfg = home / ".hindsight" / "coding-agent.json"
 
-    with pytest.raises(cc.UnsafeConfigPath, match="root-owned directory"):
+    with pytest.raises(cc.UnsafeConfigPath, match=r"symlink|root-owned directory"):
         cc.write_client_config(cfg, {}, home=home)
 
     assert dropped == [] and not (home / "dotfiles" / "coding-agent.json").exists()
@@ -184,3 +184,62 @@ def test_is_managed_section() -> None:
     assert cc.is_managed_section({"apiUrl": url, "apiToken": "hal0bk_pi-coder.x"}, "pi-coder")
     assert not cc.is_managed_section({"apiUrl": "http://other:9177"}, "pi-coder")
     assert not cc.is_managed_section({"apiToken": "hal0bk_someone.x"}, "pi-coder")
+
+
+def test_root_in_its_own_home_refuses_a_symlinked_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Root works by path in its own home, so a link anywhere on the way (here
+    the file itself, pointing into a directory someone else could repoint) is
+    refused rather than checked once and then followed again."""
+    home = tmp_path / "root"
+    (home / ".hindsight").mkdir(parents=True)
+    elsewhere = tmp_path / "dotfiles"
+    elsewhere.mkdir()
+    real = elsewhere / "coding-agent.json"
+    real.write_text("{}")
+    cfg = home / ".hindsight" / "coding-agent.json"
+    cfg.symlink_to(real)
+    _as_root_in(monkeypatch, home_owner=(0, 0))
+    monkeypatch.setattr(cc, "_require_root_tree", lambda home, directory: None)
+
+    with pytest.raises(cc.UnsafeConfigPath, match="symlink"):
+        cc.write_client_config(cfg, {"a": 1}, home=home)
+    assert real.read_text() == "{}"
+
+
+def test_root_in_its_own_home_refuses_a_symlinked_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "root"
+    home.mkdir()
+    target_dir = tmp_path / "elsewhere"
+    target_dir.mkdir()
+    (home / ".hindsight").symlink_to(target_dir)
+    _as_root_in(monkeypatch, home_owner=(0, 0))
+    monkeypatch.setattr(cc, "_require_root_tree", lambda home, directory: None)
+
+    with pytest.raises(cc.UnsafeConfigPath, match="symlink"):
+        cc.write_client_config(home / ".hindsight" / "coding-agent.json", {"a": 1}, home=home)
+    assert not (target_dir / "coding-agent.json").exists()
+
+
+def test_home_owner_uses_the_accounts_own_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The child's gid is the owner's primary group, not the home's group."""
+    import pwd
+
+    home = tmp_path / "op"
+    home.mkdir()
+    uid = os.stat(home).st_uid
+    assert cc._home_owner(home) == (uid, pwd.getpwuid(uid).pw_gid)
+
+    class _NoAccount:
+        @staticmethod
+        def getpwuid(_uid: int) -> object:
+            raise KeyError(_uid)
+
+    monkeypatch.setattr(cc, "pwd", _NoAccount)
+    with pytest.raises(cc.UnsafeConfigPath, match="no account"):
+        cc._home_owner(home)
