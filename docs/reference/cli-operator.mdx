@@ -37,10 +37,11 @@ This page covers `memory` and the remaining sub-apps, the slot lifecycle timeout
 | `bank profile set <bank>` | `bank` | `--retain-mission`, `--observations-mission`, `--reflect-mission`, `--skepticism`/`--literalism`/`--empathy` (1-5), `--min-refresh-interval <seconds>` (mental-model refresh floor; `0` = after every consolidation), `--json` |
 | `bank export <bank>` | `bank` | `--out` |
 | `bank import <bank>` | `bank` | `--file` (required), `--dry-run`, `--json` |
+| `bank seed` | — | `--config <hal0.toml>`, `--state-dir <dir>` (default: this box's), `--json` |
 | `bank delete <bank>` | `bank` | `--confirm` (required, must equal the bank id), `--json` |
 | `bank consolidate <bank>` | `bank` | `--scope` (repeatable), `--json` |
 
-`bank profile set --reflect-mission` writes the same per-bank config override as the description editor on the dashboard's Memory ▸ Facts tab: the description in the bank bar is the bank's Hindsight `reflect_mission`, and clicking it edits it in place. A bank id may contain dots as well as colons (`coding-agent::ultrareview-1.4`); a leading dot, a dot-only segment and any `..` are refused with `invalid bank_id`.
+`bank profile set --reflect-mission` writes the same per-bank config override as the description editor on the dashboard's Memory ▸ Facts tab: the description in the bank bar is the bank's Hindsight `reflect_mission`, and clicking it edits it in place. `hal0 memory bank seed` seeds this box's default banks, the same ones hal0-api seeds when it first gets the engine: on a two-bank store `[memory] bank` and `[memory] private_bank` (`hal0:shared` and `hal0:private` by default), on an old layout its platform bank alone. It reads the layout record and talks to the memory engine directly, not to hal0-api, so the installer can run it before hal0-api has the engine. A bank is seeded only while it is missing, or empty with no retain mission, and nothing is seeded while an embedder switch is running; the command then prints `not seeding now: <reason>` and exits 0. It exits 1 when the layout cannot be read or a bank could not be seeded. The installer runs it after the engine first answers. A bank id may contain dots as well as colons (`coding-agent::ultrareview-1.4`); a leading dot, a dot-only segment and any `..` are refused with `invalid bank_id`.
 
 ### `memory ops`
 

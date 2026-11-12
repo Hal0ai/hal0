@@ -142,24 +142,6 @@ wait_http_ready() {
     return 1
 }
 
-# Poll hal0-api until its memory provider is the Hindsight engine, for up to
-# `timeout` seconds. hal0-api starts before the engine does on a new install,
-# so it boots on its fallback provider and re-probes the engine every 30 s
-# (HAL0_MEMORY_REPROBE_INTERVAL_S). Until that swap /api/memory/banks/* has no
-# engine behind it, and bank seeding sent straight after the engine's /health
-# failed with "memory bank seeding incomplete" on every new install.
-wait_memory_provider_ready() {
-    local timeout="${1:-45}"
-    local deadline=$((SECONDS+timeout))
-    local resp
-    while (( SECONDS < deadline )); do
-        resp="$(curl -fsS -m 3 "http://127.0.0.1:${HAL0_PORT}/api/memory/engine" 2>/dev/null || true)"
-        [[ "${resp// /}" == *'"engine":"hindsight"'* ]] && return 0
-        sleep 1
-    done
-    return 1
-}
-
 # Print systemd's enablement state for `unit` (enabled, disabled, masked,
 # masked-runtime, static, ...), or `not-found` when systemd doesn't know it
 # (a fresh install). Callers MUST capture this BEFORE anything lays down or
@@ -4151,36 +4133,22 @@ else
             done
             if [[ "${hs_up}" -eq 1 ]]; then
                 info "hindsight-api is running (memory engine on 127.0.0.1:9177)"
-                # Seed banks through hal0-api (idempotent import, config-by-field).
-                # Each manifest is keyed by the namespace it is for (`shared`,
-                # `private:hermes`); hal0.memory.bank_seed names the engine bank
-                # this box's layout keeps it in (ADR-0058 decision 7):
-                # hal0:shared and hal0:private on a new store, the platform bank
-                # alone on an older one. No other bank is created here, and,
-                # through the heal hook's own guard, a bank that already holds
-                # anything is never reconfigured: a re-run seeds only a bank
-                # that is missing, or empty with no retain mission.
-                # The two manifests below are mirrored in hal0.memory.bank_seed,
-                # which hal0-api runs when an engine that was not up here
-                # comes up later; a test holds the two copies in lockstep.
-                _seed_bank() {
-                    local bank
-                    bank="$(HAL0_HOME="${HAL0_HOME_FOR_OWUI}" "${VENV_DIR}/bin/python" -I -c 'import sys; from hal0.memory.bank_seed import seed_target_main; raise SystemExit(seed_target_main(sys.argv[1:]))' "$1" "${HAL0_TOML}" "${VAR_DIR}/state" 2>/dev/null)" || return 1
-                    bank="$(printf '%s\n' "${bank}" | sed -n 's/^bank=//p' | tail -n 1)"
-                    [[ -n "${bank}" ]] || return 0
-                    curl -fsS -m 20 -X POST \
-                        "http://127.0.0.1:${HAL0_PORT}/api/memory/banks/${bank}/import" \
-                        -H "Content-Type: application/json" -H "X-hal0-Agent: installer" \
-                        -d "$2" >/dev/null 2>&1
-                }
-                # hal0-api may still be on its boot-time fallback provider (it
-                # started before the engine on a new install); seed once it
-                # has the engine, or the imports below have nothing to reach.
-                wait_memory_provider_ready 45 \
-                    || warn "hal0-api has not picked up the memory engine yet; bank seeding may be incomplete"
-                if _seed_bank shared '{"version":"1","bank":{"retain_mission":"Extract technical decisions and rationale, gotchas and fixes, PRs and status changes, conventions, commands, endpoints, flags, incidents and resolutions, and cross-session coordination facts. Ignore routine edits, transient state, secrets, and anything already in git.","enable_observations":true,"disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":1}}' \
-                    && _seed_bank private:hermes '{"version":"1","bank":{"retain_mission":"This agent private working notes, scratch decisions, and per-task state. Never store shared facts here.","disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":2}}'; then
-                    info "seeded the memory banks of the shared and private namespaces"
+                # Seed the default banks (#3557, ADR-0058 decision 7). The
+                # banks come from hal0 itself, never from this script: `hal0
+                # memory bank seed` reads the layout record that the
+                # post-activation pass above wrote and [memory], so a new
+                # store gets hal0:shared and hal0:private (or the banks
+                # [memory] bank and private_bank name) and an older store its
+                # platform bank alone. It talks to the engine directly, so it
+                # does not wait for hal0-api to pick the engine up, and its
+                # guard never reconfigures a bank that holds anything: a re-run
+                # seeds only a bank that is missing, or empty with no retain
+                # mission. The installer's own paths are passed so a --dev
+                # prefix is honoured. A failure only warns: hal0-api seeds the
+                # same banks once it has the engine.
+                if HAL0_HOME="${HAL0_HOME_FOR_OWUI}" "${HAL0_BIN}" memory bank seed \
+                    --config "${HAL0_TOML}" --state-dir "${VAR_DIR}/state"; then
+                    info "seeded the memory banks this box's layout names"
                 else
                     warn "memory bank seeding incomplete — hal0-api seeds them once it has the engine"
                 fi
