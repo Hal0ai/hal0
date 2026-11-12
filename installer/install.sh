@@ -4156,13 +4156,16 @@ else
                 # `private:hermes`); hal0.memory.bank_seed names the engine bank
                 # this box's layout keeps it in (ADR-0058 decision 7):
                 # hal0:shared and hal0:private on a new store, the platform bank
-                # alone on an older one. No other bank is created here.
+                # alone on an older one. No other bank is created here, and,
+                # through the heal hook's own guard, a bank that already holds
+                # anything is never reconfigured: a re-run seeds only a bank
+                # that is missing, or empty with no retain mission.
                 # The two manifests below are mirrored in hal0.memory.bank_seed,
                 # which hal0-api runs when an engine that was not up here
                 # comes up later; a test holds the two copies in lockstep.
                 _seed_bank() {
                     local bank
-                    bank="$("${VENV_DIR}/bin/python" -I -c 'import sys; from hal0.memory.bank_seed import engine_bank_main; raise SystemExit(engine_bank_main(sys.argv[1:]))' "$1" 2>/dev/null)" || return 1
+                    bank="$(HAL0_HOME="${HAL0_HOME_FOR_OWUI}" "${VENV_DIR}/bin/python" -I -c 'import sys; from hal0.memory.bank_seed import seed_target_main; raise SystemExit(seed_target_main(sys.argv[1:]))' "$1" "${HAL0_TOML}" "${VAR_DIR}/state" 2>/dev/null)" || return 1
                     bank="$(printf '%s\n' "${bank}" | sed -n 's/^bank=//p' | tail -n 1)"
                     [[ -n "${bank}" ]] || return 0
                     curl -fsS -m 20 -X POST \

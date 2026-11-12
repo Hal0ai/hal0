@@ -291,7 +291,10 @@ def test_seeding_posts_to_the_bank_the_layout_names_not_the_namespace() -> None:
     and no stray engine bank called ``shared`` or ``private:hermes``."""
     start = _TEXT.index("_seed_bank() {")
     body = _TEXT[start : _TEXT.index("\n                }", start)]
-    assert "hal0.memory.bank_seed import engine_bank_main" in body
+    assert "hal0.memory.bank_seed import seed_target_main" in body
+    # The installer's own paths, so a --dev prefix is honoured.
+    assert '"$1" "${HAL0_TOML}" "${VAR_DIR}/state"' in body
+    assert 'HAL0_HOME="${HAL0_HOME_FOR_OWUI}"' in body
     assert "/api/memory/banks/${bank}/import" in body
     assert "/api/memory/banks/$1/import" not in _TEXT
     # A namespace the layout seeds no bank for is skipped, not posted.

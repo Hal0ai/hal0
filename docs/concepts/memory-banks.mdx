@@ -109,7 +109,10 @@ private memory: the per-project scope on an old unified bank, which also
 holds private facts (#3547), and the private template's mental models on
 `hal0:private`, which holds every agent's private memory. A new box seeds
 both of its banks (the installer and hal0-api name them from the layout); a
-box on an old layout seeds only its platform bank.
+box on an old layout seeds only its platform bank. A bank is seeded only
+while it is missing, or empty with no retain mission, and never during an
+embedder switch, so re-running the installer leaves a bank that holds
+anything as it is.
 
 ## Directives on hal0:private
 
@@ -121,6 +124,10 @@ private reflect loads only untagged directives and the caller's own, since
 the engine holds a reflect's directives to its tag filter. An untagged
 directive on `hal0:private` (only the bank spec or the admin API can create
 one) applies to every agent's private reflect and is listed to none.
+
+On every other bank, `hal0:shared` included, a directive is bank-wide: the
+`agent:` and `visibility:` tags a caller sends with it are dropped, so no
+agent can write a directive that another agent's reflect loads as its own.
 
 <CardGrid>
   <LinkCard title="Memory" href="/docs/concepts/memory" description="Namespaces, the write envelope and what memory powers." />

@@ -320,26 +320,106 @@ def test_the_installer_seeds_only_the_platform_bank_on_an_old_layout(monkeypatch
     assert bank_seed.engine_bank_for("private:hermes", cfg) is None
 
 
-def test_engine_bank_main_prints_the_bank_or_nothing_and_fails_when_undecided(
-    monkeypatch, capsys
+def _main_box(monkeypatch, layout) -> None:
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+
+    monkeypatch.setattr(
+        loader, "load_hal0_config", lambda _path=None: SimpleNamespace(memory=MemoryConfig())
+    )
+    monkeypatch.setattr(bank_seed, "switch_in_progress", lambda: None)
+    _layout(monkeypatch, layout)
+
+
+def test_seed_target_main_names_a_missing_bank_and_nothing_else(monkeypatch, capsys) -> None:
+    from hal0.memory import bank_layout as bl
+
+    _main_box(monkeypatch, bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared"))
+    engine = Engine()
+    assert bank_seed.seed_target_main(["shared"], client=engine) == 0
+    assert capsys.readouterr().out == "bank=shared\n"
+    assert bank_seed.seed_target_main(["private:hermes"], client=engine) == 0
+    assert capsys.readouterr().out == ""
+    assert bank_seed.seed_target_main(["nope"], client=engine) == 2
+
+
+@pytest.mark.parametrize(
+    ("row", "seeded"),
+    [
+        (bank(documents=3, facts=40, retain_mission="theirs"), False),
+        (bank(documents=1, facts=0), False),
+        (bank(retain_mission="the operator's"), False),
+        (bank(), True),
+    ],
+)
+def test_an_installer_re_run_never_reconfigures_a_bank_that_holds_anything(
+    monkeypatch, capsys, row, seeded
 ) -> None:
+    """A re-run used to POST /import to the box's live banks and reset their
+    mission. It now goes through the heal hook's guard (_wants_seeding)."""
+    from hal0.memory import bank_layout as bl
+
+    _main_box(monkeypatch, bl.BankLayout(bl.LAYOUT_TWO_BANK))
+    engine = Engine({"hal0:shared": row})
+    assert bank_seed.seed_target_main(["shared"], client=engine) == 0
+    assert capsys.readouterr().out == ("bank=hal0:shared\n" if seeded else "")
+    assert engine.imports() == []  # the helper only decides; nothing is written
+
+
+def test_seed_target_main_seeds_nothing_during_an_embedder_switch(monkeypatch, capsys) -> None:
+    from hal0.memory import bank_layout as bl
+
+    _main_box(monkeypatch, bl.BankLayout(bl.LAYOUT_TWO_BANK))
+    monkeypatch.setattr(bank_seed, "switch_in_progress", lambda: "the switch is running")
+    assert bank_seed.seed_target_main(["shared"], client=Engine()) == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_seed_target_main_fails_closed_when_undecided_or_unreachable(monkeypatch, capsys) -> None:
+    from hal0.memory import bank_layout as bl
+
+    _main_box(monkeypatch, bl.BankLayout(bl.LAYOUT_TWO_BANK))
+
+    class _Down(Engine):
+        async def request_json(self, method, path, **kwargs):
+            raise ConnectionError("engine down")
+
+    assert bank_seed.seed_target_main(["shared"], client=_Down()) == 1
+    assert capsys.readouterr().out == ""
+
+    def undecided(_cfg, **_kw):
+        raise bl.LayoutRecordUnsaved("no")
+
+    monkeypatch.setattr(bl, "current_layout", undecided)
+    assert bank_seed.seed_target_main(["shared"], client=Engine()) == 1
+    assert capsys.readouterr().out == ""
+
+
+def test_seed_target_main_reads_the_installers_paths(monkeypatch, tmp_path) -> None:
     from types import SimpleNamespace
 
     from hal0.config import loader
     from hal0.config.schema import MemoryConfig
     from hal0.memory import bank_layout as bl
 
-    monkeypatch.setattr(loader, "load_hal0_config", lambda: SimpleNamespace(memory=MemoryConfig()))
-    _layout(monkeypatch, bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared"))
-    assert bank_seed.engine_bank_main(["shared"]) == 0
-    assert capsys.readouterr().out == "bank=shared\n"
-    assert bank_seed.engine_bank_main(["private:hermes"]) == 0
-    assert capsys.readouterr().out == ""
-    assert bank_seed.engine_bank_main(["nope"]) == 2
+    seen: dict[str, object] = {}
 
-    def undecided(_cfg, **_kw):
-        raise bl.LayoutRecordUnsaved("no")
+    def load(path=None):
+        seen["toml"] = path
+        return SimpleNamespace(memory=MemoryConfig())
 
-    monkeypatch.setattr(bl, "current_layout", undecided)
-    assert bank_seed.engine_bank_main(["shared"]) == 1
-    assert capsys.readouterr().out == ""
+    def layout(_cfg, path=None):
+        seen["layout"] = path
+        return bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared")
+
+    monkeypatch.setattr(loader, "load_hal0_config", load)
+    monkeypatch.setattr(bl, "current_layout", layout)
+    monkeypatch.setattr(bank_seed, "switch_in_progress", lambda: None)
+    argv = ["private:hermes", str(tmp_path / "hal0.toml"), str(tmp_path / "state")]
+    assert bank_seed.seed_target_main(argv, client=Engine()) == 0
+    assert seen == {
+        "toml": tmp_path / "hal0.toml",
+        "layout": tmp_path / "state" / "memory-layout.json",
+    }

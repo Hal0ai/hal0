@@ -104,20 +104,21 @@ def seed_targets(provider: Any) -> dict[str, dict[str, Any]]:
     return targets
 
 
-def engine_bank_for(namespace: str, memory_cfg: Any) -> str | None:
+def engine_bank_for(namespace: str, memory_cfg: Any, *, layout_path: Any = None) -> str | None:
     """The engine bank a seed manifest keyed by ``namespace`` goes to on this
     box, or ``None`` when its layout seeds no bank for it.
 
     The same banks :func:`seed_targets` names, from the layout record and
     ``[memory]`` without a provider: two-bank, ``shared`` is ``[memory] bank``
     and ``private:hermes`` is ``[memory] private_bank``; the old layout seeds
-    its platform bank only. Raises
+    its platform bank only. ``layout_path`` is the layout record (the state
+    directory's, by default). Raises
     :class:`hal0.memory.bank_layout.LayoutUndecided` when the layout cannot be
     told here.
     """
     from hal0.memory.bank_layout import current_layout
 
-    banks = current_layout(memory_cfg).provider_kwargs(memory_cfg)
+    banks = current_layout(memory_cfg, path=layout_path).provider_kwargs(memory_cfg)
     if namespace == _SHARED:
         return str(banks["bank"])
     if namespace == _PRIVATE_HERMES and banks.get("two_bank"):
@@ -125,27 +126,60 @@ def engine_bank_for(namespace: str, memory_cfg: Any) -> str | None:
     return None
 
 
-def engine_bank_main(argv: list[str]) -> int:
-    """``install.sh``'s seeding helper: print ``bank=<id>`` for one namespace.
+async def _bank_wants_seeding(bank: str, client: Any = None) -> bool:
+    """:func:`_wants_seeding` against the engine on this box (or ``client``)."""
+    own = client is None
+    if own:
+        from hal0.memory.hindsight_client import HindsightRestClient
 
-    Prints nothing (exit 0) when the layout seeds no bank for it, and exits 1
-    when ``hal0.toml`` cannot be read or the layout is undecided, so the
-    installer seeds nothing rather than a bank the store does not use; hal0-api
+        client = HindsightRestClient.from_env()
+    try:
+        return await _wants_seeding(client, bank)
+    finally:
+        if own:
+            await client.aclose()
+
+
+def seed_target_main(argv: list[str], *, client: Any = None) -> int:
+    """``install.sh``'s seeding helper: print ``bank=<id>`` when that bank is to be seeded.
+
+    ``argv`` is ``[namespace, hal0.toml, state directory]``; the two paths are
+    the ones the installer uses, so a ``--dev`` prefix is honoured. The bank
+    is the one this box's layout keeps the namespace in
+    (:func:`engine_bank_for`), and it is printed only when the same guard the
+    heal hook uses lets it be seeded (:func:`_wants_seeding`: missing, or empty
+    with no retain mission), and no embedder switch is in progress. So a
+    re-run of the installer never reconfigures a bank that holds anything.
+
+    Prints nothing (exit 0) when there is nothing to seed. Exits 1, printing
+    nothing, when ``hal0.toml`` cannot be read, the layout is undecided or the
+    engine cannot be asked: the installer then seeds nothing, and hal0-api
     seeds the right banks once it has the engine (:func:`heal_hook`).
     """
-    if len(argv) != 1 or argv[0] not in SEED_BANKS:
+    if len(argv) not in (1, 3) or argv[0] not in SEED_BANKS:
         return 2
+    import asyncio
+    from pathlib import Path
+
+    toml_path = Path(argv[1]) if len(argv) == 3 else None
+    layout_path = Path(argv[2]) / "memory-layout.json" if len(argv) == 3 else None
     try:
         from hal0.config.loader import load_hal0_config
 
-        bank = engine_bank_for(argv[0], load_hal0_config().memory)
+        memory_cfg = load_hal0_config(toml_path).memory
+        bank = engine_bank_for(argv[0], memory_cfg, layout_path=layout_path)
+        if not bank:
+            return 0
+        if switch_in_progress() is not None:
+            return 0
+        if not asyncio.run(_bank_wants_seeding(bank, client)):
+            return 0
     except Exception as exc:
         # stderr, never the log: the installer reads stdout as the bank id.
-        print(f"cannot name the bank for {argv[0]}: {exc}", file=sys.stderr)
+        print(f"cannot decide whether to seed {argv[0]}: {exc}", file=sys.stderr)
         return 1
-    if bank:
-        # Marked, so a log line on stdout can never be read as a bank id.
-        print(f"bank={bank}")
+    # Marked, so a log line on stdout can never be read as a bank id.
+    print(f"bank={bank}")
     return 0
 
 
@@ -243,9 +277,9 @@ def heal_hook(provider: Any) -> Any:
 __all__ = [
     "SEED_BANKS",
     "engine_bank_for",
-    "engine_bank_main",
     "heal_hook",
     "seed_missing_banks",
+    "seed_target_main",
     "seed_targets",
     "switch_in_progress",
 ]
