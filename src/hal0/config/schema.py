@@ -2344,7 +2344,9 @@ class MemoryGraphConfig(BaseModel):
             "hal0 renders 4. The floor is 3: Hindsight reserves 2 slots for "
             "consolidation, so a lower bound leaves retain none. Worker-wide "
             "like extraction_task_retries. Applied via the hindsight-api "
-            "drop-in; the daemon restarts to pick it up."
+            "drop-in; the daemon restarts to pick it up. An operator-set "
+            "HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS greater than or "
+            "equal to this value makes Hindsight refuse to start."
         ),
     )
 

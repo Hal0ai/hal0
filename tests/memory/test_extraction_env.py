@@ -2242,3 +2242,16 @@ def test_a_pre_3534_drop_in_reads_as_drift_so_update_rerenders_it(tmp_path: Path
     assert ee.drop_in_matches() is False
     path.write_text(ee.render_drop_in(), encoding="utf-8")
     assert ee.drop_in_matches() is True
+
+
+def test_engine_env_warning_names_a_missing_key_as_unset_with_update_remedy():
+    from hal0.memory import extraction_env as ee
+
+    report = {
+        "drift": [{"key": "HINDSIGHT_API_WORKER_MAX_SLOTS", "expected": "4", "effective": None}]
+    }
+    warning = ee.engine_env_warning(report)
+    assert warning is not None
+    assert "None" not in warning
+    assert "unset (engine default 10; hal0 renders 4)" in warning
+    assert "hal0 update" in warning and "daemon-reload" not in warning

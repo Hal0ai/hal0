@@ -1046,6 +1046,10 @@ def engine_env_report(
     return report
 
 
+#: What an unset managed key means to the engine, for the doctor sentence.
+_UNSET_NOTES = {"HINDSIGHT_API_WORKER_MAX_SLOTS": "engine default 10"}
+
+
 def engine_env_warning(report: Mapping[str, Any]) -> str | None:
     """One operator sentence for an :func:`engine_env_report`, or ``None`` when clean."""
     parts: list[str] = []
@@ -1056,11 +1060,24 @@ def engine_env_warning(report: Mapping[str, Any]) -> str | None:
             "save the memory settings (or run `hal0 update`) to remove it"
         )
     drift = report.get("drift") or []
-    if drift:
+    missing = [d for d in drift if d.get("effective") is None]
+    differing = [d for d in drift if d.get("effective") is not None]
+    if missing:
         shown = ", ".join(
-            f"{d['key']}={d.get('effective')} (hal0 renders {d['expected']})" for d in drift[:4]
+            f"{d['key']} unset ({_UNSET_NOTES.get(d['key'], 'engine default')}; "
+            f"hal0 renders {d['expected']})"
+            for d in missing[:4]
         )
-        more = f" and {len(drift) - 4} more" if len(drift) > 4 else ""
+        more = f" and {len(missing) - 4} more" if len(missing) > 4 else ""
+        parts.append(
+            f"hindsight-api has {shown}{more}: the drop-in predates this key; "
+            "run `hal0 update` or save the memory settings to re-render it"
+        )
+    if differing:
+        shown = ", ".join(
+            f"{d['key']}={d.get('effective')} (hal0 renders {d['expected']})" for d in differing[:4]
+        )
+        more = f" and {len(differing) - 4} more" if len(differing) > 4 else ""
         parts.append(
             f"hindsight-api runs with {shown}{more}: another drop-in in "
             f"{DROP_IN_DIR} overrides it, or the change is not loaded yet "
