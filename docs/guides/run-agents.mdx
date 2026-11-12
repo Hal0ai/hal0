@@ -373,31 +373,17 @@ type-to-confirm dialog. It has no `--keep-memory` option; see
 
 ## Update pi
 
-If you installed the pi coding agent with `sudo hal0 agent install pi`, re-pin it without an uninstall:
+Re-pin a pi you installed with `sudo hal0 agent install pi`, without an uninstall:
 
 ```sh
 sudo hal0 update component pi
 ```
 
-Run it as root, the same way you installed pi. It reruns the pinned installer, redeploys hal0's two extensions and refreshes the hal0-memory MCP entry, and leaves the extensions you added under `~/.pi/agent/extensions` and your default provider, model and theme in `settings.json` alone. It refuses, and changes nothing, when pi is not installed, when pi's profile is in a different home than the one it runs in (run it as the user who installed pi), and when `settings.json` or `mcp.json` is not a JSON object. `hal0 update` never re-pins pi; it only reports it.
-
-Both point Pi's section of `~/.hindsight/coding-agent.json` at hal0's `/api/memory/compat` with the hal0-managed bridge client `pi-coder`, and leave the flat keys and other tools' sections alone ([Generated files](/docs/reference/generated-files/)). The `pi-coder` key also holds the `agents` scope: whoever can read that 0600 file can start Hermes runs.
+Run it as root, the same way you installed pi. What it changes: [CLI reference](/docs/reference/cli/#hal0-update).
 
 ## Running `hermes` as root
 
-Upstream `hermes` resolves its state from `~/.hermes`, so a bare root
-invocation would read `/root/.hermes` — an empty tree the agent never
-uses — and commands like `hermes mcp list` would falsely report
-"No MCP servers configured" on a healthy install. hal0's `hermes`
-wrapper prevents that: run as root, it re-executes as the `hal0`
-service user (via the run-as-hal0 guard), so you see the same config
-the running agent uses. If the guard can't drop privileges, the
-wrapper points `HOME` at the service home instead and prints which
-`~/.hermes` tree it resolved on stderr. `HAL0_ALLOW_ROOT=1` opts out
-for deliberate root debugging — the wrapper then leaves root's
-environment alone but still names the tree it is reading. The
-euid-aware fix inside the hermes CLI itself is an upstream
-(NousResearch/hermes-agent) matter; the wrapper is hal0's seam.
+Run as root, hal0's `hermes` wrapper re-executes as the `hal0` user, so you see the agent's own config ([details](/docs/reference/cli-doctor-agents/#running-hermes-as-root)).
 
 ## Personas
 
