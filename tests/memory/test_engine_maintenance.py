@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -190,8 +191,50 @@ def test_the_drop_in_of_one_command_is_not_taken_for_the_units_command() -> None
 
 def test_the_engine_queues_refreshes_and_consolidation_by_itself() -> None:
     # The operation_type strings hindsight-api 1.2.0 stores (#3604).
-    assert em.ENGINE_OPERATION_TYPES == ("refresh_mental_model", "consolidation")
+    assert em.ENGINE_OPERATION_TYPES == (
+        "refresh_mental_model",
+        "consolidation",
+        "vector_index_maintenance",
+        "graph_maintenance",
+    )
+    # Only these embed, so only these mark a rolled-back store as mixed.
+    assert em.ENGINE_EMBEDDING_TYPES == ("refresh_mental_model", "consolidation")
+    assert set(em.ENGINE_EMBEDDING_TYPES) < set(em.ENGINE_OPERATION_TYPES)
     assert em.Timeouts().engine_ops_s > em.Timeouts().quiet_s
+
+
+def test_a_parked_operation_is_due_at_its_next_retry_at() -> None:
+    # hindsight-api 1.2.0 lists next_retry_at as a TIMESTAMPTZ isoformat.
+    row = {"status": "pending", "next_retry_at": "2026-11-12T10:30:00+00:00"}
+    assert em.parked_until(row) == datetime(2026, 11, 12, 10, 30, tzinfo=UTC)
+    # A time without a zone is UTC; a row that is not pending is not parked.
+    assert em.parked_until(row | {"next_retry_at": "2026-11-12T10:30:00"}) == datetime(
+        2026, 11, 12, 10, 30, tzinfo=UTC
+    )
+    assert em.parked_until(row | {"status": "processing"}) is None
+    assert em.parked_until({"status": "pending", "next_retry_at": None}) is None
+    assert em.parked_until({"status": "pending", "next_retry_at": "soon"}) is None
+
+
+@pytest.mark.parametrize(
+    ("row", "wrote"),
+    [
+        ({"status": "completed"}, True),
+        ({"status": "processing"}, True),
+        # Consolidation commits each sub-batch before it fails or sees a cancel.
+        ({"status": "failed"}, True),
+        ({"status": "cancelled"}, True),
+        # Queued, or parked before it started: retry_count stays 0.
+        ({"status": "pending", "retry_count": 0}, False),
+        ({"status": "pending", "next_retry_at": "2026-11-12T10:30:00+00:00"}, False),
+        # An attempt raised or its worker died: it may have written first.
+        ({"status": "pending", "retry_count": 1}, True),
+        ({"status": "pending", "retry_count": "x"}, True),
+        ({"status": "superseded"}, True),
+    ],
+)
+def test_which_engine_rows_may_have_written(row: dict[str, Any], wrote: bool) -> None:
+    assert em.may_have_written(row) is wrote
 
 
 def test_an_operation_is_named_by_type_bank_id_and_status() -> None:

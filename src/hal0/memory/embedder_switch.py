@@ -398,11 +398,12 @@ class BankEntry:
     #: many restores in a row failed it the same way.
     place_wrong: str | None = None
     place_repeats: int = 0
-    #: The engine's own operations (:data:`~hal0.memory.engine_maintenance.ENGINE_OPERATION_TYPES`)
+    #: The engine's own embedding work (:data:`~hal0.memory.engine_maintenance.ENGINE_EMBEDDING_TYPES`)
     #: seen on the original after the engine was first restarted on the
-    #: target, as ``{"bank", "type", "id", "status"}``. They ran on the
-    #: target embedder, so a rollback records the store as mixed for this
-    #: bank. Absent from a journal written before #3604 and then empty.
+    #: target and before a rollback restarted it on the previous embedder,
+    #: as ``{"bank", "type", "id", "status"}``. It ran on the target
+    #: embedder, so a rollback records the store as mixed for this bank.
+    #: Absent from a journal written before #3604 and then empty.
     engine_work: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -440,6 +441,12 @@ class Journal:
     #: row moved since then ran on the target. A journal written before #3604
     #: has none; a rollback then counts from ``started_at``.
     flipped_at: str | None = None
+    #: When a rollback restarted the engine on the previous embedder on the
+    #: private port (UTC, ISO), saved before that restart: the engine's work
+    #: after it ran on the previous embedder and does not mark the store
+    #: mixed. ``None`` while the engine has not been put back, and in a
+    #: journal written before it existed.
+    reverted_at: str | None = None
     version: int = JOURNAL_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -783,6 +790,7 @@ class EmbedderSwitch(em.EngineMaintenance):
         timeouts: em.Timeouts | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
+        now: Callable[[], datetime] | None = None,
         progress: Callable[[str], None] | None = None,
         hook: Callable[[str], None] | None = None,
     ) -> None:
@@ -802,6 +810,7 @@ class EmbedderSwitch(em.EngineMaintenance):
             timeouts=timeouts,
             sleep=sleep,
             clock=clock,
+            now=now,
             progress=progress,
             hook=hook,
         )
@@ -1224,7 +1233,8 @@ class EmbedderSwitch(em.EngineMaintenance):
 
         # The banks. The engine's own refreshes and consolidations are not a
         # reason to refuse: a run waits for them (#3604), engine_ops_s for all
-        # the banks together, not for each. A dry run names them.
+        # the banks together, not for each. A dry run names them. Work the
+        # engine has parked until after that budget is refused at once.
         engine_work: dict[str, list[dict[str, Any]]] = {}
         waited_from = self._clock()
         deadline = waited_from + self.t.engine_ops_s
@@ -1238,6 +1248,14 @@ class EmbedderSwitch(em.EngineMaintenance):
                         own = await self._engine_work(bank, state)
                     if own:
                         engine_work[bank] = own
+                        parked = self._parked_past(own, deadline)
+                        if parked and not apply:
+                            due = max(d for _op, d in parked).isoformat(timespec="seconds")
+                            warnings.append(
+                                f"the engine has parked its own work on {bank} until {due}, "
+                                f"after the {self.t.engine_ops_s:g}s the switch waits; run the "
+                                f"switch after {due}"
+                            )
                 plan["banks"].append(
                     {k: state[k] for k in ("counts", "links", "pending", "processing")}
                     | {"bank": bank}
@@ -1253,7 +1271,10 @@ class EmbedderSwitch(em.EngineMaintenance):
                         f"stats say {state['nodes_total']}; the switch goes by the stats"
                     )
         except SwitchError as exc:
-            refuse("engine_error", exc.message)
+            parked = "parked_operations" in exc.details
+            refuse("engine_operation_parked" if parked else "engine_error", exc.message)
+            if parked:
+                plan["engine_operations"] = exc.details["parked_operations"]
             return plan
         leftovers = [b for b in plan["banks"] if is_switch_temp(b["bank"])]
         if leftovers:
@@ -1585,7 +1606,7 @@ class EmbedderSwitch(em.EngineMaintenance):
         self._say(f"moving the engine to {describe_embedder(*target)}")
         journal.phase = PHASE_FLIPPING
         journal.flip_started = True
-        journal.flipped_at = datetime.now(UTC).isoformat()
+        journal.flipped_at = self._now().astimezone(UTC).isoformat()
         self._save(journal)
         # ``mixed`` until the swap is done: from here the engine embeds with
         # the target while every bank still holds the old model's vectors.
@@ -1609,15 +1630,19 @@ class EmbedderSwitch(em.EngineMaintenance):
             self._save(journal)
             self._hook(f"restored:{entry.bank}")
 
-    async def _original_moved(self, entry: BankEntry) -> str:
+    async def _original_moved(self, entry: BankEntry, *, parked_ok: bool = False) -> str:
         """How the original differs from what its archive was taken from; empty when it does not.
 
         With the engine isolated this should never be anything but empty. It
         is read once the engine is quiet, and observations are not part of
         it: the engine's own consolidation may add some, and the rebuilt bank
         derives them again from the same facts.
+
+        With ``parked_ok`` the engine's own work it has parked past the wait
+        is not waited for and is not a difference: it has not started
+        (:meth:`~hal0.memory.engine_maintenance.EngineMaintenance._quiet_state`).
         """
-        state = await self._quiet_state(entry.bank)
+        state = await self._quiet_state(entry.bank, parked_ok=parked_ok)
         reasons: list[str] = []
         differs = em.diff(entry.counts, state["counts"])
         if differs:
@@ -1625,25 +1650,29 @@ class EmbedderSwitch(em.EngineMaintenance):
         signals = em.signals_moved(entry.fingerprint, state["fingerprint"])
         if signals:
             reasons.append("changed since its export: " + ", ".join(signals))
-        if state["pending"] or state["processing"]:
-            reasons.append(
-                f"{state['pending']} pending and {state['processing']} processing operations"
-            )
+        pending = state["pending"] - len(state.get("parked") or [])
+        if pending or state["processing"]:
+            reasons.append(f"{pending} pending and {state['processing']} processing operations")
         return "; ".join(reasons)
 
     async def _live_operations(self, bank: str) -> list[dict[str, Any]]:
         """:meth:`EngineMaintenance._live_operations`, noting the engine's own work on an original.
 
-        Once the engine has been restarted on the target, every refresh or
+        Once the engine has been restarted on the target, and until a
+        rollback restarts it on the previous embedder, every refresh or
         consolidation seen live on an original runs on the target embedder
         and may write its vectors there (a mental model's embedding, a
-        knowledge page, an observation). It is recorded on the bank's entry
+        knowledge page, an observation). The engine's other work
+        (vector-index and graph maintenance) embeds nothing and is not
+        recorded. It is recorded on the bank's entry
         and saved, so a rollback marks the store as mixed for that bank
         whether or not the work is still live by then (:meth:`_taint`).
         """
         live = await super()._live_operations(bank)
         journal = self._run_journal
-        if journal is None or not journal.flip_started:
+        if journal is None or not journal.flip_started or journal.reverted_at is not None:
+            # Before the flip, or after a rollback put the engine back on the
+            # previous embedder: the work runs on that one.
             return live
         entry = next((e for e in journal.banks if e.bank == bank), None)
         if entry is None or entry.step not in _BEFORE_DELETE:
@@ -1653,7 +1682,9 @@ class EmbedderSwitch(em.EngineMaintenance):
         added = [
             em.operation_ref(bank, op)
             for op in live
-            if em.operation_type(op) in em.ENGINE_OPERATION_TYPES
+            if em.operation_type(op) in em.ENGINE_EMBEDDING_TYPES
+            # Not one that is only queued or parked: it has not run yet.
+            and em.may_have_written(op)
             and str(op.get("operation_id") or op.get("id")) not in known
         ]
         if added:
@@ -1666,19 +1697,29 @@ class EmbedderSwitch(em.EngineMaintenance):
 
         For the rollback of a run that restarted the engine on the target,
         which must finish, so every doubt counts against the bank: the
-        engine's own work on it after that restart, seen during the run
-        (``entry.engine_work``) or found in its operation rows since
-        ``journal.flipped_at`` (``started_at`` for a journal that has none),
-        and any reason :meth:`_original_moved` gives. A listing or a read
-        that fails is a reason too: the bank cannot be shown clean. The rows
-        are read after :meth:`_original_moved` has waited for the bank to go
-        quiet, so work the engine started during that wait, still on the
-        target, is found as well.
+        engine's own embedding work on it after that restart, seen during
+        the run (``entry.engine_work``) or found in its operation rows
+        (:meth:`~hal0.memory.engine_maintenance.EngineMaintenance._engine_work_since`)
+        between ``journal.flipped_at`` and ``journal.reverted_at``, and any
+        reason :meth:`_original_moved` gives. A listing or a read that fails
+        is a reason too: the bank cannot be shown clean. The rows are read
+        after :meth:`_original_moved` has waited for the bank to go quiet, so
+        work the engine started during that wait, still on the target, is
+        found as well; work the engine has parked is not waited for, as it
+        has not started.
+
+        A journal written before ``flipped_at`` existed counts from
+        ``started_at``, the time the run began, before the pause. That is
+        deliberate and conservative: it can mark a bank for the engine's work
+        that ran on the old embedder between the start and the flip, but it
+        never misses work that ran on the target. ``reverted_at`` unset
+        counts up to now: the engine has not been put back on the previous
+        embedder by this rollback, so whatever it ran was on the target.
         """
         moved = ""
         if not entry.engine_work:
             try:
-                moved = await self._original_moved(entry)
+                moved = await self._original_moved(entry, parked_ok=True)
             except SwitchError as exc:
                 moved = f"it could not be checked ({exc.message})"
         if entry.engine_work:
@@ -1686,8 +1727,9 @@ class EmbedderSwitch(em.EngineMaintenance):
                 f"{r.get('type')} (operation {r.get('id')})" for r in entry.engine_work
             )
         since = _parse_time(journal.flipped_at or journal.started_at)
+        until = _parse_time(journal.reverted_at)
         try:
-            ran = await self._engine_work_since(entry.bank, since)
+            ran = await self._engine_work_since(entry.bank, since, until)
         except SwitchError as exc:
             return f"its operations could not be read ({exc.message})"
         if ran:
@@ -2143,6 +2185,11 @@ class EmbedderSwitch(em.EngineMaintenance):
                 elif not private and not await self._public_answers():
                     # Not answering anywhere: bring it up where the run left
                     # it, on the previous embedder, so the cleanup is isolated.
+                    # Saved first: what the engine does from here is on the
+                    # previous embedder, and does not mark a bank (_taint).
+                    if journal.flip_started and journal.reverted_at is None:
+                        journal.reverted_at = self._now().astimezone(UTC).isoformat()
+                        self._save(journal)
                     await self._start_engine(
                         previous,
                         port=journal.private_port,
