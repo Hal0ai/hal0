@@ -231,6 +231,16 @@ def _agent_of(tags: list[str] | tuple[str, ...] | None) -> str | None:
     return None
 
 
+def _agents_of(tags: list[str] | tuple[str, ...] | None) -> set[str]:
+    """Every distinct ``<id>`` among the ``agent:<id>`` tags (the engine's
+    reflect scope matches any of them, so ownership must consider all)."""
+    return {
+        t[len(_AGENT_TAG_PREFIX) :]
+        for t in tags or ()
+        if isinstance(t, str) and t.startswith(_AGENT_TAG_PREFIX)
+    }
+
+
 def namespace_to_bank(namespace: str) -> str:
     """Map a hal0 namespace to a Hindsight bank id (spec §3 table)."""
     return namespace.replace(":", "__")
@@ -3508,16 +3518,26 @@ class HindsightProvider(MemoryProvider):
         own when it is private and owned by the caller; on the two-bank
         private bank when it is owned by the caller at all, since there the
         ``agent:`` tag alone is what a reflect is held to; and under the split
-        layout whenever it sits in the caller's own ``private__<id>`` bank,
-        which no other agent reflects on.
+        layout when it sits in the caller's own ``private__<id>`` bank and
+        carries its ``agent:`` tag (an untagged row there is hal0-managed).
+        A row with more than one distinct ``agent:`` tag is operator-managed:
+        the engine's reflect scope matches any of them.
         """
         caller = self._require_directive_writer(client_id)
         directive = await self._require_readable_directive(bank, directive_id, caller)
         tags = directive.get("tags") or []
-        if not self._acl_enforced and bank == self._bank_of(f"{_PRIVATE}{caller}"):
-            return
-        private = _VISIBILITY_PRIVATE in tags or (self._two_bank and bank == self._private_bank)
-        if not (private and _agent_of(tags) == caller):
+        # A row naming several agents is in each one's reflect scope; only the
+        # operator can write one, so no single agent owns it.
+        sole = _agents_of(tags) == {caller}
+        own_split_bank = not self._acl_enforced and bank == self._bank_of(f"{_PRIVATE}{caller}")
+        # Split layout: the agent's own bank is reflected on by it alone, but
+        # an untagged row there is hal0-managed (seeded), not its own.
+        private = (
+            own_split_bank
+            or _VISIBILITY_PRIVATE in tags
+            or (self._two_bank and bank == self._private_bank)
+        )
+        if not (private and sole):
             raise Forbidden(
                 "a bank-wide directive applies to every agent and is managed by the "
                 "operator (the bank spec or the admin API)",

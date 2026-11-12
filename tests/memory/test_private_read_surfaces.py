@@ -1305,8 +1305,14 @@ async def test_an_unidentified_caller_writes_no_directive(layout, dataset, calle
     assert engine.deleted_directives == []
 
 
+# Not split-private: there each agent's directives sit in its own bank, which
+# no other agent's reflect reads, so a "planted" row there cannot be compared
+# with hermes's scope (the two never share a bank).
+STEER_LAYOUTS = [c for c in DIRECTIVE_LAYOUTS if c.id != "split-private"]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("layout", "dataset"), DIRECTIVE_LAYOUTS)
+@pytest.mark.parametrize(("layout", "dataset"), STEER_LAYOUTS)
 async def test_another_agents_directive_does_not_steer_hermes_reflect(layout, dataset):
     """The rehearsal: a directive another agent created applied to hermes's
     reflect. Now it carries its writer, outside hermes's reflect scope."""
@@ -1365,9 +1371,80 @@ async def test_a_directive_in_an_agents_own_bank_is_its_own():
 
     engine = _DirectiveEngine()
     p = HindsightProvider(client=engine, unified_bank=False)
-    engine.directive("private__hermes", "d-old", [], "from before")
-    await p.delete_directive("d-old", dataset="private:hermes", client_id="hermes")
-    assert engine.deleted_directives == ["d-old"]
+    engine.directive("private__hermes", "d-owned", ["agent:hermes"], "hermes")
+    await p.delete_directive("d-owned", dataset="private:hermes", client_id="hermes")
+    assert engine.deleted_directives == ["d-owned"]
+
+
+@pytest.mark.asyncio
+async def test_untagged_row_in_a_split_private_bank_is_operator_managed():
+    """L2: a hal0-seeded (untagged) directive in ``private__<id>`` is not the
+    agent's to change, as on every other layout; one it created is."""
+    from hal0.errors import Forbidden
+
+    engine = _DirectiveEngine()
+    p = HindsightProvider(client=engine, unified_bank=False)
+    engine.directive("private__hermes", "memory-is-history", [], "seeded")
+    for call in (
+        p.update_directive("memory-is-history", dataset="private:hermes", client_id="hermes"),
+        p.delete_directive("memory-is-history", dataset="private:hermes", client_id="hermes"),
+    ):
+        with pytest.raises(Forbidden) as refused:
+            await call
+        assert refused.value.code == "memory.directive_operator_managed"
+    assert engine.deleted_directives == []
+    # What the agent itself creates there carries its tags and stays editable.
+    await p.create_directive(
+        name="d-mine", content="mine", dataset="private:hermes", client_id="hermes"
+    )
+    await p.update_directive("d-mine", dataset="private:hermes", client_id="hermes", content="v2")
+    await p.delete_directive("d-mine", dataset="private:hermes", client_id="hermes")
+    assert engine.deleted_directives == ["d-mine"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("layout", "dataset"), DIRECTIVE_LAYOUTS)
+async def test_a_multi_agent_directive_is_operator_managed(layout, dataset):
+    """L1: a row tagged for two agents sits in both reflect scopes, so neither
+    may rewrite it. Reads are unchanged (the memory read rule)."""
+    from hal0.errors import Forbidden
+
+    engine = _DirectiveEngine()
+    p = HindsightProvider(client=engine, **layout)
+    bank = p._bank_of(p._write_namespace(dataset, "claude-code"))
+    engine.directive(
+        bank, "d-two", ["agent:claude-code", "agent:hermes", "visibility:private"], "both"
+    )
+    for call in (
+        p.update_directive("d-two", dataset=dataset, client_id="claude-code", content="x"),
+        p.delete_directive("d-two", dataset=dataset, client_id="claude-code"),
+    ):
+        with pytest.raises(Forbidden) as refused:
+            await call
+        assert refused.value.code == "memory.directive_operator_managed"
+    assert engine.directives[bank]["d-two"]["content"] == "both"
+    assert engine.deleted_directives == []
+    # Read side stays the first-agent-tag rule: still visible to its first
+    # tag's owner, still hidden from the second agent.
+    seen = await p.list_directives(dataset=dataset, client_id="claude-code")
+    assert {d["id"] for d in seen["items"]} == {"d-two"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("layout", SHARED_DIRECTIVE_LAYOUTS)
+async def test_an_untagged_directive_still_reaches_hermes_reflect(layout):
+    """L3: the owner rule governs writes only. A bank-wide directive stays
+    readable to every agent and inside hermes's reflect scope."""
+    from hal0.memory.read_scope import tags_readable
+
+    engine = _ReflectingDirectiveEngine()
+    p = HindsightProvider(client=engine, **layout)
+    engine.directive(p.platform_bank, "d-wide", [], "operator rule")
+    listed = await p.list_directives(client_id="hermes")
+    assert {d["id"] for d in listed["items"]} == {"d-wide"}
+    assert (await p.get_directive("d-wide", client_id="hermes"))["content"] == "operator rule"
+    await p.reflect("q", client_id="hermes")
+    assert tags_readable(engine.reflects[-1]["tag_groups"], [])
 
 
 def _directive_dispatcher(p: HindsightProvider, client_id: str | None, *, private: bool = False):
