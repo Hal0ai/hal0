@@ -30,6 +30,7 @@ import pytest
 
 from hal0.memory import embedder_record as er
 from hal0.memory import embedder_switch as es
+from hal0.memory import engine_maintenance as em
 from hal0.memory import write_gate
 from hal0.memory.embedder_record import Embedder, EmbedderRecord
 from hal0.memory.hindsight_client import HindsightRestClient
@@ -45,7 +46,7 @@ SHIPPED_UNIT = "# /etc/systemd/system/hindsight-api.service\n" + SHIPPED_UNIT_PA
 BGE = Embedder("local", "BAAI/bge-small-en-v1.5")
 HS = Embedder("local", "hindsight-ai/hs-embed-1")
 
-FAST = es.Timeouts(
+FAST = em.Timeouts(
     poll_s=0.0,
     export_s=5.0,
     settle_s=3.0,
@@ -672,7 +673,7 @@ class Box:
         return record
 
     def archives(self) -> list[Path]:
-        return sorted(es.archive_root().glob("memory-embedder-switch-*/*.zip"))
+        return sorted(em.archive_root().glob("memory-embedder-switch-*/*.zip"))
 
     def temps(self) -> list[str]:
         return [b for b in self.engine.banks if es.is_switch_temp(b)]
@@ -751,7 +752,7 @@ async def test_a_dry_run_reports_the_plan_and_writes_nothing_at_all(
     # changed: no gate, no journal, no lock, no archive directory, no record.
     assert box.engine.writes == [] and box.events == []
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
-    assert not es.archive_root().exists() and not es.lock_path().exists()
+    assert not em.archive_root().exists() and not es.lock_path().exists()
 
 
 async def test_a_dry_run_on_a_box_with_no_record_writes_none(box: Box) -> None:
@@ -776,7 +777,7 @@ async def test_a_refused_apply_writes_nothing_either(box: Box) -> None:
     assert _codes(err.value.plan) == ["not_privileged"]
     assert not er.embedder_record_path().exists()
     assert box.engine.writes == [] and box.events == []
-    assert not es.journal_path().exists() and not es.archive_root().exists()
+    assert not es.journal_path().exists() and not em.archive_root().exists()
 
 
 # ── preflight refusals ───────────────────────────────────────────────────────
@@ -869,8 +870,8 @@ async def test_the_engine_filesystem_and_the_archive_filesystem_are_checked_apar
     box: Box, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Archives on a roomy disk do not excuse a full disk under the engine's data."""
-    monkeypatch.setattr(es, "_device", lambda p: 2 if "backups" in str(p) else 1)
-    monkeypatch.setattr(es, "_nearest_existing", lambda p: p)
+    monkeypatch.setattr(em, "device", lambda p: 2 if "backups" in str(p) else 1)
+    monkeypatch.setattr(em, "nearest_existing", lambda p: p)
     monkeypatch.setattr(
         es.shutil, "disk_usage", lambda p: _usage(10**12 if "backups" in str(p) else 100)
     )
@@ -967,7 +968,7 @@ async def test_the_archives_are_kept_private_and_reported(box: Box, tmp_path: Pa
 
     run_dir = Path(result["archive_dir"])
     # hal0's shared restore-point directory, one private directory per run.
-    assert run_dir.parent == es.archive_root() == tmp_path / "var-lib" / "hal0" / "backups"
+    assert run_dir.parent == em.archive_root() == tmp_path / "var-lib" / "hal0" / "backups"
     assert run_dir.name.startswith("memory-embedder-switch-")
     assert run_dir.name.endswith(result["run_id"])
     assert oct(run_dir.stat().st_mode & 0o777) == "0o700"
@@ -1096,7 +1097,7 @@ async def test_a_count_mismatch_on_the_second_bank_rolls_everything_back(box: Bo
     ]
     _assert_rolled_back(box)
     assert box.archives(), "the archives survive a failed run"
-    rolled = json.loads(next(es.archive_root().glob("*/journal.json")).read_text())
+    rolled = json.loads(next(em.archive_root().glob("*/journal.json")).read_text())
     assert rolled["phase"] == es.PHASE_ROLLED_BACK
 
 
@@ -2320,17 +2321,17 @@ ExecStart=/somewhere/else --host 127.0.0.1 --port 45999
 
 def test_the_isolation_rewrites_the_command_the_unit_runs_now() -> None:
     base = "/var/lib/hal0/memory/hindsight/.venv/bin/hindsight-api"
-    assert es.effective_exec_start(UNIT) == f"{base} --host 127.0.0.1 --port 9177"
+    assert em.effective_exec_start(es.NAMES, UNIT) == f"{base} --host 127.0.0.1 --port 9177"
     # An operator's own ExecStart drop-in (a LAN bind) is what gets rewritten:
     # their command and its other arguments are kept, only the address moves.
-    lan = es.effective_exec_start(UNIT + LAN_DROPIN)
+    lan = em.effective_exec_start(es.NAMES, UNIT + LAN_DROPIN)
     assert lan == f"{base} --host 0.0.0.0 --port=9177 --workers 2"
-    assert es.private_exec_start(lan, 45123) == f"{base} --host 127.0.0.1 --port=45123 --workers 2"
+    assert em.private_exec_start(lan, 45123) == f"{base} --host 127.0.0.1 --port=45123 --workers 2"
     # This command's own drop-in is never taken for the unit's command.
-    assert es.effective_exec_start(UNIT + LAN_DROPIN + OURS) == lan
+    assert em.effective_exec_start(es.NAMES, UNIT + LAN_DROPIN + OURS) == lan
     # An address the command leaves to the environment is appended.
-    assert es.private_exec_start(base, 45123) == f"{base} --host 127.0.0.1 --port 45123"
-    assert es.effective_exec_start("[Service]\nExecStart=\n") is None
+    assert em.private_exec_start(base, 45123) == f"{base} --host 127.0.0.1 --port 45123"
+    assert em.effective_exec_start(es.NAMES, "[Service]\nExecStart=\n") is None
 
 
 def test_the_isolation_drop_in_is_written_from_the_unit_and_read_back(tmp_path: Path) -> None:
@@ -2341,7 +2342,7 @@ def test_the_isolation_drop_in_is_written_from_the_unit_and_read_back(tmp_path: 
         assert argv == ["systemctl", "cat", "hindsight-api.service"]
         return subprocess.CompletedProcess(argv, 0, UNIT + LAN_DROPIN, "")
 
-    out = es.write_isolation_dropin(45123, "3f9a1c2e", runner=runner, path=path)
+    out = em.write_isolation_dropin(es.NAMES, 45123, "3f9a1c2e", runner=runner, path=path)
 
     assert out["error"] is None
     body = path.read_text()
@@ -2354,30 +2355,30 @@ def test_the_isolation_drop_in_is_written_from_the_unit_and_read_back(tmp_path: 
     names = ["extraction-model.conf", "lan.conf", "showcase-lanes.conf", "zz-local.conf"]
     assert sorted([*names, es.ISOLATION_DROP_IN_NAME])[-1] == es.ISOLATION_DROP_IN_NAME
 
-    assert es.remove_isolation_dropin(path) == {"error": None}
+    assert em.remove_isolation_dropin(es.NAMES, path) == {"error": None}
     assert es.isolated_port(path) is None
 
     def missing(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 1, "", "No files found")
 
-    out = es.write_isolation_dropin(45123, "x", runner=missing, path=path)
+    out = em.write_isolation_dropin(es.NAMES, 45123, "x", runner=missing, path=path)
     assert "could not read the engine's unit" in out["error"] and not path.exists()
 
     def empty(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, "[Service]\nExecStart=\n", "")
 
-    out = es.write_isolation_dropin(45123, "x", runner=empty, path=path)
+    out = em.write_isolation_dropin(es.NAMES, 45123, "x", runner=empty, path=path)
     assert "could not find an ExecStart" in out["error"] and not path.exists()
 
     def shell(argv: list[str], **kw: Any) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(argv, 0, SHIPPED_UNIT + SHELL_DROPIN, "")
 
-    out = es.write_isolation_dropin(45123, "x", runner=shell, path=path)
+    out = em.write_isolation_dropin(es.NAMES, 45123, "x", runner=shell, path=path)
     assert "through a shell" in out["error"] and not path.exists()
 
 
 def test_the_private_port_is_a_free_loopback_port() -> None:
-    port = es.free_loopback_port()
+    port = em.free_loopback_port()
     assert 1024 < port < 65536
 
 
@@ -2430,7 +2431,7 @@ async def test_a_bank_found_at_rollback_after_the_flip_leaves_the_store_mixed(bo
 
     record = box.record()
     assert (record.embedder, record.mixed) == (BGE, True), "not the previous record unmixed"
-    rolled = json.loads(next(es.archive_root().glob("*/journal.json")).read_text())
+    rolled = json.loads(next(em.archive_root().glob("*/journal.json")).read_text())
     assert rolled["phase"] == es.PHASE_ROLLED_BACK and rolled["stray_banks"] == ["stray"]
     _assert_public(box)
     assert write_gate.read_gate() is None
@@ -2762,15 +2763,15 @@ def _fake_proc(tmp_path: Path, port: int, holders: dict[int, list[str]]) -> Path
 
 def test_the_listener_check_reads_the_socket_owner_from_proc(tmp_path: Path) -> None:
     proc = _fake_proc(tmp_path, 45123, {100: ["socket:[777]"], 200: ["socket:[1]", "/dev/null"]})
-    assert es.loopback_listener(45123, unit_pids=lambda: {100}, proc=proc)["owner"] == "unit"
+    assert em.loopback_listener(45123, unit_pids=lambda: {100}, proc=proc)["owner"] == "unit"
 
-    held = es.loopback_listener(45123, unit_pids=lambda: {200}, proc=proc)
+    held = em.loopback_listener(45123, unit_pids=lambda: {200}, proc=proc)
     assert held == {"owner": "other", "holder": "pid 100 (proc100)", "pid": 100}
 
-    assert es.loopback_listener(45124, unit_pids=lambda: {100}, proc=proc)["owner"] == "none"
+    assert em.loopback_listener(45124, unit_pids=lambda: {100}, proc=proc)["owner"] == "none"
 
     hidden = _fake_proc(tmp_path / "hidden", 45123, {})
-    assert es.loopback_listener(45123, unit_pids=lambda: set(), proc=hidden)["owner"] == "unknown"
+    assert em.loopback_listener(45123, unit_pids=lambda: set(), proc=hidden)["owner"] == "unknown"
 
 
 def test_the_units_processes_are_its_main_pid_and_its_control_group(tmp_path: Path) -> None:
@@ -2783,16 +2784,16 @@ def test_the_units_processes_are_its_main_pid_and_its_control_group(tmp_path: Pa
         out = "MainPID=100\nControlGroup=/system.slice/hindsight-api.service\n"
         return subprocess.CompletedProcess(argv, 0, out, "")
 
-    assert es._unit_pids(runner, cgroup_root=tmp_path) == {100, 101}
+    assert em._unit_pids(runner, cgroup_root=tmp_path) == {100, 101}
 
 
 def test_the_shipped_units_command_is_rewritten_word_for_word() -> None:
-    line = es.effective_exec_start(SHIPPED_UNIT)
+    line = em.effective_exec_start(es.NAMES, SHIPPED_UNIT)
     assert line == SHIPPED_EXEC
-    assert es.private_exec_start(line, 45123) == SHIPPED_EXEC.replace("9177", "45123")
-    assert es.unit_refusals(SHIPPED_UNIT, NORMAL_PORT) == []
+    assert em.private_exec_start(line, 45123) == SHIPPED_EXEC.replace("9177", "45123")
+    assert em.unit_refusals(es.NAMES, SHIPPED_UNIT, NORMAL_PORT) == []
     # An operator's LAN bind (UNIT + LAN_DROPIN, above) is rewritable too.
-    assert es.unit_refusals(UNIT + LAN_DROPIN, NORMAL_PORT) == []
+    assert em.unit_refusals(es.NAMES, UNIT + LAN_DROPIN, NORMAL_PORT) == []
 
 
 def test_a_quoted_argument_is_kept_and_a_quoted_address_is_replaced() -> None:
@@ -2800,13 +2801,13 @@ def test_a_quoted_argument_is_kept_and_a_quoted_address_is_replaced() -> None:
         f'{HS_BIN} --log-config "/etc/hal0/log conf.json" --host "0.0.0.0" '
         "--port='9177' --workers 2"
     )
-    assert es.private_exec_start(line, 45123) == (
+    assert em.private_exec_start(line, 45123) == (
         f'{HS_BIN} --log-config "/etc/hal0/log conf.json" --host 127.0.0.1 --port=45123 --workers 2'
     )
 
 
 def test_a_kept_prefix_survives_the_rewrite() -> None:
-    assert es.private_exec_start(f"-{HS_BIN} --port 9177", 45123) == (
+    assert em.private_exec_start(f"-{HS_BIN} --port 9177", 45123) == (
         f"-{HS_BIN} --port 45123 --host 127.0.0.1"
     )
 
@@ -2828,9 +2829,11 @@ def test_a_kept_prefix_survives_the_rewrite() -> None:
     ],
 )
 def test_a_command_the_switch_cannot_rewrite_safely_is_refused(line: str, why: str) -> None:
-    with pytest.raises(es.UnsupportedExecStart, match=re.escape(why)):
-        es.private_exec_start(line, 45123)
-    message = es.exec_start_refusal(line, "/etc/systemd/system/hindsight-api.service.d/x.conf")
+    with pytest.raises(em.UnsupportedExecStart, match=re.escape(why)):
+        em.private_exec_start(line, 45123)
+    message = em.exec_start_refusal(
+        es.NAMES, line, "/etc/systemd/system/hindsight-api.service.d/x.conf"
+    )
     assert message is not None
     assert line in message and "x.conf" in message and "run the switch again" in message
 
@@ -2904,9 +2907,9 @@ def test_only_side_commands_naming_the_normal_port_count() -> None:
         PROBE_DROPIN
         + "\n# /etc/systemd/system/hindsight-api.service.d/undo.conf\n[Service]\nExecStartPost=\n"
     )
-    assert es.side_commands_on_port(SHIPPED_UNIT + cleared, NORMAL_PORT) == []
+    assert em.side_commands_on_port(es.NAMES, SHIPPED_UNIT + cleared, NORMAL_PORT) == []
     near = "\n# /x/n.conf\n[Service]\nExecCondition=/usr/bin/test -e /run/91770\nExecStartPre=nc -z localhost 9177\n"
-    assert es.side_commands_on_port(SHIPPED_UNIT + near, NORMAL_PORT) == [
+    assert em.side_commands_on_port(es.NAMES, SHIPPED_UNIT + near, NORMAL_PORT) == [
         ("/x/n.conf", "ExecStartPre", "nc -z localhost 9177")
     ]
 
@@ -3150,8 +3153,8 @@ async def test_status_says_when_the_port_owner_could_not_be_confirmed(box: Box) 
 
 
 def test_http_detail_is_short_single_line_and_markup_safe() -> None:
-    assert es.http_detail("<!DOCTYPE HTML><html>x</html>") == "(a non-JSON page, not shown)"
-    out = es.http_detail("line one\nline [two] <b>" + "x" * 500)
+    assert em.http_detail("<!DOCTYPE HTML><html>x</html>") == "(a non-JSON page, not shown)"
+    out = em.http_detail("line one\nline [two] <b>" + "x" * 500)
     assert "\n" not in out and not set("<>[]") & set(out) and len(out) <= 120
 
 
@@ -3181,7 +3184,7 @@ async def test_a_journal_from_the_rename_based_switch_is_refused_not_guessed_at(
     data["banks"][0]["step"] = "renaming"
     text = json.dumps(data)
     es.journal_path().write_text(text)
-    (Path(journal.archive_dir) / es.mirror_name()).write_text(text)
+    (Path(journal.archive_dir) / es.NAMES.mirror).write_text(text)
     before = len(box.events)
 
     with pytest.raises(es.SwitchError) as err:
@@ -3213,7 +3216,7 @@ async def test_a_journal_with_a_step_or_phase_this_code_does_not_know_is_refused
         data["phase"] = value
     text = json.dumps(data)
     es.journal_path().write_text(text)
-    (Path(journal.archive_dir) / es.mirror_name()).write_text(text)
+    (Path(journal.archive_dir) / es.NAMES.mirror).write_text(text)
     before = len(box.events)
 
     with pytest.raises(es.SwitchError) as err:

@@ -25,13 +25,13 @@ command the unit runs now (read with ``systemctl cat``, so an operator's own
 ``--host 127.0.0.1 --port <private>``. It sorts after every other drop-in, so
 it wins; it also turns the engine's own auto-consolidation off, so the engine
 changes nothing by itself while it is private. The preflight reads the unit
-(:func:`unit_refusals`) and refuses, before anything changes, an
+(:func:`~hal0.memory.engine_maintenance.unit_refusals`) and refuses, before anything changes, an
 ``ExecStart`` it cannot rewrite word for word (a shell wrapper, an unkept
 prefix, an expanded host or port), a later-sorting drop-in that would win
 over this one, and an ``ExecStartPre``/``Post``/``Condition``/``Reload`` that
 names the normal port. After each restart onto the private port the run
 confirms that a process of the engine's unit owns the listening socket
-(:func:`loopback_listener`), that ``/version`` reports the engine the
+(:func:`~hal0.memory.engine_maintenance.loopback_listener`), that ``/version`` reports the engine the
 preflight saw, and that nothing answers at the normal address: only a refused
 connection counts as nothing. Any of these failing stops the run before it
 has exported anything.
@@ -98,11 +98,11 @@ What is still checked
 
 With the engine isolated, the comparisons are assertions: they should never
 fire, and if one does the run stops resumably. Counts compared strictly are
-facts, mental models, directives and documents (:data:`HARD_COUNTS`).
+facts, mental models, directives and documents (:data:`~hal0.memory.engine_maintenance.HARD_COUNTS`).
 Observations are not: the engine's consolidation moves them by itself and an
 export leaves out an observation whose source facts are gone, so a rebuilt
 bank may hold more observations than its archive, never fewer. The
-fingerprint (:data:`FINGERPRINT_SIGNALS`) is kept to what cannot move by
+fingerprint (:data:`~hal0.memory.engine_maintenance.FINGERPRINT_SIGNALS`) is kept to what cannot move by
 itself: digests of the directives, of the config overrides and of the mental
 models' definitions, and the time a document was last ingested.
 
@@ -152,32 +152,25 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import fcntl
 import hashlib
 import json
 import os
 import re
 import secrets
 import shutil
-import subprocess
 import time
-import zipfile
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urlsplit
 
 import httpx
 import structlog
 
-from hal0.config.paths import var_lib
-from hal0.install import perms
 from hal0.memory import embedder_record, write_gate
+from hal0.memory import engine_maintenance as em
 from hal0.memory.embedder_record import (
-    ENGINE_DEFAULT_EMBEDDER,
-    ENGINE_DEFAULT_PROVIDER,
     SOURCE_CONFIGURED,
     SOURCE_SWITCH,
     SOURCE_UNAVAILABLE,
@@ -185,7 +178,6 @@ from hal0.memory.embedder_record import (
     EmbedderRecord,
     describe_embedder,
 )
-from hal0.security import nofollow
 
 log = structlog.get_logger(__name__)
 
@@ -195,29 +187,8 @@ log = structlog.get_logger(__name__)
 #: never guessed at.
 JOURNAL_VERSION = 2
 
-#: The counts a restored bank must match, in the order they are reported.
-COUNT_KEYS: tuple[str, ...] = ("facts", "observations", "mental_models", "directives", "documents")
-
-#: What a bank's fingerprint is made of, and where each signal comes from.
-#:
-#: The engine is isolated for the whole run (see the module docstring), so the
-#: fingerprint is an assertion, not a guard: it is kept to the signals that
-#: cannot move by themselves. Everything the engine changes on its own
-#: (consolidation and the timestamps, link tallies and operations it leaves
-#: behind, a mental model's refreshed content) is left out, because a signal
-#: that moves by itself turns a healthy run into one that can never finish.
-FINGERPRINT_SIGNALS: dict[str, str] = {
-    "directives": "a digest of every directive, inactive ones included",
-    "config": "a digest of the bank's configuration overrides",
-    "mental_models": "a digest of every mental model's definition (id, name, query, tags, "
-    "trigger, token budget), not its generated content",
-    "document": "the bank list's last_document_at: when a document was last ingested",
-    "knowledge": "a digest of the knowledge-base tree: every folder and page with its id, "
-    "kind, name, parent and backing mental model",
-}
-
 #: What a restored bank is checked by besides its counts and
-#: :data:`FINGERPRINT_SIGNALS`, against its original once it was exported
+#: :data:`~hal0.memory.engine_maintenance.FINGERPRINT_SIGNALS`, against its original once it was exported
 #: (#3597): the rebuilt copy as soon as its restore ends and again before the
 #: original is deleted, and the bank restored into its own id. Each is exact:
 #: a lossy restore with the right counts fails it, and a failure names the
@@ -237,21 +208,6 @@ CONTENT_SIGNALS: dict[str, str] = {
     "mental-model content": "each mental model's generated content, while its "
     "last_refreshed_at is the original's",
 }
-
-#: What a knowledge-base node is compared by: its place in the tree, not its
-#: generated content or its timestamps.
-_KNOWLEDGE_NODE_KEYS = ("id", "kind", "name", "parent_id", "mental_model_id")
-
-#: Counts only a writer can move. ``observations`` is not among them: the
-#: engine's consolidation adds and merges observations by itself, and an
-#: export leaves out an observation whose source facts are gone.
-HARD_COUNTS: tuple[str, ...] = ("facts", "mental_models", "directives", "documents")
-
-_MODEL_DEFINITION_KEYS = ("id", "name", "source_query", "tags", "trigger", "max_tokens")
-
-#: Measured on hindsight-api 1.2.0, CPU embedder, 2026-11-10 (ADR-0058 "Open
-#: questions"): a bank restore re-embeds roughly this many facts per second.
-RESTORE_FACTS_PER_S = 60.0
 
 #: What a run costs besides embedding, measured on the same engine on a test
 #: container, 2026-11-11: an engine restart took 15 to 33 s, and each export
@@ -294,11 +250,25 @@ IDS_ACROSS_SWITCH: dict[str, Any] = {
 #: onto the target embedder, and back to its normal address.
 RESTARTS_PER_RUN = 3
 
-SERVICE = "hindsight-api.service"
 #: The drop-in that isolates the engine. It sorts after every hal0 drop-in and
 #: after any name an operator is likely to choose, and it replaces
 #: ``ExecStart``, so it wins over an operator's own ``ExecStart`` drop-in.
 ISOLATION_DROP_IN_NAME = "zzzz-hal0-embedder-switch.conf"
+
+#: Everything this command is called, on disk and in what it says
+#: (:class:`~hal0.memory.engine_maintenance.MaintenanceNames`). Fixed: a run
+#: interrupted on a box before an upgrade is found again by these names.
+NAMES = em.MaintenanceNames(
+    command="hal0 memory embedder switch",
+    actor="the switch",
+    journal="memory-embedder-switch.json",
+    lock="memory-embedder-switch.lock",
+    archive_prefix="memory-embedder-switch-",
+    drop_in=ISOLATION_DROP_IN_NAME,
+    mirror="journal.json",
+    gate_reason=write_gate.REASON_EMBEDDER_SWITCH,
+    log_event="hal0.memory.embedder_switch",
+)
 
 #: Free space wanted on the engine's filesystem, as a multiple of its data
 #: directory: the rebuilt banks sit beside the originals until the swap.
@@ -316,8 +286,6 @@ _BANK_ID_MAX = 128
 _TEMP_RE = re.compile(
     r"(?:\.switch-[0-9a-f]{8}$)|(?:^switch-[0-9a-f]{8}-(?:scratch|[0-9a-f]{16})$)"
 )
-
-_PG_DIR = ".pg0"
 
 # Journal phases, in the order a run passes through them.
 PHASE_PAUSED = "paused"
@@ -374,35 +342,18 @@ HOOK_POINTS: tuple[str, ...] = (
     "before_finish",
 )
 
-_OP_LIVE = ("pending", "processing")
-_OP_FAILED = ("failed", "cancelled", "not_found")
-_PAGE = 100
 #: Page size for the content listings read only for a bank restored into its
 #: own id: documents and facts can run to thousands, and the engine's list
 #: routes take any limit.
 _CONTENT_PAGE = 500
 
 
-class SwitchError(Exception):
+class SwitchError(em.MaintenanceError):
     """A step of the switch failed. The message is written for the operator.
 
     ``resumable`` is true when the run stopped inside the swap, or a rollback
     could not finish: writes stay paused and ``--resume`` carries on.
     """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        bank: str | None = None,
-        details: dict[str, Any] | None = None,
-        resumable: bool = False,
-    ) -> None:
-        super().__init__(message)
-        self.message = message
-        self.bank = bank
-        self.details = details or {}
-        self.resumable = resumable
 
 
 class _EngineNotAsked(Exception):
@@ -415,29 +366,6 @@ class SwitchRefused(SwitchError):
     def __init__(self, message: str, plan: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.plan = plan or {}
-
-
-@dataclass(frozen=True)
-class Timeouts:
-    """Bounds on each wait. Tests shrink them; the CLI uses the defaults."""
-
-    poll_s: float = 2.0
-    #: One bank's export operation, and the archive download after it.
-    export_s: float = 1800.0
-    #: Queues draining after writes are paused.
-    settle_s: float = 300.0
-    #: The engine answering ``/health`` after a restart. The first start on a
-    #: new embedder may download its weights.
-    health_s: float = 600.0
-    #: A restore is given this long, or ``restore_factor`` times its estimate
-    #: at :data:`RESTORE_FACTS_PER_S`, whichever is more. A restore found
-    #: still running on a resume is waited for twice that, never cancelled.
-    restore_floor_s: float = 900.0
-    restore_factor: float = 6.0
-    #: A bank's queue going quiet before it is counted or deleted.
-    quiet_s: float = 120.0
-    delete_s: float = 3600.0
-    http_s: float = 120.0
 
 
 @dataclass
@@ -526,20 +454,20 @@ class Journal:
 
 def journal_path() -> Path:
     """``/var/lib/hal0/state/memory-embedder-switch.json`` (sandboxed under ``HAL0_HOME``)."""
-    return var_lib() / "state" / "memory-embedder-switch.json"
+    return em.journal_path(NAMES)
 
 
 def lock_path() -> Path:
-    return var_lib() / "state" / "memory-embedder-switch.lock"
+    return em.lock_path(NAMES)
 
 
-def archive_root() -> Path:
-    """``/var/lib/hal0/backups``: where hal0 keeps restore points, one directory per run here."""
-    return var_lib() / "backups"
+def isolation_drop_in_path() -> Path:
+    return em.isolation_drop_in_path(NAMES)
 
 
-def mirror_name() -> str:
-    return "journal.json"
+def isolated_port(path: Path | None = None) -> int | None:
+    """The private port the switch's isolation drop-in pins the engine to (:func:`em.isolated_port`)."""
+    return em.isolated_port(NAMES, path)
 
 
 def temp_bank_id(bank: str, run_id: str) -> str:
@@ -602,59 +530,13 @@ def _parse_journal(raw: str) -> Journal:
     return Journal.from_dict(data)
 
 
-def _read_journal_file(path: Path) -> tuple[Journal | None, str | None]:
-    """``(journal, None)``, ``(None, None)`` when absent, ``(None, why)`` when unusable."""
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None, None
-    except (OSError, UnicodeDecodeError) as exc:
-        return None, f"{path} cannot be read ({type(exc).__name__})"
-    try:
-        return _parse_journal(raw), None
-    except (ValueError, TypeError) as exc:
-        return None, f"{path} is not a usable journal ({exc})"
-
-
-def _unfinished_mirrors() -> list[Path]:
-    """Mirrors of runs that neither finished nor were rolled back, newest first."""
-    found: list[tuple[str, Path]] = []
-    try:
-        candidates = sorted(archive_root().glob(f"memory-embedder-switch-*/{mirror_name()}"))
-    except OSError:
-        return []
-    for path in candidates:
-        journal, _ = _read_journal_file(path)
-        if journal is not None and journal.phase not in _FINISHED_PHASES:
-            found.append((journal.started_at, path))
-    return [path for _, path in sorted(found, reverse=True)]
+def _finished(journal: Journal) -> bool:
+    return journal.phase in _FINISHED_PHASES
 
 
 def locate_journal() -> dict[str, Any]:
-    """Find the journal of an unfinished run wherever a copy survives.
-
-    The primary copy first. When it is missing or unusable, the mirror in the
-    archive directory the write gate names, then any unfinished mirror under
-    ``backups/``. Returns ``{"journal", "source", "error"}``: ``error`` is set
-    when a copy exists but none can be used, and when the primary was unusable
-    and a mirror stood in for it. Never raises.
-    """
-    primary, problem = _read_journal_file(journal_path())
-    if primary is not None:
-        if primary.phase in _FINISHED_PHASES:
-            return {"journal": None, "source": None, "error": None}
-        return {"journal": primary, "source": str(journal_path()), "error": None}
-    mirrors: list[Path] = []
-    gate = write_gate.read_gate() or {}
-    if isinstance(gate.get("archive_dir"), str) and gate["archive_dir"]:
-        mirrors.append(Path(gate["archive_dir"]) / mirror_name())
-    mirrors.extend(p for p in _unfinished_mirrors() if p not in mirrors)
-    for path in mirrors:
-        journal, why = _read_journal_file(path)
-        if journal is not None and journal.phase not in _FINISHED_PHASES:
-            return {"journal": journal, "source": str(path), "error": problem}
-        problem = problem or why
-    return {"journal": None, "source": None, "error": problem}
+    """Find the journal of an unfinished run wherever a copy survives (:func:`em.locate_journal`)."""
+    return em.locate_journal(NAMES, _parse_journal, _finished)
 
 
 def load_journal() -> Journal | None:
@@ -690,19 +572,7 @@ def interrupted_switch() -> dict[str, Any] | None:
 
 def lock_held() -> bool:
     """True when a process holds the switch lock. Creates nothing."""
-    try:
-        fd = os.open(lock_path(), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except OSError:
-        return False
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return True
-    except OSError:
-        return False
-    finally:
-        os.close(fd)
-    return False
+    return em.lock_held(NAMES)
 
 
 def blocking_reason() -> str | None:
@@ -731,22 +601,6 @@ def blocking_reason() -> str | None:
             f"the memory engine is isolated by an embedder switch ({isolation_drop_in_path()} "
             "is present); see `hal0 memory embedder switch --status`"
         )
-    return None
-
-
-def update_in_progress() -> str | None:
-    """The id of a queued or running ``hal0 update`` job, read from its on-disk mirror."""
-    try:
-        jobs = sorted((var_lib() / "update-jobs").glob("*.json"))
-    except OSError:
-        return None
-    for path in jobs:
-        try:
-            job = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if isinstance(job, dict) and job.get("state") in ("queued", "running"):
-            return str(job.get("id") or path.stem)
     return None
 
 
@@ -783,85 +637,6 @@ def swap_action(step: str, has_original: bool, has_rebuilt: bool) -> str:
     # Both ids. After a delete that answered, the original id can only be
     # back because something recreated it.
     return ACTION_RECREATED if step == STEP_DELETED else ACTION_SWAP
-
-
-def _bank_path(bank: str) -> str:
-    # Colons are legal in a path segment and bank ids carry them
-    # (``Hal0::Agents``); everything else that could change the path is escaped.
-    return f"/v1/default/banks/{quote(bank, safe=':')}"
-
-
-def _du_bytes(path: Path) -> int:
-    total = 0
-    try:
-        for p in path.rglob("*"):
-            try:
-                if p.is_file() and not p.is_symlink():
-                    total += p.stat().st_size
-            except OSError:
-                continue
-    except OSError:
-        return 0
-    return total
-
-
-def _device(path: Path) -> int:
-    """The filesystem ``path`` is on."""
-    return os.stat(path).st_dev
-
-
-def _nearest_existing(path: Path) -> Path:
-    for candidate in (path, *path.parents):
-        if candidate.exists():
-            return candidate
-    return Path("/")
-
-
-def _knowledge_nodes(tree: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Every folder and page in a ``knowledge-base/tree`` answer, flattened."""
-    out: list[dict[str, Any]] = []
-    stack = list(tree.get("roots") or tree.get("nodes") or [])
-    while stack:
-        node = stack.pop()
-        if not isinstance(node, dict):
-            continue
-        out.append({k: node.get(k) for k in _KNOWLEDGE_NODE_KEYS})
-        stack.extend(node.get("children") or [])
-    return out
-
-
-def _diff(
-    expected: Mapping[str, int], got: Mapping[str, int], *, observation_floor: bool = False
-) -> dict[str, dict[str, int]]:
-    """The counts that differ and matter (:data:`HARD_COUNTS`).
-
-    With ``observation_floor``, fewer observations than expected also counts:
-    a rebuilt bank may gain observations from the engine's own consolidation,
-    but must not have lost any its archive carried.
-    """
-    keys = list(HARD_COUNTS)
-    if observation_floor and int(got.get("observations", 0)) < int(expected.get("observations", 0)):
-        keys.append("observations")
-    return {
-        key: {"expected": int(expected.get(key, 0)), "got": int(got.get(key, 0))}
-        for key in COUNT_KEYS
-        if key in keys and int(expected.get(key, 0)) != int(got.get(key, 0))
-    }
-
-
-def _diff_text(diff: Mapping[str, Mapping[str, int]]) -> str:
-    return ", ".join(
-        f"{key.replace('_', ' ')} {d['got']} (expected {d['expected']})" for key, d in diff.items()
-    )
-
-
-def _signals_moved(
-    before: Mapping[str, Any] | None, now: Mapping[str, Any], keys: tuple[str, ...] | None = None
-) -> list[str]:
-    """Names of the fingerprint signals that differ. An absent baseline compares equal."""
-    if not before:
-        return []
-    return [k for k in (keys or tuple(FINGERPRINT_SIGNALS)) if before.get(k) != now.get(k)]
 
 
 #: How many ids a content difference names per kind before it says "and N more".
@@ -933,617 +708,13 @@ def _contents_moved(before: Mapping[str, Any], now: Mapping[str, Any]) -> list[s
     return moved
 
 
-def _strip(value: Any) -> Any:
-    """``value`` without the keys that differ between a bank and its rebuilt copy by design."""
-    if isinstance(value, dict):
-        return {k: _strip(v) for k, v in value.items() if k not in ("bank_id", "is_stale")}
-    if isinstance(value, list):
-        return [_strip(v) for v in value]
-    return value
-
-
-def _digest(value: Any) -> str:
-    """A short digest of ``value``; a list is digested as a set of its rows."""
-    if isinstance(value, list):
-        value = sorted(json.dumps(_strip(v), sort_keys=True, default=str) for v in value)
-    text = json.dumps(_strip(value), sort_keys=True, default=str)
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
-
-
-def _pair(raw: Mapping[str, Any] | None) -> Embedder | None:
-    """A raw evidence layer as a pair; an unset key is the engine default."""
-    if raw is None:
-        return None
-    return Embedder(
-        raw.get("provider") or ENGINE_DEFAULT_PROVIDER,
-        raw.get("model") or ENGINE_DEFAULT_EMBEDDER,
-    )
-
-
-def _write_synced(path: Path, text: str, *, mode: int) -> None:
-    """Replace ``path`` atomically and durably: temp file, fsync, rename, fsync the directory."""
-    nofollow.write_file(path, text, mode=mode, owner=perms.state_root_owner())
-    fd = nofollow.open_dir(path.parent)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def isolation_drop_in_path() -> Path:
-    from hal0.memory import extraction_env
-
-    return extraction_env.DROP_IN_DIR / ISOLATION_DROP_IN_NAME
-
-
-def _unit_assignments(unit_text: str) -> list[tuple[str, str, str]]:
-    """``(file, key, value)`` for every assignment in ``systemctl cat`` output, in order.
-
-    ``file`` is the path in the ``# /…`` header that precedes it. A line
-    ending in a backslash continues on the next, as in systemd; comments and
-    section headers are skipped.
-    """
-    out: list[tuple[str, str, str]] = []
-    source = ""
-    carried = ""
-    for raw in unit_text.splitlines():
-        if raw.startswith("# /"):
-            source = raw[2:].strip()
-            carried = ""
-            continue
-        line = carried + raw.strip()
-        if line.endswith("\\"):
-            carried = line[:-1].rstrip() + " "
-            continue
-        carried = ""
-        if not line or line.startswith(("#", ";", "[")) or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        out.append((source, key.strip(), value.strip()))
-    return out
-
-
-def _is_ours(source: str) -> bool:
-    return Path(source).name == ISOLATION_DROP_IN_NAME
-
-
-def exec_start_source(unit_text: str) -> tuple[str | None, str | None]:
-    """``(command, file)``: the ``ExecStart`` the unit runs without this command's drop-in.
-
-    The last ``ExecStart=`` wins and an empty one clears what came before, as
-    in systemd, so an operator's own drop-in that replaces ``ExecStart`` (to
-    bind the LAN, say) is what comes back, with the file that set it.
-    """
-    current: tuple[str | None, str | None] = (None, None)
-    for source, key, value in _unit_assignments(unit_text):
-        if key == "ExecStart" and not _is_ours(source):
-            current = (value or None, source if value else None)
-    return current
-
-
-def effective_exec_start(unit_text: str) -> str | None:
-    """The command the engine's unit starts, from ``systemctl cat`` output (:func:`exec_start_source`)."""
-    return exec_start_source(unit_text)[0]
-
-
-def later_exec_start_dropins(unit_text: str) -> list[tuple[str, str]]:
-    """``(file, ExecStart)`` for each drop-in that would win over :data:`ISOLATION_DROP_IN_NAME`.
-
-    systemd applies drop-ins in the order of their file names, whichever
-    directory they are in, so one whose name sorts after this command's and
-    that sets ``ExecStart`` replaces the private command: the engine would
-    come back at its normal address.
-    """
-    found: dict[str, str] = {}
-    for source, key, value in _unit_assignments(unit_text):
-        name = Path(source).name
-        if key == "ExecStart" and source.endswith(".conf") and name > ISOLATION_DROP_IN_NAME:
-            found[source] = value or found.get(source, "")
-    return sorted(found.items(), key=lambda item: Path(item[0]).name)
-
-
-class UnsupportedExecStart(ValueError):
-    """An ``ExecStart`` this command will not rewrite; the message says why and what to do."""
-
-
-#: Programs that run their arguments as a script: the address inside cannot be
-#: rewritten reliably, so a command started through one is refused.
-_SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ash", "ksh", "busybox", "fish"})
-#: systemd's ``ExecStart`` prefixes. ``-`` (a failure exit is ignored) and ``:``
-#: (no environment variable expansion) leave the command line itself alone and
-#: are kept; the others change how systemd runs it or which word is the
-#: program, and are refused.
-_KEPT_PREFIXES = frozenset("-:")
-_ALL_PREFIXES = frozenset("-@+!:|")
-
-
-@dataclass(frozen=True)
-class _Word:
-    raw: str
-    value: str
-
-
-def _split_exec(line: str) -> list[_Word]:
-    """Split ``line`` into words the way systemd does, for the subset this command accepts.
-
-    Words are separated by whitespace; a word may be quoted with ``"`` or
-    ``'`` (also in part, ``--host="a"``), and the quotes are removed from its
-    value. systemd also reads C-style backslash escapes, which ``shlex`` does
-    not follow, so a backslash anywhere is refused rather than guessed at.
-    Each word keeps its original text, so a word this command does not
-    change is written back exactly as it was.
-    """
-    if "\\" in line:
-        raise UnsupportedExecStart("it contains a backslash escape")
-    words: list[_Word] = []
-    i, n = 0, len(line)
-    while i < n:
-        while i < n and line[i] in " \t":
-            i += 1
-        if i >= n:
-            break
-        start, value = i, []
-        while i < n and line[i] not in " \t":
-            if line[i] in "\"'":
-                quote, i = line[i], i + 1
-                end = line.find(quote, i)
-                if end < 0:
-                    raise UnsupportedExecStart("it has an unterminated quote")
-                value.append(line[i:end])
-                i = end + 1
-            else:
-                value.append(line[i])
-                i += 1
-        words.append(_Word(line[start:i], "".join(value)))
-    return words
-
-
-def private_exec_start(line: str, port: int) -> str:
-    """``line`` with its listen address replaced by ``127.0.0.1:<port>``.
-
-    Everything else in the operator's command is kept word for word. An
-    address the command does not name (the engine then reads it from its
-    environment or uses its default) is appended, and an argument beats the
-    environment. Raises :class:`UnsupportedExecStart`, before anything is
-    written, for a command this cannot rewrite safely: one started through a
-    shell, one with a prefix other than ``-`` or ``:``, one whose host or port
-    argument uses a ``%`` specifier or ``$`` expansion, and one systemd quotes
-    or escapes in ways this does not follow.
-    """
-    words = _split_exec(line)
-    if not words:
-        raise UnsupportedExecStart("it is empty")
-    first = words[0]
-    prefix_len = 0
-    while prefix_len < len(first.value) and first.value[prefix_len] in _ALL_PREFIXES:
-        prefix_len += 1
-    prefix = first.value[:prefix_len]
-    if set(prefix) - _KEPT_PREFIXES:
-        raise UnsupportedExecStart(
-            f"it starts with the prefix {prefix!r}, which changes how systemd runs it "
-            "(only '-' and ':' are kept)"
-        )
-    program = first.value[prefix_len:]
-    if not program:
-        raise UnsupportedExecStart("it names no program")
-    if Path(program).name in _SHELLS:
-        raise UnsupportedExecStart(
-            f"it runs the engine through a shell ({program}), so the address is inside a script"
-        )
-    out = [w.raw for w in words]
-    seen = {"--host": False, "--port": False}
-    wanted = {"--host": "127.0.0.1", "--port": str(port)}
-    i = 1
-    while i < len(words):
-        value = words[i].value
-        for flag in seen:
-            if value == flag:
-                if i + 1 >= len(words):
-                    raise UnsupportedExecStart(f"{flag} is the last word and has no value")
-                arg = words[i + 1].value
-                _check_address_value(flag, arg)
-                out[i + 1] = wanted[flag]
-                seen[flag] = True
-                i += 1
-                break
-            if value.startswith(flag + "="):
-                _check_address_value(flag, value[len(flag) + 1 :])
-                out[i] = f"{flag}={wanted[flag]}"
-                seen[flag] = True
-                break
-        i += 1
-    for flag in ("--host", "--port"):
-        if not seen[flag]:
-            out += [flag, wanted[flag]]
-    return " ".join(out)
-
-
-def _check_address_value(flag: str, value: str) -> None:
-    if "%" in value or "$" in value:
-        raise UnsupportedExecStart(
-            f"its {flag} value {value!r} is expanded by systemd (a % specifier or $ variable), "
-            "so the address it binds cannot be read from the unit"
-        )
-
-
-def exec_start_refusal(line: str, source: str | None) -> str | None:
-    """Why the switch will not rewrite ``line``, with the way on, or ``None`` when it can."""
-    try:
-        private_exec_start(line, 1)
-    except UnsupportedExecStart as exc:
-        where = f" (set in {source})" if source else ""
-        return (
-            f"the engine's unit starts `{line}`{where}, which the switch cannot move to a "
-            f"private port: {exc}. Make ExecStart a direct command line that names the "
-            "engine's binary, with --host and --port as plain values (an ExecStart= drop-in "
-            "that sorts before " + ISOLATION_DROP_IN_NAME + " is fine), run "
-            "`systemctl daemon-reload`, then run the switch again"
-        )
-    return None
-
-
-#: Unit keys whose command runs around the engine's start or reload.
-_SIDE_COMMANDS = ("ExecStartPre", "ExecStartPost", "ExecCondition", "ExecReload")
-
-
-def side_commands_on_port(unit_text: str, port: int) -> list[tuple[str, str, str]]:
-    """``(file, key, command)`` for start/reload commands that name the engine's normal port.
-
-    While the engine is private such a command (a health probe, say) cannot
-    reach it, so its start would fail every time and the run would time out
-    and roll back. An empty assignment clears the list before it, as in
-    systemd; this command's own drop-in sets none.
-    """
-    mention = re.compile(rf"(?<![0-9]){port}(?![0-9])")
-    active: dict[str, list[tuple[str, str]]] = {k: [] for k in _SIDE_COMMANDS}
-    for source, key, value in _unit_assignments(unit_text):
-        if key not in active or _is_ours(source):
-            continue
-        if not value:
-            active[key] = []
-        else:
-            active[key].append((source, value))
-    return [
-        (source, key, value)
-        for key in _SIDE_COMMANDS
-        for source, value in active[key]
-        if mention.search(value)
-    ]
-
-
-def unit_refusals(unit_text: str | None, normal_port: int | None) -> list[dict[str, str]]:
-    """The preflight's look at the engine's unit: every reason it cannot be isolated safely."""
-    if unit_text is None:
-        return [
-            {
-                "code": "unit_unreadable",
-                "message": f"`systemctl cat {SERVICE}` could not be read, so the switch cannot "
-                "tell which command to move to a private port",
-            }
-        ]
-    refusals: list[dict[str, str]] = []
-    line, source = exec_start_source(unit_text)
-    if line is None:
-        refusals.append(
-            {
-                "code": "unit_unreadable",
-                "message": f"`systemctl cat {SERVICE}` names no ExecStart",
-            }
-        )
-    else:
-        why = exec_start_refusal(line, source)
-        if why:
-            refusals.append({"code": "exec_start_unsupported", "message": why})
-    for path, command in later_exec_start_dropins(unit_text):
-        refusals.append(
-            {
-                "code": "exec_start_overridden",
-                "message": f"{path} sorts after {ISOLATION_DROP_IN_NAME} and sets ExecStart "
-                f"(`{command or '(cleared)'}`), so it would win over the switch's private "
-                "command and the engine would stay reachable at its normal address. Rename it "
-                f"so it sorts before {ISOLATION_DROP_IN_NAME} (any name not starting with "
-                "'zzzz-' does), run `systemctl daemon-reload`, then run the switch again",
-            }
-        )
-    if normal_port is not None:
-        for path, key, command in side_commands_on_port(unit_text, normal_port):
-            refusals.append(
-                {
-                    "code": "exec_probe_normal_port",
-                    "message": f"{path} sets {key}=`{command}`, which names the engine's "
-                    f"normal port {normal_port}. While the switch runs, the engine listens only "
-                    "on a private port, so this command would fail at every restart. Remove it "
-                    "(or move it to a separate unit), run `systemctl daemon-reload`, then run "
-                    "the switch again",
-                }
-            )
-    return refusals
-
-
-def read_unit_text(
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> str | None:
-    """``systemctl cat`` of the engine's unit, or ``None`` when it cannot be read."""
-    try:
-        proc = runner(
-            ["systemctl", "cat", SERVICE], capture_output=True, text=True, timeout=10, check=False
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return proc.stdout or "" if proc.returncode == 0 else None
-
-
-_HOST_ARG = re.compile(r"(--host)(=|\s+)(\S+)")
-_PORT_ARG = re.compile(r"(--port)(=|\s+)(\S+)")
-
-
-def isolation_body(exec_start: str, run_id: str) -> str:
-    """The isolation drop-in: the unit's own command on a private port, consolidation off."""
-    return (
-        f"# Written by `hal0 memory embedder switch` (run {run_id}). While this file exists\n"
-        "# the memory engine listens only on a private loopback port, so that nothing but\n"
-        "# the switch can reach it, and does not consolidate by itself. The switch removes\n"
-        "# this file when the run ends. Do not edit or delete it by hand: run\n"
-        "# `hal0 memory embedder switch --status`.\n"
-        "[Service]\n"
-        "ExecStart=\n"
-        f"ExecStart={exec_start}\n"
-        "Environment=HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION=false\n"
-    )
-
-
-def write_isolation_dropin(
-    port: int,
-    run_id: str,
-    *,
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    path: Path | None = None,
-) -> dict[str, Any]:
-    """Write the isolation drop-in for ``port``. Root only; never raises.
-
-    Reads the unit as systemd sees it (``systemctl cat``), so the command it
-    rewrites is the one in force, an operator's ``ExecStart`` drop-in
-    included. Writes nothing for a unit the preflight would refuse
-    (:func:`unit_refusals`). Returns ``{"error", "exec_start"}``; the caller
-    reloads and restarts.
-    """
-    text = read_unit_text(runner)
-    if text is None:
-        return {"error": f"could not read the engine's unit (`systemctl cat {SERVICE}`)"}
-    line, source = exec_start_source(text)
-    if not line:
-        return {"error": f"could not find an ExecStart in `systemctl cat {SERVICE}`"}
-    later = later_exec_start_dropins(text)
-    if later:
-        return {
-            "error": f"{later[0][0]} sorts after {ISOLATION_DROP_IN_NAME} and sets ExecStart "
-            f"(`{later[0][1] or '(cleared)'}`), so the engine cannot be isolated"
-        }
-    try:
-        private = private_exec_start(line, port)
-    except UnsupportedExecStart:
-        return {"error": exec_start_refusal(line, source)}
-    target = path if path is not None else isolation_drop_in_path()
-    try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_suffix(".conf.tmp")
-        tmp.write_text(isolation_body(private, run_id), encoding="utf-8")
-        os.chmod(tmp, 0o644)
-        tmp.replace(target)
-    except OSError as exc:
-        return {"error": f"could not write {target}: {exc}"}
-    return {"error": None, "exec_start": line}
-
-
-def remove_isolation_dropin(path: Path | None = None) -> dict[str, Any]:
-    """Remove the isolation drop-in. Never raises; the caller reloads and restarts."""
-    target = path if path is not None else isolation_drop_in_path()
-    try:
-        target.unlink(missing_ok=True)
-    except OSError as exc:
-        return {"error": f"could not remove {target}: {exc}"}
-    return {"error": None}
-
-
-def isolated_port(path: Path | None = None) -> int | None:
-    """The private port the isolation drop-in pins the engine to; ``None`` when there is none.
-
-    ``0`` for a drop-in that is there and names no port this can read: the
-    engine is then to be treated as isolated, on a port unknown.
-    """
-    target = path if path is not None else isolation_drop_in_path()
-    try:
-        text = target.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeDecodeError):
-        return 0
-    found = 0
-    for line in text.splitlines():
-        match = _PORT_ARG.search(line) if line.startswith("ExecStart=") else None
-        if match and match.group(3).isdigit():
-            found = int(match.group(3))
-    return found
-
-
-def free_loopback_port() -> int:
-    """A loopback port nothing listens on now, picked by the kernel."""
-    import socket
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-_PROC = Path("/proc")
-_CGROUP_ROOT = Path("/sys/fs/cgroup")
-#: ``/proc/net/tcp`` state of a listening socket.
-_TCP_LISTEN = "0A"
-
-
-def _listening_inodes(port: int, proc: Path = _PROC) -> set[str]:
-    """Socket inodes listening on TCP ``port`` (any local address), from ``/proc/net/tcp{,6}``."""
-    found: set[str] = set()
-    for name in ("tcp", "tcp6"):
-        try:
-            lines = (proc / "net" / name).read_text(encoding="ascii").splitlines()[1:]
-        except OSError:
-            continue
-        for row in lines:
-            fields = row.split()
-            if len(fields) < 10 or fields[3] != _TCP_LISTEN:
-                continue
-            try:
-                local_port = int(fields[1].rsplit(":", 1)[1], 16)
-            except (IndexError, ValueError):
-                continue
-            if local_port == port and fields[9] != "0":
-                found.add(fields[9])
-    return found
-
-
-def _pid_sockets(pid: int, proc: Path = _PROC) -> set[str]:
-    """Socket inodes ``pid`` holds open. Empty when its fds cannot be read."""
-    out: set[str] = set()
-    try:
-        fds = list((proc / str(pid) / "fd").iterdir())
-    except OSError:
-        return out
-    for fd in fds:
-        try:
-            target = os.readlink(fd)
-        except OSError:
-            continue
-        if target.startswith("socket:[") and target.endswith("]"):
-            out.add(target[8:-1])
-    return out
-
-
-def _comm(pid: int, proc: Path = _PROC) -> str:
-    try:
-        return (proc / str(pid) / "comm").read_text(encoding="utf-8").strip()
-    except OSError:
-        return "?"
-
-
-def _unit_pids(
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    cgroup_root: Path = _CGROUP_ROOT,
-) -> set[int]:
-    """The engine unit's processes: its ``MainPID`` and everything in its control group."""
-    try:
-        proc = runner(
-            ["systemctl", "show", "-p", "MainPID", "-p", "ControlGroup", SERVICE],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return set()
-    props = dict(line.split("=", 1) for line in (proc.stdout or "").splitlines() if "=" in line)
-    pids: set[int] = set()
-    main = props.get("MainPID", "0").strip()
-    if main.isdigit() and int(main) > 0:
-        pids.add(int(main))
-    group = props.get("ControlGroup", "").strip()
-    if group.startswith("/"):
-        try:
-            text = (cgroup_root / group.lstrip("/") / "cgroup.procs").read_text(encoding="ascii")
-        except OSError:
-            text = ""
-        pids.update(int(p) for p in text.split() if p.isdigit())
-    return pids
-
-
-def loopback_listener(
-    port: int,
-    *,
-    unit_pids: Callable[[], set[int]] | None = None,
-    proc: Path = _PROC,
-) -> dict[str, Any]:
-    """Who listens on TCP ``port``: ``{"owner", "holder", "pid"}``.
-
-    ``owner`` is ``"none"`` (nothing listens), ``"unit"`` (a process of the
-    engine's unit owns the listening socket), ``"other"`` (another process
-    does; ``holder`` names it) or ``"unknown"`` (a socket listens but no
-    process could be matched to it, typically for want of root). Read from
-    ``/proc/net/tcp`` and the socket inodes in ``/proc/<pid>/fd``; no new
-    dependency, and nothing is written.
-    """
-    inodes = _listening_inodes(port, proc)
-    if not inodes:
-        return {"owner": "none", "holder": None, "pid": None}
-    for pid in sorted((unit_pids or _unit_pids)()):
-        if _pid_sockets(pid, proc) & inodes:
-            return {"owner": "unit", "holder": f"pid {pid} ({_comm(pid, proc)})", "pid": pid}
-    try:
-        candidates = sorted(int(p.name) for p in proc.iterdir() if p.name.isdigit())
-    except OSError:
-        candidates = []
-    for pid in candidates:
-        if _pid_sockets(pid, proc) & inodes:
-            return {"owner": "other", "holder": f"pid {pid} ({_comm(pid, proc)})", "pid": pid}
-    return {
-        "owner": "unknown",
-        "holder": "a process this account cannot see (run as root)",
-        "pid": None,
-    }
-
-
-def stop_engine_unit() -> dict[str, Any]:
-    """``systemctl stop`` the engine's unit. ``{"error": ...}`` when it could not be stopped."""
-    try:
-        proc = subprocess.run(
-            ["systemctl", "stop", SERVICE],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"error": f"{type(exc).__name__}: {exc}"}
-    if proc.returncode != 0:
-        detail = " ".join((proc.stderr or proc.stdout or "").split())[:160]
-        return {"error": detail or f"systemctl exited {proc.returncode}"}
-    return {}
-
-
-def engine_invocation_id() -> str | None:
-    """systemd's ``InvocationID`` of the engine's unit: new on every start, ``None`` when unknown."""
-    try:
-        proc = subprocess.run(
-            ["systemctl", "show", "-p", "InvocationID", "--value", SERVICE],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    value = (proc.stdout or "").strip()
-    return value if proc.returncode == 0 and value else None
-
-
-def http_detail(text: str, limit: int = 120) -> str:
-    """A short, single-line, markup-safe summary of an HTTP error body.
-
-    A foreign server's HTML page is never echoed: it is named, not shown.
-    """
-    stripped = (text or "").lstrip()
-    if stripped[:1] == "<":
-        return "(a non-JSON page, not shown)"
-    flat = "".join(ch if ch.isprintable() else " " for ch in stripped)
-    flat = " ".join(flat.split())
-    for ch in "<>[]":
-        flat = flat.replace(ch, "")
-    if len(flat) > limit:
-        flat = flat[: limit - 1].rstrip() + "…"
-    return flat
-
-
-class EmbedderSwitch:
+class EmbedderSwitch(em.EngineMaintenance):
     """One run of the switch against one engine.
+
+    The engine session, its isolation and identity checks, the queue waits,
+    the archives and the journal on disk are
+    :class:`~hal0.memory.engine_maintenance.EngineMaintenance`'s, run under
+    :data:`NAMES`; this class is the switch's plan and sequence.
 
     ``client`` is a :class:`hal0.memory.hindsight_client.HindsightRestClient`
     pointed at the engine itself, not at hal0-api: the switch's own imports
@@ -1554,16 +725,18 @@ class EmbedderSwitch:
     pair and restarts the engine (returning the ``apply_showcase_dropin``
     dict), ``evidence()`` is :func:`embedder_record.engine_evidence`,
     ``isolate(port, run_id)`` and ``release()`` write and remove the isolation drop-in
-    (:func:`write_isolation_dropin`, :func:`remove_isolation_dropin`; the
+    (:func:`em.write_isolation_dropin`, :func:`em.remove_isolation_dropin`; the
     restart that follows either is ``apply_dropin``'s), ``isolated_port()``
     reads it back, ``client_for(base_url)`` builds the client for the private
     port, ``listener(port)`` says which process listens on a loopback port
-    (:func:`loopback_listener`), ``unit_text()`` is ``systemctl cat`` of the
-    engine's unit (:func:`read_unit_text`), ``unit_invocation()`` is its
-    systemd ``InvocationID`` (:func:`engine_invocation_id`), ``privileged()`` says whether
+    (:func:`em.loopback_listener`), ``unit_text()`` is ``systemctl cat`` of the
+    engine's unit (:func:`em.read_unit_text`), ``unit_invocation()`` is its
+    systemd ``InvocationID`` (:func:`em.engine_invocation_id`), ``privileged()`` says whether
     this process may do all of that, and ``hook(point)`` is the test hook
     described in the module docstring.
     """
+
+    _error_type = SwitchError
 
     def __init__(
         self,
@@ -1583,39 +756,42 @@ class EmbedderSwitch:
         listener: Callable[[int], Mapping[str, Any]] | None = None,
         unit_text: Callable[[], str | None] | None = None,
         unit_invocation: Callable[[], str | None] | None = None,
-        pick_port: Callable[[], int] = free_loopback_port,
+        pick_port: Callable[[], int] = em.free_loopback_port,
         hs_dir: Path | None = None,
-        timeouts: Timeouts | None = None,
+        timeouts: em.Timeouts | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
         progress: Callable[[str], None] | None = None,
         hook: Callable[[str], None] | None = None,
     ) -> None:
-        self._public_client = client
-        self._private_client: Any | None = None
-        self._isolate = isolate or write_isolation_dropin
-        self._release = release or remove_isolation_dropin
-        self._stop_unit = stop_unit or stop_engine_unit
-        self._isolated_port = isolated_port or globals()["isolated_port"]
-        self._client_for = client_for or self._default_client_for
-        self._listener = listener or loopback_listener
-        self._unit_text = unit_text or read_unit_text
-        self._unit_invocation = unit_invocation or engine_invocation_id
-        #: ``api_version`` the preflight read; every restart must bring back the same.
-        self._api_version: str | None = None
+        super().__init__(
+            client,
+            names=NAMES,
+            apply_dropin=apply_dropin or self._default_apply_dropin,
+            evidence=evidence,
+            isolate=isolate,
+            release=release,
+            stop_unit=stop_unit,
+            isolated_port=isolated_port,
+            client_for=client_for,
+            listener=listener,
+            unit_text=unit_text,
+            unit_invocation=unit_invocation,
+            timeouts=timeouts,
+            sleep=sleep,
+            clock=clock,
+            progress=progress,
+            hook=hook,
+        )
         self._pick_port = pick_port
         self._target = target
         self._allow_pending = allow_pending
         self._configured = configured
-        self._apply_dropin = apply_dropin or self._default_apply_dropin
-        self._evidence = evidence or embedder_record.engine_evidence
         self._privileged = privileged or self._default_privileged
         self._hs_dir = hs_dir
-        self.t = timeouts or Timeouts()
-        self._sleep = sleep
-        self._clock = clock
-        self._progress = progress or (lambda _msg: None)
-        self._hook = hook or (lambda _point: None)
+
+    def _refusal(self, message: str) -> SwitchError:
+        return SwitchRefused(message)
 
     # ── host seams (defaults) ───────────────────────────────────────────
 
@@ -1633,26 +809,6 @@ class EmbedderSwitch:
         # account (a root-side verb that accepts a command line is the kind
         # of thing #1740 removed).
         return os.geteuid() == 0
-
-    def _default_client_for(self, base_url: str) -> Any:
-        from hal0.memory.hindsight_client import HindsightRestClient
-
-        return HindsightRestClient(base_url=base_url, api_key=self._public_client.api_key)
-
-    @property
-    def _client(self) -> Any:
-        """The client for where the engine is now: its private port, else its normal address."""
-        return self._private_client if self._private_client is not None else self._public_client
-
-    def _use_port(self, port: int | None) -> None:
-        """Talk to the engine on its private ``port``, or on its normal address for ``None``."""
-        if port is None:
-            self._private_client = None
-        elif (
-            self._private_client is None
-            or self._private_client.base_url != f"http://127.0.0.1:{port}"
-        ):
-            self._private_client = self._client_for(f"http://127.0.0.1:{port}")
 
     @staticmethod
     def _default_apply_dropin(embedder: Embedder) -> dict[str, Any]:
@@ -1676,189 +832,7 @@ class EmbedderSwitch:
             self._configured = embedder_record.configured_embedder(load_hal0_config().memory.models)
         return self._configured
 
-    def _say(self, message: str) -> None:
-        log.info("hal0.memory.embedder_switch", step=message)
-        self._progress(message)
-
     # ── engine calls ────────────────────────────────────────────────────
-
-    def _auth(self) -> dict[str, str]:
-        return {k: v for k, v in self._client._headers().items() if k.lower() != "content-type"}
-
-    async def _json(
-        self,
-        method: str,
-        path: str,
-        *,
-        params: dict[str, Any] | None = None,
-        body: Any | None = None,
-        what: str,
-        bank: str | None = None,
-        timeout_s: float | None = None,
-    ) -> Any:
-        try:
-            return await self._client.request_json(
-                method, path, params=params, json_body=body, timeout_s=timeout_s or self.t.http_s
-            )
-        except httpx.HTTPStatusError as exc:
-            raise SwitchError(
-                f"{what}: the engine answered HTTP {exc.response.status_code} "
-                f"{http_detail(exc.response.text)}".rstrip(),
-                bank=bank,
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise SwitchError(
-                f"{what}: the engine did not answer ({type(exc).__name__}: {exc})", bank=bank
-            ) from exc
-
-    async def _healthy(self) -> bool:
-        try:
-            await self._client.request_json("GET", "/health", timeout_s=5.0)
-        except (httpx.HTTPError, ValueError):
-            return False
-        return True
-
-    async def _wait_health(self) -> bool:
-        deadline = self._clock() + self.t.health_s
-        while True:
-            if await self._healthy():
-                return True
-            if self._clock() >= deadline:
-                return False
-            await self._sleep(self.t.poll_s)
-
-    async def _list_all(
-        self,
-        path: str,
-        params: dict[str, Any] | None = None,
-        *,
-        key: str,
-        what: str,
-        bank: str | None = None,
-        page_size: int = _PAGE,
-    ) -> list[Any]:
-        """Every row of a paged engine list.
-
-        Pages until the engine's own ``total`` is reached or a page comes back
-        empty; a short page is never taken for the end. When the engine gives
-        a total, the rows collected must add up to it.
-        """
-        rows: list[Any] = []
-        total: int | None = None
-        while True:
-            page = await self._json(
-                "GET",
-                path,
-                params={**(params or {}), "limit": page_size, "offset": len(rows)},
-                what=what,
-                bank=bank,
-            )
-            page = page if isinstance(page, dict) else {}
-            if isinstance(page.get("total"), int):
-                total = page["total"]
-            chunk = page.get(key)
-            chunk = chunk if isinstance(chunk, list) else []
-            rows.extend(chunk)
-            if not chunk or (total is not None and len(rows) >= total):
-                break
-        if total is not None and len(rows) != total:
-            raise SwitchError(
-                f"{what}: the engine reports {total} but listed {len(rows)}; the listing "
-                "changed while it was read",
-                bank=bank,
-            )
-        return rows
-
-    async def _bank_rows(self) -> list[dict[str, Any]]:
-        rows = await self._list_all("/v1/default/banks", key="banks", what="listing banks")
-        return [r for r in rows if isinstance(r, dict) and "bank_id" in r]
-
-    async def _bank_ids(self) -> list[str]:
-        return [str(r["bank_id"]) for r in await self._bank_rows()]
-
-    async def _bank_row(self, bank: str) -> dict[str, Any]:
-        rows = await self._list_all(
-            "/v1/default/banks", {"q": bank}, key="banks", what="reading the bank", bank=bank
-        )
-        for row in rows:
-            if isinstance(row, dict) and row.get("bank_id") == bank:
-                return row
-        return {}
-
-    async def bank_state(self, bank: str) -> dict[str, Any]:
-        """Counts, queue depth and fingerprint for one bank, uncached.
-
-        Facts are every memory unit that is not an observation
-        (``nodes_by_fact_type``); mental models include the ones that back a
-        knowledge page; directives include inactive ones. The fingerprint is
-        described by :data:`FINGERPRINT_SIGNALS`.
-        """
-        base = _bank_path(bank)
-        stats = await self._json(
-            "GET", f"{base}/stats", params={"refresh": "true"}, what="reading stats", bank=bank
-        )
-        stats = stats if isinstance(stats, dict) else {}
-        by_type = stats.get("nodes_by_fact_type")
-        by_type = by_type if isinstance(by_type, dict) else {}
-        observations = int(stats.get("total_observations") or by_type.get("observation") or 0)
-        facts = sum(int(v or 0) for k, v in by_type.items() if k != "observation")
-        ops = stats.get("operations_by_status")
-        ops = ops if isinstance(ops, dict) else {}
-        models = await self._list_all(
-            f"{base}/mental-models",
-            {"detail": "content"},
-            key="items",
-            what="reading mental models",
-            bank=bank,
-        )
-        directives = await self._list_all(
-            f"{base}/directives",
-            {"active_only": "false"},
-            key="items",
-            what="reading directives",
-            bank=bank,
-        )
-        try:
-            config = await self._json("GET", f"{base}/config", what="reading the config", bank=bank)
-        except SwitchError:
-            # The per-bank config API can be switched off (features.bank_config_api).
-            config = "unavailable"
-        try:
-            tree = await self._json(
-                "GET", f"{base}/knowledge-base/tree", what="reading the knowledge base", bank=bank
-            )
-            knowledge: Any = sorted(
-                (_knowledge_nodes(tree if isinstance(tree, dict) else {})),
-                key=lambda n: str(n.get("id")),
-            )
-        except SwitchError:
-            knowledge = "unavailable"
-        row = await self._bank_row(bank)
-        definitions = [
-            {k: m.get(k) for k in _MODEL_DEFINITION_KEYS} for m in models if isinstance(m, dict)
-        ]
-        return {
-            "counts": {
-                "facts": facts,
-                "observations": observations,
-                "mental_models": len(models),
-                "directives": len(directives),
-                "documents": int(stats.get("total_documents") or 0),
-            },
-            "links": int(stats.get("total_links") or 0),
-            "pending": int(ops.get("pending") or 0),
-            "processing": int(ops.get("processing") or 0),
-            "pending_consolidation": int(stats.get("pending_consolidation") or 0),
-            "listed_facts": row.get("fact_count"),
-            "nodes_total": int(stats.get("total_nodes") or 0),
-            "fingerprint": {
-                "directives": _digest(directives),
-                "config": _digest(config),
-                "mental_models": _digest(definitions),
-                "document": row.get("last_document_at"),
-                "knowledge": _digest(knowledge),
-            },
-        }
 
     async def content_state(self, bank: str) -> dict[str, Any]:
         """What ``bank`` holds, by id, as :data:`CONTENT_SIGNALS` describes.
@@ -1871,7 +845,7 @@ class EmbedderSwitch:
         document and fact, which a bank of a thousand documents answers in a
         few dozen requests.
         """
-        base = _bank_path(bank)
+        base = em.bank_path(bank)
         documents = await self._list_all(
             f"{base}/documents",
             key="items",
@@ -1912,491 +886,20 @@ class EmbedderSwitch:
             "documents": {
                 str(d.get("id")): d.get("text_length") for d in documents if isinstance(d, dict)
             },
-            "facts": {doc: _digest(rows) for doc, rows in by_document.items()},
+            "facts": {doc: em.digest(rows) for doc, rows in by_document.items()},
             "model_content": {
                 str(m.get("id")): {
                     "refreshed": m.get("last_refreshed_at"),
-                    "content": _digest(m.get("content")),
+                    "content": em.digest(m.get("content")),
                 }
                 for m in models
                 if isinstance(m, dict)
             },
         }
 
-    async def _quiet_state(self, bank: str) -> dict[str, Any]:
-        """:meth:`bank_state` once the engine has stopped working on the bank.
-
-        Quiet is no pending or processing operation and a consolidation queue
-        that has stopped moving between two reads. Counts taken while the
-        engine is still consolidating describe a bank that is about to
-        change. Bounded: after ``quiet_s`` the last read is returned as it is,
-        and the comparisons made on it treat observations as the one count
-        the engine may still move.
-        """
-        deadline = self._clock() + self.t.quiet_s
-        last: int | None = None
-        while True:
-            state = await self.bank_state(bank)
-            busy = state["pending"] or state["processing"]
-            if (not busy and state["pending_consolidation"] == last) or self._clock() >= deadline:
-                return state
-            last = state["pending_consolidation"]
-            await self._sleep(self.t.poll_s)
-
-    async def _wait_operation(
-        self, bank: str, operation_id: str, *, timeout_s: float, what: str
-    ) -> dict[str, Any]:
-        deadline = self._clock() + timeout_s
-        path = f"{_bank_path(bank)}/operations/{quote(operation_id, safe='')}"
-        # A small bank's export or restore is done in well under a second, so
-        # the first looks come quickly and only a long one settles at poll_s.
-        delay = min(0.2, self.t.poll_s)
-        while True:
-            op = await self._json("GET", path, what=what, bank=bank)
-            op = op if isinstance(op, dict) else {}
-            status = op.get("status")
-            if status == "completed":
-                return op
-            if status in _OP_FAILED:
-                raise SwitchError(
-                    f"{what} ended as {status}: {op.get('error_message') or 'no error message'}",
-                    bank=bank,
-                )
-            if self._clock() >= deadline:
-                raise SwitchError(
-                    f"{what} did not finish within {timeout_s:g}s (last status: {status})",
-                    bank=bank,
-                    details={"operation_id": operation_id},
-                )
-            await self._sleep(delay)
-            delay = min(self.t.poll_s, delay * 1.5)
-
-    async def _delete_bank(self, bank: str) -> None:
-        """Delete ``bank``. A bank that is already gone is a success."""
-        try:
-            await self._client.request_json("DELETE", _bank_path(bank), timeout_s=self.t.delete_s)
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                return
-            raise SwitchError(
-                f"deleting the bank: the engine answered HTTP {exc.response.status_code} "
-                f"{http_detail(exc.response.text)}".rstrip(),
-                bank=bank,
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise SwitchError(
-                f"deleting the bank: the engine did not answer ({type(exc).__name__}: {exc})",
-                bank=bank,
-            ) from exc
-
-    async def _wait_quiet(self, bank: str) -> None:
-        """Wait until ``bank`` has no pending or processing operation, before it is deleted."""
-        deadline = self._clock() + self.t.quiet_s
-        while True:
-            state = await self.bank_state(bank)
-            if not state["pending"] and not state["processing"]:
-                return
-            if self._clock() >= deadline:
-                raise SwitchError(
-                    f"bank {bank} still has {state['pending']} pending and {state['processing']} "
-                    f"processing operations after {self.t.quiet_s:g}s; it is not deleted "
-                    "until they finish",
-                    bank=bank,
-                )
-            await self._sleep(self.t.poll_s)
-
     # ── the engine: where it listens and what it runs ───────────────────
 
-    async def _public_answers(self) -> bool:
-        """True when anything answers at the engine's normal address.
-
-        Only a refused connection means nothing listens there. Anything else,
-        a connection that was accepted and then timed out or was reset
-        included, means something holds the normal address, so the engine is
-        not isolated.
-        """
-        try:
-            await self._public_client.request_json("GET", "/health", timeout_s=3.0)
-        except httpx.ConnectError:
-            return False
-        except (httpx.HTTPError, ValueError):
-            return True
-        return True
-
-    def _normal_port(self) -> int | None:
-        try:
-            return urlsplit(str(self._public_client.base_url)).port
-        except (AttributeError, ValueError):
-            return None
-
-    def _leak_message(self) -> str:
-        """Why the engine still answers at its normal address, naming the drop-in when one wins."""
-        text = self._unit_text()
-        later = later_exec_start_dropins(text) if text else []
-        if later:
-            path, command = later[0]
-            return (
-                f"the engine still answers at its normal address, so it is not isolated: "
-                f"{path} sorts after {ISOLATION_DROP_IN_NAME} and sets ExecStart "
-                f"(`{command or '(cleared)'}`), which replaces the switch's private command. "
-                f"Rename it so it sorts before {ISOLATION_DROP_IN_NAME}, run "
-                "`systemctl daemon-reload`, then run the switch again"
-            )
-        return (
-            "the engine still answers at its normal address, so it is not isolated: a "
-            f"drop-in that sorts after {ISOLATION_DROP_IN_NAME} replaces ExecStart, or "
-            "something else listens there. The switch does not run on an engine other "
-            "clients can reach"
-        )
-
-    def _listener_owner(self, port: int) -> Mapping[str, Any]:
-        try:
-            return self._listener(port)
-        except Exception as exc:  # a /proc read gone wrong is "cannot tell", not a crash
-            return {"owner": "unknown", "holder": f"unreadable ({type(exc).__name__})"}
-
-    async def _foreign(
-        self, port: int, seen: Mapping[str, Any], journal: Journal | None = None
-    ) -> SwitchError:
-        """Stop the engine's unit, leave it stopped, and say what to do.
-
-        The unit was started on a port someone else holds, so it cannot bind
-        and systemd would restart it every few seconds for ever (each boot
-        outlasts ``StartLimitIntervalSec``, so the start limit never trips).
-        The gate stays set and the journal stays; ``--resume`` starts it again.
-        """
-        stopped = await asyncio.to_thread(self._stop_unit)
-        error = stopped.get("error")
-        if journal is not None:
-            journal.engine_stopped = not error
-            with contextlib.suppress(OSError):
-                self._save(journal)
-        who = seen.get("holder") or "another process"
-        facts = {"foreign_port": port, "foreign_holder": who}
-        held = f"127.0.0.1:{port}, the engine's private port, is held by {who}, not by {SERVICE}. "
-        if error:
-            return SwitchError(
-                held + f"{SERVICE} could not be stopped ({error}), so it may be restarting into "
-                f"the taken port: run `systemctl stop {SERVICE}`, free the port, then run "
-                "`hal0 memory embedder switch --resume`. Memory writes stay paused",
-                details=facts,
-                resumable=True,
-            )
-        return SwitchError(
-            held + f"{SERVICE} was stopped so it does not restart into the taken port; it stays "
-            "stopped, memory writes and recall stay paused. Free the port (stop that process), "
-            "then run `hal0 memory embedder switch --resume`",
-            details=facts,
-            resumable=True,
-        )
-
-    async def _confirm_version(self, where: str) -> None:
-        """``GET /version`` answers as the engine the preflight saw, with export and import on."""
-        try:
-            version = await self._client.request_json("GET", "/version", timeout_s=10.0)
-        except (httpx.HTTPError, ValueError) as exc:
-            raise SwitchError(
-                f"the process on {where} answers /health but not /version "
-                f"({type(exc).__name__}), so it is not confirmed to be the memory engine"
-            ) from exc
-        version = version if isinstance(version, dict) else {}
-        features = version.get("features") if isinstance(version.get("features"), dict) else {}
-        api = version.get("api_version")
-        if not api or (self._api_version is not None and api != self._api_version):
-            raise SwitchError(
-                f"the process on {where} reports api_version {api!r}, not "
-                f"{self._api_version or 'an engine version'!r}: it is not the engine the "
-                "switch checked before it started"
-            )
-        if not features.get("document_export_api") or not features.get("document_import_api"):
-            raise SwitchError(
-                f"the engine on {where} has its export or import API off "
-                "(features on /version) after the restart"
-            )
-
-    async def _start_engine(
-        self,
-        embedder: Embedder,
-        *,
-        port: int | None,
-        run_id: str,
-        journal: Journal | None = None,
-    ) -> None:
-        """Restart the engine on ``embedder``, private on ``port`` or at its normal address.
-
-        Writes or removes the isolation drop-in, renders the embedder drop-in,
-        reloads and restarts once, then confirms from the engine itself: it
-        answers where it should, its environment names ``embedder``, and when
-        private, nothing answers at the normal address any more.
-        """
-        if port is not None:
-            placed = await asyncio.to_thread(self._isolate, port, run_id)
-        else:
-            placed = await asyncio.to_thread(self._release)
-        if placed.get("error"):
-            raise SwitchError(
-                f"could not {'isolate' if port is not None else 'release'} the engine: "
-                f"{placed['error']}"
-            )
-        self._use_port(port)
-        result = await asyncio.to_thread(self._apply_dropin, embedder)
-        if result.get("error"):
-            raise SwitchError(f"could not restart the engine: {result['error']}")
-        if (
-            result.get("restarted") is True
-            and journal is not None
-            and any(e.restore_op for e in journal.banks)
-        ):
-            # The unit was restarted, which ends every worker it ran: a restore
-            # sent before this can no longer be writing.
-            for e in journal.banks:
-                if e.restore_op:
-                    e.restore_op["restarted"] = True
-            self._save(journal)
-        where = f"its private port {port}" if port is not None else "its normal address"
-        deadline = self._clock() + self.t.health_s
-        while True:
-            if port is not None:
-                seen = self._listener_owner(port)
-                if seen.get("owner") == "other":
-                    # Something else took the port: fail now, not after the timeout.
-                    raise await self._foreign(port, seen, journal)
-            if await self._healthy():
-                break
-            # Up, but where it always was: do not wait out the whole timeout.
-            if port is not None and await self._public_answers():
-                raise SwitchError(self._leak_message())
-            if self._clock() >= deadline:
-                raise SwitchError(
-                    f"the engine did not answer /health on {where} within {self.t.health_s:g}s "
-                    f"of its restart on {describe_embedder(*embedder)} "
-                    "(see `journalctl -u hindsight-api`)"
-                )
-            await self._sleep(self.t.poll_s)
-        if port is not None:
-            # /health on the port proves only that something answers there.
-            seen = self._listener_owner(port)
-            if seen.get("owner") == "other":
-                raise await self._foreign(port, seen, journal)
-            if seen.get("owner") != "unit":
-                holder = seen.get("holder") or "no listener found"
-                raise SwitchError(
-                    f"something answers on 127.0.0.1:{port}, but the listening socket could not "
-                    f"be matched to a process of {SERVICE} ({holder}), so it is not confirmed "
-                    "to be the engine. Run the switch as root"
-                )
-        await self._confirm_version(where)
-        live: Embedder | None = None
-        for _ in range(10):
-            # Read from the unit's main process; on a private port that is the
-            # process confirmed above to own the listening socket.
-            live = _pair(self._evidence().get("live"))
-            if live == embedder:
-                break
-            await self._sleep(self.t.poll_s)
-        else:
-            runs = (
-                describe_embedder(*live) if live is not None else "an environment hal0 cannot read"
-            )
-            raise SwitchError(
-                f"the engine is up but runs {runs}, not {describe_embedder(*embedder)}: another "
-                "drop-in, or the unit's EnvironmentFile, overrides the embedder"
-            )
-        if port is not None and await self._public_answers():
-            raise SwitchError(self._leak_message())
-        if journal is not None and journal.engine_stopped:
-            journal.engine_stopped = False
-            with contextlib.suppress(OSError):
-                self._save(journal)
-
-    async def _ensure_engine(
-        self,
-        embedder: Embedder,
-        *,
-        port: int | None,
-        run_id: str,
-        journal: Journal | None = None,
-    ) -> None:
-        """Do nothing when the engine is where and what it should be; otherwise put it there.
-
-        A restore embeds with whatever the engine runs at that moment, so this
-        is asked before every restore and at the start of every resume, from
-        the engine itself and not from the record or the journal.
-        """
-        self._use_port(port)
-        if (
-            self._isolated_port() == port
-            and await self._healthy()
-            and _pair(self._evidence().get("live")) == embedder
-            and not (port is not None and await self._public_answers())
-            and (port is None or self._listener_owner(port).get("owner") == "unit")
-        ):
-            if port is not None and journal is not None and journal.engine_stopped:
-                # Started again outside the switch: the unit is healthy and holds the port.
-                journal.engine_stopped = False
-                with contextlib.suppress(OSError):
-                    self._save(journal)
-            return
-        self._say(
-            f"putting the engine on {describe_embedder(*embedder)}, "
-            + ("isolated" if port is not None else "at its normal address")
-        )
-        await self._start_engine(embedder, port=port, run_id=run_id, journal=journal)
-
     # ── archives ────────────────────────────────────────────────────────
-
-    def _make_archive_dir(self, run_id: str) -> Path:
-        """Create this run's ``0700`` archive directory under the shared backups directory."""
-        from hal0.config.migrations.runner_system import _backups_dir
-
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        run_dir = _backups_dir() / f"memory-embedder-switch-{stamp}-{run_id}"
-        nofollow.ensure_dir(run_dir, mode=0o700, owner=perms.state_root_owner(), create=True)
-        return run_dir
-
-    @contextlib.contextmanager
-    def _archive_dir_fd(self, journal: Journal) -> Iterator[int]:
-        fd = nofollow.open_dir(journal.archive_dir)
-        try:
-            yield fd
-        finally:
-            os.close(fd)
-
-    async def _export_bank(self, journal: Journal, entry: BankEntry, index: int) -> dict[str, int]:
-        """Export one bank into the run's archive directory; returns the archive's counts."""
-        bank = entry.bank
-        submit = await self._json(
-            "POST",
-            f"{_bank_path(bank)}/transfer/export",
-            params={
-                "include_data": "true",
-                "include_bank_config": "true",
-                "include_history": "false",
-            },
-            what="starting the export",
-            bank=bank,
-        )
-        operation_id = str((submit or {}).get("operation_id") or "")
-        if not operation_id:
-            raise SwitchError("the export returned no operation id", bank=bank)
-        op = await self._wait_operation(
-            bank, operation_id, timeout_s=self.t.export_s, what="the export"
-        )
-        meta = op.get("result_metadata")
-        url = self._download_path(meta if isinstance(meta, dict) else {}, bank)
-        name = f"{index:03d}-{re.sub(r'[^A-Za-z0-9._-]', '_', bank)[:80]}.zip"
-        owner = perms.state_root_owner()
-        with self._archive_dir_fd(journal) as dfd:
-            part = f".{name}.part"
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(part, dir_fd=dfd)
-            fd = os.open(
-                part,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                0o600,
-                dir_fd=dfd,
-            )
-            try:
-                with os.fdopen(fd, "wb") as fh:
-                    if owner is not None and os.geteuid() == 0:
-                        os.fchown(fh.fileno(), *owner)
-                    try:
-                        async with self._client._http.stream(
-                            "GET",
-                            url,
-                            headers=self._auth(),
-                            timeout=httpx.Timeout(self.t.export_s, connect=3.0),
-                        ) as resp:
-                            resp.raise_for_status()
-                            async for chunk in resp.aiter_bytes():
-                                fh.write(chunk)
-                    except httpx.HTTPError as exc:
-                        raise SwitchError(
-                            f"downloading the archive failed ({type(exc).__name__}: {exc})",
-                            bank=bank,
-                        ) from exc
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                # A bank exported again within a run (it moved, or it is
-                # being rebuilt) never overwrites its earlier archive.
-                kept = 0
-                while self._exists_in(dfd, name):
-                    kept += 1
-                    earlier = f"{name[:-4]}.earlier-{kept}.zip"
-                    if not self._exists_in(dfd, earlier):
-                        os.rename(name, earlier, src_dir_fd=dfd, dst_dir_fd=dfd)
-                os.replace(part, name, src_dir_fd=dfd, dst_dir_fd=dfd)
-                os.fsync(dfd)
-            except BaseException:
-                with contextlib.suppress(OSError):
-                    os.unlink(part, dir_fd=dfd)
-                raise
-        entry.archive = name
-        return self._archive_counts(journal, entry)
-
-    @staticmethod
-    def _exists_in(dir_fd: int, name: str) -> bool:
-        try:
-            os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return False
-        return True
-
-    @staticmethod
-    def _download_path(meta: Mapping[str, Any], bank: str) -> str:
-        """The archive's path on the engine. Never a URL on another host."""
-        raw = meta.get("download_url")
-        if isinstance(raw, str) and raw.startswith("/v1/default/files/download/"):
-            return raw
-        key = meta.get("storage_key")
-        if isinstance(key, str) and key and ".." not in key.split("/"):
-            return "/v1/default/files/download/" + quote(key, safe="/")
-        raise SwitchError(
-            "the export finished without a download location on the engine", bank=bank
-        )
-
-    def _archive_counts(self, journal: Journal, entry: BankEntry) -> dict[str, int]:
-        """What the archive says it holds. Raises :class:`SwitchError` for an unusable one."""
-        bank = entry.bank
-        try:
-            with self._archive_dir_fd(journal) as dfd:
-                fd = os.open(str(entry.archive), os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
-                with os.fdopen(fd, "rb") as fh:
-                    if os.fstat(fh.fileno()).st_size == 0:
-                        raise SwitchError("the archive is empty", bank=bank)
-                    with zipfile.ZipFile(fh) as zf:
-                        manifest = json.loads(zf.read("manifest.json"))
-                        models: int | None = None
-                        if "mental_models.json" in zf.namelist():
-                            rows = json.loads(zf.read("mental_models.json"))
-                            models = len(rows) if isinstance(rows, list) else None
-        except SwitchError:
-            raise
-        except (OSError, KeyError, ValueError, zipfile.BadZipFile) as exc:
-            raise SwitchError(
-                f"the archive is not a readable transfer archive ({type(exc).__name__}: {exc})",
-                bank=bank,
-            ) from exc
-        if not isinstance(manifest, dict) or manifest.get("archive_type") != "bank":
-            raise SwitchError("the archive is not a whole-bank archive", bank=bank)
-        if manifest.get("source_bank_id") != bank:
-            raise SwitchError(
-                f"the archive is of bank {manifest.get('source_bank_id')!r}, not this one",
-                bank=bank,
-            )
-        if models is None:
-            # ``mental_model_count`` leaves out the models that back a
-            # knowledge page; the pages are counted separately.
-            models = int(manifest.get("mental_model_count") or 0) + int(
-                manifest.get("knowledge_page_count") or 0
-            )
-        return {
-            "facts": int(manifest.get("fact_count") or 0),
-            "observations": int(manifest.get("observation_count") or 0),
-            "mental_models": models,
-            "directives": int(manifest.get("directive_count") or 0),
-            "documents": int(manifest.get("document_count") or 0),
-        }
 
     async def _export_verified(self, journal: Journal, entry: BankEntry, index: int) -> None:
         """Export ``entry`` until the bank stood still for it and the archive agrees.
@@ -2414,10 +917,10 @@ class EmbedderSwitch:
             before = await self._quiet_state(entry.bank)
             archived = await self._export_bank(journal, entry, index)
             after = await self.bank_state(entry.bank)
-            moved = _diff(before["counts"], after["counts"]) or _signals_moved(
+            moved = em.diff(before["counts"], after["counts"]) or em.signals_moved(
                 before["fingerprint"], after["fingerprint"]
             )
-            differs = _diff(after["counts"], archived)
+            differs = em.diff(after["counts"], archived)
             extra = archived["observations"] - after["counts"]["observations"]
             if journal.allow_pending:
                 # Operations may still be writing, so the archive, not the
@@ -2427,7 +930,7 @@ class EmbedderSwitch:
                 last = "it changed while it was being exported"
                 continue
             if differs or extra > 0:
-                shown = _diff_text(differs) or f"observations {archived['observations']}"
+                shown = em.diff_text(differs) or f"observations {archived['observations']}"
                 last = (
                     f"its archive does not match it: {shown} (the archive's count, then the "
                     "bank's). The engine's export leaves out a fact that belongs to no document"
@@ -2451,124 +954,18 @@ class EmbedderSwitch:
             bank=entry.bank,
         )
 
-    async def _restore(
-        self, journal: Journal, entry: BankEntry, target_id: str, *, via: str | None = None
-    ) -> dict[str, Any]:
-        """Restore ``entry``'s archive into ``target_id``; returns that bank's state.
-
-        The engine records a restore against the bank named in the URL, which
-        must therefore exist while the target must not: ``via`` is that bank,
-        the original by default.
-        """
-        assert self._target is not None
-        await self._ensure_engine(
-            self._target, port=journal.private_port, run_id=journal.run_id, journal=journal
-        )
-        url_bank = via or entry.bank
-        try:
-            with self._archive_dir_fd(journal) as dfd:
-                fd = os.open(str(entry.archive), os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
-                with os.fdopen(fd, "rb") as fh:
-                    resp = await self._client._http.post(
-                        f"{_bank_path(url_bank)}/transfer/import",
-                        headers=self._auth(),
-                        params={"mode": "restore", "target_bank_id": target_id},
-                        files={"file": (str(entry.archive), fh, "application/zip")},
-                        timeout=httpx.Timeout(self.t.export_s, connect=3.0),
-                    )
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            raise SwitchError(
-                f"starting the restore into {target_id}: the engine answered HTTP "
-                f"{exc.response.status_code} {http_detail(exc.response.text)}".rstrip(),
-                bank=entry.bank,
-            ) from exc
-        except (OSError, httpx.HTTPError) as exc:
-            raise SwitchError(
-                f"starting the restore into {target_id} failed ({type(exc).__name__}: {exc})",
-                bank=entry.bank,
-            ) from exc
-        body = resp.json() if resp.content else {}
-        operation_id = str((body or {}).get("operation_id") or "")
-        if not operation_id:
-            raise SwitchError("the restore returned no operation id", bank=entry.bank)
-        entry.restore_op = {
-            "bank": url_bank,
-            "id": operation_id,
-            "target": target_id,
-            "engine_pid": self._engine_pid(journal),
-            "engine_invocation": self._invocation(),
-        }
-        self._save(journal)
-        budget = self._restore_budget(entry)
-        try:
-            await self._wait_operation(
-                url_bank, operation_id, timeout_s=budget, what=f"the restore into {target_id}"
-            )
-        except SwitchError as exc:
-            # Recorded against the scratch bank for a restore into the own
-            # id; it is still this bank's failure.
-            exc.bank = entry.bank
-            raise
-        entry.restore_op = None
-        self._save(journal)
-        # Counted once the engine has stopped working on the new bank.
-        return await self._quiet_state(target_id)
-
-    def _restore_budget(self, entry: BankEntry) -> float:
-        embedded = entry.counts.get("facts", 0) + entry.counts.get("observations", 0)
-        return max(self.t.restore_floor_s, self.t.restore_factor * embedded / RESTORE_FACTS_PER_S)
-
-    def _engine_pid(self, journal: Journal) -> int | None:
-        """The process that holds the engine's private port, when it is the engine's unit."""
-        if journal.private_port is None:
-            return None
-        seen = self._listener_owner(journal.private_port)
-        pid = seen.get("pid")
-        return pid if seen.get("owner") == "unit" and isinstance(pid, int) else None
-
-    def _invocation(self) -> str | None:
-        """The engine unit's current ``InvocationID``; ``None`` when it cannot be read."""
-        try:
-            value = self._unit_invocation()
-        except Exception:  # cannot tell is not a crash
-            return None
-        return value if isinstance(value, str) and value else None
-
-    def _engine_restarted_since(self, journal: Journal, op: Mapping[str, Any]) -> bool | None:
-        """Whether the engine restarted since ``op`` was sent; ``None`` when it cannot be told.
-
-        Either signal is enough: the process on the private port is another
-        one, or the unit's ``InvocationID`` (new on every start, an automatic
-        restart included) is another one. Each is compared only when it was
-        recorded at the send and can be read now. A restart the switch made
-        itself is marked on the operation (``restarted``) and is enough alone.
-        """
-        if op.get("restarted"):
-            return True
-        known = False
-        for then, now in (
-            (op.get("engine_pid"), self._engine_pid(journal)),
-            (op.get("engine_invocation"), self._invocation()),
-        ):
-            if then is not None and now is not None:
-                if then != now:
-                    return True
-                known = True
-        return False if known else None
-
     async def _restore_checked(
         self, journal: Journal, entry: BankEntry, *, via: str | None = None
     ) -> None:
         """Restore into the temporary id and require the result to match the archive."""
-        state = await self._restore(journal, entry, entry.temp, via=via)
+        state = await self._restore(journal, entry, entry.temp, embedder=self._target, via=via)
         entry.restored_counts = state["counts"]
         entry.restored_fingerprint = state["fingerprint"]
-        differs = _diff(entry.counts, state["counts"], observation_floor=True)
+        differs = em.diff(entry.counts, state["counts"], observation_floor=True)
         if differs:
             self._save(journal)
             raise SwitchError(
-                f"bank {entry.bank} did not come back whole: {_diff_text(differs)}",
+                f"bank {entry.bank} did not come back whole: {em.diff_text(differs)}",
                 bank=entry.bank,
                 details={"differs": differs},
             )
@@ -2590,51 +987,6 @@ class EmbedderSwitch:
             )
 
     # ── journal, lock, record ───────────────────────────────────────────
-
-    def _save(self, journal: Journal) -> None:
-        """Write the journal and its mirror, each atomically and synced to disk."""
-        journal.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
-        text = json.dumps(journal.to_dict(), indent=2) + "\n"
-        _write_synced(journal_path(), text, mode=0o644)
-        _write_synced(Path(journal.archive_dir) / mirror_name(), text, mode=0o600)
-
-    def _retire_journal(self, journal: Journal) -> None:
-        """Close a finished run: the mirror keeps the last word, the primary goes."""
-        journal.updated_at = datetime.now(UTC).isoformat(timespec="seconds")
-        text = json.dumps(journal.to_dict(), indent=2) + "\n"
-        # Best effort: a mirror that cannot be written (its directory was
-        # removed) must not keep a finished run looking unfinished for ever.
-        with contextlib.suppress(OSError):
-            _write_synced(Path(journal.archive_dir) / mirror_name(), text, mode=0o600)
-        journal_path().unlink(missing_ok=True)
-
-    @contextlib.contextmanager
-    def _lock(self) -> Iterator[None]:
-        """Hold the one switch lock for the life of the block.
-
-        An ``flock`` on a file under ``state/``: the kernel drops it when the
-        process ends, so a killed run never leaves a stale lock behind.
-        """
-        path = lock_path()
-        os.close(nofollow.open_dir(path.parent, create=True))
-        # Read-only is enough for ``flock``, and it means a lock file left
-        # root-owned by one run never locks the service account out of the next.
-        fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
-        try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise SwitchRefused(
-                    "another `hal0 memory embedder switch` is running on this box "
-                    f"(it holds {path}); wait for it to finish"
-                ) from None
-            owner = perms.state_root_owner()
-            if owner is not None:
-                with contextlib.suppress(OSError):
-                    os.fchown(fd, *owner)
-            yield
-        finally:
-            os.close(fd)
 
     @staticmethod
     def _record_from(previous: Mapping[str, Any], *, mixed: bool | None = None) -> EmbedderRecord:
@@ -2672,7 +1024,7 @@ class EmbedderSwitch:
             "mixed": False,
             "engine": {"reachable": False, "version": None},
             "banks": [],
-            "totals": dict.fromkeys(COUNT_KEYS, 0),
+            "totals": dict.fromkeys(em.COUNT_KEYS, 0),
             "disk": None,
             "estimate_s": None,
             "estimate": None,
@@ -2722,7 +1074,7 @@ class EmbedderSwitch:
                 f"{hs_dir}/.pg0.restore-failed marks the engine's data directory as untrusted "
                 "after a failed upgrade rollback; run `hal0 update` to restore it first",
             )
-        job = update_in_progress()
+        job = em.update_in_progress()
         if job is not None:
             refuse(
                 "update_in_progress",
@@ -2747,7 +1099,7 @@ class EmbedderSwitch:
             # Look at the engine where it is, so that what it holds is in the report.
             self._use_port(private or None)
         # The unit: what isolating the engine would rewrite, and what would fight it.
-        refusals.extend(unit_refusals(self._unit_text(), self._normal_port()))
+        refusals.extend(em.unit_refusals(NAMES, self._unit_text(), self._normal_port()))
 
         # The record and the engine's environment. Read only: a run writes the
         # record down after every refusal has been evaluated.
@@ -2852,7 +1204,7 @@ class EmbedderSwitch:
                     {k: state[k] for k in ("counts", "links", "pending", "processing")}
                     | {"bank": bank}
                 )
-                for key in COUNT_KEYS:
+                for key in em.COUNT_KEYS:
                     plan["totals"][key] += state["counts"][key]
                 if (
                     isinstance(state["listed_facts"], int)
@@ -2909,7 +1261,7 @@ class EmbedderSwitch:
         plan["estimate"] = {
             "restarts_s": round(RESTARTS_PER_RUN * RESTART_S),
             "per_bank_s": round(banks * (1 + RESTORES_PER_BANK) * OPERATION_FLOOR_S),
-            "embedding_s": round(RESTORES_PER_BANK * embedded / RESTORE_FACTS_PER_S),
+            "embedding_s": round(RESTORES_PER_BANK * embedded / em.RESTORE_FACTS_PER_S),
         }
         plan["estimate_s"] = sum(plan["estimate"].values())
         if target != configured:
@@ -2925,16 +1277,16 @@ class EmbedderSwitch:
         hs_dir: Path, refuse: Callable[[str, str], None], warnings: list[str]
     ) -> dict[str, Any]:
         """Free space on the two filesystems a run fills: the engine's and the archives'."""
-        store_bytes = _du_bytes(hs_dir / _PG_DIR)
-        store_at = _nearest_existing(hs_dir / _PG_DIR)
-        archive_at = _nearest_existing(archive_root())
+        store_bytes = em.du_bytes(hs_dir / em.PG_DIR)
+        store_at = em.nearest_existing(hs_dir / em.PG_DIR)
+        archive_at = em.nearest_existing(em.archive_root())
         store_free = shutil.disk_usage(store_at).free
         archive_free = shutil.disk_usage(archive_at).free
         store_need = int(store_bytes * STORE_FREE_FACTOR)
         archive_need = int(store_bytes * ARCHIVE_FREE_FACTOR)
-        same = _device(store_at) == _device(archive_at)
+        same = em.device(store_at) == em.device(archive_at)
         disk = {
-            "archive_root": str(archive_root()),
+            "archive_root": str(em.archive_root()),
             "store_bytes": store_bytes,
             "same_filesystem": same,
             "store_free_bytes": store_free,
@@ -2944,7 +1296,7 @@ class EmbedderSwitch:
         }
         if store_bytes == 0:
             warnings.append(
-                f"could not measure the engine's data directory ({hs_dir}/{_PG_DIR}); "
+                f"could not measure the engine's data directory ({hs_dir}/{em.PG_DIR}); "
                 "free space was not checked"
             )
             return disk
@@ -2985,7 +1337,7 @@ class EmbedderSwitch:
                 archive_dir = self._make_archive_dir(run_id)
             except OSError as exc:
                 raise SwitchRefused(
-                    f"could not create the archive directory under {archive_root()}: {exc}", plan
+                    f"could not create the archive directory under {em.archive_root()}: {exc}", plan
                 ) from exc
             journal = Journal(
                 run_id=run_id,
@@ -3027,7 +1379,7 @@ class EmbedderSwitch:
                     raise SwitchError(
                         f"127.0.0.1:{exc.details['foreign_port']}, the engine's private port "
                         f"for this run, is held by {exc.details['foreign_holder']}, not by "
-                        f"{SERVICE}. Nothing was exported; the run is undone and the engine is "
+                        f"{em.SERVICE}. Nothing was exported; the run is undone and the engine is "
                         "back at its normal address. Stop that process (or wait for it to let "
                         "the port go) and run the switch again: it picks a new port each run"
                     ) from exc
@@ -3111,33 +1463,6 @@ class EmbedderSwitch:
             f"Banks on the engine: {', '.join(b for b in ids if b not in temps) or 'none'}. "
             f"Banks under temporary ids from a switch: {', '.join(temps) or 'none'}."
         )
-
-    async def _settle(self, journal: Journal) -> dict[str, dict[str, Any]]:
-        """Wait for every bank's queue to drain; returns each bank's state."""
-        deadline = self._clock() + self.t.settle_s
-        while True:
-            ids = [b for b in await self._bank_ids() if b not in journal.own_ids()]
-            states = {bank: await self.bank_state(bank) for bank in ids}
-            busy = {b: s for b, s in states.items() if s["pending"] or s["processing"]}
-            if not busy or journal.allow_pending:
-                return states
-            if self._clock() >= deadline:
-                listing = ", ".join(
-                    f"{bank} ({s['pending']} pending, {s['processing']} processing)"
-                    for bank, s in busy.items()
-                )
-                raise SwitchError(
-                    f"operations queued before the pause did not finish within "
-                    f"{self.t.settle_s:g}s: {listing}"
-                )
-            await self._sleep(self.t.poll_s)
-
-    async def _pause(self, journal: Journal) -> None:
-        """Pause writes through hal0 and let the queues drain before the engine is restarted."""
-        self._say("pausing memory writes")
-        write_gate.engage_gate(run_id=journal.run_id, archive_dir=journal.archive_dir)
-        self._hook("paused")
-        await self._settle(journal)
 
     async def _isolate_engine(self, journal: Journal) -> None:
         """Take the engine away from every other client, then list the banks this run rebuilds.
@@ -3230,10 +1555,10 @@ class EmbedderSwitch:
         """
         state = await self._quiet_state(entry.bank)
         reasons: list[str] = []
-        differs = _diff(entry.counts, state["counts"])
+        differs = em.diff(entry.counts, state["counts"])
         if differs:
-            reasons.append(_diff_text(differs))
-        signals = _signals_moved(entry.fingerprint, state["fingerprint"])
+            reasons.append(em.diff_text(differs))
+        signals = em.signals_moved(entry.fingerprint, state["fingerprint"])
         if signals:
             reasons.append("changed since its export: " + ", ".join(signals))
         if state["pending"] or state["processing"]:
@@ -3277,7 +1602,7 @@ class EmbedderSwitch:
         """What the operator does about a bank the switch will not touch by itself."""
         return (
             "look at it on the engine's private port, then delete the remains of the original "
-            f"(`curl -X DELETE http://127.0.0.1:{journal.private_port}{_bank_path(bank)}`); "
+            f"(`curl -X DELETE http://127.0.0.1:{journal.private_port}{em.bank_path(bank)}`); "
             "`hal0 memory embedder switch --resume` then restores the already-verified "
             "archive in its place"
         )
@@ -3294,10 +1619,10 @@ class EmbedderSwitch:
         """
         state = await self._quiet_state(bank_id)
         reasons: list[str] = []
-        differs = _diff(entry.counts, state["counts"], observation_floor=True)
+        differs = em.diff(entry.counts, state["counts"], observation_floor=True)
         if differs:
-            reasons.append(_diff_text(differs))
-        signals = _signals_moved(entry.restored_fingerprint, state["fingerprint"])
+            reasons.append(em.diff_text(differs))
+        signals = em.signals_moved(entry.restored_fingerprint, state["fingerprint"])
         if signals:
             reasons.append("differs from the bank that was rebuilt in: " + ", ".join(signals))
         if entry.contents:
@@ -3343,10 +1668,10 @@ class EmbedderSwitch:
         """
         state = await self._quiet_state(entry.bank)
         reasons: list[str] = []
-        differs = _diff(entry.counts, state["counts"], observation_floor=True)
+        differs = em.diff(entry.counts, state["counts"], observation_floor=True)
         if differs:
-            reasons.append(_diff_text(differs))
-        signals = _signals_moved(entry.fingerprint, state["fingerprint"])
+            reasons.append(em.diff_text(differs))
+        signals = em.signals_moved(entry.fingerprint, state["fingerprint"])
         if entry.contents:
             signals += _contents_moved(entry.contents, await self.content_state(entry.bank))
         if signals:
@@ -3377,7 +1702,7 @@ class EmbedderSwitch:
         if journal.scratch not in set(await self._bank_ids()):
             await self._json(
                 "PUT",
-                _bank_path(journal.scratch),
+                em.bank_path(journal.scratch),
                 body={},
                 what="creating the scratch bank",
                 bank=journal.scratch,
@@ -3396,79 +1721,7 @@ class EmbedderSwitch:
         self._hook(f"before_place:{entry.bank}")
         entry.step = STEP_PLACING
         self._save(journal)
-        await self._restore(journal, entry, entry.bank, via=journal.scratch)
-
-    async def _await_restore(self, journal: Journal, entry: BankEntry) -> None:
-        """Wait until ``entry``'s restore, if one may still run, has ended. Never cancel it.
-
-        Hindsight 1.2.0 cancels cooperatively: ``DELETE`` on an operation flips
-        it to ``cancelled`` at once, but a bank restore never looks at that, so
-        its worker goes on writing, and the ``completed`` or ``failed`` it
-        writes at the end is suppressed once the row says ``cancelled``
-        (``cancel_operation`` and ``_mark_operation_*`` in ``memory_engine.py``).
-        A cancelled restore therefore looks ended while it still writes, and
-        nothing the engine reports says when it really stops. So the switch
-        never cancels a restore; it waits for ``completed`` or ``failed``, the
-        worker's own last word. A restore found ``cancelled`` (by someone
-        else) or gone from the engine is believed ended only when the engine
-        has restarted since it was sent (:meth:`_engine_restarted_since`): a
-        restart of the unit ends its worker, and the engine's start-up recovery
-        requeues only ``processing`` rows. Anything else is refused, and
-        nothing is deleted or restored again.
-        """
-        op = entry.restore_op
-        if not op:
-            return
-        path = f"{_bank_path(op['bank'])}/operations/{quote(op['id'], safe='')}"
-        target = op.get("target") or entry.bank
-        budget = 2 * self._restore_budget(entry)
-        deadline = self._clock() + budget
-        delay = min(0.2, self.t.poll_s)
-        while True:
-            found = await self._json("GET", path, what="reading the restore", bank=entry.bank)
-            status = found.get("status") if isinstance(found, dict) else None
-            if status in ("completed", "failed"):
-                break
-            if status not in _OP_LIVE:
-                restarted = self._engine_restarted_since(journal, op)
-                if restarted:
-                    break
-                blind = (
-                    ""
-                    if restarted is not None
-                    else " If this message comes back after the restart, the switch cannot "
-                    "see the engine's process: no process of the unit holds "
-                    f"127.0.0.1:{journal.private_port} as far as it can tell, or `systemctl "
-                    f"show -p InvocationID {SERVICE}` gives nothing, or the restore was "
-                    "recorded by a build that wrote neither down. Then stop the engine "
-                    f"(`systemctl stop {SERVICE}`), which ends every restore, and run "
-                    "--resume: it starts the engine again and records it"
-                )
-                raise SwitchError(
-                    f"the restore of {entry.bank} into {target} (operation {op['id']}) is "
-                    f"recorded as {status or 'unknown'}. Hindsight lets a cancelled restore "
-                    "go on writing and never reports when it stops, so the switch cannot "
-                    f"tell whether {target} is still being written; nothing was deleted or "
-                    "restored again. Restart the engine (`systemctl restart "
-                    f"{SERVICE}`), which ends that restore, then run "
-                    "`hal0 memory embedder switch --resume`." + blind,
-                    bank=entry.bank,
-                    details={"operation_id": op["id"], "status": status},
-                )
-            if self._clock() >= deadline:
-                raise SwitchError(
-                    f"the restore of {entry.bank} into {target} (operation {op['id']}) is "
-                    f"still {status} after {budget:g}s. The switch does not cancel a restore "
-                    "(Hindsight would mark it cancelled and let it go on writing), and "
-                    f"nothing was deleted or restored again. Let it finish (`journalctl -u "
-                    f"{SERVICE}`), then run `hal0 memory embedder switch --resume` again",
-                    bank=entry.bank,
-                    details={"operation_id": op["id"], "status": status},
-                )
-            await self._sleep(delay)
-            delay = min(self.t.poll_s, delay * 1.5)
-        entry.restore_op = None
-        self._save(journal)
+        await self._restore(journal, entry, entry.bank, embedder=self._target, via=journal.scratch)
 
     async def _swap_one(
         self, journal: Journal, entry: BankEntry, index: int, *, rebuild: bool
@@ -3904,7 +2157,7 @@ class EmbedderSwitch:
             "resume": [],
             "summary": "",
         }
-        live = _pair(self._evidence().get("live"))
+        live = em.evidence_pair(self._evidence().get("live"))
         out["engine"]["live"] = live._asdict() if live is not None else None
         try:
             record = embedder_record.load_embedder_record()
@@ -3940,7 +2193,9 @@ class EmbedderSwitch:
             out["engine"]["owner_unconfirmed"] = True
         out["engine"]["port_holder"] = holder.get("holder") if holder is not None else None
         if holder is not None:
-            out["engine"]["error"] = f"port {port} held by {holder.get('holder')}, not by {SERVICE}"
+            out["engine"]["error"] = (
+                f"port {port} held by {holder.get('holder')}, not by {em.SERVICE}"
+            )
         try:
             if holder is not None or (stopped and owner == "none"):
                 raise _EngineNotAsked
@@ -4057,7 +2312,7 @@ class EmbedderSwitch:
             embedder = (
                 record.embedder
                 if record is not None
-                else _pair(self._evidence().get("live")) or self._configured_embedder()
+                else em.evidence_pair(self._evidence().get("live")) or self._configured_embedder()
             )
             await self._start_engine(embedder, port=None, run_id="clear-gate")
         if gate is not None:
@@ -4077,38 +2332,26 @@ __all__ = [
     "ACTION_SWAP",
     "ACTION_VERIFY",
     "CONTENT_SIGNALS",
-    "COUNT_KEYS",
-    "FINGERPRINT_SIGNALS",
-    "HARD_COUNTS",
     "HOOK_POINTS",
     "IDS_ACROSS_SWITCH",
+    "NAMES",
     "RESTORES_PER_BANK",
-    "RESTORE_FACTS_PER_S",
     "BankEntry",
     "EmbedderSwitch",
     "Journal",
     "SwitchError",
     "SwitchRefused",
-    "Timeouts",
-    "archive_root",
     "blocking_reason",
-    "effective_exec_start",
-    "free_loopback_port",
     "interrupted_switch",
     "is_switch_temp",
     "isolated_port",
-    "isolation_body",
     "isolation_drop_in_path",
     "journal_path",
     "load_journal",
     "locate_journal",
     "lock_held",
     "lock_path",
-    "private_exec_start",
-    "remove_isolation_dropin",
     "scratch_bank_id",
     "swap_action",
     "temp_bank_id",
-    "update_in_progress",
-    "write_isolation_dropin",
 ]

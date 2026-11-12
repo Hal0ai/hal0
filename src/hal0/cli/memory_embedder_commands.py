@@ -30,13 +30,12 @@ from rich.table import Table
 
 from hal0.memory.embedder_record import Embedder, describe_embedder
 from hal0.memory.embedder_switch import (
-    COUNT_KEYS,
-    RESTORE_FACTS_PER_S,
     EmbedderSwitch,
     SwitchError,
     SwitchRefused,
     interrupted_switch,
 )
+from hal0.memory.engine_maintenance import COUNT_KEYS, RESTORE_FACTS_PER_S
 from hal0.memory.write_gate import read_gate
 
 app = typer.Typer(
