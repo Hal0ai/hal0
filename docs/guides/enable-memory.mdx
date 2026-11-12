@@ -527,8 +527,10 @@ bank, so look at `--status` first.
   new model embeds with the new model. If the run is then undone, any refresh
   or consolidation activity on an original after the switch to the new model,
   whether it finished, failed, was cancelled or is still queued, records the
-  store as mixed (see below), as does an original bank the undo cannot check.
-  The engine's records cannot show whether such work wrote anything, so the
+  store as mixed (see below), as does an original bank the undo cannot check,
+  including one an interrupted undo never reached. This holds across
+  `--resume`, and activity after the undo returns the engine to the old model
+  counts too. The engine's records cannot show whether such work wrote anything, so the
   switch counts it all. The only cost of a mixed record is running the switch
   again. Vector-index and graph maintenance embed nothing and never count.
 - The export carries only facts that belong to a document. A bank holding any
