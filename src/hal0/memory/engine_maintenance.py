@@ -146,7 +146,8 @@ _PAGE = 100
 LIST_TRIES = 3
 
 
-def _op_ref(bank: str, op: Mapping[str, Any]) -> dict[str, Any]:
+def operation_ref(bank: str, op: Mapping[str, Any]) -> dict[str, Any]:
+    """An operation row as a message's details name it: ``{"bank", "type", "id", "status"}``."""
     return {
         "bank": bank,
         "type": operation_type(op),
@@ -483,6 +484,25 @@ def digest(value: Any) -> str:
 def operation_type(op: Mapping[str, Any]) -> str:
     """An operation row's type, under either name the engine lists it by."""
     return str(op.get("operation_type") or op.get("task_type") or "unknown")
+
+
+def operation_time(op: Mapping[str, Any]) -> datetime | None:
+    """When an operation row last moved: the later of its ``created_at`` and ``updated_at``.
+
+    ``None`` when neither reads as an ISO time. A time without a zone is
+    taken as UTC, which is what the engine stores.
+    """
+    seen: list[datetime] = []
+    for key in ("created_at", "updated_at"):
+        raw = op.get(key)
+        if not isinstance(raw, str):
+            continue
+        try:
+            when = datetime.fromisoformat(raw)
+        except ValueError:
+            continue
+        seen.append(when if when.tzinfo is not None else when.replace(tzinfo=UTC))
+    return max(seen) if seen else None
 
 
 def operations_text(bank: str, ops: list[Mapping[str, Any]]) -> str:
@@ -1415,6 +1435,39 @@ class EngineMaintenance:
             )
         return [r for r in rows if isinstance(r, dict) and r.get("status") in _OP_LIVE]
 
+    async def _engine_work_since(self, bank: str, since: datetime | None) -> list[dict[str, Any]]:
+        """The engine's own operations on ``bank`` that may have run since ``since``.
+
+        Every row of each :data:`ENGINE_OPERATION_TYPES` type, of any status,
+        whose time (:func:`operation_time`) is at or after ``since``, every
+        one still ``processing``, and every one whose time cannot be read.
+        ``since`` ``None`` counts every row. The engine keeps a finished
+        operation's row with the time it ended, so work that started and
+        ended between two looks at the bank is found here too. Raises when
+        the listing cannot be read.
+        """
+        found: list[dict[str, Any]] = []
+        for kind in ENGINE_OPERATION_TYPES:
+            rows = await self._list_all(
+                f"{bank_path(bank)}/operations",
+                {"type": kind},
+                key="operations",
+                what="listing operations",
+                bank=bank,
+            )
+            for row in rows:
+                if not isinstance(row, dict) or operation_type(row) != kind:
+                    continue
+                when = operation_time(row)
+                if (
+                    since is None
+                    or when is None
+                    or when >= since
+                    or row.get("status") == "processing"
+                ):
+                    found.append(row)
+        return found
+
     async def _engine_work(self, bank: str, state: Mapping[str, Any]) -> list[dict[str, Any]]:
         """The engine's own live operations on ``bank`` when they are all that keeps it busy.
 
@@ -1461,7 +1514,7 @@ class EngineMaintenance:
             f"never cancels it. Let it finish (`hal0 memory ops list --bank {bank}` shows it), "
             "then try again",
             bank=bank,
-            details={"engine_operations": [_op_ref(bank, op) for op in own]},
+            details={"engine_operations": [operation_ref(bank, op) for op in own]},
         )
 
     async def _wait_operation(
@@ -2117,7 +2170,7 @@ class EngineMaintenance:
                     f"{listing}",
                     details={
                         "engine_operations": [
-                            _op_ref(b, op) for b, ops in own.items() for op in ops
+                            operation_ref(b, op) for b, ops in own.items() for op in ops
                         ]
                     },
                 )
@@ -2246,6 +2299,8 @@ __all__ = [
     "lock_path",
     "loopback_listener",
     "nearest_existing",
+    "operation_ref",
+    "operation_time",
     "operation_type",
     "operations_text",
     "private_exec_start",

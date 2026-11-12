@@ -398,6 +398,12 @@ class BankEntry:
     #: many restores in a row failed it the same way.
     place_wrong: str | None = None
     place_repeats: int = 0
+    #: The engine's own operations (:data:`~hal0.memory.engine_maintenance.ENGINE_OPERATION_TYPES`)
+    #: seen on the original after the engine was first restarted on the
+    #: target, as ``{"bank", "type", "id", "status"}``. They ran on the
+    #: target embedder, so a rollback records the store as mixed for this
+    #: bank. Absent from a journal written before #3604 and then empty.
+    engine_work: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -429,6 +435,11 @@ class Journal:
     stray_banks: list[str] = field(default_factory=list)
     error: str | None = None
     updated_at: str | None = None
+    #: When the engine was first restarted on the target embedder (UTC, ISO),
+    #: saved before that restart: an engine operation on an original whose
+    #: row moved since then ran on the target. A journal written before #3604
+    #: has none; a rollback then counts from ``started_at``.
+    flipped_at: str | None = None
     version: int = JOURNAL_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -528,6 +539,17 @@ def _parse_journal(raw: str) -> Journal:
             name = bank.get("bank") if isinstance(bank, dict) else bank
             raise ValueError(f"bank {name!r} is at unknown step {step!r}{archives}")
     return Journal.from_dict(data)
+
+
+def _parse_time(value: str | None) -> datetime | None:
+    """A journal time as an aware datetime; ``None`` when it is missing or unreadable."""
+    if not value:
+        return None
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
 
 
 def _finished(journal: Journal) -> bool:
@@ -789,6 +811,10 @@ class EmbedderSwitch(em.EngineMaintenance):
         self._configured = configured
         self._privileged = privileged or self._default_privileged
         self._hs_dir = hs_dir
+        #: The run this session carries (set by :meth:`run` and :meth:`resume`,
+        #: never by :meth:`status`), which the engine's own work seen on an
+        #: original after the flip is recorded in.
+        self._run_journal: Journal | None = None
 
     def _refusal(self, message: str) -> SwitchError:
         return SwitchRefused(message)
@@ -1391,6 +1417,7 @@ class EmbedderSwitch(em.EngineMaintenance):
                 allow_pending=self._allow_pending,
                 private_port=self._pick_port(),
             )
+            self._run_journal = journal
             self._save(journal)
             try:
                 await self._pause(journal)
@@ -1451,6 +1478,7 @@ class EmbedderSwitch(em.EngineMaintenance):
                 raise SwitchRefused("there is no interrupted embedder switch to resume")
             if found["error"]:
                 self._say(f"the journal was read from its mirror {found['source']}")
+            self._run_journal = journal
             target = Embedder(journal.target["provider"], journal.target["model"])
             if self._target is not None and self._target != target:
                 raise SwitchRefused(
@@ -1557,6 +1585,7 @@ class EmbedderSwitch(em.EngineMaintenance):
         self._say(f"moving the engine to {describe_embedder(*target)}")
         journal.phase = PHASE_FLIPPING
         journal.flip_started = True
+        journal.flipped_at = datetime.now(UTC).isoformat()
         self._save(journal)
         # ``mixed`` until the swap is done: from here the engine embeds with
         # the target while every bank still holds the old model's vectors.
@@ -1602,18 +1631,66 @@ class EmbedderSwitch(em.EngineMaintenance):
             )
         return "; ".join(reasons)
 
-    async def _moved_or_busy(self, entry: BankEntry) -> str:
-        """:meth:`_original_moved`, with the engine's own work that never ended counted as a move.
+    async def _live_operations(self, bank: str) -> list[dict[str, Any]]:
+        """:meth:`EngineMaintenance._live_operations`, noting the engine's own work on an original.
 
-        For the rollback, which must finish: a bank the engine is still
-        working on is recorded as possibly holding the target's vectors.
+        Once the engine has been restarted on the target, every refresh or
+        consolidation seen live on an original runs on the target embedder
+        and may write its vectors there (a mental model's embedding, a
+        knowledge page, an observation). It is recorded on the bank's entry
+        and saved, so a rollback marks the store as mixed for that bank
+        whether or not the work is still live by then (:meth:`_taint`).
         """
+        live = await super()._live_operations(bank)
+        journal = self._run_journal
+        if journal is None or not journal.flip_started:
+            return live
+        entry = next((e for e in journal.banks if e.bank == bank), None)
+        if entry is None or entry.step not in _BEFORE_DELETE:
+            # Not an original, or one the swap has already replaced.
+            return live
+        known = {str(r.get("id")) for r in entry.engine_work}
+        added = [
+            em.operation_ref(bank, op)
+            for op in live
+            if em.operation_type(op) in em.ENGINE_OPERATION_TYPES
+            and str(op.get("operation_id") or op.get("id")) not in known
+        ]
+        if added:
+            entry.engine_work.extend(added)
+            self._save(journal)
+        return live
+
+    async def _taint(self, journal: Journal, entry: BankEntry) -> str:
+        """Why the original may hold vectors of the target model; empty when it cannot.
+
+        For the rollback of a run that restarted the engine on the target,
+        which must finish, so every doubt counts against the bank. The
+        engine's own work on it after that restart, seen during the run
+        (``entry.engine_work``) or found in its operation rows since
+        ``journal.flipped_at`` (``started_at`` for a journal that has none),
+        or any reason :meth:`_original_moved` gives. A listing or a read that
+        fails is a reason too: the bank cannot be shown clean.
+        """
+        if entry.engine_work:
+            return "the engine ran its own work on it on the target embedder: " + ", ".join(
+                f"{r.get('type')} (operation {r.get('id')})" for r in entry.engine_work
+            )
+        since = _parse_time(journal.flipped_at or journal.started_at)
+        try:
+            ran = await self._engine_work_since(entry.bank, since)
+        except SwitchError as exc:
+            return f"its operations could not be read ({exc.message})"
+        if ran:
+            entry.engine_work = [em.operation_ref(entry.bank, op) for op in ran]
+            self._save(journal)
+            return "the engine ran its own work on it after the flip: " + em.operations_text(
+                entry.bank, ran
+            )
         try:
             return await self._original_moved(entry)
         except SwitchError as exc:
-            if not exc.details.get("engine_operations"):
-                raise
-            return exc.message
+            return f"it could not be checked ({exc.message})"
 
     async def _check_before_swap(self, journal: Journal) -> None:
         """The last look before anything is deleted.
@@ -2039,6 +2116,7 @@ class EmbedderSwitch(em.EngineMaintenance):
             journal.error = cause
             self._save(journal)
             tainted: list[str] = []
+            reasons: list[str] = []
             if journal.isolated and self._isolated_port() == journal.private_port:
                 self._use_port(journal.private_port)
                 # /health on the private port proves only that something
@@ -2077,8 +2155,12 @@ class EmbedderSwitch(em.EngineMaintenance):
                     # of the target model in a store going back to the old one.
                     tainted = await self._stray_banks(journal)
                     for entry in journal.banks:
-                        if entry.step != STEP_PLANNED and await self._moved_or_busy(entry):
+                        if entry.step == STEP_PLANNED:
+                            continue
+                        why = await self._taint(journal, entry)
+                        if why:
                             tainted.append(entry.bank)
+                            reasons.append(f"{entry.bank}: {why}")
             if journal.isolated:
                 await self._ensure_engine(
                     previous, port=None, run_id=journal.run_id, journal=journal
@@ -2094,8 +2176,10 @@ class EmbedderSwitch(em.EngineMaintenance):
                 )
                 if tainted and not journal.previous.get("mixed"):
                     self._say(
-                        "warning: " + ", ".join(tainted) + " appeared or changed while the "
-                        "engine ran the target embedder; the store is now recorded as mixed"
+                        "warning: " + ", ".join(tainted) + " appeared, changed or had the "
+                        "engine's own work run on it while the engine ran the target embedder, "
+                        "so it may hold vectors of that model; the store is now recorded as "
+                        "mixed" + (f" ({'; '.join(reasons)})" if reasons else "")
                     )
             journal.stray_banks = tainted
             journal.isolated = False

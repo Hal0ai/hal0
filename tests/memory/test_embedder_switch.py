@@ -1130,6 +1130,199 @@ async def test_engine_work_left_when_the_pause_settles_is_named(box: Box) -> Non
     ]
 
 
+# ── the engine's own work on an original while it runs the target ──────────
+
+
+def _final_journal() -> dict[str, Any]:
+    """The retired run's last word, from the mirror in its archive directory."""
+    (mirror,) = em.archive_root().glob("memory-embedder-switch-*/journal.json")
+    return json.loads(mirror.read_text())
+
+
+def _fail_at(point: str, then: Any = None) -> Any:
+    """A hook that runs ``then`` and fails the run at ``point``, so the run rolls back."""
+
+    def hook(reached: str) -> None:
+        if reached == point:
+            if then is not None:
+                then()
+            raise es.SwitchError(f"failed at {point}")
+
+    return hook
+
+
+async def test_a_refresh_that_ran_on_an_original_after_the_flip_marks_a_rollback_mixed(
+    box: Box,
+) -> None:
+    """Started and ended between two looks at the bank, so it is found by its row.
+
+    While the run has the engine on the target, a refresh of one of the
+    original's mental models embeds with the target model. Once the run rolls
+    back, that bank holds vectors of a model the store no longer runs.
+    """
+    messages: list[str] = []
+
+    def hook(point: str) -> None:
+        if point == "restored:alpha":
+            box.engine.engine_op("alpha", "op-refresh-5", seconds=1)
+        if point == "restored:gamma":
+            raise es.SwitchError("failed at restored:gamma")
+
+    with pytest.raises(es.SwitchError, match="failed at restored:gamma"):
+        await box.switch(hook=hook, progress=messages.append).run()
+
+    assert "engine-op-done:alpha:op-refresh-5" in box.events
+    _assert_public(box)
+    assert box.engine.banks == START and box.host.live == BGE
+    record = box.record()
+    assert (record.embedder, record.mixed) == (BGE, True), "alpha may hold the target's vectors"
+    final = _final_journal()
+    assert final["phase"] == es.PHASE_ROLLED_BACK
+    assert final["stray_banks"] == ["alpha"], "only the bank the engine worked on"
+    alpha = next(b for b in final["banks"] if b["bank"] == "alpha")
+    assert [(r["type"], r["id"]) for r in alpha["engine_work"]] == [
+        ("refresh_mental_model", "op-refresh-5")
+    ]
+    warning = next(m for m in messages if m.startswith("warning: "))
+    assert "refresh_mental_model on alpha (operation op-refresh-5, completed)" in warning
+    assert write_gate.read_gate() is None
+
+
+async def test_engine_work_seen_on_an_original_after_the_flip_is_kept_for_the_rollback(
+    box: Box,
+) -> None:
+    """Seen live by the last look before the swap, recorded, then the run fails on another bank.
+
+    Recorded in the journal when it is seen, so the rollback marks the bank
+    even if the engine has dropped the row by then.
+    """
+
+    def hook(point: str) -> None:
+        if point == "restored:gamma":
+            box.engine.engine_op("alpha", "op-refresh-6", seconds=3)
+            box.engine.direct_write("gamma")
+
+    switch = box.switch(hook=hook)
+
+    async def no_rows(_bank: str, _since: Any) -> list[dict[str, Any]]:
+        return []
+
+    switch._engine_work_since = no_rows  # type: ignore[method-assign]
+    with pytest.raises(es.SwitchError, match="gamma changed while the engine was isolated"):
+        await switch.run()
+
+    final = _final_journal()
+    assert sorted(final["stray_banks"]) == ["alpha", "gamma"], "Hal0::Beta is clean"
+    alpha = next(b for b in final["banks"] if b["bank"] == "alpha")
+    assert alpha["engine_work"] == [
+        {
+            "bank": "alpha",
+            "type": "refresh_mental_model",
+            "id": "op-refresh-6",
+            "status": "processing",
+        }
+    ]
+    assert box.record().mixed is True
+
+
+async def test_engine_work_ended_before_the_flip_does_not_mark_a_rollback_mixed(
+    box: Box,
+) -> None:
+    # Queued when the pause began, and ended on the original model before the flip.
+    hook = _fail_at("restored:gamma")
+
+    def start(point: str) -> None:
+        if point == "paused":
+            box.engine.engine_op("alpha", "op-cons-4", kind="consolidation", seconds=2)
+        hook(point)
+
+    with pytest.raises(es.SwitchError, match="failed at restored:gamma"):
+        await box.switch(hook=start).run()
+
+    assert box.events.index("engine-op-done:alpha:op-cons-4") < box.events.index(
+        "engine:" + HS.model
+    )
+    _assert_rolled_back(box)
+    assert _final_journal()["stray_banks"] == []
+
+
+async def test_engine_work_on_an_original_after_the_flip_leaves_a_finished_switch_clean(
+    box: Box,
+) -> None:
+    # The original is deleted and replaced from its archive, taken before the flip.
+    def hook(point: str) -> None:
+        if point == "restored:Hal0::Beta":
+            box.engine.engine_op("alpha", "op-refresh-7", seconds=1)
+
+    result = await box.switch(hook=hook).run()
+
+    assert result["status"] == "switched" and result["mixed"] is False
+    assert result["stray_banks"] == [] and result["warnings"] == []
+    assert box.events.index("engine-op-done:alpha:op-refresh-7") < box.events.index("delete:alpha")
+    _assert_switched(box)
+
+
+async def test_an_operations_listing_that_never_settles_in_the_rollback_marks_the_bank(
+    box: Box,
+) -> None:
+    """The rollback must finish: a bank it cannot show clean is recorded as mixed."""
+    hook = _fail_at("restored:gamma", lambda: box.engine.churn.update({"Hal0::Beta": 10**6}))
+
+    with pytest.raises(es.SwitchError, match="failed at restored:gamma") as err:
+        await box.switch(hook=hook).run()
+
+    assert "rollback failed" not in err.value.message
+    final = _final_journal()
+    assert final["phase"] == es.PHASE_ROLLED_BACK
+    assert final["stray_banks"] == ["Hal0::Beta"]
+    _assert_public(box)
+    assert box.record().mixed is True
+    assert write_gate.read_gate() is None
+
+
+def _strip_journal(*bank_keys: str, top: tuple[str, ...] = ()) -> None:
+    """Rewrite the journal on disk as hal0 wrote it before these keys existed."""
+    path = es.journal_path()
+    data = json.loads(path.read_text())
+    for key in top:
+        data.pop(key, None)
+    for bank in data["banks"]:
+        for key in bank_keys:
+            bank.pop(key, None)
+    path.write_text(json.dumps(data))
+
+
+async def test_a_journal_from_before_the_engine_work_record_still_loads_and_rolls_back(
+    box: Box,
+) -> None:
+    await box.kill_at("restored:alpha")
+    _strip_journal("engine_work", top=("flipped_at",))
+    loaded = es.load_journal()
+    assert loaded is not None and loaded.version == es.JOURNAL_VERSION
+    assert loaded.flipped_at is None and all(e.engine_work == [] for e in loaded.banks)
+
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "rolled_back"
+    _assert_rolled_back(box)
+
+
+async def test_a_journal_from_before_the_engine_work_record_counts_from_the_runs_start(
+    box: Box,
+) -> None:
+    # No flip time: anything the engine did on an original since the run
+    # started may have run on the target, so it counts.
+    await box.kill_at("restored:alpha")
+    _strip_journal("engine_work", top=("flipped_at",))
+    box.engine.engine_op("gamma", "op-refresh-8", seconds=1)
+
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "rolled_back"
+    assert _final_journal()["stray_banks"] == ["gamma"]
+    assert box.record().mixed is True
+
+
 def _usage(free: int) -> Any:
     return type("U", (), {"free": free})
 
