@@ -20,8 +20,10 @@ import pytest
 from hal0.agents.manager import AgentError
 from hal0.agents.pi_coder import PiDriver
 from hal0.agents.pi_coder import driver as driver_mod
+from hal0.memory import compat_client
 
 _REAL_MANAGED_COMPAT_KEY = PiDriver._managed_compat_key
+_REAL_KNOWN_HOMES = driver_mod._known_homes
 
 
 class _FakeRunner:
@@ -363,7 +365,7 @@ _COMPAT = "http://127.0.0.1:8080/api/memory/compat"
 
 
 @pytest.fixture(autouse=True)
-def _no_real_compat(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def _no_real_compat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[str]:
     """No test reaches a real bridge store or another home. The default: the
     store cannot be asked, so no key is checked or minted. Returns the
     candidate lists the driver asked about."""
@@ -375,6 +377,11 @@ def _no_real_compat(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(driver_mod, "_known_homes", lambda: [])
     monkeypatch.setattr(PiDriver, "_managed_compat_key", no_key)
+    # tests/agents/conftest.py fakes euid 0 for the whole directory; the
+    # shared file is written as the suite's own user unless a test says not.
+    monkeypatch.setattr(compat_client, "_is_root", lambda: False)
+    # No real state dir: the wiring lock is exercised by its own tests.
+    monkeypatch.setattr(driver_mod._paths, "var_lib", lambda: tmp_path / "no-state-dir")
     monkeypatch.delenv("HAL0_API_URL", raising=False)
     return minted
 
@@ -462,15 +469,39 @@ def test_compat_wiring_keeps_the_file_owner_and_writes_through_a_symlink(
     cfg.parent.mkdir(parents=True)
     cfg.symlink_to(real)
     st = os.stat(real)
-    chowned: list[tuple[int, int]] = []
-    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid)))
     _key(monkeypatch)
 
     d._wire_memory_compat()
 
     assert cfg.is_symlink() and cfg.resolve() == real
     assert json.loads(real.read_text())["harnesses"]["pi"]["apiUrl"] == _COMPAT
-    assert chowned == [(st.st_uid, st.st_gid)]
+    assert os.stat(real).st_uid == st.st_uid
+
+
+def test_root_writes_pis_section_in_an_operator_home_as_the_operator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    # `sudo HOME=<operator home> hal0 update component pi`: the home is not
+    # root's, so every read and write of the shared file there runs as its
+    # owner, never as root.
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = _shared_config(d, {"flat": 1})
+    dropped: list[tuple[int, int]] = []
+
+    def run(uid: int, gid: int, fn):
+        dropped.append((uid, gid))
+        return fn()
+
+    monkeypatch.setattr(compat_client, "_is_root", lambda: True)
+    monkeypatch.setattr(compat_client, "_run_as_owner", run)
+    _key(monkeypatch)
+
+    assert d._wire_memory_compat() == driver_mod.COMPAT_MINTED
+
+    st = os.stat(tmp_path)
+    assert dropped and set(dropped) == {(st.st_uid, st.st_gid)}
+    assert json.loads(cfg.read_text())["harnesses"]["pi"]["apiToken"] == "hal0bk_pi-coder.new"
+    assert os.stat(cfg).st_uid == st.st_uid
 
 
 def test_a_key_the_store_verifies_is_kept_and_nothing_is_minted(
@@ -857,12 +888,16 @@ def test_root_mints_through_the_hal0_user_and_reads_the_key_from_the_pipe(
     assert answer == {"status": "minted", "key": "hal0bk_pi-coder.k"}
     argv, kwargs = runner.calls[0]
     assert argv[0] in ("runuser", "setpriv", "sudo") and "hal0" in argv
-    assert argv[-5:] == [
+    assert argv[-9:] == [
         "hal0.bridge.managed_mint",
         "pi-coder",
         "system:pi-coder",
         "--rotate",
         "--keys-on-stdin",
+        "--harness",
+        "pi",
+        "--api-url",
+        _COMPAT,
     ]
     assert kwargs["capture_output"] is True and "env" not in kwargs
     # The held key goes in on stdin only: never in argv.
@@ -874,6 +909,8 @@ def test_a_helper_with_no_answer_is_an_error_not_a_key(monkeypatch: pytest.Monke
     _real_mint(monkeypatch, euid=0)
     answer = PiDriver(runner=_MintRunner("", returncode=1))._managed_compat_key([])
     assert answer["status"] == "error" and "key" not in answer
+    # It ran with --rotate: it may have rotated before it failed.
+    assert answer["maybe_rotated"] is True
 
 
 def test_no_hal0_user_means_no_mint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -909,3 +946,132 @@ def test_the_hal0_user_mints_in_process(monkeypatch: pytest.MonkeyPatch) -> None
     assert PiDriver(runner=runner)._managed_compat_key(["k"]) == {"status": "minted"}
     # In-process as hal0: verify and mint, never rotate.
     assert seen == [("pi-coder", "system:pi-coder", False, ["k"])] and runner.calls == []
+
+
+def test_a_helper_that_fails_after_rotate_says_the_key_may_be_rotated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner, capsys
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = _shared_config(d, {"harnesses": {"pi": {"apiToken": "hal0bk_pi-coder.held"}}})
+    before = cfg.read_text()
+    _real_mint(monkeypatch, euid=0)
+    d._runner = _MintRunner('{"status": "rotated", "key": "hal0bk_pi-coder.n')  # cut off
+
+    assert d._wire_memory_compat() == driver_mod.COMPAT_SKIPPED
+
+    err = capsys.readouterr().err
+    assert "may have been rotated" in err and "sudo hal0 agent install pi" in err
+    assert cfg.read_text() == before
+
+
+def test_a_key_the_helper_found_in_hal0s_own_file_is_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = _shared_config(d, {"harnesses": {"pi": {"apiToken": "hal0bk_pi-coder.dead"}}})
+    _key(monkeypatch, status="valid", key="hal0bk_pi-coder.hal0s")
+
+    assert d._wire_memory_compat() == driver_mod.COMPAT_REUSED
+    assert json.loads(cfg.read_text())["harnesses"]["pi"]["apiToken"] == "hal0bk_pi-coder.hal0s"
+
+
+def test_root_leaves_hal0s_home_to_the_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    from hal0.system import seam
+
+    hal0_home = tmp_path / "hal0-home"
+    hal0_cfg = hal0_home / ".hindsight" / "coding-agent.json"
+    hal0_cfg.parent.mkdir(parents=True)
+    hal0_cfg.write_text(json.dumps({"harnesses": {"pi": {"apiToken": "hal0bk_pi-coder.old"}}}))
+    before = hal0_cfg.read_text()
+    monkeypatch.setattr(seam, "hal0_service_home", lambda: str(hal0_home))
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    _shared_config(d, {})
+    # The real list of other homes: root's only, never hal0's.
+    monkeypatch.setattr(driver_mod, "_known_homes", _REAL_KNOWN_HOMES)
+    assert hal0_home not in driver_mod._known_homes()
+    _real_mint(monkeypatch, euid=0)
+    d._runner = _MintRunner(
+        '{"status": "rotated", "key": "hal0bk_pi-coder.new", "shared": "written"}\n'
+    )
+
+    assert d._wire_memory_compat() == driver_mod.COMPAT_ROTATED
+
+    # The helper (here a stub) owns hal0's file; root did not touch it, and
+    # root did not read it for candidates either.
+    assert hal0_cfg.read_text() == before
+    assert json.loads(d._runner.calls[0][1]["input"]) == {"keys": []}
+
+
+# ── the wiring lock ────────────────────────────────────────────────────────
+
+
+def test_the_wiring_lock_is_exclusive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fcntl
+
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setattr(driver_mod._paths, "var_lib", lambda: state)
+    monkeypatch.setattr(os, "geteuid", os.getuid)
+    lock = state / driver_mod._PI_WIRING_LOCK
+
+    with driver_mod._pi_wiring_lock():
+        assert lock.is_file() and stat.S_IMODE(lock.stat().st_mode) == 0o600
+        fd = os.open(lock, os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+    fd = os.open(lock, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # released
+    finally:
+        os.close(fd)
+
+
+def test_the_wiring_lock_never_follows_a_symlink_or_hangs_on_a_fifo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setattr(driver_mod._paths, "var_lib", lambda: state)
+    victim = tmp_path / "victim"
+    (state / driver_mod._PI_WIRING_LOCK).symlink_to(victim)
+
+    with driver_mod._pi_wiring_lock():
+        pass
+    assert not victim.exists()
+
+    (state / driver_mod._PI_WIRING_LOCK).unlink()
+    os.mkfifo(state / driver_mod._PI_WIRING_LOCK)
+    with driver_mod._pi_wiring_lock():  # O_NONBLOCK: returns, no lock taken
+        pass
+
+
+def test_the_wiring_runs_under_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    import contextlib
+
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    _shared_config(d, {})
+    held: list[bool] = []
+    state = {"in": False}
+
+    @contextlib.contextmanager
+    def lock():
+        state["in"] = True
+        yield
+        state["in"] = False
+
+    def mint(self: PiDriver, candidates: list[str]) -> dict[str, Any]:
+        held.append(state["in"])
+        return {"status": "minted", "key": "hal0bk_pi-coder.new"}
+
+    monkeypatch.setattr(driver_mod, "_pi_wiring_lock", lock)
+    monkeypatch.setattr(PiDriver, "_managed_compat_key", mint)
+
+    d._wire_memory_compat()
+    assert held == [True]

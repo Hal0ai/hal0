@@ -8,6 +8,7 @@ The CLI therefore re-runs this module as ``hal0`` (``runuser``/``setpriv``/
 ``sudo``, :func:`hal0.system.seam.as_hal0_argv`)::
 
     python -m hal0.bridge.managed_mint <name> <created_by> [--rotate] [--keys-on-stdin]
+        [--harness <harness> --api-url <url>]
 
 With ``--keys-on-stdin`` it first reads ``{"keys": ["<candidate>", ...]}`` from
 stdin: the keys the caller already holds. It prints one JSON line::
@@ -27,7 +28,22 @@ only over stdin. Neither is put in argv, the environment, a file or a log.
 ``--rotate`` replaces the key of an active client this module may manage
 (same ``created_by``) when none of the candidates verifies; without it such a
 client answers ``existing`` and nothing changes. A client someone else made
-is never touched (``foreign``).
+is never touched (``foreign``). ``--rotate`` is refused outright unless the
+process is the hal0 service user.
+
+With ``--harness``, the helper also owns the hal0 account's copy of that
+harness's section in ``~/.hindsight/coding-agent.json`` (``HOME`` is hal0's
+home here): a key held there joins the candidates, and the key the answer
+settles on is written back into that section before the answer is printed,
+when hal0 manages the section (:func:`hal0.memory.compat_client.
+is_managed_section`). Read, decide and write happen in this one process, so
+nothing changed in between is lost, and root never writes into hal0's home.
+That write is the durable record of a rotation: if the caller then times out
+or cannot parse the answer, the next run finds the new key in hal0's file
+and reuses it instead of rotating again. A key that came from hal0's file is
+answered as ``valid`` with ``key`` set (the caller does not hold it) instead
+of an ``index``; ``shared`` says whether the section was written
+(``"written"``, ``"unchanged"``, ``"absent"`` or ``"failed: <reason>"``).
 
 The client gets the ``memory`` scope, and with it ``agents``, which every
 bridge client holds (:func:`hal0.bridge.keys.normalize_scopes`). So whoever
@@ -41,6 +57,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 #: The scopes a managed coding-agent client is given (``agents`` comes with them).
@@ -66,6 +83,15 @@ def mint(
     from hal0.bridge import keys
     from hal0.bridge.managed import ManagedClientRefused, ensure_managed_bridge_client
 
+    if rotate:
+        from hal0.system.seam import is_hal0_service_user
+
+        if not is_hal0_service_user():
+            return {
+                "status": "error",
+                "key": None,
+                "detail": "--rotate runs only as the hal0 service user",
+            }
     try:
         from hal0.config.loader import load_hal0_config
 
@@ -129,15 +155,93 @@ def _read_candidates(stream: Any) -> list[str] | None:
     return held
 
 
+def _hal0_section(harness: str, name: str) -> tuple[Path, Path, dict[str, Any] | None]:
+    """``(home, path, config)`` for this account's client config; ``config``
+    is ``None`` when it is missing, unreadable or not safe to rewrite."""
+    from hal0.memory.compat_client import read_client_config
+
+    home = Path.home()
+    path = home / ".hindsight" / "coding-agent.json"
+    return home, path, read_client_config(path, home)
+
+
+def mint_and_share(
+    name: str,
+    created_by: str,
+    *,
+    rotate: bool,
+    candidates: Sequence[str],
+    harness: str,
+    api_url: str,
+    store: Any = None,
+) -> dict[str, Any]:
+    """:func:`mint`, with this account's ``harnesses.<harness>`` section read
+    for one more candidate and then written with the settled key. Never raises."""
+    from hal0.bridge import keys
+    from hal0.memory.compat_client import is_managed_section, write_client_config
+
+    try:
+        home, path, data = _hal0_section(harness, name)
+    except Exception:  # read_client_config does not raise; belt and braces
+        home, path, data = Path.home(), Path(), None
+    harnesses = data.get("harnesses") if data is not None else None
+    section = harnesses.get(harness) if isinstance(harnesses, dict) else None
+    if not (isinstance(section, dict) and is_managed_section(section, name)):
+        section = None
+    held = section.get("apiToken") if section is not None else None
+    held = held if isinstance(held, str) and keys.name_of(held) == name else None
+    asked = list(candidates)
+    if held and held not in asked:
+        asked.append(held)
+
+    answer = mint(name, created_by, rotate=rotate, candidates=asked, store=store)
+    status = answer.get("status")
+    key: str | None = None
+    index = answer.get("index")
+    if status == "valid" and isinstance(index, int) and 0 <= index < len(asked):
+        key = asked[index]
+        if index >= len(candidates):
+            answer = {"status": "valid", "key": key, "detail": "the key in hal0's own file"}
+    elif status in ("minted", "rotated") and isinstance(answer.get("key"), str):
+        key = answer["key"]
+
+    if section is None or data is None:
+        answer["shared"] = "absent"
+    elif not key or section.get("apiToken") == key:
+        answer["shared"] = "unchanged"
+    else:
+        section["serverMode"] = "self-hosted"
+        section["apiUrl"] = api_url
+        section["apiToken"] = key
+        try:
+            write_client_config(path, data, home=home, max_mode=0o600)
+            answer["shared"] = "written"
+        except OSError as exc:
+            answer["shared"] = f"failed: {exc}"
+    return answer
+
+
+_USAGE = (
+    "usage: python -m hal0.bridge.managed_mint <name> <created_by> "
+    "[--rotate] [--keys-on-stdin] [--harness <harness> --api-url <url>]"
+)
+
+
 def main(argv: list[str]) -> int:
     flags = {"--rotate", "--keys-on-stdin"}
-    args = [a for a in argv if a not in flags]
-    if len(args) != 2:
-        print(
-            "usage: python -m hal0.bridge.managed_mint <name> <created_by> "
-            "[--rotate] [--keys-on-stdin]",
-            file=sys.stderr,
-        )
+    valued = {"--harness": "", "--api-url": ""}
+    args: list[str] = []
+    rest = iter(argv)
+    for arg in rest:
+        if arg in valued:
+            valued[arg] = next(rest, "")
+            if not valued[arg]:
+                print(_USAGE, file=sys.stderr)
+                return 2
+        elif arg not in flags:
+            args.append(arg)
+    if len(args) != 2 or bool(valued["--harness"]) != bool(valued["--api-url"]):
+        print(_USAGE, file=sys.stderr)
         return 2
     candidates: list[str] = []
     if "--keys-on-stdin" in argv:
@@ -151,7 +255,18 @@ def main(argv: list[str]) -> int:
             )
             return 0
         candidates = held
-    answer = mint(args[0], args[1], rotate="--rotate" in argv, candidates=candidates)
+    rotate = "--rotate" in argv
+    if valued["--harness"]:
+        answer = mint_and_share(
+            args[0],
+            args[1],
+            rotate=rotate,
+            candidates=candidates,
+            harness=valued["--harness"],
+            api_url=valued["--api-url"],
+        )
+    else:
+        answer = mint(args[0], args[1], rotate=rotate, candidates=candidates)
     sys.stdout.write(json.dumps(answer) + "\n")
     return 0
 

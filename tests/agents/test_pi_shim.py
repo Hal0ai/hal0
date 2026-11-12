@@ -41,6 +41,9 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(driver_mod, "_pi_binary_on_path", lambda: True)
     # The memory-endpoint wiring must not reach a real hal0-api or bridge store.
     monkeypatch.setattr(driver_mod, "_known_homes", lambda: [])
+    # tests/agents/conftest.py fakes euid 0; write the shared file as the suite user.
+    monkeypatch.setattr("hal0.memory.compat_client._is_root", lambda: False)
+    monkeypatch.setattr(driver_mod._paths, "var_lib", lambda: tmp_path / "no-state-dir")
     monkeypatch.setattr(
         PiDriver,
         "_managed_compat_key",

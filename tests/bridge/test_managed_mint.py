@@ -23,6 +23,7 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BridgeStore:
         lambda *a, **k: SimpleNamespace(bridge=SimpleNamespace(enabled=True)),
     )
     monkeypatch.setattr("hal0.bridge.managed.is_hal0_service_user", lambda: True)
+    monkeypatch.setattr("hal0.system.seam.is_hal0_service_user", lambda: True)
     s = BridgeStore(tmp_path / "bridge.db")
     s.open()
     return s
@@ -155,3 +156,111 @@ def test_as_hal0_argv_drops_hermes_home_before_setting_home(monkeypatch) -> None
     argv = seam.as_hal0_argv(["python", "-m", "x"])
     assert argv[:4] == ["runuser", "-u", "hal0", "--"]
     assert argv[4:8] == ["env", "-u", "HERMES_HOME", "HOME=/srv/hal0"]
+
+
+def test_rotate_is_refused_unless_this_is_the_hal0_user(store: BridgeStore, monkeypatch) -> None:
+    held = managed_mint.mint("pi-coder", "system:pi-coder", rotate=True, store=store)["key"]
+    monkeypatch.setattr("hal0.system.seam.is_hal0_service_user", lambda: False)
+    answer = managed_mint.mint("pi-coder", "system:pi-coder", rotate=True, store=store)
+    assert answer["status"] == "error" and "hal0 service user" in answer["detail"]
+    assert store.verify_key(held) is not None  # not rotated
+
+
+# ── --harness: the helper owns the hal0 account's copy of the section ──────
+
+_URL = "http://127.0.0.1:8080/api/memory/compat"
+
+
+def _hal0_file(tmp_path: Path, monkeypatch, data: dict | None) -> Path:
+    from hal0.memory import compat_client
+
+    home = tmp_path / "hal0-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(compat_client, "_is_root", lambda: False)
+    cfg = home / ".hindsight" / "coding-agent.json"
+    if data is not None:
+        cfg.parent.mkdir()
+        cfg.write_text(json.dumps(data))
+    return cfg
+
+
+def _share(store: BridgeStore, candidates: list[str], *, rotate: bool = True) -> dict:
+    return managed_mint.mint_and_share(
+        "pi-coder",
+        "system:pi-coder",
+        rotate=rotate,
+        candidates=candidates,
+        harness="pi",
+        api_url=_URL,
+        store=store,
+    )
+
+
+def test_a_rotate_is_written_into_hal0s_section_before_the_answer(
+    store: BridgeStore, tmp_path: Path, monkeypatch
+) -> None:
+    managed_mint.mint("pi-coder", "system:pi-coder", rotate=True, store=store)
+    cfg = _hal0_file(
+        tmp_path, monkeypatch, {"flat": 1, "harnesses": {"pi": {"apiToken": "hal0bk_pi-coder.x"}}}
+    )
+
+    answer = _share(store, ["hal0bk_pi-coder.dead"])
+
+    assert answer["status"] == "rotated" and answer["shared"] == "written"
+    data = json.loads(cfg.read_text())
+    assert data["flat"] == 1
+    assert data["harnesses"]["pi"] == {
+        "apiToken": answer["key"],
+        "serverMode": "self-hosted",
+        "apiUrl": _URL,
+    }
+    # The durable record: a re-run that holds only a dead key reuses this one.
+    again = _share(store, ["hal0bk_pi-coder.dead"])
+    assert again["status"] == "valid" and again["key"] == answer["key"]
+    assert "index" not in again and again["shared"] == "unchanged"
+
+
+def test_a_callers_key_that_verifies_is_written_into_hal0s_section(
+    store: BridgeStore, tmp_path: Path, monkeypatch
+) -> None:
+    held = managed_mint.mint("pi-coder", "system:pi-coder", rotate=True, store=store)["key"]
+    cfg = _hal0_file(tmp_path, monkeypatch, {"harnesses": {"pi": {}}})
+
+    answer = _share(store, [held])
+
+    assert answer["status"] == "valid" and answer["index"] == 0 and answer["key"] is None
+    assert json.loads(cfg.read_text())["harnesses"]["pi"]["apiToken"] == held
+
+
+def test_an_operator_section_in_hal0s_file_is_left_alone(
+    store: BridgeStore, tmp_path: Path, monkeypatch
+) -> None:
+    cfg = _hal0_file(tmp_path, monkeypatch, {"harnesses": {"pi": {"apiToken": "operator"}}})
+    text = cfg.read_text()
+
+    answer = _share(store, [])
+
+    assert answer["status"] == "minted" and answer["shared"] == "absent"
+    assert cfg.read_text() == text
+
+
+def test_no_hal0_file_is_not_created(store: BridgeStore, tmp_path: Path, monkeypatch) -> None:
+    cfg = _hal0_file(tmp_path, monkeypatch, None)
+    assert _share(store, [])["shared"] == "absent" and not cfg.exists()
+
+
+def test_main_with_harness_shares(store: BridgeStore, monkeypatch, capsys) -> None:
+    seen: list[tuple] = []
+
+    def fake(name, by, *, rotate, candidates, harness, api_url):
+        seen.append((name, by, rotate, list(candidates), harness, api_url))
+        return {"status": "minted", "key": "k", "shared": "written"}
+
+    monkeypatch.setattr(managed_mint, "mint_and_share", fake)
+    argv = ["pi-coder", "system:pi-coder", "--rotate", "--harness", "pi", "--api-url", _URL]
+    assert managed_mint.main(argv) == 0
+    assert json.loads(capsys.readouterr().out)["shared"] == "written"
+    assert seen == [("pi-coder", "system:pi-coder", True, [], "pi", _URL)]
+    assert managed_mint.main(["pi-coder", "system:pi-coder", "--harness", "pi"]) == 2
+    assert managed_mint.main(["pi-coder", "system:pi-coder", "--api-url"]) == 2
