@@ -987,9 +987,53 @@ async def test_a_refresh_that_never_ends_refuses_the_run_and_names_it(box: Box) 
     assert (
         "refresh_mental_model on Hal0::Beta (operation op-refresh-9, pending)" in err.value.message
     )
-    assert "within 6s" in err.value.message
+    assert "its budget being 6s for all banks together" in err.value.message
     assert box.events == [], "nothing paused, nothing exported"
     assert box.record().embedder == BGE and not es.journal_path().exists()
+
+
+async def test_the_preflight_wait_is_one_budget_for_all_banks_and_says_how_long_it_took(
+    box: Box,
+) -> None:
+    # Each refresh alone ends within the budget; one after the other they do not.
+    box.engine.engine_op("alpha", "op-refresh-a", seconds=5)
+    box.engine.engine_op("gamma", "op-refresh-g", seconds=9)
+
+    switch = box.switch()
+    with pytest.raises(es.SwitchRefused) as err:
+        await switch.run()
+
+    message = err.value.message
+    assert "op-refresh-a" not in message, "alpha's refresh ended within the budget"
+    assert "refresh_mental_model on gamma (operation op-refresh-g, processing)" in message
+    waited = int(re.search(r"The switch waited (\d+)s for it", message).group(1))
+    assert 6 <= waited < 9, "the real time waited, not a budget per bank"
+    assert "its budget being 6s for all banks together" in message
+    assert box.events == ["engine-op-done:alpha:op-refresh-a"], "nothing paused"
+
+
+async def test_an_operations_listing_that_changes_once_is_read_again(box: Box) -> None:
+    box.engine.engine_op("alpha", "op-refresh-c", seconds=3)
+    box.engine.churn["alpha"] = em.LIST_TRIES - 1
+
+    result = await box.switch().run()
+
+    assert result["status"] == "switched"
+    assert box.engine.churn["alpha"] == 0, "the churning reads were taken and read again"
+    _assert_switched(box)
+
+
+async def test_an_operations_listing_that_keeps_changing_is_an_engine_error(box: Box) -> None:
+    box.engine.engine_op("alpha", "op-refresh-d", seconds=None)
+    box.engine.churn["alpha"] = 100
+
+    plan = await box.switch().preflight(apply=True)
+
+    assert _codes(plan) == ["engine_error"]
+    assert (
+        f"listing operations: the engine reports 1 but listed 0, {em.LIST_TRIES} reads in a row"
+        in plan["refusals"][0]["message"]
+    )
 
 
 async def test_engine_work_beside_a_queued_retain_is_still_refused_as_queued_work(

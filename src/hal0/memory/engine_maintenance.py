@@ -139,6 +139,11 @@ _OP_FAILED = ("failed", "cancelled", "not_found")
 #: change to the bank (#3604).
 ENGINE_OPERATION_TYPES: tuple[str, ...] = ("refresh_mental_model", "consolidation")
 _PAGE = 100
+#: How many times a paged listing is read again when its rows do not add up
+#: to its ``total``. hindsight-api 1.2.0 counts and selects in two statements
+#: outside a transaction (``list_operations``), so a listing read while the
+#: engine queues or ends work can disagree with itself once and then not.
+LIST_TRIES = 3
 
 
 def _op_ref(bank: str, op: Mapping[str, Any]) -> dict[str, Any]:
@@ -1246,33 +1251,35 @@ class EngineMaintenance:
 
         Pages until the engine's own ``total`` is reached or a page comes back
         empty; a short page is never taken for the end. When the engine gives
-        a total, the rows collected must add up to it.
+        a total, the rows collected must add up to it: a listing that does
+        not is read again from the start, up to :data:`LIST_TRIES` times.
         """
-        rows: list[Any] = []
-        total: int | None = None
-        while True:
-            page = await self._json(
-                "GET",
-                path,
-                params={**(params or {}), "limit": page_size, "offset": len(rows)},
-                what=what,
-                bank=bank,
-            )
-            page = page if isinstance(page, dict) else {}
-            if isinstance(page.get("total"), int):
-                total = page["total"]
-            chunk = page.get(key)
-            chunk = chunk if isinstance(chunk, list) else []
-            rows.extend(chunk)
-            if not chunk or (total is not None and len(rows) >= total):
-                break
-        if total is not None and len(rows) != total:
-            raise self._error_type(
-                f"{what}: the engine reports {total} but listed {len(rows)}; the listing "
-                "changed while it was read",
-                bank=bank,
-            )
-        return rows
+        for _attempt in range(LIST_TRIES):
+            rows: list[Any] = []
+            total: int | None = None
+            while True:
+                page = await self._json(
+                    "GET",
+                    path,
+                    params={**(params or {}), "limit": page_size, "offset": len(rows)},
+                    what=what,
+                    bank=bank,
+                )
+                page = page if isinstance(page, dict) else {}
+                if isinstance(page.get("total"), int):
+                    total = page["total"]
+                chunk = page.get(key)
+                chunk = chunk if isinstance(chunk, list) else []
+                rows.extend(chunk)
+                if not chunk or (total is not None and len(rows) >= total):
+                    break
+            if total is None or len(rows) == total:
+                return rows
+        raise self._error_type(
+            f"{what}: the engine reports {total} but listed {len(rows)}, {LIST_TRIES} reads "
+            "in a row; the listing changed while it was read",
+            bank=bank,
+        )
 
     async def _bank_rows(self) -> list[dict[str, Any]]:
         rows = await self._list_all("/v1/default/banks", key="banks", what="listing banks")
@@ -1425,15 +1432,18 @@ class EngineMaintenance:
         return live
 
     async def _await_engine_work(
-        self, bank: str, state: Mapping[str, Any]
+        self, bank: str, state: Mapping[str, Any], *, deadline: float | None = None
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Wait while the engine's own work is all that keeps ``bank`` busy.
 
         Returns the bank's last state and whatever of that work is still
         live: empty once it has ended, or when other work is queued (which is
-        not waited for here). Bounded by ``engine_ops_s``.
+        not waited for here). Bounded by ``deadline`` on :attr:`_clock`, which
+        a caller looking at several banks shares between them, else by
+        ``engine_ops_s`` from now.
         """
-        deadline = self._clock() + self.t.engine_ops_s
+        if deadline is None:
+            deadline = self._clock() + self.t.engine_ops_s
         current = dict(state)
         while True:
             own = await self._engine_work(bank, current)
@@ -2201,6 +2211,7 @@ __all__ = [
     "ENGINE_OPERATION_TYPES",
     "FINGERPRINT_SIGNALS",
     "HARD_COUNTS",
+    "LIST_TRIES",
     "PG_DIR",
     "RESTORE_FACTS_PER_S",
     "SERVICE",
