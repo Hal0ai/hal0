@@ -25,7 +25,10 @@ minimal profile (spec D2):
       the *deployed* copy at install time. ``~/.hindsight/coding-agent.json``
       is seeded iff absent (shared state with other harnesses on the
       box; never overwritten once an operator or another agent has
-      written it).
+      written it). Pi's own section of it (``harnesses.pi``) points the
+      client at hal0's ``/api/memory/compat`` with the hal0-managed
+      ``pi-coder`` bridge key (ADR-0058 decision 4b), so Pi's memory
+      goes through the write envelope instead of straight to the engine.
 4. Theme — deploys the ``hal0`` theme and sets it as default.
 
 ``pi-memory-md`` (upstream's own project-scoped markdown memory) is left
@@ -37,8 +40,8 @@ to re-run.
 
 ``upgrade()`` is the in-place path for a box that already has pi: it
 re-pins both packages, redeploys hal0's own extensions and theme, and
-adds the Hindsight bank alias to an existing client config — without
-touching anything the operator added.
+re-points Pi's section of the client config at the memory endpoint —
+without touching anything the operator added.
 
 pi's own config tree (``~/.pi/agent/``) is resolved from ``Path.home()``
 per call, NOT cached at import time — tests rely on this to redirect
@@ -53,12 +56,14 @@ import os
 import shutil
 import stat
 import subprocess  # nosec B404 — required for shim
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from hal0.agents.manager import AgentDriver, AgentError, installer_script_path
 from hal0.config import paths as _paths
+from hal0.memory.compat_client import compat_url
 
 # MCP endpoints. Both ride the existing hal0-api process per ADR-0004 §4
 # (admin) and ADR-0005 (memory). 127.0.0.1 is intentional: the bundled
@@ -116,20 +121,33 @@ _MANAGED_PACKAGES = (_ADAPTER_PIN,)
 # double-loading entries; strip them on install and uninstall.
 _LEGACY_PACKAGE_ENTRIES = ("extensions/hal0-provider", "extensions/hindsight")
 
-# Hindsight's self-hosted server, colocated on the box (spec D4).
-_HINDSIGHT_API_URL = "http://127.0.0.1:9177"
+# The bridge client Pi's memory client authenticates to the endpoint as. ``pi``
+# itself is a reserved bridge name (``hal0.bridge.keys.RESERVED_CLIENT_NAMES``),
+# so the coding client has its own identity; it is minted and rotated only as a
+# hal0-managed client (``created_by`` below), never an operator's.
+_PI_BRIDGE_CLIENT = "pi-coder"
+_PI_BRIDGE_CREATED_BY = "system:pi-coder"
 
-# The hal0 repo's default Hindsight bank id (``coding-agent::{gitProject}``)
-# converges into the shared hal0-mono bank. Keyed by that resolved id, so it
-# follows the repo wherever it is checked out — unlike ``mapPathToBank``, which
-# is tied to one path. The pinned client (@vectorize-io/hindsight-coding-agents
-# 0.8.1, the same one the Pi binding rides) applies ``banks.<resolvedId>.bank``
-# as a rename of the destination bank (dist/index.js ``applyBankConfig``).
-_HINDSIGHT_ALIAS_ID = "coding-agent::hal0"
 # The harness name the pinned package's Pi binding resolves its per-harness
-# config section under (``createPiExtension("pi")`` in dist/pi.js).
+# config section under (``createPiExtension("pi")`` in dist/pi.js). hal0
+# writes only that section (``harnesses.pi.apiUrl`` / ``apiToken``, which the
+# package's ``applyLayer`` lays over the flat keys), so the other harnesses
+# sharing the file keep whatever they have.
 _HINDSIGHT_HARNESS = "pi"
-_HINDSIGHT_SHARED_BANK = "coding-agent::hal0-mono"
+
+# Older drivers seeded a flat ``banks`` alias renaming the hal0 repo's bank
+# (``coding-agent::hal0``) to ``coding-agent::hal0-mono``. On the endpoint the
+# bank name only carries the project, so Pi's section maps the id back to
+# itself and Pi's writes are tagged ``project:hal0``; the flat alias is left
+# for whatever else reads it.
+_HINDSIGHT_ALIAS_ID = "coding-agent::hal0"
+_HINDSIGHT_LEGACY_SHARED_BANK = "coding-agent::hal0-mono"
+
+#: Outcomes of :meth:`PiDriver._wire_memory_compat`.
+COMPAT_KEPT = "kept"
+COMPAT_MINTED = "minted"
+COMPAT_ROTATED = "rotated"
+COMPAT_SKIPPED = "skipped"
 
 # Upstream's own built-in defaults, restored on uninstall iff hal0 was
 # the active default (mirrors the pre-hal0 factory settings).
@@ -148,23 +166,6 @@ def _api_base() -> str:
     return os.environ.get("HAL0_API_URL", _HAL0_API_BASE_DEFAULT).rstrip("/")
 
 
-def _hal0_source_checkout() -> Path | None:
-    """Root of the hal0 git checkout this module is imported from, or None.
-
-    Only a source checkout (editable install, or the git-tracked FHS
-    layout — see ``hal0.build_info.build_sha``) has one; a packaged
-    site-packages copy does not. ``.git`` may be a file (git worktree).
-    """
-    for parent in Path(__file__).resolve().parents:
-        if (
-            (parent / ".git").exists()
-            and (parent / "pyproject.toml").is_file()
-            and (parent / "src" / "hal0").is_dir()
-        ):
-            return parent
-    return None
-
-
 def _is_hal0_managed_package(entry: object) -> bool:
     """True for a ``packages`` entry hal0 rewrites: an old double-loading
     extension entry or any ``pi-mcp-adapter`` pin. Matches the string form and
@@ -173,6 +174,18 @@ def _is_hal0_managed_package(entry: object) -> bool:
     return isinstance(source, str) and (
         source in _LEGACY_PACKAGE_ENTRIES or source.startswith(_ADAPTER_PREFIX)
     )
+
+
+def _note(message: str) -> None:
+    """One line for the operator running the install or update (stderr)."""
+    print(message, file=sys.stderr)
+
+
+def _compat_accepts(url: str, token: str) -> bool | None:
+    """Module-level seam over :func:`hal0.memory.compat_client.compat_accepts`."""
+    from hal0.memory.compat_client import compat_accepts
+
+    return compat_accepts(url, token)
 
 
 def _pi_binary_on_path() -> bool:
@@ -211,21 +224,23 @@ class PiDriver(AgentDriver):
         # hal0-memory MCP server (rides the pinned pi-mcp-adapter).
         self._write_mcp_config(bearer_token=bearer_token)
 
-        # Hindsight client config — seeded iff absent (spec D4).
+        # Hindsight client config — seeded iff absent (spec D4), then Pi's
+        # own section pointed at hal0's memory endpoint with its bridge key.
         self._write_hindsight_config()
         self._ensure_hindsight_auto_update_off()
+        self._wire_memory_compat()
 
         # Last: stamp the daemon-readable marker (see _write_profile_marker).
         # Ordering matters — the marker asserts the profile above landed.
         self._write_profile_marker()
 
-    def upgrade(self) -> dict[str, bool]:
+    def upgrade(self) -> dict[str, str]:
         """Re-pin pi on a box that already has it, without an uninstall.
 
         Runs the installer again (it installs the exact pins, so a box on an
         older pi or adapter converges), redeploys hal0's own two extensions
         and the theme, replaces the managed ``pi-mcp-adapter`` entry, and
-        refreshes the MCP entry, the Hindsight bank alias and the marker.
+        refreshes the MCP entry, Pi's memory-endpoint section and the marker.
         Extensions the operator added under ``~/.pi/agent/extensions`` are
         never touched — only the two hal0 directories are replaced — and the
         default provider, model and theme in ``settings.json`` are left as
@@ -238,8 +253,10 @@ class PiDriver(AgentDriver):
         too, before anything runs, rather than replaced the way ``install``
         would.
 
-        Returns ``{"hindsight_alias_added": bool}`` so the caller can tell the
-        operator that the shared Hindsight config was changed."""
+        Returns ``{"memory_compat": <outcome>}`` (:data:`COMPAT_KEPT`,
+        :data:`COMPAT_MINTED`, :data:`COMPAT_ROTATED` or :data:`COMPAT_SKIPPED`)
+        so the caller can tell the operator what changed in the shared
+        Hindsight config."""
         marker = self._profile_marker_path()
         try:
             marker_home = Path(json.loads(marker.read_text(encoding="utf-8"))["home"])
@@ -276,11 +293,11 @@ class PiDriver(AgentDriver):
         # to change after install, and an upgrade must not revert them.
         self._write_pi_settings(defaults=False)
         self._write_mcp_config(bearer_token=None)
-        alias_added = self._ensure_hindsight_alias()
         self._ensure_hindsight_auto_update_off()
+        compat = self._wire_memory_compat()
         # Last, as in install(): the marker asserts the profile above landed.
         self._write_profile_marker()
-        return {"hindsight_alias_added": alias_added}
+        return {"memory_compat": compat}
 
     def uninstall(self) -> None:
         # Best-effort: run the uninstall companion installer/agents/pi.sh
@@ -655,51 +672,151 @@ class PiDriver(AgentDriver):
     def _write_hindsight_config(self) -> None:
         """Seed ~/.hindsight/coding-agent.json iff absent — an existing
         file is operator/agent-shared state (other harnesses read it
-        too) and is never overwritten. Banks: coding-agent::{gitProject};
-        the hal0 repo, when this driver runs from a checkout of it, maps
-        into the shared hal0-mono bank (spec bank guardrail) through the
-        name-keyed ``banks`` alias, which follows the repo to any path. A
-        packaged install has no checkout, so no mapping is seeded (#2315)."""
+        too) and is never overwritten. It names no flat ``apiUrl``: Pi's
+        address and key go in its own section (:meth:`_wire_memory_compat`),
+        and nothing here points a harness at the engine directly. Created
+        0600, since Pi's section will carry a bridge key."""
         path = self._hindsight_client_config()
         if path.exists():
             return
         payload: dict[str, Any] = {
             "serverMode": "self-hosted",
-            "apiUrl": _HINDSIGHT_API_URL,
+            "retainTags": ["project:{gitProject}"],
+            "retainMetadata": {"repo": "{gitProject}"},
+            # Pi-scoped: the package's daily self-update would otherwise replace
+            # the version hal0 pins (#3165). Other harnesses' settings are untouched.
+            "harnesses": {_HINDSIGHT_HARNESS: {"autoUpdate": False}},
         }
-        if _hal0_source_checkout() is not None:
-            payload["banks"] = {_HINDSIGHT_ALIAS_ID: {"bank": _HINDSIGHT_SHARED_BANK}}
-        payload["retainTags"] = ["project:{gitProject}"]
-        payload["retainMetadata"] = {"repo": "{gitProject}"}
-        # Pi-scoped: the package's daily self-update would otherwise replace the
-        # version hal0 pins (#3165). Other harnesses' settings are untouched.
-        payload["harnesses"] = {_HINDSIGHT_HARNESS: {"autoUpdate": False}}
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, (json.dumps(payload, indent=2) + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
         tmp.replace(path)
 
-    def _ensure_hindsight_alias(self) -> bool:
-        """Add the hal0 bank alias to an EXISTING coding-agent.json when its
-        ``banks`` section lacks that key; return True iff it was added.
+    # ── memory through /api/memory/compat ─────────────────────────────────
 
-        The file is shared state, so this touches nothing else: every other
-        key and every other ``banks`` entry stays as it was, an alias the
-        operator already set (even to a different bank) is left alone, and a
-        missing, unreadable or non-object file is not seeded here — that is
-        :meth:`_write_hindsight_config`'s job at install time. The rewrite
-        keeps the file's mode and owner and writes through a symlink: it may
-        carry a token and may be managed elsewhere."""
+    def _wire_memory_compat(self) -> str:
+        """Point Pi's memory client at hal0's engine-compatible endpoint.
+
+        Writes ``harnesses.pi.apiUrl`` (``<hal0-api>/api/memory/compat``) and
+        ``harnesses.pi.apiToken`` (the ``pi-coder`` bridge key) into the shared
+        client config; the flat keys and every other harness are left alone.
+
+        * A token already in Pi's section is reused when the endpoint accepts
+          it, or when that cannot be checked (hal0-api down): a key is never
+          replaced on a guess.
+        * A missing or rejected token: the hal0-managed ``pi-coder`` client is
+          minted, or rotated when it exists. A client of that name someone
+          else made is never touched.
+        * The hal0 user or the bridge store is not there, the bridge is off,
+          or the config cannot be read: a warning, and Pi stays on the memory
+          config it has. Never raises, never fails the install.
+
+        The file is narrowed to 0600 and keeps its owner. The key is never
+        logged or printed.
+        """
         loaded = self._load_hindsight_config()
         if loaded is None:
-            return False
+            _note(
+                f"pi memory: {self._hindsight_client_config()} is missing or unreadable; "
+                "Pi's memory client was not pointed at hal0"
+            )
+            return COMPAT_SKIPPED
         path, data = loaded
-        banks = data.setdefault("banks", {})
-        if not isinstance(banks, dict) or _HINDSIGHT_ALIAS_ID in banks:
-            return False
-        banks[_HINDSIGHT_ALIAS_ID] = {"bank": _HINDSIGHT_SHARED_BANK}
-        self._store_hindsight_config(path, data)
-        return True
+        harnesses = data.setdefault("harnesses", {})
+        if not isinstance(harnesses, dict):
+            _note(f"pi memory: 'harnesses' in {path} is not an object; left as it is")
+            return COMPAT_SKIPPED
+        section = harnesses.setdefault(_HINDSIGHT_HARNESS, {})
+        if not isinstance(section, dict):
+            _note(f"pi memory: 'harnesses.pi' in {path} is not an object; left as it is")
+            return COMPAT_SKIPPED
+        url = compat_url(_api_base())
+        token = section.get("apiToken")
+        outcome = COMPAT_KEPT
+        if not (isinstance(token, str) and token and _compat_accepts(url, token) is not False):
+            answer = self._managed_compat_key()
+            key = answer.get("key")
+            if not isinstance(key, str) or not key:
+                _note(
+                    f"pi memory: no key for bridge client {_PI_BRIDGE_CLIENT!r} "
+                    f"({answer.get('status')}: {answer.get('detail') or 'no detail'}); "
+                    "Pi stays on its current memory config. Re-run "
+                    "`sudo hal0 update component pi` once that is fixed."
+                )
+                return COMPAT_SKIPPED
+            token = key
+            outcome = COMPAT_ROTATED if answer.get("status") == "rotated" else COMPAT_MINTED
+            if outcome == COMPAT_ROTATED:
+                _note(
+                    f"pi memory: rotated the hal0-managed bridge client {_PI_BRIDGE_CLIENT!r} "
+                    "(Pi's stored key was missing or rejected)"
+                )
+        section["serverMode"] = "self-hosted"
+        section["apiUrl"] = url
+        section["apiToken"] = token
+        banks = data.get("banks")
+        alias = banks.get(_HINDSIGHT_ALIAS_ID) if isinstance(banks, dict) else None
+        if isinstance(alias, dict) and alias.get("bank") == _HINDSIGHT_LEGACY_SHARED_BANK:
+            own = section.setdefault("banks", {})
+            if isinstance(own, dict):
+                own[_HINDSIGHT_ALIAS_ID] = {"bank": _HINDSIGHT_ALIAS_ID}
+        try:
+            self._store_hindsight_config(path, data, max_mode=0o600)
+        except OSError as exc:
+            _note(f"pi memory: could not write {path} ({exc}); Pi stays on its current config")
+            return COMPAT_SKIPPED
+        return outcome
+
+    def _managed_compat_key(self) -> dict[str, Any]:
+        """Mint or rotate ``pi-coder`` as the hal0 user; the answer of
+        :func:`hal0.bridge.managed_mint.mint`. Never raises.
+
+        In-process when this process is the hal0 user; from root, the helper
+        re-run as hal0 (:func:`hal0.system.seam.as_hal0_argv`), its key read
+        from the pipe and nowhere else. Any other user cannot mint."""
+        from hal0.bridge import managed_mint
+        from hal0.system.seam import as_hal0_argv, hal0_service_account, is_hal0_service_user
+
+        if hal0_service_account() is None:
+            return {"status": "error", "detail": "this box has no hal0 service user"}
+        if is_hal0_service_user():
+            return managed_mint.mint(_PI_BRIDGE_CLIENT, _PI_BRIDGE_CREATED_BY, rotate=True)
+        if os.geteuid() != 0:
+            return {"status": "error", "detail": "only root or the hal0 user can mint the key"}
+        argv = as_hal0_argv(
+            [
+                sys.executable,
+                "-I",
+                "-m",
+                "hal0.bridge.managed_mint",
+                _PI_BRIDGE_CLIENT,
+                _PI_BRIDGE_CREATED_BY,
+                "--rotate",
+            ]
+        )
+        try:
+            proc = self._runner.run(  # type: ignore[attr-defined]
+                argv, capture_output=True, text=True, check=False, timeout=60
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {"status": "error", "detail": f"could not run as hal0 ({type(exc).__name__})"}
+        lines = (proc.stdout or "").strip().splitlines()
+        try:
+            answer = json.loads(lines[-1]) if lines else None
+        except json.JSONDecodeError:
+            answer = None
+        if not isinstance(answer, dict):
+            # stderr only: stdout is where a key would be.
+            stderr = (proc.stderr or "").strip()[-200:] or "no output"
+            return {
+                "status": "error",
+                "detail": f"the hal0-side helper exited {proc.returncode}: {stderr}",
+            }
+        return answer
 
     def _ensure_hindsight_auto_update_off(self) -> bool:
         """Turn the package's daily self-update off for Pi only, in an EXISTING
@@ -711,7 +828,7 @@ class PiDriver(AgentDriver):
         file keep their setting. An operator who set ``autoUpdate`` at either
         level made a choice that is not ours to override, so the file is only
         written when neither is present. Same safety as
-        :meth:`_ensure_hindsight_alias`: nothing else is touched, and a
+        :meth:`_wire_memory_compat`: nothing else is touched, and a
         missing, unreadable or non-object file is left alone."""
         loaded = self._load_hindsight_config()
         if loaded is None:
@@ -741,10 +858,13 @@ class PiDriver(AgentDriver):
             return None
         return path, data
 
-    def _store_hindsight_config(self, path: Path, data: dict[str, Any]) -> None:
+    def _store_hindsight_config(
+        self, path: Path, data: dict[str, Any], *, max_mode: int | None = None
+    ) -> None:
         """Rewrite the shared client config in place. Keeps the file's mode and
         owner and writes through a symlink: it may carry a token and may be
-        managed elsewhere."""
+        managed elsewhere. ``max_mode`` narrows the mode (never widens it), for
+        a write that puts a key in the file."""
         st = path.stat()
         # Write through a symlink (a dotfiles-managed file) instead of
         # replacing the link with a regular file.
@@ -753,7 +873,8 @@ class PiDriver(AgentDriver):
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             os.write(fd, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
-            os.fchmod(fd, stat.S_IMODE(st.st_mode))
+            mode = stat.S_IMODE(st.st_mode)
+            os.fchmod(fd, mode & max_mode if max_mode is not None else mode)
             # Run as root over another user's file, hand it back to its owner.
             # Without the privilege the file ends up owned by whoever runs this.
             with contextlib.suppress(PermissionError):

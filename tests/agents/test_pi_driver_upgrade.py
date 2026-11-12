@@ -1,5 +1,5 @@
-"""``PiDriver.upgrade``: re-pin pi, redeploy hal0's own extensions, seed the
-Hindsight bank alias — without touching what the operator added.
+"""``PiDriver.upgrade``: re-pin pi, redeploy hal0's own extensions, point Pi's
+memory client at /api/memory/compat — without touching what the operator added.
 
 A box with an older pi used to have only uninstall + reinstall. ``upgrade``
 re-runs the installer, redeploys the two extensions and the theme, replaces
@@ -20,6 +20,8 @@ import pytest
 from hal0.agents.manager import AgentError
 from hal0.agents.pi_coder import PiDriver
 from hal0.agents.pi_coder import driver as driver_mod
+
+_REAL_MANAGED_COMPAT_KEY = PiDriver._managed_compat_key
 
 
 class _FakeRunner:
@@ -87,8 +89,8 @@ def test_upgrade_reruns_installer_and_redeploys(
 
     result = d.upgrade()
 
-    # No coding-agent.json on this box: nothing to add the alias to.
-    assert result == {"hindsight_alias_added": False}
+    # No coding-agent.json on this box: nothing to point at the endpoint.
+    assert result == {"memory_compat": "skipped"}
 
     assert fake_runner.calls[0][0][:2] == ["bash", str(driver_mod.installer_script_path("pi"))]
     # Same env contract as install(): the data dir and API URL reach the script.
@@ -172,94 +174,6 @@ def test_upgrade_keeps_operator_defaults(
     assert settings["packages"] == ["npm:pi-mcp-adapter@5.3.0"]
 
 
-def test_ensure_hindsight_alias_adds_only_missing_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
-) -> None:
-    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
-    cfg = d._hindsight_client_config()
-    cfg.parent.mkdir(parents=True)
-    cfg.write_text(
-        json.dumps(
-            {
-                "apiUrl": "http://127.0.0.1:9177",
-                "mapPathToBank": {"/old": "coding-agent::hal0-mono"},
-            }
-        )
-    )
-
-    assert d._ensure_hindsight_alias() is True
-
-    data = json.loads(cfg.read_text())
-    assert data["banks"] == {"coding-agent::hal0": {"bank": "coding-agent::hal0-mono"}}
-    assert data["mapPathToBank"] == {"/old": "coding-agent::hal0-mono"}
-    assert data["apiUrl"] == "http://127.0.0.1:9177"
-    assert d._ensure_hindsight_alias() is False
-
-
-def test_ensure_hindsight_alias_leaves_operator_banks_alone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
-) -> None:
-    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
-    cfg = d._hindsight_client_config()
-    cfg.parent.mkdir(parents=True)
-    banks = {
-        "coding-agent::secret": {"disabled": True},
-        # The operator already routes hal0 somewhere else: not ours to rewrite.
-        "coding-agent::hal0": {"bank": "team::shared"},
-    }
-    cfg.write_text(json.dumps({"banks": banks}))
-
-    assert d._ensure_hindsight_alias() is False
-
-    assert json.loads(cfg.read_text()) == {"banks": banks}
-
-
-def test_ensure_hindsight_alias_is_a_noop_without_a_usable_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
-) -> None:
-    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
-    cfg = d._hindsight_client_config()
-    assert d._ensure_hindsight_alias() is False
-    assert not cfg.exists()  # never seeds: that is install()'s job
-
-    cfg.parent.mkdir(parents=True)
-    cfg.write_text("{not json")
-    assert d._ensure_hindsight_alias() is False
-    assert cfg.read_text() == "{not json"
-
-
-def test_ensure_hindsight_alias_keeps_the_file_mode(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
-) -> None:
-    """The file is shared operator state and may carry a token: a rewrite must
-    not widen its permissions."""
-    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
-    cfg = d._hindsight_client_config()
-    cfg.parent.mkdir(parents=True)
-    cfg.write_text(json.dumps({"apiUrl": "http://127.0.0.1:9177"}))
-    os.chmod(cfg, 0o640)
-
-    assert d._ensure_hindsight_alias() is True
-
-    assert stat.S_IMODE(os.stat(cfg).st_mode) == 0o640
-
-
-def test_upgrade_seeds_alias_into_existing_hindsight_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
-) -> None:
-    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
-    cfg = d._hindsight_client_config()
-    cfg.parent.mkdir(parents=True)
-    cfg.write_text(json.dumps({"apiUrl": "http://other:9177"}))
-
-    result = d.upgrade()
-
-    assert result == {"hindsight_alias_added": True}
-    data = json.loads(cfg.read_text())
-    assert data["apiUrl"] == "http://other:9177"
-    assert data["banks"] == {"coding-agent::hal0": {"bank": "coding-agent::hal0-mono"}}
-
-
 def test_write_pi_settings_keeps_object_form_packages(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
 ) -> None:
@@ -330,45 +244,6 @@ def test_upgrade_refuses_to_replace_an_unusable_config(
     assert str(path) in str(err.value)
     assert path.read_text() == content
     assert fake_runner.calls == []  # refused before the installer ran
-
-
-def test_ensure_hindsight_alias_writes_through_a_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
-) -> None:
-    """A dotfiles-managed coding-agent.json is a symlink: the alias lands in
-    its target and the link stays a link."""
-    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
-    real = tmp_path / "dotfiles" / "coding-agent.json"
-    real.parent.mkdir()
-    real.write_text(json.dumps({"apiUrl": "http://127.0.0.1:9177"}))
-    cfg = d._hindsight_client_config()
-    cfg.parent.mkdir(parents=True)
-    cfg.symlink_to(real)
-
-    assert d._ensure_hindsight_alias() is True
-
-    assert cfg.is_symlink() and cfg.resolve() == real
-    assert json.loads(real.read_text())["banks"] == {
-        "coding-agent::hal0": {"bank": "coding-agent::hal0-mono"}
-    }
-
-
-def test_ensure_hindsight_alias_keeps_the_file_owner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
-) -> None:
-    """Run as root over another user's file, the rewrite must hand it back to
-    that owner. A non-root test cannot chown for real, so assert the call."""
-    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
-    cfg = d._hindsight_client_config()
-    cfg.parent.mkdir(parents=True)
-    cfg.write_text(json.dumps({"apiUrl": "http://127.0.0.1:9177"}))
-    st = os.stat(cfg)
-    chowned: list[tuple[int, int]] = []
-    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid)))
-
-    assert d._ensure_hindsight_alias() is True
-
-    assert chowned == [(st.st_uid, st.st_gid)]
 
 
 # ── autoUpdate off for the Pi harness only (#3165) ─────────────────────────
@@ -475,8 +350,330 @@ def test_upgrade_turns_auto_update_off_in_existing_config(
     cfg.parent.mkdir(parents=True)
     cfg.write_text(json.dumps({"apiUrl": "http://other:9177"}))
 
-    assert d.upgrade() == {"hindsight_alias_added": True}
+    assert d.upgrade() == {"memory_compat": "skipped"}
 
     data = json.loads(cfg.read_text())
     assert data["apiUrl"] == "http://other:9177"
     assert data["harnesses"] == {"pi": {"autoUpdate": False}}
+
+
+# ── Pi's memory client onto /api/memory/compat (ADR-0058 decision 4b) ──────
+
+_COMPAT = "http://127.0.0.1:8080/api/memory/compat"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_compat(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """No test reaches a real hal0-api or bridge store. The default: the token
+    cannot be checked, and no key can be minted. Returns the mint calls."""
+    minted: list[str] = []
+
+    def no_key(self: PiDriver) -> dict[str, Any]:
+        minted.append("called")
+        return {"status": "error", "key": None, "detail": "stub"}
+
+    monkeypatch.setattr(driver_mod, "_compat_accepts", lambda url, token: None)
+    monkeypatch.setattr(PiDriver, "_managed_compat_key", no_key)
+    monkeypatch.delenv("HAL0_API_URL", raising=False)
+    return minted
+
+
+def _key(monkeypatch: pytest.MonkeyPatch, status: str = "minted", key: str = "hal0bk_pi-coder.new"):
+    monkeypatch.setattr(
+        PiDriver, "_managed_compat_key", lambda self: {"status": status, "key": key}
+    )
+
+
+def _shared_config(d: PiDriver, data: dict[str, Any], mode: int = 0o644) -> Path:
+    cfg = d._hindsight_client_config()
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps(data))
+    os.chmod(cfg, mode)
+    return cfg
+
+
+def test_compat_wiring_writes_only_pis_section_and_keeps_the_flat_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    """The file is shared by every harness on the box: the flat apiUrl,
+    apiToken and banks, and every other harness section, are left as they are."""
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    original = {
+        "apiUrl": "http://127.0.0.1:9177",
+        "apiToken": "operator-token",
+        "banks": {"x": {"bank": "y"}},
+        "harnesses": {"claude-code": {"apiUrl": "http://elsewhere", "autoUpdate": True}},
+    }
+    cfg = _shared_config(d, original)
+    _key(monkeypatch)
+
+    assert d._wire_memory_compat() == driver_mod.COMPAT_MINTED
+
+    data = json.loads(cfg.read_text())
+    assert {k: v for k, v in data.items() if k != "harnesses"} == {
+        k: v for k, v in original.items() if k != "harnesses"
+    }
+    assert data["harnesses"]["claude-code"] == original["harnesses"]["claude-code"]
+    assert data["harnesses"]["pi"] == {
+        "serverMode": "self-hosted",
+        "apiUrl": _COMPAT,
+        "apiToken": "hal0bk_pi-coder.new",
+    }
+
+
+def test_compat_wiring_follows_hal0_api_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = _shared_config(d, {})
+    _key(monkeypatch)
+    monkeypatch.setenv("HAL0_API_URL", "http://box:9000/")
+
+    d._wire_memory_compat()
+
+    assert json.loads(cfg.read_text())["harnesses"]["pi"]["apiUrl"] == (
+        "http://box:9000/api/memory/compat"
+    )
+
+
+def test_compat_wiring_narrows_the_file_to_0600(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = _shared_config(d, {}, mode=0o644)
+    _key(monkeypatch)
+
+    d._wire_memory_compat()
+
+    assert stat.S_IMODE(os.stat(cfg).st_mode) == 0o600
+
+
+def test_compat_wiring_keeps_the_file_owner_and_writes_through_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    real = tmp_path / "dotfiles" / "coding-agent.json"
+    real.parent.mkdir()
+    real.write_text("{}")
+    cfg = d._hindsight_client_config()
+    cfg.parent.mkdir(parents=True)
+    cfg.symlink_to(real)
+    st = os.stat(real)
+    chowned: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "fchown", lambda fd, uid, gid: chowned.append((uid, gid)))
+    _key(monkeypatch)
+
+    d._wire_memory_compat()
+
+    assert cfg.is_symlink() and cfg.resolve() == real
+    assert json.loads(real.read_text())["harnesses"]["pi"]["apiUrl"] == _COMPAT
+    assert chowned == [(st.st_uid, st.st_gid)]
+
+
+@pytest.mark.parametrize("accepted", [True, None])
+def test_a_working_or_uncheckable_token_is_reused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_runner: _FakeRunner,
+    _no_real_compat: list[str],
+    accepted: bool | None,
+) -> None:
+    """A key is never replaced on a guess: hal0-api down keeps it too."""
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = _shared_config(d, {"harnesses": {"pi": {"apiToken": "hal0bk_pi-coder.old"}}})
+    seen: list[tuple[str, str]] = []
+
+    def accepts(url: str, token: str) -> bool | None:
+        seen.append((url, token))
+        return accepted
+
+    monkeypatch.setattr(driver_mod, "_compat_accepts", accepts)
+
+    assert d._wire_memory_compat() == driver_mod.COMPAT_KEPT
+
+    assert seen == [(_COMPAT, "hal0bk_pi-coder.old")]
+    assert _no_real_compat == []  # nothing minted or rotated
+    assert json.loads(cfg.read_text())["harnesses"]["pi"] == {
+        "serverMode": "self-hosted",
+        "apiToken": "hal0bk_pi-coder.old",
+        "apiUrl": _COMPAT,
+    }
+
+
+def test_a_rejected_token_rotates_the_managed_client_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner, capsys
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = _shared_config(d, {"harnesses": {"pi": {"apiToken": "hal0bk_pi-coder.old"}}})
+    monkeypatch.setattr(driver_mod, "_compat_accepts", lambda url, token: False)
+    _key(monkeypatch, status="rotated", key="hal0bk_pi-coder.rotated")
+
+    assert d._wire_memory_compat() == driver_mod.COMPAT_ROTATED
+
+    assert json.loads(cfg.read_text())["harnesses"]["pi"]["apiToken"] == ("hal0bk_pi-coder.rotated")
+    err = capsys.readouterr().err
+    assert err.count("\n") == 1 and "rotated" in err and "pi-coder" in err
+    assert "hal0bk_" not in err  # the key is never printed
+
+
+def test_no_key_leaves_pi_on_its_current_config_with_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner, capsys
+) -> None:
+    """No hal0 user, no bridge store, the bridge off, or a foreign client of
+    that name: warn and change nothing, never fail the install."""
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    text = json.dumps({"apiUrl": "http://127.0.0.1:9177"})
+    cfg = d._hindsight_client_config()
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(text)
+
+    assert d._wire_memory_compat() == driver_mod.COMPAT_SKIPPED
+
+    assert cfg.read_text() == text
+    assert "Pi stays on its current memory config" in capsys.readouterr().err
+
+
+def test_pis_section_undoes_the_old_hal0_mono_alias_for_pi_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    """On the endpoint the bank only carries the project: Pi's writes from the
+    hal0 repo must be project:hal0, not project:hal0-mono."""
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    flat = {"coding-agent::hal0": {"bank": "coding-agent::hal0-mono"}}
+    cfg = _shared_config(d, {"banks": flat})
+    _key(monkeypatch)
+
+    d._wire_memory_compat()
+
+    data = json.loads(cfg.read_text())
+    assert data["banks"] == flat
+    assert data["harnesses"]["pi"]["banks"] == {
+        "coding-agent::hal0": {"bank": "coding-agent::hal0"}
+    }
+
+
+def test_an_operator_alias_is_not_shadowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = _shared_config(d, {"banks": {"coding-agent::hal0": {"bank": "team::shared"}}})
+    _key(monkeypatch)
+
+    d._wire_memory_compat()
+
+    assert "banks" not in json.loads(cfg.read_text())["harnesses"]["pi"]
+
+
+@pytest.mark.parametrize(
+    "content", ["{not json", "[1, 2]", '{"harnesses": "x"}', '{"harnesses": {"pi": 3}}']
+)
+def test_compat_wiring_leaves_unusable_files_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner, content: str
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = d._hindsight_client_config()
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text(content)
+    _key(monkeypatch)
+
+    assert d._wire_memory_compat() == driver_mod.COMPAT_SKIPPED
+    assert cfg.read_text() == content
+
+
+def test_upgrade_points_an_existing_config_at_the_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_runner: _FakeRunner
+) -> None:
+    d = _driver_with_marker(tmp_path, monkeypatch, fake_runner)
+    cfg = _shared_config(d, {"apiUrl": "http://other:9177"})
+    _key(monkeypatch)
+
+    assert d.upgrade() == {"memory_compat": driver_mod.COMPAT_MINTED}
+
+    data = json.loads(cfg.read_text())
+    assert data["apiUrl"] == "http://other:9177"
+    assert data["harnesses"]["pi"]["apiUrl"] == _COMPAT
+
+
+# ── minting as the hal0 user ───────────────────────────────────────────────
+
+
+class _MintRunner(_FakeRunner):
+    def __init__(self, stdout: str, returncode: int = 0) -> None:
+        super().__init__()
+        self.stdout = stdout
+        self.returncode = returncode
+
+    def run(self, argv, **kwargs):
+        self.calls.append((list(argv), kwargs))
+        out, rc = self.stdout, self.returncode
+
+        class _Done:
+            returncode = rc
+            stdout = out
+            stderr = ""
+
+        return _Done()
+
+
+def _real_mint(monkeypatch: pytest.MonkeyPatch, *, euid: int, hal0_user: bool = False) -> None:
+    from hal0.system import seam
+
+    # Put back the real method the autouse fixture stubbed.
+    monkeypatch.setattr(PiDriver, "_managed_compat_key", _REAL_MANAGED_COMPAT_KEY)
+    monkeypatch.setattr(seam, "hal0_service_account", lambda: seam.ServiceAccount(990, 990, ()))
+    monkeypatch.setattr(seam, "is_hal0_service_user", lambda: hal0_user)
+    monkeypatch.setattr(os, "geteuid", lambda: euid)
+
+
+def test_root_mints_through_the_hal0_user_and_reads_the_key_from_the_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _real_mint(monkeypatch, euid=0)
+    runner = _MintRunner('noise\n{"status": "minted", "key": "hal0bk_pi-coder.k"}\n')
+
+    answer = PiDriver(runner=runner)._managed_compat_key()
+
+    assert answer == {"status": "minted", "key": "hal0bk_pi-coder.k"}
+    argv, kwargs = runner.calls[0]
+    assert argv[0] in ("runuser", "setpriv", "sudo") and "hal0" in argv
+    assert argv[-4:] == ["hal0.bridge.managed_mint", "pi-coder", "system:pi-coder", "--rotate"]
+    assert kwargs["capture_output"] is True
+    assert "input" not in kwargs and "env" not in kwargs  # no key in, only the pipe out
+
+
+def test_a_helper_with_no_answer_is_an_error_not_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    _real_mint(monkeypatch, euid=0)
+    answer = PiDriver(runner=_MintRunner("", returncode=1))._managed_compat_key()
+    assert answer["status"] == "error" and "key" not in answer
+
+
+def test_no_hal0_user_means_no_mint(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.system import seam
+
+    _real_mint(monkeypatch, euid=0)
+    monkeypatch.setattr(seam, "hal0_service_account", lambda: None)
+    runner = _MintRunner("")
+    answer = PiDriver(runner=runner)._managed_compat_key()
+    assert answer["status"] == "error" and runner.calls == []
+
+
+def test_another_user_cannot_mint(monkeypatch: pytest.MonkeyPatch) -> None:
+    _real_mint(monkeypatch, euid=1000)
+    runner = _MintRunner("")
+    assert PiDriver(runner=runner)._managed_compat_key()["status"] == "error"
+    assert runner.calls == []
+
+
+def test_the_hal0_user_mints_in_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.bridge import managed_mint
+
+    _real_mint(monkeypatch, euid=990, hal0_user=True)
+    seen: list[tuple[str, str, bool]] = []
+    monkeypatch.setattr(
+        managed_mint,
+        "mint",
+        lambda name, by, *, rotate: seen.append((name, by, rotate)) or {"status": "minted"},
+    )
+    runner = _MintRunner("")
+    assert PiDriver(runner=runner)._managed_compat_key() == {"status": "minted"}
+    assert seen == [("pi-coder", "system:pi-coder", True)] and runner.calls == []

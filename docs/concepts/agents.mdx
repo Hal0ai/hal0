@@ -149,10 +149,11 @@ Re-pin an installed pi with `sudo hal0 update component pi`, run the same way yo
 installed it. It reruns the pinned installer and redeploys hal0's two
 extensions, and leaves extensions you added, your default provider, model and
 theme alone. It refuses when pi's profile is in a different home or pi is not
-installed. A fresh `hal0 agent install pi` from a
-git checkout seeds a name-keyed `banks` alias (`coding-agent::hal0` to
-`coding-agent::hal0-mono`) in `~/.hindsight/coding-agent.json`; the update
-adds the alias to an existing file.
+installed. Both point Pi's memory client at hal0's `/api/memory/compat`
+with the hal0-managed bridge client `pi-coder` (its own section of
+`~/.hindsight/coding-agent.json`), so Pi's memory goes through hal0's write
+envelope instead of straight to the engine
+([Run agents](/docs/guides/run-agents/)).
 
 The dashboard's Agents view shows Pi as a live card: the installed pi and
 adapter versions against the pins (with an update badge when it is behind),

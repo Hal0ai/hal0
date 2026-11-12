@@ -57,7 +57,6 @@ from fastapi import APIRouter, Query, Request
 from hal0.agents import overview as builders
 from hal0.agents.manager import AgentManager, AgentRecord, agent_kind, installer_script_path
 from hal0.agents.pi_coder import PiDriver
-from hal0.agents.pi_coder.driver import _HINDSIGHT_API_URL
 from hal0.api.agents.memory_stats import get_agent_memory_stats, memory_reachable
 from hal0.api.agents.restart import unit_is_active
 from hal0.api.routes import agents as agents_routes
@@ -66,6 +65,7 @@ from hal0.api.routes.config import hermes_public_url
 from hal0.api.routes.updater import _update_jobs
 from hal0.components.pi_arm import UPDATE_COMMAND as PI_UPDATE_COMMAND
 from hal0.components.status import component_status_snapshot
+from hal0.memory.hindsight_client import DEFAULT_BASE_URL as HINDSIGHT_DEFAULT_BASE_URL
 from hal0.services.systemd import unit_state
 
 if TYPE_CHECKING:
@@ -176,8 +176,9 @@ _MEMORY_REACH_TIMEOUT_S: Final[float] = 2.0
 #: second in total, not one per profile.
 _PROBE_TIMEOUT_S: Final[float] = 1.0
 
-#: The hal0 memory server (Hindsight) a Pi profile points at.
-_HINDSIGHT_HEALTH_URL: Final[str] = f"{_HINDSIGHT_API_URL}/health"
+#: The memory engine (Hindsight) behind the endpoint a Pi profile points at
+#: (``/api/memory/compat``, which forwards ``/health`` to it but needs a key).
+_HINDSIGHT_HEALTH_URL: Final[str] = f"{HINDSIGHT_DEFAULT_BASE_URL}/health"
 
 #: ``updater`` registry phases that are a Hermes build, and the states that are
 #: not terminal.

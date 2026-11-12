@@ -39,6 +39,14 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # installs one, so pretend PATH has it (the marker/file checks stay
     # real). Tests for the binary-missing branch override this.
     monkeypatch.setattr(driver_mod, "_pi_binary_on_path", lambda: True)
+    # The memory-endpoint wiring must not reach a real hal0-api or bridge store.
+    monkeypatch.setattr(driver_mod, "_compat_accepts", lambda url, token: None)
+    monkeypatch.setattr(
+        PiDriver,
+        "_managed_compat_key",
+        lambda self: {"status": "minted", "key": "hal0bk_pi-coder.test"},
+    )
+    monkeypatch.delenv("HAL0_API_URL", raising=False)
     return tmp_path
 
 
@@ -145,69 +153,18 @@ def test_install_writes_hindsight_config_only_if_absent(home: Path) -> None:
     cfg_path = home / ".hindsight" / "coding-agent.json"
     cfg = json.loads(cfg_path.read_text())
     assert cfg["serverMode"] == "self-hosted"
-    assert cfg["apiUrl"] == "http://127.0.0.1:9177"
+    # No flat engine address: Pi's own section carries hal0's endpoint.
+    assert "apiUrl" not in cfg and "banks" not in cfg
+    assert cfg["harnesses"]["pi"]["apiUrl"] == "http://127.0.0.1:8080/api/memory/compat"
     assert cfg["retainTags"] == ["project:{gitProject}"]
+    assert stat.S_IMODE(cfg_path.stat().st_mode) == 0o600
 
-    # Operator config wins on re-install.
+    # Operator config wins on re-install: only Pi's section is written.
     cfg_path.write_text(json.dumps({"serverMode": "self-hosted", "apiUrl": "http://other:9177"}))
     drv.install()
-    assert json.loads(cfg_path.read_text())["apiUrl"] == "http://other:9177"
-
-
-def test_hindsight_config_maps_hal0_repo_into_shared_bank(
-    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#2315: the hal0-mono mapping is seeded when hal0 runs from a checkout,
-    keyed by the repo's bank id (not a path), so it follows the repo to any
-    clone or worktree."""
-    checkout = tmp_path / "somewhere" / "hal0"
-    monkeypatch.setattr(driver_mod, "_hal0_source_checkout", lambda: checkout)
-    drv, _ = _driver()
-    drv.install()
-    cfg = json.loads((home / ".hindsight" / "coding-agent.json").read_text())
-    assert cfg["banks"] == {"coding-agent::hal0": {"bank": "coding-agent::hal0-mono"}}
-    assert "mapPathToBank" not in cfg
-
-
-def test_hindsight_config_omits_bank_mapping_without_checkout(
-    home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#2315: a packaged install has no hal0 checkout to map, so no
-    mapping is seeded (gitProject banking applies)."""
-    monkeypatch.setattr(driver_mod, "_hal0_source_checkout", lambda: None)
-    drv, _ = _driver()
-    drv.install()
-    cfg = json.loads((home / ".hindsight" / "coding-agent.json").read_text())
-    assert "banks" not in cfg
-    assert "mapPathToBank" not in cfg
-
-
-def _fake_module_file(root: Path) -> Path:
-    module = root / "src" / "hal0" / "agents" / "pi_coder" / "driver.py"
-    module.parent.mkdir(parents=True)
-    module.write_text("")
-    return module
-
-
-def test_source_checkout_found_above_module(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "checkout"
-    module = _fake_module_file(root)
-    (root / "pyproject.toml").write_text("[project]\nname = 'hal0'\n")
-    # A git worktree's .git is a file, not a directory; both count.
-    (root / ".git").write_text("gitdir: elsewhere\n")
-    monkeypatch.setattr(driver_mod, "__file__", str(module))
-    assert driver_mod._hal0_source_checkout() == root.resolve()
-
-
-def test_source_checkout_none_for_packaged_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # site-packages copy: no .git / pyproject above the module.
-    module = _fake_module_file(tmp_path / "venv" / "lib" / "site-packages")
-    monkeypatch.setattr(driver_mod, "__file__", str(module))
-    assert driver_mod._hal0_source_checkout() is None
+    again = json.loads(cfg_path.read_text())
+    assert again["apiUrl"] == "http://other:9177"
+    assert again["harnesses"]["pi"]["apiToken"] == "hal0bk_pi-coder.test"
 
 
 def test_install_preserves_operator_settings(home: Path) -> None:

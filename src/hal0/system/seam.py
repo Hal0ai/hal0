@@ -242,6 +242,22 @@ def hal0_service_home() -> str:
         return "/var/lib/hal0"
 
 
+def as_hal0_argv(argv: Sequence[str]) -> list[str]:
+    """``argv`` wrapped to run as the ``hal0`` service user from a root process.
+
+    ``runuser``, else ``setpriv``, else ``sudo``, the order
+    ``installer/lib/run-as-hal0.sh`` uses, behind an ``env`` that sets
+    ``HOME`` to hal0's home so all three tools leave the same environment.
+    The caller guarantees ``euid == 0`` and that the account exists.
+    """
+    env_argv = ["env", f"HOME={hal0_service_home()}", *argv]
+    if shutil.which("runuser"):
+        return ["runuser", "-u", "hal0", "--", *env_argv]
+    if shutil.which("setpriv"):
+        return ["setpriv", "--reuid", "hal0", "--regid", "hal0", "--init-groups", "--", *env_argv]
+    return ["sudo", "-u", "hal0", "--", *env_argv]
+
+
 def running_hal0_bin() -> str:
     """The ``hal0`` console script belonging to the code that is running.
 

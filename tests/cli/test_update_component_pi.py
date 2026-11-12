@@ -100,15 +100,21 @@ def test_update_pi_driver_without_upgrade(monkeypatch: pytest.MonkeyPatch) -> No
     assert r.exit_code == 1 and "pi driver has no upgrade" in r.output
 
 
-def test_update_pi_reports_the_added_hindsight_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    _as_root_with(monkeypatch, lambda: {"hindsight_alias_added": True})
+@pytest.mark.parametrize("outcome", ["minted", "rotated"])
+def test_update_pi_reports_a_new_memory_endpoint_key(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    _as_root_with(monkeypatch, lambda: {"memory_compat": outcome})
     r = CliRunner().invoke(uc.update_app, ARGS)
     assert r.exit_code == 0
-    assert "Hindsight bank alias added to coding-agent.json" in r.output
+    assert "/api/memory/compat" in r.output and outcome in r.output
 
 
-def test_update_pi_is_quiet_when_no_alias_was_added(monkeypatch: pytest.MonkeyPatch) -> None:
-    _as_root_with(monkeypatch, lambda: {"hindsight_alias_added": False})
+@pytest.mark.parametrize("outcome", ["kept", "skipped"])
+def test_update_pi_is_quiet_when_the_key_did_not_change(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    _as_root_with(monkeypatch, lambda: {"memory_compat": outcome})
     r = CliRunner().invoke(uc.update_app, ARGS)
     assert r.exit_code == 0 and "Updated pi" in r.output
-    assert "Hindsight" not in r.output
+    assert "/api/memory/compat" not in r.output
