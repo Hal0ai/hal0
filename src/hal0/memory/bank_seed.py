@@ -260,8 +260,9 @@ def heal_hook(provider: Any) -> Any:
         if held is not None:
             # The engine can be back at its normal address a moment before an
             # embedder switch lifts the write gate, and a bank that is half
-            # way through its swap looks missing: seeding it then would put a
-            # new bank where the switch is about to rename the rebuilt one.
+            # way through its swap looks missing (deleted, its archive not yet
+            # restored into its own id): seeding it then would put a new bank
+            # under the id the switch is about to restore into.
             # Not done yet: the heal loop runs this again.
             log.info("hal0.memory.bank_seed_deferred", reason=held)
             return False
