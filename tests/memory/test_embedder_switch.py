@@ -108,6 +108,7 @@ class FakeEngine:
         self.stuck_polls: int | None = None
         #: Banks whose restore writes the right counts but the wrong content.
         self.lossy_restore: set[str] = set()
+        self.lossy_everywhere: set[str] = set()
         #: Engine restarts so far; the process holding the port changes with each.
         self.restarts = 0
         self.writes: list[tuple[str, str]] = []
@@ -211,6 +212,7 @@ class FakeEngine:
                         **{k: m[k] for k in ("mm", "dir", "config", "ids", "text")},
                         "mm_content": m.get("mm_content", ""),
                         "mm_refreshed": m.get("mm_refreshed"),
+                        "no_text": m.get("no_text", False),
                     }
                 ),
             )
@@ -347,9 +349,12 @@ class FakeEngine:
             for key, delta in self.restore_delta.get(source, {}).items():
                 counts[key] += delta
             op_id = f"imp{len(self.ops)}"
-            # Lossy only into the bank's own id: the rebuilt copy is checked
-            # by counts and fingerprint alone, the bank that stays by content too.
-            lossy = source in self.lossy_restore and target == source
+            # ``lossy_restore`` loses content only into the bank's own id
+            # (what a restore through the scratch bank alone gets wrong);
+            # ``lossy_everywhere`` into the rebuilt copy too.
+            lossy = source in self.lossy_everywhere or (
+                source in self.lossy_restore and target == source
+            )
 
             def land() -> None:
                 self.banks[target] = counts
@@ -363,6 +368,8 @@ class FakeEngine:
                 restored["mm_content"] = "lost" if lossy else rows["mm_content"]
                 restored["text"] = f"lost-{rows['text']}" if lossy else rows["text"]
                 restored["ids"] = rows["ids"] if keep else f"new-{op_id}"
+                restored["no_text"] = rows.get("no_text", False)
+                restored["hash_epoch"] = op_id
 
             stuck = source in self.stuck_restore
             self.ops[op_id] = {
@@ -413,8 +420,21 @@ class FakeEngine:
             ]
             return self._page("items", rows, params)
         if rest == "/documents":
+            meta = self.m(bank)
+            no_text = meta.get("no_text", False)
             rows = [
-                {"id": f"doc-{i}", "bank_id": bank, "content_hash": f"h-{i}-{self.m(bank)['text']}"}
+                {
+                    "id": f"doc-{i}",
+                    "bank_id": bank,
+                    # Recomputed by a restore from the text it stores: with no
+                    # text stored, the original keeps the hash of a text it
+                    # does not hold and the restored row hashes "".
+                    "content_hash": f"h-{i}-{meta['text']}-{meta.get('hash_epoch', 0)}"
+                    if no_text
+                    else f"h-{i}-{meta['text']}",
+                    # LENGTH(original_text), 0 when none is stored.
+                    "text_length": 0 if no_text else len(f"document {i} of {meta['text']}"),
+                }
                 for i in range(self.banks[bank]["documents"])
             ]
             return self._page("items", rows, params)
@@ -483,6 +503,9 @@ class Host:
         self.listener_says: dict[int, dict[str, Any]] = {}
         self.unit_stopped = False
         self.stop_error: str | None = None
+        #: When false, ``systemctl show -p InvocationID`` answers ``invocation_says``.
+        self.invocation_known = True
+        self.invocation_says: str | None = None
 
     def listener(self, port: int) -> dict[str, Any]:
         if port in self.listener_says:
@@ -496,6 +519,10 @@ class Host:
 
     def unit_text(self) -> str | None:
         return self.unit
+
+    def invocation(self) -> str | None:
+        """systemd's InvocationID: new on every start of the unit."""
+        return f"inv-{self.engine.restarts}" if self.invocation_known else self.invocation_says
 
     def isolate(self, port: int, run_id: str) -> dict[str, Any]:
         self.events.append("isolate")
@@ -599,6 +626,7 @@ class Box:
         kw.setdefault("evidence", self.host.evidence)
         kw.setdefault("listener", self.host.listener)
         kw.setdefault("unit_text", self.host.unit_text)
+        kw.setdefault("unit_invocation", self.host.invocation)
         return es.EmbedderSwitch(
             self.client(f"http://127.0.0.1:{NORMAL_PORT}"),
             target=target,
@@ -3251,10 +3279,10 @@ async def test_a_restore_into_the_own_id_with_the_right_counts_but_lost_content_
     assert journal.banks[0].contents is not None
 
 
-async def test_the_own_id_check_compares_document_fact_and_model_content() -> None:
+async def test_the_content_check_names_the_ids_that_differ() -> None:
     before = {
-        "documents": "d1",
-        "facts": "f1",
+        "documents": {"doc-a": 10, "doc-b": 0, "doc-c": 7},
+        "facts": {"doc-a": "f1", "doc-c": "f2"},
         "model_content": {
             "mm-0": {"refreshed": "t1", "content": "c1"},
             "mm-1": {"refreshed": "t1", "content": "c1"},
@@ -3268,8 +3296,184 @@ async def test_the_own_id_check_compares_document_fact_and_model_content() -> No
     assert es._contents_moved(before, refreshed) == []
     lost = json.loads(json.dumps(before))
     lost["model_content"]["mm-1"]["content"] = "c0"
-    lost["documents"] = "d0"
-    assert es._contents_moved(before, lost) == ["documents", "mental-model content"]
+    del lost["documents"]["doc-b"]
+    lost["documents"]["doc-z"] = 1
+    lost["documents"]["doc-c"] = 3
+    lost["facts"]["doc-a"] = "f0"
+    assert es._contents_moved(before, lost) == [
+        "documents (missing doc-b; not in the original doc-z; text length differs for doc-c)",
+        "facts (differ for document doc-a)",
+        "mental-model content (differs for mm-1)",
+    ]
+    many = {"documents": {f"d{i}": i for i in range(5)}}
+    assert es._contents_moved(many, {"documents": {}}) == [
+        "documents (missing d0, d1, d2 and 2 more)"
+    ]
+    # A form this build does not read is a difference, never assumed equal.
+    assert es._contents_moved({"documents": "d1"}, {"documents": {}}) == [
+        "documents (recorded in a form this build cannot compare)"
+    ]
+
+
+async def test_a_restore_that_loses_content_is_caught_before_any_original_is_deleted(
+    box: Box,
+) -> None:
+    """The rebuilt copy keeps the original's document and model ids: it is checked by content."""
+    box.engine.m("alpha")["mm_content"] = "what alpha knows"
+    box.engine.m("alpha")["mm_refreshed"] = "2026-11-01"
+    box.engine.lossy_everywhere.add("alpha")
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+
+    assert not err.value.resumable, "rolled back: nothing had been deleted"
+    message = err.value.message
+    assert "alpha was not touched" in message
+    assert "documents (text length differs for doc-0, doc-1, doc-2 and 3 more)" in message
+    assert "facts (differ for document doc-0)" in message
+    assert "mental-model content (differs for mm-0, mm-1)" in message
+    _assert_rolled_back(box)
+
+
+async def test_a_resume_that_rebuilds_a_lossy_copy_says_to_stop_resuming(box: Box) -> None:
+    journal = await box.kill_at("before_swap")
+    alpha = journal.banks[0]
+    box.engine.m(alpha.temp)["text"] = "tampered"  # the copy no longer matches
+    box.engine.lossy_everywhere.add("alpha")  # and every rebuild loses the same content
+    before = len(box.events)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    assert err.value.resumable and err.value.bank == "alpha"
+    assert "if --resume reports it again, stop running it" in err.value.message
+    assert "delete:alpha" not in box.events[before:], "the original is never deleted"
+    assert "alpha" in box.engine.banks
+
+
+async def test_a_bank_that_stores_no_document_text_switches_cleanly(box: Box) -> None:
+    """store_document_text off: original_text NULL, content_hash of a text it does not hold.
+
+    A restore recomputes content_hash from the text it stores, so the hashes
+    differ by design; the check compares ids and stored-text length instead.
+    """
+    box.engine.m("gamma")["no_text"] = True
+    async with box.http(f"http://127.0.0.1:{NORMAL_PORT}") as http:
+        old = (await http.get("/v1/default/banks/gamma/documents")).json()["items"]
+
+    result = await box.switch().run()
+
+    assert result["status"] == "switched"
+    _assert_switched(box)
+    async with box.http(f"http://127.0.0.1:{NORMAL_PORT}") as http:
+        new = (await http.get("/v1/default/banks/gamma/documents")).json()["items"]
+    assert [d["id"] for d in new] == [d["id"] for d in old]
+    assert all(d["text_length"] == 0 for d in new)
+    assert [d["content_hash"] for d in new] != [d["content_hash"] for d in old], (
+        "the engine's hash moved, and the switch did not take that for a loss"
+    )
+
+
+async def test_restores_into_the_own_id_that_fail_the_same_way_twice_stop_the_retries(
+    box: Box,
+) -> None:
+    box.engine.lossy_restore.add("alpha")  # wrong only into the own id
+
+    with pytest.raises(es.SwitchError) as first:
+        await box.switch().run()
+    assert "restores it again once; if it fails the same way" in first.value.message
+
+    with pytest.raises(es.SwitchError) as second:
+        await box.switch(None).resume()
+    assert "failed its check the same way each time" in second.value.message
+    assert "stop running --resume" in second.value.message
+    journal = es.load_journal()
+    assert journal is not None and journal.banks[0].place_repeats == 2
+    before = len(box.events)
+
+    with pytest.raises(es.SwitchError) as third:
+        await box.switch(None).resume()
+
+    assert "stop running --resume" in third.value.message
+    status = await box.switch(None).status()
+    alpha = next(b for b in status["resume"] if b["bank"] == "alpha")
+    assert "stop running --resume" in alpha["operator"]
+    assert not any(e.startswith(("delete:", "restore:")) for e in box.events[before:]), (
+        "nothing is deleted or restored a third time"
+    )
+    assert journal.banks[0].temp in box.engine.banks, "the verified copy is kept"
+
+
+async def test_the_restore_op_is_saved_cleared_as_soon_as_the_restore_ends(box: Box) -> None:
+    switch = box.switch()
+    real_quiet = switch._quiet_state
+    seen: list[Any] = []
+
+    async def quiet(bank: str) -> dict[str, Any]:
+        if es.is_switch_temp(bank) and not seen:
+            journal = es.load_journal()
+            assert journal is not None
+            seen.append(journal.banks[0].restore_op)
+            raise Killed
+        return await real_quiet(bank)
+
+    switch._quiet_state = quiet  # type: ignore[method-assign]
+    switch._rollback = lambda *_a: (_ for _ in ()).throw(Killed)  # type: ignore[method-assign]
+    with pytest.raises(Killed):
+        await switch.run()
+
+    assert seen == [None], "on disk before the bank is read"
+
+
+async def test_a_cancelled_restore_recorded_without_a_process_is_ended_by_a_restart(
+    box: Box,
+) -> None:
+    """No engine pid was recorded (no unit process seen); the unit's InvocationID is enough."""
+    journal = await _stuck_placing_beta(box)
+    op = journal.banks[1].restore_op
+    assert op is not None and op["engine_invocation"]
+    op["engine_pid"] = None
+    box.switch()._save(journal)
+    scratch = es.scratch_bank_id(journal.run_id)
+    async with box.http(f"http://127.0.0.1:{PRIVATE_PORT}") as http:
+        await http.delete(f"/v1/default/banks/{scratch}/operations/{op['id']}")
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+    assert "recorded as cancelled" in err.value.message
+    assert "systemctl stop" not in err.value.message, "a restart can be told apart"
+
+    box.host.apply_dropin(HS)  # the operator restarts the engine
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "switched"
+    _assert_switched(box)
+
+
+async def test_a_cancelled_restore_with_nothing_recorded_gives_a_way_out_that_works(
+    box: Box,
+) -> None:
+    journal = await _stuck_placing_beta(box)
+    op = journal.banks[1].restore_op
+    assert op is not None
+    op["engine_pid"] = op["engine_invocation"] = None  # an older record, or nothing seen
+    box.switch()._save(journal)
+    scratch = es.scratch_bank_id(journal.run_id)
+    async with box.http(f"http://127.0.0.1:{PRIVATE_PORT}") as http:
+        await http.delete(f"/v1/default/banks/{scratch}/operations/{op['id']}")
+    before = len(box.events)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    assert "systemctl stop hindsight-api.service" in err.value.message
+    assert not any(e.startswith(("delete:", "restore:")) for e in box.events[before:])
+
+    box.host.stop_unit()  # what the message says to do
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "switched"
+    _assert_switched(box)
 
 
 async def test_allow_pending_skips_the_content_checks_it_cannot_make(box: Box) -> None:
