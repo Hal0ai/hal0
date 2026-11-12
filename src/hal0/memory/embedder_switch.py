@@ -1665,13 +1665,22 @@ class EmbedderSwitch(em.EngineMaintenance):
         """Why the original may hold vectors of the target model; empty when it cannot.
 
         For the rollback of a run that restarted the engine on the target,
-        which must finish, so every doubt counts against the bank. The
+        which must finish, so every doubt counts against the bank: the
         engine's own work on it after that restart, seen during the run
         (``entry.engine_work``) or found in its operation rows since
         ``journal.flipped_at`` (``started_at`` for a journal that has none),
-        or any reason :meth:`_original_moved` gives. A listing or a read that
-        fails is a reason too: the bank cannot be shown clean.
+        and any reason :meth:`_original_moved` gives. A listing or a read
+        that fails is a reason too: the bank cannot be shown clean. The rows
+        are read after :meth:`_original_moved` has waited for the bank to go
+        quiet, so work the engine started during that wait, still on the
+        target, is found as well.
         """
+        moved = ""
+        if not entry.engine_work:
+            try:
+                moved = await self._original_moved(entry)
+            except SwitchError as exc:
+                moved = f"it could not be checked ({exc.message})"
         if entry.engine_work:
             return "the engine ran its own work on it on the target embedder: " + ", ".join(
                 f"{r.get('type')} (operation {r.get('id')})" for r in entry.engine_work
@@ -1687,10 +1696,7 @@ class EmbedderSwitch(em.EngineMaintenance):
             return "the engine ran its own work on it after the flip: " + em.operations_text(
                 entry.bank, ran
             )
-        try:
-            return await self._original_moved(entry)
-        except SwitchError as exc:
-            return f"it could not be checked ({exc.message})"
+        return moved
 
     async def _check_before_swap(self, journal: Journal) -> None:
         """The last look before anything is deleted.
