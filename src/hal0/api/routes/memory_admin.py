@@ -1107,6 +1107,13 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/mental-models/{model_id}/refresh",
         "/v1/default/banks/{bank_id}/mental-models/{model_id}/refresh",
     ),
+    # Empties a model's content (the next refresh rebuilds it in full); what
+    # ``hal0 memory mm repair`` does to a hidden model before flagging it (#3576).
+    (
+        "POST",
+        "/banks/{bank_id}/mental-models/{model_id}/clear",
+        "/v1/default/banks/{bank_id}/mental-models/{model_id}/clear",
+    ),
     (
         "GET",
         "/banks/{bank_id}/mental-models/{model_id}/history",
