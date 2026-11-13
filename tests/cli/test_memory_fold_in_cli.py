@@ -39,7 +39,15 @@ class FakeFoldIn:
         return FakeFoldIn.result
 
     def status(self) -> dict[str, Any]:
-        return {"journal": None, "gate": None, "summary": "no fold-in is in progress"}
+        return {
+            "journal": None,
+            "gate": None,
+            "summary": "no fold-in is in progress",
+            "archives_needed": ["/var/lib/hal0/backups/memory-fold-in-x-1"],
+        }
+
+    def clear_gate(self) -> dict[str, Any]:
+        return {"status": "gate_cleared", "run_id": "r1", "phase": "incomplete", "cut_over": False}
 
 
 class _Client:
@@ -73,6 +81,23 @@ def test_a_dry_run_is_the_default_and_passes_the_options_through() -> None:
     assert FakeFoldIn.built[0]["only"] == ["x"]
 
 
+def test_skip_and_clear_gate_reach_the_fold_in() -> None:
+    out = invoke("--skip", "hal0-mono", "--json")
+    assert out.exit_code == 0, out.output
+    assert FakeFoldIn.built[0]["skips"] == ["hal0-mono"]
+    out = invoke("--clear-gate")
+    assert out.exit_code == 0, out.output
+    assert "Memory writes are open again" in out.output
+    assert "old layout" in out.output
+
+
+def test_status_names_the_archives_to_keep() -> None:
+    out = invoke("--status")
+    assert out.exit_code == 0, out.output
+    assert "keep until the cutover" in out.output
+    assert "memory-fold-in-x-1" in out.output
+
+
 def test_a_refused_dry_run_exits_1() -> None:
     FakeFoldIn.plan = {"banks": [], "refusals": [{"code": "x", "message": "no"}], "warnings": []}
     out = invoke()
@@ -80,7 +105,9 @@ def test_a_refused_dry_run_exits_1() -> None:
     assert "refused: no" in out.output
 
 
-@pytest.mark.parametrize("args", [["--apply", "--resume"], ["--status", "--resume"]])
+@pytest.mark.parametrize(
+    "args", [["--apply", "--resume"], ["--status", "--resume"], ["--clear-gate", "--apply"]]
+)
 def test_modes_are_one_at_a_time(args: list[str]) -> None:
     assert invoke(*args).exit_code == 2
 

@@ -305,6 +305,14 @@ def _print_status(status: dict[str, Any]) -> None:
             lines.append(f"folded: {escape(str(bank))} (run {row.get('run_id')})")
     if status.get("ledger_error"):
         lines.append(f"[red]ledger problem: {escape(str(status['ledger_error']))}[/red]")
+    needed = status.get("archives_needed") or []
+    if needed:
+        lines.append(
+            "[bold]keep until the cutover:[/bold] the archive directories of the runs that sent "
+            "part of a bank; a later run reads what they sent from them, and refuses a bank "
+            "whose record is gone:"
+        )
+        lines.extend(f"  {escape(str(d))}" for d in needed)
     lines.append(f"[bold]{escape(str(status.get('summary')))}[/bold]")
     console.print(Panel("\n".join(lines), title="memory · fold-in · status"))
 

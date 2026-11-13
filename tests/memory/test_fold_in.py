@@ -910,6 +910,14 @@ async def test_a_folded_document_deleted_from_the_old_bank_refuses(box: Box) -> 
     assert second["status"] == "incomplete"
 
 
+async def test_status_names_the_archive_directories_a_later_run_still_needs(box: Box) -> None:
+    box.engine.fail_import.add("hal0:shared")
+    first = await box.fold().run()
+    assert box.fold().status()["archives_needed"] == [first["archive_dir"]]
+    await box.fold().run()
+    assert box.fold().status()["archives_needed"] == []
+
+
 async def test_a_missing_record_of_what_was_sent_refuses_the_bank(box: Box) -> None:
     box.engine.fail_import.add("hal0:shared")
     await box.fold().run()

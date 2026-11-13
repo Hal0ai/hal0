@@ -4053,6 +4053,21 @@ class FoldIn(em.EngineMaintenance):
         except FoldInError as exc:
             ledger = {"error": exc.message, "banks": {}}
         earlier = ledger.get("banks") or {}
+        # Until the cutover, a later run reads what earlier runs sent from the
+        # ``.ids.json`` files in their archive directories (:meth:`_prior`):
+        # without them it refuses those banks. So they are named here.
+        needed: list[str] = []
+        if not record or record.get("error"):
+            dirs = {
+                str(Path(path).parent)
+                for row in earlier.values()
+                if isinstance(row, dict)
+                for paths in (row.get("sent_files") or {}).values()
+                for path in paths or ()
+            }
+            if journal is not None:
+                dirs.add(journal.archive_dir)
+            needed = sorted(dirs)
         out: dict[str, Any] = {
             "journal": journal.to_dict() if journal is not None else None,
             "journal_source": found["source"],
@@ -4066,6 +4081,7 @@ class FoldIn(em.EngineMaintenance):
                 for bank, row in sorted(earlier.items())
             },
             "ledger_error": ledger.get("error"),
+            "archives_needed": needed,
             "summary": "",
         }
         if journal is None:
