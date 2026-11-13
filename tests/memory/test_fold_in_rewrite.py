@@ -18,7 +18,7 @@ import pytest
 
 from hal0.memory import fold_in as fi
 from hal0.memory.document_namespace import CLIENT_DOCUMENT_ID_KEY, stored_document_id
-from hal0.memory.knowledge_pages import folded_node_id, placeholder_folder_id
+from hal0.memory.knowledge_pages import folded_node_id, page_trigger, placeholder_folder_id
 from hal0.memory.projects import ProjectRegistry
 
 TARGETS = ("hal0:shared", "hal0:private")
@@ -485,6 +485,9 @@ def test_a_coding_banks_models_are_rekeyed_and_tagged_with_its_project() -> None
         "dropped": 2,
         "placed": 1,
         "unplaced": 0,
+        # The page's old trigger read no project: carried with nothing generated.
+        "content_cleared_tag_project": 0,
+        "content_cleared_unscoped": 1,
         # No --owner for the harness: the page is filed under its pseudo-owner, and named.
         "owners": {"hal0-legacy-coding-agent": 1},
         "pseudo_owned": ["P"],
@@ -1006,6 +1009,10 @@ _PLUGIN_TRIGGER = {
     "refresh_after_consolidation": True,
 }
 
+#: A trigger already scoped to project ``web`` as compat scopes a page: a page
+#: carried with it keeps what it generated.
+_WEB_SCOPED_TRIGGER = page_trigger(_PLUGIN_TRIGGER, ["knowledge:feature-work"], "web")
+
 
 def _pages_archive(bank: str, *documents: dict[str, Any], tags: list[str] | None = None) -> bytes:
     return archive(
@@ -1019,14 +1026,23 @@ def _pages_archive(bank: str, *documents: dict[str, Any], tags: list[str] | None
                 "tags": ["knowledge:component", *(tags or [])],
                 "trigger": json.dumps({**_PLUGIN_TRIGGER, "tag_groups": [{"tags": ["x"]}]}),
                 "content": "map",
+                "last_refreshed_at": "2026-11-11T00:00:00+00:00",
             },
             {
                 "id": "mm-init",
                 "name": "Bank layout",
                 "source_query": "Summarize the initiative",
                 "tags": ["knowledge:feature-work", *(tags or [])],
-                "trigger": _PLUGIN_TRIGGER,
+                "trigger": _WEB_SCOPED_TRIGGER,
                 "content": "See [[page:kp-map]], [[page:kp-gone]].",
+                "structured_content": json.dumps(
+                    {"version": "2", "blocks": [{"markdown": "See [[page:kp-map]]."}]}
+                ),
+                "reflect_response": {
+                    "text": "See [[page:kp-map]].",
+                    "based_on": {"world": [{"id": "f1", "text": "[[page:kp-map]] is the map"}]},
+                },
+                "last_refreshed_at": "2026-11-12T00:00:00+00:00",
             },
         ],
         pages=[
@@ -1078,7 +1094,7 @@ def test_a_coding_banks_pages_are_hung_in_its_project_folder_under_new_ids() -> 
         "kind": "page",
         "name": "Bank layout",
         "project": "web",
-        "refreshed_at": None,
+        "refreshed_at": "2026-11-12T00:00:00+00:00",
     }
     # Stable across runs: a resend sends the same nodes under the same ids.
     again = fi.rewrite_archive(_pages_archive("coding-agent::web"), plan("coding-agent::web"))
@@ -1100,11 +1116,12 @@ def test_a_placed_page_is_stamped_as_compat_stamps_a_page_it_writes() -> None:
     # The plugin's refresh settings, hal0's scope; the old tag_groups are gone.
     assert model["trigger"] == kp.page_trigger(_PLUGIN_TRIGGER, leaf, "web")
     assert {"tags": ["x"]} not in model["trigger"]["tag_groups"]
-    assert (model["name"], model["source_query"], model["content"]) == (
-        "Component map",
-        "How is it put together?",
-        "map",
-    )
+    assert (model["name"], model["source_query"]) == ("Component map", "How is it put together?")
+    # Its old trigger read no project, so what it generated may rest on another
+    # project's memory: cleared, and rebuilt under the new trigger.
+    assert model["content"] == ""
+    assert model["last_refreshed_at"] == fi.NEVER_REFRESHED_AT
+    assert result.report["knowledge_pages"]["content_cleared_unscoped"] == 1
     groups = [*reflect_visibility_scope("cc"), *project_scope_groups("web")]
     node = {"tags": model["tags"], "trigger": model["trigger"]}
     assert kp.page_scope_held(node, read_groups=groups, slug="web")
@@ -1112,11 +1129,92 @@ def test_a_placed_page_is_stamped_as_compat_stamps_a_page_it_writes() -> None:
     assert not kp.page_scope_held(node, read_groups=other, slug="atlas")
 
 
-def test_page_links_in_content_name_the_new_ids() -> None:
+def test_page_links_name_the_new_ids_in_content_structured_content_and_reflect_response() -> None:
     result = fi.rewrite_archive(_pages_archive("coding-agent::web"), plan("coding-agent::web"))
     _, models = _shared_pages(result)
     new_map = folded_node_id("coding-agent::web", "kp-map", "page")
-    assert models["web-mm-init"]["content"] == f"See [[page:{new_map}]], [[page:kp-gone]]."
+    model = models["web-mm-init"]
+    assert model["content"] == f"See [[page:{new_map}]], [[page:kp-gone]]."
+    # A JSON column the export gave as a string stays one.
+    assert json.loads(model["structured_content"]) == {
+        "version": "2",
+        "blocks": [{"markdown": f"See [[page:{new_map}]]."}],
+    }
+    assert model["reflect_response"] == {
+        "text": f"See [[page:{new_map}]].",
+        "based_on": {"world": [{"id": "f1", "text": f"[[page:{new_map}]] is the map"}]},
+    }
+    assert "[[page:kp-map]]" not in json.dumps(model)
+
+
+def test_a_tag_project_banks_placed_page_is_carried_with_nothing_generated() -> None:
+    """Hal0::Agents' page tagged project:hal0, whose old trigger read no project:
+    it lands in hal0's folder empty, to be rebuilt under the project scope."""
+    data = archive(
+        "Hal0::Agents",
+        [doc("n", [fact("x", "project:hal0")])],
+        models=[
+            {
+                "id": "m-arch",
+                "name": "Architecture",
+                "source_query": "How is hal0 built?",
+                "tags": ["knowledge:architecture", "project:hal0"],
+                "trigger": _PLUGIN_TRIGGER,
+                "content": "hal0 and, from another project, atlas",
+                "reflect_response": {"text": "atlas"},
+                "structured_content": {"version": "2", "blocks": [{"markdown": "atlas"}]},
+                "last_refreshed_at": "2026-11-12T00:00:00+00:00",
+            },
+        ],
+        pages=[
+            {"id": "kp-arch", "kind": "page", "name": "Architecture", "mental_model_id": "m-arch"}
+        ],
+    )
+    result = fi.rewrite_archive(data, plan("Hal0::Agents"))
+    nodes, models = _shared_pages(result)
+    page = nodes[folded_node_id("Hal0::Agents", "kp-arch", "page")]
+    assert page["parent_id"] == placeholder_folder_id("hal0")
+    model = models[page["mental_model_id"]]
+    assert model["content"] == ""
+    assert model["reflect_response"] is None and model["structured_content"] is None
+    assert model["last_refreshed_at"] == fi.NEVER_REFRESHED_AT
+    assert "atlas" not in json.dumps(read(result.shared)["mental_models"])
+    assert result.report["knowledge_pages"]["content_cleared_tag_project"] == 1
+    assert result.report["knowledge_pages"]["content_cleared_unscoped"] == 0
+    # Mutation check: the routing check catches the page with its content put back.
+    source = data
+
+    def restore(a: dict[str, Any]) -> None:
+        next(m for m in a["mental_models"] if m["id"] == model["id"])["content"] = "atlas"
+
+    out = read(result.shared)
+    restore(out)
+    bad = fi._write_archive(
+        "Hal0::Agents",
+        out["documents"],
+        out["observations"],
+        out["mental_models"],
+        out["knowledge_pages"],
+    )
+    kw = {"bank_cls": "coding", "tag_project": True}
+    assert fi.routing_problems(source, result.shared, None, result.provenance, **kw) == []
+    problems = fi.routing_problems(source, bad, None, result.provenance, **kw)
+    assert any("generated under a trigger that was not scoped" in p for p in problems), problems
+    # Even when the caller forgets the bank's kind, the old trigger is judged on its own.
+    problems = fi.routing_problems(source, bad, None, result.provenance, bank_cls="coding")
+    assert any("generated under a trigger that was not scoped" in p for p in problems), problems
+
+
+def test_without_the_clearing_a_placed_page_fails_the_routing_check(monkeypatch) -> None:
+    """Mutation check of the clearing in the rewrite: with it off, the rewrite
+    refuses its own archive (the standard page's old trigger read no project)."""
+    monkeypatch.setattr(fi, "_clear_generated", lambda model: None)
+    with pytest.raises(fi.BankLeft) as caught:
+        fi.rewrite_archive(_pages_archive("coding-agent::web"), plan("coding-agent::web"))
+    assert any(
+        "web-mm-map" in p or "generated under a trigger that was not scoped" in p
+        for p in caught.value.details["problems"]
+    )
 
 
 def test_a_tag_project_banks_pages_go_by_their_own_project_or_stay_at_the_root() -> None:
@@ -1272,3 +1370,25 @@ def test_the_platform_banks_pages_keep_their_ids_and_scope() -> None:
     assert models["m"]["trigger"] == {"a": 1}
     assert "page_nodes" not in result.ids["shared"]
     assert result.ids["shared"]["page_names"] == [["web", "p", "kp"]]
+
+
+def test_the_dry_run_counts_the_placed_pages_it_would_clear() -> None:
+    """``analyse_listing`` counts what :func:`_place_pages` clears, by the same rule."""
+    unscoped = {"id": "mm-a", "name": "A", "tags": [], "trigger": _PLUGIN_TRIGGER}
+    scoped = {"id": "mm-b", "name": "B", "tags": [], "trigger": _WEB_SCOPED_TRIGGER}
+    report = fi.analyse_listing(
+        plan("coding-agent::web"), [], [], [unscoped, scoped], page_models={"mm-a", "mm-b"}
+    )
+    assert report["knowledge_pages"]["content_cleared_unscoped"] == 1
+    assert report["knowledge_pages"]["content_cleared_tag_project"] == 0
+    tagged = [
+        {**unscoped, "tags": ["project:hal0"]},
+        {**scoped, "tags": ["project:hal0"]},
+        {"id": "mm-c", "name": "C", "tags": [], "trigger": _PLUGIN_TRIGGER},
+    ]
+    report = fi.analyse_listing(
+        plan("Hal0::Agents"), [], [], tagged, page_models={"mm-a", "mm-b", "mm-c"}
+    )
+    # Both pages with a project are cleared; the one with none stays at the root.
+    assert report["knowledge_pages"]["content_cleared_tag_project"] == 2
+    assert report["knowledge_pages"]["content_cleared_unscoped"] == 0

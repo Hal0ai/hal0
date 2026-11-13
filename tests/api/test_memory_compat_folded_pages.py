@@ -227,6 +227,11 @@ def test_the_reference_boxs_three_banks_read_back_through_compat(
             assert resp.json()["id"] == kp.folded_node_id(bank, _std_id(bank, index), "page")
             shown = name if bank == "coding-agent::hal0-mono" else f"{name} ({bank})"
             assert resp.json()["name"] == shown
-            # Each page's link to its bank's first page names that page's new id.
-            first = kp.folded_node_id(bank, _std_id(bank, 0), "page")
-            assert f"[[page:{first}]]" in resp.json()["body"]
+            if bank == "coding-agent::hal0-mono":
+                # Its pages were scoped to hal0 already and keep their content:
+                # the link to the bank's first page names that page's new id.
+                first = kp.folded_node_id(bank, _std_id(bank, 0), "page")
+                assert f"[[page:{first}]]" in resp.json()["body"]
+            else:
+                # A bank whose project comes from tags: rebuilt from nothing.
+                assert not resp.json()["body"]

@@ -2087,8 +2087,16 @@ PLUGIN_TRIGGER = {
 
 def seed_pages(box: Box, bank: str = "coding-agent::web", *, prefix: str = "") -> None:
     """The plugin's tree in an old coding bank: a standard page at the root and an
-    ``Initiatives`` folder with one initiative page that links to the first."""
+    ``Initiatives`` folder with one initiative page that links to the first.
+
+    The standard page has the plugin's own trigger, which reads no project, so
+    the fold-in carries it with its content cleared. The initiative page's
+    trigger already reads the bank's project as compat scopes a page, so it
+    keeps its content and its links are rewritten.
+    """
     b = box.engine.banks.setdefault(bank, empty_bank())
+    slug = bank.split("::", 1)[1]
+    scoped = kp_ids.page_trigger(PLUGIN_TRIGGER, ["knowledge:feature-work"], slug)
     b["models"].update(
         {
             f"{prefix}mm-map": {
@@ -2098,6 +2106,7 @@ def seed_pages(box: Box, bank: str = "coding-agent::web", *, prefix: str = "") -
                 "tags": ["knowledge:component"],
                 "trigger": json.dumps(PLUGIN_TRIGGER),
                 "content": "The map.",
+                "last_refreshed_at": "2026-11-11T00:00:00+00:00",
                 "max_tokens": 4096,
             },
             f"{prefix}mm-init": {
@@ -2105,7 +2114,7 @@ def seed_pages(box: Box, bank: str = "coding-agent::web", *, prefix: str = "") -
                 "name": "Bank layout",
                 "source_query": 'Summarize the "Bank layout" initiative',
                 "tags": ["knowledge:feature-work"],
-                "trigger": PLUGIN_TRIGGER,
+                "trigger": scoped,
                 "content": f"See [[page:{prefix}kp-map]] and [[page:elsewhere]].",
                 "max_tokens": 4096,
             },
@@ -2169,6 +2178,11 @@ def _assert_pages_placed(box: Box, bank: str = "coding-agent::web", slug: str = 
     assert "visibility:private" not in page_model["tags"]
     # The link names the page's new id; one to a page the bank never had stays.
     assert page_model["content"] == f"See [[page:{kp_map}]] and [[page:elsewhere]]."
+    # The standard page's old trigger read no project: it is rebuilt from nothing.
+    map_model = models[nodes[kp_map]["mental_model_id"]]
+    assert map_model["content"] == ""
+    assert map_model["last_refreshed_at"] == fi.NEVER_REFRESHED_AT
+    assert kp_ids.trigger_scope_held(map_model["trigger"], slug)
     rows = kp_ids.load_page_map()["targets"]["hal0:shared"]
     for old, kind in (("kp-map", "page"), ("kf-init", "folder"), ("kp-init", "page")):
         assert rows[old] == {
@@ -2447,12 +2461,20 @@ def seed_ct105(box: Box) -> None:
         tags = [] if bank == "coding-agent::hal0-mono" else ["project:hal0"]
         for index, name in enumerate(STANDARD_PAGES):
             mm = f"mm-{fi._slug_of(bank)}-{index}"
+            # hal0-mono's pages already read their project as compat scopes a
+            # page, so they keep their content; the tag-project banks' pages
+            # are rebuilt whatever their trigger.
+            trigger = (
+                kp_ids.page_trigger(PLUGIN_TRIGGER, [f"knowledge:std-{index}"], "hal0")
+                if bank == "coding-agent::hal0-mono"
+                else PLUGIN_TRIGGER
+            )
             b["models"][mm] = {
                 "id": mm,
                 "name": name,
                 "source_query": f"What are the {name.lower()}?",
                 "tags": [f"knowledge:std-{index}", *tags],
-                "trigger": PLUGIN_TRIGGER,
+                "trigger": trigger,
                 "content": f"{name} of {bank}; see [[page:{_std_id(bank, 0)}]]",
                 "last_refreshed_at": "2026-11-12T00:00:00+00:00",
             }

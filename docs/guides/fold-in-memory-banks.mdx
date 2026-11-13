@@ -175,10 +175,20 @@ So each page a coding bank carries is, in the archive itself:
 - **re-stamped as compat stamps a page:** its tags through the write
   envelope with the owner the bank's documents get, its trigger rebuilt from
   the refresh settings it chose plus the project scope, the private guard and
-  `exclude_mental_models`. Its name, source query and content stay, except
-  that `[[page:<id>]]` links name the new ids. A page from a bank that held
-  private facts arrives with no content, like the bank's other models, and is
-  refreshed under its new scope.
+  `exclude_mental_models`. Its name and source query stay;
+- **emptied, unless it was already scoped.** What a page holds was built
+  under its old trigger, which may have read another project's memory. So a
+  placed page arrives with no content (empty, last refreshed at the epoch) and
+  is rebuilt under its new scope when its trigger fires, when its bank's
+  project comes from tags (`pi-coder`, `Hal0::Agents`, `--map`), or when its
+  old trigger did not already carry the project scope, the private guard and
+  `exclude_mental_models` for its project. Pages from the plugin's own trigger
+  never did, so in practice every placed page is rebuilt. A page that was
+  already scoped keeps its content, and `[[page:<id>]]` links in its content,
+  `structured_content` and `reflect_response` name the new ids. The dry run
+  counts both kinds (`content_cleared_tag_project`,
+  `content_cleared_unscoped`). A page from a bank that held private facts
+  arrives with no content too, like the bank's other models.
 
 The owner is the harness's. For a coding bank whose plugin will use
 `/api/memory/compat`, pass `--owner` with the client that plugin uses, for
@@ -188,7 +198,8 @@ updated. The dry run lists, per bank, the pages that would go to a
 pseudo-owner.
 
 The pre-check refuses a bank whose page shown in a project folder lacks that
-scope. After the import, every page must be in its folder with its scope.
+scope, or keeps content its source trigger was not scoped to that project
+for. After the import, every page must be in its folder with its scope.
 
 **One name, one node, per project folder.** A name is unique in a folder, and
 every coding bank of one project brings the plugin's five standard pages

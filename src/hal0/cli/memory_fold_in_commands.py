@@ -251,7 +251,19 @@ def _bank_notes(rows: list[dict[str, Any]]) -> list[str]:
                 "owner is a reserved pseudo-owner no client holds. Name the harness's client with "
                 "--owner HARNESS=CLIENT to give them a reader[/yellow]"
             )
-        pseudo = (fold.get("knowledge_pages") or {}).get("pseudo_owned") or []
+        pages = fold.get("knowledge_pages") or {}
+        rebuilt = int(pages.get("content_cleared_tag_project") or 0) + int(
+            pages.get("content_cleared_unscoped") or 0
+        )
+        if rebuilt:
+            lines.append(
+                f"{bank}: {rebuilt} knowledge page(s) are carried into their project folder "
+                "empty and rebuilt under the project scope ("
+                f"{int(pages.get('content_cleared_tag_project') or 0)} from a bank whose project "
+                f"comes from tags, {int(pages.get('content_cleared_unscoped') or 0)} whose old "
+                "trigger read no single project)"
+            )
+        pseudo = pages.get("pseudo_owned") or []
         if pseudo:
             shown = ", ".join(escape(str(n)) for n in pseudo[:10])
             more = f" and {len(pseudo) - 10} more" if len(pseudo) > 10 else ""

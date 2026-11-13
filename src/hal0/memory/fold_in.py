@@ -873,7 +873,16 @@ def _new_report() -> dict[str, Any]:
             "dropped_private": 0,
             "content_cleared": 0,
         },
-        "knowledge_pages": {"carried": 0, "dropped": 0},
+        "knowledge_pages": {
+            "carried": 0,
+            "dropped": 0,
+            #: Placed pages carried with their generated content cleared, so
+            #: each is rebuilt under its project scope (:func:`_place_pages`):
+            #: every one from a bank whose project comes from tags, and any
+            #: other whose old trigger was not already scoped to its project.
+            "content_cleared_tag_project": 0,
+            "content_cleared_unscoped": 0,
+        },
         "directives_not_carried": [],
         "private_facts": 0,
         "ownerless_facts": 0,
@@ -1009,6 +1018,22 @@ def _decoded(value: Any) -> Any:
         except ValueError:
             return None
     return value
+
+
+def _clear_generated(model: dict[str, Any]) -> None:
+    """Set every :data:`_GENERATED_MODEL_KEYS` key ``model`` has to its cleared value, in place."""
+    for key in _GENERATED_MODEL_KEYS:
+        if key in model:
+            model[key] = copy.deepcopy(_CLEARED_MODEL_VALUES.get(key))
+
+
+def _generated_kept(model: Mapping[str, Any]) -> list[str]:
+    """The :data:`_GENERATED_MODEL_KEYS` ``model`` still holds something in."""
+    return [
+        k
+        for k in _GENERATED_MODEL_KEYS
+        if model.get(k) not in (None, "", [], {}, _CLEARED_MODEL_VALUES.get(k))
+    ]
 
 
 #: :func:`model_content_digest` of a model with nothing generated (as the
@@ -1271,9 +1296,7 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
             tags.append(f"{PROJECT_TAG_PREFIX}{plan.bank.project}")
         model["tags"] = tags
         if held_private:
-            for key in _GENERATED_MODEL_KEYS:
-                if key in model:
-                    model[key] = copy.deepcopy(_CLEARED_MODEL_VALUES.get(key))
+            _clear_generated(model)
             report["mental_models"]["content_cleared"] += 1
         models.append(model)
         report["mental_models"]["carried"] += 1
@@ -1324,7 +1347,9 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
     )
     problems = shared_archive_problems(shared) if shared is not None else []
     problems += model_null_problems([*models, *private_models])
-    problems += routing_problems(data, shared, private, provenance, bank_cls=plan.bank.cls)
+    problems += routing_problems(
+        data, shared, private, provenance, bank_cls=plan.bank.cls, tag_project=plan.bank.tag_project
+    )
     problems += private_archive_problems(private) if private is not None else []
     if problems:
         raise BankLeft(
@@ -1411,6 +1436,44 @@ def _carried_pages(
 #: marker's retain context and a page synthesis repeats it in the page.
 _PAGE_LINK = re.compile(r"\[\[page:([^\]\s]+)\]\]")
 
+#: The model columns a page link can sit in. ``content`` is the page's
+#: markdown; ``structured_content`` (schema v2, alembic ``d1e2f3a4b5c6``) holds
+#: each block as a verbatim markdown fragment, the source of truth for a delta
+#: refresh; ``reflect_response`` is the refresh's JSON payload (``based_on``,
+#: ``trace``, ``structured_output``), whose text fields can quote the page.
+_LINKED_MODEL_KEYS = ("content", "structured_content", "reflect_response")
+
+
+def _relinked(value: Any, new_of: Mapping[str, str]) -> Any:
+    """``value`` with every ``[[page:<old>]]`` link in it naming the new id (pure).
+
+    Strings are rewritten wherever they sit in a JSON value. A JSON column
+    the export gave as a string stays a string: it is decoded, rewritten and
+    encoded again, and a string that is not JSON is rewritten as text.
+    """
+
+    def text(raw: str) -> str:
+        return _PAGE_LINK.sub(lambda m: f"[[page:{new_of.get(m.group(1), m.group(1))}]]", raw)
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, str):
+            return text(node)
+        if isinstance(node, list):
+            return [walk(item) for item in node]
+        if isinstance(node, dict):
+            return {key: walk(item) for key, item in node.items()}
+        return node
+
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return text(value)
+        if isinstance(decoded, (dict, list)):
+            return json.dumps(walk(decoded))
+        return text(value)
+    return walk(value)
+
 
 @dataclass
 class _Placement:
@@ -1490,10 +1553,20 @@ def _place_pages(
       the page's own ``agent:`` tag, through ``--owner`` and the known
       clients), and its trigger rebuilt from the refresh settings it chose
       plus hal0's scope (:func:`~hal0.memory.knowledge_pages.page_trigger`);
-    * ``[[page:<id>]]`` links in a page's content name the new ids.
+    * what the page's model generated (:data:`_GENERATED_MODEL_KEYS`) is
+      cleared, as for a bank that held private facts, when the bank's project
+      comes from tags (``Hal0::Agents``, ``pi-coder``, ``--map``) or the old
+      trigger was not already scoped to the page's project
+      (:func:`~hal0.memory.knowledge_pages.trigger_scope_held`): it was
+      synthesised under that trigger and may rest on another project's
+      memory, so the page is rebuilt under its new trigger. Both are counted
+      (``content_cleared_tag_project``, ``content_cleared_unscoped``);
+    * in a page that keeps its content, ``[[page:<id>]]`` links in
+      ``content``, ``structured_content`` and ``reflect_response``
+      (:data:`_LINKED_MODEL_KEYS`) name the new ids.
 
-    The page's name, source query and content otherwise stay as they are; a
-    model whose bank held private facts was already cleared. A subtree whose
+    The page's name and source query otherwise stay as they are; a model
+    whose bank held private facts was already cleared. A subtree whose
     pages name no project, or several, is carried under its new ids at the
     root, as before, where compat does not show it.
     """
@@ -1504,6 +1577,7 @@ def _place_pages(
         page_trigger,
         placeholder_folder_id,
         project_folder_name,
+        trigger_scope_held,
     )
 
     bank = plan.bank.bank
@@ -1579,13 +1653,25 @@ def _place_pages(
         _tally_page_owner(report, owner, str(page.get("name") or ""))
         labels, leaf = page_tags(_caller_tags(tags), agent=owner, resolution=resolutions[old])
         model["tags"] = labels
-        chosen = caller_trigger_settings(_decoded(model.get("trigger")))
+        old_trigger = _decoded(model.get("trigger"))
+        chosen = caller_trigger_settings(old_trigger)
         model["trigger"] = page_trigger(chosen, leaf, slug)
-        content = model.get("content")
-        if isinstance(content, str) and content:
-            model["content"] = _PAGE_LINK.sub(
-                lambda m: f"[[page:{new_of.get(m.group(1), m.group(1))}]]", content
-            )
+        # What the page holds was synthesised under its old trigger. Unless
+        # that trigger already read one project, the way compat scopes a
+        # page, it may rest on another project's memory: the content is
+        # cleared and the page is rebuilt under its new, scoped trigger. A
+        # bank whose project comes from tags is always cleared, because its
+        # pages were written without a project bound to them.
+        if plan.bank.tag_project:
+            _clear_generated(model)
+            report["knowledge_pages"]["content_cleared_tag_project"] += 1
+        elif not trigger_scope_held(old_trigger, slug):
+            _clear_generated(model)
+            report["knowledge_pages"]["content_cleared_unscoped"] += 1
+        else:
+            for key in _LINKED_MODEL_KEYS:
+                if model.get(key):
+                    model[key] = _relinked(model[key], new_of)
     for folder, slug in sorted(folders.items()):
         rows.insert(
             0,
@@ -1724,6 +1810,7 @@ def routing_problems(
     provenance: Mapping[str, Any],
     *,
     bank_cls: str,
+    tag_project: bool = False,
 ) -> list[str]:
     """Everything a source row marks private that is not on the private side (empty when none).
 
@@ -1748,6 +1835,12 @@ def routing_problems(
     one; every such page must be dropped. Every row of either archive must
     come from a source row, so nothing reaches the shared archive unaccounted
     for.
+
+    A page in a project folder must have its model scoped as compat scopes a
+    page, and may keep generated content only when its source model's
+    trigger already was (:func:`~hal0.memory.knowledge_pages.trigger_scope_held`
+    on the source row) and its bank's project does not come from tags
+    (``tag_project``).
     """
     src = _read_archive(source)
     out = {
@@ -1872,11 +1965,7 @@ def routing_problems(
         for model in out[PART_SHARED]["mental_models"]:
             if not isinstance(model, dict):
                 continue
-            kept = [
-                k
-                for k in _GENERATED_MODEL_KEYS
-                if model.get(k) not in (None, "", [], {}, _CLEARED_MODEL_VALUES.get(k))
-            ]
+            kept = _generated_kept(model)
             if kept:
                 problems.append(
                     f"shared mental model {model.get('id')} keeps {', '.join(kept)} although its "
@@ -1906,6 +1995,7 @@ def routing_problems(
     shared_models = {
         str(m.get("id")): m for m in out[PART_SHARED]["mental_models"] if isinstance(m, dict)
     }
+    model_source = {str(k): str(v) for k, v in (shared_record.get("mental_models") or {}).items()}
     for page_id, page in shared_nodes.items():
         if page_id in placeholders:
             if page.get("kind") != "folder" or page.get("mental_model_id"):
@@ -1944,6 +2034,23 @@ def routing_problems(
                 f"knowledge page {page_id} in project {slug} lacks the project scope and the "
                 "private guard compat shows a page by"
             )
+        else:
+            # What it holds was generated under the source model's trigger:
+            # judged on the source row, it may keep that only when the bank's
+            # project is not one from tags and that trigger already read this
+            # project as compat scopes a page.
+            old_model = source_models.get(model_source.get(str(model.get("id")), ""))
+            scoped_before = (
+                not tag_project
+                and old_model is not None
+                and trigger_scope_held(_decoded(old_model.get("trigger")), slug)
+            )
+            kept = [] if scoped_before else _generated_kept(model)
+            if kept:
+                problems.append(
+                    f"knowledge page {page_id} in project {slug} keeps {', '.join(kept)} "
+                    "generated under a trigger that was not scoped to that project"
+                )
     if out[PART_PRIVATE]["knowledge_pages"]:
         problems.append("the private archive carries knowledge pages, which it never should")
     dropped_pages = {str(p) for p in dropped.get("pages") or ()}
@@ -2012,6 +2119,8 @@ def analyse_listing(
     same rules (``page_models``: the ids of the models behind knowledge
     pages). Observations are counted by :meth:`FoldIn.bank_state`.
     """
+    from hal0.memory.knowledge_pages import trigger_scope_held
+
     by_doc: dict[str, dict[str, Any]] = {}
     for row in documents:
         doc_id = str(row.get("id") or "")
@@ -2070,6 +2179,17 @@ def analyse_listing(
         if plan.bank.coding and old in backing and key == "carried":
             tags = [str(t) for t in model.get("tags") or () if isinstance(t, str)]
             _tally_page_owner(report, _page_owner(plan, tags), str(model.get("name") or old))
+            # As :func:`_place_pages` clears a placed page. The listings do not
+            # give the tree, so a page counts as placed when its own tags name
+            # one project; the rewrite also leaves unplaced a subtree whose
+            # pages name several.
+            slug = _page_resolution(plan, tags).slug
+            if slug is None:
+                continue
+            if plan.bank.tag_project:
+                report["knowledge_pages"]["content_cleared_tag_project"] += 1
+            elif not trigger_scope_held(_decoded(model.get("trigger")), slug):
+                report["knowledge_pages"]["content_cleared_unscoped"] += 1
     return report
 
 
@@ -4137,6 +4257,7 @@ class FoldIn(em.EngineMaintenance):
                 blobs[PART_PRIVATE],
                 provenance if isinstance(provenance, dict) else {},
                 bank_cls=entry.cls,
+                tag_project=entry.tag_project,
             )
         except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as exc:
             raise BankLeft(
