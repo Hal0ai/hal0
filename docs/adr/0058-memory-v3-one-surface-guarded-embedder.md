@@ -293,6 +293,20 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
         tagged for that agent and with a scope confined to it, so the
         provider's model read rule gives them to that agent alone; its
         knowledge pages are not carried.
+     6. (2026-11-13, second review) A run checks every bank before it
+        imports any: export, rewrite, routing, and the clash, changed and
+        gone checks against the targets. If any bank would be left,
+        nothing is imported, so gaps between runs come only from imports
+        that fail. Two banks that would send one document id to the same
+        target are both left and named; their ids are not rewritten,
+        because agents go on writing under them. A bank whose export holds
+        attachments or invalidated facts is left, since a merge import
+        restores neither. Before the cutover every bank on the engine is
+        listed again: each one that is not a target or a switch's scratch
+        bank must be folded, or, for an unknown bank or the retired
+        `agents` bank, empty or named with `--skip`. Memory ids stay out of
+        the ledger and the notes, in a 0600 file in the run's archive
+        directory.
    - *What the engine allows, checked in hindsight-api 1.2.0.* A merge
      import (`mode=merge&document_conflict=skip`) takes an archive's
      documents with their facts, the observations whose every source fact it

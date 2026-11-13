@@ -20,6 +20,7 @@ hal0 memory migrate fold-in                  # dry run: what it would do, per ba
 sudo hal0 memory migrate fold-in --apply     # do it
 hal0 memory migrate fold-in --status         # where a run stands
 sudo hal0 memory migrate fold-in --resume    # carry an interrupted run on
+sudo hal0 memory migrate fold-in --clear-gate  # lift a pause a finished run left
 ```
 
 It is a dry run unless `--apply` is given, and it is additive: it never
@@ -94,13 +95,21 @@ tags are rewritten in the archive first:
   counts them.
 - **Directives are not carried.** A merge import never takes them. The dry
   run lists how many each bank has; recreate the ones you want.
+- **Attachments and invalidated facts cannot be carried.** The engine's
+  merge import restores neither (only a whole-bank restore does), so a bank
+  whose export holds any is left rather than folded without them. Remove
+  them from the old bank (or revert the invalidated facts), then run again.
+  A mental model's refresh history is not carried either; nothing but the
+  model's history view reads it, and the report counts the rows.
 - **GUID documents** written before session-keyed ids are carried as they
   are.
 
 The `agents` bank, temporary banks of an embedder switch, and the two
 targets themselves are never folded. A bank the fold-in does not know is
 refused: name it with `--map BANK=HARNESS` to fold it as a coding bank
-written by that harness.
+written by that harness, or with `--skip BANK` to leave it out of the two
+banks. The `agents` bank must be empty before the cutover (`hal0 memory
+migrate platform` folds it), or named with `--skip`.
 
 ## The dry run
 
@@ -136,26 +145,44 @@ refused with `503 memory.writes_paused`, and recall fails until the run
 ends. `--apply` and `--resume` need root.
 </Aside>
 
-The banks fold in one at a time. After a bank's import, each target must
-hold every document, mental model and knowledge page the bank's archive
-carried, by the ids recorded for it, and have grown by exactly what was sent
-(observations by at least as many). A bank that does not match is **left**:
-it stays as it was, a readable old bank, and the run carries on with the
-next one. A bank is also left before anything is imported when a target
-already holds one of its document or mental-model ids, or when its export
-does not hold all of it (the engine's export leaves out a fact that belongs
-to no document).
+**Every bank is checked before any is imported.** Each bank of the run is
+exported, rewritten and checked: the owner and routing checks above, its
+export holding all of it (the engine's export leaves out a fact that belongs
+to no document), no attachments or invalidated facts, and none of its
+document or mental-model ids already in a target, unless an earlier run sent
+it from the same unchanged source. Two banks of the run that would send the
+same id to one target are both left and named to each other: a merge would
+keep only the first, and the ids are not rewritten, because agents go on
+writing under them after the cutover. If any bank fails, **nothing is
+imported**: every bank is left as it was, the run ends without a cutover,
+and the report says what each failed bank needs.
+
+Then the banks are imported one at a time. After a bank's import, each
+target must hold every document, mental model and knowledge page the bank's
+archive carried, by the ids recorded for it, and have grown by exactly what
+was sent (observations by at least as many). A bank that does not match is
+**left**: what landed stays, the bank stays a readable old bank, and the run
+carries on with the next one. The next run sends only what is missing.
+
+A left bank's note gives counts and bank names, never memory ids. The ids
+behind it (changed, gone, clashing, missing, mixed-owner) are in
+`left-ids.json` in the run's archive directory, readable by root only, and
+the note names that file.
 
 ## The cutover waits for every bank
 
-The store moves to the two banks only when every old bank is folded. Then
+The store moves to the two banks only when every old bank is folded. Before
+it does, the run lists every bank the engine holds again: each one that is
+not a target or a switch's scratch bank must be recorded as folded, or, for
+a bank the fold-in does not know or the `agents` bank, be empty or named
+with `--skip`. Then
 the run returns the engine to its normal address, writes the layout record
 as `two_bank`, restarts hal0-api so it uses the two banks, and only then lets
 writes in again. From then on every agent writes to `hal0:shared` and
 `hal0:private`.
 
-When any bank is left, or was not part of the run (`--bank`), there is no
-cutover. The run returns the engine to its normal address and lets writes in
+When any bank is left, was not part of the run (`--bank`), or holds the
+cutover back as above, there is no cutover. The run returns the engine to its normal address and lets writes in
 again without touching the layout: the box stays on the old layout, agents
 go on writing to the old banks, and nothing blocks `hal0 update`. It lists
 the banks that are not folded, why, and the command to retry them, and exits
@@ -177,7 +204,10 @@ bank has changed since (writes go on there until the cutover), it is
 exported again and only what the target is missing is sent:
 
 - a document the earlier run folded is the fold-in's own copy only when the
-  old bank still holds it unchanged. If it was changed since (an agent
+  old bank still holds it unchanged. The ids it sent are read from the
+  `.ids.json` files in that run's archive directory, and the ledger names
+  them; a root edit to either can make a document look like the fold-in's
+  own when it is not, and so defeats this check. If it was changed since (an agent
   appended to it, say), the bank is left: a merge with `skip` would keep the
   older copy and lose the change without a word. Delete that copy from the
   target (the engine's `DELETE /v1/default/banks/<bank>/documents/<id>`) and
@@ -212,9 +242,23 @@ missing and is checked like the first. A run that stops before any import
 was sent is undone: the engine returns to its normal address and writes
 resume.
 
+A run killed after it retired its journal but before it lifted the pause
+leaves writes paused with nothing to resume, and the next dry run refuses
+(`gate_set`). `sudo hal0 memory migrate fold-in --clear-gate` (or `--resume`)
+lifts that pause, once it has checked that no fold-in is unfinished, the
+engine is at its normal address, and the newest run's journal shows it
+finished.
+
 The archives, as exported and as rewritten, are kept in
-`/var/lib/hal0/backups/memory-fold-in-<time>-<run>/`. Delete them when you
-no longer want them.
+`/var/lib/hal0/backups/memory-fold-in-<time>-<run>/`.
+
+<Aside type="caution">
+Keep the archive directories until the cutover is done. A later run reads
+what each earlier run sent of a bank from the `.ids.json` files in its
+directory, and refuses a bank whose record is gone, so deleting one strands
+every bank that run sent part of. `--status` lists the directories still
+needed. Once the store is on the two banks you can delete them.
+</Aside>
 
 ## Related
 
