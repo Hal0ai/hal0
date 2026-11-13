@@ -584,7 +584,8 @@ def test_the_rewritten_archive_is_one_a_merge_import_reads() -> None:
     assert manifest["source_bank_id"] == "coding-agent::web"
     assert manifest["document_count"] == 1
     assert "mental_models.json" in names and "knowledge_pages.json" in names
-    assert set(result.ids["shared"].pop("model_digests")) == {"web-conventions", "web-page-model"}
+    for key in ("model_digests", "model_spec_digests", "model_content_digests"):
+        assert set(result.ids["shared"].pop(key)) == {"web-conventions", "web-page-model"}
     assert result.ids["shared"] == {
         "documents": ["web::hal0-legacy-coding-agent::n"],
         "mental_models": ["web-conventions", "web-page-model"],

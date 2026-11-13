@@ -1110,27 +1110,113 @@ async def test_a_folded_mental_model_retagged_private_refuses(box: Box) -> None:
     _assert_on_the_old_layout(box)
 
 
-async def test_a_folded_mental_model_whose_content_or_tags_changed_refuses(box: Box) -> None:
+async def test_a_folded_mental_model_refreshed_in_the_old_bank_keeps_the_target_copy(
+    box: Box,
+) -> None:
+    """Fourth review, item 1: a content-only refresh converges, with a warning and a count."""
     e = box.engine
     await box.fold(only=["coding-agent::web"]).run()
-    e.banks["coding-agent::web"]["models"]["overview"]["content"] = "rewritten since"
+    model = e.banks["coding-agent::web"]["models"]["overview"]
+    model["content"] = "refreshed since"
+    model["history"] = [{"content": "y"}]
+    said: list[str] = []
+    second = await box.fold(progress=said.append).run()
+    assert second["status"] == "folded" and second["cut_over"] is True
+    report = next(b["report"] for b in second["banks"] if b["bank"] == "coding-agent::web")
+    assert report["model_content_refreshed_kept_target"] == 1
+    assert any("refreshed in the old bank" in m and "kept as they are" in m for m in said)
+    # The older content stays: the target refreshes it from its own memory.
+    assert e.banks["hal0:shared"]["models"]["web-overview"]["content"] == "y"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tags", ["topic:build"]),
+        ("trigger", {"tag_groups": [{"tags": ["topic:build"], "match": "any"}]}),
+        ("name", "Renamed"),
+        ("source_query", "what changed?"),
+    ],
+)
+async def test_a_folded_mental_model_whose_spec_changed_refuses(
+    box: Box, field: str, value: Any
+) -> None:
+    e = box.engine
+    await box.fold(only=["coding-agent::web"]).run()
+    e.banks["coding-agent::web"]["models"]["overview"][field] = value
     second = await box.fold().run()
     assert second["status"] == "incomplete"
     note = next(b["note"] for b in second["banks"] if b["bank"] == "coding-agent::web")
     assert "0 document(s) and 1 mental model(s)" in note and "changed in the old bank" in note
-    sidecar = json.loads((Path(second["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    left_ids = str(Path(second["archive_dir"]) / fi.LEFT_IDS_NAME)
+    assert f"The full list of ids is in {left_ids}" in note
+    assert "DELETE /v1/default/banks/hal0:shared/mental-models/<id>" in note
+    assert "There is no option to keep a copy" in note
+    sidecar = json.loads(Path(left_ids).read_text())
     assert sidecar["coding-agent::web"]["changed_mental_models"] == ["web-overview"]
     assert e.banks["hal0:shared"]["models"]["web-overview"]["content"] == "y"
-    e.banks["coding-agent::web"]["models"]["overview"]["content"] = "y"
-    e.banks["coding-agent::web"]["models"]["overview"]["tags"] = ["topic:build"]
-    third = await box.fold().run()
-    assert third["status"] == "incomplete"
     _assert_on_the_old_layout(box)
     # The stale copy deleted, the model is sent as it is now.
     del e.banks["hal0:shared"]["models"]["web-overview"]
     done = await box.fold().run()
     assert done["status"] == "folded"
-    assert "topic:build" in e.banks["hal0:shared"]["models"]["web-overview"]["tags"]
+    assert e.banks["hal0:shared"]["models"]["web-overview"][field] == (
+        [*value, "project:web"] if field == "tags" else value
+    )
+
+
+async def test_a_model_whose_content_is_now_cleared_refuses(box: Box) -> None:
+    """A copy generated before the bank held private facts may draw on them: not kept."""
+    e = box.engine
+    await box.fold(only=["coding-agent::web"]).run()
+    assert e.banks["hal0:shared"]["models"]["web-overview"]["content"] == "y"
+    e.banks["coding-agent::web"]["docs"]["secret"] = doc(
+        "secret", fact("mine alone", "visibility:private", "agent:claude-code")
+    )
+    second = await box.fold().run()
+    assert second["status"] == "incomplete"
+    sidecar = json.loads((Path(second["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    assert sidecar["coding-agent::web"]["changed_mental_models"] == ["web-overview"]
+
+
+@pytest.mark.parametrize("legacy", ["none", "combined"])
+async def test_a_model_recorded_by_an_earlier_build_gets_its_own_message(
+    box: Box, legacy: str
+) -> None:
+    """Fourth review, item 3: an .ids.json without the split digest is not called "changed"."""
+    first = await box.fold(only=["coding-agent::web"]).run()
+    for path in Path(first["archive_dir"]).glob("*.ids.json"):
+        data = json.loads(path.read_text())
+        data.pop("model_spec_digests", None)
+        data.pop("model_content_digests", None)
+        if legacy == "none":
+            data.pop("model_digests", None)
+        path.write_text(json.dumps(data))
+    if legacy == "combined":
+        # Unchanged since: the combined digest still matches, so it is the fold-in's own copy.
+        again = await box.fold().run()
+        assert again["status"] == "folded"
+        return
+    second = await box.fold().run()
+    assert second["status"] == "incomplete"
+    note = next(b["note"] for b in second["banks"] if b["bank"] == "coding-agent::web")
+    assert "recorded by an earlier build" in note and "Delete the copies and re-send" in note
+    assert "changed in the old bank" not in note
+    assert str(Path(second["archive_dir"]) / fi.LEFT_IDS_NAME) in note
+
+
+async def test_a_combined_digest_from_an_earlier_build_that_moved_refuses(box: Box) -> None:
+    e = box.engine
+    first = await box.fold(only=["coding-agent::web"]).run()
+    for path in Path(first["archive_dir"]).glob("*.ids.json"):
+        data = json.loads(path.read_text())
+        data.pop("model_spec_digests", None)
+        data.pop("model_content_digests", None)
+        path.write_text(json.dumps(data))
+    e.banks["coding-agent::web"]["models"]["overview"]["content"] = "refreshed since"
+    second = await box.fold().run()
+    note = next(b["note"] for b in second["banks"] if b["bank"] == "coding-agent::web")
+    assert second["status"] == "incomplete" and "recorded by an earlier build" in note
 
 
 async def test_a_folded_documents_text_edit_refuses_rather_than_keeping_it_stale(
@@ -1161,6 +1247,32 @@ async def test_a_folded_document_deleted_from_the_old_bank_refuses(box: Box) -> 
     note = next(b["note"] for b in second["banks"] if b["bank"] == "pi-coder")
     assert "no longer in the old bank" in note
     assert second["status"] == "incomplete"
+
+
+async def test_a_folded_bank_deleted_from_the_engine_refuses_the_cutover(box: Box) -> None:
+    """Fourth review, item 2: a deleted old bank's copies must not stay readable unseen."""
+    e = box.engine
+    first = await box.fold(only=["pi-coder"]).run()
+    assert first["folded"] == ["pi-coder"]
+    assert "web::pi-coder::p1" in e.banks["hal0:shared"]["docs"]
+    del e.banks["pi-coder"]
+    dry = await box.fold().preflight()
+    assert dry["gone_banks"] == ["pi-coder"]
+    assert any("no longer on the engine (pi-coder)" in w for w in dry["warnings"])
+    second = await box.fold().run()
+    assert second["status"] == "incomplete" and second["cut_over"] is False
+    (blocker,) = [b for b in second["blocking"] if b["bank"] == "pi-coder"]
+    assert "deleted from the engine" in blocker["reason"]
+    assert "no longer in the old bank" in blocker["reason"]
+    assert ".ids.json" in blocker["fix"]
+    left_ids = Path(second["archive_dir"]) / fi.LEFT_IDS_NAME
+    assert str(left_ids) in blocker["reason"]
+    assert json.loads(left_ids.read_text())["pi-coder"]["gone"] == ["web::pi-coder::p1"]
+    _assert_on_the_old_layout(box)
+    # Once the operator deletes the copy, nothing of the bank is left behind.
+    del e.banks["hal0:shared"]["docs"]["web::pi-coder::p1"]
+    third = await box.fold().run()
+    assert third["status"] == "folded" and third["cut_over"] is True
 
 
 async def test_status_names_the_archive_directories_a_later_run_still_needs(box: Box) -> None:
