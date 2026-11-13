@@ -488,14 +488,38 @@ def ownership_table(
             child_mode=0o644,
             role="state/ (+ *.pin-override markers)",
         ),
+        # The memory store's embedder record (#3518): written by the service,
+        # or by a root-run update on its first pass — the same class again.
+        PermRow(
+            var_lib / "state",
+            state_owner,
+            service_group,
+            SHARED_DIR_MODE,
+            glob="memory-embedder.json",
+            child_mode=0o644,
+            role="state/ (+ memory-embedder.json)",
+        ),
+        # The memory store's bank layout record (ADR-0058 decision 7): written
+        # by a root-run update (install.sh runs one) or by the service at boot.
+        PermRow(
+            var_lib / "state",
+            state_owner,
+            service_group,
+            SHARED_DIR_MODE,
+            glob="memory-layout.json",
+            child_mode=0o644,
+            role="state/ (+ memory-layout.json)",
+        ),
         # Hermes last-run report and venv stamp, same class (#3260). The dir
-        # is declared at 0755, the mode install-time mkdir births it at, so
-        # the row never widens it.
+        # is declared at 2755 (#3545): install-time mkdir under the setgid 2775
+        # state skeleton births it setgid, umask 022 drops group write, so the
+        # row never widens it and the hal0 group on its files is inherited as
+        # the skeleton intends. Declaring 0755 failed every fresh install.
         PermRow(
             var_lib / "state" / "agents" / "hermes",
             state_owner,
             service_group,
-            0o755,
+            0o2755,
             glob="provision.json",
             child_mode=0o644,
             role="state/agents/hermes (+ provision.json)",
@@ -504,7 +528,7 @@ def ownership_table(
             var_lib / "state" / "agents" / "hermes",
             state_owner,
             service_group,
-            0o755,
+            0o2755,
             glob="venv.pin",
             child_mode=0o644,
             role="state/agents/hermes (+ venv.pin)",

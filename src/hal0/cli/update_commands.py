@@ -1313,8 +1313,11 @@ def _update_pi() -> None:
         die(f"pi update failed: {exc}")
         return
     record_component_result("pi", converge_pi())
-    if result.get("hindsight_alias_added"):
-        console.print("Hindsight bank alias added to coding-agent.json")
+    compat = result.get("memory_compat")
+    if compat in ("minted", "rotated", "reused"):
+        console.print(
+            f"Pi's memory client now uses hal0's /api/memory/compat (bridge key {compat})"
+        )
     console.print(Panel("[bold green]Updated[/bold green] pi", border_style="green"))
 
 

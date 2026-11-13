@@ -53,6 +53,7 @@ class TestMemoryGraphDefaults:
             "extraction_llm_retries",
             "extraction_task_retries",
             "extraction_retry_backoff_s",
+            "extraction_worker_slots",
         }
         assert "route" not in dumped and "upstream" not in dumped
 

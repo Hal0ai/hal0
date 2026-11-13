@@ -115,7 +115,14 @@ services exist. Each card shows:
   loopback-only; ComfyUI's link opens from anywhere while it binds the LAN, the
   default, and under `[network].comfyui_listen = "loopback"` only from a page on
   the box itself, disabled anywhere else beside an SSH tunnel command), and mDNS
-  `.local` URL when advertised;
+  `.local` URL when advertised. Behind a reverse proxy there is no browser URL
+  at all — the proxy's `:3001` and `:8188` are not the apps — so the card names
+  the variable to set instead (`HAL0_OPENWEBUI_PUBLIC_URL` or
+  `HAL0_COMFYUI_PUBLIC_URL`, in `/etc/hal0/api.env`) rather than linking a dead
+  address (see [Environment variables](/docs/reference/env-vars/));
+- a LAN-IP fallback link — "Can't reach it? Try the IP link" — beside the
+  name-based link, for clients that cannot resolve a `.local` name: the same app
+  on the box's main LAN address, at the same port;
 
 - lifecycle buttons (Restart/Start/Stop) limited to the verbs that service
   actually permits — ComfyUI exposes Start/Restart only, since a raw
@@ -259,7 +266,7 @@ one line and a link here rather than a repeat.
 - **Network** — the browser origins hal0 accepts on top of the installer's
   list: the reverse-proxy **Public URL** and **Extra origins**, saved to
   `hal0.toml` `[network]` and applied on the next request. Same as
-  `hal0 network`. See [Allow the public URL](/docs/operate/auth#allow-the-public-url).
+  `hal0 network`. See [Allow the public URL](/docs/operate/tls-and-listeners/#allow-the-public-url).
 - **Doctor** — runs and renders `hal0 doctor`'s typed diagnoses (id,
   severity, evidence, next steps) over HTTP. Every fail/warn row carries at
   least one real next step, not just a description of the problem: a
@@ -293,8 +300,10 @@ one line and a link here rather than a repeat.
   in detail below.
 - **Memory** — the memory engine, graph extraction, and reranker. The
   graph panel's **Engine model** picker chooses a local slot or an upstream
-  model for the engine and applies without a restart; the agents Memory tab
-  carries the same picker. See [Enable memory](/docs/guides/enable-memory).
+  model for the engine and applies without a restart. Beside it, the panel
+  says what extraction sends where and warns when the engine's unit does not
+  carry what hal0 renders. The Memory area's **Engine settings** link opens
+  this page. See [Enable memory](/docs/guides/enable-memory).
 - **Updates** — signed self-update plus version/license identity. See
   [Update and roll back](/docs/guides/update-and-rollback).
 - **Advanced** — low-level dispatcher and activity-log tuning rendered

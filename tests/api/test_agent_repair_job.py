@@ -18,6 +18,7 @@ import signal
 import stat
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -34,6 +35,40 @@ from hal0.api.agents import repair as repair_route
 from hal0.api.routes import agents as agents_routes
 from hal0.api.routes import updater as updater_routes
 from hal0.security.exposure import AuthClass, classify
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_repair_coalesces_edits_while_busy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second mode change schedules one repair after the running one."""
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+    calls = 0
+    tasks: list[asyncio.Task] = []
+
+    async def repair(_agent: str, _request: Any) -> dict[str, str]:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            from hal0.errors import Conflict
+
+            raise Conflict("repair running", code="agent.busy")
+        return {"state": "queued"}
+
+    def spawn(_request: Any, coro: Any) -> None:
+        tasks.append(asyncio.create_task(coro))
+
+    async def no_delay(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(repair_route, "repair_agent", repair)
+    monkeypatch.setattr(repair_route, "_spawn_update_task", spawn)
+    monkeypatch.setattr(repair_route.asyncio, "sleep", no_delay)
+    await repair_route.reprovision_hermes_auxiliary(request)
+    await repair_route.reprovision_hermes_auxiliary(request)
+    assert len(tasks) == 1
+    await tasks[0]
+    assert calls == 3
+    assert request.app.state._hermes_aux_retry_pending is False
+
 
 #: The real group-signalling function, kept so the one test that spawns real
 #: processes can put it back after the autouse fixture below replaces it.

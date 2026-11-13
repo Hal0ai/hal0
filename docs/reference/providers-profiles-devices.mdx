@@ -154,7 +154,7 @@ A llama-server slot's command is built from four layers, lowest precedence first
 | `profile` | the draft bundle for the kind in effect (the n-gram bundle for `speculation = "ngram"`), then the profile's `flags` (its own `--spec-draft-*` values win over the bundle; `--spec-type` is refused in `flags`) |
 | `slot` | `--device` (`ROCm0`, `Vulkan0`, `CUDA0` or `none`, from the slot's device), `-ngl`, `--threads`, `--metrics`, and, only for embedded MTP heads, `--spec-draft-device` taken from the slot's device (none on a `cpu` slot). A paired drafter file gets no device flag and runs on the same devices as the model |
 
-`GET /api/slots/{name}/resolved` returns the deduplicated `argv` and, for each surviving flag, the layer (`base`, `model`, `profile` or `slot`) that set its final value. Repeatable flags (`--override-kv`, `--draft-model`) are kept at every occurrence and have no provenance entry, because no single occurrence wins. A llama-server slot with no profile runs its type's seed (`embedding` or `reranking`), else `chat`; a profileless `tts`, `transcription` or `image` slot uses its engine's default (see [Config schema](/docs/reference/config-schema/#slotsnametoml)). A slot that names a profile the catalog does not have refuses to launch with `slot.profile_missing`.
+`GET /api/slots/{name}/resolved` returns the deduplicated `argv` and, for each surviving flag, the layer (`base`, `model`, `profile` or `slot`) that set its final value. Repeatable flags (`--override-kv`, `--draft-model`) are kept at every occurrence and have no provenance entry, because no single occurrence wins. A llama-server slot with no profile runs its type's seed (`embedding` or `reranking`), else `chat`; a profileless `tts`, `transcription` or `image` slot uses its engine's default (see [Config schema: slot files](/docs/reference/config-schema-slots/)). A slot that names a profile the catalog does not have refuses to launch with `slot.profile_missing`.
 
 ### Seed profiles
 
@@ -177,6 +177,7 @@ The registry today:
 | `standard` | `llama-server` | `rocm`, `vulkan` | `default` (Standard) | The only runner with two `supported_backends` — one AMD GPU image serves both lanes, HIP for `gpu-rocm` and RADV for `gpu-vulkan`. The Vulkan lane is admitted per digest via `lanes_gated`. Runs plain GGUF models. |
 | `cpu` | `llama-server` | `cpu` (device_class `cpu`) | `default` (CPU) | Portable `-march`, no GPU required. |
 | `flm` | `flm` | `npu` (device_class `npu`) | `default` (NPU (FastFlowLM)) | FastFlowLM on the XDNA 2 NPU. |
+| `xdna` | `llama-server` | `npu` (device_class `npu`) | `optional` (NPU (ggml-xdna)) | Tether's ggml-xdna llama.cpp fork on the AMD XDNA2 NPU; plain GGUF, open kernels, baked into the image at build time. `xdna_model_fit` classifies each model `fused` or `per-op`; today only requantized Qwen3.5-0.8B gets the fused path. Coexists with `flm` (warn, not refuse) on shared NPU hardware. See [Run GGUF models on the NPU with ggml-xdna](/docs/guides/run-xdna-npu/) and [ADR-0057](/docs/adr/0057-ggml-xdna-optional-npu-runner/). |
 | `kokoro` | `kokoro` | `cpu` (device_class `cpu`) | `default` (Kokoro speech) | TTS. |
 | `moonshine` | `moonshine` | `cpu` (device_class `cpu`) | `default` (Moonshine transcription) | STT, ONNX. |
 | `comfyui` | `comfyui` | `rocm` (device_class `img`) | `default` (ComfyUI) | Image and video generation. |

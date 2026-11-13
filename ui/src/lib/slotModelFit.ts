@@ -32,9 +32,27 @@ export interface SlotEngineLike {
   device?: string | null
   device_class?: string | null
   provider?: string | null
+  /** Slot's runner identity (e.g. 'flm', 'xdna', 'llama-server'). */
+  runner?: string | null
+  /** Slot's runtime family (e.g. 'flm', 'llama-server'). */
+  runtime_family?: string | null
+  /** Slot's `binary` (RUNNER_IMAGES key) as the slot API serves it. */
+  binary?: string | null
+}
+
+/** True when the slot runs the xdna runner (ADR-0057).
+ *
+ * The slot API serves the runner key as `binary` (no `runner` field), and the
+ * server matches it exactly (hal0.slots.activation.is_xdna_slot), so this
+ * does too. */
+export function isXdnaSlot(slot: SlotEngineLike | null | undefined): boolean {
+  return !!slot && slot.binary === 'xdna'
 }
 
 const FLM_TAGS = new Set(['flm', 'npu'])
+/** NPU-class runners that are NOT FLM: device_class is 'npu' but the model
+ *  surface is plain GGUF (ggml-xdna llama-server), never an FLM row. */
+const NON_FLM_NPU_RUNNERS = new Set(['xdna'])
 
 /** True when the model is served by FastFlowLM (runs on the NPU only). */
 export function isFlmModel(m: FlmModelLike | null | undefined): boolean {
@@ -56,9 +74,19 @@ export function isFlmModel(m: FlmModelLike | null | undefined): boolean {
   return m.device === 'npu'
 }
 
-/** True when the slot drives the NPU / FLM engine. */
+/** True when the slot drives the NPU / FLM engine.
+ *
+ * Keyed on runner/runtime_family first: `device_class === 'npu'` alone is no
+ * longer sufficient now that the xdna (ggml-xdna llama-server) runner also
+ * reports `device_class: 'npu'` — an xdna slot is a plain GGUF llama-server
+ * slot that happens to run on the NPU, never an FLM slot, and must never be
+ * offered FLM rows. */
 export function isFlmSlot(slot: SlotEngineLike | null | undefined): boolean {
   if (!slot) return false
+  const runner = String(slot.runner || '').toLowerCase()
+  const family = String(slot.runtime_family || '').toLowerCase()
+  if (isXdnaSlot(slot) || NON_FLM_NPU_RUNNERS.has(runner) || family === 'llama-server') return false
+  if (runner === 'flm' || family === 'flm') return true
   return (
     devKind(slot.device) === 'npu' ||
     slot.device_class === 'npu' ||

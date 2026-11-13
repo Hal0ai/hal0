@@ -3,6 +3,9 @@
 Thin HTTP client over the allowlisted passthrough in
 :mod:`hal0.api.routes.memory_admin` (``/api/memory/banks/...``), which
 forwards verbatim to the Hindsight REST API (``/v1/default/banks/...``).
+The exception is ``bank seed``, which the installer runs before hal0-api has
+the engine: it goes to the engine directly through
+:func:`hal0.memory.bank_seed.seed_box`.
 
 Profile note (source-checked against the hindsight-api v0.9.2 and v1.0.0
 tags): the engine retired its own ``GET/PUT .../profile`` in 0.10.0 — both
@@ -42,7 +45,9 @@ from hal0.cli._shared import (
     die,
 )
 
-app = typer.Typer(help="Manage Hindsight banks (list, stats, profile, export/import, consolidate).")
+app = typer.Typer(
+    help="Manage Hindsight banks (list, stats, profile, export/import, seed, consolidate)."
+)
 console = Console()
 
 _DISPOSITION_FIELDS = ("skepticism", "literalism", "empathy")
@@ -320,6 +325,69 @@ def bank_import_cmd(
         )
 
     _emit(result, json_out, title="import", render=render)
+
+
+# ── ``hal0 memory bank seed`` ───────────────────────────────────────────────
+
+#: ``bank seed`` exit codes besides 0 (seeded) and 1 (failed or undecided).
+SEED_EXIT_NOTHING = 3
+SEED_EXIT_DEFERRED = 4
+
+
+@app.command("seed")
+def bank_seed_cmd(
+    config: str | None = typer.Option(
+        None, "--config", help="hal0.toml to read [memory] from (default: this box's)."
+    ),
+    state_dir: str | None = typer.Option(
+        None,
+        "--state-dir",
+        help="State directory holding memory-layout.json (default: this box's).",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of lines."),
+) -> None:
+    """Seed this box's default memory banks (ADR-0058 decision 7, #3557).
+
+    Talks to the memory engine directly, not to hal0-api, so it works before
+    hal0-api has picked the engine up. The banks come from the store's bank
+    layout and ``[memory]``: ``hal0:shared`` and ``hal0:private`` (by default)
+    on a two-bank store, the platform bank alone on the old layout. A bank
+    that holds anything, or already has a retain mission, is left alone, so a
+    re-run is safe. Nothing is written while an embedder switch is running.
+
+    Exit codes, which ``install.sh`` reads so it never reports a seed that
+    did not happen: 0 when at least one bank was seeded and none failed;
+    :data:`SEED_EXIT_NOTHING` (3) when every bank was already set up, or the
+    layout names none; :data:`SEED_EXIT_DEFERRED` (4) when an embedder switch
+    held the seed back; 1 when the banks cannot be told or a bank could not
+    be seeded. hal0-api seeds the same banks once it has the engine.
+    """
+    from hal0.memory.bank_seed import FAILED, SEEDED, SeedUndecided, seed_box
+
+    try:
+        results, deferred = seed_box(toml_path=config, state_dir=state_dir)
+    except SeedUndecided as exc:
+        if json_out:
+            typer.echo(jsonlib.dumps({"error": str(exc)}, indent=2, sort_keys=True))
+        else:
+            typer.echo(f"cannot tell which memory banks to seed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    failed = FAILED in results.values()
+    if json_out:
+        typer.echo(
+            jsonlib.dumps({"banks": results, "deferred": deferred}, indent=2, sort_keys=True)
+        )
+    elif deferred is not None:
+        typer.echo(f"not seeding now: {deferred}")
+    else:
+        for bank, status in results.items():
+            typer.echo(f"{bank}: {status}")
+    if failed:
+        raise typer.Exit(1)
+    if deferred is not None:
+        raise typer.Exit(SEED_EXIT_DEFERRED)
+    if SEEDED not in results.values():
+        raise typer.Exit(SEED_EXIT_NOTHING)
 
 
 # ── ``hal0 memory bank delete`` ─────────────────────────────────────────────

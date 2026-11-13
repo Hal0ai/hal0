@@ -661,6 +661,10 @@ _ADMIN_TOOL_EXCLUDES: frozenset[str] = frozenset(
         "memory_operation_retry",
         "memory_tags_list",
         "memory_bank_stats",
+        "memory_kb_tree",
+        "memory_kb_read",
+        "memory_documents_list",
+        "memory_documents_get",
         "memory_bank_consolidate",
     }
 )
@@ -2211,7 +2215,12 @@ async def _resolved_slot_image(request: Request, model: Any) -> str | None:
             return None
         # FLM/NPU-backed slots never route through the llama.cpp container
         # runner this lookup exists for — they have no image ref to speak of.
-        if (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm":
+        # An xdna slot (ADR-0057) is on the NPU but IS a llama.cpp container.
+        from hal0.slots.activation import is_xdna_slot
+
+        if not is_xdna_slot(cfg) and (
+            (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm"
+        ):
             return None
 
         # `_resolve_image_ref`'s tier-1 `image_pin` escape hatch is checked

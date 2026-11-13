@@ -43,10 +43,15 @@ from hal0.cli._shared import (
     die,
 )
 from hal0.cli.memory_bank_commands import app as bank_app
+from hal0.cli.memory_directive_commands import app as directive_app
+from hal0.cli.memory_embedder_commands import app as embedder_app
+from hal0.cli.memory_kb_commands import app as kb_app
 from hal0.cli.memory_migrate_commands import app as migrate_app
 from hal0.cli.memory_mm_commands import app as mm_app
+from hal0.cli.memory_models_agents_commands import agents_app, models_app
 from hal0.cli.memory_ops_commands import app as ops_app
 from hal0.cli.memory_recall_commands import recall_cmd
+from hal0.cli.memory_spec_commands import app as spec_app
 
 app = typer.Typer(help="Manage hal0 memory (Hindsight engine).")
 console = Console()
@@ -57,12 +62,20 @@ graph_app = typer.Typer(help="Graph-extraction settings (ADR-0023).")
 app.add_typer(graph_app, name="graph")
 
 # Beefier Hindsight bank-admin CLI: bank/ops/mm sub-apps, a debug ``recall``,
-# and ``migrate`` (``migrate unify``). Implementations live in
+# and ``migrate`` (``migrate platform``). Implementations live in
 # hal0/cli/memory_{bank,ops,mm,recall,migrate}_commands.py so this file only
 # needs this import block + the add_typer/command calls below.
 app.add_typer(bank_app, name="bank")
 app.add_typer(ops_app, name="ops")
 app.add_typer(mm_app, name="mm")
+app.add_typer(spec_app, name="spec")
+app.add_typer(kb_app, name="kb")
+app.add_typer(directive_app, name="directive")
+app.add_typer(models_app, name="models")
+# ``embedder switch`` (#3518): the one command here that works on the box
+# itself instead of calling hal0-api.
+app.add_typer(embedder_app, name="embedder")
+app.add_typer(agents_app, name="agents")
 app.command("recall")(recall_cmd)
 
 #: ``PUT /api/memory/graph`` can restart hindsight-api (daemon-reload + restart,
@@ -364,7 +377,7 @@ def graph_enable_cmd(
     slot: str | None = typer.Option(
         None,
         "--slot",
-        help="Local llm slot the memory engine runs on (e.g. 'utility'). "
+        help="Local llm slot the memory engine runs on (e.g. 'memory'). "
         "Must be an enabled type=llm slot; the server validates against the live "
         "slot set. Omit to keep the current slot.",
     ),
@@ -517,7 +530,7 @@ def graph_disable_cmd(
     )
 
 
-# ── ``hal0 memory migrate`` / ``migrate unify`` ────────────────────────────────
+# ── ``hal0 memory migrate`` (``migrate platform``) ─────────────────────────────
 app.add_typer(migrate_app, name="migrate")
 
 

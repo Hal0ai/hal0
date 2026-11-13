@@ -1488,7 +1488,12 @@ if [[ ! -f "${HAL0_TOML}" ]]; then
 # Validate:  hal0 config validate
 
 [meta]
-schema_version = 1
+# The venv interpreter, NOT "${PY}": hal0 is pip-installed into the venv
+# only, so the base interpreter cannot import hal0.config.schema. Using
+# "${PY}" here wrote an empty schema_version (the heredoc's status is
+# cat's, so install.sh still exited 0) and left a /etc/hal0/hal0.toml that
+# tomllib cannot parse — the API then silently fell back to defaults.
+schema_version = $("${VENV_DIR}/bin/python" -I -c 'from hal0.config.schema import CURRENT_SCHEMA_VERSION; print(CURRENT_SCHEMA_VERSION)')
 
 [slots]
 port_range_start = 8081
@@ -2581,7 +2586,7 @@ fi
 ui_step "Container slot seeds" "~1-2s"
 
 # ── Container slot seeds (A10) ────────────────────────────────────────────
-# Pre-populate /etc/hal0/slots/{flm,tts,rerank,utility,img,agent,brain,…}.toml
+# Pre-populate /etc/hal0/slots/{flm,tts,rerank,memory,img,agent,brain,…}.toml
 # if absent (the loop below is the single source of truth). Idempotent: never
 # overwrite an operator-edited file. Each slot is seeded unconditionally so
 # the dashboard can show its tile on any hal0 install; each gates on its own
@@ -2658,7 +2663,7 @@ slot_seed_tombstoned() {
 
 SEEDED_NEW_SLOTS=()
 SEEDED_EXISTING_SLOTS=0
-for seed_slot in flm tts rerank utility img agent brain qwen3tts coder embed; do
+for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do
     SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
     SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
     if slot_seed_tombstoned "${seed_slot}"; then
@@ -2706,7 +2711,7 @@ if (( ${#SEEDED_NEW_SLOTS[@]} > 0 )); then
 fi
 
 # EXPECTED, NOT A BUG: the loop above closes gaps, so upgrading a box that
-# predates a curated slot ADDS it (most often `utility`, added after the
+# predates a curated slot ADDS it (for example `memory`, added after the
 # original seed set). A parallel boot-time closer does the same thing —
 # hal0.install.static_seeds.seed_static_slots, wired into hal0-api startup — so
 # the slot also appears after a plain service restart with no installer run.
@@ -3161,27 +3166,27 @@ fi
 ui_step "NPU prerequisites (FastFlowLM)" "~10-60s (apt hosts only)"
 
 # Pinned FLM .deb — bump in lockstep with ADR-0009 and the flm runner
-# image tag in manifest.json (both 1.0.10 as of v1.6.1). NOTE (since 0.9.43):
+# image tag in manifest.json (both 1.0.12). NOTE (since 0.9.43):
 # FLM rejects a CLI flag passed twice, so FLMProvider.container_spec must
 # never repeat a mode flag (--asr/--embed) the model already implies.
-FLM_DEB_VERSION="1.0.10"
+FLM_DEB_VERSION="1.0.12"
 # Upstream ships a SEPARATE .deb per distro, each built against that release's
 # boost/libedit ABI: ubuntu24.04 (boost1.83), ubuntu25.10 + ubuntu26.04
 # (boost1.90), and debian13. Pick the artefact matching THIS host so
 # `apt-get install ./deb` resolves the .deb's boost/libedit/libxrt deps from the
 # host's own repos — no hardcoded SONAME list, and newer Ubuntu is first-class.
-# Since 1.0 FLM no longer links ffmpeg or fftw, and the 1.0.10 .deb needs
+# Since 1.0 FLM no longer links ffmpeg or fftw, and the 1.0.12 .deb needs
 # libxrt2 >= 2.25.0 (the lemonade-team PPA below ships it).
 # (Older installers pinned ONLY the ubuntu24.04 build and then had to SKIP host
 # FastFlowLM on every ffmpeg>=7 distro — even though the matching build existed.)
-# SHA-256 pinned per artefact, verified on download 2026-10-23; if upstream
+# SHA-256 pinned per artefact, verified on download 2026-11-05; if upstream
 # rebuilds under the same tag these drift — bump in lockstep with FLM_DEB_VERSION.
 _flm_sha_for_suffix() {
     case "$1" in
-        ubuntu24.04) echo "1f6cd57b92f3685fc83d23b87551152d073c66d5abf58de07cdc3b7de779b82d" ;;
-        ubuntu25.10) echo "45c3385cc41ade8436931ff8b2ea96ee2de6e80944c46ada180da6af57ea5e38" ;;
-        ubuntu26.04) echo "e63cd8109ebc8890b464d3cece9ebea969726cbf73901232eb5a9f9fac7fe617" ;;
-        debian13)    echo "1ecf6eb742126d0ed48bcd0143b48532b4e5694eacf207c4e3f57c0e5ea94693" ;;
+        ubuntu24.04) echo "5e74d047ee09d0c58d532bc2b70b0cbb508a18a36b33efb0ea615867d4506815" ;;
+        ubuntu25.10) echo "7f19326ab21f51d6992b041a98d47bbf0c6a763fa0a62b6b92c8bd80c33610ae" ;;
+        ubuntu26.04) echo "a0170f98c1ad338b1dbe01396248ebb6622affe256857f9b7b514043634f7e9e" ;;
+        debian13)    echo "52243ededf50366a537e7a7e1b156c130420c0d5840658a81696aef8f3c8423a" ;;
     esac
 }
 # Resolve host distro -> .deb suffix. For Ubuntu, pick the HIGHEST shipped build
@@ -3741,8 +3746,8 @@ smoke_structured_output() {
     #   * kwarg-ABSENT body — model + messages + response_format ONLY.
     #     Extra kwargs (temperature, max_tokens, …) mask template-branch
     #     differences between slot backends.
-    # hal0/utility is the canonical virtual alias (normalize/resolver.py):
-    # it routes to the cheap helper slot and falls back to the anchor, so
+    # hal0/agent is the canonical chat alias (normalize/resolver.py):
+    # it routes to the agent anchor, so
     # the probe works on any box with at least one loaded model.
     #
     # Returns 0 pass, 1 fail, 2 skipped, 3 timed out (curl exit 28: the model
@@ -3756,7 +3761,7 @@ smoke_structured_output() {
     # error is a failure, but sending the request would only retry its load.
     SMOKE_STRUCTURED_NOTE=""
     local body resp
-    body='{"model":"hal0/utility","messages":[{"role":"user","content":"Reply with only a JSON object of the form {\"ok\": true}."}],"response_format":{"type":"json_object"}}'
+    body='{"model":"hal0/agent","messages":[{"role":"user","content":"Reply with only a JSON object of the form {\"ok\": true}."}],"response_format":{"type":"json_object"}}'
     # KB-1 auth: same key discovery as the hindsight EnvironmentFile above —
     # a fresh open-LAN box has no api.env and needs no header.
     local -a auth=()
@@ -3765,8 +3770,8 @@ smoke_structured_output() {
         key="$(grep -oP '(?<=^HAL0_CLIENT_KEY=).*' /etc/hal0/api.env 2>/dev/null | head -1 || true)"
         [[ -n "${key}" ]] && auth=(-H "Authorization: Bearer ${key}")
     fi
-    # Which slot hal0/utility would land on, read from /api/slots without
-    # touching it. Mirrors resolve_chain: the first of utility, agent with a
+    # Which slot hal0/agent would land on, read from /api/slots without
+    # touching it. Mirrors resolve_chain: agent with a
     # bound model, else the first model-bound llm slot. Bound means the
     # configured model (model_default), which is what the resolver reads; a
     # row's model_id is the runtime snapshot and outlives a cleared binding.
@@ -3802,7 +3807,7 @@ if not bound:
     print("unbound")
     sys.exit(0)
 by_name = {str(s.get("name") or "").lower(): s for s in bound}
-slot = by_name.get("utility") or by_name.get("agent") or bound[0]
+slot = by_name.get("agent") or bound[0]
 state = str(slot.get("status") or slot.get("state") or "unknown").split()[0]
 if state == "error":
     verdict = "error"
@@ -3988,7 +3993,11 @@ else
     # tests/installer/test_hindsight_pin_lockstep.py enforces it. Kept as a
     # shell literal (not read from the venv) so the fresh-install branch works
     # even when the python side is broken.
-    HINDSIGHT_PIN="1.1.0"
+    HINDSIGHT_PIN="1.2.0"
+    # Space-separated pip requirements installed beside the pin; must match
+    # hal0.memory.engine_upgrade.ENGINE_DEP_CONSTRAINTS (#3533: dateparser 1.5.0
+    # breaks the engine's temporal query analysis).
+    HINDSIGHT_DEP_CONSTRAINTS="dateparser<1.5"
     HS_DIR="${VAR_DIR}/memory/hindsight"
     HINDSIGHT_UNIT_SRC="${REPO_ROOT}/installer/systemd/hindsight-api.service"
     if [[ "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 && -f "${HINDSIGHT_UNIT_SRC}" ]]; then
@@ -4010,7 +4019,7 @@ else
             # half-built venv so the next run retries cleanly, and let the
             # `-x hindsight-api` guard below skip the unit/health steps.
             hs_pyver="$("${HS_DIR}/.venv/bin/python" -I -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
-            if ! "${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}" -q; then
+            if ! "${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}" ${HINDSIGHT_DEP_CONSTRAINTS} -q; then
                 warn "hindsight-api==${HINDSIGHT_PIN} failed to install on Python ${hs_pyver} — memory engine will be unavailable"
                 warn "  set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.11-3.14) and re-run, or set HAL0_SKIP_HINDSIGHT=1"
                 rm -rf "${HS_DIR}/.venv"
@@ -4071,8 +4080,46 @@ else
                     > /etc/hal0/hindsight-llm.env )
                 chown root:hal0 /etc/hal0/hindsight-llm.env 2>/dev/null || true
             fi
+            # #3518 (ADR-0058 decision 3): a new install builds its store with
+            # the configured embedder ([memory.models]). The base unit names
+            # none, so before the engine's FIRST start hal0 writes its managed
+            # drop-in and the embedder record, starts the engine on them, and
+            # moves it to the engine default only when that start fails and a
+            # start on the default then works. It acts only on a box with no
+            # memory store; on any other box (an upgrade, a re-run, a store
+            # whose disk is missing) it changes nothing. All of it is
+            # hal0.memory.first_start; exit 3 = fell back to the default,
+            # 5 = the engine starts on neither embedder, 6 = the model host
+            # is unreachable, anything else = the step itself failed.
+            hs_first_rc=0
+            "${VENV_DIR}/bin/python" -I -m hal0.memory.first_start || hs_first_rc=$?
+            case "${hs_first_rc}" in
+                0) ;;
+                3)
+                    warn "the memory engine could not start on the configured embedder; it runs on the engine default instead (see the line above)"
+                    warn "  check 'journalctl -u hindsight-api -n 40' for the cause; '${HAL0_BIN} doctor all' shows the recorded embedder"
+                    ;;
+                5)
+                    warn "the memory engine did not start (see the line above); it stays on the configured embedder and keeps retrying"
+                    warn "  its first start downloads the embedding and the reranker model; check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'"
+                    ;;
+                6)
+                    warn "the memory engine could not download its models; it keeps retrying and will start on the configured embedder when the model host is reachable"
+                    warn "  check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'"
+                    ;;
+                *)
+                    warn "the memory engine's embedder could not be set up before its first start (see the line above)"
+                    warn "  check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'"
+                    ;;
+            esac
             systemctl daemon-reload
-            systemctl enable --now hindsight-api
+            # A unit that reached its start limit (a first start that kept
+            # failing above) is refused by `enable --now`, and this file runs
+            # under `set -e`: clear the failed state first, and treat a start
+            # that still fails like the not-yet-healthy engine below (warn).
+            systemctl reset-failed hindsight-api 2>/dev/null || true
+            systemctl enable --now hindsight-api \
+                || warn "could not enable and start the memory engine; check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'"
             if [[ "${hs_unit_changed}" -eq 1 && "${hs_was_active}" -eq 1 ]]; then
                 info "hindsight-api unit changed — restarting the running engine so it reads the new unit"
                 systemctl restart hindsight-api || warn "hindsight-api restart failed; restart it by hand to apply the new unit"
@@ -4086,23 +4133,29 @@ else
             done
             if [[ "${hs_up}" -eq 1 ]]; then
                 info "hindsight-api is running (memory engine on 127.0.0.1:9177)"
-                # Seed banks through hal0-api (idempotent import, config-by-field):
-                # `shared` = the global cross-agent brain; `private:hermes`
-                # = hermes' private store (the server derives it from the agent-id
-                # via PRIVATE_PREFIX="private:", so the seed name must match exactly).
-                # Other private/project banks lazy-create.
-                _seed_bank() {
-                    curl -fsS -m 20 -X POST \
-                        "http://127.0.0.1:${HAL0_PORT}/api/memory/banks/$1/import" \
-                        -H "Content-Type: application/json" -H "X-hal0-Agent: installer" \
-                        -d "$2" >/dev/null 2>&1
-                }
-                if _seed_bank shared '{"version":"1","bank":{"retain_mission":"Extract technical decisions and rationale, gotchas and fixes, PRs and status changes, conventions, commands, endpoints, flags, incidents and resolutions, and cross-session coordination facts. Ignore routine edits, transient state, secrets, and anything already in git.","enable_observations":true,"disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":1}}' \
-                    && _seed_bank private:hermes '{"version":"1","bank":{"retain_mission":"This agent private working notes, scratch decisions, and per-task state. Never store shared facts here.","disposition_skepticism":4,"disposition_literalism":4,"disposition_empathy":2}}'; then
-                    info "seeded memory banks: shared (global) + private:hermes"
-                else
-                    warn "memory bank seeding incomplete — banks also lazy-create on first write"
-                fi
+                # Seed the default banks (#3557, ADR-0058 decision 7). The
+                # banks come from hal0 itself, never from this script: `hal0
+                # memory bank seed` reads the layout record that the
+                # post-activation pass above wrote and [memory], so a new
+                # store gets hal0:shared and hal0:private (or the banks
+                # [memory] bank and private_bank name) and an older store its
+                # platform bank alone. It talks to the engine directly, so it
+                # does not wait for hal0-api to pick the engine up, and its
+                # guard never reconfigures a bank that holds anything: a re-run
+                # seeds only a bank that is missing, or empty with no retain
+                # mission. The installer's own paths are passed so a --dev
+                # prefix is honoured. A failure only warns: hal0-api seeds the
+                # same banks once it has the engine. Its exit code tells a
+                # seed (0) from nothing to seed (3) and a deferred seed (4).
+                seed_rc=0
+                HAL0_HOME="${HAL0_HOME_FOR_OWUI}" "${HAL0_BIN}" memory bank seed \
+                    --config "${HAL0_TOML}" --state-dir "${VAR_DIR}/state" || seed_rc=$?
+                case "${seed_rc}" in
+                    0) info "seeded the memory banks this box's layout names" ;;
+                    3) info "memory banks already set up; nothing to seed" ;;
+                    4) info "memory bank seeding deferred while an embedder switch runs; hal0-api seeds them after it" ;;
+                    *) warn "memory bank seeding incomplete — hal0-api seeds them once it has the engine" ;;
+                esac
                 # #2353: say up front when the extraction slot cannot finish one
                 # extraction inside [memory.graph].llm_timeout_s, instead of the
                 # operator finding out from an empty bank once the retries run
@@ -4114,7 +4167,8 @@ else
                 "${HAL0_BIN}" memory graph check \
                     || warn "could not check the extraction slot's throughput; run '${HAL0_BIN} memory graph check' once a model is loaded"
             else
-                warn "hindsight-api not healthy yet; check 'journalctl -u hindsight-api -n 40'"
+                warn "hindsight-api not healthy yet: on its first start the engine downloads its embedding and reranker models"
+                warn "  check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'; hal0-api seeds the memory banks once the engine is up"
             fi
         fi
     fi

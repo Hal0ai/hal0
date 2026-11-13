@@ -182,10 +182,21 @@ def slot_selection_rank(state: SlotState | str) -> int:
 #: Must stay in sync with ui/src/composables/useSlotStats.js SELF_MANAGED_PROVIDERS.
 SELF_MANAGED_PROVIDERS: frozenset[str] = frozenset({"kokoro", "qwen3tts", "moonshine", "vibevoice"})
 
+#: Self-managed engines whose configured model IDs intentionally have no
+#: registry row because weights are operator-staged. Kokoro is excluded:
+#: ADR-0030 makes its bundle registry-backed; VibeVoice models are curated.
+STAGED_WEIGHT_PROVIDERS: frozenset[str] = frozenset({"qwen3tts", "moonshine"})
+
 
 def provider_requires_model(provider: str | None) -> bool:
     """True when a slot of this provider needs an explicit model_id to serve."""
     return (provider or "").lower() not in SELF_MANAGED_PROVIDERS
+
+
+def provider_registry_miss_is_expected(provider: str | None) -> bool:
+    """Whether this provider's configured model ID is intentionally unstored."""
+    key = (provider or "").lower()
+    return key in STAGED_WEIGHT_PROVIDERS and not provider_requires_model(key)
 
 
 # ── Typed errors ─────────────────────────────────────────────────────────────
@@ -310,6 +321,19 @@ class SlotConfigError(SlotError):
     status = 400
 
 
+class SlotFabricClockHazard(SlotConfigError):
+    """NPU and GPU slots would run together with the fabric clock unheld.
+
+    Refused by default (``[slots].fabric_clock_guard = "refuse"``); the
+    manager's ``_guard_fabric_clock`` raises this before the load starts so
+    the operator sees the host-side fix before a hang, not after one. See
+    ``hal0.slots.fabric_clock_guard`` and the ADR for the hazard.
+    """
+
+    code = "slot.fabric_clock_unheld"
+    status = 409
+
+
 class RunnerFamilyMismatch(SlotConfigError):
     """A slot's ``binary`` names a runner its launch would not dispatch to.
 
@@ -320,6 +344,21 @@ class RunnerFamilyMismatch(SlotConfigError):
     """
 
     code = "slot.runner_family_mismatch"
+    status = 409
+
+
+class XdnaInFlmPortGroup(SlotConfigError):
+    """An xdna slot whose identity row sits in the FLM trio's shared port group.
+
+    A slot made xdna (``binary = "xdna"``, ADR-0057) before the launch fix
+    could be stamped into ``npu-flm-trio``, so the port authority shares FLM's
+    port with it. hal0 does not migrate that claim: the write that would make
+    such a slot xdna is refused, and so is its load. The fix is to delete the
+    slot and create a new xdna slot, which gets a port of its own. 409: the
+    stored identity conflicts with the requested runner.
+    """
+
+    code = "slot.xdna_in_flm_port_group"
     status = 409
 
 
@@ -509,12 +548,14 @@ __all__ = [
     "DISPATCHABLE_STATES",
     "LEGAL_TRANSITIONS",
     "SELF_MANAGED_PROVIDERS",
+    "STAGED_WEIGHT_PROVIDERS",
     "IllegalSlotTransition",
     "NpuExclusivityViolation",
     "RunnerFamilyMismatch",
     "SlotConfigError",
     "SlotCrashLooping",
     "SlotError",
+    "SlotFabricClockHazard",
     "SlotHealthFailed",
     "SlotHostUnsupported",
     "SlotModelRuntimeMismatch",
@@ -526,8 +567,10 @@ __all__ = [
     "SlotStallCeiling",
     "SlotState",
     "SlotStateRecord",
+    "XdnaInFlmPortGroup",
     "is_dispatchable_state",
     "is_transition_legal",
+    "provider_registry_miss_is_expected",
     "provider_requires_model",
     "read_state",
     "slot_selection_rank",

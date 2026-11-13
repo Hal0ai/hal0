@@ -193,15 +193,13 @@ WantedBy=multi-user.target
   limits (`HINDSIGHT_API_LLM_MAX_CONCURRENT`, `HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT`,
   `HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS`,
   `HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES`, `HINDSIGHT_API_WORKER_MAX_RETRIES`,
-  `HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS`, and the derived
+  `HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS`, `HINDSIGHT_API_WORKER_MAX_SLOTS`, and the derived
   `HINDSIGHT_API_RETAIN_WALL_TIMEOUT`). Both concurrency keys use the same
   rendered `extraction_max_concurrent`, bounding consolidation, reflect and
   mental-model refresh along with retain. At the default of one, a long
   reflect or consolidation can delay retains until it finishes or reaches
-  `llm_timeout_s`. Changing one of those
-  rewrites the file and restarts hindsight-api, and the first save after
-  upgrading from a release that pinned a slot id there repairs the drop-in the
-  same way. That drop-in lives under `/etc/systemd/system`
+  `llm_timeout_s`. Changing one rewrites the file and restarts hindsight-api, as does the first save after
+  upgrading from a release that pinned a slot id there. That drop-in lives under `/etc/systemd/system`
   and hal0-api runs unprivileged, so the write and the follow-up restart both
   route through the `hal0-systemctl` wrapper
   (`write-hindsight-dropin` + `svc-restart hindsight`). If the wrapper or its
@@ -232,6 +230,50 @@ WantedBy=multi-user.target
 - **Data root** — embedded Postgres at `/var/lib/hal0/memory/hindsight/.pg0`,
   pinned via the unit's `HOME=` env (Hindsight has no dedicated data-dir
   variable of its own).
+- **Embedder** — hal0 records the embeddings provider and model the store was
+  built with in `/var/lib/hal0/state/memory-embedder.json` and starts the
+  engine on that pair. `[memory.models].embeddings_provider` and
+  `embeddings_model` do not change it: a save is kept and reported as "saved;
+  takes effect only through an embedder switch". When config and record
+  differ, or the engine runs something other than the record,
+  `GET /api/memory/models` and the `memory_embedder` row of `hal0 doctor all`
+  say so and nothing is rewritten. `hal0 memory embedder switch <model>` is
+  the one way to change it; see
+  [Change the embedding model](/docs/guides/enable-memory#change-the-embedding-model).
+- **First start** — on a box with no memory store, the installer writes the
+  `showcase-lanes.conf` drop-in and the embedder record from
+  `[memory.models]` before it starts the engine, so a new store is built with
+  the configured embedder (`hindsight-ai/hs-embed-1` by default). That start
+  downloads the embedder and the reranker into `HF_HOME` (about 260 MB each)
+  and is healthy after about 25 s on a good link. A box that has a store, or
+  whose store location is unavailable, is not touched.
+
+  The installer watches that start for up to 240 s. If the engine's process
+  exits first (about 21 s for a model id that does not exist, about 127 s
+  when the model host cannot be reached), it looks for the cause:
+  - The model host does not answer: nothing is changed. The engine keeps
+    retrying and starts on the configured embedder once the host is back.
+  - Otherwise it stops the engine, renders the drop-in with the
+    engine-default embedder (`BAAI/bge-small-en-v1.5`) and nothing else
+    changed, leaves the record alone, and starts again. Healthy: the embedder
+    was the cause, and the record becomes the engine default (source
+    `first-start-fallback`). Still down: something else is wrong, so the
+    configured drop-in is put back and the engine keeps retrying.
+
+  Each case prints a `!!` line. hal0-api seeds the default banks when the
+  engine comes up later. An engine still on its first process at 240 s is
+  left on the configured embedder; if it fails after that it restarts in a
+  loop, a `.pg0` directory exists, and a re-run of the installer skips this
+  step. The `memory` row of `hal0 doctor all` warns that the engine is
+  degraded or unreachable. Fix the cause shown by
+  `journalctl -u hindsight-api -n 40`, then run
+  `sudo systemctl reset-failed hindsight-api` and
+  `sudo systemctl restart hindsight-api`. To give the configured embedder up
+  instead, only where the engine has never been healthy (the store is empty):
+  stop `hindsight-api`, remove `/var/lib/hal0/memory/hindsight/.pg0`,
+  `/var/lib/hal0/state/memory-embedder.json` and
+  `hindsight-api.service.d/showcase-lanes.conf`, set
+  `[memory.models].embeddings_model`, and re-run the installer.
 
 ### Config files it reads
 
@@ -286,156 +328,7 @@ Any other unit is rejected with a 400 `system.logs_error`.
 
 ## Companion services
 
-The dashboard's Services page manages four companion services from a single
-registry — `hal0.services.registry.SERVICES` in
-`src/hal0/services/registry.py`. One `ServiceDef` per service names its
-owning unit, its probe strategy, and which lifecycle verbs it permits:
-
-| Service | Purpose | Unit | Allowed actions |
-|---|---|---|---|
-| OpenWebUI | Chat UI companion (podman container, LAN `:3001`) | `hal0-openwebui.service` | start, stop, restart, enable, disable |
-| ComfyUI | Image generation engine (runs as the seeded `img` slot container, LAN `:8188` by default; `[network].comfyui_listen = "loopback"` fences it to the box) | `hal0-slot@img.service` | start, restart (no stop) |
-
-| Hermes | Bundled agent + its own dashboard (loopback `:9119`) | `hal0-agent@hermes.service` | start, stop, restart, enable, disable |
-| Hindsight | Memory engine — this is the same unit documented above | `hindsight-api.service` | start, stop, restart, enable, disable |
-
-The Open WebUI card also shows an Agents chip with the Hermes profiles wired into the picker, taken from `openwebui_wiring_status`.
-
-#### Hermes systemd drop-in
-
-hal0 ships its Hermes unit settings as
-`/etc/systemd/system/hal0-agent@hermes.service.d/10-hal0.conf`. Put your own
-changes in a separate drop-in with `systemctl edit --drop-in=local
-hal0-agent@hermes` (it lands as `local.conf` and sorts after `10-hal0.conf`, so
-your values win). Earlier releases shipped this file as `override.conf`, the
-name `systemctl edit` uses by default. Re-running the installer deletes an
-`override.conf` that still matches a hal0-shipped version. An `override.conf`
-you edited is kept and the installer warns, naming the hal0-owned directives it
-repeats. Trim it to your own lines. A drop-in carrying `ConfigurationDirectory=`
-is renamed to `<name>.hal0-disabled`, because that directive crash-loops the
-unit (status 241); the file is kept, not deleted.
-
-#### Hermes gateway and linger
-
-The Hermes gateway runs as `hermes-gateway.service`, a system unit with
-`User=hal0`. `hal0 update` renders the unit from hal0's own template through
-the root verb `hal0-update hermes-gateway` once the new release is live: it
-orders the gateway after `user@<uid>.service`, turns systemd linger on for
-`hal0`, and restarts the gateway only if it was running. It never enables,
-starts or stops a gateway you disabled. Linger is needed because Hermes's
-scheduled and kanban workers start through `systemd-run --user` under that
-user's manager; without it kanban workers never start. `hal0 doctor all`
-shows the linger state on its `hal0_linger` row, and if the verb fails
-`hal0 update` prints `sudo hal0 agent install hermes`. `hal0 agent uninstall
-hermes` and `installer/uninstall.sh` run `loginctl disable-linger hal0`. A
-gateway the operator disabled or masked is left off by the installer,
-`hal0 agent install hermes` and `hal0 update`.
-
-From Hermes v0.22.3 the gateway daemon owns chat turns and the session store. The dashboard's default Chat tab still runs its turns in the dashboard process and needs no gateway. A chat opened for another profile (such as `hal0-brain`) and the classic `hermes chat` CLI are gateway clients that attach to `hermes-gateway.service`. hal0 keeps the unit file installed even when you turn the gateway off (it only ever runs `systemctl disable --now`, never removes the file), because an installed unit in any state is what stops a client from starting a gateway of its own. `hal0 doctor` has a `Hermes gateway unit` row (`hermes-gateway-unit`) that fails when the file is missing or a `gateway run --idle-exit` process is running, and the `hermes-api` row warns rather than fails while the gateway is off. To chat in another profile, run the gateway with `sudo systemctl enable --now hermes-gateway`. During `hal0 update`, a gateway unit whose `ExecStart`, `ExecStop` or `ExecStopPost` is not hal0's launcher (for example one written by `hermes gateway install` outside hal0) is rewritten to hal0's launcher while the gateway is stopped, before the new release starts.
-
-Hindsight's entry here isn't a second thing to learn: the Services page's
-buttons for it run through the identical `unit_action` → `hal0-systemctl`
-path already described in hindsight-api.service above.
-
-### Start, Stop, Restart
-
-The Services page renders one button per allowed action
-(`ui/src/dash/services.jsx:100-124`): Restart whenever it's allowed, Start
-when the unit isn't currently active, Stop only while it is. Clicking one
-calls `POST /api/services/{id}/action` with `{"action": "start"|"stop"|"restart"}`,
-which `hal0.services.systemd.unit_action()` runs against the unit — the
-same verb allow-list and `hal0-systemctl` wrapper described above for
-hal0-api and hindsight-api.
-
-Stop carries a browser confirmation — "Stop `<name>`? Clients using it will
-lose access until it is started again." — because stopping OpenWebUI,
-Hermes, or Hindsight takes down something other browsers or agents may be
-using right now. It's a client-side prompt only: it isn't enforced by the
-API, so a direct `POST` bypasses it. Restart shows no such prompt.
-
-ComfyUI has no Stop button at all — the registry grants it only `start`
-and `restart`. Its "start" is not a raw `systemctl start`: the route
-substitutes the GPU-arbiter switchover (`_comfyui_start`,
-`src/hal0/api/routes/services.py:187-208`, delegating to the same
-`comfyui_switchover` handler the FirstRun repair flow uses) so resident LLM
-slots get drained before the iGPU is handed to ComfyUI. Stopping is
-arbiter-managed too, per its card hint: "stop is GPU-arbiter managed —
-switch back to inference in the Image-Gen pane".
-
-The registry also allows `enable`/`disable` for OpenWebUI, Hermes, and
-Hindsight, but the Services page renders no buttons for those two verbs —
-only `POST /api/services/{id}/action` with `{"action": "enable"|"disable"}`
-reaches them.
-
-There's no `hal0 service` command group, and for OpenWebUI and Hermes
-specifically there's no CLI equivalent for start/stop/restart. `hal0 app
-list` and `hal0 agent list`/`hal0 agent status` show a service's systemd
-enabled/active state, but neither `hal0 app` nor `hal0 agent` has a
-start/stop/restart subcommand — for those two services, the dashboard
-buttons, or a direct `systemctl {start|stop|restart} <unit>` as root (same
-mechanism as the platform units above), are the only ways to drive these
-verbs today. ComfyUI is the exception: its unit is `hal0-slot@img.service`,
-the same seeded `img` slot the Slots page manages, so `hal0 slot restart
-img`, `hal0 slot load img`, and `hal0 slot unload img` reach it from the
-CLI.
-
-### Health
-
-Two endpoints report health, for different consumers:
-
-- `GET /api/services` — the Services page's own source. Every entry
-  carries `up` (bool), a probe-specific `detail` string, and the raw
-  systemd `unit_state` (`active_state`/`sub_state`/`unit_file_state`/`since`).
-  The page's status pill is green **up** when `up` is true, red **failed**
-  when `unit_state.active_state` is `"failed"`, grey **down** for any other
-  managed service, and a plain grey **—** for an unmanaged one
-  (`ui/src/dash/services.jsx:67`).
-- `GET /api/services/health` — a stable summary over the same service
-  catalog (OpenWebUI, ComfyUI, Hermes, Hindsight) that feeds the Overview
-  page's Services widget. It collapses the same probes into
-  `state: "up" | "stopped" | "down"`, splitting "not up" into a deliberate
-  `stopped` (unit `inactive` — comes back on demand) from `down` (unit
-  `failed`, or reachable-but-unhealthy).
-
-Each service is probed differently: OpenWebUI is a loopback
-`GET http://127.0.0.1:3001/health` (2xx = up); ComfyUI is its own
-`/system_stats` + `/queue` (reachable = up, with a live "N running / M
-queued" job count); Hermes and Hindsight both fall back to systemd
-`active_state == "active"`. Every probe is fail-soft by design — a probe or
-systemd failure degrades to `up=false` with an honest detail, never a
-fabricated "up" and never a 500. A service with no wired probe would report
-`up: false, state: "down", detail: "unmonitored"`, though none of the four
-registered services hits that path today. The summary's probes run
-concurrently, so one hung or raising probe reports its own row as `down`
-without dropping the rest.
-
-### mDNS discovery toggle
-
-The DISCOVERY (mDNS) card above the service grid
-(`DiscoveryCard`, `ui/src/dash/services.jsx:200-241`, toggle button at
-`:214-219`) toggles `POST /api/services/mdns` with
-`{"advertise": true|false}`. Turning it on writes one avahi service-group
-file — `/etc/avahi/services/hal0-addon-<id>.service` — per service that is
-both mDNS-capable and LAN-published: OpenWebUI (`:3001`) and, by default,
-ComfyUI's editor (`:8188`), so other machines reach them at
-`http://<host>.local:<port>`. Hermes and Hindsight listen on the box's
-loopback, so they're never mdns-capable. ComfyUI's LAN publication is the
-`[network].comfyui_listen` key in `hal0.toml` ([ADR-0041](/docs/adr/0041-the-comfyui-editor-answers-on-the-lan)):
-`"lan"` (the default) binds the LAN and makes it advertisable; `"loopback"`
-fences `:8188` to the box, and the card then neither lists nor announces it
-(its link answers only on the box itself or through an SSH tunnel). A change
-applies at the next `hal0 slot restart img`. avahi-daemon inotify-watches that
-directory, so the announcement takes effect immediately — no reload, no unit
-restart. Turning it off removes every `hal0-addon-*.service` file. A ComfyUI
-announcement written while it was on the LAN stays after you switch to
-`"loopback"` until you turn the toggle on or off again; either removes it.
-
-
-The toggle never touches `hal0.service`, the base dashboard announcement
-the installer writes separately — that's why "Dashboard announced as
-`<host>.local`" can be true even when the addon toggle is off. If
-avahi-daemon isn't active, the button is disabled and the card tells the
-operator to install/enable it or add a static hosts entry.
+The four companion services the dashboard's Services page manages (OpenWebUI, ComfyUI, Hermes, Hindsight), their start/stop/restart actions, health checks and the mDNS toggle are on [Companion services](/docs/operate/companion-services).
 
 ## See also
 

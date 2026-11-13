@@ -671,3 +671,88 @@
   z-index: 20;
   opacity: 1;
 }
+
+/* ── engine lineup + pmode/fclk pills (LEFT region) ──────────────────── */
+.npu-card .combo-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.npu-card .combo-pills .chip {
+  font-family: var(--jbm);
+  font-size: 10.5px;
+  padding: 3px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--fg-2);
+  background: var(--bg-2);
+}
+.npu-card .combo-pills .chip.muted {
+  color: var(--fg-3, var(--fg-2));
+  opacity: 0.6;
+}
+
+/* ── shared/time-sliced grid treatment ────────────────────────────────
+   Honesty rule: the hatch marks "more than one holder is on this array",
+   never a per-tile load claim. Static diagonal hatch, no extra animation —
+   the existing per-tile breathing (tileAnim) already respects
+   prefers-reduced-motion; this adds no new motion of its own. */
+.npu-card .aie.shared .aie-grid {
+  position: relative;
+}
+.npu-card .aie.shared .aie-grid::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent 0 6px,
+    rgba(255, 255, 255, 0.05) 6px 7px
+  );
+  border-radius: 4px;
+}
+.npu-card .aie-foot {
+  color: var(--fg-2);
+}
+
+/* ── xdna slot card ───────────────────────────────────────────────────
+   Same .cslot shell as the FLM trio cards (dot/name/metrics/model row),
+   plus its own fit/pmode chip row and a shared-with warning line. */
+.npu-card .cslot.xdna-slot .xdna-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.npu-card .cslot.xdna-slot .chip {
+  font-family: var(--jbm);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  color: var(--fg-2);
+  text-transform: lowercase;
+}
+.npu-card .cslot.xdna-slot .chip.xdna-fit.fused {
+  color: var(--npu-s1, var(--accent));
+  border-color: var(--npu-s1, var(--accent));
+}
+.npu-card .cslot.xdna-slot .chip.xdna-fit.per-op {
+  color: var(--warn, #d8a657);
+  border-color: var(--warn, #d8a657);
+}
+.npu-card .cslot.xdna-slot .chip.muted {
+  opacity: 0.55;
+}
+.npu-card .cslot.xdna-slot .xdna-shared-warn {
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--warn, #d8a657);
+  font-family: var(--jbm);
+}
+.npu-card .cslot.xdna-slot .cslot-ctrl {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+}

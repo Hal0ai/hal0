@@ -740,6 +740,15 @@ def test_resolved_slot_native_tools_true_for_npu_backed_slots() -> None:
     assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is True
 
 
+def test_resolved_slot_native_tools_checks_an_xdna_slot_on_the_npu() -> None:
+    """An xdna slot (ADR-0057) is on the NPU but IS a llama.cpp container, so
+    the native-tools preflight applies to its image (#1789)."""
+    _learn_incapable(_STALE_IMAGE)
+    cfg = {**_brain_slot_cfg(image_pin=_STALE_IMAGE, device="npu"), "binary": "xdna"}
+    request = _fake_request_with_slot(_StubLLM([]), cfg, model="hal0/brain")
+    assert _run(bc._resolved_slot_native_tools(request, "hal0/brain")) is False
+
+
 def test_a_learned_incapable_image_strips_tools_from_the_chat_round_only() -> None:
     """The end-to-end contract: chat round goes out WITHOUT tools when the
     resolved slot 500s on them; the tool-model round still carries them, and

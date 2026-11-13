@@ -21,6 +21,7 @@ from typing import Any
 import structlog
 
 from hal0.memory.provider import MemoryProvider
+from hal0.memory.write_gate import require_writes_allowed
 
 log = structlog.get_logger(__name__)
 
@@ -107,13 +108,19 @@ class PgVectorProvider(MemoryProvider):
         strategy=None,
         update_mode=None,
         sync=False,
+        project=None,
+        coding=False,
     ):
+        # #3518: while an embedder switch runs the engine is private and looks down to
+        # hal0-api. A write must then be refused, not kept in this volatile store.
+        require_writes_allowed()
         # This fallback has no document/entity/consolidation-strategy
         # semantics — the new RetainRequest-shaped kwargs are accepted (so
         # callers built against the full ABC don't need an engine check) and
         # silently ignored, same posture as the existing document_id-as-id
-        # shortcut below.
-        del entities, observation_scopes, strategy, update_mode, sync
+        # shortcut below. It applies no write envelope either, so the project
+        # a caller named is not stamped.
+        del entities, observation_scopes, strategy, update_mode, sync, project, coding
         # Emit a per-call warning (throttled to once per instance) so the
         # write-path is loud even when the construction-time warning was
         # swallowed by a log filter or the provider was built outside our
@@ -159,11 +166,12 @@ class PgVectorProvider(MemoryProvider):
         client_id=None,
         tag_groups=None,
         min_scores=None,
+        project=None,
     ):
-        # No boolean tag-expression engine and no scored ranking here — this
-        # fallback is plain substring/tag matching, so both are accepted (ABC
-        # compliance) and ignored.
-        del tag_groups, min_scores
+        # No boolean tag-expression engine, no scored ranking and no project
+        # registry here — this fallback is plain substring/tag matching, so
+        # all three are accepted (ABC compliance) and ignored.
+        del tag_groups, min_scores, project
         allowed = self._allowed(dataset, client_id)
         tags = tags or []
         out = []
@@ -181,7 +189,10 @@ class PgVectorProvider(MemoryProvider):
                 break
         return out
 
-    async def list_items(self, dataset=_SHARED, cursor=None, limit=50, client_id=None):
+    async def list_items(
+        self, dataset=_SHARED, cursor=None, limit=50, client_id=None, project=None
+    ):
+        del project  # no project registry in the volatile fallback (see search)
         allowed = self._allowed(dataset, client_id)
         return {
             "items": [dict(r) for r in self._rows if r["dataset"] in allowed][:limit],

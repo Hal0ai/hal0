@@ -373,7 +373,7 @@ X-hal0-Agent: my-agent
 An absent or malformed header falls back to `anonymous`. Add
 `X-hal0-Private: 1` to opt a memory client into its private namespace —
 writes then land in `private:<agent>` instead of the default `shared`
-dataset (or the unified bank, if `[memory].unified_bank` is on — see
+dataset (in the two-bank layout `hal0:private`; on an older store the unified bank — see
 [Enable memory](/docs/guides/enable-memory)).
 
 ### Widen the host and origin allowlists

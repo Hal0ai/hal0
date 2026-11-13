@@ -116,6 +116,15 @@ from hal0.api.routes import (
     memory_admin as memory_admin_routes,
 )
 from hal0.api.routes import (
+    memory_compat as memory_compat_routes,
+)
+from hal0.api.routes import (
+    memory_health as memory_health_routes,
+)
+from hal0.api.routes import (
+    memory_lanes as memory_lanes_routes,
+)
+from hal0.api.routes import (
     meta as meta_routes,
 )
 from hal0.api.routes import (
@@ -135,6 +144,9 @@ from hal0.api.routes import (
 )
 from hal0.api.routes import (
     runner_images as runner_images_routes,
+)
+from hal0.api.routes import (
+    runners as runners_routes,
 )
 from hal0.api.routes import (
     secrets as secrets_routes,
@@ -158,6 +170,7 @@ from hal0.registry.discover import _collect_referenced_model_ids, scan_and_regis
 from hal0.registry.model import _BLESSED_PREFIX
 from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.store import ModelRegistry
+from hal0.security.exposure import COMPAT_MEMORY_PREFIX
 from hal0.slots.manager import SlotManager
 from hal0.upstreams.huggingface import hf_token_from_env
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
@@ -569,7 +582,12 @@ async def hal0_llm_slot_views(
         # (``gemma4-it:e2b``), not hal0's ``-FLM`` catalog id — otherwise
         # ``hal0/utility``/``hal0/npu`` never match the slot and fall through
         # to the chat slot. Translate via the same map as the FLM provider.
-        if (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm":
+        from hal0.slots.activation import is_xdna_slot, slot_binary
+
+        xdna = is_xdna_slot(cfg)
+        if not xdna and (
+            (cfg.get("device") or "").strip() == "npu" or (cfg.get("backend") or "") == "flm"
+        ):
             from hal0.providers.flm import flm_id_to_tag_async
 
             # A cold catalog is probed off the event loop (#2334).
@@ -580,6 +598,7 @@ async def hal0_llm_slot_views(
             {
                 "name": name,
                 "device": (cfg.get("device") or "").strip(),
+                "binary": slot_binary(cfg),
                 "model_id": model_id,
                 "context_length": int(_slot_ctx_size(cfg, model_registry, model_id) or 0),
             }
@@ -766,6 +785,12 @@ def _flm_multiplex_tags(cfg: dict[str, Any]) -> list[str]:
     """
     if not cfg.get("name"):
         return []
+    from hal0.slots.activation import is_xdna_slot
+
+    # An xdna slot (ADR-0057) is on the NPU but is not FLM: a leftover [npu]
+    # table from before a binary flip must not advertise FLM ASR/embed tags.
+    if is_xdna_slot(cfg):
+        return []
     # An FLM slot is named by its NPU device (the launch dispatch's signal and
     # the only one a converted slot keeps: ADR-0029's conversion drops the
     # ``backend`` key) or by an explicit ``provider``/``backend`` of ``flm``.
@@ -920,14 +945,10 @@ def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
 def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
     """Auto-resume pulls that were mid-flight when a prior process died.
 
-    A persisted pull-job snapshot in a non-terminal state (``queued`` or
-    ``running``) means the process that owned it never reached a terminal
-    state — either a pre-#1225 build that got SIGKILLed by systemd
-    mid-download, or a genuine crash. ``run_pull`` only durably persists a
-    snapshot at pull START (``queued``) and again at a TERMINAL state
-    (``completed``/``failed``/``cancelled``) — there is no mid-flight
-    "running" flush — so ``queued`` left on disk is the normal footprint
-    of an interrupted download, not just a job that never started.
+    A non-terminal snapshot is resumed only when its recorded worker process
+    is no longer alive. This preserves recovery after a crash while avoiding
+    a second downloader when hal0-api starts alongside a CLI or installer
+    process that still owns the persisted pull.
 
     The download's own resume sidecar (hal0.registry.pull's Range-request
     support) means picking the pull back up is just calling ``run_pull``
@@ -948,7 +969,12 @@ def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
     """
     from pathlib import Path
 
-    from hal0.registry.pull import list_persisted_jobs, make_job, persist_pull_job
+    from hal0.registry.pull import (
+        list_persisted_jobs,
+        make_job,
+        persist_pull_job,
+        worker_process_is_alive,
+    )
 
     registry = app.state.model_registry
     jobs: dict[str, Any] = app.state.model_pull_jobs
@@ -956,6 +982,8 @@ def _auto_resume_interrupted_pulls(app: FastAPI) -> None:
 
     for snapshot in list_persisted_jobs():
         if snapshot.get("state") not in ("queued", "running"):
+            continue
+        if worker_process_is_alive(snapshot):
             continue
         model_id = snapshot.get("model_id")
         if not isinstance(model_id, str) or not model_id or model_id in jobs:
@@ -1366,6 +1394,7 @@ async def _boot_slot_manager(app: FastAPI, ctx: BootState) -> None:
         port_authority=ctx.port_authority,
         preload_evict_enabled=ctx.hal0_config.slots.preload_evict_enabled,
         preload_evict_headroom_mb=ctx.hal0_config.slots.preload_evict_headroom_mb,
+        fabric_clock_guard=ctx.hal0_config.slots.fabric_clock_guard,
     )
 
 
@@ -2191,14 +2220,34 @@ async def _memory_reprobe_loop(
     TRIED spends the budget: a drain whose armed hooks were all still waiting
     on their arming boot phase (``last_drain_attempted`` False) is free, so a
     short ``HAL0_MEMORY_REPROBE_INTERVAL_S`` cannot exhaust the cap before
-    the brain lane finishes and hands its replay over (#1912 review).
+    the brain lane finishes and hands its replay over (#1912 review). A tick
+    while the memory write gate is set runs no hook and is free too: every
+    replayed write would be refused until ``hal0 memory embedder switch``
+    lifts it (#3518).
     """
+    from hal0.memory import write_gate
+
     attempts = 0
+    paused_noted = False
     while True:
         await asyncio.sleep(interval_s)
         if not await asyncio.to_thread(provider.try_heal):
             continue
         run_hooks = getattr(provider, "run_heal_hooks", None)
+        if run_hooks is not None and write_gate.read_gate() is not None:
+            # Memory writes are paused (``hal0 memory embedder switch``): the
+            # engine can be back at its normal address a moment before the
+            # gate lifts, and a replay now would only be refused. Wait for
+            # the gate without spending the retry budget, however long it
+            # stays (a run that needs ``--resume`` keeps it set).
+            if not paused_noted:
+                log.info(
+                    "hal0.memory.heal_replay_waiting_for_write_gate",
+                    detail="memory writes are paused; the boot-write replay runs once "
+                    "they are allowed again",
+                )
+                paused_noted = True
+            continue
         if run_hooks is None or await run_hooks():
             return
         if not getattr(provider, "last_drain_attempted", True):
@@ -2338,6 +2387,12 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
             _memory_reprobe_loop(_mem_provider, _reprobe_interval)
         )
         log.info("hal0.memory.reprobe_loop_started", interval_s=_reprobe_interval)
+        # #3518: an engine that was not up when install.sh ran never had its
+        # default banks seeded. Seed whatever is missing when the engine is
+        # swapped in; a bank that already has a retain mission is left alone.
+        from hal0.memory import bank_seed
+
+        _mem_provider.add_heal_hook(bank_seed.heal_hook(_mem_provider))
 
     async def _stop_memory_reprobe_task() -> None:
         if ctx.memory_reprobe_task is not None:
@@ -3012,6 +3067,7 @@ def create_app() -> FastAPI:
     app.include_router(
         runner_images_routes.router, prefix="/api/runner-images", tags=["runner-images"]
     )
+    app.include_router(runners_routes.router, prefix="/api/runners", tags=["runners"])
     # Issue #311: HuggingFace Hub discovery (search proxy). Sits next
     # to the models surface so the dashboard's "Search HF" button has a
     # backend to call; the inspect endpoint already lives under
@@ -3081,6 +3137,30 @@ def create_app() -> FastAPI:
     app.include_router(
         memory_admin_routes.router,
         prefix="/api/memory",
+        tags=["memory"],
+    )
+    # Memory showcase surface — allowlisted raw engine passthrough, lanes
+    # status board, coding-agent install helper, models summary.
+    app.include_router(
+        memory_lanes_routes.router,
+        prefix="/api/memory",
+        tags=["memory"],
+    )
+    # Memory health: the ordered repair path behind the Memory area's Health
+    # tab (ADR-0058, decision 12). ADMIN by the /api/memory prefix rule.
+    app.include_router(
+        memory_health_routes.router,
+        prefix="/api/memory",
+        tags=["memory"],
+    )
+    # The engine-compatible memory endpoint for coding agents (ADR-0058
+    # decision 4b): the Hindsight coding-agents plugin is pointed here instead
+    # of at the engine's own port. BRIDGE-class, with the ``memory`` scope
+    # checked by its handlers. It ends in a catch-all, which only sees paths
+    # under its own prefix.
+    app.include_router(
+        memory_compat_routes.router,
+        prefix=COMPAT_MEMORY_PREFIX,
         tags=["memory"],
     )
 

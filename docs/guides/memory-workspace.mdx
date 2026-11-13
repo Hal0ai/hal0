@@ -1,205 +1,302 @@
 ---
-title: Browse the Bank workspace
-description: The hal0 dashboard's memory v2 UI — the Overview tab's bank table and growth chart, and the Bank workspace's fact list, filters, curation, and graph views.
+title: The Memory area
+description: The hal0 dashboard's Memory area — Health and its repair path, the Facts workspace, Knowledge, Operations and Agents — and where the old memory pages went.
 sidebar:
   order: 51
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-Once [memory is enabled](/docs/guides/enable-memory), the dashboard's Memory
-view (`#memory`, reachable from the sidebar) gives you two tabs: **Overview**
-and **Bank**. This guide covers both — for what memory *is* (namespaces,
-fact types, directives, mental models), see [Memory](/docs/concepts/memory).
+Once [memory is enabled](/docs/guides/enable-memory), the sidebar has one
+**Memory** row, after **Agents**. It opens the Memory area at
+`#memory/health`. The area has five tabs: **Health**, **Facts**,
+**Knowledge**, **Operations** and **Agents**. The header carries a one-line
+summary and an **Engine settings** link to Settings → Data → Memory, where
+the engine, graph extraction and the reranker are configured.
+
+For what memory *is* (namespaces, fact types, directives, mental models),
+see [Memory](/docs/concepts/memory).
 
 <Aside type="note">
-Every card here fails soft with a "Memory engine unreachable" message and a
-Retry button rather than rendering an empty state, so a Hindsight outage
-never looks like an empty bank.
+No figure on these tabs is shown as a zero while it is loading or could not be
+read. A figure the engine did not report shows as `–`, and an engine that does
+not answer gets its own message, so an outage never looks like an empty bank.
 </Aside>
 
-## Overview tab
+## The address
 
-The landing view. A bank picker at the top drives a **Retained** growth
-chart — a stacked bar of world/experience/observation counts per day, with
-1d/7d/30d range tabs and a small triangle marker on any day a consolidation
-operation completed. Below it:
+Each tab is a link, so opening one adds a history entry and **Back** returns
+to the last tab. What a tab is scoped to and what is open in it live in the
+address too: `#memory/<tab>?bank=<id>&fact=<id>&page=<id>`. Choosing a bank,
+a fact or a page rewrites the current address instead of adding an entry, so
+**Back** never walks through every bank you looked at, and a copied link opens
+the same view. Bank ids are written as they are, colons and dots included
+(`coding-agent::ultrareview-1.4`).
 
-- **Engine panel** — reachability, engine name/version, bank count (and how
-  many are empty), total facts across every bank, and — only while graph
-  extraction is off — lifetime build/error/in-flight counts (once
-  extraction is on, that same information moves into the embedded graph
-  panel instead, so it's never shown twice). When extraction is on, that
-  embedded panel also lists **Active tasks**: one row per bank with
-  in-flight work, a spinner, the operation type(s) (`retain`,
-  `consolidation`, ...) and how many are processing versus queued.
-- **Banks table** — one row per bank: name, a one-line description (or doc
-  count if there isn't one), the world/experience/observation counts on a
-  single line with a proportional bar underneath, total facts and links, and
-  an activity chip (`⟳ N working`, `N pending`, or `idle`). Click a row (or
-  its arrow button) to open that bank in the Bank workspace.
+Facts, Knowledge and Operations carry a **scope bar** that chooses the bank:
+a row of buttons while there are six banks or fewer, a dropdown past that.
+On Facts and Knowledge, an address with no bank gets the first bank written
+into it; on Facts, an address that names a bank the engine does not list says
+so instead of opening another one.
 
-A **+ New bank** button/form sits below the table. The form accepts a bank id that starts with a letter or digit and continues with letters, digits, `.`, `_`, `:` or `-`, up to 128 characters in all.
+When memory is off (`[memory].enabled = false`), the Memory row is not in
+the sidebar and any `#memory/…` address goes to the dashboard once the
+status check has answered.
 
-## Bank tab
+## Health
 
-Selecting (or exploring into) a bank opens the **Bank workspace** — a bank
-identity bar on top, a filterable fact list or graph view on the left, and
-either a filter panel or a fact inspector on the right.
+Health answers one question: does memory need you, and what first. It is
+read from a single answer, `GET /api/memory/health`, so it asks nothing of
+each bank.
+
+At the top is the verdict: **Nothing needs attention**, or how many things
+need you and which one is first. Under it is the **repair path**.
+
+### The repair path
+
+The path lists the checks in the order they depend on each other:
+
+1. **Storing memories** — the extraction slot has a model, and that model
+   accepts connections, and recent attempts to store a memory did not fail.
+2. **The queue** — no operation has failed, and none has waited longer than
+   30 minutes.
+3. **The embedder** — the record of the embedder the store was built with
+   can be read, and agrees with the engine and with Settings.
+4. **Knowledge** — no knowledge page or mental model failed to refresh or is
+   stale.
+
+The memory engine itself is checked first. While it does not answer, the
+tab shows that instead of a path, because nothing else can be read.
+
+Each step is in one of three states:
+
+- **Do this now** — the first open step. It is marked as the current step
+  (`Step 1 of 4 · do this now`), says what is wrong in words with its
+  figures, and is the only step that may carry a command.
+- **Waiting** — a later open step. It names the step it waits on
+  (`Waiting on step 1: storing memories.`), because acting on it first would
+  fail or be undone: retrying the queue while storing memories still fails
+  would only fail again.
+- **Clear** — one quiet line saying what was checked and what it found.
+
+Health fixes nothing itself. A step whose remedy is on another page ends in a
+link: **Open Operations** for the queue, **Open Knowledge** for knowledge,
+**Open Services** and **Open engine settings** for extraction. When the
+embedder step is the one to do now it shows a command to copy and run in a
+shell on the box, such as `hal0 doctor`, never a button that runs it.
+
+Below the path:
+
+- **Engine facts** — the engine, extraction, the embedder, the reranker and
+  the decision model.
+- **Banks** — every bank with its **Facts**, **Documents**, **Waiting** and
+  **Failed** operations. If some banks could not be read, the table says so
+  under it.
+
+## Facts
+
+Facts is the fact workspace for the bank the scope bar names: a bank bar on
+top, a fact list or graph on the left, and either the filters or the fact
+inspector on the right. Choosing another bank closes the open fact, which
+belonged to the bank you left. The last bank opened here is also what the
+Overview page's Memory card shows.
 
 ### The bank bar
 
-Across the top: a bank picker, the bank's description, its
-world/experience/observation composition (bar + counts), total facts,
-total links, a 30-day activity spark, and an activity chip — `⟳ N working`,
-`N queued`, or `idle` (the Overview table's equivalent chip reads `N
-pending` for the same state, not `N queued`). `+ Add` opens the add-content
-modal (below); the small refresh icon next to it triggers **consolidate
-now** for this bank, and the trash icon deletes the bank. Delete opens a
-destructive confirm that asks you to type the bank id before calling
-`DELETE /api/memory/banks/{bank_id}`; there is no undo.
+The bar shows the bank's description, its world/experience/observation mix
+(a bar and counts), total facts and links, a 30-day activity spark, and an
+activity chip (`⟳ N working`, `N queued` or `idle`). **+ Add** opens the add
+modal (below), the refresh icon queues **consolidate now** for this bank,
+and the trash icon deletes the bank after you type its id to confirm. There
+is no undo.
 
-The description next to the picker is the bank's Hindsight `reflect_mission`, the persona that reflect answers with. Click it to edit in place (a bank with none shows `no description set — click to add`), then **Save**; **Cancel** or Escape discards the edit, and Ctrl or Cmd plus Enter saves. Save writes the same per-bank config override as `hal0 memory bank profile set <bank> --reflect-mission "..."` and changes nothing else. Saving an empty text clears the description. Bank ids may contain dots (for example `coding-agent::ultrareview-1.4`), so a repo-named bank opens and deletes here like any other.
+The description is the bank's Hindsight `reflect_mission`, the persona that
+reflect answers with. Click it to edit in place (a bank with none shows
+`no description set — click to add`), then **Save**; **Cancel** or Escape
+discards the edit, and Ctrl or Cmd plus Enter saves. It writes the same
+override as `hal0 memory bank profile set <bank> --reflect-mission "…"`.
+Saving an empty text clears it.
 
-Below that, two sub-tabs:
-
-<Tabs>
-<TabItem label="Reflect">
-
-A single-question box over this bank's memory, plus two example prompts
-("why is extraction lagging?", "what broke this week?"). While the answer
-is generating it shows "recalling · reranking · composing…"; the answer
-itself is grounded-in a count of facts, documents, and mental models it
-drew on. This calls `memory_reflect` under the hood, scoped to one bank —
-there's no cross-bank reflect.
-
-</TabItem>
-<TabItem label="Rules">
-
-Two columns: **directives** (each with an on/off toggle and a delete
-button — deleting one is destructive and gated for operator approval) and
-**mental models** (each showing a stale badge or its last-refreshed date,
-with a manual refresh button). Both have their own "+ New" button that
-opens the add-content modal on the matching tab.
-
-</TabItem>
-</Tabs>
+Under the bar, **Reflect** asks one question of this bank's memory, with two
+example prompts. The answer says how many facts, documents and mental models
+it drew on. Reflect is scoped to one bank.
 
 ### Adding content
 
-The `+ Add` modal has four tabs:
+The **+ Add** modal has four tabs:
 
-- **Fact** — free text, a type picker (`world` or `experience` only —
-  `observation` is derived, never operator-authored), and comma-separated
-  tags. Retain is async: after "Fact added", the dashboard follows the
-  extraction and raises a warning toast if nothing was learned.
-- **Document** — lists existing documents in the bank with a **Reprocess**
-  button per document (re-runs extraction over it). There is currently no
-  document upload/ingest endpoint, so the drop-file/paste-URL area and the
-  **Ingest** button are inert placeholders — this tab is view-and-reprocess
-  only for now.
-- **Directive** — a rule text box and an active-immediately toggle.
-- **Mental model** — a name and a standing question. There is no
-  refresh-schedule picker.
+- **Fact** — free text, a type (`world` or `experience`; `observation` is
+  derived, never written by hand) and comma-separated tags. Storing is
+  asynchronous: after "Fact added" the dashboard follows the extraction and
+  warns if nothing was learned.
+- **Document** — the bank's documents, each with **Reprocess** (re-run
+  extraction over it). There is no upload endpoint yet, so the drop and
+  **Ingest** controls do nothing.
+- **Directive** — a rule and an active-immediately switch.
+- **Mental model** — a name and a standing question.
 
-### Filters
+### Filters, views and the inspector
 
-With no fact selected, the right-hand panel is the **Filters** card:
+With no fact open, the right-hand panel holds the filters: free-text search,
+fact-type toggles with counts, a "show invalidated" switch, a 30-day
+**when** strip you can drag across (with 24h/7d/30d presets), and a tag map
+whose bubbles and chips filter by tag. Tags shaped like UUIDs are left out.
 
-- Free-text search.
-- Fact-type toggles (world/experience/observation) with live counts.
-- A "show invalidated" toggle — the only way to browse or revert a fact
-  that's been soft-invalidated (see Curating a fact below) once you've
-  navigated away from the moment you invalidated it.
-- A **when** density strip: a day-by-day histogram of the last 30 days you
-  can drag to select a date range, plus 24h/7d/30d preset buttons.
-- A **Tag map** — tag names as bubbles sized by usage count (auto-generated
-  UUID-shaped tags, like session/document ids, are filtered out of both the
-  bubble map and the quick-filter chip row below it, since they carry no
-  readable information). Click a bubble or a chip to filter by that tag.
-
-### List, focus, and web views
-
-A view switcher above the fact list toggles between three ways of looking
-at the current filter set:
+A switcher above the list picks the view:
 
 <Tabs>
 <TabItem label="List">
 
-The default. A **Sources** panel above the fact list shows the bank's
-source documents (id, fact count, ingest date) with a size picker
-(5/15/25/50); clicking a source focuses the list to just facts extracted
-from it. The fact list itself shows each fact's type dot, text, timestamp,
-tags, and a small per-link-type count badge; sort by newest or "most
-connected" (salience). Use ↑/↓ to move the selection and Esc to close the
-inspector. Pagination is exact — "showing X–Y of N matched" always matches
-what's rendered — except that the server only ranks/paginates within its
-first 2000-row slab, flagged in the UI when a filter set is large enough to
-hit it.
+A **Sources** panel lists the bank's documents; clicking one narrows the
+list to facts extracted from it. Each fact shows its type, text, time, tags
+and a link count. Sort by newest or most connected. ↑ and ↓ move the
+selection and Esc closes the inspector. The server ranks within its first
+2000 rows, and the list says so when a filter reaches that limit.
 
 </TabItem>
 <TabItem label="Focus">
 
-A radial "ego graph" centered on the selected fact, expandable by a depth
-slider (1–10, server-bounded so it never pulls the whole bank). Click any
-node to re-centre the graph on it. A legend at the bottom maps link colors
-to relationship names and fact-type colors to dots.
+A radial graph centred on the selected fact, with a depth slider (1–10).
+Click a node to centre on it.
 
 </TabItem>
 <TabItem label="Web">
 
-A force-directed graph of the whole filtered bank, capped at 120 facts by
-salience (weighted degree — how connected a fact is) with a warning when
-the cap is active. Nodes cluster by tag; scroll to zoom, drag the canvas to
-pan, drag a node to pin it, click a node to inspect it, and use the **fit**
-button to reset the view. Lens buttons across the top toggle individual
-link types on/off — only the link types actually present in the loaded
-data get a button, so you never see a dead toggle for a relationship type
-this bank doesn't use.
+A force-directed graph of the filtered bank, held to the 120 most connected
+facts with a warning when the cap applies. Scroll to zoom, drag to pan, drag
+a node to pin it, click one to inspect it. Lens buttons switch link types on
+and off, one per type present in the bank.
 
 </TabItem>
 </Tabs>
 
-### The inspector
+Opening a fact shows the **inspector**: type, tags, text, time, unit id,
+linked entities, a salience score and a small neighbourhood graph. For
+`world` and `experience` facts:
 
-Selecting a fact (in any view) replaces the Filters panel with the
-**Inspector**: the fact's type, its tags, full text, timestamp, unit id,
-linked entities, a salience score (weighted degree, or "—" if the fact
-falls outside the server's scored slab), and a compact depth-1
-neighbourhood graph.
+- **Curate** saves an edited text as a new revision and keeps the original.
+  An unchanged text is not sent.
+- **Invalidate** stops the fact being recalled but keeps it in the bank, with
+  an optional reason. It is reversible: the fact shows a banner with
+  **Revert**.
+- **Delete** removes the fact for good and writes an audit row. Prefer
+  Invalidate unless the fact is wrong.
 
-#### Curating a fact
+`observation` facts are derived, so they can be deleted but not curated or
+invalidated; only they have **History**, their state changes with reasons.
 
-- **Curate** (world/experience only) opens an edit box — saving requires
-  the text to actually differ from the current text (an unchanged save is
-  rejected client-side rather than sent as an empty patch). This creates a
-  new revision; the original is kept.
-- **Invalidate** (world/experience only, and not already invalidated) is
-  reversible and **not** approval-gated: the fact stops being recalled or
-  injected into prompts but stays in the bank, with an optional reason. An
-  invalidated fact shows a banner with a one-click **Revert**.
-- **Delete** is permanent — removed from recall and the graph, with a
-  durable audit row (actor, target, outcome). Prefer Invalidate unless the
-  fact is genuinely wrong, not just currently unhelpful.
-- **History** only appears for `observation` facts (the history endpoint
-  404s for world/experience — hal0 doesn't offer the button where it can't
-  answer) and lists the fact's state-change events with timestamps and
-  reasons.
+## Knowledge
 
-`observation` facts show neither Curate nor Invalidate — the inspector
-explains why: "observations aren't curatable — derived patterns, not
-operator-editable." Delete still applies to any fact type.
+Knowledge is what the bank named in the scope bar has written down from its
+facts, and the rules it gives agents. A summary line counts the knowledge
+pages, mental models and directives, and gives the last refresh that worked.
 
-## Deep links
+- **Refresh** — **Refresh all stale** refreshes every stale page and model,
+  one at a time, shows how far it has got, and stops at the first that does
+  not start, naming it. **Refresh at most every** sets the bank's minimum
+  time between automatic refreshes: one hour, four hours, twelve hours, one
+  day, or every time facts are consolidated. A choice is saved at once.
+- **Knowledge pages** — the bank's page tree. Folders open and close; a page
+  opens in the reader. The tree works from the keyboard (arrows, Home, End,
+  Enter).
+- **Mental models** — the bank's standing questions that are not pages.
+  **Add a mental model** takes a name and the question.
+- **The reader** — one reader for both: the title, whether the text is
+  current, the question, the tags that choose its facts, how it refreshes,
+  and the text, with **Refresh** to rebuild it. A refresh is queued and
+  finishes later; the reader follows it. A page can be edited (its question
+  and tags). A model shows its history, and an earlier text can be read in
+  place of the current one.
+- **Directives** — standing instructions the engine gives every agent that
+  uses the bank, highest priority first. Each shows its name, text, priority
+  and whether it is active; it can be switched on and off, edited in place,
+  or deleted after a confirm in the row. **Add** takes a name, text and
+  priority.
 
-The Bank workspace's URL hash carries state: `#memory/bank?bank=<id>&fact=<id>`
-(or `#agent/memory/bank?...` if you got here from the Agent tab — both
-forms are honoured). Sharing a link with both params opens straight to
-that bank with that fact selected in the inspector.
+The open page or model is in the address (`?bank=…&page=…`).
+
+CLI equivalents: `hal0 memory kb`, `hal0 memory mm` and
+`hal0 memory directive`.
+
+## Operations
+
+Operations is the engine's queue: what is waiting, running and failed. The
+scope bar chooses **All banks** or one bank.
+
+- **While storing memories is failing**, the tab says why and links to
+  Health, where the fix is. Every retry on the tab is disabled and says why,
+  because a retry would fail; discard stays available.
+- **Figures** — Waiting, Failed, Oldest waiting, Waiting on consolidation and
+  Failed consolidation. They come from the same health answer as the Health
+  tab, so the two cannot disagree. For all banks, a table shows which banks
+  hold them.
+- **Failed** — **Retry all** queues every failed operation again.
+  **Discard** first asks, in place, saying that the writes are lost and that
+  this cannot be undone; the other button keeps them.
+- **The list** — newest first, with a status filter (All, Waiting, Running,
+  Failed, Done), 25 rows a page, and **Retry** on a failed row. One bank is
+  paged by the engine. All banks merges each bank's newest 50 rows (200 at
+  most); when older rows exist the list says so, and choosing a bank reaches
+  them.
+- **Consolidate now** queues consolidation, the step that turns stored facts
+  into observations, for the chosen bank. It appears in the list as an
+  operation.
+
+CLI equivalent: `hal0 memory ops list` and `hal0 memory ops retry`.
+
+## Agents
+
+Agents shows what reads and writes this box's memory, and how to connect
+another agent.
+
+- **Agents** — one row per agent there is evidence of: Hermes and its
+  profiles, Pi, coding agents, memory keys, and other names facts are tagged
+  with. Each row says what that kind of agent reads and writes, the banks
+  holding facts tagged with its name, and a status the evidence supports:
+  **seen writing**, **connected** (a live memory key, nothing written yet)
+  or **not seen**.
+- **Built into hal0** — the dashboard, brain chat and Open WebUI, with how
+  many facts carry each one's tag. They have no status.
+- **No known writer** — shown only when facts tagged `agent:unknown` exist:
+  how many, and on which banks.
+- **Connect a coding agent** — pick an agent (Claude Code, Codex, OpenCode,
+  Pi, Cursor CLI, Copilot CLI, Qwen Code) and follow three steps: mint a
+  bridge key with `hal0 bridge add <client> --scope memory` (the client is
+  the agent's own name, except Pi's, which is `pi-memory` because `pi` is
+  reserved), save the key alone to a file, and run `hal0 memory agents install <harness>
+  --bridge-key-file <file>`. Both commands are shown ready to copy.
+
+`hal0 memory agents install <harness> --bridge-key-file <path>` is that last step. It runs the
+plugin's installer and points that harness at hal0's `/api/memory/compat`
+instead, so its memory goes through hal0's write envelope and project-scoped
+reads. Mint the key with `hal0 bridge add <client> --scope memory` (see above
+for the client name) and save
+it, alone, to a file (a path of `-` reads that key from stdin; `bridge add`
+prints a panel, so do not pipe it). `--bridge-key <key>` also works, but puts the
+key in the process list. The key carries the `agents` scope too, so it can
+start Hermes runs as well as reach memory. `--dry-run` prints what it would do
+and changes nothing.
+
+## Old addresses
+
+The pages the Memory area replaced are gone. Their addresses are rewritten
+in place to where each part lives now, so saved links still land, until the
+next minor release:
+
+| Old address | Now |
+| --- | --- |
+| `#memory`, `#memworkspace`, `#memworkspace/overview` | `#memory/health` |
+| `#memory/bank?…`, `#agent/memory?…` | `#memory/facts?…` (bank and fact kept) |
+| `#memworkspace/kb`, `/mental-models`, `/directives` | `#memory/knowledge` |
+| `#memworkspace/operations` | `#memory/operations` |
+| `#memworkspace/agents` | `#memory/agents` |
+| `#memworkspace/models` | `#settings/memory` |
 
 ## Related
 
 - [Memory](/docs/concepts/memory) — namespaces, fact types, directives,
-  mental models, reranking, and graph extraction.
+  mental models, reranking and graph extraction.
 - [Enable memory](/docs/guides/enable-memory) — turn memory on, and the CLI
-  equivalents of the engine/graph/reranker settings.
+  equivalents of the engine, graph and reranker settings.
+- [`hal0 memory` CLI](/docs/reference/cli-memory#hal0-memory--manage-hal0-memory-hindsight-engine)
+  — the command-line equivalents of these tabs.

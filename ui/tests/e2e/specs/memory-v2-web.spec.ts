@@ -2,9 +2,9 @@
  * memory-v2-web — Playwright coverage for the Memory v2 web graph
  * (`window.MemV2WebGraph`, task C5).
  *
- * Unskipped by task C6: `#memory/bank?bank=primary` renders `MemoryView`'s
- * Bank sub-tab, whose `view === 'web'` tab mounts `window.MemV2WebGraph`
- * directly (memory-bank-workspace.jsx).
+ * `#memory/facts?bank=primary` renders the Memory area's Facts tab, whose
+ * workspace mounts `window.MemV2WebGraph` for its `web` view
+ * (memory-bank-workspace.jsx).
  */
 import { test, expect, type Locator } from '../fixtures/apiMock'
 
@@ -40,7 +40,7 @@ async function waitForNodeStable(node: Locator, { pollMs = 200, maxWaitMs = 8000
 
 test.describe('memory-v2 web graph', () => {
   test('renders <= 120 nodes from the mock graph', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-view-web').click()
     await expect(page.getByTestId('mv-web')).toBeVisible()
     await expect(page.locator('[data-testid^="mv-web-node-"]').first()).toBeVisible()
@@ -50,7 +50,7 @@ test.describe('memory-v2 web graph', () => {
   })
 
   test('a lens toggle turns off and the button reflects it', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-view-web').click()
     await expect(page.locator('[data-testid^="mv-web-node-"]').first()).toBeVisible()
     // Lens buttons are derived from the link types actually present in the
@@ -62,7 +62,7 @@ test.describe('memory-v2 web graph', () => {
   })
 
   test('clicking a node selects the fact (drives the inspector)', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-view-web').click()
     const firstNode = page.locator('[data-testid^="mv-web-node-"]').first()
     await expect(firstNode).toBeVisible()
@@ -77,7 +77,7 @@ test.describe('memory-v2 web graph', () => {
   })
 
   test('the "fit" button resets pan/zoom', async ({ page }) => {
-    await page.goto('/#memory/bank?bank=primary')
+    await page.goto('/#memory/facts?bank=primary')
     await page.getByTestId('mv-view-web').click()
     await expect(page.locator('[data-testid^="mv-web-node-"]').first()).toBeVisible()
     await expect(page.getByTestId('mv-web-zoom')).toBeVisible()

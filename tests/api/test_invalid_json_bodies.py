@@ -16,6 +16,7 @@ _SITES: list[tuple[str, str]] = [
     ("POST", "/api/memory/add"),
     ("POST", "/api/memory/search"),
     ("POST", "/api/memory/recall"),
+    ("POST", "/api/memory/reflect"),
     ("POST", "/api/memory/delete"),
     ("PUT", "/api/memory/graph"),
     ("PUT", "/api/settings"),

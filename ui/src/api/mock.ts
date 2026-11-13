@@ -113,6 +113,9 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   // is for unrouted dev/preview only.
   { re: /^\/api\/memory\/graph\/status$/, key: 'memoryGraphStatus', networkFirst: true },
   { re: /^\/api\/memory\/engine$/, key: 'memoryEngine' },
+  // The composed health answer (ADR-0058). Three states, chosen by
+  // `window.__hal0MockMemoryHealth` (see the builder in ./mockFixtures.ts).
+  { re: /^\/api\/memory\/health$/, key: 'memoryHealth' },
   { re: /^\/api\/memory\/banks$/, key: 'memoryBanks' },
   { re: /^\/api\/memory\/banks\/([^/]+)\/stats\/timeseries$/, key: 'bankTimeseries' },
   { re: /^\/api\/memory\/banks\/([^/]+)\/stats$/, key: 'bankStats' },
@@ -121,6 +124,14 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   { re: /^\/api\/memory\/banks\/([^/]+)\/graph$/, key: 'bankGraph' },
   { re: /^\/api\/memory\/banks\/([^/]+)\/documents$/, key: 'bankDocuments' },
   { re: /^\/api\/memory\/banks\/([^/]+)\/mental-models$/, key: 'bankMentalModels' },
+  // Memory area (ADR-0058): one mental model, its revision history, and the
+  // knowledge-base tree and pages. The model or page id is group 2. The
+  // PATCH and refresh routes on the same paths are mutations, so they are
+  // never substituted (see the header).
+  { re: /^\/api\/memory\/banks\/([^/]+)\/mental-models\/([^/]+)\/history$/, key: 'mentalModelHistory' },
+  { re: /^\/api\/memory\/banks\/([^/]+)\/mental-models\/([^/]+)$/, key: 'mentalModel' },
+  { re: /^\/api\/memory\/banks\/([^/]+)\/knowledge-base\/tree$/, key: 'knowledgeTree' },
+  { re: /^\/api\/memory\/banks\/([^/]+)\/knowledge-base\/pages\/([^/]+)$/, key: 'knowledgePage' },
   { re: /^\/api\/memory\/banks\/([^/]+)\/directives$/, key: 'bankDirectives' },
   { re: /^\/api\/memory\/banks\/([^/]+)\/operations$/, key: 'bankOperations' },
   // recall/reflect are POST-only on the real backend — they stay in the

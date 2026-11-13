@@ -7,10 +7,8 @@
 // setTimeout-simulated reflect.
 //
 // Window-globals contract: no ES imports across dash/*.jsx — reads
-// window.MemV2 (task C1) and window.TypeBar/window.Spark (published by
-// memory-overview-v2.jsx, task C2 — reused here rather than duplicated)
-// at render time; publishes window.MemV2BankBar / window.MemV2AddModal the
-// same way.
+// window.MemV2 (task C1, which also carries TypeBar and Spark) at render
+// time; publishes window.MemV2BankBar / window.MemV2AddModal the same way.
 //
 // Expert constraint (binding): observations are NOT curatable and are not
 // a valid input fact_type — the Add-fact type picker only offers
@@ -341,9 +339,11 @@ function AddModal({ bank, tab0 = 'fact', onClose }) {
   )
 }
 
-function BankBar({ bank, setBank }) {
-  const { FACT_COLORS, fmtN, Icon, MvError } = window.MemV2
-  const Spark = window.Spark
+// `embedded` is set when the bar is drawn inside the Memory area (#memory/facts): the area's
+// scope bar chooses the bank and its Knowledge tab holds directives and mental models, so the
+// bar drops its own bank <select> and its Rules tab there. Everything else is unchanged.
+function BankBar({ bank, setBank, embedded = false }) {
+  const { FACT_COLORS, fmtN, Icon, MvError, TypeBar, Spark } = window.MemV2
 
   const useMemoryBanks = window.__hal0UseMemoryBanks
   const useBankStats = window.__hal0UseBankStats
@@ -549,18 +549,20 @@ function BankBar({ bank, setBank }) {
   return (
     <div className="mv-card mv-bankbar" data-testid="mv-bankbar">
       <div className="row">
-        <select
-          className="mono pick"
-          data-testid="mv-bank-select"
-          value={bank}
-          onChange={(e) => setBank(e.target.value)}
-        >
-          {banks.map((x) => (
-            <option key={x.bank_id} value={x.bank_id}>
-              {x.name || x.bank_id}
-            </option>
-          ))}
-        </select>
+        {!embedded && (
+          <select
+            className="mono pick"
+            data-testid="mv-bank-select"
+            value={bank}
+            onChange={(e) => setBank(e.target.value)}
+          >
+            {banks.map((x) => (
+              <option key={x.bank_id} value={x.bank_id}>
+                {x.name || x.bank_id}
+              </option>
+            ))}
+          </select>
+        )}
         {editingMission ? (
           <form className="pers editing" onSubmit={saveMission} data-testid="mv-bank-mission-form">
             <textarea
@@ -617,7 +619,7 @@ function BankBar({ bank, setBank }) {
         )}
         <div className="cell dist">
           <span className="mv-cell-k">composition</span>
-          {window.TypeBar && <window.TypeBar b={{ world, experience, observation }} />}
+          <TypeBar b={{ world, experience, observation }} />
           <div className="mv-legend num" style={{ marginTop: 5 }}>
             <span>
               <span className="sw" style={{ background: FACT_COLORS.world }} />
@@ -686,13 +688,15 @@ function BankBar({ bank, setBank }) {
         >
           Reflect
         </button>
-        <button
-          className={'btab' + (tab === 'rules' ? ' on' : '')}
-          data-testid="mv-rules-tab"
-          onClick={() => setTab('rules')}
-        >
-          Rules <span className="n num">{onCount} · {mentalModels.length}</span>
-        </button>
+        {!embedded && (
+          <button
+            className={'btab' + (tab === 'rules' ? ' on' : '')}
+            data-testid="mv-rules-tab"
+            onClick={() => setTab('rules')}
+          >
+            Rules <span className="n num">{onCount} · {mentalModels.length}</span>
+          </button>
+        )}
       </div>
       {tab === 'reflect' && (
         <div>

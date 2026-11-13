@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
 from hal0.model_meta import SLOT_TYPES
+from hal0.slots.activation import slot_binary
+from hal0.slots.config_write import _cfg_effective_provider
 from hal0.slots.state import SlotConfigError
 
 if TYPE_CHECKING:
@@ -134,6 +136,8 @@ class LoadedSlot:
     default: bool = False
     tool_calling: bool = False
     modalities: frozenset[str] = frozenset()
+    #: The slot's ``binary`` (``"xdna"`` marks a llama-server slot on the NPU).
+    binary: str = ""
 
 
 def seeded_slots(*, include_npu: bool | None = None) -> tuple[str, ...]:
@@ -224,6 +228,7 @@ def loaded_slot_from_config(
         default=cfg.get("default") is True,
         tool_calling=bool(tool_calling),
         modalities=modalities,
+        binary=slot_binary(cfg),
     )
 
 
@@ -239,7 +244,9 @@ class RoutingHost(Protocol):
     # Optional: registry lookup for the §7.1d tool_calling gate. Not part
     # of the hard Protocol contract — hosts without it (e.g. test stubs)
     # just get the label-based fall-through in loaded_slot_from_config.
-    async def _resolve_model_info(self, model_id: str | None) -> dict[str, Any]: ...
+    async def _resolve_model_info(
+        self, model_id: str | None, *, provider: str | None = None
+    ) -> dict[str, Any]: ...
 
 
 async def default_slot_for(host: RoutingHost, slot_type: str) -> str | None:
@@ -283,7 +290,7 @@ async def _model_info_for(host: RoutingHost, cfg: dict[str, Any]) -> dict[str, A
     if not isinstance(model_id, str) or not model_id:
         return None
     try:
-        return await resolver(model_id)
+        return await resolver(model_id, provider=_cfg_effective_provider(cfg))
     except Exception:  # registry outage must not break routing
         log.warning("routing.model_info_unavailable", extra={"model_id": model_id})
         return None

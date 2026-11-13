@@ -1,0 +1,144 @@
+---
+title: Memory banks
+description: Which Hindsight banks hold hal0's memory. A new store uses hal0:shared and hal0:private; a store from before keeps its banks until it is folded in. Who reads what in each layout.
+sidebar:
+  order: 52
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+hal0's memory namespaces, `shared` and `private:<agent>`
+([Memory](/docs/concepts/memory#namespaces-and-banks-who-a-fact-belongs-to)),
+live in Hindsight engine banks. Which banks depends on when the memory store
+was created (ADR-0058, decision 7).
+
+## The two layouts
+
+| Layout | `shared` | `private:<agent>` | Where |
+|---|---|---|---|
+| two banks | `hal0:shared` (`[memory] bank`) | `hal0:private` (`[memory] private_bank`), one bank for every agent | a store created by this version or later |
+| old, unified | the bank it always used, `shared` unless `[memory] bank` was set | the same bank, tagged `visibility:private` and `agent:<id>` | a store from before, with `unified_bank = true` (the old default) |
+| old, split | the same as unified | `private__<agent>`, a bank per agent | a store from before, with `unified_bank = false` |
+
+The `agents` namespace keeps its own bank in every layout.
+
+In `hal0:private` every write is stamped `agent:<id>` and
+`visibility:private`, and a read of that bank is held to the caller's own
+`agent:` tag. A private document id keeps its `private:<agent>:` prefix, and
+an item read from `hal0:private` is reported as the `private:<agent>` its
+`agent:` tag names. A private note with no `agent:` tag, or owned by
+`unknown`, is readable by no one.
+
+A store on an old layout keeps its banks and behaves as before until
+`hal0 memory migrate fold-in` moves its memory into the two banks
+([Fold the old memory banks in](/docs/guides/fold-in-memory-banks)). Nothing
+else moves it. The one change for such a store is the read rule below:
+project-tagged memory is readable by shared reads.
+
+## The layout record
+
+hal0 keeps the layout in `/var/lib/hal0/state/memory-layout.json`, written
+once:
+
+```json
+{"version": 1, "layout": "legacy", "captured": {"platform_bank": "shared", "unified": true},
+ "source": "store-exists", "recorded_at": "2026-11-11T18:02:11+00:00"}
+```
+
+`layout` is `two_bank` or `legacy` (an old layout). An old layout's record
+holds what the old config said: the bank behind `shared` and whether private
+memory shared it. The update pass writes it (`install.sh` runs that pass
+before the memory engine first starts) and hal0-api writes it when it starts
+and finds none, before it first talks to the engine:
+
+- no memory store yet, and no `unified_bank` key in `hal0.toml`: `two_bank`;
+- a store exists, or `hal0.toml` still has `unified_bank`: the old layout,
+  with `platform_bank` from `[memory] bank` when the file sets it (whatever
+  its value), else `shared`, and `unified` from `unified_bank`, else `true`;
+- the store's location cannot be seen (its storage is not mounted, or the
+  engine's unit is installed and its home is missing), or hal0-api is pointed
+  at an engine on another host (`HAL0_HINDSIGHT_URL`, which the update pass
+  reads from `api.env`): treated as the old layout and not written down. A
+  process that cannot read `api.env` decides nothing it would record as
+  `two_bank`, and leaves the decision to hal0-api's start. Set
+  `HAL0_HINDSIGHT_URL` in `/etc/hal0/api.env` only: a value set in a systemd
+  drop-in reaches hal0-api but not the update pass.
+
+An existing record is never rewritten. Two states are errors rather than
+guesses, because a guess can put new memory in banks the store does not read:
+a record that cannot be read (it is left alone), and a `two_bank` decision
+that cannot be written down. In either, hal0-api serves no memory bank: reads
+come back empty, writes are refused with `memory.layout_undecided` (503), it
+retries in the background, and the `memory_layout` row of `hal0 doctor` names
+the cause. The same rule holds for the commands that read the layout without
+writing it (`hal0 memory spec apply`, the doctor rows): with no record, and no
+`api.env` they can read, they say the layout is undecided rather than name a
+bank.
+
+A config save writes every `[memory]` field back, `bank = "hal0:shared"` and
+`private_bank` included. So when the old layout is captured, `bank =
+"hal0:shared"` counts as the operator's choice only when hal0.toml has no
+`private_bank` key beside it (no version before the two banks wrote one). On a store
+on its old layout, setting `[memory] bank` to another name still moves its
+platform bank (ADR-0052; run `hal0 memory migrate platform` first), and
+`private_bank` is not used. `GET /api/memory/health` reports the layout as
+`banks.layout`: `two_bank`, `legacy_unified` or `legacy_split`.
+
+## Who reads what
+
+A read with no `project` covers the whole bank; a `project` narrows it to that
+project plus global memory ([Memory projects](/docs/concepts/memory-projects#reading-by-project)).
+In every layout a `project:` tag hides nothing.
+
+| Read | Two banks | Old layout |
+|---|---|---|
+| `shared` by an identified agent | `hal0:shared`, plus its own memory in `hal0:private` | the platform bank (unified: with its own private memory; split: plus its `private__<agent>` bank) |
+| `shared` with no identity | `hal0:shared` only | the platform bank, no private memory |
+| its own `private:<agent>` | `hal0:private`, its own memory only | its own private memory |
+| another agent's `private:<agent>` | nothing | nothing |
+| reflect | one bank: `hal0:shared`, or `hal0:private` with `X-hal0-Private`; mental models are left out on `hal0:private` | one bank; mental models are left out on the unified bank |
+| `/api/memory/compat` (coding agents) | `hal0:shared`, the client's project plus global memory, no mental models | unchanged |
+
+## Bank spec and seeding
+
+`hal0 memory spec apply` names roles, not banks: `platform` and `private`
+resolve to this box's banks (`hal0:shared` and `hal0:private`, or on an old
+layout the platform bank and `private__hermes`). `hal0:shared` consolidates
+observations per project (`[["project:*"]]`) and `hal0:private` per agent
+(`[["agent:*"]]`). Two parts of a template are refused where they would leak
+private memory: the per-project scope on an old unified bank, which also
+holds private facts (#3547), and the private template's mental models on
+`hal0:private`, which holds every agent's private memory. A new box seeds
+both of its banks (the installer through `hal0 memory bank seed`, and hal0-api
+once it has the engine, both name them from the layout); a
+box on an old layout seeds only its platform bank. A bank is seeded only
+while it is missing, or empty with no retain mission, and never during an
+embedder switch, so re-running the installer leaves a bank that holds
+anything as it is.
+
+## Directives
+
+A directive an agent writes (the `hal0-memory` and `hal0-admin` MCP tools) is
+its own, in every layout and on every bank. It is stamped `agent:<id>` and
+`visibility:private`, whatever tags were sent, and needs an identified agent:
+an anonymous create, update or delete answers 403
+`memory.directive_owner_required`. An agent sees its own directives and the
+bank-wide ones; reading, changing or deleting another agent's answers
+`memory.directive_not_found`. A reflect loads untagged directives and the
+caller's own, since the engine holds a reflect's directives to its tag
+filter, so no agent's directive steers another agent's reflect.
+
+A bank-wide directive (untagged, or tagged without `visibility:private`)
+applies to every agent that reflects on the bank, so only the operator
+manages it: the bank spec, the admin routes under
+`/api/memory/banks/{bank}/directives`, the Memory page and
+`hal0 memory directive`. An agent's update or delete of one answers 403
+`memory.directive_operator_managed`. On `hal0:private` an untagged directive
+applies to every agent's private reflect and is listed to none, and one
+tagged `agent:<id>` alone is that agent's. Under the old split layout every
+directive in an agent's own `private__<agent>` bank is that agent's.
+
+<CardGrid>
+  <LinkCard title="Memory" href="/docs/concepts/memory" description="Namespaces, the write envelope and what memory powers." />
+  <LinkCard title="Memory projects" href="/docs/concepts/memory-projects" description="How a write is filed under a project and how a read narrows to one." />
+</CardGrid>

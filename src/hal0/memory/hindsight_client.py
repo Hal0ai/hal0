@@ -132,6 +132,52 @@ class HindsightRestClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
 
+    @staticmethod
+    def _timeout(timeout_s: float | None) -> Any:
+        """The per-request timeout for ``timeout_s`` seconds of read budget.
+
+        ``None`` keeps the client-wide default. httpx treats an explicit
+        ``timeout=None`` as "no timeout at all", so the sentinel is returned
+        instead.
+        """
+        if timeout_s is None:
+            return httpx.USE_CLIENT_DEFAULT
+        return httpx.Timeout(timeout_s, connect=3.0)
+
+    @staticmethod
+    def _retain_item(
+        *,
+        content: Any,
+        document_id: Any,
+        context: Any = None,
+        metadata: Any = None,
+        tags: Any = None,
+        timestamp: Any = None,
+        entities: Any = None,
+        observation_scopes: Any = None,
+        strategy: Any = None,
+        update_mode: Any = None,
+    ) -> dict[str, Any]:
+        """One ``RetainRequest`` item; an unset or empty field is left out."""
+        item: dict[str, Any] = {"content": content, "document_id": document_id}
+        if context is not None:
+            item["context"] = context
+        if metadata:
+            item["metadata"] = metadata
+        if tags:
+            item["tags"] = list(tags)
+        if timestamp is not None:
+            item["timestamp"] = timestamp
+        if entities is not None:
+            item["entities"] = list(entities)
+        if observation_scopes is not None:
+            item["observation_scopes"] = observation_scopes
+        if strategy is not None:
+            item["strategy"] = strategy
+        if update_mode is not None:
+            item["update_mode"] = update_mode
+        return item
+
     async def retain(
         self,
         *,
@@ -155,26 +201,49 @@ class HindsightRestClient:
         block for the extraction LLM call). ``sync=False`` (default) is the
         existing fire-and-forget background-ingest path.
         """
-        item: dict[str, Any] = {"content": content, "document_id": document_id}
-        if context is not None:
-            item["context"] = context
-        if metadata:
-            item["metadata"] = metadata
-        if tags:
-            item["tags"] = list(tags)
-        if timestamp is not None:
-            item["timestamp"] = timestamp
-        if entities is not None:
-            item["entities"] = list(entities)
-        if observation_scopes is not None:
-            item["observation_scopes"] = observation_scopes
-        if strategy is not None:
-            item["strategy"] = strategy
-        if update_mode is not None:
-            item["update_mode"] = update_mode
-        body: dict[str, Any] = {"items": [item], "async": not sync}
+        item = {
+            "content": content,
+            "document_id": document_id,
+            "context": context,
+            "metadata": metadata,
+            "tags": tags,
+            "timestamp": timestamp,
+            "entities": entities,
+            "observation_scopes": observation_scopes,
+            "strategy": strategy,
+            "update_mode": update_mode,
+        }
+        return await self.retain_batch(bank_id=bank_id, items=[item], async_=not sync)
+
+    async def retain_batch(
+        self,
+        *,
+        bank_id: str,
+        items: list[dict[str, Any]],
+        async_: bool | None = None,
+        operation_id: str | None = None,
+        timeout_s: float | None = None,
+    ) -> Any:
+        """POST several items to ``/memories`` in ONE ``RetainRequest``.
+
+        Each entry of ``items`` holds the item keywords :meth:`retain` takes
+        (``content`` and ``document_id`` required). ``async_`` and
+        ``operation_id`` are the request-level ``async`` and ``operation_id``
+        fields, sent exactly as given; ``None`` leaves the field out, and the
+        engine then applies its own default (a synchronous retain, no
+        client-chosen operation identity). ``timeout_s`` overrides the
+        client-wide read budget for this call.
+        """
+        body: dict[str, Any] = {"items": [self._retain_item(**item) for item in items]}
+        if async_ is not None:
+            body["async"] = async_
+        if operation_id is not None:
+            body["operation_id"] = operation_id
         resp = await self._http.post(
-            f"/v1/default/banks/{bank_id}/memories", headers=self._headers(), json=body
+            f"/v1/default/banks/{bank_id}/memories",
+            headers=self._headers(),
+            json=body,
+            timeout=self._timeout(timeout_s),
         )
         resp.raise_for_status()
         return resp.json()
@@ -194,6 +263,7 @@ class HindsightRestClient:
         include=None,
         query_timestamp=None,
         min_scores=None,
+        timeout_s=None,
     ):
         body: dict[str, Any] = {"query": query, "max_tokens": max_tokens}
         if types:
@@ -215,7 +285,10 @@ class HindsightRestClient:
         if min_scores is not None:
             body["min_scores"] = min_scores
         resp = await self._http.post(
-            f"/v1/default/banks/{bank_id}/memories/recall", headers=self._headers(), json=body
+            f"/v1/default/banks/{bank_id}/memories/recall",
+            headers=self._headers(),
+            json=body,
+            timeout=self._timeout(timeout_s),
         )
         resp.raise_for_status()
         return resp.json()
@@ -319,6 +392,19 @@ class HindsightRestClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    # ── knowledge base (folders/pages — #showcase) ──────────────────────────
+
+    async def get_knowledge_base_tree(self, *, bank_id):
+        """GET the bank's knowledge-base folder/page tree."""
+        return await self.request_json("GET", f"/v1/default/banks/{bank_id}/knowledge-base/tree")
+
+    async def get_knowledge_base_page(self, *, bank_id, page_id):
+        """GET one knowledge-base page's content and metadata."""
+        page = quote(str(page_id), safe="")
+        return await self.request_json(
+            "GET", f"/v1/default/banks/{bank_id}/knowledge-base/pages/{page}"
+        )
 
     # ── single-memory curation (PATCH /memories/{memory_id}) ────────────────
 
@@ -602,13 +688,7 @@ class HindsightRestClient:
             headers=self._headers(),
             params=params,
             json=json_body,
-            timeout=(
-                httpx.Timeout(timeout_s, connect=3.0)
-                if timeout_s is not None
-                # httpx treats an explicit ``timeout=None`` as "no timeout at
-                # all"; the sentinel keeps the client-wide default instead.
-                else httpx.USE_CLIENT_DEFAULT
-            ),
+            timeout=self._timeout(timeout_s),
         )
         resp.raise_for_status()
         if not resp.content:

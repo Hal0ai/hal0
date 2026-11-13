@@ -50,10 +50,17 @@ DEFAULT_SCOPES: tuple[str, ...] = ("agents", "memory")
 # Hermes agent's private memory namespace, and ``shared`` or ``anonymous``
 # would alias the namespaces memory already treats specially. ``admin`` is the
 # name the operator's own credential reports on ``GET /api/bridge/me``.
+# ``unknown`` is the identity stamped on a memory write whose caller had none
+# (``hal0.memory.envelope.UNKNOWN_AGENT``): a client of that name would read
+# those writers' private notes. ``unresolved`` and ``shared`` are also parts
+# of a stored document id that are never a client
+# (``hal0.memory.document_namespace``).
 # Every name starting ``hal0`` is hal0's own (``hal0``, ``hal0-cli``,
 # ``hal0-doctor``, and whatever caller it adds next), and ``hermes__<profile>``
 # is a Hermes profile's namespace.
-RESERVED_CLIENT_NAMES: frozenset[str] = frozenset({"hermes", "pi", "admin", "anonymous", "shared"})
+RESERVED_CLIENT_NAMES: frozenset[str] = frozenset(
+    {"hermes", "pi", "admin", "anonymous", "shared", "unknown", "unresolved"}
+)
 RESERVED_CLIENT_PREFIXES: tuple[str, ...] = ("hermes__", "hal0")
 
 
@@ -65,6 +72,25 @@ def valid_name(name: str) -> bool:
 def is_reserved_name(name: str) -> bool:
     """Return True when ``name`` is one no bridge client may take (ADR-0043)."""
     return name in RESERVED_CLIENT_NAMES or name.startswith(RESERVED_CLIENT_PREFIXES)
+
+
+def client_name_for(label: str) -> str | None:
+    """A bridge client name for ``label`` (a coding-agent harness name).
+
+    ``label`` itself when it is a valid name that is not reserved; otherwise
+    ``<label>-memory`` or ``agent-<label>`` built from its lowercased
+    letters, digits, ``-`` and ``_`` (``pi`` gives ``pi-memory``); ``None``
+    when neither is usable."""
+
+    def usable(name: str) -> bool:
+        return valid_name(name) and not is_reserved_name(name)
+
+    if usable(label):
+        return label
+    base = "".join(c if c.isalnum() or c in "_-" else "-" for c in label.lower()).strip("-_")
+    if not base:
+        return None
+    return next((n for n in (f"{base}-memory"[:32], f"agent-{base}"[:32]) if usable(n)), None)
 
 
 def hash_key(key: str) -> str:

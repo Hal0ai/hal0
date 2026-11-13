@@ -197,7 +197,17 @@ Either action posts to the queue; nothing runs until the worker is armed.
 take effect between cells, since a sweep can't be interrupted mid-run. The
 **exclusive** checkbox is the same GPU-exclusivity gate as the CLI's
 `--exclusive` — checked by default, it stops competing slots so the
-numbers are clean.
+numbers are clean. The window re-checks the slots before every sweep: a
+slot that came back while the window held it (the dispatcher lazy-loading
+it, the memory extraction path re-rendering it, an operator loading it) is
+stopped again, so no sweep measures next to a live model. A slot that is
+reloaded while the window holds it also makes systemd cancel the window's
+stop job: the window then re-checks the unit's state, counts an
+already-down unit as stopped only when systemd has no queued start/restart
+job for it, and retries the stop once so that any replacement job is
+cancelled. Only a slot that is still running — or still has a queued
+start/restart job — after that retry aborts the session; the note on every
+failed cell then reads `[exclusive] could not stop hal0-slot@<id>`.
 
 The plan panel alongside the queue lists every stale cell (model, suite,
 lane, kind, depth, priority, exclusive, and why it's stale — never

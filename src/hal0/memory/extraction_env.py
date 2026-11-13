@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -58,11 +59,32 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from hal0.agents.anchor_window import SLOTS_DIR, AnchorWindow, resolve_anchor_window
-from hal0.system.seam import SystemCtlSeam
+from hal0.agents.anchor_window import (
+    SLOTS_DIR,
+    AnchorWindow,
+    resolve_anchor_window,
+)
+from hal0.memory import embedder_record
+from hal0.memory.embedder_record import (
+    EMBEDDINGS_MODEL_ENV,
+    EMBEDDINGS_PROVIDER_ENV,
+    Embedder,
+    configured_embedder,
+    ensure_embedder_record,
+    persist_embedder_record,
+    resolve_embedder,
+)
+from hal0.system.seam import HINDSIGHT_LEGACY_CAP_DROPIN_NAME, SeamTimeout, SystemCtlSeam
 
 if TYPE_CHECKING:  # pragma: no cover
-    from hal0.config.schema import MemoryGraphConfig
+    from hal0.config.schema import (
+        MemoryConfig,
+        MemoryDecisionConfig,
+        MemoryGraphConfig,
+        MemoryLaneOpConfig,
+        MemoryLanesConfig,
+        MemoryModelsConfig,
+    )
 
 log = structlog.get_logger(__name__)
 
@@ -125,6 +147,10 @@ class ExtractionLimits:
       consolidation, reflect and mental-model refresh. The slot ``--parallel``
       clamp applies to both rendered values. 1 serialises them, so a long
       reflect or consolidation can delay retains until completion or timeout.
+      The configured value remains in ``hal0.toml``; the rendered value is held
+      to the extraction slot's ``--parallel`` by :func:`effective_limits`
+      (#3347), because calls queued inside llama-server still spend their
+      read timeout.
     * ``max_tokens`` -> ``HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS``: per-call
       completion cap. Hindsight refuses every retain into a bank whose chunk
       size is not strictly below it: the schema floor (3072) clears the engine
@@ -139,6 +165,15 @@ class ExtractionLimits:
     * ``retry_backoff_s`` -> ``HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS``:
       wait before a requeue. Worker-wide likewise.
 
+    * ``worker_slots`` -> ``HINDSIGHT_API_WORKER_MAX_SLOTS``: how many queued
+      tasks (retain, consolidation, mental-model refresh) the engine runs at
+      once. Independent of the LLM caps above: Hindsight's own default is 10,
+      and ten concurrent tasks (chunking, embedding, graph writes) took the
+      engine to several GiB resident and into the memory cgroup's OOM killer
+      on an 11 GiB box (#3534). Held at or above
+      :data:`WORKER_SLOTS_FLOOR` by the schema: Hindsight reserves two slots
+      for consolidation, so a bound at or below that leaves retain none.
+
     ``HINDSIGHT_API_RETAIN_WALL_TIMEOUT`` is not a field: it is derived from
     ``llm_timeout_s`` and ``llm_retries`` by :func:`retain_wall_timeout_s`.
     """
@@ -148,6 +183,7 @@ class ExtractionLimits:
     llm_retries: int = 1
     task_retries: int = 2
     retry_backoff_s: int = 120
+    worker_slots: int = 4
 
     @classmethod
     def from_config(cls, cfg: MemoryGraphConfig) -> ExtractionLimits:
@@ -157,11 +193,17 @@ class ExtractionLimits:
             llm_retries=cfg.extraction_llm_retries,
             task_retries=cfg.extraction_task_retries,
             retry_backoff_s=cfg.extraction_retry_backoff_s,
+            worker_slots=cfg.extraction_worker_slots,
         )
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)
 
+
+#: Smallest ``worker_slots`` hal0 renders. Hindsight reserves 2 worker slots for
+#: consolidation (``WORKER_SLOT_TYPE_DEFAULTS`` in its config); the rest form
+#: the shared pool retain draws from, so 2 would leave retain no slot at all.
+WORKER_SLOTS_FLOOR = 3
 
 #: Floor for the retain wall limit: hindsight-api's own default (1 h). hal0 never
 #: lowers the limit below what the engine would have used.
@@ -217,8 +259,279 @@ _DROP_IN_TEMPLATE = (
     "Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES={llm_retries}\n"
     "Environment=HINDSIGHT_API_WORKER_MAX_RETRIES={task_retries}\n"
     "Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS={retry_backoff_s}\n"
+    "Environment=HINDSIGHT_API_WORKER_MAX_SLOTS={worker_slots}\n"
     "Environment=HINDSIGHT_API_RETAIN_WALL_TIMEOUT={wall_timeout_s}\n"
 )
+
+
+#: Second, additive drop-in for the Hindsight 1.2 showcase config
+#: ([memory.models]/[memory.decision]/[memory.lanes]) — kept separate from
+#: ``extraction-model.conf`` (which owns the hal0/memory alias + #1834
+#: extraction limits and is rewritten by the `hal0 memory graph` path) so the
+#: two renderers stay independently testable and a graph-only PUT never
+#: clobbers the showcase lanes, or vice versa. systemd merges all `.conf`
+#: files in the `.d` dir, last-Environment-line-wins on duplicate keys, so the
+#: load order between the two is irrelevant: they never set the same key.
+SHOWCASE_DROP_IN_PATH = DROP_IN_DIR / "showcase-lanes.conf"
+
+#: The local decision-model unit (``installer/systemd/hal0-hs-decide.service``).
+#: The installer does not lay it down yet, so its presence is what says the
+#: ``provider = "local"`` decision lane can answer at all (#3519).
+DECISION_UNIT_PATH = Path("/etc/systemd/system/hal0-hs-decide.service")
+
+#: Base URL of the hosted decision model (``provider = "hindsight-cloud"``).
+HINDSIGHT_CLOUD_DECISION_URL = "https://api.hindsight.ai"
+
+#: The decision base URLs the root-side ``write-hindsight-showcase-dropin``
+#: allow-list accepts (``installer/wrappers/hal0-systemctl``): a loopback port
+#: or the hosted API. Anything else would get the whole drop-in refused.
+_ENGINE_DECISION_URL_RE = re.compile(r"^http://127\.0\.0\.1:[0-9]{1,5}$")
+
+
+def decision_url_renderable(url: str) -> bool:
+    """True when the showcase drop-in can carry ``url`` as the decision base URL."""
+    return bool(_ENGINE_DECISION_URL_RE.match(url)) or url == HINDSIGHT_CLOUD_DECISION_URL
+
+
+def decision_unit_installed(path: Path | None = None) -> bool:
+    """True when the ``hal0-hs-decide`` unit file is installed on this box."""
+    try:
+        return (path if path is not None else DECISION_UNIT_PATH).is_file()
+    except OSError:
+        return False
+
+
+def decision_engine_base_url(
+    decision: MemoryDecisionConfig, *, unit_installed: bool | None = None
+) -> str | None:
+    """Where hindsight-api should send decision calls, or ``None`` for no decision model.
+
+    * disabled, or ``provider = "off"`` -> ``None``;
+    * an explicit ``base_url`` -> that URL, as configured, when the drop-in
+      allow-list accepts it (:func:`decision_url_renderable`); a URL it would
+      refuse renders no decision env rather than failing the whole write;
+    * ``provider = "local"`` -> ``http://127.0.0.1:<port>`` only when the
+      ``hal0-hs-decide`` unit is installed (``unit_installed``, probed from
+      :data:`DECISION_UNIT_PATH` when ``None``). Pointing the engine at a port
+      nothing serves makes every decision call fail, retry, and fall back to
+      the LLM lane (#3519); with no decision env the engine takes that LLM
+      path directly;
+    * ``provider = "hindsight-cloud"`` -> :data:`HINDSIGHT_CLOUD_DECISION_URL`.
+    """
+    if not decision.enabled or decision.provider == "off":
+        return None
+    if decision.base_url:
+        url = decision.base_url.rstrip("/")
+        return url if decision_url_renderable(url) else None
+    if decision.provider == "local":
+        installed = decision_unit_installed() if unit_installed is None else unit_installed
+        return f"http://127.0.0.1:{decision.port}" if installed else None
+    return HINDSIGHT_CLOUD_DECISION_URL
+
+
+#: The hand-maintained H0-98 workaround drop-in that the showcase drop-in
+#: replaces (#3520). It sorts after ``showcase-lanes.conf``, so while it exists
+#: its ``HINDSIGHT_API_LLM_MAX_CONCURRENT`` beats the one hal0 renders. The
+#: privileged writer removes exactly this filename when it installs the
+#: showcase drop-in; nothing else in the directory is ever touched.
+LEGACY_LLM_CAP_DROP_IN_PATH = DROP_IN_DIR / HINDSIGHT_LEGACY_CAP_DROPIN_NAME
+
+#: Op name -> HINDSIGHT_API_<PREFIX>_LLM_* env prefix.
+LANE_OP_ENV_PREFIX = {
+    "retain": "RETAIN",
+    "consolidation": "CONSOLIDATION",
+    "reflect": "REFLECT",
+    "mental_model_refresh": "MENTAL_MODEL_REFRESH",
+}
+
+
+#: Ops whose Hindsight 1.2.0 env accepts ``*_MAX_COMPLETION_TOKENS`` (#3596).
+_COMPLETION_CAP_OPS = frozenset({"consolidation", "reflect"})
+
+#: Cap rendered when ``[memory.lanes.<op>].max_completion_tokens`` is unset.
+#: Resolved here, not in the schema, so a partial table keeps it (#3596).
+DEFAULT_OP_COMPLETION_TOKENS = 8192
+
+
+def render_showcase_env(
+    *,
+    models: MemoryModelsConfig,
+    decision: MemoryDecisionConfig,
+    lanes: MemoryLanesConfig,
+    ceiling: int | None = None,
+    decision_unit_installed: bool | None = None,
+    embedder: Embedder | None = None,
+) -> str:
+    """Render the Hindsight 1.2 showcase env block (PLAN.md section 2).
+
+    The embeddings provider and model are the pair the store was built with,
+    never ``models.embeddings_provider`` / ``models.embeddings_model``
+    (#3518): ``embedder`` when the caller already holds it, else resolved
+    here (:func:`hal0.memory.embedder_record.resolve_embedder`: the live
+    engine's pair while it runs, the record otherwise, and what the unit
+    files and disk say on a box with no record). Swapping the embedder under
+    an existing store degrades recall with no error, so a config value that
+    differs is reported, not rendered. Every other key below renders from
+    config as before.
+
+    ``ceiling`` (#3492) is the extraction drop-in's effective concurrency —
+    ``[memory.graph]`` held to the memory slot's ``--parallel``
+    (:func:`effective_limits`). This drop-in sorts after
+    ``extraction-model.conf``, so its ``HINDSIGHT_API_LLM_MAX_CONCURRENT`` and
+    per-op caps are the values the engine runs with; holding the global cap
+    and every op that still routes to the memory slot (no ``virtual_model``)
+    to the ceiling keeps the slot clamp intact. An op routed elsewhere keeps
+    its own cap. ``None`` renders the configured values unclamped.
+
+    Single source for the global LLM concurrency cap
+    (``HINDSIGHT_API_LLM_MAX_CONCURRENT``) plus any per-op override — this is
+    the H0-98 fix: before this renderer existed, hal0 only ever wrote the
+    retain-specific cap (see :data:`_DROP_IN_TEMPLATE`), so consolidation /
+    reflect / mental-model-refresh calls queued behind the memory slot's own
+    concurrency with no cap of their own, and an operator had to hand-maintain
+    ``zz-h0-98-llm-global-cap.conf`` to work around it. The privileged writer
+    deletes that hand drop-in whenever it installs this one (#3520).
+
+    The decision-model env is rendered only when
+    :func:`decision_engine_base_url` names a server: ``provider == "off"``,
+    a disabled lane, or a ``"local"`` lane whose ``hal0-hs-decide`` unit is
+    not installed (``decision_unit_installed``, probed when ``None``) omit it
+    entirely so hindsight-api falls back to its configured LLM/reranker path
+    (#3519).
+    """
+    if embedder is None:
+        embedder = resolve_embedder(configured_embedder(models)).render
+    lines: list[str] = [
+        "# Managed by hal0 ([memory.models]/[memory.decision]/[memory.lanes] in",
+        "# hal0.toml, Hindsight 1.2 showcase — see PLAN.md section 2). Do not edit",
+        "# by hand; this file is fully rewritten on every apply. Retires any",
+        "# hand-maintained zz-h0-98-llm-global-cap.conf drop-in.",
+        "[Service]",
+        f"Environment={EMBEDDINGS_PROVIDER_ENV}={embedder.provider}",
+        f"Environment={EMBEDDINGS_MODEL_ENV}={embedder.model}",
+        f"Environment=HINDSIGHT_API_RERANKER_PROVIDER={models.reranker_provider}",
+        f"Environment=HINDSIGHT_API_RERANKER_LOCAL_MODEL={models.reranker_model}",
+        "Environment=HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING="
+        + ("true" if models.reranker_bucket_batching else "false"),
+    ]
+
+    base_url = decision_engine_base_url(decision, unit_installed=decision_unit_installed)
+    if base_url is not None:
+        lines += [
+            "Environment=HINDSIGHT_API_DECISION_MODEL_PROVIDER=hindsight",
+            f"Environment=HINDSIGHT_API_DECISION_MODEL_BASE_URL={base_url}",
+            f"Environment=HINDSIGHT_API_DECISION_MODEL_MODEL={decision.model}",
+            f"Environment=HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT={decision.max_concurrent}",
+            "Environment=HINDSIGHT_API_DECISION_MODEL_MAX_REQUEST_TOKENS="
+            f"{decision.max_request_tokens}",
+            # hindsight-api requires a non-empty key even for a local,
+            # unauthenticated base URL (verified on CT143 — see
+            # zz-showcase-1.2.conf): omitting it raises a startup ValueError.
+            "Environment=HINDSIGHT_API_DECISION_MODEL_API_KEY=hal0-local-noauth",
+        ]
+
+    def _held(value: int) -> int:
+        return value if ceiling is None else min(value, ceiling)
+
+    global_cap = _held(lanes.llm_max_concurrent)
+    lines += [
+        f"Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT={global_cap}",
+        f"Environment=HINDSIGHT_API_LLM_REASONING_EFFORT={lanes.reasoning_effort}",
+        "Environment=HINDSIGHT_API_LLM_STRICT_SCHEMA="
+        + ("true" if lanes.strict_schema else "false"),
+    ]
+
+    for op, prefix in LANE_OP_ENV_PREFIX.items():
+        op_cfg: MemoryLaneOpConfig = getattr(lanes, op)
+        max_concurrent = (
+            op_cfg.max_concurrent if op_cfg.max_concurrent is not None else lanes.llm_max_concurrent
+        )
+        if op_cfg.virtual_model is None:
+            max_concurrent = _held(max_concurrent)
+        lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MAX_CONCURRENT={max_concurrent}")
+        if op_cfg.virtual_model is not None:
+            lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MODEL={op_cfg.virtual_model}")
+        if op_cfg.timeout_s is not None:
+            lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_TIMEOUT={op_cfg.timeout_s}")
+        if op_cfg.reasoning_effort is not None:
+            lines.append(
+                f"Environment=HINDSIGHT_API_{prefix}_LLM_REASONING_EFFORT={op_cfg.reasoning_effort}"
+            )
+        if op_cfg.strict_schema is not None:
+            lines.append(
+                f"Environment=HINDSIGHT_API_{prefix}_LLM_STRICT_SCHEMA="
+                + ("true" if op_cfg.strict_schema else "false")
+            )
+        # #3596: Hindsight 1.2.0 reads a completion cap for consolidation and
+        # reflect only (config.py ENV_CONSOLIDATION_/ENV_REFLECT_MAX_COMPLETION_TOKENS,
+        # engine default None = uncapped). Retain has its own cap; mental-model
+        # refresh runs through reflect. 0 = operator opted out of the cap.
+        if op in _COMPLETION_CAP_OPS:
+            cap = (
+                DEFAULT_OP_COMPLETION_TOKENS
+                if op_cfg.max_completion_tokens is None
+                else op_cfg.max_completion_tokens
+            )
+            if cap:
+                lines.append(f"Environment=HINDSIGHT_API_{prefix}_MAX_COMPLETION_TOKENS={cap}")
+
+    return "\n".join(lines) + "\n"
+
+
+def showcase_drop_in_matches(
+    *,
+    models: MemoryModelsConfig,
+    decision: MemoryDecisionConfig,
+    lanes: MemoryLanesConfig,
+    ceiling: int | None = None,
+    unit_env: Mapping[str, str] | None = None,
+) -> bool:
+    """True when the on-disk showcase drop-in already matches the config.
+
+    With ``unit_env`` (the unit's merged ``Environment=``, see
+    :func:`_systemctl_show_environment`), every key this drop-in sets must
+    also hold the rendered value there (#3388): a later-sorting drop-in that
+    overrides one of them reads as drift even though hal0's own file is
+    byte-for-byte right. An empty mapping (systemd absent) cannot refute the
+    file and is ignored.
+    """
+    try:
+        body = render_showcase_env(models=models, decision=decision, lanes=lanes, ceiling=ceiling)
+        if SHOWCASE_DROP_IN_PATH.read_text(encoding="utf-8") != body:
+            return False
+    except (OSError, UnicodeDecodeError):
+        return False
+    return not unit_env or not _env_drift(_env_from_body(body), unit_env)
+
+
+def _env_from_body(body: str) -> dict[str, str]:
+    """``Environment=NAME=VALUE`` lines of a rendered drop-in → ``{NAME: VALUE}``."""
+    out: dict[str, str] = {}
+    for line in body.splitlines():
+        if not line.startswith("Environment="):
+            continue
+        name, sep, value = line[len("Environment=") :].partition("=")
+        if sep and name:
+            out[name] = value
+    return out
+
+
+def _env_drift(expected: Mapping[str, str], effective: Mapping[str, str]) -> list[dict[str, Any]]:
+    """Keys whose effective value differs from ``expected``, sorted by name."""
+    return [
+        {"key": key, "expected": value, "effective": effective.get(key)}
+        for key, value in sorted(expected.items())
+        if effective.get(key) != value
+    ]
+
+
+def _showcase_keys_on_disk(path: Path | None = None) -> set[str]:
+    """Names the on-disk showcase drop-in sets (empty when absent/unreadable)."""
+    try:
+        text = (path or SHOWCASE_DROP_IN_PATH).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return set()
+    return set(_env_from_body(text))
 
 
 def _detail(exc: BaseException) -> str:
@@ -275,6 +588,7 @@ def render_drop_in(
         llm_retries=int(lim.llm_retries),
         task_retries=int(lim.task_retries),
         retry_backoff_s=int(lim.retry_backoff_s),
+        worker_slots=int(lim.worker_slots),
         wall_timeout_s=retain_wall_timeout_s(timeout_s, lim.llm_retries),
     )
 
@@ -283,6 +597,7 @@ def drop_in_matches(
     timeout_s: int = DEFAULT_LLM_TIMEOUT_S,
     *,
     limits: ExtractionLimits | None = None,
+    unit_env: Mapping[str, str] | None = None,
 ) -> bool:
     """True when the on-disk drop-in already reflects ``(timeout_s, limits)``
     and pins :data:`MEMORY_ALIAS` (a pre-#2919 drop-in naming ``hal0/<slot>``
@@ -307,11 +622,25 @@ def drop_in_matches(
     ``Path.read_text()`` raises ``UnicodeDecodeError``, not ``OSError``)
     counts as "does not match": propagate and let the atomic rewrite
     repair it, instead of an otherwise-idempotent PUT 500ing.
+
+    #3388: the file alone is not what the engine runs with. With ``unit_env``
+    (the unit's merged ``Environment=``), each key this drop-in sets must also
+    hold the rendered value there — except the keys hal0's own showcase
+    drop-in sets, which legitimately win over this file (it sorts later). An
+    operator drop-in overriding a key therefore reads as drift. An empty
+    mapping (systemd absent) cannot refute the file and is ignored.
     """
     try:
-        return DROP_IN_PATH.read_text(encoding="utf-8") == render_drop_in(timeout_s, limits=limits)
+        body = render_drop_in(timeout_s, limits=limits)
+        if DROP_IN_PATH.read_text(encoding="utf-8") != body:
+            return False
     except (OSError, UnicodeDecodeError):
         return False
+    if not unit_env:
+        return True
+    shadowed = _showcase_keys_on_disk()
+    expected = {k: v for k, v in _env_from_body(body).items() if k not in shadowed}
+    return not _env_drift(expected, unit_env)
 
 
 #: The env file the hindsight-api unit reads (``EnvironmentFile=-``) for its
@@ -378,6 +707,17 @@ def _systemctl_show_environment() -> dict[str, str]:
     return dict(env)
 
 
+def hindsight_unit_env() -> dict[str, str]:
+    """Public read of the hindsight-api unit's merged ``Environment=`` (cached 30 s)."""
+    return _systemctl_show_environment()
+
+
+def _invalidate_unit_env_cache() -> None:
+    """Forget the cached unit env — a daemon-reload just changed it."""
+    global _unit_env_cache
+    _unit_env_cache = None
+
+
 def _read_env_file(path: Path) -> dict[str, str]:
     """``KEY=VALUE`` lines of a systemd environment file; ``{}`` if unreadable."""
     try:
@@ -422,8 +762,10 @@ def _proc_environ_path(pid: int) -> Path:
     return Path(f"/proc/{pid}/environ")
 
 
-def _read_engine_process_env() -> dict[str, str] | None:
-    """The three LLM target keys from the RUNNING engine's environment.
+def _read_engine_process_env(
+    keys: Sequence[str] = _LLM_TARGET_KEYS,
+) -> dict[str, str] | None:
+    """``keys`` (the three LLM target keys by default) from the RUNNING engine's environment.
 
     hindsight-api runs as the same ``hal0`` uid as hal0-api, so its
     ``/proc/<pid>/environ`` is readable without opening
@@ -431,7 +773,7 @@ def _read_engine_process_env() -> dict[str, str] | None:
     the engine actually loaded, after every ``Environment=`` and
     ``EnvironmentFile=``.
 
-    The raw buffer is parsed in memory and only :data:`_LLM_TARGET_KEYS` are
+    The raw buffer is parsed in memory and only ``keys`` are
     kept: the credential and every other variable are dropped before
     anything leaves this function, and no failure carries the buffer or the
     OS error text (which can echo it) into a log, an exception or the
@@ -446,7 +788,7 @@ def _read_engine_process_env() -> dict[str, str] | None:
     except Exception:  # never surface the error text
         log.debug("hal0.memory.engine_environ_unreadable", pid=pid)
         return None
-    wanted = set(_LLM_TARGET_KEYS)
+    wanted = set(keys)
     out: dict[str, str] = {}
     for entry in raw.split(b"\0"):
         key, sep, value = entry.partition(b"=")
@@ -530,6 +872,249 @@ def effective_engine_llm(
     return _shape(merged, bool(keys), keys, bool(keys), "unit+file" if path.exists() else "unit")
 
 
+#: The two keys that decide which embedder the engine runs (#3518).
+_EMBEDDER_KEYS: tuple[str, ...] = (EMBEDDINGS_PROVIDER_ENV, EMBEDDINGS_MODEL_ENV)
+
+
+def effective_engine_embedder(
+    *,
+    env_file: Path | None = None,
+    unit_env: Mapping[str, str] | None = None,
+    show_unit_env: Callable[[], Mapping[str, str]] | None = None,
+    read_process_env: Callable[[Sequence[str]], Mapping[str, str] | None] | None = None,
+    showcase_path: Path | None = None,
+) -> dict[str, Any]:
+    """The embedder hindsight-api runs, and the one its unit files would start it on (#3518).
+
+    The embedder counterpart of :func:`effective_engine_llm`, over the same
+    three readers, so the embedder record, the lanes route and the
+    ``memory_engine_env`` doctor row cannot see different environments.
+    Returns::
+
+        {"live": {"provider", "model"} | None,     # the running engine's own environment
+         "on_disk": {"provider", "model"} | None,  # what a start would load
+         "on_disk_source": "unit+file" | "unit" | "drop-in" | None}
+
+    Each value is the raw one, ``None`` where the environment leaves the key
+    unset (the engine then uses its default).
+
+    * ``live`` comes from ``read_process_env`` (``/proc/<MainPID>/environ``):
+      what the engine loaded, after every ``Environment=`` and
+      ``EnvironmentFile=``. ``None`` when it is not running or cannot be read.
+    * ``on_disk`` is the unit's merged ``Environment=`` (``unit_env`` when
+      given, else ``show_unit_env()``: base unit plus every drop-in, a
+      later-sorting operator one included, in systemd's order) with the two
+      keys from ``env_file`` on top, which is what systemd does at start.
+    * Where there is no unit to ask (systemd absent, unit unknown), hal0's
+      own showcase drop-in file is read instead (``"drop-in"``), and
+      ``on_disk`` is ``None`` when that is missing too.
+
+    Never raises: this feeds status routes and ``hal0 doctor``.
+    """
+    env_file = env_file if env_file is not None else HINDSIGHT_LLM_ENV_PATH
+    read_process = read_process_env if read_process_env is not None else _read_engine_process_env
+    out: dict[str, Any] = {"live": None, "on_disk": None, "on_disk_source": None}
+
+    def _pair(values: Mapping[str, str]) -> dict[str, str | None]:
+        return {
+            "provider": values.get(EMBEDDINGS_PROVIDER_ENV) or None,
+            "model": values.get(EMBEDDINGS_MODEL_ENV) or None,
+        }
+
+    try:
+        process = read_process(_EMBEDDER_KEYS)
+        if process is not None:
+            out["live"] = _pair(process)
+        if unit_env is not None:
+            unit = dict(unit_env)
+        else:
+            unit = dict((show_unit_env or _systemctl_show_environment)() or {})
+        if unit:
+            file_env = _read_env_file(Path(env_file))
+            from_file = {k: file_env[k] for k in _EMBEDDER_KEYS if file_env.get(k)}
+            out["on_disk"] = _pair({**unit, **from_file})
+            out["on_disk_source"] = "unit+file" if from_file else "unit"
+            return out
+        showcase = showcase_path if showcase_path is not None else SHOWCASE_DROP_IN_PATH
+        try:
+            body = showcase.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return out
+        out["on_disk"] = _pair(_env_from_body(body))
+        out["on_disk_source"] = "drop-in"
+    except Exception as exc:  # status surface: degrade, never raise
+        log.debug("hal0.memory.engine_embedder_evidence_failed", error=str(exc))
+    return out
+
+
+def expected_engine_env(
+    memory: MemoryConfig,
+    *,
+    include_extraction: bool = True,
+    include_showcase: bool = True,
+    slots_dir: Path = SLOTS_DIR,
+    embedder: Embedder | None = None,
+) -> dict[str, str]:
+    """The ``HINDSIGHT_API_*`` values hal0's drop-ins render for ``memory``.
+
+    ``embedder`` is the pair the showcase drop-in carries, resolved from the
+    embedder record when not given (see :func:`render_showcase_env`).
+
+    Both renderers merged in systemd's lexical order — ``extraction-model.conf``
+    first, ``showcase-lanes.conf`` after it, last ``Environment=`` wins — so a
+    key both set (the concurrency caps) carries the showcase value, exactly as
+    the engine would see it with no other drop-in present.
+    """
+    graph = memory.graph
+    limits = effective_limits(graph, slots_dir=slots_dir)
+    out: dict[str, str] = {}
+    if include_extraction:
+        out.update(_env_from_body(render_drop_in(graph.llm_timeout_s, limits=limits)))
+    if include_showcase:
+        out.update(
+            _env_from_body(
+                render_showcase_env(
+                    models=memory.models,
+                    decision=memory.decision,
+                    lanes=memory.lanes,
+                    ceiling=limits.max_concurrent,
+                    embedder=embedder,
+                )
+            )
+        )
+    return out
+
+
+def engine_env_report(
+    memory: MemoryConfig,
+    *,
+    unit_env: Mapping[str, str] | None = None,
+    show_unit_env: Callable[[], Mapping[str, str]] = _systemctl_show_environment,
+    drop_in_path: Path | None = None,
+    showcase_path: Path | None = None,
+    legacy_path: Path | None = None,
+    slots_dir: Path = SLOTS_DIR,
+) -> dict[str, Any]:
+    """Does hindsight-api's unit env carry what hal0 renders? (#3388 / #3520 / #3389).
+
+    Compares every ``HINDSIGHT_API_*`` key hal0's drop-ins set (only the
+    drop-ins present on this box) with the unit's merged ``Environment=``
+    (``unit_env`` when given, else ``show_unit_env()`` — injectable for
+    tests). A mismatch means another drop-in overrides hal0's value, or a
+    rendered change has not been loaded yet (no ``daemon-reload`` + restart;
+    a stale ``--parallel`` clamp shows up here too). Returns::
+
+        {"installed": bool,             # any hal0-managed drop-in exists
+         "checked": bool,               # a unit env was available to compare
+         "drift": [{"key", "expected", "effective"}],
+         "legacy_drop_in": str | None,  # zz-h0-98 file still present
+         "effective": {KEY: VALUE}}     # unit values for the managed keys
+
+    Never raises: this feeds a status route and ``hal0 doctor``.
+    """
+    drop_in = drop_in_path or DROP_IN_PATH
+    showcase = showcase_path or SHOWCASE_DROP_IN_PATH
+    leftover = legacy_path or LEGACY_LLM_CAP_DROP_IN_PATH
+    report: dict[str, Any] = {
+        "installed": False,
+        "checked": False,
+        "drift": [],
+        "legacy_drop_in": None,
+        "effective": {},
+    }
+    try:
+        report["legacy_drop_in"] = str(leftover) if leftover.exists() else None
+        extraction_present = drop_in.exists()
+        showcase_present = showcase.exists()
+        # Every managed drop-in counts (#3550): a fresh install carries only
+        # the showcase drop-in until the first graph-settings save.
+        report["installed"] = extraction_present or showcase_present
+        if not report["installed"]:
+            return report
+        unit = dict(unit_env) if unit_env is not None else dict(show_unit_env() or {})
+        # #3518: the two embedder keys are judged on the evidence the embedder
+        # record uses (the running engine first, then the unit files with the
+        # EnvironmentFile on top), so this report and the memory_embedder
+        # doctor row cannot disagree about which embedder the engine is on.
+        # A key the engine leaves unset is its default, not a missing value.
+        view = resolve_embedder(
+            configured_embedder(memory.models),
+            evidence=embedder_record.engine_evidence(unit_env=unit, showcase_path=showcase),
+        )
+        running = view.live
+        if running is None and view.effective_source in ("unit", "unit+file"):
+            running = view.on_disk
+        if unit and running is not None:
+            unit[EMBEDDINGS_PROVIDER_ENV] = running.provider
+            unit[EMBEDDINGS_MODEL_ENV] = running.model
+        # Credential keys are never compared: an operator drop-in carrying a
+        # real key would otherwise put it into a status payload.
+        expected = {
+            k: v
+            for k, v in expected_engine_env(
+                memory,
+                include_extraction=extraction_present,
+                include_showcase=showcase_present,
+                slots_dir=slots_dir,
+                embedder=view.render,
+            ).items()
+            if not k.endswith("_API_KEY")
+        }
+    except Exception as exc:  # status surface: degrade, never raise
+        log.debug("hal0.memory.engine_env_report_failed", error=str(exc))
+        return report
+    report["effective"] = {k: unit[k] for k in sorted(expected) if k in unit}
+    if not unit:
+        return report
+    report["checked"] = True
+    report["drift"] = _env_drift(expected, unit)
+    return report
+
+
+#: What an unset managed key means to the engine, for the doctor sentence.
+_UNSET_NOTES = {
+    "HINDSIGHT_API_WORKER_MAX_SLOTS": "engine default 10",
+    "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS": "engine default uncapped",
+    "HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS": "engine default uncapped",
+}
+
+
+def engine_env_warning(report: Mapping[str, Any]) -> str | None:
+    """One operator sentence for an :func:`engine_env_report`, or ``None`` when clean."""
+    parts: list[str] = []
+    leftover = report.get("legacy_drop_in")
+    if leftover:
+        parts.append(
+            f"{leftover} is still present and overrides hal0's showcase drop-in; "
+            "save the memory settings (or run `hal0 update`) to remove it"
+        )
+    drift = report.get("drift") or []
+    missing = [d for d in drift if d.get("effective") is None]
+    differing = [d for d in drift if d.get("effective") is not None]
+    if missing:
+        shown = ", ".join(
+            f"{d['key']} unset ({_UNSET_NOTES.get(d['key'], 'engine default')}; "
+            f"hal0 renders {d['expected']})"
+            for d in missing[:4]
+        )
+        more = f" and {len(missing) - 4} more" if len(missing) > 4 else ""
+        parts.append(
+            f"hindsight-api has {shown}{more}: the drop-in predates this key; "
+            "run `hal0 update` or save the memory settings to re-render it"
+        )
+    if differing:
+        shown = ", ".join(
+            f"{d['key']}={d.get('effective')} (hal0 renders {d['expected']})" for d in differing[:4]
+        )
+        more = f" and {len(differing) - 4} more" if len(differing) > 4 else ""
+        parts.append(
+            f"hindsight-api runs with {shown}{more}: another drop-in in "
+            f"{DROP_IN_DIR} overrides it, or the change is not loaded yet "
+            "(daemon-reload, then restart hindsight-api)"
+        )
+    return "; ".join(parts) or None
+
+
 def memory_engine_target(graph: MemoryGraphConfig) -> tuple[str, str]:
     """What :data:`MEMORY_ALIAS` resolves to under ``graph`` (#2919).
 
@@ -543,6 +1128,97 @@ def memory_engine_target(graph: MemoryGraphConfig) -> tuple[str, str]:
     if model:
         return ("upstream", model)
     return ("slot", extraction_model_name(graph.extraction_slot))
+
+
+def clamp_to_parallel(limits: ExtractionLimits, parallel: int | None) -> ExtractionLimits:
+    """``limits`` with ``max_concurrent`` held to the slot's ``--parallel`` (#3347).
+
+    Calls beyond the slot's sequences queue inside llama-server, and that wait
+    counts against the caller's read timeout, so a larger value only converts
+    capacity the slot does not have into 504s. ``parallel`` of ``None`` (no
+    explicit ``--parallel``, an upstream target, an unreadable slot) leaves the
+    configured value alone: hal0 has no number to hold it to.
+    """
+    if parallel is None or parallel < 1 or limits.max_concurrent <= parallel:
+        return limits
+    return replace(limits, max_concurrent=parallel)
+
+
+def _extraction_slot_config(name: str, slots_dir: Path) -> dict[str, Any] | None:
+    """The extraction slot's on-disk config, flattened; ``None`` when unreadable.
+
+    The slot is resolved through the ONE bilingual authority,
+    :func:`hal0.slots.layout.resolve_slot_stem`, so an id-keyed layout
+    (``slots/<id>.toml`` with the display name in the body) resolves too. A
+    name-keyed-only read found nothing there and left the concurrency clamp
+    silently unapplied (#3473).
+
+    Read unvalidated on purpose: this feeds a status route and the update
+    reconcile, both of which must degrade, never raise, on a slot file the
+    typed loader would reject.
+    """
+    from hal0.config.loader import _flatten_slot_toml, _read_toml
+    from hal0.slots.layout import resolve_slot_stem
+
+    try:
+        stem = resolve_slot_stem(slots_dir, name)
+        if stem is None:
+            return None
+        raw = _read_toml(Path(slots_dir) / f"{stem}.toml")
+        return _flatten_slot_toml(raw, slot_name=name)
+    except Exception:
+        log.debug("hal0.memory.extraction_slot_unreadable", slot=name)
+        return None
+
+
+def extraction_slot_parallel(
+    graph: MemoryGraphConfig, *, slots_dir: Path = SLOTS_DIR
+) -> int | None:
+    """The ``--parallel`` the extraction slot launches with, or ``None`` when unknown.
+
+    ``None`` for an upstream target (no local slot is in play), a slot whose TOML
+    cannot be read, and a slot that sets no explicit ``--parallel``. Never raises:
+    this feeds a status route and the update reconcile.
+    """
+    kind, _target = memory_engine_target(graph)
+    if kind != "slot":
+        return None
+    raw = _extraction_slot_config(graph.extraction_slot, slots_dir)
+    if raw is None:
+        return None
+    from hal0.providers.container import slot_parallel_sequences
+
+    try:
+        return slot_parallel_sequences(raw)
+    except Exception:
+        log.debug("hal0.memory.extraction_parallel_unresolved", slot=graph.extraction_slot)
+        return None
+
+
+def effective_limits(graph: MemoryGraphConfig, *, slots_dir: Path = SLOTS_DIR) -> ExtractionLimits:
+    """The limits the drop-in is rendered from: ``[memory.graph]`` held to the slot (#3347).
+
+    The one answer for the graph PUT, the update reconcile and the status
+    route, so the file they write and compare against cannot disagree.
+    """
+    return clamp_to_parallel(
+        ExtractionLimits.from_config(graph), extraction_slot_parallel(graph, slots_dir=slots_dir)
+    )
+
+
+def concurrency_clamp_warning(graph: MemoryGraphConfig, parallel: int | None) -> str | None:
+    """Operator-facing sentence when ``extraction_max_concurrent`` exceeds the slot, else ``None``."""
+    configured = graph.extraction_max_concurrent
+    if parallel is None or configured <= parallel:
+        return None
+    return (
+        f"[memory.graph].extraction_max_concurrent = {configured} is above extraction slot "
+        f"{graph.extraction_slot!r}'s --parallel {parallel}; hal0 renders {parallel} into "
+        "HINDSIGHT_API_LLM_MAX_CONCURRENT and HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT so "
+        "extra calls do not queue inside llama-server and time out. Lower "
+        "extraction_max_concurrent, or raise the slot's "
+        "--parallel, to make the two agree."
+    )
 
 
 def apply_extraction_slot(
@@ -612,6 +1288,7 @@ def apply_extraction_slot(
         try:
             seam.systemctl(*args, check=True, timeout=_SYSTEMCTL_TIMEOUT_S)
             result[step] = True
+            _invalidate_unit_env_cache()
         except (OSError, subprocess.SubprocessError) as exc:
             result["error"] = f"{' '.join(args)} failed: {_detail(exc)}"
             log.warning(
@@ -649,13 +1326,166 @@ def reconcile_extraction_dropin(
         graph = load_hal0_config().memory.graph
     except Exception as exc:
         return {"status": "skipped", "reason": f"hal0.toml unreadable: {_detail(exc)}"}
-    limits = ExtractionLimits.from_config(graph)
+    limits = effective_limits(graph)
     if drop_in_matches(graph.llm_timeout_s, limits=limits):
         return {"status": "converged"}
     result = apply_extraction_slot(
         graph.extraction_slot,
         timeout_s=graph.llm_timeout_s,
         limits=limits,
+        restart=restart,
+        seam=seam,
+    )
+    return {"status": "failed" if result.get("error") else "applied", **result}
+
+
+def showcase_ceiling(graph: MemoryGraphConfig | None) -> int | None:
+    """The concurrency ceiling the showcase drop-in is held to (#3492).
+
+    The extraction drop-in's effective ``max_concurrent`` — the one answer for
+    the settings PUT, the graph PUT and the update reconcile. ``None`` (render
+    unclamped) only when no graph config is supplied.
+    """
+    if graph is None:
+        return None
+    return effective_limits(graph).max_concurrent
+
+
+def reload_and_restart_hindsight(*, seam: SystemCtlSeam | None = None) -> dict[str, Any]:
+    """``daemon-reload`` then ``restart hindsight-api``, in that order. Never raises.
+
+    A drop-in is read only at unit load: restarting without the reload would
+    bring the engine back on the old environment. Returns
+    ``{"daemon_reloaded", "restarted", "error"}``.
+    """
+    seam = seam if seam is not None else SystemCtlSeam()
+    result: dict[str, Any] = {"daemon_reloaded": False, "restarted": False, "error": None}
+    for step, args in (
+        ("daemon_reloaded", ("systemctl", "daemon-reload")),
+        ("restarted", ("systemctl", "restart", SERVICE)),
+    ):
+        try:
+            seam.systemctl(*args, check=True, timeout=_SYSTEMCTL_TIMEOUT_S)
+            result[step] = True
+            _invalidate_unit_env_cache()
+        except (OSError, subprocess.SubprocessError, SeamTimeout) as exc:
+            result["error"] = f"{' '.join(args)} failed: {_detail(exc)}"
+            log.warning("hal0.memory.hindsight_reload_restart_failed", step=step, error=str(exc))
+            return result
+    return result
+
+
+def apply_showcase_dropin(
+    *,
+    models: MemoryModelsConfig,
+    decision: MemoryDecisionConfig,
+    lanes: MemoryLanesConfig,
+    graph: MemoryGraphConfig | None = None,
+    restart: bool = True,
+    seam: SystemCtlSeam | None = None,
+    embedder: Embedder | None = None,
+) -> dict[str, Any]:
+    """Write the showcase drop-in and (best-effort) restart hindsight-api (#3492).
+
+    The :func:`apply_extraction_slot` shape for ``[memory.models]`` /
+    ``[memory.decision]`` / ``[memory.lanes]``: render with
+    :func:`render_showcase_env` (held to :func:`showcase_ceiling` of
+    ``graph``), write through the privileged ``write-hindsight-showcase-dropin``
+    seam verb (allow-listed root-side), then :func:`reload_and_restart_hindsight`
+    — the engine reads these env vars only at start. Never raises; returns
+    ``{"drop_in", "written", "daemon_reloaded", "restarted", "error"}``.
+    Blocking: event-loop callers must hop a thread.
+
+    The embeddings provider and model come from the store's embedder record
+    (#3518), or from the running engine when it is on something else, so this
+    write never swaps a running engine's embedder. A box whose engine has
+    already run gets its record written before the render; a box with no
+    store yet is recorded as the configured pair only after the drop-in
+    carrying it is on disk, so the record cannot name an embedder the engine
+    was never started with. A record file that cannot be read is left alone.
+
+    ``embedder`` renders that pair instead and leaves the record exactly as
+    it is: the record is the caller's to write. It has two callers.
+    :mod:`hal0.memory.first_start` uses it to try a new install's engine on
+    the engine default before any store exists and then either records that
+    pair or puts the drop-in back. ``hal0 memory embedder switch``
+    (:mod:`hal0.memory.embedder_switch`) uses it for the one restart that is
+    meant to move an existing store's engine to another embedder. Used
+    anywhere else it would swap the embedder under a store.
+    """
+    seam = seam if seam is not None else SystemCtlSeam()
+    result: dict[str, Any] = {
+        "drop_in": str(SHOWCASE_DROP_IN_PATH),
+        "written": False,
+        "daemon_reloaded": False,
+        "restarted": False,
+        "error": None,
+    }
+    view = ensure_embedder_record(configured_embedder(models)) if embedder is None else None
+    try:
+        body = render_showcase_env(
+            models=models,
+            decision=decision,
+            lanes=lanes,
+            ceiling=showcase_ceiling(graph),
+            embedder=view.render if view is not None else embedder,
+        )
+        seam.write_hindsight_showcase_dropin(
+            body, path=SHOWCASE_DROP_IN_PATH, timeout=_SYSTEMCTL_TIMEOUT_S
+        )
+        result["written"] = True
+        if view is not None and view.record_error is None and not view.record.persisted:
+            persist_embedder_record(view.record)
+        # #3520: the write also retires the hand-maintained H0-98 drop-in;
+        # say so if it survived (e.g. a pre-#3520 seam wrapper on the box).
+        result["legacy_drop_in_present"] = LEGACY_LLM_CAP_DROP_IN_PATH.exists()
+    except (OSError, subprocess.SubprocessError, SeamTimeout) as exc:
+        result["error"] = (
+            f"could not write {SHOWCASE_DROP_IN_PATH}: {_detail(exc)}{_stale_wrapper_hint(exc)}"
+        )
+        log.warning("hal0.memory.showcase_dropin_write_failed", error=str(exc))
+        return result
+
+    if not restart:
+        return result
+
+    result.update(reload_and_restart_hindsight(seam=seam))
+    if result["error"] is None:
+        log.info("hal0.memory.showcase_dropin_applied")
+    return result
+
+
+def reconcile_showcase_dropin(
+    *, restart: bool = True, seam: SystemCtlSeam | None = None
+) -> dict[str, Any]:
+    """Re-render the showcase drop-in when it no longer matches ``hal0.toml``.
+
+    Like :func:`reconcile_extraction_dropin`, acts only on a box whose engine
+    is installed (the extraction drop-in exists); there it also *creates* the
+    showcase drop-in on first run, which is how an existing box picks up the
+    1.2 models/decision/lanes env after an update. Never raises. Returns
+    ``{"status": "skipped"|"converged"|"applied"|"failed", ...}``.
+    """
+    if not DROP_IN_PATH.exists():
+        return {"status": "skipped", "reason": "no memory engine on this box"}
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        mem = load_hal0_config().memory
+        ceiling = showcase_ceiling(mem.graph)
+    except Exception as exc:
+        return {"status": "skipped", "reason": f"hal0.toml unreadable: {_detail(exc)}"}
+    # #3520: a leftover hand-maintained H0-98 drop-in overrides this one, and
+    # only the privileged write removes it — so its presence alone is drift.
+    if not LEGACY_LLM_CAP_DROP_IN_PATH.exists() and showcase_drop_in_matches(
+        models=mem.models, decision=mem.decision, lanes=mem.lanes, ceiling=ceiling
+    ):
+        return {"status": "converged"}
+    result = apply_showcase_dropin(
+        models=mem.models,
+        decision=mem.decision,
+        lanes=mem.lanes,
+        graph=mem.graph,
         restart=restart,
         seam=seam,
     )
@@ -1222,19 +2052,29 @@ __all__ = [
     "EXTRACTION_FLOOR_ENV",
     "EXTRACTION_MIN_CONTEXT_TOKENS",
     "EXTRACTION_PROMPT_TOKENS",
+    "LEGACY_LLM_CAP_DROP_IN_PATH",
     "PROBE_DECODE_TOKENS",
     "PROBE_PROMPT_TOKENS",
     "PROBE_TIMEOUT_S",
+    "SHOWCASE_DROP_IN_PATH",
     "ExtractionThroughput",
     "ExtractionWindow",
     "apply_extraction_slot",
+    "apply_showcase_dropin",
     "drop_in_matches",
+    "engine_env_report",
+    "engine_env_warning",
+    "expected_engine_env",
     "extraction_floor",
     "extraction_model_name",
+    "hindsight_unit_env",
     "measure_extraction_throughput",
     "parse_busy_requests",
     "parse_throughput_metrics",
     "reconcile_extraction_dropin",
+    "reconcile_showcase_dropin",
+    "reload_and_restart_hindsight",
     "render_drop_in",
     "resolve_extraction_window",
+    "showcase_ceiling",
 ]

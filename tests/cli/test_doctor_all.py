@@ -19,6 +19,51 @@ from rich.console import Console
 from hal0.cli import doctor_all as da
 from hal0.cli.doctor_verify import Check
 
+
+def test_openwebui_task_model_warns_for_removed_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = tmp_path / "openwebui.env"
+    env.write_text("TASK_MODEL_EXTERNAL=utility\n", encoding="utf-8")
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "warn"
+    assert "utility" in row.detail
+    env.write_text("TASK_MODEL_EXTERNAL=hal0/agent\n", encoding="utf-8")
+    assert da.check_openwebui_task_model(slots).status == "pass"
+
+
+def test_openwebui_task_model_ignores_an_upstream_model_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # TASK_MODEL_EXTERNAL may legitimately hold an upstream model id, not a
+    # slot name. The row only warns about a slot reference.
+    env = tmp_path / "openwebui.env"
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+
+    env.write_text("TASK_MODEL_EXTERNAL=qwen3:30b-a3b\n", encoding="utf-8")
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "pass"
+
+    env.write_text("TASK_MODEL_EXTERNAL=bge-base-en-v1.5-q4_k_m\n", encoding="utf-8")
+    assert da.check_openwebui_task_model(slots).status == "pass"
+
+
+def test_openwebui_task_model_warns_for_a_missing_hal0_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env = tmp_path / "openwebui.env"
+    monkeypatch.setattr(da.paths, "openwebui_env", lambda: env)
+    slots = [{"name": "agent"}, {"name": "memory"}]
+
+    env.write_text("TASK_MODEL_EXTERNAL=hal0/utility\n", encoding="utf-8")
+    row = da.check_openwebui_task_model(slots)
+    assert row.status == "warn"
+    assert "hal0/utility" in row.detail
+
+
 # ── check_auth_posture ────────────────────────────────────────────────────────
 
 
@@ -1574,6 +1619,14 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(
         da,
+        "check_fabric_clock",
+        lambda slots=None, **_kw: Check(
+            "fabric_clock", "NPU/GPU fabric-clock guard", "pass", "stubbed"
+        ),
+    )
+
+    monkeypatch.setattr(
+        da,
         "check_img_custom_nodes",
         lambda: Check("img-custom-nodes", "Image custom nodes", "pass", "stubbed"),
     )
@@ -1589,12 +1642,62 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "check_migration_015",
         lambda **_kw: Check("migration-015", "Model-tuning migration (015)", "pass", "stubbed"),
     )
+    monkeypatch.setattr(
+        da,
+        "check_memory_decision_lane",
+        lambda **_kw: Check("memory_decision_lane", "Memory decision lane", "pass", "stubbed"),
+    )
+
+    # Engine-env row (#3520) reads hal0.toml + systemctl show otherwise.
+    monkeypatch.setattr(
+        da,
+        "check_memory_engine_env",
+        lambda **_kw: Check("memory_engine_env", "Memory engine env", "pass", "stubbed"),
+    )
+
+    # Layout row (ADR-0058 decision 7) reads the layout record otherwise.
+    monkeypatch.setattr(
+        da,
+        "check_memory_layout",
+        lambda **_kw: Check("memory_layout", "Memory layout", "pass", "stubbed"),
+    )
+
+    # Embedder row (#3518) reads hal0.toml, the record and the engine home otherwise.
+    monkeypatch.setattr(
+        da,
+        "check_memory_embedder",
+        lambda **_kw: Check("memory_embedder", "Memory embedder", "pass", "stubbed"),
+    )
+
+    # Projects row (ADR-0058 4a) reads hal0.toml and lists the bank's tags otherwise.
+    projects_kwargs: dict = {}
+    monkeypatch.setattr(
+        da,
+        "check_memory_projects",
+        lambda **kw: (
+            projects_kwargs.update(kw),
+            Check("memory_projects", "Memory projects", "pass", "stubbed"),
+        )[1],
+    )
+
+    # Model-owners row (#3576) lists every bank's mental models otherwise.
+    owners_kwargs: dict = {}
+    monkeypatch.setattr(
+        da,
+        "check_memory_model_owners",
+        lambda **kw: (
+            owners_kwargs.update(kw),
+            Check("memory_model_owners", "Memory model owners", "pass", "stubbed"),
+        )[1],
+    )
 
     checks = da.build_all_checks()
     keys = [c.key for c in checks]
     assert gtt_leak_slots == [[{"port": 8081}]]
+    assert set(projects_kwargs) == {"memory", "base"}
+    assert set(owners_kwargs) == {"memory", "base"}
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-44:] == [
+    assert keys[-52:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1609,6 +1712,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "secret-modes",
         "hardware_freshness",
         "gtt_leak",
+        "fabric_clock",
         "seed_context_envelope",
         "agent-uid",
         "api-journal",
@@ -1626,6 +1730,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "bridge-store",
         "agent-bridge",
         "openwebui_mcp",
+        "openwebui-task-model",
         "hermes_generation",
         "hermes_command_approvals",
         "hermes_delegation_slot",
@@ -1637,8 +1742,14 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hal0_linger",
         "hindsight_llm_auth",
         "memory_engine_version",
+        "memory_engine_env",
+        "memory_layout",
+        "memory_embedder",
         "memory_extraction_throughput",
         "memory_retain_chunk",
+        "memory_decision_lane",
+        "memory_projects",
+        "memory_model_owners",
     ]
     assert "api" in keys and "runners" in keys
     assert da.overall_verdict(checks) == "ok"
@@ -1813,6 +1924,55 @@ def test_memory_engine_version_passes_when_memory_disabled_or_unreachable() -> N
     assert da.check_memory_engine_version(memory=None).status == "warn"
 
 
+def test_memory_engine_version_distinguishes_disabled_from_down() -> None:
+    """#3551: engine payload empty + config enabled is an outage, not 'disabled'."""
+    down = {"enabled": False, "engine": None, "reachable": False}
+    off = da.check_memory_engine_version(memory=down, config_enabled=False)
+    assert off.status == "pass"
+    assert "disabled" in off.detail
+    outage = da.check_memory_engine_version(memory=down, config_enabled=True)
+    assert "disabled" not in outage.detail
+    assert "unreachable" in outage.detail
+    assert "[memory] enabled" in outage.detail
+
+
+def _stub_memory_config(monkeypatch: pytest.MonkeyPatch, *, enabled: bool | None) -> None:
+    """Make ``load_hal0_config`` return ``[memory] enabled`` or raise (unreadable)."""
+    from types import SimpleNamespace
+
+    import hal0.config.loader as loader
+
+    def _load() -> object:
+        if enabled is None:
+            raise PermissionError("hal0.toml")
+        return SimpleNamespace(memory=SimpleNamespace(enabled=enabled))
+
+    monkeypatch.setattr(loader, "load_hal0_config", _load)
+
+
+@pytest.mark.parametrize("enabled", [True, False, None])
+def test_memory_enabled_in_config(monkeypatch: pytest.MonkeyPatch, enabled: bool | None) -> None:
+    _stub_memory_config(monkeypatch, enabled=enabled)
+    assert da._memory_enabled_in_config() is enabled
+
+
+def test_memory_engine_version_row_text_follows_the_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    down = {"enabled": False, "engine": None, "reachable": False}
+    _stub_memory_config(monkeypatch, enabled=False)
+    assert "disabled in config" in da.check_memory_engine_version(memory=down).detail
+    _stub_memory_config(monkeypatch, enabled=True)
+    assert (
+        "enabled but the engine is unreachable"
+        in da.check_memory_engine_version(memory=down).detail
+    )
+    _stub_memory_config(monkeypatch, enabled=None)
+    detail = da.check_memory_engine_version(memory=down).detail
+    assert "config unreadable" in detail and "run as root" in detail
+    assert "enabled but" not in detail and "disabled in config" not in detail
+
+
 # ── memory extraction speed (#2353, advisory) ───────────────────────────────
 
 _LIVE_MEMORY = {"enabled": True, "engine": "hindsight", "reachable": True}
@@ -1911,14 +2071,17 @@ def test_api_journal_warns_when_process_lacks_the_group() -> None:
     assert "systemd-journal" in check.detail
 
 
-def test_api_journal_passes_for_a_root_api() -> None:
-    assert _journal(ids=(0, {0})).status == "pass"
+def test_api_journal_warns_for_an_unexpected_root_api() -> None:
+    check = _journal(ids=(0, {0}))
+    assert check.status == "warn"
+    assert "root" in check.detail
+    assert "hal0-api" in check.detail
 
 
-def test_api_journal_passes_for_a_root_api_on_a_host_without_the_group() -> None:
-    """Root reads the journal without systemd-journal, so a missing group is
-    not a problem for a root-run API: probe the process first."""
-    assert _journal(ids=(0, {0}), gid=None).status == "pass"
+def test_api_journal_warns_when_host_has_no_journal_group_for_hal0_api() -> None:
+    check = _journal(gid=None)
+    assert check.status == "warn"
+    assert "systemd-journal" in check.detail
 
 
 def test_api_journal_warns_when_host_has_no_journal_group() -> None:
@@ -3034,6 +3197,437 @@ def test_retain_chunk_skips_without_a_live_engine() -> None:
         assert da.check_memory_retain_chunk(memory=memory, fetch=_never).status == "pass"
 
 
+# ── memory model owners (#3576, advisory) ───────────────────────────────────
+
+
+def _owners_survey(*, hidden: int = 0, unflagged: int = 0, errors=()):
+    from hal0.memory.model_owner_repair import Finding, Survey
+
+    findings = [
+        Finding(bank="shared", model_id=f"h{i}", name="", owner="bob", hidden=True)
+        for i in range(hidden)
+    ] + [
+        Finding(bank="shared", model_id=f"u{i}", name="", owner="bob", hidden=False)
+        for i in range(unflagged)
+    ]
+    return Survey(findings=findings, errors=list(errors), banks=2)
+
+
+def test_model_owners_warns_and_names_the_repair_when_a_model_is_hidden() -> None:
+    check = da.check_memory_model_owners(
+        memory=_LIVE_MEMORY, fetch=lambda _b: _owners_survey(hidden=2, unflagged=1)
+    )
+    assert check.key == "memory_model_owners" and check.label == "Memory model owners"
+    assert check.status == "warn"
+    assert "2 mental model(s)" in check.detail
+    assert "hal0 memory mm repair" in check.detail
+
+
+def test_model_owners_passes_with_a_note_when_models_lack_the_flag_but_are_readable() -> None:
+    check = da.check_memory_model_owners(
+        memory=_LIVE_MEMORY, fetch=lambda _b: _owners_survey(unflagged=3)
+    )
+    assert check.status == "pass"
+    assert "3" in check.detail and "hal0 memory mm repair" in check.detail
+
+
+def test_model_owners_passes_when_nothing_needs_the_flag() -> None:
+    check = da.check_memory_model_owners(memory=_LIVE_MEMORY, fetch=lambda _b: _owners_survey())
+    assert check.status == "pass" and "2 bank(s)" in check.detail
+
+
+def test_model_owners_unreadable_is_a_warn() -> None:
+    assert da.check_memory_model_owners(memory=_LIVE_MEMORY, fetch=lambda _b: None).status == "warn"
+    partial = _owners_survey(errors=[("shared", "boom")])
+    check = da.check_memory_model_owners(memory=_LIVE_MEMORY, fetch=lambda _b: partial)
+    assert check.status == "warn" and "shared" in check.detail
+
+
+def test_model_owners_warns_when_the_survey_ran_out_of_time() -> None:
+    report = _owners_survey()
+    report.incomplete = True
+    check = da.check_memory_model_owners(memory=_LIVE_MEMORY, fetch=lambda _b: report)
+    assert check.status == "warn" and "survey incomplete" in check.detail
+
+
+def test_model_owners_names_skipped_models() -> None:
+    from hal0.memory.model_owner_repair import Finding
+
+    report = _owners_survey()
+    report.skipped = [(Finding("shared", "m", "", "bob", True), "clash")]
+    check = da.check_memory_model_owners(memory=_LIVE_MEMORY, fetch=lambda _b: report)
+    assert check.status == "warn" and "1 mental model(s)" in check.detail
+    assert "cannot repair" in check.detail
+
+
+def test_model_owners_survey_is_bounded_and_skips_banks_without_private_memory(
+    monkeypatch,
+) -> None:
+    """F5: the row runs on every `doctor all`: metadata listings only, banks
+    with no private memory are not listed, and the whole survey has a deadline."""
+    import hal0.memory.model_owner_repair as mor
+
+    seen: dict = {}
+
+    def fake_survey(request, banks=None, **kw):
+        seen.update(kw)
+        return _owners_survey()
+
+    monkeypatch.setattr(mor, "survey", fake_survey)
+    da._survey_model_owners(None)
+    assert seen["private_banks_only"] is True
+    assert seen["deadline"] is not None
+    import time
+
+    assert 15 <= seen["deadline"] - time.monotonic() <= 21
+
+
+def test_model_owners_skips_without_a_live_engine() -> None:
+    def _never(_b: object) -> None:  # pragma: no cover - a call here is the bug
+        raise AssertionError("no fetch without a reachable memory engine")
+
+    for memory in (
+        {"enabled": True, "engine": None},
+        {"enabled": False, "engine": "hindsight"},
+        {"enabled": True, "engine": "hindsight", "reachable": False},
+    ):
+        assert da.check_memory_model_owners(memory=memory, fetch=_never).status == "pass"
+    assert da.check_memory_model_owners(memory=None, fetch=_never).status == "warn"
+
+
+# ── memory projects (ADR-0058 decision 4a, advisory) ────────────────────────
+
+
+def _projects_row(rows, *, aliases=None, registered=(), bank="shared", read_ok=True):
+    from hal0.memory.projects import ProjectRegistry
+
+    registry = ProjectRegistry(aliases=aliases or {}, registered=frozenset(registered))
+    seen: list[tuple[object, str]] = []
+
+    def fetch(base, bank_id):
+        seen.append((base, bank_id))
+        return rows
+
+    check = da.check_memory_projects(
+        memory=_LIVE_MEMORY, base="http://api.test", fetch=fetch, config=(bank, registry, read_ok)
+    )
+    assert check.key == "memory_projects" and check.label == "Memory projects"
+    assert seen == [("http://api.test", bank)]
+    return check
+
+
+def _tag(tag: str, count: int) -> dict:
+    return {"tag": tag, "count": count}
+
+
+def test_projects_row_reports_the_registered_share() -> None:
+    check = _projects_row(
+        [_tag("project:atlas", 60), _tag("project:atlas-mono", 20), _tag("project:cirrus", 20)],
+        aliases={"atlas-mono": "atlas"},
+        registered=["atlas"],
+    )
+    assert check.status == "pass"
+    assert "80 of 100 project-tagged facts (80%)" in check.detail
+    assert "project:unresolved: 0" in check.detail
+    assert "not in the registry (1): cirrus" in check.detail
+
+
+def test_projects_row_counts_an_alias_target_as_registered() -> None:
+    check = _projects_row([_tag("project:atlas", 5)], aliases={"atlas-mono": "atlas"})
+    assert check.status == "pass" and "5 of 5" in check.detail and "100%" in check.detail
+    assert "not in the registry" not in check.detail
+
+
+def test_projects_row_warns_on_unresolved_writes() -> None:
+    check = _projects_row(
+        [_tag("project:atlas", 9), _tag("project:unresolved", 1)], registered=["atlas"]
+    )
+    assert check.status == "warn"
+    assert "9 of 10 project-tagged facts (90%)" in check.detail
+    assert "project:unresolved: 1" in check.detail
+    assert "a coding client is writing without a project" in check.detail
+    # The marker is never listed as an unregistered project.
+    assert "not in the registry" not in check.detail
+
+
+def test_projects_row_passes_with_a_handful_of_unregistered_slugs() -> None:
+    assert da.PROJECTS_UNREGISTERED_WARN_ABOVE == 5
+    rows = [_tag(f"project:repo-{n}", 10 - n) for n in range(5)]
+    check = _projects_row(rows)
+    assert check.status == "pass"
+    assert "0 of 40 project-tagged facts (0%)" in check.detail
+    # Most-used first.
+    assert "not in the registry (5): repo-0, repo-1, repo-2, repo-3, repo-4" in check.detail
+
+
+def test_projects_row_warns_past_a_handful_and_lists_ten() -> None:
+    assert da.PROJECTS_UNREGISTERED_LISTED == 10
+    rows = [_tag(f"project:repo-{n:02d}", 100 - n) for n in range(13)]
+    check = _projects_row([*rows, _tag("project:atlas", 1)], registered=["atlas"])
+    assert check.status == "warn"
+    listed = ", ".join(f"repo-{n:02d}" for n in range(10))
+    assert f"not in the registry (13): {listed} and 3 more" in check.detail
+    assert "repo-10" not in check.detail
+    assert "[memory.projects].registered" in check.detail
+    six = _projects_row([_tag(f"project:repo-{n}", 1) for n in range(6)])
+    assert six.status == "warn"
+
+
+def test_projects_row_ignores_rows_that_are_not_project_tags() -> None:
+    check = _projects_row(
+        [
+            _tag("project:atlas", 3),
+            _tag("Project:Other", 50),  # the engine's wildcard is case-insensitive
+            _tag("projects:x", 50),
+            _tag("project:", 50),
+            {"tag": "project:bad-count", "count": "many"},
+            {"tag": "project:zero", "count": 0},
+            {"tag": None, "count": 4},
+            {"count": 4},
+        ],
+        registered=["atlas"],
+    )
+    assert check.status == "pass" and "3 of 3" in check.detail
+
+
+def test_projects_row_with_no_project_tagged_facts() -> None:
+    for rows in ([], [_tag("project:atlas", 0)]):
+        check = _projects_row(rows, bank="platform-bank")
+        assert check.status == "pass"
+        assert check.detail == "no project-tagged facts in bank platform-bank yet"
+
+
+def test_projects_row_says_when_hal0_toml_could_not_be_read() -> None:
+    check = _projects_row([_tag("project:atlas", 2)], read_ok=False)
+    assert check.status == "pass"
+    assert "hal0.toml unreadable" in check.detail and "empty registry" in check.detail
+
+
+def test_projects_row_passes_with_a_note_when_there_is_nothing_to_count() -> None:
+    def _never(_base: object, _bank: str) -> None:  # pragma: no cover — a call here is the bug
+        raise AssertionError("no tags listing without a reachable memory engine")
+
+    for memory, note in (
+        (None, "status unreachable"),
+        ({"enabled": True, "engine": None}, "memory disabled"),
+        ({"enabled": False, "engine": "hindsight"}, "memory disabled"),
+        ({"enabled": True, "engine": "hindsight", "reachable": False}, "engine unreachable"),
+    ):
+        check = da.check_memory_projects(memory=memory, fetch=_never, config=("shared", None, True))
+        assert check.status == "pass" and note in check.detail
+
+    unlisted = _projects_row(None)
+    assert unlisted.status == "pass"
+    assert unlisted.detail == "could not list the tags of bank shared — nothing counted"
+
+
+def test_projects_row_lists_tags_with_the_engines_wildcard_and_pages(monkeypatch) -> None:
+    from hal0.cli import _shared
+
+    calls: list[dict] = []
+    full_page = [_tag(f"project:repo-{n}", 1) for n in range(da._PROJECT_TAGS_PAGE)]
+    pages = [
+        {"items": full_page, "total": 501},
+        {"items": [_tag("project:last", 1)], "total": 501},
+    ]
+
+    def fake_get(path, *, base=None, timeout=10.0, **kwargs):
+        calls.append({"path": path, "base": base, "timeout": timeout, **kwargs})
+        return pages[len(calls) - 1]
+
+    monkeypatch.setattr(_shared, "api_get", fake_get)
+    rows = da._fetch_project_tags("http://api.test", "platform-bank")
+    assert rows is not None and len(rows) == 501
+    assert [c["path"] for c in calls] == ["/api/memory/banks/platform-bank/tags"] * 2
+    assert [c["params"] for c in calls] == [
+        {"q": "project:*", "limit": 500, "offset": 0},
+        {"q": "project:*", "limit": 500, "offset": 500},
+    ]
+    assert {c["timeout"] for c in calls} == {da.PROJECT_TAGS_TIMEOUT_S}
+    assert {c["base"] for c in calls} == {"http://api.test"}
+
+
+def test_projects_row_tags_listing_fails_soft(monkeypatch) -> None:
+    from hal0.cli import _shared
+
+    def refuse(path, **_kw):
+        raise _shared.CliApiError("GET failed: 404")
+
+    monkeypatch.setattr(_shared, "api_get", refuse)
+    assert da._fetch_project_tags(None, "shared") is None
+    monkeypatch.setattr(_shared, "api_get", lambda path, **_kw: {"unexpected": True})
+    assert da._fetch_project_tags(None, "shared") is None
+
+
+def test_projects_row_reads_the_bank_and_registry_from_hal0_toml(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+
+    memory = MemoryConfig(
+        bank="platform-bank",
+        projects={"aliases": {"Atlas Mono": "atlas"}, "registered": ["Borealis"]},
+    )
+    from hal0.memory import bank_layout as bl
+
+    monkeypatch.setattr(loader, "load_hal0_config", lambda: SimpleNamespace(memory=memory))
+    monkeypatch.setattr(bl, "current_layout", lambda _cfg, **_kw: bl.BankLayout("two_bank"))
+    bank, registry, read_ok = da._projects_config()
+    assert (bank, read_ok) == ("platform-bank", True)
+    assert registry.is_known("atlas-mono") and registry.is_known("atlas")
+    assert registry.is_known("borealis") and not registry.is_known("cirrus")
+
+    def unreadable():
+        raise PermissionError("hal0.toml")
+
+    monkeypatch.setattr(loader, "load_hal0_config", unreadable)
+    bank, registry, read_ok = da._projects_config()
+    assert (bank, read_ok) == ("hal0:shared", False)
+    assert not registry.aliases and not registry.registered
+
+
+def test_projects_row_reads_a_legacy_stores_recorded_bank(monkeypatch) -> None:
+    """ADR-0058 decision 7: on a store still on its legacy layout the row
+    counts the bank hal0-api reads, not the two-bank default."""
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import bank_layout as bl
+
+    legacy = bl.BankLayout("legacy", legacy_platform_bank="shared", legacy_unified=True)
+    monkeypatch.setattr(bl, "current_layout", lambda _cfg, **_kw: legacy)
+    monkeypatch.setattr(loader, "load_hal0_config", lambda: SimpleNamespace(memory=MemoryConfig()))
+    assert da._projects_config()[0] == "shared"
+
+    def unreadable():
+        raise PermissionError("hal0.toml")
+
+    monkeypatch.setattr(loader, "load_hal0_config", unreadable)
+    assert da._projects_config()[0] == "shared"
+
+
+# ── memory decision lane (#3519, advisory) ──────────────────────────────────
+
+
+def _no_probe(_url: str) -> bool:  # pragma: no cover — a call here is the bug
+    raise AssertionError("no /health probe expected")
+
+
+def test_decision_lane_warns_when_local_unit_is_not_installed() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(),
+        unit_installed=False,
+        probe=_no_probe,
+    )
+    assert check.key == "memory_decision_lane"
+    assert check.status == "warn"
+    assert "hal0-hs-decide" in check.detail and 'provider = "off"' in check.detail
+
+
+def test_decision_lane_passes_when_the_local_server_answers() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    probed: list[str] = []
+
+    def _probe(url: str) -> bool:
+        probed.append(url)
+        return True
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY, decision=MemoryDecisionConfig(), unit_installed=True, probe=_probe
+    )
+    assert check.status == "pass"
+    assert probed == ["http://127.0.0.1:9178"]
+
+
+def test_decision_lane_warns_when_the_installed_server_is_down() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(),
+        unit_installed=True,
+        probe=lambda _u: False,
+    )
+    assert check.status == "warn"
+    assert "did not answer /health" in check.detail
+    assert "systemctl status hal0-hs-decide" in check.detail
+
+
+def test_decision_lane_probes_an_explicit_base_url_without_the_unit() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    probed: list[str] = []
+
+    def _probe(url: str) -> bool:
+        probed.append(url)
+        return False
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(base_url="http://127.0.0.1:9999/"),
+        unit_installed=False,
+        probe=_probe,
+    )
+    assert probed == ["http://127.0.0.1:9999"]
+    assert check.status == "warn" and "base_url" in check.detail
+
+
+def test_decision_lane_warns_on_a_base_url_the_drop_in_cannot_carry() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(base_url="http://decide.example:9178"),
+        unit_installed=True,
+        probe=_no_probe,
+    )
+    assert check.status == "warn" and "loopback" in check.detail
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [{"enabled": False}, {"provider": "off"}],
+    ids=["disabled", "provider-off"],
+)
+def test_decision_lane_off_passes_without_probing(cfg) -> None:  # type: ignore[no-untyped-def]
+    from hal0.config.schema import MemoryDecisionConfig
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(**cfg),
+        unit_installed=False,
+        probe=_no_probe,
+    )
+    assert check.status == "pass" and "off" in check.detail
+
+
+def test_decision_lane_cloud_is_not_probed() -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+
+    check = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(provider="hindsight-cloud"),
+        unit_installed=False,
+        probe=_no_probe,
+    )
+    assert check.status == "pass" and "not probed" in check.detail
+
+
+def test_decision_lane_skips_when_memory_is_disabled() -> None:
+    check = da.check_memory_decision_lane(
+        memory={"enabled": False, "engine": "hindsight"},
+        unit_installed=False,
+        probe=_no_probe,
+    )
+    assert check.status == "pass" and "memory disabled" in check.detail
+
+
 # ── check_stale_hermes_session_token ───────────────────────────────────────────
 
 
@@ -3395,3 +3989,526 @@ def test_box_default_providers_read_real_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("HAL0_PORT", "9001")
     c = da.check_box_boundary(in_box=lambda: True, publish_hosts=lambda: {})
     assert c.status == "warn" and "9001" in c.detail
+
+
+# ── check_fabric_clock ───────────────────────────────────────────────────────
+
+
+def _fclk_sysfs(root: Path, *, perf: str, marked_index: int | None) -> str:
+    device = root / "class" / "drm" / "card1" / "device"
+    device.mkdir(parents=True)
+    levels = [
+        "0: 400Mhz",
+        "1: 800Mhz",
+        "2: 1200Mhz",
+        "3: 1600Mhz",
+        "4: 1800Mhz",
+        "5: 1900Mhz",
+        "6: 1950Mhz",
+        "7: 2000Mhz",
+    ]
+    if marked_index is not None:
+        levels[marked_index] += " *"
+    (device / "pp_dpm_fclk").write_text("\n".join(levels) + "\n")
+    (device / "power_dpm_force_performance_level").write_text(perf)
+    return str(root)
+
+
+def test_fabric_clock_passes_without_slot_list() -> None:
+    c = da.check_fabric_clock(None)
+    assert c.status == "pass" and "unavailable" in c.detail
+
+
+def test_fabric_clock_passes_with_no_npu_gpu_pairing() -> None:
+    slots = [{"name": "chat", "state": "ready", "backend": "vulkan"}]
+    c = da.check_fabric_clock(slots)
+    assert c.status == "pass" and "no NPU+GPU" in c.detail
+
+
+def test_fabric_clock_passes_when_held(tmp_path: Path) -> None:
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {"name": "chat", "state": "ready", "backend": "vulkan"},
+    ]
+    c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="manual", marked_index=7))
+    assert c.status == "pass" and "held" in c.detail
+
+
+def test_fabric_clock_warns_when_npu_and_gpu_configured_and_unheld(tmp_path: Path) -> None:
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {"name": "chat", "state": "idle", "backend": "vulkan"},
+    ]
+    c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="auto", marked_index=0))
+    assert c.status == "warn"
+    assert "flm" in c.detail and "chat" in c.detail
+    assert "hal0-fabric-clock hold" in c.detail
+
+
+def test_fabric_clock_passes_unreadable_when_sysfs_absent(tmp_path: Path) -> None:
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {"name": "chat", "state": "ready", "backend": "vulkan"},
+    ]
+    c = da.check_fabric_clock(slots, sys_root=str(tmp_path / "no-such-sys"))
+    assert c.status == "pass"
+    assert "unreadable" in c.detail
+
+
+def test_fabric_clock_ignores_synthetic_hal0_composite(tmp_path: Path) -> None:
+    """review P2-5: the API always folds in a synthetic composite row named
+    ``hal0`` (backend='vulkan' from slot_view synthesis). Counting it as a
+    real, individually-configured GPU slot turned every box with an NPU
+    slot and NO real GPU slot configured into a false WARN naming ``hal0``
+    — exclude ``_synthetic`` rows so only genuine per-slot configs pair.
+    """
+    slots = [
+        {"name": "flm", "state": "ready", "backend": "flm"},
+        {
+            "name": "hal0",
+            "state": "serving",
+            "backend": "vulkan",
+            "_synthetic": True,
+        },
+    ]
+    c = da.check_fabric_clock(slots, sys_root=_fclk_sysfs(tmp_path, perf="auto", marked_index=0))
+    assert c.status == "pass", c.detail
+    assert "hal0" not in c.detail
+
+
+# ── memory engine env (#3520 / #3388) ────────────────────────────────────────
+
+
+def test_memory_engine_env_passes_when_engine_not_installed() -> None:
+    check = da.check_memory_engine_env(report={"installed": False})
+    assert check.status == "pass"
+
+
+def test_memory_engine_env_passes_when_unit_matches() -> None:
+    report = {"installed": True, "checked": True, "drift": [], "legacy_drop_in": None}
+    assert da.check_memory_engine_env(report=report).status == "pass"
+
+
+def test_memory_engine_env_pass_shows_the_worker_slots_in_force() -> None:
+    report = {
+        "installed": True,
+        "checked": True,
+        "drift": [],
+        "legacy_drop_in": None,
+        "effective": {
+            "HINDSIGHT_API_WORKER_MAX_SLOTS": "4",
+            "HINDSIGHT_API_LLM_MAX_CONCURRENT": "2",
+        },
+    }
+    detail = da.check_memory_engine_env(report=report).detail
+    assert "worker slots 4" in detail and "LLM concurrency 2" in detail
+
+
+def test_memory_engine_env_warns_on_drift_with_the_numbers() -> None:
+    report = {
+        "installed": True,
+        "checked": True,
+        "drift": [
+            {"key": "HINDSIGHT_API_LLM_MAX_CONCURRENT", "expected": "1", "effective": "2"},
+        ],
+        "legacy_drop_in": None,
+    }
+    check = da.check_memory_engine_env(report=report)
+    assert check.status == "warn"
+    assert "HINDSIGHT_API_LLM_MAX_CONCURRENT=2" in check.detail
+    assert "hal0 renders 1" in check.detail
+
+
+def test_memory_engine_env_warns_on_leftover_legacy_drop_in() -> None:
+    report = {
+        "installed": True,
+        "checked": True,
+        "drift": [],
+        "legacy_drop_in": "/x/zz-h0-98-llm-global-cap.conf",
+    }
+    check = da.check_memory_engine_env(report=report)
+    assert check.status == "warn"
+    assert "zz-h0-98-llm-global-cap.conf" in check.detail
+
+
+def test_memory_engine_env_warns_when_unit_env_unreadable() -> None:
+    report = {"installed": True, "checked": False, "drift": [], "legacy_drop_in": None}
+    assert da.check_memory_engine_env(report=report).status == "warn"
+
+
+# ── memory embedder: recorded against configured (#3518) ─────────────────────
+
+_BGE = "BAAI/bge-small-en-v1.5"
+_HS = "hindsight-ai/hs-embed-1"
+
+
+def _embedder(recorded: str, configured: str, *, mixed: bool = False, **extra: object) -> dict:
+    status: dict = {
+        "recorded": recorded,
+        "recorded_provider": "local",
+        "configured": configured,
+        "configured_provider": "local",
+        "mixed": mixed,
+        "source": "engine-default",
+        "recorded_at": "2026-11-10T21:00:00+00:00",
+        "effective": None,
+        "conflict": None,
+        "record_error": None,
+        "store_unavailable": None,
+        **extra,
+    }
+    status["needs_switch"] = mixed or (status["recorded_provider"], recorded) != (
+        status["configured_provider"],
+        configured,
+    )
+    return status
+
+
+def test_memory_embedder_passes_when_the_store_matches_the_config() -> None:
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE))
+    assert (check.key, check.status) == ("memory_embedder", "pass")
+    assert _BGE in check.detail
+
+
+def test_memory_embedder_passes_with_a_note_on_an_upgraded_box_at_the_default() -> None:
+    """Store on bge-small, config still at its shipped default: every upgraded
+    box. Not a warning (nothing the operator did), but it names the way to
+    move the store."""
+    check = da.check_memory_embedder(status=_embedder(_BGE, _HS))
+    assert check.status == "pass"
+    assert f"built with {_BGE} and stays on it" in check.detail
+    assert f"the configured model ({_HS})" in check.detail
+    assert f"only through `hal0 memory embedder switch {_HS}`" in check.detail
+    assert "re-embeds the store" in check.detail
+
+
+def test_memory_embedder_warns_when_the_operator_set_a_model_that_differs() -> None:
+    check = da.check_memory_embedder(status=_embedder(_BGE, "example-org/another-embedder"))
+    assert check.status == "warn"
+    assert f"built with {_BGE}" in check.detail
+    assert "[memory.models] asks for example-org/another-embedder" in check.detail
+    assert "no effect" in check.detail
+    # Names the way out, with the model it would move the store to.
+    assert "`hal0 memory embedder switch example-org/another-embedder`" in check.detail
+    assert "a dry run; add --apply" in check.detail
+
+
+def test_memory_embedder_names_the_provider_in_the_switch_command() -> None:
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE, configured_provider="openai"))
+    assert f"`hal0 memory embedder switch {_BGE} --provider openai`" in check.detail
+
+
+def test_memory_embedder_offers_the_switch_as_the_repair_for_a_mixed_store() -> None:
+    check = da.check_memory_embedder(status=_embedder(_HS, _HS, mixed=True))
+    assert check.status == "warn"
+    assert f"`hal0 memory embedder switch {_HS}`" in check.detail
+
+
+def test_memory_embedder_reports_an_interrupted_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A switch that stopped half-way leaves memory writes paused: say so first."""
+    from hal0.memory import embedder_switch as es
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    es.journal_path().parent.mkdir(parents=True)
+    es.journal_path().write_text(
+        jsonlib.dumps(
+            {
+                "version": es.JOURNAL_VERSION,
+                "run_id": "3f9a1c2e",
+                "started_at": "2026-11-11T02:00:00+00:00",
+                "pid": 1,
+                "phase": "swapping",
+                "target": {"provider": "local", "model": _HS},
+                "previous": {"provider": "local", "model": _BGE},
+                "archive_dir": "/nowhere",
+                "error": "deleting the bank: the engine answered HTTP 500",
+            }
+        )
+    )
+
+    # The journal alone, its pause gone: writes may be reaching half-replaced banks.
+    check = da.check_memory_embedder()
+
+    assert (check.key, check.status) == ("memory_embedder", "warn")
+    assert "did not finish (deleting the bank: the engine answered HTTP 500)" in check.detail
+    assert "run 3f9a1c2e, archives in /nowhere" in check.detail
+    assert "its write pause is gone" in check.detail
+    assert "`hal0 memory embedder switch --status`" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
+def test_memory_embedder_is_informational_after_a_switch_away_from_the_config() -> None:
+    """The operator moved the store on purpose; the config naming another
+    model is then a fact to state, with the setting that makes them agree."""
+    status = _embedder(_BGE, "example-org/another-embedder", source="embedder-switch")
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "pass"
+    assert f"moved to {_BGE} with `hal0 memory embedder switch`" in check.detail
+    assert "which is fine and has no effect" in check.detail
+    assert "embeddings_model under [memory.models]" in check.detail
+
+    # The same difference without a switch behind it is still the operator's to settle.
+    plain = _embedder(_BGE, "example-org/another-embedder")
+    assert da.check_memory_embedder(status=plain).status == "warn"
+
+
+def test_memory_embedder_says_when_the_engine_is_private_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.memory import embedder_switch as es
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/backups/x")
+    monkeypatch.setattr(es, "isolated_port", lambda: 45123)
+
+    check = da.check_memory_embedder()
+
+    assert check.status == "warn"
+    assert "the engine is isolated on a private port (45123)" in check.detail
+    assert "recall is unavailable too" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
+def test_memory_embedder_says_when_the_engine_is_back_before_the_gate_lifts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finish whose last restart failed: drop-in gone, gate and journal still there."""
+    from hal0.memory import embedder_switch as es
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/backups/x")
+    monkeypatch.setattr(es, "isolated_port", lambda: None)
+    monkeypatch.setattr(
+        es,
+        "interrupted_switch",
+        lambda: {"run_id": "3f9a1c2e", "phase": "swapping", "isolated": True, "error": "boom"},
+    )
+
+    check = da.check_memory_embedder()
+
+    assert check.status == "warn"
+    assert "back at its normal address" in check.detail
+    assert "recall works" in check.detail
+    assert "`--resume` isolates it again" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
+def test_memory_embedder_reports_a_write_gate_that_no_switch_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A killed switch leaves the gate set on purpose; this row is its liveness story."""
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/backups/memory-embedder-switch-x")
+
+    check = da.check_memory_embedder()
+
+    assert check.status == "warn"
+    assert "run 3f9a1c2e, archives in /backups/memory-embedder-switch-x" in check.detail
+    assert "no switch is running, so every memory write is refused" in check.detail
+    assert "`hal0 memory embedder switch --status`" in check.detail
+    assert "`hal0 memory embedder switch --resume`" in check.detail
+
+
+def test_memory_embedder_passes_while_a_switch_is_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    from hal0.memory import embedder_switch as es
+    from hal0.memory import write_gate
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    write_gate.engage_gate(run_id="3f9a1c2e", archive_dir="/x")
+    fd = os.open(es.lock_path(), os.O_RDONLY | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        check = da.check_memory_embedder()
+    finally:
+        os.close(fd)
+
+    assert check.status == "pass" and "an embedder switch is running" in check.detail
+
+
+def test_memory_embedder_warns_when_the_operator_set_a_provider_that_differs() -> None:
+    """Same model, a remote provider: an explicit setting that is not applied."""
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE, configured_provider="openai"))
+    assert check.status == "warn"
+    assert "the openai provider" in check.detail and "no effect" in check.detail
+
+
+def test_memory_embedder_names_a_recorded_remote_provider_when_it_passes() -> None:
+    status = _embedder(_BGE, _BGE, recorded_provider="openai", configured_provider="openai")
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "pass"
+    assert "the openai provider" in check.detail
+
+
+def test_memory_embedder_warns_on_a_mixed_store_even_when_the_models_match() -> None:
+    check = da.check_memory_embedder(status=_embedder(_HS, _HS, mixed=True))
+    assert check.status == "warn"
+    assert "two embedders" in check.detail
+    assert f"`hal0 memory embedder switch {_HS}`" in check.detail
+    assert "has no effect" not in check.detail
+
+
+def test_memory_embedder_warns_when_a_store_on_the_default_model_is_configured_away() -> None:
+    """Recorded hs-embed-1, operator asks for bge-small: an explicit setting that is not applied."""
+    check = da.check_memory_embedder(status=_embedder(_HS, _BGE))
+    assert check.status == "warn"
+    assert f"[memory.models] asks for {_BGE}" in check.detail
+
+
+def test_memory_embedder_warns_on_a_mixed_store_at_the_default_config() -> None:
+    """Mixed outranks the upgraded-box note."""
+    check = da.check_memory_embedder(status=_embedder(_BGE, _HS, mixed=True))
+    assert check.status == "warn"
+    assert "two embedders" in check.detail
+
+
+def test_memory_embedder_warns_naming_both_when_the_engine_disagrees_with_the_record() -> None:
+    conflict = {
+        "live": {"provider": "local", "model": _HS},
+        "on_disk": {"provider": "local", "model": _HS},
+    }
+    check = da.check_memory_embedder(status=_embedder(_BGE, _BGE, conflict=conflict))
+    assert check.status == "warn"
+    assert f"record says {_BGE}" in check.detail
+    assert f"the running engine is on {_HS}" in check.detail
+    assert f"would start it on {_HS}" in check.detail
+    assert "changed neither" in check.detail
+
+
+def test_memory_embedder_warns_with_the_path_when_the_record_cannot_be_read() -> None:
+    status = _embedder(_BGE, _BGE, record_error="/var/lib/hal0/state/memory-embedder.json")
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "warn"
+    assert "/var/lib/hal0/state/memory-embedder.json cannot be read" in check.detail
+    assert "left the file as it is" in check.detail
+
+
+def test_memory_embedder_warns_when_the_store_location_is_unavailable() -> None:
+    status = _embedder(
+        _BGE,
+        _HS,
+        source="store-unavailable",
+        recorded_at=None,
+        store_unavailable="/var/lib/hal0/memory/hindsight",
+    )
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "warn"
+    assert "/var/lib/hal0/memory/hindsight, is not available" in check.detail
+    assert "nothing is recorded" in check.detail
+
+
+def test_memory_embedder_passes_on_a_box_with_no_store() -> None:
+    status = _embedder(_HS, _HS, source="configured", recorded_at=None)
+    check = da.check_memory_embedder(status=status)
+    assert check.status == "pass"
+    assert "no memory store" in check.detail
+
+
+def test_memory_embedder_reads_this_boxs_store_by_default(tmp_path, monkeypatch) -> None:
+    """Unstubbed: an existing store and the default config is the upgraded-box note."""
+    from hal0.memory import extraction_env as ee
+    from hal0.memory.engine_upgrade import hindsight_dir
+
+    monkeypatch.setattr(ee, "SHOWCASE_DROP_IN_PATH", tmp_path / "absent" / "showcase-lanes.conf")
+    assert da.check_memory_embedder().status == "pass"  # no store yet
+
+    (hindsight_dir() / ".pg0" / "instances" / "hindsight" / "data").mkdir(parents=True)
+    check = da.check_memory_embedder()
+
+    assert check.status == "pass"
+    assert f"built with {_BGE} and stays on it" in check.detail and _HS in check.detail
+
+
+def test_memory_embedder_skips_when_the_config_is_unreadable(monkeypatch) -> None:
+    def boom(*_a: object, **_k: object) -> None:
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr("hal0.config.loader.load_hal0_config", boom)
+    check = da.check_memory_embedder()
+    assert check.status == "warn"
+    assert "unreadable" in check.detail
+
+
+def test_render_all_keeps_bracketed_table_names_in_row_text() -> None:
+    # #3552: a `[memory.models]` table name in a row detail was read as Rich
+    # markup and dropped from the printed table.
+    buf = io.StringIO()
+    checks = [
+        Check(
+            key="memory_embedder",
+            label="Memory embedder",
+            status="warn",
+            detail="stays on it; [memory.models] asks for hindsight-ai/x",
+        ),
+        Check(
+            key="memory_graph", label="Graph", status="warn", detail="[memory.graph].llm_timeout_s"
+        ),
+    ]
+    da.render_all(Console(file=buf, force_terminal=False, width=200), checks)
+    out = buf.getvalue()
+    assert "[memory.models] asks for" in out
+    assert "[memory.graph].llm_timeout_s" in out
+
+
+# ── memory layout (ADR-0058 decision 7) ──────────────────────────────────────
+
+
+def test_memory_layout_row(tmp_path) -> None:
+    from hal0.memory import bank_layout as bl
+
+    record = tmp_path / "memory-layout.json"
+    missing = da.check_memory_layout(path=record)
+    assert (missing.key, missing.status) == ("memory_layout", "pass")
+    assert "no record yet" in missing.detail
+
+    bl.save_layout_record(bl.BankLayout(bl.LAYOUT_TWO_BANK), record)
+    assert "two banks" in da.check_memory_layout(path=record).detail
+
+    bl.save_layout_record(
+        bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared", legacy_unified=False),
+        record,
+    )
+    old = da.check_memory_layout(path=record)
+    assert old.status == "pass" and "old split layout, platform bank shared" in old.detail
+
+    record.write_text("{not json")
+    broken = da.check_memory_layout(path=record)
+    assert broken.status == "fail"
+    assert str(record) in broken.detail and "serves no memory bank" in broken.detail
+
+
+def test_projects_row_says_when_the_layout_is_undecided(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from hal0.config import loader
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import bank_layout as bl
+
+    def unreadable(_cfg, **_kw):
+        raise bl.LayoutRecordError(bl.layout_record_path(), "is not JSON")
+
+    monkeypatch.setattr(bl, "current_layout", unreadable)
+    monkeypatch.setattr(
+        loader, "load_hal0_config", lambda: SimpleNamespace(memory=MemoryConfig(bank="x"))
+    )
+    memory = {"engine": "hindsight", "enabled": True, "reachable": True}
+    check = da.check_memory_projects(memory=memory, fetch=lambda *_a: [])
+    assert check.status == "pass"
+    assert "layout is undecided" in check.detail and "is not JSON" in check.detail
+
+
+def test_memory_layout_row_warns_while_hal0_api_cannot_settle_it(tmp_path) -> None:
+    """No record, and hal0-api reports why it serves no bank (review C)."""
+    payload = {"enabled": True, "reachable": False, "layout_undecided": "disk full"}
+    check = da.check_memory_layout(path=tmp_path / "memory-layout.json", memory=payload)
+    assert check.status == "warn"
+    assert "disk full" in check.detail and "refuses memory writes" in check.detail

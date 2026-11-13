@@ -1,3 +1,5 @@
+import { isXdnaSlot } from '@/lib/slotModelFit'
+
 // Single source of truth for the FLM [npu] modality defaults.
 //
 // Backend contract (config/schema.py NpuConfig + providers/flm.py build_env):
@@ -14,13 +16,21 @@ export const npuModalityOn = (npu, role) => {
 // discriminator the backend trio uses (device=npu + type=transcription|
 // embedding marks a shadow) — never on the display name: a shadow with a
 // non-canonical name must not fall into the chat branch and toggle the
-// anchor's chat modality.
+// anchor's chat modality. An xdna (ggml-xdna llama-server) slot is never a
+// trio participant — it has no [npu] modality roles at all — so it always
+// falls through to 'chat' here but callers must gate on `isNpuShadowSlot` /
+// a runner check before treating that as an anchor/shadow role.
 export const npuRoleForSlot = (slot) =>
   slot?.type === 'transcription' ? 'asr' : slot?.type === 'embedding' ? 'embed' : 'chat'
 
 // True for the trio shadow records (stt/embed) riding the anchor's process.
+// An xdna slot is a plain llama-server GGUF slot and can never be a shadow,
+// regardless of its `type` (defense in depth: xdna never emits
+// transcription/embedding slot types today, but the runner check keeps this
+// correct even if that changes).
 export const isNpuShadowSlot = (slot) =>
-  slot?.type === 'transcription' || slot?.type === 'embedding'
+  !isXdnaSlot(slot) &&
+  (slot?.type === 'transcription' || slot?.type === 'embedding')
 
 // Resolved pill state — what the card should actually render as ON/OFF.
 //

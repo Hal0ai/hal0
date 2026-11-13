@@ -619,6 +619,7 @@ def test_graph_status_echoes_the_extraction_limits(
         "llm_retries": 1,
         "task_retries": 2,
         "retry_backoff_s": 120,
+        "worker_slots": 4,
     }
 
 
@@ -647,6 +648,77 @@ def test_put_limits_change_propagates_with_the_new_limits(
     )
     # ...and persisted.
     assert client.get("/api/memory/graph/status").json()["extraction_limits"]["max_tokens"] == 6000
+
+
+# ── #3347: concurrency held to the extraction slot's --parallel ──────────────
+
+
+def test_graph_status_reports_the_slot_parallel_and_the_clamped_limits(
+    client: TestClient, hal0_home: Path
+) -> None:
+    with patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock:
+        apply_mock.return_value = {"slot": "utility", "written": True, "error": None}
+        client.put("/api/memory/graph", json={"extraction_max_concurrent": 8})
+    with patch("hal0.memory.extraction_env.extraction_slot_parallel", return_value=2):
+        body = client.get("/api/memory/graph/status").json()
+    assert body["extraction_slot_parallel"] == 2
+    # The recorded value stays what the operator asked for...
+    assert body["extraction_limits"]["max_concurrent"] == 8
+    # ...the rendered one is held to the slot.
+    assert body["effective_extraction_limits"]["max_concurrent"] == 2
+    assert "--parallel 2" in body["concurrency_warning"]
+
+
+def test_graph_status_has_no_warning_when_the_slot_parallel_is_unknown(client: TestClient) -> None:
+    body = client.get("/api/memory/graph/status").json()
+    assert body["extraction_slot_parallel"] is None
+    assert body["concurrency_warning"] is None
+    assert body["effective_extraction_limits"] == body["extraction_limits"]
+
+
+def test_put_renders_the_clamped_concurrency_and_warns(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """hal0.toml records 8; the drop-in is written with the slot's 2, and the
+    response says why."""
+    with (
+        patch("hal0.memory.extraction_env.extraction_slot_parallel", return_value=2),
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+    ):
+        apply_mock.return_value = {"slot": "utility", "written": True, "error": None}
+        r = client.put("/api/memory/graph", json={"extraction_max_concurrent": 8})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["extraction_max_concurrent"] == 8
+    apply_mock.assert_called_once_with(
+        "utility", timeout_s=300, limits=ExtractionLimits(max_concurrent=2)
+    )
+    assert any("--parallel 2" in w for w in body["warnings"])
+
+
+def test_put_repairs_a_drop_in_that_a_slot_parallel_change_made_stale(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path, current_drop_in: Path
+) -> None:
+    """Nothing in the PUT changed a limit, but the slot now serves fewer
+    sequences than the drop-in on disk assumes: the next PUT rewrites it."""
+    import hal0.memory.extraction_env as ee
+
+    with patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock:
+        apply_mock.return_value = {"slot": "utility", "written": True, "error": None}
+        client.put("/api/memory/graph", json={"extraction_max_concurrent": 4})
+    current_drop_in.write_text(
+        ee.render_drop_in(300, limits=ExtractionLimits(max_concurrent=4)), encoding="utf-8"
+    )
+    with (
+        patch("hal0.memory.extraction_env.extraction_slot_parallel", return_value=2),
+        patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock,
+    ):
+        apply_mock.return_value = {"slot": "utility", "written": True, "error": None}
+        r = client.put("/api/memory/graph", json={"enabled": False})
+    assert r.status_code == 200, r.text
+    apply_mock.assert_called_once_with(
+        "utility", timeout_s=300, limits=ExtractionLimits(max_concurrent=2)
+    )
 
 
 def test_put_out_of_range_limit_is_rejected_before_anything_changes(

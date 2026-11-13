@@ -111,6 +111,7 @@ class SettingsKeyChange:
     kind: str
     apply_class: str | None
     services: list[str]
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,7 @@ def compute_settings_changeset(current: Hal0Config, patch: dict[str, Any]) -> Se
                 kind=kind,
                 apply_class=entry["apply_class"] if entry else None,
                 services=list(entry["services"]) if entry else [],
+                note=entry.get("note") if entry else None,
             )
         )
 
@@ -200,6 +202,8 @@ def changeset_payload(cs: SettingsChangeSet) -> dict[str, Any]:
                 "kind": c.kind,
                 "apply_class": c.apply_class,
                 "services": c.services,
+                # Only on a row whose class name does not say what applies it.
+                **({"note": c.note} if c.note else {}),
             }
             for c in cs.changes
         ],

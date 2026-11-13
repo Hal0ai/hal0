@@ -29,10 +29,13 @@ Design (full rationale: ``hal0-specs/spec-kb1-auth.md``):
   ADMIN** — deny-by-default. A newly added router is locked out until a
   rule is added here (that's the whole point of the ratchet).
 - **BRIDGE** — the agent bridge's own surfaces (ADR-0043): the
-  ``/mcp/agents`` mount and ``GET /api/bridge/me``. A bridge client key or
-  the admin credential opens them; nothing else does, and the middleware
-  never lets one ride the dev-open bypass. A bridge key is held to its
-  scopes everywhere else (:func:`hal0.api.auth.bridge_scope_admits`).
+  ``/mcp/agents`` mount, ``GET /api/bridge/me`` and the engine-compatible
+  memory endpoint under ``/api/memory/compat`` (ADR-0058 decision 4b). A
+  bridge client key or the admin credential opens them; nothing else does,
+  and the middleware never lets one ride the dev-open bypass. The class
+  itself checks no scope, so the memory endpoint's handlers require the
+  ``memory`` scope themselves. A bridge key is held to its scopes everywhere
+  else (:func:`hal0.api.auth.bridge_scope_admits`).
 
 Ordering matters: rules are evaluated first-match-wins, so more specific
 rules (exact paths, narrow method sets) must precede the broader prefix
@@ -207,6 +210,14 @@ class _Rule:
         return self.match(path)
 
 
+#: Where the engine-compatible memory endpoint is mounted (ADR-0058 decision
+#: 4b). The one spelling of that prefix: the rule below, the router mount in
+#: ``hal0.api`` and the ratchet tests all read it. Every route under it is
+#: BRIDGE, and none of them belongs in :data:`DESTRUCTIVE_MEMORY_ROUTES`,
+#: whose rows are ADMIN: ``tests/security/test_memory_delete_auth.py`` holds
+#: both halves against the live route table.
+COMPAT_MEMORY_PREFIX = "/api/memory/compat"
+
 _GET: frozenset[str] = frozenset({"GET", "HEAD"})
 _POST: frozenset[str] = frozenset({"POST"})
 _PUT: frozenset[str] = frozenset({"PUT"})
@@ -292,6 +303,16 @@ RULES: tuple[_Rule, ...] = (
     _Rule(
         "runner images sync/pull mutations", _prefix("/api/runner-images"), AuthClass.ADMIN, None
     ),
+    # xdna runner knob schema (ADR-0057): a static description of the
+    # GGML_XDNA_* env set, pmode values and host_xrt doc string, read off
+    # hal0.runners.knobs. No box state, no mutation; the dashboard needs it
+    # to render the slot drawer, same as the runner-images listing above.
+    _Rule(
+        "xdna runner knob schema (GET)",
+        _exact("/api/runners/xdna/knobs"),
+        AuthClass.CLIENT,
+        _GET,
+    ),
     _Rule("slots list (GET, exact)", _exact("/api/slots"), AuthClass.CLIENT, _GET),
     _Rule("slots (everything else)", _prefix("/api/slots"), AuthClass.ADMIN, None),
     _Rule("hf search (GET)", _prefix("/api/hf"), AuthClass.CLIENT, _GET),
@@ -330,6 +351,26 @@ RULES: tuple[_Rule, ...] = (
     _Rule("services", _prefix("/api/services"), AuthClass.ADMIN, None),
     _Rule("settings", _prefix("/api/settings"), AuthClass.ADMIN, None),
     _Rule("secrets", _prefix("/api/secrets"), AuthClass.ADMIN, None),
+    # ── memory: the engine-compatible endpoint for coding agents ───────────
+    #
+    # ADR-0058 decision 4b: the Hindsight coding-agents plugin is pointed here
+    # instead of at the engine's own port. BRIDGE, every method: a bridge
+    # client key or the admin credential, whatever the auth posture, and never
+    # the dev-open bypass. The class admits any bridge key; the handlers hold
+    # the caller to the ``memory`` scope
+    # (:func:`hal0.api.routes.memory_compat.require_memory_bridge`).
+    #
+    # It sits ABOVE the destructive rows on purpose. A plugin deletes its own
+    # documents through this prefix, and the handler decides which ones; under
+    # the ``any DELETE`` row below that call would be ADMIN and no bridge key
+    # could make it. Nothing here reaches a bank-scoped delete: the handlers
+    # refuse ``DELETE`` on a bank outright (see COMPAT_MEMORY_PREFIX).
+    _Rule(
+        "memory compat endpoint (bridge key, memory scope)",
+        _prefix(COMPAT_MEMORY_PREFIX),
+        AuthClass.BRIDGE,
+        None,
+    ),
     # ── memory: the irreversible subset, pinned AHEAD of the generic rule ──
     #
     # Issues #1024 (a single unauthenticated `DELETE /api/memory/banks/{id}`
@@ -494,6 +535,8 @@ OPEN_ALLOWLIST: frozenset[tuple[str, str]] = frozenset(
 # live route table AND asserts this set is exactly the destructive memory
 # surface the app actually serves — so adding a new memory delete route, or
 # reclassifying an existing one, has to touch this constant in the same diff.
+# The engine-compatible endpoint under COMPAT_MEMORY_PREFIX is outside this
+# set: it is BRIDGE, and the same test file holds its routes to that class.
 #
 # ``POST /api/memory/delete`` is here because it is a *bulk* id-scoped delete
 # (body ``{"ids": [...]}``), not a create — the verb hides the blast radius.
@@ -509,6 +552,10 @@ DESTRUCTIVE_MEMORY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("DELETE", "/api/memory/banks/{bank_id}/mental-models/{model_id}"),
         ("DELETE", "/api/memory/banks/{bank_id}/operations/{operation_id}"),
         ("POST", "/api/memory/delete"),
+        # Engine passthrough (Hindsight 1.2 showcase). DELETE is narrowed in
+        # memory_lanes._check_method to a single directive / mental model;
+        # bank-scoped deletes are refused there with 403.
+        ("DELETE", "/api/memory/engine/{path:path}"),
     }
 )
 
@@ -533,6 +580,7 @@ CONFIRM_GUARDED_MEMORY_ROUTES: frozenset[tuple[str, str]] = frozenset(
 
 
 __all__ = [
+    "COMPAT_MEMORY_PREFIX",
     "CONFIRM_GUARDED_MEMORY_ROUTES",
     "DESTRUCTIVE_MEMORY_ROUTES",
     "OPEN_ALLOWLIST",

@@ -301,6 +301,19 @@ export const ENDPOINTS = {
     `/api/memory/banks/${encodeURIComponent(bank)}/reflect`,
   memoryBankMentalModels: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/mental-models`,
+  // One mental model (GET detail) and its revision history. Refresh is
+  // `${memoryBankMentalModel(bank, id)}/refresh` (see useMentalModelRefresh).
+  memoryBankMentalModel: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/mental-models/${encodeURIComponent(id)}`,
+  memoryBankMentalModelHistory: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/mental-models/${encodeURIComponent(id)}/history`,
+  // Knowledge base — the classified bank routes in routes/memory_admin.py's
+  // _FORWARDS (tree; page GET). A page is refreshed and edited through its
+  // mental model (memoryBankMentalModel), never a page route (#3564).
+  memoryBankKnowledgeTree: (bank: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/knowledge-base/tree`,
+  memoryBankKnowledgePage: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/knowledge-base/pages/${encodeURIComponent(id)}`,
   memoryBankDirectives: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/directives`,
   memoryBankOperations: (bank: string) =>
@@ -565,4 +578,13 @@ export const ENDPOINTS = {
   boardOrchestration: '/api/board/orchestration', // GET | PUT (4 knobs)
   boardEvents: '/api/board/events',          // WS ?since=&board= (local BoardStore poll — no token/tenant, see board_ws.py)
   brainChat: '/api/brain/chat',              // POST (SSE) — hal0-brain steward chat
+  // ── Memory area aggregates ─────────────────────────────────────────────
+  // Connected coding-agent banks + the harness install one-liners.
+  memoryAgents: '/api/memory/agents',
+  // Embedding / reranker / decision model identities.
+  memoryModels: '/api/memory/models',
+  // Does memory need the operator, and what first: the ordered repair path
+  // and the figures behind each step (queue, extraction failures, knowledge).
+  // Answers 200 whatever state the engine is in (routes/memory_health.py).
+  memoryHealth: '/api/memory/health',
 } as const

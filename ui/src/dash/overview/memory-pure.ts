@@ -1,32 +1,30 @@
 // hal0 Overview v2 — pure helpers for the Memory card. No React, no window globals.
 
 import type { BankStats } from '@/api/hooks/useHindsight'
+import { parseMemoryRoute, serializeMemoryRoute } from '../memory-area/memory-route-pure'
 import { relTime } from './overview-pure'
 
 const DASH = '—'
 
 /**
- * The bank the Memory pane would open: the stored choice (localStorage `hal0.mem.bank`) when it is
- * still a bank, else the bank a `#memory/<bank>` or `#memory/bank?bank=<bank>` hash names, else the
- * first bank. Null with no banks.
+ * The bank the card shows and its link opens: the stored choice (localStorage `hal0.mem.bank`,
+ * written by Memory ▸ Facts) when it is still a bank, else the bank a Memory address
+ * (`#memory/facts?bank=<bank>`) names, else the first bank. Null with no banks.
  */
 export function chosenBank(banks: string[], stored: string | null, hash: string): string | null {
   if (banks.length === 0) return null
   if (stored && banks.includes(stored)) return stored
-  const qIdx = hash.indexOf('?')
-  const fromQuery = qIdx === -1 ? null : new URLSearchParams(hash.slice(qIdx + 1)).get('bank')
-  if (fromQuery && banks.includes(fromQuery)) return fromQuery
-  const path = (qIdx === -1 ? hash : hash.slice(0, qIdx)).replace(/^#/, '').split('/')
-  if (path[0] === 'memory' && path[1]) {
-    let seg = path[1]
-    try {
-      seg = decodeURIComponent(seg)
-    } catch {
-      /* keep the raw segment */
-    }
-    if (banks.includes(seg)) return seg
-  }
+  const fromHash = parseMemoryRoute(hash).bank
+  if (fromHash && banks.includes(fromHash)) return fromHash
   return banks[0]
+}
+
+/**
+ * Where the card's link goes, as a route id (no leading `#`): the chosen bank's facts, or the
+ * Memory area's first tab when there is no bank to open.
+ */
+export function memoryCardTarget(bank: string | null): string {
+  return (bank ? serializeMemoryRoute({ tab: 'facts', bank }) : serializeMemoryRoute({ tab: 'health' })).slice(1)
 }
 
 export interface BankFigures {

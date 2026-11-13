@@ -34,6 +34,7 @@ from pydantic import (
     BaseModel,
     Field,
     PrivateAttr,
+    ValidationInfo,
     field_serializer,
     field_validator,
     model_serializer,
@@ -50,6 +51,9 @@ from hal0.model_meta import (
 from hal0.model_meta import (
     VALID_DEVICES as _VALID_DEVICES,
 )
+from hal0.project_slug import DEFAULT_DENY as _PROJECT_DEFAULT_DENY
+from hal0.project_slug import RESERVED_SLUGS as _PROJECT_RESERVED_SLUGS
+from hal0.project_slug import normalise_slug as _normalise_project_slug
 from hal0.release.policy import ReleaseKind
 
 log = logging.getLogger(__name__)
@@ -159,10 +163,61 @@ class NpuConfig(BaseModel):
         default=True,
         description="Enable chat (LLM) modality on the FLM slot. Default ON.",
     )
+    decision: str | None = Field(
+        default=None,
+        pattern=r"^d3:[A-Za-z0-9_.-]+$",
+        description=(
+            "EXPERIMENTAL / optional. Decision-model tag (FLM's small side "
+            "model, e.g. 'd3:lite') for a slot that wants to serve decision "
+            "calls itself. Must match 'd3:<name>'. When set, FLMProvider "
+            "appends 'flm serve ... --decision <tag>' and exports "
+            "HAL0_FLM_DECISION so the container/native argv builder renders "
+            "it (shared tail in _flm_shadow_role_args). FLM reserves ~1.8GB "
+            "extra NPU memory when enabled. Most deployments do NOT set "
+            "this: Hindsight decision calls (POST /v1/systemone) are served "
+            "by the CPU hs-decide System One server configured under "
+            "[memory.decision] by default, not by an FLM slot. Absent means "
+            "this slot has no decision model."
+        ),
+    )
     # NOTE: FLM has no per-role model selection — ``--asr`` / ``--embed`` are
     # boolean flags that load FLM's single bundled whisper + embed-gemma. There
     # is deliberately no asr_model/embed_model here; the chat model is the
     # ``flm serve`` positional tag ([model].default) and is the only choice.
+
+
+class XdnaConfig(BaseModel):
+    """[xdna] table in a slot TOML — xdna (ggml-xdna NPU runner) knobs.
+
+    Only meaningful on a slot whose ``binary == "xdna"``; the write guard
+    (``hal0.slots.config_write``) refuses this table on any other slot.
+    All three fields are optional — an absent ``[xdna]`` table is the
+    all-defaults xdna slot.
+
+      - ``pmode``: one of :data:`hal0.runners.knobs.XDNA_PMODES`, validated
+        by :func:`hal0.runners.knobs.validate_xdna_pmode` at write time.
+      - ``env``: ``GGML_XDNA_*`` overrides (plus the one allowed
+        non-``GGML_XDNA_`` extra), screened by
+        :func:`hal0.runners.knobs.screen_xdna_env` at write time.
+      - ``host_xrt``: absolute host path to an XRT install, RO bind-mounted
+        into the container as ``HAL0_XDNA_HOST_XRT`` (write guard rejects a
+        relative path).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    pmode: str | None = Field(
+        default=None,
+        description="xrt-smi power mode token; see hal0.runners.knobs.XDNA_PMODES.",
+    )
+    env: dict[str, str] = Field(
+        default_factory=dict,
+        description="GGML_XDNA_* env overrides (hal0.runners.knobs.XDNA_ENV_DOCS).",
+    )
+    host_xrt: str | None = Field(
+        default=None,
+        description="Absolute host XRT install path, RO bind-mounted into the container.",
+    )
 
 
 class ImageGenConfig(BaseModel):
@@ -607,6 +662,22 @@ class SlotConfig(BaseModel):
             "or pre-load eviction, whatever this value says."
         ),
     )
+    max_inflight: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-slot admission cap on concurrent forwarded requests "
+            "(hal0.dispatcher.admission). When set, the dispatcher serializes "
+            "requests to this slot through a priority admission queue instead "
+            "of forwarding them all straight through — needed for backends "
+            "that execute one request at a time internally (e.g. FastFlowLM's "
+            "NPU: 'the NPU runs one request at a time'), so a hidden upstream "
+            "queue no longer eats into [dispatcher].direct_read_timeout_s. "
+            "POST /v1/systemone (priority 0, decision) always jumps ahead of "
+            "everything else (priority 1); FIFO within a priority class. "
+            "None preserves today's unlimited-concurrency behavior for a slot."
+        ),
+    )
     pinned: bool = Field(
         default=False,
         description=(
@@ -656,6 +727,15 @@ class SlotConfig(BaseModel):
         description=(
             "[npu] table — FLM trio modality toggles (asr, embed). "
             "Absent on non-NPU slots. See NpuConfig."
+        ),
+    )
+
+    xdna: XdnaConfig | None = Field(
+        default=None,
+        description=(
+            "[xdna] table — pmode/env/host_xrt knobs for the xdna (ggml-xdna "
+            "NPU) runner. Absent on non-xdna slots; the write guard refuses "
+            "this table on any slot whose binary is not 'xdna'. See XdnaConfig."
         ),
     )
 
@@ -1802,6 +1882,23 @@ class SlotsConfig(BaseModel):
             "capture."
         ),
     )
+    fabric_clock_guard: str = Field(
+        default="refuse",
+        description=(
+            "Policy when an NPU slot (device=npu, the `flm` recipe) would load "
+            "alongside a GPU slot (vulkan/rocm/hip) that is up or loading, or "
+            "vice versa, while the Proxmox host's AMD GPU fabric clock is not "
+            "held at its top DPM level (hal0.slots.fabric_clock_guard; "
+            "ROCm/TheRock#8709 — a fclk DPM change mid-flight can hang the box "
+            "or corrupt NPU results on Strix Halo). `refuse` (default) blocks "
+            "the load with the host-side fix in the error; `warn` logs and "
+            "stores the warning on the slot like the GTT-leak check but still "
+            "loads; `off` skips the check entirely. An unreadable fabric-clock "
+            "state (expected inside hal0's own container — the sysfs write is "
+            "host-only, but the read should still work) always warns, never "
+            "refuses. Overridable per-process with HAL0_FABRIC_CLOCK_GUARD."
+        ),
+    )
     publish_host: str = Field(
         default="127.0.0.1",
         description=(
@@ -1919,6 +2016,17 @@ class SlotsConfig(BaseModel):
             )
         return host
 
+    @field_validator("fabric_clock_guard")
+    @classmethod
+    def _fabric_clock_guard_known(cls, v: str) -> str:
+        policy = str(v).strip().lower()
+        if policy not in ("refuse", "warn", "off"):
+            raise ValueError(
+                f"[slots].fabric_clock_guard {v!r} is not supported "
+                "(use 'refuse', 'warn', or 'off')"
+            )
+        return policy
+
     @field_validator("network_mode")
     @classmethod
     def _network_mode_known(cls, v: str) -> str:
@@ -2009,6 +2117,19 @@ class DispatcherConfig(BaseModel):
         default=4,
         ge=1,
         description="Max concurrent upstream parallel prefetches.",
+    )
+    admission_wait_timeout_s: float = Field(
+        default=1800.0,
+        ge=1.0,
+        le=86400.0,
+        description=(
+            "Max seconds a request may wait in a slot's admission queue "
+            "(hal0.dispatcher.admission; only applies to slots with "
+            "max_inflight set) before the dispatcher gives up and returns "
+            "503 with Retry-After, rather than forwarding. The read-timeout "
+            "clock for the forward itself starts only after admission, so "
+            "this bound is independent of [dispatcher].direct_read_timeout_s."
+        ),
     )
 
 
@@ -2116,7 +2237,11 @@ class MemoryGraphConfig(BaseModel):
             "extraction slot; the daemon restarts to pick it up. It also sets "
             "the retain wall limit (HINDSIGHT_API_RETAIN_WALL_TIMEOUT, which "
             "hal0 derives, see extraction_llm_retries): the wall limit is "
-            "always above llm_timeout_s x (extraction_llm_retries + 1)."
+            "always above llm_timeout_s x (extraction_llm_retries + 1). "
+            "Hindsight sends these calls non-streaming through hal0's /v1, so "
+            "hal0 also uses this value as the read timeout for hal0/memory "
+            "requests when it is longer than [dispatcher].direct_read_timeout_s; "
+            "a shorter value never lowers that setting."
         ),
     )
     # Extraction limits (#1834). The extraction slot is a shared inference
@@ -2135,8 +2260,11 @@ class MemoryGraphConfig(BaseModel):
             "extraction target (HINDSIGHT_API_LLM_MAX_CONCURRENT and "
             "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT). This also bounds consolidation, "
             "reflect and mental-model refresh. 1 serialises them; raise it "
-            "only for a slot that genuinely serves parallel requests. Applied via "
-            "the hindsight-api drop-in; the daemon restarts to pick it up."
+            "only for a slot that genuinely serves parallel requests. hal0 holds "
+            "the rendered value to the extraction slot's --parallel (calls beyond "
+            "it queue inside llama-server and time out), keeps this setting as "
+            "you wrote it, and warns on save and in graph status when it clamps. "
+            "Applied via the hindsight-api drop-in; the daemon restarts to pick it up."
         ),
     )
     extraction_max_tokens: int = Field(
@@ -2201,6 +2329,25 @@ class MemoryGraphConfig(BaseModel):
             "timed out. Worker-wide like extraction_task_retries: every queued "
             "operation shares it. Applied via the hindsight-api drop-in; the "
             "daemon restarts to pick it up."
+        ),
+    )
+    extraction_worker_slots: int = Field(
+        default=4,
+        ge=3,
+        le=32,
+        description=(
+            "How many queued memory tasks (retain, consolidation, mental-model "
+            "refresh) the engine runs at once (HINDSIGHT_API_WORKER_MAX_SLOTS). "
+            "Independent of extraction_max_concurrent, which caps LLM calls: "
+            "each running task also holds its chunks, embeddings and graph "
+            "writes in memory. Hindsight's own default of 10 took the engine to "
+            "several GiB resident and into the OOM killer on an 11 GiB box, so "
+            "hal0 renders 4. The floor is 3: Hindsight reserves 2 slots for "
+            "consolidation, so a lower bound leaves retain none. Worker-wide "
+            "like extraction_task_retries. Applied via the hindsight-api "
+            "drop-in; the daemon restarts to pick it up. An operator-set "
+            "HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS greater than or "
+            "equal to this value makes Hindsight refuse to start."
         ),
     )
 
@@ -2652,13 +2799,548 @@ class MemoryPriorityConfig(BaseModel):
     )
 
 
+#: #3492: value shapes the ``hal0-systemctl`` showcase allow-list accepts
+#: (installer/wrappers/hal0-systemctl, ``validate_dropin_directive showcase``).
+#: Checked here too so a value the root side would refuse is rejected at save
+#: time instead of leaving the drop-in stale behind a saved ``hal0.toml``.
+_SHOWCASE_PROVIDER_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+_SHOWCASE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}$")
+_SHOWCASE_VIRTUAL_MODEL_RE = re.compile(r"^hal0/[A-Za-z0-9_.-]{1,64}$")
+_SHOWCASE_EFFORT_RE = re.compile(r"^[a-z]{1,16}$")
+
+
+def _showcase_shape(v: str, pattern: re.Pattern[str], what: str) -> str:
+    if not pattern.fullmatch(v) or ".." in v:
+        raise ValueError(f"{what} {v!r} must match {pattern.pattern} (no '..')")
+    return v
+
+
+class MemoryModelsConfig(BaseModel):
+    """[memory.models] section of hal0.toml — Hindsight 1.2 embed/rerank models.
+
+    hindsight-api 1.2.0 ships its own first-party local embedding/reranker
+    models (``hs-embed-1`` / ``hs-rerank-1``, both CPU, in-process). Defaults
+    here match the verified showcase env (``zz-showcase-1.2.conf``): local
+    CPU models, no external gateway hop. Rendered into
+    ``HINDSIGHT_API_EMBEDDINGS_*`` / ``HINDSIGHT_API_RERANKER_*`` env by the
+    installer/extraction_env drop-in renderer.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    embeddings_provider: str = Field(
+        default="local",
+        description="HINDSIGHT_API_EMBEDDINGS_PROVIDER — 'local' runs in-process on CPU.",
+    )
+    embeddings_model: str = Field(
+        default="hindsight-ai/hs-embed-1",
+        description="HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL.",
+    )
+    reranker_provider: str = Field(
+        default="local",
+        description="HINDSIGHT_API_RERANKER_PROVIDER — 'local' runs in-process on CPU.",
+    )
+    reranker_model: str = Field(
+        default="hindsight-ai/hs-rerank-1",
+        description="HINDSIGHT_API_RERANKER_LOCAL_MODEL.",
+    )
+    reranker_bucket_batching: bool = Field(
+        default=True,
+        description="HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING.",
+    )
+
+    @field_validator("embeddings_provider", "reranker_provider")
+    @classmethod
+    def _showcase_provider(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_PROVIDER_RE, "provider")
+
+    @field_validator("embeddings_model", "reranker_model")
+    @classmethod
+    def _showcase_model(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_MODEL_RE, "model id")
+
+
+class MemoryDecisionConfig(BaseModel):
+    """[memory.decision] section of hal0.toml — the Hindsight 1.2 decision model.
+
+    The decision model (``hs-decide-1-flash``) replaces many of Hindsight's
+    LLM calls (recall rank/prune/dedup, consolidation judgments, reflect
+    sufficiency, page delta gating) with a single cheap forward pass. hal0
+    runs it locally as the ``hal0-hs-decide`` CPU System One service
+    (packaging/hindsight-decision/hs_decide_serve.py, unit
+    installer/systemd/hal0-hs-decide.service) on ``port``. The showcase
+    drop-in points hindsight-api at it only while that unit is installed
+    (#3519, ``hal0.memory.extraction_env.decision_engine_base_url``);
+    ``provider = "hindsight"``
+    with ``base_url = http://127.0.0.1:<port>`` is the verified-working local
+    shape (hindsight-api still requires a non-empty, if placeholder, API key
+    even for a local base URL — see ``zz-showcase-1.2.conf``).
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether the decision model lane is enabled at all.",
+    )
+    provider: str = Field(
+        default="local",
+        description=(
+            "'local' (hal0-managed hal0-hs-decide service), 'hindsight-cloud' "
+            "(hosted decision model), or 'off' (engine falls back to its LLM "
+            "lane for decision-gated operations)."
+        ),
+    )
+    model: str = Field(
+        default="hs-decide-1-flash",
+        description="HINDSIGHT_API_DECISION_MODEL_MODEL.",
+    )
+    threads: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description="CPU thread count for the local hal0-hs-decide server.",
+    )
+    max_concurrent: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        description="HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT.",
+    )
+    max_request_tokens: int = Field(
+        default=4096,
+        ge=256,
+        le=32768,
+        description=(
+            "HINDSIGHT_API_DECISION_MODEL_MAX_REQUEST_TOKENS — CPU latency "
+            "budget cap; measured ~25s @ 8.5k tokens on shared CPU."
+        ),
+    )
+    timeout_s: int = Field(
+        default=60,
+        ge=5,
+        le=600,
+        description="HTTP timeout (seconds) for decision-model calls.",
+    )
+    port: int = Field(
+        default=9178,
+        ge=1,
+        le=65535,
+        description="Port the local hal0-hs-decide service binds.",
+    )
+    base_url: str | None = Field(
+        default=None,
+        description=(
+            "Override for where hal0 proxies POST /v1/systemone. Unset means "
+            "http://127.0.0.1:<port> (the local hal0-hs-decide service)."
+        ),
+    )
+
+    def resolved_base_url(self) -> str:
+        """The System One server URL: ``base_url`` if set, else the local port."""
+        return (self.base_url or f"http://127.0.0.1:{self.port}").rstrip("/")
+
+    @field_validator("model")
+    @classmethod
+    def _decision_model_shape(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_MODEL_RE, "decision model id")
+
+    @field_validator("provider")
+    @classmethod
+    def _decision_provider_known(cls, v: str) -> str:
+        allowed = {"local", "hindsight-cloud", "off"}
+        if v not in allowed:
+            raise ValueError(
+                f"memory.decision.provider must be one of {sorted(allowed)}, got {v!r}"
+            )
+        return v
+
+
+class MemoryLaneOpConfig(BaseModel):
+    """Per-operation LLM lane override under ``[memory.lanes.<op>]``.
+
+    One of ``retain``, ``consolidation``, ``reflect``, ``mental_model_refresh``.
+    Any field left unset falls back to the lane's global default
+    (:class:`MemoryLanesConfig`).
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    max_concurrent: int | None = Field(
+        default=None,
+        ge=1,
+        le=32,
+        description=(
+            "HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT. Unset falls back to "
+            "[memory.lanes].llm_max_concurrent."
+        ),
+    )
+    virtual_model: str | None = Field(
+        default=None,
+        description=(
+            "Optional per-op hal0 virtual model override (e.g. 'hal0/utility' "
+            "for a burst lane) instead of the shared 'hal0/memory' alias."
+        ),
+    )
+    timeout_s: int | None = Field(
+        default=None, ge=30, le=3600, description="Per-op LLM timeout override."
+    )
+    reasoning_effort: str | None = Field(
+        default=None,
+        description="Per-op HINDSIGHT_API_{OP}_LLM_REASONING_EFFORT override.",
+    )
+    strict_schema: bool | None = Field(
+        default=None,
+        description="Per-op HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA override.",
+    )
+    max_completion_tokens: int | None = Field(
+        default=None,
+        ge=0,
+        le=131072,
+        description=(
+            "Hard cap on one LLM call's output tokens (#3596): "
+            "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS for consolidation, "
+            "HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS for reflect (which also "
+            "bounds mental-model refresh, a reflect call). Unset means 8192 for "
+            "consolidation and reflect; 0 leaves the engine uncapped. Valid only on consolidation and reflect; retain is capped "
+            "by [memory.graph].extraction_max_tokens, and Hindsight has no "
+            "separate mental-model-refresh cap."
+        ),
+    )
+
+    @field_validator("virtual_model")
+    @classmethod
+    def _op_virtual_model_shape(cls, v: str | None) -> str | None:
+        return (
+            None if v is None else _showcase_shape(v, _SHOWCASE_VIRTUAL_MODEL_RE, "virtual_model")
+        )
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _op_effort_shape(cls, v: str | None) -> str | None:
+        return None if v is None else _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
+
+
+class MemoryLanesConfig(BaseModel):
+    """[memory.lanes] section of hal0.toml — global + per-op LLM concurrency lanes.
+
+    Fixes H0-98: hindsight-api caps ALL LLM calls process-wide via
+    ``HINDSIGHT_API_LLM_MAX_CONCURRENT`` (engine default 32), but hal0 only
+    ever rendered the retain-bucket variant, so consolidation / reflect /
+    mental-model-refresh calls queued behind the memory slot's own
+    concurrency and could outlast the dispatcher's read timeout. This
+    section is the single hal0-rendered source for the global cap AND every
+    per-op override, retiring the hand-maintained
+    ``zz-h0-98-llm-global-cap.conf`` drop-in.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    llm_max_concurrent: int = Field(
+        default=1,
+        ge=1,
+        le=32,
+        description=(
+            "HINDSIGHT_API_LLM_MAX_CONCURRENT — the GLOBAL cap across every "
+            "hindsight-api LLM call (retain, consolidation, reflect, "
+            "mental-model-refresh together), independent of any per-op cap."
+        ),
+    )
+    timeout_s: int = Field(default=600, ge=30, le=3600, description="HINDSIGHT_API_LLM_TIMEOUT.")
+    reasoning_effort: str = Field(default="none", description="HINDSIGHT_API_LLM_REASONING_EFFORT.")
+    strict_schema: bool = Field(default=False, description="HINDSIGHT_API_LLM_STRICT_SCHEMA.")
+    retain: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    consolidation: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    reflect: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    mental_model_refresh: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _effort_shape(cls, v: str) -> str:
+        return _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
+
+    @model_validator(mode="after")
+    def _completion_cap_only_where_engine_accepts(self) -> MemoryLanesConfig:
+        for op in ("retain", "mental_model_refresh"):
+            if getattr(self, op).max_completion_tokens is not None:
+                raise ValueError(
+                    f"memory.lanes.{op}.max_completion_tokens is not supported: "
+                    "set [memory.graph].extraction_max_tokens for retain, and "
+                    "[memory.lanes.reflect].max_completion_tokens for mental-model refresh"
+                )
+        return self
+
+
+class MemoryConsoleConfig(BaseModel):
+    """[memory.console] section of hal0.toml — the Hindsight Control Plane.
+
+    Optional power-user UI (``@vectorize-io/hindsight-control-plane`` on
+    node, verified as ``hal0-memory-console.service`` on CT143). Gated off
+    by default: node may not be present on a given box, in which case the
+    installer must skip install with a clear doctor warning rather than
+    failing the run.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+    enabled: bool = Field(
+        default=False,
+        description="Install/run the Hindsight Control Plane service.",
+    )
+    port: int = Field(
+        default=9999,
+        ge=1,
+        le=65535,
+        description="Port the Hindsight Control Plane binds; changing it moves the console link.",
+    )
+    bind: str = Field(
+        default="127.0.0.1",
+        description="Bind address — kept loopback by default; proxy through hal0-api.",
+    )
+
+
+# One [memory.compat].shared_document_prefixes entry: what a document id may
+# start with, and never the separator of a stored id (``::``).
+_SHARED_DOCUMENT_PREFIX_RE = re.compile(r"[a-zA-Z0-9._:-]{1,64}")
+
+
+def _default_project_deny() -> list[str]:
+    # The default list and the spelling rule come from ``hal0.project_slug``,
+    # a leaf module, and not from ``hal0.memory.projects``: importing anything
+    # under ``hal0.memory`` runs that package's ``__init__``, which imports
+    # the memory providers, and reading the config schema must not do that.
+    return list(_PROJECT_DEFAULT_DENY)
+
+
+def _project_slug(value: Any, key: str) -> str:
+    """One ``[memory.projects]`` entry in its normalised spelling, or raise."""
+    slug = _normalise_project_slug(value) if isinstance(value, str) else None
+    if slug is None:
+        raise ValueError(
+            f"memory.projects.{key} entry {value!r} is not a project name: after "
+            "normalising (lower case, [a-z0-9._-], other runs to '-') nothing is left"
+        )
+    return slug
+
+
+class MemoryProjectsConfig(BaseModel):
+    """[memory.projects] section of hal0.toml — the project registry.
+
+    ADR-0058 decision 4a: hal0 resolves the project of a memory write to one
+    slug before it tags the write (``hal0.memory.projects.resolve_project``).
+    This table is what the resolver consults. Every entry is normalised at
+    load with the resolver's own spelling rule, so ``My Repo`` and ``my-repo``
+    are the same name.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    aliases: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Other spellings of a project: a name on the left is tagged as "
+            "the project on the right (for example a repository's directory "
+            "name that differs from the project's name). Applied before the "
+            "deny list. An alias may not point at a denied name or back at a "
+            "name that leads to it. An entry whose two sides are the same "
+            "name once normalised does nothing and is ignored."
+        ),
+    )
+    deny: list[str] = Field(
+        default_factory=_default_project_deny,
+        description=(
+            "Names that are never projects: directory names a client reports "
+            "when it is not inside a repository. A write naming one is stored "
+            "with no project. Setting this key replaces the default list."
+        ),
+    )
+    registered: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Project names the operator has confirmed. Writes are accepted "
+            "for any name; 'hal0 doctor' (memory_projects) reports names in "
+            "use that are neither listed here nor aliased."
+        ),
+    )
+
+    @field_validator("deny", "registered", mode="before")
+    @classmethod
+    def _slug_list(cls, v: Any, info: Any) -> Any:
+        if not isinstance(v, (list, tuple)):
+            return v
+        slugs = [_project_slug(item, info.field_name) for item in v]
+        return list(dict.fromkeys(slugs))
+
+    @field_validator("aliases", mode="before")
+    @classmethod
+    def _slug_aliases(cls, v: Any) -> Any:
+        if not isinstance(v, Mapping):
+            return v
+        out: dict[str, str] = {}
+        for name, target in v.items():
+            key = _project_slug(name, "aliases")
+            value = _project_slug(target, "aliases")
+            if key == value:
+                # ``{"Widgets": "widgets"}``: one name spelled twice. It maps
+                # the name to itself, which changes nothing, so it is dropped
+                # here as ``registry_from_config`` drops it.
+                continue
+            if out.get(key, value) != value:
+                raise ValueError(
+                    f"memory.projects.aliases names {key!r} twice with different targets "
+                    f"({out[key]!r} and {value!r})"
+                )
+            out[key] = value
+        return out
+
+    @model_validator(mode="after")
+    def _aliases_are_usable(self) -> MemoryProjectsConfig:
+        denied = set(self.deny) | _PROJECT_RESERVED_SLUGS
+        for name in self.aliases:
+            seen = [name]
+            target = self.aliases[name]
+            while True:
+                if target in seen:
+                    chain = " -> ".join([*seen, target])
+                    raise ValueError(f"memory.projects.aliases forms a cycle: {chain}")
+                seen.append(target)
+                if target not in self.aliases:
+                    break
+                target = self.aliases[target]
+            if target in denied:
+                raise ValueError(
+                    f"memory.projects.aliases maps {name!r} to {target!r}, which is a "
+                    "denied name (memory.projects.deny, or the reserved 'unresolved')"
+                )
+        return self
+
+
+def _default_shared_document_prefixes() -> list[str]:
+    return ["git:", "gitlog:", "survey-baseline:"]
+
+
+class MemoryCompatConfig(BaseModel):
+    """[memory.compat] section of hal0.toml.
+
+    The engine-compatible memory endpoint for coding agents,
+    ``/api/memory/compat`` (ADR-0058 decision 4b).
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    shared_document_prefixes: list[str] = Field(
+        default_factory=_default_shared_document_prefixes,
+        max_length=32,
+        description=(
+            "Document-id prefixes whose documents every client of a project "
+            "shares. A client's documents are otherwise stored in a namespace "
+            "of its own, so one client cannot replace another's. An id that "
+            "starts with one of these is stored in the project's shared "
+            "namespace instead and any client of that project may write it. "
+            "The default is the ids the Hindsight coding-agents plugin "
+            "derives from the repository itself: one commit (git:), the "
+            "commit log (gitlog:) and a codebase-survey marker "
+            "(survey-baseline:). Setting this key replaces the default list; "
+            "an empty list shares nothing."
+        ),
+    )
+    max_concurrent_reflects: int = Field(
+        default=2,
+        ge=1,
+        le=64,
+        description=(
+            "How many reflects through the endpoint may run at once, across "
+            "all clients. A reflect holds the memory engine's language model "
+            "for minutes; this keeps coding agents from starving hal0's own "
+            "agents of it. One client is always limited to one at a time, "
+            "and the endpoint never runs more than one fewer than "
+            "[memory.lanes] lets the engine run (one, when the engine runs "
+            "one). A request over the limit is answered 429 with Retry-After."
+        ),
+    )
+    max_concurrent_recalls: int = Field(
+        default=4,
+        ge=1,
+        le=64,
+        description=(
+            "How many recalls through the endpoint may run at once, across "
+            "all clients. One client is always limited to two. A request "
+            "over the limit is answered 429 with Retry-After."
+        ),
+    )
+    max_outstanding_operations: int = Field(
+        default=64,
+        ge=1,
+        le=10000,
+        description=(
+            "How many asynchronous retains one client may have submitted "
+            "that the engine has not finished. An async retain is accepted "
+            "at once and extracted later, so without this one client could "
+            "fill the engine's queue. A session submits one retain per turn "
+            "and the plugin polls ten at a time; a first-time repository "
+            "ingest (the plugin's default is 300 commits) is slowed by this "
+            "limit, not refused: the next retain is answered 429 with "
+            "Retry-After until earlier ones finish."
+        ),
+    )
+    max_outstanding_bytes: int = Field(
+        default=256 * 1024 * 1024,
+        ge=1024 * 1024,
+        le=16 * 1024 * 1024 * 1024,
+        description=(
+            "The most bytes of unfinished asynchronous retains one client "
+            "may have submitted. A single retain is always accepted when "
+            "the client has nothing outstanding."
+        ),
+    )
+    max_item_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=1024,
+        le=32 * 1024 * 1024,
+        description=(
+            "The largest 'content' of one retained item, in UTF-8 bytes. The "
+            "largest thing the plugin sends is a whole session transcript. "
+            "The request body is capped at 48 MiB whatever this is set to."
+        ),
+    )
+
+    @field_validator("shared_document_prefixes", mode="before")
+    @classmethod
+    def _prefixes(cls, v: Any) -> Any:
+        if not isinstance(v, (list, tuple)):
+            return v
+        out: list[str] = []
+        for item in v:
+            if (
+                not isinstance(item, str)
+                or "::" in item
+                or len(item) < 3
+                or not item.endswith(":")
+                or not _SHARED_DOCUMENT_PREFIX_RE.fullmatch(item)
+            ):
+                # A short or open-ended entry (``g``, ``sha``) would sweep
+                # ordinary ids, and the digest form of a long one, into the
+                # namespace every client of a project may write.
+                raise ValueError(
+                    "memory.compat.shared_document_prefixes entries must be 3 to 64 "
+                    "characters of [a-zA-Z0-9._:-], end with ':' and hold no '::': "
+                    f"{item!r}"
+                )
+            if item not in out:
+                out.append(item)
+        return out
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
-    Container for the per-subsystem memory tunables. Today carries
-    ``[memory.graph]``, ``[memory.embedding]`` and ``[memory.priority]``.
-    Future memory features (retention, prune-policy, archival) land under a
-    single namespace rather than scattering top-level tables.
+    Container for the per-subsystem memory tunables. Carries
+    ``[memory.graph]``, ``[memory.embedding]``, ``[memory.priority]``,
+    ``[memory.models]``, ``[memory.decision]``, ``[memory.lanes]``,
+    ``[memory.console]`` (Hindsight 1.2 showcase additions) and
+    ``[memory.projects]`` (the project registry, ADR-0058). Future memory
+    features (retention, prune-policy, archival) land under this single
+    namespace rather than scattering top-level tables.
     """
 
     model_config = {"populate_by_name": True, "extra": "allow"}
@@ -2676,16 +3358,44 @@ class MemoryConfig(BaseModel):
     graph: MemoryGraphConfig = Field(default_factory=MemoryGraphConfig)
     priority: MemoryPriorityConfig = Field(default_factory=MemoryPriorityConfig)
     embedding: MemoryEmbeddingConfig = Field(default_factory=MemoryEmbeddingConfig)
-    unified_bank: bool = Field(
-        default=True,
+    models: MemoryModelsConfig = Field(default_factory=MemoryModelsConfig)
+    decision: MemoryDecisionConfig = Field(default_factory=MemoryDecisionConfig)
+    lanes: MemoryLanesConfig = Field(default_factory=MemoryLanesConfig)
+    console: MemoryConsoleConfig = Field(default_factory=MemoryConsoleConfig)
+    projects: MemoryProjectsConfig = Field(default_factory=MemoryProjectsConfig)
+    compat: MemoryCompatConfig = Field(default_factory=MemoryCompatConfig)
+    public_url: str | None = Field(
+        default=None,
         description=(
-            "Route all memory into ONE Hindsight bank ('shared') instead of "
-            "per-agent private banks. When true, the X-hal0-Private toggle no "
-            "longer forks a private:<agent> bank — the write still lands in "
-            "'shared' but is stamped with a 'visibility:private' tag (plus an "
-            "'agent:<id>' tag), and recall is single-bank (no cross-bank "
-            "fan-out). Set false to restore the pre-unified multi-bank model "
-            "(private:<agent> / project:<id> banks + fan-out recall)."
+            "The URL coding agents should reach the Hindsight engine at, e.g. "
+            "through a reverse proxy. Used by the GET /api/memory/agents "
+            "install one-liner in place of guessing <request host>:9177 when "
+            "set."
+        ),
+    )
+    bank: str = Field(
+        default="hal0:shared",
+        description=(
+            "Name of the Hindsight bank behind the 'shared' namespace, where "
+            "every agent's durable memory lives (ADR-0052, ADR-0058 decision 7). "
+            "The namespace grammar ('shared' | 'private:<agent>') is unchanged; "
+            "only the bank id the provider talks to differs. A store hal0 wrote "
+            "before the two-bank layout keeps the bank it has (recorded in "
+            "/var/lib/hal0/state/memory-layout.json) until it is folded in, and "
+            "there this key names a bank only when set to something other than "
+            "'hal0:shared'. Changing it points hal0-api at a different bank, so "
+            "run 'hal0 memory migrate platform' first to clone the existing "
+            "bank's data into the new name, then restart hal0-api."
+        ),
+    )
+    private_bank: str = Field(
+        default="hal0:private",
+        description=(
+            "Name of the Hindsight bank behind every 'private:<agent>' "
+            "namespace in the two-bank layout (ADR-0058 decision 7): one bank "
+            "for all agents, where each agent's 'agent:<id>' tag scopes it to "
+            "its own memory. Must differ from [memory] bank. Not used by a "
+            "store still on its pre-two-bank layout. Needs a hal0-api restart."
         ),
     )
     # HAL0-SUNSET: v2.0.0 — 'cognee' engine literal retired here. It is no
@@ -2706,6 +3416,38 @@ class MemoryConfig(BaseModel):
             "still carrying it must be updated to 'hindsight'."
         ),
     )
+
+    @field_validator("bank", "private_bank")
+    @classmethod
+    def _bank_is_addressable(cls, v: str, info: ValidationInfo) -> str:
+        # Same grammar as hal0.api.routes.memory_admin._BANK_RE: the bank id
+        # travels in /api/memory/banks/{bank_id} paths, so anything that route
+        # would refuse is refused here at config load instead of at first use.
+        s = str(v or "").strip()
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}", s):
+            raise ValueError(
+                f"memory.{info.field_name} {v!r} must start with a letter or digit and use "
+                "only letters, digits, '.', '_', ':' and '-' (max 128 chars)"
+            )
+        # ``private__<agent>`` is the per-agent bank family and ``agents`` the
+        # retired identity-card bank (ADR-0005); a platform bank named like
+        # either would alias them.
+        if s.startswith("private__") or s == "agents":
+            raise ValueError(
+                f"memory.{info.field_name} {v!r} collides with a reserved bank name "
+                "('private__*' and 'agents')"
+            )
+        return s
+
+    @model_validator(mode="after")
+    def _private_bank_is_its_own(self) -> MemoryConfig:
+        # One bank for both would put every agent's private memory back beside
+        # the shared memory, which is what the two-bank layout ends.
+        if self.private_bank == self.bank:
+            raise ValueError(
+                f"memory.private_bank {self.private_bank!r} must differ from memory.bank"
+            )
+        return self
 
     @field_validator("engine")
     @classmethod

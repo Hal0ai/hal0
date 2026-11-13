@@ -14,10 +14,10 @@ completely absent when it's off. A fresh install turns it on for you; it stays
 a conscious, revertible choice rather than something that silently accumulates
 data on an existing box.
 
-Memory was rebuilt for v1.0 ("memory v2"): a redesigned dashboard workspace
-(ranked fact list, curate, history, a force-directed graph) sits behind the
-same engine-neutral backend described on this page. See
-[Browse the Bank workspace](/docs/guides/memory-workspace) for the UI tour.
+The dashboard shows memory in one place, the Memory area (Health, Facts,
+Knowledge, Operations and Agents), over the same engine-neutral backend
+described on this page. See [The Memory area](/docs/guides/memory-workspace)
+for the UI tour.
 
 ## What memory is
 
@@ -71,11 +71,11 @@ approval-gate pattern as `memory_add`/`memory_delete` — `memory_curate`'s
 `state` toggle is reversible so it stays autonomous, while
 `memory_mental_model_delete` and `memory_directive_delete` gate for operator
 approval the same way a bulk `memory_delete` does. The full tool-by-tool
-schema lives in [MCP tools](/docs/reference/mcp-tools) — this page covers the
+schema lives in [MCP tools: hal0-memory](/docs/reference/mcp-tools-memory) — this page covers the
 concepts those tools operate on.
 
 ![Memory interface showing stored facts and recall](/screenshots/memory-view.png)
-*The dashboard's Memory view (Bank workspace, list mode)*
+*The fact workspace on the Memory area's Facts tab (list mode)*
 
 The engine is **Hindsight** — a memory service that powers the shared operator
 and agent "brain." When configured, hal0 builds a Hindsight client and wraps
@@ -135,10 +135,10 @@ two-value set: `shared` or the caller's own `private:<client_id>`
 ([ADR-0005](/docs/adr/0005-memory-namespace-shared-private)). `shared` is the
 default for every write; `private:<agent>` is for memories an agent — or the
 operator — explicitly wants scoped to one identity. Scoping *within* `shared`
-is done with tags (the agent identity cards carry `agent-identity`; project
-provenance is a `project:<id>` tag), and per-repository **coding** memory
-lives outside this grammar entirely, in `coding-agent::<repo>` engine banks
-written by the coding-agent clients. The retired `agents` and `project:<id>`
+is done with tags (the agent identity cards carry `agent-identity`; a
+project is a `project:<slug>` tag, which no read hides), and coding-agent
+clients write through `/api/memory/compat` into the same shared bank. The
+retired `agents` and `project:<id>`
 namespaces are rejected on write with a pointed remedy. A write with no
 explicit namespace defaults to `shared`. Setting the `X-hal0-Private` header over REST (or `private=true`
 over MCP) promotes the write to `private:<client_id>` and **wins over an
@@ -156,14 +156,86 @@ Callers identify themselves via the `X-hal0-Agent` header, and the same
 identity resolves the same memory namespace whether it arrives over REST or
 MCP.
 
-Namespaces map onto Hindsight **banks** — `shared` is the `shared` bank,
-`private:<agent>` is the `private__<agent>` bank. `[memory].unified_bank`
-(default `true`) changes what a private write actually does: instead of
-forking a separate `private:<agent>` bank, the write still lands in `shared`
-but is stamped with a `visibility:private` tag plus an `agent:<id>` tag, and
-recall stays single-bank (no cross-bank fan-out). Set it `false` to restore
-the pre-unified model — real `private:<agent>` banks and fan-out recall
-across them.
+Namespaces map onto Hindsight **banks**. On a new install `shared` is
+`hal0:shared` (`[memory] bank`) and every `private:<agent>` is `hal0:private`
+(`[memory] private_bank`), one bank where the `agent:<id>` tag scopes each
+agent to its own memory. A store from before keeps its old banks until it is
+folded in. [Memory banks](/docs/concepts/memory-banks) has both layouts and
+who reads what.
+
+## Write envelope
+
+A write bound for the Hindsight engine is normalised on its way there,
+whichever surface it came through: REST, MCP, the Hermes memory plugin or Hal0
+Brain (ADR-0058). The envelope never rejects a write. It rewrites the tag list
+and moves a few values into the document's metadata. The volatile `pgvector`
+fallback does not apply it: a write that provider accepts keeps its tags as
+given.
+
+Two tags are required, and hal0 adds them when the caller did not:
+
+- `agent:<id>`, the caller's resolved identity. A caller-supplied `agent:`
+  tag is replaced. A write with no identity is tagged `agent:unknown`.
+- Exactly one of `kind:durable` or `kind:ephemeral`. The default is
+  `kind:durable`. A caller can send either tag to choose, and an explicit
+  choice wins; if both are sent, `kind:ephemeral` wins.
+
+Two kinds of tag are moved out of the tag list:
+
+- **Session ids** go to metadata as `session_id`, or as the list
+  `session_ids` when a write carries several. A tag counts as a session id
+  when it is `session:<id>` (also `session_id:`, `session-id:` or
+  `sessionid:`) or a bare UUID in the 8-4-4-4-12 form. Any bare UUID is
+  moved, whatever it identifies. A bare run of hexadecimal digits, such as an
+  MD5 checksum, a commit hash or a digest, stays a tag. A session id taken
+  from a tag does not change the document id.
+- **Lifecycle words** go to metadata as `lifecycle` (comma-separated when a
+  write carries several). The words are `checkpoint`, `session-end`,
+  `pre-compress`, `continuity`, `bootstrap` and `chat`, matched as whole
+  tags. A write that sends no kind and carries one becomes `kind:ephemeral`.
+  A write you mark `kind:durable` keeps these words as ordinary tags: you
+  have said it is durable content, so `chat` there is a topic.
+
+A metadata key the caller already set is left as the caller set it; an empty
+`session_id` counts as not set. Every other tag passes through unchanged:
+namespaced tags such as `source:`, `knowledge:`, `origin:` and `harness:`, and
+your own bare words.
+
+A `project:<name>` tag is not stored as sent: hal0 normalises it and drops a
+denied name, and a durable write with no project gets `scope:global`.
+[Memory projects](/docs/concepts/memory-projects) has the rules.
+
+The reason is how the engine consolidates. It builds observations per scope,
+and by default a scope is one distinct set of tags. A tag that changes with
+every session gives each session a scope of its own, so related facts never
+consolidate together and anything that reads by tag sees very little. With
+session ids and lifecycle words out of the tag list, the tag sets stay few and
+stable.
+
+For the same reason, hal0 chooses the observation scope of each write rather
+than leaving it to the tag set:
+
+- A write with no `project:` tag is sent with `observation_scopes: "shared"`,
+  which consolidates it into one untagged scope whatever its tags are.
+- A write that carries a `project:<slug>` tag is sent with the explicit scope
+  `[["project:<slug>"]]`, one scope per project tag. Its observations carry
+  that project tag and nothing else, so what is learned in one project does
+  not become a belief about another.
+- A coding client's write with no project (`project:unresolved`) is sent with
+  `[["project:unresolved", "agent:<id>"]]`, a scope of its writer's own.
+- A private write is sent with its writer's own scope,
+  `[["agent:<id>", "visibility:private"]]` (plus its project), on a new
+  install; on an older unified bank it keeps the engine's default scoping.
+  Either way its observations keep `visibility:private`.
+
+Pass another value in the `observation_scopes` argument of the MCP
+`memory_add` tool to override the first two. Because hal0 now always sends a
+scope on a non-private write, a bank-level default observation scope
+(`default_observation_scopes` in the bank's config) no longer applies to those
+writes; it still applies to private writes in the unified bank.
+
+The envelope applies to new writes. Memories stored before it keep the tags
+they were written with.
 
 ## Fact types: world, experience, observation
 
@@ -272,102 +344,7 @@ design and remaining validation.
 
 ## Graph extraction
 
-Storing facts is one thing; running an LLM over them to build a knowledge
-graph and observations is heavier and separately gated — **off by default**
-even on a fresh install, under `[memory.graph]`:
-
-- `enabled` (default `false`) — Hindsight builds its graph natively, so this
-  flag is a *reporting and routing* gate, not a hard stop. Disabling it does
-  **not** cancel in-flight extraction or stop the daemon — Hindsight keeps
-  extracting either way; the flag only controls how hal0 labels and routes
-  it.
-- `extraction_slot` (default `"memory"`) — the local `type=llm` slot
-  Hindsight's extraction/consolidation/reflect calls are routed to. With the
-  default, `hal0/memory` resolves through `(memory, agent)`; an absent or
-  model-less memory slot shares agent, and a bound memory slot is loaded on
-  demand. Upgrades retain explicit targets; migration v4 writes `"utility"`
-  when this setting was missing.
-- `extraction_model` (default unset) — an upstream model id hal0's `/v1`
-  routes (an OpenRouter or MiniMax id, for example). When set, the engine
-  runs on it instead of the slot. Hindsight always calls the one virtual id
-  `hal0/memory`; hal0 resolves it to the slot or the model on every call,
-  so the switch applies without an engine restart.
-- `llm_timeout_s` (default `300`, range 30–3600) — timeout for the Hindsight
-  daemon's LLM calls, covering cold slot starts and long reflects.
-- the extraction limits — `extraction_max_concurrent` (default `1`),
-  `extraction_max_tokens` (default `16384`), `extraction_llm_retries`
-  (default `1`), `extraction_task_retries` (default `2`) and
-  `extraction_retry_backoff_s` (default `120`). The extraction slot is a
-  shared inference slot, usually one llama-server serving one request at a
-  time; Hindsight's own defaults (32 concurrent calls, 64000 completion
-  tokens, three retries at each of two layers) let one slow extraction
-  saturate it and requeue itself until the queue never drains. These caps
-  bound that: one call in flight, a few thousand output tokens per call, and
-  a retry ladder that ends — a document that cannot be extracted lands under
-  **Retry failed** on the Memory page instead of occupying the slot for
-  hours. Raise `extraction_max_concurrent` only for a slot that genuinely
-  serves parallel requests. This setting controls both the process-wide
-  `HINDSIGHT_API_LLM_MAX_CONCURRENT` and retain-specific
-  `HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT` with the same rendered value,
-  so consolidation, reflect and mental-model refresh share the concurrency
-  budget too. With the default single permit, a long reflect or consolidation
-  can delay queued retains until that call finishes or reaches `llm_timeout_s`.
-  Note that `extraction_task_retries` and
-  `extraction_retry_backoff_s` are Hindsight's worker-wide settings: every
-  queued memory operation (consolidation and mental-model refresh too)
-  shares them, since the engine has no retain-only task retry.
-
-  `extraction_max_tokens` must stay strictly above the retain chunk size of
-  every bank: the engine refuses each retain into a bank whose chunk size is
-  not below the cap. The default `16384` clears the 12000-character strategy
-  chunks the Hindsight coding-agent plugin sets. `hal0 update` raises a saved
-  value of `12000` or less to `16384` and restarts the engine so the drop-in
-  matches; a larger value is left alone. Saving the graph settings and
-  `hal0 doctor` both warn when a bank's chunk size is not cleared.
-
-  hal0 also owns Hindsight's retain wall limit (`HINDSIGHT_API_RETAIN_WALL_TIMEOUT`),
-  which cancels a retain that runs too long and marks it failed without a
-  retry. It is derived, not configured: with
-  `per_call = llm_timeout_s × (extraction_llm_retries + 1)` the limit is
-  `max(min(max(3600, 3 × per_call), 14400), per_call + llm_timeout_s)` seconds,
-  so it is always above one call, never below Hindsight's own 3600 s, and at
-  most 4 h unless one call's own budget already exceeds that. The defaults give
-  3600 s.
-
-The timeout and the extraction limits are propagated to the `hindsight-api`
-service as `HINDSIGHT_API_LLM_TIMEOUT=<n>` and the matching
-`HINDSIGHT_API_RETAIN_*` / `HINDSIGHT_API_WORKER_*` limits through a systemd
-drop-in at
-`/etc/systemd/system/hindsight-api.service.d/extraction-model.conf`, followed
-by `daemon-reload` and a service restart. The same drop-in always carries
-`HINDSIGHT_API_LLM_MODEL=hal0/memory`, so changing the slot or
-`extraction_model` rewrites nothing and restarts nothing; only a timeout or
-limit change restarts the engine, and a stale or missing drop-in is repaired
-on any save. The write and restart go through hal0's privileged-operation seam
-rather than hal0-api (which runs unprivileged) touching `/etc/systemd`
-directly.
-
-Pick the engine model under **Engine model** on Settings → Data → Memory or on the
-agents Memory tab (Local slots / Upstream models), or from the CLI with
-`hal0 memory graph enable --model <id>`; `--local` returns to the local
-`extraction_slot`, and `--model` cannot be combined with `--slot` or
-`--local`. `GET /api/memory/graph/status` reports `target`, `available_models`
-and `engine_llm`. The **Engine running** row names the provider and model
-hindsight-api really loads, read from the running engine process. If
-`/etc/hal0/hindsight-llm.env` overrides the model, the row flags it: systemd
-applies that file after every hal0 setting, so the override wins over your
-choice until you remove it. When hal0-api can read neither the process nor
-that file, the row says it cannot verify rather than reporting no override.
-
-<Aside type="note">
-A memory write is refused (fast, with a clear error) rather than silently
-corrupted if the extraction slot's model can't clear a context-window floor
-(8192 tokens by default — an estimate of the extraction prompt's own
-footprint, overridable via the `HAL0_MEMORY_EXTRACTION_FLOOR` environment
-variable on the hal0-api service). Without this guard, a too-small context
-window either drops the retain silently or persists prompt scaffolding as a
-"fact." Chat is unaffected — only memory extraction is gated.
-</Aside>
+Graph extraction is covered on [Memory graph extraction](/docs/concepts/memory-graph-extraction/).
 
 ## What memory powers
 
@@ -377,19 +354,16 @@ When enabled, memory becomes the shared brain that ties the platform together:
   <Card title="Hermes's durable memory, by default" icon="comment">
     Provisioning a fresh bundled agent wires it straight to this subsystem
     with no manual config, backed by Hindsight via the hal0-api REST front
-    door. Under the default `unified_bank = true`, Hermes' private writes
-    land in the single `shared` bank tagged `visibility:private` and
-    `agent:hermes` rather than forking a separate bank, and recall is
-    single-bank. Set `unified_bank = false` to give Hermes a real
-    `private:hermes` bank plus `shared`, with recall unioning both. Recalled
-    context is injected automatically every turn either way, and the agent
-    can also call the MCP tools directly.
+    door. Hermes' private writes and session captures land in
+    `hal0:private` tagged `agent:hermes`, and its recall reads `hal0:shared`
+    plus its own private memory. Recalled context is injected automatically
+    every turn, and the agent can also call the MCP tools directly.
   </Card>
   <Card title="Operator memory" icon="document">
-    The dashboard's Memory view (Overview + Bank workspace) and the
-    `/api/memory/*` routes let you add, search, browse the graph, and curate
-    facts directly — across banks, documents, mental models, and directives.
-    See [Browse the Bank workspace](/docs/guides/memory-workspace).
+    The dashboard's Memory area and the `/api/memory/*` routes let you add,
+    search, browse the graph, and curate facts directly — across banks,
+    documents, mental models, and directives.
+    See [The Memory area](/docs/guides/memory-workspace).
   </Card>
   <Card title="Namespaced writes" icon="setting">
     Callers identify themselves (via the `X-hal0-Agent` header), so private
@@ -407,8 +381,10 @@ When enabled, memory becomes the shared brain that ties the platform together:
 ## Where to go next
 
 <CardGrid>
+  <LinkCard title="Memory projects" href="/docs/concepts/memory-projects" description="How project tags are resolved, the registry, and per-project scopes." />
+  <LinkCard title="Memory banks" href="/docs/concepts/memory-banks" description="hal0:shared and hal0:private, the layout record, and who reads what." />
   <LinkCard title="Enable memory" href="/docs/guides/enable-memory" description="Turn it on, pick an engine, configure graph extraction and reranking." />
-  <LinkCard title="Browse the Bank workspace" href="/docs/guides/memory-workspace" description="The dashboard's fact list, filters, curation, and graph views." />
+  <LinkCard title="The Memory area" href="/docs/guides/memory-workspace" description="Health and its repair path, facts, knowledge, operations and agents in the dashboard." />
   <LinkCard title="Agents" href="/docs/concepts/agents" description="The agent that uses memory as its brain." />
   <LinkCard title="Security" href="/docs/concepts/security" description="Identity, namespaces, and the auth layer." />
 </CardGrid>

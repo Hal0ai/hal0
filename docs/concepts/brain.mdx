@@ -223,8 +223,8 @@ model is dropped. The call takes the same retain/recall pipeline every other
 memory write takes, including the in-memory fallback when Hindsight is
 unreachable (writes there are lost on restart).
 
-The facts go into the `shared` namespace (the single `shared` Hindsight bank
-under the default `unified_bank = true`), tagged
+The facts go into the `shared` namespace (`hal0:shared` on a new install; on an
+older one the platform bank it already had), tagged
 `agent:hermes__hal0-brain`. Notes the steward wrote privately before this change stay
 private to it and it still reads them. No bank has to be created up front.
 

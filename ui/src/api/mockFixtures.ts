@@ -949,6 +949,18 @@ const MEM_BANKS = [
 ]
 
 function buildMemoryEngine() {
+  // The `unreachable` health state is an engine that does not answer, so the
+  // engine card says the same thing (see mockMemoryHealthState below).
+  if (mockMemoryHealthState() === 'unreachable') {
+    return {
+      enabled: true,
+      engine: 'hindsight',
+      reachable: false,
+      version: null,
+      features: null,
+      banks_total: null,
+    }
+  }
   return {
     enabled: true,
     engine: 'hindsight',
@@ -1297,16 +1309,17 @@ function buildUnitHistory(_url: string, match: RegExpMatchArray) {
   return [{ state: unit.state, at: unit.occurred_start, reason: null }]
 }
 
-function buildMentalModels() {
-  const items = [
-    { id: 'mm-power-resilience', name: 'Power resilience posture', source_query: 'how does the box handle power loss?', content: 'Since the May 3 outage the operator runs a CyberPower 1500VA UPS (~22min idle runtime) with the NUT daemon set to gracefully shut down at 20% battery. Inference queues are now the main loss surface, not cold boots.', tags: ['reliability'], is_stale: false, last_refreshed_at: '2026-06-10T08:00:00.000Z' },
-    { id: 'mm-thermal-envelope', name: 'iGPU thermal envelope', source_query: 'what are the iGPU thermal limits?', content: 'Sustained ComfyUI load used to push the Radeon 8060S to 95C and throttle img throughput ~30%. A -30mV ryzenadj undervolt (now in the boot unit) holds peak at ~84C with baseline throughput.', tags: ['performance'], is_stale: false, last_refreshed_at: '2026-06-09T19:30:00.000Z' },
-    { id: 'mm-operator-style', name: 'Operator interaction style', source_query: 'how should I talk to the operator?', content: 'Terse, technical, lowercase. Inline citations expected — traceability over prose. Active 20:00–01:00; mornings are safe for heavy maintenance.', tags: ['operator'], is_stale: true, last_refreshed_at: '2026-05-28T23:00:00.000Z' },
-  ]
-  return { items, total: items.length }
+// The list. The rows are MEM_MENTAL_MODELS (below, with the detail and
+// history builders): the models that hold a knowledge page's text, and the
+// ones that stand alone. The bank `empty` has none.
+function buildMentalModels(_url: string, match: RegExpMatchArray) {
+  if (bankFrom(match) === 'empty') return { items: [], total: 0 }
+  return { items: MEM_MENTAL_MODELS, total: MEM_MENTAL_MODELS.length }
 }
 
-function buildDirectives() {
+function buildDirectives(_url: string, match: RegExpMatchArray) {
+  // The bank `empty` has no directives either: the Knowledge tab's empty bank.
+  if (bankFrom(match) === 'empty') return { items: [], total: 0 }
   const items = [
     { id: 'dir-citations', name: 'Always cite sources', content: 'Include inline citations / source references in answers; the operator values traceability over prose.', priority: 1, is_active: true, tags: ['operator'] },
     { id: 'dir-terse', name: 'Keep it terse', content: 'Default to terse, technical, lowercase responses. Expand only when explicitly asked.', priority: 2, is_active: true, tags: ['operator'] },
@@ -1316,26 +1329,654 @@ function buildDirectives() {
   return { items, total: items.length }
 }
 
-// Real hindsight-api 0.8.4 envelope: {bank_id, total, limit, offset,
-// operations: [{id, task_type, status, ...}]} — NOT {items, operation_id,
-// operation_type} (#1645).
-function buildBankOperations(_url: string, match: RegExpMatchArray) {
-  const bank = bankFrom(match)
-  if (bank === 'ingest') {
-    const operations = [
-      { id: 'op-ing-9012', task_type: 'document_ingest', status: 'processing', created_at: '2026-06-12T22:14:00.000Z', error_message: null, retry_count: 0 },
-      { id: 'op-ing-9011', task_type: 'document_ingest', status: 'pending', created_at: '2026-06-12T22:13:30.000Z', error_message: null, retry_count: 0 },
-      { id: 'op-ing-8990', task_type: 'consolidation', status: 'failed', created_at: '2026-06-12T19:02:00.000Z', error_message: 'embedding backend timed out after 30s', retry_count: 2 },
-      { id: 'op-ing-8975', task_type: 'document_ingest', status: 'completed', created_at: '2026-06-12T18:40:00.000Z', error_message: null, retry_count: 0 },
-    ]
-    return { bank_id: bank, total: operations.length, limit: 50, offset: 0, operations }
+// The engine's envelope: {bank_id, total, limit, offset, operations: [...]} —
+// NOT the {items, total} of the other list routes (#1645). Every row carries
+// the sixteen fields of MockOperation below; that is the shape a 1.x engine
+// returns. On the rows seen so far `id` and `operation_id` are the same value,
+// `operation_type` repeats `task_type`, and `progress`, `details` and
+// `filename` are null, so the fixtures follow that.
+//
+// `status`, `limit` and `offset` are honoured the way the engine honours
+// them: `total` counts the rows that match `status`, and the page is cut
+// from those. A read with no query string returns what it always did for the
+// `ingest` bank and the default banks.
+//
+// States by bank, for the Memory area's Operations tab:
+//   ingest   one row each of processing (running), pending (waiting), failed
+//            (with its error message) and completed (done)
+//   big      a queue longer than one page: 137 rows, three failure messages
+//   empty    no operations at all
+//   others   the three-row default
+type MockOperation = {
+  id: string
+  operation_id: string
+  operation_type: string
+  task_type: string
+  status: string
+  created_at: string
+  updated_at: string
+  error_message: string | null
+  retry_count: number
+  next_retry_at: string | null
+  items_count: number
+  document_id: string | null
+  mental_model_id: string | null
+  progress: unknown
+  details: unknown
+  filename: string | null
+}
+
+// One row in the engine's full shape, from the fields a fixture cares about.
+function mockOperation(
+  row: Pick<MockOperation, 'id' | 'task_type' | 'status' | 'created_at'> & Partial<MockOperation>,
+): MockOperation {
+  return {
+    operation_id: row.id,
+    operation_type: row.task_type,
+    updated_at: row.created_at,
+    error_message: null,
+    retry_count: 0,
+    next_retry_at: null,
+    items_count: 0,
+    document_id: null,
+    mental_model_id: null,
+    progress: null,
+    details: null,
+    filename: null,
+    ...row,
   }
-  const operations = [
-    { id: 'op-7741', task_type: 'consolidation', status: 'completed', created_at: '2026-06-12T04:30:00.000Z', error_message: null, retry_count: 0 },
-    { id: 'op-7742', task_type: 'observation_extract', status: 'pending', created_at: '2026-06-12T22:06:00.000Z', error_message: null, retry_count: 0 },
-    { id: 'op-7710', task_type: 'document_ingest', status: 'completed', created_at: '2026-06-05T11:21:00.000Z', error_message: null, retry_count: 0 },
-  ]
-  return { bank_id: bank, total: operations.length, limit: 50, offset: 0, operations }
+}
+
+const INGEST_OPERATIONS: MockOperation[] = [
+  mockOperation({ id: 'op-ing-9012', task_type: 'document_ingest', status: 'processing', created_at: '2026-06-12T22:14:00.000Z', updated_at: '2026-06-12T22:14:20.000Z', items_count: 1, document_id: 'doc-ing-9012' }),
+  mockOperation({ id: 'op-ing-9011', task_type: 'document_ingest', status: 'pending', created_at: '2026-06-12T22:13:30.000Z', items_count: 1, document_id: 'doc-ing-9011' }),
+  mockOperation({ id: 'op-ing-8990', task_type: 'consolidation', status: 'failed', created_at: '2026-06-12T19:02:00.000Z', updated_at: '2026-06-12T19:08:00.000Z', error_message: 'embedding backend timed out after 30s', retry_count: 2 }),
+  mockOperation({ id: 'op-ing-8975', task_type: 'document_ingest', status: 'completed', created_at: '2026-06-12T18:40:00.000Z', updated_at: '2026-06-12T18:41:10.000Z', items_count: 1, document_id: 'doc-ing-8975' }),
+]
+
+const DEFAULT_OPERATIONS: MockOperation[] = [
+  mockOperation({ id: 'op-7741', task_type: 'consolidation', status: 'completed', created_at: '2026-06-12T04:30:00.000Z', updated_at: '2026-06-12T04:30:01.000Z' }),
+  mockOperation({ id: 'op-7742', task_type: 'observation_extract', status: 'pending', created_at: '2026-06-12T22:06:00.000Z' }),
+  mockOperation({ id: 'op-7710', task_type: 'document_ingest', status: 'completed', created_at: '2026-06-05T11:21:00.000Z', updated_at: '2026-06-05T11:22:00.000Z', items_count: 1, document_id: 'doc-7710' }),
+]
+
+// Both messages are the engine's own wording for a failed `batch_retain`
+// (the second seen verbatim on a 1.x engine). `refresh_mental_model` as the task
+// type of a refresh is the name hal0's CLI help uses for it
+// (cli/memory_ops_commands.py); a refresh row has not been seen on an engine yet.
+const BIG_OPERATION_ERRORS = [
+  'APIConnectionError: Connection error.',
+  "Task exceeded the 14400s wall-clock limit for 'batch_retain' (stage=llm.openai.retain_extract_facts+structured.queued) and was cancelled. Raise HINDSIGHT_API_RETAIN_WALL_TIMEOUT if this is a legitimately long operation, or set it to 0 to disable the limit.",
+]
+
+function buildBigOperations(): MockOperation[] {
+  const newest = Date.parse('2026-06-12T22:00:00.000Z')
+  const rows: MockOperation[] = []
+  // Newest first, as the engine lists them: 2 running, 96 waiting, 9 failed,
+  // 30 done. One row every four minutes, so the oldest is about 9 h old.
+  for (let i = 0; i < 137; i++) {
+    const status = i < 2 ? 'processing' : i < 98 ? 'pending' : i < 107 ? 'failed' : 'completed'
+    const refresh = status === 'failed' && i >= 105
+    const taskType = refresh ? 'refresh_mental_model' : i % 12 === 0 ? 'consolidation' : 'batch_retain'
+    const createdAt = new Date(newest - i * 4 * 60_000).toISOString()
+    rows.push(
+      mockOperation({
+        id: `op-big-${String(9000 - i)}`,
+        task_type: taskType,
+        status,
+        created_at: createdAt,
+        // A waiting row has not been touched since it was queued.
+        updated_at: status === 'pending' ? createdAt : new Date(newest - i * 4 * 60_000 + 90_000).toISOString(),
+        error_message: status !== 'failed' ? null : BIG_OPERATION_ERRORS[i === 104 ? 1 : 0],
+        retry_count: status === 'failed' ? 3 : 0,
+        items_count: taskType === 'batch_retain' ? 4 : 0,
+        mental_model_id: refresh ? 'mm-operator-style' : null,
+      }),
+    )
+  }
+  return rows
+}
+
+// One bank's operations, newest first. In the `clear` health state, and in
+// every state built on it (see MOCK_HEALTH_QUEUE_WORKED_THROUGH), the queue has
+// been worked through, so only the finished rows are left.
+function operationsFor(
+  bank: string,
+  state: MockMemoryHealthState = mockMemoryHealthState(),
+): MockOperation[] {
+  const all =
+    bank === 'ingest'
+      ? INGEST_OPERATIONS
+      : bank === 'big'
+        ? buildBigOperations()
+        : bank === 'empty'
+          ? []
+          : DEFAULT_OPERATIONS
+  return MOCK_HEALTH_QUEUE_WORKED_THROUGH.has(state)
+    ? all.filter((op) => op.status === 'completed')
+    : all
+}
+
+// ── Memory health (GET /api/memory/health, ADR-0058 decision 12) ────────────
+//
+// The body is the route's, field for field (src/hal0/api/routes/memory_health.py
+// and its collector). Three states, so every branch of a view that reads it can
+// be reached under the forced mock, where `page.route` never sees the request:
+//
+//   attention    (default) extraction is the current step: seven stores failed,
+//                two grouped messages; the queue step waits on it
+//   clear        nothing waiting, nothing failed, every step clear
+//   unreachable  the engine does not answer: every section but `engine` is null
+//                and the path is the engine step alone
+//
+// Five more put each later step of the path first in turn, for the Health tab.
+// Each is one change to a box that is otherwise `clear`, except `queue`:
+//
+//   queue              the `attention` queue, with its failed stores older than
+//                      the six-hour window: extraction is clear, so the queue is
+//                      the current step, alone
+//   embedder-mixed     the store may hold vectors from two embedders
+//   embedder-conflict  the running engine is on another embedder than the record
+//   knowledge          knowledge pages and mental models are stale; none failed
+//   partial            nothing is open, but two banks did not answer in time:
+//                      `partial` names the queue and banks sections, and those
+//                      banks' figures are null
+//
+// A spec picks one before `page.goto`:
+//
+//   await page.addInitScript(() => { window.__hal0MockMemoryHealth = 'clear' })
+//
+// The state reaches two other builders so the mock stays one box: a state whose
+// queue has been worked through leaves only finished rows in every bank's
+// operations list, and `unreachable` turns the engine card to unreachable.
+//
+// The queue figures are counted from the operation fixtures above, as the
+// route counts them from the engine's lists, read at MOCK_HEALTH_NOW. The six
+// hour window on extraction failures is not modelled: every failed store in
+// the fixtures counts, except in `queue`, where none does.
+export const MOCK_MEMORY_HEALTH_STATES = [
+  'attention',
+  'clear',
+  'unreachable',
+  'queue',
+  'embedder-mixed',
+  'embedder-conflict',
+  'knowledge',
+  'partial',
+] as const
+
+export type MockMemoryHealthState = (typeof MOCK_MEMORY_HEALTH_STATES)[number]
+
+/** The states whose box has nothing waiting and nothing failed. */
+const MOCK_HEALTH_QUEUE_WORKED_THROUGH: ReadonlySet<MockMemoryHealthState> = new Set([
+  'clear',
+  'embedder-mixed',
+  'embedder-conflict',
+  'knowledge',
+  'partial',
+])
+
+export function mockMemoryHealthState(): MockMemoryHealthState {
+  const raw =
+    typeof window !== 'undefined'
+      ? (window as unknown as { __hal0MockMemoryHealth?: unknown }).__hal0MockMemoryHealth
+      : undefined
+  return (MOCK_MEMORY_HEALTH_STATES as readonly unknown[]).includes(raw)
+    ? (raw as MockMemoryHealthState)
+    : 'attention'
+}
+
+/** The moment the fixtures are read at: a few minutes after their newest row. */
+export const MOCK_HEALTH_NOW = '2026-06-12T22:20:00.000Z'
+
+const HEALTH_RETAIN_TYPES = new Set(['retain', 'batch_retain', 'file_convert_retain'])
+const HEALTH_EXTRACTION_WINDOW_S = 6 * 60 * 60
+const HEALTH_QUEUE_MAX_AGE_S = 30 * 60
+
+// What the route's `normalise_error` makes of the two failure messages above:
+// numbers become `<n>`, and the result is cut at 160 characters.
+const HEALTH_ERROR_KEYS: Record<string, string> = {
+  [BIG_OPERATION_ERRORS[0]]: 'APIConnectionError: Connection error.',
+  [BIG_OPERATION_ERRORS[1]]:
+    "Task exceeded the <n>s wall-clock limit for 'batch_retain' (stage=llm.openai.retain_extract_facts+structured.queued) and was cancelled. Raise HINDSIGHT_API_RET…",
+}
+
+type HealthStepCheck = [id: string, reason: string | null, figures: Record<string, unknown>]
+
+// The route's own rule (src/hal0/memory/health_path.py): the first open step is
+// `current`, a later open one is `waiting` and names the open step before it.
+function healthSteps(checks: HealthStepCheck[]) {
+  let blocker: string | null = null
+  return checks.map(([id, reason, figures]) => {
+    if (reason === null) return { id, state: 'clear', waits_on: null, reason_code: null, figures }
+    const step = {
+      id,
+      state: blocker === null ? 'current' : 'waiting',
+      waits_on: blocker,
+      reason_code: reason,
+      figures,
+    }
+    blocker = id
+    return step
+  })
+}
+
+export function memoryHealthFixture(state: MockMemoryHealthState = mockMemoryHealthState()) {
+  // As the route writes it: seconds, and an explicit UTC offset.
+  const checkedAt = `${new Date().toISOString().slice(0, 19)}+00:00`
+  if (state === 'unreachable') {
+    return {
+      enabled: true,
+      verdict: 'unreachable',
+      checked_at: checkedAt,
+      partial: [],
+      engine: { reachable: false, version: null },
+      extraction: null,
+      embedder: null,
+      queue: null,
+      knowledge: null,
+      banks: null,
+      writes: null,
+      steps: [
+        {
+          id: 'engine',
+          state: 'current',
+          waits_on: null,
+          reason_code: 'engine_unreachable',
+          figures: { reachable: false },
+        },
+      ],
+    }
+  }
+
+  const now = Date.parse(MOCK_HEALTH_NOW)
+  const errors = new Map<string, number>()
+  let failures = 0
+  const byBank = MEM_BANKS.map((bank) => {
+    const rows = operationsFor(bank.bank_id, state)
+    const waiting = rows.filter((op) => op.status === 'pending')
+    const failed = rows.filter((op) => op.status === 'failed')
+    for (const op of failed) {
+      // `queue`: the failed stores are older than the extraction window.
+      if (state === 'queue' || !HEALTH_RETAIN_TYPES.has(op.task_type)) continue
+      failures += 1
+      const key = HEALTH_ERROR_KEYS[op.error_message ?? ''] ?? op.error_message ?? ''
+      if (key) errors.set(key, (errors.get(key) ?? 0) + 1)
+    }
+    const ages = waiting.map((op) => Math.max(0, (now - Date.parse(op.created_at)) / 1000))
+    return {
+      bank_id: bank.bank_id,
+      waiting: waiting.length,
+      failed: failed.length,
+      oldest_waiting_s: ages.length > 0 ? Math.max(...ages) : null,
+    }
+  })
+  const topErrors = [...errors.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 5)
+    .map(([message, count]) => ({ message, count }))
+  const waitingTotal = byBank.reduce((sum, b) => sum + b.waiting, 0)
+  const failedTotal = byBank.reduce((sum, b) => sum + b.failed, 0)
+  const oldest = byBank.map((b) => b.oldest_waiting_s).filter((s): s is number => s !== null)
+  const oldestWaiting = oldest.length > 0 ? Math.max(...oldest) : null
+
+  const stats = MEM_BANKS.map(
+    (bank) =>
+      buildBankStats('', ['', encodeURIComponent(bank.bank_id)] as unknown as RegExpMatchArray) as {
+        total_nodes: number
+        total_documents: number
+        pending_consolidation: number
+        failed_consolidation: number
+      },
+  )
+  // `partial`: these banks did not answer in time. The bank list still carries
+  // their fact counts; their stats and operation reads are missing.
+  const unread = new Set(state === 'partial' ? ['big', 'hermes'] : [])
+  for (const row of byBank) {
+    if (!unread.has(row.bank_id)) continue
+    Object.assign(row, { waiting: null, failed: null, oldest_waiting_s: null })
+  }
+  const banks = MEM_BANKS.map((bank, at) => ({
+    bank_id: bank.bank_id,
+    facts: stats[at].total_nodes,
+    documents: unread.has(bank.bank_id) ? null : stats[at].total_documents,
+  }))
+
+  // Knowledge is behind in `attention` (with failed refreshes) and in
+  // `knowledge` (stale only); every other state has it fresh.
+  const stale = state === 'attention' || state === 'knowledge'
+  const embedderId = { provider: 'local', model: 'hindsight-ai/hs-embed-1' }
+  const mixed = state === 'embedder-mixed'
+  const conflict =
+    state === 'embedder-conflict'
+      ? { live: { provider: 'local', model: 'BAAI/bge-small-en-v1.5' } }
+      : null
+  // The first reason of the route's embedder rule (src/hal0/memory/embedder_verdict.py).
+  const embedderReasons = conflict ? ['conflict'] : mixed ? ['mixed'] : []
+  const knowledge = {
+    pages: 15,
+    pages_stale: stale ? 5 : 0,
+    models: 18,
+    models_stale: stale ? 6 : 0,
+    refresh_failed: state === 'attention' ? 5 : 0,
+    last_success_at: '2026-06-10T08:00:00+00:00',
+  }
+
+  const steps = healthSteps([
+    ['engine', null, { reachable: true }],
+    [
+      'extraction',
+      failures > 0 ? 'extraction_recent_failures' : null,
+      {
+        slot_resolves: true,
+        llm_reachable: true,
+        failures,
+        window_s: HEALTH_EXTRACTION_WINDOW_S,
+        top_errors: topErrors,
+      },
+    ],
+    [
+      'queue',
+      failedTotal > 0
+        ? 'queue_operations_failed'
+        : oldestWaiting !== null && oldestWaiting > HEALTH_QUEUE_MAX_AGE_S
+          ? 'queue_waiting_too_long'
+          : null,
+      {
+        failed: failedTotal,
+        waiting: waitingTotal,
+        oldest_waiting_s: oldestWaiting,
+        max_waiting_age_s: HEALTH_QUEUE_MAX_AGE_S,
+      },
+    ],
+    [
+      'embedder',
+      embedderReasons.length > 0 ? `embedder_${embedderReasons[0]}` : null,
+      {
+        recorded: embedderId,
+        configured: embedderId,
+        mixed,
+        conflict,
+        reasons: embedderReasons,
+        informational: false,
+      },
+    ],
+    [
+      'knowledge',
+      knowledge.refresh_failed > 0
+        ? 'knowledge_refresh_failed'
+        : knowledge.pages_stale > 0 || knowledge.models_stale > 0
+          ? 'knowledge_stale'
+          : null,
+      {
+        pages_stale: knowledge.pages_stale,
+        models_stale: knowledge.models_stale,
+        refresh_failed: knowledge.refresh_failed,
+      },
+    ],
+  ])
+
+  return {
+    enabled: true,
+    verdict: steps.some((step) => step.state !== 'clear') ? 'attention' : 'clear',
+    checked_at: checkedAt,
+    partial: state === 'partial' ? ['queue', 'banks'] : [],
+    engine: { reachable: true, version: '0.9.2' },
+    extraction: {
+      slot: 'memory',
+      mode: 'dedicated',
+      slot_resolves: true,
+      llm_reachable: true,
+      concurrency: 2,
+      failures_6h: failures,
+      top_errors: topErrors,
+    },
+    embedder: {
+      recorded: embedderId,
+      configured: embedderId,
+      mixed,
+      // The record's own rule: a mixed store always needs the switch.
+      needs_switch: mixed,
+      conflict,
+      informational: false,
+    },
+    queue: {
+      waiting: waitingTotal,
+      failed: failedTotal,
+      oldest_waiting_s: oldestWaiting,
+      consolidation_pending: stats.reduce((sum, s) => sum + s.pending_consolidation, 0),
+      consolidation_failed: stats.reduce((sum, s) => sum + s.failed_consolidation, 0),
+      by_bank: byBank,
+      truncated: false,
+    },
+    knowledge,
+    banks: {
+      layout: 'per_bank',
+      total: banks.length,
+      facts: banks.reduce((sum, b) => sum + b.facts, 0),
+      list: banks,
+    },
+    writes: null,
+    steps,
+  }
+}
+
+function buildMemoryHealth() {
+  return memoryHealthFixture()
+}
+
+function buildBankOperations(url: string, match: RegExpMatchArray) {
+  const bank = bankFrom(match)
+  const all = operationsFor(bank)
+  let params = new URLSearchParams()
+  try {
+    params = new URL(url, 'http://x').searchParams
+  } catch {
+    /* path-only — no query */
+  }
+  const status = params.get('status')
+  const matched = status ? all.filter((op) => op.status === status) : all
+  const limit = Math.max(1, Number(params.get('limit')) || 50)
+  const offset = Math.max(0, Number(params.get('offset')) || 0)
+  return {
+    bank_id: bank,
+    total: matched.length,
+    limit,
+    offset,
+    operations: matched.slice(offset, offset + limit),
+  }
+}
+
+// ── Memory area (ADR-0058): knowledge base, mental-model detail + history ──
+//
+// The shapes a 1.x engine returns:
+//   - The tree is `{roots: [...]}`. Every node, folder or page, carries the
+//     thirteen fields of MockKnowledgeNode below. `kind` is "page" or
+//     "folder". A node has `is_stale` and `last_refresh_failed_at` but no
+//     `last_refreshed_at`: that comes from the mental-models list, by the
+//     node's `mental_model_id`.
+//   - A mental model's history is a bare JSON list, newest first. An entry
+//     is the text a refresh replaced (`previous_content`, at `changed_at`)
+//     or the record of a refresh that failed (`kind: "refresh_failed"`, with
+//     `error_message`). `mm-project-decisions` and `mm-operator-style` carry
+//     that shape; `mm-power-resilience` keeps the older `{updated_at,
+//     content}` rows the hooks' tests read.
+//   - A knowledge page is a mental model: the list marks its model with
+//     `is_knowledge_page`. A page's own detail (`GET .../pages/{id}`) sends
+//     its text as `body`, and again under front matter as `markdown`, with
+//     the question as `description` and the last refresh as `timestamp`. The
+//     page rows below carry those beside the fields the dashboard read
+//     before.
+//
+// States: two fresh pages; one stale page whose last refresh failed after
+// its last success (`kb-operator-style`); a model with three revisions
+// (`mm-power-resilience`); models with none; two mental models that are not
+// pages, one fresh with a history of versions and a failed refresh
+// (`mm-project-decisions`), one stale (`mm-operator-preferences`); a bank
+// with no pages, models or directives (`empty`).
+const MEM_PAGE_TRIGGER = { mode: 'delta', refresh_after_consolidation: false, refresh_cron: '0 */4 * * *', full_refresh_cron: null, min_refresh_interval_seconds: null, fact_types: ['world', 'experience', 'observation'] }
+const MEM_MODEL_TRIGGER = { mode: 'delta', refresh_after_consolidation: true, refresh_cron: null, full_refresh_cron: null, min_refresh_interval_seconds: 3600, fact_types: ['world', 'experience', 'observation'] }
+
+const MEM_MENTAL_MODELS = [
+  { id: 'mm-power-resilience', name: 'Power resilience posture', source_query: 'how does the box handle power loss?', content: 'Since the May 3 outage the operator runs a CyberPower 1500VA UPS (~22min idle runtime) with the NUT daemon set to gracefully shut down at 20% battery. Inference queues are now the main loss surface, not cold boots.', tags: ['reliability'], is_stale: false, last_refreshed_at: '2026-06-10T08:00:00.000Z', is_knowledge_page: true, trigger: MEM_PAGE_TRIGGER },
+  { id: 'mm-thermal-envelope', name: 'iGPU thermal envelope', source_query: 'what are the iGPU thermal limits?', content: 'Sustained ComfyUI load used to push the Radeon 8060S to 95C and throttle img throughput ~30%. A -30mV ryzenadj undervolt (now in the boot unit) holds peak at ~84C with baseline throughput.', tags: ['performance'], is_stale: false, last_refreshed_at: '2026-06-09T19:30:00.000Z', is_knowledge_page: true, trigger: MEM_PAGE_TRIGGER },
+  { id: 'mm-operator-style', name: 'Operator interaction style', source_query: 'how should I talk to the operator?', content: 'Terse, technical, lowercase. Inline citations expected — traceability over prose. Active 20:00–01:00; mornings are safe for heavy maintenance.', tags: ['operator'], is_stale: true, last_refreshed_at: '2026-05-28T23:00:00.000Z', is_knowledge_page: true, trigger: MEM_PAGE_TRIGGER },
+  // Not knowledge pages: no node of the tree names them.
+  { id: 'mm-project-decisions', name: 'Project decisions', source_query: 'what has been decided about how this box is run, and why?', content: '## Decided\n\n- **Updates** go in before noon, never during the evening window.\n- **Models** are pulled to the fast pool; `/var` stays under 85%.\n- The UPS shuts the box down at 20% battery.\n\n## Still open\n\nWhether image generation gets its own slot.', tags: ['decisions'], is_stale: false, last_refreshed_at: '2026-06-10T09:30:00.000Z', is_knowledge_page: false, trigger: MEM_MODEL_TRIGGER },
+  { id: 'mm-operator-preferences', name: 'Operator preferences', source_query: 'what does the operator prefer, across every agent?', content: 'Short answers with sources. Destructive actions are confirmed in the dashboard, not over the API.', tags: ['operator'], is_stale: true, last_refreshed_at: '2026-06-01T07:00:00.000Z', is_knowledge_page: false, trigger: MEM_MODEL_TRIGGER },
+]
+
+// The one refresh that failed: later than the model's last success, so it
+// reads as a fault and not as a stale hint.
+const MEM_REFRESH_FAILED_AT: Record<string, string> = {
+  'mm-operator-style': '2026-06-11T08:00:00.000Z',
+}
+
+const MEM_MODEL_HISTORY: Record<string, Record<string, unknown>[]> = {
+  // The engine's own shape: what each refresh replaced, and one that failed.
+  'mm-project-decisions': [
+    { previous_content: '## Decided\n\n- **Updates** go in before noon.\n- **Models** are pulled to the fast pool.\n\n## Still open\n\nWhat the UPS should do on low battery.', previous_reflect_response: null, changed_at: '2026-06-10T09:30:00.000Z' },
+    { previous_content: null, previous_reflect_response: null, changed_at: '2026-06-02T09:30:00.000Z', kind: 'refresh_failed', outcome: 'refresh_failed_error', failure_reason: 'unexpected_error', error_message: "Task exceeded the 300s wall-clock limit for 'refresh_mental_model' and was cancelled. Raise the task timeout to allow longer refreshes." },
+    { previous_content: 'Updates go in before noon. Nothing else has been decided yet.', previous_reflect_response: null, changed_at: '2026-05-21T09:30:00.000Z' },
+    { previous_content: null, previous_reflect_response: null, changed_at: '2026-05-06T09:30:00.000Z' },
+  ],
+  // Why the stale page's last refresh failed.
+  'mm-operator-style': [
+    { previous_content: null, previous_reflect_response: null, changed_at: '2026-06-11T08:00:00.000Z', kind: 'refresh_failed', outcome: 'refresh_failed_error', failure_reason: 'unexpected_error', error_message: 'APIConnectionError: Connection error. The extraction model did not answer.' },
+  ],
+  'mm-power-resilience': [
+    { updated_at: '2026-06-10T08:00:00.000Z', content: 'Since the May 3 outage the operator runs a CyberPower 1500VA UPS (~22min idle runtime) with the NUT daemon set to gracefully shut down at 20% battery. Inference queues are now the main loss surface, not cold boots.' },
+    { updated_at: '2026-05-20T08:00:00.000Z', content: 'The operator bought a CyberPower 1500VA UPS after the May 3 outage. Graceful shutdown is not wired yet.' },
+    { updated_at: '2026-05-04T08:00:00.000Z', content: 'The box has no power protection. A grid drop on May 3 hard-stopped it mid-generation.' },
+  ],
+}
+
+function buildMentalModel(_url: string, match: RegExpMatchArray) {
+  const id = decodeURIComponent(match[2] ?? '')
+  const model = MEM_MENTAL_MODELS.find((m) => m.id === id)
+  if (!model) return null // → 404, as for an unknown id on the engine
+  return { ...model, last_refresh_failed_at: MEM_REFRESH_FAILED_AT[id] ?? null }
+}
+
+function buildMentalModelHistory(_url: string, match: RegExpMatchArray) {
+  const id = decodeURIComponent(match[2] ?? '')
+  if (!MEM_MENTAL_MODELS.some((m) => m.id === id)) return null
+  // A bare list, as the engine sends it (not `{items: [...]}`).
+  return MEM_MODEL_HISTORY[id] ?? []
+}
+
+// A page's text as the engine stores it: markdown. Where a page has none
+// here, its model's one paragraph stands in.
+const MEM_PAGE_BODY: Record<string, string> = {
+  'mm-thermal-envelope': [
+    '## Limits',
+    '',
+    'Sustained ComfyUI load used to push the Radeon 8060S to **95 C** and throttle image throughput by about 30%.',
+    '',
+    '| Setting | Peak | Throughput |',
+    '| --- | --- | --- |',
+    '| Stock | 95 C | throttled, about 30% lower |',
+    '| `-30 mV` undervolt | 84 C | baseline |',
+    '',
+    '## What holds it',
+    '',
+    '1. A `ryzenadj` undervolt, applied by the boot unit.',
+    '2. The fan curve from the vendor firmware, unchanged.',
+    '',
+    '```',
+    'ryzenadj --set-coall=0xFFFE2',
+    '```',
+  ].join('\n'),
+}
+
+const MEM_KNOWLEDGE_PAGES = MEM_MENTAL_MODELS.filter((m) => m.is_knowledge_page).map((m) => {
+  const id = m.id.replace(/^mm-/, 'kb-')
+  const body = MEM_PAGE_BODY[m.id] ?? m.content
+  return {
+    id,
+    name: m.name,
+    content: m.content,
+    source_query: m.source_query,
+    tags: m.tags,
+    trigger: null,
+    max_tokens: null,
+    mental_model_id: m.id,
+    is_stale: m.is_stale,
+    last_refreshed_at: m.last_refreshed_at,
+    last_refresh_failed_at: MEM_REFRESH_FAILED_AT[m.id] ?? null,
+    // What a 1.x engine sends for a page.
+    type: 'knowledge-page',
+    description: m.source_query,
+    timestamp: m.last_refreshed_at,
+    body,
+    markdown: `---\nid: "${id}"\ntype: "knowledge-page"\ntitle: "${m.name}"\n---\n\n${body}`,
+  }
+})
+
+type MockKnowledgeNode = {
+  id: string
+  kind: 'page' | 'folder'
+  name: string
+  parent_id: string | null
+  children: MockKnowledgeNode[]
+  description: string | null
+  tags: string[]
+  managed: boolean
+  mental_model_id: string | null
+  timestamp: string | null
+  trigger: string | null
+  is_stale: boolean
+  last_refresh_failed_at: string | null
+}
+
+function buildKnowledgeTree(_url: string, match: RegExpMatchArray) {
+  if (bankFrom(match) === 'empty') return { roots: [] }
+  const page = (id: string, parentId: string): MockKnowledgeNode => {
+    const p = MEM_KNOWLEDGE_PAGES.find((x) => x.id === id)
+    return {
+      id,
+      kind: 'page',
+      name: p?.name ?? id,
+      parent_id: parentId,
+      children: [],
+      // On a page the engine sends the question it answers as `description`.
+      description: p?.source_query ?? null,
+      tags: p?.tags ?? [],
+      managed: true,
+      mental_model_id: p?.mental_model_id ?? null,
+      timestamp: p?.last_refreshed_at ?? null,
+      trigger: null,
+      is_stale: p?.is_stale ?? false,
+      last_refresh_failed_at: p?.last_refresh_failed_at ?? null,
+    }
+  }
+  const folder = (id: string, name: string, pages: string[]): MockKnowledgeNode => ({
+    id,
+    kind: 'folder',
+    name,
+    parent_id: null,
+    children: pages.map((pageId) => page(pageId, id)),
+    description: null,
+    tags: [],
+    managed: true,
+    mental_model_id: null,
+    timestamp: null,
+    trigger: null,
+    is_stale: false,
+    last_refresh_failed_at: null,
+  })
+  return {
+    roots: [
+      folder('kbf-box', 'The box', ['kb-power-resilience', 'kb-thermal-envelope']),
+      folder('kbf-operator', 'The operator', ['kb-operator-style']),
+    ],
+  }
+}
+
+function buildKnowledgePage(_url: string, match: RegExpMatchArray) {
+  if (bankFrom(match) === 'empty') return null
+  const id = decodeURIComponent(match[2] ?? '')
+  return MEM_KNOWLEDGE_PAGES.find((p) => p.id === id) ?? null
 }
 
 // Route wrappers: the allowlist passes the query-stripped path as the first
@@ -1432,6 +2073,7 @@ function buildMemoryGraphStatus() {
       llm_retries: 1,
       task_retries: 2,
       retry_backoff_s: 120,
+      worker_slots: 4,
     },
     in_flight: 0,
     builds_ok: 0,
@@ -1575,6 +2217,7 @@ export const MOCK_BUILDERS: Record<string, Builder> = {
   runnerImagesDownloaded: buildRunnerImagesDownloaded,
   runnerImagesPulls: buildRunnerImagesPulls,
   memoryEngine: buildMemoryEngine,
+  memoryHealth: buildMemoryHealth,
   memoryBanks: buildMemoryBanks,
   bankTimeseries: buildBankTimeseries,
   bankStats: buildBankStats,
@@ -1583,6 +2226,10 @@ export const MOCK_BUILDERS: Record<string, Builder> = {
   bankGraph: buildMemFactGraphRoute,
   bankDocuments: buildBankDocuments,
   bankMentalModels: buildMentalModels,
+  mentalModel: buildMentalModel,
+  mentalModelHistory: buildMentalModelHistory,
+  knowledgeTree: buildKnowledgeTree,
+  knowledgePage: buildKnowledgePage,
   bankDirectives: buildDirectives,
   bankOperations: buildBankOperations,
   bankRecall: buildBankRecall,

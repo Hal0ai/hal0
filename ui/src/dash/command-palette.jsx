@@ -91,7 +91,15 @@ function CommandPaletteInner({ onClose }) {
     };
   }, []);
 
-  const items = useMemoCP(() => buildCommandItems(slots, models, activePull, owuiUrl), [slots, models, activePull, owuiUrl]);
+  // The Memory entry follows the same gate as the sidebar row ([memory].enabled
+  // via /api/status), read through the window bridge like main.jsx does.
+  const useMemEnabled = (typeof window !== "undefined" && window.__hal0UseMemoryEnabled) || null;
+  const memoryEnabled = useMemEnabled ? useMemEnabled() : false;
+
+  const items = useMemoCP(
+    () => buildCommandItems(slots, models, activePull, owuiUrl, memoryEnabled),
+    [slots, models, activePull, owuiUrl, memoryEnabled],
+  );
 
   // Fuzzy-filter: characters in order, weighted by exact prefix. Per-slot
   // control verbs are hidden from the empty-query view (hideWhenEmpty) so
@@ -225,7 +233,9 @@ const CP_RUNNING_STATES = new Set(["serving", "ready", "idle", "warming"]);
 
 // Build a unified list of palette items from LIVE slots + models.
 // `owuiUrl` is the backend-resolved OpenWebUI link ("" when not reachable).
-function buildCommandItems(slots, models, activePull, owuiUrl = "") {
+// `memoryEnabled` adds the Memory area's entry (the area does not exist on a
+// box with memory off).
+function buildCommandItems(slots, models, activePull, owuiUrl = "", memoryEnabled = false) {
   const items = [];
 
   // Routes
@@ -241,7 +251,10 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "") {
     { id: "r-benchmarks", route: "benchmarks", label: "Benchmarks", icon: Icons.bench, sub: "roster board · runs · evals · run queue", keywords: "perf speed throughput decode prefill bench" },
     { id: "r-hardware",  route: "hardware",  label: "Hardware",   icon: Icons.hardware,  sub: "cpu, gpu, npu, memory" },
     { id: "r-logs",      route: "logs",      label: "Logs",       icon: Icons.logs,      sub: "hal0 stream", keywords: "tail console output" },
-    { id: "r-agent",     route: "agent",     label: "Agent",      icon: Icons.agent,     sub: "chat, personas, skills, memory, plugins" },
+    { id: "r-agent",     route: "agent",     label: "Agent",      icon: Icons.agent,     sub: "chat, personas, skills, plugins" },
+    ...(memoryEnabled
+      ? [{ id: "r-memory", route: "memory/health", label: "Memory", icon: Icons.memory, sub: "health, facts, knowledge, operations, agents", keywords: "hindsight banks facts recall engine embedder" }]
+      : []),
     { id: "r-settings",  route: "settings",  label: "Settings",   icon: Icons.settings,  sub: "secrets, storage, updates" },
   ];
   routes.forEach(r => items.push({ ...r, section: "Routes", hint: "↵ jump" }));

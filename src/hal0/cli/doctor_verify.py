@@ -103,7 +103,9 @@ def render_report(console: Console, checks: list[Check], urls: dict[str, Any] | 
     table.add_column()
     for c in checks:
         badge = _CRIT_BADGE if (c.status == _FAIL and c.critical) else _BADGE[c.status]
-        table.add_row(badge, c.label, c.detail)
+        # Row text is plain text, not markup: a `[memory.models]` table name
+        # in a detail would otherwise be read as a style tag and vanish.
+        table.add_row(badge, Text(c.label), Text(c.detail))
 
     console.print(Panel(table, title=title, border_style=border, title_align="left"))
 

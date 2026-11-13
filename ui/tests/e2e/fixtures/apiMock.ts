@@ -184,6 +184,100 @@ export async function installDefaultMocks(page: Page, state: MockState) {
       last_error: null,
     }),
   )
+  // GET /api/memory/agents is not in the in-bundle mock's allow-list, so it reaches page.route.
+  // The catch-all's `{}` is not a valid body: the legacy tools page's Agents tab reads
+  // `install.harnesses` off it, and the whole view falls to the error boundary once the
+  // response lands. The default mirrors the real route (`get_agents` in
+  // src/hal0/api/routes/memory_lanes.py): no coding-agent banks, the install one-liner, the
+  // console off.
+  await page.route('**/api/memory/agents', (route) =>
+    json(route, {
+      banks: [],
+      install: {
+        harnesses: ['claude-code', 'codex', 'opencode', 'pi', 'cursor-cli', 'copilot-cli', 'qwen-code'],
+        command: 'hal0 memory agents install <harness> --bridge-key-file hal0-memory.key',
+        mint_command: 'hal0 bridge add <client> --scope memory',
+        key_file: 'hal0-memory.key',
+        clients: { pi: 'pi-memory' },
+      },
+      console_url: null,
+    }),
+  )
+  // The Memory area's Agents tab also reads who is installed and who holds a key. Neither is in
+  // the in-bundle mock's allow-list, and the catch-all's `{}` is not the body of either route.
+  // The defaults are a box with no bundled agent installed (`list_agents` in
+  // src/hal0/api/routes/agents.py) and no bridge client (`list_clients` in
+  // src/hal0/api/routes/bridge.py).
+  await page.route(/\/api\/agents(\?|$)/, (route) => json(route, { agents: [], count: 0 }))
+  await page.route(/\/api\/bridge\/clients(\?|$)/, (route) => json(route, { items: [] }))
+  // GET /api/memory/health is answered in the bundle under the forced mock (eight states, chosen
+  // by `window.__hal0MockMemoryHealth`; see src/api/mockFixtures.ts), so it only reaches
+  // page.route when a spec names it in `__hal0MockPassthrough` or the suite runs without the
+  // forced mock. The catch-all's `{}` is not the route's body, so the default here is the real
+  // shape (src/hal0/api/routes/memory_health.py) for a box where every step is clear and no bank
+  // has anything waiting or failed.
+  await page.route('**/api/memory/health', (route) =>
+    json(route, {
+      enabled: true,
+      verdict: 'clear',
+      checked_at: '2026-06-12T22:20:00+00:00',
+      partial: [],
+      engine: { reachable: true, version: '0.9.2' },
+      extraction: {
+        slot: 'memory',
+        mode: 'dedicated',
+        slot_resolves: true,
+        llm_reachable: true,
+        concurrency: 2,
+        failures_6h: 0,
+        top_errors: [],
+      },
+      embedder: {
+        recorded: { provider: 'local', model: 'hindsight-ai/hs-embed-1' },
+        configured: { provider: 'local', model: 'hindsight-ai/hs-embed-1' },
+        mixed: false,
+        needs_switch: false,
+        conflict: null,
+        informational: false,
+      },
+      queue: {
+        waiting: 0,
+        failed: 0,
+        oldest_waiting_s: null,
+        consolidation_pending: 0,
+        consolidation_failed: 0,
+        by_bank: [],
+        truncated: false,
+      },
+      knowledge: {
+        pages: 0,
+        pages_stale: 0,
+        models: 0,
+        models_stale: 0,
+        refresh_failed: 0,
+        last_success_at: null,
+      },
+      banks: { layout: 'per_bank', total: 0, facts: 0, list: [] },
+      writes: null,
+      steps: ['engine', 'extraction', 'queue', 'embedder', 'knowledge'].map((id) => ({
+        id,
+        state: 'clear',
+        waits_on: null,
+        reason_code: null,
+        figures: {},
+      })),
+    }),
+  )
+  // GET /api/memory/banks/{bank}/config is not in the in-bundle mock's allow-list either, so
+  // it reaches page.route. Memory ▸ Knowledge reads the bank's minimum refresh interval from
+  // `config`; the catch-all's `{}` has no `config`, which reads as "the settings did not
+  // load". The default is the envelope the real route sends (`{bank_id, config}`) with the
+  // engine's default interval, 0. A write to the same path falls through to the catch-all.
+  await page.route(/\/api\/memory\/banks\/[^/]+\/config$/, (route) => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    const bank = decodeURIComponent(route.request().url().split('/banks/')[1].split('/')[0])
+    return json(route, { bank_id: bank, config: { mental_model_min_refresh_interval_seconds: 0 } })
+  })
   await page.route('**/api/agent/approvals', (route) =>
     json(route, { approvals: state.approvals }),
   )

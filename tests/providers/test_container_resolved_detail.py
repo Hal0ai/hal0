@@ -19,6 +19,7 @@ from hal0.providers.container import (
     resolved_argv_detail_for_slot,
     resolved_command_for_slot,
     slot_effective_context,
+    slot_parallel_sequences,
     tune_effective_for_slot,
 )
 
@@ -235,3 +236,40 @@ def test_slot_effective_context_halogen_profile_and_slot_windows(tmp_hal0_home: 
     # ... and a slot [tune] window beats it, exactly as on llama-server.
     narrowed = _halogen_slot(tune={"ctx_size": 65536})
     assert slot_effective_context(narrowed) == (65536, "slot")
+
+
+# ── slot_parallel_sequences: the --parallel the slot launches with (#3347) ───
+
+
+def _parallel_of(flags: str) -> int | None:
+    cfg = {"profile": "p", "port": 8101, "device": "gpu-rocm", "model": {"default": "m"}}
+    with (
+        patch(
+            "hal0.providers.container._resolve_profile",
+            return_value=ProfileConfig(flags=flags, ctx_size=4096, speculation="off"),
+        ),
+        patch(
+            "hal0.providers.container._best_effort_model_info",
+            return_value={"_model_key": "m", "path": "m"},
+        ),
+    ):
+        return slot_parallel_sequences(cfg)
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ("--parallel 2", 2),
+        ("-np 3", 3),
+        ("--parallel=4", 4),
+        ("--parallel 8 --parallel 2", 2),  # last value wins, as at launch
+        ("--parallel -1", None),  # llama-server's own auto: no explicit count
+        ("-b 512", None),
+    ],
+)
+def test_slot_parallel_sequences_reads_the_resolved_argv(flags: str, expected: int | None) -> None:
+    assert _parallel_of(flags) == expected
+
+
+def test_slot_parallel_sequences_is_none_for_a_non_llama_slot() -> None:
+    assert slot_parallel_sequences({"type": "image", "device": "gpu-rocm"}) is None

@@ -101,10 +101,15 @@ export function slotModelRow(slot, models) {
 // a renamed anchor ('flm' → 'npu') doesn't leave old shadows pointing at a
 // name-derived link to a slot that no longer exists (reconcile_trio_slots
 // names NEW shadows after the anchor but never renames pre-existing ones).
+// An xdna (ggml-xdna llama-server) slot also reports device_class 'npu' but
+// is never part of the FLM trio and can never be the anchor — excluded here
+// so a coresident xdna slot can't get mistaken for (or steal) the anchor.
 // Returns null when no anchor is present in the list (e.g. still loading).
 export function npuAnchorSlot(slots) {
   const npuSlots = (slots ?? []).filter(
-    (s) => s?.device_class === 'npu' || devKind(s?.device) === 'npu',
+    (s) =>
+      (s?.device_class === 'npu' || devKind(s?.device) === 'npu') &&
+      String(s?.runner || '').toLowerCase() !== 'xdna',
   );
   return (
     npuSlots.find((s) => !isNpuShadowSlot(s) && s.type === 'llm') ||

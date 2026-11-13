@@ -1,16 +1,30 @@
-"""Unified-bank memory model — [memory] unified_bank.
+"""The legacy unified and split layouts, as a store's layout record gives them.
 
 Pins the unified routing contract (one ``shared`` bank, tag-based
 visibility) plus the always-on write-path quality (agent tag, timestamp,
-context, session-derived document id) and the legacy multi-bank
-back-compat path (``unified_bank=False``).
+context, session-derived document id) and the legacy split layout
+(``unified=False``). Every provider here is built from a ``legacy`` layout
+record (``hal0.memory.bank_layout``) the way ``provider_from_config`` builds
+it, so these are the tests of what an upgraded store keeps doing until it is
+folded into the two-bank layout (ADR-0058 decision 7).
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from hal0.config.schema import MemoryConfig
+from hal0.memory.bank_layout import LAYOUT_LEGACY, BankLayout
 from hal0.memory.hindsight_provider import HindsightProvider
+
+
+def legacy_record(*, unified: bool, memory_cfg: Any = None) -> dict[str, Any]:
+    """The provider keywords a ``legacy`` layout record captured from an old
+    config (no ``[memory] bank`` set) gives, under the current defaults."""
+    record = BankLayout(layout=LAYOUT_LEGACY, legacy_platform_bank="shared", legacy_unified=unified)
+    return record.provider_kwargs(memory_cfg if memory_cfg is not None else MemoryConfig())
 
 
 class RecordingClient:
@@ -31,6 +45,7 @@ class RecordingClient:
         metadata=None,
         tags=None,
         timestamp=None,
+        **extra,
     ):
         self.retained.append(
             {
@@ -41,6 +56,7 @@ class RecordingClient:
                 "metadata": dict(metadata or {}),
                 "tags": list(tags or []),
                 "timestamp": timestamp,
+                **extra,
             }
         )
         self._facts_by_bank.setdefault(bank_id, []).append(
@@ -69,7 +85,9 @@ class RecordingClient:
 
 
 def _unified(client_id: str = "hermes") -> HindsightProvider:
-    return HindsightProvider(client=RecordingClient(), client_id=client_id, unified_bank=True)
+    return HindsightProvider(
+        client=RecordingClient(), client_id=client_id, **legacy_record(unified=True)
+    )
 
 
 # ── Write routing ─────────────────────────────────────────────────────────────
@@ -110,7 +128,7 @@ async def test_unified_preserves_caller_tags_and_overwrites_caller_agent_tag():
 
 @pytest.mark.asyncio
 async def test_agent_tag_falls_back_to_unknown_for_anonymous():
-    p = HindsightProvider(client=RecordingClient(), unified_bank=True)
+    p = HindsightProvider(client=RecordingClient(), **legacy_record(unified=True))
     # No client_id, source is the front-door sentinel "anonymous".
     await p.add("x", dataset="shared", source="anonymous")
     rec = p._client.retained[0]
@@ -237,7 +255,9 @@ async def test_recall_omits_tags_match_when_unset():
 
 @pytest.mark.asyncio
 async def test_legacy_multibank_private_write_forks_private_bank():
-    p = HindsightProvider(client=RecordingClient(), client_id="hermes", unified_bank=False)
+    p = HindsightProvider(
+        client=RecordingClient(), client_id="hermes", **legacy_record(unified=False)
+    )
     await p.add("secret", dataset="private:hermes", client_id="hermes")
     rec = p._client.retained[0]
     assert rec["bank_id"] == "private__hermes"
@@ -250,7 +270,7 @@ async def test_legacy_multibank_private_write_forks_private_bank():
 @pytest.mark.asyncio
 async def test_legacy_multibank_recall_fans_out():
     client = RecordingClient()
-    p = HindsightProvider(client=client, client_id="hermes", unified_bank=False)
+    p = HindsightProvider(client=client, client_id="hermes", **legacy_record(unified=False))
     await p.recall("q", dataset="shared", client_id="hermes")
     banks = {c["bank_id"] for c in client.recalled}
     assert banks == {"shared", "private__hermes"}
@@ -317,7 +337,7 @@ async def test_unified_shared_recall_visible_to_everyone():
 async def test_unified_anonymous_provider_denied_foreign_private():
     """A caller with no resolved identity (provider default ``anonymous`` →
     ``unknown``) must not receive another agent's private doc."""
-    p = HindsightProvider(client=RecordingClient(), unified_bank=True)
+    p = HindsightProvider(client=RecordingClient(), **legacy_record(unified=True))
     await p.add("hermes secret", dataset="private:hermes", client_id="hermes")
     out = await p.recall("secret", dataset="shared")  # no client_id
     assert not any(i["text"] == "hermes secret" for i in out)
@@ -373,7 +393,9 @@ async def test_legacy_multibank_private_recall_not_over_filtered():
     """Legacy multi-bank mode relies on per-bank ACL, not the tag, so a private
     doc carrying a custom (non-matching) agent tag must still come back to its
     owner — the read filter is a no-op off unified mode."""
-    p = HindsightProvider(client=RecordingClient(), client_id="hermes", unified_bank=False)
+    p = HindsightProvider(
+        client=RecordingClient(), client_id="hermes", **legacy_record(unified=False)
+    )
     await p.add("secret", dataset="private:hermes", client_id="hermes", tags=["agent:override"])
     out = await p.recall("secret", dataset="private:hermes", client_id="hermes")
     assert any(i["text"] == "secret" for i in out)
@@ -404,7 +426,7 @@ async def test_unified_delete_anonymous_refused_foreign_private():
     """A caller with no resolved identity (provider default ``anonymous`` →
     ``unknown``) cannot delete a real agent's private doc. Mirrors the read-side
     ``test_unified_anonymous_provider_denied_foreign_private``."""
-    p = HindsightProvider(client=RecordingClient(), unified_bank=True)
+    p = HindsightProvider(client=RecordingClient(), **legacy_record(unified=True))
     r = await p.add("hermes secret", dataset="private:hermes", client_id="hermes")
     res = await p.delete([r["id"]])  # no client_id → unknown
     assert res["deleted"] == 0
@@ -449,16 +471,103 @@ async def test_unified_delete_mixed_ids_only_removes_visible():
 async def test_legacy_multibank_delete_unaffected():
     """Legacy mode keeps deleting by bank ACL (no visibility scan) — the owner
     deletes its own private doc as before."""
-    p = HindsightProvider(client=RecordingClient(), client_id="hermes", unified_bank=False)
+    p = HindsightProvider(
+        client=RecordingClient(), client_id="hermes", **legacy_record(unified=False)
+    )
     r = await p.add("secret", dataset="private:hermes", client_id="hermes")
     res = await p.delete([r["id"]], dataset="private:hermes", client_id="hermes")
     assert res["deleted"] == 1
 
 
-# ── Config default ────────────────────────────────────────────────────────────
+# ── The legacy record, not the config, decides ────────────────────────────────
 
 
-def test_config_default_unified_bank_true():
-    from hal0.config.schema import MemoryConfig
+def test_a_legacy_record_without_unified_bank_in_the_config_is_unified():
+    """``unified_bank`` left the schema; an old config that never set it was
+    on the unified bank (its old default), and the record keeps that."""
+    from hal0.memory.bank_layout import SOURCE_STORE_EXISTS, capture_legacy
 
-    assert MemoryConfig().unified_bank is True
+    record = capture_legacy(MemoryConfig.model_validate({}), source=SOURCE_STORE_EXISTS)
+    assert (record.legacy_unified, record.legacy_platform_bank) == (True, "shared")
+    p = HindsightProvider(client=RecordingClient(), **record.provider_kwargs(MemoryConfig()))
+    assert (p.unified_bank, p.two_bank, p.platform_bank) == (True, False, "shared")
+    assert p.layout == "legacy_unified"
+
+
+def test_a_legacy_record_ignores_the_new_bank_defaults():
+    """A config save after the upgrade writes ``bank = "hal0:shared"`` and
+    ``private_bank`` back with their defaults; a legacy store still reads
+    the bank it recorded."""
+    cfg = MemoryConfig.model_validate({"bank": "hal0:shared", "private_bank": "hal0:private"})
+    p = HindsightProvider(client=RecordingClient(), **legacy_record(unified=True, memory_cfg=cfg))
+    assert p.platform_bank == "shared"
+    assert p.private_bank is None
+
+
+# ── Private notes owned by no identified agent are visible to nobody (#3560) ──
+
+
+async def _seed_unknown_private() -> HindsightProvider:
+    """A bank holding one shared note and one private ``agent:unknown`` note
+    (what a ``private:`` write with no client id is stamped with)."""
+    p = HindsightProvider(client=RecordingClient(), **legacy_record(unified=True))
+    await p.add("orphan secret", dataset="private:ghost")  # no id → agent:unknown
+    await p.add("public note", dataset="shared", client_id="hermes")
+    stored = p._client._facts_by_bank["shared"]
+    orphan = next(f for f in stored if f["text"] == "orphan secret")
+    assert "agent:unknown" in orphan["tags"] and "visibility:private" in orphan["tags"]
+    return p
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cid", [None, "anonymous", "unknown"])
+async def test_unidentified_caller_reads_no_private_unknown_note(cid):
+    p = await _seed_unknown_private()
+    recalled = {i["text"] for i in await p.recall("note", dataset="shared", client_id=cid)}
+    assert recalled == {"public note"}
+    listed = {i["text"] for i in (await p.list_items(dataset="shared", client_id=cid))["items"]}
+    assert listed == {"public note"}
+
+
+@pytest.mark.asyncio
+async def test_identified_agent_does_not_see_private_unknown_note():
+    p = await _seed_unknown_private()
+    recalled = {i["text"] for i in await p.recall("note", dataset="shared", client_id="hermes")}
+    assert recalled == {"public note"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cid", [None, "anonymous", "unknown"])
+async def test_unidentified_caller_reflect_scope_admits_no_private_note(cid):
+    from hal0.memory.read_scope import reflect_visibility_scope, tags_readable
+
+    groups = reflect_visibility_scope(cid)
+    assert not tags_readable(groups, ["agent:unknown", "visibility:private"])
+    assert tags_readable(groups, ["agent:hermes"])
+
+
+@pytest.mark.asyncio
+async def test_real_agent_still_sees_only_its_own_private_notes():
+    p = _unified(client_id="hermes")
+    await p.add("hermes note", dataset="private:hermes", client_id="hermes")
+    await p.add("scribe note", dataset="private:scribe", client_id="scribe")
+    got = {i["text"] for i in await p.recall("note", dataset="shared", client_id="hermes")}
+    assert got == {"hermes note"}
+
+
+def test_provider_rule_and_engine_scope_agree_for_unidentified_callers():
+    from hal0.memory.read_scope import reflect_visibility_scope, tags_readable
+
+    for caller in (None, "", "anonymous", "unknown", "hermes"):
+        for tags in (
+            ["agent:unknown", "visibility:private"],
+            ["visibility:private"],
+            ["agent:hermes", "visibility:private"],
+            ["agent:unknown"],
+        ):
+            asked = HindsightProvider._caller_agent(
+                HindsightProvider(client=RecordingClient(), **legacy_record(unified=True)), caller
+            )
+            assert tags_readable(reflect_visibility_scope(caller), tags) is (
+                HindsightProvider._is_visible_to({"tags": tags}, asked)
+            ), (caller, tags)

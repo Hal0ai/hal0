@@ -22,7 +22,7 @@
 
 | Need | Endpoint | Poll | Shape (relevant fields) |
 |---|---|---|---|
-| Slot list | `GET /api/slots` | 5s | `[{name, state, backend, device, model_id, port, tokens_per_sec, ttft_seconds, requests_processing, mem_rss_mb, kv_cache_usage, ctx, uptime_seconds}]` |
+| Slot list | `GET /api/slots` | 5s | `[{name, state, backend, device, model_id (nullable), port, tokens_per_sec, ttft_seconds, requests_processing, mem_rss_mb, kv_cache_usage, ctx, uptime_seconds}]` |
 | Slot detail | `GET /api/slots/{name}` | 2.5s | same shape, single |
 | Slot metrics | `GET /api/slots/metrics` | 2.5s | `{slot: {tokens_per_sec, ttft_seconds, ...}}` |
 | Slot capacity | `GET /api/slots/capacity` | 5s | `{per_slot: {slot: {vram_mb, ram_mb, mem_mb, state, model_id}}}` |
@@ -32,6 +32,17 @@
 | Approvals | `GET /api/agent/approvals` + SSE `GET /api/agent/approvals/events` | SSE | `{approvals:[{id, agent, tool, args, client_id, enqueued_at, state}]}` |
 | Service links | `GET /api/config/urls` | 60s | `{api, openwebui, openwebui_enabled, openwebui_reason, hermes, hermes_enabled, comfyui, comfyui_public, comfyui_lan, comfyui_reason, openwebui_ip, comfyui_ip}`. `openwebui` / `comfyui` are `""` and the matching `*_reason` is `"proxy_needs_public_url"` when the request came through a reverse proxy and no `HAL0_OPENWEBUI_PUBLIC_URL` / `HAL0_COMFYUI_PUBLIC_URL` is declared; `*_reason` is `""` whenever the link is set. FE: never build `host:port` from the page host as a fallback for an empty link; show the "set `HAL0_<APP>_PUBLIC_URL` in `/etc/hal0/api.env`" hint. A `*_reason` is absent from an older hal0. `openwebui_ip` / `comfyui_ip` are `http://<LAN IP>:<app port>` for clients that cannot resolve a `.local` name: the box's main LAN address (`primary_lan_ip()`), same port as the name-based link. Each is `""` behind a reverse proxy, with no LAN address, when the page was already reached by that address, and (`comfyui_ip`) while `comfyui_lan` is false. FE: offer it beside the primary link, only when non-empty; they are absent from an older hal0. Hermes has none (loopback-only). |
 | Chat stream | `POST /v1/chat/completions` `{model:"<slot-name>", messages, stream:true}` | — | OpenAI SSE frames |
+
+`model_id` in the slot-list and slot-detail shapes is nullable, and follows
+the slot's state. A serving slot (`ready`, `serving`, `idle`) names the model
+it is serving, even if the assignment was cleared after the load. A cold slot
+(`offline`, `error`) names its configured `[model].default` assignment, so a
+divergent assignment is not masked by a stale id. A loading slot (`pulling`,
+`starting`, `warming`) names the model it is actually pulling or warming.
+FE: a `null` `model_id` is the documented value for any non-serving state —
+`error`, `offline`, `pulling`, `starting`, `warming`, `unloading` — with no
+model assignment whose provider requires an explicit model, not only for
+`offline`.
 
 **Existing FE primitives to REUSE (do not rebuild):** `slot-status.js → slotIndicatorFromPhase()`,
 `memory-map.jsx → MemoryMap/useMemoryMapModel`, `inference-pane.jsx`,
@@ -295,3 +306,101 @@ flat task list the hook buckets by `status`). Empty board ⇒ all 8 lanes render
 - `POST /api/updates/restart-slots` returns `restarted`, `failed` (slot and error),
   `skipped_busy`, `skipped_render_error`, and `count`. Report unsuccessful outcomes
   even when other slots restarted.
+
+# xdna (ggml-xdna NPU runner) — FROZEN DATA CONTRACT (v1)
+
+An xdna slot is `runner:'xdna'`, `runtime_family:'llama-server'`,
+`device_class:'npu'`. It is NEVER an FLM-trio anchor: `npu-modality.js`'s
+structural anchor resolution and `slot-shared.js`'s `isNpuSlot` stay
+disjoint from it (see `isXdnaSlot` in `npu-pane.jsx`). It renders as its
+own `XdnaSlotCard` in the NPU occupancy card's RIGHT region and can
+appear alongside an FLM trio anchor on the same NPU array.
+
+## Slot payload (GET /api/slots, GET /api/slots/{name})
+
+```
+runner: 'xdna'
+runtime_family: 'llama-server'
+device_class: 'npu'
+xdna_path: 'fused' | 'per-op' | null   // null = not yet resolved/loaded
+xdna_reason: string | null             // human reason, used as the fit chip's title
+npu_shared_with: string[]              // other slot names holding the same NPU array
+pmode: string | null                   // active power mode, '—' when null
+```
+
+## Slot config — `[xdna]` table (PUT /api/slots/{name}/config)
+
+```
+[xdna]
+pmode = "<one of GET /api/runners/xdna/knobs .pmodes>"
+host_xrt = "/absolute/path" | null
+[xdna.env]
+GGML_XDNA_* = "<value>"   # keys MUST be in GET /api/runners/xdna/knobs .env[].name
+```
+
+Written and restarted through the existing slot config PUT + restart flow
+(no new endpoint) — same two-call contract the NPU occupancy card's
+`writeAnchor` uses for FLM pills. UI assumption: `env` values are opaque
+strings; the UI does not attempt to type/coerce them, matching how
+HALOGEN_* profile flags are treated.
+
+## GET /api/runners/xdna/knobs (already exists)
+
+```
+{
+  pmodes: string[],
+  env: [{ name: string, default: string | null, doc: string, fixed: boolean }],
+  host_xrt: { doc: string },
+}
+```
+
+Single source of truth for which `GGML_XDNA_*` names are legal — an env
+row name outside this list is rejected inline in the drawer
+(`xdna-settings.jsx`), same UX as `flags-tune.js`. A `fixed: true` row
+(`GGML_XDNA_PGEMM_GLU_A`, pinned to `0`) is never offered for editing; the
+slot-config PUT refuses any other value with a 400, in `[xdna].env` and in
+`[server].env` alike.
+
+## /api/npu/occupancy (already exists)
+
+Each slot entry carries `engine: 'flm' | 'xdna'` and `single_tenant: boolean`
+(false when >1 holder). The NPU grid (`AieGrid`) renders a static hatched
+"shared · time-sliced" treatment whenever more than one holder claims
+columns, or an xdna slot reports a non-empty `npu_shared_with` — a
+holder-count FACT, never a per-tile load claim. No new animation; existing
+`tileAnim` still honors `prefers-reduced-motion`.
+
+## Hardware stats — optional fields (already exists on the API per contract)
+
+```
+npu_pmode: string | null   // render '—' when null, never fabricate
+npu_fclk: number | null    // render '—' when null, never fabricate
+```
+
+## ASSUMED (not verified against a live backend — flag for BE review)
+
+- `GET /api/slots/{name}/config` response nests the xdna table under a
+  top-level `xdna` key (`{ xdna: { pmode, env, host_xrt } }`), mirroring
+  how `[xdna]` appears in the TOML the PUT writes. If the GET shape differs,
+  only `SlotXdnaBlock`'s `xdnaCfg={xdnaCfgQuery.data?.xdna}` wiring in
+  `slot-modals.jsx` needs to change.
+- `pmode` on the slot payload (GET) reflects the *active* applied value,
+  while the config table's `pmode` is the *desired* value — treated as the
+  same field for the pmode pill in `npu-pane.jsx` LEFT region; if the API
+  splits "desired vs applied" the LEFT-region pill should read the slot
+  payload's `pmode`, not the config.
+- `npu_pmode` / `npu_fclk` are read from the hardware-stats query's NPU row
+  (same object `hardware.jsx`'s existing `npuRow` resolves), not from a new
+  per-call field — no separate hook was added for them.
+- Extra-args screening for `--device XDNA0` / `-ngl 99` / `--poll 0` on an
+  xdna profile was NOT changed in this pass: `flags-tune.js`'s
+  `SLOT_HARDWARE_FLAGS` denylist (`--device`, `-ngl`) is generic across all
+  non-halogen runtime families and would currently reject those flags in
+  profile free text regardless of `device_class`. Needs a `device_class`-
+  aware carve-out (or backend confirmation these three never appear in
+  profile free text because they are fully covered by the `[xdna]` config
+  table) before this requirement is actually met.
+- Create-slot modal / Hardware-Runtimes page xdna listing (optional-tier
+  runner, image-pin + "unpublished" badge parity with halogen) was NOT
+  implemented in this pass — out of budget; `useRuntimes.ts` is the
+  integration point found but untouched.

@@ -27,6 +27,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Request, Response
 from pydantic import ValidationError
 
@@ -34,6 +35,7 @@ from hal0.api._audit import record_action
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import MemoryGraphConfig
+from hal0.errors import MemoryEngineUnavailable
 from hal0.memory import extraction_env as _ee
 from hal0.memory.context import build_memory_context
 from hal0.memory.extraction_env import MEMORY_ALIAS, ExtractionLimits, memory_engine_target
@@ -46,11 +48,18 @@ from hal0.memory.namespace import (
     resolve_write_dataset,
 )
 from hal0.memory.retain_chunk_guard import ChunkAudit, audit_bank_chunks
+from hal0.memory.write_gate import require_writes_allowed
 from hal0.normalize.resolver import DEFAULT_CHAINS
 
 router = APIRouter()
 
 log = logging.getLogger(__name__)
+
+# The engine's own vocabularies (Hindsight RetainRequest / ReflectRequest),
+# checked here so a typo is a 400 from hal0 and not an engine 422.
+_UPDATE_MODES = ("replace", "append")
+_REFLECT_BUDGETS = ("low", "mid", "high")
+_TAGS_MATCH_MODES = ("any", "all", "any_strict", "all_strict", "exact")
 
 
 # ── identity + namespace helpers ────────────────────────────────────────
@@ -85,6 +94,9 @@ log = logging.getLogger(__name__)
 
 _AGENT_HEADER = "x-hal0-agent"
 _PRIVATE_HEADER = "x-hal0-private"
+#: The project a write belongs to, for a client that sets it once per session
+#: and not per call. The body's ``project`` field wins over it.
+_PROJECT_HEADER = "x-hal0-project"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 # Security hardening: agent identity feeds the
@@ -235,6 +247,13 @@ class MemoryUnavailable(Hal0Error):
     status = 503
 
 
+class MemoryReflectFailed(Hal0Error):
+    """The engine answered a namespace reflect with an error, or not in time."""
+
+    code = "memory.reflect_failed"
+    status = 502
+
+
 class MemoryContextTimeout(Hal0Error):
     """Recall for ``POST /api/memory/context`` outlasted its server-side cap."""
 
@@ -266,6 +285,19 @@ def _extraction_slot_resolves(slot: str | None, available: list[str]) -> bool:
     """The default memory target may share agent when its own binding is empty."""
     chain = DEFAULT_CHAINS[MEMORY_ALIAS] if slot == "memory" else (slot,)
     return any(name in available for name in chain)
+
+
+def _extraction_mode(graph_cfg: MemoryGraphConfig, available: list[str]) -> str:
+    """``dedicated`` | ``shared`` | ``custom``, for graph status and memory health.
+
+    Configuration and model binding define the mode, never live readiness.
+    Custom slots/upstreams remain visible without rewriting operator intent.
+    """
+    if graph_cfg.extraction_model or graph_cfg.extraction_slot not in {"memory", "agent"}:
+        return "custom"
+    if graph_cfg.extraction_slot == "memory" and "memory" in available:
+        return "dedicated"
+    return "shared"
 
 
 #: Last warm attempt per upstream name (monotonic seconds): an offline
@@ -363,6 +395,24 @@ async def _available_upstream_models(request: Request) -> list[dict[str, str]]:
     return rows
 
 
+def _read_project(value: Any, path: str) -> dict[str, Any]:
+    """The ``project`` keyword a read passes to the provider, or nothing.
+
+    A read's ``project`` (ADR-0058 decision 7b) narrows it to that project
+    plus global memory; ``"*"`` or no field reads every project. It is
+    passed on only when the caller sent one, so a provider without projects
+    is not handed a keyword it does not know.
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, str):
+        raise BadRequest(
+            "'project' must be a string, or '*' for every project", details={"path": path}
+        )
+    value = value.strip()
+    return {"project": value} if value else {}
+
+
 def _wrapper(request: Request) -> Any:
     """Return the live memory provider or raise 503."""
     wrapper = getattr(request.app.state, "memory_provider", None)
@@ -412,16 +462,17 @@ async def graph_status(request: Request) -> dict[str, Any]:
     # on the provider) — echo them so the dashboard's graph panel can edit
     # them without a second config fetch.
     graph_cfg = load_hal0_config().memory.graph
-    # Configuration and model binding define the mode, never live readiness.
-    # Custom slots/upstreams remain visible without rewriting operator intent.
-    if graph_cfg.extraction_model or graph_cfg.extraction_slot not in {"memory", "agent"}:
-        status["mode"] = "custom"
-    elif graph_cfg.extraction_slot == "memory" and "memory" in available:
-        status["mode"] = "dedicated"
-    else:
-        status["mode"] = "shared"
+    status["mode"] = _extraction_mode(graph_cfg, available)
     status["llm_timeout_s"] = graph_cfg.llm_timeout_s
     status["extraction_limits"] = ExtractionLimits.from_config(graph_cfg).as_dict()
+    # #3347: the extraction slot's --parallel and the limits actually rendered
+    # into the drop-in (max_concurrent held to it), so a clamp is visible.
+    slot_parallel = await asyncio.to_thread(_ee.extraction_slot_parallel, graph_cfg)
+    status["extraction_slot_parallel"] = slot_parallel
+    status["effective_extraction_limits"] = _ee.clamp_to_parallel(
+        ExtractionLimits.from_config(graph_cfg), slot_parallel
+    ).as_dict()
+    status["concurrency_warning"] = _ee.concurrency_clamp_warning(graph_cfg, slot_parallel)
     status["throughput"] = _cached_throughput(request, status.get("extraction_slot"), graph_cfg)
     # #2919: what hal0/memory resolves to, and what else it could — the picker.
     status["extraction_model"] = graph_cfg.extraction_model
@@ -431,6 +482,15 @@ async def graph_status(request: Request) -> dict[str, Any]:
     # #2918: the LLM the engine really loads — a hindsight-llm.env override of
     # provider/base_url/model beats every drop-in and must not stay hidden.
     status["engine_llm"] = await asyncio.to_thread(_ee.effective_engine_llm)
+    # #3388/#3389: whether the unit env carries what hal0 renders now — a
+    # later-sorting drop-in, or a stale --parallel clamp, shows up as drift.
+    env_report = await asyncio.to_thread(_ee.engine_env_report, load_hal0_config().memory)
+    status["engine_env"] = {
+        "checked": env_report.get("checked", False),
+        "drift": env_report.get("drift") or [],
+        "legacy_drop_in": env_report.get("legacy_drop_in"),
+        "warning": _ee.engine_env_warning(env_report),
+    }
     await _augment_build_counters(request, status)
     # #3326: why the failing banks fail, when the cap is the reason. Additive;
     # ``None`` when nothing is failing or the engine cannot be read.
@@ -730,6 +790,8 @@ async def retry_failed_extractions(request: Request) -> dict[str, Any]:
     """
     import asyncio
 
+    # #3518: a retry is a write; refused while an embedder switch runs.
+    require_writes_allowed()
     provider = getattr(request.app.state, "memory_provider", None)
     client = getattr(provider, "hindsight_client", None) if provider is not None else None
     if client is None:
@@ -786,7 +848,10 @@ async def retry_failed_extractions(request: Request) -> dict[str, Any]:
 
 
 async def _propagate_shielded(
-    slot: str, timeout_s: int, limits: ExtractionLimits | None = None
+    slot: str,
+    timeout_s: int,
+    limits: ExtractionLimits | None = None,
+    memory: Any = None,
 ) -> dict[str, Any]:
     """Propagate an extraction-slot/timeout/limits change, safe against cancellation.
 
@@ -811,11 +876,32 @@ async def _propagate_shielded(
     early either — an unshielded ``await task`` there would exit and
     release the lock exactly like the bug this function exists to close.
     """
-    from hal0.memory.extraction_env import apply_extraction_slot
-
-    task = asyncio.ensure_future(
-        asyncio.to_thread(apply_extraction_slot, slot, timeout_s=timeout_s, limits=limits)
+    from hal0.memory.extraction_env import (
+        SHOWCASE_DROP_IN_PATH,
+        apply_extraction_slot,
+        apply_showcase_dropin,
     )
+
+    def _apply() -> dict[str, Any]:
+        # #3492: the showcase drop-in's concurrency caps are held to the
+        # extraction limit and win over it (later drop-in), so a graph change
+        # re-renders it too — written without its own restart; the extraction
+        # apply below does the one reload + restart for both.
+        showcase = None
+        if memory is not None and SHOWCASE_DROP_IN_PATH.exists():
+            showcase = apply_showcase_dropin(
+                models=memory.models,
+                decision=memory.decision,
+                lanes=memory.lanes,
+                graph=memory.graph,
+                restart=False,
+            )
+        result = apply_extraction_slot(slot, timeout_s=timeout_s, limits=limits)
+        if showcase is not None:
+            result["showcase_dropin"] = showcase
+        return result
+
+    task = asyncio.ensure_future(asyncio.to_thread(_apply))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
@@ -883,6 +969,12 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         timeout_changed = new_cfg.llm_timeout_s != cfg.memory.graph.llm_timeout_s
         new_limits = ExtractionLimits.from_config(new_cfg)
         limits_changed = new_limits != ExtractionLimits.from_config(cfg.memory.graph)
+        # #3347: hal0.toml keeps what the operator asked for; the drop-in gets
+        # it held to the extraction slot's --parallel. Slot changes can move the
+        # clamp without touching a limit, which the drift check below catches.
+        slot_parallel = await asyncio.to_thread(_ee.extraction_slot_parallel, new_cfg)
+        render_limits = _ee.clamp_to_parallel(new_limits, slot_parallel)
+        clamp_warning = _ee.concurrency_clamp_warning(new_cfg, slot_parallel)
 
         # Validate an EXPLICIT slot change against the live slot set —
         # reject an unknown / non-llm slot with the valid options so the
@@ -929,7 +1021,13 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         if not needs_propagation:
             from hal0.memory.extraction_env import drop_in_matches
 
-            needs_propagation = not drop_in_matches(new_cfg.llm_timeout_s, limits=new_limits)
+            # #3388: compare what the unit carries too, so a later-sorting
+            # drop-in overriding one of these keys is repaired-or-reported
+            # instead of silently passing as "no drift".
+            unit_env = await asyncio.to_thread(_ee.hindsight_unit_env)
+            needs_propagation = not drop_in_matches(
+                new_cfg.llm_timeout_s, limits=render_limits, unit_env=unit_env
+            )
 
         # Flip the live wrapper's reported state BEFORE persisting.
         try:
@@ -969,7 +1067,7 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
             # cancellation (see _propagate_shielded) so this lock's critical
             # section can't be exited early while the worker is still live.
             propagation = await _propagate_shielded(
-                new_cfg.extraction_slot, new_cfg.llm_timeout_s, new_limits
+                new_cfg.extraction_slot, new_cfg.llm_timeout_s, render_limits, cfg.memory
             )
 
         out = new_cfg.model_dump(mode="json")
@@ -981,6 +1079,17 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         out["target"] = {"kind": target_kind, "model": _target_model, "alias": MEMORY_ALIAS}
         if propagation is not None:
             out["propagation"] = propagation
+
+    if slot_changed or model_changed:
+        # Hermes writes auxiliary targets at provision time. Reuse its tracked
+        # repair path when the configured target changes; an absent Hermes is
+        # normal on boxes that do not bundle it.
+        try:
+            from hal0.api.agents.repair import reprovision_hermes_auxiliary
+
+            await reprovision_hermes_auxiliary(request)
+        except Exception as exc:
+            log.warning("memory.hermes_aux_reprovision_unavailable", error=str(exc))
 
     # Extraction dispatches to hal0/<extraction_slot> whether or not the
     # reporting gate is on, so a slot change measures regardless of it.
@@ -1005,6 +1114,8 @@ async def update_graph_config(request: Request) -> dict[str, Any]:
         out["throughput"] = throughput
         if throughput["verdict"] == "too_slow":
             out["warnings"] = [throughput["message"]]
+    if clamp_warning:
+        out["warnings"] = [*out.get("warnings", []), clamp_warning]
     # #3215: warn when the cap does not clear a bank's retain chunk size. Outside
     # the config lock for the same reason as the probe; a down engine skips it.
     audit = await _audit_retain_chunks(request, new_cfg.extraction_max_tokens)
@@ -1143,11 +1254,40 @@ def make_add_preflight(app: Any, wrapper: Any) -> Callable[[], Awaitable[None]]:
 
 @router.post("/add")
 async def memory_add(request: Request) -> dict[str, Any]:
-    """Add a memory item. Body: ``{text, dataset?, tags?, metadata?, document_id?}``.
+    """Add a memory item. Body: ``{text, dataset?, tags?, metadata?,
+    document_id?, update_mode?, append_document_id?, observation_scopes?,
+    project?}``.
+
+    ``project`` names the project the caller is working in (a repository
+    name, say). hal0 resolves it against ``[memory.projects]`` and tags the
+    write with one ``project:<slug>``; a caller does not write that tag by
+    hand. The ``X-hal0-Project`` header carries the same value for a client
+    that sets it once; the body field wins. A project-tagged memory is
+    readable by every shared read (ADR-0058 decision 7b).
 
     Returns ``{id, timestamp}`` plus ``operation_id`` when the engine
     ingests asynchronously (Hindsight retain). Reuse ``document_id``
     across calls to upsert one logical document.
+
+    ``update_mode`` says what a reused ``document_id`` does to the document
+    already stored under it: ``"replace"`` (the engine's default when the
+    field is absent) deletes it and stores the new text; ``"append"`` adds
+    the new text to it.
+
+    ``append_document_id`` is the one-field form of ``document_id`` plus
+    ``update_mode: "append"``, for a caller that sends one id for many
+    writes (a conversation, one turn at a time). It exists because the pair
+    is unsafe to send to a hal0-api from before ``update_mode``: that server
+    reads ``document_id``, drops the mode, and the engine replaces the
+    document on every write. An unknown field is ignored there instead, so
+    the write gets a fresh id and nothing is lost. It has exactly one
+    meaning, and is refused beside ``document_id`` or ``update_mode``.
+
+    The response carries ``update_mode`` when the provider reports it sent
+    that mode to the engine; the route never adds it on its own. An
+    appending caller treats a response without it as "this document was not
+    appended to". ``observation_scopes`` is the engine's consolidation
+    scoping, passed through as sent; when absent the provider decides.
 
     Identity headers (issue #317):
 
@@ -1209,7 +1349,71 @@ async def memory_add(request: Request) -> dict[str, Any]:
             details={"path": "/api/memory/add"},
         )
 
+    # Only what the caller sent is passed on: no default for either field
+    # lives here (the provider owns the scoping default, the engine the mode).
+    passthrough: dict[str, Any] = {}
+    update_mode = body.get("update_mode")
+    append_document_id = body.get("append_document_id")
+    if append_document_id is not None:
+        if document_id is not None or update_mode is not None:
+            raise BadRequest(
+                "memory_add 'append_document_id' cannot be combined with "
+                "'document_id' or 'update_mode'",
+                code="memory.append_document_id_conflict",
+                details={"path": "/api/memory/add"},
+            )
+        if not isinstance(append_document_id, str) or not DOCUMENT_ID_PATTERN.match(
+            append_document_id
+        ):
+            raise BadRequest(
+                "memory_add 'append_document_id' must match the identity grammar "
+                "(alnum/-/_ ≤64 chars)",
+                details={"path": "/api/memory/add"},
+            )
+        if append_document_id.startswith("private:") and not private:
+            raise BadRequest(
+                "memory_add a private:<agent>:<id> 'append_document_id' needs a private write",
+                details={"path": "/api/memory/add"},
+            )
+        document_id, update_mode = append_document_id, "append"
+    if update_mode is not None:
+        if update_mode not in _UPDATE_MODES:
+            raise BadRequest(
+                "memory_add 'update_mode' must be 'replace' or 'append'",
+                details={"path": "/api/memory/add"},
+            )
+        if update_mode == "append" and document_id is None:
+            raise BadRequest(
+                "memory_add 'update_mode' = 'append' needs a 'document_id' to append to",
+                details={"path": "/api/memory/add"},
+            )
+        passthrough["update_mode"] = update_mode
+    observation_scopes = body.get("observation_scopes")
+    if observation_scopes is not None:
+        if not isinstance(observation_scopes, (str, list)):
+            raise BadRequest(
+                "memory_add 'observation_scopes' must be a string or a list of tag lists",
+                details={"path": "/api/memory/add"},
+            )
+        passthrough["observation_scopes"] = observation_scopes
+    # The project the caller is working in (ADR-0058 decision 4a): the body
+    # field, else the header. The provider resolves the name; nothing is
+    # passed on when the caller named none.
+    project = body.get("project")
+    if project is not None and not isinstance(project, str):
+        raise BadRequest(
+            "memory_add 'project' must be a string",
+            details={"path": "/api/memory/add"},
+        )
+    project = (project or "").strip() or request.headers.get(_PROJECT_HEADER, "").strip()
+    if project:
+        passthrough["project"] = project
+
     wrapper = _wrapper(request)
+
+    # #3518: while `hal0 memory embedder switch` holds the write gate, refuse
+    # with the typed 503 before any other preflight has a say.
+    require_writes_allowed()
 
     # #1903: preflight the extraction slot's effective window against the
     # extraction prompt's own footprint BEFORE the retain is attempted. A
@@ -1222,6 +1426,8 @@ async def memory_add(request: Request) -> dict[str, Any]:
     # on a healthy box just because the catalog lookup came back thin.
     await extraction_ctx_preflight(request.app, wrapper)
 
+    # Returned as the provider built it: ``update_mode`` is in there only when
+    # the provider sent that mode to the engine (see the docstring).
     return await wrapper.add(
         text=text,
         dataset=dataset,
@@ -1230,17 +1436,36 @@ async def memory_add(request: Request) -> dict[str, Any]:
         metadata=body.get("metadata") or {},
         client_id=agent_id if agent_id != "anonymous" else None,
         document_id=document_id,
+        **passthrough,
     )
+
+
+async def _engine_read(call: Awaitable[Any]) -> Any:
+    """Await a memory read; an engine that cannot be reached is the typed 503.
+
+    A write already answers ``memory.engine_unavailable`` when the engine's
+    port refuses the connection. A read used to surface the raw connection
+    error as a 500. The engine is unreachable on purpose for the whole of
+    ``hal0 memory embedder switch`` (#3518), so reads say so too.
+    """
+    try:
+        return await call
+    except (ConnectionError, httpx.NetworkError, httpx.ConnectTimeout) as exc:
+        raise MemoryEngineUnavailable() from exc
 
 
 @router.post("/search")
 async def memory_search(request: Request) -> dict[str, Any]:
-    """Search memory. Body: ``{query, limit?, dataset?, tags?, before?, after?}``.
+    """Search memory. Body: ``{query, limit?, dataset?, tags?, before?, after?,
+    project?}``.
 
     Identity headers behave like ``/add`` — ``X-hal0-Private: 1``
     expands a default-empty ``dataset`` to ``[shared, private:<agent>]``
     so a private-mode caller sees both their own scoped
     items + the shared bucket without per-call opt-in.
+
+    ``project`` narrows the read to one project plus global memory; with
+    none, or ``"*"``, every project is read (ADR-0058 decision 7b).
 
     Returns ``{items: [MemoryRecord, ...]}`` — wrapped in an envelope so
     we can add ``next_cursor`` / counters later without breaking clients.
@@ -1264,15 +1489,19 @@ async def memory_search(request: Request) -> dict[str, Any]:
     except MemoryNamespaceError as exc:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
+    project = _read_project(body.get("project"), "/api/memory/search")
     wrapper = _wrapper(request)
-    items = await wrapper.search(
-        query=query,
-        limit=int(body.get("limit", 10)),
-        dataset=dataset,
-        tags=body.get("tags") or [],
-        before=body.get("before"),
-        after=body.get("after"),
-        client_id=agent_id if agent_id != "anonymous" else None,
+    items = await _engine_read(
+        wrapper.search(
+            query=query,
+            limit=int(body.get("limit", 10)),
+            dataset=dataset,
+            tags=body.get("tags") or [],
+            before=body.get("before"),
+            after=body.get("after"),
+            client_id=agent_id if agent_id != "anonymous" else None,
+            **project,
+        )
     )
     return {"items": items}
 
@@ -1281,10 +1510,10 @@ async def memory_search(request: Request) -> dict[str, Any]:
 async def memory_recall(request: Request) -> dict[str, Any]:
     """Token-budgeted recall (Hindsight's preferred path).
 
-    Body: ``{query, max_tokens?, types?, dataset?, tags?}``. Identity +
-    namespace resolution behave like ``/search`` (X-hal0-Agent +
-    X-hal0-Private). Returns ``{items: [MemoryItem, ...]}`` ordered by
-    relevance (no numeric score — Hindsight recall returns none).
+    Body: ``{query, max_tokens?, types?, dataset?, tags?, project?}``.
+    Identity + namespace resolution behave like ``/search`` (X-hal0-Agent +
+    X-hal0-Private), and so does ``project``. Returns
+    ``{items: [MemoryItem, ...]}`` ordered by relevance.
 
     Falls back to ``search`` semantics on engines without a richer recall
     (the ABC default), so this route is safe regardless of active engine.
@@ -1312,17 +1541,131 @@ async def memory_recall(request: Request) -> dict[str, Any]:
     except MemoryNamespaceError as exc:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
+    project = _read_project(body.get("project"), "/api/memory/recall")
     wrapper = _wrapper(request)
-    items = await wrapper.recall(
-        query=query,
-        types=body.get("types"),
-        max_tokens=int(body.get("max_tokens", 4096)),
-        dataset=dataset,
-        tags=body.get("tags") or [],
-        tags_match=body.get("tags_match"),
-        client_id=agent_id if agent_id != "anonymous" else None,
+    items = await _engine_read(
+        wrapper.recall(
+            query=query,
+            types=body.get("types"),
+            max_tokens=int(body.get("max_tokens", 4096)),
+            dataset=dataset,
+            tags=body.get("tags") or [],
+            tags_match=body.get("tags_match"),
+            client_id=agent_id if agent_id != "anonymous" else None,
+            **project,
+        )
     )
     return {"items": items}
+
+
+@router.post("/reflect")
+async def memory_reflect(request: Request) -> dict[str, Any]:
+    """Ask the engine to answer ``query`` from memory (LLM synthesis).
+
+    Body: ``{query, budget?, max_tokens?, tags?, tags_match?,
+    response_schema?, dataset?, project?}``. Returns the engine's answer,
+    ``{text, structured_output?, usage?, ...}``, or ``{status:
+    "unsupported"}`` on an engine that cannot reflect. Slow by nature: the
+    engine runs an agentic loop, minutes on local hardware.
+
+    This is the NAMESPACE reflect, the sibling of ``/recall``: identity comes
+    from ``X-hal0-Agent`` and the provider picks the bank. It reads ONE bank,
+    the one a write with the same headers would land in: in the two-bank
+    layout ``hal0:shared``, or ``hal0:private`` when ``X-hal0-Private: 1``
+    is sent; on a store still on its old layout the platform bank (which,
+    unified, also holds every agent's private memories) or, split, the
+    caller's own private bank. ``project`` narrows it as it narrows
+    ``/recall``.
+
+    Two rules keep other agents' private memories out of the answer, and the
+    provider applies both (``HindsightProvider.reflect``), so the MCP
+    ``memory_reflect`` tool gets the same ones. Facts and observations are
+    filtered by tag (the visibility rule, or the caller's own ``agent:`` tag
+    on ``hal0:private``). Mental models cannot be filtered that way, so on a
+    bank that holds other agents' private memories the reflect runs with the
+    engine's ``exclude_mental_models`` and uses none.
+
+    The bank console's ``POST /api/memory/banks/{bank}/reflect`` is a
+    different thing: a verbatim passthrough to a bank the operator names,
+    with no identity and neither rule.
+    """
+    path = {"path": "/api/memory/reflect"}
+    body = await _read_json_body(request)
+    query = body.get("query")
+    if not isinstance(query, str) or not query.strip():
+        raise BadRequest("memory_reflect requires 'query' (non-empty string)", details=path)
+    budget = body.get("budget", "low")
+    if budget not in _REFLECT_BUDGETS:
+        raise BadRequest("memory_reflect 'budget' must be 'low', 'mid' or 'high'", details=path)
+    max_tokens = body.get("max_tokens", 4096)
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+        raise BadRequest("memory_reflect 'max_tokens' must be a positive integer", details=path)
+    tags = body.get("tags")
+    if tags is not None and not (isinstance(tags, list) and all(isinstance(t, str) for t in tags)):
+        raise BadRequest("memory_reflect 'tags' must be a list of strings", details=path)
+    tags_match = body.get("tags_match")
+    if tags_match is not None and tags_match not in _TAGS_MATCH_MODES:
+        raise BadRequest(
+            "memory_reflect 'tags_match' must be one of " + ", ".join(_TAGS_MATCH_MODES),
+            details=path,
+        )
+    response_schema = body.get("response_schema")
+    if response_schema is not None and not isinstance(response_schema, dict):
+        raise BadRequest("memory_reflect 'response_schema' must be an object", details=path)
+
+    agent_id = _agent_id(request)
+    client_id = agent_id if agent_id != "anonymous" else None
+    try:
+        dataset = resolve_write_dataset(
+            body.get("dataset"), private=_is_private(request), client_id=client_id
+        )
+    except MemoryNamespaceError as exc:
+        raise MemoryNamespaceInvalid(str(exc)) from exc
+
+    project = _read_project(body.get("project"), path["path"])
+    wrapper = _wrapper(request)
+    # The provider turns the caller's identity and tags into the engine's
+    # tag filter, and leaves mental models out where the bank it reads holds
+    # other agents' private memories. This route also asks for that
+    # exclusion itself, from the bank this reflect actually reads: a provider
+    # that cannot say is treated as sharing one, because leaving mental
+    # models out costs some answer quality and using one built from another
+    # agent's private notes is a leak.
+    holds_others = getattr(wrapper, "holds_other_agents_private", None)
+    shared_with_other_agents = bool(holds_others(dataset)) if callable(holds_others) else True
+    try:
+        result = await wrapper.reflect(
+            query=query,
+            dataset=dataset,
+            client_id=client_id,
+            budget=budget,
+            max_tokens=max_tokens,
+            tags=tags,
+            tags_match=tags_match,
+            exclude_mental_models=shared_with_other_agents,
+            response_schema=response_schema,
+            **project,
+        )
+    except httpx.TimeoutException as exc:
+        err = MemoryReflectFailed("the memory engine did not finish the reflect in time")
+        err.status = 504
+        raise err from exc
+    except httpx.HTTPStatusError as exc:
+        upstream_status = exc.response.status_code
+        err = MemoryReflectFailed(
+            "the memory engine refused the reflect",
+            details={"upstream_status": upstream_status},
+        )
+        # A request the engine calls malformed is the caller's to fix. Every
+        # other engine status is a gateway failure, 404 included: this route
+        # answering 404 has to keep meaning "no such route" to a client that
+        # is working out whether its hal0 can reflect at all.
+        if upstream_status in (400, 422):
+            err.status = upstream_status
+        raise err from exc
+    except httpx.HTTPError as exc:
+        raise MemoryEngineUnavailable() from exc
+    return dict(result) if isinstance(result, dict) else {"text": str(result)}
 
 
 @router.post("/context")
@@ -1418,8 +1761,12 @@ async def memory_list(
     bank: str | None = None,
     cursor: str | None = None,
     limit: int = 50,
+    project: str | None = None,
 ) -> dict[str, Any]:
     """Paginated list. Returns ``{items: [...], next_cursor: str | null}``.
+
+    ``?project=`` keeps one project plus global memory, as ``/search``
+    does; with none, or ``*``, every project.
 
     Identity rules mirror ``/search``: this is a READ route, so it resolves
     through :func:`resolve_read_datasets` like ``/search``/``/recall`` do —
@@ -1431,9 +1778,11 @@ async def memory_list(
     private-mode case to the private bucket alone, unlike ``/search``.)
 
     ``?bank=`` is a convenience alias for the dashboard's Hindsight bank
-    browser: a bank id (``private__hermes``) is translated to the matching
-    dataset namespace (``private:hermes``) when no explicit ``?dataset=`` is
-    given. If both are supplied and conflict, the explicit ``dataset`` wins.
+    browser: a bank id (``private__hermes``, the platform bank's own name, or
+    the two-bank private bank, which answers for the caller's own
+    ``private:<agent>``) is translated to the matching dataset namespace
+    (``private:hermes``) when no explicit ``?dataset=`` is given. If both are
+    supplied and conflict, the explicit ``dataset`` wins.
 
     Like every namespace resolution in this module, the alias is still
     bound by the closed-set rule (module docstring in
@@ -1446,8 +1795,22 @@ async def memory_list(
     alias is sugar for spelling your own bank id, never a door into another
     agent's.
     """
+    agent_id = _agent_id(request)
     if bank is not None:
-        bank_dataset = bank_to_namespace(bank)
+        # The platform bank ([memory] bank, ADR-0052) answers for ``shared``
+        # whatever the operator named it, and the two-bank private bank
+        # ([memory] private_bank) for the caller's own ``private:<agent>``;
+        # any other bank id keeps the ``private__<agent>`` ->
+        # ``private:<agent>`` spelling.
+        provider = getattr(request.app.state, "memory_provider", None)
+        platform_bank = getattr(provider, "platform_bank", "shared")
+        private_bank = getattr(provider, "private_bank", None)
+        if bank == platform_bank:
+            bank_dataset = "shared"
+        elif isinstance(private_bank, str) and bank == private_bank:
+            bank_dataset = f"private:{agent_id}"
+        else:
+            bank_dataset = bank_to_namespace(bank)
         if dataset is None:
             dataset = bank_dataset
         elif dataset != bank_dataset:
@@ -1458,7 +1821,6 @@ async def memory_list(
                 bank_dataset,
             )
 
-    agent_id = _agent_id(request)
     private = _is_private(request)
     try:
         resolved = resolve_read_datasets(
@@ -1469,12 +1831,16 @@ async def memory_list(
     except MemoryNamespaceError as exc:
         raise MemoryNamespaceInvalid(str(exc)) from exc
 
+    scope = _read_project(project, "/api/memory/list")
     wrapper = _wrapper(request)
-    return await wrapper.list_items(
-        dataset=resolved,
-        cursor=cursor,
-        limit=limit,
-        client_id=agent_id if agent_id != "anonymous" else None,
+    return await _engine_read(
+        wrapper.list_items(
+            dataset=resolved,
+            cursor=cursor,
+            limit=limit,
+            client_id=agent_id if agent_id != "anonymous" else None,
+            **scope,
+        )
     )
 
 

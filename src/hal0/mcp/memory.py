@@ -75,15 +75,17 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
+import httpx
 import structlog
 
-from hal0.errors import Hal0Error
+from hal0.errors import Hal0Error, MemoryEngineUnavailable
 from hal0.memory.namespace import (
     DOCUMENT_ID_PATTERN,
     MemoryNamespaceError,
     resolve_read_datasets,
     resolve_write_dataset,
 )
+from hal0.memory.write_gate import require_writes_allowed
 
 try:
     from mcp.server.fastmcp import FastMCP  # type: ignore[import-not-found]
@@ -269,6 +271,16 @@ def _resolve_read_dataset(
         raise MemorySchemaError(str(exc)) from exc
 
 
+def _read_project(args: dict[str, Any]) -> dict[str, Any]:
+    """The ``project`` keyword a read tool passes to the provider, or nothing.
+
+    A string names one project (read with global memory), ``"*"`` every
+    project (ADR-0058 decision 7b). Passed on only when the caller sent one.
+    """
+    project = (_optional(args, "project", str) or "").strip()
+    return {"project": project} if project else {}
+
+
 def _iso_now() -> str:
     return datetime.now(tz=UTC).isoformat()
 
@@ -310,7 +322,7 @@ async def _memory_add(
     provenance: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """memory_add(text, dataset?, tags?, metadata?, document_id?, entities?,
-    observation_scopes?, strategy?, update_mode?, sync?)
+    observation_scopes?, strategy?, update_mode?, sync?, project?)
     → {id, timestamp, operation_id?, operation_ids?, items_count?}.
 
     Schema:
@@ -338,6 +350,10 @@ async def _memory_add(
       - ``sync``: ``true`` waits for extraction before returning (no
         ``operation_id``, but ``items_count`` reflects the finished write);
         ``false`` (default) is the existing fire-and-forget path.
+      - ``project``: optional name of the project the caller is working in.
+        The provider resolves it against ``[memory.projects]`` and stamps
+        one ``project:<slug>`` tag (ADR-0058 decision 4a). Shared reads see
+        project-tagged memory (decision 7b).
       - ``source``: NOT accepted from the caller. Server-injected from
         ``client_id`` so callers cannot lie about their identity,
         keeping the audit trail grounded.
@@ -389,6 +405,9 @@ async def _memory_add(
     if update_mode is not None and update_mode not in ("replace", "append"):
         raise MemorySchemaError("update_mode must be 'replace' or 'append'")
     sync = _optional_bool(args, "sync", default=False)
+    # Passed on only when the caller named one, like the REST route does.
+    project = (_optional(args, "project", str) or "").strip()
+    named_project: dict[str, Any] = {"project": project} if project else {}
     source = client_id or "anonymous"
     if provenance:
         user = provenance.get("user")
@@ -412,6 +431,7 @@ async def _memory_add(
         strategy=strategy,
         update_mode=update_mode,
         sync=bool(sync),
+        **named_project,
     )
     out = {
         "id": result["id"],
@@ -434,7 +454,8 @@ async def _memory_search(
     private: bool,
 ) -> dict[str, Any]:
     """memory_search(query, limit=10, dataset="shared"|list, tags=[],
-                     before=null, after=null, tag_groups=null, min_scores=null)
+                     before=null, after=null, tag_groups=null, min_scores=null,
+                     project=null)
     → {results}.
 
     MemoryProvider contract::
@@ -446,7 +467,9 @@ async def _memory_search(
     ``shared`` + their own ``private:<client_id>``. ``tag_groups``/
     ``min_scores`` are Hindsight-native recall filters (boolean tag
     expressions / per-stage score floors) forwarded verbatim; engines
-    without them ignore both.
+    without them ignore both. ``project`` narrows the read to one project
+    plus global memory; with none, or ``"*"``, every project is read
+    (ADR-0058 decision 7b).
     """
     query = _require(args, "query", str)
     if not query.strip():
@@ -475,6 +498,7 @@ async def _memory_search(
         tag_groups=tag_groups,
         min_scores=min_scores,
         client_id=client_id,
+        **_read_project(args),
     )
     return {"results": list(results)}
 
@@ -567,7 +591,7 @@ async def _memory_recall(
 ) -> dict[str, Any]:
     """memory_recall(query, max_tokens=4096, types?, dataset?, tags?,
     tags_match?, tag_groups?, budget?, prefer_observations?, include?,
-    query_timestamp?, min_scores?) → {results, entities?, chunks?,
+    query_timestamp?, min_scores?, project?) → {results, entities?, chunks?,
     source_facts?}.
 
     The Hindsight-preferred retrieval path: token-budgeted, observation
@@ -617,6 +641,7 @@ async def _memory_recall(
         query_timestamp=query_timestamp,
         min_scores=min_scores,
         client_id=client_id,
+        **_read_project(args),
     )
     out: dict[str, Any] = {"results": list(results)}
     entities = getattr(results, "entities", None)
@@ -639,13 +664,22 @@ async def _memory_reflect(
 ) -> dict[str, Any]:
     """memory_reflect(query, dataset?, budget?, max_tokens?, fact_types?,
     tags?, tags_match?, tag_groups?, exclude_mental_models?,
-    exclude_mental_model_ids?, include?, response_schema?)
+    exclude_mental_model_ids?, include?, response_schema?, project?)
     → {text, based_on?, structured_output?, usage?, trace?}.
 
     LLM-backed synthesis over the bank's memory. Reflect operates on exactly
     one bank (no cross-bank merge — there is no server-side cross-bank
     reflect and merging LLM narratives wouldn't mean anything), resolved via
     the same single-namespace ACL ``memory_add`` uses for its write target.
+
+    The provider holds the reflect to what ``client_id`` may read, exactly as
+    ``POST /api/memory/reflect`` does (``HindsightProvider.reflect``): other
+    agents' ``visibility:private`` memories are filtered out by tag, the
+    caller's ``tags`` and ``tag_groups`` only narrow that, and on a bank
+    that holds other agents' private memories (the old unified bank, the
+    two-bank ``hal0:private``) mental models are left out whatever
+    ``exclude_mental_models`` says. ``project`` narrows the reflect as it
+    narrows ``memory_recall``.
 
     Engines without a reflect capability (the PgVector degrade fallback)
     answer ``{status: "unsupported"}`` rather than erroring — the ABC default
@@ -685,6 +719,7 @@ async def _memory_reflect(
         exclude_mental_model_ids=exclude_mental_model_ids,
         include=include,
         response_schema=response_schema,
+        **_read_project(args),
     )
     return dict(result) if isinstance(result, dict) else {"text": str(result)}
 
@@ -1083,6 +1118,72 @@ async def _memory_operation_retry(
     return dict(result) if isinstance(result, dict) else {"result": result}
 
 
+# ── Knowledge base / documents (#showcase) ───────────────────────────────
+
+
+async def _memory_kb_tree(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_kb_tree(dataset?) → the bank's knowledge-base folder/page tree."""
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.knowledge_base_tree(dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"nodes": result}
+
+
+async def _memory_kb_read(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_kb_read(page_id, dataset?) → one knowledge-base page's content
+    and metadata."""
+    page_id = _optional_id(args, "page_id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.knowledge_base_page(page_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"page": result}
+
+
+async def _memory_documents_list(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_documents_list(dataset?, q?, tags?, tags_match?, limit?, offset?)
+    → a bounded page of raw retained documents (id + metadata, not full text)."""
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    q = _optional(args, "q", str)
+    tags_raw = args.get("tags")
+    tags = list(tags_raw) if isinstance(tags_raw, list) else None
+    tags_match = _optional(args, "tags_match", str)
+    limit = _optional_int(args, "limit")
+    offset = _optional_int(args, "offset")
+    result = await wrapper.list_documents(
+        dataset=dataset,
+        client_id=client_id,
+        q=q,
+        tags=tags,
+        tags_match=tags_match,
+        limit=limit,
+        offset=offset,
+    )
+    return dict(result) if isinstance(result, dict) else {"items": result}
+
+
+async def _memory_documents_get(
+    wrapper: Any, args: dict[str, Any], *, client_id: str | None, private: bool
+) -> dict[str, Any]:
+    """memory_documents_get(document_id, dataset?) → one document's full
+    ``original_text`` and metadata."""
+    document_id = _optional_id(args, "document_id")
+    dataset = _resolve_dataset(
+        _optional(args, "dataset", str), private=private, client_id=client_id
+    )
+    result = await wrapper.get_document(document_id, dataset=dataset, client_id=client_id)
+    return dict(result) if isinstance(result, dict) else {"document": result}
+
+
 # ── Tags / bank stats ────────────────────────────────────────────────────
 
 
@@ -1160,6 +1261,10 @@ _MEMORY_HANDLERS = {
     "memory_tags_list": _memory_tags_list,
     "memory_bank_stats": _memory_bank_stats,
     "memory_bank_consolidate": _memory_bank_consolidate,
+    "memory_kb_tree": _memory_kb_tree,
+    "memory_kb_read": _memory_kb_read,
+    "memory_documents_list": _memory_documents_list,
+    "memory_documents_get": _memory_documents_get,
 }
 
 
@@ -1283,6 +1388,12 @@ def make_dispatcher(
             return {"status": "ok", **payload}
 
         try:
+            if tool == "memory_add":
+                # #3518: while `hal0 memory embedder switch` holds the write
+                # gate, answer with ``memory.writes_paused`` before the
+                # extraction preflight. Every other mutating tool is refused
+                # by the provider with the same code.
+                require_writes_allowed()
             if approval_queue is not None and _needs_approval(tool, args, client_id=client_id):
                 approval_id = await approval_queue.enqueue(
                     tool=tool,
@@ -1315,6 +1426,20 @@ def make_dispatcher(
             return {
                 "status": "error",
                 "error": {"code": exc.code, "detail": exc.message, "details": exc.details},
+            }
+        except (ConnectionError, httpx.NetworkError, httpx.ConnectTimeout) as exc:
+            # The engine's port refused the connection: the same typed answer
+            # the REST routes give, for reads as well as writes (#3518: the
+            # engine is unreachable on purpose while an embedder switch runs).
+            log.warning("mcp.memory.engine_unavailable", tool=tool, error=type(exc).__name__)
+            unavailable = MemoryEngineUnavailable()
+            return {
+                "status": "error",
+                "error": {
+                    "code": unavailable.code,
+                    "detail": unavailable.message,
+                    "details": unavailable.details,
+                },
             }
         except Exception as exc:
             log.warning("mcp.memory.failed", tool=tool, error=str(exc))
@@ -1432,6 +1557,18 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
     ),
     "memory_tags_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_kb_tree": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_kb_read": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_documents_list": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "memory_documents_get": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
     "memory_bank_stats": ToolAnnotations(
@@ -1575,7 +1712,9 @@ def _memory_tool_definitions() -> dict[str, Tool]:
             "a conversation). sync=true waits for extraction instead of the "
             "default fire-and-forget background ingest. Writes are shared by "
             "default; private=true keeps this one write in your own private "
-            "bank (it can only make a write more private)."
+            "bank (it can only make a write more private). project names the "
+            "project you are working in (a repository name); hal0 tags the "
+            "write with it, so do not add a project: tag yourself."
         ),
         annotations=_ANNOTATIONS["memory_add"],
     )
@@ -1591,6 +1730,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         update_mode: str | None = None,
         sync: bool | None = None,
         private: bool | None = None,
+        project: str | None = None,
         args: dict[str, Any] | None = None,
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
@@ -1610,6 +1750,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
                 update_mode=update_mode,
                 sync=sync,
                 private=private,
+                project=project,
             ),
         )
 
@@ -1618,7 +1759,9 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         description=(
             "Search long-term memory. Returns {results: [...]}. tag_groups/"
             "min_scores are Hindsight-native filters (boolean tag expressions / "
-            "per-stage score floors) — ignored by engines without them."
+            "per-stage score floors) — ignored by engines without them. "
+            "project narrows the search to one project plus global memory; "
+            "without it ('*' says so explicitly) every project is searched."
         ),
         annotations=_ANNOTATIONS["memory_search"],
     )
@@ -1631,6 +1774,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         after: str | None = None,
         tag_groups: list[dict[str, Any]] | None = None,
         min_scores: dict[str, float] | None = None,
+        project: str | None = None,
         args: dict[str, Any] | None = None,
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
@@ -1647,6 +1791,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
                 after=after,
                 tag_groups=tag_groups,
                 min_scores=min_scores,
+                project=project,
             ),
         )
 
@@ -1697,7 +1842,9 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         name="memory_recall",
         description=(
             "Recall token-budgeted, consolidated memory (preferred over search). "
-            "types defaults to world+experience+observation."
+            "types defaults to world+experience+observation. project narrows "
+            "the recall to one project plus global memory; without it ('*' "
+            "says so explicitly) every project is read."
         ),
         annotations=_ANNOTATIONS["memory_recall"],
     )
@@ -1714,6 +1861,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         include: dict[str, Any] | None = None,
         query_timestamp: str | None = None,
         min_scores: dict[str, float] | None = None,
+        project: str | None = None,
         args: dict[str, Any] | None = None,
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
@@ -1734,6 +1882,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
                 include=include,
                 query_timestamp=query_timestamp,
                 min_scores=min_scores,
+                project=project,
             ),
         )
 
@@ -1743,7 +1892,9 @@ def _memory_tool_definitions() -> dict[str, Tool]:
             "LLM-backed synthesis over memory — ask a question and get a "
             "written-out answer grounded in recalled facts, not a raw fact "
             "list. Single-bank (dataset resolves to one namespace, default "
-            "shared). Returns {status: unsupported} on engines without this "
+            "shared). project narrows it to one project plus global memory; "
+            "without it ('*' says so explicitly) every project is read. "
+            "Returns {status: unsupported} on engines without this "
             "capability instead of erroring."
         ),
         annotations=_ANNOTATIONS["memory_reflect"],
@@ -1761,6 +1912,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         exclude_mental_model_ids: list[str] | None = None,
         include: dict[str, Any] | None = None,
         response_schema: dict[str, Any] | None = None,
+        project: str | None = None,
         args: dict[str, Any] | None = None,
         ctx: ToolContext | None = None,
     ) -> dict[str, Any]:
@@ -1781,6 +1933,7 @@ def _memory_tool_definitions() -> dict[str, Tool]:
                 exclude_mental_model_ids=exclude_mental_model_ids,
                 include=include,
                 response_schema=response_schema,
+                project=project,
             ),
         )
 
@@ -2204,10 +2357,83 @@ def _memory_tool_definitions() -> dict[str, Tool]:
         )
 
     @server.tool(
+        name="memory_kb_tree",
+        description="Show a bank's knowledge-base folder/page tree.",
+        annotations=_ANNOTATIONS["memory_kb_tree"],
+    )
+    async def memory_kb_tree(
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        return await _dispatch(ctx, "memory_kb_tree", _merged(args, dataset=dataset))
+
+    @server.tool(
+        name="memory_kb_read",
+        description="Read one knowledge-base page's content and metadata.",
+        annotations=_ANNOTATIONS["memory_kb_read"],
+    )
+    async def memory_kb_read(
+        page_id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        return await _dispatch(
+            ctx, "memory_kb_read", _merged(args, page_id=page_id, dataset=dataset)
+        )
+
+    @server.tool(
+        name="memory_documents_list",
+        description="List raw retained documents in a bank (id + metadata, not full text).",
+        annotations=_ANNOTATIONS["memory_documents_list"],
+    )
+    async def memory_documents_list(
+        dataset: str | None = None,
+        q: str | None = None,
+        tags: list[str] | None = None,
+        tags_match: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+        args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        return await _dispatch(
+            ctx,
+            "memory_documents_list",
+            _merged(
+                args,
+                dataset=dataset,
+                q=q,
+                tags=tags,
+                tags_match=tags_match,
+                limit=limit,
+                offset=offset,
+            ),
+        )
+
+    @server.tool(
+        name="memory_documents_get",
+        description="Get one document's full retained text and metadata.",
+        annotations=_ANNOTATIONS["memory_documents_get"],
+    )
+    async def memory_documents_get(
+        document_id: str | None = None,
+        dataset: str | None = None,
+        args: dict[str, Any] | None = None,
+        ctx: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        return await _dispatch(
+            ctx, "memory_documents_get", _merged(args, document_id=document_id, dataset=dataset)
+        )
+
+    @server.tool(
         name="memory_bank_stats",
         description=(
-            "Node/link/observation/operation counts for a bank. Read-only — no "
-            "destructive bank operations (delete/clear) are exposed via MCP."
+            "Node/link/observation/operation counts for a bank. While the bank "
+            "holds another agent's private memory only the health fields are "
+            "returned (counts_withheld: true). Read-only — no destructive bank "
+            "operations (delete/clear) are exposed via MCP."
         ),
         annotations=_ANNOTATIONS["memory_bank_stats"],
     )

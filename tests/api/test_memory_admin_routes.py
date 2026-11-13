@@ -314,6 +314,78 @@ def test_directives_get_shape_guard(client: TestClient, recorder: _Recorder) -> 
     assert r.json()["error"]["code"] == "memory.engine_shape"
 
 
+def test_knowledge_base_tree_and_page_forward(client: TestClient, recorder: _Recorder) -> None:
+    recorder.respond(
+        "GET",
+        "/v1/default/banks/shared/knowledge-base/tree",
+        200,
+        {"nodes": [{"id": "f1", "name": "Showcase"}]},
+    )
+    r = client.get("/api/memory/banks/shared/knowledge-base/tree")
+    assert r.status_code == 200
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/knowledge-base/tree"
+
+    recorder.respond("GET", "/v1/default/banks/shared/knowledge-base/pages/p1", 200, {"id": "p1"})
+    r = client.get("/api/memory/banks/shared/knowledge-base/pages/p1")
+    assert r.status_code == 200
+
+
+def test_knowledge_page_refresh_and_edit_go_through_engine_routes(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    """#3564: a 1.x engine serves no page refresh and no page PATCH.
+
+    hal0 forwards neither; a page is refreshed and edited through the mental
+    model its tree node names, on routes the engine does serve.
+    """
+    before = len(recorder.requests)
+    r = client.post("/api/memory/banks/shared/knowledge-base/pages/kp-1/refresh")
+    assert r.status_code == 404
+    r = client.patch("/api/memory/banks/shared/knowledge-base/pages/kp-1", json={"tags": []})
+    assert r.status_code == 405
+    assert len(recorder.requests) == before
+
+    recorder.respond(
+        "POST",
+        "/v1/default/banks/shared/mental-models/mm-1/refresh",
+        200,
+        {"operation_id": "op-1"},
+    )
+    r = client.post("/api/memory/banks/shared/mental-models/mm-1/refresh")
+    assert r.status_code == 200
+    assert recorder.requests[-1]["method"] == "POST"
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/mental-models/mm-1/refresh"
+
+    recorder.respond("PATCH", "/v1/default/banks/shared/mental-models/mm-1", 200, {"id": "mm-1"})
+    r = client.patch("/api/memory/banks/shared/mental-models/mm-1", json={"tags": ["a"]})
+    assert r.status_code == 200
+    assert recorder.requests[-1]["method"] == "PATCH"
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/mental-models/mm-1"
+
+
+def test_mental_model_clear_and_full_refresh_forward(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    """#3576: the repair empties a hidden model, then refreshes it in full."""
+    recorder.respond(
+        "POST", "/v1/default/banks/shared/mental-models/mm-1/clear", 200, {"id": "mm-1"}
+    )
+    r = client.post("/api/memory/banks/shared/mental-models/mm-1/clear")
+    assert r.status_code == 200
+    assert recorder.requests[-1]["method"] == "POST"
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/mental-models/mm-1/clear"
+
+    recorder.respond(
+        "POST",
+        "/v1/default/banks/shared/mental-models/mm-1/refresh",
+        200,
+        {"operation_id": "op-1"},
+    )
+    r = client.post("/api/memory/banks/shared/mental-models/mm-1/refresh", json={"mode": "full"})
+    assert r.status_code == 200
+    assert '"mode"' in recorder.requests[-1]["body"] and '"full"' in recorder.requests[-1]["body"]
+
+
 def test_bank_create_put_and_delete_forward(client: TestClient, recorder: _Recorder) -> None:
     r = client.put("/api/memory/banks/scratch", json={"retain_extraction_mode": "concise"})
     assert r.status_code == 200
@@ -860,3 +932,26 @@ def test_bank_stats_placeholder_for_an_alias_is_not_a_404(
     )
     r = client.get("/api/memory/banks/household/stats")
     assert r.status_code == 200, r.text
+
+
+def test_admin_surface_reads_private_documents_in_full(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    """#3573: the agent read tools hold back other agents' private memory; the
+    operator's admin surface does not, and is not routed through them."""
+    private = {"id": "a-priv", "tags": ["visibility:private", "agent:alice"]}
+    recorder.respond(
+        "GET", "/v1/default/banks/shared/documents", 200, {"items": [private], "total": 1}
+    )
+    recorder.respond(
+        "GET",
+        "/v1/default/banks/shared/documents/a-priv",
+        200,
+        {**private, "original_text": "alice's secret"},
+    )
+    listed = client.get("/api/memory/banks/shared/documents")
+    assert listed.status_code == 200
+    assert [r["id"] for r in listed.json()["items"]] == ["a-priv"]
+    doc = client.get("/api/memory/banks/shared/documents/a-priv")
+    assert doc.status_code == 200
+    assert doc.json()["original_text"] == "alice's secret"

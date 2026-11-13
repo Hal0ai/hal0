@@ -47,7 +47,7 @@ import asyncio
 import logging
 import time
 import tomllib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,7 +56,9 @@ from hal0.slots.activation import (
     autoload_enabled,
     claims_npu_anchor,
     effective_npu_table,
+    is_xdna_slot,
     npu_modality_active,
+    slot_binary,
 )
 from hal0.slots.naming import slot_instance_token, slot_unit_name
 from hal0.slots.reaper import eviction_priority
@@ -79,6 +81,7 @@ __all__ = [
     "serialize_slot",
     "synthesize_upstream_entries",
     "unconverted_slot_files",
+    "xdna_enrichment",
 ]
 
 
@@ -336,8 +339,7 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # env-override warning).
         threads_val = cfg.get("threads")
         entry["threads"] = threads_val if isinstance(threads_val, int) else None
-        binary_val = cfg.get("binary")
-        entry["binary"] = binary_val if isinstance(binary_val, str) and binary_val else None
+        entry["binary"] = slot_binary(cfg) or None
         entry["image_pin"] = cfg.get("image_pin")
         # METRICS (#1810) — completes the HW-grid lift: SlotConfig.metrics
         # controls whether --metrics reaches llama-server's argv. Surface it
@@ -368,6 +370,9 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # configured ``device`` so the UI renders a stable backend chip.
         _recipe, _llamacpp = device_to_backend(cfg.get("device"))
         declared_backend = _llamacpp or (_recipe if _recipe == "flm" else None)
+        if _is_xdna_cfg(cfg):
+            # The xdna runner's own backend token (ADR-0057), not FLM's.
+            declared_backend = "npu"
         if declared_backend:
             entry["declared_backend"] = declared_backend
 
@@ -388,7 +393,7 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
         # Membership requires only a live anchor: the shadows are records for
         # that one process and carry placeholder models, so per-shadow
         # membership was never independently meaningful (#1369).
-        if cfg.get("device") == "npu" and trio_active:
+        if cfg.get("device") == "npu" and trio_active and not _is_xdna_cfg(cfg):
             entry["coresident_group"] = "npu-flm-trio"
 
         out[name] = entry
@@ -398,6 +403,108 @@ def config_enrichment(configs: list[dict[str, Any]]) -> dict[str, dict[str, Any]
 def _has_context_window(cfg: Any) -> bool:
     """llm / embedding / reranking slots (llama-server or FLM) have a window."""
     return str(cfg.get("type") or "llm") in ("llm", "embedding", "reranking")
+
+
+# ── concern: xdna runner fields ────────────────────────────────────────────
+
+
+def _is_xdna_cfg(cfg: Mapping[str, Any]) -> bool:
+    """True when a slot's own ``binary`` names the xdna runner.
+
+    Mirrors ``hal0.providers.container._binary_runner``: xdna is opt-in
+    via an explicit ``binary = "xdna"``, never the HW-gated default, so
+    checking the raw field (no Runner resolution) is sufficient and keeps
+    this module import-light.
+    """
+    return is_xdna_slot(dict(cfg))
+
+
+def _npu_holder_names(configs: list[dict[str, Any]], *, exclude: str) -> list[str]:
+    """Other slot names that hold the one physical NPU alongside *exclude*.
+
+    "Holds the NPU" = an xdna slot (any ``binary="xdna"`` slot) or the FLM
+    NPU anchor (:func:`hal0.slots.activation.claims_npu_anchor`). Shared by
+    :func:`xdna_enrichment` and ``routes/npu.py``'s occupancy coexistence
+    warning so the two surfaces never drift on what counts as a holder.
+    """
+    holders: list[str] = []
+    for cfg in configs:
+        if not isinstance(cfg, dict):
+            continue
+        name = str(cfg.get("name") or "")
+        if not name or name == exclude:
+            continue
+        if _is_xdna_cfg(cfg) or claims_npu_anchor(cfg):
+            holders.append(name)
+    return holders
+
+
+def xdna_enrichment(
+    configs: list[dict[str, Any]], registry: Any = None
+) -> dict[str, dict[str, Any]]:
+    """Per-slot xdna-runner fields for slots whose ``binary == "xdna"``.
+
+    Adds, for each xdna slot only:
+
+      - ``xdna_path``: ``"fused"`` | ``"per-op"`` | ``None`` — from
+        :func:`hal0.slots.model_fit.xdna_model_fit` on the slot's
+        configured model path. ``None`` when no model is bound, the
+        registry can't resolve it, or the file can't be read/classified
+        (never guessed).
+      - ``xdna_reason``: the human-readable reason behind ``xdna_path``,
+        or ``None`` alongside it.
+      - ``pmode``: the slot's ``[xdna].pmode``, or ``None`` when unset.
+      - ``npu_shared_with``: names of other NPU holders (other xdna slots
+        + the FLM anchor), via the shared :func:`_npu_holder_names` helper
+        (also used by ``routes/npu.py``'s coexistence warning).
+
+    Non-xdna slots get no entry at all (the caller's ``setdefault`` merge
+    pattern then leaves these keys entirely absent from their payload —
+    they are NOT set to ``null`` on a non-xdna slot).
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for cfg in configs:
+        if not isinstance(cfg, dict) or not _is_xdna_cfg(cfg):
+            continue
+        name = str(cfg.get("name") or "")
+        if not name:
+            continue
+
+        xdna_path: str | None = None
+        xdna_reason: str | None = None
+        model_id = _slot_model_default_id(cfg)
+        if model_id and registry is not None:
+            try:
+                model = registry.get(model_id)
+                path = getattr(model, "path", None) or (
+                    model.get("path") if isinstance(model, Mapping) else None
+                )
+            except Exception:
+                path = None
+            if path:
+                try:
+                    from hal0.slots.model_fit import xdna_model_fit
+
+                    fit = xdna_model_fit(path)
+                    xdna_path, xdna_reason = fit.xdna_path, fit.reason
+                except Exception:
+                    xdna_path, xdna_reason = None, None
+
+        xdna_table = cfg.get("xdna")
+        pmode = xdna_table.get("pmode") if isinstance(xdna_table, dict) else None
+
+        out[name] = {
+            "xdna_path": xdna_path,
+            "xdna_reason": xdna_reason,
+            "pmode": pmode if isinstance(pmode, str) and pmode else None,
+            "npu_shared_with": _npu_holder_names(configs, exclude=name),
+        }
+    return out
+
+
+def _slot_model_default_id(cfg: Mapping[str, Any]) -> str:
+    model = cfg.get("model")
+    return str(model.get("default") or "") if isinstance(model, Mapping) else ""
 
 
 #: How an operator fixes a slot file that still carries tuning keys.
@@ -480,9 +587,12 @@ def resolve_tune_effective(cfg: Any) -> dict[str, Any] | None:
     Computed from the launch resolver's own scalars
     (:func:`hal0.providers.container.tune_effective_for_slot`) so the view and
     the launch cannot drift. ``None`` for a slot a ``[tune]`` cannot apply to
-    (not an llm slot, or on the NPU) and for one whose profile does not resolve.
+    (not an llm slot, or on the NPU off the xdna runner) and for one whose
+    profile does not resolve.
     """
-    if str(cfg.get("type") or "llm") != "llm" or str(cfg.get("device") or "") == "npu":
+    if str(cfg.get("type") or "llm") != "llm":
+        return None
+    if str(cfg.get("device") or "") == "npu" and not _is_xdna_cfg(cfg):
         return None
     try:
         from hal0.providers.container import tune_effective_for_slot
@@ -1064,6 +1174,7 @@ class SlotViewAggregator:
         configs = await self._safe_configs()
 
         enrichment = config_enrichment(configs)
+        xdna_fields = xdna_enrichment(configs, self._registry)
         cfg_by_name = {str(c.get("name")): c for c in configs if isinstance(c, dict)}
         # #1427: the container probe, the capacity probe and the metrics
         # fan-out are three independent IO waits over the same slot set —
@@ -1084,6 +1195,10 @@ class SlotViewAggregator:
             extra = enrichment.get(slot_name)
             if extra:
                 for k, v in extra.items():
+                    payload.setdefault(k, v)
+            x_extra = xdna_fields.get(slot_name)
+            if x_extra:
+                for k, v in x_extra.items():
                     payload.setdefault(k, v)
             c_extra = c_enrichment.get(slot_name)
             if c_extra:

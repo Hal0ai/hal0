@@ -1,0 +1,480 @@
+"""``hal0 memory embedder switch`` — flags, output and exit codes (#3518).
+
+The work itself is covered in ``tests/memory/test_embedder_switch.py``; here
+the switch is a stub and only the command line around it is exercised.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+from pathlib import Path
+from typing import Any
+
+import pytest
+from rich.console import Console
+from typer.testing import CliRunner
+
+from hal0.cli import memory_embedder_commands as mec
+from hal0.cli.memory_commands import app as memory_app
+from hal0.memory import embedder_switch as es
+from hal0.memory.embedder_record import Embedder
+
+runner = CliRunner()
+HS = "hindsight-ai/hs-embed-1"
+
+PLAN: dict[str, Any] = {
+    "target": {"provider": "local", "model": HS},
+    "recorded": {
+        "provider": "local",
+        "model": "BAAI/bge-small-en-v1.5",
+        "source": "engine-default",
+    },
+    "mixed": False,
+    "engine": {"reachable": True, "version": "1.2.0"},
+    "banks": [
+        {
+            "bank": "hal0:shared",
+            "counts": {
+                "facts": 1200,
+                "observations": 300,
+                "mental_models": 4,
+                "directives": 3,
+                "documents": 80,
+            },
+            "links": 9000,
+            "pending": 0,
+            "processing": 0,
+        }
+    ],
+    "totals": {"facts": 1200, "observations": 300},
+    "disk": {
+        "archive_root": "/var/lib/hal0/backups",
+        "store_bytes": 2**30,
+        "needed_bytes": 3 * 2**29,
+        "free_bytes": 2**34,
+    },
+    "estimate_s": 104,
+    "estimate": {"restarts_s": 75, "per_bank_s": 4, "embedding_s": 25},
+    "ids": es.IDS_ACROSS_SWITCH,
+    "allow_pending": False,
+    "refusals": [],
+    "warnings": [],
+}
+
+
+class StubSwitch:
+    """Stands in for ``EmbedderSwitch``; records how the command built and drove it."""
+
+    def __init__(self, calls: list[Any], outcome: Any) -> None:
+        self.calls = calls
+        self.outcome = outcome
+
+    async def _answer(self, name: str) -> Any:
+        self.calls.append(name)
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+    async def preflight(self) -> Any:
+        return await self._answer("preflight")
+
+    async def run(self) -> Any:
+        return await self._answer("run")
+
+    async def resume(self) -> Any:
+        return await self._answer("resume")
+
+    async def status(self) -> Any:
+        return await self._answer("status")
+
+    def clear_gate(self) -> Any:
+        self.calls.append("clear_gate")
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return self.outcome
+
+
+class _Client:
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.fixture
+def stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    state: dict[str, Any] = {"calls": [], "kwargs": None, "outcome": dict(PLAN)}
+
+    def make(_client: Any, **kwargs: Any) -> StubSwitch:
+        state["kwargs"] = kwargs
+        return StubSwitch(state["calls"], state["outcome"])
+
+    # Wide enough that rich never folds a bank id or a command across lines.
+    monkeypatch.setattr(mec, "console", Console(width=200))
+    monkeypatch.setattr(mec, "_client", lambda: _Client())
+    monkeypatch.setattr(mec, "_make_switch", make)
+    return state
+
+
+def test_the_command_is_mounted_under_hal0_memory() -> None:
+    """Read from the command tree, not from rendered help: rich colours the
+    help on some terminals and splits an option name across escape codes."""
+    import typer
+
+    memory = typer.main.get_command(memory_app)
+    switch = memory.commands["embedder"].commands["switch"]  # type: ignore[attr-defined]
+    options = {opt for param in switch.params for opt in (*param.opts, *param.secondary_opts)}
+    assert {
+        "--apply",
+        "--dry-run",
+        "--allow-pending",
+        "--resume",
+        "--provider",
+        "--json",
+    } <= options
+    assert [p.name for p in switch.params if p.param_type_name == "argument"] == ["model"]
+
+
+def test_it_is_a_dry_run_by_default(stub) -> None:
+    result = runner.invoke(mec.app, ["switch", HS])
+
+    assert result.exit_code == 0, result.output
+    assert stub["calls"] == ["preflight"], "no --apply, nothing but the preflight"
+    assert stub["kwargs"]["target"] == Embedder("local", HS)
+    assert "dry run" in result.output and "hal0:shared" in result.output
+    flat = " ".join(result.output.replace("│", " ").split())
+    assert "1200" in flat and "about 2 min" in flat
+    # What the time is made of, so a small store is not promised a second.
+    assert "75 s for three engine restarts" in flat and "25 s to re-embed every bank twice" in flat
+    # Which ids survive, stated before consent (#3597).
+    assert "ids kept: knowledge-base folder and page ids" in flat and "directive ids" in flat
+    assert "ids changed: fact ids" in flat
+    # The cost, stated before consent: memory is out of service, recall included.
+    assert "memory is out of service" in flat and "503 memory.writes_paused" in flat
+    assert "recall, search and reflect fail until the run ends" in flat
+    assert "--apply is your consent" in flat
+    assert "Re-run with --apply" in result.output
+
+
+def test_the_dry_run_json_is_the_plan(stub) -> None:
+    result = runner.invoke(mec.app, ["switch", HS, "--provider", "local", "--json"])
+
+    payload = json.loads(result.output)
+    assert payload["applied"] is False
+    assert payload["banks"][0]["counts"]["facts"] == 1200
+    assert payload["estimate_s"] == 104
+
+
+def test_a_refused_dry_run_exits_non_zero_and_says_why(stub) -> None:
+    stub["outcome"] = {
+        **PLAN,
+        "refusals": [{"code": "pending_operations", "message": "hal0:shared (7 pending)"}],
+    }
+
+    result = runner.invoke(mec.app, ["switch", HS])
+
+    assert result.exit_code == 1
+    assert "refused" in result.output and "hal0:shared (7 pending)" in result.output
+    assert "Re-run with --apply" not in result.output
+
+
+def test_apply_runs_the_switch_and_says_where_the_archives_are(stub) -> None:
+    stub["outcome"] = {
+        "status": "switched",
+        "run_id": "3f9a1c2e",
+        "to": {"provider": "local", "model": HS},
+        "banks": [{"bank": "hal0:shared"}],
+        "warnings": [],
+        "config_note": "hal0.toml still names bge under [memory.models]. That is fine: ...",
+        "archive_dir": "/var/lib/hal0/backups/memory-embedder-switch-20261111T020000Z-3f9a1c2e",
+        "delete_archives": "rm -r /var/lib/hal0/backups/memory-embedder-switch-20261111T020000Z-3f9a1c2e",
+    }
+
+    result = runner.invoke(mec.app, ["switch", HS, "--apply", "--allow-pending"])
+
+    assert result.exit_code == 0, result.output
+    assert stub["calls"] == ["run"]
+    assert stub["kwargs"]["allow_pending"] is True
+    flat = " ".join(result.output.split())
+    assert f"The memory store is on {HS}" in flat
+    assert "20261111T020000Z-3f9a1c2e" in flat and "rm -r" in flat
+    assert "hal0.toml still names bge under [memory.models]. That is fine" in flat
+
+
+def test_a_failed_run_that_was_undone_exits_non_zero_naming_the_bank(stub) -> None:
+    stub["outcome"] = es.SwitchError(
+        "bank hal0:shared did not come back whole: facts 1199 (expected 1200)",
+        bank="hal0:shared",
+        details={"differs": {"facts": {"expected": 1200, "got": 1199}}},
+    )
+
+    result = runner.invoke(mec.app, ["switch", HS, "--apply", "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["status"] == "failed" and payload["bank"] == "hal0:shared"
+    assert payload["details"]["differs"]["facts"] == {"expected": 1200, "got": 1199}
+    assert payload["resume_needed"] is False
+
+
+def test_a_run_that_stopped_in_the_swap_points_at_resume(stub) -> None:
+    es.journal_path().parent.mkdir(parents=True)
+    es.journal_path().write_text(
+        json.dumps(
+            {
+                "version": es.JOURNAL_VERSION,
+                "run_id": "3f9a1c2e",
+                "started_at": "t",
+                "pid": 1,
+                "phase": "swapping",
+                "target": {"provider": "local", "model": HS},
+                "previous": {"provider": "local", "model": "BAAI/bge-small-en-v1.5"},
+                "archive_dir": "/x",
+            }
+        )
+    )
+    stub["outcome"] = es.SwitchError(
+        "deleting the bank: the engine answered HTTP 500", resumable=True
+    )
+
+    result = runner.invoke(mec.app, ["switch", HS, "--apply"])
+
+    assert result.exit_code == 1
+    flat = " ".join(result.output.split())
+    assert "Memory writes stay paused" in flat
+    assert "hal0 memory embedder switch --resume" in flat
+    # Where to look, and where the archives are.
+    assert "hal0 memory embedder switch --status" in flat and "Archives: /x" in flat
+
+
+def test_a_refused_apply_prints_the_plan_it_refused(stub) -> None:
+    plan = {**PLAN, "refusals": [{"code": "not_privileged", "message": "run this as root"}]}
+    stub["outcome"] = es.SwitchRefused("run this as root", plan)
+
+    result = runner.invoke(mec.app, ["switch", HS, "--apply"])
+
+    assert result.exit_code == 1
+    assert "refused" in result.output and "run this as root" in result.output
+
+
+def test_resume_needs_no_model(stub) -> None:
+    stub["outcome"] = {
+        "status": "rolled_back",
+        "run_id": "3f9a1c2e",
+        "archive_dir": "/a",
+        "to": {"provider": "local", "model": "BAAI/bge-small-en-v1.5"},
+    }
+
+    result = runner.invoke(mec.app, ["switch", "--resume"])
+
+    assert result.exit_code == 0, result.output
+    assert stub["calls"] == ["resume"] and stub["kwargs"]["target"] is None
+    assert "was undone" in " ".join(result.output.split())
+
+
+STATUS: dict[str, Any] = {
+    "journal": {
+        "run_id": "3f9a1c2e",
+        "phase": "swapping",
+        "target": {"provider": "local", "model": HS},
+        "started_at": "2026-11-11T02:00:00+00:00",
+        "archive_dir": "/var/lib/hal0/backups/memory-embedder-switch-x-3f9a1c2e",
+        "error": "deleting the bank: the engine answered HTTP 500",
+    },
+    "journal_source": "/var/lib/hal0/state/memory-embedder-switch.json",
+    "journal_error": None,
+    "gate": {"run_id": "3f9a1c2e", "since": "2026-11-11T02:00:01+00:00", "archive_dir": "/a"},
+    "lock_held": False,
+    "engine": {
+        "reachable": True,
+        "live": {"provider": "local", "model": HS},
+        "private_port": 45123,
+    },
+    "banks": [
+        {"bank": "shared", "role": "original or rebuilt", "counts": {"facts": 12}},
+        {
+            "bank": "agents.switch-3f9a1c2e",
+            "role": "temporary (rebuilt copy of agents)",
+            "counts": {"facts": 3},
+        },
+    ],
+    "resume": [
+        {
+            "bank": "shared",
+            "step": "placed",
+            "action": "nothing: the bank is under its final id",
+            "problem": None,
+            "operator": None,
+        },
+        {
+            "bank": "agents",
+            "step": "deleted",
+            "action": "restore the bank from its archive into its own id, keeping its ids",
+            "problem": None,
+            "operator": None,
+        },
+        {
+            "bank": "notes",
+            "step": "restored",
+            "action": "delete the original, then restore its archive into its own id",
+            "problem": "the original changed after its archive was taken (facts 10 (expected 9))",
+            "operator": "stop whatever writes to the engine's private port",
+        },
+    ],
+    "summary": "the run stopped inside the swap: --resume finishes it bank by bank as listed",
+}
+
+
+def test_status_prints_the_journal_the_gate_the_banks_and_what_resume_would_do(stub) -> None:
+    stub["outcome"] = STATUS
+
+    result = runner.invoke(mec.app, ["switch", "--status"])
+
+    assert result.exit_code == 0, result.output
+    assert stub["calls"] == ["status"], "status only reads"
+    flat = " ".join(result.output.split())
+    assert "run 3f9a1c2e, phase swapping" in flat
+    assert "memory writes are paused" in flat and "no switch process is running" in flat
+    assert "agents.switch-3f9a1c2e" in flat and "temporary (rebuilt copy of agents)" in flat
+    assert (
+        "agents (step deleted): restore the bank from its archive into its own id, keeping its ids"
+        in flat
+    )
+    assert "the engine is isolated on 127.0.0.1:45123" in flat and "recall is unavailable" in flat
+    # A bank the checks found wrong, and what to do about it.
+    assert "the original changed after its archive was taken" in flat
+    assert "what to do: stop whatever writes to the engine's private port" in flat
+    assert "--resume finishes it" in flat
+    assert json.loads(runner.invoke(mec.app, ["switch", "--status", "--json"]).output) == STATUS
+
+
+def test_status_lists_the_operations_live_on_the_engine(stub) -> None:
+    ref = {"bank": "shared", "type": "refresh_mental_model", "id": "op-1", "status": "processing"}
+    stub["outcome"] = {**STATUS, "live_operations": [ref]}
+
+    flat = " ".join(runner.invoke(mec.app, ["switch", "--status"]).output.split())
+
+    assert "operations live on the engine (--status does not wait for them;" in flat
+    assert "refresh_mental_model on shared (operation op-1, processing)" in flat
+    payload = json.loads(runner.invoke(mec.app, ["switch", "--status", "--json"]).output)
+    assert payload["live_operations"] == [ref]
+
+
+def test_status_names_a_foreign_port_holder_and_a_stopped_engine(stub) -> None:
+    held = "port 45123 held by pid 4242 (python3), not by hindsight-api.service"
+    stub["outcome"] = {
+        **STATUS,
+        "engine": {
+            "reachable": False,
+            "live": None,
+            "private_port": 45123,
+            "error": held,
+            "port_holder": "pid 4242 (python3)",
+            "stopped_by_switch": False,
+        },
+    }
+    flat = " ".join(runner.invoke(mec.app, ["switch", "--status"]).output.split())
+    assert f"engine: {held}" in flat and "not answering" not in flat
+
+    stub["outcome"]["engine"].update(stopped_by_switch=True, port_holder=None, error=None)
+    flat = " ".join(runner.invoke(mec.app, ["switch", "--status"]).output.split())
+    assert "engine: stopped by the switch; free the port, then run --resume" in flat
+    assert "not answering" not in flat
+
+
+def test_status_says_when_the_port_owner_is_unconfirmed_and_when_the_engine_is_back(stub) -> None:
+    stub["outcome"] = {
+        **STATUS,
+        "engine": {
+            "reachable": True,
+            "live": {"provider": "local", "model": "bge"},
+            "private_port": 45123,
+            "owner_unconfirmed": True,
+            "running_again": True,
+            "stopped_by_switch": False,
+        },
+    }
+    flat = " ".join(runner.invoke(mec.app, ["switch", "--status"]).output.split())
+    assert "could not be confirmed (run as root to check)" in flat
+    assert "the switch had stopped it; it is running again" in flat
+    assert flat.index("could not be confirmed") < flat.index("engine: up")
+
+
+def test_clear_gate_is_loud_about_what_it_did_not_check(stub) -> None:
+    stub["outcome"] = {
+        "status": "cleared",
+        "gate": {"run_id": "3f9a1c2e", "since": "t", "archive_dir": "/a"},
+    }
+
+    result = runner.invoke(mec.app, ["switch", "--clear-gate"])
+
+    assert result.exit_code == 0 and stub["calls"] == ["clear_gate"]
+    flat = " ".join(result.output.split())
+    assert "lifted by hand" in flat and "Nothing was checked" in flat
+    assert "hal0 memory embedder switch --status" in flat
+
+
+def test_a_refused_clear_gate_exits_non_zero(stub) -> None:
+    stub["outcome"] = es.SwitchRefused("an embedder switch (run x, phase swapping) is unfinished")
+    result = runner.invoke(mec.app, ["switch", "--clear-gate"])
+    assert result.exit_code == 1 and "is unfinished" in " ".join(result.output.split())
+
+
+def test_the_modes_do_not_combine(stub) -> None:
+    for argv in (
+        ["switch", HS, "--apply", "--resume"],
+        ["switch", "--status", "--clear-gate"],
+        ["switch", "--resume", "--status"],
+    ):
+        assert runner.invoke(mec.app, argv).exit_code == 2
+    assert stub["calls"] == []
+
+
+def test_the_kill_point_is_only_armed_from_the_environment(monkeypatch) -> None:
+    """The live-verification aid: off unless the variable names a hook point."""
+    monkeypatch.delenv(mec.KILL_AT_ENV, raising=False)
+    monkeypatch.delenv(mec.TEST_HOOKS_ENV, raising=False)
+    assert mec._kill_hook() is None
+
+    # One variable alone arms nothing: a stray one in a service's environment
+    # must not be able to kill a real run.
+    monkeypatch.setenv(mec.KILL_AT_ENV, "deleted:shared")
+    assert mec._kill_hook() is None
+    monkeypatch.setenv(mec.TEST_HOOKS_ENV, "0")
+    assert mec._kill_hook() is None
+
+    monkeypatch.setenv(mec.TEST_HOOKS_ENV, "1")
+    killed: list[tuple[int, int]] = []
+    monkeypatch.setattr(mec.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    hook = mec._kill_hook()
+    assert hook is not None
+    hook("before_delete:shared")
+    assert killed == []
+    hook("deleted:shared")
+    assert killed == [(os.getpid(), signal.SIGKILL)]
+
+
+def test_a_model_is_required_without_resume(stub) -> None:
+    result = runner.invoke(mec.app, ["switch"])
+    assert result.exit_code == 2
+    assert stub["calls"] == []
+
+
+def test_an_unforeseen_error_is_reported_without_a_traceback(stub) -> None:
+    stub["outcome"] = OSError(28, "No space left on device")
+
+    result = runner.invoke(mec.app, ["switch", HS, "--apply", "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert "No space left on device" in payload["error"] and payload["resume_needed"] is False
+
+
+def test_an_interrupt_is_reported_like_any_other_stop(stub) -> None:
+    stub["outcome"] = KeyboardInterrupt()
+
+    result = runner.invoke(mec.app, ["switch", HS, "--apply", "--json"])
+
+    assert result.exit_code == 130
+    assert json.loads(result.output)["error"] == "interrupted"

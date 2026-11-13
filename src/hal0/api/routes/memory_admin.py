@@ -42,6 +42,7 @@ from hal0.api.routes import _memory_subgraph as _sg
 from hal0.api.routes.memory import MemoryUnavailable
 from hal0.errors import BadRequest, Hal0Error, NotFound, UnprocessableEntity
 from hal0.memory.hindsight_provider import annotate_retain_yield
+from hal0.memory.write_gate import engine_call_writes, require_writes_allowed
 
 router = APIRouter()
 
@@ -207,12 +208,13 @@ async def engine_status(request: Request) -> dict[str, Any]:
           "version":     "0.7.2" | null,
           "features":    {...} | null, # 0.7.x feature flags (observations, mcp, …)
           "banks_total": int | null,
+          "layout_undecided": str,    # only while the bank layout is unsettled
         }
     """
     provider = getattr(request.app.state, "memory_provider", None)
     client = getattr(provider, "hindsight_client", None) if provider is not None else None
     if client is None:
-        return {
+        out: dict[str, Any] = {
             "enabled": provider is not None,
             "engine": None,
             "reachable": False,
@@ -220,6 +222,12 @@ async def engine_status(request: Request) -> dict[str, Any]:
             "features": None,
             "banks_total": None,
         }
+        # ADR-0058 decision 7: memory is degraded because the store's bank
+        # layout is not settled, not because the engine is down.
+        undecided = getattr(provider, "layout_undecided", None)
+        if isinstance(undecided, str) and undecided:
+            out["layout_undecided"] = undecided
+        return out
     version, banks = await asyncio.gather(
         _probe(client, "/version"), _probe(client, "/v1/default/banks")
     )
@@ -368,6 +376,7 @@ async def bank_profile_get(request: Request, bank_id: str) -> dict[str, Any]:
 
 @router.put("/banks/{bank_id}/profile")
 async def bank_profile_put(request: Request, bank_id: str) -> dict[str, Any]:
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     body = await _read_body(request)
@@ -709,6 +718,7 @@ async def _require_echoed_confirm(request: Request, client: Any, bank_id: str, w
 
 @router.delete("/banks/{bank_id}")
 async def delete_bank(request: Request, bank_id: str) -> Any:
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     await _require_echoed_confirm(request, client, bank_id, f"delete bank {bank_id}")
@@ -738,6 +748,7 @@ async def delete_bank_memories(request: Request, bank_id: str) -> Any:
     ``confirm`` is hal0's own gate and is stripped so it never reaches the
     engine as an unrecognised filter.
     """
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     await _require_echoed_confirm(
@@ -768,9 +779,7 @@ async def delete_bank_memories(request: Request, bank_id: str) -> Any:
 # observations_imported). Both verbs move raw bytes, so they can't go
 # through ``_forward``/``request_json`` (JSON-only) — they reach into the
 # Hindsight client's private ``_http``/``_headers()`` rather than adding a
-# second public method to hal0.memory.hindsight_client, which is owned by a
-# parallel unified-bank effort (see PLAN note in the CLI's migrate_unify
-# docstring for the full boundary rationale).
+# second public method to hal0.memory.hindsight_client.
 #
 # Export on 0.9.x (#2155): the synchronous engine GET is a 410 tombstone
 # (``api_export_documents_removed`` in hindsight_api/api/http.py) while
@@ -932,6 +941,7 @@ async def bank_document_transfer_export(request: Request, bank_id: str) -> Respo
 
 @router.post("/banks/{bank_id}/document-transfer")
 async def bank_document_transfer_import(request: Request, bank_id: str) -> Any:
+    require_writes_allowed()
     client = _client(request)
     _validate_segments({"bank_id": bank_id})
     on_conflict = request.query_params.get("on_conflict", "skip")
@@ -1047,8 +1057,8 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         # has (no per-memory tag field on UpdateMemoryRequest) — body
         # ``{"tags": [...]}`` is a full replace that propagates to every
         # memory unit under the document and invalidates derived
-        # observations (queues re-consolidation). ``migrate unify --add-tag``
-        # relies on this: read-merge-write, never a bare overwrite.
+        # observations (queues re-consolidation). A caller that adds a tag
+        # reads, merges and writes, never a bare overwrite.
         "PATCH",
         "/banks/{bank_id}/documents/{document_id}",
         "/v1/default/banks/{bank_id}/documents/{document_id}",
@@ -1097,10 +1107,45 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/mental-models/{model_id}/refresh",
         "/v1/default/banks/{bank_id}/mental-models/{model_id}/refresh",
     ),
+    # Empties a model's content (the next refresh rebuilds it in full); what
+    # ``hal0 memory mm repair`` does to a hidden model before flagging it (#3576).
+    (
+        "POST",
+        "/banks/{bank_id}/mental-models/{model_id}/clear",
+        "/v1/default/banks/{bank_id}/mental-models/{model_id}/clear",
+    ),
     (
         "GET",
         "/banks/{bank_id}/mental-models/{model_id}/history",
         "/v1/default/banks/{bank_id}/mental-models/{model_id}/history",
+    ),
+    # knowledge base (folders/pages tree, per-page read — #showcase)
+    #
+    # A 1.x engine serves no ``PATCH .../knowledge-base/pages/{id}`` and no
+    # ``POST .../knowledge-base/pages/{id}/refresh`` (#3564), so neither is
+    # forwarded. A page is generated from the mental model its tree node names
+    # in ``mental_model_id`` (a different id from the page's own): refresh it
+    # with ``POST /banks/{bank_id}/mental-models/{model_id}/refresh`` above, and
+    # edit its question, tags and trigger with ``PATCH .../mental-models/{id}``.
+    (
+        "GET",
+        "/banks/{bank_id}/knowledge-base/tree",
+        "/v1/default/banks/{bank_id}/knowledge-base/tree",
+    ),
+    (
+        "POST",
+        "/banks/{bank_id}/knowledge-base/folders",
+        "/v1/default/banks/{bank_id}/knowledge-base/folders",
+    ),
+    (
+        "POST",
+        "/banks/{bank_id}/knowledge-base/pages",
+        "/v1/default/banks/{bank_id}/knowledge-base/pages",
+    ),
+    (
+        "GET",
+        "/banks/{bank_id}/knowledge-base/pages/{page_id}",
+        "/v1/default/banks/{bank_id}/knowledge-base/pages/{page_id}",
     ),
     # directives
     ("GET", "/banks/{bank_id}/directives", "/v1/default/banks/{bank_id}/directives"),
@@ -1141,6 +1186,12 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
     # bank templates
     ("GET", "/banks/{bank_id}/export", "/v1/default/banks/{bank_id}/export"),
     ("POST", "/banks/{bank_id}/import", "/v1/default/banks/{bank_id}/import"),
+    # POST .../clone?target_bank_id=<new> — async, additive copy of a bank into
+    # a bank that must not exist yet (engine runs export+import in-process, no
+    # LLM). ``hal0 memory migrate platform`` (ADR-0052) is the caller. Not
+    # destructive, so no DESTRUCTIVE_MEMORY_ROUTES entry; the /api/memory
+    # prefix already classifies it ADMIN.
+    ("POST", "/banks/{bank_id}/clone", "/v1/default/banks/{bank_id}/clone"),
 )
 
 _BODY_METHODS = {"POST", "PUT", "PATCH"}
@@ -1235,8 +1286,13 @@ def _make_handler(method: str, template: str):
     if (method, template) == _CURATE_TEMPLATE:
         audit_action = _CURATE_AUDIT_ACTION
     clears_cache = (method, template) in _CACHE_CLEARING_FORWARDS
+    # #3518: every forward that changes the store is refused with
+    # ``memory.writes_paused`` while `hal0 memory embedder switch` runs.
+    is_write = engine_call_writes(method, template)
 
     async def handler(request: Request) -> Any:
+        if is_write:
+            require_writes_allowed()
         client = _client(request)
         segments = _validate_segments(dict(request.path_params))
         upstream = template.format(**segments) if segments else template

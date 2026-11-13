@@ -99,3 +99,30 @@ def test_unprivileged_writes_never_chown(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(os, "fchown", unexpected)
     openwebui_arm._write_override("sha256:" + "b" * 64)
     assert openwebui_arm.override_path().exists()
+
+
+def test_memory_embedder_record_first_write_adopts_owner(
+    as_root: list[tuple[str, int, int]],
+) -> None:
+    """#3518: a root-run update writes the record; the service must be able to read it."""
+    from hal0.memory import embedder_record as er
+
+    saved = er.save_embedder_record(
+        er.EmbedderRecord(provider="local", model="BAAI/bge-small-en-v1.5", source="x")
+    )
+
+    assert er.load_embedder_record() == saved
+    _adopted(as_root, "memory-embedder.json")
+
+
+def test_memory_layout_record_first_write_adopts_owner(
+    as_root: list[tuple[str, int, int]],
+) -> None:
+    """ADR-0058 decision 7: install.sh's update pass writes the layout record as
+    root; the service reads it at every boot."""
+    from hal0.memory import bank_layout as bl
+
+    saved = bl.save_layout_record(bl.BankLayout(bl.LAYOUT_TWO_BANK, source="store-absent"))
+
+    assert bl.load_layout_record() == saved
+    _adopted(as_root, "memory-layout.json")

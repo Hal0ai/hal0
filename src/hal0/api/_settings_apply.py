@@ -39,7 +39,7 @@ Apply-class semantics
 
 from __future__ import annotations
 
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 
 # Apply-class enum. Kept as plain string literals so JSON round-trips
 # without an extra enum adapter and the type checker accepts the
@@ -81,13 +81,20 @@ SERVICE_HAL0_API: str = "hal0-api"
 #                                            plumbing, but the generic PUT
 #                                            still tags the class so the
 #                                            UI renders the right badge).
-#   * ``[memory.embedding].model``          → service-restart[hal0-api]
-#                                            (the engine pins the
-#                                            embedding dimension at index
-#                                            build; switching silently
-#                                            corrupts the store — a
-#                                            process bounce + re-embed is
-#                                            the supported path).
+#   * ``[memory.models].{embeddings_provider, → manual-restart (#3518: the
+#     embeddings_model}``                    embedder belongs to the store.
+#                                            The engine environment is
+#                                            rendered from the store's
+#                                            embedder record, not these keys,
+#                                            so a save is kept in hal0.toml
+#                                            and changes nothing the engine
+#                                            runs; only re-embedding the
+#                                            store moves it. Swapping either
+#                                            under stored vectors degrades
+#                                            recall with no error. The rows
+#                                            carry a ``note`` saying so,
+#                                            because "restart" is not what
+#                                            applies them).
 #   * ``[memory.embedding].{rerank_*}``     → immediate (consumed on each
 #                                            ``memory_search`` call).
 #   * ``[memory.graph].{enabled,extraction_slot}`` → immediate (ADR-0023: the
@@ -132,7 +139,7 @@ SERVICE_HAL0_API: str = "hal0-api"
 #   * ``[dispatcher].{stream_total_timeout_s, → service-restart[hal0-api]
 #     stream_idle_timeout_s}``                (stall-guard bounds, same
 #                                            create_app-time wiring).
-#   * ``[memory].unified_bank``             → service-restart[hal0-api]
+#   * ``[memory].{bank,private_bank}``      → service-restart[hal0-api]
 #                                            (constructor arg to
 #                                            HindsightProvider, built once
 #                                            at create_app time — same
@@ -150,6 +157,11 @@ SERVICE_HAL0_API: str = "hal0-api"
 # because the registry is keyed off the path the PUT body uses. The
 # ``_KEY_TO_ENTRY`` projection below expands each dotted entry into
 # per-leaf entries so callers can pass either form.
+
+#: The ``note`` on the two embedder rows (#3518). Their class is
+#: ``manual-restart`` because that is the class for "a service restart will
+#: not apply this", but no restart of any kind applies them either.
+EMBEDDER_KEYS_NOTE = "saved; takes effect only through an embedder switch"
 
 _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     # [telemetry]
@@ -237,6 +249,100 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.graph.extraction_llm_retries": {"apply_class": "immediate", "services": []},
     "memory.graph.extraction_task_retries": {"apply_class": "immediate", "services": []},
     "memory.graph.extraction_retry_backoff_s": {"apply_class": "immediate", "services": []},
+    "memory.graph.extraction_worker_slots": {"apply_class": "immediate", "services": []},
+    # [memory.models] / [memory.decision] / [memory.lanes] — Hindsight 1.2
+    # showcase. PUT /api/settings re-renders hindsight-api's showcase-lanes.conf
+    # drop-in through the privileged seam and restarts the engine before it
+    # responds (#3492, settings._apply_showcase_dropin) — so the save IS the
+    # apply. A failed write/restart is reported in _hal0.showcase_dropin.
+    # #3518: the two showcase keys a save does NOT apply. Provider and model
+    # are one fact, the embedder, and the drop-in carries the pair the store
+    # was built with (hal0.memory.embedder_record). The values wait in
+    # hal0.toml until the store is re-embedded: manual-restart, the class for
+    # "a service restart will not apply this", with a note that says what does.
+    # On a box with no store the save does take effect, and PUT /api/settings
+    # reports the key under ``immediate`` for that save.
+    "memory.models.embeddings_provider": {
+        "apply_class": "manual-restart",
+        "services": [],
+        "note": EMBEDDER_KEYS_NOTE,
+    },
+    "memory.models.embeddings_model": {
+        "apply_class": "manual-restart",
+        "services": [],
+        "note": EMBEDDER_KEYS_NOTE,
+    },
+    "memory.models.reranker_provider": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_model": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_bucket_batching": {"apply_class": "immediate", "services": []},
+    "memory.decision.enabled": {"apply_class": "immediate", "services": []},
+    "memory.decision.provider": {"apply_class": "immediate", "services": []},
+    "memory.decision.model": {"apply_class": "immediate", "services": []},
+    "memory.decision.threads": {"apply_class": "immediate", "services": []},
+    "memory.decision.max_concurrent": {"apply_class": "immediate", "services": []},
+    "memory.decision.max_request_tokens": {"apply_class": "immediate", "services": []},
+    "memory.decision.timeout_s": {"apply_class": "immediate", "services": []},
+    "memory.decision.port": {"apply_class": "immediate", "services": []},
+    "memory.decision.base_url": {"apply_class": "immediate", "services": []},
+    "memory.lanes.llm_max_concurrent": {"apply_class": "immediate", "services": []},
+    "memory.lanes.timeout_s": {"apply_class": "immediate", "services": []},
+    "memory.lanes.reasoning_effort": {"apply_class": "immediate", "services": []},
+    "memory.lanes.strict_schema": {"apply_class": "immediate", "services": []},
+    "memory.lanes.retain.max_concurrent": {"apply_class": "immediate", "services": []},
+    "memory.lanes.retain.virtual_model": {"apply_class": "immediate", "services": []},
+    "memory.lanes.retain.timeout_s": {"apply_class": "immediate", "services": []},
+    "memory.lanes.retain.reasoning_effort": {"apply_class": "immediate", "services": []},
+    "memory.lanes.retain.strict_schema": {"apply_class": "immediate", "services": []},
+    "memory.lanes.retain.max_completion_tokens": {"apply_class": "immediate", "services": []},
+    "memory.lanes.consolidation.max_concurrent": {"apply_class": "immediate", "services": []},
+    "memory.lanes.consolidation.virtual_model": {"apply_class": "immediate", "services": []},
+    "memory.lanes.consolidation.timeout_s": {"apply_class": "immediate", "services": []},
+    "memory.lanes.consolidation.reasoning_effort": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.consolidation.strict_schema": {"apply_class": "immediate", "services": []},
+    "memory.lanes.consolidation.max_completion_tokens": {
+        "apply_class": "immediate",
+        "services": [],
+    },
+    "memory.lanes.reflect.max_concurrent": {"apply_class": "immediate", "services": []},
+    "memory.lanes.reflect.virtual_model": {"apply_class": "immediate", "services": []},
+    "memory.lanes.reflect.timeout_s": {"apply_class": "immediate", "services": []},
+    "memory.lanes.reflect.reasoning_effort": {"apply_class": "immediate", "services": []},
+    "memory.lanes.reflect.strict_schema": {"apply_class": "immediate", "services": []},
+    "memory.lanes.reflect.max_completion_tokens": {"apply_class": "immediate", "services": []},
+    "memory.lanes.mental_model_refresh.max_concurrent": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.mental_model_refresh.virtual_model": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.mental_model_refresh.timeout_s": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.mental_model_refresh.reasoning_effort": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.mental_model_refresh.strict_schema": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    "memory.lanes.mental_model_refresh.max_completion_tokens": {
+        "apply_class": "manual-restart",
+        "services": [],
+    },
+    # [memory.console] + memory.public_url — read per request by
+    # GET /api/memory/agents (console_url, install one-liner): immediate.
+    # Installing/running the console service itself is the installer's job.
+    "memory.console.enabled": {"apply_class": "immediate", "services": []},
+    "memory.console.port": {"apply_class": "immediate", "services": []},
+    "memory.console.bind": {"apply_class": "immediate", "services": []},
+    "memory.public_url": {"apply_class": "immediate", "services": []},
     # [activity] — the AuditStore is constructed once at create_app
     # (api/__init__.py); retention/max_rows/enabled land on restart.
     "activity.enabled": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
@@ -298,6 +404,12 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
     },
+    # Read once when SlotManager is constructed (api/__init__.py), so a
+    # change needs the API process to come back up.
+    "slots.fabric_clock_guard": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [dispatcher] — same create_app-time wiring as the other two entries.
     "dispatcher.direct_read_timeout_s": {
         "apply_class": "service-restart",
@@ -311,8 +423,36 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
     },
+    # ADR-0056 serial admission: the Router takes the wait bound as a
+    # constructor arg at create_app time (/v1/systemone reads the live value,
+    # but the chat path does not), so it lands on the next hal0-api restart.
+    "dispatcher.admission_wait_timeout_s": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [memory] — HindsightProvider constructor arg, built once at boot.
-    "memory.unified_bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "memory.private_bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "memory.bank": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    # [memory.projects] — the project registry is also a HindsightProvider
+    # constructor arg (provider_from_config); the doctor row reads hal0.toml.
+    "memory.projects.aliases": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    "memory.projects.deny": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
+    "memory.projects.registered": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
+    # [memory.compat] — read off app.state.hal0_config on every request to the
+    # engine-compatible endpoint (routes/memory_compat.py, ``_settings``),
+    # which the settings PUT refreshes in place.
+    "memory.compat.shared_document_prefixes": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_concurrent_reflects": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_concurrent_recalls": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_outstanding_operations": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_outstanding_bytes": {"apply_class": "immediate", "services": []},
+    "memory.compat.max_item_bytes": {"apply_class": "immediate", "services": []},
     # [realtime] — every key is read live off app.state.hal0_config.realtime
     # on each WS connect (routes/realtime.py), which the settings PUT
     # refreshes in place, so all of them apply immediately.
@@ -345,11 +485,15 @@ class ApplyPlanEntry(TypedDict):
     ``apply_class`` is one of :data:`APPLY_CLASSES`. ``services`` lists
     the services a ``service-restart`` entry needs bounced; the list
     is empty for ``immediate`` and ``manual-restart`` (those have no
-    platform-level restart the operator can fire).
+    platform-level restart the operator can fire). ``note`` is optional:
+    one line for a row whose class name does not say what applies it.
+    It rides along wherever the row does (``GET /api/settings/apply-plan``,
+    the settings field list, a changeset entry) and only when set.
     """
 
     apply_class: str
     services: list[str]
+    note: NotRequired[str]
 
 
 class ApplyPlanResult(TypedDict, total=False):
@@ -378,10 +522,13 @@ def get_registry() -> dict[str, ApplyPlanEntry]:
     round-trip. Returns a fresh dict so callers can mutate without
     corrupting the module-level constant.
     """
-    return {
-        k: {"apply_class": v["apply_class"], "services": list(v["services"])}
-        for k, v in REGISTRY.items()
-    }
+    out: dict[str, ApplyPlanEntry] = {}
+    for k, v in REGISTRY.items():
+        row: ApplyPlanEntry = {"apply_class": v["apply_class"], "services": list(v["services"])}
+        if "note" in v:
+            row["note"] = v["note"]
+        out[k] = row
+    return out
 
 
 def apply_plan(touched_keys: list[str] | tuple[str, ...]) -> ApplyPlanResult:
@@ -441,6 +588,7 @@ def apply_plan(touched_keys: list[str] | tuple[str, ...]) -> ApplyPlanResult:
 
 __all__ = [
     "APPLY_CLASSES",
+    "EMBEDDER_KEYS_NOTE",
     "REGISTRY",
     "SERVICE_HAL0_API",
     "SERVICE_SLOTS",

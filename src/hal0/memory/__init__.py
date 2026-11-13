@@ -242,12 +242,30 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
     elif engine not in ("hindsight", ""):
         log.warning("hal0.memory.unknown_engine", engine=engine, fallback="hindsight")
 
+    # Which banks the store is laid out in (ADR-0058 decision 7): the record,
+    # else determined and written now (hal0.memory.bank_layout). Before the
+    # engine is probed, so a boot that finds no store yet records it before
+    # the engine's first start creates one. A layout that cannot be settled
+    # (an unreadable record, a two-bank decision that could not be written)
+    # serves no bank at all: a degraded fallback that refuses every write
+    # with memory.layout_undecided (503) rather than keep it in the volatile
+    # store, which the self-healing wrapper retries; `hal0 doctor`'s
+    # memory_layout row names the cause.
+    from hal0.memory.bank_layout import LayoutUndecided, ensure_layout_record, undecided_fallback
+
+    try:
+        layout = ensure_layout_record(cfg.memory)
+    except LayoutUndecided as exc:
+        log.error("hal0.memory.layout_undecided", error=str(exc), fallback="pgvector")
+        return undecided_fallback(str(exc))
+
     try:
         client = _build_hindsight_client(cfg)
     except Exception as exc:  # daemon down at boot → degrade ladder
         log.warning("hal0.memory.hindsight_unavailable", error=str(exc), fallback="pgvector")
         return PgVectorProvider()
     from hal0.memory.hindsight_provider import Hal0Reranker
+    from hal0.memory.projects import registry_from_config
 
     reranker = Hal0Reranker(
         base_url=str(embed.rerank_gateway_url),
@@ -260,5 +278,6 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
         reranker=reranker,
         graph_enabled=bool(graph.enabled),
         extraction_slot=str(getattr(graph, "extraction_slot", "memory")),
-        unified_bank=bool(getattr(cfg.memory, "unified_bank", True)),
+        projects=registry_from_config(getattr(cfg.memory, "projects", None)),
+        **layout.provider_kwargs(cfg.memory),
     )

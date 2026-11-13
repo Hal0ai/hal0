@@ -1,0 +1,171 @@
+---
+title: Memory projects
+description: How hal0 files a memory under a project and reads by one. hal0 resolves project names against the [memory.projects] registry, tags the write, consolidates observations per project, and lets a read narrow to one project.
+sidebar:
+  order: 51
+---
+
+import { Aside, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+A memory can belong to a project: a repository, usually. hal0 resolves the
+project and stamps it itself, instead of each agent composing the tag by hand
+(ADR-0058, decision 4a). This page describes the registry, how a name is
+resolved, what a write is tagged with, and how a read narrows to a project.
+
+## Naming the project of a write
+
+A write names its project with a `project` field: in the body of
+`POST /api/memory/add` (or the `X-hal0-Project` header, which the body field
+wins over) and as the `project` argument of the MCP `memory_add` tool. hal0
+resolves the name and tags the write with one `project:<slug>` tag; any
+`project:` tag the caller sent is replaced. A write that names no project is
+resolved from its own `project:` tags instead:
+
+- One tag, or several that are the same project once resolved: one
+  `project:<slug>` tag.
+- Tags that name two or more different projects: one `project:<slug>` tag for
+  each, in the order sent.
+- A tag whose name is on the deny list, or has nothing left after
+  normalising (`project:!!!`, `project:`): dropped. If no project tag is
+  left, the write has no project.
+
+So a denied name is never stored as a project tag, and no project tag is
+stored in a spelling other than the normalised one. A project-tagged memory
+is readable by every shared read (ADR-0058, decision 7b): `project:` is a
+scope a read may narrow by, not a wall.
+
+## How a name is resolved
+
+**Spelling.** Every name is normalised the same way: lower case; the
+characters `a-z`, `0-9`, `.`, `_` and `-` are kept; any run of other
+characters becomes one `-`; leading and trailing `-`, `.` and `_` are removed.
+Two or more dots in a row count as "other", so a slug never contains `..`,
+and a path such as `acme/widgets` becomes `acme-widgets`. A character outside
+ASCII is "other" as well: `café` becomes `caf`. A slug is at most 100
+characters, the longest repository name GitHub accepts; a longer name is cut.
+
+**Aliases, then the deny list.** The name is mapped through
+`[memory.projects].aliases`, and the result is checked against
+`[memory.projects].deny`. A denied name means "no project". It is not an
+error. The name `unresolved` is reserved and always denied.
+
+Any name that survives is accepted as a project. Registration is not required
+to write; it only affects what `hal0 doctor` reports.
+
+**Sources.** A named project comes first (the `project` field), then the
+project part of a per-repository bank id a coding-agent client sends to
+`/api/memory/compat`, then the `project:` tags. A named project that is
+denied ends the resolution; the tags are not consulted.
+
+### The registry
+
+```toml
+[memory.projects]
+# Other spellings of a project: left is tagged as right.
+aliases = { "widgets-monorepo" = "widgets" }
+# Names that are never projects. Setting this replaces the default list.
+deny = ["tmp", "temp", "root", "home", "workdir", "scratch", "scratchpad", "unknown", "default"]
+# Projects you have confirmed.
+registered = ["widgets", "handbook"]
+```
+
+The defaults are no aliases, no registered names, and the deny list shown.
+Entries are normalised when the file is loaded. An alias that points at a
+denied name, or back at a name that leads to it, is refused at load. An alias
+whose two sides are the same name once normalised (`"Widgets" = "widgets"`)
+does nothing and is ignored. Changes need a restart of `hal0-api`. See the
+[config schema](/docs/reference/config-schema#memoryprojects).
+
+## What a write is tagged with
+
+The first row that applies decides.
+
+| The write | Project and scope tags |
+|---|---|
+| resolves to one project | exactly one `project:<slug>` |
+| resolves to two or more projects (from its own tags) | one `project:<slug>` each |
+| comes from a coding client and has no project | `project:unresolved`, durable or ephemeral |
+| is durable, has no project, and carries no `scope:` tag of its own | `scope:global` |
+| is ephemeral and has no project | neither |
+
+So "no project" and "global" are different facts: a durable memory that
+belongs to no project says so with `scope:global`. Durable and ephemeral are
+the `kind:` tags described under
+[Write envelope](/docs/concepts/memory#write-envelope).
+
+A `scope:global` tag the caller sent is kept. A `project:unresolved` tag the
+caller sent is dropped: only hal0 stamps it, on a write through
+`/api/memory/compat` whose client names no project.
+
+The decision is also written to the document's metadata, unless the caller
+already set the key: `project` (the slug, several slugs joined by commas, or
+`unresolved`) and `project_source` (`field`, `bank`, `tag` or `denied`).
+
+<Aside type="note">
+Before this change a durable write carried `agent:<id>` and `kind:durable`
+and nothing else from hal0. It now also carries `scope:global` when it has no
+project. A `project:<name>` tag you send is normalised, may be aliased or
+dropped, and is stored after hal0's own tags instead of where you put it.
+</Aside>
+
+## Observations consolidate per project
+
+hal0 chooses the observation scope of each write from its final tags:
+
+- A write with a `project:<slug>` tag consolidates into that project's scope,
+  `[["project:<slug>"]]`, one scope per project. What is learned in one
+  repository does not become a belief about another.
+- A write with no project tag consolidates into the one untagged scope
+  (`"shared"`). `scope:global` does not change this: it is a tag for reads,
+  not an observation scope.
+- `project:unresolved` is not a project, and every repository's unresolved
+  writes carry it, so it is never a scope alone. An unresolved write
+  consolidates into a scope of its writer's own,
+  `[["project:unresolved", "agent:<id>"]]`. It does not go into the untagged
+  scope: an observation built there carries no tags, every project's read
+  admits an untagged memory, and one client's unresolved writes would then
+  surface in every other client's project.
+- A private write is scoped to its writer: in the two-bank layout
+  `[["agent:<id>", "visibility:private", "project:<slug>"]]`, or without the
+  project when it has none ([Memory banks](/docs/concepts/memory-banks)). On
+  a store still on its old unified bank it keeps the engine's default
+  scoping, so its observations still carry `visibility:private`.
+
+## Reading by project
+
+`POST /api/memory/recall`, `POST /api/memory/search`, `POST /api/memory/reflect`
+and `GET /api/memory/list` (as `?project=`), and the MCP `memory_recall`,
+`memory_search` and `memory_reflect` tools, take an optional `project`:
+
+| `project` | What the read sees |
+|---|---|
+| absent, or `"*"` | the whole bank: every project, global memory, untagged memory |
+| a name | memory tagged `project:<slug>` or `scope:global`, and untagged memory |
+| a name that resolves to no project (denied, or nothing left of it) | `scope:global` and untagged memory |
+
+The name is resolved like a write's, through the aliases and the deny list.
+Private visibility applies on top in every case: another agent's private
+memory is never read, whatever its project.
+
+A memory that has tags but neither `project:<slug>` nor `scope:global`, which
+includes every memory written through hal0 before `scope:global` existed, is
+outside a project-narrowed read until the fold-in migration retags it. A read
+with no `project` sees it.
+
+The coding-agent endpoint, `/api/memory/compat`, is the exception: its reads
+are always held to the client's project plus global memory, and it has no
+whole-bank read.
+
+## Measuring it
+
+`hal0 doctor` has a `memory_projects` row. It reads the platform bank's tag
+counts and reports the share of project-tagged facts whose project is
+registered or aliased, the `project:unresolved` count, and up to ten projects
+in use that the registry does not know. See
+[doctor](/docs/reference/cli-doctor-agents).
+
+<CardGrid>
+  <LinkCard title="Memory" href="/docs/concepts/memory" description="Namespaces, banks, the write envelope and what memory powers." />
+  <LinkCard title="Memory banks" href="/docs/concepts/memory-banks" description="hal0:shared and hal0:private, the layout record, and who reads what." />
+  <LinkCard title="Config schema reference" href="/docs/reference/config-schema" description="Every hal0.toml table, including [memory.projects]." />
+</CardGrid>

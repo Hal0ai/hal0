@@ -217,8 +217,10 @@ def test_context_neutralises_a_spoofed_context_wrapper():
 
 
 @pytest.mark.asyncio
-async def test_context_never_returns_a_private_or_project_chunk():
-    """The real provider's ACL, not a stub: only the shared fact's chunk survives."""
+async def test_context_never_returns_a_private_chunk():
+    """The real provider's ACL, not a stub: the private fact's chunk never
+    survives. A project-tagged fact is shared memory and does (ADR-0058
+    decision 7b)."""
     fake = FakeHindsightClient()
     fake._facts_by_bank["shared"] = [
         {"id": "f-pub", "document_id": "d-pub", "chunk_id": "c-pub", "text": "public", "tags": []},
@@ -246,8 +248,8 @@ async def test_context_never_returns_a_private_or_project_chunk():
 
     body = await build_memory_context(provider, "q")
 
-    assert [context["text"] for context in body["contexts"]] == ["public raw"]
-    assert [fact["text"] for fact in body["facts"]] == ["public"]
+    assert {context["text"] for context in body["contexts"]} == {"public raw", "project raw"}
+    assert {fact["text"] for fact in body["facts"]} == {"public", "project fact"}
 
 
 def test_bundled_openwebui_function_is_available_for_manual_import():

@@ -1,7 +1,7 @@
 {
   "name": "hal0-ui",
   "private": true,
-  "version": "1.7.1",
+  "version": "1.8.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -18,31 +18,32 @@
     "@fontsource-variable/geist": "^5.3.0",
     "@fontsource/jetbrains-mono": "^5.3.0",
     "@sentry/react": "^11.10.0",
-    "@tanstack/react-query": "^5.105.0",
-    "d3-force": "^3.0.0",
+    "@tanstack/react-query": "^5.105.3",
+    "d3-force": "^3.0.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "zustand": "^5.0.16"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
-    "@tailwindcss/vite": "^4.3.3",
+    "@tailwindcss/vite": "^4.3.4",
     "@types/d3-force": "^3.0.10",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^5.2.0",
-    "eslint": "^10.13.0",
-    "globals": "^17.13.0",
+    "eslint": "^10.14.0",
+    "globals": "^17.14.0",
     "happy-dom": "^21.0.4",
     "tailwindcss": "^4.2.2",
     "typescript": "^7.0.2",
     "vite": "^7.3.7",
-    "vitest": "^5.0.5"
+    "vitest": "^5.1.0"
   },
   "allowScripts": {
     "esbuild@0.25.12": true
   },
   "overrides": {
-    "js-yaml": "^4.3.2"
+    "js-yaml": "^4.3.2",
+    "minimatch": "^11.0.1"
   }
 }

@@ -20,11 +20,11 @@ from pathlib import Path
 import pytest
 
 from hal0.openwebui import image_pin
+from tests.openwebui._owui_unit import PACKAGED_UNIT as _UNIT
 
 # tests/openwebui/<file> → repo root is parents[2].
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _INSTALL_SH = _REPO_ROOT / "installer" / "install.sh"
-_UNIT = _REPO_ROOT / "packaging" / "systemd" / "hal0-openwebui.service"
 
 
 def _digests(path: Path) -> list[str]:

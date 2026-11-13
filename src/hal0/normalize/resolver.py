@@ -75,6 +75,9 @@ class SlotView:
     device: str  # "gpu-vulkan" | "gpu-rocm" | "cpu" | "npu"
     model_id: str
     context_length: int
+    #: The slot's ``binary``; ``"xdna"`` marks a llama-server slot on the NPU
+    #: (ADR-0057), which the ``npu`` device-class match does not count.
+    binary: str = ""
 
 
 @dataclass(frozen=True)
@@ -98,10 +101,13 @@ def _slot_matches_name(slot: SlotView, name: str) -> bool:
     Plain names match the slot's ``name`` exactly (case-insensitive). The
     special name ``npu`` additionally matches any slot with ``device == "npu"``
     so a container that calls the trio's chat edge by a different slot name
-    (e.g. ``flm``) still answers ``hal0/npu``. All other names match name only.
+    (e.g. ``flm``) still answers ``hal0/npu``. An xdna slot (``binary = "xdna"``)
+    is on the NPU but is not the FLM anchor, so the device-class match skips it
+    (a slot literally named ``npu`` still matches by name). All other names
+    match name only.
     """
     target = name.lower()
-    if target == "npu" and slot.device == "npu":
+    if target == "npu" and slot.device == "npu" and slot.binary != "xdna":
         return True
     return slot.name.lower() == target
 

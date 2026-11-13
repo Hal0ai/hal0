@@ -52,6 +52,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from hal0.cli.doctor_verify import (
     _FAIL,
@@ -199,6 +200,48 @@ def check_secret_file_modes() -> Check:
     return Check("secret-modes", "Secret file modes", _PASS, "secret files are owner-only")
 
 
+@_report_unreadable("openwebui-task-model", "Open WebUI task model")
+def check_openwebui_task_model(slots: list[dict[str, Any]] | None = None) -> Check:
+    """Warn when Open WebUI's configured task slot has been removed."""
+    key, label = "openwebui-task-model", "Open WebUI task model"
+    env_path = paths.openwebui_env()
+    if not env_path.is_file():
+        return Check(key, label, _PASS, "Open WebUI env is absent")
+    target = next(
+        (
+            line.partition("=")[2].strip().strip("\"'")
+            for line in env_path.read_text(encoding="utf-8").splitlines()
+            if line.startswith("TASK_MODEL_EXTERNAL=")
+        ),
+        "",
+    )
+    if not target or slots is None:
+        return Check(key, label, _PASS, "no task slot to validate")
+    names = {str(slot.get("name")) for slot in slots if isinstance(slot, dict)}
+    # `hal0/<x>` is always a local lane (the prefix names a slot, never an
+    # upstream model). A BARE value is a slot reference only when it is in
+    # the slot vocabulary — the live slots, the seed names, and the
+    # retired `utility` seed. Anything else is an upstream model id
+    # (``TASK_MODEL_EXTERNAL`` may name one), which this row must not
+    # warn about.
+    from hal0.install.static_seeds import STATIC_SEED_SLOTS
+
+    if target.startswith("hal0/"):
+        name = target.removeprefix("hal0/")
+    elif target in names or target in STATIC_SEED_SLOTS or target == "utility":
+        name = target
+    else:
+        return Check(key, label, _PASS, f"task model {target} is not a slot reference")
+    if name not in names:
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"TASK_MODEL_EXTERNAL={target} names no slot; set it to hal0/agent in {env_path}",
+        )
+    return Check(key, label, _PASS, f"task slot {name} exists")
+
+
 @_report_unreadable("hardware_freshness", "Hardware probe freshness")
 def check_hardware_freshness() -> Check:
     """The cached hardware.json must be fresh enough to trust (#1862/H9).
@@ -314,6 +357,63 @@ def check_gtt_leak(
             name, title, _PASS, f"{in_use}; KFD process table unreadable, leak check skipped"
         )
     return Check(name, title, _PASS, f"{in_use}, none unexplained")
+
+
+def check_fabric_clock(slots: Any = None, *, sys_root: str = "/sys") -> Check:
+    """Strix Halo NPU+GPU fabric-clock hazard (ROCm/TheRock#8709).
+
+    PASS when no configured slot uses the NPU, or no NPU+GPU pairing is
+    possible, or the clock is held. WARN when an NPU slot and a GPU slot are
+    both configured (regardless of current load state — the hazard is about
+    what CAN run together, not just what is up right now) and the fabric
+    clock is readable but not held: the detail names the exact host-side
+    commands. An unreadable sysfs state PASSes as 'unreadable' — expected
+    inside hal0's own container, since the hold can only be written on the
+    Proxmox host; this is advisory, never a fail.
+    """
+    from hal0.slots.fabric_clock_guard import (
+        fabric_clock_message,
+        read_fabric_clock,
+        slot_uses_gpu,
+        slot_uses_npu,
+    )
+
+    name, title = "fabric_clock", "NPU/GPU fabric-clock guard"
+    if not isinstance(slots, list):
+        return Check(name, title, _PASS, "slot list unavailable, fabric-clock check skipped")
+    # review P2-5: the API always folds in a synthetic composite row (the
+    # `hal0` "all slots" pseudo-slot, assigned backend='vulkan' by
+    # slot_view synthesis) so it reads as a real, individually-configured
+    # GPU slot. Counting it here turns every box with any GPU slot
+    # configured into a false WARN naming `hal0` as the offending slot —
+    # exclude synthetic/non-local rows and only pair real slot configs.
+    real_slots = [
+        s
+        for s in slots
+        if isinstance(s, dict) and not s.get("_synthetic") and s.get("name") != "hal0"
+    ]
+    npu_slots = [s for s in real_slots if slot_uses_npu(s)]
+    gpu_slots = [s for s in real_slots if slot_uses_gpu(s)]
+    if not npu_slots or not gpu_slots:
+        return Check(name, title, _PASS, "no NPU+GPU slot pairing configured")
+    state = read_fabric_clock(sys_root)
+    if not state.readable:
+        return Check(
+            name,
+            title,
+            _PASS,
+            "fabric-clock state unreadable (expected inside hal0's container; the hold is "
+            "written on the Proxmox host) — "
+            + fabric_clock_message(state, npu_slots[0].get("name"), []),
+        )
+    if state.held:
+        return Check(name, title, _PASS, f"held ({state.perf_level})")
+    message = fabric_clock_message(
+        state,
+        npu_slots[0].get("name"),
+        [str(s.get("name")) for s in gpu_slots if s.get("name")],
+    )
+    return Check(name, title, _WARN, message)
 
 
 def check_seed_context_envelope(*, slots_dir: Path | None = None) -> Check:
@@ -693,11 +793,15 @@ def check_api_journal_access(
     probe_gid = journal_gid if journal_gid is not None else _journal_group_gid
     key, title = "api-journal", "API journal read"
 
-    # Probe the process first: a root-run API reads the journal without the
-    # group, so a host that lacks it is not a problem for that API.
     ids = probe_ids()
     if ids is not None and ids[0] == 0:
-        return Check(key, title, _PASS, f"{_API_UNIT} runs as root and can read the journal")
+        return Check(
+            key,
+            title,
+            _WARN,
+            f"{_API_UNIT} is unexpectedly running as root; it should run as the "
+            f"hal0 user with the {_JOURNAL_GROUP} group",
+        )
     gid = probe_gid()
     if gid is None:
         return Check(
@@ -985,7 +1089,11 @@ def check_img_custom_nodes() -> Check:
     if journal.returncode or journal.stderr.strip() or not journal.stdout.strip():
         return skipped("current-start journal unavailable or empty; try `sudo hal0 doctor all`")
     failures: set[str] = set()
+    env_failure = ""
     for line in Text.from_ansi(journal.stdout).plain.splitlines():
+        # hal0_python_env.py's one line: nodes are then back on the read-only image.
+        if "comfyui.python_env_failed" in line:
+            env_failure = line.partition("comfyui.python_env_failed")[2].strip()
         match = re.search(
             r"(?:IMPORT FAILED|PRESTARTUP FAILED)\)\s*:\s*(.+)$"
             r"|Cannot import (.+?) module for custom nodes(?:\s*:|$)",
@@ -993,16 +1101,19 @@ def check_img_custom_nodes() -> Check:
         )
         if match:
             failures.add(Path((match.group(1) or match.group(2)).strip()).name)
-    if failures:
-        return Check(
-            key,
-            label,
-            _WARN,
-            "custom nodes failed in the current img start: "
-            + ", ".join(sorted(failures))
-            + " — ship dependencies in a derived runner image; see "
-            "https://hal0.dev/docs/guides/manage-runner-images#comfyui-custom-node-dependencies",
+    guide = "https://hal0.dev/docs/guides/manage-runner-images#comfyui-custom-node-dependencies"
+    problems = []
+    if env_failure:
+        problems.append(
+            f"the writable Python environment could not be prepared ({env_failure}), "
+            "so nodes cannot install packages"
         )
+    if failures:
+        problems.append(
+            "custom nodes failed in the current img start: " + ", ".join(sorted(failures))
+        )
+    if problems:
+        return Check(key, label, _WARN, "; ".join(problems) + f" — see {guide}")
     return Check(key, label, _PASS, "no custom-node startup failures in the current img start")
 
 
@@ -2508,6 +2619,10 @@ def check_bridge_store(
       shuts out): WARN "cannot read", the ``hermes-api`` row's wording.
     * Schema older than this build ships, or never applied: WARN. hal0-api
       applies migrations at start, so a restart brings it current.
+    * A live client under a name hal0 reserves (:func:`hal0.bridge.keys.is_reserved_name`),
+      minted before the name was reserved: WARN, naming it and how to revoke
+      it and mint a replacement. hal0-api refuses its key on every surface
+      (#3560), so the agent using it is cut off until then.
 
     ADVISORY (never critical): a broken store only stops bridge keys from
     authenticating, and the admin key still works.
@@ -2574,6 +2689,12 @@ def check_bridge_store(
                 "SELECT COUNT(*) FILTER (WHERE revoked_at IS NULL), "
                 "COUNT(*) FILTER (WHERE revoked_at IS NOT NULL) FROM clients"
             ).fetchone()
+            live_names = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM clients WHERE revoked_at IS NULL ORDER BY name"
+                )
+            ]
         finally:
             conn.close()
     except sqlite3.Error as exc:
@@ -2584,6 +2705,28 @@ def check_bridge_store(
         )
     counted = f"{live} client{'' if live == 1 else 's'}"
     detail = f"{counted}, schema v{version}" + (f" ({revoked} revoked)" if revoked else "")
+    from hal0.bridge.keys import is_reserved_name
+
+    reserved = [name for name in live_names if is_reserved_name(name)]
+    if reserved:
+        listed = ", ".join(repr(name) for name in reserved)
+        return Check(
+            key,
+            label,
+            _WARN,
+            "; ".join(
+                [
+                    *problems,
+                    detail,
+                    f"bridge client{'' if len(reserved) == 1 else 's'} {listed} "
+                    f"{'has a name' if len(reserved) == 1 else 'have names'} hal0 now reserves, "
+                    "so hal0-api refuses the key everywhere (bridge.client_name_reserved); "
+                    "revoke it with `hal0 bridge revoke <name>` and mint a replacement under "
+                    "another name with `hal0 bridge add <new-name>`",
+                ]
+            )
+            + (fix if problems else ""),
+        )
     if problems:
         return _warn(detail)
     return Check(key, label, _PASS, detail)
@@ -3229,7 +3372,19 @@ def check_hindsight_llm_auth(
     return Check(name, title, _PASS, "memory engine carries a current client-tier LLM key")
 
 
-def check_memory_engine_version(*, memory: dict[str, Any] | None) -> Check:
+def _memory_enabled_in_config() -> bool | None:
+    """``[memory] enabled`` from ``hal0.toml``; ``None`` when it cannot be read."""
+    from hal0.config.loader import load_hal0_config
+
+    try:
+        return bool(load_hal0_config().memory.enabled)
+    except Exception:
+        return None
+
+
+def check_memory_engine_version(
+    *, memory: dict[str, Any] | None, config_enabled: bool | None = None
+) -> Check:
     """The engine should be at the pinned version — staleness signal only.
 
     Both upgrade paths converge the engine venv via the post-activation
@@ -3241,6 +3396,11 @@ def check_memory_engine_version(*, memory: dict[str, Any] | None) -> Check:
 
     ``memory`` is the ``GET /api/memory/engine`` payload the roll-up already
     fetched — one probe, two rows.
+
+    An empty engine payload means either memory is off in ``hal0.toml`` or it
+    is on and the engine never came up (#3551); ``config_enabled`` (read from
+    ``hal0.toml`` when omitted) tells the two apart so an outage is not
+    reported as "disabled".
     """
     from hal0.memory.engine_upgrade import HINDSIGHT_API_PIN
 
@@ -3248,7 +3408,26 @@ def check_memory_engine_version(*, memory: dict[str, Any] | None) -> Check:
     if memory is None:
         return Check(name, title, _WARN, "engine status unreachable — is hal0-api up?")
     if memory.get("engine") in (None, "") or not memory.get("enabled", True):
-        return Check(name, title, _PASS, "memory disabled — nothing to check")
+        if config_enabled is None:
+            config_enabled = _memory_enabled_in_config()
+        if config_enabled is False:
+            return Check(name, title, _PASS, "memory disabled in config — nothing to check")
+        if config_enabled is None:
+            # hal0.toml is 0600: a non-root doctor cannot read it, and then
+            # neither "disabled" nor "unreachable" can be claimed.
+            return Check(
+                name,
+                title,
+                _PASS,
+                "config unreadable — cannot tell disabled from unreachable (run as root)",
+            )
+        return Check(
+            name,
+            title,
+            _PASS,
+            "[memory] enabled but the engine is unreachable — nothing to compare; "
+            "see the memory row and the hindsight-api unit",
+        )
     if not memory.get("reachable"):
         # check_memory (the shared classifier) already reports reachability;
         # a second row saying the same thing would be noise.
@@ -3264,6 +3443,251 @@ def check_memory_engine_version(*, memory: dict[str, Any] | None) -> Check:
         "the engine-upgrade pass missed or failed; run `hal0 update` (or re-run install.sh) "
         "and check the journal for updater.memory_engine_upgrade_failed",
     )
+
+
+def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
+    """hindsight-api must run with the ``HINDSIGHT_API_*`` values hal0 renders (#3520).
+
+    hal0's two drop-ins are not the whole story: systemd applies every
+    ``.conf`` in ``hindsight-api.service.d`` in lexical order, so a
+    later-sorting operator drop-in (the hand-maintained
+    ``zz-h0-98-llm-global-cap.conf`` above all) silently beats them, and a
+    rendered change that was never reloaded leaves the old values live.
+    Compares the unit's merged ``Environment=`` with what hal0 renders
+    (:func:`hal0.memory.extraction_env.engine_env_report`). Advisory
+    (``warn``): the engine still runs, just not on hal0's numbers.
+
+    ``report`` is the injection point for tests; by default the report is
+    built from this box's ``hal0.toml`` and ``systemctl show``.
+    """
+    name, title = "memory_engine_env", "Memory engine env"
+    if report is None:
+        from hal0.config.loader import load_hal0_config
+        from hal0.memory.extraction_env import engine_env_report
+
+        try:
+            memory = load_hal0_config().memory
+        except Exception as exc:
+            return Check(name, title, _WARN, f"hal0.toml unreadable — check skipped: {exc}")
+        report = engine_env_report(memory)
+    from hal0.memory.extraction_env import engine_env_warning
+
+    if not report.get("installed"):
+        return Check(
+            name, title, _PASS, "no hal0-managed memory engine drop-in installed — nothing to check"
+        )
+    warning = engine_env_warning(report)
+    if warning:
+        return Check(name, title, _WARN, warning)
+    if not report.get("checked"):
+        return Check(name, title, _WARN, "could not read the hindsight-api unit environment")
+    slots = (report.get("effective") or {}).get("HINDSIGHT_API_WORKER_MAX_SLOTS")
+    llm = (report.get("effective") or {}).get("HINDSIGHT_API_LLM_MAX_CONCURRENT")
+    in_force = ""
+    if slots is not None:
+        in_force = f" (worker slots {slots}"
+        in_force += f", LLM concurrency {llm})" if llm is not None else ")"
+    return Check(name, title, _PASS, f"hindsight-api runs with the values hal0 renders{in_force}")
+
+
+def check_memory_layout(*, path: Any = None, memory: dict[str, Any] | None = None) -> Check:
+    """Which banks the memory store is laid out in (ADR-0058 decision 7).
+
+    Reads ``/var/lib/hal0/state/memory-layout.json``
+    (:mod:`hal0.memory.bank_layout`, mode 0644, so any account can read it)
+    and writes nothing. Outcomes:
+
+    * ``pass`` with the layout and its banks;
+    * ``pass`` with a note when there is no record yet: the next update or
+      hal0-api start writes it;
+    * ``warn`` with hal0-api's reason when there is no record and hal0-api
+      reports the layout undecided (``layout_undecided`` in
+      ``GET /api/memory/engine``, the ``memory`` payload): a two-bank decision
+      it could not write down. Memory writes are refused meanwhile;
+    * ``fail`` when the file exists and cannot be read. hal0-api then serves
+      no memory bank at all (the degraded fallback), because guessing a
+      layout can put new memory in banks the store does not read; the detail
+      names the file and the remedy.
+    """
+    from hal0.memory.bank_layout import LayoutRecordError, layout_record_path, load_layout_record
+
+    name, title = "memory_layout", "Memory layout"
+    target = path if path is not None else layout_record_path()
+    try:
+        record = load_layout_record(target)
+    except LayoutRecordError as exc:
+        return Check(
+            name,
+            title,
+            _FAIL,
+            f"{exc.path} {exc.reason}: hal0-api serves no memory bank until it is fixed. "
+            "Restore it from a backup, or remove it to have the layout decided again "
+            "(only on a box whose banks you know: an existing store is recorded as the "
+            "old layout), then restart hal0-api",
+        )
+    undecided = (memory or {}).get("layout_undecided")
+    if record is None and isinstance(undecided, str) and undecided:
+        return Check(
+            name,
+            title,
+            _WARN,
+            f"hal0-api serves no memory bank and refuses memory writes: {undecided}. "
+            "Fix the cause (usually the state directory is not writable), then restart "
+            "hal0-api",
+        )
+    if record is None:
+        return Check(
+            name, title, _PASS, "no record yet; the next update or hal0-api start writes it"
+        )
+    if record.two_bank:
+        return Check(name, title, _PASS, "two banks (hal0:shared, hal0:private, or as configured)")
+    kind = "unified" if record.legacy_unified is not False else "split"
+    return Check(
+        name,
+        title,
+        _PASS,
+        f"old {kind} layout, platform bank {record.legacy_platform_bank}; "
+        "it stays until its memory is folded in",
+    )
+
+
+def check_memory_embedder(*, status: dict[str, Any] | None = None) -> Check:
+    """The configured embedder must be the one the memory store was built with (#3518).
+
+    hal0 records the embedder a store was built with
+    (:mod:`hal0.memory.embedder_record`) and renders the engine environment
+    from that record, so a ``[memory.models].embeddings_model`` that differs
+    changes nothing: the engine stays on the recorded model and this row says
+    so. The embedder is the pair of provider and model. Outcomes:
+
+    * ``pass`` when the two match and the store is not ``mixed``;
+    * ``pass`` with a note when they differ only because the config still has
+      its shipped default. That is every upgraded box (its store was built
+      with the engine default) and nothing the operator did; the note names
+      ``hal0 memory embedder switch``, the way to move the store when the
+      operator wants to;
+    * ``warn`` when the operator set a provider or model of their own that
+      differs from the record, since that setting is not doing what they
+      asked, and when the store is ``mixed``: it existed before the engine
+      was moved off its default embedder and may hold vectors from two;
+    * ``warn`` when the record and the engine disagree (``conflict``): the
+      running engine, or the unit files it would start from, name another
+      embedder. Both are named, neither is changed. It is the same evidence
+      the ``memory_engine_env`` row is judged on for these keys;
+    * ``warn`` when the record file cannot be read (it is left alone), or
+      the store's location is unavailable;
+    * ``warn`` when an embedder switch was interrupted
+      (:func:`hal0.memory.embedder_switch.interrupted_switch`), or the memory
+      write gate is set and no switch process holds the lock: every memory
+      write is refused until ``hal0 memory embedder switch --resume`` has
+      run. The gate outlives a killed run on purpose, so this row is where a
+      forgotten one shows up; it names the run, its archive directory and
+      the ``--status`` and ``--resume`` commands. While a switch is running
+      the row passes and says so.
+
+    Never ``fail``: recall keeps working, and nothing here is repaired by a
+    restart.
+
+    ``status`` is the injection point for tests; by default it is read from
+    this box's ``hal0.toml``, the record, the engine's environment and its
+    data directory.
+    """
+    from hal0.memory.embedder_record import (
+        SOURCE_CONFIGURED,
+        SOURCE_SWITCH,
+        configured_embedder,
+        describe_embedder,
+        embedder_notice,
+        embedder_status,
+        switch_command,
+    )
+    from hal0.memory.embedder_verdict import embedder_verdict
+
+    name, title = "memory_embedder", "Memory embedder"
+    if status is None:
+        from hal0.config.loader import load_hal0_config
+        from hal0.memory.embedder_switch import (
+            interrupted_switch,
+            isolated_port,
+            lock_held,
+        )
+        from hal0.memory.write_gate import read_gate
+
+        left, gate = interrupted_switch(), read_gate()
+        if lock_held():
+            return Check(
+                name,
+                title,
+                _PASS,
+                "an embedder switch is running; memory writes are paused until it finishes "
+                "(`hal0 memory embedder switch --status` shows where it stands)",
+            )
+        if left is not None or gate is not None:
+            run = (left or {}).get("run_id") or (gate or {}).get("run_id") or "unknown"
+            archives = (left or {}).get("archive_dir") or (gate or {}).get("archive_dir")
+            reason = f" ({left['error']})" if (left or {}).get("error") else ""
+            private = isolated_port()
+            paused = (
+                "memory writes are paused and no switch is running, so every memory write is "
+                "refused"
+                + (
+                    f", and the engine is isolated on a private port ({private}), so recall is "
+                    "unavailable too"
+                    if private is not None
+                    else ", while the engine is already back at its normal address (its "
+                    "isolation drop-in is gone; recall works and other clients reach it). "
+                    "`--resume` isolates it again before it finishes"
+                    if (left or {}).get("isolated")
+                    else " (recall still works)"
+                )
+                if gate is not None
+                else "its write pause is gone, so writes may be reaching banks it has not "
+                "finished replacing"
+            )
+            return Check(
+                name,
+                title,
+                _WARN,
+                f"an embedder switch did not finish{reason}: run {run}, archives in "
+                f"{archives or 'an unknown directory'}; {paused}. Run "
+                "`hal0 memory embedder switch --status` to see where it stands, then "
+                "`hal0 memory embedder switch --resume`",
+            )
+
+        try:
+            models = load_hal0_config().memory.models
+        except Exception as exc:
+            return Check(name, title, _WARN, f"hal0.toml unreadable — check skipped: {exc}")
+        status = embedder_status(configured_embedder(models))
+    recorded = (status.get("recorded_provider"), status.get("recorded"))
+    configured = (status.get("configured_provider"), status.get("configured"))
+    # The rule is shared with the Memory health path, so the two cannot disagree.
+    verdict = embedder_verdict(status)
+    if verdict.reasons:
+        return Check(name, title, _WARN, embedder_notice(status) or "")
+    built_with = describe_embedder(*recorded)
+    if verdict.informational and status.get("source") == SOURCE_SWITCH:
+        return Check(
+            name,
+            title,
+            _PASS,
+            f"the memory store was moved to {built_with} with `hal0 memory embedder switch` "
+            f"and stays on it; [memory.models] still names {describe_embedder(*configured)}, "
+            "which is fine and has no effect. To make the two agree, set embeddings_provider "
+            f"and embeddings_model under [memory.models] to {built_with}",
+        )
+    if verdict.informational:
+        return Check(
+            name,
+            title,
+            _PASS,
+            f"the memory store was built with {built_with} and stays on it; the configured "
+            f"model ({describe_embedder(*configured)}) takes effect only through "
+            f"`{switch_command(status)}` (a dry run; add --apply), which re-embeds the store",
+        )
+    if status.get("source") == SOURCE_CONFIGURED and not status.get("recorded_at"):
+        return Check(name, title, _PASS, "no memory store on this box — nothing recorded yet")
+    return Check(name, title, _PASS, f"the memory store was built with {built_with}, as configured")
 
 
 #: ``POST /api/memory/graph/throughput`` may run the 30 s probe (#2353).
@@ -3357,6 +3781,384 @@ def check_memory_retain_chunk(
         title,
         _PASS,
         f"extraction_max_tokens = {audit.get('max_tokens')} clears {audit.get('checked')} bank(s)",
+    )
+
+
+#: ``memory_projects`` warns past this many project slugs in use that the
+#: registry does not know. A handful is what a box looks like before its
+#: operator has confirmed anything; more means the registry is not being kept.
+PROJECTS_UNREGISTERED_WARN_ABOVE: int = 5
+
+#: How many unregistered slugs the row names.
+PROJECTS_UNREGISTERED_LISTED: int = 10
+
+#: Budget for each page of the tags listing, and the listing's page size and
+#: page cap (5,000 distinct ``project:`` tags is far past any real bank).
+PROJECT_TAGS_TIMEOUT_S: float = 10.0
+_PROJECT_TAGS_PAGE: int = 500
+_PROJECT_TAGS_MAX_PAGES: int = 10
+
+
+def _fetch_project_tags(base: str | None, bank: str) -> list[dict[str, Any]] | None:
+    """The bank's ``project:*`` tags with their fact counts, or ``None``.
+
+    One existing call, ``GET /api/memory/banks/{bank}/tags`` with the engine's
+    own wildcard filter, read page by page.
+    """
+    from hal0.cli._shared import CliApiError, api_get
+
+    items: list[dict[str, Any]] = []
+    for page in range(_PROJECT_TAGS_MAX_PAGES):
+        try:
+            payload = api_get(
+                f"/api/memory/banks/{bank}/tags",
+                base=base,
+                timeout=PROJECT_TAGS_TIMEOUT_S,
+                params={
+                    "q": "project:*",
+                    "limit": _PROJECT_TAGS_PAGE,
+                    "offset": page * _PROJECT_TAGS_PAGE,
+                },
+            )
+        except CliApiError:
+            return None
+        batch = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(batch, list):
+            return None
+        items.extend(row for row in batch if isinstance(row, dict))
+        total = payload.get("total")
+        if len(batch) < _PROJECT_TAGS_PAGE or (isinstance(total, int) and len(items) >= total):
+            break
+    return items
+
+
+def _projects_config() -> tuple[str, Any, bool]:
+    """``(the platform bank, the project registry, read_ok)`` from hal0.toml.
+
+    The platform bank is the one hal0-api reads: ``[memory] bank`` on a
+    two-bank store, the recorded bank on one still on its old layout
+    (:func:`hal0.memory.bank_layout.platform_bank`, which writes nothing).
+    hal0.toml is ``0600``, so for anyone but the service user and root the
+    read fails; the row then counts against the shipped defaults (the
+    layout record's bank, which any account can read, and an empty
+    registry) and says so.
+    """
+    from hal0.config.loader import ConfigError, load_hal0_config
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory.bank_layout import platform_bank
+    from hal0.memory.projects import ProjectRegistry, registry_from_config
+
+    # Raises LayoutUndecided when the layout cannot be told here (an
+    # unreadable record; no record and no api.env to read): the caller says so.
+    try:
+        memory = load_hal0_config().memory
+    except (ConfigError, OSError):
+        return platform_bank(MemoryConfig()), ProjectRegistry(), False
+    return platform_bank(memory), registry_from_config(memory.projects), True
+
+
+def check_memory_projects(
+    *,
+    memory: dict[str, Any] | None,
+    base: str | None = None,
+    fetch: Callable[[str | None, str], list[dict[str, Any]] | None] | None = None,
+    config: tuple[str, Any, bool] | None = None,
+) -> Check:
+    """How much project-tagged memory names a project the operator knows (ADR-0058 4a).
+
+    Read from the platform bank's tag counts: the facts carrying each
+    ``project:<slug>`` tag. Reports the share of those facts whose slug is in
+    ``[memory.projects]`` (``registered``, an alias, or the target of one),
+    the ``project:unresolved`` count, and up to
+    :data:`PROJECTS_UNREGISTERED_LISTED` slugs in use that the registry does
+    not know. A fact with two ``project:`` tags is counted once per tag.
+
+    ``warn`` in two cases only: ``project:unresolved`` is non-zero (a coding
+    client is writing without naming its project), or more than
+    :data:`PROJECTS_UNREGISTERED_WARN_ABOVE` unregistered slugs are in use.
+    Everything else passes with the figures. An engine that is off or
+    unreachable, and a listing that cannot be read (a fresh box has no
+    platform bank yet), pass with a note: this row measures, and has nothing
+    to measure.
+
+    ``fetch`` and ``config`` are the injection points for tests.
+    """
+    from hal0.memory.projects import PROJECT_TAG_PREFIX, UNRESOLVED_SLUG
+
+    name, title = "memory_projects", "Memory projects"
+    if memory is None:
+        return Check(name, title, _PASS, "memory engine status unreachable — nothing counted")
+    if memory.get("engine") in (None, "") or not memory.get("enabled", True):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    if not memory.get("reachable"):
+        return Check(name, title, _PASS, "engine unreachable — nothing counted; see the memory row")
+    from hal0.memory.bank_layout import LayoutUndecided
+
+    try:
+        bank, registry, read_ok = config if config is not None else _projects_config()
+    except LayoutUndecided as exc:
+        return Check(
+            name, title, _PASS, f"the memory bank layout is undecided ({exc}) — nothing counted"
+        )
+    rows = (fetch or _fetch_project_tags)(base, bank)
+    if rows is None:
+        return Check(
+            name, title, _PASS, f"could not list the tags of bank {bank} — nothing counted"
+        )
+
+    counts: dict[str, int] = {}
+    for row in rows:
+        tag, count = row.get("tag"), row.get("count")
+        if not isinstance(tag, str) or not tag.startswith(PROJECT_TAG_PREFIX):
+            continue
+        slug = tag[len(PROJECT_TAG_PREFIX) :]
+        if slug and isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            counts[slug] = counts.get(slug, 0) + count
+    total = sum(counts.values())
+    if total == 0:
+        return Check(name, title, _PASS, f"no project-tagged facts in bank {bank} yet")
+
+    unresolved = counts.pop(UNRESOLVED_SLUG, 0)
+    known = sum(count for slug, count in counts.items() if registry.is_known(slug))
+    unregistered = sorted(
+        (slug for slug in counts if not registry.is_known(slug)),
+        key=lambda slug: (-counts[slug], slug),
+    )
+    detail = (
+        f"{known} of {total} project-tagged facts ({known * 100 // total}%) name a "
+        f"registered or aliased project; project:unresolved: {unresolved}"
+    )
+    if unregistered:
+        listed = ", ".join(unregistered[:PROJECTS_UNREGISTERED_LISTED])
+        more = len(unregistered) - PROJECTS_UNREGISTERED_LISTED
+        detail += f"; not in the registry ({len(unregistered)}): {listed}"
+        if more > 0:
+            detail += f" and {more} more"
+    if not read_ok:
+        detail += "; hal0.toml unreadable, so counted against an empty registry and bank shared"
+    if unresolved or len(unregistered) > PROJECTS_UNREGISTERED_WARN_ABOVE:
+        remedies = []
+        if unresolved:
+            remedies.append(
+                "a coding client is writing without a project: it named none, or one "
+                "that [memory.projects].deny refuses"
+            )
+        if len(unregistered) > PROJECTS_UNREGISTERED_WARN_ABOVE:
+            remedies.append(
+                "list the real projects under [memory.projects].registered, map other "
+                "spellings under aliases, and put names that are not projects in deny"
+            )
+        return Check(name, title, _WARN, f"{detail}. {'; '.join(remedies)}")
+    return Check(name, title, _PASS, detail)
+
+
+def _decision_config() -> tuple[Any, bool]:
+    """``[memory.decision]`` from hal0.toml, else the shipped default.
+
+    Returns ``(config, read_ok)``. hal0.toml is ``0600``, so for anyone but the
+    service user and root the read fails; the row then judges the shipped
+    default (enabled, ``provider = "local"``) and says so.
+    """
+    from hal0.config.loader import ConfigError, load_hal0_config
+    from hal0.config.schema import MemoryDecisionConfig
+
+    try:
+        return load_hal0_config().memory.decision, True
+    except (ConfigError, OSError):
+        return MemoryDecisionConfig(), False
+
+
+def _decision_health_ok(url: str) -> bool:
+    """GET ``<url>/health`` on the decision server; True on a 2xx."""
+    import httpx
+
+    from hal0.service_identity import is_loopback_url
+
+    try:
+        resp = httpx.get(
+            f"{url}/health",
+            timeout=httpx.Timeout(5.0, connect=2.0),
+            trust_env=not is_loopback_url(url),
+        )
+    except httpx.HTTPError:
+        return False
+    return resp.is_success
+
+
+#: Total budget of the ``memory_model_owners`` survey, which runs on every
+#: ``doctor all``. Past it the row warns that the survey is incomplete.
+MODEL_OWNERS_BUDGET_S: float = 20.0
+
+
+def _survey_model_owners(base: str | None) -> Any:
+    """The banks' mental models that lack the owner flag, or ``None``.
+
+    Only banks holding private memory are listed (no model elsewhere can be
+    hidden), at the engine's metadata detail, within
+    :data:`MODEL_OWNERS_BUDGET_S`.
+    """
+    import time
+
+    from hal0.cli._shared import CliApiError, api_get
+    from hal0.memory import model_owner_repair
+
+    def request(method: str, path: str, *, params: Any = None, json: Any = None) -> Any:
+        if method != "GET":  # pragma: no cover - the survey only reads
+            raise ValueError("doctor reads only")
+        return api_get(path, base=base, timeout=PROJECT_TAGS_TIMEOUT_S, params=params)
+
+    try:
+        return model_owner_repair.survey(
+            request,
+            private_banks_only=True,
+            deadline=time.monotonic() + MODEL_OWNERS_BUDGET_S,
+        )
+    except CliApiError:
+        return None
+
+
+def check_memory_model_owners(
+    *,
+    memory: dict[str, Any] | None,
+    base: str | None = None,
+    fetch: Callable[[str | None], Any] | None = None,
+) -> Check:
+    """Mental models hidden from the agent that owns them (#3576).
+
+    Since #3575 an agent reads its own mental model (or knowledge page) while
+    the bank holds another agent's private memory only when the model's
+    trigger sets ``exclude_mental_models``. A model made before that, or
+    written straight to the engine, is 404 to its own agent on every route.
+    ``warn`` counts those and names ``hal0 memory mm repair``; models that
+    lack the flag but are readable for now (no other agent's private memory
+    in their bank) pass with a note. Models the repair skips, a survey cut
+    short by :data:`MODEL_OWNERS_BUDGET_S` and an unreadable bank warn. Reads
+    only, through hal0-api's admin memory routes
+    (:func:`hal0.memory.model_owner_repair.survey`), and only banks that hold
+    private memory.
+    """
+    from hal0.memory.model_owner_repair import REPAIR_COMMAND
+
+    name, title = "memory_model_owners", "Memory model owners"
+    if memory is None:
+        return Check(name, title, _WARN, "memory engine status unreachable")
+    if memory.get("engine") in (None, "") or not memory.get("enabled", True):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    if not memory.get("reachable"):
+        return Check(name, title, _PASS, "engine unreachable — see the memory row")
+    report = (fetch or _survey_model_owners)(base)
+    if report is None:
+        return Check(name, title, _WARN, "could not list the banks' mental models")
+    unread = ""
+    if report.errors:
+        unread = "; could not read bank(s) " + ", ".join(bank for bank, _ in report.errors)
+    if report.incomplete:
+        unread += f"; survey incomplete after {MODEL_OWNERS_BUDGET_S:g} s"
+    if report.skipped:
+        unread += (
+            f"; {len(report.skipped)} mental model(s) the repair cannot repair (another "
+            f"agent's private memory carries the owner's tag): `{REPAIR_COMMAND}` names them"
+        )
+    if report.hidden:
+        return Check(
+            name,
+            title,
+            _WARN,
+            f"{report.hidden} mental model(s) are hidden from the agent that owns them "
+            f"(no exclude_mental_models while the bank holds another agent's private "
+            f"memory); `{REPAIR_COMMAND}` lists them, `{REPAIR_COMMAND} --apply` "
+            f"repairs them{unread}",
+        )
+    if unread:
+        return Check(name, title, _WARN, unread.removeprefix("; "))
+    if report.findings:
+        return Check(
+            name,
+            title,
+            _PASS,
+            f"{len(report.findings)} agent-owned mental model(s) in banks holding private "
+            "memory lack exclude_mental_models and will be hidden from their owner once the "
+            f"bank holds another agent's private memory; `{REPAIR_COMMAND} --apply` sets it",
+        )
+    return Check(
+        name, title, _PASS, f"every agent's own mental models are readable ({report.banks} bank(s))"
+    )
+
+
+def check_memory_decision_lane(
+    *,
+    memory: dict[str, Any] | None,
+    decision: Any = None,
+    unit_installed: bool | None = None,
+    probe: Callable[[str], bool] | None = None,
+) -> Check:
+    """An enabled ``[memory.decision]`` lane must have a server that answers (#3519).
+
+    The showcase drop-in points hindsight-api at the decision server only
+    when one can answer (``extraction_env.decision_engine_base_url``); this
+    row says which way that went. ``provider = "local"`` needs the
+    ``hal0-hs-decide`` unit, which the installer does not lay down yet: an
+    enabled lane without it WARNs, because the engine then runs with no
+    decision model and every decision-gated call costs an LLM call. A
+    configured server that does not answer ``/health`` WARNs too. The hosted
+    API (``hindsight-cloud``) is not probed. Advisory only: the engine still
+    works, just more expensively.
+    """
+    from hal0.memory.extraction_env import (
+        HINDSIGHT_CLOUD_DECISION_URL,
+        decision_engine_base_url,
+        decision_unit_installed,
+    )
+
+    name, title = "memory_decision_lane", "Memory decision lane"
+    if memory is not None and (
+        memory.get("engine") in (None, "") or not memory.get("enabled", True)
+    ):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    read_ok = True
+    if decision is None:
+        decision, read_ok = _decision_config()
+    note = "" if read_ok else " (hal0.toml unreadable as this user; judged the shipped default)"
+    if not decision.enabled or decision.provider == "off":
+        return Check(name, title, _PASS, f"decision lane off — the engine uses its LLM lane{note}")
+    installed = decision_unit_installed() if unit_installed is None else unit_installed
+    url = decision_engine_base_url(decision, unit_installed=installed)
+    if url is None and decision.base_url:
+        return Check(
+            name,
+            title,
+            _WARN,
+            f"[memory.decision].base_url {decision.base_url} is not a loopback "
+            "http://127.0.0.1:<port> URL, which is all the engine drop-in accepts, so "
+            "hindsight-api runs without a decision model and decision-gated calls go to "
+            "the LLM lane — point base_url at a loopback port or unset it",
+        )
+    if url is None:
+        return Check(
+            name,
+            title,
+            _WARN,
+            "decision lane is enabled (provider local) but the hal0-hs-decide service is "
+            "not installed, so hindsight-api runs without a decision model and "
+            "decision-gated calls go to the LLM lane — install hal0-hs-decide "
+            "(packaging/hindsight-decision/README.md) and re-save the memory settings, or "
+            f'set [memory.decision].provider = "off"{note}',
+        )
+    if url == HINDSIGHT_CLOUD_DECISION_URL:
+        return Check(name, title, _PASS, f"hosted decision model at {url} (not probed){note}")
+    if (probe or _decision_health_ok)(url):
+        return Check(name, title, _PASS, f"decision server at {url} answers /health{note}")
+    hint = (
+        "check `systemctl status hal0-hs-decide` and its journal"
+        if not decision.base_url
+        else "check the server behind [memory.decision].base_url"
+    )
+    return Check(
+        name,
+        title,
+        _WARN,
+        f"decision server at {url} did not answer /health, so decision calls fail and "
+        f"fall back to the LLM lane — {hint}{note}",
     )
 
 
@@ -3586,6 +4388,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_secret_file_modes(),
         check_hardware_freshness(),
         check_gtt_leak(slots_payload),
+        check_fabric_clock(slots_payload),
         check_seed_context_envelope(),
         check_agent_uid_isolation(),
         check_api_journal_access(),
@@ -3605,6 +4408,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_bridge_store(api_running=payloads["health"] is not None),
         check_agent_bridge(base=base),
         check_openwebui_mcp(),
+        check_openwebui_task_model(slots_payload),
         check_hermes_generation_extras(),
         check_hermes_command_approvals(),
         check_hermes_delegation_slot(slots_payload),
@@ -3616,8 +4420,14 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hal0_linger(),
         check_hindsight_llm_auth(auth=auth_payload),
         check_memory_engine_version(memory=payloads["memory"]),
+        check_memory_engine_env(),
+        check_memory_layout(memory=payloads["memory"]),
+        check_memory_embedder(),
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
         check_memory_retain_chunk(memory=payloads["memory"], base=base),
+        check_memory_decision_lane(memory=payloads["memory"]),
+        check_memory_projects(memory=payloads["memory"], base=base),
+        check_memory_model_owners(memory=payloads["memory"], base=base),
     ]
     return verify_rows + extra_rows
 
@@ -3651,7 +4461,8 @@ def render_all(con: Console, checks: list[Check]) -> None:
     table.add_column("Detail")
     for c in checks:
         badge = _CRIT_BADGE if (c.status == _FAIL and c.critical) else _BADGE[c.status]
-        table.add_row(badge, c.label, c.detail)
+        # Plain text, not markup: keeps `[memory.models]`-style table names.
+        table.add_row(badge, Text(c.label), Text(c.detail))
     con.print(table)
 
 
@@ -3709,8 +4520,13 @@ __all__ = [
     "check_hermes_model_choice",
     "check_hindsight_llm_auth",
     "check_mcp_mounts",
+    "check_memory_decision_lane",
+    "check_memory_embedder",
+    "check_memory_engine_env",
     "check_memory_engine_version",
     "check_memory_extraction_throughput",
+    "check_memory_layout",
+    "check_memory_projects",
     "check_memory_retain_chunk",
     "check_model_store",
     "check_ports",

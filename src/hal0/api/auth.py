@@ -69,11 +69,15 @@ A bridge client (a coding agent on another machine) carries a key of its own,
 accepts it from ``Authorization: Bearer`` only, never from ``?api_key=``, and
 resolves it to the ``bridge`` tier carrying the client's name and scopes; a
 revoked, rotated-out or unknown key resolves to ``anon``. The tier opens the
-BRIDGE class (``/mcp/agents``, ``GET /api/bridge/me``) and the MCP mounts its
-scopes name (:data:`BRIDGE_SCOPE_PREFIXES`); every other route refuses it with
-403. Both checks run ahead of the dev-open bypass: a BRIDGE-class request is
-never waved through, and a bridge key is held to its scopes on a box with auth
-off as well. OPEN routes stay open to it, as to anyone.
+BRIDGE class (``/mcp/agents``, ``GET /api/bridge/me``, ``/api/memory/compat``)
+and the MCP mounts its scopes name (:data:`BRIDGE_SCOPE_PREFIXES`); every other
+route refuses it with 403. Both checks run ahead of the dev-open bypass: a
+BRIDGE-class request is never waved through, and a bridge key is held to its
+scopes on a box with auth off as well. OPEN routes stay open to it, as to
+anyone. On a BRIDGE-class path the middleware checks the tier only, not the
+key's scopes (:func:`_verdict`), so a BRIDGE surface that needs a scope checks
+it in its handlers, as ``/api/memory/compat`` does for ``memory``
+(:func:`hal0.api.routes.memory_compat.require_memory_bridge`).
 
 ``[bridge].enabled`` is recorded here when hal0-api boots
 (:func:`set_bridge_enabled`). While it is off no bridge key verifies, and the
@@ -126,7 +130,7 @@ import structlog
 
 from hal0.api import live_sockets
 from hal0.api.agents._auth import SESSION_COOKIE_NAME, verify_session_cookie
-from hal0.bridge.keys import KEY_PREFIX, SCOPE_SERVERS
+from hal0.bridge.keys import KEY_PREFIX, SCOPE_SERVERS, is_reserved_name
 from hal0.comfyui.gate_version import GATE_USER_AGENT_PREFIX, GATE_VERSION_HEADER
 from hal0.config.network import bind_host, is_loopback_bind
 from hal0.security.exposure import AuthClass, classify
@@ -845,13 +849,38 @@ def _decide(auth_class: AuthClass, principal: AuthPrincipal) -> tuple[bool, int,
     return False, status, code
 
 
+#: The code a bridge key under a reserved client name is refused with (#3560).
+BRIDGE_NAME_RESERVED_CODE = "bridge.client_name_reserved"
+_BRIDGE_NAME_RESERVED_MSG = (
+    "this bridge client's name is reserved; revoke it with `hal0 bridge revoke <name>` "
+    "and mint a key under another name with `hal0 bridge add <new-name>`"
+)
+
+
+def reserved_bridge_principal(principal: AuthPrincipal) -> bool:
+    """True iff ``principal`` is a bridge client whose name hal0 reserves (#3560).
+
+    No key can be minted under a reserved name (:func:`hal0.bridge.keys.is_reserved_name`,
+    the one list), but a key minted before a name joined the list still
+    verifies. Its name would be its memory identity, and a reserved name is
+    one hal0 uses itself (``unknown`` is stamped on every write whose caller
+    had none), so such a principal is refused on every non-OPEN path.
+    """
+    return principal.tier == "bridge" and bool(principal.name) and is_reserved_name(principal.name)
+
+
 def _verdict(auth_class: AuthClass, principal: AuthPrincipal, path: str) -> tuple[bool, int, str]:
     """:func:`_decide`, with a bridge principal held to its scopes (ADR-0043).
 
     Outside OPEN and BRIDGE, a bridge principal is admitted only on the MCP
     mount of a scope it holds (:func:`bridge_scope_admits`) and refused with
-    403 everywhere else, whatever class the path has.
+    403 everywhere else, whatever class the path has. A bridge principal
+    under a reserved client name (:func:`reserved_bridge_principal`) is
+    refused with 403 :data:`BRIDGE_NAME_RESERVED_CODE` on every path but an
+    OPEN one, which anyone may call without a key.
     """
+    if auth_class is not AuthClass.OPEN and reserved_bridge_principal(principal):
+        return False, 403, BRIDGE_NAME_RESERVED_CODE
     if principal.tier == "bridge" and auth_class not in (AuthClass.OPEN, AuthClass.BRIDGE):
         if bridge_scope_admits(path, principal):
             return True, 200, ""
@@ -1074,7 +1103,7 @@ class AuthEnforcementMiddleware:
         allowed, status, code = _verdict(auth_class, principal, path)
 
         if allowed:
-            if principal.tier == "bridge":
+            if principal.tier == "bridge" and not reserved_bridge_principal(principal):
                 # What the handlers behind this request act as (ADR-0043); they
                 # read it through judged_principal() and never verify again.
                 scope[BRIDGE_PRINCIPAL_SCOPE_KEY] = principal
@@ -1110,6 +1139,15 @@ class AuthEnforcementMiddleware:
 
         _note_unversioned_gate_refusal(scope, method, path)
 
+        if code == BRIDGE_NAME_RESERVED_CODE:
+            # Names the client, never the key: the operator revokes it by name.
+            log.warning(
+                "hal0.auth.bridge_client_name_reserved",
+                path=path,
+                method=method,
+                bridge_client=principal.name,
+            )
+
         log.info(
             "hal0.auth.denied",
             path=path,
@@ -1126,7 +1164,10 @@ class AuthEnforcementMiddleware:
             await send({"type": "websocket.close", "code": 4403})
             return
 
-        message = "authentication required" if status == 401 else "insufficient scope"
+        if code == BRIDGE_NAME_RESERVED_CODE:
+            message = _BRIDGE_NAME_RESERVED_MSG
+        else:
+            message = "authentication required" if status == 401 else "insufficient scope"
         payload = json.dumps(_envelope(code, message)).encode("utf-8")
         # Build the JSON body ourselves via two raw ASGI send() events
         # (what Starlette's JSONResponse.__call__ does under the hood) --
@@ -1144,6 +1185,7 @@ class AuthEnforcementMiddleware:
 
 __all__ = [
     "ANON",
+    "BRIDGE_NAME_RESERVED_CODE",
     "BRIDGE_PRINCIPAL_SCOPE_KEY",
     "BRIDGE_SCOPE_PREFIXES",
     "GATE_SCOPE_KEY",
@@ -1162,6 +1204,7 @@ __all__ = [
     "has_admin_key",
     "judged_principal",
     "require_auth_enabled",
+    "reserved_bridge_principal",
     "resolve_principal",
     "resolve_principal_from_scope",
     "set_bridge_enabled",

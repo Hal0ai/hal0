@@ -285,6 +285,8 @@ def test_systemctl_foreign_unit_passes_through_even_as_hal0_user() -> None:
         ("hindsight-api.service", "stop", ["svc-stop", "hindsight"]),
         ("hindsight-api.service", "enable", ["svc-enable", "hindsight"]),
         ("hermes-gateway.service", "restart", ["svc-restart", "hermes-gateway"]),
+        # #3533: a no-op on a stopped engine, so a bench window survives an update.
+        ("hindsight-api.service", "try-restart", ["svc-try-restart", "hindsight"]),
     ],
 )
 def test_systemctl_routes_agent_and_companion_units_through_seam(

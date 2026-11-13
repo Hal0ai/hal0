@@ -145,6 +145,8 @@ class MemoryProvider(ABC):
         strategy: str | None = None,
         update_mode: str | None = None,
         sync: bool = False,
+        project: str | None = None,
+        coding: bool = False,
     ) -> dict[str, Any]:
         """Add a memory item. Returns ``{id, timestamp}`` plus
         ``operation_id``/``operation_ids``/``items_count`` when the engine
@@ -165,7 +167,11 @@ class MemoryProvider(ABC):
         ``observation_scopes``
             How to scope observations during consolidation
             (``"per_tag"|"combined"|"all_combinations"|"shared"`` or a list
-            of tag-lists).
+            of tag-lists). ``None`` lets the engine provider choose: the
+            Hindsight provider sends one scope per ``project:`` tag, or
+            ``"shared"`` when the write carries none (ADR-0058); a private
+            write gets its writer's own scope in the two-bank layout and the
+            engine default in the old unified bank.
         ``strategy``
             Named retain strategy overriding the bank default for this item.
         ``update_mode``
@@ -174,7 +180,18 @@ class MemoryProvider(ABC):
         ``sync``
             ``True`` waits for extraction to complete before returning
             (no ``operation_id``); ``False`` (default) ingests in the
-            background."""
+            background.
+        ``project``
+            The project the caller is working in, as the caller named it
+            (ADR-0058 decision 4a). The Hindsight provider resolves it
+            against the ``[memory.projects]`` registry and stamps one
+            ``project:<slug>`` tag; an engine without the write envelope
+            ignores it. ``POST /api/memory/add`` and the MCP ``memory_add``
+            tool pass it.
+        ``coding``
+            ``True`` when the caller is a coding client, which is expected
+            to work inside a project: a write of its with no project is
+            tagged ``project:unresolved``."""
 
     @abstractmethod
     async def search(
@@ -189,12 +206,15 @@ class MemoryProvider(ABC):
         client_id: str | None = None,
         tag_groups: list[dict[str, Any]] | None = None,
         min_scores: dict[str, float] | None = None,
+        project: str | None = None,
     ) -> list[dict[str, Any]]:
         """Vector + filter search. Returns a list of MemoryItem dicts.
 
         ``tag_groups``/``min_scores`` are optional engine-native recall
         filters (boolean tag expressions / per-stage score floors); an
-        engine without them ignores both."""
+        engine without them ignores both. ``project`` narrows the read to
+        one project plus global memory (``"*"`` or ``None``: every project,
+        ADR-0058 decision 7b); an engine without projects ignores it."""
 
     @abstractmethod
     async def list_items(
@@ -203,8 +223,10 @@ class MemoryProvider(ABC):
         cursor: str | None = None,
         limit: int = 50,
         client_id: str | None = None,
+        project: str | None = None,
     ) -> dict[str, Any]:
-        """Paginated list. Returns ``{items, next_cursor}``."""
+        """Paginated list. Returns ``{items, next_cursor}``. ``project`` as
+        for :meth:`search`."""
 
     @abstractmethod
     async def delete(
@@ -253,6 +275,7 @@ class MemoryProvider(ABC):
         query_timestamp: str | None = None,
         min_scores: dict[str, float] | None = None,
         client_id: str | None = None,
+        project: str | None = None,
     ) -> list[dict[str, Any]]:
         """Token-budgeted recall. Default delegates to ``search`` so an
         engine without a richer recall surface still answers the route.
@@ -267,6 +290,7 @@ class MemoryProvider(ABC):
             dataset=dataset,
             tags=tags,
             client_id=client_id,
+            project=project,
         )
 
     async def reflect(
@@ -285,9 +309,14 @@ class MemoryProvider(ABC):
         exclude_mental_model_ids: list[str] | None = None,
         include: dict[str, Any] | None = None,
         response_schema: dict[str, Any] | None = None,
+        enforce_visibility: bool = True,
+        project: str | None = None,
     ) -> dict[str, Any]:
         """Trigger LLM-backed reflection/synthesis over memory. No-op default
-        (``{"status": "unsupported"}``) for engines without the capability."""
+        (``{"status": "unsupported"}``) for engines without the capability.
+
+        ``enforce_visibility`` (default on) holds the reflect to what
+        ``client_id`` may read; see ``HindsightProvider.reflect``."""
         return {"status": "unsupported"}
 
     async def consolidate(

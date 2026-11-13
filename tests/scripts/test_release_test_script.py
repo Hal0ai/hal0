@@ -32,6 +32,7 @@ import os
 import shutil
 import stat
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -78,13 +79,20 @@ try:
 except FileNotFoundError:
     slots = {}
 if "slot list --json" in cmd:
-    print(json.dumps([{"name": n, "status": st} for n, st in slots.items()]))
+    rows = [{"name": n, "status": st} for n, st in slots.items()]
+    if os.environ.get("STUB_FLM_SLOT_JSON"):
+        flm = json.loads(os.environ["STUB_FLM_SLOT_JSON"])
+        rows = [r for r in rows if r["name"] != "flm"] + [flm]
+    print(json.dumps(rows))
     sys.exit(0)
 if cmd.startswith("echo "):
     print("http://127.0.0.1:1")
     sys.exit(0)
 if "/dev/accel/accel0" in cmd:
-    sys.exit(1)
+    sys.exit(0 if os.environ.get("STUB_NPU_PRESENT") else 1)
+if "/api/slots/flm/models" in cmd:
+    print(os.environ.get("STUB_FLM_MODELS_JSON", '{"models": [], "probe_ok": true}'))
+    sys.exit(0)
 if "/v1/models" in cmd:
     print("1")
     sys.exit(0)
@@ -202,6 +210,88 @@ def _run(
 def _manifest_has(name: str) -> bool:
     """Does the fixture manifest pin the runner behind row ``name``?"""
     return _ROW_RUNNER.get(name, name) in _DEFAULT_PINNED
+
+
+def test_seeded_flm_slot_uses_installed_catalog_model(tmp_path: Path) -> None:
+    seed = tomllib.loads((_REPO_ROOT / "installer" / "etc-hal0" / "slots" / "flm.toml").read_text())
+    assert seed["name"] == "flm" and seed["device"] == "npu"
+    assert "model" not in seed
+    proc, cmds = _run(
+        tmp_path,
+        HAL0_TEST_BIN="/opt/test/hal0",
+        STUB_NPU_PRESENT="1",
+        STUB_FLM_SLOT_JSON=json.dumps({"name": "flm", "status": "offline", "model_id": None}),
+        STUB_FLM_MODELS_JSON=json.dumps(
+            {
+                "probe_ok": True,
+                "models": [
+                    {"model": "not-installed:1b", "installed": False, "capabilities": ["chat"]},
+                    {"model": "embed:1b", "installed": True, "capabilities": ["embed"]},
+                    {"model": "installed:1b", "installed": True, "capabilities": ["chat"]},
+                ],
+            }
+        ),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _rows_by_name(tmp_path)["flm"]["status"] == "pass"
+    assert "/opt/test/hal0 slot load flm -m installed:1b" in cmds
+    catalog_call = next(c for c in cmds if "/api/slots/flm/models" in c)
+    assert "/etc/hal0/api.env" in catalog_call
+    assert "Authorization: Bearer $HAL0_ADMIN_KEY" in catalog_call
+
+
+def test_flm_without_installed_model_warns_that_npu_was_not_tested(tmp_path: Path) -> None:
+    proc, cmds = _run(
+        tmp_path,
+        HAL0_TEST_BIN="/opt/test/hal0",
+        STUB_NPU_PRESENT="1",
+        STUB_FLM_SLOT_JSON=json.dumps({"name": "flm", "status": "offline", "model_id": None}),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    row = _rows_by_name(tmp_path)["flm"]
+    assert row["status"] == "skip"
+    assert "NPU lane NOT TESTED" in proc.stderr
+    assert not [c for c in cmds if "slot load flm" in c]
+
+
+def test_flm_failed_catalog_probe_fails_instead_of_skipping(tmp_path: Path) -> None:
+    proc, cmds = _run(
+        tmp_path,
+        HAL0_TEST_BIN="/opt/test/hal0",
+        STUB_NPU_PRESENT="1",
+        STUB_FLM_SLOT_JSON=json.dumps({"name": "flm", "status": "offline", "model_id": None}),
+        STUB_FLM_MODELS_JSON=json.dumps({"models": [], "probe_ok": False}),
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    row = _rows_by_name(tmp_path)["flm"]
+    assert row["status"] == "fail"
+    assert "catalog" in row["detail"]
+    assert "NPU lane was not tested" in row["detail"]
+    assert not [c for c in cmds if "slot load flm" in c]
+
+
+def test_flm_prefers_slot_model_default_over_catalog(tmp_path: Path) -> None:
+    proc, cmds = _run(
+        tmp_path,
+        HAL0_TEST_BIN="/opt/test/hal0",
+        STUB_NPU_PRESENT="1",
+        STUB_FLM_SLOT_JSON=json.dumps(
+            {"name": "flm", "status": "offline", "model_id": None, "model_default": "bound:1b"}
+        ),
+        STUB_FLM_MODELS_JSON=json.dumps({"models": [{"model": "other:1b", "installed": True}]}),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _rows_by_name(tmp_path)["flm"]["status"] == "pass"
+    assert "/opt/test/hal0 slot load flm -m bound:1b" in cmds
+    assert not [c for c in cmds if "/api/slots/flm/models" in c]
+
+
+def test_flm_missing_seed_fails_when_npu_lane_is_available(tmp_path: Path) -> None:
+    proc, cmds = _run(tmp_path, HAL0_TEST_BIN="/opt/test/hal0", STUB_NPU_PRESENT="1")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert _rows_by_name(tmp_path)["flm"]["status"] == "fail"
+    assert "NPU lane was not tested" in proc.stderr
+    assert not [c for c in cmds if "slot load flm" in c]
 
 
 # ── manifest_digest reads runners.<key>.digest ──────────────────────────────

@@ -35,7 +35,8 @@ below) — see [Environment variables](/docs/reference/env-vars/) for the full l
 | `/etc/hal0/manifest.json` | JSON | Release manifest — the `runners` table of runner-image pins. |
 | `/etc/hal0/api.env`, `/etc/hal0/openwebui.env` | env-file (`KEY=value`) | systemd `EnvironmentFile=` — secrets/keys, not part of the Pydantic schema. |
 
-`hal0.toml` and `slots/<name>.toml` are documented on this page. `providers.toml`,
+`hal0.toml` is documented on this page; `slots/<name>.toml` is documented in
+[Config schema: slot files](/docs/reference/config-schema-slots/). `providers.toml`,
 `upstreams.toml`, `profiles.toml`, `stacks.toml`, `agents/<name>.toml`, `hardware.json`
 and `manifest.json` are documented in
 [Config schema: providers, profiles, stacks & agents](/docs/reference/config-schema-profiles/).
@@ -128,11 +129,13 @@ override: `HAL0_FLM_MODELS_DIR`.
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `enabled` | bool | `true` | — |
-| `unified_bank` | bool | `true` | — |
+| `bank` | str | `"hal0:shared"` | Hindsight bank behind the `shared` namespace (ADR-0052, ADR-0058 decision 7); letters, digits, `.`, `_`, `:`, `-`, max 128, must start alphanumeric; not `agents` or `private__*`. A store from before the two-bank layout keeps its recorded bank, and there the key names a bank only when set to something other than `hal0:shared` ([Memory banks](/docs/concepts/memory-banks)). Run `hal0 memory migrate platform` before changing it; restart hal0-api |
+| `private_bank` | str | `"hal0:private"` | Hindsight bank behind every `private:<agent>` namespace in the two-bank layout; same rules as `bank`, and must differ from it. Not used by a store still on its old layout. Restart hal0-api |
 | `engine` | str | `"hindsight"` | one of `hindsight`, `mem0`, `pgvector` — `"cognee"` is explicitly rejected (retired) |
 | `graph` | table | — | see below |
 | `priority` | table | — | see below |
 | `embedding` | table | — | see below |
+| `projects` | table | — | see below |
 
 #### `[memory.graph]`
 
@@ -149,8 +152,9 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `extraction_llm_retries` | int | `1` | `0-5` |
 | `extraction_task_retries` | int | `2` | `0-10` |
 | `extraction_retry_backoff_s` | int | `120` | `10-3600` |
+| `extraction_worker_slots` | int | `4` | `3-32` |
 
-`hindsight-api` always calls one virtual model id, `hal0/memory`, which the `extraction-model.conf` systemd drop-in sets. hal0's `/v1` resolves it on every call to `hal0/<extraction_slot>`, or to `extraction_model` when that is set. Changing `extraction_slot` or `extraction_model` therefore applies at once and does not restart the engine. Changing `llm_timeout_s` or one of the `extraction_*` limits rewrites the drop-in and restarts hindsight-api, as does the first save after an upgrade when the drop-in is missing or stale. An `extraction_model` that no configured upstream advertises is rejected (422 `config.memory_graph_model_invalid`, listing the pickable ids) and the config is left as it was. A `HINDSIGHT_API_LLM_PROVIDER`, `HINDSIGHT_API_LLM_BASE_URL` or `HINDSIGHT_API_LLM_MODEL` line in `/etc/hal0/hindsight-llm.env` overrides both settings; see [Services](/docs/operate/services/#hindsight-apiservice).
+`hindsight-api` always calls one virtual model id, `hal0/memory`, which the `extraction-model.conf` systemd drop-in sets. hal0's `/v1` resolves it on every call to `hal0/<extraction_slot>`, or to `extraction_model` when that is set. Changing `extraction_slot` or `extraction_model` therefore applies at once and does not restart the engine. hal0 clamps `extraction_max_concurrent` to the extraction slot's `--parallel`. `hal0/memory` reads use `llm_timeout_s` when it exceeds `[dispatcher].direct_read_timeout_s`. Changing `llm_timeout_s` or one of the `extraction_*` limits rewrites the drop-in and restarts hindsight-api, as does the first save after an upgrade when the drop-in is missing or stale. An `extraction_model` that no configured upstream advertises is rejected (422 `config.memory_graph_model_invalid`, listing the pickable ids) and the config is left as it was. A `HINDSIGHT_API_LLM_PROVIDER`, `HINDSIGHT_API_LLM_BASE_URL` or `HINDSIGHT_API_LLM_MODEL` line in `/etc/hal0/hindsight-llm.env` overrides both settings; see [Services](/docs/operate/services/#hindsight-apiservice).
 
 `hal0/memory` has the canonical chain `(memory, agent)`: an absent or model-less
 memory slot falls back to agent. A model-bound memory slot wins even while cold.
@@ -163,6 +167,16 @@ limit covers consolidation, reflect and mental-model refresh as well as retain;
 these operations share the LLM concurrency budget. A long reflect or
 consolidation can hold the default single permit and delay queued retains until
 the call finishes or reaches `llm_timeout_s`.
+
+`extraction_worker_slots` sets `HINDSIGHT_API_WORKER_MAX_SLOTS`, how many queued
+memory tasks (retain, consolidation, mental-model refresh) the engine runs at
+once. It is separate from `extraction_max_concurrent`: that caps LLM calls,
+while each running task also holds its chunks, embeddings and graph writes in
+memory. Hindsight 1.2 defaults to 10 slots, which took the engine past the
+memory limit on an 11 GiB box and got it OOM-killed repeatedly, so hal0 renders
+4. The minimum is 3 because Hindsight reserves 2 slots for consolidation; a
+lower bound would leave retain none. `hal0 doctor` (row `memory_engine_env`)
+shows the value in force and warns if the running engine differs from it.
 
 #### `[memory.priority]`
 
@@ -189,6 +203,50 @@ hold-budget setting: the later gate derives it from half the memory engine's
 | `rerank_model` | str | `"builtin.jina-reranker-v1-tiny-en-q8"` | non-empty |
 | `rerank_connect_timeout_s` | float | `1.0` | `0.05-10.0` |
 | `rerank_read_timeout_s` | float | `8.0` | `0.05-60.0` |
+
+#### `[memory.projects]`
+
+`extra="forbid"`. The project registry that memory writes are resolved
+against; see [Memory projects](/docs/concepts/memory-projects).
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `aliases` | table of str → str | `{}` | other spellings of a project: a write naming the left side is tagged as the right side. Applied before `deny`. An alias may not point at a denied name (or the reserved `unresolved`) or back at a name that leads to it. An entry whose two sides are the same name once normalised (`"Widgets" = "widgets"`) does nothing and is ignored |
+| `deny` | list[str] | `["tmp", "temp", "root", "home", "workdir", "scratch", "scratchpad", "unknown", "default"]` | names that are never projects; a write naming one is stored with no project. Setting the key replaces the default list |
+| `registered` | list[str] | `[]` | projects you have confirmed. Not required to write; the `memory_projects` doctor row reports names in use that are neither listed here nor aliased |
+
+Every entry is normalised at load: lower case, `a-z`, `0-9`, `.`, `_` and `-`
+kept, any other run turned into one `-`, at most 100 characters. An entry
+with nothing left after that is refused. hal0-api reads the table at start,
+so a change needs a restart; `hal0 doctor` reads the file each run.
+
+#### `[memory.compat]`
+
+`extra="forbid"`. The engine-compatible memory endpoint for coding agents,
+`/api/memory/compat`; see its [API reference](/docs/reference/api/memory-compat/).
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `shared_document_prefixes` | list[str] | `["git:", "gitlog:", "survey-baseline:"]` | at most 32 entries, each 3 to 64 characters of `a-z A-Z 0-9 . _ : -`, ending with `:` and with no `::`. A client's documents are stored in a namespace of its own; a document id that starts with one of these is stored in its project's shared namespace, which any client of that project may write. Setting the key replaces the default list; `[]` shares nothing |
+| `max_concurrent_reflects` | int | `2` | `1-64`. Reflects through the endpoint running at once, across all clients; one client always runs one at a time. Never more than one fewer than `[memory.lanes]` lets the engine run, so with the shipped lanes the effective value is `1`. Beyond the limit a request is `429` with `Retry-After` |
+| `max_concurrent_recalls` | int | `4` | `1-64`. Recalls through the endpoint running at once, across all clients; one client runs at most two. Beyond the limit a request is `429` with `Retry-After` |
+| `max_outstanding_operations` | int | `64` | `1-10000`. Asynchronous retains one client may have unfinished in the engine. Beyond it an asynchronous retain is `429` with `Retry-After` until earlier ones finish. Counted in the hal0-api process; operations from before a restart are not counted |
+| `max_outstanding_bytes` | int | `268435456` | `1048576-17179869184`. Total request-body size of one client's unfinished asynchronous retains. A single retain is accepted whatever its size while the client has none outstanding |
+| `max_item_bytes` | int | `16777216` | `1024-33554432`. The largest `content` of one retained item, in UTF-8 bytes. The request body is capped at 48 MiB whatever this is |
+
+The default prefixes are the document ids the Hindsight coding-agents plugin
+derives from the repository itself: one commit, the commit log and a
+codebase-survey marker. The endpoint reads the table from hal0-api's loaded
+configuration on each request: a change saved through the Settings API
+applies at once, and a hand edit of `hal0.toml` at the next restart.
+
+#### `[memory.lanes.<op>]` output caps
+
+`<op>` is one of `retain`, `consolidation`, `reflect`, `mental_model_refresh`.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `max_completion_tokens` | int | unset; `consolidation` and `reflect` then render `8192` | `0-131072`; `0` leaves the engine uncapped. Rendered as `HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS` or `HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS`. Mental-model refresh runs through reflect, so the reflect cap bounds it; a mental model whose `max_tokens` is near the cap leaves no headroom, because the engine fails the call on `finish_reason=length` instead of truncating, and on a thinking model reasoning tokens count inside the cap. Setting it on `retain` (use `[memory.graph].extraction_max_tokens`) or on `mental_model_refresh` is refused |
 
 ### `[updates]`
 
@@ -261,8 +319,8 @@ disable rerouting, say so out loud: `off`, `none` or `disabled`.
 `HAL0_ALLOWED_ORIGINS` for the REST and WebSocket origin checks, read live on
 the next request, plus where ComfyUI's web UI answers. The bind host, port and
 hostname stay in `api.env`. See
-[Allow the public URL](/docs/operate/auth#allow-the-public-url) and
-[Reaching the editor](/docs/guides/generate-images#reaching-the-editor).
+[Allow the public URL](/docs/operate/tls-and-listeners/#allow-the-public-url) and
+[Reaching the editor](/docs/guides/image-workflows-troubleshooting#reaching-the-editor).
 
 
 | Key | Type | Default | Constraints |
@@ -349,136 +407,8 @@ Each key also has a `HAL0_METRICS_*` environment variable that overrides it
 (precedence: env var > `[metrics]` TOML table > default) — see
 [Environment variables](/docs/reference/env-vars/) for that list.
 
-## Slot `[tune]` table
+## Slot files
 
-An LLM slot outside the NPU lane may contain:
-
-```toml
-[tune]
-ctx_size = 8192
-enable_thinking = false
-reasoning_effort = "low"
-reasoning_budget = 512
-vision = "off"
-speculation = "ngram"
-```
-
-All keys are optional and inherit the profile when absent. Context accepts
-128–16777216. Effort accepts `default|minimal|low|medium|high|xhigh|max`;
-`default` emits no effort flag. Budget is -1 through 16777216 (-1 emits no
-budget flag; 0 ends reasoning immediately). Vision accepts `auto|off` and
-speculation accepts `auto|off|ngram`, except on a halogen slot, where `ngram` is
-refused because the engine has no n-gram drafter.
-
-Unsupported slot types/devices fail with `slot.tune_not_supported`; a thinking
-override pinned by profile flags fails with `slot.tune_pinned_by_flags`; a value
-the slot's engine cannot run (speculation `ngram` on a halogen slot, or a halogen
-context past the engine's native 262144 positions with no `HALOGEN_ROPE_YARN` in
-the profile's flags) fails with `slot.tune_unsupported_value` (400).
-Legacy root-level tuning keys remain refused with `slot.tuning_key_denied`.
-Effort flags require a resolved runner build of at least 11840.
-
-## `slots/<name>.toml`
-
-Root model `SlotConfig`, `extra="forbid"`: every key a slot file may carry is a field
-below, and a key that is not fails the load, naming the key and the file
-(`failed to validate slot config 'x' at /etc/hal0/slots/x.toml: unknown key 'lru' ...`).
-Both a nested `[slot]` table and flat top-level scalars are accepted on load and normalized
-(`[slot]` wins over a root scalar of the same name, as it does on the launch path). The same
-vocabulary gates every write: `POST /api/slots`, `PUT /api/slots/{name}/config` and the
-in-process writers (`SlotManager.create` / `update_config`, stacks apply) refuse an unknown key
-with a 400 `validation.unknown_keys`, and a key hal0 removed (`enabled`, `backend`, `lru`) with
-a 400 `slot.removed_key_denied` that names its replacement.
-
-| Key | Type | Default | Req | Constraints |
-|---|---|---|---|---|
-| `id` | int \| null | `null` | — | `>= 1` |
-| `name` | str | — | **required** | regex `^[a-z0-9][a-z0-9_-]{0,31}$` |
-| `type` | str \| null | `null` | — | slot kind (`llm`, `embedding`, `reranking`, `tts`, `transcription`, `image`, …); a type-less llm-shaped file is healed to `llm` on load |
-| `default` | bool \| null | `null` | — | the slot is its type's default; the first slot of a type becomes it at create, and at most one slot per type may be |
-| `served_by` | str \| null | `null` | — | FLM trio shadows only: the NPU anchor slot whose process serves this one |
-| `port` | int | — | **required** | `8081-8200` |
-| `device` | str | `"gpu-rocm"` | — | one of `gpu-rocm, gpu-vulkan, gpu-cuda, cpu, npu` |
-| `gpu_index` | int \| null | `null` | — | `>= 0` |
-| `n_gpu_layers` | int | `-1` | — | `-1` = all, `0` = CPU-only |
-| `threads` | int | `0` | — | `>= 0`; `0` = unset |
-| `metrics` | bool | `true` | — | emits `--metrics`, enabling llama-server's loopback-only `/metrics` endpoint; without it `/metrics` 501s and hal0's tok/s and request-count collection can never populate (#1810) |
-| `binary` | str | `""` | — | key into `RUNNER_IMAGES` |
-| `image_pin` | str \| null | `null` | — | debug-only escape-hatch image ref override (ADR-0006) — not the intended path to a shipped runtime; use `profile.runner` or the slot drawer's Runtime selector instead |
-| `provider` | str | `"llama-server"` | — | one of `llama-server, flm, moonshine, kokoro, qwen3tts, comfyui`; **deprecated**, legacy label only — all slots run as podman containers now |
-| `runtime` | `"container"` | `"container"` | — | only value; deprecated field |
-| `profile` | str \| null | `null` | — | a seed name or a `profiles.toml` entry; the profile is the slot's whole tune (ADR-0029). `null` = the slot type's seed (`embedding`, `reranking`), else `chat`; a profileless `tts`, `transcription` or `image` slot uses its engine's default instead (`kokoro`, or `qwen3-tts` on the Qwen3-TTS engine; `moonshine`; ComfyUI's built-in flag bundle). A name the catalog does not have fails the launch with `slot.profile_missing` |
-| `output_sanity` | bool \| null | `null` | — | `false` exempts this one slot from the output-sanity gate; `null` = the gate runs. See [Slot lifecycle](/docs/reference/slot-lifecycle/) |
-| `system_prompt` | str \| null | `null` | — | persona text for `hal0/<slot>` delegation; absent = no system message |
-| `default_voice` | str \| null | `null` | — | TTS slots |
-| `default_speed` | float \| null | `null` | — | `0.25-4.0` |
-| `default_response_format` | str \| null | `null` | — | one of `mp3, wav, opus, flac, pcm` |
-| `idle_timeout_s` | int | `300` | — | `>= 0`; `0` disables IDLE-TTL eviction for this slot only — pressure and pre-load eviction are separate paths, exempted by `pinned`. `idle_timeout_s` does not apply to the ComfyUI `img` slot, which idle, pressure and pre-load eviction never unload. Read via the raw-dict sweep path (not the typed loader), an out-of-range value there is clamped/floored at read time, not errored — the typed `POST`/`PUT` API path still hard-rejects via pydantic's `ge` |
-| `pinned` | bool | `false` | — | exempts the slot from auto-eviction; blocks manual unload without `force` |
-| `autoload` | bool \| null | `null` | — | `true` → the Quadlet unit gets `[Install] WantedBy=hal0.target` and the slot starts at boot; `false` → unit exists, nothing starts it. `null` (key absent) is the migration shim: derived from a non-empty `model.default`. `POST /api/slots` persists an explicit value (`false`) |
-| `priority` | int | `50` | — | `0-100`; eviction order, lowest evicted first, `last_used` breaks ties. `100` is *not* a pin — use `pinned`. Read via the raw-dict sweep path, an out-of-range TOML value is clamped to `0-100` at read time, not errored — the typed `POST`/`PUT` API path still hard-rejects via pydantic's `ge`/`le` |
-| `model` | table | — | — | `[model]`, see below |
-| `server` | table | — | — | `[server]`, see below |
-| `npu` | table \| null | `null` | — | `[npu]`, see below |
-| `image` (alias `image_gen`) | table | — | — | `[image]`, see below |
-
-There is **no catch-all**: a table or key the schema does not declare is an error, not a place
-to park a hand edit. There is **no `enabled` field** — a non-empty `model.default` is the
-activation signal. Boot start is separate and explicit (`autoload`). `enabled`, `backend` (now
-`device`), `lru` (now `priority` / `pinned`) and a bare `image = "<ref>"` (now `image_pin`) are
-retired; delete or rewrite them by hand, because a file that still carries
-one fails the load with the replacement named. See
-[Slot lifecycle](/docs/reference/slot-lifecycle/) for the activation model.
-
-A slot holds placement (device, layers, threads, runner), its model and its profile, and nothing else about how the model runs. A write that carries a tuning key (`parallel`, `chat_template`, `workers`, `ctx_size`, `mtp`, `enable_thinking`, `vision`, `[model].context_size`, `[model].ctx_size`, `[model].n_gpu_layers`, `[model].rope_freq_base`, `[model].extra` or `[server].extra_args`) is refused with a 400 `slot.tuning_key_denied` ("belongs on a profile"). A slot file on disk that still carries one is refused at launch with `slot.unconverted`: delete the keys from the file and put their values on a profile (`hal0 profile create`).
-
-<Aside type="note">
-The slot's `device` is the single authoritative hardware fact; a profile carries no
-hardware placement. See
-[Providers, profiles & devices](/docs/reference/providers-profiles-devices/).
-</Aside>
-
-### `[model]` (nested under a slot)
-
-`extra="forbid"`.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `default` | str | `""` | model id from the registry |
-
-The slot's `[model]` table names its model and nothing else about it. Base tune
-lives on the profile, and six sparse overrides belong in `[tune]` (ADR-0045).
-A write carrying tuning under `[model]` is rejected with
-`slot.tuning_key_denied`.
-
-### `[server]` (nested under a slot)
-
-`extra="forbid"`.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `env` | dict[str,str] \| null | `null` | keys must match `^[A-Za-z_][A-Za-z0-9_]*$`; values must not contain `\n`/`\r` |
-
-`env` may not set a llama-server option. Names that start with `LLAMA_ARG_`, and `LLAMA_API_KEY`, `HF_TOKEN` and `MTMD_BACKEND_DEVICE`, are refused with a 400 `slot.llama_env_denied`, at write time and again at launch: each of them sets a llama-server option. A `LLAMA_ARG_*` name sets what the matching flag sets, so it belongs in the profile's `flags` and only when that flag is allowed there. `LLAMA_API_KEY`, `HF_TOKEN` and `MTMD_BACKEND_DEVICE` set `--api-key`, `--hf-token` and `--mmproj-device`, which hal0 owns and no profile may set either.
-
-### `[npu]` (nested under a slot)
-
-`extra="forbid"`.
-
-| Key | Type | Default |
-|---|---|---|
-| `asr` | bool | `false` |
-| `embed` | bool | `false` |
-| `chat` | bool | `true` |
-
-### `[image]` (nested under a slot, alias for `image_gen`)
-
-`extra="forbid"`.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `default_size` | str | `""` | — (format `WxH`; empty means the model's native size) |
-| `default_steps` | int | `0` | `>= 0`; `0` means the model-class default |
-
-A `/v1/images/generations` request that sets no `size` or `steps` gets these when they are set,
-and the model's own defaults otherwise.
+The per-slot configuration \u2014 `/etc/hal0/slots/<name>.toml` and the
+`[tune]` override table \u2014 is documented in
+[Config schema: slot files](/docs/reference/config-schema-slots/).

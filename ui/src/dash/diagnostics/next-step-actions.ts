@@ -67,7 +67,7 @@ export function openDocTarget(target: string): void {
     window.location.hash = target.slice(1)
     return
   }
-  // A docs-site path (e.g. "/docs/operate/services/#mdns-discovery-toggle")
+  // A docs-site path (e.g. "/docs/operate/companion-services/#mdns-discovery-toggle")
   // — the dashboard doesn't serve docs itself, so this always opens externally.
   window.open(`https://hal0.dev${target}`, '_blank', 'noopener')
 }

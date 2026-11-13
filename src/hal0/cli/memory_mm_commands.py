@@ -1,4 +1,4 @@
-"""``hal0 memory mm`` — mental-model admin (list / refresh / history)."""
+"""``hal0 memory mm`` — mental-model admin (list / refresh / history / repair)."""
 
 from __future__ import annotations
 
@@ -7,10 +7,19 @@ from typing import Any
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from hal0.cli._shared import CliApiError, _api_base, _api_unreachable, api_get, api_post, die
+from hal0.cli._shared import (
+    CliApiError,
+    _api_base,
+    _api_unreachable,
+    api_get,
+    api_patch,
+    api_post,
+    die,
+)
 
 app = typer.Typer(help="Manage Hindsight mental models.")
 console = Console()
@@ -107,6 +116,123 @@ def mm_history_cmd(
         else:
             t.add_row("—", str(e))
     console.print(t)
+
+
+def _admin_request(method: str, path: str, *, params: Any = None, json: Any = None) -> Any:
+    """The ``request`` :mod:`hal0.memory.model_owner_repair` runs on: hal0-api."""
+    if method == "GET":
+        return api_get(path, params=params, timeout=30.0)
+    if method == "PATCH":
+        return api_patch(path, json=json, timeout=30.0)
+    if method == "POST":
+        return api_post(path, json=json, timeout=30.0)
+    raise ValueError(f"unsupported method {method}")
+
+
+@app.command("repair")
+def mm_repair_cmd(
+    bank: list[str] = typer.Option(
+        [], "--bank", help="Bank to repair (repeatable). Omit for every bank."
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply/--dry-run",
+        help="Write the flag. Default is --dry-run: list what would change, write nothing.",
+    ),
+    refresh: bool = typer.Option(
+        True,
+        "--refresh/--no-refresh",
+        help="With --apply, queue a full refresh of each repaired model so its content is "
+        "rebuilt under the confined scope (default). A hidden model is emptied first either way.",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of lines."),
+) -> None:
+    """Give agents back their own mental models and knowledge pages (#3576).
+
+    Sets ``trigger.exclude_mental_models`` on every model whose scope is
+    otherwise confined to one agent's ``agent:<id>`` tag, so that agent can
+    read it while its bank holds another agent's private memory. A model its
+    owner cannot read now is emptied first, and every repaired model gets a
+    full refresh. Shared, project-wide and whole-bank models are never
+    touched. Safe to run again.
+    """
+    from hal0.memory.model_owner_repair import apply_repairs, survey
+
+    _require_api()
+    try:
+        report = survey(_admin_request, banks=bank or None)
+    except CliApiError as exc:
+        die(f"could not list the memory banks: {exc}")
+        return
+    results = apply_repairs(_admin_request, report.findings, refresh=refresh) if apply else []
+    by_key = {(r.finding.bank, r.finding.model_id): r for r in results}
+    failed = [r for r in results if r.error]
+
+    if json_out:
+        rows = []
+        for f in report.findings:
+            row: dict[str, Any] = {
+                "bank": f.bank,
+                "id": f.model_id,
+                "name": f.name,
+                "owner": f.owner,
+                "hidden": f.hidden,
+            }
+            r = by_key.get((f.bank, f.model_id))
+            if r is not None:
+                row.update(
+                    error=r.error,
+                    operation_id=r.operation_id,
+                    cleared=r.cleared,
+                    flagged=r.flagged,
+                )
+            rows.append(row)
+        payload = {
+            "applied": apply,
+            "models": rows,
+            "skipped": [
+                {"bank": f.bank, "id": f.model_id, "owner": f.owner, "reason": why}
+                for f, why in report.skipped
+            ],
+            "errors": [{"bank": b, "error": e} for b, e in report.errors],
+        }
+        typer.echo(jsonlib.dumps(payload, indent=2, sort_keys=True))
+    else:
+        for b, err in report.errors:
+            console.print(f"[red]could not read bank {escape(b)}:[/red] {escape(err)}")
+        for f in report.findings:
+            where = (
+                f"{escape(f.bank)} {escape(f.model_id)} ({escape(f.name)}) owner {escape(f.owner)}"
+            )
+            hidden = " [yellow]hidden from its owner now[/yellow]" if f.hidden else ""
+            r = by_key.get((f.bank, f.model_id))
+            if r is None:
+                verb = (
+                    "would " + ("clear and " if f.hidden else "") + "set exclude_mental_models on"
+                )
+            elif r.error and r.flagged:
+                done = "flagged and cleared" if r.cleared else "flagged"
+                verb = f"[red]{done}, but the refresh failed[/red] ({escape(r.error)}):"
+            elif r.error:
+                done = "cleared, but setting the flag failed" if r.cleared else "failed"
+                verb = f"[red]{done}[/red] ({escape(r.error)}):"
+            else:
+                verb = ("cleared and " if r.cleared else "") + "set exclude_mental_models on"
+                hidden += f" full refresh queued {r.operation_id}" if r.operation_id else ""
+            console.print(f"{verb} {where}{hidden}")
+        for f, why in report.skipped:
+            console.print(
+                f"[yellow]skipped[/yellow] {escape(f.bank)} {escape(f.model_id)} "
+                f"owner {escape(f.owner)}: {escape(why)}"
+            )
+        if not report.findings:
+            console.print(f"Nothing to repair in {report.banks} bank(s).")
+        elif not apply:
+            console.print(
+                f"[dim]{len(report.findings)} model(s) to repair; run again with --apply.[/dim]"
+            )
+    if failed or report.errors:
+        raise typer.Exit(1)
 
 
 __all__ = ["app"]

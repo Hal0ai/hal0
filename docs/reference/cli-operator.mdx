@@ -10,63 +10,11 @@ This is the second part of the CLI reference. The first page,
 commands, and the `slot`, `model` and `config` sub-apps. The `doctor`, `upstream`,
 `capabilities`, `comfyui`, `agent` and `app` sub-apps are on
 [hal0 CLI reference: doctor, upstream, capabilities, ComfyUI, agents & apps](/docs/reference/cli-doctor-agents/).
-This page covers `memory` and the remaining sub-apps, the slot lifecycle timeouts, and the separate `hal0-agent` binary.
+This page covers the remaining sub-apps, the slot lifecycle timeouts, and the separate `hal0-agent` binary. The `memory` sub-app is on [hal0 CLI reference: memory](/docs/reference/cli-memory/).
 
 ## `hal0 memory` — manage hal0 memory (Hindsight engine)
 
-| Command | Args | Flags |
-|---|---|---|
-| `memory status` | — | `--json` |
-| `memory enable` | — | `--json` |
-| `memory disable` | — | `--json` |
-| `memory recall <query>` | `query` | `--bank`, `--tags` (repeatable), `--types` (repeatable), `--max-tokens` (default `4096`), `--json` |
-| `memory graph status` | — | `--json` |
-| `memory graph enable` | — | `--slot`, `--model`, `--local`, `--json` |
-| `memory graph disable` | — | `--json` |
-| `memory graph check` | — | `--json` |
-
-`memory graph enable` turns graph extraction on and can repoint the memory engine. `--slot <name>` runs it on a local LLM slot and clears any upstream model. `--model <id>` runs it on an upstream model id that hal0's `/v1` already routes (the ids `memory graph status` lists under `Upstream models`); the configured slot is kept as the way back. `--local` clears `--model` and returns the engine to the local `[memory.graph].extraction_slot`. `--model` and `--local` cannot be combined, and `--model` cannot be combined with `--slot`. hindsight-api always calls the virtual id `hal0/memory`, which hal0 resolves on every call, so the change applies at once and does not restart the engine. `memory graph status` prints `Engine target` (the local slot or upstream model `hal0/memory` resolves to) and an `Engine running` line naming the provider and model hindsight-api really loads; the line is marked as overridden when `/etc/hal0/hindsight-llm.env` sets the provider, base URL or model, and as `cannot verify` when hal0-api can read neither the engine process nor that file (see [Services](/docs/operate/services/#hindsight-apiservice)).
-
-### `memory bank`
-
-| Command | Args | Flags |
-|---|---|---|
-| `bank list` | — | `--json` |
-| `bank stats <bank>` | `bank` | `--json` |
-| `bank profile get <bank>` | `bank` | `--json` |
-| `bank profile set <bank>` | `bank` | `--retain-mission`, `--observations-mission`, `--reflect-mission`, `--skepticism`/`--literalism`/`--empathy` (1-5), `--min-refresh-interval <seconds>` (mental-model refresh floor; `0` = after every consolidation), `--json` |
-| `bank export <bank>` | `bank` | `--out` |
-| `bank import <bank>` | `bank` | `--file` (required), `--dry-run`, `--json` |
-| `bank delete <bank>` | `bank` | `--confirm` (required, must equal the bank id), `--json` |
-| `bank consolidate <bank>` | `bank` | `--scope` (repeatable), `--json` |
-
-`bank profile set --reflect-mission` writes the same per-bank config override as the description editor in the dashboard's Memory workspace: the text under the bank picker is the bank's Hindsight `reflect_mission`, and clicking it edits it in place. A bank id may contain dots as well as colons (`coding-agent::ultrareview-1.4`); a leading dot, a dot-only segment and any `..` are refused with `invalid bank_id`.
-
-### `memory ops`
-
-| Command | Args | Flags |
-|---|---|---|
-| `ops list` | — | `--bank` (omit = all banks), `--failed`, `--json` |
-| `ops retry` | — | `--bank`, `--all-failed`, `--id` (requires `--bank`) — exactly one of `--all-failed`/`--id` required, `--json` |
-
-### `memory mm` (mental models)
-
-| Command | Args | Flags |
-|---|---|---|
-| `mm list <bank>` | `bank` | `--json` |
-| `mm refresh <bank> <model_id>` | `bank`, `model_id` | `--json` |
-| `mm history <bank> <model_id>` | `bank`, `model_id` | `--json` |
-
-### `memory migrate unify`
-
-```sh
-hal0 memory migrate unify --source BANK [--source BANK ...] [--target shared]
-                           [--apply|--dry-run] [--add-tag TAG ...]
-                           [--on-conflict skip|replace|new-id] [--skip-observations] [--json]
-```
-
-`--source` is repeatable and required. `--target` defaults to `"shared"`. Defaults to
-dry-run unless `--apply` is given. `--on-conflict` defaults to `skip`.
+The `hal0 memory` sub-app is documented on [hal0 CLI reference: memory](/docs/reference/cli-memory/).
 
 ## `hal0 runner-images` — manage the runner-image catalogue
 
@@ -152,7 +100,7 @@ claude mcp add --transport http hal0-admin http://<host>:8080/mcp/admin/mcp --he
 
 `bridge runs` lists the runs bridge clients have delegated to Hermes, newest first, as a table of `run_id`, `client`, `agent`, `status`, `started` and `updated`. The last two are ages (`45s`, `5m`, `2h`, `3d`). `--client` shows one client's runs, `--status` one status (for example `running` or `completed`). Pass a `run_id` to the `agent_run_status` tool of the [`hal0-agents`](/docs/reference/mcp-tools-agents) server to read a run.
 
-A failed command prints the API's `error.message` and exits 1: a name that is taken, malformed or reserved (`hermes` and `pi`, the bundled agents' names, plus `admin`, `anonymous`, `shared`, and any name starting `hal0`, such as `hal0-cli`, or `hermes__`, such as `hermes__scout`), an unknown scope, a client that does not exist, `rotate` on a revoked client. While `[bridge].enabled` is `false`, no bridge key works and `bridge add`, `bridge rotate` and `bridge scopes` and `bridge runs` exit 1 with:
+A failed command prints the API's `error.message` and exits 1: a name that is taken, malformed or reserved (`hermes` and `pi`, the bundled agents' names, plus `admin`, `anonymous`, `shared`, `unknown`, `unresolved`, and any name starting `hal0`, such as `hal0-cli`, or `hermes__`, such as `hermes__scout`), an unknown scope, a client that does not exist, `rotate` on a revoked client. While `[bridge].enabled` is `false`, no bridge key works and `bridge add`, `bridge rotate` and `bridge scopes` and `bridge runs` exit 1 with:
 
 ```text
 The agent bridge is disabled: set [bridge] enabled = true in /etc/hal0/hal0.toml and restart hal0-api.
@@ -179,7 +127,7 @@ Edits `hal0.toml` `[network]` through the API, never `api.env`, so the values
 survive an installer re-run. `public-url set|clear` use `PUT /api/settings`.
 `origins add|remove` use `POST /api/settings/network`, which applies the one
 entry to the list on disk, so a concurrent edit elsewhere is never lost.
-Changes apply on the next request, with no restart. See [Allow the public URL](/docs/operate/auth#allow-the-public-url).
+Changes apply on the next request, with no restart. See [Allow the public URL](/docs/operate/tls-and-listeners/#allow-the-public-url).
 
 | Command | Args | Flags |
 |---|---|---|

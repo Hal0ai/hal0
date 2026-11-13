@@ -57,13 +57,18 @@ key layout.
 ├── .first_run_done          # first-run completion sentinel
 ├── registry/
 │   └── ignored-paths.json   # model paths the discovery scan skips (deleted models' kept files)
-├── backups/                 # 0600 tar.gz archives written before a one-shot conversion: runners-<ts>.tar.gz, and hal0-pre-015-<ts>.db, a 0600 copy of hal0.db taken before schema migration 015 drops retired model tuning (an older box may also hold profiles-<ts>.tar.gz and the profile-centric*.json records from the 1.4.0 conversion; nothing reads them now and they can be deleted)
+├── backups/                 # 0600 tar.gz archives written before a one-shot conversion: runners-<ts>.tar.gz, and hal0-pre-015-<ts>.db, a 0600 copy of hal0.db taken before schema migration 015 drops retired model tuning (an older box may also hold profiles-<ts>.tar.gz and the profile-centric*.json records from the 1.4.0 conversion; nothing reads them now and they can be deleted). `hal0 memory embedder switch` adds one 0700 directory per run, memory-embedder-switch-<time>-<run>/, holding a bank export archive per bank and journal.json, a mirror of that run's journal; they are kept until you delete them. `hal0 memory migrate fold-in` adds memory-fold-in-<time>-<run>/ the same way, with each bank's export, its rewritten shared and private archives, a .ids.json record per archive (its document ids with a digest of each source document, mental models, pages, observation digests), a .provenance.json per bank, fold-in-journal.json, and for a run that left a bank, left-ids.json (0600, owned by hal0: the memory ids behind each left bank's note, which the ledger never holds). A later run reads the .ids.json files the ledger names, so keep these directories until the store has cut over
 ├── models/                  # default model cache (unless overridden — see below)
 ├── slots/<name>/             # per-slot working dir
 ├── agents/
 │   ├── secret.bin            # 0600 HMAC secret for dashboard session cookies
 │   └── <name>/workspace/     # per-agent sandbox root (chroot/bind-mount target)
 ├── stacks/state.json         # active-stack pointer + content hash
+├── state/memory-embedder.json          # the embedder the memory store was built with
+├── state/memory-writes-paused.json     # set by `hal0 memory embedder switch` or `hal0 memory migrate fold-in` and kept until the run finishes or is resumed, even if it is killed: memory writes answer 503
+├── state/memory-embedder-switch.json   # journal of a switch in progress; left behind only by an interrupted one (`--resume`)
+├── state/memory-fold-in.json           # journal of a fold-in in progress; left behind only by an interrupted one (`--resume`)
+├── state/memory-fold-in-ledger.json    # what earlier fold-in runs folded and left, per bank, with the owners each bank was sent under, every run's --map and --skip, and the paths of the .ids.json records of what was sent; read by the next run until the store cuts over
 ├── mcp/hermes-managed.json   # MCP server ids hal0 itself joined into Hermes config
 ├── venvs/hermes -> /var/lib/hal0/hermes/current/venv   # fixed symlink; a real directory only before the first migration
 ├── hermes/                   # Hermes release tree (hal0:hal0), see below
@@ -71,6 +76,8 @@ key layout.
 ├── openwebui/                 # OpenWebUI state
 └── .config/flm/models/       # default FLM (NPU) model cache
 ```
+
+For the length of a run, `hal0 memory embedder switch` also writes one systemd drop-in, `/etc/systemd/system/hindsight-api.service.d/zzzz-hal0-embedder-switch.conf`, which pins the memory engine to a private loopback port. The switch removes it when the run ends; an interrupted run leaves it in place until `--resume`. `hal0 memory migrate fold-in` does the same with its own drop-in, `zzzz-hal0-memory-fold-in.conf`.
 
 
 ### Hermes release tree
@@ -161,6 +168,8 @@ hal0 uses a generic sibling-lock pattern (`hal0.config.locking.file_lock()`):
 |---|---|
 | `/etc/hal0/*.lock` | Advisory read-modify-write locks on config writes. |
 | `/var/lib/hal0/*.lock` | Advisory read-modify-write locks on state writes. |
+| `/var/lib/hal0/state/memory-embedder-switch.lock` | Held by a running `hal0 memory embedder switch`, so two cannot run at once. Released when the process ends. |
+| `/var/lib/hal0/state/memory-fold-in.lock` | Held by a running `hal0 memory migrate fold-in`; the switch refuses while it is held, and the fold-in while the switch's is. |
 | `<slots_dir>.lock` | Slot-config directory-level lock. |
 | `<record>.lock` | Per-record lock for MCP `installed.py` read-modify-write. |
 

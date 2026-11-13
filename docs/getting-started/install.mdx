@@ -91,7 +91,7 @@ in order:
     catalog.
 14. **Bundled agent skills** — installs the shipped agent skill set.
 15. **Service start** — starts `hal0-api` and `hal0-openwebui` (unless
-    `--no-start`), waits up to 60 s for `/api/health` to answer before the post-install checks run, stands up the Hindsight memory engine, then provisions the bundled Hermes agent (skip with `HAL0_SKIP_HERMES=1`; install later with `hal0 agent install hermes`). Hermes provisioning builds a release and can take a few minutes.
+    `--no-start`), waits up to 60 s for `/api/health` to answer before the post-install checks run, stands up the Hindsight memory engine (a new install starts it on the embedder in `[memory.models]`, `hindsight-ai/hs-embed-1` by default; an existing store keeps the embedder it was built with; that first start downloads the embedding and the reranker model), then provisions the bundled Hermes agent (skip with `HAL0_SKIP_HERMES=1`; install later with `hal0 agent install hermes`). Hermes provisioning builds a release and can take a few minutes.
 
 </Steps>
 
@@ -100,6 +100,24 @@ or just to pick up new configuration defaults. Existing config files are
 never clobbered, and a unit you disabled or masked (for example
 `hermes-gateway.service`) is left off on re-run; the installer prints the
 `systemctl` command to turn it back on.
+
+## Memory slot on new installs
+
+New installs include an empty `memory` LLM slot on port 8091 with the `memory`
+profile (32K context, one sequence, thinking off). No model is assigned or
+downloaded for it. Memory extraction uses the agent slot until you bind a
+model to `memory`; existing installs keep their configured extraction target
+and any existing `utility` slot. The retired utility slot is no longer seeded
+on new installs. New Open WebUI task calls and the installer's structured
+output probe use `hal0/agent`; an existing `openwebui.env` is left untouched.
+
+For a dedicated memory model, `lfm2.5-2.6b` is the recommended starting pick.
+It is the small model already used by the brain seed (about 2.87 GB Q8_0),
+and the v1.4.0 nightly validation report
+(`tests/release-validation/reports/v1.4.0-nightly.20261014214325.md`)
+records a successful Hindsight fact extraction through the gateway with
+structured JSON output. Bind it explicitly in the memory slot drawer; hal0
+does not assign it to the memory slot automatically.
 
 ## Starter image model
 
