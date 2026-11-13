@@ -41,6 +41,9 @@ _progress = Console(stderr=True)
 
 _COMMAND = "hal0 memory migrate fold-in"
 
+#: The exit code of a run that folded what it could and did not cut over.
+INCOMPLETE_EXIT = 3
+
 #: Live-verification aid, not an operator feature: the process kills itself
 #: when the run reaches the named point (``hal0.memory.fold_in.HOOK_POINTS``),
 #: and only while ``HAL0_TEST_HOOKS=1`` is set as well.
@@ -154,6 +157,46 @@ def _project_table(rows: list[dict[str, Any]]) -> Table | None:
     return t if any_row else None
 
 
+def _bank_notes(rows: list[dict[str, Any]]) -> list[str]:
+    """What the dry run found per bank that the tables do not show."""
+    lines: list[str] = []
+    for row in rows:
+        fold = row.get("fold") or {}
+        bank = escape(str(row.get("bank")))
+        models = fold.get("mental_models") or {}
+        if models.get("private"):
+            lines.append(
+                f"{bank}: {models['private']} mental model(s) go to the private bank, readable "
+                f"by {escape(str(row.get('agent') or 'their agent'))} alone"
+            )
+        if models.get("dropped_private"):
+            lines.append(
+                f"[yellow]{bank}: {models['dropped_private']} mental model(s) are not carried "
+                "(a model behind a private bank's knowledge page, or one tagged "
+                "visibility:private outside a private bank)[/yellow]"
+            )
+        if fold.get("unreadable_shared_facts"):
+            lines.append(
+                f"[yellow]{bank}: {fold['unreadable_shared_facts']} shared fact(s) will be "
+                "readable by no agent: they have no project (project:unresolved) and their "
+                "owner is a reserved pseudo-owner no client holds. Name the harness's client with "
+                "--owner HARNESS=CLIENT to give them a reader[/yellow]"
+            )
+        for mixed in fold.get("mixed_owner_documents") or []:
+            lines.append(
+                f"[red]{bank}: private document {escape(str(mixed.get('document')))} holds "
+                f"facts of {', '.join(escape(str(o)) for o in mixed.get('owners') or [])}; "
+                "the bank will be left[/red]"
+            )
+        earlier = row.get("earlier") or {}
+        if earlier.get("state") == "left":
+            lines.append(
+                f"{bank}: left by run {escape(str(earlier.get('run_id')))}: "
+                f"{escape(str(earlier.get('note')))}"
+            )
+    return lines
+
+
 def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
     rows = plan.get("banks") or []
     if rows:
@@ -161,7 +204,7 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
         for table in (_owner_table(rows), _project_table(rows)):
             if table is not None:
                 console.print(table)
-    lines: list[str] = []
+    lines: list[str] = _bank_notes(rows)
     layout = plan.get("layout") or {}
     targets = plan.get("targets") or {}
     if layout:
@@ -184,11 +227,25 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
         )
     if plan.get("estimate_s") is not None:
         lines.append(f"duration: about {max(1, round(plan['estimate_s'] / 60))} min")
+    if plan.get("pending"):
+        lines.append(
+            "cutover: [yellow]not in this run[/yellow]. "
+            + ", ".join(escape(str(b)) for b in plan["pending"])
+            + " are not part of it, and the store moves to the two banks only once every old "
+            "bank is folded"
+        )
+    elif plan.get("cuts_over"):
+        lines.append(
+            "cutover: when every bank folds, the store moves to the two banks. If any bank is "
+            "left, the run folds the rest, returns the box to the old layout with writes open, "
+            "and says how to retry"
+        )
     lines.append(
         "[bold]while it runs, memory is out of service:[/bold] the engine is moved to a "
         "private port, writes are refused with 503 memory.writes_paused and recall fails "
         "until the run ends. Nothing is deleted: the old banks stay, read-only once the run "
-        "has cut over. --apply is your consent to that"
+        "has cut over. Banks an earlier run folded are re-checked and only what they gained "
+        "since is sent. --apply is your consent to that"
     )
     for warning in plan.get("warnings") or []:
         lines.append(f"[yellow]note: {escape(str(warning))}[/yellow]")
@@ -233,12 +290,16 @@ def _print_status(status: dict[str, Any]) -> None:
         lines.append(
             f"[yellow]the engine is isolated on 127.0.0.1:{status['private_port']}[/yellow]"
         )
-    record = status.get("record") or {}
-    for row in record.get("left") or []:
-        lines.append(
-            f"[yellow]left: {escape(str(row.get('bank')))}[/yellow] — "
-            f"{escape(str(row.get('note')))}"
-        )
+    for bank, row in sorted((status.get("ledger") or {}).items()):
+        if row.get("state") == "left":
+            lines.append(
+                f"[yellow]left: {escape(str(bank))}[/yellow] (run {row.get('run_id')}) — "
+                f"{escape(str(row.get('note')))}"
+            )
+        else:
+            lines.append(f"folded: {escape(str(bank))} (run {row.get('run_id')})")
+    if status.get("ledger_error"):
+        lines.append(f"[red]ledger problem: {escape(str(status['ledger_error']))}[/red]")
     lines.append(f"[bold]{escape(str(status.get('summary')))}[/bold]")
     console.print(Panel("\n".join(lines), title="memory · fold-in · status"))
 
@@ -287,7 +348,9 @@ def fold_in_cmd(
     bank: list[str] = typer.Option(
         [],
         "--bank",
-        help="Fold only this bank (repeatable): retries a bank an earlier run left over.",
+        help="Fold only this bank (repeatable): retries a bank an earlier run left over. "
+        "Banks an earlier run folded are re-checked too, and the store moves to the two banks "
+        "only once every old bank is folded.",
     ),
     owner: list[str] = typer.Option(
         [],
@@ -309,7 +372,9 @@ def fold_in_cmd(
     and any private__<agent> bank into the two banks, one bank at a time,
     tagging by project and owner and splitting private facts out. A bank
     whose counts do not match afterwards is left as it was and the run goes
-    on. Nothing is deleted. Memory is out of service while it runs. Run it on
+    on; the store moves to the two banks only once every bank is folded, and
+    a run that leaves one exits 3 with the box still on the old layout.
+    Nothing is deleted. Memory is out of service while it runs. Run it on
     the box, as root, for --apply and --resume.
     """
     chosen = [n for n, on in (("--resume", resume), ("--status", status)) if on]
@@ -375,28 +440,44 @@ def fold_in_cmd(
 
     if json_out:
         typer.echo(jsonlib.dumps(result, indent=2, sort_keys=True, default=str))
+        if result.get("status") == "incomplete":
+            raise typer.Exit(INCOMPLETE_EXIT)
         return
-    folded, left = result.get("folded") or [], result.get("left") or []
+    folded = result.get("folded") or []
+    pending = result.get("pending") or []
+    targets = result.get("targets") or {}
+    incomplete = result.get("status") == "incomplete"
     body = [
-        f"[bold {'yellow' if left else 'green'}]{len(folded)} bank(s) folded into "
-        f"{escape(str((result.get('targets') or {}).get('shared')))} and "
-        f"{escape(str((result.get('targets') or {}).get('private')))}[/]",
-        "The store is on the two banks; memory writes are open again. The old banks are kept.",
+        f"[bold {'yellow' if incomplete else 'green'}]{len(folded)} bank(s) folded into "
+        f"{escape(str(targets.get('shared')))} and {escape(str(targets.get('private')))}[/]",
     ]
+    if incomplete:
+        body.append(
+            "[bold]No cutover:[/bold] not every old bank is folded, so the store stays on the "
+            "old layout. Memory writes are open again and go to the old banks, as before the run."
+        )
+    else:
+        body.append(
+            "The store is on the two banks; memory writes are open again. The old banks are kept."
+        )
     for entry in result.get("banks") or []:
         if entry.get("step") == "left":
             body.append(
                 f"[yellow]left: {escape(str(entry.get('bank')))}[/yellow] — "
                 f"{escape(str(entry.get('note')))}"
             )
-    if left:
+    if pending:
+        body.append("not in this run: " + ", ".join(escape(str(b)) for b in pending))
+    if incomplete:
         body.append(
-            "Retry a left bank alone with "
-            + " ".join(f"--bank {escape(b)}" for b in left)
-            + f" (`sudo {_COMMAND} --apply --bank <id>`)."
+            f"Fix what is named above, then run `{escape(str(result.get('retry')))}` (or "
+            f"`sudo {_COMMAND} --apply` for every bank). Banks folded now are re-checked, not "
+            "imported again; the cutover runs once every bank is folded."
         )
     body.append(f"Archives: {escape(str(result.get('archive_dir')))}")
-    console.print(Panel("\n".join(body), border_style="yellow" if left else "green"))
+    console.print(Panel("\n".join(body), border_style="yellow" if incomplete else "green"))
+    if incomplete:
+        raise typer.Exit(INCOMPLETE_EXIT)
 
 
 __all__ = ["fold_in_cmd"]

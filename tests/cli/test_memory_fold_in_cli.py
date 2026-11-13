@@ -96,18 +96,75 @@ def test_status_prints_without_an_engine() -> None:
     assert "no fold-in is in progress" in out.output
 
 
-def test_apply_reports_the_folded_and_left_banks() -> None:
+def test_apply_reports_the_folded_and_left_banks_and_exits_3_without_a_cutover() -> None:
     FakeFoldIn.result = {
+        "status": "incomplete",
         "folded": ["shared"],
         "left": ["pi-coder"],
+        "pending": ["private__brain"],
+        "retry": "sudo hal0 memory migrate fold-in --apply --bank pi-coder --bank private__brain",
         "banks": [{"bank": "pi-coder", "step": "left", "note": "ids taken"}],
         "targets": {"shared": "hal0:shared", "private": "hal0:private"},
         "archive_dir": "/x",
     }
     out = invoke("--apply")
-    assert out.exit_code == 0, out.output
+    assert out.exit_code == cmd.INCOMPLETE_EXIT, out.output
     assert "1 bank(s) folded" in out.output
-    assert "--bank pi-coder" in out.output
+    assert "No cutover" in out.output
+    assert "--bank pi-coder --bank private__brain" in out.output
+    assert "not in this run: private__brain" in out.output
+    assert invoke("--apply", "--json").exit_code == cmd.INCOMPLETE_EXIT
+
+
+def test_apply_that_cuts_over_exits_0() -> None:
+    FakeFoldIn.result = {
+        "status": "folded",
+        "folded": ["shared"],
+        "left": [],
+        "banks": [],
+        "targets": {"shared": "hal0:shared", "private": "hal0:private"},
+        "archive_dir": "/x",
+    }
+    out = invoke("--apply")
+    assert out.exit_code == 0, out.output
+    assert "The store is on the two banks" in out.output
+
+
+def test_the_dry_run_says_what_it_will_not_carry_and_whether_it_cuts_over() -> None:
+    FakeFoldIn.plan = {
+        "banks": [
+            {
+                "bank": "private__hermes",
+                "class": "private",
+                "agent": "hermes",
+                "action": "fold",
+                "fold": {
+                    "mental_models": {"private": 2, "dropped_private": 1},
+                    "unreadable_shared_facts": 0,
+                },
+            },
+            {
+                "bank": "Hal0::Agents",
+                "class": "coding",
+                "action": "fold",
+                "fold": {
+                    "unreadable_shared_facts": 4,
+                    "mixed_owner_documents": [{"document": "d", "owners": ["a", "b"]}],
+                },
+            },
+        ],
+        "pending": ["pi-coder"],
+        "refusals": [],
+        "warnings": [],
+    }
+    out = invoke()
+    assert out.exit_code == 0, out.output
+    text = " ".join(out.output.split())
+    assert "2 mental model(s) go to the private bank" in text
+    assert "1 mental model(s) are not carried" in text
+    assert "4 shared fact(s) will be readable by no agent" in text
+    assert "the bank will be left" in text
+    assert "cutover: not in this run" in text
 
 
 def test_a_failed_run_says_writes_stay_paused_when_a_journal_is_left(monkeypatch) -> None:
