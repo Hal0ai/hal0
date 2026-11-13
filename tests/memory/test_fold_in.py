@@ -89,6 +89,9 @@ class FakeEngine:
         self.restarts = 0
         #: Banks whose next import fails part-way: the first document lands.
         self.fail_import: set[str] = set()
+        #: Banks whose next import fails after its mental models, before its pages
+        #: (hindsight-api 1.2.0 writes them with no transaction around them).
+        self.fail_pages: set[str] = set()
         #: Banks whose import stays ``processing`` until :meth:`finish`.
         self.hold_import: set[str] = set()
         #: Per bank: queued retains (``pending``), counted and listed.
@@ -182,6 +185,9 @@ class FakeEngine:
                 target["obs"].append(o)
         for m in models:
             target["models"].setdefault(m["id"], m)
+        if bank in self.fail_pages and pages:
+            self.fail_pages.discard(bank)
+            return {"status": "failed", "error_message": "died before the pages"}
         target["pages"].extend(pages)
         return {"status": "completed"}
 
@@ -212,7 +218,7 @@ class FakeEngine:
         if path == "/v1/default/banks":
             q = params.get("q", "").lower()
             rows = [
-                {"bank_id": b, "last_document_at": f"doc-{len(v['docs'])}"}
+                {"bank_id": b, "last_document_at": "doc-" + "|".join(sorted(v["docs"]))}
                 for b, v in self.banks.items()
                 if q in b.lower()
             ]
@@ -279,7 +285,7 @@ class FakeEngine:
         if rest == "/config":
             return httpx.Response(200, json={"overrides": {}})
         if rest == "/knowledge-base/tree":
-            return httpx.Response(200, json={"roots": []})
+            return httpx.Response(200, json={"roots": [dict(p) for p in b["pages"]]})
         if rest == "/documents":
             rows = [{"id": d["id"], "tags": d["tags"]} for d in b["docs"].values()]
             return self._page("items", rows, params)
@@ -294,6 +300,12 @@ class FakeEngine:
                 for d in b["docs"].values()
                 for i, f in enumerate(d["facts"])
             ]
+            if params.get("type") == "observation":
+                obs = [
+                    {"id": f"o{i}", "text": o["text"], "tags": o["tags"]}
+                    for i, o in enumerate(b["obs"])
+                ]
+                return self._page("items", obs, params)
             return self._page("items", rows if params.get("type") == "world" else [], params)
         if rest == "/operations":
             rows = [
@@ -504,6 +516,17 @@ def _codes(plan: dict[str, Any]) -> list[str]:
     return [r["code"] for r in plan["refusals"]]
 
 
+def _assert_on_the_old_layout(box: Box) -> None:
+    """A run that did not cut over: writes open on the old banks, nothing blocking."""
+    assert box.layout().layout == bank_layout.LAYOUT_LEGACY
+    assert write_gate.read_gate() is None
+    assert fi.load_journal() is None
+    assert fi.blocking_reason() is None
+    assert box.host.dropin_port is None
+    assert box.engine.port == NORMAL_PORT
+    assert box.host.api_restarts == 0
+
+
 def _assert_folded(box: Box) -> None:
     e = box.engine
     shared, private = e.banks["hal0:shared"], e.banks["hal0:private"]
@@ -634,18 +657,22 @@ async def test_apply_folds_every_bank_and_cuts_over(box: Box) -> None:
             assert "visibility:private" not in json.dumps(archive)
 
 
-async def test_a_bank_whose_ids_are_taken_is_left_and_the_run_goes_on(box: Box) -> None:
+async def test_a_bank_whose_ids_are_taken_is_left_and_the_run_does_not_cut_over(box: Box) -> None:
     box.engine.banks["hal0:shared"] = empty_bank()
     box.engine.banks["hal0:shared"]["docs"]["n1"] = doc("n1", fact("someone else's"))
     result = await box.fold().run()
-    assert result["status"] == "folded_with_left"
+    assert result["status"] == "incomplete"
+    assert result["cut_over"] is False
     assert result["left"] == ["shared"]
+    assert result["retry"] == "sudo hal0 memory migrate fold-in --apply --bank shared"
     assert "coding-agent::web" in result["folded"]
     # Nothing of the left bank was imported, private part included.
     assert "private:hermes:s1" not in box.engine.banks["hal0:private"]["docs"]
-    record = bank_layout.load_fold_in_record()
-    assert record["left"][0]["bank"] == "shared"
-    assert record["left"][0]["sent_parts"] == []
+    _assert_on_the_old_layout(box)
+    ledger = fi.load_ledger()
+    assert ledger["banks"]["shared"]["state"] == "left"
+    assert "sent_files" not in ledger["banks"]["shared"]
+    assert ledger["banks"]["pi-coder"]["state"] == "folded"
 
 
 async def test_a_bank_the_export_cannot_carry_whole_is_left(box: Box) -> None:
@@ -663,12 +690,22 @@ async def test_a_failed_import_leaves_the_bank_and_a_retry_completes_it(box: Box
     result = await box.fold().run()
     assert result["left"] == ["coding-agent::web"]
     assert "worker died" in next(b["note"] for b in result["banks"] if b["step"] == "left")
-    assert box.layout().two_bank
-    record = bank_layout.load_fold_in_record()
-    assert record["left"][0]["sent_parts"] == ["shared"]
+    _assert_on_the_old_layout(box)
+    ledger = fi.load_ledger()
+    assert list(ledger["banks"]["coding-agent::web"]["sent_files"]) == ["shared"]
+    before = len(box.engine.imports)
     retry = await box.fold(only=["coding-agent::web"]).run()
-    assert retry["folded"] == ["coding-agent::web"]
+    assert retry["status"] == "folded"
+    assert "coding-agent::web" in retry["folded"]
     _assert_folded(box)
+    # The retry sent only what was missing of the left bank; the banks folded
+    # before were re-checked, unchanged, and not imported again.
+    sent = box.engine.imports[before:]
+    assert [t for t, _ in sent] == ["hal0:shared"]
+    assert [d["id"] for d in sent[0][1]["documents"]] == ["web::shared::git:123"]
+    rechecked = {b["bank"]: b for b in retry["banks"] if b["refold"]}
+    assert set(rechecked) == {"shared", "pi-coder", "private__brain"}
+    assert all("unchanged" in b["note"] for b in rechecked.values())
     record = bank_layout.load_fold_in_record()
     assert record["left"] == []
     assert {b["bank"] for b in record["folded"]} == {
@@ -677,14 +714,258 @@ async def test_a_failed_import_leaves_the_bank_and_a_retry_completes_it(box: Box
         "pi-coder",
         "private__brain",
     }
-    # A retry does not restart hal0-api: the layout did not change.
     assert box.host.api_restarts == 1
 
 
 async def test_a_retry_refuses_a_bank_already_folded(box: Box) -> None:
+    box.engine.fail_import.add("hal0:shared")
     await box.fold().run()
     plan = await box.fold(only=["pi-coder"]).preflight()
     assert "not_foldable" in _codes(plan)
+    await box.fold(only=["coding-agent::web"]).run()
+    plan = await box.fold(only=["pi-coder"]).preflight()
+    assert "already_two_bank" in _codes(plan)
+
+
+# ── no cutover while any bank is left (review item 2) ───────────────────
+
+
+async def test_a_left_bank_keeps_the_old_layout_then_a_later_run_folds_it_and_cuts_over(
+    box: Box,
+) -> None:
+    e = box.engine
+    e.fail_import.add("hal0:shared")
+    first = await box.fold().run()
+    assert first["status"] == "incomplete" and first["left"] == ["coding-agent::web"]
+    _assert_on_the_old_layout(box)
+    # Writes resumed on the old layout: the old banks take new memory.
+    e.banks["shared"]["docs"]["n2"] = doc("n2", fact("written after", "agent:hermes"))
+    e.banks["coding-agent::web"]["docs"]["conversation:b"] = doc(
+        "conversation:b", fact("later", "agent:claude-code")
+    )
+    before = len(e.imports)
+    second = await box.fold().run()
+    assert second["status"] == "folded"
+    sent = e.imports[before:]
+    by_target = [(t, sorted(d["id"] for d in a["documents"])) for t, a in sent]
+    # The changed platform bank sends only its new document; its private part
+    # is all there already, so nothing is sent for it. The left bank sends what
+    # is missing. pi-coder and private__brain are unchanged: nothing.
+    assert by_target == [
+        ("hal0:shared", ["n2"]),
+        ("hal0:shared", ["web::hal0-legacy-claude-code::conversation:b", "web::shared::git:123"]),
+    ]
+    shared = e.banks["hal0:shared"]["docs"]
+    assert {"n2", "web::hal0-legacy-claude-code::conversation:b"} <= set(shared)
+    assert box.layout().two_bank
+    assert box.host.api_restarts == 1
+    assert write_gate.read_gate() is None
+
+
+async def test_an_observation_the_old_bank_built_since_does_not_hold_a_refold_back(
+    box: Box,
+) -> None:
+    e = box.engine
+    first = await box.fold(only=["shared"]).run()
+    assert first["status"] == "incomplete" and first["folded"] == ["shared"]
+    assert [o["text"] for o in e.banks["hal0:shared"]["obs"]] == ["nature"]
+    # Consolidation in the old bank, after writes resumed, built a new
+    # observation over a document already folded, and a new document arrived.
+    e.banks["shared"]["obs"].append(
+        {"text": "built since", "tags": [], "sources": [{"document_id": "n1", "fact_index": 1}]}
+    )
+    e.banks["shared"]["docs"]["n2"] = doc("n2", fact("new", "agent:hermes"))
+    result = await box.fold().run()
+    assert result["status"] == "folded"
+    shared = next(b for b in result["banks"] if b["bank"] == "shared")
+    assert shared["report"]["observations"]["not_carried_built_since"] == 1
+    assert "n2" in e.banks["hal0:shared"]["docs"]
+
+
+async def test_a_bank_named_alone_does_not_cut_over_while_others_are_pending(box: Box) -> None:
+    result = await box.fold(only=["pi-coder"]).run()
+    assert result["status"] == "incomplete"
+    assert result["left"] == []
+    assert sorted(result["pending"]) == ["coding-agent::web", "private__brain", "shared"]
+    _assert_on_the_old_layout(box)
+    plan = await box.fold(only=["pi-coder"]).preflight()
+    assert "not_foldable" in _codes(plan)
+    done = await box.fold().run()
+    assert done["status"] == "folded"
+    _assert_folded(box)
+
+
+async def test_a_folded_document_changed_in_the_old_bank_refuses_until_its_copy_is_deleted(
+    box: Box,
+) -> None:
+    e = box.engine
+    e.fail_import.add("hal0:shared")
+    await box.fold().run()
+    # A document folded into hal0:shared is appended to in the old bank.
+    e.banks["pi-coder"]["docs"]["p1"]["facts"].append(fact("appended", "project:web"))
+    second = await box.fold().run()
+    assert second["status"] == "incomplete"
+    note = next(b["note"] for b in second["banks"] if b["bank"] == "pi-coder")
+    assert "changed in the old bank" in note and "web::pi-coder::p1" in note
+    assert len(e.banks["hal0:shared"]["docs"]["web::pi-coder::p1"]["facts"]) == 1
+    _assert_on_the_old_layout(box)
+    # The operator deletes the stale copy; the next run sends the document as it is now.
+    del e.banks["hal0:shared"]["docs"]["web::pi-coder::p1"]
+    third = await box.fold().run()
+    assert third["status"] == "folded"
+    assert len(e.banks["hal0:shared"]["docs"]["web::pi-coder::p1"]["facts"]) == 2
+
+
+async def test_a_folded_document_deleted_from_the_old_bank_refuses(box: Box) -> None:
+    e = box.engine
+    e.fail_import.add("hal0:shared")
+    await box.fold().run()
+    e.banks["pi-coder"]["docs"]["p2"] = doc("p2", fact("new", "project:web"))
+    del e.banks["pi-coder"]["docs"]["p1"]
+    second = await box.fold().run()
+    note = next(b["note"] for b in second["banks"] if b["bank"] == "pi-coder")
+    assert "no longer in the old bank" in note
+    assert second["status"] == "incomplete"
+
+
+async def test_a_missing_record_of_what_was_sent_refuses_the_bank(box: Box) -> None:
+    box.engine.fail_import.add("hal0:shared")
+    await box.fold().run()
+    for path in fi.load_ledger()["banks"]["coding-agent::web"]["sent_files"]["shared"]:
+        Path(path).unlink()
+    result = await box.fold().run()
+    note = next(b["note"] for b in result["banks"] if b["bank"] == "coding-agent::web")
+    assert "cannot be read" in note
+    assert result["status"] == "incomplete"
+
+
+@pytest.mark.parametrize("point", ["before_release", "released"])
+async def test_a_run_killed_while_releasing_completes_with_resume(box: Box, point: str) -> None:
+    box.engine.banks["hal0:shared"] = empty_bank()
+    box.engine.banks["hal0:shared"]["docs"]["n1"] = doc("n1", fact("someone else's"))
+    await box.kill_at(point)
+    assert write_gate.read_gate() is not None
+    result = await box.fold().resume()
+    assert result["status"] == "incomplete"
+    _assert_on_the_old_layout(box)
+
+
+# ── review items 3, 5, 6, 10 ─────────────────────────────────────────────
+
+
+async def test_an_observation_lost_on_a_resend_leaves_the_bank(box: Box) -> None:
+    e = box.engine
+    e.banks["coding-agent::web"]["obs"] = [
+        {
+            "text": "vite",
+            "tags": [],
+            "sources": [{"document_id": "conversation:a", "fact_index": 0}],
+        }
+    ]
+    # The first document lands, the import dies before its observation.
+    e.fail_import.add("hal0:shared")
+    await box.fold().run()
+    assert "vite" not in [o["text"] for o in e.banks["hal0:shared"]["obs"]]
+    retry = await box.fold(only=["coding-agent::web"]).run()
+    assert retry["status"] == "incomplete"
+    note = next(b["note"] for b in retry["banks"] if b["bank"] == "coding-agent::web")
+    assert "observation(s) rest on documents already in hal0:shared" in note
+    assert "web::hal0-legacy-claude-code::conversation:a" in note
+    _assert_on_the_old_layout(box)
+
+
+async def test_owners_are_frozen_for_every_later_run_of_a_bank(box: Box) -> None:
+    box.engine.fail_import.add("hal0:shared")
+    await box.fold(owners={"pi": "pi-coder"}).run()
+    frozen = fi.load_ledger()["banks"]["coding-agent::web"]
+    assert frozen["owners"] == {"pi": "pi-coder"}
+    assert frozen["known_clients"] == []
+    plan = await box.fold(owners={"claude-code": "laptop"}).preflight()
+    assert "owners_frozen" in _codes(plan)
+    # A client named after the harness appears between runs: the frozen list
+    # still files the bank's documents under the ids the first run gave them.
+    box.clients = {"claude-code"}
+    result = await box.fold().run()
+    assert result["status"] == "folded"
+    assert "web::hal0-legacy-claude-code::conversation:a" in box.engine.banks["hal0:shared"]["docs"]
+    assert "web::claude-code::conversation:a" not in box.engine.banks["hal0:shared"]["docs"]
+
+
+async def test_resume_refuses_a_changed_owner_map(box: Box) -> None:
+    await box.kill_at("rewritten:shared")
+    with pytest.raises(fi.FoldInRefused, match="keeps the owners"):
+        await box.fold(owners={"claude-code": "laptop"}).resume()
+    await box.fold().resume()
+    _assert_folded(box)
+
+
+async def test_a_private_banks_mental_model_goes_private_for_its_agent(box: Box) -> None:
+    box.engine.banks["private__brain"]["models"] = {
+        "habits": {"id": "habits", "name": "Habits", "tags": [], "content": "mine"}
+    }
+    await box.fold().run()
+    models = box.engine.banks["hal0:private"]["models"]
+    assert set(models) == {"brain-habits"}
+    assert {"agent:brain", "visibility:private"} <= set(models["brain-habits"]["tags"])
+    assert "brain-habits" not in box.engine.banks["hal0:shared"]["models"]
+
+
+async def test_a_page_that_did_not_land_with_its_model_is_sent_again(box: Box) -> None:
+    e = box.engine
+    e.banks["coding-agent::web"]["pages"] = [
+        {"id": "kf", "kind": "folder", "name": "Web", "parent_id": None},
+        {
+            "id": "kp",
+            "kind": "page",
+            "name": "Overview",
+            "parent_id": "kf",
+            "mental_model_id": "overview",
+        },
+    ]
+    e.fail_pages.add("hal0:shared")
+    first = await box.fold().run()
+    assert first["left"] == ["coding-agent::web"]
+    assert "web-overview" in e.banks["hal0:shared"]["models"]
+    assert e.banks["hal0:shared"]["pages"] == []
+    before = len(e.imports)
+    second = await box.fold(only=["coding-agent::web"]).run()
+    assert second["status"] == "folded"
+    (resend,) = [a for t, a in e.imports[before:] if t == "hal0:shared"]
+    assert resend["documents"] == []
+    assert [p["id"] for p in resend["knowledge_pages"]] == ["kf", "kp"]
+    pages = e.banks["hal0:shared"]["pages"]
+    assert [p["mental_model_id"] for p in pages if p["kind"] == "page"] == ["web-overview"]
+
+
+async def test_the_routing_check_on_disk_refuses_a_tampered_archive(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    journal = await box.kill_at("rewritten:shared")
+    entry = next(b for b in journal.banks if b.bank == "shared")
+    # Rebuild the platform bank's parts with the private split broken, as a
+    # bug in the rewrite would, and put them where the run will read them.
+    archive_dir = Path(journal.archive_dir)
+    source = (archive_dir / entry.archive).read_bytes()
+    with monkeypatch.context() as m:
+        m.setattr(fi, "_document_private", lambda _plan, _doc: False)
+        m.setattr(fi, "routing_problems", lambda *_a, **_k: [])
+        m.setattr(fi, "shared_archive_problems", lambda _d: [])
+        m.setattr(fi, "private_archive_problems", lambda _d: [])
+        bad = fi.rewrite_archive(source, box.fold()._rewrite_plan(entry, journal))
+    shared_part = entry.part("shared")
+    assert shared_part is not None
+    (archive_dir / shared_part.archive).write_bytes(bad.shared)
+    (archive_dir / (entry.archive[: -len(".zip")] + ".provenance.json")).write_text(
+        json.dumps(bad.provenance)
+    )
+    result = await box.fold().resume()
+    note = next(b["note"] for b in result["banks"] if b["bank"] == "shared")
+    assert "do not keep its private memory on the private side" in note
+    assert not any(
+        "private:hermes:s1" in json.dumps(a) or "my secret" in json.dumps(a)
+        for t, a in box.engine.imports
+        if t == "hal0:shared"
+    )
 
 
 async def test_a_failure_before_any_import_is_undone(box: Box) -> None:
@@ -782,7 +1063,7 @@ async def test_status_reads_the_journal_and_the_record(box: Box) -> None:
     assert status["journal"]["phase"] == fi.PHASE_FOLDING
     assert status["gate"]["reason"] == write_gate.REASON_FOLD_IN
     await box.fold().resume()
-    assert "folded 4 bank(s)" in box.fold().status()["summary"]
+    assert "4 old bank(s) folded in" in box.fold().status()["summary"]
 
 
 # ── interlocks ──────────────────────────────────────────────────────────

@@ -408,6 +408,7 @@ def test_observations_follow_their_source_facts_and_a_split_one_is_dropped() -> 
         "private": 1,
         "dropped_split": 2,
         "dropped_unrouted": 1,
+        "dropped_private_tag": 0,
     }
     assert result.expected["shared"]["observations"] == 1
 
@@ -470,6 +471,7 @@ def test_a_coding_banks_models_are_rekeyed_and_tagged_with_its_project() -> None
     assert result.report["mental_models"] == {
         "carried": 2,
         "renamed": 2,
+        "private": 0,
         "dropped_private": 1,
         "content_cleared": 0,
     }
@@ -496,10 +498,66 @@ def test_models_of_a_bank_that_held_private_facts_lose_what_they_generated() -> 
     assert result.report["mental_models"]["content_cleared"] == 2
 
 
-def test_a_private_bank_gives_no_mental_model() -> None:
+def test_a_private_banks_models_go_private_confined_to_their_owner() -> None:
+    from hal0.memory.hindsight_provider import HindsightProvider
+    from hal0.memory.read_scope import model_scope_confined_to
+
     result = fi.rewrite_archive(_models_archive("private__hermes"), plan("private__hermes"))
     assert result.shared is None
-    assert result.report["mental_models"]["dropped_private"] == 3
+    models = read(result.private)["mental_models"]
+    # The models behind pages are dropped with their pages; the other is carried.
+    assert {m["id"] for m in models} == {"hermes-conventions"}
+    assert read(result.private)["knowledge_pages"] == []
+    assert result.report["mental_models"]["private"] == 1
+    assert result.report["mental_models"]["dropped_private"] == 2
+    assert result.report["knowledge_pages"]["dropped"] == 4
+    assert result.expected["private"]["mental_models"] == 1
+    assert result.ids["private"]["mental_models"] == ["hermes-conventions"]
+    for model in models:
+        assert {"agent:hermes", "visibility:private"} <= set(model["tags"])
+        assert len(model["id"]) <= fi.MODEL_ID_MAX
+        # The provider's read rule: visible to hermes alone, scope confined to hermes.
+        assert HindsightProvider._is_visible_to(model, "hermes")
+        assert not HindsightProvider._is_visible_to(model, "brain")
+        assert model_scope_confined_to(model, "hermes")
+        assert not model_scope_confined_to(model, "brain")
+        assert model["trigger"]["exclude_mental_models"] is True
+    # Built from hermes's own bank, so its content is kept.
+    assert next(m for m in models if m["id"] == "hermes-conventions")["content"] == "use ruff"
+
+
+def test_a_private_models_own_scope_is_kept_and_anded_with_its_owner() -> None:
+    data = archive(
+        "private__hermes",
+        [doc("s1", [fact("mine")])],
+        models=[
+            {
+                "id": "topic",
+                "name": "T",
+                "tags": ["topic"],
+                "trigger": json.dumps({"tags_match": "any"}),
+            },
+            {
+                "id": "grouped",
+                "name": "G",
+                "tags": [],
+                "trigger": {"tag_groups": [{"tags": ["x"], "match": "any"}]},
+            },
+        ],
+    )
+    models = {
+        m["id"]: m
+        for m in read(fi.rewrite_archive(data, plan("private__hermes")).private)["mental_models"]
+    }
+    confine = {"tags": ["agent:hermes", "visibility:private"], "match": "all_strict"}
+    assert models["hermes-topic"]["trigger"]["tag_groups"] == [
+        {"tags": ["topic"], "match": "any"},
+        confine,
+    ]
+    assert models["hermes-grouped"]["trigger"]["tag_groups"] == [
+        {"tags": ["x"], "match": "any"},
+        confine,
+    ]
 
 
 def test_directives_are_listed_and_never_carried() -> None:
@@ -529,7 +587,10 @@ def test_the_rewritten_archive_is_one_a_merge_import_reads() -> None:
     assert result.ids["shared"] == {
         "documents": ["web::hal0-legacy-coding-agent::n"],
         "mental_models": ["web-conventions", "web-page-model"],
+        "pages": ["web-page-model"],
+        "observations": [],
     }
+    assert set(result.digests["shared"]) == {"web::hal0-legacy-coding-agent::n"}
 
 
 # ── the dry run's analysis ───────────────────────────────────────────────
@@ -574,3 +635,219 @@ def test_direct_engine_clients_are_found_by_port_in_each_section() -> None:
     found = fi.direct_engine_clients(configs, 9177)
     assert [f["harness"] for f in found] == ["(default)", "claude-code", "codex"]
     assert fi.direct_engine_clients(configs, None) == []
+
+
+# ── the routing check (review item 1) ─────────────────────────────────────
+
+
+def _leaky_archive() -> bytes:
+    # A private fact in a document whose id and tags say nothing: only the
+    # routing (``_document_private``) sends it private. The tag strip removes
+    # ``visibility:`` from whatever goes shared, so the tag check cannot see it.
+    return archive(
+        "shared",
+        [
+            doc("note", [fact("public", "agent:brain")]),
+            doc("odd", [fact("public too", "agent:brain"), fact("hidden", "visibility:private")]),
+        ],
+    )
+
+
+def test_the_routing_check_refuses_when_only_the_routing_is_broken(monkeypatch) -> None:
+    monkeypatch.setattr(fi, "_document_private", lambda _plan, _doc: False)
+    with pytest.raises(fi.BankLeft) as caught:
+        fi.rewrite_archive(_leaky_archive(), plan("shared"))
+    problems = caught.value.details["problems"]
+    assert any("document odd is private but is in the shared archive" in p for p in problems)
+
+
+def test_without_the_routing_check_the_broken_routing_would_leak(monkeypatch) -> None:
+    # The mutation check of the guard: with routing_problems neutralised, the
+    # same broken routing builds a shared archive that the tag check passes,
+    # with the private fact in it. The routing check is what stops it.
+    monkeypatch.setattr(fi, "_document_private", lambda _plan, _doc: False)
+    monkeypatch.setattr(fi, "routing_problems", lambda *_a, **_k: [])
+    result = fi.rewrite_archive(_leaky_archive(), plan("shared"))
+    assert fi.shared_archive_problems(result.shared) == []
+    assert "hidden" in json.dumps(read(result.shared))
+
+
+def test_the_routing_check_passes_a_correct_rewrite() -> None:
+    data = _leaky_archive()
+    result = fi.rewrite_archive(data, plan("shared"))
+    assert (
+        fi.routing_problems(
+            data, result.shared, result.private, result.provenance, bank_cls="platform"
+        )
+        == []
+    )
+    assert [d["id"] for d in read(result.private)["documents"]] == ["private:brain:odd"]
+
+
+def test_the_routing_check_finds_a_private_observation_model_and_page_on_the_shared_side() -> None:
+    source = archive(
+        "shared",
+        [doc("n", [fact("x")]), doc("private:hermes:s", [fact("s", "visibility:private")])],
+        observations=[
+            {"text": "pub", "tags": [], "sources": [{"document_id": "n", "fact_index": 0}]},
+            {
+                "text": "priv",
+                "tags": [],
+                "sources": [{"document_id": "private:hermes:s", "fact_index": 0}],
+            },
+        ],
+        models=[{"id": "m", "tags": ["visibility:private"]}, {"id": "ok", "tags": []}],
+        pages=[{"id": "kp", "kind": "page", "name": "P", "mental_model_id": "m"}],
+    )
+    # A hand-built shared archive that carries the private observation, model
+    # and page, all stripped of their stamps, as a broken rewrite would.
+    leaked = fi._write_archive(
+        "shared",
+        [{**doc("n", [fact("x")]), "tags": []}],
+        [
+            {"text": "pub", "tags": [], "sources": [{"document_id": "n", "fact_index": 0}]},
+            {"text": "priv", "tags": [], "sources": [{"document_id": "n", "fact_index": 0}]},
+        ],
+        [{"id": "m", "tags": []}, {"id": "ok", "tags": []}],
+        [{"id": "kp", "kind": "page", "name": "P", "mental_model_id": "m"}],
+    )
+    private = fi._write_archive(
+        "shared",
+        [doc("private:hermes:s", [fact("s", "agent:hermes", "visibility:private")])],
+        [],
+        [],
+        [],
+    )
+    provenance = {
+        "shared": {
+            "documents": {"n": "n"},
+            "observations": [0, 1],
+            "mental_models": {"m": "m", "ok": "ok"},
+            "pages": ["kp"],
+        },
+        "private": {
+            "documents": {"private:hermes:s": "private:hermes:s"},
+            "observations": [],
+            "mental_models": {},
+            "pages": [],
+        },
+        "dropped": {"observations": [], "mental_models": [], "pages": []},
+    }
+    assert fi.shared_archive_problems(leaked) == []
+    problems = fi.routing_problems(source, leaked, private, provenance, bank_cls="platform")
+    joined = "; ".join(problems)
+    assert "observation 1 is private but is in the shared archive" in joined
+    assert "mental model m is private but is in the shared archive" in joined
+    assert "knowledge page kp is private but is in the shared archive" in joined
+
+
+def test_the_routing_check_refuses_a_document_missing_from_both_archives() -> None:
+    source = archive("shared", [doc("n", [fact("x")]), doc("p", [fact("y", "visibility:private")])])
+    shared = fi._write_archive("shared", [doc("n", [fact("x")])], [], [], [])
+    provenance = {
+        "shared": {"documents": {"n": "n"}, "observations": [], "mental_models": {}, "pages": []},
+        "private": {"documents": {}, "observations": [], "mental_models": {}, "pages": []},
+        "dropped": {},
+    }
+    problems = fi.routing_problems(source, shared, None, provenance, bank_cls="platform")
+    assert problems == ["source document p is in neither archive"]
+
+
+# ── review items 4, 7, 8, 9 ──────────────────────────────────────────────
+
+
+def test_a_shared_observation_tagged_private_is_dropped_not_published() -> None:
+    data = archive(
+        "shared",
+        [doc("pub", [fact("a", "agent:brain")])],
+        observations=[
+            {
+                "text": "says private",
+                "tags": ["visibility:private", "agent:brain"],
+                "sources": [{"document_id": "pub", "fact_index": 0}],
+            }
+        ],
+    )
+    result = fi.rewrite_archive(data, plan("shared"))
+    assert read(result.shared)["observations"] == []
+    assert result.report["observations"]["dropped_private_tag"] == 1
+    assert result.expected["shared"]["observations"] == 0
+    assert result.provenance["dropped"]["observations"] == [0]
+
+
+def test_the_report_counts_shared_facts_no_agent_can_read() -> None:
+    data = archive(
+        "Hal0::Agents",
+        [doc("n", [fact("no project", "agent:claude-code")]), doc("m", [fact("p", "project:web")])],
+    )
+    p = plan("Hal0::Agents")
+    result = fi.rewrite_archive(data, p)
+    # project:unresolved under hal0-legacy-claude-code: readable by nobody.
+    assert result.report["unreadable_shared_facts"] == 1
+    listing = fi.analyse_listing(
+        p,
+        [{"id": "n"}, {"id": "m"}],
+        [
+            {"document_id": "n", "tags": ["agent:claude-code"]},
+            {"document_id": "m", "tags": ["project:web"]},
+        ],
+    )
+    assert listing["unreadable_shared_facts"] == 1
+
+
+def test_a_private_owner_in_the_platform_bank_is_lowercased_and_follows_the_map() -> None:
+    data = archive(
+        "shared",
+        [
+            doc("a", [fact("x", "agent:Hermes", "visibility:private")]),
+            doc("b", [fact("y", "agent:claude-code", "visibility:private")]),
+        ],
+    )
+    result = fi.rewrite_archive(data, plan("shared", owners={"claude-code": "laptop"}))
+    ids = sorted(d["id"] for d in read(result.private)["documents"])
+    assert ids == ["private:hermes:a", "private:laptop:b"]
+    assert result.report["owners"]["Hermes"]["source"] == "agent"
+    assert result.report["owners"]["claude-code"]["source"] == "map"
+
+
+def test_a_private_document_with_two_owners_refuses_the_bank() -> None:
+    data = archive(
+        "shared",
+        [
+            doc(
+                "mixed",
+                [
+                    fact("a", "agent:hermes", "visibility:private"),
+                    fact("b", "agent:brain", "visibility:private"),
+                ],
+            )
+        ],
+    )
+    with pytest.raises(fi.BankLeft, match="more than one owner") as caught:
+        fi.rewrite_archive(data, plan("shared"))
+    assert caught.value.details["mixed_owner_documents"] == [
+        {"document": "mixed", "owners": ["brain", "hermes"]}
+    ]
+    listing = fi.analyse_listing(
+        plan("shared"),
+        [{"id": "mixed"}],
+        [
+            {"document_id": "mixed", "tags": ["agent:hermes", "visibility:private"]},
+            {"document_id": "mixed", "tags": ["agent:brain", "visibility:private"]},
+        ],
+    )
+    assert listing["mixed_owner_documents"] == [
+        {"document": "mixed", "owners": ["brain", "hermes"]}
+    ]
+
+
+def test_a_document_digest_ignores_what_the_engine_moves_by_itself() -> None:
+    base = doc("d", [fact("x", "t")])
+    moved = json.loads(json.dumps(base))
+    moved["facts"][0].update(
+        {"consolidated_at": "2026-11-12", "source_id": "u1", "entities": ["E"], "created_at": "z"}
+    )
+    assert fi.document_digest(base) == fi.document_digest(moved)
+    appended = json.loads(json.dumps(base))
+    appended["facts"].append(fact("y"))
+    assert fi.document_digest(base) != fi.document_digest(appended)
