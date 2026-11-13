@@ -214,8 +214,8 @@ ends. `--apply` and `--resume` need root.
 </Aside>
 
 **Every bank is checked before any is imported.** Each bank of the run is
-exported, rewritten and checked: the owner and routing checks above, its
-export holding all of it (the engine's export leaves out a fact that belongs
+exported, rewritten and checked: the owner and routing checks above, the
+bank's export holding all of it (the engine's export leaves out a fact that belongs
 to no document), no attachments or invalidated facts, and none of its
 document or mental-model ids already in a target, unless an earlier run sent
 it from the same unchanged source. Two banks of the run that would send the
