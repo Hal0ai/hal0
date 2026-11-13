@@ -584,14 +584,14 @@ def test_pi_installed_versions_none_for_a_non_npm_binary(tmp_path):
 def test_pi_pins_from_installer_script(tmp_path):
     s = tmp_path / "pi.sh"
     s.write_text(
-        'PI_PKG="@earendil-works/pi-coding-agent@1.2.0"\nADAPTER_PKG="pi-mcp-adapter@5.3.0"\n'
+        'PI_PKG="@earendil-works/pi-coding-agent@1.5.2"\nADAPTER_PKG="pi-mcp-adapter@7.0.1"\n'
     )
-    assert pi_pins(s) == {"pi": "1.2.0", "adapter": "5.3.0"}
+    assert pi_pins(s) == {"pi": "1.5.2", "adapter": "7.0.1"}
 
 
 def test_pi_pins_raises_when_a_pin_is_missing(tmp_path):
     s = tmp_path / "pi.sh"
-    s.write_text('PI_PKG="@earendil-works/pi-coding-agent@1.2.0"\n')
+    s.write_text('PI_PKG="@earendil-works/pi-coding-agent@1.5.2"\n')
     with pytest.raises(ValueError, match="ADAPTER_PKG"):
         pi_pins(s)
 

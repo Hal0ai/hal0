@@ -3,8 +3,8 @@
 # Asserts the spec-D2 minimal profile, pins, and both memory wires.
 set -u
 
-PI_PIN="1.2.0"
-ADAPTER_PIN="5.3.0"
+PI_PIN="1.5.2"
+ADAPTER_PIN="7.0.1"
 HINDSIGHT_PIN="0.8.4"
 FAIL=0
 ok()   { printf 'PASS: %s\n' "$*"; }
@@ -26,7 +26,7 @@ import json, sys
 s = json.load(open(sys.argv[1]))
 assert s["theme"] == "hal0" and s["defaultProvider"] == "hal0" and s["defaultModel"] == "agent"
 pkgs = s["packages"]
-assert "npm:pi-mcp-adapter@5.3.0" in pkgs, pkgs
+assert "npm:pi-mcp-adapter@7.0.1" in pkgs, pkgs
 # pi auto-discovers ~/.pi/agent/extensions/; explicit entries double-load.
 for p in ("extensions/hal0-provider", "extensions/hindsight"):
     assert p not in pkgs, p
