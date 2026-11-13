@@ -2119,9 +2119,14 @@ class FoldIn(em.EngineMaintenance):
             hook=hook,
         )
         self._owners = {k.strip().lower(): v.strip() for k, v in (owners or {}).items()}
-        self._maps = dict(maps or {})
+        #: ``--map`` and ``--skip`` as given. The preflight adds the ones earlier
+        #: runs recorded in the ledger (:func:`load_ledger`) to ``_maps`` and
+        #: ``_skips``, so a later run classifies every bank as they did.
+        self._given_maps = dict(maps or {})
+        self._given_skips = list(dict.fromkeys(skips))
+        self._maps = dict(self._given_maps)
         self._only = list(dict.fromkeys(only))
-        self._skips = list(dict.fromkeys(skips))
+        self._skips = list(self._given_skips)
         self._memory_config = memory_config or _default_memory_config
         self._layout = layout
         self._save_layout = save_layout or bank_layout.record_fold_in
@@ -2329,6 +2334,8 @@ class FoldIn(em.EngineMaintenance):
             refuse("ledger_unreadable", exc.message)
             return plan
         earlier: dict[str, dict[str, Any]] = dict(ledger.get("banks") or {})
+        self._remembered_choices(ledger, earlier, refuse)
+        plan["maps"], plan["skips"] = dict(self._maps), list(self._skips)
         plan["earlier"] = {
             bank: {k: row.get(k) for k in ("state", "run_id", "note")}
             for bank, row in earlier.items()
@@ -2486,8 +2493,11 @@ class FoldIn(em.EngineMaintenance):
             return plan
         for missing in [b for b in self._only if b not in ids]:
             refuse("no_such_bank", f"--bank {missing}: the engine has no such bank")
-        for missing in [b for b in self._skips if b not in ids]:
+        for missing in [b for b in self._given_skips if b not in ids]:
             refuse("no_such_bank", f"--skip {missing}: the engine has no such bank")
+        # A recorded skip for a bank the engine no longer holds is dropped.
+        self._skips = [b for b in self._skips if b in ids]
+        plan["skips"] = list(self._skips)
         for row in plan["banks"]:
             if row["bank"] in self._skips and row["class"] not in (
                 CLASS_UNCLASSIFIED,
@@ -2575,6 +2585,55 @@ class FoldIn(em.EngineMaintenance):
                 "old banks; recreate the ones you want on the two banks"
             )
         return plan
+
+    def _remembered_choices(
+        self,
+        ledger: Mapping[str, Any],
+        earlier: Mapping[str, Mapping[str, Any]],
+        refuse: Callable[[str, str], None],
+    ) -> None:
+        """Add the ``--map`` and ``--skip`` choices earlier runs recorded to this run's.
+
+        A bank folded with ``--map`` would otherwise come back unclassified
+        on a later run that does not repeat the flag, and hold the cutover
+        back for good. A ``--map`` given now wins over a recorded one, except
+        for a bank an earlier run folded or sent part of: its documents are
+        filed under the owner that harness gave them, so a changed ``--map``
+        is refused. ``--skip`` is refused for such a bank too: it may have
+        taken writes since, and needs a re-check, not a skip. A recorded skip
+        gives way to a ``--map`` for the same bank.
+        """
+        recorded = ledger.get("maps")
+        saved_maps = (
+            {str(k): str(v) for k, v in recorded.items()} if isinstance(recorded, dict) else {}
+        )
+        saved_skips = [str(b) for b in ledger.get("skips") or [] if isinstance(b, str)]
+
+        def committed(bank: str) -> bool:
+            row = earlier.get(bank) or {}
+            return row.get("state") == LEDGER_FOLDED or bool(row.get("sent_files"))
+
+        for bank, harness in self._given_maps.items():
+            if bank in saved_maps and saved_maps[bank] != harness and committed(bank):
+                refuse(
+                    "map_frozen",
+                    f"--map {bank}={harness}: an earlier run folded {bank} (or sent part of it) "
+                    f"with --map {bank}={saved_maps[bank]}, and what it sent is filed under that "
+                    "harness's owner. Run without --map for it to reuse the recorded one, or "
+                    "with the same value",
+                )
+        for bank in self._given_skips:
+            if committed(bank):
+                refuse(
+                    "skip_folded",
+                    f"--skip {bank}: an earlier run folded {bank} (or sent part of it). It may "
+                    f"have taken writes since, so it needs a re-check, not a skip: run without "
+                    f"--skip {bank}",
+                )
+        self._maps = {**saved_maps, **self._given_maps}
+        self._skips = list(
+            dict.fromkeys([*self._given_skips, *(b for b in saved_skips if b not in self._maps)])
+        )
 
     async def _analyse(self, cls: BankClass, earlier: Mapping[str, Any] | None) -> dict[str, Any]:
         """The dry run's look at one bank: its listings, routed as the rewrite would."""
@@ -3762,6 +3821,11 @@ class FoldIn(em.EngineMaintenance):
         ledger = load_ledger()
         ledger["platform_bank"] = journal.platform_bank or ledger.get("platform_bank")
         ledger["targets"] = dict(journal.targets)
+        # The run's --map and --skip, for the runs after it (:meth:`_remembered_choices`).
+        maps = dict(ledger.get("maps") or {})
+        maps.update(journal.maps)
+        ledger["maps"] = maps
+        ledger["skips"] = sorted({*(ledger.get("skips") or []), *journal.skips} - set(maps))
         banks = ledger.setdefault("banks", {})
         for entry in journal.banks:
             if entry.step not in _DONE_STEPS:
@@ -3882,6 +3946,11 @@ class FoldIn(em.EngineMaintenance):
         self._say("memory writes resumed on the old layout")
         left = [e.bank for e in journal.banks if e.step == STEP_LEFT]
         retry = [*left, *journal.pending]
+        # The run's --map and --skip go into the command as well: later runs
+        # read them from the ledger too, but the command shows what it relies on.
+        choices = "".join(
+            f" --map {shlex.quote(f'{b}={h}')}" for b, h in sorted(journal.maps.items())
+        ) + "".join(f" --skip {shlex.quote(b)}" for b in journal.skips)
         return {
             **self._result(journal, embedder),
             "status": "incomplete",
@@ -3890,7 +3959,8 @@ class FoldIn(em.EngineMaintenance):
             "pending": list(journal.pending),
             "blocking": list(journal.blocking),
             "retry": f"sudo {NAMES.command} --apply"
-            + "".join(f" --bank {shlex.quote(b)}" for b in retry),
+            + "".join(f" --bank {shlex.quote(b)}" for b in retry)
+            + choices,
         }
 
     def _result(self, journal: Journal, embedder: Embedder) -> dict[str, Any]:

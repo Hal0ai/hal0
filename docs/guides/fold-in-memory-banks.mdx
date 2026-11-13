@@ -106,10 +106,18 @@ tags are rewritten in the archive first:
 
 The `agents` bank, temporary banks of an embedder switch, and the two
 targets themselves are never folded. A bank the fold-in does not know is
-refused: name it with `--map BANK=HARNESS` to fold it as a coding bank
-written by that harness, or with `--skip BANK` to leave it out of the two
-banks. The `agents` bank must be empty before the cutover (`hal0 memory
-migrate platform` folds it), or named with `--skip`.
+refused, even when it is empty: name it with `--map BANK=HARNESS` to fold it
+as a coding bank written by that harness, or with `--skip BANK` to leave it
+out of the two banks. Only the `agents` bank is let through empty: it must be
+empty before the cutover (`hal0 memory migrate platform` folds it), or named
+with `--skip`. A skipped bank stays on the engine, untouched, and nothing
+reads it after the cutover.
+
+The `--map` and `--skip` choices are kept in the ledger, and every later run
+uses them, so a retry need not repeat them (the retry command the run prints
+names them anyway). A run that names a different `--map` for a bank an
+earlier run folded, or sent part of, is refused, and so is `--skip` for such
+a bank: it may have taken writes since, and needs a re-check, not a skip.
 
 ## The dry run
 

@@ -866,6 +866,42 @@ async def test_the_retired_agents_bank_holds_the_cutover_back_until_empty_or_ski
     assert (await box.fold().run())["status"] == "folded"
 
 
+async def test_a_map_is_remembered_and_a_later_run_reuses_it(box: Box) -> None:
+    """Third review, item 2: the retry must not drop the --map the run used."""
+    e = box.engine
+    e.banks["hal0-mono"] = empty_bank()
+    e.banks["hal0-mono"]["docs"] = {"m1": doc("m1", fact("devops note", "project:web"))}
+    first = await box.fold(maps={"hal0-mono": "claude-code"}, only=["hal0-mono"]).run()
+    assert first["status"] == "incomplete" and first["folded"] == ["hal0-mono"]
+    assert "--map hal0-mono=claude-code" in first["retry"]
+    assert fi.load_ledger()["maps"] == {"hal0-mono": "claude-code"}
+    # A later run without the flag still knows the bank.
+    plan = await box.fold().preflight()
+    assert plan["maps"] == {"hal0-mono": "claude-code"}
+    assert plan["refusals"] == [] and plan["blocking"] == []
+    # A changed --map, or a --skip, for the folded bank is refused.
+    assert "map_frozen" in _codes(await box.fold(maps={"hal0-mono": "codex"}).preflight())
+    assert "skip_folded" in _codes(await box.fold(skips=["hal0-mono"]).preflight())
+    done = await box.fold().run()
+    assert done["status"] == "folded"
+    assert box.layout().two_bank
+
+
+async def test_a_skip_is_remembered_and_named_in_the_retry(box: Box) -> None:
+    e = box.engine
+    e.banks["hal0-other"] = empty_bank()
+    e.banks["hal0-other"]["docs"] = {"x1": doc("x1", fact("kept out"))}
+    first = await box.fold(skips=["hal0-other"], only=["shared"]).run()
+    assert first["status"] == "incomplete"
+    assert first["retry"].endswith("--skip hal0-other")
+    assert fi.load_ledger()["skips"] == ["hal0-other"]
+    plan = await box.fold().preflight()
+    assert plan["skips"] == ["hal0-other"] and plan["blocking"] == []
+    done = await box.fold().run()
+    assert done["status"] == "folded"
+    assert "x1" in e.banks["hal0-other"]["docs"]
+
+
 async def test_skip_is_only_for_a_bank_the_fold_in_does_not_move(box: Box) -> None:
     plan = await box.fold(skips=["pi-coder"]).preflight()
     assert "skip_not_allowed" in _codes(plan)

@@ -382,7 +382,8 @@ def fold_in_cmd(
         [],
         "--map",
         help="BANK=HARNESS (repeatable): fold a bank the fold-in does not know as a coding "
-        "bank written by HARNESS, its project taken from each fact's tags.",
+        "bank written by HARNESS, its project taken from each fact's tags. Kept in the ledger "
+        "and reused by later runs; a different --map for a bank already folded is refused.",
     ),
     skip: list[str] = typer.Option(
         [],
@@ -390,7 +391,8 @@ def fold_in_cmd(
         help="BANK (repeatable): leave a bank the fold-in does not know, or the retired agents "
         "bank, out of the two banks. Without it such a bank holds the cutover back (an excluded "
         "bank only while it is not empty). It stays on the engine and nothing reads it after "
-        "the cutover.",
+        "the cutover. Kept in the ledger and reused by later runs; refused for a bank an "
+        "earlier run folded.",
     ),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of tables."),
 ) -> None:
