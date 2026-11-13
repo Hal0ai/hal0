@@ -2139,6 +2139,7 @@ class FoldIn(em.EngineMaintenance):
         maps: Mapping[str, str] | None = None,
         only: Iterable[str] = (),
         skips: Iterable[str] = (),
+        forget_skips: Iterable[str] = (),
         allow_exposed_engine: bool = False,
         memory_config: Callable[[], Any] | None = None,
         layout: Callable[[], Any] | None = None,
@@ -2197,6 +2198,9 @@ class FoldIn(em.EngineMaintenance):
         self._maps = dict(self._given_maps)
         self._only = list(dict.fromkeys(only))
         self._skips = list(self._given_skips)
+        #: ``--forget-skip``: recorded skips this run drops from the ledger.
+        self._forget_skips = list(dict.fromkeys(forget_skips))
+        self._forgotten: list[str] = []
         self._allow_exposed_engine = allow_exposed_engine
         self._memory_config = memory_config or _default_memory_config
         self._layout = layout
@@ -2409,6 +2413,10 @@ class FoldIn(em.EngineMaintenance):
         earlier: dict[str, dict[str, Any]] = dict(ledger.get("banks") or {})
         self._remembered_choices(ledger, earlier, refuse)
         plan["maps"], plan["skips"] = dict(self._maps), list(self._skips)
+        plan["forgotten_skips"] = list(self._forgotten)
+        for bank in self._forget_skips:
+            if bank not in self._forgotten:
+                warnings.append(f"--forget-skip {bank}: no run recorded a --skip for it")
         plan["earlier"] = {
             bank: {k: row.get(k) for k in ("state", "run_id", "note")}
             for bank, row in earlier.items()
@@ -2725,10 +2733,12 @@ class FoldIn(em.EngineMaintenance):
         on a later run that does not repeat the flag, and hold the cutover
         back for good. A ``--map`` given now wins over a recorded one, except
         for a bank an earlier run folded or sent part of: its documents are
-        filed under the owner that harness gave them, so a changed ``--map``
-        is refused. ``--skip`` is refused for such a bank too: it may have
-        taken writes since, and needs a re-check, not a skip. A recorded skip
-        gives way to a ``--map`` for the same bank.
+        filed under the owner the classification then gave them, so any
+        ``--map`` that differs from what was recorded for it is refused,
+        including a first ``--map`` for a bank folded without one. ``--skip``
+        is refused for such a bank too: it may have taken writes since, and
+        needs a re-check, not a skip. A recorded skip gives way to a ``--map``
+        for the same bank, and ``--forget-skip`` drops one.
         """
         recorded = ledger.get("maps")
         saved_maps = (
@@ -2741,13 +2751,29 @@ class FoldIn(em.EngineMaintenance):
             return row.get("state") == LEDGER_FOLDED or bool(row.get("sent_files"))
 
         for bank, harness in self._given_maps.items():
-            if bank in saved_maps and saved_maps[bank] != harness and committed(bank):
+            if not committed(bank) or saved_maps.get(bank) == harness:
+                continue
+            if bank in saved_maps:
                 refuse(
                     "map_frozen",
                     f"--map {bank}={harness}: an earlier run folded {bank} (or sent part of it) "
                     f"with --map {bank}={saved_maps[bank]}, and what it sent is filed under that "
                     "harness's owner. Run without --map for it to reuse the recorded one, or "
                     "with the same value",
+                )
+            else:
+                refuse(
+                    "map_frozen",
+                    f"--map {bank}={harness}: an earlier run folded {bank} (or sent part of it) "
+                    "without --map, and what it sent is filed under the owners its own class "
+                    "gave it. A --map now would file the rest under another harness's owner. "
+                    f"Run without --map for {bank}",
+                )
+        for bank in self._forget_skips:
+            if bank in self._given_skips:
+                refuse(
+                    "forget_skip_conflict",
+                    f"--forget-skip {bank} and --skip {bank} were both given; give one",
                 )
         for bank in self._given_skips:
             if committed(bank):
@@ -2758,8 +2784,18 @@ class FoldIn(em.EngineMaintenance):
                     f"--skip {bank}",
                 )
         self._maps = {**saved_maps, **self._given_maps}
+        self._forgotten = [b for b in self._forget_skips if b in saved_skips]
         self._skips = list(
-            dict.fromkeys([*self._given_skips, *(b for b in saved_skips if b not in self._maps)])
+            dict.fromkeys(
+                [
+                    *self._given_skips,
+                    *(
+                        b
+                        for b in saved_skips
+                        if b not in self._maps and b not in self._forget_skips
+                    ),
+                ]
+            )
         )
 
     async def _analyse(self, cls: BankClass, earlier: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -4024,7 +4060,10 @@ class FoldIn(em.EngineMaintenance):
         maps = dict(ledger.get("maps") or {})
         maps.update(journal.maps)
         ledger["maps"] = maps
-        ledger["skips"] = sorted({*(ledger.get("skips") or []), *journal.skips} - set(maps))
+        # Only the run's own skips are kept: it dropped those for banks the
+        # engine no longer holds, and those named with --forget-skip, so a
+        # bank that comes back later is classified from scratch.
+        ledger["skips"] = sorted(set(journal.skips) - set(maps))
         banks = ledger.setdefault("banks", {})
         for entry in journal.banks:
             if entry.step not in _DONE_STEPS:

@@ -88,7 +88,11 @@ def test_skip_and_clear_gate_reach_the_fold_in() -> None:
     out = invoke("--skip", "hal0-mono", "--json")
     assert out.exit_code == 0, out.output
     assert FakeFoldIn.built[0]["skips"] == ["hal0-mono"]
-    out = invoke("--clear-gate")
+    assert FakeFoldIn.built[0]["forget_skips"] == []
+    out = invoke("--forget-skip", "old-bank", "--json")
+    assert out.exit_code == 0, out.output
+    assert FakeFoldIn.built[1]["forget_skips"] == ["old-bank"]
+    out = invoke("--clear-gate")  # built[2]
     assert out.exit_code == 0, out.output
     assert "Memory writes are open again" in out.output
     assert "old layout" in out.output

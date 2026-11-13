@@ -383,7 +383,8 @@ def fold_in_cmd(
         "--map",
         help="BANK=HARNESS (repeatable): fold a bank the fold-in does not know as a coding "
         "bank written by HARNESS, its project taken from each fact's tags. Kept in the ledger "
-        "and reused by later runs; a different --map for a bank already folded is refused.",
+        "and reused by later runs; for a bank already folded, a --map other than the one it "
+        "was folded with (or any --map, if it was folded without one) is refused.",
     ),
     skip: list[str] = typer.Option(
         [],
@@ -392,7 +393,13 @@ def fold_in_cmd(
         "bank, out of the two banks. Without it such a bank holds the cutover back (an excluded "
         "bank only while it is not empty). It stays on the engine and nothing reads it after "
         "the cutover. Kept in the ledger and reused by later runs; refused for a bank an "
-        "earlier run folded.",
+        "earlier run folded. A recorded skip for a bank the engine no longer holds is dropped.",
+    ),
+    forget_skip: list[str] = typer.Option(
+        [],
+        "--forget-skip",
+        help="BANK (repeatable): drop a --skip an earlier run recorded, so the bank is "
+        "classified from scratch again. The ledger forgets it when this run ends.",
     ),
     allow_exposed_engine: bool = typer.Option(
         False,
@@ -432,6 +439,7 @@ def fold_in_cmd(
         "maps": maps,
         "only": bank,
         "skips": skip,
+        "forget_skips": forget_skip,
         "allow_exposed_engine": allow_exposed_engine,
     }
 

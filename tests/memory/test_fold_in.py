@@ -1032,6 +1032,69 @@ async def test_a_skip_is_remembered_and_named_in_the_retry(box: Box) -> None:
     assert "nothing reads them after the cutover" in done["skipped_note"]
 
 
+async def test_a_first_map_for_a_bank_folded_without_one_is_refused(box: Box) -> None:
+    """Fourth review, item 5: the freeze covers every folded bank, not only mapped ones."""
+    first = await box.fold(only=["pi-coder"]).run()
+    assert first["folded"] == ["pi-coder"]
+    plan = await box.fold(maps={"pi-coder": "codex"}).preflight()
+    (message,) = [r["message"] for r in plan["refusals"] if r["code"] == "map_frozen"]
+    assert "without --map" in message and "Run without --map for pi-coder" in message
+    # A bank only partly sent is frozen as well.
+    box.engine.fail_import.add("hal0:shared")
+    left = await box.fold(only=["coding-agent::web"]).run()
+    web = fi.load_ledger()["banks"]["coding-agent::web"]
+    assert left["left"] == ["coding-agent::web"] and web["state"] == fi.LEDGER_LEFT
+    assert web.get("sent_files")
+    frozen = await box.fold(maps={"coding-agent::web": "codex"}).preflight()
+    assert "map_frozen" in _codes(frozen)
+    # A bank no run has sent anything of may still be mapped.
+    box.engine.banks["hal0-mono"] = empty_bank()
+    plan = await box.fold(maps={"hal0-mono": "claude-code"}).preflight()
+    assert "map_frozen" not in _codes(plan)
+
+
+async def test_a_recorded_skip_for_a_bank_that_is_gone_is_dropped_from_the_ledger(
+    box: Box,
+) -> None:
+    """Fourth review, item 6: a bank that comes back after its skip was dropped starts afresh."""
+    e = box.engine
+    e.banks["hal0-other"] = empty_bank()
+    e.banks["hal0-other"]["docs"] = {"x1": doc("x1", fact("kept out"))}
+    await box.fold(skips=["hal0-other"], only=["shared"]).run()
+    assert fi.load_ledger()["skips"] == ["hal0-other"]
+    del e.banks["hal0-other"]
+    again = await box.fold(only=["pi-coder"]).run()
+    assert again["status"] == "incomplete"
+    assert fi.load_ledger()["skips"] == []
+    # It comes back: unclassified again, so it needs --skip or --map anew.
+    e.banks["hal0-other"] = empty_bank()
+    e.banks["hal0-other"]["docs"] = {"x2": doc("x2", fact("back again"))}
+    plan = await box.fold().preflight()
+    assert plan["skips"] == [] and "unclassified_bank" in _codes(plan)
+
+
+async def test_forget_skip_drops_a_recorded_skip(box: Box) -> None:
+    """Fourth review, item 6: --forget-skip BANK."""
+    e = box.engine
+    e.banks["hal0-other"] = empty_bank()
+    await box.fold(skips=["hal0-other"], only=["shared"]).run()
+    assert fi.load_ledger()["skips"] == ["hal0-other"]
+    plan = await box.fold(forget_skips=["hal0-other"]).preflight()
+    assert plan["skips"] == [] and plan["forgotten_skips"] == ["hal0-other"]
+    # The empty unclassified bank is unaccounted for again.
+    assert "unclassified_bank" in _codes(plan)
+    assert fi.load_ledger()["skips"] == ["hal0-other"], "a dry run writes nothing"
+    both = await box.fold(skips=["hal0-other"], forget_skips=["hal0-other"]).preflight()
+    assert "forget_skip_conflict" in _codes(both)
+    unknown = await box.fold(forget_skips=["never-skipped"]).preflight()
+    assert any("--forget-skip never-skipped" in w for w in unknown["warnings"])
+    # A run that ends writes the ledger without it.
+    e.banks["hal0-other"]["docs"] = {}
+    del e.banks["hal0-other"]
+    await box.fold(forget_skips=["hal0-other"], only=["pi-coder"]).run()
+    assert fi.load_ledger()["skips"] == []
+
+
 async def test_skip_is_only_for_a_bank_the_fold_in_does_not_move(box: Box) -> None:
     plan = await box.fold(skips=["pi-coder"]).preflight()
     assert "skip_not_allowed" in _codes(plan)
