@@ -900,6 +900,11 @@ async def test_a_skip_is_remembered_and_named_in_the_retry(box: Box) -> None:
     done = await box.fold().run()
     assert done["status"] == "folded"
     assert "x1" in e.banks["hal0-other"]["docs"]
+    # Third review, item 3: the cutover names what it leaves unread.
+    assert done["skipped"] == [
+        {"bank": "hal0-other", "class": "unclassified", "facts": 1, "documents": 1}
+    ]
+    assert "nothing reads them after the cutover" in done["skipped_note"]
 
 
 async def test_skip_is_only_for_a_bank_the_fold_in_does_not_move(box: Box) -> None:

@@ -157,6 +157,33 @@ def test_apply_that_cuts_over_exits_0() -> None:
     assert "The store is on the two banks" in out.output
 
 
+def test_a_cutover_lists_the_skipped_banks_and_says_nothing_reads_them() -> None:
+    FakeFoldIn.result = {
+        "status": "folded",
+        "cut_over": True,
+        "folded": ["shared"],
+        "left": [],
+        "banks": [],
+        "targets": {"shared": "hal0:shared", "private": "hal0:private"},
+        "archive_dir": "/x",
+        "skipped": [{"bank": "hal0-mono", "class": "unclassified", "facts": 7, "documents": 2}],
+        "skipped_note": fi.SKIPPED_NOTE,
+    }
+    out = invoke("--apply")
+    assert out.exit_code == 0, out.output
+    text = " ".join(out.output.replace("│", " ").split())
+    assert "hal0-mono: 7 fact(s), 2 document(s)" in text
+    assert "nothing reads them after the cutover" in text
+    payload = json.loads(invoke("--apply", "--json").output)
+    assert payload["skipped"][0] == {
+        "bank": "hal0-mono",
+        "class": "unclassified",
+        "facts": 7,
+        "documents": 2,
+    }
+    assert "nothing reads them" in payload["skipped_note"]
+
+
 def test_the_dry_run_says_what_it_will_not_carry_and_whether_it_cuts_over() -> None:
     FakeFoldIn.plan = {
         "banks": [

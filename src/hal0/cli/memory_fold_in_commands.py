@@ -511,8 +511,19 @@ def fold_in_cmd(
         )
     else:
         body.append(
-            "The store is on the two banks; memory writes are open again. The old banks are kept."
+            "The store is on the two banks; memory writes are open again. The old banks stay on "
+            "the engine, untouched, but hal0 no longer reads them."
         )
+        skipped = result.get("skipped") or []
+        if skipped:
+            body.append(
+                f"[yellow]{len(skipped)} bank(s) {escape(str(result.get('skipped_note')))}:[/yellow]"
+            )
+            body.extend(
+                f"  {escape(str(row.get('bank')))}: {row.get('facts')} fact(s), "
+                f"{row.get('documents')} document(s)"
+                for row in skipped
+            )
     for entry in result.get("banks") or []:
         if entry.get("step") == "left":
             body.append(

@@ -111,7 +111,8 @@ as a coding bank written by that harness, or with `--skip BANK` to leave it
 out of the two banks. Only the `agents` bank is let through empty: it must be
 empty before the cutover (`hal0 memory migrate platform` folds it), or named
 with `--skip`. A skipped bank stays on the engine, untouched, and nothing
-reads it after the cutover.
+reads it after the cutover; the run that cuts over lists every skipped bank
+with its facts and documents (`skipped` in `--json`).
 
 The `--map` and `--skip` choices are kept in the ledger, and every later run
 uses them, so a retry need not repeat them (the retry command the run prints

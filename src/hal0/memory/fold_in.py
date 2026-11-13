@@ -1675,6 +1675,9 @@ class Journal:
     #: Banks on the engine that held the cutover back at the end of the run
     #: (:meth:`FoldIn._cutover_blockers`), each with what to do about it.
     blocking: list[dict[str, str]] = field(default_factory=list)
+    #: The ``--skip`` banks on the engine at the end of the run, with their fact
+    #: and document counts: what the cutover leaves unread (:meth:`FoldIn._cutover`).
+    skipped: list[dict[str, Any]] = field(default_factory=list)
     private_port: int | None = None
     isolated: bool = False
     engine_stopped: bool = False
@@ -1976,6 +1979,12 @@ def direct_engine_clients(
 #: mixed-owner documents, the routing problems. The ledger and the journal
 #: carry only counts and this file's path.
 LEFT_IDS_NAME = "left-ids.json"
+
+#: What the cutover means for a ``--skip`` bank, in its result and its output.
+SKIPPED_NOTE = (
+    "named with --skip: they stay on the engine, untouched, and nothing reads them after the "
+    "cutover. Their memory is not in hal0:shared or hal0:private"
+)
 
 
 def _archive_name(index: int, bank: str, part: str) -> str:
@@ -3901,6 +3910,7 @@ class FoldIn(em.EngineMaintenance):
         }
         platform = journal.platform_bank or bank_layout.LEGACY_PLATFORM_BANK
         out: list[dict[str, str]] = []
+        skipped: list[dict[str, Any]] = []
         for bank in await self._bank_ids():
             cls = classify_bank(
                 bank, platform_bank=platform, targets=journal.targets.values(), maps=journal.maps
@@ -3908,12 +3918,23 @@ class FoldIn(em.EngineMaintenance):
             row: dict[str, Any] = {"bank": bank, "class": cls.cls, "reason": cls.reason}
             if cls.foldable:
                 row["folded"] = bank in folded
-            elif cls.cls == CLASS_EXCLUDED:
+            elif cls.cls == CLASS_EXCLUDED or bank in journal.skips:
                 state = await self.bank_state(bank)
                 row["counts"] = state["counts"]
+            if bank in journal.skips and not cls.foldable:
+                counts = row.get("counts") or {}
+                skipped.append(
+                    {
+                        "bank": bank,
+                        "class": cls.cls,
+                        "facts": int(counts.get("facts", 0)),
+                        "documents": int(counts.get("documents", 0)),
+                    }
+                )
             blocker = _blocker(row, skips=journal.skips)
             if blocker is not None:
                 out.append(blocker)
+        journal.skipped = skipped
         return out
 
     async def _end_without_cutover(self, journal: Journal) -> dict[str, Any]:
@@ -4053,6 +4074,8 @@ class FoldIn(em.EngineMaintenance):
             "left": [],
             "pending": [],
             "folded_all": [f["bank"] for f in folded],
+            "skipped": list(journal.skipped),
+            "skipped_note": SKIPPED_NOTE if journal.skipped else None,
         }
 
     # ── a pause left behind ─────────────────────────────────────────────
