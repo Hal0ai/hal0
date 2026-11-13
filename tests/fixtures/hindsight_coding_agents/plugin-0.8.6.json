@@ -1,7 +1,7 @@
 {
   "plugin": "@vectorize-io/hindsight-coding-agents",
   "version": "0.8.6",
-  "note": "Request shapes as the plugin's one HTTP client class sends them, transcribed by hand from its published bundle. No plugin code is vendored. Every URL is apiUrl + /v1/default/banks/ + encodeURIComponent(bank) + suffix, with Authorization: Bearer <apiToken> and no other custom header. Ids, text, the configured stamp tag and the mission and strategy bodies of the bank template are made up or abbreviated; field names and fixed values are the plugin's. 'path' is relative to apiUrl. 'expect.status' is what hal0's endpoint answers; 'expect.engine' is the engine call it makes, or null when it makes none. In 'expect.engine', a document is named by the id hal0 stores it under for the bridge client 'cc' in project 'hal0' (<project>::<client>::<id>), and '{engine operation id}' stands for the id hal0 derives from the client and the operation id in the request.",
+  "note": "Request shapes as the plugin's one HTTP client class sends them, transcribed by hand from its published bundle. No plugin code is vendored. Every URL is apiUrl + /v1/default/banks/ + encodeURIComponent(bank) + suffix, with Authorization: Bearer <apiToken> and no other custom header. Ids, text, the configured stamp tag and the mission and strategy bodies of the bank template are made up or abbreviated; field names and fixed values are the plugin's. 'path' is relative to apiUrl. 'expect.status' is what hal0's endpoint answers; 'expect.engine' is the engine call it makes, or null when it makes none. In 'expect.engine', a document is named by the id hal0 stores it under for the bridge client 'cc' in project 'hal0' (<project>::<client>::<id>), and '{engine operation id}' stands for the id hal0 derives from the client and the operation id in the request. The knowledge-base cases run against a platform bank whose tree holds the folder 'project:hal0' (id kf-hal0) with a folder 'Initiatives' (kf-initiatives) and a page 'Component map' (kp-architecture) that client 'cc' wrote through this endpoint.",
   "requests": [
     {
       "name": "version_probe",
@@ -210,8 +210,8 @@
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/knowledge-base/tree",
       "expect": {
-        "status": 404,
-        "engine": null
+        "status": 200,
+        "engine": "GET /v1/default/banks/hal0:shared/knowledge-base/tree"
       }
     },
     {
@@ -219,8 +219,8 @@
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/knowledge-base/pages/kp-architecture",
       "expect": {
-        "status": 404,
-        "engine": null
+        "status": 200,
+        "engine": "GET /v1/default/banks/hal0:shared/knowledge-base/pages/kp-architecture"
       }
     },
     {
@@ -228,8 +228,8 @@
       "method": "GET",
       "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/knowledge-base/search?q=release%20process&limit=3",
       "expect": {
-        "status": 404,
-        "engine": null
+        "status": 200,
+        "engine": "GET /v1/default/banks/hal0:shared/knowledge-base/search"
       }
     },
     {
@@ -254,8 +254,34 @@
         }
       },
       "expect": {
-        "status": 404,
-        "engine": null
+        "status": 201,
+        "engine": "POST /v1/default/banks/hal0:shared/knowledge-base/pages"
+      }
+    },
+    {
+      "name": "knowledge_base_initiative_page_create",
+      "method": "POST",
+      "path": "/v1/default/banks/coding-agent%3A%3Ahal0-mono/knowledge-base/pages",
+      "body": {
+        "name": "Memory compat knowledge pages",
+        "source_query": "Summarize the \"Memory compat knowledge pages\" initiative: what is being built or changed and why, and its current state — drawn from the project's memory.",
+        "parent_id": "kf-initiatives",
+        "tags": [
+          "knowledge:feature-work"
+        ],
+        "trigger": {
+          "fact_types": [
+            "world",
+            "experience",
+            "observation"
+          ],
+          "tags_match": "all",
+          "refresh_after_consolidation": true
+        }
+      },
+      "expect": {
+        "status": 201,
+        "engine": "POST /v1/default/banks/hal0:shared/knowledge-base/pages"
       }
     },
     {
@@ -269,8 +295,8 @@
         ]
       },
       "expect": {
-        "status": 404,
-        "engine": null
+        "status": 200,
+        "engine": "PATCH /v1/default/banks/hal0:shared/knowledge-base/nodes/kp-architecture"
       }
     },
     {
@@ -281,8 +307,8 @@
         "name": "Runbooks"
       },
       "expect": {
-        "status": 404,
-        "engine": null
+        "status": 201,
+        "engine": "POST /v1/default/banks/hal0:shared/knowledge-base/folders"
       }
     }
   ]
