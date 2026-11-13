@@ -228,6 +228,56 @@ def test_the_dry_run_says_what_it_will_not_carry_and_whether_it_cuts_over() -> N
     assert "cutover: not in this run" in text
 
 
+def test_the_dry_run_names_the_pages_a_pseudo_owner_will_hold() -> None:
+    names = [f"Page {i}" for i in range(12)]
+    FakeFoldIn.plan = {
+        "banks": [
+            {
+                "bank": "coding-agent::hal0-mono",
+                "class": "coding",
+                "action": "fold",
+                "fold": {"knowledge_pages": {"pseudo_owned": names}},
+            }
+        ],
+        "pending": [],
+        "refusals": [],
+        "warnings": [],
+    }
+    out = invoke()
+    assert out.exit_code == 0, out.output
+    text = " ".join(out.output.split())
+    assert "coding-agent::hal0-mono: 12 knowledge page(s) will be filed under a reserved" in text
+    assert "Page 0" in text and "Page 9" in text and "Page 10" not in text
+    assert "and 2 more" in text
+    assert "--owner" in text and "HARNESS=CLIENT" in text
+
+
+def test_the_dry_run_counts_the_pages_it_carries_empty() -> None:
+    FakeFoldIn.plan = {
+        "banks": [
+            {
+                "bank": "Hal0::Agents",
+                "class": "coding",
+                "action": "fold",
+                "fold": {
+                    "knowledge_pages": {
+                        "content_cleared_tag_project": 5,
+                        "content_cleared_unscoped": 0,
+                    }
+                },
+            }
+        ],
+        "pending": [],
+        "refusals": [],
+        "warnings": [],
+    }
+    out = invoke()
+    assert out.exit_code == 0, out.output
+    text = " ".join(out.output.replace("│", " ").split())
+    assert "Hal0::Agents: 5 knowledge page(s) are carried into their project folder empty" in text
+    assert "5 from a bank whose project comes from tags, 0 whose old trigger" in text
+
+
 def test_a_failed_run_says_writes_stay_paused_when_a_journal_is_left(monkeypatch) -> None:
     FakeFoldIn.error = fi.FoldInError("engine gone", resumable=True)
     monkeypatch.setattr(cmd, "interrupted_fold_in", lambda: {"archive_dir": "/x"})

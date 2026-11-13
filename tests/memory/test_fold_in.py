@@ -31,6 +31,7 @@ from hal0.memory import bank_layout, write_gate
 from hal0.memory import embedder_switch as es
 from hal0.memory import engine_maintenance as em
 from hal0.memory import fold_in as fi
+from hal0.memory import knowledge_pages as kp_ids
 from hal0.memory.embedder_record import Embedder
 from hal0.memory.hindsight_client import HindsightRestClient
 
@@ -119,6 +120,11 @@ class FakeEngine:
         #: Per bank: the next import lands this many facts more (or, negative,
         #: fewer) than its archive carries, every id present all the same.
         self.skew_import: dict[str, int] = {}
+        #: Banks whose next import puts every page at the root, as an engine
+        #: that dropped ``parent_id`` would.
+        self.pages_at_root: set[str] = set()
+        #: Called just before a folder POST is served: a writer racing the fold-in.
+        self.before_folder_post: Any = None
         #: Per bank: mental_model_history rows the export carries.
         self.model_history: dict[str, list[dict[str, Any]]] = {}
 
@@ -234,8 +240,81 @@ class FakeEngine:
         if bank in self.fail_pages and pages:
             self.fail_pages.discard(bank)
             return {"status": "failed", "error_message": "died before the pages"}
-        target["pages"].extend(pages)
+        return self._restore_pages(bank, pages)
+
+    def _restore_pages(self, bank: str, pages: list[dict[str, Any]]) -> dict[str, Any]:
+        """``_restore_knowledge_pages`` in ``engine/transfer/importer.py``.
+
+        A node id another bank holds gets a fresh id; a ``parent_id`` is kept
+        only when the parent is in the archive; parents go first; a row whose
+        id the bank has, or a page whose name its folder has for a page
+        (``uq_kp_folder_pagename``, ``WHERE kind = 'page'``), is dropped
+        (``ON CONFLICT DO NOTHING``);
+        a parent that is not there fails the insert (``fk_kp_parent``).
+        """
+        target = self.banks[bank]
+        elsewhere = {str(p["id"]) for b, v in self.banks.items() if b != bank for p in v["pages"]}
+        id_map = {
+            str(p["id"]): (f"kp-fresh{len(self.ops)}{i}" if str(p["id"]) in elsewhere else p["id"])
+            for i, p in enumerate(pages)
+        }
+        placed = {str(p.get("id")) for p in target["pages"]}
+        ordered: list[dict[str, Any]] = []
+        remaining = list(pages)
+        while remaining:
+            ready = [
+                p
+                for p in remaining
+                if not p.get("parent_id")
+                or p["parent_id"] not in id_map
+                or any(o["id"] == p["parent_id"] for o in ordered)
+            ]
+            if not ready:
+                ready = remaining
+            ordered.extend(ready)
+            remaining = [p for p in remaining if p not in ready]
+        for page in ordered:
+            row = dict(page)
+            row["id"] = id_map[str(page["id"])]
+            parent = page.get("parent_id")
+            row["parent_id"] = id_map.get(parent) if parent else None
+            if bank in self.pages_at_root and row.get("kind") == "page":
+                row["parent_id"] = None
+            if row["id"] in placed:
+                continue
+            if row["parent_id"] and row["parent_id"] not in placed:
+                return {"status": "failed", "error_message": "ForeignKeyViolation fk_kp_parent"}
+            if row.get("kind") == "page" and any(
+                o.get("kind") == "page"
+                and (o.get("parent_id") or "") == (row["parent_id"] or "")
+                and str(o.get("name")).lower() == str(row.get("name")).lower()
+                for o in target["pages"]
+            ):
+                continue
+            target["pages"].append(row)
+            placed.add(row["id"])
         return {"status": "completed"}
+
+    def tree(self, bank: str) -> list[dict[str, Any]]:
+        """The engine's tree: nodes nested, a page with its model's tags and trigger."""
+        b = self.banks[bank]
+        nodes: dict[str, dict[str, Any]] = {}
+        for p in b["pages"]:
+            node = {**p, "children": []}
+            if p.get("kind") == "page":
+                model = b["models"].get(p.get("mental_model_id")) or {}
+                trigger = model.get("trigger")
+                node["tags"] = list(model.get("tags") or [])
+                node["trigger"] = json.loads(trigger) if isinstance(trigger, str) else trigger
+            nodes[str(p["id"])] = node
+        roots = []
+        for p in b["pages"]:
+            parent = p.get("parent_id")
+            if parent and parent in nodes:
+                nodes[parent]["children"].append(nodes[str(p["id"])])
+            else:
+                roots.append(nodes[str(p["id"])])
+        return roots
 
     def finish(self, op_id: str) -> None:
         op = self.ops[op_id]
@@ -337,7 +416,22 @@ class FakeEngine:
         if rest == "/config":
             return httpx.Response(200, json={"overrides": {}})
         if rest == "/knowledge-base/tree":
-            return httpx.Response(200, json={"roots": [dict(p) for p in b["pages"]]})
+            return httpx.Response(200, json={"roots": self.tree(bank)})
+        if rest == "/knowledge-base/folders" and method == "POST":
+            body = json.loads(request.content)
+            folder = {
+                "id": f"kf-made{len(b['pages'])}",
+                "kind": "folder",
+                "name": body["name"],
+                "parent_id": body.get("parent_id"),
+            }
+            # ``create_knowledge_folder`` checks no name: a second folder of
+            # one name is created like the first.
+            if self.before_folder_post is not None:
+                self.before_folder_post(bank)
+            self.events.append(f"folder:{bank}:{body['name']}")
+            b["pages"].append(folder)
+            return httpx.Response(201, json={**folder, "children": []})
         if rest == "/documents":
             rows = [{"id": d["id"], "tags": d["tags"]} for d in b["docs"].values()]
             return self._page("items", rows, params)
@@ -1726,15 +1820,22 @@ async def test_a_page_that_did_not_land_with_its_model_is_sent_again(box: Box) -
     first = await box.fold().run()
     assert first["left"] == ["coding-agent::web"]
     assert "web-overview" in e.banks["hal0:shared"]["models"]
-    assert e.banks["hal0:shared"]["pages"] == []
+    # The project folder was made before the send, as compat makes it; nothing is in it.
+    (folder,) = e.banks["hal0:shared"]["pages"]
+    assert (folder["kind"], folder["name"]) == ("folder", "project:web")
     before = len(e.imports)
     second = await box.fold(only=["coding-agent::web"]).run()
     assert second["status"] == "folded"
     (resend,) = [a for t, a in e.imports[before:] if t == "hal0:shared"]
     assert resend["documents"] == []
-    assert [p["id"] for p in resend["knowledge_pages"]] == ["kf", "kp"]
-    pages = e.banks["hal0:shared"]["pages"]
-    assert [p["mental_model_id"] for p in pages if p["kind"] == "page"] == ["web-overview"]
+    new_kf = kp_ids.folded_node_id("coding-agent::web", "kf", "folder")
+    new_kp = kp_ids.folded_node_id("coding-agent::web", "kp", "page")
+    assert [p["id"] for p in resend["knowledge_pages"]] == [folder["id"], new_kf, new_kp]
+    pages = {p["id"]: p for p in e.banks["hal0:shared"]["pages"]}
+    assert set(pages) == {folder["id"], new_kf, new_kp}
+    assert pages[new_kf]["parent_id"] == folder["id"]
+    assert pages[new_kp]["parent_id"] == new_kf
+    assert pages[new_kp]["mental_model_id"] == "web-overview"
 
 
 async def test_the_routing_check_on_disk_refuses_a_tampered_archive(
@@ -1974,3 +2075,672 @@ async def test_an_unfinished_fold_in_blocks_update_engine_upgrade_and_seeding(
 def test_the_gate_message_names_the_fold_in() -> None:
     error = write_gate.MemoryWritesPaused({"reason": write_gate.REASON_FOLD_IN})
     assert "hal0 memory migrate fold-in --status" in str(error)
+
+
+# ── knowledge pages of a coding bank (#3635) ────────────────────────────
+
+
+#: The coding-agents plugin's page trigger (dist/mcp-server.js ``buildPageTrigger``).
+PLUGIN_TRIGGER = {
+    "fact_types": ["world", "experience", "observation"],
+    "tags_match": "all",
+    "refresh_after_consolidation": True,
+}
+
+
+def seed_pages(box: Box, bank: str = "coding-agent::web", *, prefix: str = "") -> None:
+    """The plugin's tree in an old coding bank: a standard page at the root and an
+    ``Initiatives`` folder with one initiative page that links to the first.
+
+    The standard page has the plugin's own trigger, which reads no project, so
+    the fold-in carries it with its content cleared. The initiative page's
+    trigger already reads the bank's project as compat scopes a page, so it
+    keeps its content and its links are rewritten.
+    """
+    b = box.engine.banks.setdefault(bank, empty_bank())
+    slug = bank.split("::", 1)[1]
+    scoped = kp_ids.page_trigger(PLUGIN_TRIGGER, ["knowledge:feature-work"], slug)
+    b["models"].update(
+        {
+            f"{prefix}mm-map": {
+                "id": f"{prefix}mm-map",
+                "name": "Component map",
+                "source_query": "How is this codebase put together?",
+                "tags": ["knowledge:component"],
+                "trigger": json.dumps(PLUGIN_TRIGGER),
+                "content": "The map.",
+                "last_refreshed_at": "2026-11-11T00:00:00+00:00",
+                "max_tokens": 4096,
+            },
+            f"{prefix}mm-init": {
+                "id": f"{prefix}mm-init",
+                "name": "Bank layout",
+                "source_query": 'Summarize the "Bank layout" initiative',
+                "tags": ["knowledge:feature-work"],
+                "trigger": scoped,
+                "content": f"See [[page:{prefix}kp-map]] and [[page:elsewhere]].",
+                "max_tokens": 4096,
+            },
+        }
+    )
+    b["pages"].extend(
+        [
+            {
+                "id": f"{prefix}kp-map",
+                "kind": "page",
+                "name": "Component map",
+                "parent_id": None,
+                "mental_model_id": f"{prefix}mm-map",
+            },
+            {"id": f"{prefix}kf-init", "kind": "folder", "name": "Initiatives", "parent_id": None},
+            {
+                "id": f"{prefix}kp-init",
+                "kind": "page",
+                "name": "Bank layout",
+                "parent_id": f"{prefix}kf-init",
+                "mental_model_id": f"{prefix}mm-init",
+            },
+        ]
+    )
+
+
+def shared_nodes(box: Box) -> dict[str, dict[str, Any]]:
+    return {str(p["id"]): p for p in box.engine.banks["hal0:shared"]["pages"]}
+
+
+def project_folder(box: Box, slug: str) -> dict[str, Any]:
+    (folder,) = [
+        p
+        for p in box.engine.banks["hal0:shared"]["pages"]
+        if p["kind"] == "folder" and p["name"] == f"project:{slug}" and not p.get("parent_id")
+    ]
+    return folder
+
+
+def _new(bank: str, old: str, kind: str = "page") -> str:
+    return kp_ids.folded_node_id(bank, old, kind)
+
+
+def _assert_pages_placed(box: Box, bank: str = "coding-agent::web", slug: str = "web") -> None:
+    nodes = shared_nodes(box)
+    folder = project_folder(box, slug)
+    kp_map, kf_init, kp_init = (
+        _new(bank, "kp-map"),
+        _new(bank, "kf-init", "folder"),
+        _new(bank, "kp-init"),
+    )
+    assert nodes[kp_map]["parent_id"] == folder["id"]
+    assert nodes[kf_init]["parent_id"] == folder["id"]
+    assert nodes[kp_init]["parent_id"] == kf_init
+    models = box.engine.banks["hal0:shared"]["models"]
+    page_model = models[nodes[kp_init]["mental_model_id"]]
+    assert page_model["name"] == "Bank layout"
+    assert page_model["source_query"] == 'Summarize the "Bank layout" initiative'
+    assert kp_ids.trigger_scope_held(page_model["trigger"], slug)
+    assert page_model["trigger"]["tags_match"] == "all"
+    assert "visibility:private" not in page_model["tags"]
+    # The link names the page's new id; one to a page the bank never had stays.
+    assert page_model["content"] == f"See [[page:{kp_map}]] and [[page:elsewhere]]."
+    # The standard page's old trigger read no project: it is rebuilt from nothing.
+    map_model = models[nodes[kp_map]["mental_model_id"]]
+    assert map_model["content"] == ""
+    assert map_model["last_refreshed_at"] == fi.NEVER_REFRESHED_AT
+    assert kp_ids.trigger_scope_held(map_model["trigger"], slug)
+    rows = kp_ids.load_page_map()["targets"]["hal0:shared"]
+    for old, kind in (("kp-map", "page"), ("kf-init", "folder"), ("kp-init", "page")):
+        assert rows[old] == {
+            "id": _new(bank, old, kind),
+            "kind": kind,
+            "folder": folder["id"],
+            "project": slug,
+            "bank": bank,
+        }
+
+
+async def test_a_coding_banks_pages_land_in_its_project_folder_stamped_and_mapped(
+    box: Box,
+) -> None:
+    box.clients.add("cc")
+    seed_pages(box)
+    result = await box.fold(owners={"coding-agent": "cc"}).run()
+    assert result["cut_over"] is True
+    _assert_pages_placed(box)
+    models = box.engine.banks["hal0:shared"]["models"]
+    page_model = models[shared_nodes(box)[_new("coding-agent::web", "kp-init")]["mental_model_id"]]
+    # Through the envelope with the owner the bank's documents get.
+    assert [t for t in page_model["tags"] if t.startswith("agent:")] == ["agent:cc"]
+    assert "project:web" in page_model["tags"]
+    assert "knowledge:feature-work" in page_model["tags"]
+    assert {"tags": ["knowledge:feature-work"], "match": "all"} in page_model["trigger"][
+        "tag_groups"
+    ]
+    entry = next(b for b in result["banks"] if b["bank"] == "coding-agent::web")
+    assert entry["report"]["knowledge_pages"]["placed"] == 2
+    # The folder was made once, through the engine's own route, as compat makes it.
+    assert box.events.count("folder:hal0:shared:project:web") == 1
+
+
+async def test_pages_join_a_project_folder_the_target_already_has(box: Box) -> None:
+    seed_pages(box)
+    box.engine.banks["hal0:shared"] = empty_bank()
+    box.engine.banks["hal0:shared"]["pages"] = [
+        {"id": "kf-zzz", "kind": "folder", "name": "project:web", "parent_id": None},
+        {"id": "kf-aaa", "kind": "folder", "name": "project:atlas", "parent_id": None},
+    ]
+    await box.fold().run()
+    assert project_folder(box, "web")["id"] == "kf-zzz"
+    assert not any(e.startswith("folder:") for e in box.events)
+    _assert_pages_placed(box)
+
+
+@pytest.mark.parametrize("raced", ["kf-0raced", "kf-zraced"])
+async def test_a_project_folder_another_writer_creates_meanwhile_is_shared(
+    box: Box, raced: str
+) -> None:
+    """Between the fold-in's tree read and its POST, another writer creates
+    ``project:web``. The fold-in reads the tree again and puts the pages in the
+    first folder in id order, the one compat reads and writes, whichever made it."""
+    seed_pages(box)
+    box.engine.banks["hal0:shared"] = empty_bank()
+
+    def race(bank: str) -> None:
+        if bank == "hal0:shared":
+            box.engine.banks[bank]["pages"].append(
+                {"id": raced, "kind": "folder", "name": "project:web", "parent_id": None}
+            )
+
+    box.engine.before_folder_post = race
+    result = await box.fold().run()
+    assert result["cut_over"] is True, result["left"]
+    roots = box.engine.tree("hal0:shared")
+    folders = kp_ids.project_folders(roots, "web")
+    assert len(folders) == 2
+    first = str(folders[0]["id"])
+    assert first == min(raced, next(str(f["id"]) for f in folders if f["id"] != raced))
+    nodes = shared_nodes(box)
+    for old, kind in (("kp-map", "page"), ("kf-init", "folder")):
+        assert nodes[_new("coding-agent::web", old, kind)]["parent_id"] == first
+    # The other folder is left empty, and the page map names the shared one.
+    other = next(f for f in folders if f["id"] != first)
+    assert not any(
+        p.get("parent_id") == other["id"] for p in box.engine.banks["hal0:shared"]["pages"]
+    )
+    rows = kp_ids.load_page_map()["targets"]["hal0:shared"]
+    assert rows["kp-map"]["folder"] == first
+
+
+async def test_a_name_the_target_folder_already_holds_keeps_it_and_the_folded_one_is_renamed(
+    box: Box,
+) -> None:
+    """A page the plugin wrote through compat before the run keeps its name. A
+    folder of a name the target has is not renamed: folder names are not unique."""
+    seed_pages(box)
+    box.engine.banks["hal0:shared"] = empty_bank()
+    box.engine.banks["hal0:shared"]["models"]["mm-own"] = {
+        "id": "mm-own",
+        "name": "component map",
+        "tags": [],
+        "trigger": kp_ids.page_trigger(PLUGIN_TRIGGER, [], "web"),
+        "content": "",
+    }
+    box.engine.banks["hal0:shared"]["pages"] = [
+        {"id": "kf-web", "kind": "folder", "name": "project:web", "parent_id": None},
+        {"id": "kf-own", "kind": "folder", "name": "initiatives", "parent_id": "kf-web"},
+        {
+            "id": "kp-own",
+            "kind": "page",
+            "name": "component map",
+            "parent_id": "kf-web",
+            "mental_model_id": "mm-own",
+        },
+    ]
+    result = await box.fold().run()
+    assert result["cut_over"] is True
+    nodes = shared_nodes(box)
+    assert nodes["kp-own"]["name"] == "component map"
+    assert nodes[_new("coding-agent::web", "kp-map")]["name"] == (
+        "Component map (coding-agent::web)"
+    )
+    # Two sibling folders of one name, the folded one under its own name.
+    assert nodes["kf-own"]["name"] == "initiatives"
+    folded = nodes[_new("coding-agent::web", "kf-init", "folder")]
+    assert (folded["name"], folded["parent_id"]) == ("Initiatives", "kf-web")
+    keepers = fi.load_ledger()["page_keepers"]["hal0:shared"]
+    assert keepers["web/component map"] == "target"
+    assert "web/initiatives" not in keepers
+
+
+async def test_a_rename_that_still_collides_leaves_the_bank_before_any_import(box: Box) -> None:
+    seed_pages(box)
+    box.engine.banks["hal0:shared"] = empty_bank()
+    box.engine.banks["hal0:shared"]["pages"] = [
+        {"id": "kf-web", "kind": "folder", "name": "project:web", "parent_id": None},
+        {"id": "kp-a", "kind": "page", "name": "Component map", "parent_id": "kf-web"},
+        {
+            "id": "kp-b",
+            "kind": "page",
+            "name": "Component map (coding-agent::web)",
+            "parent_id": "kf-web",
+        },
+    ]
+    result = await box.fold().run()
+    assert "coding-agent::web" in result["left"]
+    note = next(b["note"] for b in result["banks"] if b["bank"] == "coding-agent::web")
+    assert "the renamed name is taken too" in note
+    assert box.engine.imports == []
+    left_ids = json.loads(Path(note.rsplit(" ", 1)[-1]).read_text())
+    assert left_ids["coding-agent::web"]["page_names"] == [
+        "project:web/component map (coding-agent::web)"
+    ]
+
+
+async def test_two_banks_with_one_page_name_keep_one_plain_and_rename_the_other(box: Box) -> None:
+    seed_pages(box)
+    seed_pages(box, "claude-code::web", prefix="cc-")
+    # Both name the project directly: the latest refresh keeps the plain name.
+    box.engine.banks["coding-agent::web"]["models"]["mm-map"]["last_refreshed_at"] = (
+        "2026-11-10T00:00:00+00:00"
+    )
+    box.engine.banks["claude-code::web"]["models"]["cc-mm-map"]["last_refreshed_at"] = (
+        "2026-11-01T00:00:00+00:00"
+    )
+    result = await box.fold().run()
+    assert result["cut_over"] is True
+    nodes = shared_nodes(box)
+    assert nodes[_new("coding-agent::web", "kp-map")]["name"] == "Component map"
+    assert (
+        nodes[_new("claude-code::web", "cc-kp-map")]["name"] == "Component map (claude-code::web)"
+    )
+    # Folder names are not unique: both banks' Initiatives folders keep the
+    # name, side by side in the project folder, each with its own pages.
+    folder = project_folder(box, "web")["id"]
+    for bank, old in (("claude-code::web", "cc-kf-init"), ("coding-agent::web", "kf-init")):
+        node = nodes[_new(bank, old, "folder")]
+        assert (node["name"], node["parent_id"]) == ("Initiatives", folder)
+    assert nodes[_new("claude-code::web", "cc-kp-init")]["parent_id"] == _new(
+        "claude-code::web", "cc-kf-init", "folder"
+    )
+    model = box.engine.banks["hal0:shared"]["models"][
+        nodes[_new("claude-code::web", "cc-kp-map")]["mental_model_id"]
+    ]
+    assert model["name"] == "Component map (claude-code::web)"
+
+
+async def test_a_page_of_another_project_stays_out_of_this_projects_folder(box: Box) -> None:
+    seed_pages(box)
+    seed_pages(box, "coding-agent::atlas", prefix="a-")
+    await box.fold().run()
+    nodes = shared_nodes(box)
+    web, atlas = project_folder(box, "web"), project_folder(box, "atlas")
+    assert nodes[_new("coding-agent::atlas", "a-kp-map")]["parent_id"] == atlas["id"]
+    assert nodes[_new("coding-agent::web", "kp-map")]["parent_id"] == web["id"]
+    rows = kp_ids.load_page_map()["targets"]["hal0:shared"]
+    assert rows["a-kp-map"]["project"] == "atlas"
+    assert rows["a-kp-map"]["folder"] == atlas["id"]
+
+
+@pytest.mark.parametrize(
+    "point",
+    [
+        "rewritten:coding-agent::web",
+        "placed:coding-agent::web",
+        "importing:coding-agent::web:shared",
+        "imported:coding-agent::web:shared",
+        "folded:coding-agent::web",
+    ],
+)
+async def test_a_run_killed_around_the_page_step_completes_with_resume(
+    box: Box, point: str
+) -> None:
+    seed_pages(box)
+    await box.kill_at(point)
+    result = await box.fold().resume()
+    assert result["left"] == []
+    _assert_pages_placed(box)
+    # Never a second project folder, never a page twice.
+    folders = [p for p in box.engine.banks["hal0:shared"]["pages"] if p["name"] == "project:web"]
+    assert len(folders) == 1
+    assert len(shared_nodes(box)) == 4
+
+
+async def test_a_resend_after_the_pages_failed_lands_them_in_the_folder(box: Box) -> None:
+    seed_pages(box)
+    box.engine.fail_pages.add("hal0:shared")
+    first = await box.fold().run()
+    assert "coding-agent::web" in first["left"]
+    assert "hal0:shared" not in kp_ids.load_page_map()["targets"]
+    await box.fold().run()
+    _assert_pages_placed(box)
+
+
+async def test_a_page_an_earlier_build_sent_unstamped_refuses_until_its_copy_is_deleted(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An earlier build of the fold-in carried the page with its old trigger,
+    at the root, under an id the engine chose. The page landed; its re-stamp
+    never did. The model's spec changed, so the bank is refused, not merged."""
+    seed_pages(box)
+
+    def unplaced(plan: Any, pages: list[dict[str, Any]], *_rest: Any) -> Any:
+        return fi._Placement(
+            rows=[{**p} for p in pages],
+            provenance={str(p["id"]): str(p["id"]) for p in pages},
+            folders={},
+            nodes={},
+            names=[],
+        )
+
+    with monkeypatch.context() as m:
+        m.setattr(fi, "_place_pages", unplaced)
+        first = await box.fold(only=["coding-agent::web"]).run()
+    assert first["left"] == []
+    second = await box.fold().run()
+    assert "coding-agent::web" in second["left"]
+    note = next(b["note"] for b in second["banks"] if b["bank"] == "coding-agent::web")
+    assert "have changed in the old bank since" in note
+    assert second["cut_over"] is False
+
+
+async def test_a_page_of_a_bank_that_held_private_facts_lands_with_nothing_generated(
+    box: Box,
+) -> None:
+    seed_pages(box)
+    box.engine.banks["coding-agent::web"]["docs"]["secret"] = doc(
+        "secret", fact("token is hunter2", "visibility:private", "agent:claude-code")
+    )
+    await box.fold().run()
+    nodes = shared_nodes(box)
+    model = box.engine.banks["hal0:shared"]["models"][
+        nodes[_new("coding-agent::web", "kp-init")]["mental_model_id"]
+    ]
+    assert model["content"] == ""
+    assert kp_ids.trigger_scope_held(model["trigger"], "web")
+    assert "hunter2" not in json.dumps(box.engine.banks["hal0:shared"])
+
+
+async def test_the_platform_banks_pages_keep_their_tree(box: Box) -> None:
+    """Pages of a bank that is not a coding bank are carried as before: same
+    folders, the engine's own fresh ids, scope untouched, nothing in the map."""
+    shared = box.engine.banks["shared"]
+    shared["models"]["mm-hal0"] = {"id": "mm-hal0", "name": "Overview", "tags": [], "content": "o"}
+    shared["pages"] = [
+        {"id": "kf-hal0", "kind": "folder", "name": "Hal0", "parent_id": None},
+        {
+            "id": "kp-hal0",
+            "kind": "page",
+            "name": "Overview",
+            "parent_id": "kf-hal0",
+            "mental_model_id": "mm-hal0",
+        },
+    ]
+    await box.fold().run()
+    pages = box.engine.banks["hal0:shared"]["pages"]
+    (folder,) = [p for p in pages if p["name"] == "Hal0"]
+    (page,) = [p for p in pages if p["name"] == "Overview"]
+    assert folder["id"] != "kf-hal0" and page["parent_id"] == folder["id"]
+    assert box.engine.banks["hal0:shared"]["models"]["mm-hal0"]["tags"] == []
+    assert "hal0:shared" not in kp_ids.load_page_map()["targets"]
+
+
+async def test_pages_that_land_outside_their_folder_leave_the_bank(box: Box) -> None:
+    seed_pages(box)
+    box.engine.pages_at_root.add("hal0:shared")
+    result = await box.fold().run()
+    assert "coding-agent::web" in result["left"]
+    note = next(b["note"] for b in result["banks"] if b["bank"] == "coding-agent::web")
+    assert "not in their project folder or without its scope" in note
+    assert result["cut_over"] is False
+    assert "hal0:shared" not in kp_ids.load_page_map()["targets"]
+
+
+#: The five pages every coding-agents plugin seeds (dist/mcp-server.js ``seedPages``).
+STANDARD_PAGES = (
+    "Component map",
+    "Conventions and patterns",
+    "Core concepts",
+    "Initiatives and enhancements",
+    "Key decisions and rationale",
+)
+#: The reference box: three coding banks of one project.
+CT105_BANKS = ("coding-agent::hal0-mono", "Hal0::Agents", "pi-coder")
+
+
+def _std_id(bank: str, index: int) -> str:
+    return f"kp-{fi._slug_of(bank)}-{index}"
+
+
+def seed_ct105(box: Box) -> None:
+    """Three coding banks whose project is hal0, each with the five standard pages.
+
+    ``coding-agent::hal0-mono`` names its repository (the registry maps
+    ``hal0-mono`` to ``hal0``); ``Hal0::Agents`` and ``pi-coder`` take the
+    project from their pages' own tags. Each page links to the bank's first.
+    """
+    box.cfg.projects = SimpleNamespace(aliases={"hal0-mono": "hal0"}, deny=None, registered=())
+    box.clients.add("cc")
+    for bank in CT105_BANKS:
+        b = box.engine.banks.setdefault(bank, empty_bank())
+        tags = [] if bank == "coding-agent::hal0-mono" else ["project:hal0"]
+        for index, name in enumerate(STANDARD_PAGES):
+            mm = f"mm-{fi._slug_of(bank)}-{index}"
+            # hal0-mono's pages already read their project as compat scopes a
+            # page, so they keep their content; the tag-project banks' pages
+            # are rebuilt whatever their trigger.
+            trigger = (
+                kp_ids.page_trigger(PLUGIN_TRIGGER, [f"knowledge:std-{index}"], "hal0")
+                if bank == "coding-agent::hal0-mono"
+                else PLUGIN_TRIGGER
+            )
+            b["models"][mm] = {
+                "id": mm,
+                "name": name,
+                "source_query": f"What are the {name.lower()}?",
+                "tags": [f"knowledge:std-{index}", *tags],
+                "trigger": trigger,
+                "content": f"{name} of {bank}; see [[page:{_std_id(bank, 0)}]]",
+                "last_refreshed_at": "2026-11-12T00:00:00+00:00",
+            }
+            b["pages"].append(
+                {
+                    "id": _std_id(bank, index),
+                    "kind": "page",
+                    "name": name,
+                    "parent_id": None,
+                    "mental_model_id": mm,
+                }
+            )
+
+
+async def test_three_coding_banks_of_one_project_fold_with_one_plain_set_and_cut_over(
+    box: Box,
+) -> None:
+    seed_ct105(box)
+    result = await box.fold(owners={"coding-agent": "cc"}).run()
+    assert result["left"] == []
+    assert result["cut_over"] is True
+    folder = project_folder(box, "hal0")
+    under = [p for p in box.engine.banks["hal0:shared"]["pages"] if p["parent_id"] == folder["id"]]
+    names = sorted(p["name"] for p in under)
+    expected = sorted(
+        [*STANDARD_PAGES]
+        + [f"{n} (Hal0::Agents)" for n in STANDARD_PAGES]
+        + [f"{n} (pi-coder)" for n in STANDARD_PAGES]
+    )
+    assert names == expected
+    # The bank whose id names the project keeps the plain names.
+    nodes = shared_nodes(box)
+    for index, name in enumerate(STANDARD_PAGES):
+        assert (
+            nodes[_new("coding-agent::hal0-mono", _std_id("coding-agent::hal0-mono", index))][
+                "name"
+            ]
+            == name
+        )
+    # Every page, renamed or not, is mapped from its old id.
+    rows = kp_ids.load_page_map()["targets"]["hal0:shared"]
+    for bank in CT105_BANKS:
+        for index in range(len(STANDARD_PAGES)):
+            assert rows[_std_id(bank, index)]["id"] == _new(bank, _std_id(bank, index))
+            assert rows[_std_id(bank, index)]["folder"] == folder["id"]
+    keepers = fi.load_ledger()["page_keepers"]["hal0:shared"]
+    assert {keepers[f"hal0/{n.lower()}"] for n in STANDARD_PAGES} == {"coding-agent::hal0-mono"}
+
+
+async def test_the_keeper_of_a_name_is_the_ledgers_on_every_later_run(box: Box) -> None:
+    """Stable across runs: a later run follows the recorded keeper, not a fresh ranking."""
+    seed_ct105(box)
+    first = await box.fold(owners={"coding-agent": "cc"}, only=["pi-coder"]).run()
+    assert first["left"] == []
+    keepers = fi.load_ledger()["page_keepers"]["hal0:shared"]
+    assert keepers["hal0/component map"] == "pi-coder"
+    second = await box.fold(owners={"coding-agent": "cc"}).run()
+    assert second["left"] == [] and second["cut_over"] is True
+    nodes = shared_nodes(box)
+    assert nodes[_new("pi-coder", _std_id("pi-coder", 0))]["name"] == "Component map"
+    assert (
+        nodes[_new("coding-agent::hal0-mono", _std_id("coding-agent::hal0-mono", 0))]["name"]
+        == "Component map (coding-agent::hal0-mono)"
+    )
+
+
+@pytest.mark.parametrize("point", ["rewritten:pi-coder", "placed:Hal0::Agents", "folded:pi-coder"])
+async def test_a_ct105_run_killed_around_the_renames_completes_with_resume(
+    box: Box, point: str
+) -> None:
+    seed_ct105(box)
+    await box.kill_at(point, owners={"coding-agent": "cc"})
+    result = await box.fold().resume()
+    assert result["left"] == [] and result["cut_over"] is True
+    folder = project_folder(box, "hal0")
+    under = [p for p in box.engine.banks["hal0:shared"]["pages"] if p["parent_id"] == folder["id"]]
+    assert len(under) == 15
+    assert len({p["name"].lower() for p in under}) == 15
+
+
+def test_a_renamed_name_fits_the_engines_column() -> None:
+    assert fi.renamed_page_name("Component map", "pi-coder") == "Component map (pi-coder)"
+    long = fi.renamed_page_name("x" * 300, "coding-agent::hal0-mono")
+    assert len(long) == fi.PAGE_NAME_MAX
+    assert long.endswith(" (coding-agent::hal0-mono)")
+
+
+async def test_the_dry_run_counts_each_banks_pages_by_owner(box: Box) -> None:
+    seed_ct105(box)
+    plan = await box.fold().preflight()
+    rows = {b["bank"]: b for b in plan["banks"]}
+    mono = rows["coding-agent::hal0-mono"]["fold"]["knowledge_pages"]
+    assert mono["owners"] == {"hal0-legacy-coding-agent": 5}
+    assert sorted(mono["pseudo_owned"]) == sorted(STANDARD_PAGES)
+    # Pi's harness has a known owner; nothing of it goes under a pseudo-owner.
+    pi = rows["pi-coder"]["fold"]["knowledge_pages"]
+    assert pi["owners"] == {"pi-coder": 5} and "pseudo_owned" not in pi
+    mapped = await box.fold(owners={"coding-agent": "cc"}).preflight()
+    rows = {b["bank"]: b for b in mapped["banks"]}
+    assert rows["coding-agent::hal0-mono"]["fold"]["knowledge_pages"]["owners"] == {"cc": 5}
+
+
+async def test_the_reference_box_with_a_page_compat_already_wrote_keeps_that_page(
+    box: Box,
+) -> None:
+    """Three coding banks of one project, five standard names each, and one of
+    the names already in the target's folder, written through compat: that
+    page keeps its name, every folded copy of it is renamed, and the rest keep
+    one plain set."""
+    seed_ct105(box)
+    target = box.engine.banks.setdefault("hal0:shared", empty_bank())
+    target["models"]["mm-compat"] = {
+        "id": "mm-compat",
+        "name": "Core concepts",
+        "tags": ["agent:cc", "kind:durable", "project:hal0"],
+        "content": "written through compat",
+    }
+    target["pages"] += [
+        {"id": "kf-compat", "kind": "folder", "name": "project:hal0", "parent_id": None},
+        {
+            "id": "kp-compat",
+            "kind": "page",
+            "name": "Core concepts",
+            "parent_id": "kf-compat",
+            "mental_model_id": "mm-compat",
+        },
+    ]
+    result = await box.fold(owners={"coding-agent": "cc"}).run()
+    assert result["left"] == [] and result["cut_over"] is True
+    folder = project_folder(box, "hal0")
+    assert folder["id"] == "kf-compat"
+    under = [p for p in box.engine.banks["hal0:shared"]["pages"] if p["parent_id"] == folder["id"]]
+    names = sorted(p["name"] for p in under)
+    others = [n for n in STANDARD_PAGES if n != "Core concepts"]
+    assert names == sorted(
+        [*STANDARD_PAGES]
+        + [f"Core concepts ({bank})" for bank in CT105_BANKS]
+        + [f"{n} ({bank})" for n in others for bank in ("Hal0::Agents", "pi-coder")]
+    )
+    assert shared_nodes(box)["kp-compat"]["name"] == "Core concepts"
+    keepers = fi.load_ledger()["page_keepers"]["hal0:shared"]
+    assert keepers["hal0/core concepts"] == "target"
+    rows = kp_ids.load_page_map()["targets"]["hal0:shared"]
+    for bank in CT105_BANKS:
+        for index in range(len(STANDARD_PAGES)):
+            assert rows[_std_id(bank, index)]["id"] == _new(bank, _std_id(bank, index))
+
+
+async def test_folders_of_one_name_are_no_conflict(box: Box) -> None:
+    """``uq_kp_folder_pagename`` is ``WHERE kind = 'page'``: two folders of one
+    name, and a folder named as a page, land side by side, none renamed."""
+    seed_pages(box)
+    b = box.engine.banks["coding-agent::web"]
+    for parent in ("kf-two", "kf-map"):
+        b["models"][f"mm-{parent}"] = {
+            "id": f"mm-{parent}",
+            "name": "Notes",
+            "tags": ["knowledge:notes"],
+            "trigger": PLUGIN_TRIGGER,
+            "content": "",
+        }
+    b["pages"].extend(
+        [
+            {"id": "kf-two", "kind": "folder", "name": "initiatives", "parent_id": None},
+            {"id": "kf-map", "kind": "folder", "name": "Component map", "parent_id": None},
+            *(
+                {
+                    "id": f"kp-{parent}",
+                    "kind": "page",
+                    "name": "Notes",
+                    "parent_id": parent,
+                    "mental_model_id": f"mm-{parent}",
+                }
+                for parent in ("kf-two", "kf-map")
+            ),
+        ]
+    )
+    result = await box.fold().run()
+    assert result["cut_over"] is True, result["left"]
+    nodes = shared_nodes(box)
+    folder = project_folder(box, "web")["id"]
+    for old, name in (
+        ("kf-init", "Initiatives"),
+        ("kf-two", "initiatives"),
+        ("kf-map", "Component map"),
+    ):
+        node = nodes[_new("coding-agent::web", old, "folder")]
+        assert (node["name"], node["parent_id"]) == (name, folder)
+    assert nodes[_new("coding-agent::web", "kp-map")]["name"] == "Component map"
+
+
+async def test_two_of_one_banks_own_pages_with_one_name_leave_it(box: Box) -> None:
+    """A true conflict: two of one bank's own root pages with one name. The
+    engine's own index forbids that in a real bank (names are compared lower
+    case), so the fake bank is given them directly."""
+    b = box.engine.banks["pi-coder"]
+    for i in range(2):
+        b["models"][f"m{i}"] = {"id": f"m{i}", "name": "P", "tags": ["project:web"], "content": ""}
+    b["pages"] = [
+        {"id": "kp-a", "kind": "page", "name": "Notes", "parent_id": None, "mental_model_id": "m0"},
+        {"id": "kp-b", "kind": "page", "name": "NOTES", "parent_id": None, "mental_model_id": "m1"},
+    ]
+    result = await box.fold().run()
+    assert "pi-coder" in result["left"]
+    note = next(r["note"] for r in result["banks"] if r["bank"] == "pi-coder")
+    assert "two of the bank's own pages share a name there" in note
+    assert box.engine.imports == []

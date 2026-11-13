@@ -112,15 +112,30 @@ from hal0.memory.document_namespace import (
 )
 from hal0.memory.envelope import (
     AGENT_TAG_PREFIX,
-    KIND_TAG_PREFIX,
     PROJECT_TAG_PREFIX,
     PROJECT_UNRESOLVED_TAG,
     SCOPE_GLOBAL_TAG,
-    SCOPE_TAG_PREFIX,
-    apply_envelope,
     coerce_tags,
 )
 from hal0.memory.hindsight_provider import _agents_of
+from hal0.memory.knowledge_pages import (
+    BRIDGE_SOURCE_TAG_PREFIX,
+    CALLER_TRIGGER_FIELDS,
+    LABEL_TAG_PREFIXES,
+    NOT_PRIVATE_GROUP,
+    dropped_tag,
+    page_scope_held,
+    page_tags,
+    page_trigger,
+    project_folder_name,
+    resolve_folded_node,
+)
+from hal0.memory.knowledge_pages import (
+    KNOWLEDGE_FOLDER_PREFIX as KNOWLEDGE_FOLDER_PREFIX,
+)
+from hal0.memory.knowledge_pages import (
+    project_folders as root_project_folders,
+)
 from hal0.memory.projects import (
     UNRESOLVED_SLUG,
     ProjectResolution,
@@ -128,7 +143,6 @@ from hal0.memory.projects import (
     strip_legacy_bank_prefix,
 )
 from hal0.memory.read_scope import (
-    VISIBILITY_PRIVATE_TAG,
     project_scope_groups,
     reflect_visibility_scope,
     tags_readable,
@@ -283,7 +297,7 @@ _OWNED_METADATA = frozenset(
 )
 #: A tag namespace the bridge's own memory tool stamps as provenance
 #: (``hal0.bridge.service``); a caller of this endpoint may not forge it.
-_BRIDGE_SOURCE_TAG_PREFIX = "source:bridge:"
+_BRIDGE_SOURCE_TAG_PREFIX = BRIDGE_SOURCE_TAG_PREFIX
 
 #: How many more engine pages a documents listing reads to fill a page that
 #: hal0's own filter shortened.
@@ -988,8 +1002,7 @@ def _dropped_tag(tag: str) -> bool:
     envelope drop or replace ``agent:``, ``visibility:`` and ``project:``.
     ``kind:`` stays the caller's choice: it widens nothing.
     """
-    folded = tag.strip().lower()
-    return folded.startswith((SCOPE_TAG_PREFIX, _BRIDGE_SOURCE_TAG_PREFIX))
+    return dropped_tag(tag)
 
 
 def _retain_item(
@@ -2181,9 +2194,13 @@ async def delete_bank(bank: str, request: Request, agent: str = _CALLER) -> Resp
 # directives (``HindsightProvider._require_own_directive``), a sole
 # ``agent:`` tag equal to the caller's. A caller with no project has no
 # folder and gets the old answer, 404, which the plugin reads as "no pages".
+#
+# The rule itself lives in :mod:`hal0.memory.knowledge_pages`, shared with the
+# fold-in, which carries an old coding bank's pages into the project's folder
+# stamped the same way and records their new ids. A page read or node update
+# that names a page by its id from the old bank is answered for the page that
+# id became (:func:`_current_node_id`).
 
-#: The name of a project's folder at the root of the platform bank's tree.
-KNOWLEDGE_FOLDER_PREFIX = PROJECT_TAG_PREFIX
 #: The largest body a knowledge-base write may carry.
 MAX_KNOWLEDGE_BODY_BYTES = 256 * 1024
 #: The engine's own bounds for a knowledge-base search's ``limit``.
@@ -2194,21 +2211,8 @@ _KNOWLEDGE_TIMEOUT_S = 30.0
 _PAGE_FIELDS = frozenset({"name", "source_query", "parent_id", "tags", "max_tokens", "trigger"})
 _NODE_FIELDS = frozenset({"name", "source_query", "tags", "max_tokens", "trigger"})
 _FOLDER_FIELDS = frozenset({"name", "parent_id"})
-#: The refresh settings a caller may choose. ``tag_groups``,
-#: ``exclude_mental_models`` and ``exclude_mental_model_ids`` are hal0's: they
-#: are the page's scope.
-_TRIGGER_FIELDS = frozenset(
-    {
-        "budget",
-        "mode",
-        "refresh_after_consolidation",
-        "refresh_cron",
-        "full_refresh_cron",
-        "min_refresh_interval_seconds",
-        "fact_types",
-        "tags_match",
-    }
-)
+#: The refresh settings a caller may choose (:data:`hal0.memory.knowledge_pages.CALLER_TRIGGER_FIELDS`).
+_TRIGGER_FIELDS = CALLER_TRIGGER_FIELDS
 #: The fields of a search hit that are passed on.
 _SEARCH_RESULT_FIELDS = (
     "id",
@@ -2219,12 +2223,8 @@ _SEARCH_RESULT_FIELDS = (
     "score",
     "updated_at",
 )
-#: The scope group that keeps every ``visibility:private`` memory out.
-_NOT_PRIVATE_GROUP: dict[str, Any] = {
-    "not": {"tags": [VISIBILITY_PRIVATE_TAG], "match": "any_strict"}
-}
-#: Tag namespaces that are the envelope's labels, not a page's scope.
-_LABEL_TAG_PREFIXES = (AGENT_TAG_PREFIX, KIND_TAG_PREFIX, PROJECT_TAG_PREFIX, SCOPE_TAG_PREFIX)
+_NOT_PRIVATE_GROUP = NOT_PRIVATE_GROUP
+_LABEL_TAG_PREFIXES = LABEL_TAG_PREFIXES
 
 
 class CompatKnowledgeNodeRefused(Hal0Error):
@@ -2274,45 +2274,37 @@ def _knowledge_scope(request: Request, provider: Any, bank: str, agent: str) -> 
     return scope
 
 
-def _normal_group(group: Any) -> Any:
-    """A tag group in one spelling: a leaf's default match and ``exact``
-    resolution written out the way :func:`project_scope_groups` writes them,
-    so a group the engine stored compares equal to the one sent."""
-    if not isinstance(group, dict):
-        return group
-    if "tags" in group:
-        out: dict[str, Any] = {"tags": group.get("tags"), "match": group.get("match", "any_strict")}
-        if group.get("resolve", "exact") != "exact":
-            out["resolve"] = group["resolve"]
-        return out
-    for combinator in ("and", "or"):
-        if combinator in group and isinstance(group[combinator], list):
-            return {combinator: [_normal_group(child) for child in group[combinator]]}
-    if "not" in group:
-        return {"not": _normal_group(group["not"])}
-    return group
-
-
 def _page_scope_held(node: dict[str, Any], scope: _Scope) -> bool:
-    """True when a page is one this endpoint may show the caller.
+    """True when a page is one this endpoint may show the caller
+    (:func:`hal0.memory.knowledge_pages.page_scope_held`): its tags pass the
+    caller's read groups and its refresh scope is the one this endpoint
+    writes, the project scope with private memory and other mental models
+    left out."""
+    if not scope.slug:
+        return False
+    return page_scope_held(node, read_groups=scope.read_groups(), slug=scope.slug)
 
-    Its tags pass the caller's read groups (visibility and project), and its
-    refresh scope is one this endpoint wrote: other mental models left out,
-    and among the AND-ed ``trigger.tag_groups`` both the project scope and the
-    group that keeps private memory out. Groups are AND-ed, so whatever else
-    the page's scope holds can only narrow it.
+
+def _current_node_id(provider: Any, node_id: str, held: Any) -> str:
+    """``node_id``, or the id a fold-in gave that node when the caller's view
+    holds that one instead (:func:`hal0.memory.knowledge_pages.resolve_folded_node`).
+
+    The plugin keeps a page's id in its markers' ``metadata.relatedPageId``
+    and in ``[[page:<id>]]`` links, written while its pages were in its old
+    coding bank; the fold-in carried them into the platform bank under new
+    ids. The new id is used only when the caller's view of the tree holds it,
+    so an old id gets exactly the answer its page would.
+
+    Every caller checks the id it gets back against the view again, so the
+    ``in held`` test does not decide what is shown. It decides what a
+    refusal says: ``PATCH nodes/<id>`` and ``parent_id`` echo the id in the
+    error details, and without the test an old id from another project would
+    be answered with the id that project's page has now.
     """
-    if not tags_readable(scope.read_groups(), node.get("tags")):
-        return False
-    trigger = node.get("trigger")
-    if not isinstance(trigger, dict) or trigger.get("exclude_mental_models") is not True:
-        return False
-    groups = trigger.get("tag_groups")
-    if not isinstance(groups, list):
-        return False
-    have = [_normal_group(group) for group in groups]
-    needed = [*project_scope_groups(scope.slug), _NOT_PRIVATE_GROUP]
-    return all(_normal_group(group) in have for group in needed)
+    if node_id in held:
+        return node_id
+    folded = resolve_folded_node(str(provider.platform_bank), node_id)
+    return folded if folded is not None and folded in held else node_id
 
 
 def _owns_page(node: dict[str, Any], agent: str) -> bool:
@@ -2366,16 +2358,7 @@ def _shown_node(node: dict[str, Any], scope: _Scope, project_folders: set[str]) 
 def _project_view(tree: Any, scope: _Scope) -> _ProjectPages:
     roots = tree.get("roots") if isinstance(tree, dict) else None
     view = _ProjectPages()
-    name = f"{KNOWLEDGE_FOLDER_PREFIX}{scope.slug}"
-    mine = [
-        node
-        for node in (roots if isinstance(roots, list) else [])
-        if isinstance(node, dict)
-        and node.get("kind") == "folder"
-        and node.get("name") == name
-        and isinstance(node.get("id"), str)
-    ]
-    mine.sort(key=lambda node: node["id"])  # a stable choice, not creation order
+    mine = root_project_folders(roots, scope.slug) if scope.slug else []
     view.folders = [node["id"] for node in mine]
     project_folders = set(view.folders)
     view.folder_ids.update(project_folders)
@@ -2447,6 +2430,8 @@ async def _parent_folder(
     """The folder a new node goes in: ``parent_id`` when it is a folder in
     the project's folder, else the project's folder, created on first use."""
     if requested is not None:
+        if isinstance(requested, str):
+            requested = _current_node_id(provider, requested, view.folder_ids)
         if not isinstance(requested, str) or requested not in view.folder_ids:
             raise CompatKnowledgeParentRefused(
                 "parent_id is not a folder of this project's knowledge base",
@@ -2466,7 +2451,7 @@ async def _parent_folder(
             made = await provider.hindsight_client.request_json(
                 "POST",
                 _bank_path(provider, "/knowledge-base/folders"),
-                json_body={"name": f"{KNOWLEDGE_FOLDER_PREFIX}{scope.slug}"},
+                json_body={"name": project_folder_name(str(scope.slug))},
                 timeout_s=_KNOWLEDGE_TIMEOUT_S,
             )
         except httpx.HTTPStatusError as exc:
@@ -2515,17 +2500,7 @@ def _page_tags(raw: Any, scope: _Scope, what: str) -> tuple[list[str], list[str]
     """
     if raw is not None and not (isinstance(raw, list) and all(isinstance(t, str) for t in raw)):
         raise BadRequest(f"{what} 'tags' must be a list of strings")
-    kept = [
-        tag
-        for tag in coerce_tags(raw or [])
-        if not _dropped_tag(tag) and not tag.strip().lower().startswith("visibility:")
-    ]
-    envelope = apply_envelope(
-        kept, agent=scope.agent, project_resolution=scope.resolution, coding=True
-    )
-    labels = list(envelope.tags)
-    leaf = [tag for tag in labels if not tag.strip().lower().startswith(_LABEL_TAG_PREFIXES)]
-    return labels, leaf
+    return page_tags(raw, agent=scope.agent, resolution=scope.resolution)
 
 
 def _caller_trigger(raw: Any, what: str) -> tuple[dict[str, Any], set[str]]:
@@ -2556,12 +2531,7 @@ def _page_trigger(chosen: dict[str, Any], leaf: list[str], scope: _Scope) -> dic
     where it came from. ``tags_match`` is kept as the caller sent it, because
     the plugin compares it with its own to decide whether a page drifted.
     """
-    groups: list[dict[str, Any]] = []
-    if leaf:
-        groups.append({"tags": leaf, "match": chosen.get("tags_match") or "all_strict"})
-    groups.extend(project_scope_groups(scope.slug))
-    groups.append(_NOT_PRIVATE_GROUP)
-    return {**chosen, "tag_groups": groups, "exclude_mental_models": True}
+    return page_trigger(chosen, leaf, str(scope.slug))
 
 
 def _max_tokens_field(body: dict[str, Any], what: str) -> int | None:
@@ -2694,6 +2664,7 @@ async def knowledge_base_page(
     view = await _project_pages(request, provider, scope)
     if isinstance(view, Response):
         return view
+    page_id = _current_node_id(provider, page_id, view.pages)
     node = view.pages.get(page_id)
     if node is None:
         raise missing
@@ -2818,6 +2789,7 @@ async def knowledge_base_update_node(
     view = await _project_pages(request, provider, scope)
     if isinstance(view, Response):
         return view
+    node_id = _current_node_id(provider, node_id, {*view.pages, *view.folder_ids})
     node = view.pages.get(node_id)
     if node is None and node_id not in view.folder_ids:
         raise CompatKnowledgeNodeRefused(

@@ -11,7 +11,10 @@ limits and error codes are listed there.
 The plugin keeps curated pages in a tree of folders and pages, each page a mental model the
 engine rebuilds from its `source_query`. Every bank name is the platform bank, so each project
 has one folder at the root of that bank's tree, named `project:<slug>`, created by the first
-page or folder written into it. The plugin is shown that folder's contents as its whole tree:
+page or folder written into it. The engine does not keep folder names unique, so two writers
+racing to create it (this endpoint and the [fold-in](/docs/guides/fold-in-memory-banks), say)
+can leave a project two root folders of that name: they are read as one, and new nodes go in
+the first in id order. The plugin is shown that folder's contents as its whole tree:
 nothing outside it (hal0's own pages, other projects' folders) is listed, read, searched or
 written here. A project with no folder yet has an empty tree, never `404`, because the plugin
 reads `404` as "no pages" and would then never create one. A client with no project
@@ -24,7 +27,11 @@ tags. The engine ANDs three groups: the client's own tags matched by its `trigge
 the project scope of [a read](/docs/reference/api/memory-compat#what-a-read-sees), and no `visibility:private` memory.
 `trigger.exclude_mental_models` is set too, so a refresh reads no other mental model. A page
 without all of that is not shown, nor is one another agent marked private, in every bank layout.
-Pages the fold-in carried over from a per-repository bank sit outside the folder and are not
+The [fold-in](/docs/guides/fold-in-memory-banks#knowledge-pages-of-a-coding-bank) carries a
+coding bank's pages into its project's folder stamped this way, under new ids. A page read, a
+node update and a `parent_id` may name such a page or folder by the id it had in the old bank:
+the fold-in's page map says which node that id became, and the request is answered for that
+node, with the same checks. A page carried from any other bank keeps its old scope and is not
 shown.
 
 The page's `tags` are then labels, stamped as on a [retain](/docs/reference/api/memory-compat#retain): `agent:<client>`, `kind:`
