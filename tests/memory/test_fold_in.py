@@ -101,6 +101,9 @@ class FakeEngine:
         self.imports: list[tuple[str, dict[str, Any]]] = []
         #: Per bank: manifest fields the export adds (attachment_count, ...).
         self.manifest_extra: dict[str, dict[str, Any]] = {}
+        #: Per bank: the next import lands this many facts more (or, negative,
+        #: fewer) than its archive carries, every id present all the same.
+        self.skew_import: dict[str, int] = {}
         #: Per bank: mental_model_history rows the export carries.
         self.model_history: dict[str, list[dict[str, Any]]] = {}
 
@@ -187,6 +190,13 @@ class FakeEngine:
                 continue
             target["docs"][d["id"]] = d
             landed.add(d["id"])
+        skew = self.skew_import.pop(bank, 0)
+        if skew and landed:
+            facts = target["docs"][sorted(landed)[0]]["facts"]
+            if skew > 0:
+                facts.extend(fact(f"extra {i}") for i in range(skew))
+            else:
+                del facts[skew:]
         for o in obs:
             if all(s["document_id"] in landed for s in o["sources"]):
                 target["obs"].append(o)
@@ -991,6 +1001,36 @@ async def test_an_id_an_earlier_run_sent_for_another_bank_is_named_in_the_clash(
     note = next(b["note"] for b in result["banks"] if b["bank"] == "project__docs")
     assert "sent there by an earlier run of shared" in note
     assert len(e.imports) == sent and result["status"] == "incomplete"
+
+
+@pytest.mark.parametrize("skew", [1, -1])
+async def test_an_import_that_lands_more_or_fewer_facts_than_sent_leaves_the_bank(
+    box: Box, skew: int
+) -> None:
+    # Every recorded id is in the target; only the exact growth check sees it.
+    box.engine.skew_import["hal0:shared"] = skew
+    result = await box.fold().run()
+    assert result["status"] == "incomplete"
+    assert result["left"] == ["shared"]
+    note = next(b["note"] for b in result["banks"] if b["bank"] == "shared")
+    assert "hal0:shared grew by" in note
+    _assert_on_the_old_layout(box)
+
+
+async def test_a_refold_rechecks_models_of_a_part_that_sent_no_documents(box: Box) -> None:
+    e = box.engine
+    e.banks["private__brain"]["docs"] = {}
+    e.banks["private__brain"]["models"] = {
+        "habits": {"id": "habits", "name": "Habits", "tags": [], "content": "mine"}
+    }
+    await box.fold(only=["private__brain"]).run()
+    assert "brain-habits" in e.banks["hal0:private"]["models"]
+    del e.banks["hal0:private"]["models"]["brain-habits"]
+    result = await box.fold().run()
+    assert result["status"] == "folded"
+    brain = next(b for b in result["banks"] if b["bank"] == "private__brain")
+    assert "unchanged" not in (brain["note"] or "")
+    assert "brain-habits" in e.banks["hal0:private"]["models"]
 
 
 # ── review items 3, 5, 6, 10 ─────────────────────────────────────────────

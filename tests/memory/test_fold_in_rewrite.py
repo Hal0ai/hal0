@@ -753,6 +753,63 @@ def test_the_routing_check_refuses_a_document_missing_from_both_archives() -> No
     assert problems == ["source document p is in neither archive"]
 
 
+def _one_shared_doc_provenance(observations: list[int], models: dict[str, str]) -> dict:
+    return {
+        "shared": {
+            "documents": {"n": "n"},
+            "observations": observations,
+            "mental_models": models,
+            "pages": [],
+        },
+        "private": {"documents": {}, "observations": [], "mental_models": {}, "pages": []},
+        "dropped": {"observations": [], "mental_models": [], "pages": []},
+    }
+
+
+def test_the_routing_check_finds_an_observation_private_by_its_own_tag_on_the_shared_side() -> None:
+    # Its source is shared; only its own visibility:private says it is private.
+    # A broken rewrite stripped the stamp and sent it shared.
+    obs = {
+        "text": "says private",
+        "tags": ["visibility:private"],
+        "sources": [{"document_id": "n", "fact_index": 0}],
+    }
+    source = archive("shared", [doc("n", [fact("x")])], observations=[obs])
+    leaked = fi._write_archive("shared", [doc("n", [fact("x")])], [{**obs, "tags": []}], [], [])
+    assert fi.shared_archive_problems(leaked) == []
+    problems = fi.routing_problems(
+        source, leaked, None, _one_shared_doc_provenance([0], {}), bank_cls="platform"
+    )
+    assert "observation 0 is private but is in the shared archive" in problems
+    assert "observation 0 is private but is not on the private side" in problems
+
+
+def test_the_routing_check_finds_a_shared_model_that_kept_what_private_facts_generated() -> None:
+    source = archive(
+        "shared",
+        [doc("n", [fact("x")]), doc("p", [fact("y", "visibility:private")])],
+        models=[{"id": "m", "tags": [], "content": "built from p"}],
+    )
+    private = fi._write_archive(
+        "shared", [doc("private:unknown:p", [fact("y", "visibility:private")])], [], [], []
+    )
+    provenance = _one_shared_doc_provenance([], {"m": "m"})
+    provenance["private"]["documents"] = {"private:unknown:p": "p"}
+    kept = fi._write_archive(
+        "shared",
+        [doc("n", [fact("x")])],
+        [],
+        [{"id": "m", "tags": [], "content": "built from p"}],
+        [],
+    )
+    problems = fi.routing_problems(source, kept, private, provenance, bank_cls="platform")
+    assert any("shared mental model m keeps content" in p for p in problems)
+    cleared = fi._write_archive(
+        "shared", [doc("n", [fact("x")])], [], [{"id": "m", "tags": [], "content": ""}], []
+    )
+    assert fi.routing_problems(source, cleared, private, provenance, bank_cls="platform") == []
+
+
 # ── review items 4, 7, 8, 9 ──────────────────────────────────────────────
 
 

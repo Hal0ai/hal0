@@ -1281,6 +1281,10 @@ def routing_problems(
     * a mental model, when it is tagged so;
     * a knowledge page, when its backing mental model is private.
 
+    And when any source document is private, no shared mental model may keep
+    what a refresh generated (:data:`_GENERATED_MODEL_KEYS`): it may rest on
+    the private facts.
+
     Every such document must be in the private archive, under the new id the
     rewrite recorded for it (``provenance``), with all its facts, and in the
     shared archive under none; every such observation and mental model must
@@ -1405,6 +1409,19 @@ def routing_problems(
     for old in source_models:
         if model_marked(old) and model_part.get(old) != PART_PRIVATE and old not in dropped_models:
             problems.append(f"mental model {old} is private but is not on the private side")
+
+    if marked:
+        # The bank held private facts: what a refresh generated may rest on
+        # them, so no shared model may carry it.
+        for model in out[PART_SHARED]["mental_models"]:
+            if not isinstance(model, dict):
+                continue
+            kept = [k for k in _GENERATED_MODEL_KEYS if model.get(k) not in (None, "", [], {})]
+            if kept:
+                problems.append(
+                    f"shared mental model {model.get('id')} keeps {', '.join(kept)} although its "
+                    "bank held private facts"
+                )
 
     marked_models = {old for old in source_models if model_marked(old)}
     source_pages = {str(p.get("id")): p for p in src["knowledge_pages"] if isinstance(p, dict)}
@@ -2998,13 +3015,13 @@ class FoldIn(em.EngineMaintenance):
             return False
         for name, prior in self._prior(entry).items():
             target = journal.targets[name]
-            if not prior["documents"]:
-                continue
-            if set(prior["documents"]) - await self._document_ids(target):
+            if prior["documents"] and set(prior["documents"]) - await self._document_ids(target):
                 return False
-            if set(prior["mental_models"]) - await self._model_ids(target):
+            if prior["mental_models"] and set(prior["mental_models"]) - await self._model_ids(
+                target
+            ):
                 return False
-            if set(prior["pages"]) - await self._page_model_ids(target):
+            if prior["pages"] and set(prior["pages"]) - await self._page_model_ids(target):
                 return False
         entry.counts = dict(earlier.get("counts") or recorded)
         entry.source_counts = dict(recorded)
