@@ -118,9 +118,14 @@ with its facts and documents (`skipped` in `--json`).
 
 The `--map` and `--skip` choices are kept in the ledger, and every later run
 uses them, so a retry need not repeat them (the retry command the run prints
-names them anyway). A run that names a different `--map` for a bank an
-earlier run folded, or sent part of, is refused, and so is `--skip` for such
-a bank: it may have taken writes since, and needs a re-check, not a skip.
+names them anyway). For a bank an earlier run folded, or sent part of, a
+`--map` other than the one it was folded with is refused, and so is a first
+`--map` for one folded without any: what was sent is filed under the owners
+that classification gave it. `--skip` is refused for such a bank too: it may
+have taken writes since, and needs a re-check, not a skip. A recorded skip
+for a bank the engine no longer holds is dropped from the ledger at the end
+of the next run, and `--forget-skip BANK` drops one by hand; either way, a
+bank of that name that turns up later is classified from scratch.
 
 ## The dry run
 
@@ -153,9 +158,11 @@ on another machine that writes to the engine's port directly (for example a
 coding-agents plugin pointed at `http://<box>:9177`) is invisible to it, and
 after the cutover that client goes on writing the old banks, which nothing
 reads. So the fold-in reads the address the engine listens on from its unit
-(`systemctl cat hindsight-api.service`: `--host` on `ExecStart`, else
-`HINDSIGHT_API_HOST`, else the engine's default `0.0.0.0`). When that is
-anything but loopback, the dry run warns and `--apply` refuses
+(`systemctl cat hindsight-api.service`: the last `--host` on `ExecStart`,
+else `HINDSIGHT_API_HOST` from an `EnvironmentFile=`, which systemd lets
+override `Environment=`, else from `Environment=`, else the engine's default
+`0.0.0.0`). An `EnvironmentFile` the fold-in cannot read leaves the address
+unknown, which counts as exposed. When that is anything but loopback, the dry run warns and `--apply` refuses
 (`engine_exposed`) unless you add `--allow-exposed-engine`. Before you add
 it, repoint every such client onto hal0 with
 `hal0 memory agents install <harness> --bridge-key-file <file>` on that
@@ -203,7 +210,11 @@ it does, the run lists every bank the engine holds again: each one that is
 not a target or a switch's scratch bank must be recorded as folded. A bank
 the fold-in does not know must be named with `--skip` (or `--map`), even
 when it is empty; the `agents` bank must be empty or named with `--skip`.
-Then the run returns the engine to its normal address, writes the layout
+A bank an earlier run sent memory from that has since been deleted from the
+engine holds the cutover back while the targets still hold any copy of it:
+nothing else would tell those copies from live memory. The run names the
+bank, writes the ids to `left-ids.json`, and names the `.ids.json` files that
+record what was sent; delete the copies, then run again. Then the run returns the engine to its normal address, writes the layout
 record as `two_bank`, restarts hal0-api so it uses the two banks, and only
 then lets writes in again. From then on every agent writes to `hal0:shared` and
 `hal0:private`.
@@ -233,19 +244,30 @@ target is missing is sent:
 
 - a document the earlier run folded is the fold-in's own copy only when the
   old bank still holds it unchanged: the same text, facts and tags. A mental
-  model is its own copy only when its content and tags are as they were
-  sent; one the engine refreshed in the old bank since counts as changed
-  (a model whose content was cleared because its bank held private facts
-  does not). The ids it sent are read from the
+  model is its own copy only when its name, query, tags and trigger are as
+  they were sent; any change there is refused, because it changes who may
+  read the model. A model the engine only refreshed in the old bank since
+  (new content or history) keeps the copy in the target, with a warning, and
+  the bank's report counts it as `model_content_refreshed_kept_target`: its
+  trigger goes with it, so the target refreshes it from its own memory after
+  the cutover. The exception is a model whose content the fold-in now clears
+  because its bank holds private facts: the copy in the target was generated
+  before and may draw on them, so it is refused. A model recorded by an
+  earlier build of the fold-in, which kept one digest for the whole model,
+  passes only while that digest still matches; otherwise its own message
+  says so, and the copies are deleted and sent again. The ids it sent are
+  read from the
   `.ids.json` files in that run's archive directory, and the ledger names
   them; an edit to either by root or the hal0 account can make a document
   look like the fold-in's own when it is not, and so defeats this check. If
   it was changed since (an agent appended to it, someone edited its text or
   tags), the bank is left: a merge with `skip` would keep the older copy and
-  lose the change without a word. Delete that copy from the target (the
-  engine's `DELETE /v1/default/banks/<bank>/documents/<id>`, or
-  `.../mental-models/<id>` for a model) and run again; it is then sent as it
-  is now. A document or model deleted from the old bank since, or one that
+  lose the change without a word. The note names `left-ids.json`, which
+  holds every id. Delete each copy from the target (the engine's
+  `DELETE /v1/default/banks/<bank>/documents/<id>`, or
+  `.../mental-models/<id>` for a model, ids URL-encoded) and run again; it
+  is then sent as it is now. There is no option to keep a copy: the cutover
+  waits while one stays behind. A document or model deleted from the old bank since, or one that
   no longer goes to that target (re-tagged `visibility:private`, it now goes
   to `hal0:private`), is refused the same way: its copy would stay readable
   in the target. Delete the copy, then run again;

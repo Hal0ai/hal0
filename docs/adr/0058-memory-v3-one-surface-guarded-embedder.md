@@ -322,6 +322,15 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
         engine listens beyond loopback, `--apply` refuses unless
         `--allow-exposed-engine` is given, because a remote client writing
         to the engine's port directly would go on writing the old banks.
+     8. (2026-11-13, fourth review) A model's digest is split: a changed
+        name, query, tags or trigger refuses its bank; a content-only
+        refresh keeps the target's copy with a warning, since the trigger
+        travels and the target refreshes it, unless the content is now
+        cleared for private facts. A bank deleted from the engine after a
+        run sent from it holds the cutover back while its copies remain.
+        The `--map` freeze covers every folded bank, stale skips are
+        dropped (`--forget-skip` too), and the listen address follows the
+        last `--host` and the unit's `EnvironmentFile`.
    - *What the engine allows, checked in hindsight-api 1.2.0.* A merge
      import (`mode=merge&document_conflict=skip`) takes an archive's
      documents with their facts, the observations whose every source fact it
