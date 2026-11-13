@@ -39,29 +39,46 @@ What hindsight-api 1.2.0 gives it (read in its source, not assumed):
   (``_restore_knowledge_pages``). The source bank keeps its pages, so a
   folded page always gets a new id.
 
-Per bank, one at a time (:meth:`FoldIn._fold`): export it into the run's
-archive directory; rewrite the archive into a shared part and a private part
-(:func:`rewrite_archive`, pure); check, on the files, that every row the
-source marks private is on the private side (:func:`routing_problems`, judged
-on the source archive, not on the tags the rewrite wrote) and that the shared
-part holds no private tag or id (:func:`shared_archive_problems`); merge each
-part into its target; and check each target holds every id the part
-recorded and grew by exactly what was sent. A bank that fails is ``left``: it
-stays exactly as it was, a readable old bank, and the run carries on with the
-next. A partial merge is not undone (nothing here deletes); a later run sends
-only what is missing, with ``skip``.
+First the pre-check, for every bank of the run (:meth:`FoldIn._precheck_all`),
+importing nothing: export the bank into the run's archive directory; rewrite
+the archive into a shared part and a private part (:func:`rewrite_archive`,
+pure); check, on the files, that every row the source marks private is on
+the private side (:func:`routing_problems`, judged on the source archive,
+not on the tags the rewrite wrote) and that the shared part holds no private
+tag or id (:func:`shared_archive_problems`); and check each part against its
+target (:meth:`FoldIn._clashes`): no id another bank put there, and nothing
+an earlier run sent that has changed (a document's text, facts or tags, a
+mental model's content or tags), gone from the old bank, or no longer goes
+to that target (a document re-tagged ``visibility:private``). Then across
+banks, no two may send one id to one target. It is all or nothing: when any
+bank fails its pre-check, no bank is imported, every bank is left as it was,
+and the run ends without a cutover. A bank an earlier run folded is never
+taken on trust: it goes through the whole pre-check again on what it holds
+now, because a re-tag moves neither its counts nor its last write time.
+
+Only then the imports, bank by bank (:meth:`FoldIn._fold`): merge each part
+into its target, sending only what the target is missing, and check each
+target holds every id the part recorded and grew by exactly what was sent.
+A bank whose import fails or lands wrong is ``left``: it stays exactly as it
+was, a readable old bank, and the run carries on with the next. A partial
+merge is not undone (nothing here deletes); a later run sends only what is
+missing, with ``skip``.
 
 No cutover while any bank is left (ADR-0058 decision 7a). When every old bank
-is folded, the cutover (:meth:`FoldIn._cutover`) returns the engine to its
-normal address, writes the layout record as ``two_bank``, restarts hal0-api
-so it reads the record, retires the journal and only then lifts the write
-gate. When any bank is left, or was not part of the run (``--bank``), the run
-returns the engine to its normal address, retires the journal and lifts the
-gate without touching the layout (:meth:`FoldIn._end_without_cutover`): the
-box stays on the old layout and writes go on to the old banks. The ledger
-(:func:`load_ledger`) keeps what each run folded and sent, so the next run
-re-checks a folded bank instead of importing it again, sends only what an old
-bank gained since, and refuses a document that changed after it was folded.
+is folded, and every other bank on the engine is a target, a switch's
+scratch bank or named with ``--skip``, the cutover (:meth:`FoldIn._cutover`)
+returns the engine to its normal address, writes the layout record as
+``two_bank``, restarts hal0-api so it reads the record, retires the journal
+and only then lifts the write gate. From then on hal0 reads only the two
+banks; the old ones stay on the engine, untouched and unread. When any bank
+is left, or was not part of the run (``--bank``), the run returns the engine
+to its normal address, retires the journal and lifts the gate without
+touching the layout (:meth:`FoldIn._end_without_cutover`): the box stays on
+the old layout and writes go on to the old banks. The ledger
+(:func:`load_ledger`) keeps what each run folded and sent, and the run's
+``--map`` and ``--skip``, so the next run re-checks a folded bank instead of
+importing it again, sends only what an old bank gained since, and refuses a
+document or model that changed after it was folded.
 
 Operator decisions taken on 2026-11-12 (ADR-0058 decision 7a):
 

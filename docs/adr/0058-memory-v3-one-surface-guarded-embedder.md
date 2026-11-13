@@ -306,10 +306,22 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
         attachments or invalidated facts is left, since a merge import
         restores neither. Before the cutover every bank on the engine is
         listed again: each one that is not a target or a switch's scratch
-        bank must be folded, or, for an unknown bank or the retired
-        `agents` bank, empty or named with `--skip`. Memory ids stay out of
-        the ledger and the notes, in a 0600 file in the run's archive
-        directory.
+        bank must be folded; an unknown bank must be named with `--skip`
+        (or `--map`), even when it is empty; only the retired `agents`
+        bank is let through empty, and otherwise needs `--skip` too. Memory
+        ids stay out of the ledger and the notes, in a 0600 file owned by
+        the hal0 account in the run's archive directory.
+     7. (2026-11-13, third review) No folded bank is taken on trust: every
+        run exports it again and runs the whole pre-check, because a re-tag
+        to `visibility:private` moves neither its counts nor its last write
+        time. Mental models are recorded with a digest of their content and
+        tags, so a changed or re-tagged model refuses its bank. A run's
+        `--map` and `--skip` are kept in the ledger for later runs; a
+        changed `--map` or a `--skip` for a folded bank is refused. The
+        cutover lists the skipped banks with their counts. While the
+        engine listens beyond loopback, `--apply` refuses unless
+        `--allow-exposed-engine` is given, because a remote client writing
+        to the engine's port directly would go on writing the old banks.
    - *What the engine allows, checked in hindsight-api 1.2.0.* A merge
      import (`mode=merge&document_conflict=skip`) takes an archive's
      documents with their facts, the observations whose every source fact it

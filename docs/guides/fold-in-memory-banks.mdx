@@ -24,8 +24,10 @@ sudo hal0 memory migrate fold-in --clear-gate  # lift a pause a finished run lef
 ```
 
 It is a dry run unless `--apply` is given, and it is additive: it never
-deletes, replaces or renames a bank. The old banks stay, readable, after the
-run; deleting them is a separate step you take when you are satisfied.
+deletes, replaces or renames a bank. After the cutover the old banks stay on
+the engine, untouched, but hal0 no longer reads them: every agent reads and
+writes the two banks. Deleting them is a separate step you take when you are
+satisfied.
 
 ## What it does to each bank
 
@@ -190,19 +192,20 @@ carries on with the next one. The next run sends only what is missing.
 
 A left bank's note gives counts and bank names, never memory ids. The ids
 behind it (changed, gone, clashing, missing, mixed-owner) are in
-`left-ids.json` in the run's archive directory, readable by root only, and
-the note names that file.
+`left-ids.json` in the run's archive directory, mode 0600 and owned by the
+hal0 account (the owner of hal0's state), so root and hal0 can read it; the
+note names that file.
 
 ## The cutover waits for every bank
 
 The store moves to the two banks only when every old bank is folded. Before
 it does, the run lists every bank the engine holds again: each one that is
-not a target or a switch's scratch bank must be recorded as folded, or, for
-a bank the fold-in does not know or the `agents` bank, be empty or named
-with `--skip`. Then
-the run returns the engine to its normal address, writes the layout record
-as `two_bank`, restarts hal0-api so it uses the two banks, and only then lets
-writes in again. From then on every agent writes to `hal0:shared` and
+not a target or a switch's scratch bank must be recorded as folded. A bank
+the fold-in does not know must be named with `--skip` (or `--map`), even
+when it is empty; the `agents` bank must be empty or named with `--skip`.
+Then the run returns the engine to its normal address, writes the layout
+record as `two_bank`, restarts hal0-api so it uses the two banks, and only
+then lets writes in again. From then on every agent writes to `hal0:shared` and
 `hal0:private`.
 
 When any bank is left, was not part of the run (`--bank`), or holds the
