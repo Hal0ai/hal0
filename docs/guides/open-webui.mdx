@@ -77,6 +77,14 @@ itself) skip the Filter, and so does a workspace model you built over a slot,
 because Open WebUI does not say where it runs. All of them can still call the
 memory tools.
 
+Open WebUI 0.13 turned the file/RAG path that carries this memory off by
+default: it now runs only for a model whose `file_context` capability is on.
+hal0 pins that capability on in the Open WebUI environment file
+(`DEFAULT_MODEL_METADATA={"capabilities":{"file_context":true}}`), so recall
+keeps reaching the model. A model whose own settings say otherwise still wins,
+and a hand edit to that line in `/etc/hal0/openwebui.env` survives every
+re-render — see [ADR-0059](/docs/adr/0059-openwebui-file-context-capability-pin).
+
 <Aside type="caution">
 Do not enable this on a box with Open WebUI users you do not trust. Any user's
 `memory_add` lands in shared memory (`user:<name>` is a tag, not a permission),

@@ -23,6 +23,7 @@ Prewired variables (PLAN.md §8):
     ENABLE_PERSISTENT_CONFIG=False
     DATA_DIR=/app/backend/data
     DEFAULT_LOCALE=en
+    DEFAULT_MODEL_METADATA={"capabilities":{"file_context":true}}
 
 Voice / Call-mode variables:
     AUDIO_STT_ENGINE=openai
@@ -34,6 +35,16 @@ Voice / Call-mode variables:
     AUDIO_TTS_OPENAI_API_KEY=sk-hal0-local
     AUDIO_TTS_MODEL=kokoro-v1
     AUDIO_TTS_VOICE=af_heart
+
+Model capabilities. OpenWebUI 0.13 gated the files/RAG handler behind the
+model capability ``capabilities.file_context`` and flipped that capability's
+default to off for a normal web chat (native function calling plus a session
+id). hal0's Hindsight Filter injects the recalled memory through exactly
+that handler (ADR-0049), so on 0.13 the injected context would silently
+stop reaching the model. ``DEFAULT_MODEL_METADATA`` is the environment
+knob upstream reads for the global model defaults; hal0 pins
+``capabilities.file_context`` to true so the recall path keeps working, and
+a per-model capability still wins upstream (ADR-0059).
 
 Exposure (#1515). OpenWebUI runs in its open-by-default posture — no login
 page; hal0's own optional key auth (KB-1) gates the hal0 API only and does
@@ -180,6 +191,17 @@ _DEFAULT_OPENWEBUI_ENV: dict[str, str] = {
     "AUDIO_TTS_VOICE": "af_heart",
     "DATA_DIR": "/app/backend/data",
     "DEFAULT_LOCALE": "en",
+    # Open WebUI 0.13 gates the files/RAG handler behind the model capability
+    # ``capabilities.file_context`` and flipped its default to off for a chat
+    # that uses native function calling with a session id — the normal web
+    # chat. hal0's Hindsight Filter injects its context through that handler
+    # (ADR-0049), so without this pin the injected memory never reaches the
+    # model. The value is Open WebUI's own default metadata shape, compact so
+    # it stays one line, and it is read straight from the environment
+    # (``DEFAULT_MODEL_METADATA``) because hal0 runs Open WebUI with
+    # ``ENABLE_PERSISTENT_CONFIG=False``. A per-model capability still wins
+    # upstream, so an operator can opt a model out (ADR-0059).
+    "DEFAULT_MODEL_METADATA": '{"capabilities":{"file_context":true}}',
     "ENABLE_OLLAMA_API": "False",
     "ENABLE_OPENAI_API": "True",
     # Disable OWUI's PersistentConfig so env vars always win.  Without this,
