@@ -2079,6 +2079,7 @@ class FoldIn(em.EngineMaintenance):
         maps: Mapping[str, str] | None = None,
         only: Iterable[str] = (),
         skips: Iterable[str] = (),
+        allow_exposed_engine: bool = False,
         memory_config: Callable[[], Any] | None = None,
         layout: Callable[[], Any] | None = None,
         save_layout: Callable[[Any, dict[str, Any]], Any] | None = None,
@@ -2136,6 +2137,7 @@ class FoldIn(em.EngineMaintenance):
         self._maps = dict(self._given_maps)
         self._only = list(dict.fromkeys(only))
         self._skips = list(self._given_skips)
+        self._allow_exposed_engine = allow_exposed_engine
         self._memory_config = memory_config or _default_memory_config
         self._layout = layout
         self._save_layout = save_layout or bank_layout.record_fold_in
@@ -2309,7 +2311,9 @@ class FoldIn(em.EngineMaintenance):
                 f"({isolation_drop_in_path()} exists); see `hal0 memory migrate fold-in --status`",
             )
             self._use_port(private or None)
-        refusals.extend(em.unit_refusals(NAMES, self._unit_text(), self._normal_port()))
+        unit_text = self._unit_text()
+        refusals.extend(em.unit_refusals(NAMES, unit_text, self._normal_port()))
+        self._check_exposed_engine(plan, unit_text, apply=apply, refuse=refuse, warnings=warnings)
 
         # The layout and the targets.
         memory_cfg = self._memory_config()
@@ -2594,6 +2598,47 @@ class FoldIn(em.EngineMaintenance):
                 "old banks; recreate the ones you want on the two banks"
             )
         return plan
+
+    def _check_exposed_engine(
+        self,
+        plan: dict[str, Any],
+        unit_text: str | None,
+        *,
+        apply: bool,
+        refuse: Callable[[str, str], None],
+        warnings: list[str],
+    ) -> None:
+        """Warn, and refuse ``--apply`` unless allowed, when the engine listens beyond loopback.
+
+        :func:`direct_engine_clients` sees only the ``coding-agent.json``
+        files on this box. A client on another machine that writes to the
+        engine's port directly is invisible to it, and after the cutover it
+        goes on writing the old banks, which nothing reads.
+        """
+        host, where = em.listen_host(NAMES, unit_text) if unit_text is not None else (None, "")
+        exposed = host is not None and not em.is_loopback_host(host)
+        plan["engine_listen"] = {"host": host, "source": where, "exposed": exposed}
+        if not exposed:
+            return
+        port = self._normal_port() or 9177
+        message = (
+            f"the memory engine listens on {host} ({where}), not on loopback only. Remote "
+            "clients that write to the engine port directly (for example a coding-agents "
+            f"plugin on another machine pointed at http://<box>:{port}) keep writing the old "
+            "banks after the cutover, and nothing reads them. Repoint them with `hal0 memory "
+            "agents install <harness> --bridge-key-file <file>` first"
+        )
+        if self._allow_exposed_engine:
+            warnings.append(message + "; --allow-exposed-engine is given, so the run goes ahead")
+        elif apply:
+            refuse(
+                "engine_exposed",
+                message + ", then run again with --allow-exposed-engine",
+            )
+        else:
+            warnings.append(
+                message + ". --apply refuses this unless --allow-exposed-engine is given"
+            )
 
     def _remembered_choices(
         self,

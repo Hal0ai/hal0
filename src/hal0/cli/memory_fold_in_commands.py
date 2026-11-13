@@ -394,6 +394,14 @@ def fold_in_cmd(
         "the cutover. Kept in the ledger and reused by later runs; refused for a bank an "
         "earlier run folded.",
     ),
+    allow_exposed_engine: bool = typer.Option(
+        False,
+        "--allow-exposed-engine",
+        help="Go ahead although the memory engine listens on more than loopback. Remote "
+        "clients that write to the engine port directly keep writing the old banks after the "
+        "cutover, and nothing reads them: repoint them with `hal0 memory agents install "
+        "<harness> --bridge-key-file <file>` first.",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of tables."),
 ) -> None:
     """Fold the old memory banks into hal0:shared and hal0:private.
@@ -419,7 +427,13 @@ def fold_in_cmd(
         raise typer.Exit(2)
     owners = {k.lower(): v for k, v in _pairs(owner, "--owner").items()}
     maps = _pairs(mapping, "--map")
-    kwargs = {"owners": owners, "maps": maps, "only": bank, "skips": skip}
+    kwargs = {
+        "owners": owners,
+        "maps": maps,
+        "only": bank,
+        "skips": skip,
+        "allow_exposed_engine": allow_exposed_engine,
+    }
 
     def say(message: str) -> None:
         _progress.print(f"[dim]{escape(message)}[/dim]")

@@ -79,6 +79,9 @@ def test_a_dry_run_is_the_default_and_passes_the_options_through() -> None:
     assert FakeFoldIn.built[0]["owners"] == {"claude-code": "laptop"}
     assert FakeFoldIn.built[0]["maps"] == {"hal0-mono": "claude-code"}
     assert FakeFoldIn.built[0]["only"] == ["x"]
+    assert FakeFoldIn.built[0]["allow_exposed_engine"] is False
+    assert invoke("--allow-exposed-engine", "--json").exit_code == 0
+    assert FakeFoldIn.built[1]["allow_exposed_engine"] is True
 
 
 def test_skip_and_clear_gate_reach_the_fold_in() -> None:

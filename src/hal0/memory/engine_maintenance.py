@@ -764,6 +764,69 @@ def _check_address_value(flag: str, value: str) -> None:
         )
 
 
+#: The engine's own listen address when neither ``--host`` nor
+#: ``HINDSIGHT_API_HOST`` names one (hindsight-api 1.2.0 ``config.DEFAULT_HOST``).
+ENGINE_DEFAULT_HOST = "0.0.0.0"
+
+
+def listen_host(names: MaintenanceNames, unit_text: str) -> tuple[str | None, str]:
+    """``(host, where)``: the address the engine's unit makes it listen on, and how that was read.
+
+    hindsight-api binds ``--host`` from its command line, else
+    ``HINDSIGHT_API_HOST`` from its environment, else
+    :data:`ENGINE_DEFAULT_HOST` (``main.py`` ``parse_cli_args``). The
+    command is the one :func:`exec_start_source` finds, without this
+    command's own drop-in; the environment is the unit's last
+    ``Environment=`` that sets the variable. An ``EnvironmentFile`` is not
+    read, so a host set only there shows as the default. ``host`` is
+    ``None`` when the command line cannot be read (the preflight refuses
+    such a unit anyway).
+    """
+    line, source = exec_start_source(names, unit_text)
+    if line is None:
+        return None, ""
+    try:
+        words = [w.value for w in _split_exec(line)]
+    except UnsupportedExecStart:
+        return None, ""
+    where = f"the unit's ExecStart{f' in {source}' if source else ''}"
+    for i, word in enumerate(words[1:], start=1):
+        if word == "--host" and i + 1 < len(words):
+            return words[i + 1], f"--host in {where}"
+        if word.startswith("--host="):
+            return word[len("--host=") :], f"--host in {where}"
+    found: tuple[str, str] | None = None
+    for file, key, value in _unit_assignments(unit_text):
+        if key != "Environment" or _is_ours(names, file):
+            continue
+        try:
+            assignments = [w.value for w in _split_exec(value)]
+        except UnsupportedExecStart:
+            continue
+        for item in assignments:
+            name, sep, setting = item.partition("=")
+            if sep and name == "HINDSIGHT_API_HOST":
+                found = (setting, f"HINDSIGHT_API_HOST in {file or 'the unit'}")
+    if found is not None:
+        return found
+    return ENGINE_DEFAULT_HOST, (
+        f"the engine's default: {where} names no --host and the unit sets no HINDSIGHT_API_HOST"
+    )
+
+
+def is_loopback_host(host: str) -> bool:
+    """True for an address only this box can reach: ``localhost``, ``127.0.0.0/8``, ``::1``."""
+    import ipaddress
+
+    value = host.strip().strip("[]")
+    if value.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
 def exec_start_refusal(names: MaintenanceNames, line: str, source: str | None) -> str | None:
     """Why the command will not rewrite ``line``, with the way on, or ``None`` when it can."""
     try:
@@ -2383,6 +2446,7 @@ class EngineMaintenance:
 
 __all__ = [
     "COUNT_KEYS",
+    "ENGINE_DEFAULT_HOST",
     "ENGINE_EMBEDDING_TYPES",
     "ENGINE_OPERATION_TYPES",
     "FINGERPRINT_SIGNALS",
@@ -2412,11 +2476,13 @@ __all__ = [
     "exec_start_source",
     "free_loopback_port",
     "http_detail",
+    "is_loopback_host",
     "isolated_port",
     "isolation_body",
     "isolation_drop_in_path",
     "journal_path",
     "later_exec_start_dropins",
+    "listen_host",
     "locate_journal",
     "lock_held",
     "lock_path",

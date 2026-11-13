@@ -398,6 +398,7 @@ class Box:
         self.configs: list[tuple[str, dict[str, Any]]] = []
         self.clients: set[str] = set()
         self.privileged = True
+        self.unit_text = SHIPPED_UNIT
         bank_layout.save_layout_record(
             bank_layout.BankLayout(
                 layout=bank_layout.LAYOUT_LEGACY,
@@ -495,7 +496,7 @@ class Box:
             isolated_port=lambda: self.host.dropin_port,
             client_for=self.client,
             listener=self.host.listener,
-            unit_text=lambda: SHIPPED_UNIT,
+            unit_text=lambda: self.unit_text,
             unit_invocation=lambda: f"inv-{self.engine.restarts}",
             sleep=no_sleep,
             clock=clock,
@@ -618,6 +619,55 @@ async def test_refuses_while_pi_still_writes_to_the_engines_own_port(box: Box) -
     plan = await box.fold().preflight()
     assert "pi_direct_engine" not in _codes(plan)
     assert any("codex" in w for w in plan["warnings"])
+
+
+async def test_an_engine_listening_beyond_loopback_warns_and_needs_a_flag_to_apply(
+    box: Box,
+) -> None:
+    """Third review, item 4: a remote client on the engine's port is invisible otherwise."""
+    plan = await box.fold().preflight()
+    listen = plan["engine_listen"]
+    assert listen["host"] == "127.0.0.1" and listen["exposed"] is False
+    assert listen["source"].startswith("--host in the unit's ExecStart")
+    assert not any("loopback" in w for w in plan["warnings"])
+    box.unit_text = SHIPPED_UNIT.replace("--host 127.0.0.1", "--host 0.0.0.0")
+    dry = await box.fold().preflight()
+    assert "engine_exposed" not in _codes(dry)
+    (warning,) = [w for w in dry["warnings"] if "not on loopback only" in w]
+    assert "http://<box>:9177" in warning and "nothing reads them" in warning
+    assert "--bridge-key-file" in warning and "--allow-exposed-engine" in warning
+    applied = await box.fold().preflight(apply=True)
+    assert "engine_exposed" in _codes(applied)
+    with pytest.raises(fi.FoldInRefused, match="not on loopback only"):
+        await box.fold().run()
+    assert box.engine.imports == [] and write_gate.read_gate() is None
+    allowed = await box.fold(allow_exposed_engine=True).preflight(apply=True)
+    assert allowed["refusals"] == []
+    assert (await box.fold(allow_exposed_engine=True).run())["status"] == "folded"
+
+
+@pytest.mark.parametrize(
+    ("command", "environment", "exposed"),
+    [
+        ("--port 9177", "", True),
+        ("--port 9177", "Environment=HINDSIGHT_API_HOST=127.0.0.1\n", False),
+        ("--port 9177", 'Environment="HINDSIGHT_API_HOST=0.0.0.0" OTHER=1\n', True),
+        ("--host=localhost --port 9177", "Environment=HINDSIGHT_API_HOST=0.0.0.0\n", False),
+        ("--host ::1 --port 9177", "", False),
+        ("--host 10.0.0.5 --port 9177", "", True),
+    ],
+)
+def test_the_listen_address_is_read_as_the_engine_reads_it(
+    command: str, environment: str, exposed: bool
+) -> None:
+    unit = (
+        "# /etc/systemd/system/hindsight-api.service\n[Service]\n"
+        + environment
+        + f"ExecStart=/opt/hs/bin/hindsight-api {command}\n"
+    )
+    host, _where = em.listen_host(fi.NAMES, unit)
+    assert host is not None
+    assert (not em.is_loopback_host(host)) is exposed
 
 
 async def test_refuses_apply_without_root_and_a_target_that_is_the_old_bank(box: Box) -> None:

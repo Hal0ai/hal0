@@ -176,7 +176,7 @@ run whose store had to be recorded as mixed exits 0 and says so.
 ```sh
 hal0 memory migrate fold-in [--apply|--dry-run] [--resume] [--status] [--clear-gate]
                             [--bank ID]... [--owner HARNESS=CLIENT]... [--map BANK=HARNESS]...
-                            [--skip BANK]... [--json]
+                            [--skip BANK]... [--allow-exposed-engine] [--json]
 ```
 
 Folds a store's old banks into `hal0:shared` and `hal0:private` (ADR-0058
@@ -199,6 +199,7 @@ happens to each fact, observation, mental model and directive.
 | `--owner HARNESS=CLIENT` | Repeatable. File a coding bank's facts written by `HARNESS` (their `agent:` tag, else the bank's harness) under bridge client `CLIENT`, and a private fact's `agent:` name in the other banks too. Without it: a memory-scoped bridge client of the harness's own name, else the reserved `hal0-legacy-<harness>` (a private agent name outside coding banks is kept, lower-cased). `pi` maps to `pi-coder` by default. Frozen per bank, with the list of bridge clients, once anything of the bank was sent: a later run that names different owners for it is refused. |
 | `--map BANK=HARNESS` | Repeatable. Fold a bank the fold-in does not know as a coding bank written by `HARNESS`, its project taken from each fact's `project:` tags. Without it, or `--skip`, such a bank is refused and holds the cutover back. Kept in the ledger and reused by every later run; a different `--map` for a bank an earlier run folded (or sent part of) is refused. |
 | `--skip BANK` | Repeatable. Leave a bank the fold-in does not know, or the retired `agents` bank, out of the two banks: it stays on the engine and nothing reads it after the cutover. Without it, an unknown bank holds the cutover back even when it is empty, and so does `agents` while it is not empty. Kept in the ledger and reused by every later run. The run that cuts over lists each skipped bank with its fact and document counts (`skipped` in `--json`). Refused for a bank the fold-in folds, and for one an earlier run folded: it may have taken writes since, and needs a re-check, not a skip. |
+| `--allow-exposed-engine` | Go ahead although the engine's unit makes it listen on more than loopback (`--host`, else `HINDSIGHT_API_HOST`, else the engine's default `0.0.0.0`). Without it `--apply` refuses (`engine_exposed`) and the dry run warns: a client on another machine that writes to the engine's port directly keeps writing the old banks after the cutover, and nothing reads them. Repoint such clients with `hal0 memory agents install <harness> --bridge-key-file <file>` first. |
 | `--json` | One JSON document on stdout: the plan, the result or the failure. |
 
 Exit codes: 0 when the dry run has no refusal, the run cut over, or

@@ -145,6 +145,21 @@ engine's export or import API off, or Pi's section of
 Move Pi first with `sudo hal0 update component pi`; another harness pointing
 there is a warning (move it with `hal0 memory agents install <harness>`).
 
+<Aside type="danger" title="Clients on other machines">
+The fold-in can see only the `coding-agent.json` files on this box. A client
+on another machine that writes to the engine's port directly (for example a
+coding-agents plugin pointed at `http://<box>:9177`) is invisible to it, and
+after the cutover that client goes on writing the old banks, which nothing
+reads. So the fold-in reads the address the engine listens on from its unit
+(`systemctl cat hindsight-api.service`: `--host` on `ExecStart`, else
+`HINDSIGHT_API_HOST`, else the engine's default `0.0.0.0`). When that is
+anything but loopback, the dry run warns and `--apply` refuses
+(`engine_exposed`) unless you add `--allow-exposed-engine`. Before you add
+it, repoint every such client onto hal0 with
+`hal0 memory agents install <harness> --bridge-key-file <file>` on that
+machine. The shipped unit listens on `127.0.0.1` only.
+</Aside>
+
 ## While it runs
 
 <Aside type="caution">
