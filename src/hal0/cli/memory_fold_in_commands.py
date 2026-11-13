@@ -227,6 +227,11 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
         )
     if plan.get("estimate_s") is not None:
         lines.append(f"duration: about {max(1, round(plan['estimate_s'] / 60))} min")
+    for blocker in plan.get("blocking") or []:
+        lines.append(
+            f"cutover: [yellow]held back by {escape(str(blocker.get('bank')))}[/yellow]: "
+            f"{escape(str(blocker.get('reason')))}. {escape(str(blocker.get('fix')))}"
+        )
     if plan.get("pending"):
         lines.append(
             "cutover: [yellow]not in this run[/yellow]. "
@@ -234,7 +239,7 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
             + " are not part of it, and the store moves to the two banks only once every old "
             "bank is folded"
         )
-    elif plan.get("cuts_over"):
+    elif plan.get("cuts_over") and not plan.get("blocking"):
         lines.append(
             "cutover: when every bank folds, the store moves to the two banks. If any bank is "
             "left, the run folds the rest, returns the box to the old layout with writes open, "
@@ -364,6 +369,14 @@ def fold_in_cmd(
         help="BANK=HARNESS (repeatable): fold a bank the fold-in does not know as a coding "
         "bank written by HARNESS, its project taken from each fact's tags.",
     ),
+    skip: list[str] = typer.Option(
+        [],
+        "--skip",
+        help="BANK (repeatable): leave a bank the fold-in does not know, or the retired agents "
+        "bank, out of the two banks. Without it such a bank holds the cutover back (an excluded "
+        "bank only while it is not empty). It stays on the engine and nothing reads it after "
+        "the cutover.",
+    ),
     json_out: bool = typer.Option(False, "--json", help="Emit JSON instead of tables."),
 ) -> None:
     """Fold the old memory banks into hal0:shared and hal0:private.
@@ -383,7 +396,7 @@ def fold_in_cmd(
         raise typer.Exit(2)
     owners = {k.lower(): v for k, v in _pairs(owner, "--owner").items()}
     maps = _pairs(mapping, "--map")
-    kwargs = {"owners": owners, "maps": maps, "only": bank}
+    kwargs = {"owners": owners, "maps": maps, "only": bank, "skips": skip}
 
     def say(message: str) -> None:
         _progress.print(f"[dim]{escape(message)}[/dim]")
@@ -468,6 +481,11 @@ def fold_in_cmd(
             )
     if pending:
         body.append("not in this run: " + ", ".join(escape(str(b)) for b in pending))
+    for blocker in result.get("blocking") or []:
+        body.append(
+            f"[yellow]holds the cutover back: {escape(str(blocker.get('bank')))}[/yellow] — "
+            f"{escape(str(blocker.get('reason')))}. {escape(str(blocker.get('fix')))}"
+        )
     if incomplete:
         body.append(
             f"Fix what is named above, then run `{escape(str(result.get('retry')))}` (or "

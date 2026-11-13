@@ -96,7 +96,7 @@ def plan(bank: str, *, owners: dict[str, str] | None = None, known: set[str] | N
         ("hal0:shared", fi.CLASS_TARGET, {}),
         ("hal0:private", fi.CLASS_TARGET, {}),
         ("agents", fi.CLASS_EXCLUDED, {}),
-        ("shared.switch-0123abcd", fi.CLASS_EXCLUDED, {}),
+        ("shared.switch-0123abcd", fi.CLASS_SCRATCH, {}),
         ("shared", fi.CLASS_PLATFORM, {}),
         ("private__hermes", fi.CLASS_PRIVATE, {"agent": "hermes"}),
         ("coding-agent::hal0", fi.CLASS_CODING, {"harness": "coding-agent", "project": "hal0"}),

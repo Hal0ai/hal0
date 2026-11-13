@@ -795,6 +795,57 @@ async def test_a_bank_named_alone_does_not_cut_over_while_others_are_pending(box
     _assert_folded(box)
 
 
+FOLDABLE_BANKS = ["shared", "coding-agent::web", "pi-coder", "private__brain"]
+
+
+async def test_an_unclassified_bank_holds_the_cutover_back_even_when_not_named(box: Box) -> None:
+    # The second review's case: hal0-mono holds a fact, and --bank names only
+    # the four foldable banks. Every named bank folds, and still no cutover.
+    box.engine.banks["hal0-mono"] = empty_bank()
+    box.engine.banks["hal0-mono"]["docs"] = {"m1": doc("m1", fact("devops note"))}
+    plan = await box.fold(only=FOLDABLE_BANKS).preflight(apply=True)
+    assert plan["refusals"] == []
+    assert plan["cuts_over"] is False
+    assert [b["bank"] for b in plan["blocking"]] == ["hal0-mono"]
+    result = await box.fold(only=FOLDABLE_BANKS).run()
+    assert result["status"] == "incomplete"
+    assert result["cut_over"] is False
+    assert sorted(result["folded"]) == sorted(FOLDABLE_BANKS)
+    (blocker,) = result["blocking"]
+    assert blocker["bank"] == "hal0-mono"
+    assert "--map hal0-mono=HARNESS" in blocker["fix"] and "--skip hal0-mono" in blocker["fix"]
+    _assert_on_the_old_layout(box)
+    # Acknowledged with --skip, the next run cuts over and leaves it where it is.
+    done = await box.fold(skips=["hal0-mono"]).run()
+    assert done["status"] == "folded"
+    assert "m1" in box.engine.banks["hal0-mono"]["docs"]
+    assert box.layout().two_bank
+
+
+async def test_the_retired_agents_bank_holds_the_cutover_back_until_empty_or_skipped(
+    box: Box,
+) -> None:
+    box.engine.banks["agents"]["docs"] = {"a1": doc("a1", fact("old agent memory"))}
+    result = await box.fold().run()
+    assert result["status"] == "incomplete"
+    assert [b["bank"] for b in result["blocking"]] == ["agents"]
+    assert "hal0 memory migrate platform" in result["blocking"][0]["fix"]
+    _assert_on_the_old_layout(box)
+    box.engine.banks["agents"]["docs"] = {}
+    assert (await box.fold().run())["status"] == "folded"
+
+
+async def test_skip_is_only_for_a_bank_the_fold_in_does_not_move(box: Box) -> None:
+    plan = await box.fold(skips=["pi-coder"]).preflight()
+    assert "skip_not_allowed" in _codes(plan)
+    plan = await box.fold(skips=["nope"]).preflight()
+    assert "no_such_bank" in _codes(plan)
+    box.engine.banks["hal0-mono"] = empty_bank()
+    plan = await box.fold(skips=["hal0-mono"]).preflight()
+    assert "unclassified_bank" not in _codes(plan)
+    assert plan["blocking"] == [] and plan["cuts_over"] is True
+
+
 async def test_a_folded_document_changed_in_the_old_bank_refuses_until_its_copy_is_deleted(
     box: Box,
 ) -> None:

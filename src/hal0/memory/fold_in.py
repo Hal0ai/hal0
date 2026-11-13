@@ -175,6 +175,8 @@ CLASS_CODING = "coding"
 CLASS_PROJECT = "project"
 CLASS_TARGET = "target"
 CLASS_EXCLUDED = "excluded"
+#: A temporary bank of an embedder switch: scratch, never part of a fold-in.
+CLASS_SCRATCH = "scratch"
 CLASS_UNCLASSIFIED = "unclassified"
 FOLDABLE = (CLASS_PLATFORM, CLASS_PRIVATE, CLASS_CODING, CLASS_PROJECT)
 
@@ -357,7 +359,7 @@ def classify_bank(
             reason="the retired agents bank: `hal0 memory migrate platform` folds it",
         )
     if is_switch_temp(bank):
-        return BankClass(bank, CLASS_EXCLUDED, reason="a temporary bank of an embedder switch")
+        return BankClass(bank, CLASS_SCRATCH, reason="a temporary bank of an embedder switch")
     if bank == platform_bank:
         return BankClass(bank, CLASS_PLATFORM)
     if bank.startswith(_PRIVATE_BANK_PREFIX) and len(bank) > len(_PRIVATE_BANK_PREFIX):
@@ -1597,6 +1599,13 @@ class Journal:
     #: ``--bank``, never folded): while there are any, it does not cut over.
     pending: list[str] = field(default_factory=list)
     allow_pending: bool = False
+    #: Banks the operator named with ``--skip``: an unclassified or excluded
+    #: bank acknowledged as staying out of the two banks, so it does not hold
+    #: the cutover back.
+    skips: list[str] = field(default_factory=list)
+    #: Banks on the engine that held the cutover back at the end of the run
+    #: (:meth:`FoldIn._cutover_blockers`), each with what to do about it.
+    blocking: list[dict[str, str]] = field(default_factory=list)
     private_port: int | None = None
     isolated: bool = False
     engine_stopped: bool = False
@@ -1910,6 +1919,45 @@ def _read_nofollow(path: Path) -> bytes:
         os.close(dfd)
 
 
+def _blocker(row: Mapping[str, Any], *, skips: Iterable[str]) -> dict[str, str] | None:
+    """Why the bank in ``row`` holds the cutover back, and what to do; ``None`` when it does not.
+
+    ``row`` is a plan row or a re-check row: ``bank``, ``class``, and
+    ``action`` / ``folded`` for a foldable bank, ``counts`` for an excluded
+    one. A foldable bank holds it back until it is folded (a plan row's
+    ``action`` is ``recheck`` for a bank an earlier run folded, ``fold`` for
+    one this run folds). An unclassified bank holds it back unless named
+    with ``--skip``; an excluded one unless it is empty or named so.
+    """
+    bank, cls = str(row.get("bank")), str(row.get("class"))
+    if cls in (CLASS_TARGET, CLASS_SCRATCH) or bank in set(skips):
+        return None
+    if cls in FOLDABLE:
+        if row.get("folded") or row.get("action") in ("fold", "recheck"):
+            return None
+        return {
+            "bank": bank,
+            "reason": "not folded",
+            "fix": f"fold it: `sudo {NAMES.command} --apply --bank {shlex.quote(bank)}`",
+        }
+    if cls == CLASS_EXCLUDED:
+        counts = row.get("counts")
+        if isinstance(counts, Mapping) and not any(int(v or 0) for v in counts.values()):
+            return None
+        return {
+            "bank": bank,
+            "reason": f"{row.get('reason') or 'excluded'}, and it is not empty",
+            "fix": "fold it with `hal0 memory migrate platform` first, or name it with "
+            f"--skip {shlex.quote(bank)} to leave it out of the two banks",
+        }
+    return {
+        "bank": bank,
+        "reason": "not a bank the fold-in knows",
+        "fix": f"name its harness with --map {shlex.quote(bank)}=HARNESS to fold it, or name "
+        f"it with --skip {shlex.quote(bank)} to leave it out of the two banks",
+    }
+
+
 class FoldIn(em.EngineMaintenance):
     """One run of the fold-in against one engine.
 
@@ -1919,7 +1967,9 @@ class FoldIn(em.EngineMaintenance):
     :data:`NAMES`; this class is the fold-in's plan and sequence.
 
     ``owners`` is the operator's ``--owner HARNESS=CLIENT`` map, ``maps``
-    ``--map BANK=HARNESS``, ``only`` the banks of ``--bank``. Host seams
+    ``--map BANK=HARNESS``, ``only`` the banks of ``--bank``, ``skips`` the
+    banks of ``--skip`` (an unclassified or excluded bank acknowledged as
+    staying out of the two banks). Host seams
     besides the base class's: ``memory_config()`` (``[memory]`` from
     hal0.toml), ``layout()`` (:func:`hal0.memory.bank_layout.current_layout`),
     ``save_layout(layout, fold_in)``, ``known_clients()``, ``client_configs()``
@@ -1936,6 +1986,7 @@ class FoldIn(em.EngineMaintenance):
         owners: Mapping[str, str] | None = None,
         maps: Mapping[str, str] | None = None,
         only: Iterable[str] = (),
+        skips: Iterable[str] = (),
         memory_config: Callable[[], Any] | None = None,
         layout: Callable[[], Any] | None = None,
         save_layout: Callable[[Any, dict[str, Any]], Any] | None = None,
@@ -1987,6 +2038,7 @@ class FoldIn(em.EngineMaintenance):
         self._owners = {k.strip().lower(): v.strip() for k, v in (owners or {}).items()}
         self._maps = dict(maps or {})
         self._only = list(dict.fromkeys(only))
+        self._skips = list(dict.fromkeys(skips))
         self._memory_config = memory_config or _default_memory_config
         self._layout = layout
         self._save_layout = save_layout or bank_layout.record_fold_in
@@ -2082,11 +2134,13 @@ class FoldIn(em.EngineMaintenance):
             "owners": {**DEFAULT_OWNERS, **self._owners},
             "maps": dict(self._maps),
             "only": list(self._only),
+            "skips": list(self._skips),
             "totals": dict.fromkeys(em.COUNT_KEYS, 0),
             "disk": None,
             "estimate_s": None,
             "direct_clients": [],
             "pending": [],
+            "blocking": [],
             "cuts_over": False,
             "refusals": refusals,
             "warnings": warnings,
@@ -2295,6 +2349,12 @@ class FoldIn(em.EngineMaintenance):
                     row["reason"] = "not named with --bank"
                     if cls.foldable:
                         plan["pending"].append(bank)
+                if bank in self._skips and not cls.foldable:
+                    row["action"] = "skip"
+                    row["reason"] = (
+                        "named with --skip: it stays on the engine, outside the two banks, and "
+                        "nothing reads it after the cutover"
+                    )
                 if before is not None and row["action"] in ("fold", "recheck"):
                     frozen = before.get("owners")
                     if (
@@ -2309,9 +2369,12 @@ class FoldIn(em.EngineMaintenance):
                             + ", and what it sent is filed under those owners. Run again with "
                             "the same --owner flags, or with none to reuse them",
                         )
-                if row["action"] in ("fold", "recheck") or cls.cls == CLASS_UNCLASSIFIED:
+                if row["action"] in ("fold", "recheck") or cls.cls in (
+                    CLASS_UNCLASSIFIED,
+                    CLASS_EXCLUDED,
+                ):
                     state = await self.bank_state(bank)
-                    if state["pending"] or state["processing"]:
+                    if cls.foldable and (state["pending"] or state["processing"]):
                         if apply:
                             state, own = await self._await_engine_work(
                                 bank, state, deadline=deadline
@@ -2333,13 +2396,34 @@ class FoldIn(em.EngineMaintenance):
             return plan
         for missing in [b for b in self._only if b not in ids]:
             refuse("no_such_bank", f"--bank {missing}: the engine has no such bank")
+        for missing in [b for b in self._skips if b not in ids]:
+            refuse("no_such_bank", f"--skip {missing}: the engine has no such bank")
+        for row in plan["banks"]:
+            if row["bank"] in self._skips and row["class"] not in (
+                CLASS_UNCLASSIFIED,
+                CLASS_EXCLUDED,
+            ):
+                refuse(
+                    "skip_not_allowed",
+                    f"--skip {row['bank']}: a {row['class']} bank is folded, never skipped; "
+                    "--skip is for a bank the fold-in does not know or does not move",
+                )
+            # A foldable bank this run does not fold is in ``pending``.
+            blocker = None if row["class"] in FOLDABLE else _blocker(row, skips=self._skips)
+            if blocker is not None:
+                plan["blocking"].append(blocker)
         for row in plan["banks"]:
             named = row["bank"] in self._only
-            if row["class"] == CLASS_UNCLASSIFIED and (named or not self._only):
+            if (
+                row["class"] == CLASS_UNCLASSIFIED
+                and row["bank"] not in self._skips
+                and (named or not self._only)
+            ):
                 refuse(
                     "unclassified_bank",
                     f"bank {row['bank']} ({row.get('counts', {}).get('facts', 0)} facts) is "
-                    f"{row['reason']}. Nothing is folded while a bank is left unaccounted for",
+                    f"{row['reason']}, or with --skip BANK to leave it out of the two banks. "
+                    "Nothing is folded while a bank is left unaccounted for",
                 )
             elif named and row["action"] != "fold":
                 refuse(
@@ -2349,7 +2433,9 @@ class FoldIn(em.EngineMaintenance):
         busy = [
             b
             for b in plan["banks"]
-            if (b.get("pending") or b.get("processing")) and b["bank"] not in engine_work
+            if b["action"] in ("fold", "recheck")
+            and (b.get("pending") or b.get("processing"))
+            and b["bank"] not in engine_work
         ]
         if busy:
             listing = ", ".join(
@@ -2376,7 +2462,12 @@ class FoldIn(em.EngineMaintenance):
                 )
         if not any(b["action"] in ("fold", "recheck") for b in plan["banks"]) and not refusals:
             refuse("nothing_to_fold", "there is no old bank to fold in")
-        plan["cuts_over"] = not plan["pending"]
+        plan["cuts_over"] = not plan["pending"] and not plan["blocking"]
+        if plan["blocking"]:
+            warnings.append(
+                "the cutover waits for "
+                + "; ".join(f"{b['bank']}: {b['reason']} ({b['fix']})" for b in plan["blocking"])
+            )
         if plan["pending"]:
             warnings.append(
                 f"{len(plan['pending'])} old bank(s) are not part of this run "
@@ -2542,6 +2633,7 @@ class FoldIn(em.EngineMaintenance):
                 maps=dict(self._maps),
                 platform_bank=plan["platform_bank"],
                 pending=list(plan.get("pending") or []),
+                skips=list(self._skips),
                 private_port=self._pick_port(),
                 banks=banks,
             )
@@ -3449,13 +3541,50 @@ class FoldIn(em.EngineMaintenance):
         store on the old layout.
         """
         self._record_ledger(journal)
-        if journal.pending or any(e.step != STEP_FOLDED for e in journal.banks):
+        if not journal.pending and all(e.step == STEP_FOLDED for e in journal.banks):
+            # Every bank of the run folded: the engine may still hold a bank
+            # no run folded (one not named, unknown, or the retired agents
+            # bank with memory in it). Listed afresh, every time.
+            journal.blocking = await self._cutover_blockers(journal)
+        if journal.pending or journal.blocking or any(e.step != STEP_FOLDED for e in journal.banks):
             journal.phase = PHASE_RELEASING
             self._save(journal)
             return await self._end_without_cutover(journal)
         journal.phase = PHASE_CUTTING_OVER
         self._save(journal)
         return await self._cutover(journal)
+
+    async def _cutover_blockers(self, journal: Journal) -> list[dict[str, str]]:
+        """Every bank on the engine that holds the cutover back, with what to do about it.
+
+        Every bank the engine holds is listed and classified again. A target
+        or a switch's scratch bank is fine. A foldable bank must be recorded
+        as folded in the ledger. An unclassified bank must be named with
+        ``--skip`` (or ``--map``, which makes it foldable). An excluded bank
+        (the retired ``agents`` bank) must be empty, or named with ``--skip``.
+        """
+        ledger = load_ledger()
+        folded = {
+            bank
+            for bank, row in (ledger.get("banks") or {}).items()
+            if isinstance(row, dict) and row.get("state") == LEDGER_FOLDED
+        }
+        platform = journal.platform_bank or bank_layout.LEGACY_PLATFORM_BANK
+        out: list[dict[str, str]] = []
+        for bank in await self._bank_ids():
+            cls = classify_bank(
+                bank, platform_bank=platform, targets=journal.targets.values(), maps=journal.maps
+            )
+            row: dict[str, Any] = {"bank": bank, "class": cls.cls, "reason": cls.reason}
+            if cls.foldable:
+                row["folded"] = bank in folded
+            elif cls.cls == CLASS_EXCLUDED:
+                state = await self.bank_state(bank)
+                row["counts"] = state["counts"]
+            blocker = _blocker(row, skips=journal.skips)
+            if blocker is not None:
+                out.append(blocker)
+        return out
 
     async def _end_without_cutover(self, journal: Journal) -> dict[str, Any]:
         """End a run that does not cut over: engine back, journal retired, then writes.
@@ -3492,6 +3621,7 @@ class FoldIn(em.EngineMaintenance):
             "cut_over": False,
             "left": left,
             "pending": list(journal.pending),
+            "blocking": list(journal.blocking),
             "retry": f"sudo {NAMES.command} --apply"
             + "".join(f" --bank {shlex.quote(b)}" for b in retry),
         }
@@ -3661,6 +3791,7 @@ __all__ = [
     "CLASS_PLATFORM",
     "CLASS_PRIVATE",
     "CLASS_PROJECT",
+    "CLASS_SCRATCH",
     "CLASS_TARGET",
     "CLASS_UNCLASSIFIED",
     "DEFAULT_OWNERS",
