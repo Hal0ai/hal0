@@ -82,7 +82,12 @@ Root model `Hal0Config`, `extra="allow"`.
 | `stream_total_timeout_s` | float | `900.0` | `0.0-86400.0` (`0` disables) |
 | `stream_idle_timeout_s` | float | `300.0` | `0.0-86400.0` (`0` disables) |
 | `prefetch_parallel_cap` | int | `4` | `>= 1` |
-| `admission_wait_timeout_s` | float | `1800.0` | `1.0-86400.0`. Max seconds a request may wait in a slot's admission queue (only slots with `max_inflight` set) before the dispatcher answers `503` with `Retry-After` instead of forwarding. The forward's own read-timeout clock starts after admission, so this bound is independent of `direct_read_timeout_s` ([ADR-0056](/docs/adr/0056-serial-backend-admission)) |
+| `admission_wait_timeout_s` | float | `1800.0` | `1.0-86400.0`. Only `POST /v1/systemone` reads it; chat keeps its 1800.0-second default, so it does not bound `/v1/chat/completions` ([#3632](https://github.com/Hal0ai/hal0/issues/3632)). |
+
+Chat admission covers slots with effective `max_inflight` (explicit, or `1`
+by default on FLM/ggml-xdna). Timeout: `503` with `Retry-After`; the
+forward's read timeout starts after admission
+([ADR-0056](/docs/adr/0056-serial-backend-admission)).
 
 `stream_total_timeout_s` / `stream_idle_timeout_s` are the streaming **stall
 guard**: a chatty never-terminating upstream resets the transport read timer
@@ -252,8 +257,8 @@ under `[memory.lanes.<op>]` below. The engine reads these as its own
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `llm_max_concurrent` | int | `1` | `1-32`. `HINDSIGHT_API_LLM_MAX_CONCURRENT` — the global cap across every engine LLM call (retain, consolidation, reflect, mental-model refresh together). |
-| `timeout_s` | int | `600` | `30-3600`. `HINDSIGHT_API_LLM_TIMEOUT`. |
+| `llm_max_concurrent` | int | `1` | `1-32`. `HINDSIGHT_API_LLM_MAX_CONCURRENT` global cap; rendered as min(this, effective `[memory.graph].extraction_max_concurrent`). |
+| `timeout_s` | int | `600` | `30-3600`. Not rendered. Engine-wide timeout: `[memory.graph].llm_timeout_s` (`HINDSIGHT_API_LLM_TIMEOUT`); see [#3631](https://github.com/Hal0ai/hal0/issues/3631). |
 | `reasoning_effort` | str | `"none"` | `HINDSIGHT_API_LLM_REASONING_EFFORT`. |
 | `strict_schema` | bool | `false` | `HINDSIGHT_API_LLM_STRICT_SCHEMA`. |
 
@@ -266,9 +271,9 @@ The per-operation tables `retain`, `consolidation`, `reflect` and
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `max_concurrent` | int | unset | `1-32`. `HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT` for this operation only; unset falls back to `[memory.lanes].llm_max_concurrent`. |
+| `max_concurrent` | int | unset | `1-32`. `HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT` for this op; unset falls back to `[memory.lanes].llm_max_concurrent`. Shared-model ops use the same ceiling. |
 | `virtual_model` | str | unset | Optional per-op hal0 virtual model override (for example `hal0/utility` for a burst lane) instead of the shared `hal0/memory` alias. |
-| `timeout_s` | int | unset | `30-3600`. Per-op LLM timeout override; unset falls back to `[memory.lanes].timeout_s`. |
+| `timeout_s` | int | unset | `30-3600`. `HINDSIGHT_API_{OP}_LLM_TIMEOUT`; unset falls back to `HINDSIGHT_API_LLM_TIMEOUT` from `[memory.graph].llm_timeout_s` (not `[memory.lanes].timeout_s`). |
 | `reasoning_effort` | str | unset | Per-op `HINDSIGHT_API_{OP}_LLM_REASONING_EFFORT` override; unset falls back to `[memory.lanes].reasoning_effort`. |
 | `strict_schema` | bool | unset | Per-op `HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA` override; unset falls back to `[memory.lanes].strict_schema`. |
 | `max_completion_tokens` | int | unset; `consolidation` and `reflect` then render `8192` | `0-131072`; `0` leaves the engine uncapped. Rendered as `HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS` or `HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS`. Mental-model refresh runs through reflect, so the reflect cap bounds it; a mental model whose `max_tokens` is near the cap leaves no headroom, because the engine fails the call on `finish_reason=length` instead of truncating, and on a thinking model reasoning tokens count inside the cap. Setting it on `retain` (use `[memory.graph].extraction_max_tokens`) or on `mental_model_refresh` is refused |
