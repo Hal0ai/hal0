@@ -245,18 +245,19 @@ async def seed_missing_banks(client: Any, targets: dict[str, dict[str, Any]]) ->
 
 
 def switch_in_progress() -> str | None:
-    """Why the engine's banks must not be written by anything but the switch now, else ``None``.
+    """Why the engine's banks must not be written by anything but a maintenance run now, else ``None``.
 
-    ``hal0 memory embedder switch`` running or unfinished, its write gate set,
-    or the engine isolated on its private port. Never raises: a check that
-    cannot be made reads as "in progress", so nothing is written on a guess.
+    ``hal0 memory embedder switch`` or ``hal0 memory migrate fold-in`` running
+    or unfinished, its write gate set, or the engine isolated on its private
+    port. Never raises: a check that cannot be made reads as "in progress", so
+    nothing is written on a guess.
     """
     try:
-        from hal0.memory import embedder_switch
+        from hal0.memory import embedder_switch, fold_in
 
-        return embedder_switch.blocking_reason()
+        return embedder_switch.blocking_reason() or fold_in.blocking_reason()
     except Exception as exc:
-        return f"whether an embedder switch is running could not be checked ({exc})"
+        return f"whether an embedder switch or a fold-in is running could not be checked ({exc})"
 
 
 def heal_hook(provider: Any) -> Any:
