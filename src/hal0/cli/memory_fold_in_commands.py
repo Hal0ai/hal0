@@ -249,8 +249,8 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
         "[bold]while it runs, memory is out of service:[/bold] the engine is moved to a "
         "private port, writes are refused with 503 memory.writes_paused and recall fails "
         "until the run ends. Nothing is deleted: the old banks stay, read-only once the run "
-        "has cut over. Banks an earlier run folded are re-checked and only what they gained "
-        "since is sent. --apply is your consent to that"
+        "has cut over. Banks an earlier run folded are exported and checked again, and only "
+        "what the targets are missing is sent. --apply is your consent to that"
     )
     for warning in plan.get("warnings") or []:
         lines.append(f"[yellow]note: {escape(str(warning))}[/yellow]")

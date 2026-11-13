@@ -197,23 +197,31 @@ sudo hal0 memory migrate fold-in --apply --bank pi-coder  # one left bank
 ```
 
 A later run exports each left bank afresh and folds it. A bank an earlier run
-folded is never imported again. It is re-checked: when its counts and last
-write are as the ledger recorded them and every document, model and page the
-earlier run sent is still in its target, it counts as folded. When the old
-bank has changed since (writes go on there until the cutover), it is
-exported again and only what the target is missing is sent:
+folded is never imported twice, and it is never taken on trust either: every
+run exports it again and runs the whole pre-check on what it holds now (the
+routing check, and the clash, changed and gone checks below), because a
+re-tag, such as a document marked `visibility:private` after it was folded,
+changes neither the bank's counts nor its last write time. Only what the
+target is missing is sent:
 
 - a document the earlier run folded is the fold-in's own copy only when the
-  old bank still holds it unchanged. The ids it sent are read from the
+  old bank still holds it unchanged: the same text, facts and tags. A mental
+  model is its own copy only when its content and tags are as they were
+  sent; one the engine refreshed in the old bank since counts as changed
+  (a model whose content was cleared because its bank held private facts
+  does not). The ids it sent are read from the
   `.ids.json` files in that run's archive directory, and the ledger names
-  them; a root edit to either can make a document look like the fold-in's
-  own when it is not, and so defeats this check. If it was changed since (an agent
-  appended to it, say), the bank is left: a merge with `skip` would keep the
-  older copy and lose the change without a word. Delete that copy from the
-  target (the engine's `DELETE /v1/default/banks/<bank>/documents/<id>`) and
-  run again; the document is then sent as it is now. A document deleted from
-  the old bank since is refused the same way, because its copy would bring
-  it back;
+  them; an edit to either by root or the hal0 account can make a document
+  look like the fold-in's own when it is not, and so defeats this check. If
+  it was changed since (an agent appended to it, someone edited its text or
+  tags), the bank is left: a merge with `skip` would keep the older copy and
+  lose the change without a word. Delete that copy from the target (the
+  engine's `DELETE /v1/default/banks/<bank>/documents/<id>`, or
+  `.../mental-models/<id>` for a model) and run again; it is then sent as it
+  is now. A document or model deleted from the old bank since, or one that
+  no longer goes to that target (re-tagged `visibility:private`, it now goes
+  to `hal0:private`), is refused the same way: its copy would stay readable
+  in the target. Delete the copy, then run again;
 - new documents are sent, and must all arrive;
 - an observation the earlier run sent that rests on a document already in
   the target must be there; if it did not land with its document, no merge

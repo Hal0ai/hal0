@@ -443,8 +443,8 @@ class RewriteResult:
     expected: dict[str, dict[str, int]]
     report: dict[str, Any]
     #: Document, mental-model and page (backing model) ids per part, for the
-    #: checks after the import.
-    ids: dict[str, dict[str, list[str]]]
+    #: checks after the import, and each model's :func:`model_digest`.
+    ids: dict[str, dict[str, Any]]
     #: Where every row of each part came from in the source archive, and what
     #: was dropped: what :func:`routing_problems` judges.
     provenance: dict[str, Any] = field(default_factory=dict)
@@ -871,6 +871,25 @@ def document_digest(doc: Mapping[str, Any]) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
 
 
+def model_digest(model: Mapping[str, Any]) -> str:
+    """A digest of a mental model as the fold-in sends it: name, query, content, tags, trigger.
+
+    Taken from the rewritten model, so a model whose content or tags changed
+    in the old bank since an earlier run sent it (or whose content the
+    rewrite now clears) is told apart from the copy in the target. The
+    engine's own timestamps are left out.
+    """
+    body = {
+        "name": model.get("name"),
+        "source_query": model.get("source_query"),
+        "content": model.get("content"),
+        "tags": sorted(str(t) for t in model.get("tags") or ()),
+        "trigger": _decoded(model.get("trigger")),
+    }
+    text = json.dumps(body, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+
+
 def observation_digest(obs: Mapping[str, Any]) -> str:
     """A short digest of an observation's text: how a sent observation is known again."""
     return hashlib.sha256(str(obs.get("text")).encode("utf-8")).hexdigest()[:24]
@@ -1200,12 +1219,14 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
         PART_SHARED: {
             "documents": [str(d["id"]) for d in parts[PART_SHARED]],
             "mental_models": [str(m["id"]) for m in models],
+            "model_digests": {str(m["id"]): model_digest(m) for m in models},
             "pages": page_model_ids,
             "observations": sorted({observation_digest(o) for o in observations[PART_SHARED]}),
         },
         PART_PRIVATE: {
             "documents": [str(d["id"]) for d in parts[PART_PRIVATE]],
             "mental_models": [str(m["id"]) for m in private_models],
+            "model_digests": {str(m["id"]): model_digest(m) for m in private_models},
             "pages": [],
             "observations": sorted({observation_digest(o) for o in observations[PART_PRIVATE]}),
         },
@@ -1596,11 +1617,9 @@ class BankEntry:
     #: gives its documents the same ids.
     owners: dict[str, str] | None = None
     known_clients: list[str] | None = None
-    #: True for a bank an earlier run folded: re-checked, never imported twice.
+    #: True for a bank an earlier run folded: exported and checked again, and only
+    #: what its targets are missing is sent.
     refold: bool = False
-    #: The ledger's record of an earlier run's fold of this bank (counts,
-    #: last_document_at, run_id), for the re-check.
-    earlier: dict[str, Any] = field(default_factory=dict)
     #: Per part, what earlier runs sent of this bank (the ``.ids.json`` files
     #: they wrote): documents present in the target under these ids, with the
     #: same source digest, are the fold-in's own copies, not a clash.
@@ -2412,8 +2431,8 @@ class FoldIn(em.EngineMaintenance):
                     # not, because the cutover needs every bank folded as it is now.
                     row["action"] = "recheck"
                     row["reason"] = (
-                        f"folded by run {before.get('run_id')}; re-checked, and only what "
-                        "the old bank gained since is sent"
+                        f"folded by run {before.get('run_id')}; exported and checked again, "
+                        "and only what the targets are missing is sent"
                     )
                 elif self._only and bank not in self._only:
                     row["action"] = "none"
@@ -2679,12 +2698,6 @@ class FoldIn(em.EngineMaintenance):
                         if isinstance(frozen_known, list)
                         else list(current_known),
                         refold=row["action"] == "recheck",
-                        earlier={
-                            k: before.get(k)
-                            for k in ("counts", "source_counts", "last_document_at", "run_id")
-                        }
-                        if before
-                        else {},
                         prior_files={
                             k: list(v)
                             for k, v in (before.get("sent_files") or {}).items()
@@ -2880,12 +2893,13 @@ class FoldIn(em.EngineMaintenance):
         self._check_duplicates(journal)
 
     async def _precheck(self, journal: Journal, entry: BankEntry, index: int) -> None:
-        if entry.step == STEP_PLANNED and entry.refold and await self._unchanged(journal, entry):
-            entry.step = STEP_FOLDED
-            entry.note = f"folded by run {entry.earlier.get('run_id')}; unchanged since"
-            self._save(journal)
-            self._hook(f"folded:{entry.bank}")
-            return
+        """One bank's export, rewrite and checks. A bank an earlier run folded goes the same way.
+
+        There is no "unchanged" shortcut: counts and the last write time do
+        not move when a document is re-tagged ``visibility:private`` or a
+        model's tags change, so every folded bank is exported again and its
+        routing, clash, changed and gone checks run on what it holds now.
+        """
         if entry.step == STEP_PLANNED:
             await self._export(journal, entry, index)
             self._hook(f"exported:{entry.bank}")
@@ -2897,6 +2911,11 @@ class FoldIn(em.EngineMaintenance):
             part = entry.part(name)
             if part is not None and not part.sent:
                 await self._clashes(entry, name, part.target, self._part_ids(journal, part))
+            elif part is None and entry.prior_files.get(name):
+                # An earlier run sent this part, and the bank now has nothing
+                # for it (every shared document re-tagged private, say): what
+                # it sent must not stay behind unseen.
+                await self._clashes(entry, name, journal.targets[name], {})
 
     def _check_duplicates(self, journal: Journal) -> None:
         """Leave every pair of banks of this run that would send one id to the same target.
@@ -3013,36 +3032,6 @@ class FoldIn(em.EngineMaintenance):
             self._save(journal)
             self._hook(f"folded:{entry.bank}")
 
-    async def _unchanged(self, journal: Journal, entry: BankEntry) -> bool:
-        """A bank an earlier run folded that has not changed since, and is all in its targets.
-
-        Unchanged is the same counts and the same ``last_document_at`` as the
-        ledger recorded; present is every document, mental model and page the
-        earlier run sent, by its recorded id. Anything else goes the long way:
-        exported again and folded by what is missing (:meth:`_import_part`).
-        """
-        state = await self._quiet_state(entry.bank)
-        earlier = entry.earlier or {}
-        recorded = earlier.get("source_counts") or earlier.get("counts") or {}
-        if any(int(state["counts"].get(k, 0)) != int(recorded.get(k, -1)) for k in em.HARD_COUNTS):
-            return False
-        if state["fingerprint"].get("document") != earlier.get("last_document_at"):
-            return False
-        for name, prior in self._prior(entry).items():
-            target = journal.targets[name]
-            if prior["documents"] and set(prior["documents"]) - await self._document_ids(target):
-                return False
-            if prior["mental_models"] and set(prior["mental_models"]) - await self._model_ids(
-                target
-            ):
-                return False
-            if prior["pages"] and set(prior["pages"]) - await self._page_model_ids(target):
-                return False
-        entry.counts = dict(earlier.get("counts") or recorded)
-        entry.source_counts = dict(recorded)
-        entry.last_document_at = earlier.get("last_document_at")
-        return True
-
     def _prior(self, entry: BankEntry) -> dict[str, dict[str, Any]]:
         """What earlier runs sent of ``entry``, per part, from their ``.ids.json`` files.
 
@@ -3054,6 +3043,9 @@ class FoldIn(em.EngineMaintenance):
             merged: dict[str, Any] = {
                 "documents": {},
                 "mental_models": set(),
+                #: Each sent model's :func:`model_digest`. A file an earlier
+                #: build wrote has none: such a model counts as changed.
+                "model_digests": {},
                 "pages": set(),
                 "observations": set(),
             }
@@ -3076,6 +3068,11 @@ class FoldIn(em.EngineMaintenance):
                     )
                 merged["documents"].update({str(k): str(v) for k, v in digests.items()})
                 merged["mental_models"].update(str(m) for m in data.get("mental_models") or ())
+                model_digests = data.get("model_digests")
+                if isinstance(model_digests, dict):
+                    merged["model_digests"].update(
+                        {str(k): str(v) for k, v in model_digests.items()}
+                    )
                 merged["pages"].update(str(m) for m in data.get("pages") or ())
                 merged["observations"].update(str(o) for o in data.get("observations") or ())
             out[name] = merged
@@ -3399,19 +3396,27 @@ class FoldIn(em.EngineMaintenance):
     async def _clashes(
         self, entry: BankEntry, name: str, target: str, ids: Mapping[str, Any]
     ) -> None:
-        """Leave the bank when its target already holds any of the part's ids that are not its own.
+        """Leave the bank when its target holds anything of it that is not its current copy.
 
         A document id the target holds is the fold-in's own copy only when an
         earlier run of this bank sent it (the ledger's ``sent_files``) from a
-        source with the same digest. One the earlier run sent from a source
-        that has changed since is refused: a merge with ``skip`` would keep
-        the older copy and drop the change without a word. A document the
-        earlier run sent that the old bank no longer holds is refused too:
-        the copy would bring back what was deleted. Mental models: present and
-        sent by an earlier run is the fold-in's own; present otherwise is a
-        clash, because a merge drops it.
+        source with the same digest (:func:`document_digest`: text, facts and
+        tags). One the earlier run sent from a source that has changed since
+        is refused: a merge with ``skip`` would keep the older copy and drop
+        the change without a word. A document or model the earlier run sent
+        to ``target`` that this part no longer carries is refused too: it was
+        deleted from the old bank, or it now goes elsewhere (a document
+        re-tagged ``visibility:private`` goes to the private bank), and its
+        copy in ``target`` would stay readable there. Mental models: present
+        and sent by an earlier run with the same :func:`model_digest` is the
+        fold-in's own; sent with another digest (its content or tags changed)
+        is refused; present otherwise is a clash, because a merge drops it.
         """
-        prior = self._prior(entry).get(name) or {"documents": {}, "mental_models": set()}
+        prior = self._prior(entry).get(name) or {
+            "documents": {},
+            "mental_models": set(),
+            "model_digests": {},
+        }
         digests = dict(ids.get("digests") or {})
         present = await self._document_ids(target)
         mine = set(ids.get("documents") or [])
@@ -3422,10 +3427,18 @@ class FoldIn(em.EngineMaintenance):
             if d in prior["documents"] and prior["documents"][d] != digests.get(d)
         )
         gone = sorted((set(prior["documents"]) & present) - mine)
-        models = sorted(
-            (set(ids.get("mental_models") or []) & await self._model_ids(target))
-            - set(prior["mental_models"])
+        my_models = set(ids.get("mental_models") or [])
+        model_digests = dict(ids.get("model_digests") or {})
+        prior_models = set(prior["mental_models"])
+        prior_model_digests = dict(prior.get("model_digests") or {})
+        present_models = await self._model_ids(target) if my_models or prior_models else set()
+        models = sorted((my_models & present_models) - prior_models)
+        models_changed = sorted(
+            m
+            for m in my_models & present_models & prior_models
+            if prior_model_digests.get(m) is None or prior_model_digests[m] != model_digests.get(m)
         )
+        models_gone = sorted((prior_models & present_models) - my_models)
         if clash or models:
             sent_by = self._sent_by_other_banks(entry, name, {*clash, *models})
             named = sorted(set(sent_by.values()))
@@ -3438,23 +3451,27 @@ class FoldIn(em.EngineMaintenance):
                 bank=entry.bank,
                 details={"documents": clash, "mental_models": models, "sent_by": sent_by},
             )
-        if changed:
+        if changed or models_changed:
             raise BankLeft(
-                f"bank {entry.bank}: {len(changed)} document(s) an earlier run folded into "
-                f"{target} have changed in the old bank since. A merge with skip keeps the older "
-                f"copy, so the change would be lost without a word. Delete those documents from "
-                f"{target} (the engine's DELETE /v1/default/banks/{target}/documents/<id>), then "
-                "run the fold-in again: it sends them as they are now",
+                f"bank {entry.bank}: {len(changed)} document(s) and {len(models_changed)} mental "
+                f"model(s) an earlier run folded into {target} have changed in the old bank "
+                "since (text, facts or tags; a model's content or tags). A merge with skip keeps "
+                f"the older copy, so the change would be lost without a word. Delete those copies "
+                f"from {target} (the engine's DELETE /v1/default/banks/{target}/documents/<id> "
+                "and .../mental-models/<id>), then run the fold-in again: it sends them as they "
+                "are now",
                 bank=entry.bank,
-                details={"changed": changed},
+                details={"changed": changed, "changed_mental_models": models_changed},
             )
-        if gone:
+        if gone or models_gone:
             raise BankLeft(
-                f"bank {entry.bank}: {len(gone)} document(s) an earlier run folded into {target} "
-                f"are no longer in the old bank. The fold-in deletes nothing; delete them from "
-                f"{target} too if they should go, then run again",
+                f"bank {entry.bank}: {len(gone)} document(s) and {len(models_gone)} mental "
+                f"model(s) an earlier run folded into {target} are no longer in the old bank, or "
+                f"no longer go to {target} (one re-tagged visibility:private now goes to the "
+                f"private bank). Their copies would stay readable in {target}. The fold-in deletes "
+                f"nothing; delete them from {target}, then run again",
                 bank=entry.bank,
-                details={"gone": gone},
+                details={"gone": gone, "gone_mental_models": models_gone},
             )
 
     def _sent_by_other_banks(self, entry: BankEntry, name: str, wanted: set[str]) -> dict[str, str]:

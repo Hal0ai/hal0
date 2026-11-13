@@ -722,19 +722,21 @@ async def test_a_failed_import_leaves_the_bank_and_a_retry_completes_it(box: Box
     _assert_on_the_old_layout(box)
     ledger = fi.load_ledger()
     assert list(ledger["banks"]["coding-agent::web"]["sent_files"]) == ["shared"]
-    before = len(box.engine.imports)
+    before, mark = len(box.engine.imports), len(box.events)
     retry = await box.fold(only=["coding-agent::web"]).run()
     assert retry["status"] == "folded"
     assert "coding-agent::web" in retry["folded"]
     _assert_folded(box)
     # The retry sent only what was missing of the left bank; the banks folded
-    # before were re-checked, unchanged, and not imported again.
+    # before were exported and checked again, and nothing of them was sent.
     sent = box.engine.imports[before:]
     assert [t for t, _ in sent] == ["hal0:shared"]
     assert [d["id"] for d in sent[0][1]["documents"]] == ["web::shared::git:123"]
     rechecked = {b["bank"]: b for b in retry["banks"] if b["refold"]}
     assert set(rechecked) == {"shared", "pi-coder", "private__brain"}
-    assert all("unchanged" in b["note"] for b in rechecked.values())
+    assert all(b["step"] == "folded" for b in rechecked.values())
+    exported = [ev for ev in box.events[mark:] if ev.startswith("export:")]
+    assert set(exported) >= {"export:shared", "export:pi-coder", "export:private__brain"}
     record = bank_layout.load_fold_in_record()
     assert record["left"] == []
     assert {b["bank"] for b in record["folded"]} == {
@@ -896,6 +898,91 @@ async def test_a_folded_document_changed_in_the_old_bank_refuses_until_its_copy_
     third = await box.fold().run()
     assert third["status"] == "folded"
     assert len(e.banks["hal0:shared"]["docs"]["web::pi-coder::p1"]["facts"]) == 2
+
+
+async def test_a_folded_document_retagged_private_refuses_the_cutover(box: Box) -> None:
+    """Third review, item 1: a re-tag moves neither the counts nor the last write time."""
+    e = box.engine
+    first = await box.fold(only=["shared"]).run()
+    assert first["folded"] == ["shared"] and "n1" in e.banks["hal0:shared"]["docs"]
+    # PATCH /banks/shared/documents/n1 {"tags": [..., "visibility:private"]}:
+    # the engine replaces the document's tags and every fact's under it.
+    n1 = e.banks["shared"]["docs"]["n1"]
+    n1["tags"] = [*n1["tags"], "visibility:private"]
+    for f in n1["facts"]:
+        f["tags"] = [*f["tags"], "visibility:private"]
+    sent = len(e.imports)
+    second = await box.fold().run()
+    assert second["status"] == "incomplete" and second["cut_over"] is False
+    assert e.imports[sent:] == []
+    note = next(b["note"] for b in second["banks"] if b["bank"] == "shared")
+    assert "no longer go to hal0:shared" in note and "n1" not in note.split(". ")[0]
+    sidecar = json.loads((Path(second["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    assert sidecar["shared"]["gone"] == ["n1"]
+    _assert_on_the_old_layout(box)
+    # Once the operator deletes the shared copy, the document folds private.
+    del e.banks["hal0:shared"]["docs"]["n1"]
+    third = await box.fold().run()
+    assert third["status"] == "folded"
+    assert "n1" not in e.banks["hal0:shared"]["docs"]
+    assert "private:hermes:n1" in e.banks["hal0:private"]["docs"]
+    assert "visibility:private" not in e.all_tags("hal0:shared")
+    assert all(not d.startswith("private:") for d in e.banks["hal0:shared"]["docs"])
+
+
+async def test_a_folded_mental_model_retagged_private_refuses(box: Box) -> None:
+    e = box.engine
+    await box.fold(only=["shared"]).run()
+    assert "overview" in e.banks["hal0:shared"]["models"]
+    e.banks["shared"]["models"]["overview"]["tags"] = ["visibility:private"]
+    second = await box.fold().run()
+    assert second["status"] == "incomplete" and second["cut_over"] is False
+    note = next(b["note"] for b in second["banks"] if b["bank"] == "shared")
+    assert "1 mental model(s)" in note and "no longer go to hal0:shared" in note
+    sidecar = json.loads((Path(second["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    assert sidecar["shared"]["gone_mental_models"] == ["overview"]
+    _assert_on_the_old_layout(box)
+
+
+async def test_a_folded_mental_model_whose_content_or_tags_changed_refuses(box: Box) -> None:
+    e = box.engine
+    await box.fold(only=["coding-agent::web"]).run()
+    e.banks["coding-agent::web"]["models"]["overview"]["content"] = "rewritten since"
+    second = await box.fold().run()
+    assert second["status"] == "incomplete"
+    note = next(b["note"] for b in second["banks"] if b["bank"] == "coding-agent::web")
+    assert "0 document(s) and 1 mental model(s)" in note and "changed in the old bank" in note
+    sidecar = json.loads((Path(second["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    assert sidecar["coding-agent::web"]["changed_mental_models"] == ["web-overview"]
+    assert e.banks["hal0:shared"]["models"]["web-overview"]["content"] == "y"
+    e.banks["coding-agent::web"]["models"]["overview"]["content"] = "y"
+    e.banks["coding-agent::web"]["models"]["overview"]["tags"] = ["topic:build"]
+    third = await box.fold().run()
+    assert third["status"] == "incomplete"
+    _assert_on_the_old_layout(box)
+    # The stale copy deleted, the model is sent as it is now.
+    del e.banks["hal0:shared"]["models"]["web-overview"]
+    done = await box.fold().run()
+    assert done["status"] == "folded"
+    assert "topic:build" in e.banks["hal0:shared"]["models"]["web-overview"]["tags"]
+
+
+async def test_a_folded_documents_text_edit_refuses_rather_than_keeping_it_stale(
+    box: Box,
+) -> None:
+    e = box.engine
+    await box.fold(only=["pi-coder"]).run()
+    e.banks["pi-coder"]["docs"]["p1"]["original_text"] = "edited"
+    second = await box.fold().run()
+    assert second["status"] == "incomplete"
+    note = next(b["note"] for b in second["banks"] if b["bank"] == "pi-coder")
+    assert "changed in the old bank" in note
+    sidecar = json.loads((Path(second["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    assert sidecar["pi-coder"]["changed"] == ["web::pi-coder::p1"]
+    _assert_on_the_old_layout(box)
+    del e.banks["hal0:shared"]["docs"]["web::pi-coder::p1"]
+    assert (await box.fold().run())["status"] == "folded"
+    assert e.banks["hal0:shared"]["docs"]["web::pi-coder::p1"]["original_text"] == "edited"
 
 
 async def test_a_folded_document_deleted_from_the_old_bank_refuses(box: Box) -> None:

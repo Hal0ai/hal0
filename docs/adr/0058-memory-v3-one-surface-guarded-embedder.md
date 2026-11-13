@@ -235,11 +235,14 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      does not include one, `--bank`) returns the engine, lifts the pause and
      keeps the box on the old layout, so writes go on to the old banks; it
      keeps what it folded in a ledger. A later run folds the rest and cuts
-     over. It never imports a folded bank twice: it re-checks it by counts and
-     by the document ids it recorded, sends only documents the old bank gained
-     since, and refuses (leaves the bank) when a folded document has changed or
-     gone from the old bank, because a merge with `skip` would keep the stale
-     copy without a word. An observation a resend cannot carry, because its
+     over. It never imports a folded bank twice, and never takes one on trust:
+     every run exports it again and runs the whole pre-check on what it holds
+     now (a re-tag to `visibility:private` moves neither its counts nor its
+     last write time), sends only what the targets are missing, and refuses
+     (leaves the bank) when a folded document or mental model has changed
+     (text, facts, content or tags), gone from the old bank, or no longer goes
+     to the target it was sent to, because a merge with `skip` would keep the
+     stale copy without a word and a re-tagged copy would stay readable. An observation a resend cannot carry, because its
      documents landed before without it, leaves the bank too.
    - *It tags in the archive.* An engine import cannot add or change tags
      (verified on engine 1.2.0), so the fold-in exports a bank, rewrites the
