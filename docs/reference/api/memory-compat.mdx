@@ -62,6 +62,7 @@ agents. These rules hold whatever a client sends:
 | never reads another agent's private memory | same filter |
 | sees only its own operations | [operation ids](#operations) are derived from the client's name |
 | cannot change or delete the bank | template imports are ignored, bank deletes refused |
+| sees and changes only its project's [knowledge pages](#knowledge-pages), and changes only its own | one folder per project; the writer's `agent:` tag decides |
 
 What clients of one project do share: the project's non-private memory (all of them read it),
 and the documents whose ids start with a shared prefix (any of them may rewrite one).
@@ -138,7 +139,14 @@ how long hal0 waits for the engine.
 | GET | `/v1/default/banks/{bank}/config` | read for the platform bank | the three mission keys only | 15 s |
 | POST | `/v1/default/banks/{bank}/import` | not applied | `200 {"status": "ignored", "reason": "bank configuration is managed by hal0"}` | none |
 | DELETE | `/v1/default/banks/{bank}` | refused | `403 memory.compat_bank_delete_refused` | none |
-| any | `/v1/default/banks/{bank}/knowledge-base/…` | not served | `404 memory.compat_knowledge_base_unsupported` | none |
+| GET | `/v1/default/banks/{bank}/knowledge-base/tree` | [the project's folder](#knowledge-pages) | `{roots}`: the folder's contents | 30 s |
+| GET | `/v1/default/banks/{bank}/knowledge-base/pages/{page_id}` | a page the tree shows | the engine's page | 30 s per call |
+| GET | `/v1/default/banks/{bank}/knowledge-base/search` | `q`, `limit` (1 to 50, default 10); held to the project | `{results, total}` of pages the tree shows | 30 s per call |
+| POST | `/v1/default/banks/{bank}/knowledge-base/pages` | through the write envelope, into the project's folder | `201`, the engine's JSON | 30 s per call |
+| PATCH | `/v1/default/banks/{bank}/knowledge-base/nodes/{node_id}` | the client's own page only | the engine's node | 30 s per call |
+| POST | `/v1/default/banks/{bank}/knowledge-base/folders` | into the project's folder | `201`, the engine's node | 30 s per call |
+| GET | any other `…/knowledge-base…` route | not served | `404 memory.compat_knowledge_base_unsupported` | none |
+| POST, PUT, PATCH, DELETE | any other `…/knowledge-base…` route | not served | `405 memory.compat_mutation_unsupported` | none |
 | GET | anything else | not served | `404 memory.compat_route_unsupported` | none |
 | POST, PUT, PATCH, DELETE | anything else | not served | `405 memory.compat_mutation_unsupported` | none |
 
@@ -271,6 +279,45 @@ own id), `task_type`, `operation_type`, `status`, `items_count`, `created_at`, `
 count. Payloads, result metadata, document ids and engine ids are not returned, and the client's
 stored-id prefixes are removed from `error_message`.
 
+### Knowledge pages
+
+The plugin keeps curated pages in a tree of folders and pages, each page a mental model the
+engine rebuilds from its `source_query`. Every bank name is the platform bank, so each project
+has one folder at the root of that bank's tree, named `project:<slug>`, created by the first
+page or folder written into it. The plugin is shown that folder's contents as its whole tree:
+nothing outside it (hal0's own pages, other projects' folders) is listed, read, searched or
+written here. A project with no folder yet has an empty tree, never `404`, because the plugin
+reads `404` as "no pages" and would then never create one. A client with no project
+(`X-hal0-Project: unresolved`) has no folder: every knowledge-base route answers it
+`404 memory.compat_knowledge_base_unsupported`.
+
+A page's content cannot be filtered after it is written, so a page is shown only when its scope
+is one this endpoint wrote, in `trigger.tag_groups`, which the engine uses in place of a page's
+tags. The engine ANDs three groups: the client's own tags matched by its `trigger.tags_match`,
+the project scope of [a read](#what-a-read-sees), and no `visibility:private` memory.
+`trigger.exclude_mental_models` is set too, so a refresh reads no other mental model. A page
+without all of that is not shown, nor is one another agent marked private, in every bank layout.
+Pages the fold-in carried over from a per-repository bank sit outside the folder and are not
+shown.
+
+The page's `tags` are then labels, stamped as on a [retain](#retain): `agent:<client>`, `kind:`
+and the project's tag, with the reserved tags the client sent dropped. `trigger.tags_match` is
+kept as sent: the plugin compares it with its own to decide whether a page drifted.
+`tag_groups`, `exclude_mental_models` and `exclude_mental_model_ids` in a client's `trigger` are
+dropped and listed in `X-hal0-Ignored-Fields`.
+
+| Rule | How |
+|---|---|
+| Who may change a page | the client that wrote it: its tags carry one `agent:` tag, the client's. Anyone else, a folder or a page naming several agents is `404 memory.compat_knowledge_page_not_owned` |
+| A node the tree does not show | `404 memory.compat_knowledge_node_refused` on an update, `404 memory.knowledge_page_not_found` on a read |
+| `parent_id` on a create | a folder of the project's folder, else `403 memory.compat_knowledge_parent_refused`; absent, the project's folder |
+| What an update may change | `name`, `source_query`, `max_tokens`, `tags`, `trigger`. New tags or trigger settings go through the envelope again and the scope is written again. `parent_id` (a move) is ignored |
+| What is shown of another client's page | its descriptive tags (the project, `kind:`, `knowledge:`, `source:`), in `tags` and in the frontmatter of `markdown`; never its writer |
+| A name the folder already holds | the engine's `409` |
+
+An update refusal is `404`, unlike every other refused write: the plugin's page re-sync raises on
+any other status, and with it the pass that imports the client's memory.
+
 ## Limits
 
 | Limit | Value | Beyond it |
@@ -279,6 +326,7 @@ stored-id prefixes are removed from `error_message`.
 | Items per retain | 32 | `413 memory.compat_too_many_items` |
 | One item's `content` | `[memory.compat] max_item_bytes`, 16 MiB | `413 memory.compat_item_too_large` |
 | Reflect or recall body | 1 MiB | `413 memory.compat_body_too_large` |
+| Knowledge-base write body | 256 KiB | `413 memory.compat_body_too_large` |
 | `budget` | `low`, `mid` or `high` | `400` |
 | `max_tokens` | 8192 on a reflect, 16384 on a recall | lowered to the limit |
 | Documents `limit` | 500 | lowered to the limit |
@@ -316,7 +364,8 @@ All of these are counted in the hal0-api process and start empty when it restart
 | `observation_scopes` on a retain | ignored | hal0 chooses the scope |
 | `POST …/import` (a bank template) | `200`, not applied | hal0 owns the platform bank's missions, strategies and directives. The plugin sends its template on every configure pass and raises on a refusal |
 | `DELETE …/banks/{bank}` | `403` | Every bank name is the shared platform bank |
-| Knowledge-base routes, reads and writes | `404` | The plugin reads this as "no pages on this server" and carries on without them |
+| Knowledge-base routes for a client with no project | `404` | The plugin reads this as "no pages on this server" and carries on without them |
+| An engine `404` on a knowledge-base write | `502` | The plugin would read a `404` as "no pages" and stop writing them |
 | Any other read | `404`, with the served routes in `error.details.supported` | |
 | Any other write | `405` | A `404` would be treated by the plugin as done |
 | An engine `404` on a retain | `502` | The same reason: a write must never answer `404` |
@@ -335,15 +384,17 @@ A failure hal0 raises is the standard envelope `{"error": {"code", "message", "d
 | 403 | `memory.compat_scope_required`, `bridge.client_name_reserved` | A bridge key without the `memory` scope, or under a reserved name |
 | 403 | `memory.compat_document_not_owned` | Deleting a shared document another client wrote last |
 | 403 | `memory.compat_bank_delete_refused` | `DELETE` on a bank |
+| 403 | `memory.compat_knowledge_parent_refused` | See [Knowledge pages](#knowledge-pages) |
 | 404 | `memory.compat_document_not_found`, `memory.compat_operation_not_found` | A document or operation that is not the client's own |
-| 404 | `memory.compat_knowledge_base_unsupported` | A knowledge-base route |
+| 404 | `memory.compat_knowledge_base_unsupported` | A knowledge-base route this endpoint does not serve, or any for a client with no project |
+| 404 | `memory.knowledge_page_not_found`, `memory.compat_knowledge_page_not_owned`, `memory.compat_knowledge_node_refused` | A page the client's tree does not show, or may not change |
 | 404 | `memory.compat_route_unsupported` | A read this endpoint does not serve |
 | 405 | `memory.compat_mutation_unsupported` | A write this endpoint does not serve |
 | 413 | `memory.compat_body_too_large`, `memory.compat_too_many_items`, `memory.compat_item_too_large` | See [Limits](#limits) |
 | 429 | `memory.compat_busy` | Too many retains, reflects or recalls in flight, or the client's quota of unfinished retains is used up; `Retry-After` says when to retry |
 | 502 | `memory.compat_engine_error` | The engine answered `5xx`, refused hal0's own credential, or answered `404` to a retain. `error.details.upstream_status` has its status |
 | 503 | `memory.engine_unavailable`, `memory.unavailable` | The engine cannot be reached, or hal0 is running on its volatile fallback store |
-| 503 | `memory.writes_paused` | `POST .../memories` and `DELETE .../documents/{id}` while `hal0 memory embedder switch` holds the memory write gate, checked before any engine call; `Retry-After: 30`, the same answer as `POST /api/memory/add`. Reads are not gated |
+| 503 | `memory.writes_paused` | `POST .../memories`, `DELETE .../documents/{id}` and the three knowledge-base writes while `hal0 memory embedder switch` holds the memory write gate, checked before any engine call; `Retry-After: 30`, the same answer as `POST /api/memory/add`. Reads are not gated |
 | 503 | `memory.extraction_ctx_too_small` | The extraction model's context window is too small to process any retain |
 | 504 | `memory.compat_engine_timeout` | The engine did not answer within the route's timeout |
 

@@ -58,7 +58,13 @@ silent data loss: an engine 404 on a retain is answered 502. Every other
 non-2xx raises in the plugin and is logged, so hal0's own refusal of a write
 is 403, 405 or 409, never 404. The knowledge-base routes are the exception by
 design: the plugin reads 404 there as "pages unsupported" and carries on
-without them.
+without them, which is the answer a caller with no project gets.
+
+Knowledge pages live in one folder per project at the root of the platform
+bank's tree, and the plugin is shown its project's folder as its whole tree
+(section 11). A page is shown only when its refresh scope is one this
+endpoint wrote, the project scope with no private memory in it, and only the
+client that wrote a page can change it.
 """
 
 from __future__ import annotations
@@ -106,12 +112,15 @@ from hal0.memory.document_namespace import (
 )
 from hal0.memory.envelope import (
     AGENT_TAG_PREFIX,
+    KIND_TAG_PREFIX,
     PROJECT_TAG_PREFIX,
     PROJECT_UNRESOLVED_TAG,
     SCOPE_GLOBAL_TAG,
     SCOPE_TAG_PREFIX,
+    apply_envelope,
     coerce_tags,
 )
+from hal0.memory.hindsight_provider import _agents_of
 from hal0.memory.projects import (
     UNRESOLVED_SLUG,
     ProjectResolution,
@@ -119,6 +128,7 @@ from hal0.memory.projects import (
     strip_legacy_bank_prefix,
 )
 from hal0.memory.read_scope import (
+    VISIBILITY_PRIVATE_TAG,
     project_scope_groups,
     reflect_visibility_scope,
     tags_readable,
@@ -244,6 +254,12 @@ SUPPORTED_ROUTES: tuple[str, ...] = (
     "GET /v1/default/banks/{bank}/operations/{operation_id}",
     "GET /v1/default/banks/{bank}/config",
     "POST /v1/default/banks/{bank}/import",
+    "GET /v1/default/banks/{bank}/knowledge-base/tree",
+    "GET /v1/default/banks/{bank}/knowledge-base/pages/{page_id}",
+    "GET /v1/default/banks/{bank}/knowledge-base/search",
+    "POST /v1/default/banks/{bank}/knowledge-base/pages",
+    "PATCH /v1/default/banks/{bank}/knowledge-base/nodes/{node_id}",
+    "POST /v1/default/banks/{bank}/knowledge-base/folders",
 )
 
 # ── request fields ───────────────────────────────────────────────────────────
@@ -472,6 +488,9 @@ class _CompatState:
     #: Client -> when its outstanding operations were last read from the
     #: engine for the quota (``time.monotonic``).
     quota_read_at: dict[str, float] = field(default_factory=dict)
+    #: Held while a project's knowledge folder is looked for and created, so
+    #: two first writes of one project make one folder.
+    knowledge_folder_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def operations_of(self, client: str) -> OrderedDict[str, _Operation]:
         return self.operations.setdefault(client, OrderedDict())
@@ -2131,21 +2150,709 @@ async def delete_bank(bank: str, request: Request, agent: str = _CALLER) -> Resp
 
 
 # ── 11. knowledge base ───────────────────────────────────────────────────────
+#
+# The plugin keeps curated pages in its bank's knowledge base: a tree of
+# folders and pages, each page a mental model the engine rebuilds from a
+# source query. Every bank name here is the platform bank, which also holds
+# hal0's own pages and every other project's, so each project gets one folder
+# at the root of the platform bank's tree, named ``project:<slug>``
+# (:data:`KNOWLEDGE_FOLDER_PREFIX`), and the plugin is shown that folder's
+# contents as its whole tree. Nothing outside it is listed, read, searched or
+# written through this endpoint.
+#
+# A page's content is written from every memory its scope admits and cannot
+# be filtered afterwards, so a page is shown only when its scope is one this
+# endpoint wrote (:func:`_page_scope_held`): the project scope this endpoint
+# reads with (:func:`hal0.memory.read_scope.project_scope_groups`), no
+# ``visibility:private`` memory, and no other mental model in the refresh.
+# The page's tags are then labels, stamped by the write envelope as a retain
+# here is (``agent:<writer>``, ``kind:``, ``project:<slug>``); the scope
+# travels in ``trigger.tag_groups``, which the engine uses in place of the
+# tags (hindsight-api 1.2.0, ``_resolve_refresh_tag_filtering``). The rule
+# does not depend on the bank layout: it holds in the old unified bank, whose
+# platform bank also holds private memory, and in the two-bank one.
+#
+# A page is changed only by the client that wrote it: the owner rule of
+# directives (``HindsightProvider._require_own_directive``), a sole
+# ``agent:`` tag equal to the caller's. A caller with no project has no
+# folder and gets the old answer, 404, which the plugin reads as "no pages".
+
+#: The name of a project's folder at the root of the platform bank's tree.
+KNOWLEDGE_FOLDER_PREFIX = PROJECT_TAG_PREFIX
+#: The largest body a knowledge-base write may carry.
+MAX_KNOWLEDGE_BODY_BYTES = 256 * 1024
+#: The engine's own bounds for a knowledge-base search's ``limit``.
+MAX_KNOWLEDGE_SEARCH_LIMIT = 50
+_DEFAULT_KNOWLEDGE_SEARCH_LIMIT = 10
+_KNOWLEDGE_TIMEOUT_S = 30.0
+
+_PAGE_FIELDS = frozenset({"name", "source_query", "parent_id", "tags", "max_tokens", "trigger"})
+_NODE_FIELDS = frozenset({"name", "source_query", "tags", "max_tokens", "trigger"})
+_FOLDER_FIELDS = frozenset({"name", "parent_id"})
+#: The refresh settings a caller may choose. ``tag_groups``,
+#: ``exclude_mental_models`` and ``exclude_mental_model_ids`` are hal0's: they
+#: are the page's scope.
+_TRIGGER_FIELDS = frozenset(
+    {
+        "budget",
+        "mode",
+        "refresh_after_consolidation",
+        "refresh_cron",
+        "full_refresh_cron",
+        "min_refresh_interval_seconds",
+        "fact_types",
+        "tags_match",
+    }
+)
+#: The fields of a search hit that are passed on.
+_SEARCH_RESULT_FIELDS = (
+    "id",
+    "name",
+    "mental_model_id",
+    "source_query",
+    "snippet",
+    "score",
+    "updated_at",
+)
+#: The scope group that keeps every ``visibility:private`` memory out.
+_NOT_PRIVATE_GROUP: dict[str, Any] = {
+    "not": {"tags": [VISIBILITY_PRIVATE_TAG], "match": "any_strict"}
+}
+#: Tag namespaces that are the envelope's labels, not a page's scope.
+_LABEL_TAG_PREFIXES = (AGENT_TAG_PREFIX, KIND_TAG_PREFIX, PROJECT_TAG_PREFIX, SCOPE_TAG_PREFIX)
+
+
+class CompatKnowledgeNodeRefused(Hal0Error):
+    """The node is not a page this caller's project folder holds.
+
+    404, unlike every other write this endpoint refuses (see
+    :func:`knowledge_base_update_node`)."""
+
+    code = "memory.compat_knowledge_node_refused"
+    status = 404
+
+
+class CompatKnowledgePageNotOwned(Hal0Error):
+    """The page is another client's, or the node is a folder. 404, as
+    :class:`CompatKnowledgeNodeRefused`."""
+
+    code = "memory.compat_knowledge_page_not_owned"
+    status = 404
+
+
+class CompatKnowledgeParentRefused(Hal0Error):
+    """``parent_id`` is not a folder in the caller's project folder."""
+
+    code = "memory.compat_knowledge_parent_refused"
+    status = 403
 
 
 def knowledge_base_unsupported(method: str, path: str) -> NotFound:
-    """The answer to every knowledge-base route, reads and writes: 404.
+    """The answer to a knowledge-base route this endpoint does not serve, and
+    to every knowledge-base route for a caller with no project: 404.
 
     The plugin reads 404 on its first knowledge-base call as "this server has
-    no pages" and carries on without them, which is what is wanted until
-    pages are mapped to per-project folders. That mapping replaces this one
-    function.
+    no pages" and carries on without them.
     """
     return NotFound(
         "knowledge pages are not available through this endpoint",
         code="memory.compat_knowledge_base_unsupported",
         details={"method": method, "path": path},
     )
+
+
+def _knowledge_scope(request: Request, provider: Any, bank: str, agent: str) -> _Scope:
+    """The caller's scope, or 404 when it has no project and so no folder."""
+    scope = _scope(request, provider, bank, agent)
+    if not scope.slug:
+        raise knowledge_base_unsupported(request.method, request.url.path)
+    return scope
+
+
+def _normal_group(group: Any) -> Any:
+    """A tag group in one spelling: a leaf's default match and ``exact``
+    resolution written out the way :func:`project_scope_groups` writes them,
+    so a group the engine stored compares equal to the one sent."""
+    if not isinstance(group, dict):
+        return group
+    if "tags" in group:
+        out: dict[str, Any] = {"tags": group.get("tags"), "match": group.get("match", "any_strict")}
+        if group.get("resolve", "exact") != "exact":
+            out["resolve"] = group["resolve"]
+        return out
+    for combinator in ("and", "or"):
+        if combinator in group and isinstance(group[combinator], list):
+            return {combinator: [_normal_group(child) for child in group[combinator]]}
+    if "not" in group:
+        return {"not": _normal_group(group["not"])}
+    return group
+
+
+def _page_scope_held(node: dict[str, Any], scope: _Scope) -> bool:
+    """True when a page is one this endpoint may show the caller.
+
+    Its tags pass the caller's read groups (visibility and project), and its
+    refresh scope is one this endpoint wrote: other mental models left out,
+    and among the AND-ed ``trigger.tag_groups`` both the project scope and the
+    group that keeps private memory out. Groups are AND-ed, so whatever else
+    the page's scope holds can only narrow it.
+    """
+    if not tags_readable(scope.read_groups(), node.get("tags")):
+        return False
+    trigger = node.get("trigger")
+    if not isinstance(trigger, dict) or trigger.get("exclude_mental_models") is not True:
+        return False
+    groups = trigger.get("tag_groups")
+    if not isinstance(groups, list):
+        return False
+    have = [_normal_group(group) for group in groups]
+    needed = [*project_scope_groups(scope.slug), _NOT_PRIVATE_GROUP]
+    return all(_normal_group(group) in have for group in needed)
+
+
+def _owns_page(node: dict[str, Any], agent: str) -> bool:
+    """The owner rule of directives: one ``agent:`` tag, the caller's."""
+    tags = node.get("tags")
+    return isinstance(tags, list) and _agents_of(tags) == {agent}
+
+
+@dataclass(slots=True)
+class _ProjectPages:
+    """What of the platform bank's tree one project's caller may see."""
+
+    #: Ids of the project's folders at the root, oldest id first.
+    folders: list[str] = field(default_factory=list)
+    #: The contents of those folders, as the caller is shown them.
+    roots: list[dict[str, Any]] = field(default_factory=list)
+    #: Page id -> the engine's node, for every page shown.
+    pages: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Every folder in the project's folders, the folders themselves included.
+    folder_ids: set[str] = field(default_factory=set)
+
+
+def _shown_node(node: dict[str, Any], scope: _Scope, project_folders: set[str]) -> dict[str, Any]:
+    """One node as the caller is shown it. A page another client wrote keeps
+    only its descriptive tags, as a recall row does; a node directly in the
+    project folder is a root."""
+    out = dict(node)
+    if out.get("parent_id") in project_folders:
+        out["parent_id"] = None
+    if out.get("kind") == "page" and not _owns_page(out, scope.agent):
+        out["tags"] = _descriptive_tags(out.get("tags"))
+    return out
+
+
+def _project_view(tree: Any, scope: _Scope) -> _ProjectPages:
+    roots = tree.get("roots") if isinstance(tree, dict) else None
+    view = _ProjectPages()
+    name = f"{KNOWLEDGE_FOLDER_PREFIX}{scope.slug}"
+    mine = [
+        node
+        for node in (roots if isinstance(roots, list) else [])
+        if isinstance(node, dict)
+        and node.get("kind") == "folder"
+        and node.get("name") == name
+        and isinstance(node.get("id"), str)
+    ]
+    mine.sort(key=lambda node: node["id"])
+    view.folders = [node["id"] for node in mine]
+    project_folders = set(view.folders)
+    view.folder_ids.update(project_folders)
+
+    def walk(nodes: Any) -> list[dict[str, Any]]:
+        shown: list[dict[str, Any]] = []
+        for node in nodes if isinstance(nodes, list) else []:
+            if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+                continue
+            kind = node.get("kind")
+            if kind == "page":
+                if not _page_scope_held(node, scope):
+                    continue
+                view.pages[node["id"]] = node
+            elif kind == "folder":
+                view.folder_ids.add(node["id"])
+            else:
+                continue
+            out = _shown_node(node, scope, project_folders)
+            out["children"] = walk(node.get("children"))
+            shown.append(out)
+        return shown
+
+    for folder in mine:
+        view.roots.extend(walk(folder.get("children")))
+    return view
+
+
+async def _project_pages(
+    request: Request, provider: Any, scope: _Scope
+) -> _ProjectPages | Response:
+    """The caller's view of the platform bank's tree, or the engine's 4xx.
+
+    A platform bank the engine does not know yet has an empty tree: the
+    plugin reads 404 here as "no pages", and would then never create one.
+    """
+    try:
+        tree = await provider.hindsight_client.request_json(
+            "GET", _bank_path(provider, "/knowledge-base/tree"), timeout_s=_KNOWLEDGE_TIMEOUT_S
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            return _ProjectPages()
+        return _engine_failure(exc, what="the knowledge-base read", headers=scope.headers())
+    except Exception as exc:
+        return _engine_failure(exc, what="the knowledge-base read", headers=scope.headers())
+    return _project_view(tree, scope)
+
+
+async def _knowledge_write(
+    request: Request, provider: Any, scope: _Scope, method: str, suffix: str, body: Any, what: str
+) -> Any | Response:
+    """One engine knowledge-base write. An engine 404 is 502: the plugin does
+    not raise on a 404, and here it would mean "pages unsupported"."""
+    try:
+        return await provider.hindsight_client.request_json(
+            method,
+            _bank_path(provider, suffix),
+            json_body=body,
+            timeout_s=_KNOWLEDGE_TIMEOUT_S,
+        )
+    except Exception as exc:
+        return _engine_failure(exc, what=what, headers=scope.headers(), not_found_is_gateway=True)
+
+
+async def _parent_folder(
+    request: Request, provider: Any, scope: _Scope, view: _ProjectPages, requested: Any
+) -> str | Response:
+    """The folder a new node goes in: ``parent_id`` when it is a folder in
+    the project's folder, else the project's folder, created on first use."""
+    if requested is not None:
+        if not isinstance(requested, str) or requested not in view.folder_ids:
+            raise CompatKnowledgeParentRefused(
+                "parent_id is not a folder of this project's knowledge base",
+                details={"parent_id": requested if isinstance(requested, str) else None},
+            )
+        return requested
+    if view.folders:
+        return view.folders[0]
+    async with _state(request).knowledge_folder_lock:
+        again = await _project_pages(request, provider, scope)
+        if isinstance(again, Response):
+            return again
+        if again.folders:
+            return again.folders[0]
+        made = await _knowledge_write(
+            request,
+            provider,
+            scope,
+            "POST",
+            "/knowledge-base/folders",
+            {"name": f"{KNOWLEDGE_FOLDER_PREFIX}{scope.slug}"},
+            "the project folder create",
+        )
+        if isinstance(made, Response):
+            return made
+        folder = made.get("id") if isinstance(made, dict) else None
+        if not isinstance(folder, str) or not folder:
+            raise CompatEngineError("the memory engine created a folder without an id")
+        log.info("hal0.memory.compat.knowledge_folder_created", project=scope.slug)
+        return folder
+
+
+def _text_field(body: dict[str, Any], name: str, what: str, *, required: bool) -> str | None:
+    value = body.get(name)
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise BadRequest(f"{what} '{name}' must be a non-empty string")
+    return value
+
+
+def _page_tags(raw: Any, scope: _Scope, what: str) -> tuple[list[str], list[str]]:
+    """A page's labels and the tags of its scope leaf.
+
+    The labels are the caller's tags through the write envelope, as a retain
+    here gets them: ``scope:``, ``source:bridge:`` and ``visibility:`` tags
+    dropped, exactly one ``agent:<caller>``, ``kind:`` and the resolved
+    ``project:``. The scope leaf is what the caller asked the page to be built
+    from: its own tags, without the envelope's.
+    """
+    if raw is not None and not (isinstance(raw, list) and all(isinstance(t, str) for t in raw)):
+        raise BadRequest(f"{what} 'tags' must be a list of strings")
+    kept = [
+        tag
+        for tag in coerce_tags(raw or [])
+        if not _dropped_tag(tag) and not tag.strip().lower().startswith("visibility:")
+    ]
+    envelope = apply_envelope(
+        kept, agent=scope.agent, project_resolution=scope.resolution, coding=True
+    )
+    labels = list(envelope.tags)
+    leaf = [tag for tag in labels if not tag.strip().lower().startswith(_LABEL_TAG_PREFIXES)]
+    return labels, leaf
+
+
+def _caller_trigger(raw: Any, what: str) -> tuple[dict[str, Any], set[str]]:
+    """The refresh settings the caller may choose, and the names it sent
+    that are hal0's."""
+    if raw is None:
+        return {}, set()
+    if not isinstance(raw, dict):
+        raise BadRequest(f"{what} 'trigger' must be an object")
+    match = raw.get("tags_match")
+    if match is not None and not (isinstance(match, str) and match in _TAGS_MATCH_MODES):
+        raise BadRequest(
+            f"{what} 'trigger.tags_match' must be one of " + ", ".join(sorted(_TAGS_MATCH_MODES))
+        )
+    kept = {key: value for key, value in raw.items() if key in _TRIGGER_FIELDS}
+    return kept, {f"trigger.{key}" for key in raw if key not in _TRIGGER_FIELDS}
+
+
+def _page_trigger(chosen: dict[str, Any], leaf: list[str], scope: _Scope) -> dict[str, Any]:
+    """The trigger a page is written with: the caller's refresh settings and
+    hal0's scope, ``trigger.tag_groups``.
+
+    The groups are AND-ed: the caller's own tags as one leaf, matched the way
+    it asked (the engine's default for a tagged page, ``all_strict``, when it
+    did not say); the project scope this endpoint reads with; and no
+    ``visibility:private`` memory. ``exclude_mental_models`` keeps the
+    refresh from reading other mental models, whose content says nothing of
+    where it came from. ``tags_match`` is kept as the caller sent it, because
+    the plugin compares it with its own to decide whether a page drifted.
+    """
+    groups: list[dict[str, Any]] = []
+    if leaf:
+        groups.append({"tags": leaf, "match": chosen.get("tags_match") or "all_strict"})
+    groups.extend(project_scope_groups(scope.slug))
+    groups.append(_NOT_PRIVATE_GROUP)
+    return {**chosen, "tag_groups": groups, "exclude_mental_models": True}
+
+
+def _max_tokens_field(body: dict[str, Any], what: str) -> int | None:
+    value = body.get("max_tokens")
+    if value is None:
+        return None
+    if not _positive_int(value):
+        raise BadRequest(f"{what} 'max_tokens' must be a positive integer")
+    return int(value)
+
+
+def _yaml_scalar(value: str) -> str:
+    """A tag as the engine writes it in a page's frontmatter
+    (``engine/page_markdown.py`` ``_scalar``, hindsight-api 1.2.0)."""
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "")
+    return f'"{escaped}"'
+
+
+def _without_frontmatter_tags(markdown: str, hidden: Iterable[str]) -> str:
+    """``markdown`` without the frontmatter lines that list ``hidden`` tags.
+
+    The engine renders a page as a YAML frontmatter block, tags one per line
+    (``  - "agent:cc"``), then the body. Only that block is edited; a
+    ``tags:`` key left with no entries goes too. A document whose block is
+    not closed has those lines removed wherever they are.
+    """
+    drop = {f"  - {_yaml_scalar(tag)}" for tag in hidden}
+    if not drop:
+        return markdown
+    lines = markdown.split("\n")
+    end = None
+    if lines and lines[0] == "---":
+        end = next((i for i in range(1, len(lines)) if lines[i] == "---"), None)
+    if end is None:
+        return "\n".join(line for line in lines if line not in drop)
+    head = [line for line in lines[1:end] if line not in drop]
+    head = [
+        line
+        for i, line in enumerate(head)
+        if not (line == "tags:" and not (i + 1 < len(head) and head[i + 1].startswith("  - ")))
+    ]
+    return "\n".join(["---", *head, *lines[end:]])
+
+
+@router.get(_BANK + "/knowledge-base/tree")
+async def knowledge_base_tree(bank: str, request: Request, agent: str = _CALLER) -> Response:
+    """The engine's tree, as the contents of the caller's project folder.
+
+    ``roots`` holds the folders and pages in the project's folder at the root
+    of the platform bank's tree, as the engine nests them. A page is listed
+    only when this endpoint wrote its scope (:func:`_page_scope_held`); a page
+    another client wrote keeps only its descriptive tags. A project with no
+    folder yet has an empty tree, never 404.
+    """
+    provider = _provider(request)
+    scope = _knowledge_scope(request, provider, bank, agent)
+    view = await _project_pages(request, provider, scope)
+    if isinstance(view, Response):
+        return view
+    return _json({"roots": view.roots}, scope.headers())
+
+
+@router.get(_BANK + "/knowledge-base/search")
+async def knowledge_base_search(bank: str, request: Request, agent: str = _CALLER) -> Response:
+    """The engine's hybrid page search, held to the pages the tree shows.
+
+    The engine is asked for its most results among the pages tagged with the
+    caller's project; those the tree would not show are dropped and the rest
+    cut to the caller's ``limit``. ``total`` counts what is returned.
+    """
+    provider = _provider(request)
+    scope = _knowledge_scope(request, provider, bank, agent)
+    query = request.query_params.get("q")
+    if not query or not query.strip():
+        raise BadRequest("knowledge-base search requires 'q' (non-empty string)")
+    limit = _page_number(request, "limit", _DEFAULT_KNOWLEDGE_SEARCH_LIMIT)
+    if not 1 <= limit <= MAX_KNOWLEDGE_SEARCH_LIMIT:
+        raise BadRequest(
+            f"knowledge-base search 'limit' must be between 1 and {MAX_KNOWLEDGE_SEARCH_LIMIT}"
+        )
+    headers = {
+        **scope.headers(),
+        **_ignored(name for name in request.query_params if name not in ("q", "limit")),
+    }
+    view = await _project_pages(request, provider, scope)
+    if isinstance(view, Response):
+        return view
+    if not view.pages:
+        return _json({"results": [], "total": 0}, headers)
+    out = await _forward(
+        request,
+        "GET",
+        _bank_path(provider, "/knowledge-base/search"),
+        what="the knowledge-base search",
+        timeout_s=_KNOWLEDGE_TIMEOUT_S,
+        params={
+            "q": query,
+            "limit": MAX_KNOWLEDGE_SEARCH_LIMIT,
+            "tags": [scope.project_tag],
+            "tags_match": "all_strict",
+        },
+        headers=headers,
+    )
+    if isinstance(out, Response):
+        return out
+    rows = out.get("results") if isinstance(out, dict) else None
+    results = [
+        _pick(row, _SEARCH_RESULT_FIELDS)
+        for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, dict) and row.get("id") in view.pages
+    ][:limit]
+    return _json({"results": results, "total": len(results)}, headers)
+
+
+@router.get(_BANK + "/knowledge-base/pages/{page_id}")
+async def knowledge_base_page(
+    bank: str, page_id: str, request: Request, agent: str = _CALLER
+) -> Response:
+    """One page as the engine renders it, when the tree shows it; 404 for any
+    other id, the same answer as a page that does not exist. A page another
+    client wrote keeps only its descriptive tags, in ``tags`` and in the
+    frontmatter of ``markdown``."""
+    provider = _provider(request)
+    scope = _knowledge_scope(request, provider, bank, agent)
+    missing = NotFound(
+        "no such knowledge page",
+        code="memory.knowledge_page_not_found",
+        details={"page_id": page_id},
+    )
+    view = await _project_pages(request, provider, scope)
+    if isinstance(view, Response):
+        return view
+    node = view.pages.get(page_id)
+    if node is None:
+        raise missing
+    try:
+        page = await provider.hindsight_client.request_json(
+            "GET",
+            _bank_path(provider, f"/knowledge-base/pages/{quote(page_id, safe='')}"),
+            timeout_s=_KNOWLEDGE_TIMEOUT_S,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise missing from None
+        return _engine_failure(exc, what="the knowledge page read", headers=scope.headers())
+    except Exception as exc:
+        return _engine_failure(exc, what="the knowledge page read", headers=scope.headers())
+    if not isinstance(page, dict):
+        raise CompatEngineError("the memory engine answered a page read with no page")
+    if not _owns_page(node, scope.agent):
+        shown = set(_descriptive_tags(node.get("tags")))
+        every = [
+            t for t in [*(node.get("tags") or []), *(page.get("tags") or [])] if isinstance(t, str)
+        ]
+        hidden = {tag for tag in every if tag not in shown}
+        page = {**page, "tags": _descriptive_tags(page.get("tags"))}
+        if isinstance(page.get("markdown"), str):
+            page["markdown"] = _without_frontmatter_tags(page["markdown"], hidden)
+    return _json(page, scope.headers())
+
+
+@router.post(_BANK + "/knowledge-base/pages")
+async def knowledge_base_create_page(bank: str, request: Request, agent: str = _CALLER) -> Response:
+    """Create a page in the caller's project folder, through the envelope.
+
+    The page goes in ``parent_id`` when that is a folder of the project's
+    knowledge base, else in the project's folder (created on first use); any
+    other ``parent_id`` is 403. Its tags are the caller's through the write
+    envelope (:func:`_page_tags`) and its scope is hal0's
+    (:func:`_page_trigger`). The engine's answer (``page_id``,
+    ``mental_model_id``, ``operation_id``) is returned as it is, 201; a name
+    the folder already holds is the engine's 409.
+    """
+    _require_writes_allowed()
+    provider = _provider(request)
+    scope = _knowledge_scope(request, provider, bank, agent)
+    body = await _read_json(request, cap=MAX_KNOWLEDGE_BODY_BYTES)
+    what = "knowledge page create"
+    name = _text_field(body, "name", what, required=True)
+    source_query = _text_field(body, "source_query", what, required=True)
+    max_tokens = _max_tokens_field(body, what)
+    labels, leaf = _page_tags(body.get("tags"), scope, what)
+    chosen, refused = _caller_trigger(body.get("trigger"), what)
+    headers = {
+        **scope.headers(),
+        **_ignored([*(n for n in body if n not in _PAGE_FIELDS), *refused]),
+    }
+    view = await _project_pages(request, provider, scope)
+    if isinstance(view, Response):
+        return view
+    parent = await _parent_folder(request, provider, scope, view, body.get("parent_id"))
+    if isinstance(parent, Response):
+        return parent
+    wire: dict[str, Any] = {
+        "name": name,
+        "source_query": source_query,
+        "parent_id": parent,
+        "tags": labels,
+        "trigger": _page_trigger(chosen, leaf, scope),
+    }
+    if max_tokens is not None:
+        wire["max_tokens"] = max_tokens
+    out = await _knowledge_write(
+        request, provider, scope, "POST", "/knowledge-base/pages", wire, "the knowledge page create"
+    )
+    if isinstance(out, Response):
+        return out
+    log.info("hal0.memory.compat.knowledge_page_created", client=agent, project=scope.slug)
+    return _json(out, {**headers}, status_code=201)
+
+
+@router.patch(_BANK + "/knowledge-base/nodes/{node_id}")
+async def knowledge_base_update_node(
+    bank: str, node_id: str, request: Request, agent: str = _CALLER
+) -> Response:
+    """Change one of the caller's own pages.
+
+    The node must be a page the tree shows (``memory.compat_knowledge_node_refused``
+    otherwise) and the caller's own (``memory.compat_knowledge_page_not_owned``
+    for another client's page or a folder). Both refusals are 404, the one
+    write refusal here that is: the plugin sends this request only from its
+    page re-sync (``seedPages``), which raises on any other status and with it
+    the whole configure pass that imports the client's memory, while a 404
+    ends the re-sync and nothing else. Two clients of one project re-sync
+    each other's pages whenever their plugin versions or repository directory
+    names differ, so the refusal is an everyday answer, not an attack. ``name``, ``source_query`` and ``max_tokens`` are passed on;
+    new ``tags`` or ``trigger`` settings are written back through the envelope
+    with hal0's scope recomputed from them, so the page stays the caller's and
+    stays inside the project. Moving a node (``parent_id``) is not offered.
+    The engine's node is returned as the tree shows it.
+    """
+    _require_writes_allowed()
+    provider = _provider(request)
+    scope = _knowledge_scope(request, provider, bank, agent)
+    body = await _read_json(request, cap=MAX_KNOWLEDGE_BODY_BYTES)
+    what = "knowledge node update"
+    chosen, refused = _caller_trigger(body.get("trigger"), what)
+    wire: dict[str, Any] = {}
+    for key in ("name", "source_query"):
+        value = _text_field(body, key, what, required=False)
+        if value is not None:
+            wire[key] = value
+    max_tokens = _max_tokens_field(body, what)
+    if max_tokens is not None:
+        wire["max_tokens"] = max_tokens
+    headers = {
+        **scope.headers(),
+        **_ignored([*(n for n in body if n not in _NODE_FIELDS), *refused]),
+    }
+    view = await _project_pages(request, provider, scope)
+    if isinstance(view, Response):
+        return view
+    node = view.pages.get(node_id)
+    if node is None and node_id not in view.folder_ids:
+        raise CompatKnowledgeNodeRefused(
+            "no page of this project's knowledge base has this id",
+            details={"node_id": node_id},
+        )
+    if node is None or not _owns_page(node, scope.agent):
+        raise CompatKnowledgePageNotOwned(
+            "only the client that wrote a knowledge page can change it",
+            details={"node_id": node_id},
+        )
+    if body.get("tags") is not None or body.get("trigger") is not None:
+        raw_tags = body.get("tags")
+        if raw_tags is None:
+            raw_tags = [
+                tag
+                for tag in node.get("tags") or []
+                if isinstance(tag, str) and not tag.strip().lower().startswith(_LABEL_TAG_PREFIXES)
+            ]
+        labels, leaf = _page_tags(raw_tags, scope, what)
+        current = node.get("trigger") if isinstance(node.get("trigger"), dict) else {}
+        before = {"tags_match": current["tags_match"]} if current.get("tags_match") else {}
+        wire["tags"] = labels
+        wire["trigger"] = _page_trigger({**before, **chosen}, leaf, scope)
+    if not wire:
+        raise BadRequest(f"{what} changes nothing")
+    out = await _knowledge_write(
+        request,
+        provider,
+        scope,
+        "PATCH",
+        f"/knowledge-base/nodes/{quote(node_id, safe='')}",
+        wire,
+        "the knowledge node update",
+    )
+    if isinstance(out, Response):
+        return out
+    shown = _shown_node(out, scope, set(view.folders)) if isinstance(out, dict) else out
+    return _json(shown, headers)
+
+
+@router.post(_BANK + "/knowledge-base/folders")
+async def knowledge_base_create_folder(
+    bank: str, request: Request, agent: str = _CALLER
+) -> Response:
+    """Create a folder in the caller's project folder (or in ``parent_id``,
+    a folder of it). Folders hold no content and carry no owner; the
+    engine's node is returned as the tree shows it, 201."""
+    _require_writes_allowed()
+    provider = _provider(request)
+    scope = _knowledge_scope(request, provider, bank, agent)
+    body = await _read_json(request, cap=MAX_KNOWLEDGE_BODY_BYTES)
+    name = _text_field(body, "name", "knowledge folder create", required=True)
+    headers = {**scope.headers(), **_ignored(n for n in body if n not in _FOLDER_FIELDS)}
+    view = await _project_pages(request, provider, scope)
+    if isinstance(view, Response):
+        return view
+    parent = await _parent_folder(request, provider, scope, view, body.get("parent_id"))
+    if isinstance(parent, Response):
+        return parent
+    out = await _knowledge_write(
+        request,
+        provider,
+        scope,
+        "POST",
+        "/knowledge-base/folders",
+        {"name": name, "parent_id": parent},
+        "the knowledge folder create",
+    )
+    if isinstance(out, Response):
+        return out
+    project_folders = (
+        {*view.folders, parent} if parent not in view.folder_ids else set(view.folders)
+    )
+    shown = _shown_node(out, scope, project_folders) if isinstance(out, dict) else out
+    return _json(shown, headers, status_code=201)
 
 
 @router.api_route(
@@ -2156,7 +2863,18 @@ def knowledge_base_unsupported(method: str, path: str) -> NotFound:
     methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
 )
 async def knowledge_base(bank: str, request: Request, agent: str = _CALLER) -> Response:
-    raise knowledge_base_unsupported(request.method, request.url.path)
+    """Every other knowledge-base route: export, graph, a node delete, and
+    the routes above under a method they do not take.
+
+    A read is 404, which the plugin reads as "no pages". A write is 405, so
+    that a write the endpoint does not take is never counted as done.
+    """
+    if request.method in ("GET", "HEAD"):
+        raise knowledge_base_unsupported(request.method, request.url.path)
+    raise CompatMutationUnsupported(
+        "the engine-compatible memory endpoint does not accept this knowledge-base request",
+        details={"method": request.method, "path": request.url.path},
+    )
 
 
 # ── 12. everything else ──────────────────────────────────────────────────────
@@ -2184,6 +2902,7 @@ async def unsupported(rest: str, request: Request, agent: str = _CALLER) -> Resp
 
 __all__ = [
     "ADMIN_AGENT",
+    "KNOWLEDGE_FOLDER_PREFIX",
     "MAX_RETAIN_BODY_BYTES",
     "MAX_RETAIN_ITEMS",
     "MEMORY_SCOPE",

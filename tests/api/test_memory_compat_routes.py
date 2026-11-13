@@ -98,6 +98,10 @@ class Engine:
     extra_operation_ids: list[str] = field(default_factory=list)
     #: ``(method, path)`` -> a response, or an exception to raise.
     overrides: dict[tuple[str, str], Any] = field(default_factory=dict)
+    #: The knowledge base, flat: folders and pages as the engine stores them
+    #: (a page's ``tags``, ``trigger`` and ``source_query`` are its mental
+    #: model's). See :class:`KnowledgeBase`.
+    kb: KnowledgeBase = field(default_factory=lambda: KnowledgeBase())
 
     def lines(self) -> list[str]:
         return [call.line for call in self.calls]
@@ -192,6 +196,8 @@ class Engine:
                 return httpx.Response(404, json={"detail": f"Operation {operation_id} not found"})
             record = {**OPERATION_STATUS, "operation_id": operation_id, "id": operation_id}
             return httpx.Response(200, json={**record, **self.operations[operation_id]})
+        if rest.startswith("/knowledge-base/"):
+            return self.kb.answer(method, rest[len("/knowledge-base") :], params, body)
         if (method, rest) == ("GET", "/config"):
             resolved = {
                 "retain_strategies": {
@@ -206,6 +212,227 @@ class Engine:
                 200, json={"bank_id": BANK, "config": resolved, "overrides": overrides}
             )
         return httpx.Response(404, json={"detail": "Not Found"})
+
+
+def _stored_group(group: Any) -> Any:
+    """A tag group as hindsight-api 1.2.0 dumps it back: every leaf with its
+    ``match`` and ``resolve`` written out."""
+    if isinstance(group, dict) and "tags" in group:
+        return {
+            "tags": group["tags"],
+            "match": group.get("match", "any_strict"),
+            "resolve": "exact",
+        }
+    if isinstance(group, dict):
+        return {
+            k: ([_stored_group(g) for g in v] if isinstance(v, list) else _stored_group(v))
+            for k, v in group.items()
+        }
+    return group
+
+
+def _yaml(value: str) -> str:
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+@dataclass
+class KnowledgeBase:
+    """The engine's knowledge-base routes, as 1.2.0 answers them (``api/http.py``)."""
+
+    nodes: list[dict[str, Any]] = field(default_factory=list)
+    content: dict[str, str] = field(default_factory=dict)
+    made: int = 0
+
+    def _id(self, prefix: str) -> str:
+        self.made += 1
+        return f"{prefix}-{self.made:04d}"
+
+    def folder(self, name: str, parent_id: str | None = None, node_id: str | None = None) -> str:
+        node_id = node_id or self._id("kf")
+        self.nodes.append({"id": node_id, "kind": "folder", "name": name, "parent_id": parent_id})
+        return node_id
+
+    def page(
+        self,
+        name: str,
+        *,
+        parent_id: str | None,
+        tags: list[str],
+        trigger: dict[str, Any] | None = None,
+        source_query: str = "What is this?",
+        node_id: str | None = None,
+        content: str = "",
+    ) -> str:
+        node_id = node_id or self._id("kp")
+        stored = dict(trigger or {})
+        if stored.get("tag_groups") is not None:
+            stored["tag_groups"] = [_stored_group(g) for g in stored["tag_groups"]]
+        self.nodes.append(
+            {
+                "id": node_id,
+                "kind": "page",
+                "name": name,
+                "parent_id": parent_id,
+                "mental_model_id": f"mm-{node_id}",
+                "tags": list(tags),
+                "trigger": stored,
+                "source_query": source_query,
+            }
+        )
+        self.content[node_id] = content
+        return node_id
+
+    def get(self, node_id: str) -> dict[str, Any] | None:
+        return next((n for n in self.nodes if n["id"] == node_id), None)
+
+    def _model(self, node: dict[str, Any]) -> dict[str, Any]:
+        is_page = node["kind"] == "page"
+        return {
+            "id": node["id"],
+            "kind": node["kind"],
+            "name": node["name"],
+            "parent_id": node.get("parent_id"),
+            "mental_model_id": node.get("mental_model_id"),
+            "managed": False,
+            "description": node.get("source_query") if is_page else None,
+            "tags": list(node.get("tags") or []) if is_page else [],
+            "timestamp": "2026-11-12T10:00:00Z",
+            "is_stale": False if is_page else None,
+            "last_refresh_failed_at": None,
+            "trigger": dict(node.get("trigger") or {}) if is_page else None,
+            "children": [],
+        }
+
+    def tree(self) -> list[dict[str, Any]]:
+        models = {n["id"]: self._model(n) for n in self.nodes}
+        roots = []
+        for node in self.nodes:
+            model = models[node["id"]]
+            parent = node.get("parent_id")
+            if parent and parent in models:
+                models[parent]["children"].append(model)
+            else:
+                roots.append(model)
+        return roots
+
+    def markdown(self, node: dict[str, Any]) -> str:
+        lines = ["---", f"id: {_yaml(node['id'])}", 'type: "knowledge-page"']
+        lines.append(f"title: {_yaml(node['name'])}")
+        lines.append(f"description: {_yaml(node['source_query'])}")
+        if node.get("tags"):
+            lines.append("tags:")
+            lines.extend(f"  - {_yaml(t)}" for t in node["tags"])
+        lines += ['timestamp: "2026-11-12T10:00:00Z"', "---"]
+        body = self.content.get(node["id"]) or "No content yet."
+        return "\n".join(lines) + f"\n\n{body}\n"
+
+    def answer(self, method: str, rest: str, params: dict[str, list[str]], body: Any):
+        if (method, rest) == ("GET", "/tree"):
+            return httpx.Response(200, json={"roots": self.tree()})
+        if (method, rest) == ("POST", "/folders"):
+            node_id = self.folder(body["name"], body.get("parent_id"))
+            return httpx.Response(201, json=self._model(self.get(node_id)))
+        if (method, rest) == ("POST", "/pages"):
+            parent = body.get("parent_id")
+            if any(
+                n["kind"] == "page" and n.get("parent_id") == parent and n["name"] == body["name"]
+                for n in self.nodes
+            ):
+                detail = f"A page named '{body['name']}' already exists in this folder"
+                return httpx.Response(409, json={"detail": detail})
+            node_id = self.page(
+                body["name"],
+                parent_id=parent,
+                tags=body.get("tags") or [],
+                trigger=body.get("trigger"),
+                source_query=body["source_query"],
+            )
+            answer = {
+                "page_id": node_id,
+                "mental_model_id": f"mm-{node_id}",
+                "operation_id": "op-1",
+            }
+            return httpx.Response(201, json=answer)
+        if (method, rest) == ("GET", "/search"):
+            wanted = set(params.get("tags", []))
+            hits = [
+                {
+                    "id": n["id"],
+                    "name": n["name"],
+                    "mental_model_id": n["mental_model_id"],
+                    "source_query": n["source_query"],
+                    "snippet": self.content.get(n["id"]) or "No content yet.",
+                    "score": 0.5,
+                    "updated_at": None,
+                }
+                for n in self.nodes
+                if n["kind"] == "page" and wanted <= set(n.get("tags") or [])
+            ]
+            limit = int(params.get("limit", ["10"])[0])
+            return httpx.Response(200, json={"results": hits[:limit], "total": len(hits[:limit])})
+        if method == "GET" and rest.startswith("/pages/"):
+            node = self.get(rest[len("/pages/") :])
+            if node is None or node["kind"] != "page":
+                return httpx.Response(404, json={"detail": "Knowledge page not found"})
+            page = {
+                "id": node["id"],
+                "name": node["name"],
+                "type": "knowledge-page",
+                "description": node["source_query"],
+                "tags": list(node["tags"]),
+                "timestamp": "2026-11-12T10:00:00Z",
+                "body": self.content.get(node["id"]) or None,
+                "markdown": self.markdown(node),
+            }
+            return httpx.Response(200, json=page)
+        if method == "PATCH" and rest.startswith("/nodes/"):
+            node = self.get(rest[len("/nodes/") :])
+            if node is None:
+                return httpx.Response(404, json={"detail": "Knowledge node not found"})
+            for key in ("name", "source_query"):
+                if body.get(key) is not None:
+                    node[key] = body[key]
+            if body.get("tags") is not None:
+                node["tags"] = list(body["tags"])
+            if body.get("trigger") is not None:
+                patch = dict(body["trigger"])
+                if patch.get("tag_groups") is not None:
+                    patch["tag_groups"] = [_stored_group(g) for g in patch["tag_groups"]]
+                node["trigger"] = {**node.get("trigger", {}), **patch}
+            return httpx.Response(200, json=self._model(node))
+        return httpx.Response(404, json={"detail": "Not Found"})
+
+
+def compat_page_trigger(slug: str, leaf: list[str], match: str = "all") -> dict[str, Any]:
+    """The trigger the endpoint writes a page with, for a page whose caller
+    tags are ``leaf`` (``memory_compat._page_trigger``)."""
+    groups: list[dict[str, Any]] = [{"tags": leaf, "match": match}] if leaf else []
+    groups += project_scope_groups(slug)
+    groups.append({"not": {"tags": ["visibility:private"], "match": "any_strict"}})
+    return {
+        "fact_types": ["world", "experience", "observation"],
+        "tags_match": match,
+        "refresh_after_consolidation": True,
+        "tag_groups": groups,
+        "exclude_mental_models": True,
+    }
+
+
+def seed_project_pages(engine: Engine, *, owner: str = "cc") -> None:
+    """The tree the plugin contract cases run against: project ``hal0``'s
+    folder, an ``Initiatives`` folder in it, and one page ``owner`` wrote
+    through the endpoint."""
+    engine.kb.folder("project:hal0", node_id="kf-hal0")
+    engine.kb.folder("Initiatives", parent_id="kf-hal0", node_id="kf-initiatives")
+    engine.kb.page(
+        "Component map",
+        parent_id="kf-hal0",
+        node_id="kp-architecture",
+        tags=["knowledge:component", f"agent:{owner}", "kind:durable", "project:hal0"],
+        trigger=compat_page_trigger("hal0", ["knowledge:component"]),
+        source_query="How is this codebase put together?",
+        content="The API sits in front of the engine.",
+    )
 
 
 OPERATION_STATUS = {
@@ -2097,17 +2324,39 @@ def test_a_bank_cannot_be_deleted(client: TestClient, engine: Engine, key: str) 
         ("POST", "/knowledge-base/pages"),
         ("PATCH", "/knowledge-base/nodes/kp-1"),
         ("POST", "/knowledge-base/folders"),
-        ("DELETE", "/knowledge-base/nodes/kp-1"),
-        ("GET", "/knowledge-base"),
     ],
 )
-def test_knowledge_base_routes_answer_pages_unsupported(
-    client: TestClient, engine: Engine, key: str, method: str, path: str
+@pytest.mark.parametrize("bank", ["claude-code", "coding-agent%3A%3Atmp"])
+def test_a_caller_with_no_project_has_no_knowledge_pages(
+    client: TestClient, engine: Engine, key: str, method: str, path: str, bank: str
 ) -> None:
-    """404 on reads AND writes: the plugin takes it as "no pages here"."""
-    resp = client.request(method, _url(URL_BANK + path), headers=_auth(key), json={"name": "x"})
+    """No project, no folder: 404 on reads AND writes, which the plugin takes
+    as "no pages here"."""
+    resp = client.request(
+        method, _url(f"/v1/default/banks/{bank}{path}"), headers=_auth(key), json={"name": "x"}
+    )
     assert resp.status_code == 404
     assert _code(resp) == "memory.compat_knowledge_base_unsupported"
+    assert engine.calls == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status", "code"),
+    [
+        ("GET", "/knowledge-base", 404, "memory.compat_knowledge_base_unsupported"),
+        ("GET", "/knowledge-base/export", 404, "memory.compat_knowledge_base_unsupported"),
+        ("GET", "/knowledge-base/graph", 404, "memory.compat_knowledge_base_unsupported"),
+        ("DELETE", "/knowledge-base/nodes/kp-1", 405, "memory.compat_mutation_unsupported"),
+        ("PUT", "/knowledge-base/pages", 405, "memory.compat_mutation_unsupported"),
+        ("POST", "/knowledge-base/import", 405, "memory.compat_mutation_unsupported"),
+    ],
+)
+def test_knowledge_base_routes_the_plugin_does_not_use_are_not_served(
+    client: TestClient, engine: Engine, key: str, method: str, path: str, status: int, code: str
+) -> None:
+    """A read is 404 ("no pages"); a write is 405, never counted as done."""
+    resp = client.request(method, _url(URL_BANK + path), headers=_auth(key), json={"name": "x"})
+    assert (resp.status_code, _code(resp)) == (status, code)
     assert engine.calls == []
 
 
@@ -2184,18 +2433,32 @@ def test_an_unknown_mutation_is_405(
 
 def test_every_listed_route_is_really_served(client: TestClient, engine: Engine, key: str) -> None:
     _seed(engine, _doc("hal0::cc::d", OWN_PROJECT))
+    seed_project_pages(engine)
     engine.operations[_engine_operation_id("cc", "op-1")] = {}
-    unsupported = {"memory.compat_route_unsupported", "memory.compat_mutation_unsupported"}
-    for line in memory_compat.SUPPORTED_ROUTES:
+    unsupported = {
+        "memory.compat_route_unsupported",
+        "memory.compat_mutation_unsupported",
+        "memory.compat_knowledge_base_unsupported",
+    }
+    for n, line in enumerate(memory_compat.SUPPORTED_ROUTES):
         method, template = line.split(" ", 1)
         path = (
             template.replace("{bank}", "coding-agent%3A%3Ahal0-mono")
             .replace("{document_id}", "d")
             .replace("{operation_id}", "op-1")
+            .replace("{page_id}", "kp-architecture")
+            .replace("{node_id}", "kp-architecture")
         )
-        body = {"items": [_item()], "query": "why?"}
+        if path.endswith("/search"):
+            path += "?q=engine"
+        body = {
+            "items": [_item()],
+            "query": "why?",
+            "name": f"page {n}",
+            "source_query": "What is it?",
+        }
         resp = client.request(method, _url(path), headers=_auth(key), json=body)
-        assert resp.status_code == 200, (line, resp.text)
+        assert resp.status_code in (200, 201), (line, resp.text)
         assert resp.json().get("error", {}).get("code") not in unsupported
 
 
@@ -3072,6 +3335,7 @@ def test_the_plugins_requests_are_served(
     bank in the URL, the engine's own paths under the mount prefix."""
     engine.strategies = ("conversation", "document")
     _seed(engine, _doc("hal0::cc::release-process", [*OWN_PROJECT, "source:upload"]))
+    seed_project_pages(engine)
     for started in ("6f1d3b52-8f0e-5c41-a7d2-3e9c4b1f0a66", "0d9b6c0a-41f7-4e7c-b3a8-52c1e8f97d24"):
         engine.operations[_engine_operation_id("cc", started)] = {}
     resp = client.request(
