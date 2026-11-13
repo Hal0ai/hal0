@@ -2140,6 +2140,34 @@ def _read_nofollow(path: Path) -> bytes:
         os.close(dfd)
 
 
+def target_is_old_bank_message(platform: str, parts: Iterable[str]) -> str:
+    """The ``target_is_old_bank`` refusal: what names the old bank, and the edit that fixes it.
+
+    An upgraded box's hal0.toml can carry ``[memory] bank = "shared"`` (the
+    old platform bank). The cutover would then make the old bank the new
+    shared bank, so the run refuses until the config names the two-bank
+    targets. The edit is safe to make before the run: while the layout is old
+    the platform bank is read from the layout record, never from the
+    two-bank default (:func:`hal0.memory.bank_layout.legacy_platform_bank`).
+    """
+    from hal0.config.paths import hal0_toml
+
+    defaults = {
+        PART_SHARED: ("bank", bank_layout.TWO_BANK_PLATFORM_BANK),
+        PART_PRIVATE: ("private_bank", bank_layout.TWO_BANK_PRIVATE_BANK),
+    }
+    named = [defaults[part] for part in parts]
+    edits = " and ".join(f'{key} = "{value}"' for key, value in named)
+    keys = " and ".join(f"[memory] {key}" for key, _ in named)
+    return (
+        f"{keys} in {hal0_toml()} names {platform}, the old platform bank, so the cutover "
+        f"would make the old bank a target. Edit {hal0_toml()} to set [memory] {edits}, then "
+        "run the fold-in again. The edit is safe now: while the store is on the old layout, "
+        f"memory keeps reading {platform} from the layout record, and the new name is used "
+        "only from the cutover on"
+    )
+
+
 def _blocker(row: Mapping[str, Any], *, skips: Iterable[str]) -> dict[str, str] | None:
     """Why the bank in ``row`` holds the cutover back, and what to do; ``None`` when it does not.
 
@@ -2496,13 +2524,12 @@ class FoldIn(em.EngineMaintenance):
             or bank_layout.LEGACY_PLATFORM_BANK
         )
         plan["platform_bank"] = platform
-        if platform in targets.values():
-            refuse(
-                "target_is_old_bank",
-                f"[memory] names {platform}, the old platform bank, as a target. Set [memory] "
-                f'bank = "{bank_layout.TWO_BANK_PLATFORM_BANK}" (or remove the key), then run '
-                "the fold-in again",
-            )
+        clashing = [part for part, bank in targets.items() if bank == platform]
+        if clashing:
+            refuse("target_is_old_bank", target_is_old_bank_message(platform, clashing))
+        # A target that is the old platform bank is the platform bank, still
+        # to fold: the refusal above says how to name the real target.
+        bank_targets = [bank for bank in targets.values() if bank != platform]
 
         # The engine.
         live = em.evidence_pair(self._evidence().get("live"))
@@ -2569,7 +2596,7 @@ class FoldIn(em.EngineMaintenance):
             ids = await self._bank_ids()
             for bank in ids:
                 cls = classify_bank(
-                    bank, platform_bank=platform, targets=targets.values(), maps=self._maps
+                    bank, platform_bank=platform, targets=bank_targets, maps=self._maps
                 )
                 row: dict[str, Any] = {
                     "bank": bank,
@@ -4632,4 +4659,5 @@ __all__ = [
     "rewrite_archive",
     "routing_problems",
     "shared_archive_problems",
+    "target_is_old_bank_message",
 ]

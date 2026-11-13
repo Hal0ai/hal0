@@ -29,6 +29,25 @@ the engine, untouched, but hal0 no longer reads them: every agent reads and
 writes the two banks. Deleting them is a separate step you take when you are
 satisfied.
 
+## Before you run it
+
+An upgraded box's `/etc/hal0/hal0.toml` usually carries
+`[memory] bank = "shared"`, the old platform bank. With that value the cutover would make the old bank the
+new shared bank, so both the dry run and `--apply` refuse
+(`target_is_old_bank`) and give the exact edit. Make it first:
+
+```toml
+[memory]
+bank = "hal0:shared"
+```
+
+The edit is safe to make while the box is still on the old layout. Until the
+cutover, memory reads the platform bank from the layout record
+(`/var/lib/hal0/state/memory-layout.json`), never from `hal0:shared`, so
+agents go on reading and writing the bank the record captured (usually
+`shared`) as before. The dry run still shows
+`shared` as the platform bank, to be folded, while the refusal stands.
+
 ## What it does to each bank
 
 Each bank is exported, its archive is rewritten, and the result is merged

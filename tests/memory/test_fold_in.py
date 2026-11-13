@@ -787,6 +787,35 @@ async def test_refuses_apply_without_root_and_a_target_that_is_the_old_bank(box:
     assert "target_is_old_bank" in _codes(await box.fold().preflight())
 
 
+async def test_an_upgraded_boxs_bank_shared_gets_the_exact_edit_and_stays_the_platform_bank(
+    box: Box,
+) -> None:
+    # CT143: every upgraded box carries [memory] bank = "shared". The run
+    # refuses, names the edit, and the dry run still shows shared as the
+    # platform bank to fold, not as a target.
+    box.cfg = memory_config(bank="shared")
+    plan = await box.fold().preflight()
+    (message,) = [r["message"] for r in plan["refusals"] if r["code"] == "target_is_old_bank"]
+    assert '[memory] bank = "hal0:shared"' in message
+    assert "hal0.toml" in message
+    assert "layout record" in message
+    rows = {row["bank"]: row for row in plan["banks"]}
+    assert rows["shared"]["class"] == "platform"
+    assert rows["shared"]["action"] == "fold"
+
+
+def test_the_old_bank_edit_is_safe_while_the_layout_is_old() -> None:
+    # The message's promise: with the old layout recorded, the edited value is
+    # never read as the platform bank; the record's bank is.
+    from hal0.memory import bank_layout
+
+    layout = bank_layout.BankLayout(
+        layout=bank_layout.LAYOUT_LEGACY, legacy_platform_bank="shared", legacy_unified=True
+    )
+    cfg = SimpleNamespace(bank="hal0:shared", model_fields_set={"bank"})
+    assert bank_layout.legacy_platform_bank(layout, cfg) == "shared"
+
+
 async def test_refuses_an_owner_no_client_could_hold(box: Box) -> None:
     plan = await box.fold(owners={"claude-code": "hal0-mine"}).preflight()
     assert "invalid_owner" in _codes(plan)
