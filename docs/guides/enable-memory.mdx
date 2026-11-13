@@ -322,6 +322,10 @@ a Cognee migration path — there is no CLI command for migrating a
 Cognee-era store. See the engine note above.
 </Aside>
 
+A store from before the two-bank layout moves to `hal0:shared` and
+`hal0:private` with `hal0 memory migrate fold-in` instead: see
+[Fold the old memory banks in](/docs/guides/fold-in-memory-banks).
+
 ## Change the embedding model
 
 The embedding model belongs to the store, not to the config. hal0 records the
@@ -565,6 +569,8 @@ wipe is attributable after the fact.
   fact types, directives, and mental models.
 - [The Memory area](/docs/guides/memory-workspace) — the dashboard's
   Health, Facts, Knowledge, Operations and Agents tabs.
+- [Fold the old memory banks in](/docs/guides/fold-in-memory-banks) — moving
+  a store's old banks into the two banks.
 - [Run agents](/docs/guides/run-agents) — agents are the main consumer of
   the memory store.
 - [Connect MCP servers](/docs/guides/connect-mcp) — the `memory_*` tool

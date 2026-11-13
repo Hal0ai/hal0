@@ -30,7 +30,8 @@ an item read from `hal0:private` is reported as the `private:<agent>` its
 `unknown`, is readable by no one.
 
 A store on an old layout keeps its banks and behaves as before until
-`hal0 memory migrate fold-in` moves its memory into the two banks. Nothing
+`hal0 memory migrate fold-in` moves its memory into the two banks
+([Fold the old memory banks in](/docs/guides/fold-in-memory-banks)). Nothing
 else moves it. The one change for such a store is the read rule below:
 project-tagged memory is readable by shared reads.
 
