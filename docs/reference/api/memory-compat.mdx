@@ -312,7 +312,7 @@ dropped and listed in `X-hal0-Ignored-Fields`.
 | A node the tree does not show | `404 memory.compat_knowledge_node_refused` on an update, `404 memory.knowledge_page_not_found` on a read |
 | `parent_id` on a create | a folder of the project's folder, else `403 memory.compat_knowledge_parent_refused`; absent, the project's folder |
 | What an update may change | `name`, `source_query`, `max_tokens`, `tags`, `trigger`. New tags or trigger settings go through the envelope again and the scope is written again. `parent_id` (a move) is ignored |
-| What is shown of another client's page | its descriptive tags (the project, `kind:`, `knowledge:`, `source:`), in `tags` and in the frontmatter of `markdown`; never its writer |
+| What is shown of another client's page | its descriptive tags (the project, `kind:`, `knowledge:`, `source:`), in `tags` and in the frontmatter of `markdown`, and of its `trigger` only `tags_match`; never its writer or its scope |
 | A name the folder already holds | the engine's `409` |
 
 An update refusal is `404`, unlike every other refused write: the plugin's page re-sync raises on

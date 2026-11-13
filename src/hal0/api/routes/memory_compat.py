@@ -2330,15 +2330,27 @@ class _ProjectPages:
     folder_ids: set[str] = field(default_factory=set)
 
 
+#: The trigger fields the plugin reads from a tree node: its page re-sync
+#: compares ``trigger.tags_match`` with its own to decide whether a page
+#: drifted (dist/mcp-server.js ``seedPages``). Another client's page is shown
+#: with these alone.
+_SHOWN_TRIGGER_FIELDS = ("tags_match",)
+
+
 def _shown_node(node: dict[str, Any], scope: _Scope, project_folders: set[str]) -> dict[str, Any]:
     """One node as the caller is shown it. A page another client wrote keeps
-    only its descriptive tags, as a recall row does; a node directly in the
-    project folder is a root."""
+    only its descriptive tags, as a recall row does, and only the trigger
+    fields the plugin reads (:data:`_SHOWN_TRIGGER_FIELDS`): its
+    ``trigger.tag_groups`` would name the writer's own tags in their scope
+    leaf. A node directly in the project folder is a root."""
     out = dict(node)
     if out.get("parent_id") in project_folders:
         out["parent_id"] = None
     if out.get("kind") == "page" and not _owns_page(out, scope.agent):
         out["tags"] = _descriptive_tags(out.get("tags"))
+        trigger = out.get("trigger")
+        if isinstance(trigger, dict):
+            out["trigger"] = {k: trigger[k] for k in _SHOWN_TRIGGER_FIELDS if k in trigger}
     return out
 
 

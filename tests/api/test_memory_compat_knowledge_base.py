@@ -181,6 +181,33 @@ def test_the_tree_is_the_project_folder_and_only_pages_with_a_held_scope(
     assert engine.lines() == [f"GET {ENGINE_KB}/tree"]
 
 
+def test_another_clients_page_shows_only_the_trigger_fields_the_plugin_reads(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    """``trigger.tag_groups`` carries the writer's own tags in its scope leaf;
+    the plugin reads only ``trigger.tags_match`` (its re-sync drift check)."""
+    _seed_neighbours(engine)
+    engine.kb.page(
+        "Codex runbook",
+        parent_id="kf-hal0",
+        node_id="kp-runbook",
+        tags=["agent:codex", "kind:durable", "project:hal0", "codex-secret-label"],
+        trigger=compat_page_trigger("hal0", ["codex-secret-label"]),
+    )
+    roots = client.get(_url(KB + "/tree"), headers=_auth(key)).json()["roots"]
+    by_id = {node["id"]: node for node in roots}
+    assert by_id["kp-conventions"]["trigger"] == {"tags_match": "all"}
+    assert by_id["kp-runbook"]["trigger"] == {"tags_match": "all"}
+    assert by_id["kp-runbook"]["tags"] == ["kind:durable", "project:hal0"]
+    assert "codex-secret-label" not in str(roots)
+    # The caller's own page keeps its whole trigger.
+    own = by_id["kp-architecture"]["trigger"]
+    assert own["exclude_mental_models"] is True
+    assert {"tags": ["knowledge:component"], "match": "all", "resolve": "exact"} in own[
+        "tag_groups"
+    ]
+
+
 def test_a_project_with_no_folder_has_an_empty_tree_not_a_404(
     client: TestClient, engine: Engine, key: str
 ) -> None:
