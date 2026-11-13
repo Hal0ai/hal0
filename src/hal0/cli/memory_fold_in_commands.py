@@ -350,6 +350,13 @@ def fold_in_cmd(
     status: bool = typer.Option(
         False, "--status", help="Show where a fold-in stands, from the files on disk."
     ),
+    clear_gate: bool = typer.Option(
+        False,
+        "--clear-gate",
+        help="Lift a memory-write pause a finished fold-in left behind (it stopped between "
+        "retiring its journal and lifting the pause). Root only; refuses while any fold-in "
+        "is unfinished.",
+    ),
     bank: list[str] = typer.Option(
         [],
         "--bank",
@@ -390,9 +397,15 @@ def fold_in_cmd(
     Nothing is deleted. Memory is out of service while it runs. Run it on
     the box, as root, for --apply and --resume.
     """
-    chosen = [n for n, on in (("--resume", resume), ("--status", status)) if on]
+    chosen = [
+        n
+        for n, on in (("--resume", resume), ("--status", status), ("--clear-gate", clear_gate))
+        if on
+    ]
     if len(chosen) > 1 or (chosen and apply):
-        _progress.print("[red]error:[/red] --apply, --resume and --status are one at a time")
+        _progress.print(
+            "[red]error:[/red] --apply, --resume, --status and --clear-gate are one at a time"
+        )
         raise typer.Exit(2)
     owners = {k.lower(): v for k, v in _pairs(owner, "--owner").items()}
     maps = _pairs(mapping, "--map")
@@ -409,7 +422,9 @@ def fold_in_cmd(
             else:
                 _print_status(report)
             return
-        if resume:
+        if clear_gate:
+            result = _drive(lambda f: f.clear_gate(), progress=say, **kwargs)
+        elif resume:
             result = _drive(lambda f: f.resume(), progress=say, **kwargs)
         elif apply:
             result = _drive(lambda f: f.run(), progress=say, **kwargs)
@@ -455,6 +470,21 @@ def fold_in_cmd(
         typer.echo(jsonlib.dumps(result, indent=2, sort_keys=True, default=str))
         if result.get("status") == "incomplete":
             raise typer.Exit(INCOMPLETE_EXIT)
+        return
+    if result.get("status") == "gate_cleared":
+        state = (
+            "the store is on the two banks"
+            if result.get("cut_over")
+            else "the store is on the old layout"
+        )
+        console.print(
+            Panel(
+                f"[green]Memory writes are open again.[/green] Run {escape(str(result.get('run_id')))} "
+                f"had finished ({escape(str(result.get('phase')))}) but stopped before lifting the "
+                f"pause; {state}. `{_COMMAND} --status` shows the ledger.",
+                border_style="green",
+            )
+        )
         return
     folded = result.get("folded") or []
     pending = result.get("pending") or []

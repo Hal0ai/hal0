@@ -248,6 +248,7 @@ HOOK_POINTS: tuple[str, ...] = (
     "before_release",
     "released",
     "recorded",
+    "retired",
 )
 
 #: The mental-model id column is ``VARCHAR(64)`` in hindsight-api 1.2.0.
@@ -1839,7 +1840,8 @@ def blocking_reason() -> str | None:
     if gate is not None and gate.get("reason") == write_gate.REASON_FOLD_IN:
         return (
             f"memory writes are paused by a fold-in (run {gate.get('run_id')}) that left no "
-            "journal; see `hal0 memory migrate fold-in --status`"
+            "unfinished journal; `sudo hal0 memory migrate fold-in --clear-gate` lifts the pause "
+            "once that run's journal shows it finished (see --status)"
         )
     if isolated_port() is not None:
         return (
@@ -2229,11 +2231,18 @@ class FoldIn(em.EngineMaintenance):
                 "not finish; see `hal0 memory migrate fold-in --status`, then run it with --resume",
             )
         gate = write_gate.read_gate()
-        if gate is not None and switch is None:
+        if gate is not None and switch is None and left is None:
+            stuck = gate.get("reason") == write_gate.REASON_FOLD_IN
             refuse(
                 "gate_set",
                 f"memory writes are already paused (reason {gate.get('reason')}, run "
-                f"{gate.get('run_id')})",
+                f"{gate.get('run_id')})"
+                + (
+                    ", by a fold-in that finished without lifting it: run `sudo "
+                    f"{NAMES.command} --clear-gate`"
+                    if stuck
+                    else ""
+                ),
             )
         if not apply and lock_held():
             refuse("locked", "another `hal0 memory migrate fold-in` is running on this box")
@@ -2745,6 +2754,11 @@ class FoldIn(em.EngineMaintenance):
                         f"the fold-in journal is not usable ({found['error']}) and no usable "
                         "mirror of it was found. Nothing was changed"
                     )
+                gate = write_gate.read_gate()
+                if gate is not None and gate.get("reason") == write_gate.REASON_FOLD_IN:
+                    # Stopped between retiring its journal and lifting the
+                    # pause: nothing is left to carry on but the pause.
+                    return self._clear_stuck_gate()
                 raise FoldInRefused("there is no interrupted fold-in to resume")
             if not self._privileged():
                 raise FoldInRefused("run this as root (sudo)")
@@ -2813,6 +2827,7 @@ class FoldIn(em.EngineMaintenance):
         journal.phase = PHASE_ABANDONED
         journal.error = cause
         self._retire_journal(journal)
+        self._hook("retired")
         write_gate.lift_gate()
 
     async def _fold_all(self, journal: Journal) -> None:
@@ -3845,6 +3860,7 @@ class FoldIn(em.EngineMaintenance):
             raise
         journal.phase = PHASE_INCOMPLETE
         self._retire_journal(journal)
+        self._hook("retired")
         write_gate.lift_gate()
         self._say("memory writes resumed on the old layout")
         left = [e.bank for e in journal.banks if e.step == STEP_LEFT]
@@ -3940,6 +3956,7 @@ class FoldIn(em.EngineMaintenance):
             raise
         journal.phase = PHASE_COMPLETE
         self._retire_journal(journal)
+        self._hook("retired")
         write_gate.lift_gate()
         self._say("memory writes resumed")
         return {
@@ -3949,6 +3966,76 @@ class FoldIn(em.EngineMaintenance):
             "left": [],
             "pending": [],
             "folded_all": [f["bank"] for f in folded],
+        }
+
+    # ── a pause left behind ─────────────────────────────────────────────
+
+    def clear_gate(self) -> dict[str, Any]:
+        """Lift a ``fold_in`` pause that a finished run left behind (``--clear-gate``).
+
+        For a run stopped between retiring its journal and lifting the pause:
+        the journal is retired, so ``--resume`` has nothing to carry on and
+        the preflight refuses while the pause is set. Root only.
+        """
+        with self._lock():
+            return self._clear_stuck_gate()
+
+    def _clear_stuck_gate(self) -> dict[str, Any]:
+        """Lift the pause when it is the fold-in's, no run is unfinished and the newest one finished.
+
+        Refuses, changing nothing, unless: run as root; the pause's reason is
+        ``fold_in``; no fold-in journal or mirror is unfinished (or
+        unreadable); the engine is at its normal address; and the newest
+        fold-in mirror under ``backups/`` is the paused run's, and finished.
+        """
+        if not self._privileged():
+            raise FoldInRefused("run this as root (sudo)")
+        gate = write_gate.read_gate()
+        if gate is None or gate.get("reason") != write_gate.REASON_FOLD_IN:
+            raise FoldInRefused(
+                "memory writes are not paused by a fold-in"
+                + (f" (the pause is {gate.get('reason')}'s)" if gate else "")
+            )
+        found = locate_journal()
+        if found["journal"] is not None:
+            raise FoldInRefused(
+                f"fold-in run {found['journal'].run_id} is unfinished; run "
+                f"`sudo {NAMES.command} --resume`, which lifts the pause when it ends"
+            )
+        if found["error"]:
+            raise FoldInRefused(
+                f"a fold-in journal exists but cannot be used ({found['error']}), so an "
+                f"unfinished run cannot be ruled out; see `{NAMES.command} --status`"
+            )
+        if self._isolated_port() is not None:
+            raise FoldInRefused(
+                f"the memory engine is still isolated ({isolation_drop_in_path()} exists); a "
+                "finished run returns it first, so this one did not finish"
+            )
+        newest: Journal | None = None
+        try:
+            mirrors = sorted(em.archive_root().glob(f"{NAMES.archive_prefix}*/{NAMES.mirror}"))
+        except OSError:
+            mirrors = []
+        for path in mirrors:
+            journal, _why = em.read_journal_file(path, _parse_journal)
+            if journal is not None and (newest is None or journal.started_at > newest.started_at):
+                newest = journal
+        if newest is None or not _finished(newest) or newest.run_id != gate.get("run_id"):
+            raise FoldInRefused(
+                f"the pause names run {gate.get('run_id')}, but the newest fold-in journal under "
+                f"{em.archive_root()} is "
+                + (f"run {newest.run_id}, phase {newest.phase}" if newest else "missing")
+                + "; nothing shows the paused run finished, so the pause stays"
+            )
+        write_gate.lift_gate()
+        log.warning("hal0.memory.fold_in_gate_cleared", run_id=gate.get("run_id"))
+        self._say(f"lifted the pause run {newest.run_id} ({newest.phase}) left behind")
+        return {
+            **self._result(newest, self._embedder(newest)),
+            "status": "gate_cleared",
+            "phase": newest.phase,
+            "cut_over": newest.phase == PHASE_COMPLETE,
         }
 
     # ── status ──────────────────────────────────────────────────────────

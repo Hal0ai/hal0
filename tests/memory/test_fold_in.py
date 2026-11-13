@@ -1240,6 +1240,51 @@ async def test_a_lost_hal0_api_restart_is_resumable(box: Box) -> None:
     _assert_folded(box)
 
 
+# ── a pause left behind (second review, item 3) ────────────────────────
+
+
+@pytest.mark.parametrize("cut_over", [True, False])
+async def test_a_kill_between_retiring_the_journal_and_lifting_the_gate_is_cleared(
+    box: Box, cut_over: bool
+) -> None:
+    if not cut_over:
+        box.engine.orphans["pi-coder"] = 1
+
+    def hook(reached: str) -> None:
+        if reached == "retired":
+            raise Killed
+
+    with pytest.raises(Killed):
+        await box.fold(hook=hook).run()
+    # The journal is retired and the pause is still set: stuck, before the fix.
+    assert fi.load_journal() is None
+    assert write_gate.read_gate()["reason"] == write_gate.REASON_FOLD_IN
+    assert "gate_set" in _codes(await box.fold().preflight())
+    assert "--clear-gate" in (fi.blocking_reason() or "")
+    box.privileged = False
+    with pytest.raises(fi.FoldInRefused, match="root"):
+        box.fold().clear_gate()
+    box.privileged = True
+    cleared = await box.fold().resume()
+    assert cleared["status"] == "gate_cleared" and cleared["cut_over"] is cut_over
+    assert write_gate.read_gate() is None
+    assert fi.blocking_reason() is None
+    assert box.layout().two_bank is cut_over
+
+
+async def test_clear_gate_refuses_a_pause_no_finished_run_accounts_for(box: Box) -> None:
+    with pytest.raises(fi.FoldInRefused, match="not paused by a fold-in"):
+        box.fold().clear_gate()
+    await box.kill_at("rewritten:shared")
+    with pytest.raises(fi.FoldInRefused, match="--resume"):
+        box.fold().clear_gate()
+    await box.fold().resume()
+    write_gate.engage_gate(reason=write_gate.REASON_FOLD_IN, run_id="someone-else")
+    with pytest.raises(fi.FoldInRefused, match="the pause stays"):
+        box.fold().clear_gate()
+    assert write_gate.read_gate() is not None
+
+
 # ── status ──────────────────────────────────────────────────────────────
 
 
