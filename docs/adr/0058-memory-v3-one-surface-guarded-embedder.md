@@ -259,6 +259,34 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      contents are visible, only for banks whose counts matched, and never as a
      step of the run. There is no alias or fallback that reads the legacy
      banks once agents write to the two banks.
+   - *Operator decisions for the fold-in, accepted 2026-11-12.*
+     1. An old coding bank's facts are filed under a known owner: the bridge
+        client the operator names for the harness that wrote them
+        (`--owner HARNESS=CLIENT`), else a bridge client with the memory
+        scope that has the harness's own name (Pi's `pi` is `pi-coder`). A
+        bank with no known owner folds into the reserved pseudo-owner
+        `hal0-legacy-<harness>`; names starting `hal0` are reserved
+        (`hal0.bridge.keys`), so no client can read what is filed under it
+        as its own.
+     2. `Hal0::Agents` and `pi-coder` are coding banks. Their facts take
+        their project from each fact's own `project:` tags, through the
+        registry's aliases and deny list, not from the bank id.
+     3. Documents written before #2017 under a GUID id are carried as they
+        are. There is no regrouping of them by session.
+     4. The dashboard shows where a fold-in stands and the command to run;
+        it does not start one. The run needs root, as the embedder switch
+        does.
+   - *What the engine allows, checked in hindsight-api 1.2.0.* A merge
+     import (`mode=merge&document_conflict=skip`) takes an archive's
+     documents with their facts, the observations whose every source fact it
+     imported in the same call, and its mental models and knowledge pages;
+     never directives or bank config. Mental models are keyed by bank and id
+     and inserted without replacing, so a per-repository bank's models are
+     given new ids. A bank whose counts do not match after the merge is left
+     over, and a partial merge is completed by a re-import with `skip`,
+     never undone. The fold-in and the embedder switch never run at the same
+     time, and the updater, the engine upgrade and bank seeding wait for
+     either to finish.
 7b. **Shared reads see project-tagged memory.** Today a document carrying any
    `project:` tag is hidden from every `shared` read
    (`src/hal0/memory/hindsight_provider.py`, the unified project-scope
