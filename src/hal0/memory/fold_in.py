@@ -304,7 +304,7 @@ _GENERATED_MODEL_KEYS = (
 #: nullable, and ``history`` is no longer a column (alembic ``a7b8c9d0e1f2``
 #: dropped it; the import ignores keys that are not columns). A cleared model
 #: says it was last refreshed at the epoch: it holds nothing generated, and the
-#: target treats it as stale and refreshes it.
+#: target treats it as stale; it is refreshed when its trigger fires.
 NEVER_REFRESHED_AT = "1970-01-01T00:00:00+00:00"
 _CLEARED_MODEL_VALUES: dict[str, Any] = {
     "content": "",
@@ -3866,8 +3866,8 @@ class FoldIn(em.EngineMaintenance):
             self._say(
                 f"warning: {entry.bank}: {len(refreshed)} mental model(s) were refreshed in the "
                 f"old bank since an earlier run folded them into {target}; the copies in "
-                f"{target} are kept as they are, and {target} refreshes them from its own "
-                "memory after the cutover"
+                f"{target} are kept as they are, and are refreshed from {target}'s own memory "
+                "when their trigger fires after the cutover"
             )
 
     @staticmethod

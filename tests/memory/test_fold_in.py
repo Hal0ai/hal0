@@ -768,6 +768,13 @@ def test_the_listen_address_reads_the_units_environment_file(tmp_path: Path) -> 
         host, where = em.listen_host(fi.NAMES, unit(lines))
         assert host == em.UNKNOWN_HOST and "cannot be read" in where
         assert not em.is_loopback_host(host)
+    # A wildcard path, optional or not, cannot be followed: unknown, so exposed.
+    for lines in (
+        f"EnvironmentFile=-{tmp_path}/*.env\nEnvironment=HINDSIGHT_API_HOST=127.0.0.1\n",
+        f"EnvironmentFile={tmp_path}/engine?.env\n",
+    ):
+        host, where = em.listen_host(fi.NAMES, unit(lines))
+        assert host == em.UNKNOWN_HOST and "cannot follow" in where
 
 
 async def test_an_unreadable_environment_file_refuses_apply_without_the_flag(

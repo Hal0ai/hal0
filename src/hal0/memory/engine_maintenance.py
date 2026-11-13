@@ -869,7 +869,7 @@ def listen_host(names: MaintenanceNames, unit_text: str) -> tuple[str | None, st
     for file, value in env_files:
         optional = value.startswith("-")
         path = value[1:] if optional else value
-        if "%" in path or not path.startswith("/"):
+        if "%" in path or any(c in path for c in "*?[") or not path.startswith("/"):
             return UNKNOWN_HOST, (
                 f"the EnvironmentFile {path!r} in {file or 'the unit'} is named in a way this "
                 f"cannot follow, so its {_HOST_VAR} is unknown"

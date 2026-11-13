@@ -104,7 +104,9 @@ tags are rewritten in the archive first:
   cannot collide with each other in one bank. A bank that held private facts
   gives its models without what they generated: empty content, and a last
   refresh time of the epoch (the engine requires one), so the engine treats
-  them as stale and refreshes them from what the shared bank holds. A model tagged `visibility:private` there
+  them as stale. It refreshes one from what the shared bank holds when its trigger
+  fires (`refresh_after_consolidation` or a `refresh_cron`); a model with neither
+  stays empty until you refresh it (`hal0 memory mm refresh`). A model tagged `visibility:private` there
   is dropped and counted. Knowledge pages follow their models and get new
   page ids from the engine.
 - **A `private__<agent>` bank's mental models go to `hal0:private`,** with
