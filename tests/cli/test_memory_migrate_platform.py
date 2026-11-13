@@ -215,4 +215,4 @@ def test_a_two_bank_name_is_refused_as_a_target(stub_api, target) -> None:
 def test_migrate_unify_is_gone() -> None:
     result = runner.invoke(mgc.app, ["unify", "--source", "private__hermes"])
     assert result.exit_code != 0
-    assert [c.name for c in mgc.app.registered_commands] == ["platform"]
+    assert [c.name for c in mgc.app.registered_commands] == ["platform", "fold-in"]

@@ -171,6 +171,40 @@ completes; the message names the archive directory and `--status`. A finished
 run whose store had to be recorded as mixed exits 0 and says so.
 
 
+### `memory migrate fold-in`
+
+```sh
+hal0 memory migrate fold-in [--apply|--dry-run] [--resume] [--status] [--bank ID]...
+                            [--owner HARNESS=CLIENT]... [--map BANK=HARNESS]... [--json]
+```
+
+Folds a store's old banks into `hal0:shared` and `hal0:private` (ADR-0058
+decision 7a): the old platform bank, `coding-agent::<repo>` and
+`<harness>::<repo>`, `project__<id>`, `pi-coder`, `Hal0::Agents` and every
+`private__<agent>` bank, one bank at a time, by export, rewrite of the tags in
+the archive, and merge import with `document_conflict=skip`. A dry run by
+default, which reads every bank and writes nothing; `--apply` and `--resume`
+need root. It never deletes, replaces or renames a bank. See
+[Fold the old memory banks in](/docs/guides/fold-in-memory-banks) for what
+happens to each fact, observation, mental model and directive.
+
+| Flag | Meaning |
+|---|---|
+| `--apply` | Do it. The engine is moved to a private port and memory writes are paused for the whole run; at the end the layout record says `two_bank` and hal0-api is restarted. |
+| `--resume` | Carry an interrupted run on from its journal (`state/memory-fold-in.json`, mirrored as `fold-in-journal.json` in the run's archive directory). An import still running is waited for, never cancelled. |
+| `--status` | Where a run stands, from the files on disk: the journal, the pause, the isolation drop-in and the banks folded and left. Asks nothing of the engine. |
+| `--bank ID` | Repeatable. Fold only these banks. On a store already on the two banks it retries a bank an earlier run left; a bank already folded is refused. |
+| `--owner HARNESS=CLIENT` | Repeatable. File a coding bank's facts written by `HARNESS` (their `agent:` tag, else the bank's harness) under bridge client `CLIENT`. Without it: a memory-scoped bridge client of the harness's own name, else the reserved `hal0-legacy-<harness>`. `pi` maps to `pi-coder` by default. |
+| `--map BANK=HARNESS` | Repeatable. Fold a bank the fold-in does not know as a coding bank written by `HARNESS`, its project taken from each fact's `project:` tags. Without it such a bank is refused. |
+| `--json` | One JSON document on stdout: the plan, the result or the failure. |
+
+Exit codes: 0 when the dry run has no refusal or the run cut over (also when
+some banks were left; the output lists them and the `--bank` retry); 1 when the
+dry run or `--apply` is refused, or a run fails; 2 for a usage error; 130 when
+interrupted. A run that fails after it sent an import keeps memory writes
+paused and the engine private until `--resume` completes; one that fails
+before is undone.
+
 ### `memory migrate platform`
 
 ```sh

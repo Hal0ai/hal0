@@ -1,9 +1,10 @@
-"""``hal0 memory migrate`` — move the platform bank (ADR-0052).
+"""``hal0 memory migrate`` — move the platform bank (ADR-0052), fold the old banks in.
 
 ``migrate platform`` clones the platform bank into its configured name and
-folds the retired ``agents`` bank into it; see its docstring. The old
-``migrate unify`` is gone: ADR-0058 decision 7a moves a store's other banks
-into the two-bank layout with one converter instead.
+folds the retired ``agents`` bank into it; see its docstring. ``migrate
+fold-in`` is ADR-0058 decision 7a's one converter that moves a store's other
+banks into the two-bank layout
+(:mod:`hal0.cli.memory_fold_in_commands`).
 
 The fold of the ``agents`` bank goes through hal0-api's document-transfer
 passthrough:
@@ -39,7 +40,7 @@ from hal0.cli._shared import (
 )
 
 app = typer.Typer(
-    help="Migrate memory stores (platform bank).",
+    help="Migrate memory stores (platform bank, fold-in of the old banks).",
     invoke_without_command=True,
 )
 console = Console()
@@ -59,7 +60,7 @@ _EXPORT_READ_TIMEOUT_S = _POLL_TIMEOUT_S + 60.0
 def migrate_default(ctx: typer.Context) -> None:
     """Migrate memory stores (``platform`` moves the platform bank)."""
     if ctx.invoked_subcommand is None:
-        die("use 'migrate platform' (see 'hal0 memory migrate --help').")
+        die("use 'migrate platform' or 'migrate fold-in' (see 'hal0 memory migrate --help').")
 
 
 def _poll_operation(bank: str, operation_id: str) -> dict:
@@ -348,6 +349,13 @@ def migrate_platform_cmd(
             )
     if apply and not report["verified"]:
         raise typer.Exit(1)
+
+
+# ``migrate fold-in`` lives in its own module: it runs on the box against the
+# engine, not through hal0-api like ``platform`` above.
+from hal0.cli.memory_fold_in_commands import fold_in_cmd  # noqa: E402
+
+app.command("fold-in")(fold_in_cmd)
 
 
 __all__ = ["app"]
