@@ -404,3 +404,9 @@ def uninstall(
         argv.append("--dev")
 
     os.execvp("bash", argv)
+
+
+if __name__ == "__main__":
+    # ``python -m hal0.cli.main`` runs the CLI the way the ``hal0`` console
+    # script does (``[project.scripts] hal0 = "hal0.cli.main:app"``).
+    app(prog_name="hal0")

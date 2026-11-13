@@ -1,7 +1,8 @@
 """Pause memory writes while the store is being rebuilt (#3518, ADR-0058 decision 2).
 
 hindsight-api has no engine-wide write pause, so ``hal0 memory embedder
-switch`` makes its own window safe: while it runs it keeps one flag file in
+switch`` and ``hal0 memory migrate fold-in`` (:mod:`hal0.memory.fold_in`, with
+reason :data:`REASON_FOLD_IN`) make their own window safe: while it runs it keeps one flag file in
 the state directory, and every hal0 path that changes memory checks for it
 first::
 
@@ -66,8 +67,10 @@ log = structlog.get_logger(__name__)
 
 GATE_VERSION = 1
 
-#: The only reason hal0 pauses memory writes today.
+#: Why hal0 pauses memory writes: a store rebuild by ``hal0 memory embedder
+#: switch`` or the fold-in of the old banks (``hal0 memory migrate fold-in``).
 REASON_EMBEDDER_SWITCH = "embedder_switch"
+REASON_FOLD_IN = "fold_in"
 
 #: What a refused caller is told to wait before trying again. A switch runs
 #: for minutes, so this is a polling hint, not an estimate of the end.
@@ -81,6 +84,16 @@ _REASON_TEXT = {
     REASON_EMBEDDER_SWITCH: (
         "the memory store is being moved to another embedder (`hal0 memory embedder switch`)"
     ),
+    REASON_FOLD_IN: (
+        "the old memory banks are being folded into hal0:shared and hal0:private "
+        "(`hal0 memory migrate fold-in`)"
+    ),
+}
+
+#: The command whose ``--status`` says where the run that set the gate stands.
+_REASON_COMMAND = {
+    REASON_EMBEDDER_SWITCH: "hal0 memory embedder switch",
+    REASON_FOLD_IN: "hal0 memory migrate fold-in",
 }
 
 
@@ -93,10 +106,11 @@ class MemoryWritesPaused(Hal0Error):
     def __init__(self, gate: dict[str, Any]) -> None:
         reason = str(gate.get("reason") or "maintenance")
         why = _REASON_TEXT.get(reason, "memory maintenance is running")
+        command = _REASON_COMMAND.get(reason, "hal0 memory embedder switch")
         super().__init__(
             f"Memory writes are paused: {why}. Nothing was written. Writes and recall are paused "
-            "while the embedder switch runs (`hal0 memory embedder switch --status` shows "
-            "where it stands). Retry when it has finished.",
+            f"while it runs (`{command} --status` shows where it stands). Retry when it has "
+            "finished.",
             details={
                 "reason": reason,
                 "since": gate.get("since"),
@@ -200,6 +214,7 @@ def lift_gate(path: Path | None = None) -> bool:
 
 __all__ = [
     "REASON_EMBEDDER_SWITCH",
+    "REASON_FOLD_IN",
     "RETRY_AFTER_S",
     "MemoryWritesPaused",
     "engage_gate",

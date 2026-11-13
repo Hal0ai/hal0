@@ -1,0 +1,362 @@
+---
+title: Fold the old memory banks in
+description: hal0 memory migrate fold-in moves a store's old banks (the platform bank, coding-agent::<repo>, pi-coder, Hal0::Agents, private__<agent>) into hal0:shared and hal0:private, one bank at a time, without deleting anything.
+sidebar:
+  order: 52
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A box whose memory store was created before the two-bank layout keeps its
+old banks: a platform bank (usually `shared`), and often `coding-agent::<repo>`,
+`pi-coder`, `Hal0::Agents` and one `private__<agent>` bank per agent
+([Memory banks](/docs/concepts/memory-banks)). `hal0 memory migrate fold-in`
+is the one command that moves all of it into `hal0:shared` and
+`hal0:private`. Nothing else moves a store to the two banks (ADR-0058
+decision 7a).
+
+```sh
+hal0 memory migrate fold-in                  # dry run: what it would do, per bank
+sudo hal0 memory migrate fold-in --apply     # do it
+hal0 memory migrate fold-in --status         # where a run stands
+sudo hal0 memory migrate fold-in --resume    # carry an interrupted run on
+sudo hal0 memory migrate fold-in --clear-gate  # lift a pause a finished run left
+```
+
+It is a dry run unless `--apply` is given, and it is additive: it never
+deletes, replaces or renames a bank. After the cutover the old banks stay on
+the engine, untouched, but hal0 no longer reads them: every agent reads and
+writes the two banks. Deleting them is a separate step you take when you are
+satisfied.
+
+## Before you run it
+
+An upgraded box's `/etc/hal0/hal0.toml` usually carries
+`[memory] bank = "shared"`, the old platform bank. With that value the cutover would make the old bank the
+new shared bank, so both the dry run and `--apply` refuse
+(`target_is_old_bank`) and give the exact edit. Make it first:
+
+```toml
+[memory]
+bank = "hal0:shared"
+```
+
+The edit is safe to make while the box is still on the old layout. Until the
+cutover, memory reads the platform bank from the layout record
+(`/var/lib/hal0/state/memory-layout.json`), never from `hal0:shared`, so
+agents go on reading and writing the bank the record captured (usually
+`shared`) as before. The dry run still shows
+`shared` as the platform bank, to be folded, while the refusal stands.
+
+## What it does to each bank
+
+Each bank is exported, its archive is rewritten, and the result is merged
+into the two banks with the engine's own import (`mode=merge`,
+`document_conflict=skip`). The engine's import cannot change tags, so the
+tags are rewritten in the archive first:
+
+- **Private memory goes to `hal0:private`.** Everything in a
+  `private__<agent>` bank, and every document from another bank that has a
+  `private:` id or a `visibility:private` tag on it or on any of its facts.
+  Each such document gets the id `private:<owner>:<id>` and each fact the
+  tags `agent:<owner>` and `visibility:private`. A private owner taken from
+  an `agent:` tag in the platform bank or a project bank is lower-cased and
+  goes through `--owner`. A private document whose facts name more than one
+  owner cannot be filed under one, so its bank is left.
+- **The split is checked against the source before anything is sent.** Every
+  document, observation, mental model and knowledge page the exported bank
+  marks private (it is in a `private__<agent>` bank, has a `private:` id, is
+  tagged `visibility:private`, or is an observation resting on such a fact)
+  must be in the private archive under its new id, or counted as dropped,
+  and never in the shared archive. The shared archive must also hold no
+  `visibility:private` tag and no `private:` id. A bank that fails either
+  check is left before any import.
+- **Everything else goes to `hal0:shared`,** tagged as hal0 tags a write
+  today: one `agent:`, one `kind:`, session ids and lifecycle words moved
+  into metadata, and the project.
+- **The project** comes from the bank id for `coding-agent::<repo>`,
+  `<harness>::<repo>` and `project__<id>`, and from each fact's own
+  `project:` tags for `pi-coder`, `Hal0::Agents` and any bank you name with
+  `--map`. Both go through `[memory.projects]` aliases and its deny list. A
+  coding fact with no project gets `project:unresolved`; any other durable
+  fact with none gets `scope:global`.
+- **The owner of a coding bank's facts** is decided from the harness that
+  wrote them (the fact's `agent:` tag, else the bank's harness): the bridge
+  client you name with `--owner HARNESS=CLIENT`, else a bridge client with
+  the memory scope that has the harness's own name, else the reserved
+  pseudo-owner `hal0-legacy-<harness>`. Pi's harness `pi` maps to the
+  `pi-coder` client by default. A name starting `hal0` is reserved, so no
+  client can take a pseudo-owner: its shared memory is readable as project
+  memory, and its private memory by nobody.
+- **Coding-agent document ids stay reachable.** A shared document from a
+  coding bank is stored under the id the engine-compatible endpoint would
+  give it (`<project>::<owner>::<id>`, or `<project>::shared::<id>` for the
+  shared prefixes such as `git:`), so a client moved onto
+  `/api/memory/compat` finds its old `conversation:` and `git:` documents
+  under the ids it already uses.
+- **Observations follow their source facts.** One whose sources fall on
+  both sides, or under two owners, is dropped and counted; so is one tagged
+  `visibility:private` whose sources are all shared, because it can be
+  neither published nor imported on the private side. Consolidation builds
+  them again.
+- **Mental models of a shared bank go to `hal0:shared`.** A per-repository
+  bank's models get a new id, `<project>-<id>`, and its project tag, so they
+  cannot collide with each other in one bank. A bank that held private facts
+  gives its models without what they generated: empty content, and a last
+  refresh time of the epoch (the engine requires one), so the engine treats
+  them as stale. It refreshes one from what the shared bank holds when its trigger
+  fires (`refresh_after_consolidation` or a `refresh_cron`); a model with neither
+  stays empty until you refresh it (`hal0 memory mm refresh`). A model tagged `visibility:private` there
+  is dropped and counted. Knowledge pages follow their models and get new
+  page ids from the engine.
+- **A `private__<agent>` bank's mental models go to `hal0:private`,** with
+  the id `<agent>-<id>`, the tags `agent:<agent>` and `visibility:private`,
+  and a scope confined to that agent (`exclude_mental_models`, and a tag
+  group that requires `agent:<agent>` and `visibility:private`), so only
+  that agent reads them and a refresh reads only its memory. They keep their
+  content: it was built from that agent's own bank. A private bank's
+  knowledge pages, and the models behind them, are not carried; the dry run
+  counts them.
+- **Directives are not carried.** A merge import never takes them. The dry
+  run lists how many each bank has; recreate the ones you want.
+- **Attachments and invalidated facts cannot be carried.** The engine's
+  merge import restores neither (only a whole-bank restore does), so a bank
+  whose export holds any is left rather than folded without them. Remove
+  them from the old bank (or revert the invalidated facts), then run again.
+  A mental model's refresh history is not carried either; nothing but the
+  model's history view reads it, and the report counts the rows.
+- **GUID documents** written before session-keyed ids are carried as they
+  are.
+
+The `agents` bank, temporary banks of an embedder switch, and the two
+targets themselves are never folded. A bank the fold-in does not know is
+refused, even when it is empty: name it with `--map BANK=HARNESS` to fold it
+as a coding bank written by that harness, or with `--skip BANK` to leave it
+out of the two banks. Only the `agents` bank is let through empty: it must be
+empty before the cutover (`hal0 memory migrate platform` folds it), or named
+with `--skip`. A skipped bank stays on the engine, untouched, and nothing
+reads it after the cutover; the run that cuts over lists every skipped bank
+with its facts and documents (`skipped` in `--json`).
+
+The `--map` and `--skip` choices are kept in the ledger, and every later run
+uses them, so a retry need not repeat them (the retry command the run prints
+names them anyway). For a bank an earlier run folded, or sent part of, a
+`--map` other than the one it was folded with is refused, and so is a first
+`--map` for one folded without any: what was sent is filed under the owners
+that classification gave it. `--skip` is refused for such a bank too: it may
+have taken writes since, and needs a re-check, not a skip. A recorded skip
+for a bank the engine no longer holds is dropped from the ledger at the end
+of the next run, and `--forget-skip BANK` drops one by hand; either way, a
+bank of that name that turns up later is classified from scratch.
+
+## The dry run
+
+The dry run reads every bank's documents and facts and reports, per bank:
+its class, facts, documents, observations, mental models and directives,
+how many facts are private, how many have no owner at all, who each
+harness's facts would be filed under (and why: the map, a client, or the
+pseudo-owner), and the project slugs its facts would be tagged with. It also
+says how many mental models go to `hal0:private` and how many are not
+carried, how many shared facts no agent will be able to read (no project,
+so `project:unresolved`, under a `hal0-legacy-*` pseudo-owner: name the
+harness's client with `--owner` to give them a reader), any private document
+that names two owners, what an earlier run did to each bank, and whether this
+run can cut over. It writes nothing anywhere, not even an export. `--json`
+gives the same as one document. On a console too narrow for the bank table
+(80 columns, as over `ssh` without a tty or in a pipe) each bank is one line
+instead, and the reason for each bank's action is printed under it.
+
+It also refuses what `--apply` would refuse, and exits 1: an embedder switch
+running or unfinished, an earlier fold-in unfinished, memory writes already
+paused, an update or an engine upgrade in progress, a bank it does not know,
+a bank with queued or running operations, `[memory] bank` naming the old
+platform bank, an owner no bridge client could have, too little disk, the
+engine's export or import API off, or Pi's section of
+`~/.hindsight/coding-agent.json` still pointing at the engine's own port.
+Move Pi first with `sudo hal0 update component pi`; another harness pointing
+there is a warning (move it with `hal0 memory agents install <harness>`).
+
+The engine's own work on a bank (a mental-model refresh, consolidation of
+new facts) is not a refusal for the dry run, only a note. `--apply` waits for
+it, up to 15 minutes for all banks together, before it changes anything, and
+about every 30 seconds prints on stderr which operations it is waiting for
+(type, bank and id) and how long it will still wait, so `--json` output stays
+one document. If the work has not ended by then, the run refuses
+(`engine_operations`) and names two ways on: let it finish
+(`hal0 memory ops list` shows it) and run again, or cancel each named
+operation with the request the message gives,
+`DELETE /api/memory/banks/<bank>/operations/<id>` (admin), and run again.
+
+<Aside type="danger" title="Clients on other machines">
+The fold-in can see only the `coding-agent.json` files on this box. A client
+on another machine that writes to the engine's port directly (for example a
+coding-agents plugin pointed at `http://<box>:9177`) is invisible to it, and
+after the cutover that client goes on writing the old banks, which nothing
+reads. So the fold-in reads the address the engine listens on from its unit
+(`systemctl cat hindsight-api.service`: the last `--host` on `ExecStart`,
+else `HINDSIGHT_API_HOST` from an `EnvironmentFile=`, which systemd lets
+override `Environment=`, else from `Environment=`, else the engine's default
+`0.0.0.0`). An `EnvironmentFile` the fold-in cannot read leaves the address
+unknown, which counts as exposed. When that is anything but loopback, the dry run warns and `--apply` refuses
+(`engine_exposed`) unless you add `--allow-exposed-engine`. Before you add
+it, repoint every such client onto hal0 with
+`hal0 memory agents install <harness> --bridge-key-file <file>` on that
+machine. The shipped unit listens on `127.0.0.1` only.
+</Aside>
+
+## While it runs
+
+<Aside type="caution">
+Memory is out of service for the whole run. The engine is restarted
+listening only on a private loopback port, memory writes through hal0 are
+refused with `503 memory.writes_paused`, and recall fails until the run
+ends. `--apply` and `--resume` need root.
+</Aside>
+
+**Every bank is checked before any is imported.** Each bank of the run is
+exported, rewritten and checked: the owner and routing checks above, the
+bank's export holding all of it (the engine's export leaves out a fact that belongs
+to no document), no attachments or invalidated facts, and none of its
+document or mental-model ids already in a target, unless an earlier run sent
+it from the same unchanged source. Two banks of the run that would send the
+same id to one target are both left and named to each other: a merge would
+keep only the first, and the ids are not rewritten, because agents go on
+writing under them after the cutover. If any bank fails, **nothing is
+imported**: every bank is left as it was, the run ends without a cutover,
+and the report says what each failed bank needs.
+
+Then the banks are imported one at a time. After a bank's import, each
+target must hold every document, mental model and knowledge page the bank's
+archive carried, by the ids recorded for it, and have grown by exactly what
+was sent (observations by at least as many). A bank that does not match is
+**left**: what landed stays, the bank stays a readable old bank, and the run
+carries on with the next one. The next run sends only what is missing.
+
+A left bank's note gives counts and bank names, never memory ids. The ids
+behind it (changed, gone, clashing, missing, mixed-owner) are in
+`left-ids.json` in the run's archive directory, mode 0600 and owned by the
+hal0 account (the owner of hal0's state), so root and hal0 can read it; the
+note names that file.
+
+## The cutover waits for every bank
+
+The store moves to the two banks only when every old bank is folded. Before
+it does, the run lists every bank the engine holds again: each one that is
+not a target or a switch's scratch bank must be recorded as folded. A bank
+the fold-in does not know must be named with `--skip` (or `--map`), even
+when it is empty; the `agents` bank must be empty or named with `--skip`.
+A bank an earlier run sent memory from that has since been deleted from the
+engine holds the cutover back while the targets still hold any copy of it:
+nothing else would tell those copies from live memory. The run names the
+bank, writes the ids to `left-ids.json`, and names the `.ids.json` files that
+record what was sent; delete the copies, then run again. Then the run returns the engine to its normal address, writes the layout
+record as `two_bank`, restarts hal0-api so it uses the two banks, and only
+then lets writes in again. From then on every agent writes to `hal0:shared` and
+`hal0:private`.
+
+When any bank is left, was not part of the run (`--bank`), or holds the
+cutover back as above, there is no cutover. The run returns the engine to its normal address and lets writes in
+again without touching the layout: the box stays on the old layout, agents
+go on writing to the old banks, and nothing blocks `hal0 update`. It lists
+the banks that are not folded, why, and the command to retry them, and exits
+3. What it folded is kept in `/var/lib/hal0/state/memory-fold-in-ledger.json`
+for the next run.
+
+## Running it again
+
+```sh
+sudo hal0 memory migrate fold-in --apply                  # every bank
+sudo hal0 memory migrate fold-in --apply --bank pi-coder  # one left bank
+```
+
+A later run exports each left bank afresh and folds it. A bank an earlier run
+folded is never imported twice, and it is never taken on trust either: every
+run exports it again and runs the whole pre-check on what it holds now (the
+routing check, and the clash, changed and gone checks below), because a
+re-tag, such as a document marked `visibility:private` after it was folded,
+changes neither the bank's counts nor its last write time. Only what the
+target is missing is sent:
+
+- a document the earlier run folded is the fold-in's own copy only when the
+  old bank still holds it unchanged: the same text, facts and tags. A mental
+  model is its own copy only when its name, query, tags and trigger are as
+  they were sent; any change there is refused, because it changes who may
+  read the model. A model the engine only refreshed in the old bank since
+  (new content or history) keeps the copy in the target, with a warning, and
+  the bank's report counts it as `model_content_refreshed_kept_target`: its
+  trigger goes with it, so the target refreshes it from its own memory after
+  the cutover. The exception is a model whose content the fold-in now clears
+  because its bank holds private facts: the copy in the target was generated
+  before and may draw on them, so it is refused. A model recorded by an
+  earlier build of the fold-in, which kept one digest for the whole model,
+  passes only while that digest still matches; otherwise its own message
+  says so, and the copies are deleted and sent again. The ids it sent are
+  read from the
+  `.ids.json` files in that run's archive directory, and the ledger names
+  them; an edit to either by root or the hal0 account can make a document
+  look like the fold-in's own when it is not, and so defeats this check. If
+  it was changed since (an agent appended to it, someone edited its text or
+  tags), the bank is left: a merge with `skip` would keep the older copy and
+  lose the change without a word. The note names `left-ids.json`, which
+  holds every id. Delete each copy from the target (the engine's
+  `DELETE /v1/default/banks/<bank>/documents/<id>`, or
+  `.../mental-models/<id>` for a model, ids URL-encoded) and run again; it
+  is then sent as it is now. There is no option to keep a copy: the cutover
+  waits while one stays behind. A document or model deleted from the old bank since, or one that
+  no longer goes to that target (re-tagged `visibility:private`, it now goes
+  to `hal0:private`), is refused the same way: its copy would stay readable
+  in the target. Delete the copy, then run again;
+- new documents are sent, and must all arrive;
+- an observation the earlier run sent that rests on a document already in
+  the target must be there; if it did not land with its document, no merge
+  can bring it now, and the bank is left with the documents to delete before
+  trying again. One the old bank built after the earlier run is not carried
+  (the target's own consolidation builds it), and the report counts it;
+- a knowledge page whose model landed without it is sent again, with the
+  folders above it. The engine gives those folders new ids, so a resent page
+  can sit in a second folder of the same name.
+
+A `--bank` run re-checks the banks folded earlier too, because the cutover
+needs every bank folded as it is now. The `--owner` map and the list of
+bridge clients a bank was first sent with are kept in the ledger and used
+for that bank on every later run and every resume, so its documents keep
+their ids; a run that names a different `--owner` for such a bank is
+refused. A bank left before anything of it was sent is planned afresh.
+
+## If the run stops
+
+A run that stops after it sent an import (a crash, a kill, the engine gone)
+keeps memory writes paused and the engine private, and `--resume` carries it
+on from its journal, `/var/lib/hal0/state/memory-fold-in.json` (mirrored in
+the run's archive directory), with the owners it was planned with. An import
+still running is waited for, never cancelled; a resend sends only what is
+missing and is checked like the first. A run that stops before any import
+was sent is undone: the engine returns to its normal address and writes
+resume.
+
+A run killed after it retired its journal but before it lifted the pause
+leaves writes paused with nothing to resume, and the next dry run refuses
+(`gate_set`). `sudo hal0 memory migrate fold-in --clear-gate` (or `--resume`)
+lifts that pause, once it has checked that no fold-in is unfinished, the
+engine is at its normal address, and the newest run's journal shows it
+finished.
+
+The archives, as exported and as rewritten, are kept in
+`/var/lib/hal0/backups/memory-fold-in-<time>-<run>/`.
+
+<Aside type="caution">
+Keep the archive directories until the cutover is done. A later run reads
+what each earlier run sent of a bank from the `.ids.json` files in its
+directory, and refuses a bank whose record is gone, so deleting one strands
+every bank that run sent part of. `--status` lists the directories still
+needed. Once the store is on the two banks you can delete them.
+</Aside>
+
+## Related
+
+- [Memory banks](/docs/concepts/memory-banks) — the layouts and the layout
+  record.
+- [Enable memory](/docs/guides/enable-memory) — the embedder switch, which
+  never runs at the same time as a fold-in.
+- [CLI: memory](/docs/reference/cli-memory#memory-migrate-fold-in) — every
+  flag and exit code.

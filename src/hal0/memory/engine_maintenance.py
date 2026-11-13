@@ -251,6 +251,8 @@ class Timeouts:
     #: ending, when it is all that keeps the bank busy. A mental-model
     #: refresh is an LLM call over the bank, minutes on a slow local model.
     engine_ops_s: float = 900.0
+    #: How often a wait for the engine's own work says what it is waiting for.
+    engine_ops_note_s: float = 30.0
     delete_s: float = 3600.0
     http_s: float = 120.0
 
@@ -762,6 +764,146 @@ def _check_address_value(flag: str, value: str) -> None:
             f"its {flag} value {value!r} is expanded by systemd (a % specifier or $ variable), "
             "so the address it binds cannot be read from the unit"
         )
+
+
+#: The engine's own listen address when neither ``--host`` nor
+#: ``HINDSIGHT_API_HOST`` names one (hindsight-api 1.2.0 ``config.DEFAULT_HOST``).
+ENGINE_DEFAULT_HOST = "0.0.0.0"
+
+
+#: What :func:`listen_host` returns as the host when the unit's
+#: ``EnvironmentFile`` cannot be read: an address that is not loopback, so
+#: the caller treats the engine as exposed (fail closed).
+UNKNOWN_HOST = "an address that cannot be read"
+
+_HOST_VAR = "HINDSIGHT_API_HOST"
+
+
+def _env_file_host(path: str) -> tuple[str | None, str | None]:
+    """``(host, error)`` from one ``EnvironmentFile``: the last ``HINDSIGHT_API_HOST=`` in it.
+
+    Reads simple ``KEY=VALUE`` lines, as systemd does: blank lines and lines
+    starting ``#`` or ``;`` are skipped, and a value wrapped in one pair of
+    single or double quotes loses them. ``host`` is ``None`` when the file
+    does not set the variable; ``error`` is set when the file cannot be read.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return None, type(exc).__name__
+    host: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")) or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() != _HOST_VAR:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        host = value
+    return host, None
+
+
+def listen_host(names: MaintenanceNames, unit_text: str) -> tuple[str | None, str]:
+    """``(host, where)``: the address the engine's unit makes it listen on, and how that was read.
+
+    hindsight-api binds ``--host`` from its command line, else
+    ``HINDSIGHT_API_HOST`` from its environment, else
+    :data:`ENGINE_DEFAULT_HOST` (``main.py`` ``parse_cli_args``). The
+    command is the one :func:`exec_start_source` finds, without this
+    command's own drop-in; a ``--host`` given twice binds the last, as
+    argparse does. The environment is systemd's: a variable an
+    ``EnvironmentFile=`` sets beats one from ``Environment=``, whatever the
+    order, and among either kind the last assignment wins (an empty
+    assignment clears the list before it). Each ``EnvironmentFile`` is read
+    (simple ``KEY=VALUE`` lines); one that cannot be read, or whose path
+    holds a ``%`` specifier, makes the host :data:`UNKNOWN_HOST`, which is
+    not loopback, so the caller treats the engine as exposed. A file with
+    the ``-`` prefix that does not exist is skipped, as systemd skips it.
+    ``host`` is ``None`` when the command line cannot be read (the
+    preflight refuses such a unit anyway).
+    """
+    line, source = exec_start_source(names, unit_text)
+    if line is None:
+        return None, ""
+    try:
+        words = [w.value for w in _split_exec(line)]
+    except UnsupportedExecStart:
+        return None, ""
+    where = f"the unit's ExecStart{f' in {source}' if source else ''}"
+    flag_host: str | None = None
+    for i, word in enumerate(words[1:], start=1):
+        if word == "--host" and i + 1 < len(words):
+            flag_host = words[i + 1]
+        elif word.startswith("--host="):
+            flag_host = word[len("--host=") :]
+    if flag_host is not None:
+        return flag_host, f"--host in {where}"
+    from_env: tuple[str, str] | None = None
+    env_files: list[tuple[str, str]] = []
+    for file, key, value in _unit_assignments(unit_text):
+        if _is_ours(names, file):
+            continue
+        if key == "EnvironmentFile":
+            if not value:
+                env_files = []
+            else:
+                env_files.append((file, value))
+            continue
+        if key != "Environment":
+            continue
+        if not value:
+            from_env = None
+            continue
+        try:
+            assignments = [w.value for w in _split_exec(value)]
+        except UnsupportedExecStart:
+            continue
+        for item in assignments:
+            name, sep, setting = item.partition("=")
+            if sep and name == _HOST_VAR:
+                from_env = (setting, f"{_HOST_VAR} in {file or 'the unit'}")
+    from_file: tuple[str, str] | None = None
+    for file, value in env_files:
+        optional = value.startswith("-")
+        path = value[1:] if optional else value
+        if "%" in path or any(c in path for c in "*?[") or not path.startswith("/"):
+            return UNKNOWN_HOST, (
+                f"the EnvironmentFile {path!r} in {file or 'the unit'} is named in a way this "
+                f"cannot follow, so its {_HOST_VAR} is unknown"
+            )
+        if optional and not os.path.lexists(path):
+            continue
+        host, error = _env_file_host(path)
+        if error is not None:
+            return UNKNOWN_HOST, (
+                f"the EnvironmentFile {path} in {file or 'the unit'} cannot be read ({error}), "
+                f"so its {_HOST_VAR} is unknown"
+            )
+        if host is not None:
+            from_file = (host, f"{_HOST_VAR} in the EnvironmentFile {path}")
+    if from_file is not None:
+        return from_file
+    if from_env is not None:
+        return from_env
+    return ENGINE_DEFAULT_HOST, (
+        f"the engine's default: {where} names no --host and the unit sets no {_HOST_VAR}"
+    )
+
+
+def is_loopback_host(host: str) -> bool:
+    """True for an address only this box can reach: ``localhost``, ``127.0.0.0/8``, ``::1``."""
+    import ipaddress
+
+    value = host.strip().strip("[]")
+    if value.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
 
 
 def exec_start_refusal(names: MaintenanceNames, line: str, source: str | None) -> str | None:
@@ -1454,6 +1596,7 @@ class EngineMaintenance:
         start = self._clock()
         deadline = start + self.t.quiet_s
         last: int | None = None
+        noted: float | None = None
         while True:
             state = await self.bank_state(bank)
             busy = state["pending"] or state["processing"]
@@ -1474,6 +1617,7 @@ class EngineMaintenance:
                     raise self._parked_error(bank, parked, start + self.t.engine_ops_s)
                 if now >= start + self.t.engine_ops_s:
                     raise self._engine_work_error(bank, own)
+                noted = self._note_engine_wait(bank, own, start + self.t.engine_ops_s, now, noted)
             elif now >= deadline:
                 return state
             last = state["pending_consolidation"]
@@ -1562,14 +1706,42 @@ class EngineMaintenance:
         if deadline is None:
             deadline = self._clock() + self.t.engine_ops_s
         current = dict(state)
+        noted: float | None = None
         while True:
             own = await self._engine_work(bank, current)
             if own:
                 self._raise_if_parked(bank, own, deadline)
-            if not own or self._clock() >= deadline:
+            if not own:
                 return current, own
+            now = self._clock()
+            if now >= deadline:
+                return current, own
+            noted = self._note_engine_wait(bank, own, deadline, now, noted)
             await self._sleep(self.t.poll_s)
             current = await self.bank_state(bank)
+
+    def _note_engine_wait(
+        self,
+        bank: str,
+        own: list[dict[str, Any]],
+        deadline: float,
+        now: float,
+        noted: float | None,
+    ) -> float | None:
+        """Say what a wait for the engine's own work is waiting for, about every ``engine_ops_note_s``.
+
+        The first look says it at once, then one line per interval, so a wait
+        of up to ``engine_ops_s`` is never silent. ``now`` is the caller's read
+        of :attr:`_clock`. Returns when it last spoke.
+        """
+        if noted is not None and now - noted < self.t.engine_ops_note_s:
+            return noted
+        left = max(0.0, deadline - now)
+        self._say(
+            f"waiting for the engine's own {operations_text(bank, own)}; "
+            f"{left:.0f}s left before {self.names.actor} stops waiting"
+        )
+        return now
 
     def _parked_past(
         self, own: list[dict[str, Any]], deadline: float
@@ -2383,6 +2555,7 @@ class EngineMaintenance:
 
 __all__ = [
     "COUNT_KEYS",
+    "ENGINE_DEFAULT_HOST",
     "ENGINE_EMBEDDING_TYPES",
     "ENGINE_OPERATION_TYPES",
     "FINGERPRINT_SIGNALS",
@@ -2412,11 +2585,13 @@ __all__ = [
     "exec_start_source",
     "free_loopback_port",
     "http_detail",
+    "is_loopback_host",
     "isolated_port",
     "isolation_body",
     "isolation_drop_in_path",
     "journal_path",
     "later_exec_start_dropins",
+    "listen_host",
     "locate_journal",
     "lock_held",
     "lock_path",

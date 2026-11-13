@@ -2419,6 +2419,13 @@ class UpdateBlockedByEmbedderSwitch(UpdateError):
     status = 409
 
 
+class UpdateBlockedByFoldIn(UpdateError):
+    """409: a fold-in of the old memory banks is running or unfinished; an update must wait."""
+
+    code = "system.update_blocked_by_fold_in"
+    status = 409
+
+
 def _raise_if_embedder_switch() -> None:
     """Refuse an update while ``hal0 memory embedder switch`` is running or unfinished.
 
@@ -2434,6 +2441,15 @@ def _raise_if_embedder_switch() -> None:
         raise UpdateBlockedByEmbedderSwitch(
             f"hal0 update cannot start: {reason}",
             details={"hint": "hal0 memory embedder switch --status"},
+        )
+    # The fold-in (ADR-0058 decision 7a) rebuilds the store the same way.
+    from hal0.memory import fold_in
+
+    folding = fold_in.blocking_reason()
+    if folding is not None:
+        raise UpdateBlockedByFoldIn(
+            f"hal0 update cannot start: {folding}",
+            details={"hint": "hal0 memory migrate fold-in --status"},
         )
 
 

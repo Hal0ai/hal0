@@ -1099,6 +1099,12 @@ class EmbedderSwitch(em.EngineMaintenance):
                 "not finish; see `hal0 memory embedder switch --status`, then run it with "
                 "--resume",
             )
+        # The fold-in of the old banks rebuilds the store too: the two never overlap.
+        from hal0.memory import fold_in
+
+        folding = fold_in.blocking_reason()
+        if folding is not None:
+            refuse("fold_in", f"{folding}; the switch and the fold-in never overlap")
         gate = write_gate.read_gate()
         if gate is not None:
             refuse(
@@ -2606,6 +2612,14 @@ class EmbedderSwitch(em.EngineMaintenance):
         """
         if lock_held():
             raise SwitchRefused("a `hal0 memory embedder switch` is running; it owns the pause")
+        from hal0.memory import fold_in
+
+        folding = fold_in.blocking_reason()
+        if folding is not None:
+            raise SwitchRefused(
+                f"{folding}. The pause is the fold-in's; `hal0 memory migrate fold-in "
+                "--resume` lifts it"
+            )
         found = locate_journal()
         if found["journal"] is not None:
             raise SwitchRefused(

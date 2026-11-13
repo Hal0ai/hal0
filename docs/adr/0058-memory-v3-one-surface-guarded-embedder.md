@@ -230,6 +230,20 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      reporting how many folded in and which are left; a left-over bank can be
      retried alone. This differs from the embedder switch in decision 2, which
      stops on the first mismatch because the embedder is instance-wide.
+   - *No cutover while any bank is left.* The layout record becomes
+     `two_bank` only when every old bank is folded. A run that leaves one (or
+     does not include one, `--bank`) returns the engine, lifts the pause and
+     keeps the box on the old layout, so writes go on to the old banks; it
+     keeps what it folded in a ledger. A later run folds the rest and cuts
+     over. It never imports a folded bank twice, and never takes one on trust:
+     every run exports it again and runs the whole pre-check on what it holds
+     now (a re-tag to `visibility:private` moves neither its counts nor its
+     last write time), sends only what the targets are missing, and refuses
+     (leaves the bank) when a folded document or mental model has changed
+     (text, facts, content or tags), gone from the old bank, or no longer goes
+     to the target it was sent to, because a merge with `skip` would keep the
+     stale copy without a word and a re-tagged copy would stay readable. An observation a resend cannot carry, because its
+     documents landed before without it, leaves the bank too.
    - *It tags in the archive.* An engine import cannot add or change tags
      (verified on engine 1.2.0), so the fold-in exports a bank, rewrites the
      tags in the exported documents (project, agent, the envelope's rules, and
@@ -259,6 +273,75 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      contents are visible, only for banks whose counts matched, and never as a
      step of the run. There is no alias or fallback that reads the legacy
      banks once agents write to the two banks.
+   - *Operator decisions for the fold-in, accepted 2026-11-12.*
+     1. An old coding bank's facts are filed under a known owner: the bridge
+        client the operator names for the harness that wrote them
+        (`--owner HARNESS=CLIENT`), else a bridge client with the memory
+        scope that has the harness's own name (Pi's `pi` is `pi-coder`). A
+        bank with no known owner folds into the reserved pseudo-owner
+        `hal0-legacy-<harness>`; names starting `hal0` are reserved
+        (`hal0.bridge.keys`), so no client can read what is filed under it
+        as its own.
+     2. `Hal0::Agents` and `pi-coder` are coding banks. Their facts take
+        their project from each fact's own `project:` tags, through the
+        registry's aliases and deny list, not from the bank id.
+     3. Documents written before #2017 under a GUID id are carried as they
+        are. There is no regrouping of them by session.
+     4. The dashboard shows where a fold-in stands and the command to run;
+        it does not start one. The run needs root, as the embedder switch
+        does.
+     5. (2026-11-13) No cutover while any bank is left, as above; this
+        replaces cutting over with banks left over. A `private__<agent>`
+        bank's mental models go to `hal0:private` under `<agent>-<id>`,
+        tagged for that agent and with a scope confined to it, so the
+        provider's model read rule gives them to that agent alone; its
+        knowledge pages are not carried.
+     6. (2026-11-13, second review) A run checks every bank before it
+        imports any: export, rewrite, routing, and the clash, changed and
+        gone checks against the targets. If any bank would be left,
+        nothing is imported, so gaps between runs come only from imports
+        that fail. Two banks that would send one document id to the same
+        target are both left and named; their ids are not rewritten,
+        because agents go on writing under them. A bank whose export holds
+        attachments or invalidated facts is left, since a merge import
+        restores neither. Before the cutover every bank on the engine is
+        listed again: each one that is not a target or a switch's scratch
+        bank must be folded; an unknown bank must be named with `--skip`
+        (or `--map`), even when it is empty; only the retired `agents`
+        bank is let through empty, and otherwise needs `--skip` too. Memory
+        ids stay out of the ledger and the notes, in a 0600 file owned by
+        the hal0 account in the run's archive directory.
+     7. (2026-11-13, third review) No folded bank is taken on trust: every
+        run exports it again and runs the whole pre-check, because a re-tag
+        to `visibility:private` moves neither its counts nor its last write
+        time. Mental models are recorded with a digest of their content and
+        tags, so a changed or re-tagged model refuses its bank. A run's
+        `--map` and `--skip` are kept in the ledger for later runs; a
+        changed `--map` or a `--skip` for a folded bank is refused. The
+        cutover lists the skipped banks with their counts. While the
+        engine listens beyond loopback, `--apply` refuses unless
+        `--allow-exposed-engine` is given, because a remote client writing
+        to the engine's port directly would go on writing the old banks.
+     8. (2026-11-13, fourth review) A model's digest is split: a changed
+        name, query, tags or trigger refuses its bank; a content-only
+        refresh keeps the target's copy with a warning, since the trigger
+        travels and the target refreshes it, unless the content is now
+        cleared for private facts. A bank deleted from the engine after a
+        run sent from it holds the cutover back while its copies remain.
+        The `--map` freeze covers every folded bank, stale skips are
+        dropped (`--forget-skip` too), and the listen address follows the
+        last `--host` and the unit's `EnvironmentFile`.
+   - *What the engine allows, checked in hindsight-api 1.2.0.* A merge
+     import (`mode=merge&document_conflict=skip`) takes an archive's
+     documents with their facts, the observations whose every source fact it
+     imported in the same call, and its mental models and knowledge pages;
+     never directives or bank config. Mental models are keyed by bank and id
+     and inserted without replacing, so a per-repository bank's models are
+     given new ids. A bank whose counts do not match after the merge is left
+     over, and a partial merge is completed by a re-import with `skip`,
+     never undone. The fold-in and the embedder switch never run at the same
+     time, and the updater, the engine upgrade and bank seeding wait for
+     either to finish.
 7b. **Shared reads see project-tagged memory.** Today a document carrying any
    `project:` tag is hidden from every `shared` read
    (`src/hal0/memory/hindsight_provider.py`, the unified project-scope

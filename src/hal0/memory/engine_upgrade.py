@@ -557,9 +557,11 @@ def upgrade_memory_engine(
         # middle of an embedder switch that would put renamed banks back under
         # their temporary ids, so the two never overlap. The switch refuses
         # in the other direction (``.venv.new``, a queued or running update).
+        # The fold-in of the old banks (ADR-0058 decision 7a) likewise.
+        from hal0.memory import fold_in
         from hal0.memory.embedder_switch import blocking_reason
 
-        blocked = blocking_reason()
+        blocked = blocking_reason() or fold_in.blocking_reason()
         if blocked is not None:
             log.warning("updater.memory_engine_blocked", job_id=job_id, reason=blocked)
             return {"status": "blocked", "reason": blocked}

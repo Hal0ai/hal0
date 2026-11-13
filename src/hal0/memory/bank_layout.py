@@ -15,8 +15,11 @@ its store, not about its config, so hal0 keeps it in one small state file::
 of the old layout also holds what the old config said, under ``captured``:
 the bank behind ``shared`` (``platform_bank``) and whether private memory
 shared it (``unified``, the retired ``[memory] unified_bank``). This module is
-the only reader and writer of the file. Nothing here moves a store from the
-old layout to ``two_bank``; that is the fold-in's last step.
+the only reader and writer of the file. Nothing here decides to move a store
+from the old layout to ``two_bank``: that is the fold-in's last step
+(:mod:`hal0.memory.fold_in`), which writes the record through
+:func:`record_fold_in`, with a ``fold_in`` section naming the banks it folded
+and the ones it left.
 
 First run on a box with no record
 ---------------------------------
@@ -110,6 +113,9 @@ SOURCE_LEGACY_CONFIG = "old-config"
 SOURCE_STORE_UNAVAILABLE = "store-unavailable"
 SOURCE_REMOTE_ENGINE = "remote-engine"
 SOURCE_ENGINE_UNKNOWN = "engine-unknown"
+#: Written by the fold-in's cutover (:mod:`hal0.memory.fold_in`), the one
+#: thing that moves a store from the old layout to ``two_bank``.
+SOURCE_FOLD_IN = "fold-in"
 
 #: Sources that describe a store hal0 could not look at. Never written down.
 _UNSETTLED_SOURCES = frozenset(
@@ -506,6 +512,80 @@ def save_layout_record(layout: BankLayout, path: Path | None = None) -> BankLayo
     return stamped
 
 
+#: The record's key for what the fold-in did: ``{"run_id", "folded": [...],
+#: "left": [...]}``. Absent from a record the fold-in never wrote.
+_FOLD_IN = "fold_in"
+
+
+def load_fold_in_record(path: Path | None = None) -> dict[str, Any] | None:
+    """The fold-in's section of the record, or ``None`` when it has none.
+
+    ``folded`` lists ``{"bank", "counts", "last_document_at", "run_id"}`` for
+    each bank folded in, ``left`` ``{"bank", "note", "run_id", "sent_parts"}``
+    for each one left as it was, and ``platform_bank`` the old layout's bank
+    behind ``shared``. Raises :class:`LayoutRecordError` for a
+    record that cannot be read.
+    """
+    target = path if path is not None else layout_record_path()
+    load_layout_record(target)
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise LayoutRecordError(target, f"cannot be read ({type(exc).__name__})") from exc
+    section = data.get(_FOLD_IN) if isinstance(data, dict) else None
+    return section if isinstance(section, dict) else None
+
+
+def record_fold_in(
+    layout: BankLayout, fold_in: dict[str, Any], path: Path | None = None
+) -> BankLayout:
+    """Write the ``two_bank`` record at the end of a fold-in, with what it folded.
+
+    Merges with an earlier fold-in's section (a ``--bank`` retry): a bank
+    folded now leaves the ``left`` list, and the newest line per bank wins.
+    Atomic; raises ``OSError``.
+    """
+    target = path if path is not None else layout_record_path()
+    earlier = load_fold_in_record(target) or {}
+    folded = {str(b.get("bank")): b for b in earlier.get("folded") or []}
+    left = {str(b.get("bank")): b for b in earlier.get("left") or []}
+    for row in fold_in.get("folded") or []:
+        folded[str(row.get("bank"))] = row
+        left.pop(str(row.get("bank")), None)
+    for row in fold_in.get("left") or []:
+        left[str(row.get("bank"))] = row
+    stamped = replace(layout, recorded_at=datetime.now(UTC).isoformat(timespec="seconds"))
+    body: dict[str, Any] = {
+        "version": RECORD_VERSION,
+        "layout": stamped.layout,
+        _CAPTURED: None,
+        "source": stamped.source,
+        "recorded_at": stamped.recorded_at,
+        _FOLD_IN: {
+            "run_id": fold_in.get("run_id"),
+            "platform_bank": fold_in.get("platform_bank") or earlier.get("platform_bank"),
+            "folded": list(folded.values()),
+            "left": list(left.values()),
+        },
+    }
+    nofollow.write_file(
+        target,
+        json.dumps(body, indent=2) + "\n",
+        mode=_RECORD_MODE,
+        owner=perms.state_root_owner(),
+    )
+    log.info(
+        "hal0.memory.layout_recorded",
+        layout=stamped.layout,
+        source=stamped.source,
+        folded=len(folded),
+        left=len(left),
+    )
+    return stamped
+
+
 def ensure_layout_record(
     memory_cfg: Any,
     *,
@@ -608,6 +688,7 @@ __all__ = [
     "LAYOUT_LEGACY",
     "LAYOUT_TWO_BANK",
     "LEGACY_PLATFORM_BANK",
+    "SOURCE_FOLD_IN",
     "TWO_BANK_PLATFORM_BANK",
     "TWO_BANK_PRIVATE_BANK",
     "BankLayout",
@@ -622,8 +703,10 @@ __all__ = [
     "ensure_layout_record",
     "layout_record_path",
     "legacy_platform_bank",
+    "load_fold_in_record",
     "load_layout_record",
     "platform_bank",
+    "record_fold_in",
     "record_memory_layout",
     "save_layout_record",
     "undecided_fallback",
