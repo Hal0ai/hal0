@@ -251,6 +251,16 @@ def _bank_notes(rows: list[dict[str, Any]]) -> list[str]:
                 "owner is a reserved pseudo-owner no client holds. Name the harness's client with "
                 "--owner HARNESS=CLIENT to give them a reader[/yellow]"
             )
+        pseudo = (fold.get("knowledge_pages") or {}).get("pseudo_owned") or []
+        if pseudo:
+            shown = ", ".join(escape(str(n)) for n in pseudo[:10])
+            more = f" and {len(pseudo) - 10} more" if len(pseudo) > 10 else ""
+            lines.append(
+                f"[yellow]{bank}: {len(pseudo)} knowledge page(s) will be filed under a reserved "
+                f"pseudo-owner ({shown}{more}). Compat shows them to the project's clients, but "
+                "none of them can change them. Name the harness's client with --owner "
+                "HARNESS=CLIENT if its plugin uses /api/memory/compat[/yellow]"
+            )
         for mixed in fold.get("mixed_owner_documents") or []:
             lines.append(
                 f"[red]{bank}: private document {escape(str(mixed.get('document')))} holds "
