@@ -1156,6 +1156,8 @@ async def test_the_routing_check_on_disk_refuses_a_tampered_archive(
     result = await box.fold().resume()
     note = next(b["note"] for b in result["banks"] if b["bank"] == "shared")
     assert "do not keep its private memory on the private side" in note
+    # Caught by the pre-check, so no bank of the run was imported at all.
+    assert box.engine.imports == []
     assert not any(
         "private:hermes:s1" in json.dumps(a) or "my secret" in json.dumps(a)
         for t, a in box.engine.imports
