@@ -172,6 +172,17 @@ engine's export or import API off, or Pi's section of
 Move Pi first with `sudo hal0 update component pi`; another harness pointing
 there is a warning (move it with `hal0 memory agents install <harness>`).
 
+The engine's own work on a bank (a mental-model refresh, consolidation of
+new facts) is not a refusal for the dry run, only a note. `--apply` waits for
+it, up to 15 minutes for all banks together, before it changes anything, and
+about every 30 seconds prints on stderr which operations it is waiting for
+(type, bank and id) and how long it will still wait, so `--json` output stays
+one document. If the work has not ended by then, the run refuses
+(`engine_operations`) and names two ways on: let it finish
+(`hal0 memory ops list` shows it) and run again, or cancel each named
+operation with the request the message gives,
+`DELETE /api/memory/banks/<bank>/operations/<id>` (admin), and run again.
+
 <Aside type="danger" title="Clients on other machines">
 The fold-in can see only the `coding-agent.json` files on this box. A client
 on another machine that writes to the engine's port directly (for example a

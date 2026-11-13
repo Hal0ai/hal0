@@ -15,6 +15,7 @@ ordered event list. A run is stopped at an exact point through its ``hook``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import json
 import re
@@ -108,6 +109,8 @@ class FakeEngine:
         self.hold_import: set[str] = set()
         #: Per bank: queued retains (``pending``), counted and listed.
         self.queue: dict[str, int] = {}
+        #: Per bank: the engine's own live operations (a refresh that never ends).
+        self.own_ops: dict[str, list[dict[str, Any]]] = {}
         #: Facts the export leaves out (they belong to no document).
         self.orphans: dict[str, int] = {}
         self.imports: list[tuple[str, dict[str, Any]]] = []
@@ -317,7 +320,13 @@ class FakeEngine:
                     "nodes_by_fact_type": {"world": c["facts"], "observation": c["observations"]},
                     "total_observations": c["observations"],
                     "total_nodes": c["facts"] + c["observations"],
-                    "operations_by_status": {"pending": self.queue.get(bank, 0), "processing": 0},
+                    "operations_by_status": {
+                        "pending": self.queue.get(bank, 0)
+                        + sum(o["status"] == "pending" for o in self.own_ops.get(bank, [])),
+                        "processing": sum(
+                            o["status"] == "processing" for o in self.own_ops.get(bank, [])
+                        ),
+                    },
                     "pending_consolidation": 0,
                 },
             )
@@ -354,7 +363,7 @@ class FakeEngine:
             rows = [
                 {"id": f"r{i}", "operation_type": "retain", "status": "pending"}
                 for i in range(self.queue.get(bank, 0))
-            ]
+            ] + [dict(o) for o in self.own_ops.get(bank, [])]
             if "status" in params:
                 rows = [r for r in rows if r["status"] == params["status"]]
             return self._page("operations", rows, params)
@@ -819,6 +828,39 @@ def test_the_old_bank_edit_is_safe_while_the_layout_is_old() -> None:
 async def test_refuses_an_owner_no_client_could_hold(box: Box) -> None:
     plan = await box.fold(owners={"claude-code": "hal0-mine"}).preflight()
     assert "invalid_owner" in _codes(plan)
+
+
+async def test_apply_says_what_engine_work_it_waits_for_and_how_to_cancel_it(box: Box) -> None:
+    # CT143: --apply waited up to 900 s for the engine's own work and said nothing.
+    box.engine.own_ops["shared"] = [
+        {"id": "op-r1", "operation_type": "refresh_mental_model", "status": "processing"}
+    ]
+    said: list[str] = []
+    fold = box.fold(
+        progress=said.append,
+        timeouts=dataclasses.replace(FAST, engine_ops_s=12.0, engine_ops_note_s=4.0),
+    )
+    with pytest.raises(fi.FoldInRefused) as err:
+        await fold.run()
+    waits = [m for m in said if m.startswith("waiting for the engine's own")]
+    assert len(waits) >= 2, said
+    assert all("refresh_mental_model on shared (operation op-r1, processing)" in m for m in waits)
+    assert all(re.search(r"; \d+s left before", m) for m in waits)
+    message = err.value.message
+    assert "Either let it finish" in message
+    assert "DELETE /api/memory/banks/shared/operations/op-r1" in message
+
+
+def test_the_engine_operations_refusal_names_each_cancel_request() -> None:
+    message = fi.engine_operations_message(
+        {
+            "coding-agent::web": [
+                {"operation_id": "a/1", "operation_type": "consolidation", "status": "pending"}
+            ]
+        }
+    )
+    assert "consolidation on coding-agent::web (operation a/1, pending)" in message
+    assert "DELETE /api/memory/banks/coding-agent::web/operations/a%2F1" in message
 
 
 async def test_refuses_queued_retains(box: Box) -> None:

@@ -2140,6 +2140,27 @@ def _read_nofollow(path: Path) -> bytes:
         os.close(dfd)
 
 
+def engine_operations_message(work: Mapping[str, list[Mapping[str, Any]]]) -> str:
+    """The ``engine_operations`` refusal: the engine work still live, and the two ways on.
+
+    Either let it finish and run again, or cancel each named operation
+    through hal0's engine API (admin): the exact request per operation.
+    """
+    listing = "; ".join(em.operations_text(b, list(ops)) for b, ops in work.items())
+    cancels = ", ".join(
+        f"DELETE /api/memory/banks/{quote(bank, safe=':')}/operations/"
+        f"{quote(str(op.get('operation_id') or op.get('id')), safe='')}"
+        for bank, ops in work.items()
+        for op in ops
+    )
+    return (
+        f"the engine's own work did not finish: {listing}. Either let it finish (`hal0 memory "
+        "ops list` shows it) and run the fold-in again, or cancel it through hal0's engine API "
+        f"as an admin ({cancels}) and run the fold-in again. The engine queues this work by "
+        "itself (a mental-model refresh, consolidation of new facts)"
+    )
+
+
 def target_is_old_bank_message(platform: str, parts: Iterable[str]) -> str:
     """The ``target_is_old_bank`` refusal: what names the old bank, and the edit that fixes it.
 
@@ -2740,11 +2761,7 @@ class FoldIn(em.EngineMaintenance):
         if engine_work:
             listing = "; ".join(em.operations_text(b, ops) for b, ops in engine_work.items())
             if apply:
-                refuse(
-                    "engine_operations",
-                    f"the engine's own work did not finish: {listing}. Let it finish, then run "
-                    "the fold-in again",
-                )
+                refuse("engine_operations", engine_operations_message(engine_work))
             else:
                 warnings.append(
                     f"the engine is running its own work: {listing}. --apply waits up to "
@@ -4641,6 +4658,7 @@ __all__ = [
     "classify_bank",
     "direct_engine_clients",
     "document_digest",
+    "engine_operations_message",
     "interrupted_fold_in",
     "isolated_port",
     "isolation_drop_in_path",

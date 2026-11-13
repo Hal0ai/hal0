@@ -251,6 +251,8 @@ class Timeouts:
     #: ending, when it is all that keeps the bank busy. A mental-model
     #: refresh is an LLM call over the bank, minutes on a slow local model.
     engine_ops_s: float = 900.0
+    #: How often a wait for the engine's own work says what it is waiting for.
+    engine_ops_note_s: float = 30.0
     delete_s: float = 3600.0
     http_s: float = 120.0
 
@@ -1594,6 +1596,7 @@ class EngineMaintenance:
         start = self._clock()
         deadline = start + self.t.quiet_s
         last: int | None = None
+        noted: float | None = None
         while True:
             state = await self.bank_state(bank)
             busy = state["pending"] or state["processing"]
@@ -1614,6 +1617,7 @@ class EngineMaintenance:
                     raise self._parked_error(bank, parked, start + self.t.engine_ops_s)
                 if now >= start + self.t.engine_ops_s:
                     raise self._engine_work_error(bank, own)
+                noted = self._note_engine_wait(bank, own, start + self.t.engine_ops_s, now, noted)
             elif now >= deadline:
                 return state
             last = state["pending_consolidation"]
@@ -1702,14 +1706,42 @@ class EngineMaintenance:
         if deadline is None:
             deadline = self._clock() + self.t.engine_ops_s
         current = dict(state)
+        noted: float | None = None
         while True:
             own = await self._engine_work(bank, current)
             if own:
                 self._raise_if_parked(bank, own, deadline)
-            if not own or self._clock() >= deadline:
+            if not own:
                 return current, own
+            now = self._clock()
+            if now >= deadline:
+                return current, own
+            noted = self._note_engine_wait(bank, own, deadline, now, noted)
             await self._sleep(self.t.poll_s)
             current = await self.bank_state(bank)
+
+    def _note_engine_wait(
+        self,
+        bank: str,
+        own: list[dict[str, Any]],
+        deadline: float,
+        now: float,
+        noted: float | None,
+    ) -> float | None:
+        """Say what a wait for the engine's own work is waiting for, about every ``engine_ops_note_s``.
+
+        The first look says it at once, then one line per interval, so a wait
+        of up to ``engine_ops_s`` is never silent. ``now`` is the caller's read
+        of :attr:`_clock`. Returns when it last spoke.
+        """
+        if noted is not None and now - noted < self.t.engine_ops_note_s:
+            return noted
+        left = max(0.0, deadline - now)
+        self._say(
+            f"waiting for the engine's own {operations_text(bank, own)}; "
+            f"{left:.0f}s left before {self.names.actor} stops waiting"
+        )
+        return now
 
     def _parked_past(
         self, own: list[dict[str, Any]], deadline: float
