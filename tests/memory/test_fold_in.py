@@ -40,6 +40,15 @@ SHIPPED_UNIT = "# /etc/systemd/system/hindsight-api.service\n" + (
     Path(__file__).resolve().parents[2] / "installer/systemd/hindsight-api.service"
 ).read_text(encoding="utf-8")
 
+#: The ``mental_models`` columns hindsight-api 1.2.0 declares NOT NULL on
+#: Postgres: alembic ``n9i0j1k2l3m4`` (name, source_query, content,
+#: last_refreshed_at, created_at; the table was ``pinned_reflections``) and
+#: ``v7q8r9s0t1u2`` (max_tokens, trigger). Written from the engine's
+#: migrations, not from the fold-in's own list.
+MM_NOT_NULL = frozenset(
+    {"name", "source_query", "content", "last_refreshed_at", "created_at", "max_tokens", "trigger"}
+)
+
 FAST = em.Timeouts(
     poll_s=0.0,
     export_s=5.0,
@@ -92,6 +101,9 @@ class FakeEngine:
         #: Banks whose next import fails after its mental models, before its pages
         #: (hindsight-api 1.2.0 writes them with no transaction around them).
         self.fail_pages: set[str] = set()
+        #: Banks whose next import fails at its first mental model, as a NOT NULL
+        #: violation does, after its documents landed.
+        self.fail_models: set[str] = set()
         #: Banks whose import stays ``processing`` until :meth:`finish`.
         self.hold_import: set[str] = set()
         #: Per bank: queued retains (``pending``), counted and listed.
@@ -200,6 +212,20 @@ class FakeEngine:
         for o in obs:
             if all(s["document_id"] in landed for s in o["sources"]):
                 target["obs"].append(o)
+        # hindsight-api writes model rows verbatim with no transaction around
+        # them, after the documents: a NULL in a NOT NULL column fails the
+        # insert and leaves the documents landed.
+        for m in models:
+            nulls = sorted(k for k in MM_NOT_NULL if k in m and m[k] is None)
+            if bank in self.fail_models:
+                self.fail_models.discard(bank)
+                nulls = ["last_refreshed_at"]
+            if nulls:
+                return {
+                    "status": "failed",
+                    "error_message": "NotNullViolationError: null value in column "
+                    f'"{nulls[0]}" of relation "mental_models" violates not-null constraint',
+                }
         for m in models:
             target["models"].setdefault(m["id"], m)
         if bank in self.fail_pages and pages:
@@ -441,7 +467,15 @@ class Box:
             },
         ]
         e.banks["shared"]["models"] = {
-            "overview": {"id": "overview", "name": "O", "tags": [], "content": "x"}
+            "overview": {
+                "id": "overview",
+                "name": "O",
+                "tags": [],
+                "content": "x",
+                "last_refreshed_at": "2026-11-01T10:00:00+00:00",
+                "last_memory_seen_at": "2026-11-01T10:00:00+00:00",
+                "created_at": "2026-10-01T10:00:00+00:00",
+            }
         }
         e.banks["shared"]["directives"] = [{"id": "d1", "name": "Terse", "content": "be terse"}]
         e.banks["coding-agent::web"] = empty_bank()
@@ -1310,6 +1344,64 @@ async def test_a_folded_document_deleted_from_the_old_bank_refuses(box: Box) -> 
     note = next(b["note"] for b in second["banks"] if b["bank"] == "pi-coder")
     assert "no longer in the old bank" in note
     assert second["status"] == "incomplete"
+
+
+async def test_a_platform_bank_with_private_facts_and_a_model_folds_end_to_end(box: Box) -> None:
+    """CT143: a cleared model must not send NULL into a NOT NULL column.
+
+    The platform bank holds a private fact, so its model is carried with its
+    generated content cleared; the fake engine enforces the NOT NULL columns
+    hindsight-api declares on mental_models.
+    """
+    e = box.engine
+    source = e.banks["shared"]["models"]["overview"]
+    assert source["last_refreshed_at"] and "private:hermes:s1" in e.banks["shared"]["docs"]
+    result = await box.fold().run()
+    assert result["status"] == "folded" and result["cut_over"] is True
+    model = e.banks["hal0:shared"]["models"]["overview"]
+    assert model["content"] == ""
+    assert model["last_refreshed_at"] == fi.NEVER_REFRESHED_AT
+    assert model["last_memory_seen_at"] is None
+    assert not any(model.get(k) is None for k in MM_NOT_NULL if k in model)
+    assert "n1" in e.banks["hal0:shared"]["docs"]
+    assert "private:hermes:s1" in e.banks["hal0:private"]["docs"]
+
+
+async def test_a_model_the_rewrite_would_null_is_refused_before_anything_is_sent(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard behind the clearing: a NULL in a NOT NULL column leaves the bank unsent."""
+    monkeypatch.setitem(fi._CLEARED_MODEL_VALUES, "last_refreshed_at", None)
+    result = await box.fold().run()
+    assert result["status"] == "incomplete" and box.engine.imports == []
+    note = next(b["note"] for b in result["banks"] if b["bank"] == "shared")
+    assert "failed their safety check" in note
+    sidecar = json.loads((Path(result["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    assert any("last_refreshed_at would be NULL" in p for p in sidecar["shared"]["problems"])
+
+
+async def test_a_part_half_landed_by_a_failed_model_insert_is_completed_by_the_next_run(
+    box: Box,
+) -> None:
+    """The engine runs no transaction around models: documents in, models not."""
+    e = box.engine
+    e.fail_models.add("hal0:shared")
+    first = await box.fold(only=["shared"]).run()
+    assert first["left"] == ["shared"] and first["cut_over"] is False
+    assert "n1" in e.banks["hal0:shared"]["docs"]
+    assert "overview" not in e.banks["hal0:shared"]["models"]
+    row = fi.load_ledger()["banks"]["shared"]
+    assert row["state"] == fi.LEDGER_LEFT and row["sent_files"]["shared"]
+    _assert_on_the_old_layout(box)
+    sent = len(e.imports)
+    second = await box.fold().run()
+    assert second["status"] == "folded" and second["cut_over"] is True
+    assert "overview" in e.banks["hal0:shared"]["models"]
+    # The resend carried what was missing: the model, not the document again.
+    resent = [archive for bank, archive in e.imports[sent:] if bank == "hal0:shared"]
+    assert resent
+    assert all(d["id"] != "n1" for archive in resent for d in archive["documents"])
+    assert any(m["id"] == "overview" for archive in resent for m in archive["mental_models"])
 
 
 async def test_a_folded_bank_deleted_from_the_engine_refuses_the_cutover(box: Box) -> None:

@@ -104,6 +104,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -291,6 +292,54 @@ _GENERATED_MODEL_KEYS = (
     "last_refresh_failed_at",
     "history",
 )
+
+#: What :data:`_GENERATED_MODEL_KEYS` are set to when a model is carried with
+#: its generated content cleared. The engine's merge import writes a model row
+#: verbatim (``_restore_rows`` in ``engine/transfer/importer.py``), so a key
+#: set to ``None`` is an explicit NULL and the column default does not apply.
+#: In hindsight-api 1.2.0 ``mental_models.content`` and
+#: ``mental_models.last_refreshed_at`` are ``NOT NULL`` (created as
+#: ``pinned_reflections`` in alembic ``n9i0j1k2l3m4``, renamed since); the
+#: other timestamps and ``reflect_response`` / ``structured_content`` are
+#: nullable, and ``history`` is no longer a column (alembic ``a7b8c9d0e1f2``
+#: dropped it; the import ignores keys that are not columns). A cleared model
+#: says it was last refreshed at the epoch: it holds nothing generated, and the
+#: target treats it as stale and refreshes it.
+NEVER_REFRESHED_AT = "1970-01-01T00:00:00+00:00"
+_CLEARED_MODEL_VALUES: dict[str, Any] = {
+    "content": "",
+    "history": [],
+    "last_refreshed_at": NEVER_REFRESHED_AT,
+}
+
+#: The ``mental_models`` columns hindsight-api 1.2.0 declares ``NOT NULL`` that
+#: an exported row carries. A model sent with any of them set to ``None``
+#: fails the engine's insert after the part's documents landed (the import
+#: runs no transaction around models), so the rewrite refuses such a bank.
+MODEL_NOT_NULL_KEYS = (
+    "id",
+    "bank_id",
+    "subtype",
+    "name",
+    "description",
+    "source_query",
+    "content",
+    "max_tokens",
+    "trigger",
+    "last_refreshed_at",
+    "created_at",
+)
+
+
+def model_null_problems(models: Iterable[Mapping[str, Any]]) -> list[str]:
+    """One line per model row that sets a :data:`MODEL_NOT_NULL_KEYS` column to ``None``."""
+    out = []
+    for model in models:
+        nulls = [k for k in MODEL_NOT_NULL_KEYS if k in model and model[k] is None]
+        if nulls:
+            out.append(f"mental model {model.get('id')}: {', '.join(nulls)} would be NULL")
+    return out
+
 
 _CONTENT_PAGE = 500
 
@@ -1213,7 +1262,7 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
         if held_private:
             for key in _GENERATED_MODEL_KEYS:
                 if key in model:
-                    model[key] = [] if key == "history" else ("" if key == "content" else None)
+                    model[key] = copy.deepcopy(_CLEARED_MODEL_VALUES.get(key))
             report["mental_models"]["content_cleared"] += 1
         models.append(model)
         report["mental_models"]["carried"] += 1
@@ -1251,6 +1300,7 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
         else None
     )
     problems = shared_archive_problems(shared) if shared is not None else []
+    problems += model_null_problems([*models, *private_models])
     problems += routing_problems(data, shared, private, provenance, bank_cls=plan.bank.cls)
     problems += private_archive_problems(private) if private is not None else []
     if problems:
@@ -1498,7 +1548,11 @@ def routing_problems(
         for model in out[PART_SHARED]["mental_models"]:
             if not isinstance(model, dict):
                 continue
-            kept = [k for k in _GENERATED_MODEL_KEYS if model.get(k) not in (None, "", [], {})]
+            kept = [
+                k
+                for k in _GENERATED_MODEL_KEYS
+                if model.get(k) not in (None, "", [], {}, _CLEARED_MODEL_VALUES.get(k))
+            ]
             if kept:
                 problems.append(
                     f"shared mental model {model.get('id')} keeps {', '.join(kept)} although its "

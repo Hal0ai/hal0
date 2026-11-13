@@ -910,3 +910,12 @@ def test_a_document_digest_ignores_what_the_engine_moves_by_itself() -> None:
     appended = json.loads(json.dumps(base))
     appended["facts"].append(fact("y"))
     assert fi.document_digest(base) != fi.document_digest(appended)
+
+
+def test_a_model_row_with_a_null_in_a_not_null_column_is_refused() -> None:
+    """The engine's insert fails on it after the documents landed; refuse before sending."""
+    ok = {"id": "m", "name": "M", "content": "", "last_refreshed_at": fi.NEVER_REFRESHED_AT}
+    assert fi.model_null_problems([ok]) == []
+    assert fi.model_null_problems([{"id": "m", "content": "x"}]) == []
+    (problem,) = fi.model_null_problems([{**ok, "last_refreshed_at": None, "content": None}])
+    assert "content, last_refreshed_at would be NULL" in problem
