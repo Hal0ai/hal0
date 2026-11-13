@@ -485,6 +485,9 @@ def test_a_coding_banks_models_are_rekeyed_and_tagged_with_its_project() -> None
         "dropped": 2,
         "placed": 1,
         "unplaced": 0,
+        # No --owner for the harness: the page is filed under its pseudo-owner, and named.
+        "owners": {"hal0-legacy-coding-agent": 1},
+        "pseudo_owned": ["P"],
     }
     assert result.expected["shared"]["mental_models"] == 2
     assert out["mental_models"][0]["content"] == "use ruff"
@@ -1075,6 +1078,7 @@ def test_a_coding_banks_pages_are_hung_in_its_project_folder_under_new_ids() -> 
         "kind": "page",
         "name": "Bank layout",
         "project": "web",
+        "refreshed_at": None,
     }
     # Stable across runs: a resend sends the same nodes under the same ids.
     again = fi.rewrite_archive(_pages_archive("coding-agent::web"), plan("coding-agent::web"))

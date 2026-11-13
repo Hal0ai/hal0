@@ -25,7 +25,14 @@ from hal0.bridge.store import BridgeStore
 from hal0.memory import knowledge_pages as kp
 from tests.api import test_memory_compat_routes as routes
 from tests.api.test_memory_compat_routes import Engine, _auth, _code, _url, build_app
-from tests.memory.test_fold_in import Box, seed_pages
+from tests.memory.test_fold_in import (
+    CT105_BANKS,
+    STANDARD_PAGES,
+    Box,
+    _std_id,
+    seed_ct105,
+    seed_pages,
+)
 
 _box_keys = routes._box_keys
 _fresh_posture_cache = routes._fresh_posture_cache
@@ -186,3 +193,40 @@ def test_a_map_row_pointing_at_another_projects_page_does_not_widen_the_view(
     path.write_text(json.dumps(data))
     resp = client.get(_url(WEB + "/pages/kp-init"), headers=_auth(key))
     assert resp.status_code == 404
+
+
+HAL0 = "/v1/default/banks/coding-agent%3A%3Ahal0-mono/knowledge-base"
+
+
+def test_the_reference_boxs_three_banks_read_back_through_compat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store: BridgeStore
+) -> None:
+    """Three coding banks of one project, five standard names each: one plain
+    set and two renamed sets in the tree, and every old id still reads."""
+    import asyncio
+
+    box = Box(tmp_path / "box", monkeypatch)
+    seed_ct105(box)
+    result = asyncio.run(box.fold(owners={"coding-agent": "cc"}).run())
+    assert result["cut_over"] is True
+    engine = _serve(box)
+    app = build_app(engine.handler, unified_bank=False, two_bank=True)
+    client = TestClient(AuthEnforcementMiddleware(app), client=("127.0.0.1", 50000))
+    _row, key = store.add_client("cc", created_by="t")
+    roots = client.get(_url(HAL0 + "/tree"), headers=_auth(key)).json()["roots"]
+    names = sorted(n["name"] for n in roots)
+    assert names == sorted(
+        [*STANDARD_PAGES]
+        + [f"{n} (Hal0::Agents)" for n in STANDARD_PAGES]
+        + [f"{n} (pi-coder)" for n in STANDARD_PAGES]
+    )
+    for bank in CT105_BANKS:
+        for index, name in enumerate(STANDARD_PAGES):
+            resp = client.get(_url(HAL0 + f"/pages/{_std_id(bank, index)}"), headers=_auth(key))
+            assert resp.status_code == 200, (bank, index, resp.text)
+            assert resp.json()["id"] == kp.folded_node_id(bank, _std_id(bank, index), "page")
+            shown = name if bank == "coding-agent::hal0-mono" else f"{name} ({bank})"
+            assert resp.json()["name"] == shown
+            # Each page's link to its bank's first page names that page's new id.
+            first = kp.folded_node_id(bank, _std_id(bank, 0), "page")
+            assert f"[[page:{first}]]" in resp.json()["body"]

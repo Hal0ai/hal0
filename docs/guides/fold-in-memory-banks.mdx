@@ -110,7 +110,7 @@ tags are rewritten in the archive first:
   is dropped and counted.
 - **Knowledge pages follow their models.** A coding bank's pages go to its
   project's folder; see [Knowledge pages of a coding bank](#knowledge-pages-of-a-coding-bank).
-  The platform bank's and a `project__` bank's pages keep their folders,
+  The platform bank's and a `project__` bank's pages keep their names, folders,
   their tags and their scope, and get new page ids from the engine (the old
   bank keeps its own); no map of those ids is kept.
 - **A `private__<agent>` bank's mental models go to `hal0:private`,** with
@@ -180,16 +180,38 @@ So each page a coding bank carries is, in the archive itself:
   private facts arrives with no content, like the bank's other models, and is
   refreshed under its new scope.
 
-The owner is the harness's, so map the harness to the client that uses the
-pages (`--owner coding-agent=<client>`): compat lets only a page's owner
+The owner is the harness's. For a coding bank whose plugin will use
+`/api/memory/compat`, pass `--owner` with the client that plugin uses, for
+example `--owner coding-agent=claude-code`: compat lets only a page's owner
 change it, and a page filed under a pseudo-owner can be read but not
-updated.
+updated. The dry run lists, per bank, the pages that would go to a
+pseudo-owner.
 
 The pre-check refuses a bank whose page shown in a project folder lacks that
-scope, and one whose page would take a name its project folder already holds
-(names are unique in a folder, and a merge would drop the second without a
-word); two banks of one run that would put one name in one folder are both
-left. After the import, every page must be in its folder with its scope.
+scope. After the import, every page must be in its folder with its scope.
+
+**One name, one node, per project folder.** A name is unique in a folder, and
+every coding bank of one project brings the plugin's five standard pages
+(Component map, Conventions and patterns, Core concepts, Initiatives and
+enhancements, Key decisions and rationale) under the same names. So when
+several nodes would take one name in one project folder, one keeps it and the
+others are renamed `<name> (<old bank>)`, cut to fit the engine's 256
+characters:
+
+1. a node the target already holds that the fold-in did not send (one the
+   plugin wrote through compat), or one the platform bank carries into that
+   folder, keeps the name, and every folded node of that name is renamed;
+2. otherwise the bank whose id names the project most directly keeps it:
+   `<harness>::<slug>`, then a repository name the registry maps to the slug,
+   then a bank whose project comes from tags (`Hal0::Agents`, `pi-coder`);
+3. then the page refreshed last in its old bank, then the bank id in sort
+   order.
+
+The choice is kept in the ledger (`page_keepers`, names only), so every later
+run makes the same one. A renamed page keeps its page-map entry, so its old
+id and its links still resolve. Only a true conflict leaves a bank: two of its
+own nodes with one name in one folder, or a renamed name the folder already
+holds.
 
 Then the fold-in records each page's old id, new id and folder in
 `/var/lib/hal0/state/memory-fold-in-page-map.json` (0644, read by hal0-api).
@@ -267,8 +289,9 @@ bank's export holding all of it (the engine's export leaves out a fact that belo
 to no document), no attachments or invalidated facts, and none of its
 document or mental-model ids already in a target, unless an earlier run sent
 it from the same unchanged source. Two banks of the run that would send the
-same id to one target, or put one page name in one project folder, are both
-left and named to each other: a merge would keep only the first. Document
+same id to one target are both left and named to each other: a merge would
+keep only the first (a page name is settled instead; see
+[Knowledge pages of a coding bank](#knowledge-pages-of-a-coding-bank)). Document
 and model ids are not rewritten, because agents go on writing under them
 after the cutover. If any bank fails, **nothing is imported**: every bank is
 left as it was, the run ends without a cutover,

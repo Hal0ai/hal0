@@ -1283,7 +1283,12 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
     )
     provenance["dropped"]["pages"] = dropped_pages
     if plan.bank.coding:
-        placement = _place_pages(plan, pages, models, report)
+        refreshed = {
+            renamed[str(m.get("id"))]: m.get("last_refreshed_at")
+            for m in archive["mental_models"]
+            if isinstance(m, dict) and str(m.get("id")) in renamed
+        }
+        placement = _place_pages(plan, pages, models, report, refreshed)
         pages = placement.rows
         provenance[PART_SHARED]["pages"] = placement.provenance
         provenance[PART_SHARED]["project_folders"] = dict(placement.folders)
@@ -1432,6 +1437,23 @@ class _Placement:
         }
 
 
+def _page_owner(plan: RewritePlan, tags: Iterable[Any]) -> str:
+    """Who a carried page of a coding bank is filed under: its own ``agent:`` tag or
+    the bank's harness, resolved as the bank's documents are (operator decision 1)."""
+    return resolve_owner(
+        _agent_of(tags) or plan.bank.harness, owners=plan.owners, known=plan.known_clients
+    )[0]
+
+
+def _tally_page_owner(report: dict[str, Any], owner: str, name: str) -> None:
+    """Count a page under its owner; list it when that owner is a pseudo-owner no client holds."""
+    pages = report["knowledge_pages"]
+    owners = pages.setdefault("owners", {})
+    owners[owner] = owners.get(owner, 0) + 1
+    if owner.startswith(PSEUDO_OWNER_PREFIX):
+        pages.setdefault("pseudo_owned", []).append(name)
+
+
 def _page_resolution(plan: RewritePlan, tags: Iterable[Any]) -> Any:
     """The project a carried page belongs to: the bank's, or for a bank whose
     project comes from each fact's tags (operator decision 2), the page's own."""
@@ -1445,6 +1467,7 @@ def _place_pages(
     pages: list[dict[str, Any]],
     models: list[dict[str, Any]],
     report: dict[str, Any],
+    refreshed: Mapping[str, Any] | None = None,
 ) -> _Placement:
     """Put a coding bank's carried pages in their project's folder, stamped as compat stamps them.
 
@@ -1536,6 +1559,11 @@ def _place_pages(
             "kind": str(page.get("kind")),
             "name": str(page.get("name") or ""),
             "project": slug,
+            # The source model's, before any clearing: a tie-break when two
+            # banks bring one page name to one folder (:meth:`FoldIn._settle_page_names`).
+            "refreshed_at": (refreshed or {}).get(str(page.get("mental_model_id")))
+            if page.get("kind") == "page"
+            else None,
         }
         if page.get("kind") != "page":
             continue
@@ -1547,9 +1575,8 @@ def _place_pages(
         if model is None:
             continue
         tags = [str(t) for t in model.get("tags") or () if isinstance(t, str)]
-        owner = resolve_owner(
-            _agent_of(tags) or plan.bank.harness, owners=plan.owners, known=plan.known_clients
-        )[0]
+        owner = _page_owner(plan, tags)
+        _tally_page_owner(report, owner, str(page.get("name") or ""))
         labels, leaf = page_tags(_caller_tags(tags), agent=owner, resolution=resolutions[old])
         model["tags"] = labels
         chosen = caller_trigger_settings(_decoded(model.get("trigger")))
@@ -1600,6 +1627,28 @@ def _platform_page_names(pages: list[dict[str, Any]]) -> list[list[str]]:
         for p in pages
         if p.get("parent_id") and str(p.get("parent_id")) in folders
     ]
+
+
+#: ``mental_models.name`` is ``VARCHAR(256)`` in hindsight-api 1.2.0 (alembic
+#: ``n9i0j1k2l3m4``, created as ``pinned_reflections``), and a page's model
+#: carries the page's name; ``knowledge_pages.name`` is ``TEXT``.
+PAGE_NAME_MAX = 256
+
+
+def renamed_page_name(name: str, bank: str) -> str:
+    """``<name> (<bank>)``, the name cut so the whole fits :data:`PAGE_NAME_MAX`."""
+    suffix = f" ({bank})"
+    if len(suffix) >= PAGE_NAME_MAX:
+        return f"{name}{suffix}"[:PAGE_NAME_MAX]
+    return name[: PAGE_NAME_MAX - len(suffix)].rstrip() + suffix
+
+
+def _refreshed_epoch(value: Any) -> float:
+    """A ``last_refreshed_at`` as seconds; one that is missing or unreadable is the oldest."""
+    try:
+        return datetime.fromisoformat(str(value)).timestamp() if value else float("-inf")
+    except ValueError:
+        return float("-inf")
 
 
 def rehome_folders(data: bytes, folders: Mapping[str, str]) -> bytes:
@@ -2018,6 +2067,9 @@ def analyse_listing(
             if held_private:
                 report["mental_models"]["content_cleared"] += 1
         report["mental_models"][key] += 1
+        if plan.bank.coding and old in backing and key == "carried":
+            tags = [str(t) for t in model.get("tags") or () if isinstance(t, str)]
+            _tally_page_owner(report, _page_owner(plan, tags), str(model.get("name") or old))
     return report
 
 
@@ -2137,6 +2189,10 @@ class Journal:
     #: True once every bank of the run passed its pre-check
     #: (:meth:`FoldIn._precheck_all`); imports start only then.
     checked: bool = False
+    #: Per target, ``"<slug>/<lower-cased name>" -> keeper``: who keeps the
+    #: plain name of a page or folder that several banks bring to one
+    #: project folder (:meth:`FoldIn._settle_page_names`). Kept in the ledger.
+    page_keepers: dict[str, dict[str, str]] = field(default_factory=dict)
     banks: list[BankEntry] = field(default_factory=list)
     error: str | None = None
     updated_at: str | None = None
@@ -3547,6 +3603,14 @@ class FoldIn(em.EngineMaintenance):
                 await self._precheck(journal, entry, index)
             except BankLeft as exc:
                 self._leave(journal, entry, exc)
+        await self._settle_page_names(journal)
+        for entry in journal.banks:
+            if entry.step in _DONE_STEPS:
+                continue
+            try:
+                await self._precheck_targets(journal, entry)
+            except BankLeft as exc:
+                self._leave(journal, entry, exc)
         self._check_duplicates(journal)
 
     async def _precheck(self, journal: Journal, entry: BankEntry, index: int) -> None:
@@ -3564,6 +3628,13 @@ class FoldIn(em.EngineMaintenance):
             self._rewrite(journal, entry, index)
             self._hook(f"rewritten:{entry.bank}")
         self._check_routing(journal, entry)
+
+    async def _precheck_targets(self, journal: Journal, entry: BankEntry) -> None:
+        """One bank's clash, changed and gone checks against its targets.
+
+        After :meth:`_settle_page_names`, which may rename the bank's pages:
+        the checks compare what will be sent.
+        """
         for name in _PARTS:
             part = entry.part(name)
             if part is not None and not part.sent:
@@ -3575,6 +3646,198 @@ class FoldIn(em.EngineMaintenance):
                 # for it (every shared document re-tagged private, say): what
                 # it sent must not stay behind unseen.
                 await self._clashes(journal, entry, name, journal.targets[name], {})
+
+    async def _settle_page_names(self, journal: Journal) -> None:
+        """Give every page or folder bound for one project folder a name of its own.
+
+        A name is unique in a folder (``uq_kp_folder_pagename``), and every
+        coding bank of one project brings the plugin's five standard pages
+        under the same names. Within one project folder of the target:
+
+        * a node already there that no bank of the run sent (one the plugin
+          wrote through compat, or the platform bank's), or one the platform
+          bank of this run carries there, keeps its name, and every folded
+          node of that name is renamed;
+        * otherwise one folded node keeps the plain name: the one the ledger
+          recorded as keeper, else the one from the bank whose id names the
+          project most directly (``<harness>::<slug>``, then a repository
+          name the registry maps to it, then a bank whose project comes from
+          tags), then the latest ``last_refreshed_at``, then the bank id;
+        * the others are renamed ``<name> (<bank>)`` (:func:`renamed_page_name`).
+
+        The choice is recorded per name (:attr:`Journal.page_keepers`, then
+        the ledger), so every run makes the same one. A bank is left only by
+        a true conflict: two of its own nodes with one name in one folder, or
+        a renamed name the folder already holds. Renames are written into the
+        bank's shared archive and its ids (:meth:`_apply_page_names`) before
+        the clash checks, so those compare what will be sent.
+        """
+        target = journal.targets.get(PART_SHARED)
+        if not target:
+            return
+        from hal0.memory.projects import registry_from_config
+
+        registry = registry_from_config(getattr(self._memory_config(), "projects", None))
+        live = [e for e in journal.banks if e.step == STEP_REWRITTEN]
+        candidates: dict[tuple[str, str], list[tuple[BankEntry, dict[str, Any]]]] = {}
+        fixed: dict[tuple[str, str], str] = {}
+        ours: set[str] = set()
+        ids_of: dict[str, dict[str, Any]] = {}
+        for entry in live:
+            part = entry.part(PART_SHARED)
+            if part is None or part.sent:
+                continue
+            ids = self._part_ids(journal, part)
+            ids_of[entry.bank] = ids
+            nodes = ids.get("page_nodes") or {}
+            ours.update(str(r.get("id")) for r in nodes.values() if isinstance(r, dict))
+            if entry.cls != CLASS_CODING:
+                for slug, lname, _node in ids.get("page_names") or []:
+                    fixed.setdefault((str(slug), str(lname)), entry.bank)
+                continue
+            by_new = {str(r.get("id")): r for r in nodes.values() if isinstance(r, dict)}
+            for slug, lname, new_id in ids.get("page_names") or []:
+                row = by_new.get(str(new_id))
+                if row is not None:
+                    candidates.setdefault((str(slug), str(lname)), []).append((entry, row))
+        if not candidates:
+            return
+        present = await self._project_page_names(target)
+        #: Per project folder, every lower-cased name that will be in it.
+        taken: dict[str, set[str]] = {}
+        for (slug, lname), node_id in present.items():
+            if node_id not in ours:
+                fixed.setdefault((slug, lname), "target")
+        for slug, lname in fixed:
+            taken.setdefault(slug, set()).add(lname)
+        try:
+            recorded = (load_ledger().get("page_keepers") or {}).get(target) or {}
+        except FoldInError:
+            recorded = {}
+        keepers = journal.page_keepers.setdefault(target, {})
+        renames: dict[str, dict[str, str]] = {}
+        conflicts: dict[str, list[str]] = {}
+        for (slug, lname), cands in sorted(candidates.items()):
+            key = f"{slug}/{lname}"
+            banks = [e.bank for e, _ in cands]
+            for bank in {b for b in banks if banks.count(b) > 1}:
+                conflicts.setdefault(bank, []).append(f"project:{slug}/{lname}")
+            if (slug, lname) in fixed:
+                keeper = fixed[(slug, lname)]
+            elif recorded.get(key) in banks:
+                keeper = recorded[key]
+            else:
+                keeper = min(cands, key=lambda c: self._keeper_rank(c[0], c[1], slug, registry))[
+                    0
+                ].bank
+            keepers[key] = keeper
+            for entry, row in cands:
+                if entry.bank == keeper:
+                    taken.setdefault(slug, set()).add(lname)
+                    continue
+                renames.setdefault(entry.bank, {})[str(row["id"])] = renamed_page_name(
+                    str(row.get("name") or ""), entry.bank
+                )
+        for entry in live:
+            for new_id, name in (renames.get(entry.bank) or {}).items():
+                slug = next(
+                    str(r[0]) for r in ids_of[entry.bank].get("page_names") or [] if r[2] == new_id
+                )
+                names = taken.setdefault(slug, set())
+                if name.lower() in names or (slug, name.lower()) in candidates:
+                    conflicts.setdefault(entry.bank, []).append(f"project:{slug}/{name.lower()}")
+                names.add(name.lower())
+        self._save(journal)
+        for entry in live:
+            if entry.bank in conflicts:
+                self._leave(
+                    journal,
+                    entry,
+                    BankLeft(
+                        f"bank {entry.bank}: {len(conflicts[entry.bank])} knowledge page or "
+                        "folder name(s) cannot be given a place of their own in their project "
+                        "folder (two of the bank's own nodes share a name there, or the renamed "
+                        "name is taken too). Rename one in the old bank, then run the fold-in "
+                        "again",
+                        bank=entry.bank,
+                        details={"page_names": sorted(conflicts[entry.bank])},
+                    ),
+                )
+                continue
+            if entry.bank in ids_of and entry.cls == CLASS_CODING:
+                self._apply_page_names(journal, entry, renames.get(entry.bank) or {})
+
+    @staticmethod
+    def _keeper_rank(
+        entry: BankEntry, row: Mapping[str, Any], slug: str, registry: Any
+    ) -> tuple[int, float, str]:
+        """Sort key of a candidate to keep a plain name: lowest wins (:meth:`_settle_page_names`)."""
+        if entry.project == slug:
+            direct = 0
+        elif entry.project is not None and (
+            resolve_project(bank_segment=entry.project, registry=registry, coding=True).slug == slug
+        ):
+            direct = 1
+        else:
+            direct = 2
+        return (direct, -_refreshed_epoch(row.get("refreshed_at")), entry.bank)
+
+    def _apply_page_names(
+        self, journal: Journal, entry: BankEntry, renames: Mapping[str, str]
+    ) -> None:
+        """Write each node's settled name into the bank's shared archive and its ids.
+
+        Idempotent: every placed node gets its rename or, without one, its
+        own name again, so a re-check after a kill lands on the same files.
+        A page's backing model is named as its page (the engine creates both
+        under one name), and its digests are taken again.
+        """
+        part = entry.part(PART_SHARED)
+        assert part is not None
+        ids = self._part_ids(journal, part)
+        nodes = {
+            str(r.get("id")): r
+            for r in (ids.get("page_nodes") or {}).values()
+            if isinstance(r, dict)
+        }
+        names = {
+            node_id: renames.get(node_id, str(r.get("name") or "")) for node_id, r in nodes.items()
+        }
+        archive = _read_archive(self._read_archive_file(journal, part.archive))
+        pages = []
+        model_names: dict[str, str] = {}
+        for page in archive["knowledge_pages"]:
+            row = dict(page)
+            if str(row.get("id")) in names:
+                row["name"] = names[str(row["id"])]
+                if row.get("kind") == "page" and row.get("mental_model_id"):
+                    model_names[str(row["mental_model_id"])] = row["name"]
+            pages.append(row)
+        models = []
+        for model in archive["mental_models"]:
+            row = dict(model)
+            if str(row.get("id")) in model_names:
+                row["name"] = model_names[str(row["id"])]
+            models.append(row)
+        data = _write_archive(
+            str(archive["manifest"].get("source_bank_id") or entry.bank),
+            archive["documents"],
+            archive["observations"],
+            models,
+            pages,
+        )
+        self._write_archive_file(journal, part.archive, data)
+        for row in models:
+            mid = str(row.get("id"))
+            if mid in (ids.get("model_digests") or {}):
+                ids["model_digests"][mid] = model_digest(row)
+                ids["model_spec_digests"][mid] = model_spec_digest(row)
+        ids["page_shown_names"] = {
+            k: v for k, v in sorted(names.items()) if v != nodes[k].get("name")
+        }
+        self._write_archive_file(journal, _ids_name(part.archive), json.dumps(ids).encode())
+        if renames:
+            entry.report.setdefault("knowledge_pages", {})["renamed"] = len(renames)
 
     def _check_duplicates(self, journal: Journal) -> None:
         """Leave every pair of banks of this run that would send one id to the same target.
@@ -3599,12 +3862,6 @@ class FoldIn(em.EngineMaintenance):
                 for kind in ("documents", "mental_models"):
                     for item in ids.get(kind) or []:
                         seen.setdefault((part.target, kind, str(item)), []).append(entry.bank)
-                # A name is unique in a folder: two banks putting a node of one
-                # name in one project folder would lose one of them.
-                for row in ids.get("page_names") or []:
-                    if isinstance(row, list) and len(row) == 3:
-                        key = f"project:{row[0]}/{row[1]}"
-                        seen.setdefault((part.target, "page_names", key), []).append(entry.bank)
         pairs: dict[str, dict[str, Any]] = {}
         for (target, kind, item), banks in seen.items():
             banks = list(dict.fromkeys(banks))
@@ -3624,10 +3881,10 @@ class FoldIn(em.EngineMaintenance):
                 journal,
                 entry,
                 BankLeft(
-                    f"bank {entry.bank}: {count} of its document or mental-model id(s), or "
-                    f"knowledge-page names in a project folder, are also in {others}, and both "
-                    "would go to the same target, where a merge keeps only the first. Delete or "
-                    "rename one copy in one of the old banks, then run the fold-in again",
+                    f"bank {entry.bank}: {count} of its document or mental-model id(s) are also "
+                    f"in {others}, and both would go to the same target, where a merge keeps "
+                    "only the first. Delete or rename one copy in one of the old banks, then run "
+                    "the fold-in again",
                     bank=entry.bank,
                     details={"duplicates_with": sorted(row["with"]), "ids": row["ids"]},
                 ),
@@ -4271,24 +4528,6 @@ class FoldIn(em.EngineMaintenance):
                 models_unrecorded.append(m)
         models_gone = sorted((prior_models & present_models) - my_models)
         left_ids = Path(journal.archive_dir) / LEFT_IDS_NAME
-        names = [n for n in ids.get("page_names") or [] if isinstance(n, list) and len(n) == 3]
-        if names and entry.cls == CLASS_CODING:
-            taken = await self._project_page_names(target)
-            page_clash = sorted(
-                f"project:{slug}/{name}"
-                for slug, name, new_id in names
-                if (slug, name) in taken and taken[(slug, name)] != new_id
-            )
-            if page_clash:
-                raise BankLeft(
-                    f"bank {entry.bank}: {target} already holds {len(page_clash)} knowledge "
-                    "page(s) or folder(s) of the same name in the project folder this bank's "
-                    "pages go to. A name is unique in a folder, so the merge would drop this "
-                    "bank's copy without a word. Rename or delete one of them, in the old bank "
-                    "or in the target, then run the fold-in again",
-                    bank=entry.bank,
-                    details={"page_names": page_clash},
-                )
         if clash or models:
             sent_by = self._sent_by_other_banks(entry, name, {*clash, *models})
             named = sorted(set(sent_by.values()))
@@ -4705,6 +4944,13 @@ class FoldIn(em.EngineMaintenance):
         # engine no longer holds, and those named with --forget-skip, so a
         # bank that comes back later is classified from scratch.
         ledger["skips"] = sorted(set(journal.skips) - set(maps))
+        # Who keeps each contested page name (:meth:`_settle_page_names`): page
+        # names only, never ids.
+        keepers = dict(ledger.get("page_keepers") or {})
+        for target, rows in journal.page_keepers.items():
+            keepers[target] = {**(keepers.get(target) or {}), **rows}
+        if keepers:
+            ledger["page_keepers"] = keepers
         banks = ledger.setdefault("banks", {})
         for entry in journal.banks:
             if entry.step not in _DONE_STEPS:
