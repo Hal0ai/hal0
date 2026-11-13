@@ -1650,8 +1650,10 @@ def analyse_listing(
         doc = by_doc.setdefault(doc_id, {"id": doc_id, "tags": [], "facts": []})
         doc["facts"].append({"tags": list(fact.get("tags") or [])})
     report = _new_report()
+    held_private = False
     for doc in by_doc.values():
         route = _route_document(plan, doc)
+        held_private = held_private or route.part == PART_PRIVATE
         report["documents"][route.part] += 1
         report["facts"][route.part] += len(doc["facts"])
         if route.new_id != doc["id"]:
@@ -1672,14 +1674,27 @@ def analyse_listing(
             if _unreadable_shared(route, tags):
                 report["unreadable_shared_facts"] += 1
     backing = set(page_models)
+    bank_owner = (
+        resolve_owner(
+            plan.bank.agent, owners=plan.owners, known=plan.known_clients, keep_unknown=True
+        )[0]
+        if plan.bank.cls == CLASS_PRIVATE
+        else None
+    )
     for model in models or ():
         old = str(model.get("id"))
-        if plan.bank.cls == CLASS_PRIVATE:
-            key = "dropped_private" if old in backing else "private"
+        if bank_owner is not None:
+            dropped = old in backing or _private_model(model, bank_owner) is None
+            key = "dropped_private" if dropped else "private"
         elif any(_is_private_tag(t) for t in model.get("tags") or ()):
             key = "dropped_private"
         else:
             key = "carried"
+            # The rewrite clears a carried model's generated content when the
+            # bank holds anything private (an observation goes private only
+            # with a private source document, so documents decide it).
+            if held_private:
+                report["mental_models"]["content_cleared"] += 1
         report["mental_models"][key] += 1
     return report
 

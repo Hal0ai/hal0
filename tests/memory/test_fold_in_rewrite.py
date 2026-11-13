@@ -617,6 +617,65 @@ def test_the_dry_run_analysis_agrees_with_the_rewrite() -> None:
         assert report[key] == result.report[key], key
 
 
+def _listing_of(documents: list[dict[str, Any]]) -> tuple[list[dict], list[dict]]:
+    """The document and fact listings the engine would give for ``documents``."""
+    docs = [{"id": d["id"], "tags": d["tags"]} for d in documents]
+    facts = [{"document_id": d["id"], "tags": f["tags"]} for d in documents for f in d["facts"]]
+    return docs, facts
+
+
+_MODELS = [
+    {"id": "conventions", "name": "Conventions", "tags": [], "content": "use ruff"},
+    {"id": "page-model", "name": "Page", "tags": [], "content": "page text"},
+    {"id": "mine", "name": "Mine", "tags": ["visibility:private"], "content": "secret"},
+]
+
+
+@pytest.mark.parametrize(
+    ("bank", "documents"),
+    [
+        ("shared", [doc("n", [fact("x", "agent:brain")])]),
+        (
+            "shared",
+            [
+                doc("n", [fact("x", "agent:brain")]),
+                doc("private:hermes:s", [fact("secret", "agent:hermes", "visibility:private")]),
+            ],
+        ),
+        (
+            "coding-agent::web",
+            [doc("n", [fact("x"), fact("y", "visibility:private")])],
+        ),
+        ("private__hermes", [doc("n", [fact("x")])]),
+    ],
+)
+def test_the_dry_run_counts_the_models_the_rewrite_clears(
+    bank: str, documents: list[dict[str, Any]]
+) -> None:
+    # CT143: the dry run said 0 models would be cleared and the apply cleared 3.
+    p = plan(bank)
+    result = fi.rewrite_archive(_models_archive(bank, *documents), p)
+    docs, facts = _listing_of(documents)
+    # The models behind the archive's knowledge pages (``_models_archive``).
+    report = fi.analyse_listing(p, docs, facts, _MODELS, ["page-model", "mine"])
+    assert report["mental_models"] == {
+        **result.report["mental_models"],
+        # The dry run does not re-key; only the rewrite counts renames.
+        "renamed": report["mental_models"]["renamed"],
+    }
+    assert report["documents"] == result.report["documents"]
+
+
+def test_the_dry_run_says_a_bank_with_private_facts_clears_its_shared_models() -> None:
+    documents = [
+        doc("n", [fact("x", "agent:brain")]),
+        doc("private:hermes:s", [fact("secret", "agent:hermes", "visibility:private")]),
+    ]
+    docs, facts = _listing_of(documents)
+    report = fi.analyse_listing(plan("shared"), docs, facts, _MODELS, ["page-model"])
+    assert report["mental_models"]["content_cleared"] == 2
+
+
 # ── direct clients ───────────────────────────────────────────────────────
 
 
