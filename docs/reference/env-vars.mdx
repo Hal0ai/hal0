@@ -34,6 +34,7 @@ doctor and preflight variables have their own page,
 |---|---|---|
 | `HAL0_MODEL_STORE` | unset | Overrides the model-store root. Precedence: env → `[models].store`/`effective_store()` in `hal0.toml` → `/var/lib/hal0/models`. |
 | `HAL0_FLM_MODELS_DIR` | unset | NPU/FLM model-store dir override. Precedence: env → `[models].flm_store` → `/var/lib/hal0/.config/flm/models`. |
+| `HAL0_HALOGEN_CACHE` | `/var/lib/hal0/halogen-cache` | Host directory bind-mounted read-write at `/cache` in the optional halogen runner. Reserved for the engine's own cache variables; see [ADR-0047](/docs/adr/0047-halogen-is-an-external-image-optional-runner). |
 
 ## API / networking
 
@@ -79,6 +80,7 @@ rely on the default rather than setting it explicitly, verify which code path ap
 | Variable | Default | Controls |
 |---|---|---|
 | `HAL0_SLOT_OUTPUT_SANITY` | unset (gate ON) | `0`/`false`/`no`/`off` disables the [output-sanity gate](/docs/reference/slot-lifecycle/) box-wide, so a `type = "llm"` slot reaches `READY` on the health probe alone. Per-slot equivalent: `output_sanity = false` in the slot TOML. |
+| `HAL0_FABRIC_CLOCK_GUARD` | unset (follows `[slots].fabric_clock_guard`) | Per-process override of the NPU+GPU fabric-clock policy: `refuse`, `warn` or `off`. See [Config schema](/docs/reference/config-schema/) and [ADR-0054](/docs/adr/0054-gpu-fabric-clock-guard). |
 
 ## Metrics
 
@@ -155,6 +157,7 @@ egress — until a DSN is configured. Requires `pip install 'hal0ai[sentry]'` (o
 |---|---|---|
 | `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN` | unset (first-set wins) | Hugging Face Hub auth, used across install, model routes, and pull jobs. |
 | `COMFYUI_BASE_URL` | `http://127.0.0.1:8188` | — |
+| `HAL0_COMFYUI_GATE_TOKEN_FILE` | set by hal0 to `/opt/hal0-gate/<token file>` | Path of the file holding the ComfyUI GPU gate's credential. hal0 sets it in the img slot's environment and mounts the credential's directory read-only at `/opt/hal0-gate`; the gate reads the file on every request and the token itself never enters the unit file or the environment. Set it only to point the gate at a different file. See [ADR-0040](/docs/adr/0040-the-comfyui-gate-has-its-own-credential). |
 | `HAL0_COMFYUI_DATA_ROOT` | `""` (falls back to `<model store>/comfyui`) | Root of ComfyUI's data: its `models/`, `workflows/` and custom nodes. It is the only override; the subdirectories follow it, so they cannot disagree. |
 | `HAL0_CONTAINER_RUNTIME` | unset (auto-detect) | Overrides the podman/container runtime binary. |
 | `HAL0_FLM_BIN` | `/usr/bin/flm` | Host FastFlowLM binary. hal0 uses it only for `flm validate` and as a last-resort `flm list` when the flm runner image cannot be reached. Model pulls never use it: they run inside the flm runner image. |
@@ -173,6 +176,7 @@ egress — until a DSN is configured. Requires `pip install 'hal0ai[sentry]'` (o
 | Variable | Default | Controls |
 |---|---|---|
 | `HAL0_ACTIVITY_RETENTION_DAYS` | falls back to `[activity].retention_days` | — |
+| `HAL0_RUNNER_PULL_MAX_ATTEMPTS` | `4` | Retry attempts for a dashboard-triggered runner-image pull (with backoff). Raise it for a slower or flakier network. |
 | `HAL0_BENCH_SUITE_DIR` | unset | — |
 | `HAL0_BENCH_API` | module-local default constant | — |
 | `HAL0_BENCH_STATE` | `/var/lib/hal0-bench` (`$HAL0_HOME/var-lib/hal0-bench` under HAL0_HOME) | — |
@@ -199,7 +203,7 @@ operator-facing flow.
 <Aside type="note">
 Excluded from this page: env vars that exist purely as test seams (explicitly
 labelled as such in their own source comments — e.g. the `HAL0_GPU_*_OVERRIDE`
-family and `HAL0_SCHEMA_PY_OVERRIDE` in `installer/lib/preflight.sh`, `HAL0_RUNAS_TEST_UID`,
+family in `installer/lib/preflight.sh`, `HAL0_RUNAS_TEST_UID`,
 `HAL0_APPARMOR_CONF`), and internal wiring one process sets for a child it spawns
 rather than something an operator sets from outside (`HAL0_*_REQUIRED`/`HAL0_*_AUTOINSTALL`
 flags `install.sh` passes into `preflight.sh`'s own functions, `HAL0_MCP_PROBE_URL`/
