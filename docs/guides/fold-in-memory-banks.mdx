@@ -197,6 +197,12 @@ So each page a coding bank carries is, in the archive itself:
   `content_cleared_unscoped`). A page from a bank that held private facts
   arrives with no content too, like the bank's other models.
 
+  When a rebuilt page fills again depends on its trigger. A page on a
+  `refresh_cron` refreshes at the next maintenance scan after the run. A page
+  that refreshes after consolidation (the plugin's default) waits for a
+  consolidation of `hal0:shared` that touches its tags, so with auto-consolidation
+  off it stays empty until you refresh it (`hal0 memory mm refresh`).
+
 The owner is the harness's. For a coding bank whose plugin will use
 `/api/memory/compat`, pass `--owner` with the client that plugin uses, for
 example `--owner coding-agent=claude-code`: compat lets only a page's owner
