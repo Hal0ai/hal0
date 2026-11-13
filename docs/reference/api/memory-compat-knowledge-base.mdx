@@ -1,0 +1,46 @@
+---
+title: "Engine-compatible memory endpoint: knowledge pages"
+description: "The knowledge-base routes of /api/memory/compat: one folder per project at the root of the platform bank's tree, which pages a client is shown, the labels and scope a page is written with, and who may change a page. Verified against src/hal0/api/routes/memory_compat.py."
+sidebar:
+  order: 86
+---
+
+Part of the [engine-compatible memory endpoint](/docs/reference/api/memory-compat). The routes,
+limits and error codes are listed there.
+
+The plugin keeps curated pages in a tree of folders and pages, each page a mental model the
+engine rebuilds from its `source_query`. Every bank name is the platform bank, so each project
+has one folder at the root of that bank's tree, named `project:<slug>`, created by the first
+page or folder written into it. The plugin is shown that folder's contents as its whole tree:
+nothing outside it (hal0's own pages, other projects' folders) is listed, read, searched or
+written here. A project with no folder yet has an empty tree, never `404`, because the plugin
+reads `404` as "no pages" and would then never create one. A client with no project
+(`X-hal0-Project: unresolved`) has no folder: every knowledge-base route answers it
+`404 memory.compat_knowledge_base_unsupported`.
+
+A page's content cannot be filtered after it is written, so a page is shown only when its scope
+is one this endpoint wrote, in `trigger.tag_groups`, which the engine uses in place of a page's
+tags. The engine ANDs three groups: the client's own tags matched by its `trigger.tags_match`,
+the project scope of [a read](/docs/reference/api/memory-compat#what-a-read-sees), and no `visibility:private` memory.
+`trigger.exclude_mental_models` is set too, so a refresh reads no other mental model. A page
+without all of that is not shown, nor is one another agent marked private, in every bank layout.
+Pages the fold-in carried over from a per-repository bank sit outside the folder and are not
+shown.
+
+The page's `tags` are then labels, stamped as on a [retain](/docs/reference/api/memory-compat#retain): `agent:<client>`, `kind:`
+and the project's tag, with the reserved tags the client sent dropped. `trigger.tags_match` is
+kept as sent: the plugin compares it with its own to decide whether a page drifted.
+`tag_groups`, `exclude_mental_models` and `exclude_mental_model_ids` in a client's `trigger` are
+dropped and listed in `X-hal0-Ignored-Fields`.
+
+| Rule | How |
+|---|---|
+| Who may change a page | the client that wrote it: its tags carry one `agent:` tag, the client's. Anyone else, a folder or a page naming several agents is `404 memory.compat_knowledge_page_not_owned` |
+| A node the tree does not show | `404 memory.compat_knowledge_node_refused` on an update, `404 memory.knowledge_page_not_found` on a read |
+| `parent_id` on a create | a folder of the project's folder, else `403 memory.compat_knowledge_parent_refused`; absent, the project's folder |
+| What an update may change | `name`, `source_query`, `max_tokens`, `tags`, `trigger`. New tags or trigger settings go through the envelope again and the scope is written again. `parent_id` (a move) is ignored |
+| What is shown of another client's page | its descriptive tags (the project, `kind:`, `knowledge:`, `source:`), in `tags` and in the frontmatter of `markdown`, and of its `trigger` only `tags_match`; never its writer or its scope |
+| A name the folder already holds | the engine's `409` |
+
+An update refusal is `404`, unlike every other refused write: the plugin's page re-sync raises on
+any other status, and with it the pass that imports the client's memory.
