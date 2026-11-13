@@ -712,13 +712,25 @@ def _read_archive(data: bytes) -> dict[str, Any]:
             json.loads(zf.read(n))
             for n in sorted(n for n in names if n.startswith("documents/") and n.endswith(".json"))
         ]
+        manifest = manifest if isinstance(manifest, dict) else {}
+
+        def carried(key: str, name: str) -> int:
+            return max(int(manifest.get(key) or 0), len(rows(name)))
+
         return {
-            "manifest": manifest if isinstance(manifest, dict) else {},
+            "manifest": manifest,
             "documents": documents,
             "observations": rows("observations.json"),
             "mental_models": rows("mental_models.json"),
             "knowledge_pages": rows("knowledge_pages.json"),
             "directives": rows("directives.json"),
+            # What a merge import does not carry (``import_documents`` in
+            # hindsight-api 1.2.0 reads none of these): counted, never read.
+            "attachments": carried("attachment_count", "attachments.json"),
+            "invalidated": carried(
+                "invalidated_memory_count", "data/invalidated_memory_units.json"
+            ),
+            "model_history": len(rows("mental_model_history.json")),
         }
 
 
@@ -795,6 +807,9 @@ def _new_report() -> dict[str, Any]:
         "projects": {},
         "document_ids_rewritten": 0,
         "document_ids_digested": 0,
+        #: ``mental_model_history`` rows in the export: a merge import does not
+        #: carry them, and nothing reads them but the history view of a model.
+        "mental_model_history_not_carried": 0,
     }
 
 
@@ -942,7 +957,24 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
     (:func:`private_archive_problems`).
     """
     archive = _read_archive(data)
+    uncarried = {k: archive[k] for k in ("attachments", "invalidated") if archive[k]}
+    if uncarried:
+        # The merge import (``import_documents``) restores neither attachment
+        # bytes nor the curation archive of invalidated facts; only a
+        # whole-bank restore does. Folding the bank would lose them silently.
+        shown = ", ".join(
+            f"{n} {'attachment(s)' if k == 'attachments' else 'invalidated fact(s)'}"
+            for k, n in uncarried.items()
+        )
+        raise BankLeft(
+            f"bank {plan.bank.bank} holds {shown}, which a merge import does not carry "
+            "(hindsight-api 1.2.0 restores them only in a whole-bank restore). Folding it would "
+            "lose them without a word, so it is not folded. Remove them from the old bank "
+            "(or revert the invalidated facts) if they may go, then run the fold-in again",
+            bank=plan.bank.bank,
+        )
     report = _new_report()
+    report["mental_model_history_not_carried"] = archive["model_history"]
     parts: dict[str, list[dict[str, Any]]] = {PART_SHARED: [], PART_PRIVATE: []}
     routes: dict[str, _DocRoute] = {}
     fact_tags: dict[str, list[list[str]]] = {}
@@ -1125,15 +1157,12 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
 
     bank_id = plan.bank.bank
     if report["mixed_owner_documents"]:
-        listing = "; ".join(
-            f"{row['document']} ({', '.join(row['owners'])})"
-            for row in report["mixed_owner_documents"][:3]
-        )
+        owners = sorted({o for row in report["mixed_owner_documents"] for o in row["owners"]})
         raise BankLeft(
             f"bank {bank_id}: {len(report['mixed_owner_documents'])} private document(s) hold "
-            f"facts of more than one owner ({listing}). A private document is filed under one "
-            "owner, and filing it under either would give one agent's private fact to another, "
-            "so the bank is not folded",
+            f"facts of more than one owner ({', '.join(owners)}). A private document is filed "
+            "under one owner, and filing it under either would give one agent's private fact to "
+            "another, so the bank is not folded",
             bank=bank_id,
             details={"mixed_owner_documents": report["mixed_owner_documents"]},
         )
@@ -1152,8 +1181,8 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
     problems += private_archive_problems(private) if private is not None else []
     if problems:
         raise BankLeft(
-            f"bank {bank_id}: the rewritten archives failed their safety check: "
-            + "; ".join(problems[:5]),
+            f"bank {bank_id}: the rewritten archives failed their safety check "
+            f"({len(problems)} problem(s)); nothing of it is sent",
             bank=bank_id,
             details={"problems": problems},
         )
@@ -1226,6 +1255,9 @@ def _empty_archive() -> dict[str, Any]:
         "mental_models": [],
         "knowledge_pages": [],
         "directives": [],
+        "attachments": 0,
+        "invalidated": 0,
+        "model_history": 0,
     }
 
 
@@ -1611,6 +1643,9 @@ class Journal:
     engine_stopped: bool = False
     #: True once any import was sent: from then on the run is carried on, never abandoned.
     sent: bool = False
+    #: True once every bank of the run passed its pre-check
+    #: (:meth:`FoldIn._precheck_all`); imports start only then.
+    checked: bool = False
     banks: list[BankEntry] = field(default_factory=list)
     error: str | None = None
     updated_at: str | None = None
@@ -1649,7 +1684,10 @@ class Journal:
 # the runs that sent that part: every document id the part held with the
 # digest of its source (:func:`document_digest`), its mental-model ids and
 # its pages. They stay in the archive directories (mode 0600) and are not
-# copied here, so the ledger itself holds no memory ids. ``owners`` and
+# copied here. A left bank's ``note`` carries counts and bank names only:
+# the ids behind it (changed, gone, clashing, mixed-owner, missing) go to the
+# run's ``left-ids.json`` (:data:`LEFT_IDS_NAME`, 0600) and the note names
+# that file. So the ledger itself holds no memory ids. ``owners`` and
 # ``known_clients`` are set once anything of the bank was sent and never
 # change after that.
 
@@ -1893,6 +1931,13 @@ def direct_engine_clients(
 
 
 # ── the run ──────────────────────────────────────────────────────────────
+
+
+#: The run's record of the ids behind each bank it left (0600, in its archive
+#: directory): every changed, gone and clashing document or model id, the
+#: mixed-owner documents, the routing problems. The ledger and the journal
+#: carry only counts and this file's path.
+LEFT_IDS_NAME = "left-ids.json"
 
 
 def _archive_name(index: int, bank: str, part: str) -> str:
@@ -2754,21 +2799,55 @@ class FoldIn(em.EngineMaintenance):
         write_gate.lift_gate()
 
     async def _fold_all(self, journal: Journal) -> None:
+        """Pre-check every bank of the run, then import them, one at a time.
+
+        Nothing is imported until every bank passed its pre-check
+        (:meth:`_precheck_all`): when any would be left, none is imported and
+        the run ends with the full report. A bank can then be left only by an
+        import that fails, and the next run sends what is missing of it.
+        """
+        if not journal.checked:
+            await self._precheck_all(journal)
+            failed = [e.bank for e in journal.banks if e.step == STEP_LEFT]
+            if failed:
+                self._hold_back(journal, failed)
+                return
+            journal.checked = True
+            self._save(journal)
         for index, entry in enumerate(journal.banks):
             if entry.step in _DONE_STEPS:
                 continue
-            verb = "re-checking" if entry.refold else "folding in"
-            self._say(f"{verb} {entry.bank} ({index + 1}/{len(journal.banks)})")
+            self._say(f"importing {entry.bank} ({index + 1}/{len(journal.banks)})")
             try:
                 await self._fold(journal, entry, index)
             except BankLeft as exc:
-                entry.step = STEP_LEFT
-                entry.note = exc.message
-                self._save(journal)
-                self._say(f"{entry.bank} is left as it was: {exc.message}")
+                self._leave(journal, entry, exc)
             self._record_ledger(journal)
 
-    async def _fold(self, journal: Journal, entry: BankEntry, index: int) -> None:
+    async def _precheck_all(self, journal: Journal) -> None:
+        """Export, rewrite and check every bank of the run, importing nothing.
+
+        Per bank (:meth:`_precheck`): the export, the rewrite with its owner
+        and routing checks, the archive's own contents (attachments and
+        invalidated facts a merge cannot carry), the routing check again on
+        the files on disk, and the clash, changed and gone checks of each
+        part against its target. Then across banks: no two banks of the run
+        may send the same document or mental-model id to one target
+        (:meth:`_check_duplicates`). Every bank is checked, so the report is
+        whole.
+        """
+        for index, entry in enumerate(journal.banks):
+            if entry.step in _DONE_STEPS:
+                continue
+            verb = "re-checking" if entry.refold else "checking"
+            self._say(f"{verb} {entry.bank} ({index + 1}/{len(journal.banks)})")
+            try:
+                await self._precheck(journal, entry, index)
+            except BankLeft as exc:
+                self._leave(journal, entry, exc)
+        self._check_duplicates(journal)
+
+    async def _precheck(self, journal: Journal, entry: BankEntry, index: int) -> None:
         if entry.step == STEP_PLANNED and entry.refold and await self._unchanged(journal, entry):
             entry.step = STEP_FOLDED
             entry.note = f"folded by run {entry.earlier.get('run_id')}; unchanged since"
@@ -2781,6 +2860,114 @@ class FoldIn(em.EngineMaintenance):
         if entry.step == STEP_EXPORTED:
             self._rewrite(journal, entry, index)
             self._hook(f"rewritten:{entry.bank}")
+        self._check_routing(journal, entry)
+        for name in _PARTS:
+            part = entry.part(name)
+            if part is not None and not part.sent:
+                await self._clashes(entry, name, part.target, self._part_ids(journal, part))
+
+    def _check_duplicates(self, journal: Journal) -> None:
+        """Leave every pair of banks of this run that would send one id to the same target.
+
+        Two old banks can hold a document under the same id (a platform bank
+        and a ``project__`` bank both written with a provider id, for
+        example). Both land in one target, where a merge with ``skip`` keeps
+        whichever comes first and drops the other without a word. The ids
+        are not rewritten: the agents go on writing under them after the
+        cutover, and a rewritten copy would no longer be the document they
+        update. So both banks are left, and named to each other.
+        """
+        seen: dict[tuple[str, str, str], list[str]] = {}
+        for entry in journal.banks:
+            if entry.step != STEP_REWRITTEN:
+                continue
+            for name in _PARTS:
+                part = entry.part(name)
+                if part is None:
+                    continue
+                ids = self._part_ids(journal, part)
+                for kind in ("documents", "mental_models"):
+                    for item in ids.get(kind) or []:
+                        seen.setdefault((part.target, kind, str(item)), []).append(entry.bank)
+        pairs: dict[str, dict[str, Any]] = {}
+        for (target, kind, item), banks in seen.items():
+            banks = list(dict.fromkeys(banks))
+            if len(banks) < 2:
+                continue
+            for bank in banks:
+                row = pairs.setdefault(bank, {"with": set(), "ids": {}})
+                row["with"].update(b for b in banks if b != bank)
+                row["ids"].setdefault(target, {}).setdefault(kind, []).append(item)
+        for entry in journal.banks:
+            row = pairs.get(entry.bank)
+            if row is None:
+                continue
+            count = sum(len(v) for kinds in row["ids"].values() for v in kinds.values())
+            others = ", ".join(sorted(row["with"]))
+            self._leave(
+                journal,
+                entry,
+                BankLeft(
+                    f"bank {entry.bank}: {count} of its document or mental-model id(s) are also "
+                    f"in {others}, and both would go to the same target, where a merge keeps "
+                    "only the first. Delete or rename one copy in one of the old banks, then run "
+                    "the fold-in again",
+                    bank=entry.bank,
+                    details={"duplicates_with": sorted(row["with"]), "ids": row["ids"]},
+                ),
+            )
+
+    def _hold_back(self, journal: Journal, failed: list[str]) -> None:
+        """Leave every bank that passed its pre-check: a run imports all of its banks or none."""
+        listing = ", ".join(failed)
+        for entry in journal.banks:
+            if entry.step in _DONE_STEPS:
+                continue
+            entry.step = STEP_LEFT
+            entry.note = (
+                f"checked and ready, but not imported: {len(failed)} bank(s) of this run would "
+                f"be left ({listing}), and a run imports nothing unless every bank in it passes "
+                "its checks"
+            )
+        self._save(journal)
+        self._say(f"nothing was imported: {listing} did not pass the pre-check")
+
+    def _leave(self, journal: Journal, entry: BankEntry, exc: BankLeft) -> None:
+        """Mark ``entry`` left; its ids go to the run's 0600 sidecar, never into the note."""
+        entry.step = STEP_LEFT
+        note = exc.message
+        if exc.details:
+            path = self._record_left_ids(journal, entry.bank, exc.details)
+            note += f". The ids are listed in {path}" if path else ""
+        entry.note = note
+        self._save(journal)
+        self._say(f"{entry.bank} is left as it was: {note}")
+
+    def _record_left_ids(self, journal: Journal, bank: str, details: Mapping[str, Any]) -> str:
+        """Add ``details`` for ``bank`` to :data:`LEFT_IDS_NAME`; its path, or "" if unwritable."""
+        try:
+            try:
+                current = json.loads(self._read_archive_file(journal, LEFT_IDS_NAME))
+            except FileNotFoundError:
+                current = {}
+            current = current if isinstance(current, dict) else {}
+            current[bank] = json.loads(json.dumps(details, default=sorted))
+            self._write_archive_file(
+                journal, LEFT_IDS_NAME, json.dumps(current, indent=2, sort_keys=True).encode()
+            )
+        except (OSError, ValueError) as exc:
+            log.warning("hal0.memory.fold_in_left_ids_unwritten", bank=bank, error=str(exc))
+            return ""
+        return str(Path(journal.archive_dir) / LEFT_IDS_NAME)
+
+    async def _fold(self, journal: Journal, entry: BankEntry, index: int) -> None:
+        """Import one pre-checked bank's parts and check each target holds all of it."""
+        if entry.step in (STEP_PLANNED, STEP_EXPORTED):
+            raise BankLeft(
+                f"bank {entry.bank} reached the imports without its pre-check; nothing of it is "
+                "sent",
+                bank=entry.bank,
+            )
         if entry.step in (STEP_REWRITTEN, STEP_IMPORTING):
             self._check_routing(journal, entry)
             for name in _PARTS:
@@ -2996,7 +3183,7 @@ class FoldIn(em.EngineMaintenance):
         if problems:
             raise BankLeft(
                 f"bank {entry.bank}: its rewritten archives do not keep its private memory on "
-                f"the private side ({'; '.join(problems[:3])}); nothing of it is sent",
+                f"the private side ({len(problems)} problem(s)); nothing of it is sent",
                 bank=entry.bank,
                 details={"problems": problems},
             )
@@ -3093,14 +3280,15 @@ class FoldIn(em.EngineMaintenance):
             if problems:
                 raise BankLeft(
                     f"bank {entry.bank}: its shared archive holds private memory "
-                    f"({'; '.join(problems[:3])}); it is not imported",
+                    f"({len(problems)} problem(s)); it is not imported",
                     bank=entry.bank,
+                    details={"problems": problems},
                 )
         ids = self._part_ids(journal, part)
         await self._ensure_target(target)
         if part.sent:
             await self._await_part(journal, entry, part)
-            if await self._part_problems(entry, part, ids) == []:
+            if (await self._part_problems(entry, part, ids))[0] == []:
                 part.done = True
                 entry.put(name, part)
                 self._save(journal)
@@ -3131,11 +3319,12 @@ class FoldIn(em.EngineMaintenance):
         if data is None:
             # Everything of the part is in the target already (an earlier run sent it).
             part.before, part.sending = None, None
-            problems = await self._part_problems(entry, part, ids)
+            problems, missing = await self._part_problems(entry, part, ids)
             if problems:
                 raise BankLeft(
                     f"bank {entry.bank} is not whole in {target}: {'; '.join(problems)}",
                     bank=entry.bank,
+                    details={"missing": missing},
                 )
             part.done = True
             entry.put(name, part)
@@ -3162,14 +3351,14 @@ class FoldIn(em.EngineMaintenance):
         self._save(journal)
         await self._wait_import(entry, part)
         self._hook(f"imported:{entry.bank}:{name}")
-        problems = await self._part_problems(entry, part, ids)
+        problems, missing = await self._part_problems(entry, part, ids)
         if problems:
             entry.put(name, part)
             self._save(journal)
             raise BankLeft(
                 f"bank {entry.bank} did not fold into {target} whole: {'; '.join(problems)}",
                 bank=entry.bank,
-                details={"problems": problems},
+                details={"missing": missing},
             )
         part.done = True
         entry.put(name, part)
@@ -3206,33 +3395,56 @@ class FoldIn(em.EngineMaintenance):
             - set(prior["mental_models"])
         )
         if clash or models:
-            listing = ", ".join([*clash[:3], *models[:3]])
+            sent_by = self._sent_by_other_banks(entry, name, {*clash, *models})
+            named = sorted(set(sent_by.values()))
             raise BankLeft(
                 f"bank {entry.bank}: {target} already holds {len(clash)} of its document id(s) "
-                f"and {len(models)} of its mental-model id(s) ({listing}). A merge would skip "
-                "them and the bank would fold in only in part",
+                f"and {len(models)} of its mental-model id(s)"
+                + (f", sent there by an earlier run of {', '.join(named)}" if named else "")
+                + ". A merge would skip them and the bank would fold in only in part. Delete "
+                "or rename one copy, in the old bank or in the target, then run the fold-in again",
                 bank=entry.bank,
-                details={"documents": clash, "mental_models": models},
+                details={"documents": clash, "mental_models": models, "sent_by": sent_by},
             )
         if changed:
             raise BankLeft(
                 f"bank {entry.bank}: {len(changed)} document(s) an earlier run folded into "
-                f"{target} have changed in the old bank since ({', '.join(changed[:3])}). A merge "
-                "with skip keeps the older copy, so the change would be lost without a word. "
-                f"Delete those documents from {target} (the engine's DELETE "
-                f"/v1/default/banks/{target}/documents/<id>), then run the fold-in again: it "
-                "sends them as they are now",
+                f"{target} have changed in the old bank since. A merge with skip keeps the older "
+                f"copy, so the change would be lost without a word. Delete those documents from "
+                f"{target} (the engine's DELETE /v1/default/banks/{target}/documents/<id>), then "
+                "run the fold-in again: it sends them as they are now",
                 bank=entry.bank,
                 details={"changed": changed},
             )
         if gone:
             raise BankLeft(
                 f"bank {entry.bank}: {len(gone)} document(s) an earlier run folded into {target} "
-                f"are no longer in the old bank ({', '.join(gone[:3])}). The fold-in deletes "
-                f"nothing; delete them from {target} too if they should go, then run again",
+                f"are no longer in the old bank. The fold-in deletes nothing; delete them from "
+                f"{target} too if they should go, then run again",
                 bank=entry.bank,
                 details={"gone": gone},
             )
+
+    def _sent_by_other_banks(self, entry: BankEntry, name: str, wanted: set[str]) -> dict[str, str]:
+        """Which other bank an earlier run sent each of ``wanted`` for, as far as the ledger says."""
+        out: dict[str, str] = {}
+        try:
+            banks = load_ledger().get("banks") or {}
+        except FoldInError:
+            return out
+        for bank, row in banks.items():
+            if bank == entry.bank or not isinstance(row, dict):
+                continue
+            for path in (row.get("sent_files") or {}).get(name) or []:
+                try:
+                    data = json.loads(_read_nofollow(Path(path)))
+                except (OSError, ValueError):
+                    continue
+                data = data if isinstance(data, dict) else {}
+                for item in [*(data.get("documents") or []), *(data.get("mental_models") or [])]:
+                    if str(item) in wanted:
+                        out.setdefault(str(item), bank)
+        return out
 
     async def _remainder(
         self, data: bytes, target: str, ids: Mapping[str, Any]
@@ -3325,11 +3537,11 @@ class FoldIn(em.EngineMaintenance):
             return
         docs = sorted({str(s.get("document_id")) for o in missing for s in o.get("sources") or ()})
         raise BankLeft(
-            f"bank {entry.bank}: {len(missing)} observation(s) rest on documents already in "
-            f"{target} that landed without them, and a merge with skip cannot carry them now "
-            "(the engine imports an observation only with all its source documents in the same "
-            f"call). To fold the bank whole, delete these documents from {target} and run the "
-            f"fold-in again: {', '.join(docs[:5])}" + (" and more" if len(docs) > 5 else ""),
+            f"bank {entry.bank}: {len(missing)} observation(s) rest on {len(docs)} document(s) "
+            f"already in {target} that landed without them, and a merge with skip cannot carry "
+            "them now (the engine imports an observation only with all its source documents in "
+            f"the same call). To fold the bank whole, delete those documents from {target} and "
+            "run the fold-in again",
             bank=entry.bank,
             details={"documents": docs, "observations": len(missing)},
         )
@@ -3445,7 +3657,7 @@ class FoldIn(em.EngineMaintenance):
 
     async def _part_problems(
         self, entry: BankEntry, part: Part, ids: Mapping[str, Any]
-    ) -> list[str]:
+    ) -> tuple[list[str], dict[str, list[str]]]:
         """What is wrong with ``part``'s target after its import; empty when it folded in.
 
         Every document, mental model and knowledge page of the part must be in
@@ -3456,23 +3668,28 @@ class FoldIn(em.EngineMaintenance):
         by exactly what that send carried (facts, documents, mental models),
         and by at least its observations: the observation floor holds for a
         resend as for a first send.
+
+        Returns ``(problems, missing)``: the problems hold counts only, the
+        ids missing per kind go to the run's sidecar (:data:`LEFT_IDS_NAME`).
         """
         problems: list[str] = []
+        lost: dict[str, list[str]] = {}
         missing = sorted(set(ids.get("documents") or []) - await self._document_ids(part.target))
         if missing:
-            problems.append(f"{len(missing)} document(s) missing ({', '.join(missing[:3])})")
+            problems.append(f"{len(missing)} document(s) missing")
+            lost["documents"] = missing
         models = set(ids.get("mental_models") or [])
         if models:
             gone = sorted(models - await self._model_ids(part.target))
             if gone:
-                problems.append(f"{len(gone)} mental model(s) missing ({', '.join(gone[:3])})")
+                problems.append(f"{len(gone)} mental model(s) missing")
+                lost["mental_models"] = gone
         pages = set(ids.get("pages") or [])
         if pages:
             absent = sorted(pages - await self._page_model_ids(part.target))
             if absent:
-                problems.append(
-                    f"{len(absent)} knowledge page(s) missing (pages of {', '.join(absent[:3])})"
-                )
+                problems.append(f"{len(absent)} knowledge page(s) missing")
+                lost["pages_of_models"] = absent
         if part.before is not None and part.sending is not None:
             state = await self._quiet_state(part.target)
             delta = {k: int(state["counts"][k]) - int(part.before.get(k, 0)) for k in em.COUNT_KEYS}
@@ -3482,7 +3699,7 @@ class FoldIn(em.EngineMaintenance):
                     f"{part.target} grew by "
                     + em.diff_text(differs).replace("expected", "expected +")
                 )
-        return problems
+        return problems, lost
 
     def _record_ledger(self, journal: Journal) -> None:
         """Write what this run did to every bank into the ledger, for the runs after it.

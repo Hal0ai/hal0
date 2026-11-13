@@ -99,6 +99,10 @@ class FakeEngine:
         #: Facts the export leaves out (they belong to no document).
         self.orphans: dict[str, int] = {}
         self.imports: list[tuple[str, dict[str, Any]]] = []
+        #: Per bank: manifest fields the export adds (attachment_count, ...).
+        self.manifest_extra: dict[str, dict[str, Any]] = {}
+        #: Per bank: mental_model_history rows the export carries.
+        self.model_history: dict[str, list[dict[str, Any]]] = {}
 
     # ── state ──
 
@@ -140,9 +144,12 @@ class FakeEngine:
                         "directive_count": len(b["directives"]),
                         "mental_model_count": len(b["models"]),
                         "knowledge_page_count": 0,
+                        **self.manifest_extra.get(bank, {}),
                     }
                 ),
             )
+            if bank in self.model_history:
+                zf.writestr("mental_model_history.json", json.dumps(self.model_history[bank]))
             for i, d in enumerate(docs):
                 zf.writestr(f"documents/{i:06d}.json", json.dumps(d))
             zf.writestr("observations.json", json.dumps(b["obs"]))
@@ -657,28 +664,40 @@ async def test_apply_folds_every_bank_and_cuts_over(box: Box) -> None:
             assert "visibility:private" not in json.dumps(archive)
 
 
-async def test_a_bank_whose_ids_are_taken_is_left_and_the_run_does_not_cut_over(box: Box) -> None:
+async def test_a_bank_whose_ids_are_taken_leaves_the_run_with_nothing_imported(box: Box) -> None:
     box.engine.banks["hal0:shared"] = empty_bank()
     box.engine.banks["hal0:shared"]["docs"]["n1"] = doc("n1", fact("someone else's"))
     result = await box.fold().run()
     assert result["status"] == "incomplete"
     assert result["cut_over"] is False
-    assert result["left"] == ["shared"]
-    assert result["retry"] == "sudo hal0 memory migrate fold-in --apply --bank shared"
-    assert "coding-agent::web" in result["folded"]
-    # Nothing of the left bank was imported, private part included.
-    assert "private:hermes:s1" not in box.engine.banks["hal0:private"]["docs"]
+    # The pre-check found the clash before any import: no bank was imported,
+    # so no bank is left half-sent and the next run starts clean.
+    assert box.engine.imports == []
+    assert result["folded"] == []
+    assert sorted(result["left"]) == sorted(FOLDABLE_BANKS)
+    notes = {b["bank"]: b["note"] for b in result["banks"]}
+    assert "already holds 1 of its document id(s)" in notes["shared"]
+    assert "not imported" in notes["pi-coder"] and "(shared)" in notes["pi-coder"]
     _assert_on_the_old_layout(box)
     ledger = fi.load_ledger()
-    assert ledger["banks"]["shared"]["state"] == "left"
-    assert "sent_files" not in ledger["banks"]["shared"]
-    assert ledger["banks"]["pi-coder"]["state"] == "folded"
+    assert {row["state"] for row in ledger["banks"].values()} == {"left"}
+    assert all("sent_files" not in row for row in ledger["banks"].values())
+    # The clashing id is in the 0600 sidecar the note names, not in the note.
+    sidecar = Path(result["archive_dir"]) / fi.LEFT_IDS_NAME
+    assert str(sidecar) in notes["shared"] and "n1" not in notes["shared"].split(". ")[0]
+    assert sidecar.stat().st_mode & 0o777 == 0o600
+    assert json.loads(sidecar.read_text())["shared"]["documents"] == ["n1"]
+    # Once the target's copy is gone, every bank folds and the store cuts over.
+    del box.engine.banks["hal0:shared"]["docs"]["n1"]
+    assert (await box.fold().run())["status"] == "folded"
+    _assert_folded(box)
 
 
 async def test_a_bank_the_export_cannot_carry_whole_is_left(box: Box) -> None:
     box.engine.orphans["pi-coder"] = 1
     result = await box.fold().run()
-    assert result["left"] == ["pi-coder"]
+    assert sorted(result["left"]) == sorted(FOLDABLE_BANKS)
+    assert box.engine.imports == []
     assert "belongs to no document" in next(
         b["note"] for b in result["banks"] if b["bank"] == "pi-coder"
     )
@@ -857,7 +876,9 @@ async def test_a_folded_document_changed_in_the_old_bank_refuses_until_its_copy_
     second = await box.fold().run()
     assert second["status"] == "incomplete"
     note = next(b["note"] for b in second["banks"] if b["bank"] == "pi-coder")
-    assert "changed in the old bank" in note and "web::pi-coder::p1" in note
+    assert "changed in the old bank" in note and "web::pi-coder::p1" not in note
+    sidecar = json.loads((Path(second["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    assert sidecar["pi-coder"]["changed"] == ["web::pi-coder::p1"]
     assert len(e.banks["hal0:shared"]["docs"]["web::pi-coder::p1"]["facts"]) == 1
     _assert_on_the_old_layout(box)
     # The operator deletes the stale copy; the next run sends the document as it is now.
@@ -901,6 +922,77 @@ async def test_a_run_killed_while_releasing_completes_with_resume(box: Box, poin
     _assert_on_the_old_layout(box)
 
 
+# ── the pre-check (second review, items 2, 4, 6, 7) ────────────────────
+
+
+async def test_the_ledger_and_the_notes_hold_no_memory_id(box: Box) -> None:
+    e = box.engine
+    # A private document with two owners (left by the rewrite), and a coding
+    # document whose id the target already holds (left by the clash check).
+    e.banks["shared"]["docs"]["private:hermes:s2"] = doc(
+        "private:hermes:s2",
+        fact("a", "agent:hermes", "visibility:private"),
+        fact("b", "agent:brain", "visibility:private"),
+    )
+    e.banks["hal0:shared"] = empty_bank()
+    taken = "web::shared::git:123"
+    e.banks["hal0:shared"]["docs"][taken] = doc(taken, fact("someone else's"))
+    result = await box.fold().run()
+    assert result["status"] == "incomplete" and e.imports == []
+    text = fi.ledger_path().read_text()
+    for memory_id in ("private:", "s2", "git:123", "conversation:a", "n1", "p1", "b1"):
+        assert memory_id not in text, memory_id
+    sidecar = json.loads((Path(result["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    assert sidecar["shared"]["mixed_owner_documents"][0]["document"] == "private:hermes:s2"
+    assert sidecar["coding-agent::web"]["documents"] == [taken]
+
+
+async def test_a_bank_with_attachments_or_invalidated_facts_is_left_before_any_import(
+    box: Box,
+) -> None:
+    box.engine.manifest_extra["pi-coder"] = {"attachment_count": 2}
+    box.engine.manifest_extra["private__brain"] = {"invalidated_memory_count": 1}
+    box.engine.model_history["coding-agent::web"] = [{"id": 1}, {"id": 2}]
+    result = await box.fold().run()
+    assert box.engine.imports == []
+    notes = {b["bank"]: b["note"] for b in result["banks"]}
+    assert "2 attachment(s), which a merge import does not carry" in notes["pi-coder"]
+    assert "1 invalidated fact(s)" in notes["private__brain"]
+    box.engine.manifest_extra.clear()
+    done = await box.fold().run()
+    assert done["status"] == "folded"
+    web = next(b for b in done["banks"] if b["bank"] == "coding-agent::web")
+    assert web["report"]["mental_model_history_not_carried"] == 2
+
+
+async def test_two_banks_with_one_document_id_are_both_left_and_named(box: Box) -> None:
+    e = box.engine
+    e.banks["project__docs"] = empty_bank()
+    e.banks["project__docs"]["docs"] = {"n1": doc("n1", fact("same id, other bank"))}
+    result = await box.fold().run()
+    assert e.imports == []
+    notes = {b["bank"]: b["note"] for b in result["banks"]}
+    assert "also in project__docs" in notes["shared"]
+    assert "also in shared" in notes["project__docs"]
+    sidecar = json.loads((Path(result["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    assert sidecar["shared"]["ids"] == {"hal0:shared": {"documents": ["n1"]}}
+
+
+async def test_an_id_an_earlier_run_sent_for_another_bank_is_named_in_the_clash(
+    box: Box,
+) -> None:
+    e = box.engine
+    first = await box.fold(only=["shared"]).run()
+    assert first["folded"] == ["shared"]
+    sent = len(e.imports)
+    e.banks["project__docs"] = empty_bank()
+    e.banks["project__docs"]["docs"] = {"n1": doc("n1", fact("same id, other bank"))}
+    result = await box.fold().run()
+    note = next(b["note"] for b in result["banks"] if b["bank"] == "project__docs")
+    assert "sent there by an earlier run of shared" in note
+    assert len(e.imports) == sent and result["status"] == "incomplete"
+
+
 # ── review items 3, 5, 6, 10 ─────────────────────────────────────────────
 
 
@@ -920,8 +1012,12 @@ async def test_an_observation_lost_on_a_resend_leaves_the_bank(box: Box) -> None
     retry = await box.fold(only=["coding-agent::web"]).run()
     assert retry["status"] == "incomplete"
     note = next(b["note"] for b in retry["banks"] if b["bank"] == "coding-agent::web")
-    assert "observation(s) rest on documents already in hal0:shared" in note
-    assert "web::hal0-legacy-claude-code::conversation:a" in note
+    assert "observation(s) rest on 1 document(s) already in hal0:shared" in note
+    assert "conversation:a" not in note
+    sidecar = json.loads((Path(retry["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
+    assert sidecar["coding-agent::web"]["documents"] == [
+        "web::hal0-legacy-claude-code::conversation:a"
+    ]
     _assert_on_the_old_layout(box)
 
 
