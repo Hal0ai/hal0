@@ -123,6 +123,8 @@ class FakeEngine:
         #: Banks whose next import puts every page at the root, as an engine
         #: that dropped ``parent_id`` would.
         self.pages_at_root: set[str] = set()
+        #: Called just before a folder POST is served: a writer racing the fold-in.
+        self.before_folder_post: Any = None
         #: Per bank: mental_model_history rows the export carries.
         self.model_history: dict[str, list[dict[str, Any]]] = {}
 
@@ -245,8 +247,9 @@ class FakeEngine:
 
         A node id another bank holds gets a fresh id; a ``parent_id`` is kept
         only when the parent is in the archive; parents go first; a row whose
-        id the bank has, or whose name its folder has
-        (``uq_kp_folder_pagename``), is dropped (``ON CONFLICT DO NOTHING``);
+        id the bank has, or a page whose name its folder has for a page
+        (``uq_kp_folder_pagename``, ``WHERE kind = 'page'``), is dropped
+        (``ON CONFLICT DO NOTHING``);
         a parent that is not there fails the insert (``fk_kp_parent``).
         """
         target = self.banks[bank]
@@ -281,8 +284,9 @@ class FakeEngine:
                 continue
             if row["parent_id"] and row["parent_id"] not in placed:
                 return {"status": "failed", "error_message": "ForeignKeyViolation fk_kp_parent"}
-            if any(
-                (o.get("parent_id") or "") == (row["parent_id"] or "")
+            if row.get("kind") == "page" and any(
+                o.get("kind") == "page"
+                and (o.get("parent_id") or "") == (row["parent_id"] or "")
                 and str(o.get("name")).lower() == str(row.get("name")).lower()
                 for o in target["pages"]
             ):
@@ -421,11 +425,10 @@ class FakeEngine:
                 "name": body["name"],
                 "parent_id": body.get("parent_id"),
             }
-            if any(
-                not p.get("parent_id") and p["name"].lower() == folder["name"].lower()
-                for p in b["pages"]
-            ):
-                return httpx.Response(409, json={"detail": "exists"})
+            # ``create_knowledge_folder`` checks no name: a second folder of
+            # one name is created like the first.
+            if self.before_folder_post is not None:
+                self.before_folder_post(bank)
             self.events.append(f"folder:{bank}:{body['name']}")
             b["pages"].append(folder)
             return httpx.Response(201, json={**folder, "children": []})
@@ -2233,23 +2236,42 @@ async def test_pages_join_a_project_folder_the_target_already_has(box: Box) -> N
 async def test_a_name_the_target_folder_already_holds_keeps_it_and_the_folded_one_is_renamed(
     box: Box,
 ) -> None:
-    """A node the plugin wrote through compat before the run keeps its name."""
+    """A page the plugin wrote through compat before the run keeps its name. A
+    folder of a name the target has is not renamed: folder names are not unique."""
     seed_pages(box)
     box.engine.banks["hal0:shared"] = empty_bank()
+    box.engine.banks["hal0:shared"]["models"]["mm-own"] = {
+        "id": "mm-own",
+        "name": "component map",
+        "tags": [],
+        "trigger": kp_ids.page_trigger(PLUGIN_TRIGGER, [], "web"),
+        "content": "",
+    }
     box.engine.banks["hal0:shared"]["pages"] = [
         {"id": "kf-web", "kind": "folder", "name": "project:web", "parent_id": None},
         {"id": "kf-own", "kind": "folder", "name": "initiatives", "parent_id": "kf-web"},
+        {
+            "id": "kp-own",
+            "kind": "page",
+            "name": "component map",
+            "parent_id": "kf-web",
+            "mental_model_id": "mm-own",
+        },
     ]
     result = await box.fold().run()
     assert result["cut_over"] is True
     nodes = shared_nodes(box)
-    assert nodes["kf-own"]["name"] == "initiatives"
-    assert nodes[_new("coding-agent::web", "kf-init", "folder")]["name"] == (
-        "Initiatives (coding-agent::web)"
+    assert nodes["kp-own"]["name"] == "component map"
+    assert nodes[_new("coding-agent::web", "kp-map")]["name"] == (
+        "Component map (coding-agent::web)"
     )
+    # Two sibling folders of one name, the folded one under its own name.
+    assert nodes["kf-own"]["name"] == "initiatives"
+    folded = nodes[_new("coding-agent::web", "kf-init", "folder")]
+    assert (folded["name"], folded["parent_id"]) == ("Initiatives", "kf-web")
     keepers = fi.load_ledger()["page_keepers"]["hal0:shared"]
-    assert keepers["web/initiatives"] == "target"
-    assert keepers["web/component map"] == "coding-agent::web"
+    assert keepers["web/component map"] == "target"
+    assert "web/initiatives" not in keepers
 
 
 async def test_a_rename_that_still_collides_leaves_the_bank_before_any_import(box: Box) -> None:
@@ -2257,11 +2279,11 @@ async def test_a_rename_that_still_collides_leaves_the_bank_before_any_import(bo
     box.engine.banks["hal0:shared"] = empty_bank()
     box.engine.banks["hal0:shared"]["pages"] = [
         {"id": "kf-web", "kind": "folder", "name": "project:web", "parent_id": None},
-        {"id": "kf-a", "kind": "folder", "name": "Initiatives", "parent_id": "kf-web"},
+        {"id": "kp-a", "kind": "page", "name": "Component map", "parent_id": "kf-web"},
         {
-            "id": "kf-b",
-            "kind": "folder",
-            "name": "Initiatives (coding-agent::web)",
+            "id": "kp-b",
+            "kind": "page",
+            "name": "Component map (coding-agent::web)",
             "parent_id": "kf-web",
         },
     ]
@@ -2272,7 +2294,7 @@ async def test_a_rename_that_still_collides_leaves_the_bank_before_any_import(bo
     assert box.engine.imports == []
     left_ids = json.loads(Path(note.rsplit(" ", 1)[-1]).read_text())
     assert left_ids["coding-agent::web"]["page_names"] == [
-        "project:web/initiatives (coding-agent::web)"
+        "project:web/component map (coding-agent::web)"
     ]
 
 
@@ -2293,10 +2315,14 @@ async def test_two_banks_with_one_page_name_keep_one_plain_and_rename_the_other(
     assert (
         nodes[_new("claude-code::web", "cc-kp-map")]["name"] == "Component map (claude-code::web)"
     )
-    # No refresh times on the folders: the bank id decides.
-    assert nodes[_new("claude-code::web", "cc-kf-init", "folder")]["name"] == "Initiatives"
-    assert nodes[_new("coding-agent::web", "kf-init", "folder")]["name"] == (
-        "Initiatives (coding-agent::web)"
+    # Folder names are not unique: both banks' Initiatives folders keep the
+    # name, side by side in the project folder, each with its own pages.
+    folder = project_folder(box, "web")["id"]
+    for bank, old in (("claude-code::web", "cc-kf-init"), ("coding-agent::web", "kf-init")):
+        node = nodes[_new(bank, old, "folder")]
+        assert (node["name"], node["parent_id"]) == ("Initiatives", folder)
+    assert nodes[_new("claude-code::web", "cc-kp-init")]["parent_id"] == _new(
+        "claude-code::web", "cc-kf-init", "folder"
     )
     model = box.engine.banks["hal0:shared"]["models"][
         nodes[_new("claude-code::web", "cc-kp-map")]["mental_model_id"]
@@ -2623,8 +2649,51 @@ async def test_the_reference_box_with_a_page_compat_already_wrote_keeps_that_pag
             assert rows[_std_id(bank, index)]["id"] == _new(bank, _std_id(bank, index))
 
 
-async def test_two_of_one_banks_own_nodes_with_one_name_leave_it(box: Box) -> None:
-    """A true conflict: two of one bank's own root nodes with one name. The
+async def test_folders_of_one_name_are_no_conflict(box: Box) -> None:
+    """``uq_kp_folder_pagename`` is ``WHERE kind = 'page'``: two folders of one
+    name, and a folder named as a page, land side by side, none renamed."""
+    seed_pages(box)
+    b = box.engine.banks["coding-agent::web"]
+    for parent in ("kf-two", "kf-map"):
+        b["models"][f"mm-{parent}"] = {
+            "id": f"mm-{parent}",
+            "name": "Notes",
+            "tags": ["knowledge:notes"],
+            "trigger": PLUGIN_TRIGGER,
+            "content": "",
+        }
+    b["pages"].extend(
+        [
+            {"id": "kf-two", "kind": "folder", "name": "initiatives", "parent_id": None},
+            {"id": "kf-map", "kind": "folder", "name": "Component map", "parent_id": None},
+            *(
+                {
+                    "id": f"kp-{parent}",
+                    "kind": "page",
+                    "name": "Notes",
+                    "parent_id": parent,
+                    "mental_model_id": f"mm-{parent}",
+                }
+                for parent in ("kf-two", "kf-map")
+            ),
+        ]
+    )
+    result = await box.fold().run()
+    assert result["cut_over"] is True, result["left"]
+    nodes = shared_nodes(box)
+    folder = project_folder(box, "web")["id"]
+    for old, name in (
+        ("kf-init", "Initiatives"),
+        ("kf-two", "initiatives"),
+        ("kf-map", "Component map"),
+    ):
+        node = nodes[_new("coding-agent::web", old, "folder")]
+        assert (node["name"], node["parent_id"]) == (name, folder)
+    assert nodes[_new("coding-agent::web", "kp-map")]["name"] == "Component map"
+
+
+async def test_two_of_one_banks_own_pages_with_one_name_leave_it(box: Box) -> None:
+    """A true conflict: two of one bank's own root pages with one name. The
     engine's own index forbids that in a real bank (names are compared lower
     case), so the fake bank is given them directly."""
     b = box.engine.banks["pi-coder"]
@@ -2637,5 +2706,5 @@ async def test_two_of_one_banks_own_nodes_with_one_name_leave_it(box: Box) -> No
     result = await box.fold().run()
     assert "pi-coder" in result["left"]
     note = next(r["note"] for r in result["banks"] if r["bank"] == "pi-coder")
-    assert "two of the bank's own nodes share a name there" in note
+    assert "two of the bank's own pages share a name there" in note
     assert box.engine.imports == []

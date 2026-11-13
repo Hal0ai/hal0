@@ -604,9 +604,8 @@ def test_the_rewritten_archive_is_one_a_merge_import_reads() -> None:
         assert set(result.ids["shared"].pop(key)) == {"web-conventions", "web-page-model"}
     assert set(result.ids["shared"].pop("page_nodes")) == {"kf-1", "kp-1"}
     assert result.ids["shared"].pop("project_folders") == {placeholder_folder_id("web"): "web"}
-    assert result.ids["shared"].pop("page_names") == [
-        ["web", "f", folded_node_id("coding-agent::web", "kf-1", "folder")]
-    ]
+    # Only a page's name is unique in a folder: the folder F at the top is not listed.
+    assert result.ids["shared"].pop("page_names") == []
     assert result.ids["shared"] == {
         "documents": ["web::hal0-legacy-coding-agent::n"],
         "mental_models": ["web-conventions", "web-page-model"],

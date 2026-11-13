@@ -201,17 +201,17 @@ The pre-check refuses a bank whose page shown in a project folder lacks that
 scope, or keeps content its source trigger was not scoped to that project
 for. After the import, every page must be in its folder with its scope.
 
-**One name, one node, per project folder.** A name is unique in a folder, and
-every coding bank of one project brings the plugin's five standard pages
-(Component map, Conventions and patterns, Core concepts, Initiatives and
-enhancements, Key decisions and rationale) under the same names. So when
-several nodes would take one name in one project folder, one keeps it and the
-others are renamed `<name> (<old bank>)`, cut to fit the engine's 256
-characters:
+**One name, one page, per project folder.** A page's name is unique in its
+folder (the engine's index covers pages only), and every coding bank of one
+project brings the plugin's five standard pages (Component map, Conventions
+and patterns, Core concepts, Initiatives and enhancements, Key decisions and
+rationale) under the same names. So when several pages would take one name in
+one project folder, one keeps it and the others are renamed
+`<name> (<old bank>)`, cut to fit the engine's 256 characters:
 
-1. a node the target already holds that the fold-in did not send (one the
+1. a page the target already holds that the fold-in did not send (one the
    plugin wrote through compat), or one the platform bank carries into that
-   folder, keeps the name, and every folded node of that name is renamed;
+   folder, keeps the name, and every folded page of that name is renamed;
 2. otherwise the bank whose id names the project most directly keeps it:
    `<harness>::<slug>`, then a repository name the registry maps to the slug,
    then a bank whose project comes from tags (`Hal0::Agents`, `pi-coder`);
@@ -221,8 +221,16 @@ characters:
 The choice is kept in the ledger (`page_keepers`, names only), so every later
 run makes the same one. A renamed page keeps its page-map entry, so its old
 id and its links still resolve. Only a true conflict leaves a bank: two of its
-own nodes with one name in one folder, or a renamed name the folder already
+own pages with one name in one folder, or a renamed name the folder already
 holds.
+
+Folder names are not unique, so folders are never renamed. When several banks
+of one project each bring an `Initiatives` folder, the project folder holds
+one `Initiatives` folder per bank, side by side, each with that bank's pages.
+They are not merged into one: the merge import keeps a page's parent only
+when the parent is in the same archive, so one bank's pages cannot be hung
+under a folder another bank sends. The plugin finds a folder by name and puts
+new initiatives in the first it finds.
 
 Then the fold-in records each page's old id, new id and folder in
 `/var/lib/hal0/state/memory-fold-in-page-map.json` (0644, read by hal0-api).

@@ -39,8 +39,9 @@ What hindsight-api 1.2.0 gives it (read in its source, not assumed):
   (``_restore_knowledge_pages``). The source bank keeps its pages, so a
   folded page keeps its id only when the archive gives it one no bank holds.
   A node's ``parent_id`` is kept only when the parent is in the same archive
-  (else it lands at the root), and a node's name is unique in its folder
-  (``uq_kp_folder_pagename``; a clash is dropped ``ON CONFLICT DO NOTHING``).
+  (else it lands at the root), and a page's name is unique in its folder
+  (``uq_kp_folder_pagename``, a partial index ``WHERE kind = 'page'``: folder
+  names are not unique; a clash is dropped ``ON CONFLICT DO NOTHING``).
   So a coding bank's pages are given new ids and hung in their project's
   folder in the archive itself (:func:`_place_pages`), the folder being the
   target's own, swapped in just before the send
@@ -1489,7 +1490,9 @@ class _Placement:
     #: Old node id -> ``{"id", "kind", "name", "project"}``; ``project`` is
     #: ``None`` for a node left outside every project folder.
     nodes: dict[str, dict[str, Any]]
-    #: ``[slug, lower-cased name, new id]`` of every node directly in a project folder.
+    #: ``[slug, lower-cased name, new id]`` of every page directly in a project
+    #: folder: only a page's name is unique in a folder (``uq_kp_folder_pagename``
+    #: is ``WHERE kind = 'page'``), so folders are not listed.
     names: list[list[str]]
 
     def ids(self) -> dict[str, Any]:
@@ -1624,7 +1627,8 @@ def _place_pages(
             folder = placeholder_folder_id(slug)
             folders[folder] = slug
             row["parent_id"] = folder
-            names.append([slug, str(page.get("name") or "").lower(), new_of[old]])
+            if page.get("kind") == "page":
+                names.append([slug, str(page.get("name") or "").lower(), new_of[old]])
         else:
             row["parent_id"] = None
         rows.append(row)
@@ -1697,7 +1701,7 @@ def _place_pages(
 
 
 def _platform_page_names(pages: list[dict[str, Any]]) -> list[list[str]]:
-    """``[slug, lower-cased name, id]`` of every node a platform bank carries directly
+    """``[slug, lower-cased name, id]`` of every page a platform bank carries directly
     in a root ``project:<slug>`` folder: what a coding bank's pages may not clash with."""
     from hal0.memory.knowledge_pages import KNOWLEDGE_FOLDER_PREFIX
 
@@ -1711,7 +1715,7 @@ def _platform_page_names(pages: list[dict[str, Any]]) -> list[list[str]]:
     return [
         [folders[str(p["parent_id"])], str(p.get("name") or "").lower(), str(p.get("id"))]
         for p in pages
-        if p.get("parent_id") and str(p.get("parent_id")) in folders
+        if p.get("kind") == "page" and p.get("parent_id") and str(p.get("parent_id")) in folders
     ]
 
 
@@ -2310,7 +2314,7 @@ class Journal:
     #: (:meth:`FoldIn._precheck_all`); imports start only then.
     checked: bool = False
     #: Per target, ``"<slug>/<lower-cased name>" -> keeper``: who keeps the
-    #: plain name of a page or folder that several banks bring to one
+    #: plain name of a page that several banks bring to one
     #: project folder (:meth:`FoldIn._settle_page_names`). Kept in the ledger.
     page_keepers: dict[str, dict[str, str]] = field(default_factory=dict)
     banks: list[BankEntry] = field(default_factory=list)
@@ -3768,17 +3772,25 @@ class FoldIn(em.EngineMaintenance):
                 await self._clashes(journal, entry, name, journal.targets[name], {})
 
     async def _settle_page_names(self, journal: Journal) -> None:
-        """Give every page or folder bound for one project folder a name of its own.
+        """Give every page bound for one project folder a name of its own.
 
-        A name is unique in a folder (``uq_kp_folder_pagename``), and every
-        coding bank of one project brings the plugin's five standard pages
-        under the same names. Within one project folder of the target:
+        A page's name is unique in its folder (``uq_kp_folder_pagename``,
+        alembic ``a9b8c7d6e5f4``, a partial index ``WHERE kind = 'page'``),
+        and every coding bank of one project brings the plugin's five standard
+        pages under the same names. Folder names are not unique, so folders
+        are never renamed: two banks' ``Initiatives`` folders land as two
+        sibling folders of that name in the project folder. (Merging them into
+        one would hang one bank's pages under a folder another bank's archive
+        carries, which the merge import cannot do: it keeps a ``parent_id``
+        only when the parent is in the same archive, and the page rule would
+        then have to run inside every merged folder.) Within one project
+        folder of the target:
 
-        * a node already there that no bank of the run sent (one the plugin
+        * a page already there that no bank of the run sent (one the plugin
           wrote through compat, or the platform bank's), or one the platform
           bank of this run carries there, keeps its name, and every folded
           node of that name is renamed;
-        * otherwise one folded node keeps the plain name: the one the ledger
+        * otherwise one folded page keeps the plain name: the one the ledger
           recorded as keeper, else the one from the bank whose id names the
           project most directly (``<harness>::<slug>``, then a repository
           name the registry maps to it, then a bank whose project comes from
@@ -3787,7 +3799,7 @@ class FoldIn(em.EngineMaintenance):
 
         The choice is recorded per name (:attr:`Journal.page_keepers`, then
         the ledger), so every run makes the same one. A bank is left only by
-        a true conflict: two of its own nodes with one name in one folder, or
+        a true conflict: two of its own pages with one name in one folder, or
         a renamed name the folder already holds. Renames are written into the
         bank's shared archive and its ids (:meth:`_apply_page_names`) before
         the clash checks, so those compare what will be sent.
@@ -3874,9 +3886,9 @@ class FoldIn(em.EngineMaintenance):
                     journal,
                     entry,
                     BankLeft(
-                        f"bank {entry.bank}: {len(conflicts[entry.bank])} knowledge page or "
-                        "folder name(s) cannot be given a place of their own in their project "
-                        "folder (two of the bank's own nodes share a name there, or the renamed "
+                        f"bank {entry.bank}: {len(conflicts[entry.bank])} knowledge page "
+                        "name(s) cannot be given a place of their own in their project "
+                        "folder (two of the bank's own pages share a name there, or the renamed "
                         "name is taken too). Rename one in the old bank, then run the fold-in "
                         "again",
                         bank=entry.bank,
@@ -4354,8 +4366,13 @@ class FoldIn(em.EngineMaintenance):
         return out
 
     async def _project_page_names(self, bank: str) -> dict[tuple[str, str], str]:
-        """``(slug, lower-cased name) -> node id`` of every node directly in a root
-        ``project:<slug>`` folder of ``bank``: the names a carried page may not take."""
+        """``(slug, lower-cased name) -> page id`` of every page directly in a root
+        ``project:<slug>`` folder of ``bank``: the names a carried page may not take.
+
+        Only pages: ``uq_kp_folder_pagename`` is ``WHERE kind = 'page'``. When
+        a project has several root folders of its name (:meth:`_project_folder`),
+        the names in all of them count, because compat shows them as one.
+        """
         from hal0.memory.knowledge_pages import KNOWLEDGE_FOLDER_PREFIX
 
         if bank not in await self._bank_ids():
@@ -4369,7 +4386,11 @@ class FoldIn(em.EngineMaintenance):
                 continue
             slug = name[len(KNOWLEDGE_FOLDER_PREFIX) :]
             for child in root.get("children") or []:
-                if isinstance(child, dict) and isinstance(child.get("id"), str):
+                if (
+                    isinstance(child, dict)
+                    and child.get("kind") == "page"
+                    and isinstance(child.get("id"), str)
+                ):
                     out.setdefault((slug, str(child.get("name") or "").lower()), child["id"])
         return out
 
@@ -4410,12 +4431,15 @@ class FoldIn(em.EngineMaintenance):
         """``data`` with each placeholder project folder swapped for the target's own.
 
         The rewrite hangs a coding bank's pages under a placeholder folder per
-        project (:func:`_place_pages`); the merge import keeps a node's
-        ``parent_id`` only when the parent is in the same archive, and a root
-        folder's name is unique in a bank (``uq_kp_folder_pagename``), so the
-        archive must carry the target's own folder under its own id. That row
-        is kept as the target has it (``ON CONFLICT DO NOTHING``) and the
-        pages land in it.
+        project (:func:`_place_pages`). The merge import keeps a node's
+        ``parent_id`` only when the parent is in the same archive, so the
+        archive must carry the folder the pages go in. Folder names are not
+        unique (``uq_kp_folder_pagename`` is ``WHERE kind = 'page'``), so a
+        placeholder sent as it is would land as one more ``project:<slug>``
+        folder beside the target's; instead the archive carries the target's
+        own folder (:meth:`_project_folder`) under its own id. That row is kept
+        as the target has it (``ON CONFLICT DO NOTHING``) and the pages land
+        in it.
         """
         folders = {str(k): str(v) for k, v in (ids.get("project_folders") or {}).items()}
         if not folders:
