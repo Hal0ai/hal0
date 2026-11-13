@@ -2325,7 +2325,11 @@ def _owns_page(node: dict[str, Any], agent: str) -> bool:
 class _ProjectPages:
     """What of the platform bank's tree one project's caller may see."""
 
-    #: Ids of the project's folders at the root, oldest id first.
+    #: Ids of the project's folders at the root, in id order. The engine names
+    #: a folder ``kf-<uuid4 hex>`` and does not return a node's creation time
+    #: (a folder's ``timestamp`` is its last update), so this is not creation
+    #: order: it is an order every request and every process agrees on, so
+    #: they all put new nodes in the same folder.
     folders: list[str] = field(default_factory=list)
     #: The contents of those folders, as the caller is shown them.
     roots: list[dict[str, Any]] = field(default_factory=list)
@@ -2371,7 +2375,7 @@ def _project_view(tree: Any, scope: _Scope) -> _ProjectPages:
         and node.get("name") == name
         and isinstance(node.get("id"), str)
     ]
-    mine.sort(key=lambda node: node["id"])
+    mine.sort(key=lambda node: node["id"])  # a stable choice, not creation order
     view.folders = [node["id"] for node in mine]
     project_folders = set(view.folders)
     view.folder_ids.update(project_folders)
@@ -2780,10 +2784,14 @@ async def knowledge_base_update_node(
     for another client's page or a folder). Both refusals are 404, the one
     write refusal here that is: the plugin sends this request only from its
     page re-sync (``seedPages``), which raises on any other status and with it
-    the whole configure pass that imports the client's memory, while a 404
-    ends the re-sync and nothing else. Two clients of one project re-sync
+    the whole configure pass that imports the client's memory. On a 404 the
+    plugin marks knowledge pages unsupported for the rest of that run: the
+    re-sync stops, the taxonomy pages after this one are neither created nor
+    re-synced, deepen logs ``knowledge_pages_unavailable``
+    (dist/deepen.js), and the memory import carries on. Two clients of one project re-sync
     each other's pages whenever their plugin versions or repository directory
-    names differ, so the refusal is an everyday answer, not an attack. ``name``, ``source_query`` and ``max_tokens`` are passed on;
+    names differ, so the refusal is an everyday answer, not an attack.
+    ``name``, ``source_query`` and ``max_tokens`` are passed on;
     new ``tags`` or ``trigger`` settings are written back through the envelope
     with hal0's scope recomputed from them, so the page stays the caller's and
     stays inside the project. Moving a node (``parent_id``) is not offered.
