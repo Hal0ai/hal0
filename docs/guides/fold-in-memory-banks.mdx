@@ -37,9 +37,18 @@ tags are rewritten in the archive first:
   `private__<agent>` bank, and every document from another bank that has a
   `private:` id or a `visibility:private` tag on it or on any of its facts.
   Each such document gets the id `private:<owner>:<id>` and each fact the
-  tags `agent:<owner>` and `visibility:private`. The shared archive is checked
-  before it is imported: it must hold no `visibility:private` tag and no
-  `private:` id, or the bank is not imported.
+  tags `agent:<owner>` and `visibility:private`. A private owner taken from
+  an `agent:` tag in the platform bank or a project bank is lower-cased and
+  goes through `--owner`. A private document whose facts name more than one
+  owner cannot be filed under one, so its bank is left.
+- **The split is checked against the source before anything is sent.** Every
+  document, observation, mental model and knowledge page the exported bank
+  marks private (it is in a `private__<agent>` bank, has a `private:` id, is
+  tagged `visibility:private`, or is an observation resting on such a fact)
+  must be in the private archive under its new id, or counted as dropped,
+  and never in the shared archive. The shared archive must also hold no
+  `visibility:private` tag and no `private:` id. A bank that fails either
+  check is left before any import.
 - **Everything else goes to `hal0:shared`,** tagged as hal0 tags a write
   today: one `agent:`, one `kind:`, session ids and lifecycle words moved
   into metadata, and the project.
@@ -64,14 +73,25 @@ tags are rewritten in the archive first:
   `/api/memory/compat` finds its old `conversation:` and `git:` documents
   under the ids it already uses.
 - **Observations follow their source facts.** One whose sources fall on
-  both sides, or under two owners, is dropped and counted; consolidation
-  builds it again.
-- **Mental models go to `hal0:shared` only.** A per-repository bank's
-  models get a new id, `<project>-<id>`, and its project tag, so they cannot
-  collide with each other in one bank. A bank that held private facts gives
-  its models without what they generated: the engine refreshes them from what
-  the shared bank holds. Private banks give none. Knowledge pages follow
-  their models and get new page ids from the engine.
+  both sides, or under two owners, is dropped and counted; so is one tagged
+  `visibility:private` whose sources are all shared, because it can be
+  neither published nor imported on the private side. Consolidation builds
+  them again.
+- **Mental models of a shared bank go to `hal0:shared`.** A per-repository
+  bank's models get a new id, `<project>-<id>`, and its project tag, so they
+  cannot collide with each other in one bank. A bank that held private facts
+  gives its models without what they generated: the engine refreshes them
+  from what the shared bank holds. A model tagged `visibility:private` there
+  is dropped and counted. Knowledge pages follow their models and get new
+  page ids from the engine.
+- **A `private__<agent>` bank's mental models go to `hal0:private`,** with
+  the id `<agent>-<id>`, the tags `agent:<agent>` and `visibility:private`,
+  and a scope confined to that agent (`exclude_mental_models`, and a tag
+  group that requires `agent:<agent>` and `visibility:private`), so only
+  that agent reads them and a refresh reads only its memory. They keep their
+  content: it was built from that agent's own bank. A private bank's
+  knowledge pages, and the models behind them, are not carried; the dry run
+  counts them.
 - **Directives are not carried.** A merge import never takes them. The dry
   run lists how many each bank has; recreate the ones you want.
 - **GUID documents** written before session-keyed ids are carried as they
@@ -88,9 +108,14 @@ The dry run reads every bank's documents and facts and reports, per bank:
 its class, facts, documents, observations, mental models and directives,
 how many facts are private, how many have no owner at all, who each
 harness's facts would be filed under (and why: the map, a client, or the
-pseudo-owner), and the project slugs its facts would be tagged with. It
-writes nothing anywhere, not even an export. `--json` gives the same as one
-document.
+pseudo-owner), and the project slugs its facts would be tagged with. It also
+says how many mental models go to `hal0:private` and how many are not
+carried, how many shared facts no agent will be able to read (no project,
+so `project:unresolved`, under a `hal0-legacy-*` pseudo-owner: name the
+harness's client with `--owner` to give them a reader), any private document
+that names two owners, what an earlier run did to each bank, and whether this
+run can cut over. It writes nothing anywhere, not even an export. `--json`
+gives the same as one document.
 
 It also refuses what `--apply` would refuse, and exits 1: an embedder switch
 running or unfinished, an earlier fold-in unfinished, memory writes already
@@ -112,37 +137,80 @@ ends. `--apply` and `--resume` need root.
 </Aside>
 
 The banks fold in one at a time. After a bank's import, each target must
-hold every document and mental model the bank's archive carried and have
-grown by exactly that much (observations by at least as many). A bank that
-does not match is **left**: it stays as it was, a readable old bank, and the
-run carries on with the next one. A bank is also left before anything is
-imported when a target already holds one of its document or mental-model
-ids, or when its export does not hold all of it (the engine's export leaves
-out a fact that belongs to no document).
+hold every document, mental model and knowledge page the bank's archive
+carried, by the ids recorded for it, and have grown by exactly what was sent
+(observations by at least as many). A bank that does not match is **left**:
+it stays as it was, a readable old bank, and the run carries on with the
+next one. A bank is also left before anything is imported when a target
+already holds one of its document or mental-model ids, or when its export
+does not hold all of it (the engine's export leaves out a fact that belongs
+to no document).
 
-When every bank is folded or left, the run returns the engine to its normal
-address, writes the layout record as `two_bank` with the folded and left
-banks, restarts hal0-api so it uses the two banks, and only then lets writes
-in again. From then on every agent writes to `hal0:shared` and
+## The cutover waits for every bank
+
+The store moves to the two banks only when every old bank is folded. Then
+the run returns the engine to its normal address, writes the layout record
+as `two_bank`, restarts hal0-api so it uses the two banks, and only then lets
+writes in again. From then on every agent writes to `hal0:shared` and
 `hal0:private`.
 
-## If a bank is left, or the run stops
+When any bank is left, or was not part of the run (`--bank`), there is no
+cutover. The run returns the engine to its normal address and lets writes in
+again without touching the layout: the box stays on the old layout, agents
+go on writing to the old banks, and nothing blocks `hal0 update`. It lists
+the banks that are not folded, why, and the command to retry them, and exits
+3. What it folded is kept in `/var/lib/hal0/state/memory-fold-in-ledger.json`
+for the next run.
+
+## Running it again
 
 ```sh
-sudo hal0 memory migrate fold-in --apply --bank pi-coder
+sudo hal0 memory migrate fold-in --apply                  # every bank
+sudo hal0 memory migrate fold-in --apply --bank pi-coder  # one left bank
 ```
 
-retries one left bank on a store already on the two banks. A partial import
-is never undone: documents that landed stay, and the retry sends the bank
-again with `skip`, so only what is missing lands, and the check is then that
-every document and model is there.
+A later run exports each left bank afresh and folds it. A bank an earlier run
+folded is never imported again. It is re-checked: when its counts and last
+write are as the ledger recorded them and every document, model and page the
+earlier run sent is still in its target, it counts as folded. When the old
+bank has changed since (writes go on there until the cutover), it is
+exported again and only what the target is missing is sent:
+
+- a document the earlier run folded is the fold-in's own copy only when the
+  old bank still holds it unchanged. If it was changed since (an agent
+  appended to it, say), the bank is left: a merge with `skip` would keep the
+  older copy and lose the change without a word. Delete that copy from the
+  target (the engine's `DELETE /v1/default/banks/<bank>/documents/<id>`) and
+  run again; the document is then sent as it is now. A document deleted from
+  the old bank since is refused the same way, because its copy would bring
+  it back;
+- new documents are sent, and must all arrive;
+- an observation the earlier run sent that rests on a document already in
+  the target must be there; if it did not land with its document, no merge
+  can bring it now, and the bank is left with the documents to delete before
+  trying again. One the old bank built after the earlier run is not carried
+  (the target's own consolidation builds it), and the report counts it;
+- a knowledge page whose model landed without it is sent again, with the
+  folders above it. The engine gives those folders new ids, so a resent page
+  can sit in a second folder of the same name.
+
+A `--bank` run re-checks the banks folded earlier too, because the cutover
+needs every bank folded as it is now. The `--owner` map and the list of
+bridge clients a bank was first sent with are kept in the ledger and used
+for that bank on every later run and every resume, so its documents keep
+their ids; a run that names a different `--owner` for such a bank is
+refused. A bank left before anything of it was sent is planned afresh.
+
+## If the run stops
 
 A run that stops after it sent an import (a crash, a kill, the engine gone)
 keeps memory writes paused and the engine private, and `--resume` carries it
 on from its journal, `/var/lib/hal0/state/memory-fold-in.json` (mirrored in
-the run's archive directory). An import still running is waited for, never
-cancelled. A run that stops before any import was sent is undone: the engine
-returns to its normal address and writes resume.
+the run's archive directory), with the owners it was planned with. An import
+still running is waited for, never cancelled; a resend sends only what is
+missing and is checked like the first. A run that stops before any import
+was sent is undone: the engine returns to its normal address and writes
+resume.
 
 The archives, as exported and as rewritten, are kept in
 `/var/lib/hal0/backups/memory-fold-in-<time>-<run>/`. Delete them when you

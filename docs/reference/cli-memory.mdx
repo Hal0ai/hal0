@@ -190,18 +190,19 @@ happens to each fact, observation, mental model and directive.
 
 | Flag | Meaning |
 |---|---|
-| `--apply` | Do it. The engine is moved to a private port and memory writes are paused for the whole run; at the end the layout record says `two_bank` and hal0-api is restarted. |
-| `--resume` | Carry an interrupted run on from its journal (`state/memory-fold-in.json`, mirrored as `fold-in-journal.json` in the run's archive directory). An import still running is waited for, never cancelled. |
-| `--status` | Where a run stands, from the files on disk: the journal, the pause, the isolation drop-in and the banks folded and left. Asks nothing of the engine. |
-| `--bank ID` | Repeatable. Fold only these banks. On a store already on the two banks it retries a bank an earlier run left; a bank already folded is refused. |
-| `--owner HARNESS=CLIENT` | Repeatable. File a coding bank's facts written by `HARNESS` (their `agent:` tag, else the bank's harness) under bridge client `CLIENT`. Without it: a memory-scoped bridge client of the harness's own name, else the reserved `hal0-legacy-<harness>`. `pi` maps to `pi-coder` by default. |
+| `--apply` | Do it. The engine is moved to a private port and memory writes are paused for the whole run. When every old bank is folded, the layout record says `two_bank` and hal0-api is restarted. When any bank is left or not in the run, there is no cutover: the engine returns to its normal address, writes resume on the old layout, and the banks folded so far are kept in `state/memory-fold-in-ledger.json` for the next run. |
+| `--resume` | Carry an interrupted run on from its journal (`state/memory-fold-in.json`, mirrored as `fold-in-journal.json` in the run's archive directory), with the owners it was planned with; a different `--owner` is refused. An import still running is waited for, never cancelled. |
+| `--status` | Where a run stands, from the files on disk: the journal, the pause, the isolation drop-in, the ledger's banks folded and left, and the layout record. Asks nothing of the engine. |
+| `--bank ID` | Repeatable. Fold only these banks, typically ones an earlier run left. Banks an earlier run folded are re-checked as well (never imported again; only what the old bank gained since is sent), and naming one is refused. The run cuts over only if no other bank is still to fold. |
+| `--owner HARNESS=CLIENT` | Repeatable. File a coding bank's facts written by `HARNESS` (their `agent:` tag, else the bank's harness) under bridge client `CLIENT`, and a private fact's `agent:` name in the other banks too. Without it: a memory-scoped bridge client of the harness's own name, else the reserved `hal0-legacy-<harness>` (a private agent name outside coding banks is kept, lower-cased). `pi` maps to `pi-coder` by default. Frozen per bank, with the list of bridge clients, once anything of the bank was sent: a later run that names different owners for it is refused. |
 | `--map BANK=HARNESS` | Repeatable. Fold a bank the fold-in does not know as a coding bank written by `HARNESS`, its project taken from each fact's `project:` tags. Without it such a bank is refused. |
 | `--json` | One JSON document on stdout: the plan, the result or the failure. |
 
-Exit codes: 0 when the dry run has no refusal or the run cut over (also when
-some banks were left; the output lists them and the `--bank` retry); 1 when the
-dry run or `--apply` is refused, or a run fails; 2 for a usage error; 130 when
-interrupted. A run that fails after it sent an import keeps memory writes
+Exit codes: 0 when the dry run has no refusal or the run cut over; 3 when the
+run ended without a cutover because a bank was left or not in the run (the
+output lists them, why, and the `--apply --bank` retry; writes are open on the
+old layout); 1 when the dry run or `--apply` is refused, or a run fails; 2 for
+a usage error; 130 when interrupted. A run that fails after it sent an import keeps memory writes
 paused and the engine private until `--resume` completes; one that fails
 before is undone.
 

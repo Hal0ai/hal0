@@ -230,6 +230,17 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      reporting how many folded in and which are left; a left-over bank can be
      retried alone. This differs from the embedder switch in decision 2, which
      stops on the first mismatch because the embedder is instance-wide.
+   - *No cutover while any bank is left.* The layout record becomes
+     `two_bank` only when every old bank is folded. A run that leaves one (or
+     does not include one, `--bank`) returns the engine, lifts the pause and
+     keeps the box on the old layout, so writes go on to the old banks; it
+     keeps what it folded in a ledger. A later run folds the rest and cuts
+     over. It never imports a folded bank twice: it re-checks it by counts and
+     by the document ids it recorded, sends only documents the old bank gained
+     since, and refuses (leaves the bank) when a folded document has changed or
+     gone from the old bank, because a merge with `skip` would keep the stale
+     copy without a word. An observation a resend cannot carry, because its
+     documents landed before without it, leaves the bank too.
    - *It tags in the archive.* An engine import cannot add or change tags
      (verified on engine 1.2.0), so the fold-in exports a bank, rewrites the
      tags in the exported documents (project, agent, the envelope's rules, and
@@ -276,6 +287,12 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      4. The dashboard shows where a fold-in stands and the command to run;
         it does not start one. The run needs root, as the embedder switch
         does.
+     5. (2026-11-13) No cutover while any bank is left, as above; this
+        replaces cutting over with banks left over. A `private__<agent>`
+        bank's mental models go to `hal0:private` under `<agent>-<id>`,
+        tagged for that agent and with a scope confined to it, so the
+        provider's model read rule gives them to that agent alone; its
+        knowledge pages are not carried.
    - *What the engine allows, checked in hindsight-api 1.2.0.* A merge
      import (`mode=merge&document_conflict=skip`) takes an archive's
      documents with their facts, the observations whose every source fact it
