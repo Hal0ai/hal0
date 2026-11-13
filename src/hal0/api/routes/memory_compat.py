@@ -2294,6 +2294,12 @@ def _current_node_id(provider: Any, node_id: str, held: Any) -> str:
     coding bank; the fold-in carried them into the platform bank under new
     ids. The new id is used only when the caller's view of the tree holds it,
     so an old id gets exactly the answer its page would.
+
+    Every caller checks the id it gets back against the view again, so the
+    ``in held`` test does not decide what is shown. It decides what a
+    refusal says: ``PATCH nodes/<id>`` and ``parent_id`` echo the id in the
+    error details, and without the test an old id from another project would
+    be answered with the id that project's page has now.
     """
     if node_id in held:
         return node_id

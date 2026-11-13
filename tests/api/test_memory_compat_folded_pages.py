@@ -235,3 +235,39 @@ def test_the_reference_boxs_three_banks_read_back_through_compat(
             else:
                 # A bank whose project comes from tags: rebuilt from nothing.
                 assert not resp.json()["body"]
+
+
+def test_an_old_id_resolves_only_to_a_node_the_view_holds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_current_node_id`` directly: the map's answer is used only when the
+    caller's view holds it, so an old id that names another project's node
+    stays the old id (and an error never echoes that node's id)."""
+    from types import SimpleNamespace
+
+    from hal0.api.routes import memory_compat
+
+    provider = SimpleNamespace(platform_bank="hal0:shared")
+    monkeypatch.setattr(
+        memory_compat,
+        "resolve_folded_node",
+        lambda bank, node_id: "kp-other-project" if node_id == "kp-old" else None,
+    )
+    assert memory_compat._current_node_id(provider, "kp-old", {"kp-other-project"}) == (
+        "kp-other-project"
+    )
+    assert memory_compat._current_node_id(provider, "kp-old", {"kp-mine"}) == "kp-old"
+    assert memory_compat._current_node_id(provider, "kp-mine", {"kp-mine"}) == "kp-mine"
+    assert memory_compat._current_node_id(provider, "kp-unmapped", set()) == "kp-unmapped"
+
+
+def test_a_refusal_never_names_the_node_another_projects_old_id_became(
+    client: TestClient, key: str
+) -> None:
+    """Through compat: an atlas client updating web's old id is refused with
+    the id it sent, not with the id of web's page."""
+    new = kp.folded_node_id("coding-agent::web", "kp-init", "page")
+    resp = client.patch(
+        _url(ATLAS + "/nodes/kp-init"), json={"source_query": "x?"}, headers=_auth(key)
+    )
+    assert resp.status_code in (403, 404), resp.text
+    assert new not in resp.text
+    assert resp.json()["error"]["details"] == {"node_id": "kp-init"}
