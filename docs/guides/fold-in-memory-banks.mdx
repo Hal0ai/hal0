@@ -166,8 +166,15 @@ So each page a coding bank carries is, in the archive itself:
 - **given a new id**, derived from the old bank and the old id, so every run
   and every resend sends it under the same id;
 - **put in its project's folder** with the folders above it. The folder is
-  found as compat finds it (the first root folder of that name), or created
-  as compat creates it, just before the bank is sent. A bank whose project
+  found as compat finds it (the first root folder of that name in id order),
+  or created as compat creates it, just before the bank is sent. The engine
+  does not refuse a second folder of one name, so if another writer creates
+  the project's folder while the fold-in creates it too (the run isolates the
+  engine and pauses writes through hal0, so this should not happen), the
+  project has two. The fold-in reads the tree again after it creates one and
+  uses the first in id order, as compat does, so its pages and the plugin's
+  later writes share a folder; the other is left empty. Compat shows every
+  root folder of a project's name as one. A bank whose project
   comes from each fact's tags (`pi-coder`, `Hal0::Agents`, `--map`) places
   each tree at its root by its pages' own `project:` tag; a tree whose pages
   name no project, or several, stays at the root, where compat does not show

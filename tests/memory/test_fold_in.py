@@ -2233,6 +2233,42 @@ async def test_pages_join_a_project_folder_the_target_already_has(box: Box) -> N
     _assert_pages_placed(box)
 
 
+@pytest.mark.parametrize("raced", ["kf-0raced", "kf-zraced"])
+async def test_a_project_folder_another_writer_creates_meanwhile_is_shared(
+    box: Box, raced: str
+) -> None:
+    """Between the fold-in's tree read and its POST, another writer creates
+    ``project:web``. The fold-in reads the tree again and puts the pages in the
+    first folder in id order, the one compat reads and writes, whichever made it."""
+    seed_pages(box)
+    box.engine.banks["hal0:shared"] = empty_bank()
+
+    def race(bank: str) -> None:
+        if bank == "hal0:shared":
+            box.engine.banks[bank]["pages"].append(
+                {"id": raced, "kind": "folder", "name": "project:web", "parent_id": None}
+            )
+
+    box.engine.before_folder_post = race
+    result = await box.fold().run()
+    assert result["cut_over"] is True, result["left"]
+    roots = box.engine.tree("hal0:shared")
+    folders = kp_ids.project_folders(roots, "web")
+    assert len(folders) == 2
+    first = str(folders[0]["id"])
+    assert first == min(raced, next(str(f["id"]) for f in folders if f["id"] != raced))
+    nodes = shared_nodes(box)
+    for old, kind in (("kp-map", "page"), ("kf-init", "folder")):
+        assert nodes[_new("coding-agent::web", old, kind)]["parent_id"] == first
+    # The other folder is left empty, and the page map names the shared one.
+    other = next(f for f in folders if f["id"] != first)
+    assert not any(
+        p.get("parent_id") == other["id"] for p in box.engine.banks["hal0:shared"]["pages"]
+    )
+    rows = kp_ids.load_page_map()["targets"]["hal0:shared"]
+    assert rows["kp-map"]["folder"] == first
+
+
 async def test_a_name_the_target_folder_already_holds_keeps_it_and_the_folded_one_is_renamed(
     box: Box,
 ) -> None:

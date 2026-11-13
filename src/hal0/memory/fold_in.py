@@ -4402,6 +4402,18 @@ class FoldIn(em.EngineMaintenance):
         first root folder named ``project:<slug>`` in id order
         (:func:`hal0.memory.knowledge_pages.project_folders`), else the
         engine's ``POST .../knowledge-base/folders`` with that name.
+
+        The engine does not refuse a second folder of one name
+        (``create_knowledge_folder`` checks none). The run isolates the
+        engine and pauses memory writes through hal0, so compat should not
+        reach it; but a writer that does (compat's own folder create racing
+        this one, before the isolation took hold or from outside hal0) can
+        create the folder between this tree read and the POST. So a project
+        can end up with several root ``project:<slug>`` folders. Compat reads them as one tree and
+        puts new nodes in the first in id order, so after a POST the tree is
+        read again and that first one is used, whether it is the folder made
+        here or the other writer's; the pages and later plugin writes then
+        share one folder, and an empty duplicate is left as it is.
         """
         from hal0.memory.knowledge_pages import project_folder_name, project_folders
 
@@ -4423,6 +4435,15 @@ class FoldIn(em.EngineMaintenance):
                 resumable=True,
             )
         self._say(f"created the folder {project_folder_name(slug)} in {target}")
+        again = project_folders(await self._tree_roots(target), slug)
+        if len(again) > 1:
+            first = str(again[0]["id"])
+            self._say(
+                f"{target} now has {len(again)} folders named {project_folder_name(slug)} "
+                f"(another writer created one too); the pages go in {first}, the first in id "
+                "order, which compat reads and writes as the project's folder"
+            )
+            return first
         return folder
 
     async def _rehome_folders(

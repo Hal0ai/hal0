@@ -11,7 +11,10 @@ limits and error codes are listed there.
 The plugin keeps curated pages in a tree of folders and pages, each page a mental model the
 engine rebuilds from its `source_query`. Every bank name is the platform bank, so each project
 has one folder at the root of that bank's tree, named `project:<slug>`, created by the first
-page or folder written into it. The plugin is shown that folder's contents as its whole tree:
+page or folder written into it. The engine does not keep folder names unique, so two writers
+racing to create it (this endpoint and the [fold-in](/docs/guides/fold-in-memory-banks), say)
+can leave a project two root folders of that name: they are read as one, and new nodes go in
+the first in id order. The plugin is shown that folder's contents as its whole tree:
 nothing outside it (hal0's own pages, other projects' folders) is listed, read, searched or
 written here. A project with no folder yet has an empty tree, never `404`, because the plugin
 reads `404` as "no pages" and would then never create one. A client with no project
