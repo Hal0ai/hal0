@@ -133,7 +133,7 @@ VRAM bank; instead it shares the system's RAM through a GTT pool. A single large
 memory pool can be handed to whichever engine needs it, so you can load models
 far larger than a typical discrete GPU's VRAM would allow.
 
-![The dashboard Unified Memory bar — one 128 GB pool with each slot's allocation colour-coded and the free headroom that actually remains](/screenshots/unified-memory-hero.png)
+![The Overview page's memory bar — one GPU pool with each slot's allocation colour-coded and the free headroom that actually remains](/screenshots/dashboard-overview.png)
 
 This shapes how hal0 reports memory. It does **not** add system RAM to GPU VRAM,
 because on a unified-memory APU that would double-count — the GPU's memory *is*
@@ -180,13 +180,10 @@ box cannot afford the seed profile's window, the installer writes a custom profi
 `<seed>-ctx<N>` and points the slot at it; the slot file itself carries no
 context key.
 
-![The Slots view: the iGPU GTT carve-out bar above the Inference Engine, where iGPU and FLM (NPU) slots share the unified-memory pool](/screenshots/npu-occupancy.png)
+![The Slots view: the shared memory pool bar above the Inference Engine, where iGPU and FLM (NPU) slots draw from one unified-memory pool](/screenshots/slots-inference.png)
 *The shared GTT carve-out above the Inference Engine — iGPU slots and FLM (NPU) slots both draw from one unified-memory pool.*
 
 ## What the hardware probe detects
-
-![hal0 hardware metrics panel showing CPU, GPU, NPU, RAM, and disk readings](/screenshots/hardware-metrics.png)
-*The hardware dashboard panel after a successful probe run.*
 
 hal0 ships a hardware probe that inspects the machine and writes the result for
 the rest of the system to read. It detects the CPU (model, cores, threads),

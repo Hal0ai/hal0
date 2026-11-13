@@ -11,10 +11,9 @@ hal0 gives you three log/activity surfaces, each with a different
 lifetime and a different CLI verb: per-slot runtime logs, per-agent
 provisioning logs, the API's own systemd journal, and — separately from
 all of those — the durable Activity/Audit log, which you read in the
-dashboard's dock, merged with the journal. The dashboard also rolls
-request traffic up live:
-
-![The dashboard Requests widget — per-endpoint request volume with p50 / p95 latency over the last 60 seconds](/screenshots/requests-latency-widget.png)
+dashboard's dock, merged with the journal. The dashboard also rolls request
+traffic up live: per-endpoint request volume with p50 / p95 latency over the
+last 60 seconds.
 
 ## Slot logs
 
@@ -63,9 +62,6 @@ never disagree.
 | `n`         | `200`   | Trailing lines, 1–5000. |
 | `since`     | —       | A `journalctl --since` value (ISO timestamp or `'5min ago'`). |
 | `level`     | —       | Filter to this priority **and higher severity**. |
-
-![The hal0 dashboard Logs panel showing live journal output for a slot unit](/screenshots/logs-activity.png)
-*The dashboard Logs panel streams journal output for any hal0 unit in real time.*
 
 On a host without `journalctl` (e.g. CI), the endpoint returns an empty
 `lines` array plus a `hint` rather than erroring.

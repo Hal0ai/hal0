@@ -69,6 +69,7 @@ Root model `Hal0Config`, `extra="allow"`.
 | `publish_host` | str | `"127.0.0.1"` | non-empty, no whitespace/`:`/`/` |
 | `network_mode` | str | `""` | must be `""` or `"host"` |
 | `default_images` | dict[str,str] | `{}` | keys must be a `RUNNER_IMAGES` runner key (`standard`, `cpu`, `cuda`, `halogen`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`) — any other key is a config error; values must be non-empty image refs; sending `null` for a runner key clears its override |
+| `fabric_clock_guard` | str | `"refuse"` | one of `refuse`, `warn`, `off`. Policy when an NPU slot (`device=npu`) would load alongside a GPU slot (vulkan/rocm/hip) while the host's AMD GPU fabric clock is not held at its top DPM level: `refuse` blocks the load and names the host-side fix, `warn` loads and records the warning on the slot, `off` skips the check. An unreadable fabric-clock state always warns, never refuses. Overridable per-process with `HAL0_FABRIC_CLOCK_GUARD` ([ADR-0054](/docs/adr/0054-gpu-fabric-clock-guard)) |
 
 ### `[dispatcher]`
 
@@ -81,6 +82,7 @@ Root model `Hal0Config`, `extra="allow"`.
 | `stream_total_timeout_s` | float | `900.0` | `0.0-86400.0` (`0` disables) |
 | `stream_idle_timeout_s` | float | `300.0` | `0.0-86400.0` (`0` disables) |
 | `prefetch_parallel_cap` | int | `4` | `>= 1` |
+| `admission_wait_timeout_s` | float | `1800.0` | `1.0-86400.0`. Max seconds a request may wait in a slot's admission queue (only slots with `max_inflight` set) before the dispatcher answers `503` with `Retry-After` instead of forwarding. The forward's own read-timeout clock starts after admission, so this bound is independent of `direct_read_timeout_s` ([ADR-0056](/docs/adr/0056-serial-backend-admission)) |
 
 `stream_total_timeout_s` / `stream_idle_timeout_s` are the streaming **stall
 guard**: a chatty never-terminating upstream resets the transport read timer
@@ -136,6 +138,8 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `priority` | table | — | see below |
 | `embedding` | table | — | see below |
 | `projects` | table | — | see below |
+| `compat` | table | — | see below |
+| `lanes` | table | — | see below |
 
 #### `[memory.graph]`
 
@@ -240,12 +244,33 @@ codebase-survey marker. The endpoint reads the table from hal0-api's loaded
 configuration on each request: a change saved through the Settings API
 applies at once, and a hand edit of `hal0.toml` at the next restart.
 
+#### `[memory.lanes]` LLM concurrency lanes
+
+The global caps every memory LLM call shares, and the per-operation overrides
+under `[memory.lanes.<op>]` below. The engine reads these as its own
+`HINDSIGHT_API_*` environment variables.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `llm_max_concurrent` | int | `1` | `1-32`. `HINDSIGHT_API_LLM_MAX_CONCURRENT` — the global cap across every engine LLM call (retain, consolidation, reflect, mental-model refresh together). |
+| `timeout_s` | int | `600` | `30-3600`. `HINDSIGHT_API_LLM_TIMEOUT`. |
+| `reasoning_effort` | str | `"none"` | `HINDSIGHT_API_LLM_REASONING_EFFORT`. |
+| `strict_schema` | bool | `false` | `HINDSIGHT_API_LLM_STRICT_SCHEMA`. |
+
+The per-operation tables `retain`, `consolidation`, `reflect` and
+`mental_model_refresh` sit under this one and are documented below.
+
 #### `[memory.lanes.<op>]` output caps
 
 `<op>` is one of `retain`, `consolidation`, `reflect`, `mental_model_refresh`.
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
+| `max_concurrent` | int | unset | `1-32`. `HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT` for this operation only; unset falls back to `[memory.lanes].llm_max_concurrent`. |
+| `virtual_model` | str | unset | Optional per-op hal0 virtual model override (for example `hal0/utility` for a burst lane) instead of the shared `hal0/memory` alias. |
+| `timeout_s` | int | unset | `30-3600`. Per-op LLM timeout override; unset falls back to `[memory.lanes].timeout_s`. |
+| `reasoning_effort` | str | unset | Per-op `HINDSIGHT_API_{OP}_LLM_REASONING_EFFORT` override; unset falls back to `[memory.lanes].reasoning_effort`. |
+| `strict_schema` | bool | unset | Per-op `HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA` override; unset falls back to `[memory.lanes].strict_schema`. |
 | `max_completion_tokens` | int | unset; `consolidation` and `reflect` then render `8192` | `0-131072`; `0` leaves the engine uncapped. Rendered as `HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS` or `HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS`. Mental-model refresh runs through reflect, so the reflect cap bounds it; a mental model whose `max_tokens` is near the cap leaves no headroom, because the engine fails the call on `finish_reason=length` instead of truncating, and on a thinking model reasoning tokens count inside the cap. Setting it on `retain` (use `[memory.graph].extraction_max_tokens`) or on `mental_model_refresh` is refused |
 
 ### `[updates]`
