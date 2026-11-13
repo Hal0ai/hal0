@@ -242,3 +242,56 @@ def test_the_kill_hook_needs_both_variables(monkeypatch) -> None:
     assert cmd._kill_hook() is None
     monkeypatch.setenv(cmd.TEST_HOOKS_ENV, "1")
     assert cmd._kill_hook() is not None
+
+
+def test_the_dry_run_reasons_stay_readable_at_80_columns(monkeypatch) -> None:
+    # CT143: piped (no tty) at 80 columns, the action column was squashed to a
+    # few characters and its reasons could not be read.
+    from rich.console import Console
+
+    monkeypatch.setattr(cmd, "console", Console(width=80))
+    reason = (
+        "folded by run r-20261112; exported and checked again, and only what the "
+        "targets are missing is sent"
+    )
+    FakeFoldIn.plan = {
+        "banks": [
+            {
+                "bank": "coding-agent::hal0",
+                "class": "coding",
+                "action": "recheck",
+                "reason": reason,
+                "counts": {"facts": 12345, "documents": 678},
+            },
+            {"bank": "hal0:shared", "class": "target", "action": "none", "reason": "a target"},
+        ],
+        "refusals": [],
+        "warnings": [],
+    }
+    out = invoke()
+    assert out.exit_code == 0, out.output
+    assert max(len(line) for line in out.output.splitlines()) <= 80
+    text = " ".join(out.output.split())
+    assert f"coding-agent::hal0: recheck: {reason}" in text
+    assert "hal0:shared: none: a target" in text
+    # Too narrow for ten columns: one line per bank, names whole.
+    assert "coding-agent::hal0 (coding) recheck: 12345 facts, 678 documents" in text
+    assert "…" not in out.output.split("while it runs")[0]
+
+
+def test_a_wide_console_gets_the_bank_table_with_reasons_under_it(monkeypatch) -> None:
+    from rich.console import Console
+
+    monkeypatch.setattr(cmd, "console", Console(width=160))
+    FakeFoldIn.plan = {
+        "banks": [
+            {"bank": "shared", "class": "platform", "action": "fold", "reason": None},
+            {"bank": "hal0:shared", "class": "target", "action": "none", "reason": "a target"},
+        ],
+        "refusals": [],
+        "warnings": [],
+    }
+    out = invoke()
+    rows = [line for line in out.output.splitlines() if "hal0:shared" in line and "│" in line]
+    assert rows and "a target" not in rows[0]
+    assert "hal0:shared: none: a target" in " ".join(out.output.split())

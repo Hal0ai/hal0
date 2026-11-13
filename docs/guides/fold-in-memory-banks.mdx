@@ -160,7 +160,9 @@ so `project:unresolved`, under a `hal0-legacy-*` pseudo-owner: name the
 harness's client with `--owner` to give them a reader), any private document
 that names two owners, what an earlier run did to each bank, and whether this
 run can cut over. It writes nothing anywhere, not even an export. `--json`
-gives the same as one document.
+gives the same as one document. On a console too narrow for the bank table
+(80 columns, as over `ssh` without a tty or in a pipe) each bank is one line
+instead, and the reason for each bank's action is printed under it.
 
 It also refuses what `--apply` would refuse, and exits 1: an embedder switch
 running or unfinished, an earlier fold-in unfinished, memory writes already

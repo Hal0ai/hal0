@@ -104,13 +104,14 @@ def _drive(work: Callable[[FoldIn], Awaitable[Any] | Any], **kwargs: Any) -> Any
 
 def _bank_table(title: str, rows: list[dict[str, Any]]) -> Table:
     t = Table(title=title)
-    t.add_column("bank")
-    t.add_column("class")
+    # Names and numbers never wrap mid-word: a bank id cut to "codi…" is not one.
+    t.add_column("bank", no_wrap=True)
+    t.add_column("class", no_wrap=True)
     for key in COUNT_KEYS:
-        t.add_column(key.replace("_", " "), justify="right")
-    t.add_column("private facts", justify="right")
-    t.add_column("owner-less", justify="right")
-    t.add_column("action")
+        t.add_column(key.replace("_", " "), justify="right", no_wrap=True)
+    t.add_column("private facts", justify="right", no_wrap=True)
+    t.add_column("owner-less", justify="right", no_wrap=True)
+    t.add_column("action", no_wrap=True)
     for row in rows:
         counts = row.get("counts") or {}
         fold = row.get("fold") or {}
@@ -120,9 +121,77 @@ def _bank_table(title: str, rows: list[dict[str, Any]]) -> Table:
             *(str(counts.get(k, "")) for k in COUNT_KEYS),
             str(fold.get("private_facts", "")),
             str(fold.get("ownerless_facts", "")),
-            escape(str(row.get("action")) + (f": {row['reason']}" if row.get("reason") else "")),
+            escape(str(row.get("action"))),
         )
     return t
+
+
+def _bank_lines(rows: list[dict[str, Any]]) -> list[str]:
+    """The bank table as one line per bank, for a console too narrow for the table."""
+    lines: list[str] = []
+    for row in rows:
+        counts = row.get("counts") or {}
+        fold = row.get("fold") or {}
+        numbers = [
+            f"{counts[k]} {k.replace('_', ' ')}" for k in COUNT_KEYS if counts.get(k) is not None
+        ]
+        for key, label in (
+            ("private_facts", "private facts"),
+            ("ownerless_facts", "owner-less"),
+        ):
+            if fold.get(key) is not None:
+                numbers.append(f"{fold[key]} {label}")
+        lines.append(
+            f"[bold]{escape(str(row.get('bank')))}[/bold] ({escape(str(row.get('class')))}) "
+            f"{escape(str(row.get('action')))}"
+            + (f": {escape(', '.join(numbers))}" if numbers else "")
+        )
+    return lines
+
+
+def _table_fits(table: Table, width: int) -> bool:
+    """True when every cell fits whole and every header wraps only between words.
+
+    Rich would squeeze a table this wide into any console, cutting names to
+    an ellipsis, so the width is worked out here: each column's widest cell
+    or longest header word, plus its padding and rule.
+    """
+    from rich.text import Text
+
+    needed = 1
+    for column in table.columns:
+        words = str(column.header).split() or [""]
+        cells = [Text.from_markup(str(c)).cell_len for c in column.cells]
+        needed += max([len(w) for w in words] + cells) + 3
+    return needed <= width
+
+
+def _print_banks(title: str, rows: list[dict[str, Any]]) -> None:
+    """The bank table when it fits the console, else one line per bank; then each reason."""
+    table = _bank_table(title, rows)
+    if _table_fits(table, console.width):
+        console.print(table)
+    else:
+        console.print(f"[bold]{escape(title)}[/bold]")
+        for line in _bank_lines(rows):
+            console.print(line)
+    for line in _action_lines(rows):
+        console.print(line)
+
+
+def _action_lines(rows: list[dict[str, Any]]) -> list[str]:
+    """Why each bank gets its action, one line per bank, printed under the bank table.
+
+    Kept out of the table: at 80 columns (a pipe, ``ssh`` without a tty) ten
+    columns leave the last one a few characters wide, and a reason squashed
+    into it cannot be read. Rich wraps each line to the console instead.
+    """
+    return [
+        f"{escape(str(row.get('bank')))}: {escape(str(row.get('action')))}: "
+        f"{escape(str(row['reason']))}"
+        for row in rows
+        if row.get("reason")
+    ]
 
 
 def _owner_table(rows: list[dict[str, Any]]) -> Table | None:
@@ -200,7 +269,7 @@ def _bank_notes(rows: list[dict[str, Any]]) -> list[str]:
 def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
     rows = plan.get("banks") or []
     if rows:
-        console.print(_bank_table("memory · fold-in" + ("" if applied else " (dry run)"), rows))
+        _print_banks("memory · fold-in" + ("" if applied else " (dry run)"), rows)
         for table in (_owner_table(rows), _project_table(rows)):
             if table is not None:
                 console.print(table)
