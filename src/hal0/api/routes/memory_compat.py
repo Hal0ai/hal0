@@ -488,9 +488,14 @@ class _CompatState:
     #: Client -> when its outstanding operations were last read from the
     #: engine for the quota (``time.monotonic``).
     quota_read_at: dict[str, float] = field(default_factory=dict)
-    #: Held while a project's knowledge folder is looked for and created, so
-    #: two first writes of one project make one folder.
-    knowledge_folder_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Project slug -> the lock held while that project's knowledge folder is
+    #: looked for and created, so two first writes of one project in this
+    #: process make one folder. One lock per project: a slow engine call for
+    #: one project's folder does not hold up another project's first write.
+    knowledge_folder_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+
+    def knowledge_folder_lock(self, slug: str) -> asyncio.Lock:
+        return self.knowledge_folder_locks.setdefault(slug, asyncio.Lock())
 
     def operations_of(self, client: str) -> OrderedDict[str, _Operation]:
         return self.operations.setdefault(client, OrderedDict())
@@ -2446,23 +2451,39 @@ async def _parent_folder(
         return requested
     if view.folders:
         return view.folders[0]
-    async with _state(request).knowledge_folder_lock:
+    async with _state(request).knowledge_folder_lock(scope.slug):
         again = await _project_pages(request, provider, scope)
         if isinstance(again, Response):
             return again
         if again.folders:
             return again.folders[0]
-        made = await _knowledge_write(
-            request,
-            provider,
-            scope,
-            "POST",
-            "/knowledge-base/folders",
-            {"name": f"{KNOWLEDGE_FOLDER_PREFIX}{scope.slug}"},
-            "the project folder create",
-        )
-        if isinstance(made, Response):
-            return made
+        what = "the project folder create"
+        try:
+            made = await provider.hindsight_client.request_json(
+                "POST",
+                _bank_path(provider, "/knowledge-base/folders"),
+                json_body={"name": f"{KNOWLEDGE_FOLDER_PREFIX}{scope.slug}"},
+                timeout_s=_KNOWLEDGE_TIMEOUT_S,
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 409:
+                return _engine_failure(
+                    exc, what=what, headers=scope.headers(), not_found_is_gateway=True
+                )
+            # The folder was made first outside this lock (another process, or
+            # a writer that is not this endpoint): use that one.
+            raced = await _project_pages(request, provider, scope)
+            if isinstance(raced, Response):
+                return raced
+            if raced.folders:
+                return raced.folders[0]
+            return _engine_failure(
+                exc, what=what, headers=scope.headers(), not_found_is_gateway=True
+            )
+        except Exception as exc:
+            return _engine_failure(
+                exc, what=what, headers=scope.headers(), not_found_is_gateway=True
+            )
         folder = made.get("id") if isinstance(made, dict) else None
         if not isinstance(folder, str) or not folder:
             raise CompatEngineError("the memory engine created a folder without an id")

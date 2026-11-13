@@ -21,6 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hal0.api.auth import AuthEnforcementMiddleware
+from hal0.api.routes import memory_compat
 from hal0.bridge.store import BridgeStore
 from hal0.memory.read_scope import project_scope_groups
 from tests.api import test_memory_compat_routes as routes
@@ -645,6 +646,56 @@ def test_two_project_folders_are_read_as_one(client: TestClient, engine: Engine,
     assert {n["id"] for n in tree["roots"]} == {"kf-initiatives", "kp-architecture", "kp-late"}
     client.post(_url(KB + "/folders"), headers=_auth(key), json={"name": "Runbooks"})
     assert engine.calls[-1].body["parent_id"] == "kf-another"
+
+
+def _folder_made_elsewhere(engine: Engine, *, appears: bool) -> None:
+    """The engine answers the project folder create 409, as when another
+    process made it a moment before; with ``appears`` that folder is then in
+    the tree."""
+    answer = engine.kb.answer
+
+    def racing(method: str, rest: str, params: dict[str, list[str]], body: Any):
+        if (method, rest) == ("POST", "/folders") and body.get("name") == "project:hal0":
+            if appears:
+                engine.kb.folder("project:hal0", node_id="kf-elsewhere")
+            return httpx.Response(409, json={"detail": "A folder named 'project:hal0' exists"})
+        return answer(method, rest, params, body)
+
+    engine.kb.answer = racing  # type: ignore[method-assign]
+
+
+def test_a_project_folder_made_concurrently_is_used(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    _folder_made_elsewhere(engine, appears=True)
+    resp = client.post(_url(KB + "/pages"), headers=_auth(key), json=SEED_PAGE)
+    assert resp.status_code == 201, resp.text
+    assert engine.lines() == [
+        f"GET {ENGINE_KB}/tree",
+        f"GET {ENGINE_KB}/tree",
+        f"POST {ENGINE_KB}/folders",
+        f"GET {ENGINE_KB}/tree",
+        f"POST {ENGINE_KB}/pages",
+    ]
+    assert engine.calls[-1].body["parent_id"] == "kf-elsewhere"
+    resp = client.post(_url(KB + "/folders"), headers=_auth(key), json={"name": "Initiatives"})
+    assert resp.status_code == 201, resp.text
+    assert engine.calls[-1].body == {"name": "Initiatives", "parent_id": "kf-elsewhere"}
+
+
+def test_a_project_folder_409_with_no_folder_after_it_is_the_engines_409(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    _folder_made_elsewhere(engine, appears=False)
+    resp = client.post(_url(KB + "/pages"), headers=_auth(key), json=SEED_PAGE)
+    assert resp.status_code == 409, resp.text
+    assert f"POST {ENGINE_KB}/pages" not in engine.lines()
+
+
+def test_each_project_has_its_own_folder_lock() -> None:
+    state = memory_compat._CompatState()
+    assert state.knowledge_folder_lock("hal0") is state.knowledge_folder_lock("hal0")
+    assert state.knowledge_folder_lock("hal0") is not state.knowledge_folder_lock("atlas")
 
 
 # ── who ─────────────────────────────────────────────────────────────────────
