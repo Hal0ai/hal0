@@ -268,6 +268,39 @@ def test_a_page_the_tree_does_not_show_is_404_without_reading_it(
     assert engine.lines() == [f"GET {ENGINE_KB}/tree"]
 
 
+@pytest.mark.parametrize("allowed", [False, None], ids=["false", "absent"])
+def test_a_page_whose_refresh_may_read_mental_models_is_never_shown(
+    client: TestClient, engine: Engine, key: str, allowed: bool | None
+) -> None:
+    """A page in the project folder that another writer made with the whole
+    project scope and the private guard, but whose refresh may read other
+    mental models: their content says nothing of where it came from, so the
+    page is not listed, read or found."""
+    seed_project_pages(engine)
+    trigger = compat_page_trigger("hal0", [])
+    if allowed is None:
+        del trigger["exclude_mental_models"]
+    else:
+        trigger["exclude_mental_models"] = allowed
+    engine.kb.page(
+        "Hermes digest",
+        parent_id="kf-hal0",
+        node_id="kp-models",
+        tags=["agent:hermes", "kind:durable", "project:hal0"],
+        trigger=trigger,
+        content="Built from every page.",
+    )
+    tree = client.get(_url(KB + "/tree"), headers=_auth(key)).json()
+    assert "kp-models" not in {n["id"] for n in tree["roots"]}
+    resp = client.get(_url(KB + "/pages/kp-models"), headers=_auth(key))
+    assert (resp.status_code, _code(resp)) == (404, "memory.knowledge_page_not_found")
+    assert f"GET {ENGINE_KB}/pages/kp-models" not in engine.lines()
+    found = client.get(_url(KB + "/search"), params={"q": "digest"}, headers=_auth(key)).json()
+    # The engine did return it: the project tag matches.
+    assert [r["id"] for r in found["results"]] == ["kp-architecture"]
+    assert engine.calls[-1].line == f"GET {ENGINE_KB}/search"
+
+
 # ── search ──────────────────────────────────────────────────────────────────
 
 
