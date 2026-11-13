@@ -24,7 +24,11 @@ tags. The engine ANDs three groups: the client's own tags matched by its `trigge
 the project scope of [a read](/docs/reference/api/memory-compat#what-a-read-sees), and no `visibility:private` memory.
 `trigger.exclude_mental_models` is set too, so a refresh reads no other mental model. A page
 without all of that is not shown, nor is one another agent marked private, in every bank layout.
-Pages the fold-in carried over from a per-repository bank sit outside the folder and are not
+The [fold-in](/docs/guides/fold-in-memory-banks#knowledge-pages-of-a-coding-bank) carries a
+coding bank's pages into its project's folder stamped this way, under new ids. A page read, a
+node update and a `parent_id` may name such a page or folder by the id it had in the old bank:
+the fold-in's page map says which node that id became, and the request is answered for that
+node, with the same checks. A page carried from any other bank keeps its old scope and is not
 shown.
 
 The page's `tags` are then labels, stamped as on a [retain](/docs/reference/api/memory-compat#retain): `agent:<client>`, `kind:`

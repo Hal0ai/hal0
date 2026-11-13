@@ -18,6 +18,7 @@ import pytest
 
 from hal0.memory import fold_in as fi
 from hal0.memory.document_namespace import CLIENT_DOCUMENT_ID_KEY, stored_document_id
+from hal0.memory.knowledge_pages import folded_node_id, placeholder_folder_id
 from hal0.memory.projects import ProjectRegistry
 
 TARGETS = ("hal0:shared", "hal0:private")
@@ -465,9 +466,13 @@ def test_a_coding_banks_models_are_rekeyed_and_tagged_with_its_project() -> None
     out = read(result.shared)
     assert {m["id"] for m in out["mental_models"]} == {"web-conventions", "web-page-model"}
     assert all("project:web" in m["tags"] for m in out["mental_models"])
-    assert {p["id"] for p in out["knowledge_pages"]} == {"kf-1", "kp-1"}
-    page = next(p for p in out["knowledge_pages"] if p["id"] == "kp-1")
+    new_kf = folded_node_id("coding-agent::web", "kf-1", "folder")
+    new_kp = folded_node_id("coding-agent::web", "kp-1", "page")
+    folder = placeholder_folder_id("web")
+    assert {p["id"] for p in out["knowledge_pages"]} == {folder, new_kf, new_kp}
+    page = next(p for p in out["knowledge_pages"] if p["id"] == new_kp)
     assert page["mental_model_id"] == "web-page-model"
+    assert page["parent_id"] == new_kf
     assert result.report["mental_models"] == {
         "carried": 2,
         "renamed": 2,
@@ -475,7 +480,12 @@ def test_a_coding_banks_models_are_rekeyed_and_tagged_with_its_project() -> None
         "dropped_private": 1,
         "content_cleared": 0,
     }
-    assert result.report["knowledge_pages"] == {"carried": 2, "dropped": 2}
+    assert result.report["knowledge_pages"] == {
+        "carried": 2,
+        "dropped": 2,
+        "placed": 1,
+        "unplaced": 0,
+    }
     assert result.expected["shared"]["mental_models"] == 2
     assert out["mental_models"][0]["content"] == "use ruff"
 
@@ -586,6 +596,11 @@ def test_the_rewritten_archive_is_one_a_merge_import_reads() -> None:
     assert "mental_models.json" in names and "knowledge_pages.json" in names
     for key in ("model_digests", "model_spec_digests", "model_content_digests"):
         assert set(result.ids["shared"].pop(key)) == {"web-conventions", "web-page-model"}
+    assert set(result.ids["shared"].pop("page_nodes")) == {"kf-1", "kp-1"}
+    assert result.ids["shared"].pop("project_folders") == {placeholder_folder_id("web"): "web"}
+    assert result.ids["shared"].pop("page_names") == [
+        ["web", "f", folded_node_id("coding-agent::web", "kf-1", "folder")]
+    ]
     assert result.ids["shared"] == {
         "documents": ["web::hal0-legacy-coding-agent::n"],
         "mental_models": ["web-conventions", "web-page-model"],
@@ -978,3 +993,278 @@ def test_a_model_row_with_a_null_in_a_not_null_column_is_refused() -> None:
     assert fi.model_null_problems([{"id": "m", "content": "x"}]) == []
     (problem,) = fi.model_null_problems([{**ok, "last_refreshed_at": None, "content": None}])
     assert "content, last_refreshed_at would be NULL" in problem
+
+
+# ── a coding bank's knowledge pages (#3635) ─────────────────────────────
+
+_PLUGIN_TRIGGER = {
+    "fact_types": ["world", "experience", "observation"],
+    "tags_match": "all",
+    "refresh_after_consolidation": True,
+}
+
+
+def _pages_archive(bank: str, *documents: dict[str, Any], tags: list[str] | None = None) -> bytes:
+    return archive(
+        bank,
+        list(documents) or [doc("n", [fact("x")])],
+        models=[
+            {
+                "id": "mm-map",
+                "name": "Component map",
+                "source_query": "How is it put together?",
+                "tags": ["knowledge:component", *(tags or [])],
+                "trigger": json.dumps({**_PLUGIN_TRIGGER, "tag_groups": [{"tags": ["x"]}]}),
+                "content": "map",
+            },
+            {
+                "id": "mm-init",
+                "name": "Bank layout",
+                "source_query": "Summarize the initiative",
+                "tags": ["knowledge:feature-work", *(tags or [])],
+                "trigger": _PLUGIN_TRIGGER,
+                "content": "See [[page:kp-map]], [[page:kp-gone]].",
+            },
+        ],
+        pages=[
+            {"id": "kp-map", "kind": "page", "name": "Component map", "mental_model_id": "mm-map"},
+            {"id": "kf-init", "kind": "folder", "name": "Initiatives", "parent_id": None},
+            {
+                "id": "kp-init",
+                "kind": "page",
+                "name": "Bank layout",
+                "parent_id": "kf-init",
+                "mental_model_id": "mm-init",
+            },
+        ],
+    )
+
+
+def _shared_pages(result: fi.RewriteResult) -> tuple[dict[str, Any], dict[str, Any]]:
+    out = read(result.shared)
+    return (
+        {p["id"]: p for p in out["knowledge_pages"]},
+        {m["id"]: m for m in out["mental_models"]},
+    )
+
+
+def test_a_coding_banks_pages_are_hung_in_its_project_folder_under_new_ids() -> None:
+    result = fi.rewrite_archive(_pages_archive("coding-agent::web"), plan("coding-agent::web"))
+    nodes, _ = _shared_pages(result)
+    folder = placeholder_folder_id("web")
+    new = {
+        old: folded_node_id("coding-agent::web", old, k)
+        for old, k in (("kp-map", "page"), ("kf-init", "folder"), ("kp-init", "page"))
+    }
+    assert nodes[folder] == {
+        "id": folder,
+        "kind": "folder",
+        "name": "project:web",
+        "parent_id": None,
+        "mental_model_id": None,
+        "sort_order": 0,
+        "managed": False,
+    }
+    assert nodes[new["kp-map"]]["parent_id"] == folder
+    assert nodes[new["kf-init"]]["parent_id"] == folder
+    assert nodes[new["kp-init"]]["parent_id"] == new["kf-init"]
+    assert nodes[new["kp-init"]]["name"] == "Bank layout"
+    assert result.provenance["shared"]["pages"] == {v: k for k, v in new.items()}
+    assert result.ids["shared"]["page_nodes"]["kp-init"] == {
+        "id": new["kp-init"],
+        "kind": "page",
+        "name": "Bank layout",
+        "project": "web",
+    }
+    # Stable across runs: a resend sends the same nodes under the same ids.
+    again = fi.rewrite_archive(_pages_archive("coding-agent::web"), plan("coding-agent::web"))
+    assert again.ids["shared"]["page_nodes"] == result.ids["shared"]["page_nodes"]
+
+
+def test_a_placed_page_is_stamped_as_compat_stamps_a_page_it_writes() -> None:
+    from hal0.memory import knowledge_pages as kp
+    from hal0.memory.projects import resolve_project
+    from hal0.memory.read_scope import project_scope_groups, reflect_visibility_scope
+
+    p = plan("coding-agent::web", owners={"coding-agent": "cc"}, known={"cc"})
+    result = fi.rewrite_archive(_pages_archive("coding-agent::web"), p)
+    _, models = _shared_pages(result)
+    model = models["web-mm-map"]
+    resolution = resolve_project(bank_segment="web", registry=p.registry, coding=True)
+    labels, leaf = kp.page_tags(["knowledge:component"], agent="cc", resolution=resolution)
+    assert model["tags"] == labels
+    # The plugin's refresh settings, hal0's scope; the old tag_groups are gone.
+    assert model["trigger"] == kp.page_trigger(_PLUGIN_TRIGGER, leaf, "web")
+    assert {"tags": ["x"]} not in model["trigger"]["tag_groups"]
+    assert (model["name"], model["source_query"], model["content"]) == (
+        "Component map",
+        "How is it put together?",
+        "map",
+    )
+    groups = [*reflect_visibility_scope("cc"), *project_scope_groups("web")]
+    node = {"tags": model["tags"], "trigger": model["trigger"]}
+    assert kp.page_scope_held(node, read_groups=groups, slug="web")
+    other = [*reflect_visibility_scope("cc"), *project_scope_groups("atlas")]
+    assert not kp.page_scope_held(node, read_groups=other, slug="atlas")
+
+
+def test_page_links_in_content_name_the_new_ids() -> None:
+    result = fi.rewrite_archive(_pages_archive("coding-agent::web"), plan("coding-agent::web"))
+    _, models = _shared_pages(result)
+    new_map = folded_node_id("coding-agent::web", "kp-map", "page")
+    assert models["web-mm-init"]["content"] == f"See [[page:{new_map}]], [[page:kp-gone]]."
+
+
+def test_a_tag_project_banks_pages_go_by_their_own_project_or_stay_at_the_root() -> None:
+    data = archive(
+        "pi-coder",
+        [doc("n", [fact("x", "project:web")])],
+        models=[
+            {"id": "m-web", "name": "W", "tags": ["project:web"], "content": "w"},
+            {"id": "m-none", "name": "N", "tags": [], "content": "n", "trigger": {"x": 1}},
+        ],
+        pages=[
+            {"id": "kp-web", "kind": "page", "name": "W", "mental_model_id": "m-web"},
+            {"id": "kp-none", "kind": "page", "name": "N", "mental_model_id": "m-none"},
+        ],
+    )
+    result = fi.rewrite_archive(data, plan("pi-coder"))
+    nodes, models = _shared_pages(result)
+    placed = nodes[folded_node_id("pi-coder", "kp-web", "page")]
+    unplaced = nodes[folded_node_id("pi-coder", "kp-none", "page")]
+    assert placed["parent_id"] == placeholder_folder_id("web")
+    assert unplaced["parent_id"] is None
+    # Pi's pages are pi-coder's (DEFAULT_OWNERS), like its documents.
+    assert "agent:pi-coder" in models[placed["mental_model_id"]]["tags"]
+    assert models[unplaced["mental_model_id"]]["trigger"] == {"x": 1}
+    assert result.report["knowledge_pages"]["placed"] == 1
+    assert result.report["knowledge_pages"]["unplaced"] == 1
+    assert result.ids["shared"]["page_nodes"]["kp-none"]["project"] is None
+
+
+def test_a_placed_page_of_a_bank_with_private_facts_keeps_nothing_generated() -> None:
+    data = _pages_archive(
+        "coding-agent::web",
+        doc("n", [fact("x")]),
+        doc("s", [fact("secret", "visibility:private", "agent:cc")]),
+    )
+    result = fi.rewrite_archive(data, plan("coding-agent::web"))
+    _, models = _shared_pages(result)
+    assert models["web-mm-init"]["content"] == ""
+    assert "secret" not in json.dumps(read(result.shared))
+
+
+def test_a_private_page_is_never_placed() -> None:
+    data = _pages_archive("coding-agent::web", tags=["visibility:private"])
+    result = fi.rewrite_archive(data, plan("coding-agent::web"))
+    assert read(result.shared)["knowledge_pages"] == []
+    assert result.report["knowledge_pages"]["dropped"] == 3
+
+
+def _placed(bank: str = "coding-agent::web") -> tuple[bytes, fi.RewriteResult]:
+    data = _pages_archive(bank)
+    return data, fi.rewrite_archive(data, plan(bank))
+
+
+def _tampered(result: fi.RewriteResult, change) -> bytes:
+    out = read(result.shared)
+    change(out)
+    return fi._write_archive(
+        "coding-agent::web",
+        out["documents"],
+        out["observations"],
+        out["mental_models"],
+        out["knowledge_pages"],
+    )
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        (
+            lambda a: next(m for m in a["mental_models"] if m["id"] == "web-mm-map")["trigger"][
+                "tag_groups"
+            ].pop(),
+            "lacks the project scope and the private guard",
+        ),
+        (
+            lambda a: next(m for m in a["mental_models"] if m["id"] == "web-mm-map")[
+                "trigger"
+            ].update(exclude_mental_models=False),
+            "lacks the project scope and the private guard",
+        ),
+        (
+            lambda a: next(m for m in a["mental_models"] if m["id"] == "web-mm-init")[
+                "trigger"
+            ].update(tag_groups=[]),
+            "lacks the project scope and the private guard",
+        ),
+        (
+            lambda a: a["knowledge_pages"].append(
+                {"id": "kp-stray", "kind": "page", "name": "S", "mental_model_id": "web-mm-map"}
+            ),
+            "shared knowledge page kp-stray comes from no source page",
+        ),
+        (
+            lambda a: next(p for p in a["knowledge_pages"] if p["kind"] == "folder").update(
+                kind="page", mental_model_id="web-mm-map"
+            ),
+            "is not a folder",
+        ),
+    ],
+)
+def test_the_routing_check_refuses_a_shown_page_without_compats_scope(change, expected) -> None:
+    """Mutation check of the page guard: each way of breaking the stamp is caught."""
+    source, result = _placed()
+    assert (
+        fi.routing_problems(
+            source, result.shared, result.private, result.provenance, bank_cls="coding"
+        )
+        == []
+    )
+    bad = _tampered(result, change)
+    problems = fi.routing_problems(
+        source, bad, result.private, result.provenance, bank_cls="coding"
+    )
+    assert any(expected in p for p in problems), problems
+
+
+def test_without_the_restamp_a_placed_page_fails_the_routing_check(monkeypatch) -> None:
+    """Mutation check of the re-stamp itself: with the trigger left as the plugin
+    wrote it, the rewrite refuses its own archive."""
+    from hal0.memory import knowledge_pages as kp
+
+    monkeypatch.setattr(kp, "page_trigger", lambda chosen, leaf, slug: dict(chosen))
+    with pytest.raises(fi.BankLeft) as caught:
+        fi.rewrite_archive(_pages_archive("coding-agent::web"), plan("coding-agent::web"))
+    assert any("lacks the project scope" in p for p in caught.value.details["problems"])
+
+
+def test_rehome_swaps_the_placeholder_for_the_targets_folder() -> None:
+    _, result = _placed()
+    folder = placeholder_folder_id("web")
+    out = read(fi.rehome_folders(result.shared, {folder: "kf-real"}))
+    ids = {p["id"] for p in out["knowledge_pages"]}
+    assert folder not in ids and "kf-real" in ids
+    assert folder not in json.dumps(out["knowledge_pages"])
+    tops = [p for p in out["knowledge_pages"] if p.get("parent_id") == "kf-real"]
+    assert len(tops) == 2
+    assert out["mental_models"] == read(result.shared)["mental_models"]
+
+
+def test_the_platform_banks_pages_keep_their_ids_and_scope() -> None:
+    data = archive(
+        "shared",
+        [doc("n", [fact("x")])],
+        models=[{"id": "m", "name": "M", "tags": [], "content": "c", "trigger": {"a": 1}}],
+        pages=[
+            {"id": "kf-p", "kind": "folder", "name": "project:web", "parent_id": None},
+            {"id": "kp", "kind": "page", "name": "P", "parent_id": "kf-p", "mental_model_id": "m"},
+        ],
+    )
+    result = fi.rewrite_archive(data, plan("shared"))
+    nodes, models = _shared_pages(result)
+    assert set(nodes) == {"kf-p", "kp"}
+    assert models["m"]["trigger"] == {"a": 1}
+    assert "page_nodes" not in result.ids["shared"]
+    assert result.ids["shared"]["page_names"] == [["web", "p", "kp"]]

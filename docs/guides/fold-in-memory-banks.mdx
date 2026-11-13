@@ -107,8 +107,12 @@ tags are rewritten in the archive first:
   them as stale. It refreshes one from what the shared bank holds when its trigger
   fires (`refresh_after_consolidation` or a `refresh_cron`); a model with neither
   stays empty until you refresh it (`hal0 memory mm refresh`). A model tagged `visibility:private` there
-  is dropped and counted. Knowledge pages follow their models and get new
-  page ids from the engine.
+  is dropped and counted.
+- **Knowledge pages follow their models.** A coding bank's pages go to its
+  project's folder; see [Knowledge pages of a coding bank](#knowledge-pages-of-a-coding-bank).
+  The platform bank's and a `project__` bank's pages keep their folders,
+  their tags and their scope, and get new page ids from the engine (the old
+  bank keeps its own); no map of those ids is kept.
 - **A `private__<agent>` bank's mental models go to `hal0:private`,** with
   the id `<agent>-<id>`, the tags `agent:<agent>` and `visibility:private`,
   and a scope confined to that agent (`exclude_mental_models`, and a tag
@@ -148,6 +152,50 @@ have taken writes since, and needs a re-check, not a skip. A recorded skip
 for a bank the engine no longer holds is dropped from the ledger at the end
 of the next run, and `--forget-skip BANK` drops one by hand; either way, a
 bank of that name that turns up later is classified from scratch.
+
+## Knowledge pages of a coding bank
+
+The coding-agents plugin keeps curated pages (its standard pages and one
+page per initiative) in its bank's knowledge base, and links them by id:
+markers carry `metadata.relatedPageId` and a `[[page:<id>]]` link. After the
+cutover it reads them through `/api/memory/compat`, which shows one folder per
+project, `project:<slug>` at the root of `hal0:shared`, and only pages whose
+scope hal0 wrote ([knowledge pages](/docs/reference/api/memory-compat-knowledge-base)).
+So each page a coding bank carries is, in the archive itself:
+
+- **given a new id**, derived from the old bank and the old id, so every run
+  and every resend sends it under the same id;
+- **put in its project's folder** with the folders above it. The folder is
+  found as compat finds it (the first root folder of that name), or created
+  as compat creates it, just before the bank is sent. A bank whose project
+  comes from each fact's tags (`pi-coder`, `Hal0::Agents`, `--map`) places
+  each tree at its root by its pages' own `project:` tag; a tree whose pages
+  name no project, or several, stays at the root, where compat does not show
+  it, and the dry run counts it as `unplaced`;
+- **re-stamped as compat stamps a page:** its tags through the write
+  envelope with the owner the bank's documents get, its trigger rebuilt from
+  the refresh settings it chose plus the project scope, the private guard and
+  `exclude_mental_models`. Its name, source query and content stay, except
+  that `[[page:<id>]]` links name the new ids. A page from a bank that held
+  private facts arrives with no content, like the bank's other models, and is
+  refreshed under its new scope.
+
+The owner is the harness's, so map the harness to the client that uses the
+pages (`--owner coding-agent=<client>`): compat lets only a page's owner
+change it, and a page filed under a pseudo-owner can be read but not
+updated.
+
+The pre-check refuses a bank whose page shown in a project folder lacks that
+scope, and one whose page would take a name its project folder already holds
+(names are unique in a folder, and a merge would drop the second without a
+word); two banks of one run that would put one name in one folder are both
+left. After the import, every page must be in its folder with its scope.
+
+Then the fold-in records each page's old id, new id and folder in
+`/var/lib/hal0/state/memory-fold-in-page-map.json` (0644, read by hal0-api).
+Compat answers a page read, a node update or a `parent_id` that names a page
+by its old id for the page it became, with the same visibility checks: a
+client of another project gets `404` for either id.
 
 ## The dry run
 
@@ -213,16 +261,17 @@ refused with `503 memory.writes_paused`, and recall fails until the run
 ends. `--apply` and `--resume` need root.
 </Aside>
 
-**Every bank is checked before any is imported.** Each bank of the run is
-exported, rewritten and checked: the owner and routing checks above, the
+**Every bank is checked before any is imported.** Each bank of the run
+is exported, rewritten and checked: the owner and routing checks above, the
 bank's export holding all of it (the engine's export leaves out a fact that belongs
 to no document), no attachments or invalidated facts, and none of its
 document or mental-model ids already in a target, unless an earlier run sent
 it from the same unchanged source. Two banks of the run that would send the
-same id to one target are both left and named to each other: a merge would
-keep only the first, and the ids are not rewritten, because agents go on
-writing under them after the cutover. If any bank fails, **nothing is
-imported**: every bank is left as it was, the run ends without a cutover,
+same id to one target, or put one page name in one project folder, are both
+left and named to each other: a merge would keep only the first. Document
+and model ids are not rewritten, because agents go on writing under them
+after the cutover. If any bank fails, **nothing is imported**: every bank is
+left as it was, the run ends without a cutover,
 and the report says what each failed bank needs.
 
 Then the banks are imported one at a time. After a bank's import, each
@@ -313,8 +362,13 @@ target is missing is sent:
   trying again. One the old bank built after the earlier run is not carried
   (the target's own consolidation builds it), and the report counts it;
 - a knowledge page whose model landed without it is sent again, with the
-  folders above it. The engine gives those folders new ids, so a resent page
-  can sit in a second folder of the same name.
+  folders above it. A coding bank's pages and folders keep the ids the
+  fold-in gave them, so they land where they belong; the platform bank's
+  folders get new ids from the engine, so one of its resent pages can sit in
+  a second folder of the same name;
+- a coding bank's page an earlier build of the fold-in carried without its
+  project scope is refused as a changed model: delete its model from the
+  target (the page goes with it) and run again.
 
 A `--bank` run re-checks the banks folded earlier too, because the cutover
 needs every bank folded as it is now. The `--owner` map and the list of

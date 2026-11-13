@@ -37,7 +37,15 @@ What hindsight-api 1.2.0 gives it (read in its source, not assumed):
   (:func:`model_id_for`), and the counts are checked after.
 * A knowledge-page id held by another bank gets a fresh id on import
   (``_restore_knowledge_pages``). The source bank keeps its pages, so a
-  folded page always gets a new id.
+  folded page keeps its id only when the archive gives it one no bank holds.
+  A node's ``parent_id`` is kept only when the parent is in the same archive
+  (else it lands at the root), and a node's name is unique in its folder
+  (``uq_kp_folder_pagename``; a clash is dropped ``ON CONFLICT DO NOTHING``).
+  So a coding bank's pages are given new ids and hung in their project's
+  folder in the archive itself (:func:`_place_pages`), the folder being the
+  target's own, swapped in just before the send
+  (:meth:`FoldIn._rehome_folders`), and their old ids are kept in the page
+  map that ``/api/memory/compat`` reads (:func:`record_page_map`).
 
 First the pre-check, for every bank of the run (:meth:`FoldIn._precheck_all`),
 importing nothing: export the bank into the run's archive directory; rewrite
@@ -259,6 +267,7 @@ HOOK_POINTS: tuple[str, ...] = (
     "isolated",
     "exported:<bank>",
     "rewritten:<bank>",
+    "placed:<bank>",
     "importing:<bank>:<part>",
     "imported:<bank>:<part>",
     "folded:<bank>",
@@ -1069,7 +1078,9 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
     ``private__<agent>`` bank's models go to the private side, confined to
     their owner (:func:`_private_model`). Knowledge pages follow shared
     models; a private bank's pages, and the models behind them, are dropped
-    and counted. Directives are not carried (a merge never imports them);
+    and counted. A coding bank's pages get new ids and go to their project's
+    folder, stamped with the scope ``/api/memory/compat`` shows a page by
+    (:func:`_place_pages`). Directives are not carried (a merge never imports them);
     they are listed in the report.
 
     Raises :class:`BankLeft` when a private document names more than one
@@ -1270,8 +1281,15 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
     pages, carried_pages, dropped_pages = _carried_pages(
         archive["knowledge_pages"], renamed, report
     )
-    provenance[PART_SHARED]["pages"] = carried_pages
     provenance["dropped"]["pages"] = dropped_pages
+    if plan.bank.coding:
+        placement = _place_pages(plan, pages, models, report)
+        pages = placement.rows
+        provenance[PART_SHARED]["pages"] = placement.provenance
+        provenance[PART_SHARED]["project_folders"] = dict(placement.folders)
+    else:
+        placement = None
+        provenance[PART_SHARED]["pages"] = carried_pages
     report["directives_not_carried"] = [
         str(d.get("name") or d.get("id") or "(unnamed)")
         for d in archive["directives"]
@@ -1328,6 +1346,11 @@ def rewrite_archive(data: bytes, plan: RewritePlan) -> RewriteResult:
             "model_content_digests": {str(m["id"]): model_content_digest(m) for m in models},
             "pages": page_model_ids,
             "observations": sorted({observation_digest(o) for o in observations[PART_SHARED]}),
+            **(
+                placement.ids()
+                if placement is not None
+                else {"page_names": _platform_page_names(pages)}
+            ),
         },
         PART_PRIVATE: {
             "documents": [str(d["id"]) for d in parts[PART_PRIVATE]],
@@ -1377,6 +1400,258 @@ def _carried_pages(
         carried.append(str(page.get("id")))
         report["knowledge_pages"]["carried"] += 1
     return out, carried, dropped
+
+
+#: A ``[[page:<id>]]`` link, as the coding-agents plugin writes one into a
+#: marker's retain context and a page synthesis repeats it in the page.
+_PAGE_LINK = re.compile(r"\[\[page:([^\]\s]+)\]\]")
+
+
+@dataclass
+class _Placement:
+    """Where a coding bank's carried knowledge-base nodes go (:func:`_place_pages`)."""
+
+    #: The archive's ``knowledge_pages`` rows: the carried nodes under their
+    #: new ids, and one placeholder folder row per project.
+    rows: list[dict[str, Any]]
+    #: New node id -> old node id, for :func:`routing_problems`.
+    provenance: dict[str, str]
+    #: Placeholder folder id -> project slug.
+    folders: dict[str, str]
+    #: Old node id -> ``{"id", "kind", "name", "project"}``; ``project`` is
+    #: ``None`` for a node left outside every project folder.
+    nodes: dict[str, dict[str, Any]]
+    #: ``[slug, lower-cased name, new id]`` of every node directly in a project folder.
+    names: list[list[str]]
+
+    def ids(self) -> dict[str, Any]:
+        return {
+            "page_nodes": self.nodes,
+            "project_folders": self.folders,
+            "page_names": self.names,
+        }
+
+
+def _page_resolution(plan: RewritePlan, tags: Iterable[Any]) -> Any:
+    """The project a carried page belongs to: the bank's, or for a bank whose
+    project comes from each fact's tags (operator decision 2), the page's own."""
+    if plan.bank.project is not None:
+        return resolve_project(bank_segment=plan.bank.project, registry=plan.registry, coding=True)
+    return resolve_project(tags=_caller_tags(tags), registry=plan.registry, coding=True)
+
+
+def _place_pages(
+    plan: RewritePlan,
+    pages: list[dict[str, Any]],
+    models: list[dict[str, Any]],
+    report: dict[str, Any],
+) -> _Placement:
+    """Put a coding bank's carried pages in their project's folder, stamped as compat stamps them.
+
+    ``/api/memory/compat`` shows the coding-agents plugin one folder per
+    project, ``project:<slug>`` at the root of the platform bank's tree, and
+    in it only pages whose scope hal0 wrote
+    (:func:`hal0.memory.knowledge_pages.page_scope_held`). So, in the archive
+    itself (the merge import keeps a node's ``parent_id`` when its parent is
+    in the archive, and writes a model row verbatim):
+
+    * every carried node gets the id :func:`~hal0.memory.knowledge_pages.folded_node_id`
+      gives it, the same on every run and resend;
+    * each subtree at the bank's root whose pages all belong to one project
+      is hung under a placeholder folder for that project
+      (:func:`~hal0.memory.knowledge_pages.placeholder_folder_id`), which the
+      fold-in swaps for the target's own folder before it sends the archive
+      (:meth:`FoldIn._rehome_folders`);
+    * each page in it has its backing model's tags put through the write
+      envelope with the owner the documents of the bank get (the harness, or
+      the page's own ``agent:`` tag, through ``--owner`` and the known
+      clients), and its trigger rebuilt from the refresh settings it chose
+      plus hal0's scope (:func:`~hal0.memory.knowledge_pages.page_trigger`);
+    * ``[[page:<id>]]`` links in a page's content name the new ids.
+
+    The page's name, source query and content otherwise stay as they are; a
+    model whose bank held private facts was already cleared. A subtree whose
+    pages name no project, or several, is carried under its new ids at the
+    root, as before, where compat does not show it.
+    """
+    from hal0.memory.knowledge_pages import (
+        caller_trigger_settings,
+        folded_node_id,
+        page_tags,
+        page_trigger,
+        placeholder_folder_id,
+        project_folder_name,
+    )
+
+    bank = plan.bank.bank
+    by_old = {str(p.get("id")): p for p in pages}
+    new_of = {old: folded_node_id(bank, old, str(p.get("kind"))) for old, p in by_old.items()}
+    model_by_id = {str(m.get("id")): m for m in models}
+
+    def top_of(old: str) -> str:
+        seen: set[str] = set()
+        node = by_old[old]
+        while True:
+            parent = node.get("parent_id")
+            if not parent or str(parent) not in by_old or str(parent) in seen:
+                return str(node.get("id"))
+            seen.add(str(parent))
+            node = by_old[str(parent)]
+
+    resolutions: dict[str, Any] = {}
+    for old, page in by_old.items():
+        if page.get("kind") == "page":
+            model = model_by_id.get(str(page.get("mental_model_id"))) or {}
+            resolutions[old] = _page_resolution(plan, model.get("tags") or ())
+    slugs_of_top: dict[str, set[str | None]] = {}
+    for old, resolution in resolutions.items():
+        slugs_of_top.setdefault(top_of(old), set()).add(resolution.slug)
+    project_of_top = {
+        top: next(iter(slugs)) for top, slugs in slugs_of_top.items() if len(slugs) == 1
+    }
+
+    rows: list[dict[str, Any]] = []
+    folders: dict[str, str] = {}
+    nodes: dict[str, dict[str, Any]] = {}
+    names: list[list[str]] = []
+    placed = unplaced = 0
+    for old, page in by_old.items():
+        top = top_of(old)
+        slug = project_of_top.get(top)
+        row = dict(page)
+        row["id"] = new_of[old]
+        parent = page.get("parent_id")
+        if old != top:
+            row["parent_id"] = new_of[str(parent)]
+        elif slug is not None:
+            folder = placeholder_folder_id(slug)
+            folders[folder] = slug
+            row["parent_id"] = folder
+            names.append([slug, str(page.get("name") or "").lower(), new_of[old]])
+        else:
+            row["parent_id"] = None
+        rows.append(row)
+        nodes[old] = {
+            "id": new_of[old],
+            "kind": str(page.get("kind")),
+            "name": str(page.get("name") or ""),
+            "project": slug,
+        }
+        if page.get("kind") != "page":
+            continue
+        if slug is None:
+            unplaced += 1
+            continue
+        placed += 1
+        model = model_by_id.get(str(page.get("mental_model_id")))
+        if model is None:
+            continue
+        tags = [str(t) for t in model.get("tags") or () if isinstance(t, str)]
+        owner = resolve_owner(
+            _agent_of(tags) or plan.bank.harness, owners=plan.owners, known=plan.known_clients
+        )[0]
+        labels, leaf = page_tags(_caller_tags(tags), agent=owner, resolution=resolutions[old])
+        model["tags"] = labels
+        chosen = caller_trigger_settings(_decoded(model.get("trigger")))
+        model["trigger"] = page_trigger(chosen, leaf, slug)
+        content = model.get("content")
+        if isinstance(content, str) and content:
+            model["content"] = _PAGE_LINK.sub(
+                lambda m: f"[[page:{new_of.get(m.group(1), m.group(1))}]]", content
+            )
+    for folder, slug in sorted(folders.items()):
+        rows.insert(
+            0,
+            {
+                "id": folder,
+                "kind": "folder",
+                "name": project_folder_name(slug),
+                "parent_id": None,
+                "mental_model_id": None,
+                "sort_order": 0,
+                "managed": False,
+            },
+        )
+    report["knowledge_pages"]["placed"] = placed
+    report["knowledge_pages"]["unplaced"] = unplaced
+    return _Placement(
+        rows=rows,
+        provenance={new_of[old]: old for old in by_old},
+        folders=folders,
+        nodes=nodes,
+        names=names,
+    )
+
+
+def _platform_page_names(pages: list[dict[str, Any]]) -> list[list[str]]:
+    """``[slug, lower-cased name, id]`` of every node a platform bank carries directly
+    in a root ``project:<slug>`` folder: what a coding bank's pages may not clash with."""
+    from hal0.memory.knowledge_pages import KNOWLEDGE_FOLDER_PREFIX
+
+    folders = {
+        str(p.get("id")): str(p.get("name"))[len(KNOWLEDGE_FOLDER_PREFIX) :]
+        for p in pages
+        if p.get("kind") == "folder"
+        and not p.get("parent_id")
+        and str(p.get("name") or "").startswith(KNOWLEDGE_FOLDER_PREFIX)
+    }
+    return [
+        [folders[str(p["parent_id"])], str(p.get("name") or "").lower(), str(p.get("id"))]
+        for p in pages
+        if p.get("parent_id") and str(p.get("parent_id")) in folders
+    ]
+
+
+def rehome_folders(data: bytes, folders: Mapping[str, str]) -> bytes:
+    """``data`` with each placeholder folder id of ``folders`` replaced by its real id (pure).
+
+    The folder row and every ``parent_id`` that names it are rewritten;
+    nothing else in the archive changes.
+    """
+    archive = _read_archive(data)
+    pages = []
+    for page in archive["knowledge_pages"]:
+        row = dict(page)
+        if str(row.get("id")) in folders:
+            row["id"] = folders[str(row["id"])]
+        if row.get("parent_id") and str(row["parent_id"]) in folders:
+            row["parent_id"] = folders[str(row["parent_id"])]
+        pages.append(row)
+    return _write_archive(
+        str(archive["manifest"].get("source_bank_id") or ""),
+        archive["documents"],
+        archive["observations"],
+        archive["mental_models"],
+        pages,
+    )
+
+
+def record_page_map(target: str, rows: Mapping[str, Mapping[str, Any]]) -> None:
+    """Merge ``rows`` (old node id -> where it is now) into ``target``'s part of the page map.
+
+    The map (:data:`hal0.memory.knowledge_pages.PAGE_MAP_NAME`) sits beside
+    the ledger in the state directory, 0644, so hal0-api reads it
+    (:func:`hal0.memory.knowledge_pages.resolve_folded_node`). A row is
+    replaced when a later run records the same old id again.
+    """
+    from hal0.memory.knowledge_pages import PAGE_MAP_VERSION, load_page_map, page_map_path
+
+    if not rows:
+        return
+    path = page_map_path()
+    try:
+        data = load_page_map(path)
+    except (OSError, ValueError) as exc:
+        raise FoldInError(
+            f"the page map {path} cannot be read ({type(exc).__name__}: {exc}); move it aside "
+            "and run `hal0 memory migrate fold-in --resume`",
+            resumable=True,
+        ) from exc
+    bank_rows = data["targets"].setdefault(target, {})
+    bank_rows.update({str(k): dict(v) for k, v in rows.items()})
+    data["version"] = PAGE_MAP_VERSION
+    data["updated_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+    em.write_synced(path, json.dumps(data, indent=2, sort_keys=True) + "\n", mode=0o644)
 
 
 def _empty_archive() -> dict[str, Any]:
@@ -1566,13 +1841,60 @@ def routing_problems(
         page = source_pages.get(page_id)
         return whole or page is None or str(page.get("mental_model_id")) in marked_models
 
-    carried = {str(p) for p in (provenance.get(PART_SHARED) or {}).get("pages") or ()}
-    for page in out[PART_SHARED]["knowledge_pages"]:
-        page_id = str(page.get("id")) if isinstance(page, dict) else ""
+    shared_record = provenance.get(PART_SHARED) or {}
+    recorded = shared_record.get("pages") or ()
+    # New id -> source id. A coding bank's nodes are carried under new ids
+    # (:func:`_place_pages`); any other bank's keep theirs.
+    carried = (
+        {str(k): str(v) for k, v in recorded.items()}
+        if isinstance(recorded, Mapping)
+        else {str(p): str(p) for p in recorded}
+    )
+    placeholders = {str(k): str(v) for k, v in (shared_record.get("project_folders") or {}).items()}
+    shared_nodes = {
+        str(p.get("id")): p for p in out[PART_SHARED]["knowledge_pages"] if isinstance(p, dict)
+    }
+    shared_models = {
+        str(m.get("id")): m for m in out[PART_SHARED]["mental_models"] if isinstance(m, dict)
+    }
+    for page_id, page in shared_nodes.items():
+        if page_id in placeholders:
+            if page.get("kind") != "folder" or page.get("mental_model_id"):
+                problems.append(f"project folder {page_id} of the shared archive is not a folder")
+            continue
         if page_id not in carried:
             problems.append(f"shared knowledge page {page_id} comes from no source page")
-        elif page_marked(page_id):
+        elif page_marked(carried[page_id]):
             problems.append(f"knowledge page {page_id} is private but is in the shared archive")
+    # A page in a project folder is one compat shows: its model must carry the
+    # scope compat writes, which keeps private memory and other models out.
+    from hal0.memory.knowledge_pages import trigger_scope_held
+
+    for page_id, page in shared_nodes.items():
+        if page.get("kind") != "page":
+            continue
+        node: Mapping[str, Any] | None = page
+        seen: set[str] = set()
+        slug = None
+        while node is not None and str(node.get("id")) not in seen:
+            seen.add(str(node.get("id")))
+            parent = node.get("parent_id")
+            if parent and str(parent) in placeholders:
+                slug = placeholders[str(parent)]
+                break
+            node = shared_nodes.get(str(parent)) if parent else None
+        if slug is None:
+            continue
+        model = shared_models.get(str(page.get("mental_model_id")))
+        if model is None:
+            problems.append(f"knowledge page {page_id} has no backing model in the shared archive")
+        elif any(_is_private_tag(t) for t in model.get("tags") or ()):
+            problems.append(f"knowledge page {page_id} in project {slug} is tagged private")
+        elif not trigger_scope_held(_decoded(model.get("trigger")), slug):
+            problems.append(
+                f"knowledge page {page_id} in project {slug} lacks the project scope and the "
+                "private guard compat shows a page by"
+            )
     if out[PART_PRIVATE]["knowledge_pages"]:
         problems.append("the private archive carries knowledge pages, which it never should")
     dropped_pages = {str(p) for p in dropped.get("pages") or ()}
@@ -3277,6 +3599,12 @@ class FoldIn(em.EngineMaintenance):
                 for kind in ("documents", "mental_models"):
                     for item in ids.get(kind) or []:
                         seen.setdefault((part.target, kind, str(item)), []).append(entry.bank)
+                # A name is unique in a folder: two banks putting a node of one
+                # name in one project folder would lose one of them.
+                for row in ids.get("page_names") or []:
+                    if isinstance(row, list) and len(row) == 3:
+                        key = f"project:{row[0]}/{row[1]}"
+                        seen.setdefault((part.target, "page_names", key), []).append(entry.bank)
         pairs: dict[str, dict[str, Any]] = {}
         for (target, kind, item), banks in seen.items():
             banks = list(dict.fromkeys(banks))
@@ -3296,10 +3624,10 @@ class FoldIn(em.EngineMaintenance):
                 journal,
                 entry,
                 BankLeft(
-                    f"bank {entry.bank}: {count} of its document or mental-model id(s) are also "
-                    f"in {others}, and both would go to the same target, where a merge keeps "
-                    "only the first. Delete or rename one copy in one of the old banks, then run "
-                    "the fold-in again",
+                    f"bank {entry.bank}: {count} of its document or mental-model id(s), or "
+                    f"knowledge-page names in a project folder, are also in {others}, and both "
+                    "would go to the same target, where a merge keeps only the first. Delete or "
+                    "rename one copy in one of the old banks, then run the fold-in again",
                     bank=entry.bank,
                     details={"duplicates_with": sorted(row["with"]), "ids": row["ids"]},
                 ),
@@ -3362,6 +3690,9 @@ class FoldIn(em.EngineMaintenance):
                 part = entry.part(name)
                 if part is not None and not part.done:
                     await self._import_part(journal, entry, name, part)
+            shared = entry.part(PART_SHARED)
+            if shared is not None and shared.done:
+                await self._record_page_map(journal, entry, shared)
             entry.step = STEP_IMPORTED
             self._save(journal)
         if entry.step == STEP_IMPORTED:
@@ -3609,13 +3940,7 @@ class FoldIn(em.EngineMaintenance):
         """
         if bank not in await self._bank_ids():
             return set()
-        tree = await self._json(
-            "GET",
-            f"{em.bank_path(bank)}/knowledge-base/tree",
-            what="reading the knowledge base",
-            bank=bank,
-        )
-        stack = list((tree if isinstance(tree, dict) else {}).get("roots") or [])
+        stack = await self._tree_roots(bank)
         out: set[str] = set()
         while stack:
             node = stack.pop()
@@ -3625,6 +3950,136 @@ class FoldIn(em.EngineMaintenance):
                 out.add(str(node["mental_model_id"]))
             stack.extend(node.get("children") or [])
         return out
+
+    async def _tree_roots(self, bank: str) -> list[Any]:
+        """The roots of ``bank``'s knowledge-base tree, as the engine nests them."""
+        tree = await self._json(
+            "GET",
+            f"{em.bank_path(bank)}/knowledge-base/tree",
+            what="reading the knowledge base",
+            bank=bank,
+        )
+        roots = (tree if isinstance(tree, dict) else {}).get("roots")
+        return list(roots) if isinstance(roots, list) else []
+
+    async def _tree_index(self, bank: str) -> dict[str, tuple[dict[str, Any], str]]:
+        """Every node of ``bank``'s tree by id, with the id of the root it hangs from."""
+        out: dict[str, tuple[dict[str, Any], str]] = {}
+        stack: list[tuple[Any, str | None]] = [(n, None) for n in await self._tree_roots(bank)]
+        while stack:
+            node, root = stack.pop()
+            if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+                continue
+            here = root or node["id"]
+            out.setdefault(node["id"], (node, here))
+            stack.extend((child, here) for child in node.get("children") or [])
+        return out
+
+    async def _project_page_names(self, bank: str) -> dict[tuple[str, str], str]:
+        """``(slug, lower-cased name) -> node id`` of every node directly in a root
+        ``project:<slug>`` folder of ``bank``: the names a carried page may not take."""
+        from hal0.memory.knowledge_pages import KNOWLEDGE_FOLDER_PREFIX
+
+        if bank not in await self._bank_ids():
+            return {}
+        out: dict[tuple[str, str], str] = {}
+        for root in await self._tree_roots(bank):
+            if not isinstance(root, dict) or root.get("kind") != "folder":
+                continue
+            name = str(root.get("name") or "")
+            if not name.startswith(KNOWLEDGE_FOLDER_PREFIX):
+                continue
+            slug = name[len(KNOWLEDGE_FOLDER_PREFIX) :]
+            for child in root.get("children") or []:
+                if isinstance(child, dict) and isinstance(child.get("id"), str):
+                    out.setdefault((slug, str(child.get("name") or "").lower()), child["id"])
+        return out
+
+    async def _project_folder(self, entry: BankEntry, target: str, slug: str) -> str:
+        """The id of ``target``'s folder for project ``slug``, created when it has none.
+
+        Found and created exactly as ``/api/memory/compat`` finds and creates
+        it (``_parent_folder`` in ``hal0.api.routes.memory_compat``): the
+        first root folder named ``project:<slug>`` in id order
+        (:func:`hal0.memory.knowledge_pages.project_folders`), else the
+        engine's ``POST .../knowledge-base/folders`` with that name.
+        """
+        from hal0.memory.knowledge_pages import project_folder_name, project_folders
+
+        found = project_folders(await self._tree_roots(target), slug)
+        if found:
+            return str(found[0]["id"])
+        made = await self._json(
+            "POST",
+            f"{em.bank_path(target)}/knowledge-base/folders",
+            body={"name": project_folder_name(slug)},
+            what="creating a project folder",
+            bank=target,
+        )
+        folder = made.get("id") if isinstance(made, dict) else None
+        if not isinstance(folder, str) or not folder:
+            raise FoldInError(
+                f"the memory engine created {project_folder_name(slug)} in {target} without an id",
+                bank=entry.bank,
+                resumable=True,
+            )
+        self._say(f"created the folder {project_folder_name(slug)} in {target}")
+        return folder
+
+    async def _rehome_folders(
+        self, entry: BankEntry, target: str, data: bytes, ids: Mapping[str, Any]
+    ) -> bytes:
+        """``data`` with each placeholder project folder swapped for the target's own.
+
+        The rewrite hangs a coding bank's pages under a placeholder folder per
+        project (:func:`_place_pages`); the merge import keeps a node's
+        ``parent_id`` only when the parent is in the same archive, and a root
+        folder's name is unique in a bank (``uq_kp_folder_pagename``), so the
+        archive must carry the target's own folder under its own id. That row
+        is kept as the target has it (``ON CONFLICT DO NOTHING``) and the
+        pages land in it.
+        """
+        folders = {str(k): str(v) for k, v in (ids.get("project_folders") or {}).items()}
+        if not folders:
+            return data
+        archive = _read_archive(data)
+        present = {str(p.get("id")) for p in archive["knowledge_pages"] if isinstance(p, dict)}
+        wanted = sorted(f for f in folders if f in present)
+        if not wanted:
+            return data
+        real = {f: await self._project_folder(entry, target, folders[f]) for f in wanted}
+        self._hook(f"placed:{entry.bank}")
+        return rehome_folders(data, real)
+
+    async def _record_page_map(self, journal: Journal, entry: BankEntry, part: Part) -> None:
+        """Add where each placed node of ``entry`` is now in its target to the page map.
+
+        Read back from the target's tree, after the part was checked, so the
+        map names only nodes that are there and the folder they are in.
+        """
+        ids = self._part_ids(journal, part)
+        nodes = ids.get("page_nodes") or {}
+        placed = {
+            str(old): row
+            for old, row in nodes.items()
+            if isinstance(row, dict) and row.get("project")
+        }
+        if not placed:
+            return
+        index = await self._tree_index(part.target)
+        rows: dict[str, dict[str, Any]] = {}
+        for old, row in sorted(placed.items()):
+            got = index.get(str(row.get("id")))
+            if got is None:
+                continue
+            rows[old] = {
+                "id": str(row["id"]),
+                "kind": str(row.get("kind")),
+                "folder": got[1],
+                "project": str(row["project"]),
+                "bank": entry.bank,
+            }
+        record_page_map(part.target, rows)
 
     async def _observation_texts(self, bank: str) -> set[str]:
         rows = await self._list_all(
@@ -3712,6 +4167,7 @@ class FoldIn(em.EngineMaintenance):
                 "memory; it is not imported",
                 bank=entry.bank,
             )
+        data = await self._rehome_folders(entry, target, data, ids)
         state = await self._quiet_state(target)
         part.before = dict(state["counts"])
         part.sending = sending
@@ -3815,6 +4271,24 @@ class FoldIn(em.EngineMaintenance):
                 models_unrecorded.append(m)
         models_gone = sorted((prior_models & present_models) - my_models)
         left_ids = Path(journal.archive_dir) / LEFT_IDS_NAME
+        names = [n for n in ids.get("page_names") or [] if isinstance(n, list) and len(n) == 3]
+        if names and entry.cls == CLASS_CODING:
+            taken = await self._project_page_names(target)
+            page_clash = sorted(
+                f"project:{slug}/{name}"
+                for slug, name, new_id in names
+                if (slug, name) in taken and taken[(slug, name)] != new_id
+            )
+            if page_clash:
+                raise BankLeft(
+                    f"bank {entry.bank}: {target} already holds {len(page_clash)} knowledge "
+                    "page(s) or folder(s) of the same name in the project folder this bank's "
+                    "pages go to. A name is unique in a folder, so the merge would drop this "
+                    "bank's copy without a word. Rename or delete one of them, in the old bank "
+                    "or in the target, then run the fold-in again",
+                    bank=entry.bank,
+                    details={"page_names": page_clash},
+                )
         if clash or models:
             sent_by = self._sent_by_other_banks(entry, name, {*clash, *models})
             named = sorted(set(sent_by.values()))
@@ -3923,9 +4397,11 @@ class FoldIn(em.EngineMaintenance):
         page backed by its model; a missing one is sent again with the
         folders above it and its backing model (the engine refuses a page
         whose model is not in the archive), which the target keeps as it is.
-        The folders are new rows: the engine gives a page or folder a fresh
-        id when another bank holds its id, so the ones that landed cannot be
-        named; a resent page may sit in a second folder of the same name.
+        A coding bank's folders keep the ids the rewrite gave them, so a
+        resent page lands in the folder that landed before; any other bank's
+        folders are new rows (the engine gives a node a fresh id when another
+        bank holds its id), so such a resent page may sit in a second folder
+        of the same name.
         """
         present_docs = await self._document_ids(target) & set(ids.get("documents") or [])
         present_models = await self._model_ids(target)
@@ -4146,6 +4622,22 @@ class FoldIn(em.EngineMaintenance):
             if absent:
                 problems.append(f"{len(absent)} knowledge page(s) missing")
                 lost["pages_of_models"] = absent
+        placed = {
+            str(old): row
+            for old, row in (ids.get("page_nodes") or {}).items()
+            if isinstance(row, dict) and row.get("project")
+        }
+        if placed:
+            missing_nodes, misplaced = await self._placement_problems(part.target, placed)
+            if missing_nodes:
+                problems.append(f"{len(missing_nodes)} knowledge-base node(s) missing")
+                lost["page_nodes"] = missing_nodes
+            if misplaced:
+                problems.append(
+                    f"{len(misplaced)} knowledge page(s) not in their project folder or without "
+                    "its scope"
+                )
+                lost["misplaced_pages"] = misplaced
         if part.before is not None and part.sending is not None:
             state = await self._quiet_state(part.target)
             delta = {k: int(state["counts"][k]) - int(part.before.get(k, 0)) for k in em.COUNT_KEYS}
@@ -4156,6 +4648,42 @@ class FoldIn(em.EngineMaintenance):
                     + em.diff_text(differs).replace("expected", "expected +")
                 )
         return problems, lost
+
+    async def _placement_problems(
+        self, target: str, placed: Mapping[str, Mapping[str, Any]]
+    ) -> tuple[list[str], list[str]]:
+        """``(missing, misplaced)`` new ids among the nodes the rewrite placed in a project folder.
+
+        A node is placed when it hangs from a root folder named
+        ``project:<slug>`` for its project; a page also when the target's
+        tree shows it with no private tag and with the scope compat shows a
+        page by (:func:`hal0.memory.knowledge_pages.trigger_scope_held`).
+        """
+        from hal0.memory.knowledge_pages import project_folder_name, trigger_scope_held
+
+        index = await self._tree_index(target)
+        missing: list[str] = []
+        misplaced: list[str] = []
+        for row in placed.values():
+            new_id, slug = str(row.get("id")), str(row.get("project"))
+            got = index.get(new_id)
+            if got is None:
+                missing.append(new_id)
+                continue
+            node, root = got
+            folder = index.get(root, ({}, root))[0]
+            in_folder = (
+                root != new_id
+                and folder.get("kind") == "folder"
+                and folder.get("name") == project_folder_name(slug)
+            )
+            unscoped = row.get("kind") == "page" and (
+                any(_is_private_tag(t) for t in node.get("tags") or ())
+                or not trigger_scope_held(_decoded(node.get("trigger")), slug)
+            )
+            if not in_folder or unscoped:
+                misplaced.append(new_id)
+        return sorted(missing), sorted(misplaced)
 
     def _record_ledger(self, journal: Journal) -> None:
         """Write what this run did to every bank into the ledger, for the runs after it.
