@@ -670,6 +670,81 @@ def test_the_listen_address_is_read_as_the_engine_reads_it(
     assert (not em.is_loopback_host(host)) is exposed
 
 
+@pytest.mark.parametrize(
+    ("command", "host"),
+    [
+        ("--host 127.0.0.1 --port 9177 --host 0.0.0.0", "0.0.0.0"),
+        ("--host 0.0.0.0 --port 9177 --host=127.0.0.1", "127.0.0.1"),
+        ("--host=10.0.0.5 --host 127.0.0.1", "127.0.0.1"),
+    ],
+)
+def test_a_host_given_twice_binds_the_last_as_argparse_does(command: str, host: str) -> None:
+    """Fourth review, item 7."""
+    unit = (
+        "# /etc/systemd/system/hindsight-api.service\n[Service]\n"
+        f"ExecStart=/opt/hs/bin/hindsight-api {command}\n"
+    )
+    assert em.listen_host(fi.NAMES, unit)[0] == host
+
+
+def test_the_listen_address_reads_the_units_environment_file(tmp_path: Path) -> None:
+    """Fourth review, item 8: an EnvironmentFile beats Environment=, and unreadable is exposed."""
+    env = tmp_path / "engine.env"
+    env.write_text("# a comment\nOTHER=1\nHINDSIGHT_API_HOST='0.0.0.0'\n", encoding="utf-8")
+
+    def unit(lines: str, command: str = "--port 9177") -> str:
+        return (
+            "# /etc/systemd/system/hindsight-api.service\n[Service]\n"
+            + lines
+            + f"ExecStart=/opt/hs/bin/hindsight-api {command}\n"
+        )
+
+    # The file overrides Environment=, even when Environment= comes after it.
+    host, where = em.listen_host(
+        fi.NAMES, unit(f"EnvironmentFile={env}\nEnvironment=HINDSIGHT_API_HOST=127.0.0.1\n")
+    )
+    assert host == "0.0.0.0" and str(env) in where
+    # A file that does not set it leaves Environment= in charge.
+    env.write_text("OTHER=1\n", encoding="utf-8")
+    host, _ = em.listen_host(
+        fi.NAMES, unit(f"EnvironmentFile={env}\nEnvironment=HINDSIGHT_API_HOST=127.0.0.1\n")
+    )
+    assert host == "127.0.0.1"
+    # An explicit --host on the command line wins over both.
+    env.write_text("HINDSIGHT_API_HOST=0.0.0.0\n", encoding="utf-8")
+    host, _ = em.listen_host(fi.NAMES, unit(f"EnvironmentFile={env}\n", "--host 127.0.0.1"))
+    assert host == "127.0.0.1"
+    # A missing optional file is skipped, as systemd skips it.
+    host, _ = em.listen_host(
+        fi.NAMES,
+        unit(f"EnvironmentFile=-{tmp_path}/absent.env\nEnvironment=HINDSIGHT_API_HOST=::1\n"),
+    )
+    assert host == "::1"
+    # A file that cannot be read makes the host unknown, which is exposed.
+    for lines in (f"EnvironmentFile={tmp_path}/absent.env\n", f"EnvironmentFile={tmp_path}\n"):
+        host, where = em.listen_host(fi.NAMES, unit(lines))
+        assert host == em.UNKNOWN_HOST and "cannot be read" in where
+        assert not em.is_loopback_host(host)
+
+
+async def test_an_unreadable_environment_file_refuses_apply_without_the_flag(
+    box: Box, tmp_path: Path
+) -> None:
+    """Fourth review, item 8: an engine whose host cannot be read is treated as exposed."""
+    unreadable = tmp_path / "secret.env"
+    unreadable.mkdir()
+    box.unit_text = SHIPPED_UNIT.replace("--host 127.0.0.1 ", "").replace(
+        "EnvironmentFile=-/etc/hal0/hindsight-llm.env",
+        f"EnvironmentFile={unreadable}",
+    )
+    dry = await box.fold().preflight()
+    assert dry["engine_listen"]["exposed"] is True
+    assert any("cannot be read" in w for w in dry["warnings"])
+    assert "engine_exposed" in _codes(await box.fold().preflight(apply=True))
+    allowed = await box.fold(allow_exposed_engine=True).preflight(apply=True)
+    assert "engine_exposed" not in _codes(allowed)
+
+
 async def test_refuses_apply_without_root_and_a_target_that_is_the_old_bank(box: Box) -> None:
     box.privileged = False
     assert "not_privileged" in _codes(await box.fold().preflight(apply=True))
