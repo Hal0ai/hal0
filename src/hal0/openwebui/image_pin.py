@@ -50,11 +50,11 @@ OPENWEBUI_UNIT_NAME = "hal0-openwebui.service"
 #: duplicate in tests/openwebui/test_prewire_smoke.py. Bump all
 #: together; tests/installer/test_owui_pin_lockstep.py fails naming
 #: whichever site is stale.
-OPENWEBUI_IMAGE_PIN = "sha256:03443b8de6b617da9d900edd09b4bf1cb0ddbfdcba6afb42c548336a0b821ded"
+OPENWEBUI_IMAGE_PIN = "sha256:46b59158e6558eeb980bc828e0f1b30238ad24d82ed84d5e5eda1dab2a082f14"
 
 #: Human-readable label for the pin, shown next to the digest in status
 #: surfaces. Informational only — the digest is the authority.
-OPENWEBUI_PIN_LABEL = "03443b8de6b6"
+OPENWEBUI_PIN_LABEL = "46b59158e655"
 
 #: Matches the pinned ref in the unit / install.sh, capturing the digest.
 #: e.g. ``ghcr.io/open-webui/open-webui@sha256:7f1b0a…`` → ``sha256:7f1b0a…``.
