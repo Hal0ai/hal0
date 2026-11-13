@@ -1385,7 +1385,14 @@ async def test_the_ledger_and_the_notes_hold_no_memory_id(box: Box) -> None:
     e.banks["hal0:shared"]["docs"][taken] = doc(taken, fact("someone else's"))
     result = await box.fold().run()
     assert result["status"] == "incomplete" and e.imports == []
-    text = fi.ledger_path().read_text()
+    # The run id is random hex and the notes name left-ids.json by its path;
+    # either may spell "b1", so both are masked before the search.
+    text = (
+        fi.ledger_path()
+        .read_text()
+        .replace(result["archive_dir"], "<archive dir>")
+        .replace(result["run_id"], "<run>")
+    )
     for memory_id in ("private:", "s2", "git:123", "conversation:a", "n1", "p1", "b1"):
         assert memory_id not in text, memory_id
     sidecar = json.loads((Path(result["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
