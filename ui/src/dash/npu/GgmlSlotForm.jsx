@@ -10,20 +10,19 @@ import { useXdnaFit } from '@/api/hooks/useXdnaFit'
 import { useXdnaKnobs } from '@/api/hooks/useXdnaKnobs'
 import './npu-tab.css'
 import { slotButtonPhase } from '../slot-status.js'
-import { compatibleModels } from '../slots/slot-shared.js'
 import {
   GGML_CTX_PRESETS,
   GGML_REQUANT_CMD,
   ggmlCreateBody,
   ggmlCtxError,
   ggmlEditBody,
+  ggmlModelIds,
   ggmlNameError,
   ggmlProfileOptions,
   ggmlRequantHint,
   nextGgmlName,
 } from './ggml-slot-pure'
 
-const XDNA_SLOT = { binary: 'xdna', device: 'npu', device_class: 'npu' }
 const toast = (msg, kind = 'info') => typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
 const fmt = (n) => (n == null ? '—' : Number(n).toLocaleString('en-US'))
 
@@ -82,8 +81,8 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
   const [customCtx, setCustomCtx] = useState('')
   const cmdRef = useRef(null)
 
-  const models = useMemo(() => compatibleModels(modelsQ.data, { type: 'llm', slot: XDNA_SLOT }), [modelsQ.data])
   const fit = fitQ.data ?? {}
+  const models = useMemo(() => ggmlModelIds(modelsQ.data, fitQ.data).map((id) => ({ id })), [modelsQ.data, fitQ.data])
   const profileOpts = ggmlProfileOptions(profilesQ.data)
   const profileRow = (profilesQ.data ?? []).find((p) => p.name === d.profile)
   const pmodes = knobsQ.data?.pmodes ?? []
@@ -179,7 +178,14 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
       <section className="ggml-sec" data-testid="ggml-model-list">
         <span className="ggml-lbl">Model</span>
         <div className="ggml-models" role="listbox" aria-label="GGUF model">
-          {models.length === 0 && <div className="npt-hint">No GGUF chat models installed.</div>}
+          {fitQ.isLoading && <div className="npt-hint" data-testid="ggml-models-loading">Loading GGUF models…</div>}
+          {fitQ.isError && (
+            <div className="npt-hint" data-testid="ggml-models-error">
+              Could not load GGUF models.{' '}
+              <button type="button" className="btn ghost sm" data-testid="ggml-models-retry" onClick={() => fitQ.refetch()}>Retry</button>
+            </div>
+          )}
+          {!fitQ.isLoading && !fitQ.isError && models.length === 0 && <div className="npt-hint">No GGUF chat models installed.</div>}
           {models.map((m) => (
             <button key={m.id} type="button" role="option" aria-selected={d.model === m.id} className={'ggml-model' + (d.model === m.id ? ' on' : '')} data-testid={`ggml-model-${m.id}`} onClick={() => set({ model: m.id })}>
               <span className="mono">{m.id}</span>

@@ -122,3 +122,19 @@ export const GGML_REQUANT_CMD = 'llama-quantize --tensor-type ssm_out=q5_K <in> 
 export function ggmlRequantHint(row: { xdna_path: string | null; reason?: string } | null | undefined): boolean {
   return !!row && row.xdna_path === 'per-op' && /ssm_out\.weight is .+, not Q5_K/.test(row.reason || '')
 }
+
+/** Ids the GGML slot form offers. The backend fit map (GET /api/runners/xdna/fit) is the authority
+ *  for "GGUF chat model" (its keys are the rows `_is_gguf_llm` selects), the same rule the NPU Models
+ *  table uses; the registry only vetoes a row it knows to be a non-llm type. Filtering the registry
+ *  client-side instead listed llm rows `_is_gguf_llm` excludes (non-GGUF or non-FLM backends, empty-backend
+ *  rows whose path is not .gguf), and gave them no fit chip (#3647). */
+export function ggmlModelIds(
+  models: Array<{ id: string; type?: string }> | null | undefined,
+  fit: Record<string, unknown> | null | undefined,
+): string[] {
+  const reg = new Map((models ?? []).map((m) => [m.id, m]))
+  return Object.keys(fit ?? {}).filter((id) => {
+    const m = reg.get(id)
+    return !m || m.type === 'llm'
+  })
+}
