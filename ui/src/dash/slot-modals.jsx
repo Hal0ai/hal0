@@ -14,7 +14,6 @@ import {
 	useSlotResolved,
 	useSlots,
 	useSlotRename,
-	useSlotConfig,
 } from "@/api/hooks/useSlots";
 import { useHardware } from "@/api/hooks/useHardware";
 import { useModels, usePullJob } from "@/api/hooks/useModels";
@@ -51,7 +50,7 @@ import {
 	halogenFlagsError,
 } from "./profiles.jsx";
 import { EngineSettings } from "./engine-settings.jsx";
-import { XdnaEngineSettings } from "./xdna-settings.jsx";
+import { GgmlSlotForm } from "./npu/GgmlSlotForm.jsx";
 import { footprintLine } from "./halogen-footprint.js";
 import { RichSelect } from "./rich-select.jsx";
 import { FitChip, ModalityTag } from "./fit-chip.jsx";
@@ -86,6 +85,7 @@ import { SlotBreakerChip } from "./breaker-chip.jsx";
 import { ConversionBlockedChip, ConversionBlockedDetail } from "./conversion-blocked-chip.jsx";
 import { npuModalityOn, npuApplyBody } from "./npu-modality.js";
 import { slotModelRow, slotModelId, npuAnchorSlot, compatibleModels } from "./slots/slot-shared.js";
+import { slotEditHash } from './slots-route'
 
 // The slot edit drawer's own width, and therefore the offset the stacked model
 // drawer docks at so its right edge lands flush against this drawer's left one.
@@ -215,35 +215,10 @@ function SlotEngineBlock({ profile, engine, slotName, open, onDuplicate }) {
 
 // ── xdna slot engine block ──────────────────────────────────────────────
 // Unlike SlotEngineBlock (halogen, profile-owned flags), an xdna slot's
-// pmode/env/host_xrt write the SLOT's own `[xdna]` config table directly
-// (PUT /api/slots/{name}/config) and cold-restart it — the same two-call
-// contract the NPU occupancy card's writeAnchor uses. Draft state mirrors
-// SlotEngineBlock's base/dirty tracking so a config refetch underneath an
-// unsaved edit retires the draft instead of clobbering it.
-function SlotXdnaBlock({ slot, xdnaCfg, xdnaPath, editMut, restartMut }) {
-	const stored = xdnaCfg || {};
-	const [draft, setDraft] = useStateSM(null);
-	const live = draft && draft.base === stored ? draft : null;
-	const value = live ? live.value : stored;
-	const dirty = !!live && !live.sent;
-	const hostXrtError = value?.host_xrt && !String(value.host_xrt).startsWith("/");
-	const toast = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind);
-	const apply = () => {
-		if (!dirty || hostXrtError || editMut.isPending || restartMut.isPending) return;
-		editMut.mutate(
-			{ name: slot.name, body: { xdna: value } },
-			{
-				onSuccess: () => {
-					setDraft({ base: stored, value, sent: true });
-					toast(`${slot.name} xdna settings updated — restarting`, "info");
-					restartMut.mutate(slot.name, {
-						onError: (err) => toast(`${slot.name} restart failed — ${err?.message || "see logs"}`, "warn"),
-					});
-				},
-				onError: (err) => toast(err?.message || "xdna settings change failed", "warn"),
-			},
-		);
-	};
+// pmode/env/host_xrt write the SLOT's own `[xdna]` table (PUT
+// /api/slots/{name}/config) and restart it when running. The UI is the shared
+// GGML slot form's engine variant — the drawer owns name, model, profile, context.
+function SlotXdnaBlock({ slot }) {
 	return (
 		<div className="form-row" data-testid="slot-xdna-block">
 			<div className="form-lbl">
@@ -251,26 +226,7 @@ function SlotXdnaBlock({ slot, xdnaCfg, xdnaPath, editMut, restartMut }) {
 				<FieldInfoIcon description="The ggml-xdna runner's own settings: power mode (applied host-side), GGML_XDNA_* env knobs, and the host_xrt path. Written to this slot's own config and applied with a restart." />
 			</div>
 			<div className="form-ctl">
-				<XdnaEngineSettings
-					xdna={value}
-					xdnaPath={xdnaPath}
-					onChange={(next) => setDraft({ base: stored, value: next, sent: false })}
-				/>
-				<div className="tune-foot">
-					<span className="hint" data-testid="slot-xdna-note">
-						Saved to this slot's config, applied on restart.
-					</span>
-					<span className="pf-grow" />
-					<button
-						type="button"
-						className="btn ghost sm"
-						data-testid="slot-xdna-apply"
-						disabled={!dirty || !!hostXrtError || editMut.isPending || restartMut.isPending}
-						onClick={apply}
-					>
-						{editMut.isPending || restartMut.isPending ? "Saving…" : "Save & restart"}
-					</button>
-				</div>
+				<GgmlSlotForm mode="edit" variant="engine" slot={slot} />
 			</div>
 		</div>
 	);
@@ -736,12 +692,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const swapMut = useSlotSwap();
 	const profilesQuery = useProfiles();
 	const modelsQuery = useModels();
-	// xdna slot config — `[xdna]` table (pmode/env/host_xrt), for the XDNA
-	// engine-settings block below. Enabled only for an xdna slot and only
-	// while the drawer is open — a null-name query is a no-op (useSlotConfig
-	// mirrors useSlotResolved's enabled guard).
 	const isXdnaSlotEdit = isXdnaSlot(slot);
-	const xdnaCfgQuery = useSlotConfig(isXdnaSlotEdit ? slot.name : undefined);
 	// Full slot list — needed only to resolve a shadow's anchor STRUCTURALLY
 	// (see the NPU-modalities row below); #1637 already pays this same query
 	// in npu-pane.jsx, so react-query serves it from cache here.
@@ -1341,7 +1292,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			// The route still names the old slot (#slots/<old>); without this
 			// the drawer unmounts silently on the next poll because no slot
 			// matches the old name any more. Follow the rename in the URL.
-			window.location.hash = "#slots/" + next;
+			window.location.hash = slotEditHash(next);
 		} catch (err) {
 			setNameDraft(slot.name);
 			window.__hal0Toast &&
@@ -2179,13 +2130,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						</>
 					)}
 					{isXdnaSlotEdit && (
-						<SlotXdnaBlock
-							slot={slot}
-							xdnaCfg={xdnaCfgQuery.data?.xdna}
-							xdnaPath={slot.xdna_path}
-							editMut={editMut}
-							restartMut={restartMut}
-						/>
+						<SlotXdnaBlock slot={slot} />
 					)}
 				</FieldGroup>
 
@@ -2447,10 +2392,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											This capability is served by the anchor FLM slot — STT and
 											Embed are toggled there.{" "}
 											<a
-												href={"#slots/" + anchor}
+												href={slotEditHash(anchor)}
 												onClick={(e) => {
 													e.preventDefault();
-													const target = "#slots/" + anchor;
+													const target = slotEditHash(anchor);
 													// Route through the dirty guard — a direct hash
 													// assignment would re-seed the drawer for the anchor
 													// and silently drop pending Save-batched edits.

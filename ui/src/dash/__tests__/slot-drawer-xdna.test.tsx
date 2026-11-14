@@ -57,6 +57,12 @@ vi.mock('@/api/hooks/useSlots', () => ({
   useSlots: () => ({ data: [], isLoading: false }),
   useSlotRename: () => idle,
   useSlotConfig: () => ({ data: {} }),
+  useSlotCreate: () => idle,
+  useSlotDelete: () => idle,
+}))
+vi.mock('@/api/hooks/useXdnaFit', () => ({ useXdnaFit: () => ({ data: {} }) }))
+vi.mock('@/api/hooks/useXdnaKnobs', () => ({
+  useXdnaKnobs: () => ({ data: { pmodes: ['turbo'], env: [], host_xrt: { doc: '' } } }),
 }))
 vi.mock('@/api/hooks/useHardware', () => ({ useHardware: () => ({ data: undefined }) }))
 vi.mock('@/api/hooks/useModels', () => ({
@@ -143,8 +149,19 @@ describe('slot drawer on an xdna slot', () => {
     const { root } = mount(XDNA)
     expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/slots/flm/models'))).toBe(false)
     expect(byId('npu-capability-matrix')).toBeNull()
+    // The drawer keeps rename, model and profile; only the engine block is the GGML form's engine variant.
+    expect(byId('slot-name-inline')).not.toBeNull()
+    expect(byId('slot-pin-toggle')).not.toBeNull()
     expect(document.querySelector('[data-testid="slot-model-swap"], [aria-label="Model for gguf-npu"]')).not.toBeNull()
     expect(byId('slot-profile')).not.toBeNull()
+    expect(byId('slot-xdna-block')).not.toBeNull()
+    expect(byId('ggml-pmode-row')).not.toBeNull()
+    expect(byId('ggml-save-engine')).not.toBeNull()
+    // No Name / Delete / model list / context from the form: the drawer owns those.
+    expect(byId('ggml-name')).toBeNull()
+    expect(byId('ggml-delete')).toBeNull()
+    expect(byId('ggml-model-list')).toBeNull()
+    expect(byId('ggml-ctx-row')).toBeNull()
     act(() => root.unmount())
   })
 

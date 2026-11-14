@@ -15,10 +15,11 @@
 import { useSlotCreate } from '@/api/hooks/useSlots'
 import { useModels } from '@/api/hooks/useModels'
 import { localModels, deviceFromModel, deviceHue } from './slot-shared.js'
+import { SLOT_NAME_RE } from './slot-name'
 
 const { useState: useStateC, useEffect: useEffectC, useMemo: useMemoC } = React;
 
-const NAME_RE = /^[a-z][a-z0-9-]{0,30}$/;
+const NAME_RE = SLOT_NAME_RE;
 
 function CreateSlotModal({ open, onClose, defaults = {}, existingSlots = [] }) {
   const createMut = useSlotCreate();

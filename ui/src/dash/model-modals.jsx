@@ -22,6 +22,7 @@ import { draftKey, mergeDrafts, draftSourceLine, draftVerdict, draftKindNeeded, 
 import { useSlots } from '@/api/hooks/useSlots'
 import { useSettings } from '@/api/hooks/useSettings'
 import { useChatTemplates } from '@/api/hooks/useChatTemplates'
+import { slotEditHash } from './slots-route'
 
 const { useState: useStateMM, useEffect: useEffectMM, useMemo: useMemoMM } = React;
 
@@ -519,7 +520,7 @@ function UsedByPanel({ model }) {
       ) : (
         using.map(s => (
           <div key={s.name} className="ro-row" style={{cursor: "pointer", padding: "7px 0"}}
-               onClick={() => { window.location.hash = "#slots/" + s.name; }}>
+               onClick={() => { window.location.hash = slotEditHash(s.name); }}>
             <span className="k" style={{display: "flex", alignItems: "center", gap: 6}}>
               <span className={"dot " + (s.state || "empty")} />
               {s.name}

@@ -92,7 +92,7 @@ test.describe('NPU chat-model seeding (#1388)', () => {
     await stubFlm(page, [{ model: CONFIGURED, installed: true }])
     await seedSlots(page, [NPU_SLOT])
 
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     await lane(page, 'NPU · ASR').getByRole('switch').click()
 
     await expect.poll(() => puts.length).toBe(1)
@@ -109,7 +109,7 @@ test.describe('NPU chat-model seeding (#1388)', () => {
     await stubFlm(page, [{ model: CONFIGURED, installed: true }])
     await seedSlots(page, [NPU_SLOT])
 
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     await lane(page, 'NPU · Embed').getByRole('switch').click()
 
     await expect.poll(() => puts.length).toBe(1)
@@ -125,7 +125,7 @@ test.describe('NPU chat-model seeding (#1388)', () => {
     ])
     await seedSlots(page, [NPU_SLOT])
 
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     // An operator must be able to see what a toggle is about to send.
     await expect(lane(page, 'NPU · Chat').getByTestId('npu-chat-model')).toContainText(CONFIGURED)
   })
@@ -138,7 +138,7 @@ test.describe('NPU chat-model seeding (#1388)', () => {
     ])
     await seedSlots(page, [NPU_SLOT])
 
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     await pickRichOption(lane(page, 'NPU · Chat').getByTestId('npu-chat-model'), 'flm-other')
 
     await expect.poll(() => puts.length).toBe(1)
@@ -153,7 +153,7 @@ test.describe('NPU chat-model seeding (#1388)', () => {
     await stubFlm(page, [{ model: STALE_LIVE, installed: true }])
     await seedSlots(page, [{ ...NPU_SLOT, model_default: undefined }])
 
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     await lane(page, 'NPU · ASR').getByRole('switch').click()
 
     await expect.poll(() => puts.length).toBe(1)

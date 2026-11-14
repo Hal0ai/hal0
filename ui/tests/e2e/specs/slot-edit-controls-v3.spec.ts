@@ -523,7 +523,7 @@ test.describe('Slot edit controls (/slots)', () => {
       npu: { chat: true, asr: false, embed: false },
     }, EMBED])
 
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     await expect(page.getByText('NPU · Chat')).toBeVisible()
     await expect(page.getByText('NPU · ASR')).toBeVisible()
     await expect(page.getByText('NPU · Embed')).toBeVisible()

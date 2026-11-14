@@ -113,6 +113,8 @@ export interface StatsHardware {
   // §2b new fields — backend adds cpu_util; npu_util only if NPU-telemetry spike lands
   cpu_util?: number | null
   npu_util?: number | null
+  npu_pmode?: string | null
+  npu_fclk?: number | null
   npu_status?: { ok: boolean; model_mb: number }
   host?: StatsHardwareHost
   per_upstream?: Record<string, unknown>

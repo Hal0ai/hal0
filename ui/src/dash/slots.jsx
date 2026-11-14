@@ -19,7 +19,10 @@ import { useModels } from '@/api/hooks/useModels'
 import { useComfyui } from '@/api/hooks/useComfyui'
 import { RunnerImagesView } from '@/dash/runner-images.jsx'
 import { ImageGenTabs } from './image/ImageGenTabs'
-import { slotsSub, slotsTab } from './slots-route'
+import { NpuTabs } from './npu/NpuTabs'
+import { npuTabVisible } from './npu/npu-pure'
+import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
+import { isReservedSlotsTab, slotEditHash, slotEditTarget, slotsSub, slotsTab } from './slots-route'
 import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
   InferencePane,
@@ -493,7 +496,7 @@ function SlotListRow({ slot, modelRow, onEdit }) {
   // restart mutation and the Edit drawer (via the #slots/:name route, the
   // same path SlotCard uses). `onEdit` is optional; fall through to hash.
   const restartMut = useSlotRestart();
-  const goEdit = onEdit || (() => { window.location.hash = "#slots/" + slot.name; });
+  const goEdit = onEdit || (() => { window.location.hash = slotEditHash(slot.name); });
   // Fire-and-forget restart — never block the row on the model reload.
   const onRestart = () => {
     restartMut.mutate(slot.name, {
@@ -648,10 +651,11 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
   // is the Image Gen pane's sub-tab (`slotSub`, from main.jsx's parseRoute).
   const paramTab = slotsTab(slotParam);
   const [tab, setTab] = useStateS(
-    paramTab === "endpoints" || paramTab === "runner-images" || paramTab === "stacks" || paramTab === "image"
+    isReservedSlotsTab(paramTab)
       ? paramTab
       : "inference",
   );
+  const npuOccQ = useNpuOccupancy();
   const comfyQuery = useComfyui({ active: tab === "image" });
   const comfyLive = comfyQuery.data?.container?.state === "running";
   const { active: activeBanners } = useBanners();
@@ -691,9 +695,11 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
 
   // Open Edit drawer when route is #slots/:name
   React.useEffect(() => {
-    if (slotParam) {
-      const exists = (slots || []).find(s => s.name === slotParam);
-      if (exists) setEditName(slotParam);
+    // `#slots/<name>` or, for a slot named like a reserved tab, `#slots/edit/<name>`.
+    const target = slotEditTarget(slotParam);
+    if (target) {
+      const exists = (slots || []).find(s => s.name === target);
+      if (exists) setEditName(target);
     } else {
       setEditName(null);
     }
@@ -706,7 +712,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
   // generation links to #slots/image). Bare #slots, #slots/inference and a
   // slot-name param (the edit drawer) all show Inference.
   React.useEffect(() => {
-    if (paramTab === "endpoints" || paramTab === "runner-images" || paramTab === "stacks" || paramTab === "image") setTab(paramTab);
+    if (isReservedSlotsTab(paramTab)) setTab(paramTab);
     else setTab("inference");
   }, [paramTab]);
 
@@ -804,7 +810,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
       swapOpen={swapName === s.name}
       onSwap={(e) => { e.stopPropagation(); setSwapName(swapName === s.name ? null : s.name); }}
       onCloseSwap={() => setSwapName(null)}
-      onEdit={() => { window.location.hash = "#slots/" + s.name; }}
+      onEdit={() => { window.location.hash = slotEditHash(s.name); }}
       onRestart={() =>
         runMutation(s.name, restartMut, s.name, `Restarting ${s.name}…`)
       }
@@ -891,7 +897,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
   // engine, not the slot list). Only the Inference tab falls through to the
   // loading skeleton / empty state below.
   const onSubTab =
-    tab === "endpoints" || tab === "runner-images" || tab === "stacks" || tab === "image";
+    isReservedSlotsTab(tab);
 
   // Loading skeleton — shown while /api/slots is still resolving so no
   // fake/stub slot cards flash before real data arrives.
@@ -1038,6 +1044,16 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
           {comfyLive && <span className="slot-tab-dot live" />}
           <span>Image Gen</span>
         </button>
+        {(npuTabVisible(npuOccQ.data, cardSlots) || tab === "npu") && (
+        <button
+          role="tab"
+          aria-selected={tab === "npu"}
+          className={"slot-tab npu" + (tab === "npu" ? " on" : "")}
+          onClick={() => { window.location.hash = "#slots/npu"; }}
+        >
+          <span>NPU</span>
+        </button>
+        )}
         <button
           role="tab"
           aria-selected={tab === "endpoints"}
@@ -1074,10 +1090,12 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
       ) : tab === "stacks" ? (
         window.StacksView ? <window.StacksView /> : null
       ) : (
-      <div className={"dash" + (tab === "image" ? " dash-solo" : "")}>
+      <div className={"dash" + (tab === "image" || tab === "npu" ? " dash-solo" : "")}>
         <div className="dash-main">
           {tab === "image" ? (
             <ImageGenTabs sub={slotSub} />
+          ) : tab === "npu" ? (
+            <NpuTabs sub={slotSub} slots={cardSlots} />
           ) : (
             <>
               {/* Inference "engine" pane — a summary engine-shell (yellow accent)

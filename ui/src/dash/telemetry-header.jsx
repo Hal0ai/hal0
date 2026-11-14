@@ -26,6 +26,7 @@ import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase } from './slot-status.js'
 import { devKind } from '@/lib/deviceMeta'
+import { slotEditHash } from './slots-route'
 
 const { useState: useStateT, useRef: useRefT, useEffect: useEffectT, useMemo: useMemoT } = React
 
@@ -422,7 +423,7 @@ function ThRuler({ slots }) {
   // memory but the backend names no img slot (the model calls it 'image engine').
   const goSlot = (s) => {
     if (s.isImageEngine && !slotByName[s.name]) return
-    window.location.hash = '#slots/' + s.name
+    window.location.hash = slotEditHash(s.name)
   }
 
   return (

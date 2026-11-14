@@ -54,3 +54,19 @@ describe('isImageGenRoute', () => {
     expect(isImageGenRoute(undefined, undefined)).toBe(false)
   })
 })
+
+describe('slot edit routes', () => {
+  it('slotEditHash routes a reserved name through edit/', async () => {
+    const { slotEditHash } = await import('../slots-route')
+    expect(slotEditHash('npu')).toBe('#slots/edit/npu')
+    expect(slotEditHash('agent')).toBe('#slots/agent')
+  })
+  it('slotEditTarget resolves the drawer target', async () => {
+    const { slotEditTarget } = await import('../slots-route')
+    expect(slotEditTarget('edit/npu')).toBe('npu')
+    expect(slotEditTarget('agent')).toBe('agent')
+    expect(slotEditTarget('npu')).toBeNull()
+    expect(slotEditTarget('npu/lanes')).toBeNull()
+    expect(slotEditTarget(null)).toBeNull()
+  })
+})
