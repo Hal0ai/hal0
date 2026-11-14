@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -91,30 +92,52 @@ def _last_used_age_s(app_state: Any, slot_name: str) -> float | None:
 
 _IMAGE_STORE_TTL_S = 30.0
 _image_store_cache: tuple[float, set[str] | None] | None = None
+_image_refresh_lock = threading.Lock()
+_image_refresh_thread: threading.Thread | None = None
+
+
+def _read_image_store() -> set[str] | None:
+    """Blocking podman store read (seam + rootless fallback, up to ~20 s)."""
+    try:
+        from hal0.providers.podman_introspect import images_digests
+
+        local = images_digests()
+        return None if local is None else set(local.refs) | set(local.refs.values())
+    except Exception:
+        log.warning("npu.image_store_read_failed", exc_info=True)
+        return None
+
+
+def _refresh_image_store() -> None:
+    global _image_store_cache, _image_refresh_thread
+    try:
+        result = _read_image_store()
+    except Exception:
+        result = None
+    with _image_refresh_lock:
+        _image_store_cache = (time.monotonic(), result)
+        _image_refresh_thread = None
 
 
 def _local_image_refs() -> set[str] | None:
     """Refs and digests in the local podman image store, or ``None``.
 
-    The store read shells out (``podman images``, up to 10 s), so the result —
-    including a failed read — is cached for ``_IMAGE_STORE_TTL_S`` and the
-    caller runs this off the event loop.
+    Never blocks on podman: stale-while-revalidate with single-flight. Returns
+    the cached value (stale included; ``None`` before the first read lands or
+    when the last read failed) and, when the cache is missing or older than
+    ``_IMAGE_STORE_TTL_S``, starts at most one background refresh. A failed
+    refresh is cached as ``None`` for the TTL too.
     """
-    global _image_store_cache
-    now = time.monotonic()
-    if _image_store_cache is not None and now - _image_store_cache[0] < _IMAGE_STORE_TTL_S:
-        return _image_store_cache[1]
-    result: set[str] | None
-    try:
-        from hal0.providers.podman_introspect import images_digests
-
-        local = images_digests()
-        result = None if local is None else set(local.refs) | set(local.refs.values())
-    except Exception:
-        log.warning("npu.image_store_read_failed", exc_info=True)
-        result = None
-    _image_store_cache = (now, result)
-    return result
+    global _image_refresh_thread
+    with _image_refresh_lock:
+        cached = _image_store_cache
+        fresh = cached is not None and time.monotonic() - cached[0] < _IMAGE_STORE_TTL_S
+        if not fresh and _image_refresh_thread is None:
+            _image_refresh_thread = threading.Thread(
+                target=_refresh_image_store, name="npu-image-store", daemon=True
+            )
+            _image_refresh_thread.start()
+        return cached[1] if cached is not None else None
 
 
 def _npu_host_probe() -> dict[str, Any]:

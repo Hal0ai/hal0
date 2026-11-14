@@ -393,7 +393,7 @@ npu_host: {
 `image` is the ref a slot with no pin launches (same resolution as
 `GET /api/runner-images` `families[].effective_ref`). `flm.version` is that
 tag minus the `-r<revision>` build suffix. `xdna.pulled` is `null` when the
-local image store cannot be read; the store read is cached for 30 s.
+local image store has not been read yet or cannot be read; the store is read in the background (refreshed every 30 s) and never blocks the route.
 
 ## GET /api/runners/xdna/fit
 
