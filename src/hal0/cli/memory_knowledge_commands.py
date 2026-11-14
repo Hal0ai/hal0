@@ -73,6 +73,20 @@ def _lines(report: dict[str, Any]) -> list[str]:
     for top in report.get("tops") or []:
         mark = "move" if top.get("state") == "move" else "in place"
         out.append(f"  {mark}: {escape(str(top.get('shown_name')))} ({top.get('kind')})")
+    unfolded = report.get("not_folded") or []
+    if unfolded:
+        out.append(
+            f"[yellow]{len(unfolded)} node(s) were written to "
+            f"{escape(str(report.get('bank')))} that the fold-in never sent (written after it, or "
+            "dropped by it): they stay "
+            "in the old bank, which nothing reads. Re-create one through compat, or ignore "
+            "it.[/yellow]"
+        )
+        for node in unfolded:
+            out.append(
+                f"  not folded: {escape(str(node.get('name')))} ({node.get('kind')}, "
+                f"{escape(str(node.get('old_id')))})"
+            )
     for rename in report.get("renames") or []:
         out.append(
             f"  rename: {escape(str(rename.get('from')))} -> {escape(str(rename.get('to')))}"

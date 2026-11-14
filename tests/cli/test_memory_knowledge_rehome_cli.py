@@ -107,3 +107,15 @@ def test_a_refused_apply_exits_1_with_the_plan_as_json(monkeypatch: pytest.Monke
 def test_bank_and_project_are_required() -> None:
     out = runner.invoke(app, ["memory", "knowledge", "rehome", "--bank", "Hal0::Agents"])
     assert out.exit_code == 2
+
+
+def test_a_node_written_after_the_fold_in_is_named_as_staying_in_the_old_bank(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    late = {"old_id": "kp-late", "kind": "page", "name": "NPU exclusion (#3666)"}
+    monkeypatch.setattr(cmd, "_drive", lambda apply, **_kw: {**PLAN, "not_folded": [late]})
+    out = runner.invoke(app, ARGS)
+    assert out.exit_code == 0, out.output
+    flat = " ".join(out.output.split())
+    assert "NPU exclusion (#3666)" in flat and "kp-late" in flat
+    assert "stay in the old bank" in flat

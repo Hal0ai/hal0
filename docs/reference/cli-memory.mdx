@@ -246,7 +246,17 @@ the old id), and each page must be backed by the model the fold-in re-keyed
 `<bank slug>-<old id>` (`hal0-agents-mm-…`). Only a subtree at the old bank's
 root that sits outside every `project:` folder moves; one already in
 `project:SLUG` is left as it is, and one in another project's folder is
-refused.
+refused. A node the fold-in never sent (no `.ids.json` the ledger names for
+the bank, no page map row and no run archive holds it) was written to the old
+bank after the fold-in: it is skipped and listed under `not_folded` by name
+and old id, and stays in the old bank, which nothing reads; re-create it
+through compat or ignore it. A node the fold-in did send that is missing
+still refuses the run.
+
+**Restart coding-agent sessions after the cutover.** The coding-agents
+plugin's MCP server reads its config only when it starts, so a session that
+was running at the cutover keeps writing the old banks until it, or the
+plugin's MCP server, is restarted.
 
 What `--apply` does, in this order, so that compat never shows a page before
 it is scoped:
