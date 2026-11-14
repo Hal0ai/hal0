@@ -1976,8 +1976,8 @@ def test_mcp_profile_create_budget_hint_is_integer_only() -> None:
 async def test_slot_load_forwards_unload_npu_holder(
     queue: ApprovalQueue, mock_transport: dict[str, Any]
 ) -> None:
-    """#3666: the opt-in reaches POST /api/slots/{name}/load as a body field."""
-    await admin.dispatch(
+    """#3666: the opt-in waits for approval, then reaches POST /load as a body field."""
+    result = await admin.dispatch(
         tool="slot_load",
         args={"name": "px", "unload_npu_holder": True},
         client_id="pi",
@@ -1985,9 +1985,41 @@ async def test_slot_load_forwards_unload_npu_holder(
         base_url="http://t",
         approval_queue=queue,
     )
+    assert result["status"] == "pending_approval"
+    assert mock_transport["calls"] == []
+    await queue.approve(result["approval_id"])
     method, url, body, _headers = mock_transport["calls"][-1]
     assert (method, url) == ("POST", "http://t/api/slots/px/load")
     assert body == {"unload_npu_holder": True}
+
+
+def test_slot_load_gates_only_with_unload_npu_holder_true() -> None:
+    """#3666: the opt-in unloads a pinned FLM anchor, so an agent needs approval for it.
+
+    Same ``is True`` test the load route applies to its body: anything that
+    would unload gates, anything the route ignores stays autonomous.
+    """
+    assert admin.is_gated("slot_load", {"name": "px", "unload_npu_holder": True}) is True
+    assert admin.is_gated("slot_load", {"name": "px"}) is False
+    assert admin.is_gated("slot_load", {"name": "px", "unload_npu_holder": False}) is False
+    assert admin.is_gated("slot_load", {"name": "px", "unload_npu_holder": None}) is False
+
+
+@pytest.mark.asyncio
+async def test_slot_load_without_the_opt_in_runs_autonomously(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool="slot_load",
+        args={"name": "px"},
+        client_id="pi",
+        bearer=None,
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result.get("status") != "pending_approval"
+    method, url, _body, _headers = mock_transport["calls"][-1]
+    assert (method, url) == ("POST", "http://t/api/slots/px/load")
 
 
 def test_slot_load_and_restart_document_unload_npu_holder() -> None:
