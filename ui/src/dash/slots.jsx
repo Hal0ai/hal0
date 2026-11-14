@@ -22,7 +22,7 @@ import { ImageGenTabs } from './image/ImageGenTabs'
 import { NpuTabs } from './npu/NpuTabs'
 import { npuTabVisible } from './npu/npu-pure'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
-import { isReservedSlotsTab, slotEditHash, slotEditTarget, slotsSub, slotsTab, takeSlotDrawerReturn } from './slots-route'
+import { isReservedSlotsTab, slotEditHash, slotEditTarget, slotsSub, slotsTab, takeSlotDrawerReturn, dropSlotDrawerReturnOnLeave } from './slots-route'
 import { NpuSummaryRow } from './npu/NpuSummaryRow.jsx'
 import {
   InferencePane,
@@ -694,9 +694,14 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
   };
 
   // Open Edit drawer when route is #slots/:name
+  const prevDrawerTarget = React.useRef(null);
   React.useEffect(() => {
     // `#slots/<name>` or, for a slot named like a reserved tab, `#slots/edit/<name>`.
     const target = slotEditTarget(slotParam);
+    // Leaving the drawer by hash (its "NPU tab" link, Back, sidebar) skips onClose: drop the
+    // NPU-tab return target so a later unrelated close does not jump there.
+    dropSlotDrawerReturnOnLeave(prevDrawerTarget.current, target);
+    prevDrawerTarget.current = target;
     if (target) {
       const exists = (slots || []).find(s => s.name === target);
       if (exists) setEditName(target);
