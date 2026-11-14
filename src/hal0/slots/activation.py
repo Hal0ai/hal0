@@ -143,8 +143,9 @@ def claims_npu_anchor(cfg: dict[str, Any] | None) -> bool:
     such slot. The NPU trio's ``transcription`` / ``embedding`` shadows run
     coresident on the same column and are deliberately NOT anchors. Neither
     is an xdna slot (:func:`is_xdna_slot`): the invariant exists for FLM's one
-    chat context, and xdna time-slices the NPU beside FLM rather than
-    excluding it (ADR-0057 decision 5).
+    chat context. A fused xdna slot time-slices the NPU beside FLM (ADR-0057
+    decision 5); a per-op one is excluded from running with FLM by the slot
+    manager's NPU guard instead (ADR-0059), not by this invariant.
     """
     if not isinstance(cfg, dict):
         return False

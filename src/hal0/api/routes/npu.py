@@ -603,12 +603,12 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             used.update(slot_view["cols"])
         cols_used = min(len(used), _NPU_COLS)
 
-    # Coexistence (xdna-runner plan): an xdna (llama-server/npu backend) slot
-    # and the flm trio each independently hold the one physical NPU — hal0
-    # never blocks either from loading alongside the other (spec-hw-slot-
-    # ownership never arbitrates npu/cpu devices), but time-slicing throughput
-    # is a real cost the operator should see. Surface it as a warning on the
-    # occupancy payload (and the activation log) rather than silently.
+    # Coexistence: a fused xdna slot and the flm trio each hold the one
+    # physical NPU and time-slice it, which is a real cost the operator should
+    # see. Surface it as a warning on the occupancy payload (and the activation
+    # log) rather than silently. A per-op xdna slot and the FLM anchor cannot
+    # share the NPU at all: the slot manager refuses that load (ADR-0059), so
+    # this warning only describes fused coexistence.
     npu_shared_warning: str | None = None
     if len(tenant_names) > 1:
         npu_shared_warning = f"NPU shared with slot {tenant_names[0]!r}; throughput is time-sliced"
