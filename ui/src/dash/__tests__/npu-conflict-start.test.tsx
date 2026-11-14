@@ -8,7 +8,10 @@ import { describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { React: typeof React }).React = React
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
-const { posts } = vi.hoisted(() => ({ posts: [] as unknown[] }))
+const { posts, gate } = vi.hoisted(() => ({
+  posts: [] as unknown[],
+  gate: { wait: null as Promise<void> | null },
+}))
 vi.mock('@/api/hooks/useSlots', async () => {
   const { Hal0Error } = await import('@/api/client')
   const mut = {
@@ -17,6 +20,7 @@ vi.mock('@/api/hooks/useSlots', async () => {
       posts.push(v)
       if (typeof v === 'string')
         throw new Hal0Error('held', { code: 'slot.npu_conflict', status: 409, details: { slot: v, holders: ['flm'], holder_engine: 'flm', unloads: ['flm'] } })
+      if (gate.wait) await gate.wait
       return {}
     },
   }
@@ -49,5 +53,28 @@ describe('useNpuConflictStart', () => {
     expect(first).toHaveBeenCalledTimes(1)
     expect(second).not.toHaveBeenCalled()
     expect(host.querySelector('[data-testid="dlg"]')).toBeNull()
+  })
+
+  it('closing while the confirmed retry is in flight is a no-op, so onSettled fires once', async () => {
+    let h!: ReturnType<typeof useNpuConflictStart>
+    const P = () => ((h = useNpuConflictStart()), h.dialog)
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    const root = createRoot(host)
+    act(() => root.render(<P />))
+    const settled = vi.fn()
+    let release!: () => void
+    gate.wait = new Promise<void>((r) => { release = r })
+    await act(async () => { await h.run('c', 'load', { onSettled: settled }) })
+    await act(async () => { (host.querySelector('[data-testid="ok"]') as HTMLElement).click() })
+    // Escape / Cancel while the retry is still posting: ignored.
+    await act(async () => { (host.querySelector('[data-testid="cancel"]') as HTMLElement).click() })
+    expect(settled).not.toHaveBeenCalled()
+    expect(host.querySelector('[data-testid="dlg"]')).not.toBeNull()
+    await act(async () => { release(); await gate.wait })
+    gate.wait = null
+    expect(settled).toHaveBeenCalledTimes(1)
+    expect(host.querySelector('[data-testid="dlg"]')).toBeNull()
+    expect(posts.at(-1)).toEqual({ name: 'c', unloadNpuHolder: true })
   })
 })

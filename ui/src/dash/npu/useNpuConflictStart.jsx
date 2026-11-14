@@ -22,6 +22,9 @@ export function useNpuConflictStart() {
   // Ref mirror of `ask`: a second run() in the same tick must see the open dialog.
   const asking = useRef(false)
   const [busy, setBusy] = useState(false)
+  // Ref mirror of `busy`: Escape (the Modal's onClose) must not settle the dialog while the
+  // confirmed retry is in flight, or onSettled would fire twice (here and in confirm's finally).
+  const inFlight = useRef(false)
 
   const post = (name, kind, unloadNpuHolder) => {
     const mut = kind === 'restart' ? restartMut : loadMut
@@ -49,6 +52,7 @@ export function useNpuConflictStart() {
   }
 
   const close = () => {
+    if (inFlight.current) return
     const a = ask
     asking.current = false
     setAsk(null)
@@ -56,6 +60,8 @@ export function useNpuConflictStart() {
   }
   const confirm = async () => {
     const a = ask
+    if (inFlight.current) return
+    inFlight.current = true
     setBusy(true)
     try {
       await post(a.name, a.kind, true)
@@ -63,6 +69,7 @@ export function useNpuConflictStart() {
       // By design a second slot.npu_conflict on the retry is just this toast: no re-prompt loop.
       toast(err?.message ? `${a.name}: ${err.message}` : `${a.name}: action failed`, 'warn')
     } finally {
+      inFlight.current = false
       setBusy(false)
       asking.current = false
       setAsk(null)
