@@ -183,3 +183,75 @@ def test_registry_lookup_failure_logged_at_debug(
         getattr(r, "error_type", "") == "RuntimeError" and r.levelname == "DEBUG"
         for r in caplog.records
     )
+
+
+def test_refusal_names_the_remedy(tmp_path: Path) -> None:
+    _write(tmp_path, "flm", _flm_lines())
+    with pytest.raises(SlotNpuConflict) as ei:
+        check_npu_autoload_conflict(
+            "x", _cfg(_xdna_lines), slots_dir=tmp_path, model_path_for=_resolver
+        )
+    assert str(ei.value).endswith("; turn autoload off on one of them")
+
+
+@pytest.mark.parametrize("unrelated", [{"tune"}, {"idle_timeout_s"}, {"port", "priority"}])
+def test_write_that_cannot_move_the_pair_is_not_refused(
+    tmp_path: Path, unrelated: set[str]
+) -> None:
+    """A box already in the conflicting state can still take an unrelated edit."""
+    _write(tmp_path, "flm", _flm_lines())
+    check_npu_autoload_conflict(
+        "x",
+        _cfg(_xdna_lines),
+        slots_dir=tmp_path,
+        model_path_for=_resolver,
+        changed_keys=unrelated,
+    )
+
+
+@pytest.mark.parametrize(
+    "touched", [{"autoload"}, {"model"}, {"binary"}, {"xdna"}, {"server.env"}, {"tune", "model"}]
+)
+def test_write_that_touches_the_pair_is_refused(tmp_path: Path, touched: set[str]) -> None:
+    _write(tmp_path, "flm", _flm_lines())
+    with pytest.raises(SlotNpuConflict):
+        check_npu_autoload_conflict(
+            "x",
+            _cfg(_xdna_lines),
+            slots_dir=tmp_path,
+            model_path_for=_resolver,
+            changed_keys=touched,
+        )
+
+
+def test_changed_keys_reads_server_env_and_the_nested_slot_table() -> None:
+    from hal0.slots.config_write import npu_autoload_changed_keys
+
+    assert "server.env" in npu_autoload_changed_keys({"server": {"env": {"A": "1"}}})
+    assert "server.env" not in npu_autoload_changed_keys({"server": {"extra_args": []}})
+    assert "autoload" in npu_autoload_changed_keys({"slot": {"autoload": True}})
+
+
+def test_unrelated_edit_through_the_write_pipeline_passes_on_a_conflicting_box(
+    tmp_path: Path,
+) -> None:
+    """The seam update_config and stacks share passes the write's own keys."""
+    from hal0.slots.config_write import reconcile_and_guard_slot_config
+
+    _write(tmp_path, "flm", _flm_lines())
+    base = _cfg(_xdna_lines)
+    merged = reconcile_and_guard_slot_config("x", base, {"idle_timeout_s": 600}, slots_dir=tmp_path)
+    assert merged["idle_timeout_s"] == 600
+    with pytest.raises(SlotNpuConflict):
+        reconcile_and_guard_slot_config("x", base, {"autoload": True}, slots_dir=tmp_path)
+
+
+def test_peer_with_unknown_xdna_env_key_is_judged_per_op(tmp_path: Path) -> None:
+    """A hand-edited peer env the launch would refuse must not 422 another slot's write."""
+    lines = [*_xdna_lines(model="m-fused"), "[xdna.env]", 'GGML_XDNA_NOT_A_KNOB = "1"']
+    _write(tmp_path, "x", lines)
+    with pytest.raises(SlotNpuConflict) as ei:
+        check_npu_autoload_conflict(
+            "flm", _cfg(_flm_lines), slots_dir=tmp_path, model_path_for=_resolver
+        )
+    assert ei.value.details["holders"] == ["x"]
