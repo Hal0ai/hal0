@@ -113,8 +113,10 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
   const xrtErr = d.host_xrt && !d.host_xrt.startsWith('/') ? 'host_xrt must be an absolute path' : null
   const blocker = engineOnly ? xrtErr : nameErr || (mode === 'create' && !d.model ? 'pick a model' : null) || ctxErr || xrtErr
   const editBody = mode === 'edit' ? ggmlEditBody(d, saved, fixedNames) : {}
+  // Before the slot config resolves `saved` is empty; saving against it could wipe a real [xdna] table.
+  const cfgLoading = mode === 'edit' && cfgQ.data === undefined
   const dirty = engineOnly ? 'xdna' in editBody : Object.keys(editBody).length > 0
-  const working = busy || createMut.isPending || editMut.isPending
+  const working = busy || createMut.isPending || editMut.isPending || cfgLoading
 
   const run = async (fn) => {
     setErr(null)
@@ -295,12 +297,14 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
       {engineOnly ? (
         <div className="ggml-foot" data-testid="ggml-foot">
           {err && <div className="pf-msg err mono" role="alert" data-testid="ggml-error">{err}</div>}
+          {cfgLoading && <span className="npt-hint" data-testid="ggml-loading">Loading slot settings…</span>}
           <span className="npt-hint" data-testid="slot-xdna-note">Saved to this slot's config, applied on restart.</span>
           <span className="pf-grow" />
-          <button type="button" className="btn ghost sm" data-testid="ggml-save-engine" disabled={!dirty || !!blocker || working} onClick={saveEngine}>{working ? 'Saving…' : 'Save engine settings'}</button>
+          <button type="button" className="btn ghost sm" data-testid="ggml-save-engine" disabled={!dirty || !!blocker || working} onClick={saveEngine}>{busy || editMut.isPending ? 'Saving…' : 'Save engine settings'}</button>
         </div>
       ) : (
         <>
+      {cfgLoading && <div className="npt-hint" data-testid="ggml-loading">Loading slot settings…</div>}
       {err && <div className="pf-msg err mono" role="alert" data-testid="ggml-error">{err}</div>}
       {mode === 'create' && blocker && <div className="npt-hint" data-testid="ggml-blocker">{blocker}</div>}
 

@@ -17,13 +17,14 @@ const { box } = vi.hoisted(() => ({
     deletes: [] as string[],
     cfg: { model: { default: 'qwen3-4b' }, profile: 'xdna', xdna: { pmode: 'turbo', env: {}, host_xrt: null } } as Record<string, unknown>,
     createErr: null as Error | null,
+    cfgLoading: false,
     fit: {} as Record<string, { xdna_path: string | null; reason: string }>,
   },
 }))
 
 vi.mock('@/api/hooks/useSlots', () => ({
   useSlots: () => ({ data: [{ name: 'agent' }, { name: 'npu-gguf' }] }),
-  useSlotConfig: () => ({ data: box.cfg }),
+  useSlotConfig: () => ({ data: box.cfgLoading ? undefined : box.cfg }),
   useSlotCreate: () => ({ isPending: false, mutateAsync: async (b: Record<string, unknown>) => { if (box.createErr) throw box.createErr; box.creates.push(b); return {} } }),
   useSlotLoad: () => ({ isPending: false, mutateAsync: async (n: string) => { box.loads.push(n); return {} } }),
   useSlotEdit: () => ({ isPending: false, mutateAsync: async (a: { name: string; body: Record<string, unknown> }) => { box.edits.push(a); return {} } }),
@@ -87,6 +88,7 @@ function mount(props: Record<string, unknown>) {
 beforeEach(() => {
   box.creates.length = 0; box.loads.length = 0; box.edits.length = 0; box.restarts.length = 0; box.deletes.length = 0
   box.createErr = null
+  box.cfgLoading = false
   box.fit = { 'qwen3-4b': { xdna_path: 'fused', reason: 'ok' }, 'big-moe': { xdna_path: null, reason: 'not gguf' } }
 })
 afterEach(() => { act(() => root.unmount()); document.body.innerHTML = '' })
@@ -276,5 +278,23 @@ describe('fit fallback and fixed knobs in the form', () => {
     await flush()
     expect(box.edits[0].body).toEqual({ xdna: { pmode: 'balanced', env: { GGML_XDNA_HEAD: '1' }, host_xrt: null } })
     box.cfg = { model: { default: 'qwen3-4b' }, profile: 'xdna', xdna: { pmode: 'turbo', env: {}, host_xrt: null } }
+  })
+})
+
+describe('config still loading', () => {
+  it('cannot save before the slot config resolves (engine and full)', async () => {
+    box.cfgLoading = true
+    mount({ mode: 'edit', variant: 'engine', slot: { name: 'npu-gguf', state: 'ready' } })
+    expect(q('ggml-loading')).not.toBeNull()
+    click('ggml-pmode-balanced')
+    expect((q('ggml-save-engine') as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => { q('ggml-save-engine')!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(box.edits).toEqual([])
+    act(() => root.unmount())
+    mount({ mode: 'edit', slot: { name: 'npu-gguf', state: 'ready' }, onDone: () => {} })
+    click('ggml-ctx-32768')
+    expect((q('ggml-save') as HTMLButtonElement).disabled).toBe(true)
+    expect((q('ggml-save-restart') as HTMLButtonElement).disabled).toBe(true)
+    expect(box.edits).toEqual([])
   })
 })
