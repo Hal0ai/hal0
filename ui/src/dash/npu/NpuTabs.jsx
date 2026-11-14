@@ -6,7 +6,7 @@
 //
 // NpuTabs owns the FLM draft (`flmDraft`): the Lanes panel edits it, and the Models panel's
 // "Use for chat" stages into it, so both see one staged set. `onSwitchTab` lets Models jump to
-// Lanes. The panels here are stubs; later tasks fill them.
+// Lanes.
 //
 // No NPU (probe says absent) and no NPU slot → the "No NPU on this box" panel. NPU slots with a
 // failed probe keep the shell (degraded): lanes stay operable.
@@ -17,6 +17,9 @@ import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { ArrayBand } from './ArrayBand.jsx'
 import { FlmLane } from './FlmLane.jsx'
 import { GgmlLane } from './GgmlLane.jsx'
+import { NpuEnginesPanel } from './NpuEnginesPanel.jsx'
+import { NpuModelsPanel } from './NpuModelsPanel.jsx'
+import { draftCount } from './flm-draft-pure'
 import { NPU_TABS, npuStatusParts, npuTabVisible, validNpuTab } from './npu-pure'
 
 const IDS = NPU_TABS.map((t) => t.id)
@@ -37,12 +40,6 @@ function LanesPanel({ draft, setDraft, occ, hw, slots }) {
       <GgmlLane slots={slots} occ={occ} hw={hw} />
     </div>
   )
-}
-function ModelsPanel() {
-  return <div data-testid="npu-models-stub" />
-}
-function EnginesPanel() {
-  return <div data-testid="npu-engines-stub" />
 }
 
 function AbsentPanel({ host }) {
@@ -122,11 +119,25 @@ export function NpuTabs({ sub, slots = [] }) {
   // Wait for the first occupancy answer before deciding "absent": a loading probe is not an
   // absent NPU.
   if (occ === undefined && !npuTabVisible(undefined, slots)) {
-    if (occQ.isLoading) return <div className="npt" data-testid="npu-loading">Loading…</div>
+    if (occQ.isLoading) return <div className="npt npu-card" data-testid="npu-loading">Loading…</div>
+  }
+  // A failed occupancy read with no NPU slot to fall back on is "can't tell", not "no NPU".
+  if (occQ.isError && !npuTabVisible(occ, slots)) {
+    return (
+      <div className="npt npu-card" data-testid="npu-pane">
+        <div className="npt-absent" data-testid="npu-status-error" role="alert">
+          <h2>Couldn't read the NPU status</h2>
+          <p>hal0 could not reach the NPU status endpoint, so it cannot tell whether this box has an NPU.</p>
+          <button type="button" className="btn sm" data-testid="npu-status-retry" disabled={occQ.isFetching} onClick={() => occQ.refetch()}>
+            Retry
+          </button>
+        </div>
+      </div>
+    )
   }
   if (!npuTabVisible(occ, slots)) {
     return (
-      <div className="npt" data-testid="npu-pane">
+      <div className="npt npu-card" data-testid="npu-pane">
         <AbsentPanel host={occ?.npu_host} />
       </div>
     )
@@ -135,7 +146,7 @@ export function NpuTabs({ sub, slots = [] }) {
   const parts = npuStatusParts(occ, hwQ.data, slots)
 
   return (
-    <div className="npt" data-testid="npu-pane">
+    <div className="npt npu-card" data-testid="npu-pane">
       <div className="npt-status" data-testid="npu-status" role="status">
         {parts.map((p) => (
           <span key={p.k} className={`npt-status-part${p.tone ? ` ${p.tone}` : ''}`}>
@@ -175,10 +186,10 @@ export function NpuTabs({ sub, slots = [] }) {
         <LanesPanel draft={flmDraft} setDraft={setFlmDraft} occ={occ} hw={hwQ.data} slots={slots} />
       </div>
       <div role="tabpanel" id="npu-panel-models" className="npt-panel" aria-labelledby="npu-tab-models" hidden={tab !== 'models'}>
-        <ModelsPanel setFlmDraft={setFlmDraft} onSwitchTab={select} occ={occ} />
+        <NpuModelsPanel slots={slots} occ={occ} setFlmDraft={setFlmDraft} onSwitchTab={select} />
       </div>
       <div role="tabpanel" id="npu-panel-engines" className="npt-panel" aria-labelledby="npu-tab-engines" hidden={tab !== 'engines'}>
-        <EnginesPanel occ={occ} />
+        <NpuEnginesPanel occ={occ} hw={hwQ.data} slots={slots} flmDirty={draftCount(flmDraft) > 0} />
       </div>
     </div>
   )

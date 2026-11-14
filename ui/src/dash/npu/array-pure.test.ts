@@ -29,4 +29,17 @@ describe('arrayOwners', () => {
     expect(o.every((x) => x === null)).toBe(true)
     expect(arrayShared(o)).toBe(false)
   })
+  it('an anchor named npu: its synthesized -stt/-embed rows (served_by, no slot record) own nothing', () => {
+    const all = [0, 1, 2, 3, 4, 5, 6, 7]
+    const o = arrayOwners(
+      [
+        { name: 'npu', cols: all, engine: 'flm', state: 'ready' },
+        { name: 'npu-stt', cols: all, engine: 'flm', state: 'ready', served_by: 'npu' },
+        { name: 'npu-embed', cols: all, engine: 'flm', state: 'ready', served_by: 'npu' },
+      ],
+      [{ name: 'npu', type: 'llm', device_class: 'npu' }],
+    )
+    expect(o.every((x) => x?.name === 'npu')).toBe(true)
+    expect(arrayShared(o)).toBe(false)
+  })
 })

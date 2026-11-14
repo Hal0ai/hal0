@@ -8,7 +8,7 @@ export interface ArrayOwner {
   engine: 'flm' | 'xdna'
   serving: boolean
 }
-type OccSlot = { name: string; cols?: number[]; engine?: 'flm' | 'xdna'; state?: string | null }
+type OccSlot = { name: string; cols?: number[]; engine?: 'flm' | 'xdna'; state?: string | null; served_by?: string | null }
 type SlotLike = { name: string; type?: string; binary?: string; runner?: string | null; device_class?: string | null; state?: string | null; phase?: string | null }
 
 /** One owner object per holder, shared by reference across its columns (AieGrid merges runs by
@@ -18,6 +18,8 @@ export function arrayOwners(occSlots: ReadonlyArray<OccSlot> | undefined, slots:
   const owners: Array<ArrayOwner | null> = Array(NPU_COLS).fill(null)
   const byName = new Map((slots ?? []).map((s) => [s.name, s]))
   for (const o of occSlots ?? []) {
+    // Rows synthesized for the anchor's STT/embed ride its process and never own columns.
+    if (o.served_by) continue
     const slot = byName.get(o.name)
     if (slot && isNpuShadowSlot(slot)) continue
     const cols = (o.cols ?? []).filter((c) => c >= 0 && c < NPU_COLS)

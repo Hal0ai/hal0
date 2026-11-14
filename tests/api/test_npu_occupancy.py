@@ -74,6 +74,11 @@ def _stub_footprint(monkeypatch):
         lambda: {"device_node": None, "driver_loaded": None, "xdna_gen": None},
     )
     monkeypatch.setattr("hal0.api.routes.npu._local_image_refs", lambda: None)
+    # Facts block is cached 30 s with a background refresh: start every test with a
+    # fresh all-None entry so no stray refresh thread runs; tests that need real
+    # facts call _prime_facts() after stubbing.
+    monkeypatch.setattr(_npu_routes, "_facts_cache", (time.monotonic(), _npu_routes._none_facts()))
+    monkeypatch.setattr(_npu_routes, "_facts_refresh_thread", None)
     yield
     npu_columns.invalidate_columns_cache()
 
@@ -432,6 +437,11 @@ _XDNA_REF = "ghcr.io/hal0ai/hal0-runner-xdna:1.2.3-r1a2b3c4"
 _FLM_REF = "ghcr.io/hal0ai/hal0-runner-flm:0.9.44-r1a2b3c4"
 
 
+def _prime_facts():
+    """Compute the facts block synchronously into the cache (the route never blocks on it)."""
+    _npu_routes._refresh_facts()
+
+
 def _stub_engine_facts(monkeypatch, *, refs, host):
     monkeypatch.setattr(
         "hal0.api.routes.runner_images._effective_defaults",
@@ -439,6 +449,7 @@ def _stub_engine_facts(monkeypatch, *, refs, host):
     )
     monkeypatch.setattr("hal0.api.routes.npu._local_image_refs", lambda: refs)
     monkeypatch.setattr("hal0.api.routes.npu._npu_host_probe", lambda: host)
+    _prime_facts()
 
 
 def test_occupancy_reports_npu_engines_and_host(client: TestClient, monkeypatch):
@@ -492,6 +503,7 @@ def test_engine_facts_are_none_when_every_read_fails(client: TestClient, monkeyp
     monkeypatch.setattr("hal0.api.routes.runner_images._effective_defaults", boom)
     monkeypatch.setattr("hal0.api.routes.npu._local_image_refs", boom)
     monkeypatch.setattr("hal0.api.routes.npu._npu_host_probe", boom)
+    _prime_facts()
     monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value=None))
     _wire(client, [])
     r = client.get("/api/npu/occupancy")
@@ -581,3 +593,73 @@ def test_image_pulled_matches_ref_base_and_digest():
     assert _image_pulled("r/x:1@sha256:abc", {"r/x:1"}) is True  # base ref
     assert _image_pulled("r/x:1@sha256:abc", {"sha256:abc"}) is True  # digest
     assert _image_pulled("r/x:2", {"r/x:1"}) is False
+
+
+# ── served_by tag on synthesized rows ────────────────────────────────────────
+
+
+def test_occupancy_tags_synthesized_rows_with_their_anchor(client: TestClient, monkeypatch):
+    """The anchor's -stt/-embed rows say who serves them; the anchor row has no tag."""
+    _wire_ready_anchor(client, monkeypatch, npu={"asr": True, "embed": True})
+
+    by_name = {s["name"]: s for s in client.get("/api/npu/occupancy").json()["slots"]}
+    assert by_name["npu-stt"]["served_by"] == "npu"
+    assert by_name["npu-embed"]["served_by"] == "npu"
+    assert "served_by" not in by_name["npu"]
+
+
+# ── facts block cache (30 s, stale-while-revalidate) ─────────────────────────
+
+
+@pytest.fixture
+def facts_cache(monkeypatch):
+    monkeypatch.setattr(_npu_routes, "_facts_cache", None)
+    monkeypatch.setattr(_npu_routes, "_facts_refresh_thread", None)
+    return _npu_routes
+
+
+def _join_facts(npu_mod):
+    t = npu_mod._facts_refresh_thread
+    if t is not None:
+        t.join(timeout=5)
+
+
+def test_facts_first_call_is_all_none_then_cached(facts_cache, monkeypatch):
+    import asyncio
+
+    npu_mod = facts_cache
+    calls: list[int] = []
+
+    def probe():
+        calls.append(1)
+        return {"device_node": "/dev/accel/accel0", "driver_loaded": True, "xdna_gen": 2}
+
+    monkeypatch.setattr(npu_mod, "_npu_host_probe", probe)
+    first = asyncio.run(npu_mod._engine_and_host_facts())
+    assert first == npu_mod._none_facts()  # never blocks on the read
+    _join_facts(npu_mod)
+    second = asyncio.run(npu_mod._engine_and_host_facts())
+    assert second["npu_host"]["device_node"] == "/dev/accel/accel0"
+    for _ in range(5):
+        asyncio.run(npu_mod._engine_and_host_facts())
+    assert len(calls) == 1  # TTL hit: no per-poll probe
+
+
+def test_facts_expiry_serves_last_value_and_refreshes_once(facts_cache, monkeypatch):
+    import asyncio
+
+    npu_mod = facts_cache
+    nodes = iter(["old", "new"])
+    monkeypatch.setattr(
+        npu_mod,
+        "_npu_host_probe",
+        lambda: {"device_node": next(nodes), "driver_loaded": None, "xdna_gen": None},
+    )
+    asyncio.run(npu_mod._engine_and_host_facts())
+    _join_facts(npu_mod)
+    ts, val = npu_mod._facts_cache
+    monkeypatch.setattr(npu_mod, "_facts_cache", (ts - 1000, val))
+    stale = asyncio.run(npu_mod._engine_and_host_facts())
+    assert stale["npu_host"]["device_node"] == "old"  # last value, immediately
+    _join_facts(npu_mod)
+    assert asyncio.run(npu_mod._engine_and_host_facts())["npu_host"]["device_node"] == "new"

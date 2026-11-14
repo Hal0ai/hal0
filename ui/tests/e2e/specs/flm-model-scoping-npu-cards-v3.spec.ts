@@ -4,16 +4,12 @@
  * 1. FLM (NPU) models are offered ONLY where an NPU/FLM slot picks a model:
  *    the Inference card model picker of a GPU/CPU llama.cpp slot never lists
  *    them (shared predicate: src/lib/slotModelFit.ts).
- * 2. The NPU occupancy card's per-slot rows carry the same RichSelect model
- *    dropdown the inference cards use, limited to FLM models of the card's
- *    role. A chat pick applies through the drawer's contract: PUT the anchor's
- *    config ({npu:{chat,asr,embed}, model:{default}}) then POST /restart.
- *
- * Set FLM_CARD_SHOTS=<label> to also write desktop + 390px screenshots of the
- * NPU card to ui/test-results/flm-cards/<label>-{desktop,mobile}.png.
+ * 2. The NPU tab (#slots/npu) FLM lane's chat select is limited to FLM chat models; STT and
+ *    Embed show their bundled model. A staged chat pick applies through the drawer's contract:
+ *    PUT the anchor's config ({npu:{chat,asr,embed}, model:{default}}) then POST /restart.
  */
 import { test, expect, MOCK_DATA, json, type Page } from '../fixtures/apiMock'
-import { openRichSelect, pickRichOption } from '../fixtures/richSelect'
+import { openRichSelect } from '../fixtures/richSelect'
 
 const FLM_MODELS = [
   {
@@ -122,12 +118,23 @@ async function setup(page: Page) {
   )
   await page.route('**/api/slots/flm/config', (route) => {
     if (route.request().method() === 'PUT') return json(route, { name: 'flm' })
-    return json(route, { name: 'flm', npu: { chat: true, asr: true, embed: true } })
+    return json(route, { name: 'flm', npu: { chat: true, asr: true, embed: true }, model: { default: 'qwen3:4b' } })
   })
   await page.route('**/api/slots/flm/restart', (route) => json(route, { name: 'flm' }))
+  await page.route('**/api/slots/flm/models', (route) =>
+    json(route, {
+      probe_ok: true,
+      models: [
+        { model: 'qwen3:4b', installed: true, capabilities: ['chat'] },
+        { model: 'gemma3:1b', installed: true, capabilities: ['chat'] },
+        { model: 'whisper-v3:turbo', installed: true, capabilities: ['stt'] },
+        { model: 'embed-gemma:300m', installed: true, capabilities: ['embed'] },
+      ],
+    }),
+  )
 }
 
-test.describe('FLM model scoping + NPU slot-card pickers', () => {
+test.describe('FLM model scoping + NPU tab chat model', () => {
   test('a GPU slot card picker never lists FLM models', async ({ page }) => {
     await setup(page)
     await page.goto('/#slots')
@@ -141,53 +148,18 @@ test.describe('FLM model scoping + NPU slot-card pickers', () => {
     }
   })
 
-  test('each NPU card has a RichSelect limited to FLM models of its role', async ({ page }) => {
+  test('the NPU tab chat select lists only FLM chat models; STT/Embed show their bundled model', async ({ page }) => {
     await setup(page)
-    await page.goto('/#slots')
-    const card = page.locator('.npu-card')
-    await expect(card).toBeVisible()
-    const chat = page.getByTestId('npu-model-flm')
+    await page.goto('/#slots/npu')
+    const chat = page.getByTestId('flm-chat-model')
     await expect(chat).toBeVisible()
-    await openRichSelect(chat)
-    let list = page.getByRole('listbox')
-    await expect(list.getByRole('option', { name: /Qwen3 4B/ })).toBeVisible()
-    await expect(list.getByRole('option', { name: /Gemma3 1B/ })).toBeVisible()
-    // chat card: no ASR / embed / GGUF rows
-    await expect(list.getByText('Whisper')).toHaveCount(0)
-    await expect(list.getByText('EmbeddingGemma')).toHaveCount(0)
-    await expect(list.getByText('Qwen3.6-27B')).toHaveCount(0)
-    // runtime chip in the NPU tone
-    await expect(list.locator('.chip.dev-npu').first()).toBeVisible()
-    await page.keyboard.press('Escape')
-
-    // STT / Embed cards show their own FLM model and are read-only: FLM's
-    // --asr / --embed load one bundled model, there is no per-role write.
-    const stt = page.getByTestId('npu-model-flm-stt')
-    await expect(stt).toContainText('Whisper v3 turbo')
-    await expect(stt).toBeDisabled()
-    const embed = page.getByTestId('npu-model-flm-embed')
-    await expect(embed).toContainText('EmbeddingGemma 300M')
-    await expect(embed).toBeDisabled()
+    await expect(chat.locator('option')).toHaveText(['qwen3:4b', 'gemma3:1b'])
+    // STT / Embed load one bundled model with FLM's --asr / --embed: no per-role pick.
+    await expect(page.getByTestId('flm-row-asr')).toContainText('whisper-v3:turbo')
+    await expect(page.getByTestId('flm-row-embed')).toContainText('embed-gemma:300m')
   })
 
-  test('the dropdown popover is not clipped by the NPU card', async ({ page }) => {
-    await setup(page)
-    await page.goto('/#slots')
-    await openRichSelect(page.getByTestId('npu-model-flm'))
-    const list = page.getByRole('listbox')
-    await expect(list).toBeVisible()
-    const box = await list.boundingBox()
-    expect(box).not.toBeNull()
-    // the popover is hit-testable at its centre (an ancestor with overflow:hidden
-    // would hide / clip it)
-    const hit = await page.evaluate(
-      ({ x, y }) => !!document.elementFromPoint(x, y)?.closest('[role="listbox"]'),
-      { x: box!.x + box!.width / 2, y: box!.y + box!.height - 4 },
-    )
-    expect(hit).toBe(true)
-  })
-
-  test('picking a chat model writes the anchor config then restarts it', async ({ page }) => {
+  test('picking a chat model stages it; Apply writes the anchor config then restarts it', async ({ page }) => {
     await setup(page)
     const calls: string[] = []
     let putBody: any = null
@@ -197,41 +169,20 @@ test.describe('FLM model scoping + NPU slot-card pickers', () => {
         calls.push('PUT config')
         return json(route, { name: 'flm' })
       }
-      return json(route, { name: 'flm', npu: { chat: true, asr: true, embed: true } })
+      return json(route, { name: 'flm', npu: { chat: true, asr: true, embed: true }, model: { default: 'qwen3:4b' } })
     })
     await page.route('**/api/slots/flm/restart', (route) => {
       calls.push('POST restart')
       return json(route, { name: 'flm' })
     })
-    await page.goto('/#slots')
-    await pickRichOption(page.getByTestId('npu-model-flm'), 'gemma3:1b')
+    await page.goto('/#slots/npu')
+    await page.getByTestId('flm-chat-model').selectOption('gemma3:1b')
+    expect(calls).toEqual([])
+    await page.getByTestId('flm-apply').click()
     await expect.poll(() => calls).toEqual(['PUT config', 'POST restart'])
     expect(putBody).toEqual({
       npu: { chat: true, asr: true, embed: true },
       model: { default: 'gemma3:1b' },
     })
-  })
-
-  test('screenshots of the NPU card', async ({ page }) => {
-    const label = process.env.FLM_CARD_SHOTS
-    test.skip(!label, 'set FLM_CARD_SHOTS=<label> to capture screenshots')
-    await setup(page)
-    for (const [name, width, height] of [
-      ['desktop', 1440, 900],
-      ['mobile', 390, 844],
-    ] as const) {
-      await page.setViewportSize({ width, height })
-      await page.goto('/#slots')
-      const card = page.locator('.npu-card')
-      await expect(card).toBeVisible()
-      await card.scrollIntoViewIfNeeded()
-      await card.screenshot({ path: `test-results/flm-cards/${label}-${name}.png` })
-      const pick = page.getByTestId('npu-model-flm')
-      if (await pick.count()) {
-        await openRichSelect(pick)
-        await page.screenshot({ path: `test-results/flm-cards/${label}-${name}-open.png` })
-        await page.keyboard.press('Escape')
-      }
-    }
   })
 })

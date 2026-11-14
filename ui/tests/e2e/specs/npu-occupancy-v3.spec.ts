@@ -56,53 +56,43 @@ const seedNpu = (page: any, slot: any, occupancy: any = null) =>
     [slot, occupancy],
   )
 
-test.describe('NPU occupancy card', () => {
-  test('renders gauge + 4×8 AIE grid + serving FLM slot card', async ({ page }) => {
+test.describe('NPU tab — array band and FLM lane', () => {
+  test('renders gauge + 4×8 AIE grid + serving FLM lane', async ({ page }) => {
     await seedNpu(page, NPU_SERVING_SLOT)
-    await page.goto('/#slots')
+    await page.goto('/#slots/npu')
 
-    const card = page.locator('.npu-card')
-    await expect(card).toBeVisible()
-
-    // gauge present
-    await expect(card.locator('.gauge')).toBeVisible()
+    const tab = page.getByTestId('npu-pane')
+    await expect(tab).toBeVisible()
+    await expect(tab.locator('.gauge')).toBeVisible()
 
     // 4×8 AIE-ML grid — 8 columns, 4 tiles each
-    await expect(card.locator('.aie-grid .aie-col')).toHaveCount(8)
-    await expect(card.locator('.aie-grid .aie-col').first().locator('.aie-tile')).toHaveCount(4)
+    await expect(tab.locator('.aie-grid .aie-col')).toHaveCount(8)
+    await expect(tab.locator('.aie-grid .aie-col').first().locator('.aie-tile')).toHaveCount(4)
 
     // single-tenant: a serving FLM lights the whole array → active tiles present
-    await expect(card.locator('.aie-tile.active').first()).toBeVisible()
+    await expect(tab.locator('.aie-tile.active').first()).toBeVisible()
 
-    // partition bracket labels the owning slot — single-tenant: one span-8
-    // bracket for the whole array, not one per column
-    await expect(card.locator('.aie-part')).toHaveCount(1)
-    await expect(card.locator('.aie-part .pl')).toContainText('npu')
-    await expect(card.locator('.aie-part .pc')).toHaveText('· 8c')
+    // one span-8 bracket for the whole array, labelled with the owning slot
+    await expect(tab.locator('.aie-part')).toHaveCount(1)
+    await expect(tab.locator('.aie-part .pl')).toContainText('npu')
+    await expect(tab.locator('.aie-part .pc')).toHaveText('· 8c')
 
-    // per-slot card: name + model picker (-FLM stripped) + the serving dot
-    const cslot = card.locator('.cslot').filter({ hasText: 'npu' }).first()
-    await expect(cslot.locator('.nm')).toHaveText('npu')
-    await expect(cslot.getByTestId('npu-model-npu')).toContainText('gemma3-4b')
-    await expect(cslot.locator('.ldot.serving')).toHaveCount(1)
-    // inline tok/s from slot.metrics
-    await expect(cslot.locator('.cslot-mx .tps')).toContainText('52')
+    // FLM lane: the serving dot and the chat row's tok/s from slot.metrics
+    const lane = page.getByTestId('flm-lane')
+    await expect(lane.locator('.ldot.serving')).toHaveCount(1)
+    await expect(lane.getByTestId('flm-row-chat')).toContainText('52')
   })
 
-  test('header Stop control issues POST /api/slots/flm/unload', async ({ page }) => {
+  test('lane Stop control issues POST /api/slots/flm/unload', async ({ page }) => {
     const unloads: string[] = []
     await page.route('**/api/slots/flm/unload', async (route) => {
       unloads.push(route.request().url())
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
-
-    // Lifecycle moved off the per-slot cards to the card-header ▶/■/↻
-    // buttons, which target the 'flm' anchor slot (npu→flm rename; the
-    // .sctrl controls were replaced by modality pill toggles in #1172).
     await seedNpu(page, { ...NPU_SERVING_SLOT, name: 'flm' })
-    await page.goto('/#slots')
+    await page.goto('/#slots/npu')
 
-    const stop = page.locator('.npu-card .wcard-h button[title="Stop"]')
+    const stop = page.getByTestId('flm-lane').locator('button[title="Stop"]')
     await expect(stop).toBeEnabled()
     await stop.click()
 
@@ -127,16 +117,17 @@ test.describe('NPU occupancy card', () => {
       ],
     }
     await seedNpu(page, NPU_SERVING_SLOT, DEGRADED_OCC)
-    await page.goto('/#slots')
+    await page.goto('/#slots/npu')
 
-    const card = page.locator('.npu-card')
-    await expect(card).toBeVisible()
-    // grid greys
-    await expect(card.locator('.aie.degraded')).toBeVisible()
-    // gauge sub-label flips to the probe-unavailable note
-    await expect(card.locator('.gauge .sub')).toContainText('column probe unavailable')
+    const tab = page.getByTestId('npu-pane')
+    await expect(tab).toBeVisible()
+    await expect(tab.locator('.aie.degraded')).toBeVisible()
+    await expect(tab.locator('.gauge .sub')).toContainText('column probe unavailable')
+    // Review Focus 5: the lane is still operable while the grid is degraded
+    await expect(page.getByTestId('flm-lane')).toBeVisible()
   })
 })
+
 
 // ─── #1661: STT/Embed pills must reflect npu_modality_active, not the raw
 // [npu] table, on a model-less anchor ──────────────────────────────────────
@@ -206,34 +197,30 @@ const EMBED_SHADOW = {
   npu_modality_active: false,
 }
 
-test.describe('NPU pills on a model-less anchor (#1661)', () => {
-  test('STT/Embed pills render OFF even though the raw [npu] table says on', async ({ page }) => {
+test.describe('NPU toggles on a model-less anchor (#1661)', () => {
+  test('STT/Embed toggles render OFF and disabled even though the raw [npu] table says on', async ({ page }) => {
     await seedTrio(page, [MODELLESS_ANCHOR, STT_SHADOW, EMBED_SHADOW])
-    await page.goto('/#slots')
+    await page.goto('/#slots/npu')
 
-    const card = page.locator('.npu-card')
-    await expect(card).toBeVisible()
-
-    const sttSwitch = card.locator('.cslot', { hasText: 'flm-stt' }).getByRole('switch', { name: 'STT' })
-    const embedSwitch = card.locator('.cslot', { hasText: 'flm-embed' }).getByRole('switch', { name: 'Embed' })
-    await expect(sttSwitch).toHaveAttribute('aria-checked', 'false')
-    await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
+    const stt = page.getByTestId('flm-row-asr').getByTestId('flm-cap-asr')
+    const embed = page.getByTestId('flm-row-embed').getByTestId('flm-cap-embed')
+    await expect(stt).toHaveAttribute('aria-checked', 'false')
+    await expect(embed).toHaveAttribute('aria-checked', 'false')
+    await expect(stt).toBeDisabled()
+    await expect(embed).toBeDisabled()
   })
 
-  test('clicking the STT pill on a model-less anchor never PUTs — it routes to the drawer instead', async ({ page }) => {
+  test('the STT toggle on a model-less anchor never PUTs', async ({ page }) => {
     const puts: any[] = []
     await page.route('**/api/slots/flm/config', async (route) => {
       if (route.request().method() === 'PUT') puts.push(route.request().postDataJSON())
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
     await seedTrio(page, [MODELLESS_ANCHOR, STT_SHADOW, EMBED_SHADOW])
-    await page.goto('/#slots')
+    await page.goto('/#slots/npu')
 
-    const card = page.locator('.npu-card')
-    await card.locator('.cslot', { hasText: 'flm-stt' }).getByRole('switch', { name: 'STT' }).click()
-
-    // No write ever fires — the guard redirects to the drawer to pick a model.
-    await expect(page).toHaveURL(/#slots\/flm$/)
+    await page.getByTestId('flm-row-asr').getByTestId('flm-cap-asr').click({ force: true })
+    await expect(page.getByTestId('flm-applybar')).toHaveCount(0)
     expect(puts.length).toBe(0)
   })
 })

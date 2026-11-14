@@ -19,7 +19,8 @@ type AnchorSlot = { npu?: Record<string, unknown> | null; modelDefault?: unknown
  *  (the `-FLM` suffix of a pre-#1629 id is dropped), as the occupancy card has always done. */
 export function savedFlm(anchorCfg: AnchorCfg, anchorSlot: AnchorSlot): SavedFlm {
   const npu = anchorCfg?.npu ?? anchorSlot?.npu ?? {}
-  const raw = anchorCfg?.model?.default ?? anchorSlot?.modelDefault ?? anchorSlot?.model_id ?? anchorSlot?.model ?? null
+  // `||`: useSlots normalises an absent default to '', which must fall through to the live ids.
+  const raw = anchorCfg?.model?.default || anchorSlot?.modelDefault || anchorSlot?.model_id || anchorSlot?.model || null
   const chatModel = typeof raw === 'string' && raw ? raw.replace(/-FLM$/, '') : null
   return {
     chat: npuModalityOn(npu, 'chat'),
@@ -70,4 +71,15 @@ export function draftBody(draft: FlmDraft, saved: SavedFlm): Record<string, unkn
 /** What "the anchor config changed elsewhere" is judged on: the `[npu]` table and the model. */
 export function cfgFingerprint(anchorCfg: AnchorCfg): string {
   return JSON.stringify({ npu: anchorCfg?.npu ?? null, model: anchorCfg?.model?.default ?? null })
+}
+
+/** The bundled (non-chat) row serving a capability: real rows can carry several capabilities, so
+ *  the bundled model is the one that is NOT chat-capable. */
+export function bundledFlmModel(
+  catalog: { models?: Array<{ model: string; capabilities?: string[] }> } | null | undefined,
+  catCaps: string[],
+): string | null {
+  const rows = (catalog?.models ?? []).filter((m) => (m.capabilities ?? []).some((c) => catCaps.includes(c)))
+  const row = rows.find((m) => !(m.capabilities ?? []).includes('chat'))
+  return row?.model ?? null
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { NPU_TABS, npuStatusParts, npuTabVisible, validNpuTab } from './npu-pure'
+import { NPU_TABS, npuHolders, npuStatusParts, npuTabVisible, npuToks, validNpuTab } from './npu-pure'
 
 const occ = (over: Record<string, unknown> = {}) =>
   ({ present: true, slots: [], npu_engines: undefined, npu_host: undefined, ...over }) as never
@@ -61,5 +61,40 @@ describe('npuStatusParts', () => {
     expect(find(parts, 'flm').v).toBe('0.9.4')
     expect(find(parts, 'ggml-xdna').v).toBe('b123')
     expect(find(parts, 'device').v).toContain('/dev/accel/accel0')
+  })
+})
+
+// The real payload shape for one FLM process with STT + embed on (see /api/npu/occupancy).
+const flmTrio = [
+  { name: 'npu', state: 'ready', engine: 'flm', cols: [0, 1, 2, 3, 4, 5, 6, 7] },
+  { name: 'npu-stt', state: 'ready', engine: 'flm', cols: [0, 1, 2, 3, 4, 5, 6, 7], served_by: 'npu' },
+  { name: 'npu-embed', state: 'ready', engine: 'flm', cols: [0, 1, 2, 3, 4, 5, 6, 7], served_by: 'npu' },
+]
+
+describe('npuHolders', () => {
+  it('counts the FLM anchor once, not its STT/embed rows', () => {
+    expect(npuHolders(flmTrio).map((r) => r.name)).toEqual(['npu'])
+    const parts = npuStatusParts(occ({ slots: flmTrio }), undefined, [])
+    expect(parts.find((p) => p.k === 'holders')!.v).toBe('1')
+  })
+  it('still counts an FLM anchor plus a GGML slot as two', () => {
+    const rows = [...flmTrio, { name: 'g', state: 'ready', engine: 'xdna', cols: [] }]
+    expect(npuHolders(rows)).toHaveLength(2)
+  })
+})
+
+describe('npuToks', () => {
+  const slots = [
+    { name: 'npu', device_class: 'npu', metrics: { toks: 10.04 } },
+    { name: 'g', device_class: 'npu', binary: 'xdna', metrics: { toks: 5 } },
+    { name: 'gpu', device_class: 'gpu', metrics: { toks: 90 } },
+    { name: 'npu-stt', type: 'transcription', device_class: 'npu', metrics: { toks: 7 } },
+  ]
+  it('sums NPU, non-shadow slots only', () => {
+    expect(npuToks(slots as never)).toBe(15)
+  })
+  it('is null when nothing on the NPU generates', () => {
+    expect(npuToks([{ name: 'gpu', device_class: 'gpu', metrics: { toks: 90 } }] as never)).toBeNull()
+    expect(npuToks(undefined)).toBeNull()
   })
 })

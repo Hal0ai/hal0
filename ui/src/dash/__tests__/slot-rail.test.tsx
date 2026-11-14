@@ -179,22 +179,46 @@ describe('SlotRail', () => {
     expect(card.classList.contains('flash')).toBe(false)
   })
 
-  it("clicking an npu row scrolls the NPU card's model row into view", async () => {
+  it('clicking an FLM row goes to the NPU lanes, then scrolls to and flashes the FLM lane', async () => {
     vi.useFakeTimers()
-    const target = document.createElement('div')
-    target.setAttribute('data-testid', 'npu-model-flm')
-    target.scrollIntoView = vi.fn()
-    document.body.appendChild(target)
+    window.location.hash = ''
+    box.slots = [slot('flm', 'npu', 'ready', { device_class: 'npu' })]
     await mount()
     await act(async () => {
       row('flm').click()
     })
-    expect(target.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
-    expect(target.classList.contains('flash')).toBe(true)
+    expect(window.location.hash).toBe('#slots/npu/lanes')
+    // the tab renders a moment later
+    const lane = document.createElement('div')
+    lane.setAttribute('data-testid', 'flm-lane')
+    lane.scrollIntoView = vi.fn()
+    document.body.appendChild(lane)
+    await act(async () => {
+      vi.advanceTimersByTime(60)
+    })
+    expect(lane.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(lane.classList.contains('flash')).toBe(true)
     await act(async () => {
       vi.advanceTimersByTime(1700)
     })
-    expect(target.classList.contains('flash')).toBe(false)
+    expect(lane.classList.contains('flash')).toBe(false)
+  })
+
+  it('clicking an xdna row flashes its GGML card when the tab is already open', async () => {
+    vi.useFakeTimers()
+    window.location.hash = '#slots/npu/lanes'
+    box.slots = [slot('npu-gguf', 'npu', 'ready', { device_class: 'npu', binary: 'xdna' })]
+    const card = document.createElement('div')
+    card.setAttribute('data-testid', 'ggml-card-npu-gguf')
+    card.scrollIntoView = vi.fn()
+    document.body.appendChild(card)
+    await mount()
+    await act(async () => {
+      row('npu-gguf').click()
+    })
+    expect(window.location.hash).toBe('#slots/npu/lanes')
+    expect(card.scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+    expect(card.classList.contains('flash')).toBe(true)
   })
 
   it('a row with no card target is a no-op', async () => {

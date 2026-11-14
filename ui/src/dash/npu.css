@@ -1,4 +1,4 @@
-/* hal0 dashboard — NPU occupancy card.
+/* hal0 dashboard — NPU tab (AIE grid, gauge, owner hues, slot dots).
  *
  * The NPU is an AMD XDNA 2 (Ryzen AI) inference engine: a 4×8 = 32 AIE-ML
  * tile array, partitioned by columns, running FLM slots. This sheet owns the
@@ -6,13 +6,13 @@
  * readouts on this card are tinted --dev-npu (telemetry-header handoff);
  * amber stays reserved for the product-wide "live / primary" accents.
  *
- * Everything is scoped under .npu-card so the generic class names (.combo,
- * .aie-tile, .gauge…) can't collide with other panes. Slot-control buttons
+ * Everything is scoped under .npu-card (the NPU tab root, NpuTabs.jsx) so the generic class names (.aie-tile,
+ * .gauge…) can't collide with other panes. Slot-control buttons
  * (.sctrl / .slot-ctrls) are intentionally NOT redefined here — they reuse the
  * shared definitions in engine-panes.css, whose selector includes .npu-card
  * so the buttons match the inference/comfyui slot cards exactly. */
 
-/* per-slot owner accents — assigned by slot index (npu-pane HUES). These
+/* per-slot owner accents — assigned by slot index (aie-grid HUES). These
    fill the slot's claimed columns (grid + mini strip + partition bars) and
    are SHARED with the dashboard telemetry header's NPU cell, so they live
    on :root rather than .npu-card. The glow/line halos are deliberately
@@ -54,74 +54,6 @@
 }
 .npu-card * {
   box-sizing: border-box;
-}
-
-/* ── card shell ────────────────────────────────────────────────────── */
-.npu-card .wcard {
-  border: 1px solid var(--line);
-  border-radius: var(--rad-lg);
-  background: var(--bg-1);
-  overflow: hidden;
-  margin-top: 18px;
-}
-.npu-card .wcard-h {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--line-soft);
-}
-.npu-card .wcard-h .glyph {
-  display: inline-flex;
-  color: var(--npu);
-}
-.npu-card .wcard-h .ttl {
-  font-family: var(--jbm);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--fg-2);
-}
-.npu-card .wcard-h .grow {
-  flex: 1;
-}
-.npu-card .wcard-h .meta {
-  font-family: var(--jbm);
-  font-size: 10px;
-  color: var(--fg-4);
-}
-.npu-card .wcard-h .meta b {
-  color: var(--fg-2);
-  font-weight: 500;
-}
-.npu-card .wcard-h .meta .st {
-  color: var(--npu);
-}
-.npu-card .wcard-b {
-  padding: 16px;
-}
-
-/* device pill — [ XDNA 2 · npu ] */
-.npu-card .npu-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  border-radius: 3px;
-  font-family: var(--jbm);
-  font-size: 10px;
-  letter-spacing: 0.03em;
-  color: var(--npu);
-  border: 1px solid var(--npu-line);
-  background: var(--npu-soft);
-  white-space: nowrap;
-}
-.npu-card .npu-pill .d {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 6px currentColor;
 }
 
 /* tiny live dot */
@@ -166,47 +98,11 @@
     animation: none;
   }
 }
-
-/* ── 3-region layout ───────────────────────────────────────────────── */
-.npu-card .combo {
-  display: flex;
-  gap: 32px;
-  align-items: flex-start;
-  flex-wrap: wrap;
-}
-.npu-card .combo-gauge {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 18px;
-  flex-shrink: 0;
-}
-.npu-card .combo-metrics {
-  display: flex;
-  gap: 28px;
-  padding-top: 16px;
-  border-top: 1px solid var(--line-soft);
-  width: 100%;
-  justify-content: center;
-}
-.npu-card .combo-grid {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
 .npu-card .aie-foot {
   font-family: var(--jbm);
   font-size: 9px;
   letter-spacing: 0.04em;
   color: var(--fg-5);
-}
-.npu-card .combo-slots {
-  flex: 1;
-  min-width: 248px;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
 }
 
 /* ── radial gauge (270° sweep) ─────────────────────────────────────── */
@@ -463,236 +359,6 @@
   }
 }
 
-/* ── per-slot cards (right rail) ───────────────────────────────────── */
-.npu-card .cslot {
-  border: 1px solid var(--line);
-  border-radius: var(--rad-lg);
-  background: var(--bg-1);
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  position: relative;
-  overflow: hidden;
-  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
-}
-.npu-card .cslot::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  background: var(--slot-hue, var(--line));
-  opacity: 0.85;
-}
-.npu-card .cslot:hover {
-  border-color: var(--line-strong);
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
-}
-.npu-card .cslot:hover::before {
-  opacity: 1;
-  box-shadow: 0 0 12px var(--slot-hue);
-}
-.npu-card .cslot.dim {
-  opacity: 0.62;
-}
-/* Running slot — faint purple halo + a lit accent bar so a live NPU slot is
-   unmistakable at a glance. The pulsing purple .ldot is the primary signal;
-   this reinforces it without flattening the per-slot hue on the bar. */
-.npu-card .cslot.running {
-  box-shadow: 0 0 16px -6px var(--npu-glow);
-}
-.npu-card .cslot.running::before {
-  opacity: 1;
-  box-shadow: 0 0 10px var(--slot-hue);
-}
-.npu-card .cslot.free {
-  background: transparent;
-  border-style: dashed;
-  border-color: var(--line-strong);
-}
-.npu-card .cslot.free::before {
-  display: none;
-}
-.npu-card .cslot-top {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-}
-.npu-card .cslot-top .nm {
-  font-family: var(--jbm);
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--fg);
-  flex-shrink: 0;
-}
-.npu-card .cslot-top .grow {
-  flex: 1;
-}
-.npu-card .cslot-top .sw.free {
-  width: 9px;
-  height: 9px;
-  border-radius: 2px;
-  border: 1px dashed var(--line-strong);
-  align-self: center;
-}
-.npu-card .cslot .md {
-  font-family: var(--jbm);
-  font-size: 10px;
-  color: var(--fg-4);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 0 1 auto;
-  min-width: 24px;
-}
-.npu-card .cslot-row {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-.npu-card .cslot-row .cslot-strip {
-  display: flex;
-  flex-shrink: 0;
-}
-/* inline metrics — sit with the title, pulled to the right */
-.npu-card .cslot-mx {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  font-family: var(--jbm);
-  font-size: 12px;
-  color: var(--fg-3);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.npu-card .cslot-mx .tps {
-  /* enlarged + tinted with the slot's own owner hue fg tint (--slot-fg is
-     set per-card in npu-pane ComboSlot; --npu-b is the pre-handoff
-     fallback for a card that carries no owner hue) */
-  font-size: 17px;
-  font-weight: 500;
-  font-feature-settings: 'tnum' 1;
-  color: var(--slot-fg, var(--npu-b));
-}
-.npu-card .cslot-mx .tps .u {
-  font-size: 9px;
-  color: var(--fg-5);
-  margin-left: 2px;
-  font-weight: 400;
-}
-.npu-card .cslot-mx .m {
-  color: var(--fg-2);
-}
-.npu-card .cslot-mx .m.muted {
-  color: var(--fg-5);
-}
-.npu-card .cslot-mx .m .u {
-  font-size: 9px;
-  color: var(--fg-5);
-  margin-left: 1px;
-}
-.npu-card .cslot-mx .sep {
-  color: var(--fg-5);
-}
-.npu-card .cslot-foot {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.npu-card .cslot-foot .grow {
-  flex: 1;
-}
-
-/* responsive — below ~1100px the three regions wrap; rail drops full-width */
-@media (max-width: 1100px) {
-  .npu-card .combo-slots {
-    flex-basis: 100%;
-  }
-}
-
-.npu-card-toggle.pill.on {
-  box-shadow: 0 0 8px var(--dev-npu), 0 0 16px var(--dev-npu);
-  transition: box-shadow 0.3s ease;
-}
-
-/* ── per-slot model picker (RichSelect, same chrome as the inference cards) ──
-   The picker row sits under the name/metrics line. The shared model-picker
-   styles in engine-panes.css are scoped to .infer-pane/.npu-pane, which do not
-   wrap this card, so the same tokens are restated here — no new colours. */
-.npu-card .cslot-model {
-  min-width: 0;
-}
-.npu-card .cslot-model .model-picker-cell {
-  display: block;
-  min-width: 0;
-}
-.npu-card .rsel-trigger.model-picker {
-  width: 100%;
-  min-width: 0;
-  padding: 6px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--rad-sm);
-  background: var(--bg-1);
-  color: var(--fg);
-  font-family: var(--jbm);
-  font-size: 11.5px;
-  transition: border-color var(--dur-fast, 0.15s) var(--ease, ease);
-}
-.npu-card .rsel-trigger.model-picker:hover:not([disabled]) {
-  border-color: var(--dev-npu);
-}
-.npu-card .rsel-trigger.model-picker[disabled] {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* Open-dropdown escape hatch (same caveat as `.scard` in engine-panes.css).
-   Three ancestors would otherwise swallow the listbox, an absolutely-
-   positioned popover that must overflow the card:
-     · `.cslot` and `.wcard` are `overflow: hidden` (radius clip) — released
-       only while a listbox is open, so a closed card is unchanged;
-     · `.cslot:hover`'s transform makes the card a stacking context that traps
-       the listbox's z-index inside it — lift the card (and the whole NPU card
-       over the sections after it) while open;
-     · `.cslot.dim`'s opacity composites the popover see-through — full
-       opacity while the operator is choosing on it. */
-.npu-card:has(.rsel-trigger[aria-expanded='true']) {
-  position: relative;
-  z-index: 20;
-}
-.npu-card .wcard:has(.rsel-trigger[aria-expanded='true']) {
-  overflow: visible;
-}
-.npu-card .cslot:has(.rsel-trigger[aria-expanded='true']) {
-  overflow: visible;
-  z-index: 20;
-  opacity: 1;
-}
-
-/* ── engine lineup + pmode/fclk pills (LEFT region) ──────────────────── */
-.npu-card .combo-pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
-}
-.npu-card .combo-pills .chip {
-  font-family: var(--jbm);
-  font-size: 10.5px;
-  padding: 3px 7px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  color: var(--fg-2);
-  background: var(--bg-2);
-}
-.npu-card .combo-pills .chip.muted {
-  color: var(--fg-3, var(--fg-2));
-  opacity: 0.6;
-}
-
 /* ── shared/time-sliced grid treatment ────────────────────────────────
    Honesty rule: the hatch marks "more than one holder is on this array",
    never a per-tile load claim. Static diagonal hatch, no extra animation —
@@ -715,44 +381,4 @@
 }
 .npu-card .aie-foot {
   color: var(--fg-2);
-}
-
-/* ── xdna slot card ───────────────────────────────────────────────────
-   Same .cslot shell as the FLM trio cards (dot/name/metrics/model row),
-   plus its own fit/pmode chip row and a shared-with warning line. */
-.npu-card .cslot.xdna-slot .xdna-chips {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.npu-card .cslot.xdna-slot .chip {
-  font-family: var(--jbm);
-  font-size: 10px;
-  padding: 2px 6px;
-  border-radius: 5px;
-  border: 1px solid var(--line);
-  color: var(--fg-2);
-  text-transform: lowercase;
-}
-.npu-card .cslot.xdna-slot .chip.xdna-fit.fused {
-  color: var(--npu-s1, var(--accent));
-  border-color: var(--npu-s1, var(--accent));
-}
-.npu-card .cslot.xdna-slot .chip.xdna-fit.per-op {
-  color: var(--warn, #d8a657);
-  border-color: var(--warn, #d8a657);
-}
-.npu-card .cslot.xdna-slot .chip.muted {
-  opacity: 0.55;
-}
-.npu-card .cslot.xdna-slot .xdna-shared-warn {
-  margin-top: 6px;
-  font-size: 10.5px;
-  color: var(--warn, #d8a657);
-  font-family: var(--jbm);
-}
-.npu-card .cslot.xdna-slot .cslot-ctrl {
-  margin-top: 8px;
-  display: flex;
-  justify-content: flex-end;
 }

@@ -8,7 +8,7 @@ import { isXdnaSlot } from '@/lib/slotModelFit'
 import { SlotControls, slotCtrlPhase } from '../inference-pane.jsx'
 import { slotIndicatorFromPhase } from '../slot-status.js'
 import { GgmlSlotDrawer } from './GgmlSlotDrawer.jsx'
-import { ggmlRequantHint } from './ggml-slot-pure'
+import { GGML_IMAGE_MISSING, ggmlRequantHint } from './ggml-slot-pure'
 
 const num = (v, digits = 0) => (typeof v === 'number' && v > 0 ? (digits ? v.toFixed(digits) : String(Math.round(v))) : null)
 
@@ -101,6 +101,7 @@ export function GgmlLane({ slots = [], occ, hw }) {
           className="btn primary sm"
           data-testid="ggml-add"
           disabled={missing}
+          title={missing ? GGML_IMAGE_MISSING : undefined}
           onClick={() => setDrawer({ open: true, mode: 'create', slot: undefined })}
         >
           + Add GGML slot
@@ -108,7 +109,7 @@ export function GgmlLane({ slots = [], occ, hw }) {
       </div>
       {missing && (
         <div className="npt-banner" data-testid="ggml-pull-banner">
-          <span>The ggml-xdna runner image is not pulled yet.{pulling && pull.pct != null ? ` ${Math.round(pull.pct)}%` : ''}</span>
+          <span>{GGML_IMAGE_MISSING}{pulling && pull.pct != null ? ` ${Math.round(pull.pct)}%` : ''}</span>
           <button type="button" className="btn sm" data-testid="ggml-pull" disabled={pulling} onClick={() => Promise.resolve(pull.start('xdna')).catch(() => {})}>
             {pulling ? 'Pulling…' : 'Pull'}
           </button>

@@ -36,6 +36,9 @@ describe('flm draft', () => {
       chat: false, asr: true, embed: false, chatModel: 'c:3',
     })
   })
+  it('savedFlm falls through an empty modelDefault (useSlots normalises absent to "") to the live id', () => {
+    expect(savedFlm({ npu: {} }, { modelDefault: '', model_id: 'live:1' }).chatModel).toBe('live:1')
+  })
   it('cfgFingerprint tracks npu and model only', () => {
     const a = cfgFingerprint({ npu: { chat: true }, model: { default: 'a' } })
     expect(cfgFingerprint({ npu: { chat: true }, model: { default: 'a' } })).toBe(a)

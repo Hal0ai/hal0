@@ -10,12 +10,14 @@
  *       — its OWN route, never folded into the batched PUT /config.
  *   W2. Same select on a LIVE container slot → ConfirmDialog gate; cancel
  *       fires nothing, confirm fires the same POST body.
- *   W4. NPU · Embed toggle → PUT /config { npu: { chat, asr, embed } } + restart
- *       (the ASR lane is covered in slot-edit-controls-v3; embed was not).
- *   W5. NPU chat-model pick, installed tag → PUT /config { npu, model.default }.
- *   W6. NPU chat-model pick, NOT-installed tag → POST /api/models/{tag}/pull
- *       FIRST, no config write until the pull stream reports `completed`, then
- *       the same { model: { default } } apply.
+ *   W4-W6 (NPU modality + chat-model wiring) moved with the capability matrix to
+ *   the NPU tab's FLM lane (`#slots/npu`): the lane STAGES a toggle or a model
+ *   pick and applies once (one PUT, one restart) instead of writing per click.
+ *   W4. Embed / Chat toggle → PUT /config { npu: { chat, asr, embed } } + restart.
+ *   W5. Chat-model pick, installed tag → PUT /config { npu, model.default }.
+ *   W6. Chat-model pick, NOT-installed tag → POST /api/models/{tag}/pull FIRST,
+ *       no config write until the pull stream reports `completed`, then the
+ *       same { model: { default } } apply.
  *
  * Mechanics mirror slot-edit-controls-v3: the slot LIST comes from in-bundle
  * HAL0_DATA (VITE_MOCK_HAL0=1 short-circuits GET /api/slots before page.route
@@ -288,7 +290,7 @@ test.describe('Slot drawer — GTT feasibility (model-row fit chips)', () => {
 // profile"). The wire-level guarantee that no Save puts those keys on the wire
 // lives in slot-drawer-sunset-removal-v3.
 
-test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
+test.describe('FLM lane — NPU modality + chat-model wiring (moved from the slot drawer)', () => {
   const NPU_SLOT = {
     ...PRIMARY,
     name: 'npu',
@@ -299,13 +301,13 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     npu: { chat: true, asr: false, embed: false },
   }
 
-  /** Stub the FLM catalogue the NPU lane selects read. */
+  /** Stub the FLM catalogue the lane's chat select reads. */
   async function stubFlmModels(page: Page, models: any[]) {
     await page.route('**/api/slots/flm/models', (route) =>
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ models }),
+        body: JSON.stringify({ models: models.map((m) => ({ capabilities: ['chat'], ...m })) }),
       }),
     )
   }
@@ -319,14 +321,18 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     return restarts
   }
 
-  test('W4 — the Embed toggle instant-applies PUT /config { npu.embed } + restart', async ({ page }) => {
+  test('W4 — the Embed toggle stages, then PUT /config { npu.embed } + restart on Apply', async ({ page }) => {
     const puts = await captureConfig(page, 'npu')
     const restarts = await captureRestarts(page, 'npu')
     await stubFlmModels(page, [{ model: 'flm-chat', installed: true }])
     await seedSlots(page, [NPU_SLOT, EMBED])
 
-    await page.goto('/#slots/edit/npu')
-    await page.locator('.drawer .form-row', { hasText: 'NPU · Embed' }).getByRole('switch').click()
+    await page.goto('/#slots/npu')
+    await page.getByTestId('flm-cap-embed').click()
+    // Staged only: nothing is written until Apply.
+    await expect(page.getByTestId('flm-applybar')).toContainText('1 change staged')
+    expect(puts).toEqual([])
+    await page.getByTestId('flm-apply').click()
 
     await expect.poll(() => puts.length).toBe(1)
     // The whole modality triple rides every write — the backend replaces [npu]
@@ -335,14 +341,15 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     await expect.poll(() => restarts.length).toBe(1)
   })
 
-  test('W4 — the Chat toggle instant-applies PUT /config { npu.chat: false }', async ({ page }) => {
+  test('W4 — the Chat toggle applies PUT /config { npu.chat: false }', async ({ page }) => {
     const puts = await captureConfig(page, 'npu')
     await captureRestarts(page, 'npu')
     await stubFlmModels(page, [{ model: 'flm-chat', installed: true }])
     await seedSlots(page, [NPU_SLOT, EMBED])
 
-    await page.goto('/#slots/edit/npu')
-    await page.locator('.drawer .form-row', { hasText: 'NPU · Chat' }).getByRole('switch').click()
+    await page.goto('/#slots/npu')
+    await page.getByTestId('flm-cap-chat').click()
+    await page.getByTestId('flm-apply').click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].npu).toEqual({ chat: false, asr: false, embed: false })
@@ -350,7 +357,7 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     expect(puts[0]).not.toHaveProperty('model')
   })
 
-  test('W5 — picking an INSTALLED chat model PUTs { npu, model: { default } }', async ({ page }) => {
+  test('W5 — picking an INSTALLED chat model applies { npu, model: { default } }', async ({ page }) => {
     const puts = await captureConfig(page, 'npu')
     const restarts = await captureRestarts(page, 'npu')
     await stubFlmModels(page, [
@@ -359,11 +366,10 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     ])
     await seedSlots(page, [NPU_SLOT, EMBED])
 
-    await page.goto('/#slots/edit/npu')
-    const chatRow = page.locator('.drawer .form-row', { hasText: 'NPU · Chat' })
-    const chatPicker = chatRow.getByTestId('npu-chat-model')
-    await expect(chatPicker).toContainText('flm-chat')
-    await pickRichOption(chatPicker, 'flm-chat-xl')
+    await page.goto('/#slots/npu')
+    await expect(page.getByTestId('flm-chat-model')).toHaveValue('flm-chat')
+    await page.getByTestId('flm-chat-model').selectOption('flm-chat-xl')
+    await page.getByTestId('flm-apply').click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].npu).toEqual({ chat: true, asr: false, embed: false })
@@ -373,7 +379,7 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     await expect.poll(() => restarts.length).toBe(1)
   })
 
-  test('W6 — picking a NOT-installed chat model pulls first, then applies', async ({ page }) => {
+  test('W6 — a NOT-installed chat model pulls first, then applies', async ({ page }) => {
     const puts = await captureConfig(page, 'npu')
     const restarts = await captureRestarts(page, 'npu')
     await stubFlmModels(page, [
@@ -406,21 +412,16 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     })
 
     await seedSlots(page, [NPU_SLOT, EMBED])
-    await page.goto('/#slots/edit/npu')
-    const chatRow = page.locator('.drawer .form-row', { hasText: 'NPU · Chat' })
-    // Non-installed tags are offered with a ⬇ download chip rather than
-    // hidden, after the installed ones, each with the NPU runtime chip.
-    const chatPicker = chatRow.getByTestId('npu-chat-model')
-    const listbox = await openRichSelect(chatPicker)
-    const options = listbox.getByRole('option')
-    await expect(options.nth(0)).toHaveAttribute('data-option-id', 'flm-chat')
-    await expect(options.nth(1)).toHaveAttribute('data-option-id', 'flm-chat-xl')
-    await expect(options.nth(1)).toContainText('⬇ download')
-    await expect(options.nth(0)).not.toContainText('⬇ download')
-    await expect(options.nth(0).locator('.chip.dev-npu')).toHaveText('flm')
-    await pickRichOption(chatPicker, 'flm-chat-xl')
+    await page.goto('/#slots/npu')
+    // Non-installed tags are offered with a "download" suffix rather than hidden.
+    const picker = page.getByTestId('flm-chat-model')
+    await expect(picker.locator('option[value="flm-chat-xl"]')).toContainText('download')
+    await expect(picker.locator('option[value="flm-chat"]')).not.toContainText('download')
+    await picker.selectOption('flm-chat-xl')
+    await page.getByTestId('flm-apply').click()
 
     // Pull is fired first; the slot config is NOT written yet.
+    await expect(page.getByTestId('flm-pulling')).toBeVisible()
     await expect.poll(() => pulls.length).toBe(1)
     expect(pulls[0]).toBe('POST')
     await page.waitForTimeout(300)

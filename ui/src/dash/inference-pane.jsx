@@ -59,8 +59,7 @@ import { effectiveProfileName, eyeState, thinkingMark } from './tune-state.js'
 import { draftTagValue } from './spec-state.js'
 import { feasibilityHint } from './feasibility-copy'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
-// the copy this file used to carry (and the verbatim clones in slot-list.jsx
-// and npu-pane.jsx).
+// the copy this file used to carry (and the verbatim clone in slot-list.jsx).
 import { devKind } from '@/lib/deviceMeta'
 import { slotEditHash } from './slots-route'
 
@@ -737,6 +736,9 @@ export function SlotControls({
   onRestart,
   onLogs,
   onEdit,
+  // Edit stays visible but cannot be used (with `editDisabledTitle` as the reason).
+  editDisabled,
+  editDisabledTitle,
   // SC-4: promote this slot to its type's default. Rendered only when
   // `onSetDefault` is supplied AND the slot isn't already the default — a slot
   // that already holds the marker has nothing to promote.
@@ -782,7 +784,13 @@ export function SlotControls({
         </button>
       )}
       {!compact && (
-        <button className="sctrl" title="Edit" onClick={onEdit}>
+        <button
+          className="sctrl"
+          title={editDisabled ? editDisabledTitle || 'Edit' : 'Edit'}
+          disabled={editDisabled}
+          data-testid="slot-ctrl-edit"
+          onClick={onEdit}
+        >
           <Ic name="edit" size={13} />
         </button>
       )}

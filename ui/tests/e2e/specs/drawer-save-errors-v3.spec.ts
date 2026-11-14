@@ -137,11 +137,21 @@ test.describe('Slot drawer — rejected writes', () => {
     await expect(drawer(page)).toBeVisible()
   })
 
-  test('E4 — a rejected NPU toggle reverts the switch instead of lying', async ({ page }) => {
-    // The npu-exclusivity 409 the slot manager raises when a second
-    // device=npu llm anchor is enabled.
-    await page.route('**/api/slots/npu/config', (route) =>
-      route.fulfill({
+  test('E4 — a rejected FLM lane apply shows the error and keeps the staged change', async ({ page }) => {
+    // The npu-exclusivity 409 the slot manager raises when a second device=npu llm anchor is
+    // enabled. The FLM capability matrix moved from the drawer to the NPU tab's lane: the lane
+    // stages, so a rejected apply must surface the message and leave the draft in place.
+    let puts = 0
+    await page.route('**/api/slots/npu/config', (route) => {
+      if (route.request().method() !== 'PUT') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ name: 'npu', npu: { chat: true, asr: false, embed: false }, model: { default: 'flm-chat' } }),
+        })
+      }
+      puts += 1
+      return route.fulfill({
         status: 409,
         contentType: 'application/json',
         body: envelope(
@@ -149,13 +159,18 @@ test.describe('Slot drawer — rejected writes', () => {
           'another device=npu llm slot is already enabled',
           { conflicting: 'npu-other' },
         ),
-      }),
-    )
+      })
+    })
+    let restarts = 0
+    await page.route('**/api/slots/npu/restart', (route) => {
+      restarts += 1
+      return route.fulfill({ status: 202, contentType: 'application/json', body: '{}' })
+    })
     await page.route('**/api/slots/flm/models', (route) =>
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ models: [{ model: 'flm-chat', installed: true }] }),
+        body: JSON.stringify({ models: [{ model: 'flm-chat', installed: true, capabilities: ['chat'] }] }),
       }),
     )
     await seedSlots(page, [
@@ -170,15 +185,20 @@ test.describe('Slot drawer — rejected writes', () => {
       },
     ])
 
-    await page.goto('/#slots/edit/npu')
-    const embedSwitch = page.locator('.drawer .form-row', { hasText: 'NPU · Embed' }).getByRole('switch')
+    await page.goto('/#slots/npu')
+    const embedSwitch = page.getByTestId('flm-cap-embed')
     await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
     await embedSwitch.click()
+    await expect(embedSwitch).toHaveAttribute('aria-checked', 'true')
+    await page.getByTestId('flm-apply').click()
 
-    // Error surfaced…
-    await expect(drawer(page)).toContainText('another device=npu llm slot is already enabled')
-    // …and the optimistic flip is rolled back to server truth.
-    await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
+    // Error surfaced on the lane…
+    await expect(page.getByTestId('flm-error')).toContainText('another device=npu llm slot is already enabled')
+    // …nothing restarted, and the staged change is kept so the operator can discard or retry.
+    await expect.poll(() => puts).toBe(1)
+    expect(restarts).toBe(0)
+    await expect(page.getByTestId('flm-applybar')).toContainText('1 change staged')
+    await expect(embedSwitch).toHaveAttribute('aria-checked', 'true')
   })
 })
 

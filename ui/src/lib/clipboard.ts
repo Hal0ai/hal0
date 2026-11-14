@@ -35,3 +35,16 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
     return false;
   }
 }
+
+/** Copy `text`; when that fails, select the contents of `el` so the user can copy by hand. */
+export async function copyOrSelect(text: string, el?: Element | null): Promise<boolean> {
+  const ok = await copyTextToClipboard(text);
+  if (!ok && el && typeof window !== "undefined" && window.getSelection) {
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(r);
+  }
+  return ok;
+}

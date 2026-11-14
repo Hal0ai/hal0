@@ -24,6 +24,9 @@ export interface NpuOccupancySlot {
   engine?: 'flm' | 'xdna'
   active?: boolean
   last_used_age_s?: number | null
+  // Set on rows the backend synthesizes for the anchor's STT/embed: the anchor's name. These ride
+  // the anchor's one process and are never separate holders.
+  served_by?: string
 }
 
 export interface NpuOccupancy {
@@ -52,10 +55,12 @@ export interface NpuOccupancy {
 
 const POLL_MS = 2_500
 
-export function useNpuOccupancy() {
+/** `poll: false` for an observer that only needs the shape of the answer (the sidebar's NPU link):
+ *  it shares the query but does not hold a 2.5 s poll open on every page. */
+export function useNpuOccupancy({ poll = true }: { poll?: boolean } = {}) {
   return useQuery<NpuOccupancy>({
     queryKey: ['npu', 'occupancy'],
     queryFn: () => apiGet<NpuOccupancy>(ENDPOINTS.npuOccupancy),
-    refetchInterval: POLL_MS,
+    refetchInterval: poll ? POLL_MS : false,
   })
 }

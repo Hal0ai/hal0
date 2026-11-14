@@ -497,22 +497,15 @@ test.describe('Slot edit controls (/slots)', () => {
     )
   })
 
-  test('NPU modality controls remain visible and wire ASR updates', async ({ page }) => {
+  test('the FLM anchor drawer points at the NPU tab instead of carrying the capability matrix', async ({ page }) => {
+    // Modality + chat model moved to the NPU tab's FLM lane (staged, applied once); the drawer
+    // keeps profile / port / image / autoload. The lane's staged apply is pinned in
+    // npu-tab-v3 and npu-chat-model-seed-v3.
     const puts: any[] = []
     await page.route('**/api/slots/npu/config', async (route) => {
       if (route.request().method() === 'PUT') puts.push(JSON.parse(route.request().postData() || '{}'))
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
     })
-    await page.route('**/api/slots/npu/restart', (route) =>
-      route.fulfill({ status: 202, contentType: 'application/json', body: '{}' }),
-    )
-    await page.route('**/api/slots/flm/models', (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: 'application/json',
-        body: JSON.stringify({ models: [{ model: 'flm-chat', installed: true }] }),
-      }),
-    )
     await seedSlots(page, [{
       ...PRIMARY,
       name: 'npu',
@@ -524,12 +517,12 @@ test.describe('Slot edit controls (/slots)', () => {
     }, EMBED])
 
     await page.goto('/#slots/edit/npu')
-    await expect(page.getByText('NPU · Chat')).toBeVisible()
-    await expect(page.getByText('NPU · ASR')).toBeVisible()
-    await expect(page.getByText('NPU · Embed')).toBeVisible()
-    await page.locator('.drawer .form-row', { hasText: 'NPU · ASR' }).getByRole('switch').click()
-    await expect.poll(() => puts.length).toBeGreaterThan(0)
-    expect(puts[0].npu).toMatchObject({ chat: true, asr: true, embed: false })
+    await expect(page.getByTestId('npu-lane-pointer')).toContainText('Chat model and capabilities are on the NPU tab')
+    await expect(page.getByTestId('npu-lane-link')).toHaveAttribute('href', '#slots/npu/lanes')
+    await expect(page.getByText('NPU · Chat')).toHaveCount(0)
+    await expect(page.getByText('NPU · ASR')).toHaveCount(0)
+    await expect(page.getByText('NPU · Embed')).toHaveCount(0)
+    expect(puts).toEqual([])
   })
 
   test('C5 — the Context ceiling is gone: no input, no PATCH /defaults, the profile window is shown read-only', async ({ page }) => {

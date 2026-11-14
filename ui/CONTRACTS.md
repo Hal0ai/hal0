@@ -309,17 +309,19 @@ flat task list the hook buckets by `status`). Empty board ⇒ all 8 lanes render
 
 # xdna (ggml-xdna NPU runner) — FROZEN DATA CONTRACT (v1)
 
-An xdna slot is `runner:'xdna'`, `runtime_family:'llama-server'`,
+An xdna slot is `binary:'xdna'`, `runtime_family:'llama-server'`,
 `device_class:'npu'`. It is NEVER an FLM-trio anchor: `npu-modality.js`'s
 structural anchor resolution and `slot-shared.js`'s `isNpuSlot` stay
-disjoint from it (see `isXdnaSlot` in `npu-pane.jsx`). It renders as its
-own `XdnaSlotCard` in the NPU occupancy card's RIGHT region and can
-appear alongside an FLM trio anchor on the same NPU array.
+disjoint from it (see `isXdnaSlot` in `src/lib/slotModelFit.ts`, keyed on
+`binary === 'xdna'`). It renders as a card in the GGML lane of the NPU tab
+(`#slots/npu`, `ui/src/dash/npu/GgmlLane.jsx`) and can appear alongside the
+FLM anchor on the same NPU array. The Inference tab shows only a one-line
+NPU summary (`NpuSummaryRow`) linking to the tab.
 
 ## Slot payload (GET /api/slots, GET /api/slots/{name})
 
 ```
-runner: 'xdna'
+binary: 'xdna'
 runtime_family: 'llama-server'
 device_class: 'npu'
 xdna_path: 'fused' | 'per-op' | null   // null = not yet resolved/loaded
@@ -339,8 +341,8 @@ GGML_XDNA_* = "<value>"   # keys MUST be in GET /api/runners/xdna/knobs .env[].n
 ```
 
 Written and restarted through the existing slot config PUT + restart flow
-(no new endpoint) — same two-call contract the NPU occupancy card's
-`writeAnchor` uses for FLM pills. UI assumption: `env` values are opaque
+(no new endpoint) — the same two-call contract (config PUT, then restart)
+the NPU tab's FLM lane uses for its staged toggles. UI assumption: `env` values are opaque
 strings; the UI does not attempt to type/coerce them, matching how
 HALOGEN_* profile flags are treated.
 
@@ -364,7 +366,11 @@ slot-config PUT refuses any other value with a 400, in `[xdna].env` and in
 ## /api/npu/occupancy (already exists)
 
 Each slot entry carries `engine: 'flm' | 'xdna'` and `single_tenant: boolean`
-(false when >1 holder). The NPU grid (`AieGrid`) renders a static hatched
+(false when >1 holder). The FLM anchor's STT and embed capabilities appear as extra
+rows named `<anchor>-stt` / `<anchor>-embed`, emitted with the anchor's state. Those
+synthesized rows carry `served_by: '<anchor name>'` (absent on real slots): they ride
+the anchor's one process, so clients must not count them as holders, give them columns,
+or treat them as time-sliced tenants. The NPU grid (`AieGrid`) renders a static hatched
 "shared · time-sliced" treatment whenever more than one holder claims
 columns, or an xdna slot reports a non-empty `npu_shared_with` — a
 holder-count FACT, never a per-tile load claim. No new animation; existing
@@ -398,13 +404,13 @@ local image store has not been read yet or cannot be read; the store is read in 
 ## GET /api/runners/xdna/fit
 
 ```
-{ models: { [model_id]: { xdna_path: 'fused' | 'per-op' | null, reason: string | null } } }
+{ models: { [model_id]: { xdna_path: 'fused' | 'per-op' | null, reason: string } } }
 ```
 
 One row per registered GGUF chat model; `?model=<id>` narrows to one (404
 `runners.model_not_found` when unknown). A row whose file is missing,
 unreadable or not GGUF is still returned with `xdna_path: null` and a
-`reason`, status 200.
+`reason`, status 200. `reason` is always a string: the one-line fact that decided the path, or the read error.
 
 ## Hardware stats — optional fields (already exists on the API per contract)
 

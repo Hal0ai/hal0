@@ -17,11 +17,14 @@ import { PROXY_NEEDS_PUBLIC_URL, publicUrlHint } from '@/api/publicUrlHint'
 import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 import { SessionChip } from './auth/SessionChip.jsx'
 import { NAV_GROUPS as SETTINGS_NAV_GROUPS, VALID_IDS as SETTINGS_IDS } from './settings/SettingsNav.jsx'
-import { slotEditHash, slotsTab } from './slots-route'
+import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
+import { npuTabVisible } from './npu/npu-pure'
+import { SLOTS_RESERVED_TABS, slotEditHash, slotsTab } from './slots-route'
 
 // Slots tabs that are not the default; any other param (a slot name) stays on Inference. A param is
-// `<tab>[/<sub>]` (`image/generate`): the tab is its first segment (slots-route.ts).
-const SLOT_SUB_TABS = ["image", "endpoints", "runner-images", "stacks"]
+// `<tab>[/<sub>]` (`image/generate`): the tab is its first segment (slots-route.ts). One shared list
+// with the router, so a new tab cannot be routed but missed here.
+const SLOT_SUB_TABS = SLOTS_RESERVED_TABS
 
 const { useState: useStateC, useEffect: useEffectC, useRef: useRefC } = React;
 
@@ -492,6 +495,10 @@ function useNavItems() {
   // them entirely. Driven by /api/status so the UI can never disagree with
   // the backend. main.jsx applies the matching route guard for deep links.
   const memoryEnabled = useMemoryEnabled();
+  // NPU tab: same visibility rule as the tab itself (the NPU is present, or any slot lives on it).
+  // The occupancy poll belongs to the pages that draw it; the sidebar only reads the shared answer.
+  const npuOcc = useNpuOccupancy({ poll: false }).data;
+  const showNpu = npuTabVisible(npuOcc, slotsQuery.data ?? []);
   return [
     { id: "dashboard", label: "Overview", icon: Icons.dashboard },
     // v0.5 nav: Slots hosts Endpoints (local OpenAI endpoints, from the old
@@ -504,6 +511,7 @@ function useNavItems() {
       { id: "slots/inference",     label: "Inference",
         match: (route, param) => route === "slots" && !SLOT_SUB_TABS.includes(slotsTab(param)) },
       { id: "slots/image",         label: "Image Gen" },
+      ...(showNpu ? [{ id: "slots/npu", label: "NPU" }] : []),
       { id: "slots/endpoints",     label: "Endpoints" },
       { id: "slots/runner-images", label: "Runner Images" },
       { id: "slots/stacks",        label: "Stacks" },

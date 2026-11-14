@@ -141,3 +141,46 @@
 .ggml-requant { display: flex; flex-direction: column; gap: 6px; }
 .ggml-requant-cmd { display: flex; align-items: center; gap: 8px; }
 .ggml-requant-cmd code { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: nowrap; }
+
+/* Models sub-tab */
+.npt-models { display: flex; flex-direction: column; gap: 14px; }
+.npt-msec { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: var(--rad-md, 6px); }
+.npt-msec-flm { border-left: 3px solid var(--dev-npu); }
+.npt-msec-ggml { border-left: 3px solid var(--npu-s1); }
+.npt-mbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.npt-mrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+.npt-mrow .npt-mname { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.npt-mrow .btn.on { outline: 1px solid var(--fg-3); }
+
+/* Engines & profiles */
+.npt-engines { display: flex; flex-direction: column; gap: 12px; }
+.npt-ready.ok { color: var(--ok); }
+.npt-ready.warn { color: var(--warn); }
+.npt-ready.unknown { color: var(--fg-3); }
+.npt-cmd { display: inline-flex; gap: 6px; align-items: center; }
+
+/* Inference tab summary row (NpuSummaryRow.jsx) */
+.npt-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
+  font-family: var(--jbm);
+  font-size: 11.5px;
+}
+.npt-summary-title { color: var(--dev-npu); font-weight: 600; }
+.npt-summary-chip {
+  padding: 1px 8px;
+  border: 1px solid var(--dev-npu);
+  border-radius: 999px;
+  color: var(--dev-npu);
+  font-size: 10.5px;
+}
+.npt-summary-link { margin-left: auto; color: var(--dev-npu); text-decoration: none; }
+.npt-summary-link:hover { text-decoration: underline; }
+.npt-summary-link:focus-visible { outline: 2px solid var(--dev-npu); outline-offset: 2px; }
+.npt-link-disabled { color: var(--fg-5); cursor: not-allowed; }
