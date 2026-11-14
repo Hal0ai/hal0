@@ -315,7 +315,7 @@ def test_the_dry_run_and_the_result_count_the_observations_left_to_rebuild() -> 
     assert out.exit_code == 0, out.output
     text = " ".join(out.output.replace("│", " ").split())
     assert "pi-coder: 4 observation(s) were not carried (observations_to_rebuild)" in text
-    assert "3 of their facts sent marked for it" in text
+    assert "only for the 3 facts requeued" in text
 
 
 def test_a_failed_run_says_writes_stay_paused_when_a_journal_is_left(monkeypatch) -> None:

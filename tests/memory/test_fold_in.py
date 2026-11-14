@@ -2885,3 +2885,51 @@ async def test_two_of_one_banks_own_pages_with_one_name_leave_it(box: Box) -> No
     note = next(r["note"] for r in result["banks"] if r["bank"] == "pi-coder")
     assert "two of the bank's own pages share a name there" in note
     assert box.engine.imports == []
+
+
+async def test_an_unsent_observation_the_target_already_holds_is_not_counted_or_requeued(
+    box: Box,
+) -> None:
+    e = box.engine
+    first = await box.fold(only=["shared"]).run()
+    assert first["folded"] == ["shared"]
+    assert "nature" in [o["text"] for o in e.banks["hal0:shared"]["obs"]]
+    stamp = "2026-11-01T10:00:00+00:00"
+    # A new document arrives, with an observation over it and a landed
+    # document whose text the target holds already: no merge can carry it
+    # (n1 is in the target), and none has to.
+    e.banks["shared"]["docs"]["n2"] = doc(
+        "n2", {**fact("new", "agent:hermes"), "consolidated_at": stamp}
+    )
+    e.banks["shared"]["obs"].append(
+        {
+            "text": "nature",
+            "tags": [],
+            "sources": [
+                {"document_id": "n1", "fact_index": 1},
+                {"document_id": "n2", "fact_index": 0},
+            ],
+        }
+    )
+    result = await box.fold().run()
+    assert result["status"] == "folded"
+    report = next(b for b in result["banks"] if b["bank"] == "shared")["report"]
+    assert report["observations_to_rebuild"] == 0
+    assert report["observations_to_rebuild_by_part"].get("shared") == 0
+    assert report["facts_requeued_for_rebuild"] == 0
+    assert report["observations"].get("not_carried_built_since", 0) == 0
+    # The sent fact keeps the stamp the old bank gave it.
+    assert e.banks["hal0:shared"]["docs"]["n2"]["facts"][0]["consolidated_at"] == stamp
+
+
+async def test_a_built_since_observation_is_counted_once_not_as_a_rebuild_too(box: Box) -> None:
+    e = box.engine
+    await box.fold(only=["shared"]).run()
+    e.banks["shared"]["obs"].append(
+        {"text": "built since", "tags": [], "sources": [{"document_id": "n1", "fact_index": 1}]}
+    )
+    e.banks["shared"]["docs"]["n2"] = doc("n2", fact("new", "agent:hermes"))
+    result = await box.fold().run()
+    report = next(b for b in result["banks"] if b["bank"] == "shared")["report"]
+    assert report["observations"]["not_carried_built_since"] == 1
+    assert report["observations_to_rebuild"] == 0

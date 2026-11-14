@@ -267,8 +267,10 @@ def _bank_notes(rows: list[dict[str, Any]]) -> list[str]:
         if rebuild:
             lines.append(
                 f"{bank}: about {rebuild} observation(s) rest on documents already in the target "
-                "and are not there; a merge cannot carry them, so the target's consolidation "
-                "rebuilds them (observations_to_rebuild)"
+                "and are not there; a merge cannot carry them (observations_to_rebuild). "
+                "They are rebuilt only when consolidation runs on the target (automatically "
+                "only while auto-consolidation is on), and only for the facts the run "
+                "requeues; the guide has the manual step"
             )
         pseudo = pages.get("pseudo_owned") or []
         if pseudo:
@@ -647,12 +649,19 @@ def fold_in_cmd(
     for entry in result.get("banks") or []:
         report = entry.get("report") or {}
         rebuild = int(report.get("observations_to_rebuild") or 0)
-        if rebuild:
+        since = int((report.get("observations") or {}).get("not_carried_built_since") or 0)
+        if rebuild or since:
+            extra = (
+                f" and {since} the old bank built since an earlier run (not_carried_built_since)"
+                if since
+                else ""
+            )
             body.append(
                 f"{escape(str(entry.get('bank')))}: {rebuild} observation(s) were not carried "
-                "(observations_to_rebuild); the target's consolidation rebuilds them, "
-                f"{int(report.get('facts_requeued_for_rebuild') or 0)} of their facts sent "
-                "marked for it. The guide says how to rebuild the rest after the cutover."
+                f"(observations_to_rebuild){extra}; they are rebuilt when consolidation runs on "
+                "the target (automatically only while auto-consolidation is on), and only for "
+                f"the {int(report.get('facts_requeued_for_rebuild') or 0)} facts requeued. "
+                "The guide says how to rebuild the rest after the cutover."
             )
     for entry in result.get("banks") or []:
         if entry.get("step") == "left":

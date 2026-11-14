@@ -1028,7 +1028,10 @@ def requeue_sources(data: bytes, observations: Iterable[Mapping[str, Any]]) -> t
     (``find_unconsolidated`` in ``engine/memories/pg/reads.py``); the merge
     import restores both as the archive has them (``restore_fact_lifecycle``
     in ``engine/memories/pg/transfer.py``). A fact the archive does not
-    carry is left alone. Neither stamp is part of :func:`document_digest`.
+    carry is left alone, and so is one under an observation the archive
+    sends: the import re-stamps such a fact (``COALESCE`` in
+    ``transfer.py``), so clearing it would count a rebuild that does not
+    happen. Neither stamp is part of :func:`document_digest`.
     """
     wanted: dict[str, set[int]] = {}
     for obs in observations:
@@ -1039,6 +1042,13 @@ def requeue_sources(data: bytes, observations: Iterable[Mapping[str, Any]]) -> t
                 continue
             wanted.setdefault(str(source.get("document_id")), set()).add(index)
     archive = _read_archive(data)
+    held: set[tuple[str, int]] = set()
+    for obs in archive["observations"]:
+        for source in obs.get("sources") or ():
+            try:
+                held.add((str(source.get("document_id")), int(source.get("fact_index"))))
+            except (TypeError, ValueError):
+                continue
     cleared = 0
     for doc in archive["documents"]:
         indices = wanted.get(str(doc.get("id")))
@@ -1047,6 +1057,8 @@ def requeue_sources(data: bytes, observations: Iterable[Mapping[str, Any]]) -> t
         facts = doc.get("facts") or []
         for index in sorted(indices):
             if not 0 <= index < len(facts) or not isinstance(facts[index], dict):
+                continue
+            if (str(doc.get("id")), index) in held:
                 continue
             facts[index]["consolidated_at"] = None
             facts[index]["consolidation_failed_at"] = None
@@ -4687,23 +4699,12 @@ class FoldIn(em.EngineMaintenance):
         else:
             await self._clashes(journal, entry, name, target, ids)
         data, sending, unsent = await self._remainder(full, target, ids)
-        if unsent:
-            # One the old bank built since an earlier run rests on documents
-            # already folded and was never sent: the target's own
-            # consolidation builds it from the same facts.
-            sent_before = set((self._prior(entry).get(name) or {}).get("observations") or ())
-            if part.sent:
-                sent_before |= set(ids.get("observations") or [])
-            later = sum(1 for o in unsent if observation_digest(o) not in sent_before)
-            if later:
-                observed = entry.report.setdefault("observations", {})
-                observed["not_carried_built_since"] = later
-                self._say(
-                    f"{entry.bank}: {later} observation(s) the old bank built since an earlier "
-                    f"run rest on documents already in {target} and are not carried; "
-                    f"{target}'s consolidation builds them from the same facts"
-                )
-        data = await self._drop_unlanded_observations(entry, name, target, unsent, data)
+        sent_before = set((self._prior(entry).get(name) or {}).get("observations") or ())
+        if part.sent:
+            sent_before |= set(ids.get("observations") or [])
+        data = await self._drop_unlanded_observations(
+            entry, name, target, unsent, data, sent_before
+        )
         if data is None:
             # Everything of the part is in the target already (an earlier run sent it).
             part.before, part.sending = None, None
@@ -5003,6 +5004,7 @@ class FoldIn(em.EngineMaintenance):
         target: str,
         unsent: list[dict[str, Any]],
         data: bytes | None,
+        sent_before: set[str],
     ) -> bytes | None:
         """Count the observations no merge can carry now, and requeue what is sent of their facts.
 
@@ -5013,7 +5015,10 @@ class FoldIn(em.EngineMaintenance):
         merge with ``skip`` cannot bring one now. One whose text the target
         holds landed before. Any other is not carried: observations are
         derived from facts, so the target's consolidation rebuilds it. It is
-        counted as ``observations_to_rebuild`` and does not leave the bank:
+        counted and does not leave the bank: ``observations.not_carried_built_since``
+        when the old bank built it after an earlier run (its digest is not in
+        ``sent_before``), ``observations_to_rebuild`` otherwise, so the two
+        counts never overlap:
         deleting the landed documents to resend them whole would cascade to
         every observation resting on them in the target, and the next run
         would find more of the same (a fold-in that never converges).
@@ -5033,9 +5038,16 @@ class FoldIn(em.EngineMaintenance):
             return data
         texts = await self._observation_texts(target)
         dropped = [o for o in unsent if str(o.get("text")) not in texts]
+        later = [o for o in dropped if observation_digest(o) not in sent_before]
+        earlier = len(dropped) - len(later)
         by_part = entry.report.setdefault("observations_to_rebuild_by_part", {})
-        by_part[name] = len(dropped)
+        by_part[name] = earlier
         entry.report["observations_to_rebuild"] = sum(int(v) for v in by_part.values())
+        built = entry.report.setdefault("observations_built_since_by_part", {})
+        built[name] = len(later)
+        entry.report.setdefault("observations", {})["not_carried_built_since"] = sum(
+            int(v) for v in built.values()
+        )
         if not dropped:
             return data
         requeued = 0
@@ -5047,9 +5059,11 @@ class FoldIn(em.EngineMaintenance):
         self._say(
             f"{entry.bank}: {len(dropped)} observation(s) rest on documents already in {target} "
             "and cannot be carried now (the engine imports an observation only with all its "
-            "source documents in the same call). They are not carried and are counted as "
-            f"observations_to_rebuild: {target}'s consolidation rebuilds them from their facts. "
-            f"{requeued} of those facts are sent now, marked for consolidation"
+            f"source documents in the same call): {earlier} counted as observations_to_rebuild, "
+            f"{len(later)} as not_carried_built_since (the old bank built them after an earlier "
+            f"run). {target}'s consolidation rebuilds them from their facts when it runs on "
+            "the target (automatically only while auto-consolidation is on), and only for the "
+            f"{requeued} facts requeued now; the guide has the manual step"
         )
         return data
 

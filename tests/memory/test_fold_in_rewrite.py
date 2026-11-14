@@ -1427,3 +1427,43 @@ def test_requeue_sources_clears_both_stamps_on_the_facts_it_carries_and_nothing_
     assert fi.document_digest(fi._read_archive(out)["documents"][0]) == digest
     # Nothing of the archive is sent for: it comes back as it was.
     assert fi.requeue_sources(data, [{"text": "x", "sources": []}]) == (data, 0)
+
+
+def test_requeue_sources_clears_a_fact_that_only_has_consolidation_failed_at() -> None:
+    stamp = "2026-11-01T10:00:00+00:00"
+    sent = doc("a", [{**fact("failed"), "consolidated_at": None, "consolidation_failed_at": stamp}])
+    data = fi._write_archive("old", [sent], [], [], [])
+    out, cleared = fi.requeue_sources(
+        data, [{"text": "x", "sources": [{"document_id": "a", "fact_index": 0}]}]
+    )
+    assert cleared == 1
+    row = fi._read_archive(out)["documents"][0]["facts"][0]
+    assert row["consolidation_failed_at"] is None and row["consolidated_at"] is None
+
+
+def test_requeue_sources_leaves_a_fact_under_a_sent_observation_and_does_not_count_it() -> None:
+    stamp = "2026-11-01T10:00:00+00:00"
+    sent = doc(
+        "a",
+        [
+            {**fact("shared source"), "consolidated_at": stamp},
+            {**fact("only dropped"), "consolidated_at": stamp},
+        ],
+    )
+    carried = {"text": "sent", "sources": [{"document_id": "a", "fact_index": 0}]}
+    data = fi._write_archive("old", [sent], [carried], [], [])
+    dropped = [
+        {
+            "text": "dropped",
+            "sources": [
+                {"document_id": "a", "fact_index": 0},
+                {"document_id": "a", "fact_index": 1},
+            ],
+        }
+    ]
+    out, cleared = fi.requeue_sources(data, dropped)
+    # The import re-stamps fact 0 (it is under a sent observation): not counted.
+    assert cleared == 1
+    facts = fi._read_archive(out)["documents"][0]["facts"]
+    assert facts[0]["consolidated_at"] == stamp
+    assert facts[1]["consolidated_at"] is None
