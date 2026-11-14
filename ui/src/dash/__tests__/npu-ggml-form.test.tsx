@@ -19,6 +19,9 @@ const { box } = vi.hoisted(() => ({
     createErr: null as Error | null,
     cfgLoading: false,
     fit: {} as Record<string, { xdna_path: string | null; reason: string }>,
+    fitState: { isLoading: false, isError: false } as { isLoading: boolean; isError: boolean },
+    refetches: 0,
+    models: [] as Record<string, unknown>[],
   },
 }))
 
@@ -32,15 +35,15 @@ vi.mock('@/api/hooks/useSlots', () => ({
   useSlotDelete: () => ({ isPending: false, mutateAsync: async (n: string) => { box.deletes.push(n); return {} } }),
 }))
 vi.mock('@/api/hooks/useModels', () => ({
-  useModels: () => ({
-    data: [
-      { id: 'qwen3-4b', type: 'llm', installed: true, runtime: 'llama-server', labels: [] },
-      { id: 'big-moe', type: 'llm', installed: true, runtime: 'llama-server', labels: [] },
-    ],
-  }),
+  useModels: () => ({ data: box.models }),
 }))
 vi.mock('@/api/hooks/useXdnaFit', () => ({
-  useXdnaFit: () => ({ data: box.fit }),
+  useXdnaFit: () => ({
+    data: box.fitState.isLoading || box.fitState.isError ? undefined : box.fit,
+    isLoading: box.fitState.isLoading,
+    isError: box.fitState.isError,
+    refetch: () => { box.refetches += 1 },
+  }),
 }))
 vi.mock('@/api/hooks/useXdnaKnobs', () => ({
   useXdnaKnobs: () => ({
@@ -89,6 +92,12 @@ beforeEach(() => {
   box.creates.length = 0; box.loads.length = 0; box.edits.length = 0; box.restarts.length = 0; box.deletes.length = 0
   box.createErr = null
   box.cfgLoading = false
+  box.fitState = { isLoading: false, isError: false }
+  box.refetches = 0
+  box.models = [
+    { id: 'qwen3-4b', type: 'llm', installed: true, runtime: 'llama-server', labels: [] },
+    { id: 'big-moe', type: 'llm', installed: true, runtime: 'llama-server', labels: [] },
+  ]
   box.fit = { 'qwen3-4b': { xdna_path: 'fused', reason: 'ok' }, 'big-moe': { xdna_path: null, reason: 'not gguf' } }
 })
 afterEach(() => { act(() => root.unmount()); document.body.innerHTML = '' })
@@ -296,5 +305,44 @@ describe('config still loading', () => {
     expect((q('ggml-save') as HTMLButtonElement).disabled).toBe(true)
     expect((q('ggml-save-restart') as HTMLButtonElement).disabled).toBe(true)
     expect(box.edits).toEqual([])
+  })
+})
+
+describe('model list follows the fit map (#3647)', () => {
+  it('offers exactly the fit map keys: a registry llm row outside it has no button, a fit key the registry lacks has one', () => {
+    box.models = [
+      ...box.models,
+      { id: 'orphan-llm', type: 'llm', installed: true, runtime: 'llama-server', labels: [] },
+    ]
+    box.fit = { ...box.fit, 'hub-blob-sha': { xdna_path: 'fused', reason: '' } }
+    mount({ mode: 'create', onDone: () => {} })
+    expect(q('ggml-model-orphan-llm')).toBeNull()
+    expect(q('ggml-model-hub-blob-sha')).not.toBeNull()
+    expect(q('ggml-model-qwen3-4b')).not.toBeNull()
+  })
+})
+
+describe('fit query states', () => {
+  it('shows a loading hint, not the empty message, while the fit map loads', () => {
+    box.fitState = { isLoading: true, isError: false }
+    mount({ mode: 'create', onDone: () => {} })
+    expect(q('ggml-models-loading')).not.toBeNull()
+    expect(q('ggml-models-error')).toBeNull()
+    expect(q('ggml-model-list')!.textContent).not.toContain('No GGUF chat models installed')
+  })
+
+  it('shows an error hint with retry when the fit map fails', () => {
+    box.fitState = { isLoading: false, isError: true }
+    mount({ mode: 'create', onDone: () => {} })
+    expect(q('ggml-models-error')).not.toBeNull()
+    expect(q('ggml-model-list')!.textContent).not.toContain('No GGUF chat models installed')
+    click('ggml-models-retry')
+    expect(box.refetches).toBe(1)
+  })
+
+  it('still says none installed when the fit map is loaded and empty', () => {
+    box.fit = {}
+    mount({ mode: 'create', onDone: () => {} })
+    expect(q('ggml-model-list')!.textContent).toContain('No GGUF chat models installed')
   })
 })

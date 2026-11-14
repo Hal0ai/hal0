@@ -126,7 +126,8 @@ export function ggmlRequantHint(row: { xdna_path: string | null; reason?: string
 /** Ids the GGML slot form offers. The backend fit map (GET /api/runners/xdna/fit) is the authority
  *  for "GGUF chat model" (its keys are the rows `_is_gguf_llm` selects), the same rule the NPU Models
  *  table uses; the registry only vetoes a row it knows to be a non-llm type. Filtering the registry
- *  client-side instead drops hub-cache and add-from-path GGUFs the fit map includes (#3647). */
+ *  client-side instead listed llm rows `_is_gguf_llm` excludes (non-GGUF or non-FLM backends, empty-backend
+ *  rows whose path is not .gguf), and gave them no fit chip (#3647). */
 export function ggmlModelIds(
   models: Array<{ id: string; type?: string }> | null | undefined,
   fit: Record<string, unknown> | null | undefined,

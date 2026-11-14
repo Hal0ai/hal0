@@ -178,7 +178,14 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
       <section className="ggml-sec" data-testid="ggml-model-list">
         <span className="ggml-lbl">Model</span>
         <div className="ggml-models" role="listbox" aria-label="GGUF model">
-          {models.length === 0 && <div className="npt-hint">No GGUF chat models installed.</div>}
+          {fitQ.isLoading && <div className="npt-hint" data-testid="ggml-models-loading">Loading GGUF models…</div>}
+          {fitQ.isError && (
+            <div className="npt-hint" data-testid="ggml-models-error">
+              Could not load GGUF models.{' '}
+              <button type="button" className="btn ghost sm" data-testid="ggml-models-retry" onClick={() => fitQ.refetch()}>Retry</button>
+            </div>
+          )}
+          {!fitQ.isLoading && !fitQ.isError && models.length === 0 && <div className="npt-hint">No GGUF chat models installed.</div>}
           {models.map((m) => (
             <button key={m.id} type="button" role="option" aria-selected={d.model === m.id} className={'ggml-model' + (d.model === m.id ? ' on' : '')} data-testid={`ggml-model-${m.id}`} onClick={() => set({ model: m.id })}>
               <span className="mono">{m.id}</span>

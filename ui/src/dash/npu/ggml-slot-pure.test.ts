@@ -132,7 +132,7 @@ describe('ggmlEditBody', () => {
 
 describe('ggmlModelIds', () => {
   const fit = { 'blob-sha-a': { xdna_path: 'fused', reason: '' }, 'tiny.gguf': { xdna_path: 'per-op', reason: '' }, 'embed-x': { xdna_path: null, reason: '' } }
-  it('lists exactly the fit map keys, including a hub-cache row the registry type rules would drop', () => {
+  it('lists exactly the fit map keys, and ignores registry llm rows the fit map lacks', () => {
     const models = [{ id: 'blob-sha-a', type: 'llm' }, { id: 'tiny.gguf', type: 'llm' }, { id: 'embed-x', type: 'embedding' }, { id: 'flm-only', type: 'llm' }]
     expect(ggmlModelIds(models, fit)).toEqual(['blob-sha-a', 'tiny.gguf'])
   })
