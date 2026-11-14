@@ -350,6 +350,19 @@ def test_id_keyed_real_peer_still_conflicts_and_is_named(tmp_hal0_home: str) -> 
 # (warn, never refuse), so it neither trips nor is tripped by the guard.
 
 
+@pytest.fixture(autouse=True)
+def _xdna_models_fit_fused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bound xdna models here are unregistered; treat them as fused (coexisting)."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("hal0.slots.config_write.registry_model_path", lambda m: f"/m/{m}.gguf")
+    monkeypatch.setattr("hal0.slots.manager.registry_model_path", lambda m: f"/m/{m}.gguf")
+    monkeypatch.setattr(
+        "hal0.slots.model_fit.xdna_model_fit_cached",
+        lambda path: SimpleNamespace(xdna_path="fused"),
+    )
+
+
 def _xdna_create_cfg(name: str, port: int) -> dict[str, object]:
     return {
         "name": name,

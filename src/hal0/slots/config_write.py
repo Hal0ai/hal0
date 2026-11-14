@@ -17,6 +17,7 @@ unchanged.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,12 @@ from hal0.config import paths
 from hal0.slot_config import merge_slot_config
 from hal0.slots._cfg_helpers import _cfg_to_dict
 from hal0.slots.activation import claims_npu_anchor as _claims_npu_anchor
-from hal0.slots.state import NpuExclusivityViolation, SlotConfigError, provider_requires_model
+from hal0.slots.state import (
+    NpuExclusivityViolation,
+    SlotConfigError,
+    SlotNpuConflict,
+    provider_requires_model,
+)
 
 # ── device/profile coherence ────────────────────────────────────────────────
 
@@ -292,6 +298,86 @@ def check_npu_exclusivity(
                 "hint": "clear the existing NPU LLM slot's model before configuring another",
             },
         )
+
+
+def registry_model_path(model_id: str) -> str | None:
+    """A registered model's file path, as the slot payload resolves ``xdna_path``."""
+    if not model_id:
+        return None
+    try:
+        from hal0.registry.store import ModelRegistry
+
+        model = ModelRegistry().get(model_id)
+    except Exception:
+        return None
+    path = getattr(model, "path", None) or (model.get("path") if isinstance(model, dict) else None)
+    return str(path) if path else None
+
+
+def check_npu_autoload_conflict(
+    slot_name: str,
+    cfg_dict: dict[str, Any],
+    *,
+    slots_dir: Path | None = None,
+    model_path_for: Callable[[str], str | None],
+) -> None:
+    """Refuse a write that makes a per-op xdna slot and the FLM anchor both autoload.
+
+    Autoload slots start from systemd at boot and never pass the load-time
+    NPU guard (#3666), so the write is the only place to stop the pair. Only
+    fires when the written config autoloads; state is ignored and any
+    configured peer with ``autoload`` on counts. ``model_path_for`` resolves a
+    model id to its file so the rule can tell fused from per-op.
+
+    Raises:
+        SlotNpuConflict: ``reason="autoload"``.
+    """
+    from hal0.slots import npu_conflict as nc
+    from hal0.slots.activation import autoload_enabled, is_xdna_slot, slot_model_id
+    from hal0.slots.npu.trio import is_npu_trio_shadow
+    from hal0.slots.reaper import is_pinned
+
+    def role_of(cfg: dict[str, Any]) -> nc.NpuRole | None:
+        path: nc.XdnaPath | None = None
+        if is_xdna_slot(cfg):
+            model_id = slot_model_id(cfg)
+            path = nc.effective_xdna_path(
+                nc.xdna_launch_env(cfg), model_path_for(model_id) if model_id else None
+            )
+        return nc.npu_role(cfg, path)
+
+    if not autoload_enabled(cfg_dict) or is_npu_trio_shadow(dict(cfg_dict)):
+        return
+    mine = role_of(cfg_dict)
+    if mine is None:
+        return
+    peers = _iter_peer_configs(slot_name, slots_dir)
+    holders: list[tuple[str, dict[str, Any]]] = [
+        (name, peer)
+        for name, peer in peers
+        if autoload_enabled(peer) and nc.roles_conflict(mine, role_of(peer))
+    ]
+    if not holders:
+        return
+    holder_engine = "xdna" if mine == "flm" else "flm"
+    names = [n for n, _ in holders]
+    unloads = list(names)
+    if holder_engine == "flm":
+        for n, peer in peers:
+            if peer.get("served_by") in names and n not in unloads:
+                unloads.append(n)
+    raise SlotNpuConflict(
+        f"slot {slot_name!r} and {', '.join(names)} would both autoload and need the whole NPU",
+        details={
+            "slot": slot_name,
+            "holders": names,
+            "holder_engine": holder_engine,
+            "unloads": unloads,
+            "pinned": any(is_pinned(n, peer) for n, peer in holders),
+            "pending": False,
+            "reason": "autoload",
+        },
+    )
 
 
 def check_default_uniqueness(
@@ -928,6 +1014,9 @@ def reconcile_and_guard_slot_config(
     guard_and_normalize_xdna(merged, updates)
     guard_xdna_slot_shape(merged, _changed_scalar_keys(updates))
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
+    check_npu_autoload_conflict(
+        slot_name, merged, slots_dir=slots_dir, model_path_for=registry_model_path
+    )
     # Only the keys this apply actually carries drive the SC-4 guard — an
     # unrelated stack field must not be blocked by a stale duplicate-default
     # state it neither created nor touches.

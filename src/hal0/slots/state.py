@@ -359,7 +359,9 @@ class SlotNpuConflict(SlotError):
     (the holders plus an FLM anchor's ``-stt``/``-embed`` shadows), ``pinned``,
     ``pending`` (a holder's load is still in flight, which the opt-in never
     overrides) and ``reason``. A refusal is not a load failure: the slot is
-    left OFFLINE and the crash-loop breaker is not fed.
+    left OFFLINE and the crash-loop breaker is not fed. The autoload
+    config-write guard (``check_npu_autoload_conflict``) raises it too, with
+    ``reason="autoload"``, when a write would make both boot-start.
     """
 
     code = "slot.npu_conflict"
