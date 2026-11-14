@@ -44,7 +44,7 @@ vi.mock('@/api/hooks/useXdnaFit', () => ({
 vi.mock('@/api/hooks/useModels', () => ({
   useModels: () => ({
     data: [
-      { id: 'qwen3-4b', type: 'llm', size: '2.5 GB', architecture: 'qwen3' },
+      { id: 'qwen3-4b', type: 'llm', size: '2.5 GB', architecture: 'granite' },
       { id: 'qwen35-0.8b', type: 'llm', size: '0.6 GB' },
     ],
   }),
@@ -126,7 +126,8 @@ describe('NpuModelsPanel', () => {
   })
 
   it('shows the GGUF architecture from the registry row', () => {
-    expect(q('gguf-row-qwen3-4b')!.textContent).toContain('qwen3')
+    expect(q('gguf-arch-qwen3-4b')!.textContent).toBe('granite')
+    expect(q('gguf-arch-qwen35-0.8b')!.textContent).toBe('—')
   })
 
   it('filters by installed and capability', () => {

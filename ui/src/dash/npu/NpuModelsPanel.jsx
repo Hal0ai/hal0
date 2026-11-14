@@ -103,7 +103,7 @@ export function NpuModelsPanel({ slots = [], setFlmDraft, onSwitchTab }) {
         {ggufRows.map((r) => (
           <div key={r.id} className="npt-mrow" data-testid={`gguf-row-${r.id}`}>
             <span className="npt-mname mono">{r.id}</span>
-            <span className="chip mono">{r.arch ?? '—'}</span>
+            <span className="chip mono" data-testid={`gguf-arch-${r.id}`}>{r.arch ?? '—'}</span>
             <span className="chip mono">{r.size ?? '—'}</span>
             <span className={`chip mono npt-fit ${r.fit || 'none'}`} data-testid={`gguf-fit-${r.id}`} title={r.reason || undefined}>{r.fit || '—'}</span>
             {r.usedBy.map((n) => (
