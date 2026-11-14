@@ -3,7 +3,7 @@
 // shows ALLOCATED columns. FLM columns take the NPU hue, ggml-xdna the npu-s1 hue.
 import { useMemo } from 'react'
 import { Gauge, AieGrid, HUES, NPU_COLS, activityLevel } from './aie-grid.jsx'
-import { arrayOwners, arrayShared } from './array-pure'
+import { arrayHolders, arrayOwners, arrayShared } from './array-pure'
 import { npuHolders, npuToks } from './npu-pure'
 
 const ENGINE_HUE = {
@@ -23,8 +23,8 @@ export function ArrayBand({ occ, hw, slots }) {
       return seen.get(o)
     })
   }, [owners])
-  const holders = [...new Set(owners.filter(Boolean))]
-  const shared = arrayShared(owners)
+  const holders = useMemo(() => arrayHolders(occ?.slots, slots), [occ?.slots, slots])
+  const shared = arrayShared(holders)
 
   const colsAvailable = occ?.columns_available !== false
   const colsTotal = occ?.cols_total || NPU_COLS
