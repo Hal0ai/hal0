@@ -17,6 +17,7 @@ unchanged.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,8 @@ from hal0.slots.state import (
     SlotNpuConflict,
     provider_requires_model,
 )
+
+_log = logging.getLogger(__name__)
 
 # ── device/profile coherence ────────────────────────────────────────────────
 
@@ -308,7 +311,11 @@ def registry_model_path(model_id: str) -> str | None:
         from hal0.registry.store import ModelRegistry
 
         model = ModelRegistry().get(model_id)
-    except Exception:
+    except Exception as exc:
+        _log.debug(
+            "slot.npu_autoload_model_lookup_failed",
+            extra={"model_id": model_id, "error_type": type(exc).__name__},
+        )
         return None
     path = getattr(model, "path", None) or (model.get("path") if isinstance(model, dict) else None)
     return str(path) if path else None
@@ -337,13 +344,16 @@ def check_npu_autoload_conflict(
     from hal0.slots.npu.trio import is_npu_trio_shadow
     from hal0.slots.reaper import is_pinned
 
+    unresolved: list[str] = []
+
     def role_of(cfg: dict[str, Any]) -> nc.NpuRole | None:
         path: nc.XdnaPath | None = None
         if is_xdna_slot(cfg):
             model_id = slot_model_id(cfg)
-            path = nc.effective_xdna_path(
-                nc.xdna_launch_env(cfg), model_path_for(model_id) if model_id else None
-            )
+            model_path = model_path_for(model_id) if model_id else None
+            if model_id and not model_path and model_id not in unresolved:
+                unresolved.append(model_id)
+            path = nc.effective_xdna_path(nc.xdna_launch_env(cfg), model_path)
         return nc.npu_role(cfg, path)
 
     if not autoload_enabled(cfg_dict) or is_npu_trio_shadow(dict(cfg_dict)):
@@ -366,8 +376,12 @@ def check_npu_autoload_conflict(
         for n, peer in peers:
             if peer.get("served_by") in names and n not in unloads:
                 unloads.append(n)
+    note = "".join(
+        f" (model {m} is not in the registry, so it is treated as per-op)" for m in unresolved
+    )
     raise SlotNpuConflict(
-        f"slot {slot_name!r} and {', '.join(names)} would both autoload and need the whole NPU",
+        f"slot {slot_name!r} and {', '.join(names)} would both autoload and need the whole NPU"
+        + note,
         details={
             "slot": slot_name,
             "holders": names,

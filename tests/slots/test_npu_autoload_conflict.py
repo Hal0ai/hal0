@@ -138,3 +138,48 @@ def test_unloads_include_flm_shadows(tmp_path: Path) -> None:
             "x", _cfg(_xdna_lines), slots_dir=tmp_path, model_path_for=_resolver
         )
     assert ei.value.details["unloads"] == ["flm", "flm-stt"]
+
+
+def test_fused_layer_env_zero_makes_fused_model_conflict(tmp_path: Path) -> None:
+    _write(tmp_path, "flm", _flm_lines())
+    cfg = _cfg(_xdna_lines, model="m-fused")
+    cfg["xdna"] = {"env": {"GGML_XDNA_FUSED_LAYER": "0"}}
+    with pytest.raises(SlotNpuConflict):
+        check_npu_autoload_conflict("x", cfg, slots_dir=tmp_path, model_path_for=_resolver)
+
+
+def test_unregistered_xdna_model_refused_with_note(tmp_path: Path) -> None:
+    _write(tmp_path, "flm", _flm_lines())
+    with pytest.raises(SlotNpuConflict) as ei:
+        check_npu_autoload_conflict(
+            "x", _cfg(_xdna_lines, model="ghost"), slots_dir=tmp_path, model_path_for=lambda m: None
+        )
+    assert "model ghost is not in the registry, so it is treated as per-op" in str(ei.value)
+    assert set(ei.value.details) == {
+        "slot",
+        "holders",
+        "holder_engine",
+        "unloads",
+        "pinned",
+        "pending",
+        "reason",
+    }
+
+
+def test_registry_lookup_failure_logged_at_debug(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import hal0.registry.store as store
+    from hal0.slots.config_write import registry_model_path
+
+    class Boom:
+        def get(self, _id: str) -> Any:
+            raise RuntimeError("down")
+
+    monkeypatch.setattr(store, "ModelRegistry", Boom)
+    with caplog.at_level("DEBUG", logger="hal0.slots.config_write"):
+        assert registry_model_path("m") is None
+    assert any(
+        getattr(r, "error_type", "") == "RuntimeError" and r.levelname == "DEBUG"
+        for r in caplog.records
+    )
