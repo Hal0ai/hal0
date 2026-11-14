@@ -39,10 +39,20 @@ class _EndlessStream(httpx.AsyncByteStream):
     upstream that opened the stream and then went silent (idle guard).
     """
 
-    def __init__(self, chunk: bytes, *, gap: float, burst: int | None = None) -> None:
+    def __init__(
+        self,
+        chunk: bytes,
+        *,
+        gap: float,
+        burst: int | None = None,
+        hiccup: tuple[int, float] | None = None,
+    ) -> None:
         self._chunk = chunk
         self._gap = gap
         self._burst = burst
+        # ``(after_n_chunks, seconds)``: one extra pause that models a loaded
+        # runner delaying the event loop (coverage tracing, noisy neighbour).
+        self._hiccup = hiccup
         self.closed = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:  # type: ignore[override]
@@ -52,6 +62,8 @@ class _EndlessStream(httpx.AsyncByteStream):
                 await asyncio.sleep(3600)  # opened, then silent forever
                 continue
             await asyncio.sleep(self._gap)
+            if self._hiccup is not None and emitted == self._hiccup[0]:
+                await asyncio.sleep(self._hiccup[1])
             emitted += 1
             yield self._chunk
 
@@ -189,8 +201,10 @@ async def test_well_behaved_stream_is_untouched() -> None:
 @pytest.mark.asyncio
 async def test_guard_can_be_disabled_with_zero() -> None:
     """``0`` disables a bound — the escape hatch for a deliberate long stream."""
-    upstream = _EndlessStream(_GARBAGE_CHUNK, gap=0.02, burst=20)
-    dispatcher = _dispatcher(upstream, total=0.0, idle=0.15)
+    # The 0.2 s hiccup mid-stream stands in for scheduler latency on a loaded
+    # CI runner (#3664); the idle bound must be wide enough to ride it out.
+    upstream = _EndlessStream(_GARBAGE_CHUNK, gap=0.02, burst=20, hiccup=(10, 0.2))
+    dispatcher = _dispatcher(upstream, total=0.0, idle=0.6)
     try:
         resp = await dispatcher.forward(_call())
         body = await _drain(resp)
