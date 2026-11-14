@@ -380,32 +380,35 @@ test.describe('BoardView — agent chat', () => {
     // Task that will "move" from todo to done via WS event
     const movingTask = BOARD_TASKS.find(t => t.status === 'todo')!
 
-    // Initial response: task in todo
-    let served = false
+    // Serve the board by phase, not by request count: the board query can be
+    // fetched more than once before the WS frame (mount, focus, second
+    // consumer), so only the test flipping `moved` may change the response.
+    let moved = false
     await page.route('**/api/board/board', async (route) => {
-      if (!served) {
-        served = true
-        await json(route, makeBoardLanesResponse(false))
+      const base = makeBoardLanesResponse(false)
+      if (!moved) {
+        await json(route, base)
       } else {
-        // After WS event → return task in done lane
-        const moved = {
-          ...makeBoardLanesResponse(false),
+        // After WS event -> return task in done lane
+        await json(route, {
+          ...base,
           lanes: {
-            ...makeBoardLanesResponse(false).lanes,
-            todo: makeBoardLanesResponse(false).lanes.todo.filter(
-              (t: any) => t.id !== movingTask.id
-            ),
-            done: [
-              ...makeBoardLanesResponse(false).lanes.done,
-              { ...movingTask, status: 'done' },
-            ],
+            ...base.lanes,
+            todo: base.lanes.todo.filter((t: any) => t.id !== movingTask.id),
+            done: [...base.lanes.done, { ...movingTask, status: 'done' }],
           },
-        }
-        await json(route, moved)
+        })
       }
     })
 
     await gotoBoardAndWait(page)
+
+    // Force an extra board refetch (window focus) before asserting.
+    await page.evaluate(() => {
+      document.dispatchEvent(new Event('visibilitychange'))
+      window.dispatchEvent(new Event('focus'))
+    })
+    await page.waitForTimeout(500)
 
     // Confirm task starts in todo lane
     await expect(
@@ -415,7 +418,8 @@ test.describe('BoardView — agent chat', () => {
     // Wait for WS to connect
     await waitForWs(page, '/api/board/events')
 
-    // Emit task.updated event
+    // Emit task.updated event; refetches from here on see the moved board
+    moved = true
     await emitWs(page, '/api/board/events', {
       kind: 'task.updated',
       task_id: movingTask.id,
