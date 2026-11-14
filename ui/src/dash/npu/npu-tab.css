@@ -59,3 +59,47 @@
 .npt-absent dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 12px 0; font-family: var(--jbm); font-size: 11.5px; }
 .npt-absent dt { color: var(--fg-3); }
 .npt-absent dd { margin: 0; color: var(--fg); }
+
+/* ── Lanes: array band + FLM lane ─────────────────────────────────────────── */
+.npt-lanes { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.npt-band { display: flex; flex-wrap: wrap; gap: 20px 28px; align-items: center; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--rad-lg); background: var(--bg-1); }
+.npt-band-stats { display: flex; flex-direction: column; gap: 12px; }
+.npt-band-grid { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.npt-holders { display: flex; flex-wrap: wrap; gap: 6px 12px; font-family: var(--jbm); font-size: 11.5px; color: var(--fg); }
+.npt-holder { display: inline-flex; align-items: center; gap: 6px; }
+.npt-holder .sw { width: 10px; height: 10px; border-radius: 2px; }
+.npt-holder small { color: var(--fg-4, var(--fg-3)); }
+.npt-hint { font-size: 12px; color: var(--fg-3); }
+
+.npt-lane { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-top: 2px solid var(--dev-npu); border-radius: var(--rad-lg); background: var(--bg-1); min-width: 0; }
+.npt-lane-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.npt-lane-ttl { display: flex; align-items: baseline; gap: 10px; flex: 1 1 auto; }
+.npt-eng { font-family: var(--jbm); font-size: 12px; font-weight: 600; letter-spacing: .04em; }
+.npt-eng.flm { color: var(--dev-npu); }
+.npt-sub { font-family: var(--jbm); font-size: 11.5px; color: var(--fg-3); }
+.npt-state { font-family: var(--jbm); font-size: 11.5px; color: var(--fg-2); }
+.npt-caps { display: flex; flex-direction: column; gap: 8px; }
+.npt-cap { display: grid; grid-template-columns: auto minmax(120px, 190px) minmax(0, 1fr) minmax(70px, auto); gap: 12px; align-items: center; padding: 6px 0; }
+.npt-cap-nm { display: flex; flex-direction: column; font-size: 13px; color: var(--fg); }
+.npt-cap-nm small { font-family: var(--jbm); font-size: 10.5px; color: var(--fg-3); }
+.npt-bundled { font-family: var(--jbm); font-size: 12px; color: var(--fg); }
+.npt-bundled em { color: var(--fg-3); font-style: normal; }
+.npt-mx { font-family: var(--jbm); font-size: 11.5px; color: var(--fg-3); text-align: right; }
+.npt-mx b { color: var(--dev-npu); font-weight: 500; }
+.npt-sel { min-width: 0; max-width: 100%; padding: 5px 8px; border: 1px solid var(--line); border-radius: var(--rad-md, 6px); background: var(--bg-2, var(--bg-1)); color: var(--fg); font-family: var(--jbm); font-size: 12px; }
+.npt-sel:disabled { opacity: .5; }
+.npt-toggle { position: relative; width: 32px; height: 18px; border: 1px solid var(--line); border-radius: 999px; background: var(--bg-2, var(--bg-1)); cursor: pointer; padding: 0; }
+.npt-toggle::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--fg-3); transition: transform .12s ease; }
+.npt-toggle.on { border-color: var(--dev-npu); }
+.npt-toggle.on::after { transform: translateX(14px); background: var(--dev-npu); }
+.npt-toggle.pending { box-shadow: 0 0 0 2px color-mix(in srgb, var(--dev-npu) 35%, transparent); }
+.npt-toggle:disabled { opacity: .45; cursor: not-allowed; }
+.npt-toggle:focus-visible { outline: 2px solid var(--dev-npu); outline-offset: 2px; }
+.npt-applybar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--dev-npu); border-radius: var(--rad-md, 6px); background: color-mix(in srgb, var(--dev-npu) 10%, transparent); font-size: 12.5px; }
+.npt-applybar .t { flex: 1 1 280px; color: var(--fg-2); }
+.npt-applybar .t b { color: var(--fg); }
+.npt-error { padding: 8px 12px; border: 1px solid var(--err, #d46a6a); border-radius: var(--rad-md, 6px); color: var(--err, #d46a6a); font-size: 12.5px; }
+.npt-kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; font-family: var(--jbm); font-size: 11.5px; }
+.npt-kv dt { color: var(--fg-3); }
+.npt-kv dd { margin: 0; color: var(--fg); }
+@media (max-width: 720px) { .npt-cap { grid-template-columns: auto 1fr; } .npt-bundled, .npt-sel, .npt-mx { grid-column: 2; text-align: left; } }

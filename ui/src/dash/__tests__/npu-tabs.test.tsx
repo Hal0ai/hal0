@@ -2,7 +2,9 @@
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
+;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const { box } = vi.hoisted(() => ({
@@ -11,7 +13,14 @@ const { box } = vi.hoisted(() => ({
 vi.mock('@/api/hooks/useNpuOccupancy', () => ({ useNpuOccupancy: () => ({ data: box.occ }) }))
 vi.mock('@/api/hooks/useStatsHardware', () => ({ useStatsHardware: () => ({ data: box.hw }) }))
 
-import { NpuTabs } from '../npu/NpuTabs'
+vi.mock('@/api/hooks/useSlots', () => {
+  const m = () => ({ isPending: false, mutate: () => {}, mutateAsync: async () => {} })
+  return { useSlotConfig: () => ({ data: undefined }), useSlotEdit: m, useSlotRestart: m, useSlotCreate: m, useSlotLoad: m, useSlotUnload: m }
+})
+vi.mock('@/api/hooks/useFlmCatalog', () => ({ useFlmCatalog: () => ({ data: { models: [], probe_ok: true } }) }))
+vi.mock('@/api/hooks/useModels', () => ({ usePullJob: () => ({ start: async () => {}, state: 'idle', modelId: null, error: null, pct: null }) }))
+
+const { NpuTabs } = await import('../npu/NpuTabs')
 
 let host: HTMLDivElement
 let root: Root

@@ -14,6 +14,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import './npu-tab.css'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
+import { ArrayBand } from './ArrayBand.jsx'
+import { FlmLane } from './FlmLane.jsx'
 import { NPU_TABS, npuStatusParts, npuTabVisible, validNpuTab } from './npu-pure'
 
 const IDS = NPU_TABS.map((t) => t.id)
@@ -25,8 +27,14 @@ function subFromHash() {
   return m ? validNpuTab(m[1]) : null
 }
 
-function LanesPanel() {
-  return <div data-testid="npu-lanes-stub" />
+// Lanes: the array band on top, then the FLM lane. The GGML lanes (Task 9) sit below.
+function LanesPanel({ draft, setDraft, occ, hw, slots }) {
+  return (
+    <div className="npt-lanes" data-testid="npu-lanes">
+      <ArrayBand occ={occ} hw={hw} slots={slots} />
+      <FlmLane slots={slots} draft={draft} setDraft={setDraft} />
+    </div>
+  )
 }
 function ModelsPanel() {
   return <div data-testid="npu-models-stub" />
@@ -162,7 +170,7 @@ export function NpuTabs({ sub, slots = [] }) {
       </div>
 
       <div role="tabpanel" id="npu-panel-lanes" className="npt-panel" aria-labelledby="npu-tab-lanes" hidden={tab !== 'lanes'}>
-        <LanesPanel draft={flmDraft} setDraft={setFlmDraft} occ={occ} slots={slots} />
+        <LanesPanel draft={flmDraft} setDraft={setFlmDraft} occ={occ} hw={hwQ.data} slots={slots} />
       </div>
       <div role="tabpanel" id="npu-panel-models" className="npt-panel" aria-labelledby="npu-tab-models" hidden={tab !== 'models'}>
         <ModelsPanel setFlmDraft={setFlmDraft} onSwitchTab={select} occ={occ} />
