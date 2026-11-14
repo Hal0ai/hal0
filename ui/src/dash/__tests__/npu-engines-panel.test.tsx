@@ -1,0 +1,70 @@
+// @vitest-environment happy-dom
+import React, { act } from 'react'
+import { createRoot, type Root } from 'react-dom/client'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
+;(globalThis as unknown as { React: typeof React }).React = React
+;(globalThis as unknown as { Icons: unknown }).Icons = new Proxy({}, { get: () => null })
+;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+const profiles = [
+  { name: 'flm', runner: 'flm', seed: true, ctx_size: 16384, flags: '' },
+  { name: 'xdna', runner: 'xdna', seed: true, ctx_size: 8192, vision: 'off', flags: '' },
+]
+const refetch = vi.fn(async () => ({}))
+vi.mock('@/api/hooks/useProfiles', () => ({ useProfiles: () => ({ data: profiles, isLoading: false }) }))
+vi.mock('@/api/hooks/useFlmCatalog', () => ({ useFlmCatalog: () => ({ data: { models: [] }, refetch, isFetching: false }) }))
+vi.mock('../profiles.jsx', () => ({ ProfileDrawer: ({ mode, source }: { mode: string; source: { name: string } }) => <div data-testid="drawer">{mode}:{source.name}</div> }))
+const copy = vi.fn(async () => true)
+vi.mock('@/lib/clipboard', () => ({ copyOrSelect: (...a: unknown[]) => (copy as (...a: unknown[]) => unknown)(...a) }))
+
+const { NpuEnginesPanel } = await import('../npu/NpuEnginesPanel')
+
+let host: HTMLDivElement
+let root: Root
+const Panel = NpuEnginesPanel as unknown as React.FC<Record<string, unknown>>
+const render = (props: Record<string, unknown>) => act(() => root.render(<Panel slots={[{ name: 'gg1', profile: 'xdna' }]} {...props} />))
+const q = (id: string) => host.querySelector(`[data-testid="${id}"]`) as HTMLElement | null
+
+beforeEach(() => {
+  host = document.createElement('div')
+  document.body.appendChild(host)
+  root = createRoot(host)
+})
+afterEach(() => {
+  act(() => root.unmount())
+  host.remove()
+})
+
+describe('NpuEnginesPanel', () => {
+  it('null facts render unknown / —, never ok', () => {
+    render({ occ: { npu_host: null, npu_engines: null }, hw: {} })
+    expect(q('ready-pmode')?.dataset.state).toBe('unknown')
+    expect(q('engine-flm-image')?.textContent).toBe('—')
+    expect(q('engine-xdna-pulled')?.textContent).toBe('unknown')
+  })
+  it('pmode default shows the command with a Copy button', () => {
+    render({ occ: { npu_host: null }, hw: { npu_pmode: 'default' } })
+    expect(q('ready-pmode')?.textContent).toContain('sudo xrt-smi configure --pmode turbo')
+    act(() => q('ready-pmode-copy')!.click())
+    expect(copy).toHaveBeenCalledWith('sudo xrt-smi configure --pmode turbo', expect.anything())
+  })
+  it('engines show image facts and the locked chip', () => {
+    render({ occ: { npu_engines: { flm: { image: 'flm:1', version: '0.9' }, xdna: { image: 'x:2', tag: 'v2', pulled: true } } }, hw: {} })
+    expect(q('engine-flm-version')?.textContent).toBe('0.9')
+    expect(q('engine-xdna-pulled')?.textContent).toBe('yes')
+    expect(q('engine-xdna-locked')?.textContent).toBe('GGML_XDNA_PGEMM_GLU_A=0')
+  })
+  it('profiles list used-by as slot edit links; Clone opens the drawer', () => {
+    render({ occ: {}, hw: {} })
+    const a = q('npu-profile-xdna-usedby')!.querySelector('a')!
+    expect(a.getAttribute('href')).toBe('#slots/gg1')
+    act(() => q('npu-profile-clone-xdna')!.click())
+    expect(q('drawer')?.textContent).toBe('clone:xdna')
+  })
+  it('refresh refetches the FLM catalogue', () => {
+    render({ occ: {}, hw: {} })
+    act(() => q('engine-flm-refresh')!.click())
+    expect(refetch).toHaveBeenCalled()
+  })
+})

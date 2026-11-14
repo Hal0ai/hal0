@@ -151,3 +151,10 @@
 .npt-mrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
 .npt-mrow .npt-mname { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
 .npt-mrow .btn.on { outline: 1px solid var(--fg-3); }
+
+/* Engines & profiles */
+.npt-engines { display: flex; flex-direction: column; gap: 12px; }
+.npt-ready.ok { color: var(--ok); }
+.npt-ready.warn { color: var(--warn); }
+.npt-ready.unknown { color: var(--fg-3); }
+.npt-cmd { display: inline-flex; gap: 6px; align-items: center; }

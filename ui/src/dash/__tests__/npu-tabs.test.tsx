@@ -20,6 +20,8 @@ vi.mock('@/api/hooks/useSlots', () => {
 vi.mock('@/api/hooks/useRunnerImages', () => ({ useRunnerImagePullJob: () => ({ start: async () => {}, state: 'idle', pct: null, error: null, inFlight: false }) }))
 vi.mock('../npu/GgmlSlotDrawer.jsx', () => ({ GgmlSlotDrawer: () => null }))
 vi.mock('@/api/hooks/useFlmCatalog', () => ({ useFlmCatalog: () => ({ data: { models: [], probe_ok: true } }) }))
+vi.mock('@/api/hooks/useProfiles', () => ({ useProfiles: () => ({ data: [], isLoading: false }) }))
+vi.mock('../profiles.jsx', () => ({ ProfileDrawer: () => null }))
 vi.mock('@/api/hooks/useXdnaFit', () => ({ useXdnaFit: () => ({ data: {} }) }))
 vi.mock('@/api/hooks/useModels', () => ({ useModels: () => ({ data: [] }), usePullJob: () => ({ start: async () => {}, state: 'idle', modelId: null, error: null, pct: null }) }))
 
