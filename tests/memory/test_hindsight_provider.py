@@ -261,17 +261,19 @@ async def test_add_routes_to_retain_under_mapped_bank():
     # items_count/operation_ids are surfaced whenever the engine reports them
     # (RetainResponse.items_count is a required field) — no longer dropped.
     assert (
-        {"id", "timestamp", "operation_id"}
+        {"id", "timestamp", "operation_id", "bank"}
         <= set(res)
         <= {
             "id",
             "timestamp",
+            "bank",
             "operation_id",
             "operation_ids",
             "items_count",
         }
     )
     assert fake.retained[0]["bank_id"] == "private__hermes"
+    assert res["bank"] == "private__hermes"
     # The returned id IS the document_id (the join key), not a fact id.
     assert fake.retained[0]["document_id"] == res["id"]
     # retain is async on this engine — the operation id surfaces for polling.

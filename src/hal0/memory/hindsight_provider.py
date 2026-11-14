@@ -2103,7 +2103,10 @@ class HindsightProvider(MemoryProvider):
         # The sync/async toggle is forwarded only when the caller set it.
         toggle: dict[str, Any] = {"sync": True} if sync else {}
         resp = await self._retain("retain", bank_id=bank, **item, **toggle)
-        out: dict[str, Any] = {"id": item["document_id"], "timestamp": _now()}
+        # ``bank`` is the engine bank the write landed in (``hal0:shared`` /
+        # ``hal0:private`` on a two-bank store), so a client can report where
+        # its note went without knowing the layout.
+        out: dict[str, Any] = {"id": item["document_id"], "timestamp": _now(), "bank": bank}
         if update_mode is not None:
             # The engine was sent this mode with the retain. A caller that
             # appends to one document id over many writes waits for this
