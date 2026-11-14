@@ -2077,6 +2077,19 @@ class ContainerProvider(Provider):
                 if isinstance(host_xrt, str) and host_xrt:
                     extra_mounts.append(model_store_module.mount_for(host_xrt, read_only=True))
                     merged_env["HAL0_XDNA_HOST_XRT"] = host_xrt
+            # The fork enables its fused decode layer by default, and that
+            # layer aborts on any weight set it was not requantized for
+            # (#3656). A model the fit check classes per-op therefore runs
+            # with the fused layer off, unless the operator set the knob.
+            if "GGML_XDNA_FUSED_LAYER" not in merged_env:
+                from hal0.slots.model_fit import xdna_model_fit_cached
+
+                try:
+                    fit = xdna_model_fit_cached(model_path)
+                except (OSError, ValueError):
+                    fit = None  # unreadable / non-GGUF: no verdict, leave the default
+                if fit is not None and fit.xdna_path == "per-op":
+                    merged_env["GGML_XDNA_FUSED_LAYER"] = "0"
             # Pinned correctness env goes on LAST, over [server].env and
             # [xdna].env alike: the write seam refuses another value, and this
             # catches a hand-edited TOML (GLU_A=1 corrupts prefill logits).
