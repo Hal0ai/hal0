@@ -89,7 +89,11 @@ the second slot goes to ERROR and the operator has to work out why.
    at boot without passing the load guard, so a config write that would make a
    per-op xdna slot and the FLM anchor both autoload is refused with the same
    `slot.npu_conflict` code and `reason: "autoload"`
-   (`check_npu_autoload_conflict` in `src/hal0/slots/config_write.py`).
+   (`check_npu_autoload_conflict` in `src/hal0/slots/config_write.py`). It
+   fires only on a write that touches a key the rule reads (autoload, the model, binary, device, type, profile, `[xdna].env`,
+   `[server].env`), so an unrelated edit on a box that is already in the
+   conflicting state still saves; the message says to turn autoload off on one
+   of the two.
 
 ## Alternatives considered
 

@@ -199,7 +199,10 @@ restart leaves the slot as it was.
 Autoload is checked when the config is written: a write that would make a
 per-op xdna slot and the FLM anchor both start at boot is refused with the same
 error and `reason: "autoload"`, because systemd starts those units without
-going through the load check. A model hal0 cannot resolve counts as per-op.
+going through the load check. Only a write that changes autoload, the model or
+the launch environment is checked, so other edits still save; to clear the
+refusal, turn autoload off on one of the two. A model hal0 cannot resolve counts
+as per-op.
 
 FLM serving chat only (no speech-to-text or embeddings) next to a per-op slot
 has not been tested; hal0 assumes it conflicts. See
