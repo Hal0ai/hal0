@@ -31,13 +31,15 @@ function subFromHash() {
   return m ? validNpuTab(m[1]) : null
 }
 
-// Lanes: the array band on top, then the FLM lane and the GGML lane.
+// Lanes: the array band on top (full width), then the FLM lane | GGML lane row.
 function LanesPanel({ draft, setDraft, occ, hw, slots }) {
   return (
     <div className="npt-lanes" data-testid="npu-lanes">
       <ArrayBand occ={occ} hw={hw} slots={slots} />
-      <FlmLane slots={slots} draft={draft} setDraft={setDraft} />
-      <GgmlLane slots={slots} occ={occ} hw={hw} />
+      <div className="npt-cols">
+        <FlmLane slots={slots} draft={draft} setDraft={setDraft} />
+        <GgmlLane slots={slots} occ={occ} hw={hw} />
+      </div>
     </div>
   )
 }
