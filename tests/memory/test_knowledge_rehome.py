@@ -466,3 +466,183 @@ async def test_a_mutated_project_scope_fails_the_placement_check(
     monkeypatch.setattr(kp, "page_trigger", lambda c, leaf, _s: real(c, leaf, "other"))
     with pytest.raises(fi.FoldInError, match="not in project:hal0 with its scope"):
         await rehome(box, owner="claude-code").rehome()
+
+
+# ── nodes written to the old bank after the fold-in ───────────────────
+
+LATE = "kp-12d57137eaac4851a8f929a516812303"
+LATE_NAME = "NPU exclusion for per-op xdna slots: confirm and unload (#3666)"
+
+
+def write_late_page(box: Box, node_id: str, name: str, parent: str | None) -> None:
+    """A page a session still on its old plugin config wrote to the old bank after the cutover."""
+    b = box.engine.banks[BANK]
+    mm = node_id.replace("kp-", "mm-")
+    b["models"][mm] = {
+        "id": mm,
+        "name": name,
+        "source_query": f"What about {name}?",
+        "tags": ["knowledge:feature-work", "agent:claude-code"],
+        "trigger": json.dumps(PLUGIN_TRIGGER),
+        "content": "written after the fold-in",
+        "last_refreshed_at": "2026-11-14T19:24:00+00:00",
+        "max_tokens": 4096,
+    }
+    b["pages"].append(
+        {"id": node_id, "kind": "page", "name": name, "parent_id": parent, "mental_model_id": mm}
+    )
+
+
+async def test_a_page_written_after_the_fold_in_is_skipped_and_reported(box: Box) -> None:
+    """The real case: an Initiatives child the fold-in never sent stays in the old bank."""
+    writes = Writes(box)
+    write_late_page(box, LATE, LATE_NAME, "kf-initiatives")
+    old_bank = json.dumps(box.engine.banks[BANK], sort_keys=True, default=str)
+    plan = await rehome(box, owner="claude-code").plan()
+    assert plan["refusals"] == []
+    assert plan["not_folded"] == [{"old_id": LATE, "kind": "page", "name": LATE_NAME}]
+    assert plan["nodes"]["total"] == 32
+    report = await rehome(box, owner="claude-code").rehome()
+    assert report["verified"] is True
+    assert report["done"] == {"stamped": 31, "cleared": 31, "moved": 6}
+    here, folder = nodes(box), folder_id(box)
+    kf = new("kf-initiatives", "folder")
+    assert here[kf]["parent_id"] == folder
+    assert new(LATE) not in here
+    rows = kp.load_page_map()["targets"][TARGET]
+    assert LATE not in rows
+    assert all(old in rows for old, _ in all_old())
+    assert json.dumps(box.engine.banks[BANK], sort_keys=True, default=str) == old_bank
+    assert not any(LATE in c or new(LATE) in c for c in writes.calls)
+
+
+async def test_a_whole_subtree_written_after_the_fold_in_is_skipped(box: Box) -> None:
+    Writes(box)
+    b = box.engine.banks[BANK]
+    b["pages"].append({"id": "kf-late", "kind": "folder", "name": "Late", "parent_id": None})
+    write_late_page(box, "kp-late-1", "Late one", "kf-late")
+    write_late_page(box, "kp-late-2", "Late two", "kf-late")
+    report = await rehome(box, owner="claude-code").rehome()
+    assert report["refusals"] == [] and report["verified"] is True
+    assert sorted(n["old_id"] for n in report["not_folded"]) == [
+        "kf-late",
+        "kp-late-1",
+        "kp-late-2",
+    ]
+    assert report["nodes"]["top_level"] == 6 and report["done"]["moved"] == 6
+    assert all(t["old_id"] != "kf-late" for t in report["tops"])
+
+
+async def test_a_folded_node_that_is_missing_still_refuses(box: Box) -> None:
+    """A node the fold-in sent but the target lacks is not "written after": refused."""
+    writes = Writes(box)
+    gone = new(_ini(5))
+    box.engine.banks[TARGET]["pages"] = [
+        p for p in box.engine.banks[TARGET]["pages"] if p["id"] != gone
+    ]
+    write_late_page(box, LATE, LATE_NAME, "kf-initiatives")
+    plan = await rehome(box, owner="claude-code").plan()
+    assert [r["code"] for r in plan["refusals"]] == ["nodes_missing"]
+    assert _ini(5) in plan["refusals"][0]["message"]
+    assert LATE not in plan["refusals"][0]["message"]
+    assert plan["not_folded"] == [{"old_id": LATE, "kind": "page", "name": LATE_NAME}]
+    with pytest.raises(kr.RehomeRefused):
+        await rehome(box, owner="claude-code").rehome()
+    assert writes.calls == []
+
+
+async def test_a_sent_node_under_an_unsent_folder_refuses(box: Box) -> None:
+    """A folder the fold-in never sent cannot be skipped while a sent node hangs under it."""
+    gone = new(_ini(7))
+    box.engine.banks[TARGET]["pages"] = [
+        p for p in box.engine.banks[TARGET]["pages"] if p["id"] != gone
+    ]
+    b = box.engine.banks[BANK]
+    b["pages"].append({"id": "kf-late", "kind": "folder", "name": "Late", "parent_id": None})
+    next(p for p in b["pages"] if p["id"] == _ini(7))["parent_id"] = "kf-late"
+    plan = await rehome(box, owner="claude-code").plan()
+    assert [r["code"] for r in plan["refusals"]] == ["nodes_missing"]
+    assert "kf-late" in plan["refusals"][0]["message"]
+    assert plan["not_folded"] == []
+
+
+async def test_unreadable_records_count_every_absent_node_missing(box: Box) -> None:
+    """Fail closed: when the fold-in's records cannot be read, nothing is skipped."""
+    for path in fi.load_ledger()["banks"][BANK]["sent_files"]["shared"]:
+        Path(path).unlink()
+    write_late_page(box, LATE, LATE_NAME, "kf-initiatives")
+    plan = await rehome(box, owner="claude-code").plan()
+    assert [r["code"] for r in plan["refusals"]] == ["nodes_missing"]
+    assert plan["not_folded"] == []
+
+
+@pytest.mark.parametrize("record", ["ids", "page_map", "archive"])
+async def test_each_record_alone_proves_a_node_was_sent(
+    box: Box, monkeypatch: pytest.MonkeyPatch, record: str
+) -> None:
+    """Mutation check of the distinction: a missing node any one record names is refused."""
+    gone = new(_ini(5))
+    box.engine.banks[TARGET]["pages"] = [
+        p for p in box.engine.banks[TARGET]["pages"] if p["id"] != gone
+    ]
+    files = [Path(p) for p in fi.load_ledger()["banks"][BANK]["sent_files"]["shared"]]
+    real_read = fi._read_nofollow
+    real_rows = kr.fi_page_map_rows
+
+    def read(path: Path) -> bytes:
+        data = real_read(path)
+        if path.name.endswith(".ids.json"):
+            ids = json.loads(data)
+            if record == "ids":
+                ids["page_nodes"] = {_ini(5): ids["page_nodes"][_ini(5)]}
+            else:
+                ids["page_nodes"] = {}
+            return json.dumps(ids).encode()
+        if record != "archive":
+            raise OSError("no archive")
+        return data
+
+    def rows(target: str) -> dict[str, Any]:
+        if record == "page_map":
+            return {_ini(5): {"id": gone, "kind": "page", "bank": BANK}}
+        return {}
+
+    monkeypatch.setattr(fi, "_read_nofollow", read)
+    monkeypatch.setattr(kr, "fi_page_map_rows", rows)
+    assert files
+    plan = await rehome(box, owner="claude-code").plan()
+    assert [r["code"] for r in plan["refusals"]] == ["nodes_missing"], record
+    assert plan["not_folded"] == []
+    # And with no record naming it, the same node is taken as written after.
+    monkeypatch.setattr(kr, "fi_page_map_rows", lambda _t: {})
+    monkeypatch.setattr(
+        fi,
+        "_read_nofollow",
+        lambda p: (
+            json.dumps({**json.loads(real_read(p)), "page_nodes": {}}).encode()
+            if p.name.endswith(".ids.json")
+            else (_ for _ in ()).throw(OSError("no archive"))
+        ),
+    )
+    assert real_rows is not None
+    skipped = await rehome(box, owner="claude-code").plan()
+    assert [n["old_id"] for n in skipped["not_folded"]] == [_ini(5)]
+
+
+async def test_a_ledger_that_names_no_sent_files_skips_nothing(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fail closed: with no record of what was sent, an absent node is missing, not late."""
+    real = fi.load_ledger
+
+    def without_files() -> dict[str, Any]:
+        ledger = real()
+        ledger["banks"][BANK].pop("sent_files", None)
+        return ledger
+
+    monkeypatch.setattr(fi, "load_ledger", without_files)
+    monkeypatch.setattr(kr, "fi_page_map_rows", lambda _t: {})
+    write_late_page(box, LATE, LATE_NAME, "kf-initiatives")
+    plan = await rehome(box, owner="claude-code").plan()
+    assert [r["code"] for r in plan["refusals"]] == ["nodes_missing"]
+    assert plan["not_folded"] == []

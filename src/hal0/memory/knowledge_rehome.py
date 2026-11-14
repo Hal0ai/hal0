@@ -13,6 +13,11 @@ old bank and one project named by the operator, live, after the cutover:
   node's new id is ``folded_node_id(bank, old id, kind)``, a page's model
   ``<bank slug>-<old model id>`` (:func:`~hal0.memory.fold_in.model_id_for`).
   Only a subtree outside every ``project:`` folder moves;
+* a node the fold-in never sent (no ``.ids.json`` the ledger names, no page-map
+  row and no run archive holds it) was written to the old bank after the
+  fold-in, by a session still on its old plugin config: it is skipped and
+  reported under ``not_folded``, and stays in the old bank. A node the fold-in
+  did send that is missing still refuses the run;
 * it finds the project's folder as compat does, the first root folder named
   ``project:<slug>`` in id order, and creates it as compat does when there is
   none (:meth:`~hal0.memory.fold_in.FoldIn._project_folder`);
@@ -40,8 +45,11 @@ dry run writes nothing and ``--apply`` needs root (the page map is root's).
 
 from __future__ import annotations
 
+import json
 import re
+import zipfile
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -72,6 +80,19 @@ def _links_to(content: Any, old_ids: Iterable[str]) -> int:
     if not isinstance(content, str):
         return 0
     return sum(1 for m in _PAGE_LINK.finditer(content) if m.group(1) in wanted)
+
+
+def _parents(roots: Iterable[Any]) -> dict[str, str]:
+    """Child id -> parent id over a tree as the engine serves it (nested ``children``)."""
+    out: dict[str, str] = {}
+    stack = [n for n in roots if isinstance(n, dict)]
+    while stack:
+        node = stack.pop()
+        for child in node.get("children") or []:
+            if isinstance(child, dict) and isinstance(child.get("id"), str):
+                out.setdefault(child["id"], str(node.get("id")))
+                stack.append(child)
+    return out
 
 
 def _same_tags(have: Any, want: list[str]) -> bool:
@@ -237,9 +258,37 @@ class KnowledgeRehome(fi.FoldIn):
             node = old_index[old][0]
             return folded_node_id(self._bank, old, str(node.get("kind")))
 
+        # Every node of the old tree, in the target under the fold-in's id, except
+        # one the fold-in never sent: written to the old bank after it, by a
+        # session that kept its old plugin config. Such a node stays there.
+        absent = [old for old in sorted(old_index) if new_id(old) not in index]
+        unfolded: set[str] = set()
+        if absent:
+            sent = self._sent_nodes(row, target, {old: new_id(old) for old in absent})
+            if sent is not None:
+                unfolded = {old for old in absent if old not in sent}
+        # A node the fold-in did send cannot hang under one it never sent: that
+        # one is counted missing too, and its subtree is not split.
+        parents = _parents(old_roots)
+        for old in old_index:
+            if old in unfolded:
+                continue
+            up = parents.get(old)
+            while up is not None:
+                unfolded.discard(up)
+                up = parents.get(up)
+        report["not_folded"] = [
+            {
+                "old_id": old,
+                "kind": str(old_index[old][0].get("kind")),
+                "name": str(old_index[old][0].get("name") or ""),
+            }
+            for old in sorted(unfolded)
+        ]
+        old_index = {k: v for k, v in old_index.items() if k not in unfolded}
+        old_roots = [r for r in old_roots if not (isinstance(r, dict) and r.get("id") in unfolded)]
         ours = {new_id(old) for old in old_index}
 
-        # Every node of the old tree, in the target under the fold-in's id.
         missing: list[str] = []
         mismatched: list[str] = []
         for old, (node, _root) in sorted(old_index.items()):
@@ -495,6 +544,68 @@ class KnowledgeRehome(fi.FoldIn):
             "nodes": nodes,
         }
         return report
+
+    def _sent_nodes(
+        self, row: Mapping[str, Any], target: str, absent: Mapping[str, str]
+    ) -> set[str] | None:
+        """Which of ``absent`` (old id -> folded id) the fold-in's records say it sent.
+
+        Read in order: the ``.ids.json`` files the ledger's ``sent_files`` name
+        for this bank (their ``page_nodes``), the page map's rows for the bank,
+        then the run archives beside those files (their ``knowledge_pages``
+        rows, by folded id). ``None`` when the records cannot say (a file named
+        but unreadable, or nothing recorded at all): then every absent node
+        counts as missing, so the run is refused rather than a sent node skipped.
+        """
+        files = [
+            Path(str(p)) for paths in (row.get("sent_files") or {}).values() for p in paths or ()
+        ]
+        if not files:
+            return None
+        sent: set[str] = set()
+        complete = True
+        for path in files:
+            try:
+                data = json.loads(fi._read_nofollow(path))
+            except (OSError, ValueError):
+                return None
+            nodes = data.get("page_nodes") if isinstance(data, dict) else None
+            if isinstance(nodes, dict):
+                sent.update(str(k) for k in nodes if str(k) in absent)
+            else:
+                # Written before the placement was recorded: only the archive can say.
+                complete = False
+        left = {old for old in absent if old not in sent}
+        if not left:
+            return sent
+        try:
+            mapped = fi_page_map_rows(target)
+        except (OSError, ValueError):
+            return None
+        sent.update(
+            old
+            for old in left
+            if isinstance(mapped.get(old), Mapping) and mapped[old].get("bank") == self._bank
+        )
+        left -= sent
+        if not left:
+            return sent
+        wanted = {absent[old]: old for old in left}
+        for path in files:
+            name = path.name
+            if not name.endswith(".ids.json"):
+                continue
+            zipped = path.with_name(name[: -len(".ids.json")] + ".zip")
+            try:
+                archive = fi._read_archive(fi._read_nofollow(zipped))
+            except (OSError, ValueError, KeyError, zipfile.BadZipFile):
+                if not complete:
+                    return None
+                continue
+            for page in archive["knowledge_pages"]:
+                if isinstance(page, dict) and str(page.get("id")) in wanted:
+                    sent.add(wanted[str(page.get("id"))])
+        return sent
 
     # ── the run ──────────────────────────────────────────────────────────
 
