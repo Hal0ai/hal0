@@ -2,6 +2,7 @@
 // One editor for both entry points — the NPU tab's GGML lane drawer and the Slots page's edit drawer.
 // The xdna knobs are per slot (`[xdna]`); context is `[tune].ctx_size`; everything else is placement.
 import { useMemo, useRef, useState } from 'react'
+import { copyOrSelect } from '@/lib/clipboard'
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSlotConfig, useSlotCreate, useSlotDelete, useSlotEdit, useSlotLoad, useSlotRestart, useSlots } from '@/api/hooks/useSlots'
@@ -51,25 +52,6 @@ function savedDraft(mode, slot, cfg, names, initialModel) {
     env: { ...(x.env || {}) },
     host_xrt: x.host_xrt ?? null,
     autoload: !!(cfg?.autoload ?? slot.autoload),
-  }
-}
-
-export function copyText(text, el) {
-  const select = () => {
-    if (el && window.getSelection) {
-      const r = document.createRange()
-      r.selectNodeContents(el)
-      const sel = window.getSelection()
-      sel.removeAllRanges()
-      sel.addRange(r)
-    }
-  }
-  try {
-    const p = navigator.clipboard?.writeText(text)
-    if (p && p.catch) p.catch(select)
-    else if (!p) select()
-  } catch {
-    select()
   }
 }
 
@@ -269,7 +251,7 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
           <div className="npt-hint">This model runs per-op (slower) on the NPU: {fitRow.reason}. Requantizing ssm_out to Q5_K lets it take the fused path:</div>
           <div className="ggml-requant-cmd">
             <code className="mono" ref={cmdRef} data-testid="ggml-requant-cmd">{GGML_REQUANT_CMD}</code>
-            <button type="button" className="btn ghost sm" data-testid="ggml-requant-copy" onClick={() => copyText(GGML_REQUANT_CMD, cmdRef.current)}>Copy</button>
+            <button type="button" className="btn ghost sm" data-testid="ggml-requant-copy" onClick={() => copyOrSelect(GGML_REQUANT_CMD, cmdRef.current)}>Copy</button>
           </div>
         </div>
       )}

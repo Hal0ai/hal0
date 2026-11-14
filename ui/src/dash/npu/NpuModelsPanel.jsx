@@ -3,6 +3,7 @@
 // "New slot" opening the GGML create drawer, plus the requantize command for the per-op rows
 // it fixes. Every readout is a real field or `—`.
 import { useMemo, useRef, useState } from 'react'
+import { copyOrSelect } from '@/lib/clipboard'
 import { useFlmCatalog } from '@/api/hooks/useFlmCatalog'
 import { useModels, usePullJob } from '@/api/hooks/useModels'
 import { useSlotConfig } from '@/api/hooks/useSlots'
@@ -12,7 +13,6 @@ import { slotEditHash } from '../slots-route'
 import { GgmlSlotDrawer } from './GgmlSlotDrawer.jsx'
 import { GGML_REQUANT_CMD, ggmlRequantHint } from './ggml-slot-pure'
 import { bundledFlmModel, pickChatModel, savedFlm } from './flm-draft-pure'
-import { copyText } from './GgmlSlotForm.jsx'
 import { flmCatalogRows, ggufNpuRows } from './npu-models-pure'
 
 const toast = (msg, kind = 'info') => typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
@@ -70,7 +70,8 @@ export function NpuModelsPanel({ slots = [], setFlmDraft, onSwitchTab }) {
         </div>
         {flmRows.length === 0 && <p className="npt-hint">{catalog ? 'No FLM models match.' : '—'}</p>}
         {flmRows.map((r) => {
-          const downloading = pull.modelId === r.model && (pull.inFlight || pull.state === 'running' || pull.state === 'queued')
+          const pulling = pull.inFlight || pull.state === 'running' || pull.state === 'queued'
+          const downloading = pull.modelId === r.model && pulling
           const isChat = r.capabilities.includes('chat')
           const current = (saved.chatModel ?? null) === r.model
           return (
@@ -81,7 +82,7 @@ export function NpuModelsPanel({ slots = [], setFlmDraft, onSwitchTab }) {
               <span className="chip mono">{r.installed ? 'installed' : 'not installed'}</span>
               {r.usedBy && <span className="chip mono npt-used">{r.usedBy}</span>}
               {!r.installed && (
-                <button type="button" className="btn sm" data-testid={`flm-download-${r.model}`} disabled={downloading} onClick={() => download(r.model)}>
+                <button type="button" className="btn sm" data-testid={`flm-download-${r.model}`} disabled={pulling} onClick={() => download(r.model)}>
                   {downloading ? `Downloading${pull.pct != null ? ` ${Math.round(pull.pct)}%` : '…'}` : 'Download'}
                 </button>
               )}
@@ -119,7 +120,7 @@ export function NpuModelsPanel({ slots = [], setFlmDraft, onSwitchTab }) {
             <div className="npt-hint">Requantizing ssm_out to Q5_K lets a per-op qwen35 model take the fused path:</div>
             <div className="ggml-requant-cmd">
               <code className="mono" ref={cmdRef} data-testid="npu-requant-cmd">{GGML_REQUANT_CMD}</code>
-              <button type="button" className="btn ghost sm" data-testid="npu-requant-copy" onClick={() => copyText(GGML_REQUANT_CMD, cmdRef.current)}>Copy</button>
+              <button type="button" className="btn ghost sm" data-testid="npu-requant-copy" onClick={() => copyOrSelect(GGML_REQUANT_CMD, cmdRef.current)}>Copy</button>
             </div>
           </div>
         )}

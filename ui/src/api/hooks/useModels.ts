@@ -25,6 +25,8 @@ export interface Model {
   size: string
   labels: string[]
   type: string
+  /** GGUF architecture (registry `architecture`), when known. */
+  architecture?: string | null
   device: string
   ns: 'blessed' | 'pulled' | string
   installed: boolean

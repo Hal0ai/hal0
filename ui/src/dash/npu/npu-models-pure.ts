@@ -34,7 +34,7 @@ export function flmCatalogRows(models: FlmModel[] | null | undefined, f: FlmFilt
   )
 }
 
-type RegModel = { id: string; type?: string; size?: string | null; metadata?: Record<string, unknown> | null }
+type RegModel = { id: string; type?: string; size?: string | null; architecture?: string | null }
 type SlotLike = { name: string; binary?: string; model?: unknown }
 export interface GgufRow {
   id: string
@@ -53,10 +53,9 @@ export function ggufNpuRows(models: RegModel[] | null | undefined, fit: XdnaFit 
   for (const [id, row] of Object.entries(fit ?? {})) {
     const m = reg.get(id)
     if (m && m.type !== 'llm') continue
-    const a = m?.metadata?.architecture ?? m?.metadata?.arch
     out.push({
       id,
-      arch: typeof a === 'string' && a ? a : null,
+      arch: m?.architecture || null,
       size: m?.size || null,
       fit: row.xdna_path,
       reason: row.reason,

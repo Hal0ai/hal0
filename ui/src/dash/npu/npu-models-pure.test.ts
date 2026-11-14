@@ -40,7 +40,7 @@ describe('flmCatalogRows', () => {
 
 describe('ggufNpuRows', () => {
   const reg = [
-    { id: 'qwen3-4b', type: 'llm', size: '2.5 GB', metadata: { architecture: 'qwen3' } },
+    { id: 'qwen3-4b', type: 'llm', size: '2.5 GB', architecture: 'qwen3' },
     { id: 'qwen35-0.8b', type: 'llm', size: '0.6 GB' },
     { id: 'kokoro', type: 'tts', size: '0.3 GB' },
     { id: 'not-in-fit', type: 'llm', size: '1 GB' },

@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const { box } = vi.hoisted(() => ({
   box: {
     pullStart: vi.fn(),
+    pullState: 'idle',
     drawer: null as null | { open: boolean; mode: string; initialModel?: string },
     toasts: [] as string[],
   },
@@ -43,11 +44,11 @@ vi.mock('@/api/hooks/useXdnaFit', () => ({
 vi.mock('@/api/hooks/useModels', () => ({
   useModels: () => ({
     data: [
-      { id: 'qwen3-4b', type: 'llm', size: '2.5 GB' },
+      { id: 'qwen3-4b', type: 'llm', size: '2.5 GB', architecture: 'qwen3' },
       { id: 'qwen35-0.8b', type: 'llm', size: '0.6 GB' },
     ],
   }),
-  usePullJob: () => ({ start: box.pullStart, state: 'idle', modelId: null, pct: null, inFlight: false, error: null }),
+  usePullJob: () => ({ start: box.pullStart, state: box.pullState, modelId: null, pct: null, inFlight: box.pullState === 'running', error: null }),
 }))
 vi.mock('../npu/GgmlSlotDrawer.jsx', () => ({
   GgmlSlotDrawer: (p: { open: boolean; mode: string; initialModel?: string }) => {
@@ -75,6 +76,7 @@ function Harness() {
 }
 
 beforeEach(() => {
+  box.pullState = 'idle'
   box.pullStart.mockReset()
   box.pullStart.mockResolvedValue(undefined)
   box.toasts.length = 0
@@ -115,6 +117,16 @@ describe('NpuModelsPanel', () => {
     expect(q('flm-download-gemma4-it:e4b')).toBeNull()
     act(() => q('flm-download-qwen3:8b')!.click())
     expect(box.pullStart).toHaveBeenCalledWith('qwen3:8b')
+  })
+
+  it('disables every Download while a pull is in flight', () => {
+    box.pullState = 'running'
+    act(() => root.render(<Harness />))
+    expect((q('flm-download-qwen3:8b') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('shows the GGUF architecture from the registry row', () => {
+    expect(q('gguf-row-qwen3-4b')!.textContent).toContain('qwen3')
   })
 
   it('filters by installed and capability', () => {
