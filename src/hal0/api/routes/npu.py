@@ -94,6 +94,28 @@ _IMAGE_STORE_TTL_S = 30.0
 _image_store_cache: tuple[float, set[str] | None] | None = None
 _image_refresh_lock = threading.Lock()
 _image_refresh_thread: threading.Thread | None = None
+# Bumped by ``invalidate_engine_caches``; a refresh that started before the bump
+# read the store before the change and must not repopulate the cache with it.
+_cache_generation = 0
+# The generation the cached store value was read under.
+_image_store_gen = 0
+
+
+def invalidate_engine_caches() -> None:
+    """Mark the image-store and facts caches stale (keeping their last values).
+
+    Called when the local image store changes (a runner-image pull or delete
+    finishes) so the next poll re-reads instead of waiting out both 30 s TTLs.
+    The last value keeps being served while the refresh runs, so the facts never
+    flicker to ``None``. Safe to call from any thread.
+    """
+    global _image_store_cache, _facts_cache, _cache_generation
+    with _image_refresh_lock:
+        _cache_generation += 1
+        if _image_store_cache is not None:
+            _image_store_cache = (float("-inf"), _image_store_cache[1])
+        if _facts_cache is not None:
+            _facts_cache = (float("-inf"), _facts_cache[1])
 
 
 def _read_image_store() -> set[str] | None:
@@ -109,13 +131,16 @@ def _read_image_store() -> set[str] | None:
 
 
 def _refresh_image_store() -> None:
-    global _image_store_cache, _image_refresh_thread
+    global _image_store_cache, _image_refresh_thread, _image_store_gen
+    gen = _cache_generation
     try:
         result = _read_image_store()
     except Exception:
         result = None
     with _image_refresh_lock:
-        _image_store_cache = (time.monotonic(), result)
+        if gen == _cache_generation:
+            _image_store_cache = (time.monotonic(), result)
+            _image_store_gen = gen
         _image_refresh_thread = None
 
 
@@ -127,8 +152,22 @@ def _local_image_refs() -> set[str] | None:
     when the last read failed) and, when the cache is missing or older than
     ``_IMAGE_STORE_TTL_S``, starts at most one background refresh. A failed
     refresh is cached as ``None`` for the TTL too.
+
+    Exception: after ``invalidate_engine_caches`` the cached value is known to
+    be wrong, not merely old, so this reads the store inline instead. Its only
+    caller is the facts refresh worker thread, never the request path.
     """
-    global _image_refresh_thread
+    global _image_refresh_thread, _image_store_cache, _image_store_gen
+    with _image_refresh_lock:
+        gen = _cache_generation
+        invalidated = _image_store_cache is not None and _image_store_gen != gen
+    if invalidated:
+        result = _read_image_store()
+        with _image_refresh_lock:
+            if gen == _cache_generation:
+                _image_store_cache = (time.monotonic(), result)
+                _image_store_gen = gen
+        return result
     with _image_refresh_lock:
         cached = _image_store_cache
         fresh = cached is not None and time.monotonic() - cached[0] < _IMAGE_STORE_TTL_S
@@ -215,6 +254,7 @@ def _none_facts() -> dict[str, Any]:
 def _refresh_facts() -> None:
     """Blocking read of the whole facts block; stores it and clears the in-flight thread."""
     global _facts_cache, _facts_refresh_thread
+    gen = _cache_generation
     try:
         engines, host = _engine_facts_sync()
         facts = {"npu_engines": engines, "npu_host": host}
@@ -222,7 +262,8 @@ def _refresh_facts() -> None:
         log.warning("npu.engine_facts_failed", exc_info=True)
         facts = _none_facts()
     with _image_refresh_lock:
-        _facts_cache = (time.monotonic(), facts)
+        if gen == _cache_generation:
+            _facts_cache = (time.monotonic(), facts)
         _facts_refresh_thread = None
 
 

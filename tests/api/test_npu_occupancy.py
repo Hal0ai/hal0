@@ -691,3 +691,81 @@ def test_facts_expiry_serves_last_value_and_refreshes_once(facts_cache, monkeypa
     assert stale["npu_host"]["device_node"] == "old"  # last value, immediately
     _join_facts(npu_mod)
     assert asyncio.run(npu_mod._engine_and_host_facts())["npu_host"]["device_node"] == "new"
+
+
+# ── cache invalidation when the image store changes (#3645) ──────────────────
+
+
+def test_invalidate_makes_next_poll_reread_and_keeps_last_value(facts_cache, monkeypatch):
+    import asyncio
+
+    npu_mod = facts_cache
+    monkeypatch.setattr(npu_mod, "_local_image_refs", _REAL_LOCAL_IMAGE_REFS)
+    monkeypatch.setattr(npu_mod, "_image_store_cache", None)
+    monkeypatch.setattr(npu_mod, "_image_refresh_thread", None)
+    ref = "ghcr.io/x/ggml-xdna:1"
+    monkeypatch.setattr(npu_mod, "_npu_host_probe", lambda: {})
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._effective_defaults",
+        lambda: {"xdna": (ref, "x"), "flm": ("", "")},
+    )
+    store: list[set[str] | None] = [set()]
+    monkeypatch.setattr(npu_mod, "_read_image_store", lambda: store[0])
+
+    def pulled():
+        return asyncio.run(npu_mod._engine_and_host_facts())["npu_engines"]["xdna"]["pulled"]
+
+    def settle():
+        for name in ("_image_refresh_thread", "_facts_refresh_thread"):
+            with npu_mod._image_refresh_lock:
+                t = getattr(npu_mod, name)
+            if t is not None:
+                t.join(timeout=5)
+
+    npu_mod._local_image_refs()  # land the first store read before the facts read
+    settle()
+    pulled()
+    settle()
+    assert pulled() is False
+
+    store[0] = {ref}  # the pull finishes
+    assert pulled() is False  # both caches still fresh: the reported bug
+    npu_mod.invalidate_engine_caches()
+    assert pulled() is False  # stale value served, never flickers to None
+    settle()
+    pulled()
+    settle()
+    assert pulled() is True
+
+
+def test_inflight_refresh_started_before_invalidate_does_not_repopulate(monkeypatch):
+    import threading
+
+    from hal0.api.routes import npu as npu_mod
+
+    monkeypatch.setattr(npu_mod, "_local_image_refs", _REAL_LOCAL_IMAGE_REFS)
+    monkeypatch.setattr(npu_mod, "_image_store_cache", None)
+    monkeypatch.setattr(npu_mod, "_image_refresh_thread", None)
+    gate = threading.Event()
+
+    def slow_read():
+        gate.wait(5)
+        return set()  # pre-pull snapshot
+
+    monkeypatch.setattr(npu_mod, "_read_image_store", slow_read)
+    npu_mod._local_image_refs()
+    t = npu_mod._image_refresh_thread
+    npu_mod.invalidate_engine_caches()  # pull finished mid-read
+    gate.set()
+    t.join(timeout=5)
+    assert npu_mod._image_store_cache is None  # the stale read was discarded
+
+
+def test_pull_job_terminal_state_invalidates_npu_caches(monkeypatch):
+    from hal0.api.routes import npu as npu_mod
+    from hal0.registry import runner_pull_jobs
+
+    calls: list[int] = []
+    monkeypatch.setattr(npu_mod, "invalidate_engine_caches", lambda: calls.append(1))
+    runner_pull_jobs._invalidate_npu_caches()
+    assert calls == [1]
