@@ -2,7 +2,7 @@
 //
 // Single source of truth for the device→class→backend vocabulary the dash
 // panes used to hardcode (devKind was copied verbatim into slot-list.jsx,
-// npu-pane.jsx and inference-pane.jsx; profiles/stacks each carried their own
+// the NPU tab and inference-pane.jsx; profiles/stacks each carried their own
 // BACKEND_META / DEVICE_META tables). All helpers accept an optional
 // `MetaEnums` (from GET /api/meta/enums via useMeta) and fall back to
 // `META_ENUMS_FALLBACK` — a typed snapshot of today's known values — so every
@@ -245,7 +245,7 @@ export type DevKind = 'rocm' | 'vulkan' | 'cpu' | 'npu'
 
 /**
  * Normalize a slot `device` (or backend token) to the chip device-kind token.
- * Replaces the three per-pane copies (slot-list / npu-pane / inference-pane).
+ * Replaces the three per-pane copies (slot-list / npu tab / inference-pane).
  * Meta-aware: unknown tokens are folded through `backend_to_device` (e.g. an
  * "flm" backend string classifies as npu) before defaulting to cpu.
  */

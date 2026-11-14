@@ -23,7 +23,7 @@ import { NpuTabs } from './npu/NpuTabs'
 import { npuTabVisible } from './npu/npu-pure'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { isReservedSlotsTab, slotEditHash, slotEditTarget, slotsSub, slotsTab } from './slots-route'
-import { NpuOccupancyCard } from './npu-pane.jsx'
+import { NpuSummaryRow } from './npu/NpuSummaryRow.jsx'
 import {
   InferencePane,
   SlotScard,
@@ -745,7 +745,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
   // Section assignment is derived from the slot's device_class (now always
   // emitted by the serializer) rather than the legacy null `group` field:
   //   gpu  → Chat
-  //   npu  → NPU occupancy card (rendered by NpuOccupancyCard, excluded here)
+  //   npu  → NPU tab (Slots → NPU), excluded here; Inference shows NpuSummaryRow
   //   img  → Image-Gen tab (ComfyUI pane)
   //   else (embedding/reranking/transcription/tts capability slots) →
   //         Capabilities. GPU-backed embed/rerank slots are LLM-adjacent
@@ -1109,13 +1109,9 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
                   they only duplicated rows the pane already lists. */}
               <InferencePane />
 
-              {/* NPU occupancy — full-width card: duty gauge · live 4×8 AIE-ML
-                  occupancy map (single-tenant: one FLM claims the whole array) ·
-                  per-FLM-slot rail with tok/s · ttft · RAM + slot controls.
-                  Replaces the old NpuFlmStack accordion + trio picker. Keyed off
-                  device_class "npu" (serializer-emitted), legacy device === "npu"
-                  kept as a fallback by dc(). */}
-              {cardSlots.some(s => dc(s) === "npu") && <NpuOccupancyCard slots={cardSlots} />}
+              {/* One-line NPU summary → the NPU tab (Slots → NPU). Hidden without an
+                  NPU or NPU slots (npuTabVisible). */}
+              <NpuSummaryRow slots={cardSlots} />
             </>
           )}
         </div>

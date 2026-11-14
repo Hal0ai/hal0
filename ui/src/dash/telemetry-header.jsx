@@ -15,7 +15,7 @@
 // useNpuOccupancy().slots[].cols — never hardcoded.
 //
 // Styles: overhaul.css (th-*). Owner hues: the :root --npu-s0/s1/s2 token
-// sets from npu.css (shared with the slots-page NpuOccupancyCard).
+// sets from npu.css (shared with the NPU tab).
 
 import { useSlots } from '@/api/hooks/useSlots'
 import { useHardware } from '@/api/hooks/useHardware'
@@ -40,9 +40,9 @@ const sumToks = (list) =>
     .filter((t) => typeof t === 'number' && t > 0)
     .reduce((a, b) => a + b, 0)
 // Deterministic per-tile hash → [0,1), stable across renders (mirrors the
-// npu-pane pattern — the desync is decorative, never claimed as per-tile load).
+// NPU tab pattern — the desync is decorative, never claimed as per-tile load).
 // Owner hues shared with the slots-page NPU card — tokens live on :root in
-// npu.css (npu-pane HUES mirrors this table).
+// npu.css (aie-grid HUES mirrors this table).
 const TH_HUES = [
   { hue: 'var(--npu-s0)', line: 'var(--npu-s0-line)', glow: 'var(--npu-s0-glow)', dim: 'var(--npu-s0-dim)', fg: 'var(--npu-s0-fg)' },
   { hue: 'var(--npu-s1)', line: 'var(--npu-s1-line)', glow: 'var(--npu-s1-glow)', dim: 'var(--npu-s1-dim)', fg: 'var(--npu-s1-fg)' },

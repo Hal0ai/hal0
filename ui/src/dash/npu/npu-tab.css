@@ -158,3 +158,28 @@
 .npt-ready.warn { color: var(--warn); }
 .npt-ready.unknown { color: var(--fg-3); }
 .npt-cmd { display: inline-flex; gap: 6px; align-items: center; }
+
+/* Inference tab summary row (NpuSummaryRow.jsx) */
+.npt-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 18px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--rad-lg);
+  background: var(--bg-1);
+  font-family: var(--jbm);
+  font-size: 11.5px;
+}
+.npt-summary-title { color: var(--dev-npu); font-weight: 600; }
+.npt-summary-chip {
+  padding: 1px 8px;
+  border: 1px solid var(--dev-npu);
+  border-radius: 999px;
+  color: var(--dev-npu);
+  font-size: 10.5px;
+}
+.npt-summary-link { margin-left: auto; color: var(--dev-npu); text-decoration: none; }
+.npt-summary-link:hover { text-decoration: underline; }
+.npt-summary-link:focus-visible { outline: 2px solid var(--dev-npu); outline-offset: 2px; }

@@ -353,6 +353,42 @@ export const MOCK_DATA = {
 
 export type MockData = typeof MOCK_DATA
 
+// ── NPU tab (Slots → NPU) ─────────────────────────────────────────────────
+//
+// A GGML (ggml-xdna) slot beside the FLM anchor `npu` in MOCK_DATA.slots, plus the occupancy
+// payload with the engine/host blocks the NPU tab reads. Specs seed these through HAL0_DATA
+// (`/api/slots` and `/api/npu/occupancy` are answered by the in-bundle mock layer). NOTE: the FLM
+// anchor is named `npu`, a reserved Slots tab name, so its drawer is `#slots/edit/npu`; the NPU
+// tab itself is `#slots/npu`.
+export const NPU_XDNA_SLOT = {
+  name: 'npu-gguf', type: 'llm', device: 'npu',
+  device_class: 'npu', backend: null, binary: 'xdna',
+  model: 'qwen3-4b-q4', model_id: 'qwen3-4b-q4',
+  group: 'npu', state: 'ready', port: 8101,
+  runtime: 'container', profile: 'xdna',
+  image: 'ghcr.io/hal0ai/hal0-runner-xdna:72f6dfa-rf1a3931',
+  image_status: 'present', container_status: 'running', container_health: true,
+  mem_mb: 3_200,
+  xdna_path: 'fused', xdna_reason: 'all ops fit', pmode: 'turbo',
+  tune: { ctx_size: 16384 },
+  metrics: { toks: 21.4, ttft: 310, mem: 3.2 },
+}
+
+export const NPU_OCCUPANCY_MOCK = {
+  present: true, rows: 4, cols: 8, tiles: 32, tops_peak: 50,
+  cols_total: 8, cols_used: 8, serving: false, single_tenant: true, columns_available: true,
+  slots: [
+    { name: 'npu', model: 'qwen3-0.6b', state: 'ready', engine: 'flm', cols: [0, 1, 2, 3, 4, 5, 6, 7], gb: 1.2 },
+    { name: 'npu-gguf', model: 'qwen3-4b-q4', state: 'ready', engine: 'xdna', cols: [0, 1, 2, 3, 4, 5, 6, 7], gb: 3.2 },
+  ],
+  shared_warning: null,
+  npu_engines: {
+    flm: { image: 'ghcr.io/hal0ai/hal0-runner-flm:2026.10.11', version: '0.9.42' },
+    xdna: { image: 'ghcr.io/hal0ai/hal0-runner-xdna:72f6dfa-rf1a3931', tag: '72f6dfa-rf1a3931', pulled: true },
+  },
+  npu_host: { device_node: '/dev/accel/accel0', driver_loaded: true, xdna_gen: 2 },
+}
+
 // ── Operator Board mock data (feat/operator-board) ─────────────────────────
 //
 // Ported from the kanban board prototype (board-data.jsx).

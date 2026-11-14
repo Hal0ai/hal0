@@ -32,6 +32,11 @@ export interface StatusPart {
 const DASH = '—'
 const DOWN = new Set(['offline', 'off', ''])
 
+/** Occupancy rows that currently hold the NPU (anything not offline/off). */
+export function npuHolders<T extends { state?: string | null }>(rows: ReadonlyArray<T> | undefined): T[] {
+  return (rows ?? []).filter((s) => !DOWN.has((s.state ?? '') as string))
+}
+
 export function npuStatusParts(
   occ: NpuOccupancy | undefined,
   hw: Pick<StatsHardware, 'npu_pmode' | 'npu_fclk'> | undefined,
@@ -40,7 +45,7 @@ export function npuStatusParts(
   const rows = occ?.slots ?? []
   const host = occ?.npu_host
   const engines = occ?.npu_engines
-  const holders = rows.filter((s) => !DOWN.has((s.state ?? '') as string))
+  const holders = npuHolders(rows)
   const xdnaUp = holders.some((s) => s.engine === 'xdna')
 
   const node = host?.device_node ?? null

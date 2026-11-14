@@ -118,11 +118,11 @@ export function NpuTabs({ sub, slots = [] }) {
   // Wait for the first occupancy answer before deciding "absent": a loading probe is not an
   // absent NPU.
   if (occ === undefined && !npuTabVisible(undefined, slots)) {
-    if (occQ.isLoading) return <div className="npt" data-testid="npu-loading">Loading…</div>
+    if (occQ.isLoading) return <div className="npt npu-card" data-testid="npu-loading">Loading…</div>
   }
   if (!npuTabVisible(occ, slots)) {
     return (
-      <div className="npt" data-testid="npu-pane">
+      <div className="npt npu-card" data-testid="npu-pane">
         <AbsentPanel host={occ?.npu_host} />
       </div>
     )
@@ -131,7 +131,7 @@ export function NpuTabs({ sub, slots = [] }) {
   const parts = npuStatusParts(occ, hwQ.data, slots)
 
   return (
-    <div className="npt" data-testid="npu-pane">
+    <div className="npt npu-card" data-testid="npu-pane">
       <div className="npt-status" data-testid="npu-status" role="status">
         {parts.map((p) => (
           <span key={p.k} className={`npt-status-part${p.tone ? ` ${p.tone}` : ''}`}>

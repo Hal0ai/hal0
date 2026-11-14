@@ -1,5 +1,4 @@
-// The AIE tile grid, its owner hues and the duty gauge. Moved out of npu-pane.jsx so the NPU tab
-// and the old occupancy card share one copy (npu-pane.jsx re-exports until it is removed).
+// The AIE tile grid, its owner hues and the duty gauge (shared by the NPU tab's array band).
 // Per-tile load is never claimed: the shimmer is cosmetic, the aggregate level is real.
 
 // owner hues — assigned by slot index so each resident FLM reads as its own
