@@ -17,6 +17,8 @@ vi.mock('@/api/hooks/useSlots', () => {
   const m = () => ({ isPending: false, mutate: () => {}, mutateAsync: async () => {} })
   return { useSlotConfig: () => ({ data: undefined }), useSlotEdit: m, useSlotRestart: m, useSlotCreate: m, useSlotLoad: m, useSlotUnload: m }
 })
+vi.mock('@/api/hooks/useRunnerImages', () => ({ useRunnerImagePullJob: () => ({ start: async () => {}, state: 'idle', pct: null, error: null, inFlight: false }) }))
+vi.mock('../npu/GgmlSlotDrawer.jsx', () => ({ GgmlSlotDrawer: () => null }))
 vi.mock('@/api/hooks/useFlmCatalog', () => ({ useFlmCatalog: () => ({ data: { models: [], probe_ok: true } }) }))
 vi.mock('@/api/hooks/useModels', () => ({ usePullJob: () => ({ start: async () => {}, state: 'idle', modelId: null, error: null, pct: null }) }))
 

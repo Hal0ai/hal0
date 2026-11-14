@@ -16,6 +16,7 @@ import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { ArrayBand } from './ArrayBand.jsx'
 import { FlmLane } from './FlmLane.jsx'
+import { GgmlLane } from './GgmlLane.jsx'
 import { NPU_TABS, npuStatusParts, npuTabVisible, validNpuTab } from './npu-pure'
 
 const IDS = NPU_TABS.map((t) => t.id)
@@ -27,12 +28,13 @@ function subFromHash() {
   return m ? validNpuTab(m[1]) : null
 }
 
-// Lanes: the array band on top, then the FLM lane. The GGML lanes (Task 9) sit below.
+// Lanes: the array band on top, then the FLM lane and the GGML lane.
 function LanesPanel({ draft, setDraft, occ, hw, slots }) {
   return (
     <div className="npt-lanes" data-testid="npu-lanes">
       <ArrayBand occ={occ} hw={hw} slots={slots} />
       <FlmLane slots={slots} draft={draft} setDraft={setDraft} />
+      <GgmlLane slots={slots} occ={occ} hw={hw} />
     </div>
   )
 }
