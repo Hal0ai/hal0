@@ -258,6 +258,31 @@ async def test_update_config_refuses_glu_a_in_server_env(tmp_hal0_home: str) -> 
     assert exc.value.code == "validation.xdna_env_pinned"
 
 
+def _persisted_slot_toml(home: str, *, binary: str) -> dict[str, Any]:
+    import tomllib
+
+    found = [
+        data
+        for path in Path(home).rglob("*.toml")
+        if (data := tomllib.loads(path.read_text())).get("binary") == binary
+        or data.get("slot", {}).get("binary") == binary
+    ]
+    assert len(found) == 1, found
+    return found[0].get("slot", found[0])
+
+
+async def test_create_xdna_slot_without_profile_gets_the_xdna_seed(tmp_hal0_home: str) -> None:
+    cfg = _xdna()
+    del cfg["profile"]
+    await SlotManager().create("xdna", cfg)
+    assert _persisted_slot_toml(tmp_hal0_home, binary="xdna")["profile"] == "xdna"
+
+
+async def test_create_xdna_slot_keeps_an_explicit_llama_profile(tmp_hal0_home: str) -> None:
+    await SlotManager().create("xdna", _xdna(profile="chat"))
+    assert _persisted_slot_toml(tmp_hal0_home, binary="xdna")["profile"] == "chat"
+
+
 def test_live_delegation_path_allows_xdna_beside_flm() -> None:
     """``validate_delegation_slots`` (the omni_router dispatch path) mirrors #3537."""
     from hal0.omni_router.route_to_chat import validate_delegation_slots

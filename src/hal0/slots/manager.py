@@ -3496,6 +3496,11 @@ class SlotManager:
         # the utility slot (vulkan device + rocm-dnse profile). Every field is
         # "new" at create time, so a conflicting device+profile is an explicit
         # operator error and raises.
+        # A ggml-xdna slot created with no profile takes the seeded ``xdna``
+        # profile (runner xdna, ctx 8192, vision off) rather than none; an
+        # explicit profile is kept as sent.
+        if cfg_dict.get("binary") == "xdna" and not cfg_dict.get("profile"):
+            cfg_dict["profile"] = "xdna"
         _reconcile_device_profile(cfg_dict, set(cfg_dict.keys()))
         check_runner_family(cfg_dict, set(cfg_dict.keys()))
         # Same [tune] validation, guard and normalization as the update path.
