@@ -167,6 +167,7 @@ async def enqueue(request: Request, *, image_id: str, tag: str | None = None) ->
             )
         finally:
             persist_pull_job(job)
+            _invalidate_npu_caches()
             if event_bus is not None:
                 await _emit_terminal(event_bus, job)
 
@@ -178,6 +179,14 @@ async def enqueue(request: Request, *, image_id: str, tag: str | None = None) ->
         "state": job.state,
         "image_ref": image_ref,
     }
+
+
+def _invalidate_npu_caches() -> None:
+    """The local image store just changed: drop the NPU tab's cached 'image pulled' fact."""
+    with contextlib.suppress(Exception):
+        from hal0.api.routes.npu import invalidate_engine_caches
+
+        invalidate_engine_caches()
 
 
 async def _emit_terminal(event_bus: Any, job: RunnerPullJob) -> None:
