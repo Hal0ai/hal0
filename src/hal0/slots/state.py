@@ -96,6 +96,21 @@ class SlotState(StrEnum):
     """Slot has failed.  Details in state.json and journald."""
 
 
+#: States in which a slot occupies its device (up, loading or unloading).
+#: ``ERROR`` is deliberately absent: it needs a liveness probe to tell a dead
+#: slot from one whose process is alive but silent. Shared by the fabric-clock
+#: guard and the NPU conflict rule so the two never disagree on "live".
+LIVE_COUNTERPART_STATES: frozenset[SlotState] = frozenset(
+    {
+        SlotState.STARTING,
+        SlotState.WARMING,
+        SlotState.READY,
+        SlotState.SERVING,
+        SlotState.IDLE,
+        SlotState.UNLOADING,
+    }
+)
+
 #: Legal transitions: {from_state -> set of reachable states}
 #: Enforcement is the SlotManager's responsibility; this is a reference map.
 LEGAL_TRANSITIONS: dict[SlotState, frozenset[SlotState]] = {
@@ -331,6 +346,23 @@ class SlotFabricClockHazard(SlotConfigError):
     """
 
     code = "slot.fabric_clock_unheld"
+    status = 409
+
+
+class SlotNpuConflict(SlotError):
+    """An FLM anchor and a per-op xdna slot would hold the NPU together (#3666).
+
+    Each needs the whole NPU, so whichever starts second fails on the device
+    (``DRM_IOCTL_AMDXDNA_CREATE_HWCTX`` EINVAL). The manager's ``_admit_npu``
+    raises this before the load starts. ``details`` carries exactly ``slot``,
+    ``holders``, ``holder_engine`` (``"flm"`` or ``"xdna"``), ``unloads``
+    (the holders plus an FLM anchor's ``-stt``/``-embed`` shadows), ``pinned``,
+    ``pending`` (a holder's load is still in flight, which the opt-in never
+    overrides) and ``reason``. A refusal is not a load failure: the slot is
+    left OFFLINE and the crash-loop breaker is not fed.
+    """
+
+    code = "slot.npu_conflict"
     status = 409
 
 

@@ -457,3 +457,33 @@ def test_tune_line_renders_values_with_sources() -> None:
     assert "enable_thinking=False (profile-flags)" in line
     assert "vision=off (profile)" in line
     assert slot_commands._tune_line({"state": "offline"}) == ""
+
+
+def test_slot_load_unload_npu_holder_flag_sends_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_post(path: str, *, json: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
+        seen["path"], seen["body"] = path, json
+        return {"state": "ready", "model_id": "m"}
+
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _u: False)
+    monkeypatch.setattr(slot_commands, "api_post", fake_post)
+    result = runner.invoke(slot_commands.app, ["load", "px", "--unload-npu-holder"])
+    assert result.exit_code == 0, result.output
+    assert seen["body"] == {"unload_npu_holder": True}
+    result = runner.invoke(slot_commands.app, ["load", "px"])
+    assert seen["body"] == {}
+
+
+def test_slot_restart_unload_npu_holder_flag_sends_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_post(path: str, *, json: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
+        seen["path"], seen["body"] = path, json
+        return {"state": "ready"}
+
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _u: False)
+    monkeypatch.setattr(slot_commands, "api_post", fake_post)
+    result = runner.invoke(slot_commands.app, ["restart", "px", "--unload-npu-holder"])
+    assert result.exit_code == 0, result.output
+    assert seen["body"] == {"unload_npu_holder": True}

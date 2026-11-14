@@ -1629,6 +1629,31 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
         },
         "required": ["new_name"],
     },
+    "slot_load": {
+        "properties": {
+            "unload_npu_holder": {
+                "type": "boolean",
+                "description": (
+                    "true = if an FLM anchor or per-op xdna slot holds the NPU, unload it "
+                    "(pinned too) before starting. Default false: a conflict is refused "
+                    "with slot.npu_conflict (409). Never overrides a holder still loading. "
+                    "true makes this call gated: it runs only after operator approval."
+                ),
+            },
+        },
+    },
+    "slot_restart": {
+        "properties": {
+            "unload_npu_holder": {
+                "type": "boolean",
+                "description": (
+                    "true = if an FLM anchor or per-op xdna slot holds the NPU, unload it "
+                    "(pinned too) before starting. Default false: a conflict is refused "
+                    "with slot.npu_conflict (409). Never overrides a holder still loading."
+                ),
+            },
+        },
+    },
     "model_set_default": {
         "properties": {
             "model_id": {"type": "string", "description": "Model id to promote/clear"},
@@ -2400,9 +2425,18 @@ class ToolPolicy:
 def is_gated(tool: str, args: dict[str, Any], *, client_id: str | None = None) -> bool:
     """Classify a tool invocation as gated (needs approval) or autonomous.
 
-    ``memory_delete`` is the only tool whose gating depends on args —
-    single-id deletes run autonomously, bulk deletes (>1 id) gate. Every
-    other tool's classification is static.
+    Two tools' gating depends on args; every other tool's classification
+    is static:
+
+    * ``memory_delete`` — single-id deletes run autonomously, bulk deletes
+      (>1 id) gate (and see the ``dataset`` hardening below).
+    * ``slot_load`` — runs autonomously, except with
+      ``unload_npu_holder: true`` (#3666), which unloads the NPU holder
+      (the FLM anchor and its shadows, pinned or not) before the start. A
+      pinned slot is otherwise never unloaded without the operator
+      (``slot_unload`` has no ``force``), so that call gates. The test is
+      ``is True``, the same one ``POST /api/slots/{name}/load`` applies to
+      the body, so any value that would unload also gates.
 
     Diagnosis #8 hardening: a single-id delete that also directs the
     sweep at an explicit ``dataset`` used to run fully autonomously with
@@ -2416,6 +2450,8 @@ def is_gated(tool: str, args: dict[str, Any], *, client_id: str | None = None) -
     """
     if tool in GATED_TOOLS:
         return True
+    if tool == "slot_load":
+        return args.get("unload_npu_holder") is True
     if tool == "memory_delete":
         ids = args.get("ids") or []
         if len(ids) > 1:
@@ -3320,7 +3356,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "slot_load": (
         "Load a slot (optionally assign a model first). "
-        "Args: name=SLOT name, optional model_id=registered model to load."
+        "Args: name=SLOT name, optional model_id=registered model to load, optional "
+        "unload_npu_holder=true to unload the FLM anchor / per-op xdna slot that holds "
+        "the NPU (otherwise a conflict is refused with slot.npu_conflict); a call with "
+        "unload_npu_holder=true is gated and runs only after operator approval."
     ),
     "slot_unload": "Unload a running slot gracefully.",
     "slot_edit": (
@@ -3433,7 +3472,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_restart": (
         "Restart a slot's systemd unit (gated). Prefer slot_load for a slot in "
         "error state or after a config change — load regenerates the unit; "
-        "restart can time out on errored slots."
+        "restart can time out on errored slots. Optional unload_npu_holder=true, as "
+        "for slot_load."
     ),
     "capability_set": "Assign a capability child to a slot (gated).",
     "config_write": "Update hal0.toml top-level settings (gated).",

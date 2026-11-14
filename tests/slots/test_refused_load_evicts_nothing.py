@@ -554,4 +554,4 @@ async def test_a_swap_to_a_model_still_to_pull_is_judged_after_the_pull(
     monkeypatch.setattr(running, "load", load)
     await running.swap("flash", "to-be-pulled")
     check.assert_not_called()
-    load.assert_awaited_once_with("flash", model_id="to-be-pulled")
+    load.assert_awaited_once_with("flash", model_id="to-be-pulled", unload_npu_holder=False)

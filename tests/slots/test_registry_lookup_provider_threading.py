@@ -46,6 +46,7 @@ _PINNED_CALL_SITES: frozenset[tuple[str, str]] = frozenset(
         ("manager.py", "_load"),
         ("manager.py", "_spawn_locked"),
         ("manager.py", "_check_swap"),
+        ("manager.py", "_npu_xdna_path"),
         ("preload_evict.py", "_estimate_incoming_footprint_mb"),
         ("routing.py", "_model_info_for"),
     }

@@ -364,12 +364,19 @@ def slot_load(
     json_out: bool = typer.Option(
         False, "--json", help="Emit the final /api/slots/{name}/load JSON only (no progress)."
     ),
+    unload_npu_holder: bool = typer.Option(
+        False,
+        "--unload-npu-holder",
+        help="If an FLM anchor or per-op xdna slot holds the NPU, unload it first.",
+    ),
 ) -> None:
     """Load a slot (optionally assign a model first)."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
-    body = {"model_id": model} if model else {}
+    body: dict[str, Any] = {"model_id": model} if model else {}
+    if unload_npu_holder:
+        body["unload_npu_holder"] = True
     snap = _run_lifecycle_call(
         name=name,
         label=f"Loading {name}",
@@ -427,6 +434,11 @@ def slot_restart(
     json_out: bool = typer.Option(
         False, "--json", help="Emit the final /api/slots/{name}/restart JSON only (no progress)."
     ),
+    unload_npu_holder: bool = typer.Option(
+        False,
+        "--unload-npu-holder",
+        help="If an FLM anchor or per-op xdna slot holds the NPU, unload it first.",
+    ),
 ) -> None:
     """Restart a slot (unload then load)."""
     url = _api_base()
@@ -437,7 +449,11 @@ def slot_restart(
         label=f"Restarting {name}",
         timeout_s=SLOT_LIFECYCLE_TIMEOUT_S,
         json_out=json_out,
-        call=lambda: api_post(f"/api/slots/{name}/restart", timeout=SLOT_LIFECYCLE_TIMEOUT_S),
+        call=lambda: api_post(
+            f"/api/slots/{name}/restart",
+            json={"unload_npu_holder": True} if unload_npu_holder else None,
+            timeout=SLOT_LIFECYCLE_TIMEOUT_S,
+        ),
     )
     if json_out:
         typer.echo(jsonlib.dumps(snap, indent=2))
