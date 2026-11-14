@@ -4,6 +4,7 @@
 import { useMemo } from 'react'
 import { Gauge, AieGrid, HUES, NPU_COLS, activityLevel } from './aie-grid.jsx'
 import { arrayOwners, arrayShared } from './array-pure'
+import { npuHolders } from './npu-pure'
 
 const ENGINE_HUE = {
   flm: { hue: 'var(--dev-npu)', glow: 'var(--npu-s0-glow)', line: 'var(--npu-s0-line)', dim: 'var(--npu-s0-dim)', fg: 'var(--npu-s0-fg)' },
@@ -35,7 +36,27 @@ export function ArrayBand({ occ, hw, slots }) {
     .reduce((a, b) => a + b, 0)
   const act = activityLevel(dutyPct, tpsSum)
 
+  // Banners: the server's shared warning, and a host power mode that is not turbo while a GGML
+  // slot is up. A null pmode is unknown, never guessed.
+  const sharedWarning = typeof occ?.shared_warning === 'string' && occ.shared_warning ? occ.shared_warning : null
+  const pmode = typeof hw?.npu_pmode === 'string' && hw.npu_pmode ? hw.npu_pmode : null
+  const xdnaUp = npuHolders(occ?.slots).some((s) => s.engine === 'xdna')
+  const pmodeWarn = xdnaUp && pmode && pmode !== 'turbo' ? pmode : null
+
   return (
+    <>
+    {sharedWarning && (
+      <div className="npt-banner" role="status" data-testid="npu-shared-warning">{sharedWarning}</div>
+    )}
+    {pmodeWarn && (
+      <div className="npt-banner" role="status" data-testid="npu-pmode-banner">
+        <span>
+          Host power mode is {pmodeWarn}. GGML slots run best on turbo (about +15% prefill, +20% decode over the default power
+          mode); hal0 cannot set it from the container.
+        </span>
+        <a className="npt-glink" href="#slots/npu/engines" data-testid="npu-pmode-fix">How to fix</a>
+      </div>
+    )}
     <div className="npt-band" data-testid="npu-array-band">
       <Gauge pct={dutyPct} label="npu duty" sub={colsAvailable ? `${colsUsed ?? '—'}/${colsTotal} columns` : 'column probe unavailable'} size={150} />
       <div className="npt-band-stats">
@@ -74,5 +95,6 @@ export function ArrayBand({ occ, hw, slots }) {
         </div>
       </div>
     </div>
+    </>
   )
 }
