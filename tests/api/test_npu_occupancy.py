@@ -431,6 +431,34 @@ def test_occupancy_engine_reads_the_xdna_binary_from_config(client: TestClient, 
     assert by_name["xdna-qwen"]["engine"] == "xdna"
 
 
+def test_occupancy_keeps_xdna_slot_named_with_companion_suffix(client: TestClient, monkeypatch):
+    """An xdna slot named ``*-embed`` / ``*-stt`` is a real NPU holder, not a FLM companion."""
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(npu_columns, "cached_aie_columns", AsyncMock(return_value=None))
+    _wire(
+        client,
+        [
+            _FakeSlot("flm", SlotState.READY, model_id="gemma3:4b", backend="flm"),
+            _FakeSlot("test-embed", SlotState.READY, model_id="e", backend="npu"),
+            _FakeSlot("notes-stt", SlotState.READY, model_id="s", backend="npu"),
+        ],
+    )
+    sm = client.app.state.slot_manager
+    sm.iter_configs = AsyncMock(
+        return_value=[
+            {"name": "test-embed", "device": "npu", "type": "llm", "binary": "xdna"},
+            {"name": "notes-stt", "device": "npu", "type": "llm", "binary": "xdna"},
+        ]
+    )
+
+    body = client.get("/api/npu/occupancy").json()
+    by_name = {s["name"]: s for s in body["slots"]}
+    assert by_name["test-embed"]["engine"] == "xdna"
+    assert by_name["notes-stt"]["engine"] == "xdna"
+    assert body["single_tenant"] is False
+    assert body["shared_warning"] is not None
+
+
 # ── engine + host facts ──────────────────────────────────────────────────────
 
 _XDNA_REF = "ghcr.io/hal0ai/hal0-runner-xdna:1.2.3-r1a2b3c4"
