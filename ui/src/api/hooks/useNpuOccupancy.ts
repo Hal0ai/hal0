@@ -21,6 +21,7 @@ export interface NpuOccupancySlot {
   gb: number | null
   // Capability hit the NPU within the server's activity window (~6s) or has
   // a request in flight. Drives the grid's per-capability colour takeover.
+  engine?: 'flm' | 'xdna'
   active?: boolean
   last_used_age_s?: number | null
 }
@@ -37,6 +38,16 @@ export interface NpuOccupancy {
   single_tenant: boolean
   columns_available: boolean
   slots: NpuOccupancySlot[]
+  shared_warning?: string | null
+  npu_engines?: {
+    flm: { image: string | null; version: string | null }
+    xdna: { image: string | null; tag: string | null; pulled: boolean | null }
+  } | null
+  npu_host?: {
+    device_node: string | null
+    driver_loaded: boolean | null
+    xdna_gen: number | null
+  } | null
 }
 
 const POLL_MS = 2_500
