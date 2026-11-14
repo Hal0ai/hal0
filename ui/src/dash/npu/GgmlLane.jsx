@@ -3,20 +3,24 @@
 // in this page. Every readout is a real slot field or `—`.
 import { useState } from 'react'
 import { useRunnerImagePullJob } from '@/api/hooks/useRunnerImages'
-import { useSlotLoad, useSlotRestart, useSlotUnload } from '@/api/hooks/useSlots'
+import { useSlotUnload } from '@/api/hooks/useSlots'
 import { isXdnaSlot } from '@/lib/slotModelFit'
 import { SlotControls, slotCtrlPhase } from '../inference-pane.jsx'
 import { slotIndicatorFromPhase } from '../slot-status.js'
 import { GgmlSlotDrawer } from './GgmlSlotDrawer.jsx'
 import { GGML_IMAGE_MISSING } from './ggml-slot-pure'
 import { XdnaFitChips } from './XdnaFitChips.jsx'
+import { useNpuConflictStart } from './useNpuConflictStart.jsx'
 
 const num = (v, digits = 0) => (typeof v === 'number' && v > 0 ? (digits ? v.toFixed(digits) : String(Math.round(v))) : null)
 
 function GgmlCard({ slot, hostPmode, onEdit }) {
-  const loadMut = useSlotLoad()
+  const start = useNpuConflictStart()
   const unloadMut = useSlotUnload()
-  const restartMut = useSlotRestart()
+  const startOrWarn = (kind) =>
+    start.run(slot.name, kind).catch((e) => {
+      if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(e?.message ? `${slot.name}: ${e.message}` : `${slot.name}: action failed`, 'warn')
+    })
   const ind = slotIndicatorFromPhase(slot)
   const up = ['serving', 'ready', 'idle', 'loaded', 'warming', 'stale'].includes(ind.cls)
   const m = slot.metrics || {}
@@ -37,9 +41,9 @@ function GgmlCard({ slot, hostPmode, onEdit }) {
         <span className="npt-gsp" />
         <SlotControls
           phase={slotCtrlPhase(slot)}
-          onStart={() => loadMut.mutate(nm)}
+          onStart={() => startOrWarn('load')}
           onStop={() => unloadMut.mutate(nm)}
-          onRestart={() => restartMut.mutate(nm)}
+          onRestart={() => startOrWarn('restart')}
           onLogs={() => window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: nm } }))}
           onEdit={() => onEdit(slot)}
         />
@@ -60,6 +64,7 @@ function GgmlCard({ slot, hostPmode, onEdit }) {
         {up && ttft ? ` · ${ttft} ms` : ''}
         {up && mem ? ` · ${mem} GB` : ''}
       </div>
+      {start.dialog}
     </div>
   )
 }
