@@ -109,7 +109,7 @@ export function GgmlLane({ slots = [], occ, hw }) {
       {missing && (
         <div className="npt-banner" data-testid="ggml-pull-banner">
           <span>The ggml-xdna runner image is not pulled yet.{pulling && pull.pct != null ? ` ${Math.round(pull.pct)}%` : ''}</span>
-          <button type="button" className="btn sm" data-testid="ggml-pull" disabled={pulling} onClick={() => pull.start('xdna')}>
+          <button type="button" className="btn sm" data-testid="ggml-pull" disabled={pulling} onClick={() => Promise.resolve(pull.start('xdna')).catch(() => {})}>
             {pulling ? 'Pulling…' : 'Pull'}
           </button>
           {pull.error && <span className="npt-error-inline" role="alert">{pull.error.message}</span>}
