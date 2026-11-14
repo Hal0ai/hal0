@@ -2071,23 +2071,20 @@ class ContainerProvider(Provider):
         server_env = scalars["server_env"] or {}
         merged_env = {**vis_env, **server_env}
         if runner_key == "xdna":
-            from hal0.runners.knobs import XDNA_PINNED_ENV, screen_xdna_env, xdna_env_defaults
+            from hal0.runners.knobs import XDNA_PINNED_ENV
+            from hal0.slots.npu_conflict import xdna_launch_env
 
-            # Defaults first, then whatever's already resolved (visibility +
-            # [server].env, which includes any operator GGML_XDNA_*/pmode/
-            # host_xrt knob tokens) — an explicit key always wins over the
-            # default per the XDNA knob-set contract.
-            merged_env = {**xdna_env_defaults(), **merged_env}
+            # xdna defaults < [server].env < [xdna].env, screened (the XDNA
+            # knob-set contract: an explicit key always wins over the
+            # default). One helper so the NPU conflict rule sees the same env.
+            # gpu_visibility_env is {} for an NPU slot, so nothing is lost
+            # by building from the slot config alone.
+            merged_env = xdna_launch_env(slot_cfg)
 
-            # [xdna] table (84b3b186's pattern): env overrides screened the
-            # same way as [server].env, host_xrt RO-bind-mounted identical-
-            # path with HAL0_XDNA_HOST_XRT pointing the entrypoint at it.
+            # [xdna].host_xrt (84b3b186's pattern): RO-bind-mounted
+            # identical-path, HAL0_XDNA_HOST_XRT pointing the entrypoint at it.
             xdna_table = slot_cfg.get("xdna") if isinstance(slot_cfg, Mapping) else None
             if isinstance(xdna_table, Mapping):
-                xdna_env = xdna_table.get("env")
-                if isinstance(xdna_env, Mapping):
-                    screen_xdna_env(xdna_env)
-                    merged_env = {**merged_env, **xdna_env}
                 host_xrt = xdna_table.get("host_xrt")
                 if isinstance(host_xrt, str) and host_xrt:
                     extra_mounts.append(model_store_module.mount_for(host_xrt, read_only=True))

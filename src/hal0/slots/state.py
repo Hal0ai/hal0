@@ -96,6 +96,21 @@ class SlotState(StrEnum):
     """Slot has failed.  Details in state.json and journald."""
 
 
+#: States in which a slot occupies its device (up, loading or unloading).
+#: ``ERROR`` is deliberately absent: it needs a liveness probe to tell a dead
+#: slot from one whose process is alive but silent. Shared by the fabric-clock
+#: guard and the NPU conflict rule so the two never disagree on "live".
+LIVE_COUNTERPART_STATES: frozenset[SlotState] = frozenset(
+    {
+        SlotState.STARTING,
+        SlotState.WARMING,
+        SlotState.READY,
+        SlotState.SERVING,
+        SlotState.IDLE,
+        SlotState.UNLOADING,
+    }
+)
+
 #: Legal transitions: {from_state -> set of reachable states}
 #: Enforcement is the SlotManager's responsibility; this is a reference map.
 LEGAL_TRANSITIONS: dict[SlotState, frozenset[SlotState]] = {

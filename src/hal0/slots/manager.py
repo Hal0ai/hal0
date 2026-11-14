@@ -99,6 +99,7 @@ from hal0.slots.routing import route_for_request as _routing_route_for_request
 from hal0.slots.routing import seeded_slots as _routing_seeded_slots
 from hal0.slots.state import (
     DISPATCHABLE_STATES,
+    LIVE_COUNTERPART_STATES,
     IllegalSlotTransition,
     SlotConfigError,
     SlotCrashLooping,
@@ -3283,14 +3284,7 @@ class SlotManager:
             for s in others:
                 if not counterpart_predicate(s):
                     continue
-                if s.state in (
-                    SlotState.STARTING,
-                    SlotState.WARMING,
-                    SlotState.READY,
-                    SlotState.SERVING,
-                    SlotState.IDLE,
-                    SlotState.UNLOADING,
-                ):
+                if s.state in LIVE_COUNTERPART_STATES:
                     counterparts.append(s.name)
                 elif s.state is SlotState.ERROR:
                     try:
