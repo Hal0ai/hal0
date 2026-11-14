@@ -62,6 +62,7 @@ import { feasibilityHint } from './feasibility-copy'
 // the copy this file used to carry (and the verbatim clones in slot-list.jsx
 // and npu-pane.jsx).
 import { devKind } from '@/lib/deviceMeta'
+import { slotEditHash } from './slots-route'
 
 const { useState: useStateI, useRef: useRefI } = React
 
@@ -1235,7 +1236,7 @@ export function InferencePane() {
     onSwap: (s, model_id) =>
       run(s.name, swapMut, { name: s.name, model_id }, `Swapping ${s.name}…`),
     onEdit: (s) => {
-      window.location.hash = '#slots/' + s.name
+      window.location.hash = slotEditHash(s.name)
     },
     // SC-4 allows exactly one default=true slot per type and REFUSES a write
     // that would land a second one — it does not silently demote. There is no

@@ -17,7 +17,7 @@ import { PROXY_NEEDS_PUBLIC_URL, publicUrlHint } from '@/api/publicUrlHint'
 import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 import { SessionChip } from './auth/SessionChip.jsx'
 import { NAV_GROUPS as SETTINGS_NAV_GROUPS, VALID_IDS as SETTINGS_IDS } from './settings/SettingsNav.jsx'
-import { slotsTab } from './slots-route'
+import { slotEditHash, slotsTab } from './slots-route'
 
 // Slots tabs that are not the default; any other param (a slot name) stays on Inference. A param is
 // `<tab>[/<sub>]` (`image/generate`): the tab is its first segment (slots-route.ts).
@@ -239,7 +239,7 @@ function NotificationBell() {
               className="notif-act"
               onClick={() => window.dispatchEvent(new CustomEvent("hal0:slot-restart", { detail: { name: s.name } }))}
             >Restart</button>
-            <button className="notif-act" onClick={() => go("#slots/" + s.name)}>View</button>
+            <button className="notif-act" onClick={() => go(slotEditHash(s.name))}>View</button>
           </div>
         ))}
       </div>

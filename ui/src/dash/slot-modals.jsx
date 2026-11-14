@@ -86,6 +86,7 @@ import { SlotBreakerChip } from "./breaker-chip.jsx";
 import { ConversionBlockedChip, ConversionBlockedDetail } from "./conversion-blocked-chip.jsx";
 import { npuModalityOn, npuApplyBody } from "./npu-modality.js";
 import { slotModelRow, slotModelId, npuAnchorSlot, compatibleModels } from "./slots/slot-shared.js";
+import { slotEditHash } from './slots-route'
 
 // The slot edit drawer's own width, and therefore the offset the stacked model
 // drawer docks at so its right edge lands flush against this drawer's left one.
@@ -1341,7 +1342,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 			// The route still names the old slot (#slots/<old>); without this
 			// the drawer unmounts silently on the next poll because no slot
 			// matches the old name any more. Follow the rename in the URL.
-			window.location.hash = "#slots/" + next;
+			window.location.hash = slotEditHash(next);
 		} catch (err) {
 			setNameDraft(slot.name);
 			window.__hal0Toast &&
@@ -2447,10 +2448,10 @@ function EditSlotDrawer({ open, slot, onClose }) {
 											This capability is served by the anchor FLM slot — STT and
 											Embed are toggled there.{" "}
 											<a
-												href={"#slots/" + anchor}
+												href={slotEditHash(anchor)}
 												onClick={(e) => {
 													e.preventDefault();
-													const target = "#slots/" + anchor;
+													const target = slotEditHash(anchor);
 													// Route through the dirty guard — a direct hash
 													// assignment would re-seed the drawer for the anchor
 													// and silently drop pending Save-batched edits.

@@ -32,6 +32,7 @@ import { devKind } from '@/lib/deviceMeta'
 import { isXdnaSlot as isXdnaRunner } from '@/lib/slotModelFit'
 import { PillToggle } from './primitives.jsx'
 import { npuPillOn, npuModalityOn, npuApplyBody, npuRoleForSlot, isNpuShadowSlot } from './npu-modality.js'
+import { slotEditHash } from './slots-route'
 
 // ─── icons (16×16, hal0 thin-line family — ported from the design) ─────────
 const NI = ({ d, size = 16, sw = 1.5, children, fill = 'none' }) => (
@@ -645,7 +646,7 @@ export function NpuOccupancyCard({ slots }) {
     // dependency (#1661). The model picker lives in the drawer.
     if (next && !(anchorSlot.modelDefault || anchorSlot.model_id || anchorSlot.model)) {
       toast('Pick a chat model first — opening the slot editor', 'info')
-      window.location.hash = '#slots/' + anchorSlot.name
+      window.location.hash = slotEditHash(anchorSlot.name)
       return
     }
     // Partial write on purpose: the backend one-level-deep-merges [npu]
@@ -695,7 +696,7 @@ export function NpuOccupancyCard({ slots }) {
     onStop: (s) => run(s.name, unloadMut, s.name, `Stopping ${s.name}…`),
     onRestart: (s) => run(s.name, restartMut, s.name, `Restarting ${s.name}…`),
     onEdit: (s) => {
-      window.location.hash = '#slots/' + s.name
+      window.location.hash = slotEditHash(s.name)
     },
     onLogs: (s) => {
       window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: s.name } }))
@@ -758,7 +759,7 @@ export function NpuOccupancyCard({ slots }) {
             onStop={() => anchorSlot && handlers.onStop(anchorSlot)}
             onRestart={() => anchorSlot && handlers.onRestart(anchorSlot)}
             onLogs={() => anchorSlot && handlers.onLogs(anchorSlot)}
-            onEdit={() => anchorSlot && (window.location.hash = '#slots/' + anchorSlot.name)}
+            onEdit={() => anchorSlot && (window.location.hash = slotEditHash(anchorSlot.name))}
           />
         </div>
         <div className="wcard-b">

@@ -33,3 +33,18 @@ export function isReservedSlotsTab(param: string | null | undefined): boolean {
   const t = slotsTab(param)
   return t != null && (SLOTS_RESERVED_TABS as readonly string[]).includes(t)
 }
+
+/** The hash that opens a slot's edit drawer. A slot named like a reserved tab goes through
+ *  `#slots/edit/<name>`, because `#slots/<name>` would open the tab instead. */
+export function slotEditHash(name: string): string {
+  return isReservedSlotsTab(name) ? `#slots/edit/${name}` : `#slots/${name}`
+}
+
+/** The slot a Slots route param asks to edit: `edit/<name>` → name, a bare non-reserved param →
+ *  itself, anything else (a reserved tab, with or without a sub-tab) → null. */
+export function slotEditTarget(param: string | null | undefined): string | null {
+  if (!param) return null
+  if (param.startsWith('edit/')) return param.slice('edit/'.length) || null
+  if (isReservedSlotsTab(param)) return null
+  return param
+}

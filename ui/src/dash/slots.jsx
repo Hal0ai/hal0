@@ -22,7 +22,7 @@ import { ImageGenTabs } from './image/ImageGenTabs'
 import { NpuTabs } from './npu/NpuTabs'
 import { npuTabVisible } from './npu/npu-pure'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
-import { isReservedSlotsTab, slotsSub, slotsTab } from './slots-route'
+import { isReservedSlotsTab, slotEditHash, slotEditTarget, slotsSub, slotsTab } from './slots-route'
 import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
   InferencePane,
@@ -496,7 +496,7 @@ function SlotListRow({ slot, modelRow, onEdit }) {
   // restart mutation and the Edit drawer (via the #slots/:name route, the
   // same path SlotCard uses). `onEdit` is optional; fall through to hash.
   const restartMut = useSlotRestart();
-  const goEdit = onEdit || (() => { window.location.hash = "#slots/" + slot.name; });
+  const goEdit = onEdit || (() => { window.location.hash = slotEditHash(slot.name); });
   // Fire-and-forget restart — never block the row on the model reload.
   const onRestart = () => {
     restartMut.mutate(slot.name, {
@@ -695,12 +695,11 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
 
   // Open Edit drawer when route is #slots/:name
   React.useEffect(() => {
-    if (slotParam && isReservedSlotsTab(slotParam)) {
-      // A reserved tab name wins over a slot of the same name.
-      setEditName(null);
-    } else if (slotParam) {
-      const exists = (slots || []).find(s => s.name === slotParam);
-      if (exists) setEditName(slotParam);
+    // `#slots/<name>` or, for a slot named like a reserved tab, `#slots/edit/<name>`.
+    const target = slotEditTarget(slotParam);
+    if (target) {
+      const exists = (slots || []).find(s => s.name === target);
+      if (exists) setEditName(target);
     } else {
       setEditName(null);
     }
@@ -811,7 +810,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
       swapOpen={swapName === s.name}
       onSwap={(e) => { e.stopPropagation(); setSwapName(swapName === s.name ? null : s.name); }}
       onCloseSwap={() => setSwapName(null)}
-      onEdit={() => { window.location.hash = "#slots/" + s.name; }}
+      onEdit={() => { window.location.hash = slotEditHash(s.name); }}
       onRestart={() =>
         runMutation(s.name, restartMut, s.name, `Restarting ${s.name}…`)
       }

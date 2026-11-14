@@ -98,6 +98,28 @@ describe('a slot named like a reserved tab', () => {
   })
 })
 
+describe('editing a slot named like a reserved tab', () => {
+  it('#slots/edit/npu opens the drawer for the slot named npu', () => {
+    box.slots = [{ name: 'npu', kind: 'local', type: 'chat', state: 'running', device_class: 'npu' }]
+    const opened: unknown[] = []
+    g.EditSlotDrawer = (p: { open: boolean; slot?: { name: string } }) => {
+      if (p.open) opened.push(p.slot?.name)
+      return null
+    }
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client },
+          React.createElement(SlotsView, { slotParam: 'edit/npu', slotSub: 'npu', onGo: () => {} }),
+        ),
+      )
+    })
+    g.EditSlotDrawer = () => null
+    expect(opened).toContain('npu')
+  })
+})
+
 describe('slotSub reaches the Image Gen pane', () => {
   // What main.jsx does for the route: `slotParam={param}` and `slotSub={slotsSub(param)}`.
   const renderRoute = (param: string | null) =>

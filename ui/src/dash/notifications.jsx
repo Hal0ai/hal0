@@ -20,6 +20,7 @@ import { useUpdateState, useSlotDrift, useRestartDriftedSlots } from '@/api/hook
 import { useApprovalList } from '@/api/hooks/useAgents'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
+import { slotEditHash } from './slots-route'
 
 const { useState: useSN, useEffect: useEN, useMemo: useMN } = React
 
@@ -189,7 +190,7 @@ export function useNotifications() {
         ),
         actions: [
           { label: 'Restart', onClick: () => window.dispatchEvent(new CustomEvent('hal0:slot-restart', { detail: { name: s.name } })) },
-          { label: 'View slot', onClick: () => { window.location.hash = '#slots/' + s.name } },
+          { label: 'View slot', onClick: () => { window.location.hash = slotEditHash(s.name) } },
         ],
       })
     }
