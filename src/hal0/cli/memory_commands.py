@@ -46,6 +46,7 @@ from hal0.cli.memory_bank_commands import app as bank_app
 from hal0.cli.memory_directive_commands import app as directive_app
 from hal0.cli.memory_embedder_commands import app as embedder_app
 from hal0.cli.memory_kb_commands import app as kb_app
+from hal0.cli.memory_knowledge_commands import app as knowledge_app
 from hal0.cli.memory_migrate_commands import app as migrate_app
 from hal0.cli.memory_mm_commands import app as mm_app
 from hal0.cli.memory_models_agents_commands import agents_app, models_app
@@ -70,6 +71,8 @@ app.add_typer(ops_app, name="ops")
 app.add_typer(mm_app, name="mm")
 app.add_typer(spec_app, name="spec")
 app.add_typer(kb_app, name="kb")
+# ``knowledge rehome``: on the box, talks to the engine directly, like ``embedder``.
+app.add_typer(knowledge_app, name="knowledge")
 app.add_typer(directive_app, name="directive")
 app.add_typer(models_app, name="models")
 # ``embedder switch`` (#3518): the one command here that works on the box
