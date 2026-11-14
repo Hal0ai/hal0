@@ -133,7 +133,7 @@ class _FakeHttpClient:
         self._raises = raises
         self.closed = False
 
-    def request(self, method, path, *, headers=None, json=None, params=None):
+    def request(self, method, path, *, headers=None, json=None, params=None, timeout=None):
         self.calls.append(
             {"method": method, "path": path, "headers": headers, "json": json, "params": params}
         )
@@ -357,15 +357,29 @@ def test_shutdown_is_a_noop_without_initialize() -> None:
 # ── system_prompt_block ───────────────────────────────────────────────────
 
 
-def test_system_prompt_block_mentions_private_bank_name() -> None:
+def test_system_prompt_block_describes_the_two_bank_layout() -> None:
     fake_client = Mock(spec=Hal0MemoryClient)
     fake_client.agent_id = "hermes"
     provider = Hal0MemoryProvider(client=fake_client)
     provider.initialize()
     block = provider.system_prompt_block()
-    assert "private:hermes" in block
+    # Never the retired ``private:<agent>`` namespace or a one-bank/split story.
+    assert "private:" not in block
+    assert "one bank" not in block and "separate" not in block
+    assert "hal0:shared" in block and "hal0:private" in block
+    assert "never name a bank" in block
+    assert 'visibility="private"' in block
+    assert "project" in block
     assert "hindsight_recall" in block
     assert "hindsight_retain" in block
+
+
+def test_tool_schemas_name_no_old_bank_and_take_project() -> None:
+    for schema in ALL_TOOL_SCHEMAS:
+        text = json.dumps(schema)
+        assert "private:" not in text, schema["name"]
+        assert "one bank" not in text and "separate private" not in text, schema["name"]
+        assert schema["parameters"]["properties"]["project"]["type"] == "string"
 
 
 # ── prefetch ───────────────────────────────────────────────────────────────
@@ -609,8 +623,24 @@ def test_handle_tool_call_add_defaults_to_shared_bank() -> None:
     provider.initialize()
     out = json.loads(provider.handle_tool_call("hal0_memory_add", {"text": "fact"}))
     fake_client.add.assert_called_once_with("fact", tags=["agent:hermes"], private=False)
-    assert out["bank"] == "shared"
+    # hal0 reported no bank, so none is invented.
+    assert "bank" not in out
     assert out["visibility"] == "shared"
+
+
+@pytest.mark.parametrize("bank", ["hal0:shared", "hal0:private"])
+def test_handle_tool_call_add_reports_the_bank_hal0_returns(bank: str) -> None:
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.agent_id = "hermes"
+    fake_client.add.return_value = {"id": "m1", "timestamp": "t", "bank": bank}
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize()
+    visibility = "private" if bank == "hal0:private" else "shared"
+    out = json.loads(
+        provider.handle_tool_call("hindsight_retain", {"text": "fact", "visibility": visibility})
+    )
+    assert out["bank"] == bank
+    assert out["visibility"] == visibility
 
 
 def test_handle_tool_call_add_visibility_private_override() -> None:
@@ -624,7 +654,7 @@ def test_handle_tool_call_add_visibility_private_override() -> None:
         provider.handle_tool_call("hal0_memory_add", {"text": "fact", "visibility": "private"})
     )
     fake_client.add.assert_called_once_with("fact", tags=["agent:hermes"], private=True)
-    assert out["bank"] == "private:hermes"
+    assert "bank" not in out
     assert out["visibility"] == "private"
 
 
@@ -638,7 +668,7 @@ def test_handle_tool_call_add_profile_default_visibility_override() -> None:
     provider._default_visibility = "private"  # simulates profile/env policy
     out = json.loads(provider.handle_tool_call("hal0_memory_add", {"text": "fact"}))
     fake_client.add.assert_called_once_with("fact", tags=["agent:hermes"], private=True)
-    assert out["bank"] == "private:hermes"
+    assert out["visibility"] == "private"
 
 
 @pytest.fixture(autouse=True)
@@ -820,6 +850,7 @@ def test_handle_tool_call_add_does_not_overwrite_existing_error_result() -> None
     provider.initialize()
     out = json.loads(provider.handle_tool_call("hal0_memory_add", {"text": "fact"}))
     assert "bank" not in out
+    assert "visibility" not in out
 
 
 def test_handle_tool_call_unknown_tool() -> None:
@@ -863,7 +894,7 @@ def test_handle_tool_call_hindsight_retain_dispatches_shared_by_default() -> Non
     provider.initialize()
     out = json.loads(provider.handle_tool_call("hindsight_retain", {"text": "fact"}))
     fake_client.add.assert_called_once_with("fact", tags=["agent:hermes"], private=False)
-    assert out["bank"] == "shared"
+    assert out["visibility"] == "shared"
 
 
 def test_hindsight_reflect_is_exposed_and_dispatches() -> None:
@@ -908,7 +939,81 @@ def test_legacy_tool_name_aliases_still_dispatch() -> None:
         "items": ["r"]
     }
     out = json.loads(provider.handle_tool_call("hal0_memory_add", {"text": "fact"}))
-    assert out["bank"] == "shared"
+    assert out["visibility"] == "shared"
+
+
+# ── project scoping (ADR-0058 decisions 4a / 7b) ───────────────────────────
+
+
+def _http_provider() -> tuple[Hal0MemoryProvider, _FakeHttpClient]:
+    http = _FakeHttpClient(response=_FakeResponse(json_body={"id": "m1", "bank": "hal0:shared"}))
+    client = Hal0MemoryClient(base_url="http://h:1", agent_id="hermes", http_client=http)
+    provider = Hal0MemoryProvider(client=client)
+    provider.initialize()
+    return provider, http
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "path"),
+    [
+        ("hindsight_retain", {"text": "fact"}, "/api/memory/add"),
+        ("hindsight_recall", {"query": "q"}, "/api/memory/recall"),
+        ("hindsight_reflect", {"query": "q"}, "/api/memory/reflect"),
+    ],
+)
+def test_project_reaches_the_hal0_request_body(tool: str, args: dict, path: str) -> None:
+    provider, http = _http_provider()
+    provider.handle_tool_call(tool, {**args, "project": "  hal0  "})
+    (call,) = http.calls
+    assert call["path"] == path
+    assert call["json"]["project"] == "hal0"
+    # hal0 stamps the project tag itself; the plugin never writes one.
+    assert not any(str(t).startswith("project:") for t in call["json"].get("tags") or [])
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("hindsight_retain", {"text": "fact"}),
+        ("hindsight_recall", {"query": "q"}),
+        ("hindsight_reflect", {"query": "q"}),
+    ],
+)
+@pytest.mark.parametrize("project", [None, "", "   "])
+def test_no_project_sends_no_project_field(tool: str, args: dict, project: Any) -> None:
+    provider, http = _http_provider()
+    call_args = dict(args) if project is None else {**args, "project": project}
+    provider.handle_tool_call(tool, call_args)
+    (call,) = http.calls
+    assert "project" not in call["json"]
+
+
+def test_a_non_string_project_is_an_error_result() -> None:
+    provider, http = _http_provider()
+    out = json.loads(provider.handle_tool_call("hindsight_retain", {"text": "f", "project": 3}))
+    assert out == {"status": "error", "error": "project must be a string"}
+    assert http.calls == []
+
+
+def test_reflect_fallback_keeps_the_project() -> None:
+    fake_client = Mock(spec=Hal0MemoryClient)
+    fake_client.reflect.return_value = {"status": "unsupported"}
+    fake_client.recall.return_value = {"items": []}
+    provider = Hal0MemoryProvider(client=fake_client)
+    provider.initialize()
+    provider.handle_tool_call("hindsight_reflect", {"query": "q", "project": "hal0"})
+    assert fake_client.reflect.call_args.kwargs["project"] == "hal0"
+    assert fake_client.recall.call_args.kwargs["project"] == "hal0"
+
+
+def test_prefetch_reads_every_project() -> None:
+    # Hermes hands the provider no project (initialize kwargs carry
+    # hermes_home, platform, agent_identity ...), so prefetch names none.
+    provider, http = _http_provider()
+    provider.prefetch("q")
+    (call,) = http.calls
+    assert call["path"] == "/api/memory/recall"
+    assert "project" not in call["json"]
 
 
 # ── on_memory_write ─────────────────────────────────────────────────────
@@ -951,7 +1056,7 @@ def test_on_memory_write_adds_with_target_tag() -> None:
     provider.on_memory_write("add", "note", "content", metadata={"k": "v"})
     fake_client.add.assert_called_once_with(
         "content",
-        tags=["builtin-memory", "agent:hermes", "note"],
+        tags=["builtin-memory", "agent:hermes", "kind:durable", "note"],
         metadata={"k": "v"},
         private=True,
     )
@@ -963,7 +1068,10 @@ def test_on_memory_write_without_target_uses_base_tags() -> None:
     provider.initialize()
     provider.on_memory_write("add", "", "content")
     fake_client.add.assert_called_once_with(
-        "content", tags=["builtin-memory", "agent:hermes"], metadata=None, private=True
+        "content",
+        tags=["builtin-memory", "agent:hermes", "kind:durable"],
+        metadata=None,
+        private=True,
     )
 
 
@@ -1083,6 +1191,9 @@ def test_on_delegation_records_in_private_bank() -> None:
     provider.on_delegation("do X", "did X", child_session_id="child-9")
     _args, kwargs = fake_client.add.call_args
     assert "delegation" in kwargs["tags"]
+    # A hand-off record is session context, not a durable fact.
+    assert "kind:ephemeral" in kwargs["tags"]
+    assert "kind:durable" not in kwargs["tags"]
     assert kwargs["private"] is True
     assert kwargs["metadata"]["child_session_id"] == "child-9"
 
@@ -1122,8 +1233,8 @@ def test_get_config_schema_declares_expected_keys() -> None:
 
 def test_save_config_writes_local_external_shape(tmp_path) -> None:
     # M1: config persists to <hermes_home>/hindsight/config.json in the upstream
-    # local_external shape, extended with hal0's dual-bank template. Secrets are
-    # dropped (only base_url + agent_id are read from values).
+    # local_external shape, with no bank names (hal0 picks the bank). Secrets
+    # are dropped (only base_url + agent_id are read from values).
     provider = Hal0MemoryProvider()
     provider.save_config(
         {
@@ -1137,8 +1248,6 @@ def test_save_config_writes_local_external_shape(tmp_path) -> None:
     assert written == {
         "mode": "local_external",
         "api_url": "http://box:8080/api/memory",
-        "private_bank_template": "private:{agent}",
-        "shared_bank": "shared",
         "base_url": "http://box:8080",
         "agent_id": "hermes",
     }
@@ -1376,22 +1485,21 @@ def test_initialize_ignores_a_stored_default_id_on_a_profile_home(
     assert p._client is not None and p._client.agent_id == "hermes__coder"
 
 
-def test_prompt_and_retain_schema_do_not_overclaim_privacy() -> None:
-    """Private notes are filtered from other agents' recall and reflect. A
-    reflect answer blends the caller's own private notes in unmarked where one
-    bank holds everything, and reads the shared bank alone where banks are split."""
+def test_prompt_and_schemas_describe_the_two_bank_reads() -> None:
+    """Two banks: a private note is readable only by its writer, recall spans
+    shared memory and the caller's own private notes, and reflect (sent without
+    the private toggle) reads shared memory alone."""
     from hal0.agents.hermes.plugins.memory_hindsight import provider as prov
 
     provider = Hal0MemoryProvider(client=Mock(spec=Hal0MemoryClient))
     provider.initialize()
     block = provider.system_prompt_block()
-    assert "only you" not in block and "only you" not in prov.RETAIN_SCHEMA["description"]
-    assert "leaves out other agents' private notes" in block
-    assert "your own private notes, without marking them" in block
-    assert "where private banks are separate it reads the shared bank alone" in block
+    assert "readable only by you" in block
+    assert "readable only by you" in prov.RETAIN_SCHEMA["description"]
+    assert "reflect for a written synthesis (slow, often minutes; shared memory only)" in block
     reflect = prov.REFLECT_SCHEMA["description"]
-    assert "Other agents' private notes are left out" in reflect
-    assert "separate private banks this reads the shared bank alone" in reflect
+    assert "reads shared memory only" in reflect
+    assert "use hindsight_recall for your own" in reflect
 
 
 def test_a_yaml_parse_error_never_puts_the_config_text_in_the_log(tmp_path, caplog) -> None:

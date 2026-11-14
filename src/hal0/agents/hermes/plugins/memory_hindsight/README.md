@@ -21,7 +21,8 @@ the hermes-agent venv at runtime.
 | Kind | `exclusive` (per `MemoryManager` single-provider invariant) |
 | Base URL | arg → `HAL0_MEMORY_BASE` env → `memory.hal0.base_url` (config.yaml) → `http://127.0.0.1:8080` |
 | Identity | `X-hal0-Agent` header: arg → `HAL0_AGENT_ID` env → `memory.hal0.agent_id` → `hermes` |
-| Banks | `private:<agent-id>` + `shared`; reads are a server-enforced union |
+| Banks | hal0 picks them: `hal0:shared` (every agent reads) and `hal0:private` (only the writer reads); the plugin never names one. Reads are a server-enforced union of shared memory and the caller's own private notes |
+| Projects | `project` on `hindsight_retain` / `hindsight_recall` / `hindsight_reflect` is sent in the request body; hal0 resolves it and stamps `project:<slug>`. A read with it returns that project plus global memory. Prefetch names no project (Hermes hands the provider none) |
 | Visibility policy | Raw turns/lifecycle captures → **private**; explicit durable writes (`hal0_memory_add`) → **shared by default**, `visibility:"private"` override (or `HAL0_MEMORY_DEFAULT_VISIBILITY` / profile policy). Enforced server-side. |
 | Dataset field | **NEVER SENT** — server resolves the bank from `X-hal0-Agent` + `X-hal0-Private` headers (issue #317 / PR #366) |
 | Transport | **synchronous** `httpx.Client` (memory hooks are sync; async wrapping broke on reuse) |
@@ -36,8 +37,8 @@ the hermes-agent venv at runtime.
 The hal0-memory REST routes call `resolve_write_dataset(requested,
 private, client_id)` (`src/hal0/api/routes/memory.py`). When the
 client omits an explicit dataset, the server reads `X-hal0-Agent` (and
-`X-hal0-Private`) and routes the write to `private:<agent_id>` or
-`shared`. Sending an explicit `private:<id>` re-trips the
+`X-hal0-Private`) and routes the write to the caller's private namespace or
+to shared memory. Sending an explicit `private:<id>` re-trips the
 `_AGENT_ID_PATTERN` reject in `src/hal0/mcp/memory.py`.
 
 The regression test `test_no_dataset_field_ever_sent` in
@@ -74,10 +75,11 @@ From `agent/memory_provider.py`:
   rotates it without re-initialising (`/new`, `/resume`, compression), so
   later captures go to the new session's document.
 * `on_delegation(task, result, *, child_session_id)` — records delegated work
-  in the **private** bank (separate namespace via `child_session_id`).
+  **privately**, tagged `kind:ephemeral` (a hand-off record, not a durable fact).
 * `get_tool_schemas()` / `handle_tool_call()` — the explicit
-  `hindsight_{recall,retain,reflect}` tools. `retain` defaults to the
-  **shared** bank; pass `visibility:"private"` for the private override.
+  `hindsight_{recall,retain,reflect}` tools. `retain` defaults to
+  **shared**; pass `visibility:"private"` for the private override. Its result
+  carries the `bank` hal0 reports for the write, when hal0 reports one.
   `recall` is fast and returns stored facts. `reflect` asks
   `POST /api/memory/reflect`, where an LLM in the memory engine writes an
   answer; it is slow (minutes on local hardware), its answer is framed as
@@ -91,7 +93,8 @@ From `agent/memory_provider.py`:
   still on its pre-two-bank layout it reads the platform bank, which (by
   default) also holds every agent's private notes, filtered the same way.
 * `on_memory_write(action, target, content, metadata=None)` — mirrors the
-  built-in memory tool's writes **privately** into hal0-memory.
+  built-in memory tool's writes **privately** into hal0-memory, tagged
+  `kind:durable`.
 * `get_config_schema()` / `save_config(values, hermes_home)` — official setup
   schema (base_url, agent_id, default visibility); persists only the declared
   non-secret keys to `<hermes_home>/hal0-memory.config.json`.

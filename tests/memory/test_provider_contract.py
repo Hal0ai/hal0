@@ -127,6 +127,7 @@ async def test_hindsight_conforms_to_contract():
         <= {
             "id",
             "timestamp",
+            "bank",
             "operation_id",
             "operation_ids",
             "items_count",

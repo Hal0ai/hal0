@@ -11,10 +11,13 @@ Talks to hal0-api's ``/api/memory/*`` routes, NOT the ``/mcp/memory``
 JSON-RPC transport. Identity is carried via ``X-hal0-Agent``;
 there is no Bearer auth on the hal0 LAN.
 
-Two banks, selected per write by ``X-hal0-Private``:
-  * ``X-hal0-Agent: hermes`` + ``X-hal0-Private: 1`` → ``private:hermes``
-  * ``X-hal0-Agent: hermes`` + ``X-hal0-Private: 0`` → ``shared``
-Reads are a server-side UNION of both banks regardless of the flag.
+Visibility, selected per write by ``X-hal0-Private`` (hal0 picks the bank):
+  * ``X-hal0-Private: 1`` → private, readable only by the ``X-hal0-Agent``
+    that wrote it (``hal0:private`` on a two-bank store)
+  * ``X-hal0-Private: 0`` → shared, readable by every agent (``hal0:shared``)
+Reads are a server-side UNION of shared memory and the caller's own private
+notes regardless of the flag. ``project`` travels in the body, never as a tag:
+hal0 resolves the name and stamps the ``project:`` tag itself.
 
 #317 contract: this client NEVER sends a ``dataset`` field — the server
 resolves the write target from the headers (PR #366).
@@ -28,8 +31,8 @@ from typing import Any
 import httpx
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8080"
-# hal0's registry calls this agent ``hermes``; the server derives the bank
-# name from it (``private:<id>``), so this IS the private bank name.
+# hal0's registry calls this agent ``hermes``; the server tags every write with
+# it and keys private notes to it.
 DEFAULT_AGENT_ID = "hermes"
 DEFAULT_CONNECT_TIMEOUT = 3.0
 DEFAULT_READ_TIMEOUT = 30.0  # recall/extraction can take a while on the iGPU
@@ -164,8 +167,12 @@ class Hal0MemoryClient:
         document_id: str | None = None,
         append_document_id: str | None = None,
         observation_scopes: Any = None,
+        project: str | None = None,
     ) -> dict[str, Any]:
-        """POST /api/memory/add. ``private=True`` → hermes-private, else shared.
+        """POST /api/memory/add. ``private=True`` → private to this agent, else shared.
+
+        ``project`` names the project the fact belongs to; hal0 resolves it and
+        tags the write. Sent only when given.
 
         ``document_id`` is a plain upsert: the engine REPLACES the document it
         already holds under that id. Right for one fact revised in place, and
@@ -191,6 +198,8 @@ class Hal0MemoryClient:
             payload["append_document_id"] = append_document_id
         if observation_scopes is not None:
             payload["observation_scopes"] = observation_scopes
+        if project:
+            payload["project"] = project
         return self._request("POST", "/api/memory/add", json=payload, private=private)
 
     def search(self, query: str, *, limit: int = 10) -> dict[str, Any]:
@@ -200,12 +209,23 @@ class Hal0MemoryClient:
         )
 
     def recall(
-        self, query: str, *, types: list[str] | None = None, max_tokens: int = 4096
+        self,
+        query: str,
+        *,
+        types: list[str] | None = None,
+        max_tokens: int = 4096,
+        project: str | None = None,
     ) -> dict[str, Any]:
-        """POST /api/memory/recall — token-budgeted consolidated recall (union)."""
+        """POST /api/memory/recall — token-budgeted consolidated recall (union).
+
+        ``project`` narrows it to that project plus global memory; without it
+        every project is read.
+        """
         payload: dict[str, Any] = {"query": query, "max_tokens": int(max_tokens)}
         if types is not None:
             payload["types"] = list(types)
+        if project:
+            payload["project"] = project
         return self._request("POST", "/api/memory/recall", json=payload, private=True)
 
     def reflect(
@@ -217,14 +237,14 @@ class Hal0MemoryClient:
         tags: list[str] | None = None,
         tags_match: str | None = None,
         response_schema: dict[str, Any] | None = None,
+        project: str | None = None,
     ) -> dict[str, Any]:
         """POST /api/memory/reflect — the engine's LLM synthesis over memory.
 
         Slow: the engine runs an agentic loop, so this waits minutes, not the
         30 s the other verbs get. Sent without the private toggle, so it reads
-        the shared namespace: under hal0's unified bank that includes this
-        agent's own private notes (other agents' are filtered out by hal0-api);
-        with split banks it is the shared bank alone.
+        shared memory (``hal0:shared`` on a two-bank store); private notes are
+        not in it. ``project`` narrows it as it narrows :meth:`recall`.
         """
         payload: dict[str, Any] = {
             "query": query,
@@ -237,6 +257,8 @@ class Hal0MemoryClient:
             payload["tags_match"] = tags_match
         if response_schema is not None:
             payload["response_schema"] = dict(response_schema)
+        if project:
+            payload["project"] = project
         return self._request(
             "POST",
             "/api/memory/reflect",

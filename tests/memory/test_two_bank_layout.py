@@ -191,6 +191,14 @@ async def test_a_two_bank_private_write_lands_in_the_private_bank_with_its_own_s
 
 
 @pytest.mark.asyncio
+async def test_a_two_bank_write_reports_the_bank_it_landed_in() -> None:
+    p = provider(TWO, Engine())
+    shared = await p.add("a note", client_id=ME)
+    private = await p.add("a note", dataset=f"private:{ME}", client_id=ME)
+    assert (shared["bank"], private["bank"]) == (SHARED, PRIVATE)
+
+
+@pytest.mark.asyncio
 async def test_a_two_bank_private_write_with_a_project_scopes_by_project_too() -> None:
     engine = Engine()
     p = provider(TWO, engine, projects=ProjectRegistry(aliases={"atlas-mono": "atlas"}))
