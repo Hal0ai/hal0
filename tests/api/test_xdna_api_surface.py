@@ -146,7 +146,21 @@ def test_npu_pmode_parses_xrt_smi_output(monkeypatch):
         "hal0.hardware.stats._run",
         lambda argv: (0, "Device\nPower Mode : Balanced\n", ""),
     )
-    assert stats.npu_pmode() == "Balanced"
+    assert stats.npu_pmode() == "balanced"
+
+
+def test_npu_pmode_turbo_matches_lowercase_pmode_token(monkeypatch):
+    """xrt-smi prints ``Turbo``; the UI compares against the lowercase ``turbo`` token."""
+    from hal0.runners.knobs import XDNA_PMODES
+
+    stats = HardwareStats()
+    monkeypatch.setattr("hal0.hardware.stats.shutil.which", lambda name: "/usr/bin/xrt-smi")
+    monkeypatch.setattr(
+        "hal0.hardware.stats._run",
+        lambda argv: (0, "Device\nPower Mode : Turbo\n", ""),
+    )
+    assert stats.npu_pmode() == "turbo"
+    assert stats.npu_pmode() in XDNA_PMODES
 
 
 def test_npu_fclk_none_without_sysfs(monkeypatch, tmp_path):

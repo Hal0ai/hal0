@@ -249,6 +249,10 @@ class HardwareStats:
         looking for a ``Power Mode`` / ``Mode`` field. Best-effort: no
         binary, no device, or an unparseable report all yield None —
         this never blocks (no retries) and never fabricates a value.
+
+        The value is lowercased so it compares equal to the ``[xdna].pmode``
+        tokens (``XDNA_PMODES`` in ``hal0.runners.knobs``) the dashboard
+        checks it against; ``xrt-smi`` prints it title-cased (``Turbo``).
         """
         if shutil.which("xrt-smi") is None:
             return None
@@ -261,7 +265,7 @@ class HardwareStats:
             if (low.startswith("power mode") or low.startswith("mode")) and ":" in stripped:
                 val = stripped.split(":", 1)[1].strip()
                 if val:
-                    return val
+                    return val.lower()
         return None
 
     def npu_fclk(self) -> int | None:
