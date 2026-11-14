@@ -386,8 +386,10 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                 continue
             # flm-stt / flm-embed are companion slots whose occupancy is
             # reported via virtual synthesis from the FLM anchor's TOML —
-            # they never appear as standalone entries.
-            if s.name.endswith("-stt") or s.name.endswith("-embed"):
+            # they never appear as standalone entries. An xdna slot an operator
+            # happened to name ``*-stt`` / ``*-embed`` is a real process holding
+            # the NPU, so it is never skipped.
+            if s.name not in xdna_names and (s.name.endswith("-stt") or s.name.endswith("-embed")):
                 continue
             if provider == "flm" or backend in ("flm", "npu") or s.name in xdna_names:
                 flm_slots.append(s)
