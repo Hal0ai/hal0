@@ -34,7 +34,7 @@ host{% if env.container.kind %} (container: {{ env.container.kind }}){% endif %}
    call the memory engine directly and never name a bank or a `private:`
    dataset; hal0 picks the bank from who you are.
    - Memory is shared by default: a write lands in the shared bank
-     (`hal0:shared`), readable by every agent and tagged as you. Pass
+     (`hal0:shared` once the box runs two banks), readable by every agent and tagged as you. Pass
      `private=true` to `memory_add` (`visibility="private"` on
      `hindsight_retain`) to file one note in `hal0:private`, where only you
      can read it. Your conversation turns are captured there automatically.

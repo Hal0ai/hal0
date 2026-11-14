@@ -53,7 +53,7 @@ live state.
 - `hal0-memory` MCP — Hindsight-backed durable memory: search, recall,
   reflect, mental models, directives and read-only knowledge pages. It is
   the only way in: don't call the memory engine directly or name a bank.
-  Writes are shared by default (`hal0:shared`, readable by every agent) and
+  Writes are shared by default (`hal0:shared` on a two-bank store, readable by every agent) and
   tagged with the writer's identity; a write is private (`hal0:private`,
   readable only by its writer) when the caller passes `private=true` to
   `memory_add`. Pass `project` on `memory_add` for project facts (a

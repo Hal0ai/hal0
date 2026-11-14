@@ -41,9 +41,9 @@ name a bank.
 - To keep one note private, pass `private=true` to `memory_add`. hal0 files it in the
   private bank (`hal0:private`) under your own identity; only you can read it.
 - A profile can be configured so its memory facts are private (`hal0: {memory_private: true}`
-  in its `config.yaml`). Then you do not need the argument. It does not cover mental models
-  or directives: they are bank-level and visible to every agent, so never put anything
-  sensitive in them.
+  in its `config.yaml`). Then you do not need the argument. It does not cover mental models:
+  one you create is readable by any agent its tags allow, so never put anything sensitive in
+  one. Directives you create are private to you; bank-wide directives are the operator's.
 - Never name a `private:<agent>` dataset yourself: the server derives it from your identity
   and rejects the name. `shared` is the only dataset a write may name.
 - Notes written while your profile was private stay private.
