@@ -33,7 +33,7 @@ import logging
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +45,7 @@ from hal0.slot_config import (
     write_slot_toml,
 )
 from hal0.slot_lifecycle_budget import TERMINATE_TIMEOUT_S
+from hal0.slots import npu_conflict as _npu_conflict
 from hal0.slots._cfg_helpers import (
     _cfg_port,
     _cfg_provider,
@@ -105,6 +106,7 @@ from hal0.slots.state import (
     SlotCrashLooping,
     SlotFabricClockHazard,
     SlotNotFound,
+    SlotNpuConflict,
     SlotOutputSanityFailed,
     SlotPinned,
     SlotSpawnFailed,
@@ -132,6 +134,7 @@ if TYPE_CHECKING:
     from hal0.config.schema import SlotConfig
     from hal0.slots.arbiter import GpuArbiter
     from hal0.slots.interface import SlotInterface
+    from hal0.slots.npu_conflict import NpuConflict, NpuPeer, NpuRole, XdnaPath
 
 #: States in which a slot is already loaded: ``load`` has nothing to start.
 _READY_STATES = (SlotState.READY, SlotState.SERVING, SlotState.IDLE)
@@ -607,6 +610,14 @@ class SlotManager:
         # fails or becomes visible via `_transition(..., STARTING, ...)`.
         self._fabric_admission_lock: asyncio.Lock = asyncio.Lock()
         self._fabric_pending: dict[str, str] = {}
+        # NPU per-op exclusion (#3666), the same shape as the fabric pair: an
+        # FLM anchor and a per-op xdna slot each need the whole NPU. A slot
+        # that passed ``_admit_npu`` but has not published STARTING yet sits
+        # in ``_npu_pending`` under its role, so a concurrent opposite load
+        # sees it (as ``pending``) instead of an OFFLINE slot. Released by
+        # ``_release_npu_pending`` wherever ``_release_fabric_pending`` is.
+        self._npu_admission_lock: asyncio.Lock = asyncio.Lock()
+        self._npu_pending: dict[str, NpuRole] = {}
         self._admission_lock: asyncio.Lock = asyncio.Lock()
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
         # Idle/eviction background loop (P3-slots §1b) — SlotReaper owns its
@@ -1956,10 +1967,22 @@ class SlotManager:
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
-    async def load(self, slot_name: str, model_id: str | None = None) -> Slot:
+    async def load(
+        self,
+        slot_name: str,
+        model_id: str | None = None,
+        *,
+        unload_npu_holder: bool = False,
+    ) -> Slot:
         """Load a model into a slot.  Transitions: offline → starting → warming → ready.
 
         If model_id is None, uses the model assigned in the slot's TOML config.
+
+        A load that would put an FLM anchor and a per-op xdna slot on the NPU
+        together raises :class:`SlotNpuConflict` (409) before anything starts.
+        ``unload_npu_holder=True`` is the operator's opt-in to unload the
+        holder(s) first, pinned or not; it never overrides a holder whose own
+        load is still in flight. Traffic callers never pass it (#3666).
 
         A caller that published an abandon probe (:mod:`hal0.slots.abandon`, set
         by the ``/v1`` routes) stops waiting once its client has gone and gets the
@@ -1967,8 +1990,10 @@ class SlotManager:
         """
         probe = abandon_probe.get()
         if probe is None:
-            return await self._load(slot_name, model_id)
-        task = asyncio.ensure_future(self._load(slot_name, model_id))
+            return await self._load(slot_name, model_id, unload_npu_holder=unload_npu_holder)
+        task = asyncio.ensure_future(
+            self._load(slot_name, model_id, unload_npu_holder=unload_npu_holder)
+        )
         finished, slot = await wait_for_load(task, probe)
         if finished:
             assert slot is not None
@@ -1976,10 +2001,30 @@ class SlotManager:
         log.info("slot.load_wait_abandoned", extra={"slot": slot_name})
         return await self.status(self._resolve_alias(slot_name))
 
-    async def _load(self, slot_name: str, model_id: str | None = None) -> Slot:
+    async def _load(
+        self,
+        slot_name: str,
+        model_id: str | None = None,
+        *,
+        unload_npu_holder: bool = False,
+    ) -> Slot:
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
-        async with self._lock(slot_name):
+        # NPU admission (#3666) runs BEFORE this slot's lock: the opt-in unloads
+        # the holder(s) through ``unload()``, which takes THEIR locks, and must
+        # do so holding neither the admission lock nor this one. A loaded slot
+        # skips it (the per-request hot path; it already holds what it holds).
+        npu_admitted = False
+        if self._current_state(slot_name) not in _READY_STATES:
+            await self._admit_npu_for_load(slot_name, model_id, unload_holder=unload_npu_holder)
+            npu_admitted = True
+        async with self._npu_reservation(slot_name), self._lock(slot_name):
+            if not npu_admitted and self._current_state(slot_name) not in _READY_STATES:
+                # The slot was loaded at the check above and went down while
+                # this call queued for the lock. Check now, under the lock, but
+                # never unload from here: that would nest a holder's lock
+                # inside this one.
+                await self._admit_npu_locked(slot_name, model_id)
             # The client that asked for this load may have gone while it queued
             # for the lock (behind another load, usually). Start nothing on its
             # behalf: not a cold load, not the stale-WARMING recovery below,
@@ -2216,6 +2261,7 @@ class SlotManager:
                     # the opposite device class if this slot later errors out
                     # further down and is retried.
                     self._release_fabric_pending(slot_name)
+                    self._release_npu_pending(slot_name)
                     await self._spawn_locked(slot_name, cfg, resolved_model, model_info=model_info)
                     await self._transition(
                         slot_name,
@@ -2287,6 +2333,7 @@ class SlotManager:
                 # applies: this re-raise is unchanged, only the state side
                 # effects are.
                 self._release_fabric_pending(slot_name)
+                self._release_npu_pending(slot_name)
                 await self._transition(
                     slot_name,
                     SlotState.OFFLINE,
@@ -2296,6 +2343,7 @@ class SlotManager:
                 raise
             except Exception as exc:
                 self._release_fabric_pending(slot_name)
+                self._release_npu_pending(slot_name)
                 error_message = str(exc)
                 gate_extra: dict[str, Any] = {}
                 if isinstance(exc, SlotOutputSanityFailed):
@@ -2481,8 +2529,12 @@ class SlotManager:
         self._slow_stop_tasks.add(task)
         task.add_done_callback(self._slow_stop_tasks.discard)
 
-    async def restart(self, slot_name: str) -> Slot:
+    async def restart(self, slot_name: str, *, unload_npu_holder: bool = False) -> Slot:
         """Restart a slot without changing its model assignment.
+
+        ``unload_npu_holder`` is :meth:`load`'s NPU opt-in (#3666); without it
+        a conflicting restart raises :class:`SlotNpuConflict` before the slot
+        is unloaded.
 
         A slot wedged in ERROR must NOT go through the graceful ``unload()``
         drain: its systemd unit may be ``failed``, where the stop path can
@@ -2494,6 +2546,10 @@ class SlotManager:
         """
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
+        # NPU conflict (#3666) before anything is torn down: a refused restart
+        # leaves the slot exactly as it was. No reservation and no unload here;
+        # with the opt-in, the load below unloads the holder.
+        await self._check_npu(slot_name, None, unload_holder=unload_npu_holder)
         # Restart is operator intent — clear the crash-loop breaker so the
         # reload below is never refused as SlotCrashLooping.
         self.reset_load_failures(slot_name)
@@ -2506,11 +2562,11 @@ class SlotManager:
                 with contextlib.suppress(Exception):
                     await self.terminate(slot_name)
                 await self._transition(slot_name, SlotState.OFFLINE, force=True)
-            return await self.load(slot_name)
+            return await self.load(slot_name, unload_npu_holder=unload_npu_holder)
         await self.unload(slot_name)
-        return await self.load(slot_name)
+        return await self.load(slot_name, unload_npu_holder=unload_npu_holder)
 
-    async def start(self, slot_name: str) -> Slot:
+    async def start(self, slot_name: str, *, unload_npu_holder: bool = False) -> Slot:
         """Idempotent start.  Equivalent to load() when slot is offline.
 
         Mirrors haloai's slots.start() (lib/slots.py:644) so callers like
@@ -2521,9 +2577,11 @@ class SlotManager:
         if current in (SlotState.READY, SlotState.SERVING, SlotState.IDLE):
             self.bump_last_used(slot_name)
             return await self.status(slot_name)
-        return await self.load(slot_name)
+        return await self.load(slot_name, unload_npu_holder=unload_npu_holder)
 
-    async def swap(self, slot_name: str, new_model_id: str) -> Slot:
+    async def swap(
+        self, slot_name: str, new_model_id: str, *, unload_npu_holder: bool = False
+    ) -> Slot:
         """Hot-swap a slot's model: unload current, load new (container restart)."""
         if not new_model_id:
             raise SlotConfigError("swap requires a non-empty model id")
@@ -2532,6 +2590,9 @@ class SlotManager:
         # A swap the runtime is going to refuse stops here, while the slot still
         # runs its old model and the old model is still the stored default.
         await self._check_swap(slot_name, new_model_id)
+        # The new model decides fused vs per-op, so the NPU check (#3666) runs
+        # against it, before the default is persisted or anything torn down.
+        await self._check_npu(slot_name, new_model_id, unload_holder=unload_npu_holder)
         # ADR-0029: a swap keeps the slot's profile; the model no longer picks
         # one, and the runner stays the slot's own ``binary``.
         # SWAP ATOMICITY (#1791): make the requested model DURABLE before any
@@ -2593,7 +2654,9 @@ class SlotManager:
                 await self._transition(slot_name, SlotState.OFFLINE, force=True)
         else:
             await self.unload(slot_name)
-        slot = await self.load(slot_name, model_id=new_model_id)
+        slot = await self.load(
+            slot_name, model_id=new_model_id, unload_npu_holder=unload_npu_holder
+        )
         # Refresh Hermes's live-context files so a model swap is visible to
         # the agent on its next session (detached; never blocks the swap).
         from hal0.agents.hermes_refresh import spawn_context_refresh
@@ -3349,6 +3412,222 @@ class SlotManager:
         would wrongly block the opposite device class forever.
         """
         self._fabric_pending.pop(slot_name, None)
+
+    # ── NPU per-op exclusion (#3666) ─────────────────────────────────────────
+
+    async def _npu_xdna_path(self, cfg: Mapping[str, Any], model_id: str | None) -> XdnaPath:
+        """Fused or per-op for an xdna slot, as its launch would run *model_id*.
+
+        Follows the launch env first (``GGML_XDNA_FUSED_LAYER=0`` forces per-op
+        without reading the model), then the model's fit. An env the launch
+        would refuse, or a model that cannot be found, is per-op: the side that
+        excludes FLM.
+        """
+        try:
+            env = _npu_conflict.xdna_launch_env(cfg)
+        except Exception:
+            return "per-op"
+        model_path: str | None = None
+        if env.get("GGML_XDNA_FUSED_LAYER") != "0" and model_id:
+            info = await self._resolve_model_info(
+                model_id, provider=_cfg_effective_provider(dict(cfg))
+            )
+            model_path = str(info.get("path") or "") or None
+        return await asyncio.to_thread(_npu_conflict.effective_xdna_path, env, model_path)
+
+    async def _npu_role(
+        self, cfg: Mapping[str, Any], model_id: str | None
+    ) -> tuple[NpuRole | None, XdnaPath | None]:
+        """This slot's NPU role with *model_id* bound, and its xdna path."""
+        d = dict(cfg)
+        if is_npu_trio_shadow(d):
+            return None, None
+        path = await self._npu_xdna_path(d, model_id) if is_xdna_slot(d) else None
+        return _npu_conflict.npu_role(d, path), path
+
+    async def _npu_peers(self, slot_name: str) -> Sequence[NpuPeer]:
+        """The other NPU slots as the conflict rule sees them.
+
+        An ERROR slot whose unit is still running is presented as live, as
+        ``_guard_fabric_clock`` treats it: an FLM anchor in a crash loop is
+        restarted by systemd and takes the NPU each time it comes up.
+        """
+        from hal0.slots.npu_conflict import NpuPeer
+
+        peers: list[NpuPeer] = []
+        for s in await self.list(exclude=slot_name):
+            cfg = await self._maybe_load_config(s.name)
+            if cfg is None or cfg.get("device") != "npu":
+                continue
+            state = s.state
+            live = state in LIVE_COUNTERPART_STATES
+            if state is SlotState.ERROR:
+                try:
+                    live = await self._is_active(s.name)
+                except Exception:  # pragma: no cover - defensive
+                    live = False
+                if live:
+                    state = SlotState.READY
+            path: XdnaPath | None = None
+            if live and is_xdna_slot(cfg):
+                path = await self._npu_xdna_path(cfg, s.model_id or _model_default(cfg))
+            pinned = live and await self.is_pinned(s.name)
+            peers.append(NpuPeer(name=s.name, cfg=cfg, state=state, pinned=pinned, xdna_path=path))
+        return peers
+
+    @staticmethod
+    def _npu_conflict_error(slot_name: str, conflict: NpuConflict) -> SlotNpuConflict:
+        return SlotNpuConflict(
+            conflict.reason,
+            details={
+                "slot": slot_name,
+                "holders": list(conflict.holders),
+                "holder_engine": conflict.holder_engine,
+                "unloads": list(conflict.unloads),
+                "pinned": conflict.pinned,
+                "pending": conflict.pending,
+                "reason": conflict.reason,
+            },
+        )
+
+    async def _npu_verdict(
+        self, slot_name: str, cfg: Mapping[str, Any], path: XdnaPath | None
+    ) -> NpuConflict | None:
+        """The conflict loading *slot_name* would cause. Caller holds the admission lock."""
+        peers = await self._npu_peers(slot_name)
+        return _npu_conflict.find_npu_conflict(slot_name, cfg, path, peers, dict(self._npu_pending))
+
+    async def _admit_npu(
+        self,
+        slot_name: str,
+        cfg: Mapping[str, Any],
+        model_id: str | None,
+        *,
+        unload_holder: bool,
+    ) -> None:
+        """Admit *slot_name* onto the NPU or raise :class:`SlotNpuConflict`.
+
+        Under ``_npu_admission_lock`` this scans the other slots and, when the
+        load may go ahead, reserves the slot in ``_npu_pending`` so a
+        concurrent opposite load sees it as ``pending``. With ``unload_holder``
+        a conflict that is not pending is resolved by unloading
+        ``conflict.unloads`` (the holder and, for FLM, its shadows) AFTER the
+        reservation is made and the admission lock released. ``unload()``
+        enforces no pin (only the HTTP route does), so a pinned holder goes
+        too. The caller must hold no slot lock and must release the
+        reservation (:meth:`_release_npu_pending`) once STARTING is visible or
+        the load ends; a failed holder unload releases it here.
+        """
+        # The role needs only this slot's config and model, so a slot that is
+        # not on the NPU never queues on the admission lock.
+        role, path = await self._npu_role(cfg, model_id or _model_default(dict(cfg)))
+        if role is None:
+            return
+        async with self._npu_admission_lock:
+            conflict = await self._npu_verdict(slot_name, cfg, path)
+            if conflict is not None and (conflict.pending or not unload_holder):
+                log.info(
+                    "slot.npu_conflict_refused",
+                    extra={"slot": slot_name, "holders": list(conflict.holders)},
+                )
+                raise self._npu_conflict_error(slot_name, conflict)
+            self._npu_pending[slot_name] = role
+        if conflict is None:
+            return
+        log.info(
+            "slot.npu_conflict_unloading_holder",
+            extra={"slot": slot_name, "unloads": list(conflict.unloads)},
+        )
+        try:
+            for name in conflict.unloads:
+                await self.unload(name)
+        except BaseException:
+            self._release_npu_pending(slot_name)
+            raise
+
+    async def _admit_npu_for_load(
+        self, slot_name: str, model_id: str | None, *, unload_holder: bool
+    ) -> None:
+        """``_load``'s admission, outside the slot lock; a refusal leaves the slot OFFLINE."""
+        cfg = await self._maybe_load_config(slot_name)
+        if cfg is None:
+            return  # the load itself reports the unreadable config
+        try:
+            await self._admit_npu(slot_name, cfg, model_id, unload_holder=unload_holder)
+        except SlotNpuConflict:
+            # ``_admit_npu`` raises before it reserves, so there is nothing of
+            # this call's to release. A held slot lock means another caller is
+            # mid-operation on this slot and owns its state: answer the 409
+            # now rather than queue behind that load.
+            lock = self._lock(slot_name)
+            if not lock.locked():
+                async with lock:
+                    await self._settle_npu_refusal(slot_name, cfg)
+            raise
+
+    async def _admit_npu_locked(self, slot_name: str, model_id: str | None) -> None:
+        """``_load``'s admission when it must run under the slot lock: never unloads."""
+        cfg = await self._maybe_load_config(slot_name)
+        if cfg is None:
+            return
+        try:
+            await self._admit_npu(slot_name, cfg, model_id, unload_holder=False)
+        except SlotNpuConflict:
+            await self._settle_npu_refusal(slot_name, cfg)
+            raise
+
+    async def _settle_npu_refusal(self, slot_name: str, cfg: Mapping[str, Any]) -> None:
+        """Leave a refused slot OFFLINE, as the fabric-clock refusal does. Slot lock held.
+
+        A refusal is not a load failure: no ERROR, no crash-loop count. Only
+        an OFFLINE slot, or an ERROR one whose unit is gone, is restamped
+        OFFLINE; a slot another caller is loading or unloading, or one still
+        running, is left to that caller, since this refusal started nothing.
+        """
+        current = self._current_state(slot_name)
+        if current is SlotState.ERROR:
+            try:
+                if await self._is_active(slot_name):
+                    return
+            except Exception:  # pragma: no cover - defensive
+                return
+        elif current is not SlotState.OFFLINE:
+            return
+        await self._transition(slot_name, SlotState.OFFLINE, port=_cfg_port(dict(cfg)), force=True)
+
+    async def _check_npu(
+        self, slot_name: str, model_id: str | None, *, unload_holder: bool
+    ) -> None:
+        """``restart``/``swap``'s precheck: raise a conflict the load would raise.
+
+        No reservation and no unload: it runs before the slot is torn down, so
+        a refused restart or swap leaves everything as it was. A conflict the
+        opt-in can resolve passes; the load that follows unloads the holder.
+        """
+        cfg = await self._maybe_load_config(slot_name)
+        if cfg is None:
+            return
+        role, path = await self._npu_role(cfg, model_id or _model_default(cfg))
+        if role is None:
+            return
+        async with self._npu_admission_lock:
+            conflict = await self._npu_verdict(slot_name, cfg, path)
+        if conflict is None:
+            return
+        if conflict.pending or not unload_holder:
+            raise self._npu_conflict_error(slot_name, conflict)
+
+    def _release_npu_pending(self, slot_name: str) -> None:
+        """Drop *slot_name*'s NPU reservation, if any (see :meth:`_admit_npu`)."""
+        self._npu_pending.pop(slot_name, None)
+
+    @contextlib.asynccontextmanager
+    async def _npu_reservation(self, slot_name: str) -> AsyncIterator[None]:
+        """Release *slot_name*'s NPU reservation however ``_load`` leaves."""
+        try:
+            yield
+        finally:
+            self._release_npu_pending(slot_name)
 
     async def terminate(self, slot_name: str, *, timeout_s: float | None = None) -> None:
         """Stop the slot's container unit and deregister its upstream.

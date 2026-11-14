@@ -152,3 +152,12 @@ def test_launch_env_merge_order_matches_load_sync() -> None:
     env = xdna_launch_env(cfg)
     assert env["GGML_XDNA_FUSED_LAYER"] == "0"  # [xdna].env wins
     assert env["FOO"] == "s"
+
+
+def test_live_and_pending_holders_together_report_pending() -> None:
+    """A pending holder anywhere in the set blocks the opt-in, even beside a live one."""
+    peers = [_peer(_xdna("a"), path="per-op")]
+    c = find_npu_conflict("flm", FLM, None, peers, {"b": "per-op"})
+    assert c is not None
+    assert c.holders == ("a", "b")
+    assert c.pending is True

@@ -106,7 +106,7 @@ def find_npu_conflict(
     cfg: Mapping[str, Any],
     xdna_path: XdnaPath | None,
     peers: Sequence[NpuPeer],
-    pending: Mapping[str, str],
+    pending: Mapping[str, NpuRole],
 ) -> NpuConflict | None:
     """The conflict ``name`` would cause by loading, or ``None``.
 
@@ -127,7 +127,7 @@ def find_npu_conflict(
         and p.state in LIVE_COUNTERPART_STATES
         and roles_conflict(mine, npu_role(p.cfg, p.xdna_path))
     ]
-    pend = [n for n, role in pending.items() if n != name and roles_conflict(mine, role)]  # type: ignore[arg-type]
+    pend = [n for n, role in pending.items() if n != name and roles_conflict(mine, role)]
     if not live and not pend:
         return None
 
@@ -144,7 +144,9 @@ def find_npu_conflict(
             for p in peers:
                 if p.cfg.get("served_by") == holder and p.name not in unloads:
                     unloads.append(p.name)
-    is_pending = not live
+    # Any in-flight holder makes the whole conflict pending: the opt-in must
+    # never unload around a load that has not published its state yet.
+    is_pending = bool(pend)
     what = "FLM anchor" if holder_role == "flm" else "per-op xdna slot"
     reason = f"{name} needs the whole NPU, which {what} {', '.join(holders)} holds" + (
         " (load in flight)" if is_pending else ""

@@ -349,6 +349,23 @@ class SlotFabricClockHazard(SlotConfigError):
     status = 409
 
 
+class SlotNpuConflict(SlotError):
+    """An FLM anchor and a per-op xdna slot would hold the NPU together (#3666).
+
+    Each needs the whole NPU, so whichever starts second fails on the device
+    (``DRM_IOCTL_AMDXDNA_CREATE_HWCTX`` EINVAL). The manager's ``_admit_npu``
+    raises this before the load starts. ``details`` carries exactly ``slot``,
+    ``holders``, ``holder_engine`` (``"flm"`` or ``"xdna"``), ``unloads``
+    (the holders plus an FLM anchor's ``-stt``/``-embed`` shadows), ``pinned``,
+    ``pending`` (a holder's load is still in flight, which the opt-in never
+    overrides) and ``reason``. A refusal is not a load failure: the slot is
+    left OFFLINE and the crash-loop breaker is not fed.
+    """
+
+    code = "slot.npu_conflict"
+    status = 409
+
+
 class RunnerFamilyMismatch(SlotConfigError):
     """A slot's ``binary`` names a runner its launch would not dispatch to.
 
