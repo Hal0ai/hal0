@@ -178,3 +178,56 @@ async def test_dispatcher_path_reraises_npu_conflict() -> None:
         assert "retry_after_s" not in ei.value.details
     finally:
         await dispatcher.aclose()
+
+
+def test_restart_conflict_returns_409_envelope(
+    isolated_app_client: tuple[FastAPI, TestClient], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, client = isolated_app_client
+
+    async def restart(slot_name: str, **kw: Any) -> Any:
+        raise _conflict()
+
+    monkeypatch.setattr(app.state.slot_manager, "restart", restart)
+    r = client.post("/api/slots/px/restart", json={})
+    assert r.status_code == 409, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.npu_conflict"
+    assert set(err["details"]) == _DETAILS_KEYS
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/v1/embeddings", {"model": "m", "input": "x"}),
+    ],
+)
+def test_capability_wake_returns_409_without_retry_after(
+    monkeypatch: pytest.MonkeyPatch, path: str, payload: dict[str, Any]
+) -> None:
+    slot = "embed" if "embeddings" in path else "stt"
+    monkeypatch.setattr(v1, "_capability_slot_for_path", lambda _p: slot)
+
+    class _SM:
+        arbiter = None
+
+        async def iter_configs(self) -> list[dict[str, Any]]:
+            return [{"name": slot, "model": {"default": "m"}}]
+
+        def state(self, _name: str) -> SlotState:
+            return SlotState.OFFLINE
+
+        async def load(self, slot_name: str, model_id: str | None = None) -> None:
+            raise _conflict()
+
+    async def _dispatch(self: Any, request: Any, body: Any = None) -> Any:
+        raise AssertionError("dispatch must not run after an NPU refusal")
+
+    monkeypatch.setattr(Dispatcher, "dispatch", _dispatch)
+    app = create_app()
+    with TestClient(app, raise_server_exceptions=False) as client:
+        app.state.slot_manager = _SM()
+        r = client.post(path, json=payload)
+    assert r.status_code == 409, r.text
+    assert r.json()["error"]["code"] == "slot.npu_conflict"
+    assert "retry-after" not in {k.lower() for k in r.headers}

@@ -1017,6 +1017,10 @@ async def _wake_capability_slot(request: Request, body: Mapping[str, Any]) -> No
         arbiter.guard_dispatch(slot_name)
     try:
         await slot_manager.load(slot_name)
+    except SlotNpuConflict:
+        # Waking an FLM-backed capability slot never unloads a per-op holder:
+        # the 409 is the answer, not a retryable 503 (#3666).
+        raise
     except Exception as exc:
         log.warning(
             "v1.capability_wake_failed",
