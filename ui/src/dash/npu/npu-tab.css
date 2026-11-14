@@ -124,3 +124,6 @@
 .ggml-knob.fixed { opacity: 0.75; }
 .ggml-foot { display: flex; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); position: sticky; bottom: 0; background: var(--bg); }
 .ggml-del { display: inline-flex; align-items: center; gap: 8px; }
+.ggml-requant { display: flex; flex-direction: column; gap: 6px; }
+.ggml-requant-cmd { display: flex; align-items: center; gap: 8px; }
+.ggml-requant-cmd code { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: nowrap; }

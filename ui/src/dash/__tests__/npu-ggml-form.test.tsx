@@ -17,6 +17,7 @@ const { box } = vi.hoisted(() => ({
     deletes: [] as string[],
     cfg: { model: { default: 'qwen3-4b' }, profile: 'xdna', xdna: { pmode: 'turbo', env: {}, host_xrt: null } } as Record<string, unknown>,
     createErr: null as Error | null,
+    fit: {} as Record<string, { xdna_path: string | null; reason: string }>,
   },
 }))
 
@@ -38,7 +39,7 @@ vi.mock('@/api/hooks/useModels', () => ({
   }),
 }))
 vi.mock('@/api/hooks/useXdnaFit', () => ({
-  useXdnaFit: () => ({ data: { 'qwen3-4b': { xdna_path: 'fused', reason: 'ok' }, 'big-moe': { xdna_path: null, reason: 'not gguf' } } }),
+  useXdnaFit: () => ({ data: box.fit }),
 }))
 vi.mock('@/api/hooks/useXdnaKnobs', () => ({
   useXdnaKnobs: () => ({
@@ -86,6 +87,7 @@ function mount(props: Record<string, unknown>) {
 beforeEach(() => {
   box.creates.length = 0; box.loads.length = 0; box.edits.length = 0; box.restarts.length = 0; box.deletes.length = 0
   box.createErr = null
+  box.fit = { 'qwen3-4b': { xdna_path: 'fused', reason: 'ok' }, 'big-moe': { xdna_path: null, reason: 'not gguf' } }
 })
 afterEach(() => { act(() => root.unmount()); document.body.innerHTML = '' })
 
@@ -203,5 +205,58 @@ describe('edit', () => {
     click('ggml-delete-cancel')
     expect(q('ggml-delete')).not.toBeNull()
     expect(box.deletes).toEqual([])
+  })
+})
+
+describe('engine variant', () => {
+  const slot = { name: 'npu-gguf', port: 8093, binary: 'xdna', state: 'ready' }
+
+  it('renders only the engine section and saves just {xdna}, restarting a running slot', async () => {
+    mount({ mode: 'edit', variant: 'engine', slot })
+    for (const id of ['ggml-name', 'ggml-model-list', 'ggml-ctx-row', 'ggml-delete', 'ggml-save', 'ggml-profile'])
+      expect(q(id)).toBeNull()
+    expect(q('ggml-pmode-row')).not.toBeNull()
+    expect(q('ggml-host-xrt')).not.toBeNull()
+    click('ggml-pmode-balanced')
+    await act(async () => { q('ggml-save-engine')!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await flush()
+    expect(box.edits).toEqual([{ name: 'npu-gguf', body: { xdna: { pmode: 'balanced', env: {}, host_xrt: null } } }])
+    expect(box.restarts).toEqual(['npu-gguf'])
+  })
+
+  it('does not restart a stopped slot', async () => {
+    mount({ mode: 'edit', variant: 'engine', slot: { ...slot, state: 'stopped' } })
+    click('ggml-pmode-balanced')
+    await act(async () => { q('ggml-save-engine')!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await flush()
+    expect(box.edits).toHaveLength(1)
+    expect(box.restarts).toEqual([])
+  })
+})
+
+describe('per-op requantize hint', () => {
+  it('shows the command for a qwen35 model whose only gap is ssm_out', () => {
+    box.fit = { 'qwen3-4b': { xdna_path: 'per-op', reason: 'blk.0.ssm_out.weight is Q8_0, not Q5_K' } }
+    mount({ mode: 'create', initialModel: 'qwen3-4b', onDone: () => {} })
+    expect(q('ggml-requant-hint')!.textContent).toContain('Q8_0')
+    expect(q('ggml-requant-cmd')!.textContent).toBe('llama-quantize --tensor-type ssm_out=q5_K <in> <out> Q4_K_M')
+    expect(q('ggml-requant-copy')).not.toBeNull()
+  })
+
+  it('shows only the reason for a per-op lfm2 model', () => {
+    box.fit = { 'qwen3-4b': { xdna_path: 'per-op', reason: "architecture 'lfm2' is not 'qwen35'" } }
+    mount({ mode: 'create', initialModel: 'qwen3-4b', onDone: () => {} })
+    expect(q('ggml-requant-hint')).toBeNull()
+    expect(q('ggml-perop-reason')!.textContent).toContain('lfm2')
+  })
+
+  it('shows it in the engine variant and survives a rejected clipboard write', async () => {
+    box.fit = { 'qwen3-4b': { xdna_path: 'per-op', reason: 'blk.0.ssm_out.weight is Q6_K, not Q5_K' } }
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: () => Promise.reject(new Error('denied')) } })
+    mount({ mode: 'edit', variant: 'engine', slot: { name: 'npu-gguf', state: 'ready' } })
+    expect(q('ggml-requant-hint')).not.toBeNull()
+    await act(async () => { q('ggml-requant-copy')!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await flush()
+    expect(q('ggml-requant-hint')).not.toBeNull()
   })
 })

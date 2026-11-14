@@ -103,3 +103,11 @@ export function ggmlEditBody(d: GgmlDraft, saved: GgmlDraft): Record<string, unk
   if (!sameXdna(x, s)) body.xdna = xdnaEmpty(x) ? null : x
   return body
 }
+
+export const GGML_REQUANT_CMD = 'llama-quantize --tensor-type ssm_out=q5_K <in> <out> Q4_K_M'
+
+/** The requantize command applies only when ssm_out's type is the sole thing keeping a qwen35
+ *  1024-wide model off the fused path (model_fit.py reason `…ssm_out.weight is X, not Q5_K`). */
+export function ggmlRequantHint(row: { xdna_path: string | null; reason?: string } | null | undefined): boolean {
+  return !!row && row.xdna_path === 'per-op' && /ssm_out\.weight is .+, not Q5_K/.test(row.reason || '')
+}

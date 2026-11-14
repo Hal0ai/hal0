@@ -149,9 +149,19 @@ describe('slot drawer on an xdna slot', () => {
     const { root } = mount(XDNA)
     expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/slots/flm/models'))).toBe(false)
     expect(byId('npu-capability-matrix')).toBeNull()
-    // The slot drawer's body for an xdna slot is the one GGML slot form (Task 9).
-    expect(byId('ggml-slot-form')?.getAttribute('data-mode')).toBe('edit')
-    expect(byId('slot-xdna-block')).toBeNull()
+    // The drawer keeps rename, model and profile; only the engine block is the GGML form's engine variant.
+    expect(byId('slot-name-inline')).not.toBeNull()
+    expect(byId('slot-pin-toggle')).not.toBeNull()
+    expect(document.querySelector('[data-testid="slot-model-swap"], [aria-label="Model for gguf-npu"]')).not.toBeNull()
+    expect(byId('slot-profile')).not.toBeNull()
+    expect(byId('slot-xdna-block')).not.toBeNull()
+    expect(byId('ggml-pmode-row')).not.toBeNull()
+    expect(byId('ggml-save-engine')).not.toBeNull()
+    // No Name / Delete / model list / context from the form: the drawer owns those.
+    expect(byId('ggml-name')).toBeNull()
+    expect(byId('ggml-delete')).toBeNull()
+    expect(byId('ggml-model-list')).toBeNull()
+    expect(byId('ggml-ctx-row')).toBeNull()
     act(() => root.unmount())
   })
 

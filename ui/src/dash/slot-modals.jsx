@@ -213,6 +213,25 @@ function SlotEngineBlock({ profile, engine, slotName, open, onDuplicate }) {
 	);
 }
 
+// ── xdna slot engine block ──────────────────────────────────────────────
+// Unlike SlotEngineBlock (halogen, profile-owned flags), an xdna slot's
+// pmode/env/host_xrt write the SLOT's own `[xdna]` table (PUT
+// /api/slots/{name}/config) and restart it when running. The UI is the shared
+// GGML slot form's engine variant — the drawer owns name, model, profile, context.
+function SlotXdnaBlock({ slot }) {
+	return (
+		<div className="form-row" data-testid="slot-xdna-block">
+			<div className="form-lbl">
+				<span>XDNA</span>
+				<FieldInfoIcon description="The ggml-xdna runner's own settings: power mode (applied host-side), GGML_XDNA_* env knobs, and the host_xrt path. Written to this slot's own config and applied with a restart." />
+			</div>
+			<div className="form-ctl">
+				<GgmlSlotForm mode="edit" variant="engine" slot={slot} />
+			</div>
+		</div>
+	);
+}
+
 // Map a slot lifecycle state to a chip color class.
 //   running healthy/serving → green (ok); starting/pulling → amber (warn);
 //   crashed/error → red (err); stopped/anything else → neutral grey.
@@ -1729,21 +1748,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				})()
 			: null;
 
-	// An xdna (GGML) slot: the one GGML slot form is the whole body (NPU tab → GGML lane uses it too).
-	if (isXdnaSlotEdit) {
-		return (
-			<Drawer
-				open={open}
-				onClose={onClose}
-				eyebrow={`Slots · /slots/${slot.name}`}
-				title={<span className="mono">{slot.name}</span>}
-				width={SLOT_DRAWER_WIDTH}
-			>
-				{open && <GgmlSlotForm mode="edit" slot={slot} onDone={onClose} />}
-			</Drawer>
-		);
-	}
-
 	return (
 		<>
 			{/* The Drawer's Esc/backdrop/✕ paths call onClose — routed through
@@ -2124,6 +2128,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 								/>
 							)}
 						</>
+					)}
+					{isXdnaSlotEdit && (
+						<SlotXdnaBlock slot={slot} />
 					)}
 				</FieldGroup>
 
