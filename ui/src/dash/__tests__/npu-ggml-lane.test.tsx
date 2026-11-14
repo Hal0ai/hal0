@@ -67,8 +67,8 @@ describe('GgmlLane', () => {
     expect(host.querySelectorAll('[data-testid^="ggml-card-"]').length).toBe(2)
     expect(q('ggml-card-npu-gguf')!.textContent).toContain(':8101')
     expect(q('ggml-card-npu-gguf')!.textContent).toContain('qwen3-4b')
-    expect(q('ggml-fit-npu-gguf')!.textContent).toBe('fused')
-    expect(q('ggml-fit-npu-gguf')!.getAttribute('title')).toBe('all ops fit')
+    expect(q('ggml-npu-gguf-fit')!.textContent).toBe('✓ fused')
+    expect(q('ggml-npu-gguf-why')).toBeNull()
     expect(q('ggml-card-npu-gguf')!.textContent).toContain('1 override')
     expect(q('ggml-card-npu-gguf')!.textContent).toContain('21')
   })
@@ -92,11 +92,12 @@ describe('GgmlLane', () => {
     expect(q('ggml-pmode-npu-gguf-2')).toBeNull()
   })
 
-  it('Get the fused path links to the Models tab only for the ssm_out case', () => {
+  it('a per-op card names its blocker, and "copy fix" shows only for the ssm_out case', () => {
     render()
-    expect(q('ggml-fused-npu-gguf')).toBeNull()
-    const a = q('ggml-fused-npu-gguf-2') as HTMLAnchorElement
-    expect(a.getAttribute('href')).toBe('#slots/npu/models')
+    expect(q('ggml-npu-gguf-fix')).toBeNull()
+    expect(q('ggml-npu-gguf-2-fit')!.textContent).toBe('per-op')
+    expect(q('ggml-npu-gguf-2-why')!.textContent).toBe('ssm_out q4_k')
+    expect(q('ggml-npu-gguf-2-fix')).not.toBeNull()
   })
 
   it('Add opens the drawer in create mode; Edit opens it in edit mode with the slot', () => {

@@ -135,17 +135,15 @@
 }
 .ggml-model.on { border-color: var(--npu-s1); }
 .ggml-model:focus-visible { outline: 2px solid var(--npu-s1); outline-offset: -2px; }
-.npt-fit.fused { color: var(--npu-s1); }
-.npt-fit.per-op { color: var(--warn, #e0a050); }
-.npt-fit.none { color: var(--fg-3); }
+.ggml-model-chips { display: inline-flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+/* The "copy fix" chip (XdnaFitChips) is a button wearing chip styling. */
+.npt-fix { cursor: pointer; }
+.npt-fix:hover { border-color: var(--accent); }
 .ggml-knob { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 12px; }
 .ggml-knob > .pf-input { flex: 1 1 140px; min-width: 0; }
 .ggml-knob.fixed { opacity: 0.75; }
 .ggml-foot { display: flex; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); position: sticky; bottom: 0; background: var(--bg); }
 .ggml-del { display: inline-flex; align-items: center; gap: 8px; }
-.ggml-requant { display: flex; flex-direction: column; gap: 6px; }
-.ggml-requant-cmd { display: flex; align-items: center; gap: 8px; }
-.ggml-requant-cmd code { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: nowrap; }
 
 /* Models sub-tab */
 .npt-msec { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: var(--rad-md, 6px); }

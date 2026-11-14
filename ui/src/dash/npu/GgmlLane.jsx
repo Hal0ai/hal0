@@ -8,7 +8,8 @@ import { isXdnaSlot } from '@/lib/slotModelFit'
 import { SlotControls, slotCtrlPhase } from '../inference-pane.jsx'
 import { slotIndicatorFromPhase } from '../slot-status.js'
 import { GgmlSlotDrawer } from './GgmlSlotDrawer.jsx'
-import { GGML_IMAGE_MISSING, ggmlRequantHint } from './ggml-slot-pure'
+import { GGML_IMAGE_MISSING } from './ggml-slot-pure'
+import { XdnaFitChips } from './XdnaFitChips.jsx'
 
 const num = (v, digits = 0) => (typeof v === 'number' && v > 0 ? (digits ? v.toFixed(digits) : String(Math.round(v))) : null)
 
@@ -24,8 +25,7 @@ function GgmlCard({ slot, hostPmode, onEdit }) {
   const mem = typeof m.mem === 'number' && m.mem > 0 ? (Math.round(m.mem * 10) / 10).toString() : null
   const overrides = Object.keys(slot.tune || {}).length
   const wantsPmode = slot.pmode && hostPmode && slot.pmode !== hostPmode ? slot.pmode : null
-  const fitRow = { xdna_path: slot.xdna_path ?? null, reason: slot.xdna_reason || '' }
-  const fusedLink = ggmlRequantHint(fitRow)
+  const fitRow = slot.xdna_path === undefined ? null : { xdna_path: slot.xdna_path, reason: slot.xdna_reason || '' }
   const nm = slot.name
   return (
     <div className="npt-gcard" data-testid={`ggml-card-${nm}`}>
@@ -46,13 +46,7 @@ function GgmlCard({ slot, hostPmode, onEdit }) {
       </div>
       <div className="npt-gmodel">{slot.model || '—'}</div>
       <div className="npt-gchips">
-        <span
-          className={`chip mono npt-fit ${slot.xdna_path || 'none'}`}
-          data-testid={`ggml-fit-${nm}`}
-          title={slot.xdna_reason || slot.xdna_path || 'no fit data'}
-        >
-          {slot.xdna_path || '—'}
-        </span>
+        <XdnaFitChips row={fitRow} testid={`ggml-${nm}`} />
         <span className="chip mono">{slot.profile || '—'}</span>
         {wantsPmode && (
           <span className="chip mono warn" data-testid={`ggml-pmode-${nm}`} title={`host power mode is ${hostPmode}`}>
@@ -66,11 +60,6 @@ function GgmlCard({ slot, hostPmode, onEdit }) {
         {up && ttft ? ` · ${ttft} ms` : ''}
         {up && mem ? ` · ${mem} GB` : ''}
       </div>
-      {fusedLink && (
-        <a className="npt-glink" data-testid={`ggml-fused-${nm}`} href="#slots/npu/models">
-          Get the fused path
-        </a>
-      )}
     </div>
   )
 }
