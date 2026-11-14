@@ -1391,3 +1391,39 @@ def test_the_dry_run_counts_the_placed_pages_it_would_clear() -> None:
     # Both pages with a project are cleared; the one with none stays at the root.
     assert report["knowledge_pages"]["content_cleared_tag_project"] == 2
     assert report["knowledge_pages"]["content_cleared_unscoped"] == 0
+
+
+def test_requeue_sources_clears_both_stamps_on_the_facts_it_carries_and_nothing_else() -> None:
+    stamp = "2026-11-01T10:00:00+00:00"
+    sent = doc(
+        "a",
+        [
+            {**fact("kept"), "consolidated_at": stamp},
+            {**fact("done"), "consolidated_at": stamp},
+            {**fact("failed"), "consolidation_failed_at": stamp},
+        ],
+    )
+    data = fi._write_archive("old", [sent], [], [], [])
+    digest = fi.document_digest(sent)
+    dropped = [
+        {
+            "text": "spans",
+            "sources": [
+                {"document_id": "a", "fact_index": 1},
+                {"document_id": "a", "fact_index": 2},
+                # Already in the target: not in this archive, left alone.
+                {"document_id": "landed", "fact_index": 0},
+                {"document_id": "a", "fact_index": 9},
+            ],
+        }
+    ]
+    out, cleared = fi.requeue_sources(data, dropped)
+    assert cleared == 2
+    facts = fi._read_archive(out)["documents"][0]["facts"]
+    assert facts[0]["consolidated_at"] == stamp
+    for row in facts[1:]:
+        assert row["consolidated_at"] is None and row["consolidation_failed_at"] is None
+    # The stamps are not part of what the document says.
+    assert fi.document_digest(fi._read_archive(out)["documents"][0]) == digest
+    # Nothing of the archive is sent for: it comes back as it was.
+    assert fi.requeue_sources(data, [{"text": "x", "sources": []}]) == (data, 0)

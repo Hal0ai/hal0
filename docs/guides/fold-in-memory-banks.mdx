@@ -411,11 +411,22 @@ target is missing is sent:
   to `hal0:private`), is refused the same way: its copy would stay readable
   in the target. Delete the copy, then run again;
 - new documents are sent, and must all arrive;
-- an observation the earlier run sent that rests on a document already in
-  the target must be there; if it did not land with its document, no merge
-  can bring it now, and the bank is left with the documents to delete before
-  trying again. One the old bank built after the earlier run is not carried
-  (the target's own consolidation builds it), and the report counts it;
+- an observation that rests on a document already in the target, and is
+  not there itself, cannot be carried: the engine imports an observation
+  only with all its source documents in one call. It did not land with its
+  documents, the engine deleted it with a copy you deleted, or the old bank
+  built it after the earlier run. It is left out, the bank still folds, and
+  the dry run (an estimate), the report and the result count it as
+  `observations_to_rebuild`. Observations are built from facts, so the
+  target's consolidation builds it again: its facts this run sends go
+  marked for consolidation, and the engine marks the facts of other
+  documents under the observations it deletes with a copy. If automatic
+  consolidation is off, run `hal0 memory bank consolidate hal0:shared` after
+  the cutover. A fact that landed in an earlier send without its
+  observation stays marked as consolidated; to rebuild those too, clear the
+  target's observations (`DELETE /v1/default/banks/hal0%3Ashared/observations`
+  on the engine: it marks every fact again and rebuilds every observation,
+  which takes model time), then consolidate;
 - a knowledge page whose model landed without it is sent again, with the
   folders above it. A coding bank's pages and folders keep the ids the
   fold-in gave them, so they land where they belong; the platform bank's

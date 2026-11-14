@@ -23,6 +23,7 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -218,9 +219,16 @@ class FakeEngine:
                 facts.extend(fact(f"extra {i}") for i in range(skew))
             else:
                 del facts[skew:]
+        # ``_import_observations``: an observation lands only when every source
+        # document landed in this very call; its source facts are then stamped
+        # ``consolidated_at = COALESCE(consolidated_at, now())``. The facts keep
+        # the stamps the archive carries (``restore_fact_lifecycle``).
         for o in obs:
             if all(s["document_id"] in landed for s in o["sources"]):
                 target["obs"].append(o)
+                for s in o["sources"]:
+                    stamped = target["docs"][s["document_id"]]["facts"][s["fact_index"]]
+                    stamped["consolidated_at"] = stamped.get("consolidated_at") or "imported"
         # hindsight-api writes model rows verbatim with no transaction around
         # them, after the documents: a NULL in a NOT NULL column fails the
         # insert and leaves the documents landed.
@@ -315,6 +323,33 @@ class FakeEngine:
             else:
                 roots.append(nodes[str(p["id"])])
         return roots
+
+    def delete_document(self, bank: str, doc_id: str) -> None:
+        """``MemoryEngine.delete_document``: the document, its facts and their observations.
+
+        Every observation resting on one of its facts goes with it
+        (``delete_stale_observations`` in ``engine/memories/pg/writes.py``), and
+        the surviving co-source facts of those observations, in other
+        documents, get ``consolidated_at = NULL`` so consolidation takes them
+        up again.
+        """
+        b = self.banks[bank]
+        del b["docs"][doc_id]
+        gone = [o for o in b["obs"] if any(s["document_id"] == doc_id for s in o["sources"])]
+        b["obs"] = [o for o in b["obs"] if o not in gone]
+        for o in gone:
+            for s in o["sources"]:
+                if s["document_id"] != doc_id and s["document_id"] in b["docs"]:
+                    b["docs"][s["document_id"]]["facts"][s["fact_index"]]["consolidated_at"] = None
+
+    def unconsolidated(self, bank: str) -> set[tuple[str, int]]:
+        """``(document, fact index)`` of every fact consolidation would take up."""
+        return {
+            (d["id"], i)
+            for d in self.banks[bank]["docs"].values()
+            for i, f in enumerate(d["facts"])
+            if f.get("consolidated_at") is None and f.get("consolidation_failed_at") is None
+        }
 
     def finish(self, op_id: str) -> None:
         op = self.ops[op_id]
@@ -432,6 +467,13 @@ class FakeEngine:
             self.events.append(f"folder:{bank}:{body['name']}")
             b["pages"].append(folder)
             return httpx.Response(201, json={**folder, "children": []})
+        if rest.startswith("/documents/") and method == "DELETE":
+            doc_id = unquote(rest[len("/documents/") :])
+            if doc_id not in b["docs"]:
+                return httpx.Response(404, json={"detail": "document not found"})
+            self.events.append(f"delete:{bank}:{doc_id}")
+            self.delete_document(bank, doc_id)
+            return httpx.Response(200, json={"success": True})
         if rest == "/documents":
             rows = [{"id": d["id"], "tags": d["tags"]} for d in b["docs"].values()]
             return self._page("items", rows, params)
@@ -448,7 +490,14 @@ class FakeEngine:
             ]
             if params.get("type") == "observation":
                 obs = [
-                    {"id": f"o{i}", "text": o["text"], "tags": o["tags"]}
+                    {
+                        "id": f"o{i}",
+                        "text": o["text"],
+                        "tags": o["tags"],
+                        "source_memory_ids": [
+                            f"{s['document_id']}#{s['fact_index']}" for s in o["sources"]
+                        ],
+                    }
                     for i, o in enumerate(b["obs"])
                 ]
                 return self._page("items", obs, params)
@@ -1743,7 +1792,9 @@ async def test_a_refold_rechecks_models_of_a_part_that_sent_no_documents(box: Bo
 # ── review items 3, 5, 6, 10 ─────────────────────────────────────────────
 
 
-async def test_an_observation_lost_on_a_resend_leaves_the_bank(box: Box) -> None:
+async def test_an_observation_lost_on_a_resend_is_left_to_consolidation_not_the_bank(
+    box: Box,
+) -> None:
     e = box.engine
     e.banks["coding-agent::web"]["obs"] = [
         {
@@ -1757,15 +1808,105 @@ async def test_an_observation_lost_on_a_resend_leaves_the_bank(box: Box) -> None
     await box.fold().run()
     assert "vite" not in [o["text"] for o in e.banks["hal0:shared"]["obs"]]
     retry = await box.fold(only=["coding-agent::web"]).run()
-    assert retry["status"] == "incomplete"
-    note = next(b["note"] for b in retry["banks"] if b["bank"] == "coding-agent::web")
-    assert "observation(s) rest on 1 document(s) already in hal0:shared" in note
-    assert "conversation:a" not in note
-    sidecar = json.loads((Path(retry["archive_dir"]) / fi.LEFT_IDS_NAME).read_text())
-    assert sidecar["coding-agent::web"]["documents"] == [
-        "web::hal0-legacy-claude-code::conversation:a"
+    # No merge can carry it now (its document is in hal0:shared): it is
+    # counted for the target's consolidation, and the bank folds.
+    assert retry["status"] == "folded"
+    web = next(b for b in retry["banks"] if b["bank"] == "coding-agent::web")
+    assert web["step"] == "folded"
+    assert web["report"]["observations_to_rebuild"] == 1
+    assert web["report"]["observations_to_rebuild_by_part"] == {"shared": 1}
+    # Its fact landed in the earlier send; nothing of it is sent again.
+    assert web["report"]["facts_requeued_for_rebuild"] == 0
+    assert "vite" not in [o["text"] for o in e.banks["hal0:shared"]["obs"]]
+    _assert_folded(box)
+
+
+async def test_a_changed_document_whose_copy_is_deleted_folds_and_leaves_spanning_observations(
+    box: Box,
+) -> None:
+    """The real box: fold, change, refusal, delete the copy, cascade, rerun, cutover."""
+    e = box.engine
+    stamp = "2026-11-01T10:00:00+00:00"
+    pi = e.banks["pi-coder"]
+    pi["docs"] = {
+        "p1": doc(
+            "p1",
+            {**fact("pi note", "project:web"), "consolidated_at": stamp},
+            {**fact("pi two", "project:web"), "consolidated_at": stamp},
+        ),
+        "p2": doc("p2", {**fact("pi other", "project:web"), "consolidated_at": stamp}),
+    }
+    pi["obs"] = [
+        {"text": "p1 alone", "tags": [], "sources": [{"document_id": "p1", "fact_index": 0}]},
+        {
+            "text": "spans p1 and p2",
+            "tags": [],
+            "sources": [
+                {"document_id": "p1", "fact_index": 1},
+                {"document_id": "p2", "fact_index": 0},
+            ],
+        },
     ]
+    p1, p2 = "web::pi-coder::p1", "web::pi-coder::p2"
+    # 1. A run folds the bank, with both its observations.
+    first = await box.fold(only=["pi-coder"]).run()
+    assert first["folded"] == ["pi-coder"]
+    shared = e.banks["hal0:shared"]
+    assert sorted(o["text"] for o in shared["obs"]) == ["p1 alone", "spans p1 and p2"]
+    # 2. A folded document changes in the old bank.
+    pi["docs"]["p1"]["facts"].append(fact("appended", "project:web"))
+    # 3. The next run refuses it as changed (and so imports nothing).
+    second = await box.fold().run()
+    assert second["status"] == "incomplete" and "pi-coder" in second["left"]
+    note = next(b["note"] for b in second["banks"] if b["bank"] == "pi-coder")
+    assert "changed in the old bank" in note and "observations_to_rebuild" in note
     _assert_on_the_old_layout(box)
+    # 4. The operator deletes the target's copy through the engine. The engine
+    # deletes every observation resting on it, the one that also rests on p2
+    # (still in the target) too, and requeues p2's co-source fact.
+    async with box.http(f"http://127.0.0.1:{NORMAL_PORT}") as http:
+        resp = await http.delete(f"/v1/default/banks/hal0:shared/documents/{p1}")
+        assert resp.status_code == 200
+    assert shared["obs"] == []
+    assert (p2, 0) in e.unconsolidated("hal0:shared")
+    # The dry run says how many observations will be left to consolidation.
+    plan = await box.fold().preflight()
+    assert plan["refusals"] == []
+    row = next(r for r in plan["banks"] if r["bank"] == "pi-coder")
+    assert row["fold"]["observations_to_rebuild"] == 1
+    # 5. The rerun folds every bank and cuts over.
+    mark = len(e.imports)
+    third = await box.fold().run()
+    assert third["status"] == "folded"
+    assert box.layout().two_bank
+    assert write_gate.read_gate() is None and fi.load_journal() is None
+    # 6. The observation that spans the resent p1 and the landed p2 is not
+    # carried (the engine imports one only with all its source documents in
+    # one call): counted, and p1's fact is sent marked for consolidation.
+    report = next(b for b in third["banks"] if b["bank"] == "pi-coder")["report"]
+    assert report["observations_to_rebuild"] == 1 > 0
+    assert report["facts_requeued_for_rebuild"] == 1
+    sent = [a for t, a in e.imports[mark:] if any(d["id"] == p1 for d in a["documents"])]
+    assert len(sent) == 1
+    assert [d["id"] for d in sent[0]["documents"]] == [p1]
+    assert [o["text"] for o in sent[0]["observations"]] == ["p1 alone"]
+    assert sent[0]["documents"][0]["facts"][1]["consolidated_at"] is None
+    assert len(shared["docs"][p1]["facts"]) == 3
+    assert sorted(o["text"] for o in shared["obs"]) == ["nature", "p1 alone"]
+    # Consolidation takes up both facts of the dropped observation: p1's as
+    # sent, p2's as the delete requeued it. p1's first fact is the carried
+    # observation's and stays stamped.
+    waiting = e.unconsolidated("hal0:shared")
+    assert {(p1, 1), (p2, 0)} <= waiting
+    assert (p1, 0) not in waiting
+    # 7. Nothing private reached the shared bank.
+    assert "visibility:private" not in e.all_tags("hal0:shared")
+    assert all(not d.startswith("private:") for d in shared["docs"])
+    assert "private:hermes:s1" in e.banks["hal0:private"]["docs"]
+    assert "secret obs" not in [o["text"] for o in shared["obs"]]
+    for target, archive in e.imports:
+        if target == "hal0:shared":
+            assert "visibility:private" not in json.dumps(archive)
 
 
 async def test_owners_are_frozen_for_every_later_run_of_a_bank(box: Box) -> None:

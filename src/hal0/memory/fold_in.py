@@ -896,6 +896,14 @@ def _new_report() -> dict[str, Any]:
         #: ``mental_model_history`` rows in the export: a merge import does not
         #: carry them, and nothing reads them but the history view of a model.
         "mental_model_history_not_carried": 0,
+        #: Observations no merge can carry because some of their source
+        #: documents are in the target already and they are not
+        #: (:meth:`FoldIn._drop_unlanded_observations`): left to the target's
+        #: consolidation. The dry run's figure is an estimate from listings.
+        "observations_to_rebuild": 0,
+        #: Source facts of those observations sent with their consolidation
+        #: stamps cleared, so the target's consolidation picks them up.
+        "facts_requeued_for_rebuild": 0,
     }
 
 
@@ -1010,6 +1018,49 @@ def model_content_digest(model: Mapping[str, Any]) -> str:
 def observation_digest(obs: Mapping[str, Any]) -> str:
     """A short digest of an observation's text: how a sent observation is known again."""
     return hashlib.sha256(str(obs.get("text")).encode("utf-8")).hexdigest()[:24]
+
+
+def requeue_sources(data: bytes, observations: Iterable[Mapping[str, Any]]) -> tuple[bytes, int]:
+    """``data`` with the stamps cleared on every fact it carries that ``observations`` rest on.
+
+    Returns ``(archive, facts cleared)``. Consolidation picks up a fact whose
+    ``consolidated_at`` and ``consolidation_failed_at`` are both null
+    (``find_unconsolidated`` in ``engine/memories/pg/reads.py``); the merge
+    import restores both as the archive has them (``restore_fact_lifecycle``
+    in ``engine/memories/pg/transfer.py``). A fact the archive does not
+    carry is left alone. Neither stamp is part of :func:`document_digest`.
+    """
+    wanted: dict[str, set[int]] = {}
+    for obs in observations:
+        for source in obs.get("sources") or ():
+            try:
+                index = int(source.get("fact_index"))
+            except (TypeError, ValueError):
+                continue
+            wanted.setdefault(str(source.get("document_id")), set()).add(index)
+    archive = _read_archive(data)
+    cleared = 0
+    for doc in archive["documents"]:
+        indices = wanted.get(str(doc.get("id")))
+        if not indices:
+            continue
+        facts = doc.get("facts") or []
+        for index in sorted(indices):
+            if not 0 <= index < len(facts) or not isinstance(facts[index], dict):
+                continue
+            facts[index]["consolidated_at"] = None
+            facts[index]["consolidation_failed_at"] = None
+            cleared += 1
+    if not cleared:
+        return data, 0
+    rebuilt = _write_archive(
+        str(archive["manifest"].get("source_bank_id") or ""),
+        archive["documents"],
+        archive["observations"],
+        archive["mental_models"],
+        archive["knowledge_pages"],
+    )
+    return rebuilt, cleared
 
 
 def _decoded(value: Any) -> Any:
@@ -2115,6 +2166,9 @@ def analyse_listing(
     facts: list[Mapping[str, Any]],
     models: list[Mapping[str, Any]] | None = None,
     page_models: Iterable[str] = (),
+    observations: list[Mapping[str, Any]] | None = None,
+    landed: Mapping[str, set[str]] | None = None,
+    landed_texts: Mapping[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """What :func:`rewrite_archive` would report for a bank, from its listings (pure).
 
@@ -2122,6 +2176,14 @@ def analyse_listing(
     document, fact and mental-model listings instead and routes them by the
     same rules (``page_models``: the ids of the models behind knowledge
     pages). Observations are counted by :meth:`FoldIn.bank_state`.
+
+    For a bank an earlier run sent part of, ``observations`` (the bank's
+    observation listing, with ``source_memory_ids``), ``landed`` (per part,
+    the new document ids its target holds) and ``landed_texts`` (per part,
+    the observation texts its target holds) estimate
+    ``observations_to_rebuild``: an observation on one side whose sources
+    are partly in the target, and whose text the target does not hold
+    (:meth:`FoldIn._drop_unlanded_observations`).
     """
     from hal0.memory.knowledge_pages import trigger_scope_held
 
@@ -2135,8 +2197,10 @@ def analyse_listing(
         doc["facts"].append({"tags": list(fact.get("tags") or [])})
     report = _new_report()
     held_private = False
+    routes: dict[str, _DocRoute] = {}
     for doc in by_doc.values():
         route = _route_document(plan, doc)
+        routes[doc["id"]] = route
         held_private = held_private or route.part == PART_PRIVATE
         report["documents"][route.part] += 1
         report["facts"][route.part] += len(doc["facts"])
@@ -2157,6 +2221,14 @@ def analyse_listing(
             _tally_projects(report, tags)
             if _unreadable_shared(route, tags):
                 report["unreadable_shared_facts"] += 1
+    if observations and landed:
+        report["observations_to_rebuild"] = _rebuild_estimate(
+            routes,
+            {str(f.get("id")): str(f.get("document_id") or "") for f in facts},
+            observations,
+            landed,
+            landed_texts or {},
+        )
     backing = set(page_models)
     bank_owner = (
         resolve_owner(
@@ -2195,6 +2267,33 @@ def analyse_listing(
             elif not trigger_scope_held(_decoded(model.get("trigger")), slug):
                 report["knowledge_pages"]["content_cleared_unscoped"] += 1
     return report
+
+
+def _rebuild_estimate(
+    routes: Mapping[str, _DocRoute],
+    fact_documents: Mapping[str, str],
+    observations: list[Mapping[str, Any]],
+    landed: Mapping[str, set[str]],
+    landed_texts: Mapping[str, set[str]],
+) -> int:
+    """How many of a bank's observations a run would leave to the target's consolidation."""
+    count = 0
+    for obs in observations:
+        docs = {fact_documents.get(str(s)) for s in obs.get("source_memory_ids") or ()}
+        located = [routes.get(d) for d in docs if d]
+        if not located or len(located) != len(docs) or any(r is None for r in located):
+            continue
+        parts = {r.part for r in located if r is not None}
+        if len(parts) != 1:
+            continue
+        part = next(iter(parts))
+        if part == PART_SHARED and any(_is_private_tag(t) for t in obs.get("tags") or ()):
+            continue
+        new_ids = {r.new_id for r in located if r is not None}
+        present = new_ids & set(landed.get(part) or ())
+        if present and str(obs.get("text")) not in set(landed_texts.get(part) or ()):
+            count += 1
+    return count
 
 
 # ── the journal ──────────────────────────────────────────────────────────
@@ -3186,7 +3285,9 @@ class FoldIn(em.EngineMaintenance):
                         for key in em.COUNT_KEYS:
                             plan["totals"][key] += state["counts"][key]
                         if not apply:
-                            row["fold"] = await self._analyse(cls, earlier.get(bank))
+                            row["fold"] = await self._analyse(
+                                cls, earlier.get(bank), targets, set(ids)
+                            )
                 plan["banks"].append(row)
         except FoldInError as exc:
             refuse("engine_error", exc.message)
@@ -3413,8 +3514,19 @@ class FoldIn(em.EngineMaintenance):
             )
         )
 
-    async def _analyse(self, cls: BankClass, earlier: Mapping[str, Any] | None) -> dict[str, Any]:
-        """The dry run's look at one bank: its listings, routed as the rewrite would."""
+    async def _analyse(
+        self,
+        cls: BankClass,
+        earlier: Mapping[str, Any] | None,
+        targets: Mapping[str, str] | None = None,
+        on_engine: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """The dry run's look at one bank: its listings, routed as the rewrite would.
+
+        For a bank an earlier run sent part of, the observations it would
+        leave to the targets' consolidation are estimated too
+        (``observations_to_rebuild``, :func:`analyse_listing`).
+        """
         base = em.bank_path(cls.bank)
         documents = await self._list_all(
             f"{base}/documents",
@@ -3440,12 +3552,37 @@ class FoldIn(em.EngineMaintenance):
             what="reading mental models",
             bank=cls.bank,
         )
+        observations: list[Mapping[str, Any]] = []
+        landed: dict[str, set[str]] = {}
+        landed_texts: dict[str, set[str]] = {}
+        sent = (earlier or {}).get("sent_files") or {}
+        for part, target in (targets or {}).items():
+            if not sent.get(part) or target not in (on_engine or set()):
+                continue
+            landed[part] = await self._document_ids(target)
+            landed_texts[part] = await self._observation_texts(target)
+        if landed:
+            observations = [
+                o
+                for o in await self._list_all(
+                    f"{base}/memories/list",
+                    {"type": "observation"},
+                    key="items",
+                    what="listing observations",
+                    bank=cls.bank,
+                    page_size=_CONTENT_PAGE,
+                )
+                if isinstance(o, dict)
+            ]
         return analyse_listing(
             self._rewrite_plan(cls, None, frozen=earlier),
             [d for d in documents if isinstance(d, dict)],
             [f for f in facts if isinstance(f, dict)],
             [m for m in models if isinstance(m, dict)],
             await self._page_model_ids(cls.bank),
+            observations=observations,
+            landed=landed,
+            landed_texts=landed_texts,
         )
 
     @staticmethod
@@ -4551,15 +4688,13 @@ class FoldIn(em.EngineMaintenance):
             await self._clashes(journal, entry, name, target, ids)
         data, sending, unsent = await self._remainder(full, target, ids)
         if unsent:
-            # An observation an earlier send carried must have landed with its
-            # documents (item 3 of the review); one the old bank built since
-            # rests on documents already folded and cannot be carried: the
-            # target's own consolidation builds it from the same facts.
+            # One the old bank built since an earlier run rests on documents
+            # already folded and was never sent: the target's own
+            # consolidation builds it from the same facts.
             sent_before = set((self._prior(entry).get(name) or {}).get("observations") or ())
             if part.sent:
                 sent_before |= set(ids.get("observations") or [])
-            required = [o for o in unsent if observation_digest(o) in sent_before]
-            later = len(unsent) - len(required)
+            later = sum(1 for o in unsent if observation_digest(o) not in sent_before)
             if later:
                 observed = entry.report.setdefault("observations", {})
                 observed["not_carried_built_since"] = later
@@ -4568,8 +4703,7 @@ class FoldIn(em.EngineMaintenance):
                     f"run rest on documents already in {target} and are not carried; "
                     f"{target}'s consolidation builds them from the same facts"
                 )
-            if required:
-                await self._require_landed_observations(entry, target, required)
+        data = await self._drop_unlanded_observations(entry, name, target, unsent, data)
         if data is None:
             # Everything of the part is in the target already (an earlier run sent it).
             part.before, part.sending = None, None
@@ -4724,7 +4858,10 @@ class FoldIn(em.EngineMaintenance):
                 "trigger, or its content now cleared because the bank holds private facts). A "
                 "merge with skip keeps the older copy, so the change would be lost without a "
                 f"word. Delete those copies from {target}, then run the fold-in again: it sends "
-                "them as they are now. " + how,
+                "them as they are now. The engine deletes the observations in "
+                f"{target} that rest on a deleted copy; the next run carries again those that "
+                "rest only on documents it sends, and counts the others as "
+                "observations_to_rebuild, for consolidation to build again. " + how,
                 bank=entry.bank,
                 details={"changed": changed, "changed_mental_models": models_changed},
             )
@@ -4791,7 +4928,7 @@ class FoldIn(em.EngineMaintenance):
         that rests on a document already in the target cannot be sent: the
         engine imports an observation only when all its source documents
         land in the same call. Those are returned as ``unsent`` for
-        :meth:`_require_landed_observations`.
+        :meth:`_drop_unlanded_observations`.
 
         Mental models are inserted ``ON CONFLICT DO NOTHING``, so a model
         already there is left out and not counted. Knowledge pages are
@@ -4859,29 +4996,62 @@ class FoldIn(em.EngineMaintenance):
         )
         return rebuilt, sending, unsent
 
-    async def _require_landed_observations(
-        self, entry: BankEntry, target: str, unsent: list[dict[str, Any]]
-    ) -> None:
-        """Leave the bank unless every observation that cannot be sent again is in the target.
+    async def _drop_unlanded_observations(
+        self,
+        entry: BankEntry,
+        name: str,
+        target: str,
+        unsent: list[dict[str, Any]],
+        data: bytes | None,
+    ) -> bytes | None:
+        """Count the observations no merge can carry now, and requeue what is sent of their facts.
 
-        They rest on documents that landed in an earlier send; if they did not
-        land with them, no merge with ``skip`` can bring them now, and the
-        bank is not reported folded. Found by their text.
+        ``unsent`` rest on at least one document already in the target
+        (:meth:`_remainder`): hindsight-api 1.2.0 imports an observation only
+        when every source document lands in the same call
+        (``_import_observations`` in ``engine/transfer/importer.py``), so a
+        merge with ``skip`` cannot bring one now. One whose text the target
+        holds landed before. Any other is not carried: observations are
+        derived from facts, so the target's consolidation rebuilds it. It is
+        counted as ``observations_to_rebuild`` and does not leave the bank:
+        deleting the landed documents to resend them whole would cascade to
+        every observation resting on them in the target, and the next run
+        would find more of the same (a fold-in that never converges).
+
+        Consolidation picks up a fact whose ``consolidated_at`` and
+        ``consolidation_failed_at`` are both null. The export carries each
+        fact's stamps and the import restores them verbatim, so the source
+        facts of a dropped observation that this send carries go with both
+        cleared; ``data`` comes back with that done. A fact already in the
+        target cannot be changed by a merge import. When it got there with
+        the document whose copy the operator deleted, the engine's delete
+        already requeued it as a co-source of the observations it removed;
+        when it landed in a send that did not bring its observation, it stays
+        stamped, and the guide says how to rebuild after the cutover.
         """
+        if not unsent:
+            return data
         texts = await self._observation_texts(target)
-        missing = [o for o in unsent if str(o.get("text")) not in texts]
-        if not missing:
-            return
-        docs = sorted({str(s.get("document_id")) for o in missing for s in o.get("sources") or ()})
-        raise BankLeft(
-            f"bank {entry.bank}: {len(missing)} observation(s) rest on {len(docs)} document(s) "
-            f"already in {target} that landed without them, and a merge with skip cannot carry "
-            "them now (the engine imports an observation only with all its source documents in "
-            f"the same call). To fold the bank whole, delete those documents from {target} and "
-            "run the fold-in again",
-            bank=entry.bank,
-            details={"documents": docs, "observations": len(missing)},
+        dropped = [o for o in unsent if str(o.get("text")) not in texts]
+        by_part = entry.report.setdefault("observations_to_rebuild_by_part", {})
+        by_part[name] = len(dropped)
+        entry.report["observations_to_rebuild"] = sum(int(v) for v in by_part.values())
+        if not dropped:
+            return data
+        requeued = 0
+        if data is not None:
+            data, requeued = requeue_sources(data, dropped)
+        requeue = entry.report.setdefault("facts_requeued_by_part", {})
+        requeue[name] = requeued
+        entry.report["facts_requeued_for_rebuild"] = sum(int(v) for v in requeue.values())
+        self._say(
+            f"{entry.bank}: {len(dropped)} observation(s) rest on documents already in {target} "
+            "and cannot be carried now (the engine imports an observation only with all its "
+            "source documents in the same call). They are not carried and are counted as "
+            f"observations_to_rebuild: {target}'s consolidation rebuilds them from their facts. "
+            f"{requeued} of those facts are sent now, marked for consolidation"
         )
+        return data
 
     def _import_budget(self, part: Part) -> float:
         counts = part.sending or part.expected
