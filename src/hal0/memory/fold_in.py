@@ -4543,7 +4543,7 @@ class FoldIn(em.EngineMaintenance):
                     out.setdefault((slug, str(child.get("name") or "").lower()), child["id"])
         return out
 
-    async def _project_folder(self, entry: BankEntry, target: str, slug: str) -> str:
+    async def _project_folder(self, bank: str, target: str, slug: str) -> str:
         """The id of ``target``'s folder for project ``slug``, created when it has none.
 
         Found and created exactly as ``/api/memory/compat`` finds and creates
@@ -4580,7 +4580,7 @@ class FoldIn(em.EngineMaintenance):
         if not isinstance(folder, str) or not folder:
             raise FoldInError(
                 f"the memory engine created {project_folder_name(slug)} in {target} without an id",
-                bank=entry.bank,
+                bank=bank,
                 resumable=True,
             )
         self._say(f"created the folder {project_folder_name(slug)} in {target}")
@@ -4619,7 +4619,7 @@ class FoldIn(em.EngineMaintenance):
         wanted = sorted(f for f in folders if f in present)
         if not wanted:
             return data
-        real = {f: await self._project_folder(entry, target, folders[f]) for f in wanted}
+        real = {f: await self._project_folder(entry.bank, target, folders[f]) for f in wanted}
         self._hook(f"placed:{entry.bank}")
         return rehome_folders(data, real)
 
