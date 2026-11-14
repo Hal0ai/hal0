@@ -34,9 +34,9 @@ vi.mock('@/api/hooks/useSlots', () => ({
       box.edits.push(a)
     },
   }),
-  useSlotRestart: () => ({ isPending: false, mutate: (n: string) => box.restarts.push(n) }),
+  useSlotRestart: () => ({ isPending: false, mutate: (n: string) => box.restarts.push(n), mutateAsync: async (n: string) => { box.restarts.push(n); return {} } }),
   useSlotCreate: () => ({ isPending: false, mutate: (b: Record<string, unknown>) => box.creates.push(b) }),
-  useSlotLoad: () => ({ mutate: () => {} }),
+  useSlotLoad: () => ({ mutate: () => {}, mutateAsync: async () => ({}) }),
   useSlotUnload: () => ({ mutate: () => {} }),
 }))
 vi.mock('@/api/hooks/useFlmCatalog', () => ({

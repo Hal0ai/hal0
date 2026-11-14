@@ -8,11 +8,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useFlmCatalog } from '@/api/hooks/useFlmCatalog'
 import { usePullJob } from '@/api/hooks/useModels'
-import { useSlotConfig, useSlotCreate, useSlotEdit, useSlotLoad, useSlotRestart, useSlotUnload } from '@/api/hooks/useSlots'
+import { useSlotConfig, useSlotCreate, useSlotEdit, useSlotUnload } from '@/api/hooks/useSlots'
 import { SlotControls, slotCtrlPhase } from '../inference-pane.jsx'
 import { slotIndicatorFromPhase } from '../slot-status.js'
 import { npuAnchorSlot } from '../slots/slot-shared.js'
 import { openSlotEditFromNpu } from '../slots-route'
+import { useNpuConflictStart } from './useNpuConflictStart.jsx'
 import { bundledFlmModel, capEnabled, cfgFingerprint, draftBody, draftCount, pickChatModel, savedFlm, toggleCap } from './flm-draft-pure'
 
 const toast = (msg, kind = 'info') =>
@@ -72,8 +73,7 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
   const cfgQ = useSlotConfig(anchor.name)
   const catQ = useFlmCatalog()
   const editMut = useSlotEdit()
-  const restartMut = useSlotRestart()
-  const loadMut = useSlotLoad()
+  const start = useNpuConflictStart()
   const unloadMut = useSlotUnload()
   const pull = usePullJob()
 
@@ -169,9 +169,7 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
       setDraft({})
       if (up) {
         toast(`${anchor.name} FLM settings updated — restarting`, 'info')
-        restartMut.mutate(anchor.name, {
-          onError: (e) => toast(`NPU restart failed — ${e?.message || 'see logs'}`, 'warn'),
-        })
+        start.run(anchor.name, 'restart').catch((e) => toast(`NPU restart failed — ${e?.message || 'see logs'}`, 'warn'))
       } else {
         // A restart on a stopped anchor is unload + load: it would start FLM and claim the NPU.
         toast(`${anchor.name} FLM settings saved — they take effect on the next start`, 'info')
@@ -184,6 +182,8 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
     }
   }
 
+  const startOrWarn = (kind) =>
+    start.run(anchor.name, kind).catch((e) => toast(e?.message ? `${anchor.name}: ${e.message}` : `${anchor.name}: action failed`, 'warn'))
   const m = anchor.metrics || {}
   const tps = typeof m.toks === 'number' && m.toks > 0 ? Math.round(m.toks) : null
   const ttft = typeof m.ttft === 'number' && m.ttft > 0 ? Math.round(m.ttft) : null
@@ -205,9 +205,9 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
         <span className="npt-state" data-testid="flm-state">{ind.label ?? ind.cls}</span>
         <SlotControls
           phase={slotCtrlPhase(anchor)}
-          onStart={() => loadMut.mutate(anchor.name)}
+          onStart={() => startOrWarn('load')}
           onStop={() => unloadMut.mutate(anchor.name)}
-          onRestart={() => restartMut.mutate(anchor.name)}
+          onRestart={() => startOrWarn('restart')}
           onLogs={() => window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: anchor.name } }))}
           editDisabled={count > 0}
           editDisabledTitle="Apply or discard the staged FLM changes first"
@@ -304,6 +304,7 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
         <dt>RAM</dt>
         <dd>{up && mem != null ? `${mem} GB` : '—'}</dd>
       </dl>
+      {start.dialog}
     </div>
   )
 }

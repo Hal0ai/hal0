@@ -4,10 +4,11 @@
 import { useMemo, useState } from 'react'
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
-import { useSlotConfig, useSlotCreate, useSlotDelete, useSlotEdit, useSlotLoad, useSlotRestart, useSlots } from '@/api/hooks/useSlots'
+import { useSlotConfig, useSlotCreate, useSlotDelete, useSlotEdit, useSlots } from '@/api/hooks/useSlots'
 import { useXdnaFit } from '@/api/hooks/useXdnaFit'
 import { useXdnaKnobs } from '@/api/hooks/useXdnaKnobs'
 import './npu-tab.css'
+import { useNpuConflictStart } from './useNpuConflictStart.jsx'
 import { slotButtonPhase } from '../slot-status.js'
 import {
   GGML_CTX_PRESETS,
@@ -54,8 +55,7 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
   const profilesQ = useProfiles()
   const createMut = useSlotCreate()
   const editMut = useSlotEdit()
-  const loadMut = useSlotLoad()
-  const restartMut = useSlotRestart()
+  const start = useNpuConflictStart()
   const deleteMut = useSlotDelete()
 
   const names = useMemo(() => (slotsQ.data ?? []).map((s) => s?.name).filter(Boolean), [slotsQ.data])
@@ -97,12 +97,13 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
       setBusy(false)
     }
   }
-  const create = (start) =>
+  const create = (startAfter) =>
     run(async () => {
       await createMut.mutateAsync(ggmlCreateBody(d, fixedNames))
-      if (start) {
+      if (startAfter) {
         try {
-          await loadMut.mutateAsync(d.name)
+          // A conflict opens the confirm; the drawer stays up under it and closes once it settles.
+          if ((await start.run(d.name, 'load', { onSettled: onDone })) === 'prompted') return
         } catch (e) {
           toast(`${d.name} created, but starting it failed — ${e?.message || 'see logs'}`, 'warn')
         }
@@ -112,7 +113,10 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
   const save = (restart) =>
     run(async () => {
       if (dirty) await editMut.mutateAsync({ name: slot.name, body: editBody })
-      if (restart) await restartMut.mutateAsync(slot.name)
+      if (restart && (await start.run(slot.name, 'restart', { onSettled: onDone })) === 'prompted') {
+        setPatch({})
+        return
+      }
       setPatch({})
       onDone?.()
     })
@@ -124,7 +128,7 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
       if (slotButtonPhase(slot) !== 'off') {
         toast(`${slot.name} xdna settings updated — restarting`, 'info')
         try {
-          await restartMut.mutateAsync(slot.name)
+          if ((await start.run(slot.name, 'restart', { onSettled: onDone })) === 'prompted') return
         } catch (e) {
           toast(`${slot.name} restart failed — ${e?.message || 'see logs'}`, 'warn')
         }
@@ -303,6 +307,7 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
       </footer>
         </>
       )}
+      {start.dialog}
     </div>
   )
 }

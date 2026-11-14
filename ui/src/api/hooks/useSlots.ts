@@ -624,10 +624,23 @@ function useSlotLifecycleInvalidator() {
   }
 }
 
+/**
+ * A load/restart variable: the slot name, or `{ name, unloadNpuHolder: true }` to retry a start the
+ * backend refused with `slot.npu_conflict` (409) and let it unload the NPU holder first. The body
+ * is sent only when the flag is true, so the plain string form posts exactly what it always did.
+ */
+export type SlotStartVar = string | { name: string; unloadNpuHolder?: boolean }
+
+function slotStartPost(path: (name: string) => string, v: SlotStartVar) {
+  const name = typeof v === 'string' ? v : v.name
+  const optIn = typeof v !== 'string' && v.unloadNpuHolder === true
+  return optIn ? slotPost(path(name), { unload_npu_holder: true }) : slotPost(path(name))
+}
+
 export function useSlotRestart() {
   const invalidate = useSlotLifecycleInvalidator()
   return useMutation({
-    mutationFn: (name: string) => slotPost(ENDPOINTS.slotRestart(name)),
+    mutationFn: (v: SlotStartVar) => slotStartPost(ENDPOINTS.slotRestart, v),
     onSuccess: invalidate,
   })
 }
@@ -635,7 +648,7 @@ export function useSlotRestart() {
 export function useSlotLoad() {
   const invalidate = useSlotLifecycleInvalidator()
   return useMutation({
-    mutationFn: (name: string) => slotPost(ENDPOINTS.slotLoad(name)),
+    mutationFn: (v: SlotStartVar) => slotStartPost(ENDPOINTS.slotLoad, v),
     onSuccess: invalidate,
   })
 }

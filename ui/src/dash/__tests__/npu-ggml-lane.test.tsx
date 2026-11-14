@@ -19,9 +19,9 @@ const { box } = vi.hoisted(() => ({
 }))
 
 vi.mock('@/api/hooks/useSlots', () => ({
-  useSlotLoad: () => ({ mutate: (n: string) => box.loads.push(n) }),
+  useSlotLoad: () => ({ mutate: (n: string) => box.loads.push(n), mutateAsync: async (n: string) => { box.loads.push(n); return {} } }),
   useSlotUnload: () => ({ mutate: (n: string) => box.unloads.push(n) }),
-  useSlotRestart: () => ({ mutate: (n: string) => box.restarts.push(n) }),
+  useSlotRestart: () => ({ mutate: (n: string) => box.restarts.push(n), mutateAsync: async (n: string) => { box.restarts.push(n); return {} } }),
 }))
 vi.mock('@/api/hooks/useRunnerImages', () => ({
   useRunnerImagePullJob: () => ({ start: box.pullStart, state: 'idle', pct: null, error: null, inFlight: false }),

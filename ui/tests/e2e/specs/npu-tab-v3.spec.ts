@@ -30,9 +30,9 @@ const FLM_ANCHOR_MODEL = {
   ns: 'pulled',
 }
 
-async function setup(page: Page) {
+async function setup(page: Page, xdnaState = NPU_XDNA_SLOT.state) {
   const anchor = MOCK_DATA.slots.find((s: any) => s.name === 'npu')
-  const slots = [anchor, NPU_XDNA_SLOT]
+  const slots = [anchor, { ...NPU_XDNA_SLOT, state: xdnaState, ...(xdnaState === 'off' ? { container_status: 'exited', container_health: false } : {}) }]
   const models = [...MOCK_DATA.models, GGUF_MODEL, FLM_ANCHOR_MODEL]
   await page.addInitScript(
     ({ slots, models, occ }) => {
@@ -173,5 +173,72 @@ test.describe('NPU tab', () => {
     await page.goto('/#slots/edit/npu')
     await expect(page.getByTestId('npu-lane-link')).toHaveAttribute('href', '#slots/npu/lanes')
     await expect(page.getByTestId('npu-capability-matrix')).toHaveCount(0)
+  })
+
+  // #3666: a start the backend refuses with 409 slot.npu_conflict asks first, then retries with the opt-in.
+  const conflict = (over: Record<string, unknown> = {}) => ({
+    error: {
+      code: 'slot.npu_conflict',
+      message: 'npu-gguf cannot start: flm holds the NPU',
+      details: {
+        slot: 'npu-gguf',
+        holders: ['npu'],
+        holder_engine: 'flm',
+        unloads: ['npu', 'npu-stt', 'npu-embed'],
+        pinned: false,
+        pending: false,
+        reason: 'flm holds the NPU',
+        ...over,
+      },
+    },
+  })
+
+  async function routeLoad(page: Page, first: unknown) {
+    const bodies: any[] = []
+    await page.route('**/api/slots/npu-gguf/load', (route) => {
+      bodies.push(route.request().postData() ? route.request().postDataJSON() : null)
+      if (bodies.length === 1) return json(route, first, 409)
+      return json(route, { ok: true })
+    })
+    return bodies
+  }
+
+  test('a conflicting GGML Start confirms, then retries with unload_npu_holder', async ({ page }) => {
+    await setup(page, 'off')
+    const bodies = await routeLoad(page, conflict())
+    await page.goto('/#slots/npu')
+    await page.getByTestId('ggml-card-npu-gguf').locator('button[title="Start"]').click()
+    const dlg = page.getByRole('dialog')
+    await expect(dlg).toContainText('Unload npu to start npu-gguf?')
+    await expect(dlg).toContainText('npu-gguf runs a per-op model, which needs the whole NPU. Starting it will unload npu, npu-stt, npu-embed.')
+    await expect(dlg).not.toContainText('is pinned')
+    await dlg.getByRole('button', { name: 'Unload and start' }).click()
+    await expect.poll(() => bodies.length).toBe(2)
+    expect(bodies[0]).toBeNull()
+    expect(bodies[1]).toEqual({ unload_npu_holder: true })
+    await expect(dlg).toHaveCount(0)
+  })
+
+  test('cancelling the NPU conflict dialog posts nothing more', async ({ page }) => {
+    await setup(page, 'off')
+    const bodies = await routeLoad(page, conflict({ pinned: true }))
+    await page.goto('/#slots/npu')
+    await page.getByTestId('ggml-card-npu-gguf').locator('button[title="Start"]').click()
+    const dlg = page.getByRole('dialog')
+    await expect(dlg).toContainText('npu is pinned.')
+    await dlg.getByRole('button', { name: 'Cancel' }).click()
+    await expect(dlg).toHaveCount(0)
+    await page.waitForTimeout(300)
+    expect(bodies).toHaveLength(1)
+  })
+
+  test('a pending NPU conflict toasts and opens no dialog', async ({ page }) => {
+    await setup(page, 'off')
+    const bodies = await routeLoad(page, conflict({ pending: true }))
+    await page.goto('/#slots/npu')
+    await page.getByTestId('ggml-card-npu-gguf').locator('button[title="Start"]').click()
+    await expect(page.locator('.hal0-toast', { hasText: 'cannot start' })).toBeVisible()
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    expect(bodies).toHaveLength(1)
   })
 })
