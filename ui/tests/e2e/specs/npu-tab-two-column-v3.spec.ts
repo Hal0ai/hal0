@@ -79,6 +79,8 @@ test.describe('NPU tab two-column layout', () => {
     const xdna = await box(page, 'npu-engine-xdna')
     expect(Math.abs(xdna.x - flm.x)).toBeLessThan(1)
     expect(xdna.y).toBeGreaterThanOrEqual(flm.y + flm.height)
+    // Stacked at the design gap, not spread to the readiness column's height.
+    expect(xdna.y - (flm.y + flm.height)).toBeLessThan(15)
     const engines = await box(page, 'npu-engines')
     const prof = await box(page, 'npu-profiles')
     expect(prof.width).toBeGreaterThanOrEqual(engines.width - 2)

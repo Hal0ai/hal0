@@ -162,9 +162,13 @@
 .npt-engines > [data-testid='npu-engine-flm'] { grid-column: 2; grid-row: 1; }
 .npt-engines > [data-testid='npu-engine-xdna'] { grid-column: 2; grid-row: 2; }
 .npt-engines > [data-testid='npu-profiles'] { grid-column: 1 / -1; }
+/* Readiness spans the first two rows and is usually the taller column; let the
+   second row absorb its extra height so the two engine cards keep the 14px gap. */
+.npt-engines { grid-template-rows: auto 1fr; }
 @media (max-width: 980px) {
   .npt-cols, .npt-models, .npt-engines { grid-template-columns: minmax(0, 1fr); }
-  .npt-engines > [data-testid] { grid-column: auto !important; grid-row: auto !important; }
+  .npt-engines { grid-template-rows: none; }
+  .npt-engines > [data-testid] { grid-column: auto; grid-row: auto; }
 }
 .npt-ready.ok { color: var(--ok); }
 .npt-ready.warn { color: var(--warn); }
