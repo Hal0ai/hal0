@@ -278,6 +278,46 @@ def test_the_dry_run_counts_the_pages_it_carries_empty() -> None:
     assert "5 from a bank whose project comes from tags, 0 whose old trigger" in text
 
 
+def test_the_dry_run_and_the_result_count_the_observations_left_to_rebuild() -> None:
+    FakeFoldIn.plan = {
+        "banks": [
+            {
+                "bank": "pi-coder",
+                "class": "coding",
+                "action": "fold",
+                "fold": {"observations_to_rebuild": 4},
+            }
+        ],
+        "pending": [],
+        "refusals": [],
+        "warnings": [],
+    }
+    out = invoke()
+    assert out.exit_code == 0, out.output
+    text = " ".join(out.output.replace("│", " ").split())
+    assert "pi-coder: about 4 observation(s) rest on documents already in the target" in text
+    assert "(observations_to_rebuild)" in text
+    FakeFoldIn.result = {
+        "status": "folded",
+        "folded": ["pi-coder"],
+        "left": [],
+        "banks": [
+            {
+                "bank": "pi-coder",
+                "step": "folded",
+                "report": {"observations_to_rebuild": 4, "facts_requeued_for_rebuild": 3},
+            }
+        ],
+        "targets": {"shared": "hal0:shared", "private": "hal0:private"},
+        "archive_dir": "/x",
+    }
+    out = invoke("--apply")
+    assert out.exit_code == 0, out.output
+    text = " ".join(out.output.replace("│", " ").split())
+    assert "pi-coder: 4 observation(s) were not carried (observations_to_rebuild)" in text
+    assert "only for the 3 facts requeued" in text
+
+
 def test_a_failed_run_says_writes_stay_paused_when_a_journal_is_left(monkeypatch) -> None:
     FakeFoldIn.error = fi.FoldInError("engine gone", resumable=True)
     monkeypatch.setattr(cmd, "interrupted_fold_in", lambda: {"archive_dir": "/x"})
