@@ -14,7 +14,7 @@ const profiles = [
 const refetch = vi.fn(async () => ({}))
 vi.mock('@/api/hooks/useProfiles', () => ({ useProfiles: () => ({ data: profiles, isLoading: false }) }))
 vi.mock('@/api/hooks/useFlmCatalog', () => ({ useFlmCatalog: () => ({ data: { models: [] }, refetch, isFetching: false }) }))
-vi.mock('../profiles.jsx', () => ({ ProfileDrawer: ({ mode, source }: { mode: string; source: { name: string } }) => <div data-testid="drawer">{mode}:{source.name}</div> }))
+vi.mock('../profiles.jsx', () => ({ ProfileDrawer: ({ mode, source, existing }: { mode: string; source: { name: string }; existing: string[] }) => <div data-testid="drawer" data-existing={JSON.stringify(existing)}>{mode}:{source.name}</div> }))
 const copy = vi.fn(async () => true)
 vi.mock('@/lib/clipboard', () => ({ copyOrSelect: (...a: unknown[]) => (copy as (...a: unknown[]) => unknown)(...a) }))
 
@@ -61,6 +61,7 @@ describe('NpuEnginesPanel', () => {
     expect(a.getAttribute('href')).toBe('#slots/gg1')
     act(() => q('npu-profile-clone-xdna')!.click())
     expect(q('drawer')?.textContent).toBe('clone:xdna')
+    expect(JSON.parse(q('drawer')!.dataset.existing!)).toEqual(['flm', 'xdna'])
   })
   it('refresh refetches the FLM catalogue', () => {
     render({ occ: {}, hw: {} })

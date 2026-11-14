@@ -4,7 +4,7 @@
 import type { NpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import type { Profile } from '@/api/hooks/useProfiles'
 
-export type ReadinessState = 'ok' | 'warn' | 'unknown'
+export type ReadinessState = 'ok' | 'warn' | 'info' | 'unknown'
 export interface ReadinessRow {
   id: string
   label: string
@@ -37,10 +37,10 @@ export function readinessRows(occ: Pick<NpuOccupancy, 'npu_host'> | null | undef
       ? { id: 'pmode', label: 'Power mode', state: 'unknown', detail: 'not reported', command: PMODE_TURBO_CMD }
       : pmode === 'turbo'
         ? { id: 'pmode', label: 'Power mode', state: 'ok', detail: 'turbo' }
-        : { id: 'pmode', label: 'Power mode', state: 'warn', detail: `${pmode}; turbo measured about +15% prefill, +20% decode`, command: PMODE_TURBO_CMD },
+        : { id: 'pmode', label: 'Power mode', state: 'warn', detail: `${pmode}; turbo measured about +15% prefill and +20% decode over the default power mode`, command: PMODE_TURBO_CMD },
     fclk == null
       ? { id: 'fclk', label: 'Fabric clock', state: 'unknown', detail: 'not reported' }
-      : { id: 'fclk', label: 'Fabric clock', state: 'ok', detail: `${fclk} MHz` },
+      : { id: 'fclk', label: 'Fabric clock', state: 'info', detail: `${fclk} MHz (no threshold known; not judged)` },
     { id: 'memlock', label: 'Memlock', state: 'unknown', detail: 'set on GGML slot containers' },
   ]
 }

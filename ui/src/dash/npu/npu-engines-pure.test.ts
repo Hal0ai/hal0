@@ -27,6 +27,7 @@ describe('readinessRows', () => {
     expect(row(readinessRows(occ(null), hw({ npu_pmode: null })), 'pmode').state).toBe('unknown')
     const w = row(readinessRows(occ(null), hw({ npu_pmode: 'default' })), 'pmode')
     expect(w.state).toBe('warn')
+    expect(w.detail).toContain('over the default power mode')
     expect(w.command).toBe('sudo xrt-smi configure --pmode turbo')
     expect(row(readinessRows(occ(null), hw({ npu_pmode: 'turbo' })), 'pmode').state).toBe('ok')
   })
@@ -38,9 +39,9 @@ describe('readinessRows', () => {
     expect(row(rows, 'iommu').detail).toContain('iommu=pt amd_iommu=on')
     expect(row(rows, 'memlock').state).toBe('unknown')
   })
-  it('fclk shows the MHz when read', () => {
+  it('fclk shows the MHz when read, never ok', () => {
     const f = row(readinessRows(occ(null), hw({ npu_fclk: 1600 })), 'fclk')
-    expect(f.state).toBe('ok')
+    expect(f.state).toBe('info')
     expect(f.detail).toContain('1600')
   })
 })

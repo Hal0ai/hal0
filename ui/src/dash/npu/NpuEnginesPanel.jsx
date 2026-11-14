@@ -11,7 +11,7 @@ import { npuProfiles, readinessRows } from './npu-engines-pure'
 
 const toast = (msg, kind = 'info') => typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
 
-const MARK = { ok: 'ok', warn: 'warn', unknown: 'unknown' }
+const MARK = { ok: 'ok', warn: 'warn', info: 'info', unknown: 'unknown' }
 
 function CopyCmd({ cmd, testid }) {
   const ref = useRef(null)
@@ -45,7 +45,7 @@ export function NpuEnginesPanel({ occ, hw, slots = [] }) {
         <p className="npt-hint">hal0 runs in a container and can read only part of the NPU host. Rows marked unknown need checking on the host.</p>
         {rows.map((r) => (
           <div key={r.id} className="npt-mrow" data-testid={`ready-${r.id}`} data-state={r.state}>
-            <span className={`chip mono npt-ready ${MARK[r.state]}`}>{r.state}</span>
+            {r.state !== 'info' && <span className={`chip mono npt-ready ${MARK[r.state]}`}>{r.state}</span>}
             <span className="npt-mname">{r.label}</span>
             <span className="npt-hint">{r.detail}</span>
             {r.command && <CopyCmd cmd={r.command} testid="ready-pmode-copy" />}
@@ -96,7 +96,7 @@ export function NpuEnginesPanel({ occ, hw, slots = [] }) {
       </section>
 
       {drawer?.source && (
-        <ProfileDrawer mode={drawer.mode} source={drawer.source} existing={profQ.data || []} onClose={() => setDrawer(null)} onSaved={() => setDrawer(null)} />
+        <ProfileDrawer mode={drawer.mode} source={drawer.source} existing={(profQ.data || []).filter((p) => !p.quarantined).map((p) => p.name)} onClose={() => setDrawer(null)} onSaved={() => setDrawer(null)} />
       )}
     </div>
   )
