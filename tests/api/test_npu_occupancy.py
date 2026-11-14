@@ -64,6 +64,12 @@ def _stub_footprint(monkeypatch):
     )
     monkeypatch.setattr("hal0.providers.flm.flm_id_to_tag", lambda _mid: None)
     npu_columns.invalidate_columns_cache()
+    # Hermetic engine/host facts: never shell out to lsmod / podman.
+    monkeypatch.setattr(
+        "hal0.api.routes.npu._npu_host_probe",
+        lambda: {"device_node": None, "driver_loaded": None, "xdna_gen": None},
+    )
+    monkeypatch.setattr("hal0.api.routes.npu._local_image_refs", lambda: None)
     yield
     npu_columns.invalidate_columns_cache()
 
@@ -220,6 +226,8 @@ def test_occupancy_contract_field_shape(client: TestClient, monkeypatch):
         "columns_available",
         "slots",
         "shared_warning",
+        "npu_engines",
+        "npu_host",
     }
     assert set(body.keys()) == top_keys
     assert set(body["slots"][0].keys()) == {
@@ -412,3 +420,81 @@ def test_occupancy_engine_reads_the_xdna_binary_from_config(client: TestClient, 
     by_name = {s["name"]: s for s in body["slots"]}
     assert by_name["flm"]["engine"] == "flm"
     assert by_name["xdna-qwen"]["engine"] == "xdna"
+
+
+# ── engine + host facts ──────────────────────────────────────────────────────
+
+_XDNA_REF = "ghcr.io/hal0ai/hal0-runner-xdna:1.2.3-r1a2b3c4"
+_FLM_REF = "ghcr.io/hal0ai/hal0-runner-flm:0.9.44-r1a2b3c4"
+
+
+def _stub_engine_facts(monkeypatch, *, refs, host):
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._effective_defaults",
+        lambda: {"xdna": (_XDNA_REF, "release"), "flm": (_FLM_REF, "release")},
+    )
+    monkeypatch.setattr("hal0.api.routes.npu._local_image_refs", lambda: refs)
+    monkeypatch.setattr("hal0.api.routes.npu._npu_host_probe", lambda: host)
+
+
+def test_occupancy_reports_npu_engines_and_host(client: TestClient, monkeypatch):
+    _stub_engine_facts(
+        monkeypatch,
+        refs={_XDNA_REF},
+        host={"device_node": "/dev/accel/accel0", "driver_loaded": True, "xdna_gen": 2},
+    )
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(
+        npu_columns,
+        "cached_aie_columns",
+        AsyncMock(return_value={"partitions": [{"start_col": 0, "num_cols": 8}], "total": 8}),
+    )
+    _wire(
+        client,
+        [_FakeSlot("npu", SlotState.READY, model_id="gemma3:4b", metadata={"provider": "flm"})],
+    )
+    body = client.get("/api/npu/occupancy").json()
+    assert body["npu_engines"] == {
+        "flm": {"image": _FLM_REF, "version": "0.9.44"},
+        "xdna": {"image": _XDNA_REF, "tag": "1.2.3-r1a2b3c4", "pulled": True},
+    }
+    assert "hal0-runner-xdna" in body["npu_engines"]["xdna"]["image"]
+    assert body["npu_host"] == {
+        "device_node": "/dev/accel/accel0",
+        "driver_loaded": True,
+        "xdna_gen": 2,
+    }
+
+
+def test_absent_occupancy_still_reports_engines(client: TestClient, monkeypatch):
+    _stub_engine_facts(
+        monkeypatch,
+        refs=set(),
+        host={"device_node": None, "driver_loaded": False, "xdna_gen": None},
+    )
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value=None))
+    _wire(client, [])
+    body = client.get("/api/npu/occupancy").json()
+    assert body["present"] is False
+    assert body["npu_engines"]["xdna"]["pulled"] is False
+    assert "flm" in body["npu_engines"]["flm"]["image"]
+    assert body["npu_host"] == {"device_node": None, "driver_loaded": False, "xdna_gen": None}
+
+
+def test_engine_facts_are_none_when_every_read_fails(client: TestClient, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr("hal0.api.routes.runner_images._effective_defaults", boom)
+    monkeypatch.setattr("hal0.api.routes.npu._local_image_refs", boom)
+    monkeypatch.setattr("hal0.api.routes.npu._npu_host_probe", boom)
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value=None))
+    _wire(client, [])
+    r = client.get("/api/npu/occupancy")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["npu_engines"] == {
+        "flm": {"image": None, "version": None},
+        "xdna": {"image": None, "tag": None, "pulled": None},
+    }
+    assert body["npu_host"] == {"device_node": None, "driver_loaded": None, "xdna_gen": None}
