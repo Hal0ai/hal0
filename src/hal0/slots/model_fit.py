@@ -170,11 +170,46 @@ _XDNA_FUSED_EMBEDDING_LENGTH = 1024
 #: means the model was not requantized for the fused kernel.
 _XDNA_FUSED_TENSOR = "blk.0.ssm_out.weight"
 
-#: ggml type id for Q5_K (see ggml.h's ``ggml_type``; not imported from
-#: elsewhere in the tree because nothing else needs the full enum).
+#: ggml type id for Q5_K (see ggml.h's ``ggml_type``).
 _GGML_TYPE_Q5_K = 13
 
-_GGML_TYPE_NAMES = {_GGML_TYPE_Q5_K: "Q5_K"}
+#: ggml.h ``ggml_type`` ids to names, so a per-op reason reads "is Q8_0"
+#: rather than "is type 8". Ids 4, 5 and 31-33 are retired upstream; an id
+#: missing here still renders as "type N".
+_GGML_TYPE_NAMES = {
+    0: "F32",
+    1: "F16",
+    2: "Q4_0",
+    3: "Q4_1",
+    6: "Q5_0",
+    7: "Q5_1",
+    8: "Q8_0",
+    9: "Q8_1",
+    10: "Q2_K",
+    11: "Q3_K",
+    12: "Q4_K",
+    _GGML_TYPE_Q5_K: "Q5_K",
+    14: "Q6_K",
+    15: "Q8_K",
+    16: "IQ2_XXS",
+    17: "IQ2_XS",
+    18: "IQ3_XXS",
+    19: "IQ1_S",
+    20: "IQ4_NL",
+    21: "IQ3_S",
+    22: "IQ2_S",
+    23: "IQ4_XS",
+    24: "I8",
+    25: "I16",
+    26: "I32",
+    27: "I64",
+    28: "F64",
+    29: "IQ1_M",
+    30: "BF16",
+    34: "TQ1_0",
+    35: "TQ2_0",
+    39: "MXFP4",
+}
 
 
 def _ggml_type_name(ttype: int | None) -> str:

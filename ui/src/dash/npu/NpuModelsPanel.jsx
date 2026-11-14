@@ -1,9 +1,9 @@
 // The NPU Models sub-tab (Slots → NPU → Models): the closed FLM catalogue (download, "Use for
 // chat" stages into the Lanes draft) and the GGUF models with their ggml-xdna NPU fit, with
-// "New slot" opening the GGML create drawer, plus the requantize command for the per-op rows
-// it fixes. Every readout is a real field or `—`.
-import { useMemo, useRef, useState } from 'react'
-import { copyOrSelect } from '@/lib/clipboard'
+// "New slot" opening the GGML create drawer. A per-op row carries one chip naming what keeps it
+// off the fused path; when a requantize fixes it, a "copy fix" chip copies the command. Every
+// readout is a real field or `—`.
+import { useMemo, useState } from 'react'
 import { useFlmCatalog } from '@/api/hooks/useFlmCatalog'
 import { useModels, usePullJob } from '@/api/hooks/useModels'
 import { useSlotConfig } from '@/api/hooks/useSlots'
@@ -11,7 +11,8 @@ import { useXdnaFit } from '@/api/hooks/useXdnaFit'
 import { npuAnchorSlot } from '../slots/slot-shared.js'
 import { slotEditHash } from '../slots-route'
 import { GgmlSlotDrawer } from './GgmlSlotDrawer.jsx'
-import { GGML_IMAGE_MISSING, GGML_REQUANT_CMD, ggmlRequantHint } from './ggml-slot-pure'
+import { GGML_IMAGE_MISSING } from './ggml-slot-pure'
+import { XdnaFitChips } from './XdnaFitChips.jsx'
 import { bundledFlmModel, pickChatModel, savedFlm } from './flm-draft-pure'
 import { flmCatalogRows, ggufNpuRows } from './npu-models-pure'
 
@@ -29,7 +30,6 @@ export function NpuModelsPanel({ slots = [], occ, setFlmDraft, onSwitchTab }) {
   const [filter, setFilter] = useState({ installed: 'all', cap: 'all' })
   const [drawer, setDrawer] = useState({ open: false, mode: 'create', model: undefined, slot: undefined })
   const imageMissing = occ?.npu_engines?.xdna?.pulled === false
-  const cmdRef = useRef(null)
 
   const catalog = catQ.data
   const saved = useMemo(() => savedFlm(cfgQ.data, anchor), [cfgQ.data, anchor])
@@ -46,7 +46,6 @@ export function NpuModelsPanel({ slots = [], occ, setFlmDraft, onSwitchTab }) {
 
   const flmRows = useMemo(() => flmCatalogRows(catalog?.models, filter, usage), [catalog, filter, usage])
   const ggufRows = useMemo(() => ggufNpuRows(modelsQ.data, fitQ.data, slots), [modelsQ.data, fitQ.data, slots])
-  const showRequant = ggufRows.some((r) => ggmlRequantHint({ xdna_path: r.fit, reason: r.reason }))
 
   const useForChat = (id) => {
     setFlmDraft((d) => pickChatModel(d, saved, id))
@@ -99,14 +98,14 @@ export function NpuModelsPanel({ slots = [], occ, setFlmDraft, onSwitchTab }) {
       </section>
 
       <section className="npt-msec npt-msec-ggml" data-testid="gguf-models">
-        <div className="npt-lane-ttl"><span className="npt-eng ggml">GGML</span><span className="npt-sub">GGUF models on the NPU</span></div>
+        <div className="npt-lane-ttl"><span className="npt-eng ggml">GGML</span><span className="npt-sub" title="fused: the whole SSM block runs as one NPU kernel (fast). per-op: each operator dispatches separately (slower).">GGUF models on the NPU</span></div>
         {ggufRows.length === 0 && <p className="npt-hint">{fitQ.data ? 'No GGUF chat models in the registry.' : '—'}</p>}
         {ggufRows.map((r) => (
           <div key={r.id} className="npt-mrow" data-testid={`gguf-row-${r.id}`}>
             <span className="npt-mname mono">{r.id}</span>
             <span className="chip mono" data-testid={`gguf-arch-${r.id}`}>{r.arch ?? '—'}</span>
             <span className="chip mono">{r.size ?? '—'}</span>
-            <span className={`chip mono npt-fit ${r.fit || 'none'}`} data-testid={`gguf-fit-${r.id}`} title={r.reason || undefined}>{r.fit || '—'}</span>
+            <XdnaFitChips row={{ xdna_path: r.fit, reason: r.reason }} testid={`gguf-${r.id}`} />
             {r.usedBy.map((n) => (
               <a
                 key={n}
@@ -128,18 +127,8 @@ export function NpuModelsPanel({ slots = [], occ, setFlmDraft, onSwitchTab }) {
             <button type="button" className="btn sm" data-testid={`gguf-new-${r.id}`} disabled={imageMissing} title={imageMissing ? GGML_IMAGE_MISSING : undefined} onClick={() => setDrawer({ open: true, mode: 'create', model: r.id, slot: undefined })}>
               New slot
             </button>
-            {r.fit !== 'fused' && r.reason && <div className="npt-hint" style={{ flexBasis: '100%' }} data-testid={`gguf-reason-${r.id}`}>{r.reason}</div>}
           </div>
         ))}
-        {showRequant && (
-          <div className="ggml-requant" data-testid="npu-requant" role="note">
-            <div className="npt-hint">Requantizing ssm_out to Q5_K lets a per-op qwen35 model take the fused path:</div>
-            <div className="ggml-requant-cmd">
-              <code className="mono" ref={cmdRef} data-testid="npu-requant-cmd">{GGML_REQUANT_CMD}</code>
-              <button type="button" className="btn ghost sm" data-testid="npu-requant-copy" onClick={() => copyOrSelect(GGML_REQUANT_CMD, cmdRef.current)}>Copy</button>
-            </div>
-          </div>
-        )}
       </section>
 
       <GgmlSlotDrawer open={drawer.open} mode={drawer.mode} slot={drawer.slot} initialModel={drawer.model} onClose={() => setDrawer((d) => ({ ...d, open: false }))} />

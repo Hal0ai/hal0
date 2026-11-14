@@ -1,8 +1,7 @@
 // The GGML slot form: create and edit for an xdna slot (ggml-xdna llama-server on the NPU, ADR-0057).
 // One editor for both entry points — the NPU tab's GGML lane drawer and the Slots page's edit drawer.
 // The xdna knobs are per slot (`[xdna]`); context is `[tune].ctx_size`; everything else is placement.
-import { useMemo, useRef, useState } from 'react'
-import { copyOrSelect } from '@/lib/clipboard'
+import { useMemo, useState } from 'react'
 import { useModels } from '@/api/hooks/useModels'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useSlotConfig, useSlotCreate, useSlotDelete, useSlotEdit, useSlotLoad, useSlotRestart, useSlots } from '@/api/hooks/useSlots'
@@ -12,29 +11,18 @@ import './npu-tab.css'
 import { slotButtonPhase } from '../slot-status.js'
 import {
   GGML_CTX_PRESETS,
-  GGML_REQUANT_CMD,
   ggmlCreateBody,
   ggmlCtxError,
   ggmlEditBody,
   ggmlModelIds,
   ggmlNameError,
   ggmlProfileOptions,
-  ggmlRequantHint,
   nextGgmlName,
 } from './ggml-slot-pure'
+import { XdnaFitChips } from './XdnaFitChips.jsx'
 
 const toast = (msg, kind = 'info') => typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
 const fmt = (n) => (n == null ? '—' : Number(n).toLocaleString('en-US'))
-
-function FitTag({ row }) {
-  if (!row) return <span className="chip mono npt-fit none" title="no fit data">—</span>
-  const word = row.xdna_path || '—'
-  return (
-    <span className={`chip mono npt-fit ${row.xdna_path || 'none'}`} title={row.reason || word} data-fit={row.xdna_path || 'none'}>
-      {word}
-    </span>
-  )
-}
 
 /** The saved draft: what the slot's config says now (edit) or the create defaults. */
 function savedDraft(mode, slot, cfg, names, initialModel) {
@@ -79,7 +67,6 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
   const [busy, setBusy] = useState(false)
   const [confirmDel, setConfirmDel] = useState(false)
   const [customCtx, setCustomCtx] = useState('')
-  const cmdRef = useRef(null)
 
   const fit = fitQ.data ?? {}
   const models = useMemo(() => ggmlModelIds(modelsQ.data, fitQ.data).map((id) => ({ id })), [modelsQ.data, fitQ.data])
@@ -189,7 +176,7 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
           {models.map((m) => (
             <button key={m.id} type="button" role="option" aria-selected={d.model === m.id} className={'ggml-model' + (d.model === m.id ? ' on' : '')} data-testid={`ggml-model-${m.id}`} onClick={() => set({ model: m.id })}>
               <span className="mono">{m.id}</span>
-              <FitTag row={fit[m.id]} />
+              <span className="ggml-model-chips"><XdnaFitChips row={fit[m.id]} testid={`ggml-model-${m.id}`} fix={false} /></span>
             </button>
           ))}
         </div>
@@ -252,17 +239,11 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
       </section>
 
 
-      {ggmlRequantHint(fitRow) && (
-        <div className="ggml-requant" data-testid="ggml-requant-hint" role="note">
-          <div className="npt-hint">This model runs per-op (slower) on the NPU: {fitRow.reason}. Requantizing ssm_out to Q5_K lets it take the fused path:</div>
-          <div className="ggml-requant-cmd">
-            <code className="mono" ref={cmdRef} data-testid="ggml-requant-cmd">{GGML_REQUANT_CMD}</code>
-            <button type="button" className="btn ghost sm" data-testid="ggml-requant-copy" onClick={() => copyOrSelect(GGML_REQUANT_CMD, cmdRef.current)}>Copy</button>
-          </div>
-        </div>
-      )}
-      {fitRow?.xdna_path === 'per-op' && !ggmlRequantHint(fitRow) && (
-        <div className="npt-hint" data-testid="ggml-perop-reason">Runs per-op (slower) on the NPU: {fitRow.reason}</div>
+      {fitRow?.xdna_path === 'per-op' && (
+        <section className="ggml-sec" data-testid="ggml-fit-row">
+          <span className="ggml-lbl">NPU path</span>
+          <div className="npt-gchips"><XdnaFitChips row={fitRow} testid="ggml-form" /></div>
+        </section>
       )}
 
       <section className="ggml-sec" data-testid="ggml-host-xrt-row">

@@ -245,30 +245,37 @@ describe('engine variant', () => {
   })
 })
 
-describe('per-op requantize hint', () => {
-  it('shows the command for a qwen35 model whose only gap is ssm_out', () => {
+describe('per-op fit chips', () => {
+  it('a qwen35 model whose only gap is ssm_out gets the blocker chip and "copy fix"', () => {
     box.fit = { 'qwen3-4b': { xdna_path: 'per-op', reason: 'blk.0.ssm_out.weight is Q8_0, not Q5_K' } }
     mount({ mode: 'create', initialModel: 'qwen3-4b', onDone: () => {} })
-    expect(q('ggml-requant-hint')!.textContent).toContain('Q8_0')
-    expect(q('ggml-requant-cmd')!.textContent).toBe('llama-quantize --tensor-type ssm_out=q5_K <in> <out> Q4_K_M')
-    expect(q('ggml-requant-copy')).not.toBeNull()
+    expect(q('ggml-form-fit')!.textContent).toBe('per-op')
+    expect(q('ggml-form-why')!.textContent).toBe('ssm_out q8_0')
+    expect(q('ggml-form-fix')!.getAttribute('title')).toContain('llama-quantize --tensor-type ssm_out=q5_K <in> <out> Q4_K_M')
   })
 
-  it('shows only the reason for a per-op lfm2 model', () => {
+  it('a per-op lfm2 model names the architecture, with no "copy fix"', () => {
     box.fit = { 'qwen3-4b': { xdna_path: 'per-op', reason: "architecture 'lfm2' is not 'qwen35'" } }
     mount({ mode: 'create', initialModel: 'qwen3-4b', onDone: () => {} })
-    expect(q('ggml-requant-hint')).toBeNull()
-    expect(q('ggml-perop-reason')!.textContent).toContain('lfm2')
+    expect(q('ggml-form-why')!.textContent).toBe('lfm2 arch')
+    expect(q('ggml-form-fix')).toBeNull()
   })
 
-  it('shows it in the engine variant and survives a rejected clipboard write', async () => {
+  it('the model list carries the chips but never a "copy fix" button inside the option button', () => {
+    box.fit = { 'qwen3-4b': { xdna_path: 'per-op', reason: 'blk.0.ssm_out.weight is Q8_0, not Q5_K' } }
+    mount({ mode: 'create', onDone: () => {} })
+    expect(q('ggml-model-qwen3-4b-why')!.textContent).toBe('ssm_out q8_0')
+    expect(q('ggml-model-qwen3-4b-fix')).toBeNull()
+  })
+
+  it('shows in the engine variant and survives a rejected clipboard write', async () => {
     box.fit = { 'qwen3-4b': { xdna_path: 'per-op', reason: 'blk.0.ssm_out.weight is Q6_K, not Q5_K' } }
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: () => Promise.reject(new Error('denied')) } })
     mount({ mode: 'edit', variant: 'engine', slot: { name: 'npu-gguf', state: 'ready' } })
-    expect(q('ggml-requant-hint')).not.toBeNull()
-    await act(async () => { q('ggml-requant-copy')!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    expect(q('ggml-form-fix')).not.toBeNull()
+    await act(async () => { q('ggml-form-fix')!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
     await flush()
-    expect(q('ggml-requant-hint')).not.toBeNull()
+    expect(q('ggml-form-fix')).not.toBeNull()
   })
 })
 
@@ -276,7 +283,7 @@ describe('fit fallback and fixed knobs in the form', () => {
   it('falls back to the slot payload fit when the fit map misses the model', () => {
     box.fit = {}
     mount({ mode: 'edit', variant: 'engine', slot: { name: 'npu-gguf', state: 'ready', xdna_path: 'per-op', xdna_reason: 'blk.0.ssm_out.weight is Q8_0, not Q5_K' } })
-    expect(q('ggml-requant-hint')).not.toBeNull()
+    expect(q('ggml-form-why')!.textContent).toBe('ssm_out q8_0')
   })
 
   it('does not re-send a hand-edited GLU_A on a pmode change', async () => {

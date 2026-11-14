@@ -123,6 +123,29 @@ export function ggmlRequantHint(row: { xdna_path: string | null; reason?: string
   return !!row && row.xdna_path === 'per-op' && /ssm_out\.weight is .+, not Q5_K/.test(row.reason || '')
 }
 
+/** One chip naming what keeps a model off the fused path, parsed from the three model_fit.py
+ *  per-op reasons (architecture, embedding_length, ssm_out type). `fix` marks the one blocker a
+ *  requantize clears. Null for a fused row, a null-path row, or a reason this does not recognise
+ *  (the caller keeps the full reason as a tooltip either way). */
+export interface XdnaBlocker {
+  label: string
+  title: string
+  fix: boolean
+}
+
+export function xdnaBlocker(row: { xdna_path: string | null; reason?: string } | null | undefined): XdnaBlocker | null {
+  if (!row || row.xdna_path !== 'per-op') return null
+  const r = row.reason || ''
+  let m = /^architecture '([^']*)' is not 'qwen35'/.exec(r)
+  if (m) return { label: `${m[1] || '?'} arch`, title: `The fused kernel is Qwen3.5-only (${r})`, fix: false }
+  m = /^embedding_length (\S+) is not (\d+)/.exec(r)
+  if (m) return { label: `${m[1]} wide`, title: `The fused kernel needs a ${m[2]}-wide model (${r})`, fix: false }
+  m = /ssm_out\.weight is (.+), not Q5_K/.exec(r)
+  if (m && m[1] === 'missing') return { label: 'no ssm_out', title: `The fused kernel needs an ssm_out tensor in Q5_K (${r})`, fix: false }
+  if (m) return { label: `ssm_out ${m[1].toLowerCase()}`, title: `The fused kernel needs ssm_out in Q5_K; requantize to fix (${r})`, fix: true }
+  return null
+}
+
 /** Ids the GGML slot form offers. The backend fit map (GET /api/runners/xdna/fit) is the authority
  *  for "GGUF chat model" (its keys are the rows `_is_gguf_llm` selects), the same rule the NPU Models
  *  table uses; the registry only vetoes a row it knows to be a non-llm type. Filtering the registry

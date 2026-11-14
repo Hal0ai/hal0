@@ -38,6 +38,7 @@ vi.mock('@/api/hooks/useXdnaFit', () => ({
     data: {
       'qwen3-4b': { xdna_path: 'fused', reason: 'all ops fit' },
       'qwen35-0.8b': { xdna_path: 'per-op', reason: 'blk.0.ssm_out.weight is Q4_K, not Q5_K' },
+      'gemma4-e4b': { xdna_path: 'per-op', reason: "architecture 'gemma4' is not 'qwen35'" },
     },
   }),
 }))
@@ -46,6 +47,7 @@ vi.mock('@/api/hooks/useModels', () => ({
     data: [
       { id: 'qwen3-4b', type: 'llm', size: '2.5 GB', architecture: 'granite' },
       { id: 'qwen35-0.8b', type: 'llm', size: '0.6 GB' },
+      { id: 'gemma4-e4b', type: 'llm', size: '6.9 GB', architecture: 'gemma4' },
     ],
   }),
   usePullJob: () => ({ start: box.pullStart, state: box.pullState, modelId: null, pct: null, inFlight: box.pullState === 'running', error: null }),
@@ -141,7 +143,8 @@ describe('NpuModelsPanel', () => {
   })
 
   it('GGUF rows show fit, size, used-by with an edit link; "New slot" opens create with the model', () => {
-    expect(q('gguf-fit-qwen3-4b')!.textContent).toBe('fused')
+    expect(q('gguf-qwen3-4b-fit')!.textContent).toBe('✓ fused')
+    expect(q('gguf-qwen3-4b-why')).toBeNull()
     expect(q('gguf-row-qwen3-4b')!.textContent).toContain('2.5 GB')
     const link = q('gguf-used-qwen3-4b-npu-gguf') as HTMLAnchorElement
     expect(link.getAttribute('href')).toBe('#slots/npu-gguf')
@@ -150,15 +153,18 @@ describe('NpuModelsPanel', () => {
     expect(q('drawer')!.getAttribute('data-model')).toBe('qwen3-4b')
   })
 
-  it('shows the requant command once, for per-op rows, and Copy falls back to selecting on rejection', async () => {
-    expect(q('gguf-reason-qwen35-0.8b')!.textContent).toContain('Q4_K')
-    const cmd = q('npu-requant-cmd')!
-    expect(cmd.textContent).toContain('llama-quantize')
-    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: () => Promise.reject(new Error('denied')) } })
+  it('a per-op row names its blocker in one chip; only a requant-fixable row gets "copy fix"', async () => {
+    expect(q('gguf-qwen35-0.8b-fit')!.textContent).toBe('per-op')
+    expect(q('gguf-qwen35-0.8b-why')!.textContent).toBe('ssm_out q4_k')
+    expect(q('gguf-gemma4-e4b-why')!.textContent).toBe('gemma4 arch')
+    expect(q('gguf-gemma4-e4b-fix')).toBeNull()
+    expect(host.textContent).not.toContain('is not')
+    const copied: string[] = []
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: (t: string) => { copied.push(t); return Promise.resolve() } } })
     await act(async () => {
-      q('npu-requant-copy')!.click()
+      q('gguf-qwen35-0.8b-fix')!.click()
     })
-    expect(window.getSelection()!.toString()).toContain('llama-quantize')
+    expect(copied[0]).toContain('llama-quantize --tensor-type ssm_out=q5_K')
   })
 
   it('a used-by xdna slot opens the GGML drawer in edit mode in the page instead of navigating', () => {

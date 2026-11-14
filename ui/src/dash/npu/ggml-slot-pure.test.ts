@@ -8,6 +8,7 @@ import {
   ggmlNameError,
   ggmlProfileOptions,
   nextGgmlName,
+  xdnaBlocker,
   type GgmlDraft,
 } from './ggml-slot-pure'
 
@@ -138,5 +139,23 @@ describe('ggmlModelIds', () => {
   })
   it('is empty without a fit map', () => {
     expect(ggmlModelIds([{ id: 'a', type: 'llm' }], null)).toEqual([])
+  })
+})
+
+describe('xdnaBlocker', () => {
+  const perOp = (reason: string) => xdnaBlocker({ xdna_path: 'per-op', reason })
+  it('names the one check that failed, as a short chip label', () => {
+    expect(perOp("architecture 'gemma4' is not 'qwen35'")).toMatchObject({ label: 'gemma4 arch', fix: false })
+    expect(perOp('embedding_length 5120 is not 1024')).toMatchObject({ label: '5120 wide', fix: false })
+    expect(perOp('blk.0.ssm_out.weight is Q8_0, not Q5_K')).toMatchObject({ label: 'ssm_out q8_0', fix: true })
+    expect(perOp('blk.0.ssm_out.weight is missing, not Q5_K')).toMatchObject({ label: 'no ssm_out', fix: false })
+  })
+  it('keeps the full reason in the tooltip', () => {
+    expect(perOp('embedding_length 5120 is not 1024')!.title).toContain('embedding_length 5120 is not 1024')
+  })
+  it('is null for fused, null-path, and unrecognised reasons', () => {
+    expect(xdnaBlocker({ xdna_path: 'fused', reason: 'x' })).toBeNull()
+    expect(xdnaBlocker({ xdna_path: null, reason: 'not a GGUF file' })).toBeNull()
+    expect(perOp('something new')).toBeNull()
   })
 })

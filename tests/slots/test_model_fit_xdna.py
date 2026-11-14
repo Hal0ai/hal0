@@ -56,7 +56,14 @@ def test_per_op_when_ssm_out_tensor_is_not_q5_k(tmp_path: Path) -> None:
     path = write_gguf(tmp_path / "m.gguf", "qwen35", **kw)
     fit = xdna_model_fit(path)
     assert fit.xdna_path == "per-op"
-    assert "ssm_out" in fit.reason
+    assert fit.reason == "blk.0.ssm_out.weight is Q4_K, not Q5_K"
+
+
+def test_per_op_names_q8_0_rather_than_its_type_id(tmp_path: Path) -> None:
+    kw = dict(_FUSED_KW)
+    kw["tensor_types"] = {"blk.0.ssm_out.weight": 8}  # Q8_0
+    path = write_gguf(tmp_path / "m.gguf", "qwen35", **kw)
+    assert xdna_model_fit(path).reason == "blk.0.ssm_out.weight is Q8_0, not Q5_K"
 
 
 def test_per_op_when_ssm_out_tensor_is_missing(tmp_path: Path) -> None:
