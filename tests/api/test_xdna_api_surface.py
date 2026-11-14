@@ -158,7 +158,24 @@ def test_npu_fclk_none_without_sysfs(monkeypatch, tmp_path):
 def test_snapshot_includes_npu_keys(monkeypatch):
     stats = HardwareStats()
     monkeypatch.setattr(stats, "npu_pmode", lambda: "balanced")
-    monkeypatch.setattr(stats, "npu_fclk", lambda: "1800Mhz")
+    monkeypatch.setattr(stats, "npu_fclk", lambda: 1800)
     snap = stats.snapshot()
     assert snap["npu_pmode"] == "balanced"
-    assert snap["npu_fclk"] == "1800Mhz"
+    assert snap["npu_fclk"] == 1800
+
+
+def test_npu_fclk_parses_active_line_to_int_mhz(monkeypatch, tmp_path):
+    """The UI types fclk as a number; the raw ``2000Mhz`` token must become 2000."""
+    f = tmp_path / "pp_dpm_fclk"
+    f.write_text("0: 800Mhz\n1: 2000Mhz *\n")
+    stats = HardwareStats()
+    monkeypatch.setattr("hal0.hardware.stats.Path.glob", lambda self, pat: iter([f]))
+    assert stats.npu_fclk() == 2000
+
+
+def test_npu_fclk_unparseable_token_is_none(monkeypatch, tmp_path):
+    f = tmp_path / "pp_dpm_fclk"
+    f.write_text("0: fast *\n")
+    stats = HardwareStats()
+    monkeypatch.setattr("hal0.hardware.stats.Path.glob", lambda self, pat: iter([f]))
+    assert stats.npu_fclk() is None
