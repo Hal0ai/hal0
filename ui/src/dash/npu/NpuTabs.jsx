@@ -19,6 +19,7 @@ import { FlmLane } from './FlmLane.jsx'
 import { GgmlLane } from './GgmlLane.jsx'
 import { NpuEnginesPanel } from './NpuEnginesPanel.jsx'
 import { NpuModelsPanel } from './NpuModelsPanel.jsx'
+import { draftCount } from './flm-draft-pure'
 import { NPU_TABS, npuStatusParts, npuTabVisible, validNpuTab } from './npu-pure'
 
 const IDS = NPU_TABS.map((t) => t.id)
@@ -120,6 +121,20 @@ export function NpuTabs({ sub, slots = [] }) {
   if (occ === undefined && !npuTabVisible(undefined, slots)) {
     if (occQ.isLoading) return <div className="npt npu-card" data-testid="npu-loading">Loading…</div>
   }
+  // A failed occupancy read with no NPU slot to fall back on is "can't tell", not "no NPU".
+  if (occQ.isError && !npuTabVisible(occ, slots)) {
+    return (
+      <div className="npt npu-card" data-testid="npu-pane">
+        <div className="npt-absent" data-testid="npu-status-error" role="alert">
+          <h2>Couldn't read the NPU status</h2>
+          <p>hal0 could not reach the NPU status endpoint, so it cannot tell whether this box has an NPU.</p>
+          <button type="button" className="btn sm" data-testid="npu-status-retry" disabled={occQ.isFetching} onClick={() => occQ.refetch()}>
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
   if (!npuTabVisible(occ, slots)) {
     return (
       <div className="npt npu-card" data-testid="npu-pane">
@@ -171,10 +186,10 @@ export function NpuTabs({ sub, slots = [] }) {
         <LanesPanel draft={flmDraft} setDraft={setFlmDraft} occ={occ} hw={hwQ.data} slots={slots} />
       </div>
       <div role="tabpanel" id="npu-panel-models" className="npt-panel" aria-labelledby="npu-tab-models" hidden={tab !== 'models'}>
-        <NpuModelsPanel slots={slots} setFlmDraft={setFlmDraft} onSwitchTab={select} />
+        <NpuModelsPanel slots={slots} occ={occ} setFlmDraft={setFlmDraft} onSwitchTab={select} />
       </div>
       <div role="tabpanel" id="npu-panel-engines" className="npt-panel" aria-labelledby="npu-tab-engines" hidden={tab !== 'engines'}>
-        <NpuEnginesPanel occ={occ} hw={hwQ.data} slots={slots} />
+        <NpuEnginesPanel occ={occ} hw={hwQ.data} slots={slots} flmDirty={draftCount(flmDraft) > 0} />
       </div>
     </div>
   )

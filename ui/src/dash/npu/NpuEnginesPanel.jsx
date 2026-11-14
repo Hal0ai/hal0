@@ -6,7 +6,9 @@ import { copyOrSelect } from '@/lib/clipboard'
 import { useProfiles } from '@/api/hooks/useProfiles'
 import { useFlmCatalog } from '@/api/hooks/useFlmCatalog'
 import { ProfileDrawer } from '../profiles.jsx'
-import { slotEditHash } from '../slots-route'
+import { isXdnaSlot } from '@/lib/slotModelFit'
+import { openSlotEditFromNpu, slotEditHash } from '../slots-route'
+import { GgmlSlotDrawer } from './GgmlSlotDrawer.jsx'
 import { npuProfiles, readinessRows } from './npu-engines-pure'
 
 const toast = (msg, kind = 'info') => typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
@@ -23,10 +25,11 @@ function CopyCmd({ cmd, testid }) {
   )
 }
 
-export function NpuEnginesPanel({ occ, hw, slots = [] }) {
+export function NpuEnginesPanel({ occ, hw, slots = [], flmDirty = false }) {
   const profQ = useProfiles()
   const catQ = useFlmCatalog()
   const [drawer, setDrawer] = useState(null)
+  const [ggml, setGgml] = useState(null) // an xdna slot edited in-page
   const rows = useMemo(() => readinessRows(occ, hw), [occ, hw])
   const profiles = useMemo(() => npuProfiles(profQ.data, slots), [profQ.data, slots])
   const eng = occ?.npu_engines
@@ -86,14 +89,31 @@ export function NpuEnginesPanel({ occ, hw, slots = [] }) {
             <span className="npt-mname mono">{p.name}{p.seed && <span className="chip mono" style={{ marginLeft: 6 }}>seed</span>}</span>
             <span className="npt-hint mono">{p.body}</span>
             <span className="npt-hint" data-testid={`npu-profile-${p.name}-usedby`}>
-              {p.usedBy.length === 0 ? 'unused' : p.usedBy.map((n, i) => (
-                <span key={n}>{i > 0 && ', '}<a href={slotEditHash(n)}>{n}</a></span>
-              ))}
+              {p.usedBy.length === 0 ? 'unused' : p.usedBy.map((n, i) => {
+                const slot = (slots ?? []).find((x) => x.name === n)
+                // An xdna slot edits in the page (like the GGML lane). An FLM slot's drawer is a
+                // route change, which would drop the staged FLM changes: blocked while staged.
+                if (slot && isXdnaSlot(slot)) {
+                  return (
+                    <span key={n}>{i > 0 && ', '}<a href={slotEditHash(n)} data-testid={`npu-used-${n}`} onClick={(e) => { e.preventDefault(); setGgml(slot) }}>{n}</a></span>
+                  )
+                }
+                if (flmDirty) {
+                  return (
+                    <span key={n}>{i > 0 && ', '}<span className="npt-link-disabled" aria-disabled="true" data-testid={`npu-used-${n}`} title="Apply or discard the staged FLM changes first">{n}</span></span>
+                  )
+                }
+                return (
+                  <span key={n}>{i > 0 && ', '}<a href={slotEditHash(n)} data-testid={`npu-used-${n}`} onClick={(e) => { e.preventDefault(); openSlotEditFromNpu(n) }}>{n}</a></span>
+                )
+              })}
             </span>
             <button type="button" className="btn ghost sm" data-testid={`npu-profile-clone-${p.name}`} onClick={() => setDrawer({ mode: 'clone', source: (profQ.data || []).find((x) => x.name === p.name) })}>Clone</button>
           </div>
         ))}
       </section>
+
+      <GgmlSlotDrawer open={!!ggml} mode="edit" slot={ggml ?? undefined} onClose={() => setGgml(null)} />
 
       {drawer?.source && (
         <ProfileDrawer mode={drawer.mode} source={drawer.source} existing={(profQ.data || []).filter((p) => !p.quarantined).map((p) => p.name)} onClose={() => setDrawer(null)} onSaved={() => setDrawer(null)} />

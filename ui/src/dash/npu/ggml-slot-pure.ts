@@ -1,6 +1,7 @@
 // Pure helpers behind the GGML slot form (GgmlSlotForm.jsx): drafts, validation and the create
 // and edit request bodies. A GGML slot is an xdna slot (ADR-0057): `binary: 'xdna'`, `device: 'npu'`.
 import { SLOT_NAME_RE } from '../slots/slot-name'
+import { isReservedSlotsTab } from '../slots-route'
 
 export type GgmlDraft = {
   name: string
@@ -38,9 +39,13 @@ export function nextGgmlName(allSlotNames: string[]): string {
   }
 }
 
+/** Why Add / New slot are unavailable until the ggml-xdna runner image is pulled. */
+export const GGML_IMAGE_MISSING = 'The ggml-xdna runner image is not pulled yet.'
+
 /** Checked against every slot name (GPU, remote alias, FLM shadow), not just NPU ones. */
 export function ggmlNameError(name: string, allSlotNames: string[]): string | null {
   if (!SLOT_NAME_RE.test(name)) return 'lowercase + dashes only'
+  if (isReservedSlotsTab(name)) return 'that name is a Slots tab'
   if (allSlotNames.includes(name)) return 'name already in use'
   return null
 }

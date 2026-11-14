@@ -12,7 +12,7 @@ import { useSlotConfig, useSlotCreate, useSlotEdit, useSlotLoad, useSlotRestart,
 import { SlotControls, slotCtrlPhase } from '../inference-pane.jsx'
 import { slotIndicatorFromPhase } from '../slot-status.js'
 import { npuAnchorSlot } from '../slots/slot-shared.js'
-import { slotEditHash } from '../slots-route'
+import { openSlotEditFromNpu } from '../slots-route'
 import { bundledFlmModel, capEnabled, cfgFingerprint, draftBody, draftCount, pickChatModel, savedFlm, toggleCap } from './flm-draft-pure'
 
 const toast = (msg, kind = 'info') =>
@@ -37,7 +37,9 @@ function describeDraft(draft, saved) {
 function CreateFlm({ slots }) {
   const create = useSlotCreate()
   const taken = new Set((slots ?? []).map((s) => s?.name))
-  const name = taken.has('flm') ? 'npu' : 'flm'
+  // `npu` is a reserved Slots tab name, so the fallback is flm-npu (then flm-npu-2, ...).
+  let name = 'flm'
+  for (let i = 1; taken.has(name); i += 1) name = i === 1 ? 'flm-npu' : `flm-npu-${i}`
   return (
     <div className="npt-lane npt-lane-flm" data-testid="flm-lane">
       <div className="npt-lane-ttl"><span className="npt-eng flm">FLM</span><span className="npt-sub">FastFlowLM</span></div>
@@ -146,6 +148,9 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
     return !row || row.installed !== false
   }
 
+  const ind = slotIndicatorFromPhase(anchor)
+  const up = ['serving', 'ready', 'idle', 'loaded', 'warming', 'stale'].includes(ind.cls)
+
   const apply = async () => {
     if (busy || count === 0) return
     setErr(null)
@@ -162,10 +167,15 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
       await editMut.mutateAsync({ name: anchor.name, body: draftBody(draft, saved) })
       fpAtStage.current = null
       setDraft({})
-      toast(`${anchor.name} FLM settings updated — restarting`, 'info')
-      restartMut.mutate(anchor.name, {
-        onError: (e) => toast(`NPU restart failed — ${e?.message || 'see logs'}`, 'warn'),
-      })
+      if (up) {
+        toast(`${anchor.name} FLM settings updated — restarting`, 'info')
+        restartMut.mutate(anchor.name, {
+          onError: (e) => toast(`NPU restart failed — ${e?.message || 'see logs'}`, 'warn'),
+        })
+      } else {
+        // A restart on a stopped anchor is unload + load: it would start FLM and claim the NPU.
+        toast(`${anchor.name} FLM settings saved — they take effect on the next start`, 'info')
+      }
     } catch (e) {
       if (e?.message !== DRIFT) setErr(e?.message || 'Apply failed')
     } finally {
@@ -174,8 +184,6 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
     }
   }
 
-  const ind = slotIndicatorFromPhase(anchor)
-  const up = ['serving', 'ready', 'idle', 'loaded', 'warming', 'stale'].includes(ind.cls)
   const m = anchor.metrics || {}
   const tps = typeof m.toks === 'number' && m.toks > 0 ? Math.round(m.toks) : null
   const ttft = typeof m.ttft === 'number' && m.ttft > 0 ? Math.round(m.ttft) : null
@@ -201,9 +209,9 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
           onStop={() => unloadMut.mutate(anchor.name)}
           onRestart={() => restartMut.mutate(anchor.name)}
           onLogs={() => window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: anchor.name } }))}
-          onEdit={() => {
-            window.location.hash = slotEditHash(anchor.name)
-          }}
+          editDisabled={count > 0}
+          editDisabledTitle="Apply or discard the staged FLM changes first"
+          onEdit={() => openSlotEditFromNpu(anchor.name)}
         />
       </div>
       <div className="npt-hint">One FLM process serves chat, speech-to-text and embeddings together. Changes are staged and applied with one restart.</div>
@@ -271,8 +279,7 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
             <b>
               {count} change{count > 1 ? 's' : ''} staged.
             </b>{' '}
-            {describeDraft(draft, saved)}. Applying restarts {anchor.name}
-            {up ? ' and drops in-flight requests' : ''}.
+            {describeDraft(draft, saved)}. {up ? `Applying restarts ${anchor.name} and drops in-flight requests.` : `${anchor.name} is stopped: applying saves the change and does not start it.`}
             {busy === 'pulling' && (
               <span data-testid="flm-pulling"> Downloading {draft.chatModel}{pull.pct != null ? ` · ${Math.round(pull.pct)}%` : ''}…</span>
             )}

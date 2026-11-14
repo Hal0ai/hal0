@@ -183,3 +183,4 @@
 .npt-summary-link { margin-left: auto; color: var(--dev-npu); text-decoration: none; }
 .npt-summary-link:hover { text-decoration: underline; }
 .npt-summary-link:focus-visible { outline: 2px solid var(--dev-npu); outline-offset: 2px; }
+.npt-link-disabled { color: var(--fg-5); cursor: not-allowed; }

@@ -49,7 +49,7 @@ vi.mock('@/api/hooks/useModels', () => ({
 const { FlmLane } = await import('../npu/FlmLane')
 
 const slots = [
-  { name: 'flm', type: 'llm', device_class: 'npu', model_id: 'gemma4-it:e4b' },
+  { name: 'flm', type: 'llm', device_class: 'npu', model_id: 'gemma4-it:e4b', container_status: 'running', container_health: true },
   { name: 'flm-stt', type: 'transcription', device_class: 'npu' },
 ]
 let host: HTMLDivElement
@@ -214,10 +214,40 @@ describe('FlmLane', () => {
     expect(box.creates).toEqual([{ name: 'flm', type: 'llm', runtime: 'container', device: 'npu', profile: 'flm' }])
   })
 
-  it('create uses name npu when flm is taken (by a non-NPU slot)', () => {
+  it('create falls back to flm-npu (npu is a reserved Slots tab), then flm-npu-2', () => {
     render(<Harness slotList={[{ name: 'flm', type: 'llm', device_class: 'gpu' }]} />)
     click('flm-create')
-    expect(box.creates[0]).toMatchObject({ name: 'npu' })
+    expect(box.creates[0]).toMatchObject({ name: 'flm-npu' })
+    box.creates.length = 0
+    render(<Harness slotList={[{ name: 'flm', type: 'llm', device_class: 'gpu' }, { name: 'flm-npu', type: 'llm', device_class: 'gpu' }]} />)
+    click('flm-create')
+    expect(box.creates[0]).toMatchObject({ name: 'flm-npu-2' })
+  })
+
+  it('Apply on a STOPPED anchor writes the config and does not restart it', async () => {
+    render(<Harness slotList={[{ name: 'flm', type: 'llm', device_class: 'npu', model_id: 'gemma4-it:e4b', container_status: 'stopped' }]} />)
+    click('flm-cap-asr')
+    click('flm-apply')
+    await flush()
+    expect(box.edits).toHaveLength(1)
+    expect(box.restarts).toEqual([])
+    expect(q('flm-applybar')).toBeNull()
+  })
+
+  it('Edit is disabled while FLM changes are staged, and opens the drawer with a return to the tab otherwise', async () => {
+    window.location.hash = '#slots/npu/lanes'
+    render()
+    const edit = () => q('slot-ctrl-edit') as HTMLButtonElement
+    expect(edit().disabled).toBe(false)
+    click('flm-cap-asr')
+    expect(edit().disabled).toBe(true)
+    expect(edit().title).toBe('Apply or discard the staged FLM changes first')
+    click('flm-discard')
+    expect(edit().disabled).toBe(false)
+    click('slot-ctrl-edit')
+    expect(window.location.hash).toBe('#slots/flm')
+    const { takeSlotDrawerReturn } = await import('../slots-route')
+    expect(takeSlotDrawerReturn('flm')).toBe('#slots/npu/lanes')
   })
 
   it('STT and Embed show the bundled model text', () => {

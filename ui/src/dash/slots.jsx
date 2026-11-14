@@ -22,7 +22,7 @@ import { ImageGenTabs } from './image/ImageGenTabs'
 import { NpuTabs } from './npu/NpuTabs'
 import { npuTabVisible } from './npu/npu-pure'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
-import { isReservedSlotsTab, slotEditHash, slotEditTarget, slotsSub, slotsTab } from './slots-route'
+import { isReservedSlotsTab, slotEditHash, slotEditTarget, slotsSub, slotsTab, takeSlotDrawerReturn } from './slots-route'
 import { NpuSummaryRow } from './npu/NpuSummaryRow.jsx'
 import {
   InferencePane,
@@ -1132,7 +1132,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
       <EditSlotDrawer
         open={!!editSlot}
         slot={editSlot}
-        onClose={() => { setEditName(null); window.location.hash = "#slots"; }}
+        onClose={() => { const back = takeSlotDrawerReturn(editName); setEditName(null); window.location.hash = back || "#slots"; }}
       />
       <SlotLogsDrawer
         open={!!logsSlot}

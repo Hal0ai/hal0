@@ -11,7 +11,7 @@ import { useXdnaFit } from '@/api/hooks/useXdnaFit'
 import { npuAnchorSlot } from '../slots/slot-shared.js'
 import { slotEditHash } from '../slots-route'
 import { GgmlSlotDrawer } from './GgmlSlotDrawer.jsx'
-import { GGML_REQUANT_CMD, ggmlRequantHint } from './ggml-slot-pure'
+import { GGML_IMAGE_MISSING, GGML_REQUANT_CMD, ggmlRequantHint } from './ggml-slot-pure'
 import { bundledFlmModel, pickChatModel, savedFlm } from './flm-draft-pure'
 import { flmCatalogRows, ggufNpuRows } from './npu-models-pure'
 
@@ -19,7 +19,7 @@ const toast = (msg, kind = 'info') => typeof window !== 'undefined' && window.__
 
 const CAP_FILTERS = ['all', 'chat', 'stt', 'embed']
 
-export function NpuModelsPanel({ slots = [], setFlmDraft, onSwitchTab }) {
+export function NpuModelsPanel({ slots = [], occ, setFlmDraft, onSwitchTab }) {
   const anchor = npuAnchorSlot(slots)
   const cfgQ = useSlotConfig(anchor?.name)
   const catQ = useFlmCatalog()
@@ -27,7 +27,8 @@ export function NpuModelsPanel({ slots = [], setFlmDraft, onSwitchTab }) {
   const modelsQ = useModels()
   const pull = usePullJob()
   const [filter, setFilter] = useState({ installed: 'all', cap: 'all' })
-  const [drawer, setDrawer] = useState({ open: false, model: undefined })
+  const [drawer, setDrawer] = useState({ open: false, mode: 'create', model: undefined, slot: undefined })
+  const imageMissing = occ?.npu_engines?.xdna?.pulled === false
   const cmdRef = useRef(null)
 
   const catalog = catQ.data
@@ -107,9 +108,24 @@ export function NpuModelsPanel({ slots = [], setFlmDraft, onSwitchTab }) {
             <span className="chip mono">{r.size ?? '—'}</span>
             <span className={`chip mono npt-fit ${r.fit || 'none'}`} data-testid={`gguf-fit-${r.id}`} title={r.reason || undefined}>{r.fit || '—'}</span>
             {r.usedBy.map((n) => (
-              <a key={n} className="chip mono npt-used" data-testid={`gguf-used-${r.id}-${n}`} href={slotEditHash(n)}>{n}</a>
+              <a
+                key={n}
+                className="chip mono npt-used"
+                data-testid={`gguf-used-${r.id}-${n}`}
+                href={slotEditHash(n)}
+                onClick={(e) => {
+                  // An xdna slot edits in the page, like the GGML lane; leaving the tab would drop
+                  // the staged FLM changes.
+                  const slot = (slots ?? []).find((x) => x.name === n)
+                  if (!slot) return
+                  e.preventDefault()
+                  setDrawer({ open: true, mode: 'edit', model: undefined, slot })
+                }}
+              >
+                {n}
+              </a>
             ))}
-            <button type="button" className="btn sm" data-testid={`gguf-new-${r.id}`} onClick={() => setDrawer({ open: true, model: r.id })}>
+            <button type="button" className="btn sm" data-testid={`gguf-new-${r.id}`} disabled={imageMissing} title={imageMissing ? GGML_IMAGE_MISSING : undefined} onClick={() => setDrawer({ open: true, mode: 'create', model: r.id, slot: undefined })}>
               New slot
             </button>
             {r.fit !== 'fused' && r.reason && <div className="npt-hint" style={{ flexBasis: '100%' }} data-testid={`gguf-reason-${r.id}`}>{r.reason}</div>}
@@ -126,7 +142,7 @@ export function NpuModelsPanel({ slots = [], setFlmDraft, onSwitchTab }) {
         )}
       </section>
 
-      <GgmlSlotDrawer open={drawer.open} mode="create" initialModel={drawer.model} onClose={() => setDrawer((d) => ({ ...d, open: false }))} />
+      <GgmlSlotDrawer open={drawer.open} mode={drawer.mode} slot={drawer.slot} initialModel={drawer.model} onClose={() => setDrawer((d) => ({ ...d, open: false }))} />
     </div>
   )
 }

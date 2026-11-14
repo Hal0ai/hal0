@@ -48,3 +48,50 @@ export function slotEditTarget(param: string | null | undefined): string | null 
   if (isReservedSlotsTab(param)) return null
   return param
 }
+
+// ── Return target for the slot edit drawer ───────────────────────────────────────────────────────
+//
+// Closing the Slots edit drawer normally lands on `#slots`. When it was opened from the NPU tab
+// (the FLM lane's Edit, an FLM "used by" link) closing it should return there. The opener records
+// the target here (module-level, mirrored to sessionStorage; both guarded) together with the slot
+// it was for, and the close handler takes it once.
+const DRAWER_RETURN_KEY = 'hal0:slot-drawer-return'
+let drawerReturn: { target: string; slot: string } | null = null
+
+/** Remember where closing `slot`'s edit drawer should go. */
+export function setSlotDrawerReturn(target: string, slot: string): void {
+  drawerReturn = { target, slot }
+  try {
+    window.sessionStorage.setItem(DRAWER_RETURN_KEY, JSON.stringify(drawerReturn))
+  } catch {
+    /* private mode / sandboxed frame: the module-level copy still works */
+  }
+}
+
+/** The recorded return target for `slot`, cleared on read; null when none or for another slot. */
+export function takeSlotDrawerReturn(slot?: string | null): string | null {
+  let rec = drawerReturn
+  if (!rec) {
+    try {
+      const raw = window.sessionStorage.getItem(DRAWER_RETURN_KEY)
+      rec = raw ? (JSON.parse(raw) as { target: string; slot: string }) : null
+    } catch {
+      rec = null
+    }
+  }
+  drawerReturn = null
+  try {
+    window.sessionStorage.removeItem(DRAWER_RETURN_KEY)
+  } catch {
+    /* ignore */
+  }
+  if (!rec || (slot != null && rec.slot !== slot)) return null
+  return rec.target
+}
+
+/** Open a slot's edit drawer from the NPU tab; closing it returns to the tab. */
+export function openSlotEditFromNpu(name: string): void {
+  const here = typeof window !== 'undefined' ? window.location.hash || '' : ''
+  setSlotDrawerReturn(here.startsWith('#slots/npu') ? here : '#slots/npu', name)
+  window.location.hash = slotEditHash(name)
+}

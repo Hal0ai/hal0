@@ -12,7 +12,7 @@ const { box } = vi.hoisted(() => ({
   box: {
     pullStart: vi.fn(),
     pullState: 'idle',
-    drawer: null as null | { open: boolean; mode: string; initialModel?: string },
+    drawer: null as null | { open: boolean; mode: string; initialModel?: string; slot?: { name: string } },
     toasts: [] as string[],
   },
 }))
@@ -51,9 +51,9 @@ vi.mock('@/api/hooks/useModels', () => ({
   usePullJob: () => ({ start: box.pullStart, state: box.pullState, modelId: null, pct: null, inFlight: box.pullState === 'running', error: null }),
 }))
 vi.mock('../npu/GgmlSlotDrawer.jsx', () => ({
-  GgmlSlotDrawer: (p: { open: boolean; mode: string; initialModel?: string }) => {
+  GgmlSlotDrawer: (p: { open: boolean; mode: string; initialModel?: string; slot?: { name: string } }) => {
     box.drawer = p
-    return p.open ? <div data-testid="drawer" data-mode={p.mode} data-model={p.initialModel ?? ''} /> : null
+    return p.open ? <div data-testid="drawer" data-mode={p.mode} data-model={p.initialModel ?? ''} data-slot={p.slot?.name ?? ''} /> : null
   },
 }))
 
@@ -68,11 +68,12 @@ let root: Root
 const q = (id: string) => host.querySelector(`[data-testid="${id}"]`) as HTMLElement | null
 const switched: string[] = []
 let draftNow: Record<string, unknown> = {}
+let occNow: unknown
 
 function Harness() {
   const [draft, setDraft] = useState<Record<string, unknown>>({})
   draftNow = draft
-  return <NpuModelsPanel slots={slots as never} setFlmDraft={setDraft as never} onSwitchTab={(t: string) => switched.push(t)} />
+  return <NpuModelsPanel slots={slots as never} occ={occNow as never} setFlmDraft={setDraft as never} onSwitchTab={(t: string) => switched.push(t)} />
 }
 
 beforeEach(() => {
@@ -82,6 +83,7 @@ beforeEach(() => {
   box.toasts.length = 0
   switched.length = 0
   draftNow = {}
+  occNow = undefined
   ;(window as unknown as { __hal0Toast: (m: string) => void }).__hal0Toast = (m) => box.toasts.push(m)
   host = document.createElement('div')
   document.body.appendChild(host)
@@ -157,5 +159,24 @@ describe('NpuModelsPanel', () => {
       q('npu-requant-copy')!.click()
     })
     expect(window.getSelection()!.toString()).toContain('llama-quantize')
+  })
+
+  it('a used-by xdna slot opens the GGML drawer in edit mode in the page instead of navigating', () => {
+    window.location.hash = '#slots/npu/models'
+    act(() => q('gguf-used-qwen3-4b-npu-gguf')!.click())
+    expect(box.drawer).toMatchObject({ open: true, mode: 'edit' })
+    expect(q('drawer')!.getAttribute('data-slot')).toBe('npu-gguf')
+    expect(window.location.hash).toBe('#slots/npu/models')
+  })
+
+  it('"New slot" is disabled, with the reason, while the ggml-xdna image is not pulled', () => {
+    occNow = { npu_engines: { xdna: { pulled: false } } }
+    act(() => root.render(<Harness />))
+    const btn = q('gguf-new-qwen3-4b') as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    expect(btn.title).toBe('The ggml-xdna runner image is not pulled yet.')
+    occNow = { npu_engines: { xdna: { pulled: null } } }
+    act(() => root.render(<Harness />))
+    expect((q('gguf-new-qwen3-4b') as HTMLButtonElement).disabled).toBe(false)
   })
 })

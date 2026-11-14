@@ -8,9 +8,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const { box } = vi.hoisted(() => ({
-  box: { occ: undefined as unknown, hw: undefined as unknown },
+  box: { occ: undefined as unknown, hw: undefined as unknown, isError: false, refetch: vi.fn() },
 }))
-vi.mock('@/api/hooks/useNpuOccupancy', () => ({ useNpuOccupancy: () => ({ data: box.occ }) }))
+vi.mock('@/api/hooks/useNpuOccupancy', () => ({
+  useNpuOccupancy: () => ({ data: box.occ, isError: box.isError, isLoading: false, isFetching: false, refetch: box.refetch }),
+}))
 vi.mock('@/api/hooks/useStatsHardware', () => ({ useStatsHardware: () => ({ data: box.hw }) }))
 
 vi.mock('@/api/hooks/useSlots', () => {
@@ -41,6 +43,8 @@ beforeEach(() => {
   root = createRoot(host)
   box.occ = present
   box.hw = {}
+  box.isError = false
+  box.refetch.mockReset()
 })
 afterEach(() => {
   act(() => root.unmount())
@@ -77,6 +81,22 @@ describe('NpuTabs', () => {
   it('npu slots with present:false keep the tab shell (degraded)', () => {
     box.occ = { present: false, slots: [] }
     render({ slots: [{ name: 'n', device_class: 'npu' }] })
+    expect(host.querySelector('[data-testid="npu-tab-lanes"]')).toBeTruthy()
+  })
+  it('a failed occupancy read with no npu slot says it could not read the status, with a retry', () => {
+    box.occ = undefined
+    box.isError = true
+    render({})
+    expect(host.querySelector('[data-testid="npu-absent"]')).toBeNull()
+    expect(host.querySelector('[data-testid="npu-status-error"]')?.textContent).toContain("Couldn't read the NPU status")
+    act(() => (host.querySelector('[data-testid="npu-status-retry"]') as HTMLElement).click())
+    expect(box.refetch).toHaveBeenCalled()
+  })
+  it('a failed occupancy read with an npu slot keeps the degraded shell', () => {
+    box.occ = undefined
+    box.isError = true
+    render({ slots: [{ name: 'n', device_class: 'npu' }] })
+    expect(host.querySelector('[data-testid="npu-status-error"]')).toBeNull()
     expect(host.querySelector('[data-testid="npu-tab-lanes"]')).toBeTruthy()
   })
 })

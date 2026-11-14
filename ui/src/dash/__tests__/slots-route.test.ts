@@ -69,4 +69,13 @@ describe('slot edit routes', () => {
     expect(slotEditTarget('npu/lanes')).toBeNull()
     expect(slotEditTarget(null)).toBeNull()
   })
+
+  it('the drawer return target is taken once, only for its own slot', async () => {
+    const { setSlotDrawerReturn, takeSlotDrawerReturn } = await import('../slots-route')
+    setSlotDrawerReturn('#slots/npu', 'npu')
+    expect(takeSlotDrawerReturn('other')).toBeNull() // another slot's drawer never inherits it
+    setSlotDrawerReturn('#slots/npu', 'npu')
+    expect(takeSlotDrawerReturn('npu')).toBe('#slots/npu')
+    expect(takeSlotDrawerReturn('npu')).toBeNull() // cleared on read
+  })
 })

@@ -148,4 +148,30 @@ test.describe('NPU tab', () => {
     expect(puts).toHaveLength(1)
     expect(restarts).toBe(1)
   })
+
+  test('the FLM lane Edit opens the drawer and closing it returns to the NPU tab; it is blocked while changes are staged', async ({ page }) => {
+    await setup(page)
+    await page.route('**/api/slots/npu/config', (route) =>
+      json(route, { name: 'npu', npu: { chat: true, asr: false, embed: false }, model: { default: 'qwen3-0.6b-npu' } }),
+    )
+    await page.goto('/#slots/npu')
+    await page.getByTestId('flm-cap-asr').click()
+    const edit = page.getByTestId('flm-lane').getByTestId('slot-ctrl-edit')
+    await expect(edit).toBeDisabled()
+    await expect(edit).toHaveAttribute('title', 'Apply or discard the staged FLM changes first')
+    await page.getByTestId('flm-discard').click()
+    await edit.click()
+    await expect(page).toHaveURL(/#slots\/edit\/npu$/)
+    await expect(page.locator('.drawer.open')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page).toHaveURL(/#slots\/npu(\/lanes)?$/)
+    await expect(page.getByTestId('npu-lanes')).toBeVisible()
+  })
+
+  test('the Slots drawer for the FLM anchor links to the NPU lanes instead of carrying the matrix', async ({ page }) => {
+    await setup(page)
+    await page.goto('/#slots/edit/npu')
+    await expect(page.getByTestId('npu-lane-link')).toHaveAttribute('href', '#slots/npu/lanes')
+    await expect(page.getByTestId('npu-capability-matrix')).toHaveCount(0)
+  })
 })

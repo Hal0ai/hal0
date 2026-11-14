@@ -32,6 +32,7 @@ describe('names', () => {
     expect(ggmlNameError('agent', ['agent', 'flm'])).toBe('name already in use')
     expect(ggmlNameError('Bad_Name', [])).toBe('lowercase + dashes only')
     expect(ggmlNameError('npu-gguf', ['agent'])).toBeNull()
+    for (const n of ['npu', 'image', 'endpoints', 'stacks', 'runner-images']) expect(ggmlNameError(n, [])).toBe('that name is a Slots tab')
   })
 })
 
