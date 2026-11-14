@@ -60,7 +60,9 @@ def effective_xdna_path(env: Mapping[str, str], model_path: str | Path | None) -
     ``GGML_XDNA_FUSED_LAYER=0`` in the launch env forces per-op. A missing or
     unreadable model is per-op: the fail-safe side, since per-op excludes FLM.
     """
-    if env.get(_FUSED_LAYER_KEY) == "0":
+    # ``[xdna].env`` values are not type-normalised on write, so an integer 0
+    # (TOML or JSON) must force per-op as the string "0" does.
+    if str(env.get(_FUSED_LAYER_KEY)).strip() == "0":
         return "per-op"
     if not model_path:
         return "per-op"

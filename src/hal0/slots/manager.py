@@ -1533,6 +1533,10 @@ class SlotManager:
         if not carried_extra.get("fabric_clock_warning") or to_state == SlotState.OFFLINE:
             # Same lifetime as gtt_leak_warning: one load attempt's warning.
             carried_extra.pop("fabric_clock_warning", None)
+        if to_state == SlotState.OFFLINE:
+            # #3666: the drift-converge NPU refusal describes the unit that kept
+            # serving; once it is down the next load re-runs admission.
+            carried_extra.pop("npu_conflict_warning", None)
         if to_state in (SlotState.READY, SlotState.IDLE):
             # Converged healthy — clear the crash-loop breaker and its
             # carried extras. Covers load() success AND out-of-band
@@ -2072,7 +2076,29 @@ class SlotManager:
                 # restart, and it self-heals a unit that drifted by any route
                 # (direct TOML edit, stacks apply, capabilities).
                 if not await self._should_converge(slot_name, cfg):
+                    self._stamp_npu_converge_warning(slot_name, None)
                     return await self.status(slot_name)
+                # #3666: the edited TOML may turn this slot into one the NPU
+                # cannot hold beside its peers (a fused model swapped for a
+                # per-op one beside FLM). Judge the NEW config before tearing
+                # the running unit down; never unload from here (slot lock
+                # held). A conflict keeps the old unit serving and says why.
+                try:
+                    await self._admit_npu_locked(slot_name, model_id, token=npu_token)
+                except SlotNpuConflict as exc:
+                    log.warning(
+                        "slot.load_converge_refused_npu_conflict",
+                        extra={"slot": slot_name, "holders": exc.details.get("holders")},
+                    )
+                    self._stamp_npu_converge_warning(
+                        slot_name,
+                        f"edited config not applied: {exc.details.get('reason')}. "
+                        f"Still serving the running model; stop "
+                        f"{', '.join(exc.details.get('holders') or [])} and restart "
+                        f"{slot_name} to apply it.",
+                    )
+                    return await self.status(slot_name)
+                self._stamp_npu_converge_warning(slot_name, None)
                 log.info("slot.load_converging_drifted_config", extra={"slot": slot_name})
                 # Tear down in place — we hold the slot lock, so we cannot go
                 # through unload() (it takes the same lock). Best-effort: a
@@ -2911,6 +2937,13 @@ class SlotManager:
             and observed in (SlotState.STARTING, SlotState.WARMING)
         ):
             meta["message"] = fabric_clock_warning
+        npu_conflict_warning = rec.extra.get("npu_conflict_warning")
+        if (
+            npu_conflict_warning
+            and not meta.get("message")
+            and observed in (SlotState.READY, SlotState.SERVING, SlotState.IDLE)
+        ):
+            meta["message"] = npu_conflict_warning
         breaker = self._breaker_snapshot(slot_name)
         if breaker:
             meta["breaker"] = breaker
@@ -3435,7 +3468,9 @@ class SlotManager:
         except Exception:
             return "per-op"
         model_path: str | None = None
-        if env.get("GGML_XDNA_FUSED_LAYER") != "0" and model_id:
+        # ``[xdna].env`` values are not type-normalised on write: a TOML or JSON
+        # integer 0 forces per-op exactly as the string does.
+        if str(env.get("GGML_XDNA_FUSED_LAYER")).strip() != "0" and model_id:
             info = await self._resolve_model_info(
                 model_id, provider=_cfg_effective_provider(dict(cfg))
             )
@@ -3506,9 +3541,11 @@ class SlotManager:
                 f"{holders} is still loading on the NPU; wait for it to finish, or stop it first."
             )
         else:
+            # Every surface shows this text, dashboard toasts included, so it
+            # names the operator's choices before the API flag.
             message = (
-                f"{conflict.reason}. Pass unload_npu_holder=true to unload "
-                f"{', '.join(conflict.unloads)} and start {slot_name}."
+                f"{conflict.reason}. Stop {', '.join(conflict.unloads)} first, or start "
+                f"{slot_name} from the NPU tab (API: unload_npu_holder: true)."
             )
         return SlotNpuConflict(
             message,
@@ -3634,6 +3671,36 @@ class SlotManager:
         elif current is not SlotState.OFFLINE:
             return
         await self._transition(slot_name, SlotState.OFFLINE, port=_cfg_port(dict(cfg)), force=True)
+
+    def _stamp_npu_converge_warning(self, slot_name: str, warning: str | None) -> None:
+        """Record (or retire, with ``None``) why a drifted slot was not re-converged.
+
+        Slot lock held. A ``_load`` of a live slot whose TOML drifted into an
+        NPU conflict (#3666) keeps the old unit serving; this leaves the reason
+        on the state record's ``extra`` (surfaced in ``status()`` metadata and
+        as its message), written the way ``update_config`` refreshes the
+        ``extra`` mirrors: in place, with no state transition.
+        """
+        key = self._key(slot_name)
+        rec = self._states.get(key)
+        if rec is None or rec.extra.get("npu_conflict_warning") == warning:
+            return
+        new_extra = dict(rec.extra)
+        if warning is None:
+            new_extra.pop("npu_conflict_warning", None)
+        else:
+            new_extra["npu_conflict_warning"] = warning
+        refreshed = SlotStateRecord(
+            name=rec.name,
+            state=rec.state,
+            model_id=rec.model_id,
+            port=rec.port,
+            updated_at=time.time(),
+            message=rec.message,
+            extra=new_extra,
+        )
+        write_state_atomic(self._state_file_for(slot_name), refreshed)
+        self._states[key] = refreshed
 
     async def _check_npu(
         self, slot_name: str, model_id: str | None, *, unload_holder: bool

@@ -136,6 +136,20 @@ def test_effective_path_env_zero_forces_perop_on_fused_model(tmp_path: Path) -> 
     assert effective_xdna_path({"GGML_XDNA_FUSED_LAYER": "0"}, path) == "per-op"
 
 
+def test_effective_path_integer_zero_forces_perop_on_fused_model(tmp_path: Path) -> None:
+    """``[xdna].env`` is not type-normalised on write: an int 0 forces per-op too."""
+    path = write_gguf(
+        tmp_path / "m.gguf",
+        "qwen35",
+        uints={"qwen35.embedding_length": 1024},
+        tensor_names=["blk.0.ssm_out.weight"],
+        tensor_types={"blk.0.ssm_out.weight": 13},
+    )
+    assert effective_xdna_path({"GGML_XDNA_FUSED_LAYER": 0}, path) == "per-op"  # type: ignore[dict-item]
+    assert effective_xdna_path({"GGML_XDNA_FUSED_LAYER": " 0 "}, path) == "per-op"
+    assert effective_xdna_path({"GGML_XDNA_FUSED_LAYER": 1}, path) == "fused"  # type: ignore[dict-item]
+
+
 def test_effective_path_unreadable_model_is_perop(tmp_path: Path) -> None:
     assert effective_xdna_path({}, tmp_path / "missing.gguf") == "per-op"
     assert effective_xdna_path({}, None) == "per-op"

@@ -588,6 +588,11 @@ async def test_refusal_messages_tell_the_operator_what_to_do(
     msg = str(settled.value)
     assert "flm" in msg and "unload_npu_holder" in msg
     assert "flm-stt" in msg
+    # Read on every surface (dashboard toasts too): the operator's choices
+    # come first, the API flag last.
+    assert "Stop flm, flm-stt first, or start px from the NPU tab" in msg
+    assert msg.endswith("(API: unload_npu_holder: true).")
+    assert "Pass unload_npu_holder" not in msg
     assert settled.value.details["pending"] is False
 
     # A holder still loading: the opt-in cannot help, so the message says wait/stop.
@@ -599,3 +604,75 @@ async def test_refusal_messages_tell_the_operator_what_to_do(
     assert "still loading on the NPU" in pmsg
     assert "wait for it to finish, or stop it first" in pmsg
     assert "unload_npu_holder" not in pmsg
+
+
+async def test_integer_fused_layer_zero_is_per_op_without_reading_the_model(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An int ``GGML_XDNA_FUSED_LAYER = 0`` in the TOML forces per-op, as "0" does."""
+    sm = SlotManager()
+
+    async def must_not_resolve(self: SlotManager, *a: Any, **k: Any) -> dict[str, Any]:
+        raise AssertionError("the model fit must not be read when the env forces per-op")
+
+    monkeypatch.setattr(SlotManager, "_resolve_model_info", must_not_resolve)
+    cfg = {
+        "name": "px",
+        "device": "npu",
+        "binary": "xdna",
+        "xdna": {"env": {"GGML_XDNA_FUSED_LAYER": 0}},
+    }
+    assert await sm._npu_xdna_path(cfg, "qwen3-1.7b") == "per-op"
+
+
+async def test_drifted_fused_slot_is_not_reconverged_into_a_per_op_conflict(
+    tmp_hal0_home: str, events: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I1: a ready fused slot whose TOML now names a per-op model keeps serving beside FLM.
+
+    The converge branch judges the NEW config before tearing the unit down;
+    a conflict leaves the old unit up, FLM untouched, and a warning on the slot.
+    """
+    _flm(tmp_hal0_home)
+    _xdna(tmp_hal0_home, "fx", 8091, per_op=False)
+
+    async def path_by_model(self: SlotManager, cfg: Any, model_id: str | None) -> str:
+        return "per-op" if model_id == "perop-m" else "fused"
+
+    monkeypatch.setattr(SlotManager, "_npu_xdna_path", path_by_model)
+    sm = SlotManager()
+    await sm.load("flm")
+    await sm.load("fx")
+    assert sm.state("fx") == SlotState.READY
+    events.clear()
+
+    # The operator edits the model without restarting; the running unit drifts.
+    toml = Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "fx.toml"
+    toml.write_text(
+        toml.read_text(encoding="utf-8").replace('"qwen3-1.7b"', '"perop-m"'), encoding="utf-8"
+    )
+
+    async def drifted(self: SlotManager, slot_name: str, cfg: Any) -> bool:
+        return slot_name == "fx"
+
+    monkeypatch.setattr(SlotManager, "_should_converge", drifted)
+
+    slot = await sm.load("fx")
+
+    assert events == []  # no stop, no spawn: the fused unit keeps serving
+    assert sm.state("fx") == SlotState.READY
+    assert sm.state("flm") == SlotState.READY
+    assert sm._npu_pending == {}
+    warning = slot.metadata.get("npu_conflict_warning")
+    assert warning and "flm" in warning and "edited config not applied" in warning
+    assert slot.metadata.get("message") == warning
+
+    # Once the drift is gone (TOML reverted), the warning retires.
+    monkeypatch.setattr(SlotManager, "_should_converge", lambda *a, **k: _false())
+    slot = await sm.load("fx")
+    assert "npu_conflict_warning" not in slot.metadata
+    assert events == []
+
+
+async def _false() -> bool:
+    return False
