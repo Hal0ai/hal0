@@ -24,6 +24,9 @@ def fit_client(client: TestClient, tmp_path: Path) -> TestClient:
     )
     perop = write_gguf(tmp_path / "lfm2-chat.gguf", "lfm2")
     embed = write_gguf(tmp_path / "nomic-embed-text.gguf", "nomic-bert")
+    blob = write_gguf(tmp_path / "sha256-0123abcd", "lfm2")
+    hgn = tmp_path / "halo-chat.gguf"
+    hgn.write_bytes(b"HGN1" + b"\0" * 32)
     reg = client.app.state.model_registry
     for mid, path, caps in (
         ("qwen35-fused", fused, ["chat"]),
@@ -32,6 +35,18 @@ def fit_client(client: TestClient, tmp_path: Path) -> TestClient:
         ("nomic-embed-text", embed, ["embed"]),
     ):
         reg.add(Model(id=mid, name=mid, path=str(path), capabilities=caps))
+    reg.add(
+        Model(
+            id="blob-chat",
+            name="b",
+            path=str(blob),
+            capabilities=["chat"],
+            backends=["vulkan", "rocm", "cuda", "cpu"],
+        )
+    )
+    reg.add(
+        Model(id="halo-chat", name="h", path=str(hgn), capabilities=["chat"], backends=["halogen"])
+    )
     yield client
     xdna_fit_cache_clear()
 
@@ -63,3 +78,9 @@ def test_fit_unknown_model_is_404(fit_client: TestClient) -> None:
     r = fit_client.get("/api/runners/xdna/fit", params={"model": "nope"})
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "runners.model_not_found"
+
+
+def test_fit_includes_extensionless_gguf_blob_and_skips_halogen(fit_client: TestClient) -> None:
+    models = fit_client.get("/api/runners/xdna/fit").json()["models"]
+    assert models["blob-chat"]["xdna_path"] == "per-op"
+    assert "halo-chat" not in models

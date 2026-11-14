@@ -8,6 +8,7 @@ so the dashboard never hardcodes the ``GGML_XDNA_*`` set, the valid
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import APIRouter, Request
@@ -25,12 +26,22 @@ async def get_xdna_knobs() -> dict[str, Any]:
 
 
 def _is_gguf_llm(model: Any) -> bool:
+    """GGUF chat row: llama-server ``backends`` decide, ``.gguf`` suffix only as fallback.
+
+    Hub-cache and add-from-path rows store an extensionless sha-named blob
+    (#1838), so the suffix alone would drop them; halogen/FLM rows carry other
+    backend names and are excluded.
+    """
+    from hal0.registry.detect import _GGUF_BACKENDS
     from hal0.services.models_service import dispatch_type
 
-    path = str(getattr(model, "path", "") or "")
-    if not path.lower().endswith(".gguf"):
+    if dispatch_type(model.id, capabilities=getattr(model, "capabilities", None)) != "llm":
         return False
-    return dispatch_type(model.id, capabilities=getattr(model, "capabilities", None)) == "llm"
+    backends = [str(b) for b in (getattr(model, "backends", None) or [])]
+    if backends:
+        return any(b in _GGUF_BACKENDS for b in backends)
+    path = str(getattr(model, "path", "") or "")
+    return path.lower().endswith(".gguf") and not os.path.isdir(path)
 
 
 @router.get("/xdna/fit")
