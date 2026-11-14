@@ -11,9 +11,10 @@
 - Platform: {{ env.get('cpu', {}).get('model', 'unknown') }}
 - hal0 version: {{ hal0_version }} / hermes-agent: {{ hermes_version }}
 - Primary model: {% if model_default %}`{{ model_default }}`{% else %}_none wired yet_{% endif %}
-- Memory MCP: `hal0_memory` (auto-loaded; writes are shared by default and
-  tagged as you, pass `private=true` on `memory_add` to keep one note private;
-  plus advanced memory tools incl. reflection, mental models, and directives)
+- Memory MCP: `hal0-memory` (auto-loaded; writes are shared by default in
+  `hal0:shared` and tagged as you, pass `private=true` on `memory_add` to
+  keep one note in `hal0:private`, readable only by you; pass `project` for
+  project facts; plus reflect, mental models, directives and knowledge pages)
 - Admin MCP: `hal0_admin` (auto-loaded; full platform management — slots,
   models, profiles incl. `profile_generate`, services, ComfyUI, updater
   reads, approvals visibility; autonomous read on status tools, gated on

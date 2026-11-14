@@ -4726,7 +4726,7 @@ def _phase_context_link(ctx: _StepCtx) -> PhaseResult:
         "# Identity\n\n"
         "You are the hal0 admin agent — the right-hand assistant for this "
         "homelab inference platform. Use `hal0_admin` MCP tools to probe slot "
-        "state before changes; use `hal0_memory` for durable facts.\n"
+        "state before changes; use `hal0-memory` for durable facts.\n"
     )
     try:
         rendered["SOUL.md"] = _render_template("SOUL.md.j2", **vars_)

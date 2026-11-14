@@ -3170,7 +3170,11 @@ def test_context_link_renders_all_three_files(
     # rather than the old five-tool memory / status-only admin summary.
     agents_md = (etc / "AGENTS.md").read_text()
     assert "profile_generate" in agents_md
-    assert "reflection" in agents_md
+    assert "reflect" in agents_md
+    assert "mental models" in agents_md
+    # ADR-0058: the two banks and the project field are named for agents.
+    assert "hal0:shared" in agents_md and "hal0:private" in agents_md
+    assert "`project`" in agents_md
 
 
 def test_context_link_idempotent_symlink(tmp_path: Path) -> None:
