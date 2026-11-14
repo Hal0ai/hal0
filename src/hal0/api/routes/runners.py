@@ -8,6 +8,7 @@ so the dashboard never hardcodes the ``GGML_XDNA_*`` set, the valid
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any
 
@@ -63,13 +64,19 @@ async def get_xdna_fit(request: Request, model: str | None = None) -> dict[str, 
         rows = [m for m in rows if m.id == model]
         if not rows:
             raise NotFound(f"unknown model {model!r}", code="runners.model_not_found")
-    out: dict[str, dict[str, Any]] = {}
-    for m in rows:
-        try:
-            fit = xdna_model_fit_cached(m.path)
-            out[m.id] = {"xdna_path": fit.xdna_path, "reason": fit.reason}
-        except (OSError, ValueError) as exc:
-            out[m.id] = {"xdna_path": None, "reason": str(exc) or type(exc).__name__}
+
+    def _fit_rows() -> dict[str, dict[str, Any]]:
+        # stat + GGUF header reads: off the event loop.
+        out: dict[str, dict[str, Any]] = {}
+        for m in rows:
+            try:
+                fit = xdna_model_fit_cached(m.path)
+                out[m.id] = {"xdna_path": fit.xdna_path, "reason": fit.reason}
+            except (OSError, ValueError) as exc:
+                out[m.id] = {"xdna_path": None, "reason": str(exc) or type(exc).__name__}
+        return out
+
+    out = await asyncio.to_thread(_fit_rows)
     return {"models": out}
 
 

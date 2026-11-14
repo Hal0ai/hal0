@@ -18,8 +18,8 @@ every error path (no SlotManager, accessor errors, etc.).
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
+import copy
 import threading
 import time
 import tomllib
@@ -196,18 +196,56 @@ def _engine_facts_sync() -> tuple[dict[str, Any], dict[str, Any]]:
     return engines, host
 
 
-async def _engine_and_host_facts() -> dict[str, Any]:
-    """``{"npu_engines": ..., "npu_host": ...}`` — never raises."""
-    try:
-        engines, host = await asyncio.to_thread(_engine_facts_sync)
-    except Exception:
-        log.warning("npu.engine_facts_failed", exc_info=True)
-        engines = {
+_FACTS_TTL_S = 30.0
+_facts_cache: tuple[float, dict[str, Any]] | None = None
+_facts_refresh_thread: threading.Thread | None = None
+
+
+def _none_facts() -> dict[str, Any]:
+    """The all-``None`` facts shape: what a failed or not-yet-read block reports."""
+    return {
+        "npu_engines": {
             "flm": {"image": None, "version": None},
             "xdna": {"image": None, "tag": None, "pulled": None},
-        }
-        host = {"device_node": None, "driver_loaded": None, "xdna_gen": None}
-    return {"npu_engines": engines, "npu_host": host}
+        },
+        "npu_host": {"device_node": None, "driver_loaded": None, "xdna_gen": None},
+    }
+
+
+def _refresh_facts() -> None:
+    """Blocking read of the whole facts block; stores it and clears the in-flight thread."""
+    global _facts_cache, _facts_refresh_thread
+    try:
+        engines, host = _engine_facts_sync()
+        facts = {"npu_engines": engines, "npu_host": host}
+    except Exception:
+        log.warning("npu.engine_facts_failed", exc_info=True)
+        facts = _none_facts()
+    with _image_refresh_lock:
+        _facts_cache = (time.monotonic(), facts)
+        _facts_refresh_thread = None
+
+
+async def _engine_and_host_facts() -> dict[str, Any]:
+    """``{"npu_engines": ..., "npu_host": ...}`` -- never raises, never blocks.
+
+    The occupancy route is polled every ~2.5 s, so the block (a thread, ``lsmod``,
+    the image store) is cached for ``_FACTS_TTL_S``: stale-while-revalidate with
+    one refresh in flight. The very first call, before any read lands, reports
+    the all-``None`` shape.
+    """
+    global _facts_refresh_thread
+    with _image_refresh_lock:
+        cached = _facts_cache
+        fresh = cached is not None and time.monotonic() - cached[0] < _FACTS_TTL_S
+        if not fresh and _facts_refresh_thread is None:
+            _facts_refresh_thread = threading.Thread(
+                target=_refresh_facts, name="npu-facts", daemon=True
+            )
+            _facts_refresh_thread.start()
+    if cached is None:
+        return _none_facts()
+    return copy.deepcopy(cached[1])
 
 
 def _occupancy_absent() -> dict[str, Any]:
@@ -465,6 +503,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                     "gb": None,
                     "active": stt_live and stt_age is not None and stt_age <= _ACTIVE_WINDOW_S,
                     "last_used_age_s": round(stt_age, 1) if stt_age is not None else None,
+                    "served_by": s.name,
                 }
             )
         if npu_cfg.get("embed"):
@@ -482,6 +521,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
                     and embed_age is not None
                     and embed_age <= _ACTIVE_WINDOW_S,
                     "last_used_age_s": round(embed_age, 1) if embed_age is not None else None,
+                    "served_by": s.name,
                 }
             )
 
