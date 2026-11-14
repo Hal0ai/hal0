@@ -313,6 +313,16 @@ RULES: tuple[_Rule, ...] = (
         AuthClass.CLIENT,
         _GET,
     ),
+    # xdna per-model fit: read-only verdict per registry model, no mutation.
+    # Same exposure as the models list GET (/api/models is CLIENT and its
+    # rows already carry model paths and ids); the dashboard needs it to
+    # render model pickers.
+    _Rule(
+        "xdna runner model fit (GET)",
+        _exact("/api/runners/xdna/fit"),
+        AuthClass.CLIENT,
+        _GET,
+    ),
     _Rule("slots list (GET, exact)", _exact("/api/slots"), AuthClass.CLIENT, _GET),
     _Rule("slots (everything else)", _prefix("/api/slots"), AuthClass.ADMIN, None),
     _Rule("hf search (GET)", _prefix("/api/hf"), AuthClass.CLIENT, _GET),

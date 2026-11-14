@@ -18,7 +18,9 @@ every error path (no SlotManager, accessor errors, etc.).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -80,6 +82,132 @@ def _last_used_age_s(app_state: Any, slot_name: str) -> float | None:
     if not isinstance(ts, (int, float)):
         return None
     return max(0.0, time.monotonic() - float(ts))
+
+
+# ── engine + host facts ──────────────────────────────────────────────────────
+#
+# ``npu_engines`` / ``npu_host`` ride on BOTH occupancy shapes so the NPU tab's
+# status line and readiness checklist have real facts even with no NPU slot.
+# Every fact is real or ``None`` — a failed read never fails the route.
+
+_IMAGE_STORE_TTL_S = 30.0
+_image_store_cache: tuple[float, set[str] | None] | None = None
+_image_refresh_lock = threading.Lock()
+_image_refresh_thread: threading.Thread | None = None
+
+
+def _read_image_store() -> set[str] | None:
+    """Blocking podman store read (seam + rootless fallback, up to ~20 s)."""
+    try:
+        from hal0.providers.podman_introspect import images_digests
+
+        local = images_digests()
+        return None if local is None else set(local.refs) | set(local.refs.values())
+    except Exception:
+        log.warning("npu.image_store_read_failed", exc_info=True)
+        return None
+
+
+def _refresh_image_store() -> None:
+    global _image_store_cache, _image_refresh_thread
+    try:
+        result = _read_image_store()
+    except Exception:
+        result = None
+    with _image_refresh_lock:
+        _image_store_cache = (time.monotonic(), result)
+        _image_refresh_thread = None
+
+
+def _local_image_refs() -> set[str] | None:
+    """Refs and digests in the local podman image store, or ``None``.
+
+    Never blocks on podman: stale-while-revalidate with single-flight. Returns
+    the cached value (stale included; ``None`` before the first read lands or
+    when the last read failed) and, when the cache is missing or older than
+    ``_IMAGE_STORE_TTL_S``, starts at most one background refresh. A failed
+    refresh is cached as ``None`` for the TTL too.
+    """
+    global _image_refresh_thread
+    with _image_refresh_lock:
+        cached = _image_store_cache
+        fresh = cached is not None and time.monotonic() - cached[0] < _IMAGE_STORE_TTL_S
+        if not fresh and _image_refresh_thread is None:
+            _image_refresh_thread = threading.Thread(
+                target=_refresh_image_store, name="npu-image-store", daemon=True
+            )
+            _image_refresh_thread.start()
+        return cached[1] if cached is not None else None
+
+
+def _npu_host_probe() -> dict[str, Any]:
+    from hal0.mcp.probes import npu_status
+
+    return npu_status()
+
+
+def _image_pulled(ref: str, local: set[str] | None) -> bool | None:
+    if local is None:
+        return None
+    base, _, digest = ref.partition("@")
+    return ref in local or base in local or (bool(digest) and digest in local)
+
+
+def _engine_facts_sync() -> tuple[dict[str, Any], dict[str, Any]]:
+    from hal0.api.routes.updater import _parse_flm_version_from_image
+
+    flm_ref: str | None = None
+    xdna_ref: str | None = None
+    try:
+        from hal0.api.routes.runner_images import _effective_defaults
+
+        defaults = _effective_defaults()
+        flm_ref = (defaults.get("flm") or ("", ""))[0] or None
+        xdna_ref = (defaults.get("xdna") or ("", ""))[0] or None
+    except Exception:
+        log.warning("npu.engine_images_unreadable", exc_info=True)
+
+    flm_version: str | None = None
+    with contextlib.suppress(Exception):
+        flm_version = _parse_flm_version_from_image(flm_ref)
+
+    xdna_tag: str | None = None
+    xdna_pulled: bool | None = None
+    if xdna_ref:
+        last = xdna_ref.split("@", 1)[0].rsplit("/", 1)[-1]
+        xdna_tag = last.rsplit(":", 1)[-1] if ":" in last else None
+        try:
+            xdna_pulled = _image_pulled(xdna_ref, _local_image_refs())
+        except Exception:
+            xdna_pulled = None
+
+    host: dict[str, Any] = {"device_node": None, "driver_loaded": None, "xdna_gen": None}
+    try:
+        probed = _npu_host_probe()
+        for key in host:
+            host[key] = probed.get(key)
+    except Exception:
+        log.warning("npu.host_probe_failed", exc_info=True)
+
+    engines = {
+        "flm": {"image": flm_ref, "version": flm_version},
+        "xdna": {"image": xdna_ref, "tag": xdna_tag, "pulled": xdna_pulled},
+    }
+    return engines, host
+
+
+async def _engine_and_host_facts() -> dict[str, Any]:
+    """``{"npu_engines": ..., "npu_host": ...}`` — never raises."""
+    try:
+        engines, host = await asyncio.to_thread(_engine_facts_sync)
+    except Exception:
+        log.warning("npu.engine_facts_failed", exc_info=True)
+        engines = {
+            "flm": {"image": None, "version": None},
+            "xdna": {"image": None, "tag": None, "pulled": None},
+        }
+        host = {"device_node": None, "driver_loaded": None, "xdna_gen": None}
+    return {"npu_engines": engines, "npu_host": host}
 
 
 def _occupancy_absent() -> dict[str, Any]:
@@ -232,7 +360,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         npu_present = False
 
     if not npu_present and not flm_slots:
-        return _occupancy_absent()
+        return {**_occupancy_absent(), **await _engine_and_host_facts()}
 
     if flm_slots:
         # _model_tag / _flm_footprint_gb below read the FLM catalog
@@ -419,6 +547,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         "columns_available": columns_available,
         "slots": slots_out,
         "shared_warning": npu_shared_warning,
+        **await _engine_and_host_facts(),
     }
 
 

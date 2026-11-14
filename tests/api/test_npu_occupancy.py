@@ -24,8 +24,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 import hal0.api.routes.hardware as hw_mod
+import hal0.api.routes.npu as _npu_routes
 import hal0.providers.npu_columns as npu_columns
 from hal0.slots.state import SlotState
+
+# Captured at import, before the autouse fixture stubs it, for the cache tests.
+_REAL_LOCAL_IMAGE_REFS = _npu_routes._local_image_refs
 
 
 class _FakeSlot:
@@ -64,6 +68,12 @@ def _stub_footprint(monkeypatch):
     )
     monkeypatch.setattr("hal0.providers.flm.flm_id_to_tag", lambda _mid: None)
     npu_columns.invalidate_columns_cache()
+    # Hermetic engine/host facts: never shell out to lsmod / podman.
+    monkeypatch.setattr(
+        "hal0.api.routes.npu._npu_host_probe",
+        lambda: {"device_node": None, "driver_loaded": None, "xdna_gen": None},
+    )
+    monkeypatch.setattr("hal0.api.routes.npu._local_image_refs", lambda: None)
     yield
     npu_columns.invalidate_columns_cache()
 
@@ -220,6 +230,8 @@ def test_occupancy_contract_field_shape(client: TestClient, monkeypatch):
         "columns_available",
         "slots",
         "shared_warning",
+        "npu_engines",
+        "npu_host",
     }
     assert set(body.keys()) == top_keys
     assert set(body["slots"][0].keys()) == {
@@ -412,3 +424,160 @@ def test_occupancy_engine_reads_the_xdna_binary_from_config(client: TestClient, 
     by_name = {s["name"]: s for s in body["slots"]}
     assert by_name["flm"]["engine"] == "flm"
     assert by_name["xdna-qwen"]["engine"] == "xdna"
+
+
+# ── engine + host facts ──────────────────────────────────────────────────────
+
+_XDNA_REF = "ghcr.io/hal0ai/hal0-runner-xdna:1.2.3-r1a2b3c4"
+_FLM_REF = "ghcr.io/hal0ai/hal0-runner-flm:0.9.44-r1a2b3c4"
+
+
+def _stub_engine_facts(monkeypatch, *, refs, host):
+    monkeypatch.setattr(
+        "hal0.api.routes.runner_images._effective_defaults",
+        lambda: {"xdna": (_XDNA_REF, "release"), "flm": (_FLM_REF, "release")},
+    )
+    monkeypatch.setattr("hal0.api.routes.npu._local_image_refs", lambda: refs)
+    monkeypatch.setattr("hal0.api.routes.npu._npu_host_probe", lambda: host)
+
+
+def test_occupancy_reports_npu_engines_and_host(client: TestClient, monkeypatch):
+    _stub_engine_facts(
+        monkeypatch,
+        refs={_XDNA_REF},
+        host={"device_node": "/dev/accel/accel0", "driver_loaded": True, "xdna_gen": 2},
+    )
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(
+        npu_columns,
+        "cached_aie_columns",
+        AsyncMock(return_value={"partitions": [{"start_col": 0, "num_cols": 8}], "total": 8}),
+    )
+    _wire(
+        client,
+        [_FakeSlot("npu", SlotState.READY, model_id="gemma3:4b", metadata={"provider": "flm"})],
+    )
+    body = client.get("/api/npu/occupancy").json()
+    assert body["npu_engines"] == {
+        "flm": {"image": _FLM_REF, "version": "0.9.44"},
+        "xdna": {"image": _XDNA_REF, "tag": "1.2.3-r1a2b3c4", "pulled": True},
+    }
+    assert "hal0-runner-xdna" in body["npu_engines"]["xdna"]["image"]
+    assert body["npu_host"] == {
+        "device_node": "/dev/accel/accel0",
+        "driver_loaded": True,
+        "xdna_gen": 2,
+    }
+
+
+def test_absent_occupancy_still_reports_engines(client: TestClient, monkeypatch):
+    _stub_engine_facts(
+        monkeypatch,
+        refs=set(),
+        host={"device_node": None, "driver_loaded": False, "xdna_gen": None},
+    )
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value=None))
+    _wire(client, [])
+    body = client.get("/api/npu/occupancy").json()
+    assert body["present"] is False
+    assert body["npu_engines"]["xdna"]["pulled"] is False
+    assert "flm" in body["npu_engines"]["flm"]["image"]
+    assert body["npu_host"] == {"device_node": None, "driver_loaded": False, "xdna_gen": None}
+
+
+def test_engine_facts_are_none_when_every_read_fails(client: TestClient, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr("hal0.api.routes.runner_images._effective_defaults", boom)
+    monkeypatch.setattr("hal0.api.routes.npu._local_image_refs", boom)
+    monkeypatch.setattr("hal0.api.routes.npu._npu_host_probe", boom)
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value=None))
+    _wire(client, [])
+    r = client.get("/api/npu/occupancy")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["npu_engines"] == {
+        "flm": {"image": None, "version": None},
+        "xdna": {"image": None, "tag": None, "pulled": None},
+    }
+    assert body["npu_host"] == {"device_node": None, "driver_loaded": None, "xdna_gen": None}
+
+
+# ── image-store cache: stale-while-revalidate, single-flight ─────────────────
+
+
+@pytest.fixture
+def image_store(monkeypatch):
+    import hal0.api.routes.npu as npu_mod
+
+    monkeypatch.setattr(npu_mod, "_local_image_refs", _REAL_LOCAL_IMAGE_REFS)
+    monkeypatch.setattr(npu_mod, "_image_store_cache", None)
+    monkeypatch.setattr(npu_mod, "_image_refresh_thread", None)
+    return npu_mod
+
+
+def _join(npu_mod):
+    t = npu_mod._image_refresh_thread
+    if t is not None:
+        t.join(timeout=5)
+
+
+def test_cold_cache_returns_none_and_starts_one_refresh(image_store, monkeypatch):
+    import threading
+
+    npu_mod = image_store
+    gate = threading.Event()
+    calls: list[int] = []
+
+    def slow_read():
+        calls.append(1)
+        gate.wait(5)
+        return {"a"}
+
+    monkeypatch.setattr(npu_mod, "_read_image_store", slow_read)
+    assert [npu_mod._local_image_refs() for _ in range(5)] == [None] * 5
+    gate.set()
+    _join(npu_mod)
+    assert len(calls) == 1
+    assert npu_mod._local_image_refs() == {"a"}
+    assert len(calls) == 1  # fresh: no new refresh
+
+
+def test_expiry_serves_stale_and_triggers_one_new_refresh(image_store, monkeypatch):
+    npu_mod = image_store
+    values = iter([{"old"}, {"new"}])
+    monkeypatch.setattr(npu_mod, "_read_image_store", lambda: next(values))
+    npu_mod._local_image_refs()
+    _join(npu_mod)
+    assert npu_mod._local_image_refs() == {"old"}
+    ts, val = npu_mod._image_store_cache
+    monkeypatch.setattr(npu_mod, "_image_store_cache", (ts - 1000, val))
+    assert npu_mod._local_image_refs() == {"old"}  # stale served immediately
+    _join(npu_mod)
+    assert npu_mod._local_image_refs() == {"new"}
+
+
+def test_failed_refresh_is_cached_as_none(image_store, monkeypatch):
+    npu_mod = image_store
+    calls: list[int] = []
+
+    def fail():
+        calls.append(1)
+        return None
+
+    monkeypatch.setattr(npu_mod, "_read_image_store", fail)
+    npu_mod._local_image_refs()
+    _join(npu_mod)
+    assert npu_mod._local_image_refs() is None
+    assert len(calls) == 1  # failure cached for the TTL, no retry stampede
+
+
+def test_image_pulled_matches_ref_base_and_digest():
+    from hal0.api.routes.npu import _image_pulled
+
+    assert _image_pulled("r/x:1", None) is None
+    assert _image_pulled("r/x:1", {"r/x:1"}) is True
+    assert _image_pulled("r/x:1@sha256:abc", {"r/x:1"}) is True  # base ref
+    assert _image_pulled("r/x:1@sha256:abc", {"sha256:abc"}) is True  # digest
+    assert _image_pulled("r/x:2", {"r/x:1"}) is False

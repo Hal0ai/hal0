@@ -370,6 +370,42 @@ columns, or an xdna slot reports a non-empty `npu_shared_with` — a
 holder-count FACT, never a per-tile load claim. No new animation; existing
 `tileAnim` still honors `prefers-reduced-motion`.
 
+### Engine and host facts (`npu_engines`, `npu_host`)
+
+Both occupancy shapes (`present: true` and `present: false`) also carry two
+objects. Every field is a real read or `null`; the UI renders `—` for `null`
+and never guesses. This is where the NPU tab reads engine versions from:
+`hw.flm_version` and `hw.xdna_version` do not exist on the hardware-stats
+payload and must not be assumed.
+
+```
+npu_engines: {
+  flm:  { image: string | null, version: string | null },
+  xdna: { image: string | null, tag: string | null, pulled: boolean | null },
+}
+npu_host: {
+  device_node: string | null,    // e.g. the accel device, null when absent
+  driver_loaded: boolean | null, // amdxdna module loaded
+  xdna_gen: 1 | 2 | null,        // from the PCI id
+}
+```
+
+`image` is the ref a slot with no pin launches (same resolution as
+`GET /api/runner-images` `families[].effective_ref`). `flm.version` is that
+tag minus the `-r<revision>` build suffix. `xdna.pulled` is `null` when the
+local image store has not been read yet or cannot be read; the store is read in the background (refreshed every 30 s) and never blocks the route.
+
+## GET /api/runners/xdna/fit
+
+```
+{ models: { [model_id]: { xdna_path: 'fused' | 'per-op' | null, reason: string | null } } }
+```
+
+One row per registered GGUF chat model; `?model=<id>` narrows to one (404
+`runners.model_not_found` when unknown). A row whose file is missing,
+unreadable or not GGUF is still returned with `xdna_path: null` and a
+`reason`, status 200.
+
 ## Hardware stats — optional fields (already exists on the API per contract)
 
 ```
