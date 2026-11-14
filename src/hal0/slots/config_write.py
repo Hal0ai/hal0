@@ -169,6 +169,8 @@ def _reconcile_device_profile(cfg_dict: dict[str, Any], changed: set[str]) -> No
                 new_device = map_backend_to_device(lane)
             elif lane in ("vulkan", "cuda"):
                 new_device = map_backend_to_device(lane)
+            elif lane == "npu":
+                new_device = "npu"
             elif runner.device_class == "cpu":
                 new_device = "cpu"
         # Every write below happens only after the feasibility gate above has
