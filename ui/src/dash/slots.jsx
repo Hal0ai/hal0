@@ -695,6 +695,11 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
 
   // Open Edit drawer when route is #slots/:name
   const prevDrawerTarget = React.useRef(null);
+  // Leaving the Slots page with the drawer open (sidebar, palette) unmounts this view without a
+  // drawer -> no-drawer transition, and the ref dies with it: drop the record here.
+  React.useEffect(() => () => {
+    if (prevDrawerTarget.current != null) takeSlotDrawerReturn();
+  }, []);
   React.useEffect(() => {
     // `#slots/<name>` or, for a slot named like a reserved tab, `#slots/edit/<name>`.
     const target = slotEditTarget(slotParam);
