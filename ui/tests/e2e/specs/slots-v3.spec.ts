@@ -23,24 +23,18 @@ test.describe('Slots v3 (/slots)', () => {
     await expect(newBtn).toBeVisible()
   })
 
-  test('NPU occupancy card renders when an NPU slot is present', async ({ page }) => {
+  test('the NPU summary row renders when an NPU slot is present', async ({ page }) => {
     await page.goto('/#slots')
-    // The NPU/FLM surface is now a single full-width "NPU occupancy" card
-    // (gauge + 4×8 AIE-ML map + per-FLM-slot rail), replacing the old
-    // NpuFlmStack accordion + trio picker. HAL0_DATA seeds at least one
-    // device=npu slot, so the card appears.
-    await expect(page.locator('.npu-card')).toBeVisible()
-    await expect(page.locator('.npu-card .wcard-h .ttl')).toContainText('NPU occupancy')
+    // HAL0_DATA seeds at least one device=npu slot; the Inference tab shows a one-line summary.
+    await expect(page.getByTestId('npu-summary-row')).toBeVisible()
   })
 
-  test('NPU occupancy card shows the AIE grid + a per-FLM-slot card', async ({ page }) => {
-    await page.goto('/#slots')
-    const card = page.locator('.npu-card')
-    await expect(card).toBeVisible()
+  test('the NPU tab shows the AIE grid + an FLM lane', async ({ page }) => {
+    await page.goto('/#slots/npu')
+    const tab = page.getByTestId('npu-pane')
+    await expect(tab).toBeVisible()
     // 4×8 AIE-ML occupancy grid (single-tenant: one FLM claims the whole array)
-    await expect(card.locator('.aie-grid .aie-col')).toHaveCount(8)
-    // at least one resident FLM slot card (name + metrics row — the card's
-    // inline TileStrip was removed in 86c73366, so assert the current shape)
-    await expect(card.locator('.cslot .cslot-top .nm').first()).toBeVisible()
+    await expect(tab.locator('.aie-grid .aie-col')).toHaveCount(8)
+    await expect(page.getByTestId('flm-lane')).toBeVisible()
   })
 })

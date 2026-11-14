@@ -133,7 +133,7 @@ describe('NpuModelsPanel', () => {
   it('filters by installed and capability', () => {
     act(() => q('flm-filter-installed')!.click())
     expect(q('flm-row-qwen3:8b')).toBeNull()
-    act(() => q('flm-cap-stt')!.click())
+    act(() => q('flm-filter-stt')!.click())
     expect(q('flm-row-whisper-v3:turbo')).not.toBeNull()
     expect(q('flm-row-gemma4-it:e4b')).toBeNull()
   })

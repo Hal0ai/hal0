@@ -171,8 +171,8 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
     for (const name of ['agent', 'stt-npu', 'embed-npu']) {
       await expect(pane(page).locator(`[data-testid="infer-slot-${name}"]`)).toHaveCount(0)
     }
-    // …they live in the NPU occupancy card below.
-    await expect(page.locator('.npu-card').first()).toBeVisible()
+    // …the Inference tab only carries the one-line NPU summary linking to the NPU tab.
+    await expect(page.getByTestId('npu-summary-row')).toBeVisible()
   })
 
   test('engine renders full slot cards with the metric meta row (no accordion)', async ({ page }) => {
@@ -319,23 +319,23 @@ test.describe('Inference engine pane (/slots · Inference tab)', () => {
   })
 })
 
-test.describe('NPU occupancy card (/slots · Inference tab)', () => {
-  test('renders the occupancy card — gauge + 4×8 AIE-ML grid', async ({ page }) => {
+test.describe('NPU summary row (/slots · Inference tab)', () => {
+  test('renders the one-line summary and links to the NPU tab', async ({ page }) => {
     await page.goto('/#slots')
-    const card = page.locator('.npu-card')
-    await expect(card).toBeVisible()
-    await expect(card.locator('.gauge')).toBeVisible()
-    await expect(card.locator('.aie-grid .aie-col')).toHaveCount(8)
+    const row = page.getByTestId('npu-summary-row')
+    await expect(row).toBeVisible()
+    await expect(page.getByTestId('npu-summary-link')).toHaveAttribute('href', '#slots/npu')
+    // the card itself is gone from this tab
+    await expect(page.locator('.aie-grid')).toHaveCount(0)
   })
 
-  test('lists a per-FLM-slot card with its toggle + header lifecycle controls', async ({ page }) => {
-    await page.goto('/#slots')
-    const card = page.locator('.npu-card')
-    await expect(card.locator('.cslot').first()).toBeVisible()
-    // Per-card control is now the modality pill toggle (trio-drawer rework,
-    // #1172); slot lifecycle moved to the card-header ▶/■/↻ buttons.
-    await expect(card.locator('.cslot .npu-switch').first()).toBeVisible()
-    await expect(card.locator('.wcard-h button[title="Stop"]')).toBeVisible()
+  test('the NPU tab shows the gauge + 4×8 AIE-ML grid and an FLM lane', async ({ page }) => {
+    await page.goto('/#slots/npu')
+    const tab = page.getByTestId('npu-pane')
+    await expect(tab).toBeVisible()
+    await expect(tab.locator('.gauge')).toBeVisible()
+    await expect(tab.locator('.aie-grid .aie-col')).toHaveCount(8)
+    await expect(page.getByTestId('flm-lane')).toBeVisible()
   })
 })
 

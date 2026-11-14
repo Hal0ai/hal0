@@ -63,7 +63,7 @@ export function NpuModelsPanel({ slots = [], setFlmDraft, onSwitchTab }) {
             Installed only
           </button>
           {CAP_FILTERS.map((c) => (
-            <button key={c} type="button" className={`btn sm${filter.cap === c ? ' on' : ''}`} data-testid={`flm-cap-${c}`} aria-pressed={filter.cap === c} onClick={() => setFilter((f) => ({ ...f, cap: c }))}>
+            <button key={c} type="button" className={`btn sm${filter.cap === c ? ' on' : ''}`} data-testid={`flm-filter-${c}`} aria-pressed={filter.cap === c} onClick={() => setFilter((f) => ({ ...f, cap: c }))}>
               {c === 'all' ? 'All' : c}
             </button>
           ))}
