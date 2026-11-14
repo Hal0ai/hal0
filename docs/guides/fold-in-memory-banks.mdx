@@ -332,7 +332,9 @@ and the report says what each failed bank needs.
 Then the banks are imported one at a time. After a bank's import, each
 target must hold every document, mental model and knowledge page the bank's
 archive carried, by the ids recorded for it, and have grown by exactly what
-was sent (observations by at least as many). A bank that does not match is
+was sent (observations by at least as many). Consolidation running during the quiet
+wait can lower the observation count below that floor and leave a bank; the
+next run heals it. A bank that does not match is
 **left**: what landed stays, the bank stays a readable old bank, and the run
 carries on with the next one. The next run sends only what is missing.
 
@@ -417,12 +419,16 @@ target is missing is sent:
   documents, the engine deleted it with a copy you deleted, or the old bank
   built it after the earlier run. It is left out, the bank still folds, and
   the dry run (an estimate), the report and the result count it as
-  `observations_to_rebuild`. Observations are built from facts, so the
-  target's consolidation builds it again: its facts this run sends go
-  marked for consolidation, and the engine marks the facts of other
-  documents under the observations it deletes with a copy. If automatic
-  consolidation is off, run `hal0 memory bank consolidate hal0:shared` after
-  the cutover. A fact that landed in an earlier send without its
+  `observations_to_rebuild`, or as `observations.not_carried_built_since`
+  when the old bank built it after the earlier run (the two never overlap).
+  Observations are built from facts, so the target's consolidation builds it
+  again: its facts this run sends go marked for consolidation (except one
+  under an observation the same send carries), and the engine marks the
+  facts of other documents under the observations it deletes with a copy.
+  Consolidation runs by itself only while auto-consolidation is on. After the
+  cutover run `hal0 memory bank consolidate hal0:shared`, and
+  `hal0 memory bank consolidate hal0:private` too: dropped observations can
+  be private. A fact that landed in an earlier send without its
   observation stays marked as consolidated; to rebuild those too, clear the
   target's observations (`DELETE /v1/default/banks/hal0%3Ashared/observations`
   on the engine: it marks every fact again and rebuilds every observation,
