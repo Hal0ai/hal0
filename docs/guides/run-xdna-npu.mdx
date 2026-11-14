@@ -186,7 +186,7 @@ To switch lanes, opt in to unloading the holder:
 - **API:** send `{"unload_npu_holder": true}` in the body of
   `POST /api/slots/{name}/load` or `POST /api/slots/{name}/restart`. The MCP
   `slot_load` and `slot_restart` tools take the same `unload_npu_holder`
-  argument.
+  argument; a `slot_load` call that sets it waits for operator approval.
 
 The opt-in unloads a pinned holder too: a pin guards automatic eviction only,
 and the FLM anchor `npu` is pinned by default. It never unloads a holder whose

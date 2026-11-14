@@ -34,9 +34,11 @@ the second slot goes to ERROR and the operator has to work out why.
    {FLM anchor, per-op xdna slot}. Fused xdna plus FLM stays allowed with
    today's shared warning. The FLM anchor's `-stt` and `-embed` shadows are
    part of the anchor, not separate holders. Whether an xdna slot is fused or
-   per-op follows its launch environment (a `GGML_XDNA_FUSED_LAYER` set in
-   `[xdna].env` or `[server].env` wins over the model fit), and a model the
-   registry cannot resolve counts as per-op, so a doubt fails safe.
+   per-op follows its launch environment: `GGML_XDNA_FUSED_LAYER=0` in
+   `[xdna].env` or `[server].env` forces per-op, whatever the model fit says.
+   Otherwise the model fit decides, so a forced `1` on a per-op model still
+   counts as per-op (that launch aborts, #3656). A model the registry cannot
+   resolve counts as per-op, so a doubt fails safe.
 
 2. **Refuse the conflicting load unless the caller opts in.** A load that
    would put the pair on the NPU is refused with `409 slot.npu_conflict`. The
@@ -51,7 +53,11 @@ the second slot goes to ERROR and the operator has to work out why.
    `--unload-npu-holder` flag on `hal0 slot load` and `hal0 slot restart`, and
    the `unload_npu_holder` argument of the MCP `slot_load` and `slot_restart`
    tools. With it, the load unloads `unloads` first and then proceeds. The
-   dashboard asks for confirmation on a 409 and retries with the flag.
+   dashboard asks for confirmation on a 409 and retries with the flag. The
+   holder is unloaded before the incoming load runs its own preflight checks
+   (a missing model file, a slot parked by the crash-loop breaker), so an
+   opted-in load that then fails leaves both lanes down until one is started
+   again.
 
 4. **A pin does not protect a holder from the opt-in.** A pin guards
    automatic eviction only. The opt-in is the same operator intent as
@@ -74,7 +80,10 @@ the second slot goes to ERROR and the operator has to work out why.
 7. **Restart and swap check before tearing anything down.** `SlotManager.restart`
    and `SlotManager.swap` (which takes `unload_npu_holder` and checks the new
    model's NPU role before it persists the new default) refuse first, so a
-   refused restart or swap leaves the slot exactly as it was.
+   refused restart or swap leaves the slot exactly as it was. The
+   `POST /api/slots/{name}/swap` route does not expose the flag: a swap that
+   conflicts gets the 409, and the operator stops the holder or starts the
+   slot from the NPU tab.
 
 8. **Autoload is refused at config-write time.** systemd starts autoload units
    at boot without passing the load guard, so a config write that would make a
@@ -97,6 +106,13 @@ the second slot goes to ERROR and the operator has to work out why.
   the NPU tab (or one flag on the CLI), and nothing starts and fails any more.
 - A pinned FLM anchor can now be unloaded by an explicit opt-in. The
   confirmation dialog names it as pinned.
+- The MCP opt-in requires approval: `slot_load` runs autonomously, but a call
+  with `unload_npu_holder: true` is gated and runs only after the operator
+  approves it (`slot_restart` is gated already).
+- A running slot whose config drifted into a conflict (a fused model edited to
+  a per-op one beside FLM) is not reloaded into it: the next load keeps the
+  running unit serving and records a warning on the slot, instead of
+  stopping it and starting the per-op model beside FLM.
 - `docs/guides/run-xdna-npu.mdx` describes the operator-facing behaviour, and
   the occupancy shared warning now applies to fused coexistence only.
 
