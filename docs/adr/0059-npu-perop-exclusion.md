@@ -71,8 +71,10 @@ the second slot goes to ERROR and the operator has to work out why.
    pass the flag, so a request that triggers a lazy load gets the 409 instead
    of evicting the other lane.
 
-7. **Restart checks before tearing anything down.** A refused restart leaves
-   the slot exactly as it was.
+7. **Restart and swap check before tearing anything down.** `SlotManager.restart`
+   and `SlotManager.swap` (which takes `unload_npu_holder` and checks the new
+   model's NPU role before it persists the new default) refuse first, so a
+   refused restart or swap leaves the slot exactly as it was.
 
 8. **Autoload is refused at config-write time.** systemd starts autoload units
    at boot without passing the load guard, so a config write that would make a
