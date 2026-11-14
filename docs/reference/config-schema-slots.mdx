@@ -136,6 +136,12 @@ A write carrying tuning under `[model]` is rejected with
 | `asr` | bool | `false` |
 | `embed` | bool | `false` |
 | `chat` | bool | `true` |
+| `decision` | str | unset |
+
+`decision` is optional and experimental: a decision-model tag (FLM's small side
+model, e.g. `d3:lite`) for a slot that serves decision calls itself. It must
+match `d3:<name>`; the FLM provider then appends `flm serve … --decision <tag>`
+to the slot's command.
 
 ### `[image]` (nested under a slot, alias for `image_gen`)
 

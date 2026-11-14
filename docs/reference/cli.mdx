@@ -191,7 +191,7 @@ in its place and logs a `slot.model_default_fallback` warning that names both id
 | `model add <path>` | `path` | `--id` (default `""`), `--name`, `--license` (default `""`), `--overwrite`, `--draft` (a drafter GGUF to pair; fit-checked) |
 | `model set <ref>` | `ref` | `--draft` (a drafter path to pair, or `none` to unpair and keep the file) |
 | `model store [path]` | optional `path` | `--migrate` |
-| `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default: the derived slot-load budget from `hal0.slot_lifecycle_budget`, `622` at time of writing — see [Slot lifecycle timeouts](/docs/reference/cli-operator/#slot-lifecycle-timeouts)) |
+| `model run <ref>` | `ref` | `--slot`/`-s` (default `""`), `--timeout` (default: the derived slot-load budget from `hal0.slot_lifecycle_budget`, `2140` at time of writing — see [Slot lifecycle timeouts](/docs/reference/cli-operator/#slot-lifecycle-timeouts)) |
 
 ## `hal0 config` — inspect and manage configuration
 
