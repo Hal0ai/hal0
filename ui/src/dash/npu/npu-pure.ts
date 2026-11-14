@@ -1,6 +1,8 @@
 // Pure helpers for the NPU tab (Slots → NPU): visibility, sub-tab ids, the status line.
 import type { NpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import type { StatsHardware } from '@/api/hooks/useStatsHardware'
+import { devKind } from '@/lib/deviceMeta'
+import { isNpuShadowSlot } from '../npu-modality.js'
 
 export const NPU_TABS = [
   { id: 'lanes', label: 'Lanes' },
@@ -32,9 +34,26 @@ export interface StatusPart {
 const DASH = '—'
 const DOWN = new Set(['offline', 'off', ''])
 
-/** Occupancy rows that currently hold the NPU (anything not offline/off). */
-export function npuHolders<T extends { state?: string | null }>(rows: ReadonlyArray<T> | undefined): T[] {
-  return (rows ?? []).filter((s) => !DOWN.has((s.state ?? '') as string))
+/** Occupancy rows that currently hold the NPU (anything not offline/off). Rows the backend
+ *  synthesizes for the anchor's STT/embed carry `served_by`: they ride the anchor's one process
+ *  and are not holders. */
+export function npuHolders<T extends { state?: string | null; served_by?: string | null }>(
+  rows: ReadonlyArray<T> | undefined,
+): T[] {
+  return (rows ?? []).filter((s) => !s.served_by && !DOWN.has((s.state ?? '') as string))
+}
+
+/** Summed tok/s over the NPU slots only (not GPU slots, not STT/embed shadows), rounded to one
+ *  decimal; null when none is generating. One helper so the array band and the Inference-tab
+ *  summary cannot disagree. */
+export function npuToks(
+  slots: ReadonlyArray<{ device?: unknown; device_class?: string | null; metrics?: { toks?: number | null } | null }> | undefined,
+): number | null {
+  const rates = (slots ?? [])
+    .filter((s) => s && (s.device_class === 'npu' || devKind(s.device as never) === 'npu') && !isNpuShadowSlot(s))
+    .map((s) => s.metrics?.toks)
+    .filter((t): t is number => typeof t === 'number' && t > 0)
+  return rates.length ? Math.round(rates.reduce((a, b) => a + b, 0) * 10) / 10 : null
 }
 
 export function npuStatusParts(

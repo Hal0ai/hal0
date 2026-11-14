@@ -2,7 +2,7 @@
 // chip, and a link to the NPU tab (#slots/npu). It reads the shared occupancy query (same key as
 // the NPU tab, no extra poll). Every readout is a real field or renders "—".
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
-import { npuHolders, npuTabVisible } from './npu-pure'
+import { npuHolders, npuTabVisible, npuToks } from './npu-pure'
 import './npu-tab.css'
 
 export function NpuSummaryRow({ slots }) {
@@ -11,11 +11,7 @@ export function NpuSummaryRow({ slots }) {
   if (!npuTabVisible(occ, list)) return null
 
   const holders = npuHolders(occ?.slots)
-  const rates = list
-    .filter((s) => s?.device_class === 'npu')
-    .map((s) => s.metrics?.toks)
-    .filter((t) => typeof t === 'number' && t > 0)
-  const toks = rates.length ? Math.round(rates.reduce((a, b) => a + b, 0) * 10) / 10 : null
+  const toks = npuToks(list)
 
   return (
     <div className="npt-summary" data-testid="npu-summary-row">

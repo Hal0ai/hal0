@@ -4,7 +4,7 @@
 import { useMemo } from 'react'
 import { Gauge, AieGrid, HUES, NPU_COLS, activityLevel } from './aie-grid.jsx'
 import { arrayOwners, arrayShared } from './array-pure'
-import { npuHolders } from './npu-pure'
+import { npuHolders, npuToks } from './npu-pure'
 
 const ENGINE_HUE = {
   flm: { hue: 'var(--dev-npu)', glow: 'var(--npu-s0-glow)', line: 'var(--npu-s0-line)', dim: 'var(--npu-s0-dim)', fg: 'var(--npu-s0-fg)' },
@@ -30,11 +30,8 @@ export function ArrayBand({ occ, hw, slots }) {
   const colsTotal = occ?.cols_total || NPU_COLS
   const colsUsed = typeof occ?.cols_used === 'number' ? occ.cols_used : null
   const dutyPct = typeof hw?.npu_util === 'number' ? hw.npu_util * 100 : null
-  const tpsSum = (slots ?? [])
-    .map((s) => s?.metrics?.toks)
-    .filter((t) => typeof t === 'number' && t > 0)
-    .reduce((a, b) => a + b, 0)
-  const act = activityLevel(dutyPct, tpsSum)
+  const tps = npuToks(slots)
+  const act = activityLevel(dutyPct, tps ?? 0)
 
   // Banners: the server's shared warning, and a host power mode that is not turbo while a GGML
   // slot is up. A null pmode is unknown, never guessed.
@@ -69,7 +66,7 @@ export function ArrayBand({ occ, hw, slots }) {
         </div>
         <div className="aie-stat">
           <div className="sv acc">
-            {tpsSum > 0 ? Math.round(tpsSum) : '—'}
+            {tps ?? '—'}
             <span className="u">tok/s</span>
           </div>
           <div className="sl">throughput</div>

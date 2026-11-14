@@ -376,12 +376,16 @@ export const NPU_XDNA_SLOT = {
 
 export const NPU_OCCUPANCY_MOCK = {
   present: true, rows: 4, cols: 8, tiles: 32, tops_peak: 50,
-  cols_total: 8, cols_used: 8, serving: false, single_tenant: true, columns_available: true,
+  cols_total: 8, cols_used: 8, serving: false, single_tenant: false, columns_available: true,
+  // Mirrors the backend: the anchor's STT/embed rows ride its one process (served_by); two loaded
+  // tenants (FLM + GGML) raise shared_warning.
   slots: [
     { name: 'npu', model: 'qwen3-0.6b', state: 'ready', engine: 'flm', cols: [0, 1, 2, 3, 4, 5, 6, 7], gb: 1.2 },
+    { name: 'npu-stt', model: 'whisper-v3:turbo', state: 'ready', engine: 'flm', cols: [0, 1, 2, 3, 4, 5, 6, 7], gb: null, served_by: 'npu' },
+    { name: 'npu-embed', model: 'embedding-gemma', state: 'ready', engine: 'flm', cols: [0, 1, 2, 3, 4, 5, 6, 7], gb: null, served_by: 'npu' },
     { name: 'npu-gguf', model: 'qwen3-4b-q4', state: 'ready', engine: 'xdna', cols: [0, 1, 2, 3, 4, 5, 6, 7], gb: 3.2 },
   ],
-  shared_warning: null,
+  shared_warning: "NPU shared with slot 'npu'; throughput is time-sliced",
   npu_engines: {
     flm: { image: 'ghcr.io/hal0ai/hal0-runner-flm:2026.10.11', version: '0.9.42' },
     xdna: { image: 'ghcr.io/hal0ai/hal0-runner-xdna:72f6dfa-rf1a3931', tag: '72f6dfa-rf1a3931', pulled: true },

@@ -24,6 +24,9 @@ export interface NpuOccupancySlot {
   engine?: 'flm' | 'xdna'
   active?: boolean
   last_used_age_s?: number | null
+  // Set on rows the backend synthesizes for the anchor's STT/embed: the anchor's name. These ride
+  // the anchor's one process and are never separate holders.
+  served_by?: string
 }
 
 export interface NpuOccupancy {
