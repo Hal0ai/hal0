@@ -245,6 +245,55 @@ class TestGuardedReconcile:
         after = {fs.path: fs.data for fs in plan.change_set.after}[slot_path]
         assert after == _read(slot_path)
 
+    def test_autoload_npu_conflict_skips_the_slot_instead_of_failing_the_plan(
+        self, tmp_hal0_home: str
+    ) -> None:
+        """#3666: the autoload guard's SlotNpuConflict is recorded per slot, like any guard."""
+        self._write_slot(
+            tmp_hal0_home,
+            "flm",
+            [
+                'name = "flm"',
+                "port = 8082",
+                'device = "npu"',
+                'type = "llm"',
+                "autoload = true",
+                "[model]",
+                'default = "gemma3-4b-FLM"',
+            ],
+        )
+        slot_path = self._write_slot(
+            tmp_hal0_home,
+            "px",
+            [
+                'name = "px"',
+                "port = 8090",
+                'device = "npu"',
+                'type = "llm"',
+                'binary = "xdna"',
+                "autoload = true",
+                "[model]",
+                'default = "old"',
+            ],
+        )
+        stack = StackConfig(
+            name="S",
+            slots=[
+                StackSlotEntry(slot="agent", model="chadrock-35b-ace-saber"),
+                StackSlotEntry(slot="px", model="perop-unregistered"),
+            ],
+        )
+        _write_agent_slot(tmp_hal0_home)
+        plan = StackApplyEngine().plan("s", stack)
+        assert [name for name, _ in plan.errors] == ["px"]
+        assert "autoload" in plan.errors[0][1]
+        after = {fs.path: fs.data for fs in plan.change_set.after}
+        assert after[slot_path] == _read(slot_path)
+        # The other entry still plans.
+        assert after[_slots_dir(tmp_hal0_home) / "agent.toml"]["model"] == {
+            "default": "chadrock-35b-ace-saber"
+        }
+
 
 class TestPlanTune:
     def _slot(self, home: str, name: str, slot_type: str, device: str) -> Path:
