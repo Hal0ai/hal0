@@ -20,6 +20,8 @@ guards own the unknown-id case.
 
 from __future__ import annotations
 
+import functools
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -238,6 +240,32 @@ def xdna_model_fit(path: Any) -> XdnaFit:
     )
 
 
+_XDNA_FIT_CACHE_SIZE = 512
+
+
+@functools.lru_cache(maxsize=_XDNA_FIT_CACHE_SIZE)
+def _xdna_fit_for_version(path_str: str, mtime_ns: int, size: int) -> XdnaFit:
+    # mtime_ns/size only key the cache: a rewritten file misses and is re-read.
+    return xdna_model_fit(path_str)
+
+
+def xdna_model_fit_cached(path: str | os.PathLike[str]) -> XdnaFit:
+    """:func:`xdna_model_fit` memoised per ``(path, mtime_ns, size)``.
+
+    Header reads are cheap but the dashboard polls; a replaced file changes
+    its mtime/size and re-reads. Raises like :func:`xdna_model_fit`
+    (``ValueError`` for non-GGUF, ``OSError`` when the file is missing);
+    failures are never cached.
+    """
+    st = os.stat(path)
+    return _xdna_fit_for_version(str(path), st.st_mtime_ns, st.st_size)
+
+
+def xdna_fit_cache_clear() -> None:
+    """Drop every cached xdna fit (tests; model files replaced in place)."""
+    _xdna_fit_for_version.cache_clear()
+
+
 __all__ = [
     "HALOGEN",
     "RuntimeRef",
@@ -245,5 +273,7 @@ __all__ = [
     "model_runtime_mismatch",
     "slot_model_runtime_mismatch",
     "slot_runtime_provider",
+    "xdna_fit_cache_clear",
     "xdna_model_fit",
+    "xdna_model_fit_cached",
 ]

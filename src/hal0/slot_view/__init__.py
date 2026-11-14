@@ -483,9 +483,9 @@ def xdna_enrichment(
                 path = None
             if path:
                 try:
-                    from hal0.slots.model_fit import xdna_model_fit
+                    from hal0.slots.model_fit import xdna_model_fit_cached
 
-                    fit = xdna_model_fit(path)
+                    fit = xdna_model_fit_cached(path)
                     xdna_path, xdna_reason = fit.xdna_path, fit.reason
                 except Exception:
                     xdna_path, xdna_reason = None, None

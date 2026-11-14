@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from hal0.slots.model_fit import xdna_model_fit
+from hal0.slots.model_fit import xdna_fit_cache_clear, xdna_model_fit, xdna_model_fit_cached
 from tests.registry.gguf_fixtures import write_gguf
 
 _FUSED_KW = dict(
@@ -73,3 +73,38 @@ def test_non_gguf_is_refused(tmp_path: Path) -> None:
     path.write_bytes(b"not a gguf file" * 4)
     with pytest.raises(ValueError, match="GGUF"):
         xdna_model_fit(path)
+
+
+def test_cached_fit_reads_the_header_once_per_file_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from hal0.registry import gguf_header
+
+    xdna_fit_cache_clear()
+    path = write_gguf(tmp_path / "m.gguf", "qwen35", **_FUSED_KW)
+    real = gguf_header.read_gguf_header
+    calls = {"n": 0}
+
+    def counting(p):
+        calls["n"] += 1
+        return real(p)
+
+    monkeypatch.setattr(gguf_header, "read_gguf_header", counting)
+    assert xdna_model_fit_cached(path).xdna_path == "fused"
+    assert xdna_model_fit_cached(path).xdna_path == "fused"
+    assert calls["n"] == 1
+    st = os.stat(path)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+    xdna_model_fit_cached(path)
+    assert calls["n"] == 2
+    xdna_fit_cache_clear()
+
+
+def test_cached_fit_still_raises_for_non_gguf(tmp_path: Path) -> None:
+    xdna_fit_cache_clear()
+    path = tmp_path / "m.hgn"
+    path.write_bytes(b"not a gguf file" * 4)
+    with pytest.raises(ValueError, match="GGUF"):
+        xdna_model_fit_cached(path)
