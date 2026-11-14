@@ -215,6 +215,73 @@ a usage error; 130 when interrupted. A run that fails after it sent an import ke
 paused and the engine private until `--resume` completes; one that fails
 before is undone.
 
+### `memory knowledge rehome`
+
+```sh
+hal0 memory knowledge rehome --bank BANK --project SLUG [--owner CLIENT]
+                             [--keep-content] [--apply|--dry-run] [--json]
+```
+
+Moves the knowledge pages a fold-in left at the root of `hal0:shared` into the
+project folder `project:SLUG`, where `/api/memory/compat` shows them. The
+fold-in places a page by its own `project:` tag when its bank's project comes
+from tags (`Hal0::Agents`, `pi-coder`, `--map`); a page that names no project
+stays at the root, unstamped, and no plugin sees it. Run this once per such
+bank, after the cutover. Like the fold-in it runs on the box and talks to the
+engine directly. A dry run by default, which writes nothing; `--apply` needs
+root, because it writes the page map.
+
+| Flag | Meaning |
+|---|---|
+| `--bank BANK` | The old bank the pages came from, for example `Hal0::Agents`. It must be recorded as folded in the fold-in ledger and still be on the engine: its own tree is how its pages are found. |
+| `--project SLUG` | The project whose folder the pages go to, resolved through the project registry (aliases apply, a denied name is refused). |
+| `--owner CLIENT` | File every page under this bridge client: the client the coding-agents plugin uses, since compat lets only a page's owner change it. Without it, each page's `agent:` tag, else the bank's harness, resolved with the owners the fold-in froze for the bank; a name no client holds becomes the reserved `hal0-legacy-<harness>`, and the plan lists those pages. |
+| `--keep-content` | Keep what each page holds instead of emptying it. Refused when the bank holds any private fact (counted as the fold-in counts them, from the old bank's listings); the dry run says whether keeping would be allowed and why. Kept content was written under the page's old trigger, which read the whole old bank with no project scope, so it may include non-private facts of other projects from that bank. |
+| `--apply` / `--dry-run` | Default `--dry-run`. |
+| `--json` | Print the plan or the result as one JSON document. |
+
+How the pages are found: each node of the old bank's tree is looked up in
+`hal0:shared` under the id the fold-in gave it (derived from the old bank and
+the old id), and each page must be backed by the model the fold-in re-keyed
+`<bank slug>-<old id>` (`hal0-agents-mm-…`). Only a subtree at the old bank's
+root that sits outside every `project:` folder moves; one already in
+`project:SLUG` is left as it is, and one in another project's folder is
+refused.
+
+What `--apply` does, in this order, so that compat never shows a page before
+it is scoped:
+
+1. finds the project folder as compat does (the first root folder of that
+   name in id order), or creates it;
+2. stamps every page of a subtree still to move, as compat stamps a page: its
+   tags through the write envelope with the owner, its trigger with the
+   project scope, the private guard and `exclude_mental_models`, and the
+   refresh settings the page chose;
+3. empties each of those pages (the engine's mental-model clear: content
+   empty, structured content and `last_refresh_failed_at` cleared), unless
+   `--keep-content`. The engine has no way to set `last_refreshed_at` from
+   outside, so it keeps its old value; a page that refreshes after
+   consolidation fills again at the next consolidation of `hal0:shared` that
+   touches its tags, or on `hal0 memory kb refresh`;
+4. moves each subtree under the folder with one node update that sets its
+   parent; its children move with it. A page whose name the folder already
+   holds is renamed `<name> (<bank>)` in that update, as the fold-in renames
+   one;
+5. records each node's old id, new id and folder in the fold-in's page map,
+   so compat answers an old id, and an old `[[page:<id>]]` link, for the
+   page it became. With `--keep-content` such links stay in the content as
+   they are (the engine does not let its content be rewritten) and resolve
+   through the map; the plan counts them;
+6. checks every node with the fold-in's placement check, and that each
+   page's tags pass the project scope compat reads with.
+
+A run that stops part-way is finished by the same command; a run after a
+complete one changes nothing. It refuses while a fold-in or an embedder
+switch is unfinished, while memory writes are paused, and unless the layout
+record says `two_bank`. Exit codes: 0 when the plan has no refusal or the run
+completed; 1 when it is refused or fails; 2 for a usage error; 130 when
+interrupted.
+
 ### `memory migrate platform`
 
 ```sh
