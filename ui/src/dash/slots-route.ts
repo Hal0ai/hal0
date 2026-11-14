@@ -23,3 +23,13 @@ export function slotsSub(param: string | null | undefined): string | null {
 export function isImageGenRoute(route: string | null | undefined, param: string | null | undefined): boolean {
   return route === 'slots' && slotsTab(param) === 'image'
 }
+
+/** Slots-page tabs that have their own pane. A route param naming one is that tab, never a slot:
+ *  a slot called `npu` is not reachable as `#slots/npu` (reserved tab names win over slot names). */
+export const SLOTS_RESERVED_TABS = ['image', 'npu', 'endpoints', 'runner-images', 'stacks'] as const
+
+/** Whether the tab segment of a Slots route param is one of the reserved tab names. */
+export function isReservedSlotsTab(param: string | null | undefined): boolean {
+  const t = slotsTab(param)
+  return t != null && (SLOTS_RESERVED_TABS as readonly string[]).includes(t)
+}

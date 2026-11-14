@@ -22,7 +22,7 @@ import { ImageGenTabs } from './image/ImageGenTabs'
 import { NpuTabs } from './npu/NpuTabs'
 import { npuTabVisible } from './npu/npu-pure'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
-import { slotsSub, slotsTab } from './slots-route'
+import { isReservedSlotsTab, slotsSub, slotsTab } from './slots-route'
 import { NpuOccupancyCard } from './npu-pane.jsx'
 import {
   InferencePane,
@@ -651,7 +651,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
   // is the Image Gen pane's sub-tab (`slotSub`, from main.jsx's parseRoute).
   const paramTab = slotsTab(slotParam);
   const [tab, setTab] = useStateS(
-    paramTab === "endpoints" || paramTab === "runner-images" || paramTab === "stacks" || paramTab === "image" || paramTab === "npu"
+    isReservedSlotsTab(paramTab)
       ? paramTab
       : "inference",
   );
@@ -695,7 +695,10 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
 
   // Open Edit drawer when route is #slots/:name
   React.useEffect(() => {
-    if (slotParam) {
+    if (slotParam && isReservedSlotsTab(slotParam)) {
+      // A reserved tab name wins over a slot of the same name.
+      setEditName(null);
+    } else if (slotParam) {
       const exists = (slots || []).find(s => s.name === slotParam);
       if (exists) setEditName(slotParam);
     } else {
@@ -710,7 +713,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
   // generation links to #slots/image). Bare #slots, #slots/inference and a
   // slot-name param (the edit drawer) all show Inference.
   React.useEffect(() => {
-    if (paramTab === "endpoints" || paramTab === "runner-images" || paramTab === "stacks" || paramTab === "image" || paramTab === "npu") setTab(paramTab);
+    if (isReservedSlotsTab(paramTab)) setTab(paramTab);
     else setTab("inference");
   }, [paramTab]);
 
@@ -895,7 +898,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
   // engine, not the slot list). Only the Inference tab falls through to the
   // loading skeleton / empty state below.
   const onSubTab =
-    tab === "endpoints" || tab === "runner-images" || tab === "stacks" || tab === "image" || tab === "npu";
+    isReservedSlotsTab(tab);
 
   // Loading skeleton — shown while /api/slots is still resolving so no
   // fake/stub slot cards flash before real data arrives.

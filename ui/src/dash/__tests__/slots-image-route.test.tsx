@@ -42,6 +42,10 @@ vi.mock('../inference-pane.jsx', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
   InferencePane: () => null,
 }))
+vi.mock('../npu/NpuTabs', async () => {
+  const R = await import('react')
+  return { NpuTabs: () => R.createElement('div', { 'data-testid': 'stub-npu-pane' }) }
+})
 vi.mock('../image/ImageGenTabs', async () => {
   const R = await import('react')
   return {
@@ -68,6 +72,30 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount())
   host.remove()
+})
+
+describe('a slot named like a reserved tab', () => {
+  it('#slots/npu shows the NPU tab and no edit drawer', () => {
+    box.slots = [{ name: 'npu', kind: 'local', type: 'chat', state: 'running', device_class: 'npu' }]
+    const seen: unknown[] = []
+    g.EditSlotDrawer = (p: { open: boolean; slot: unknown }) => {
+      seen.push(p.open)
+      return null
+    }
+    act(() => {
+      root.render(
+        React.createElement(
+          QueryClientProvider,
+          { client },
+          React.createElement(SlotsView, { slotParam: 'npu', slotSub: null, onGo: () => {} }),
+        ),
+      )
+    })
+    g.EditSlotDrawer = () => null
+    expect(host.querySelector('[data-testid="stub-npu-pane"]')).not.toBeNull()
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.every((o) => o === false)).toBe(true)
+  })
 })
 
 describe('slotSub reaches the Image Gen pane', () => {
