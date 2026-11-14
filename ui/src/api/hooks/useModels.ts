@@ -15,6 +15,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPost, apiPut, Hal0Error, isSignedOut, SIGNED_OUT_MESSAGE } from '../client'
 import { ENDPOINTS } from '../endpoints'
 import { CAPABILITIES_QUERY_KEY } from './useCapabilities'
+import { FLM_CATALOG_QUERY_KEY } from './useFlmCatalog'
 import { normalizeApiModel } from '@/lib/normalizeApiModel'
 
 export interface Model {
@@ -583,6 +584,9 @@ export function usePullJob(): PullSnapshot {
       // capabilities: it reports backends_settled=false and useCapabilities
       // resumes its 2 s poll until NPU presence is final again (#1974).
       qc.invalidateQueries({ queryKey: CAPABILITIES_QUERY_KEY })
+      // The NPU tab's FLM catalogue (useFlmCatalog) is not under ['models']: a finished
+      // download flips its rows' `installed` flag.
+      qc.invalidateQueries({ queryKey: FLM_CATALOG_QUERY_KEY })
       // Broadcast terminal state so route-independent listeners (e.g. the
       // command palette's "Cancel download" affordance) can stop offering
       // to cancel a pull that has finished.
@@ -718,6 +722,7 @@ export function usePullJob(): PullSnapshot {
       // registry row may flip back to its pre-pull state.
       qc.invalidateQueries({ queryKey: ['models'] })
       qc.invalidateQueries({ queryKey: CAPABILITIES_QUERY_KEY })
+      qc.invalidateQueries({ queryKey: FLM_CATALOG_QUERY_KEY })
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('hal0:pull-ended', { detail: { modelId } }))
       }

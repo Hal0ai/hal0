@@ -9,8 +9,8 @@
 // The npu keys are service-restart (slot bounce). The old hardcoded amber chip
 // is now a real ApplyBadge (closes the NpuPage TODO / spec Risk #2 anti-pattern)
 // — slot.npu.* are classified in RELOAD_CLASS_FALLBACK.
-// The [npu].asr/.embed booleans are also written by the NPU pane pills and
-// the slot drawer; this panel is the settings-side writer of the same keys.
+// The [npu].asr/.embed booleans are also written by the NPU tab's FLM lane;
+// this panel is the settings-side writer of the same keys.
 import { useState, useEffect } from 'react'
 import { useSlots, useSlotEdit, useSlotConfig } from '@/api/hooks/useSlots'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'

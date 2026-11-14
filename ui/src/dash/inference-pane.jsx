@@ -59,8 +59,7 @@ import { effectiveProfileName, eyeState, thinkingMark } from './tune-state.js'
 import { draftTagValue } from './spec-state.js'
 import { feasibilityHint } from './feasibility-copy'
 // devKind — one shared, meta-aware helper (src/lib/deviceMeta.ts); replaces
-// the copy this file used to carry (and the verbatim clones in slot-list.jsx
-// and npu-pane.jsx).
+// the copy this file used to carry (and the verbatim clone in slot-list.jsx).
 import { devKind } from '@/lib/deviceMeta'
 import { slotEditHash } from './slots-route'
 

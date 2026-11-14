@@ -309,7 +309,7 @@ flat task list the hook buckets by `status`). Empty board ⇒ all 8 lanes render
 
 # xdna (ggml-xdna NPU runner) — FROZEN DATA CONTRACT (v1)
 
-An xdna slot is `runner:'xdna'`, `runtime_family:'llama-server'`,
+An xdna slot is `binary:'xdna'`, `runtime_family:'llama-server'`,
 `device_class:'npu'`. It is NEVER an FLM-trio anchor: `npu-modality.js`'s
 structural anchor resolution and `slot-shared.js`'s `isNpuSlot` stay
 disjoint from it (see `isXdnaSlot` in `src/lib/slotModelFit.ts`, keyed on
@@ -321,7 +321,7 @@ NPU summary (`NpuSummaryRow`) linking to the tab.
 ## Slot payload (GET /api/slots, GET /api/slots/{name})
 
 ```
-runner: 'xdna'
+binary: 'xdna'
 runtime_family: 'llama-server'
 device_class: 'npu'
 xdna_path: 'fused' | 'per-op' | null   // null = not yet resolved/loaded
@@ -366,7 +366,11 @@ slot-config PUT refuses any other value with a 400, in `[xdna].env` and in
 ## /api/npu/occupancy (already exists)
 
 Each slot entry carries `engine: 'flm' | 'xdna'` and `single_tenant: boolean`
-(false when >1 holder). The NPU grid (`AieGrid`) renders a static hatched
+(false when >1 holder). The FLM anchor's STT and embed capabilities appear as extra
+rows named `<anchor>-stt` / `<anchor>-embed`, emitted with the anchor's state. Those
+synthesized rows carry `served_by: '<anchor name>'` (absent on real slots): they ride
+the anchor's one process, so clients must not count them as holders, give them columns,
+or treat them as time-sliced tenants. The NPU grid (`AieGrid`) renders a static hatched
 "shared · time-sliced" treatment whenever more than one holder claims
 columns, or an xdna slot reports a non-empty `npu_shared_with` — a
 holder-count FACT, never a per-tile load claim. No new animation; existing
@@ -400,13 +404,13 @@ local image store has not been read yet or cannot be read; the store is read in 
 ## GET /api/runners/xdna/fit
 
 ```
-{ models: { [model_id]: { xdna_path: 'fused' | 'per-op' | null, reason: string | null } } }
+{ models: { [model_id]: { xdna_path: 'fused' | 'per-op' | null, reason: string } } }
 ```
 
 One row per registered GGUF chat model; `?model=<id>` narrows to one (404
 `runners.model_not_found` when unknown). A row whose file is missing,
 unreadable or not GGUF is still returned with `xdna_path: null` and a
-`reason`, status 200.
+`reason`, status 200. `reason` is always a string: the one-line fact that decided the path, or the read error.
 
 ## Hardware stats — optional fields (already exists on the API per contract)
 

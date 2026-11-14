@@ -23,9 +23,11 @@ export function normalizeFlmCatalog(d: unknown): FlmCatalog {
   return { models: models as FlmModel[], probe_ok: o.probe_ok === true }
 }
 
+export const FLM_CATALOG_QUERY_KEY = ['slots', 'flm', 'models'] as const
+
 export function useFlmCatalog() {
   return useQuery<FlmCatalog>({
-    queryKey: ['slots', 'flm', 'models'],
+    queryKey: FLM_CATALOG_QUERY_KEY,
     queryFn: async () => normalizeFlmCatalog(await apiGet<unknown>(ENDPOINTS.flmModels)),
     staleTime: 30_000,
   })

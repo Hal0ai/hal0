@@ -13,10 +13,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type Json = Record<string, unknown>
 
+const { box } = vi.hoisted(() => ({ box: { slots: [] as unknown[], occ: undefined as unknown } }))
+
 vi.mock('@/api/hooks/useSlots', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
-  useSlots: () => ({ data: [] }),
+  useSlots: () => ({ data: box.slots }),
 }))
+vi.mock('@/api/hooks/useNpuOccupancy', () => ({ useNpuOccupancy: () => ({ data: box.occ }) }))
 vi.mock('@/api/hooks/useModels', async (importOriginal) => ({
   ...(await importOriginal<Json>()),
   useModels: () => ({ data: [] }),
@@ -42,6 +45,8 @@ const row = (id: string) => host.querySelector<HTMLElement>(`[data-testid="nav-$
 const active = (id: string) => row(id).getAttribute('aria-current') === 'page'
 
 beforeEach(() => {
+  box.slots = []
+  box.occ = undefined
   host = document.createElement('div')
   document.body.appendChild(host)
   root = createRoot(host)
@@ -75,5 +80,28 @@ describe('sidebar', () => {
     render('slots', 'brain')
     expect(active('slots-inference')).toBe(true)
     expect(active('slots-image')).toBe(false)
+  })
+
+  it('shows an NPU sub-link under the tab visibility rule, active on #slots/npu and its sub-tabs', () => {
+    render('slots', 'npu/models')
+    expect(host.querySelector('[data-testid="nav-slots-npu"]')).toBeNull() // no NPU, no NPU slot
+    box.occ = { present: true, slots: [] }
+    render('slots', 'npu/models')
+    expect(row('slots-npu')).not.toBeNull()
+    expect(active('slots-npu')).toBe(true)
+    expect(active('slots-inference')).toBe(false)
+    render('slots', null)
+    expect(active('slots-npu')).toBe(false)
+    box.occ = { present: false, slots: [] }
+    box.slots = [{ name: 'g', device_class: 'npu' }]
+    render('slots', 'npu')
+    expect(row('slots-npu')).not.toBeNull() // an NPU slot keeps it, as it keeps the tab
+  })
+
+  it('keeps Inference from claiming every reserved tab, from one shared list', () => {
+    for (const tab of ['image', 'npu', 'endpoints', 'runner-images', 'stacks']) {
+      render('slots', tab)
+      expect(active('slots-inference')).toBe(false)
+    }
   })
 })
