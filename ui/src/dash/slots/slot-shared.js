@@ -8,6 +8,7 @@
 
 import { normalizeApiModel, isUpstreamModel } from '@/lib/normalizeApiModel'
 import { devKind } from '@/lib/deviceMeta'
+import { isXdnaSlot } from '@/lib/slotModelFit'
 import { modelFitsSlot } from '@/lib/slotModelFit'
 import { isNpuShadowSlot } from '../npu-modality.js'
 
@@ -109,7 +110,7 @@ export function npuAnchorSlot(slots) {
   const npuSlots = (slots ?? []).filter(
     (s) =>
       (s?.device_class === 'npu' || devKind(s?.device) === 'npu') &&
-      String(s?.runner || '').toLowerCase() !== 'xdna',
+      !isXdnaSlot(s),
   );
   return (
     npuSlots.find((s) => !isNpuShadowSlot(s) && s.type === 'llm') ||
