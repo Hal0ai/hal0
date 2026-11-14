@@ -18,6 +18,7 @@ CANONICAL_PROFILES = {
     "halogen",
     "brain",
     "moonshine",
+    "xdna",
 }
 
 

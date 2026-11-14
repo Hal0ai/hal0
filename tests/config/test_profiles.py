@@ -154,12 +154,12 @@ class TestLoadProfilesConfig:
             SEED_PROFILES, "auto"
         )
 
-    def test_seeds_name_no_runner_except_halogen(self, tmp_path: Path) -> None:
+    def test_seeds_name_no_runner_except_halogen_and_xdna(self, tmp_path: Path) -> None:
         """Seeds are device-agnostic: none pins a runner (the slot's binary decides),
-        except halogen, whose engine is one family and so names its own runner."""
+        except halogen and xdna, whose engines are one family each and so name their own runner."""
         cfg = load_profiles_config(path=tmp_path / "nonexistent.toml")
         pinned = {name: p.runner for name, p in cfg.profile.items() if p.runner is not None}
-        assert pinned == {"halogen": "halogen"}
+        assert pinned == {"halogen": "halogen", "xdna": "xdna"}
 
     def test_load_valid_file(self, tmp_path: Path) -> None:
         p = tmp_path / "profiles.toml"

@@ -72,6 +72,7 @@ SEED_PROFILE_NAMES = [
     "qwen3-tts",
     "reranking",
     "utility",
+    "xdna",
 ]
 
 #: Keys a seed table may carry — exactly :class:`ProfileConfig`'s fields.
@@ -227,6 +228,14 @@ def test_typed_seeds_carry_their_mode_flag(name: str, mode_flag: str) -> None:
 def test_long_context_workload_seeds_pin_a_64k_window(name: str) -> None:
     """The bundled agent needs at least 64,000 tokens (ADR-0029 §4)."""
     assert _load()[name]["ctx_size"] == 65536
+
+
+def test_xdna_seed_runs_ggml_xdna_on_the_npu() -> None:
+    seed = _load()["xdna"]
+    assert seed["runner"] == "xdna"
+    assert "flags" not in seed  # the xdna launch fixes -fa on -np 1 itself
+    assert seed["ctx_size"] == 8192
+    assert seed["vision"] == "off"
 
 
 def test_halogen_seed_is_the_share_a_third_layout() -> None:
