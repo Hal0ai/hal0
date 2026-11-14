@@ -78,4 +78,20 @@ describe('slot edit routes', () => {
     expect(takeSlotDrawerReturn('npu')).toBe('#slots/npu')
     expect(takeSlotDrawerReturn('npu')).toBeNull() // cleared on read
   })
+
+  it('drops the return target when the route leaves the drawer without onClose', async () => {
+    const { setSlotDrawerReturn, takeSlotDrawerReturn, dropSlotDrawerReturnOnLeave } = await import('../slots-route')
+    setSlotDrawerReturn('#slots/npu/lanes', 'flm')
+    dropSlotDrawerReturnOnLeave('flm', null) // drawer -> #slots/npu via the drawer's own link
+    expect(takeSlotDrawerReturn('flm')).toBeNull()
+  })
+
+  it('keeps the return target while the drawer stays open or before it opens', async () => {
+    const { setSlotDrawerReturn, takeSlotDrawerReturn, dropSlotDrawerReturnOnLeave } = await import('../slots-route')
+    setSlotDrawerReturn('#slots/npu/lanes', 'flm')
+    dropSlotDrawerReturnOnLeave(null, null) // effect re-run (slots poll) before the hash lands
+    dropSlotDrawerReturnOnLeave(null, 'flm') // opening
+    dropSlotDrawerReturnOnLeave('flm', 'flm')
+    expect(takeSlotDrawerReturn('flm')).toBe('#slots/npu/lanes')
+  })
 })

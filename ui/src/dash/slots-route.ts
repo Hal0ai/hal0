@@ -89,6 +89,15 @@ export function takeSlotDrawerReturn(slot?: string | null): string | null {
   return rec.target
 }
 
+/** Drop the recorded return target when the route leaves the drawer without `onClose` (the
+ *  drawer's own "NPU tab" link, browser Back, a sidebar click). Called by the Slots route effect
+ *  with the drawer slot of the previous and the current route; only a drawer -> no-drawer
+ *  transition drops it, so a re-run of the effect (slots poll) between the opener recording the
+ *  target and the hash change landing cannot eat it. */
+export function dropSlotDrawerReturnOnLeave(prevTarget: string | null, nextTarget: string | null): void {
+  if (prevTarget != null && nextTarget == null) takeSlotDrawerReturn()
+}
+
 /** Open a slot's edit drawer from the NPU tab; closing it returns to the tab. */
 export function openSlotEditFromNpu(name: string): void {
   const here = typeof window !== 'undefined' ? window.location.hash || '' : ''
