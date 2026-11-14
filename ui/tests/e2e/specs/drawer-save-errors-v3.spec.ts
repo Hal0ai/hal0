@@ -170,7 +170,7 @@ test.describe('Slot drawer — rejected writes', () => {
       },
     ])
 
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     const embedSwitch = page.locator('.drawer .form-row', { hasText: 'NPU · Embed' }).getByRole('switch')
     await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
     await embedSwitch.click()

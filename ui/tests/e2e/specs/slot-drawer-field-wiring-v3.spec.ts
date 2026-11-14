@@ -325,7 +325,7 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     await stubFlmModels(page, [{ model: 'flm-chat', installed: true }])
     await seedSlots(page, [NPU_SLOT, EMBED])
 
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     await page.locator('.drawer .form-row', { hasText: 'NPU · Embed' }).getByRole('switch').click()
 
     await expect.poll(() => puts.length).toBe(1)
@@ -341,7 +341,7 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     await stubFlmModels(page, [{ model: 'flm-chat', installed: true }])
     await seedSlots(page, [NPU_SLOT, EMBED])
 
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     await page.locator('.drawer .form-row', { hasText: 'NPU · Chat' }).getByRole('switch').click()
 
     await expect.poll(() => puts.length).toBe(1)
@@ -359,7 +359,7 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     ])
     await seedSlots(page, [NPU_SLOT, EMBED])
 
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     const chatRow = page.locator('.drawer .form-row', { hasText: 'NPU · Chat' })
     const chatPicker = chatRow.getByTestId('npu-chat-model')
     await expect(chatPicker).toContainText('flm-chat')
@@ -406,7 +406,7 @@ test.describe('Slot drawer — NPU modality + chat-model wiring', () => {
     })
 
     await seedSlots(page, [NPU_SLOT, EMBED])
-    await page.goto('/#slots/npu')
+    await page.goto('/#slots/edit/npu')
     const chatRow = page.locator('.drawer .form-row', { hasText: 'NPU · Chat' })
     // Non-installed tags are offered with a ⬇ download chip rather than
     // hidden, after the installed ones, each with the NPU runtime chip.
