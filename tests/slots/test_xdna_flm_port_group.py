@@ -105,6 +105,19 @@ async def test_create_xdna_on_a_name_still_in_the_flm_group_is_refused(
     assert not sm._config_file("xdna").exists()
 
 
+@pytest.fixture
+def _fused_xdna_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The xdna model here is unregistered; treat it as fused so it coexists with FLM."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("hal0.slots.manager.registry_model_path", lambda m: f"/m/{m}.gguf")
+    monkeypatch.setattr(
+        "hal0.slots.model_fit.xdna_model_fit_cached",
+        lambda path: SimpleNamespace(xdna_path="fused"),
+    )
+
+
+@pytest.mark.usefixtures("_fused_xdna_model")
 async def test_new_xdna_slot_beside_flm_gets_a_port_of_its_own(hal0_home: Path) -> None:
     sm = _manager(hal0_home)
     flm = await sm.create(

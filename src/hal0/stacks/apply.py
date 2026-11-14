@@ -30,6 +30,7 @@ from hal0.slots.state import (
     DISPATCHABLE_STATES,
     NpuExclusivityViolation,
     SlotConfigError,
+    SlotNpuConflict,
     SlotState,
 )
 from hal0.stacks.state import (
@@ -234,7 +235,9 @@ class StackApplyEngine:
             before = _read_toml_or_none(path)
             try:
                 after = self._reconciled_stack_slot(before, entry, stem)
-            except (SlotConfigError, NpuExclusivityViolation, BadRequest) as exc:
+            # SlotNpuConflict is a SlotError, not a SlotConfigError: the
+            # write-time autoload guard (#3666) raises it from the same pipeline.
+            except (SlotConfigError, NpuExclusivityViolation, SlotNpuConflict, BadRequest) as exc:
                 errors.append((entry.slot, str(exc)))
                 summary.append(f"{entry.slot}: rejected — {exc}")
                 after = before

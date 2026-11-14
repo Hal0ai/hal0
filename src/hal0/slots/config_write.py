@@ -17,6 +17,8 @@ unchanged.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +26,14 @@ from hal0.config import paths
 from hal0.slot_config import merge_slot_config
 from hal0.slots._cfg_helpers import _cfg_to_dict
 from hal0.slots.activation import claims_npu_anchor as _claims_npu_anchor
-from hal0.slots.state import NpuExclusivityViolation, SlotConfigError, provider_requires_model
+from hal0.slots.state import (
+    NpuExclusivityViolation,
+    SlotConfigError,
+    SlotNpuConflict,
+    provider_requires_model,
+)
+
+_log = logging.getLogger(__name__)
 
 # ── device/profile coherence ────────────────────────────────────────────────
 
@@ -292,6 +301,141 @@ def check_npu_exclusivity(
                 "hint": "clear the existing NPU LLM slot's model before configuring another",
             },
         )
+
+
+def registry_model_path(model_id: str) -> str | None:
+    """A registered model's file path, as the slot payload resolves ``xdna_path``."""
+    if not model_id:
+        return None
+    try:
+        from hal0.registry.store import ModelRegistry
+
+        model = ModelRegistry().get(model_id)
+    except Exception as exc:
+        _log.debug(
+            "slot.npu_autoload_model_lookup_failed",
+            extra={"model_id": model_id, "error_type": type(exc).__name__},
+        )
+        return None
+    path = getattr(model, "path", None) or (model.get("path") if isinstance(model, dict) else None)
+    return str(path) if path else None
+
+
+#: The write keys that can move the per-op/FLM autoload pair (#3666): the
+#: autoload switch itself, what decides fused vs per-op (the model, the
+#: binary, ``[xdna].env``, ``[server].env``), and what decides whether the slot
+#: is on the NPU at all (device, type, a profile that re-derives them).
+#: ``"server.env"`` stands for an update whose ``server`` table carries ``env``.
+NPU_AUTOLOAD_GUARD_KEYS: frozenset[str] = frozenset(
+    {"autoload", "model", "binary", "xdna", "server.env", "device", "type", "profile"}
+)
+
+
+def npu_autoload_changed_keys(updates: dict[str, Any]) -> set[str]:
+    """The keys a partial write moves, as :func:`check_npu_autoload_conflict` reads them."""
+    keys = _changed_scalar_keys(updates)
+    server = updates.get("server")
+    if isinstance(server, dict) and "env" in server:
+        keys.add("server.env")
+    return keys
+
+
+def check_npu_autoload_conflict(
+    slot_name: str,
+    cfg_dict: dict[str, Any],
+    *,
+    slots_dir: Path | None = None,
+    model_path_for: Callable[[str], str | None],
+    changed_keys: set[str] | None = None,
+) -> None:
+    """Refuse a write that makes a per-op xdna slot and the FLM anchor both autoload.
+
+    Autoload slots start from systemd at boot and never pass the load-time
+    NPU guard (#3666), so the write is the only place to stop the pair. Only
+    fires when the written config autoloads; state is ignored and any
+    configured peer with ``autoload`` on counts. ``model_path_for`` resolves a
+    model id to its file so the rule can tell fused from per-op.
+
+    ``changed_keys`` follows :func:`check_default_uniqueness`: the keys this
+    write touches (see :func:`npu_autoload_changed_keys`). When supplied and
+    none is in :data:`NPU_AUTOLOAD_GUARD_KEYS`, the write cannot create the
+    pair, so a box already in that state (possible before this guard) is not
+    refused an unrelated edit such as a ctx-size change. ``None`` checks the
+    full config, which is what ``create()`` wants.
+
+    A peer whose env the launch would refuse (an unknown ``GGML_XDNA_*`` key
+    in a hand-edited TOML) is judged per-op, as the load-time guard does,
+    rather than failing this write with the peer's 422.
+
+    Raises:
+        SlotNpuConflict: ``reason="autoload"``.
+    """
+    from hal0.slots import npu_conflict as nc
+    from hal0.slots.activation import autoload_enabled, is_xdna_slot, slot_model_id
+    from hal0.slots.npu.trio import is_npu_trio_shadow
+    from hal0.slots.reaper import is_pinned
+
+    if changed_keys is not None and not changed_keys & NPU_AUTOLOAD_GUARD_KEYS:
+        return
+
+    unresolved: list[str] = []
+
+    def role_of(cfg: dict[str, Any], *, peer: bool = False) -> nc.NpuRole | None:
+        path: nc.XdnaPath | None = None
+        if is_xdna_slot(cfg):
+            if peer:
+                try:
+                    env = nc.xdna_launch_env(cfg)
+                except Exception:
+                    # Fail safe like the manager's peer scan: per-op is the
+                    # side that excludes FLM.
+                    return nc.npu_role(cfg, "per-op")
+            else:
+                env = nc.xdna_launch_env(cfg)
+            model_id = slot_model_id(cfg)
+            model_path = model_path_for(model_id) if model_id else None
+            if model_id and not model_path and model_id not in unresolved:
+                unresolved.append(model_id)
+            path = nc.effective_xdna_path(env, model_path)
+        return nc.npu_role(cfg, path)
+
+    if not autoload_enabled(cfg_dict) or is_npu_trio_shadow(dict(cfg_dict)):
+        return
+    mine = role_of(cfg_dict)
+    if mine is None:
+        return
+    peers = _iter_peer_configs(slot_name, slots_dir)
+    holders: list[tuple[str, dict[str, Any]]] = [
+        (name, peer)
+        for name, peer in peers
+        if autoload_enabled(peer) and nc.roles_conflict(mine, role_of(peer, peer=True))
+    ]
+    if not holders:
+        return
+    holder_engine = "xdna" if mine == "flm" else "flm"
+    names = [n for n, _ in holders]
+    unloads = list(names)
+    if holder_engine == "flm":
+        for n, peer in peers:
+            if peer.get("served_by") in names and n not in unloads:
+                unloads.append(n)
+    note = "".join(
+        f" (model {m} is not in the registry, so it is treated as per-op)" for m in unresolved
+    )
+    raise SlotNpuConflict(
+        f"slot {slot_name!r} and {', '.join(names)} would both autoload and need the whole NPU"
+        + note
+        + "; turn autoload off on one of them",
+        details={
+            "slot": slot_name,
+            "holders": names,
+            "holder_engine": holder_engine,
+            "unloads": unloads,
+            "pinned": any(is_pinned(n, peer) for n, peer in holders),
+            "pending": False,
+            "reason": "autoload",
+        },
+    )
 
 
 def check_default_uniqueness(
@@ -928,6 +1072,13 @@ def reconcile_and_guard_slot_config(
     guard_and_normalize_xdna(merged, updates)
     guard_xdna_slot_shape(merged, _changed_scalar_keys(updates))
     check_npu_exclusivity(slot_name, merged, slots_dir=slots_dir)
+    check_npu_autoload_conflict(
+        slot_name,
+        merged,
+        slots_dir=slots_dir,
+        model_path_for=registry_model_path,
+        changed_keys=npu_autoload_changed_keys(updates),
+    )
     # Only the keys this apply actually carries drive the SC-4 guard — an
     # unrelated stack field must not be blocked by a stale duplicate-default
     # state it neither created nor touches.

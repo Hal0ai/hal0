@@ -61,6 +61,7 @@ from hal0.slots.config_write import (
     _iter_peer_configs,
     _reconcile_device_profile,
     check_default_uniqueness,
+    check_npu_autoload_conflict,
     check_npu_exclusivity,
     check_runner_family,
     guard_and_normalize_tune,
@@ -69,6 +70,7 @@ from hal0.slots.config_write import (
     guard_xdna_slot_shape,
     reconcile_and_guard_slot_config,
     reconcile_slot_updates,
+    registry_model_path,
 )
 from hal0.slots.drift import _CONFIG_DRIFT_KEYS, _argv_values
 from hal0.slots.drift import compute_config_drift as _compute_config_drift
@@ -4373,6 +4375,7 @@ class SlotManager:
         shares so its writes obey the same guard.
         """
         check_npu_exclusivity(slot_name, cfg_dict)
+        check_npu_autoload_conflict(slot_name, cfg_dict, model_path_for=registry_model_path)
 
     async def _check_default_uniqueness(
         self,
@@ -5746,6 +5749,7 @@ __all__ = [
     "_cfg_provider",
     "_model_default",
     "check_default_uniqueness",
+    "check_npu_autoload_conflict",
     "check_npu_exclusivity",
     "guard_slot_write_payload",
     "is_npu_trio_shadow",
