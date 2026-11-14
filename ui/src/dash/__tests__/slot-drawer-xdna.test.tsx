@@ -57,6 +57,12 @@ vi.mock('@/api/hooks/useSlots', () => ({
   useSlots: () => ({ data: [], isLoading: false }),
   useSlotRename: () => idle,
   useSlotConfig: () => ({ data: {} }),
+  useSlotCreate: () => idle,
+  useSlotDelete: () => idle,
+}))
+vi.mock('@/api/hooks/useXdnaFit', () => ({ useXdnaFit: () => ({ data: {} }) }))
+vi.mock('@/api/hooks/useXdnaKnobs', () => ({
+  useXdnaKnobs: () => ({ data: { pmodes: ['turbo'], env: [], host_xrt: { doc: '' } } }),
 }))
 vi.mock('@/api/hooks/useHardware', () => ({ useHardware: () => ({ data: undefined }) }))
 vi.mock('@/api/hooks/useModels', () => ({
@@ -143,8 +149,9 @@ describe('slot drawer on an xdna slot', () => {
     const { root } = mount(XDNA)
     expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/slots/flm/models'))).toBe(false)
     expect(byId('npu-capability-matrix')).toBeNull()
-    expect(document.querySelector('[data-testid="slot-model-swap"], [aria-label="Model for gguf-npu"]')).not.toBeNull()
-    expect(byId('slot-profile')).not.toBeNull()
+    // The slot drawer's body for an xdna slot is the one GGML slot form (Task 9).
+    expect(byId('ggml-slot-form')?.getAttribute('data-mode')).toBe('edit')
+    expect(byId('slot-xdna-block')).toBeNull()
     act(() => root.unmount())
   })
 
