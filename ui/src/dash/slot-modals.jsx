@@ -903,9 +903,9 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	React.useEffect(() => {
 		// Anchor only — the trio shadows render no model pickers (their [npu]
 		// section is a pointer at the anchor), so skip the catalogue fetch.
-		if (device !== "npu" || slot?.type !== "llm") return;
+		if (device !== "npu" || slot?.type !== "llm" || isXdnaSlotEdit) return;
 		refreshFlmModels();
-	}, [slot?.name, device]);
+	}, [slot?.name, device, isXdnaSlotEdit]);
 
 	// Apply an NPU modality/model change and cold-restart the container. Lifted
 	// to component scope (out of the render IIFE) so the pull-completion effect
@@ -1986,7 +1986,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				    it) but their Profile row folds into this same section instead
 				    of keeping its own now-redundant group. */}
 				<FieldGroup label="What runs" hint="model & tune">
-					{device === "npu" ? (
+					{device === "npu" && !isXdnaSlotEdit ? (
 						profileRow
 					) : (
 						<>
@@ -2475,6 +2475,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 				    Anchor only (type=llm): the trio shadows have no config of
 				    their own (see the block above). */}
 				{device === "npu" &&
+					!isXdnaSlotEdit &&
 					slot?.type === "llm" &&
 					(() => {
 						// Full catalogue per lane (installed + downloadable) — NOT filtered by
@@ -2491,7 +2492,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						const pullPct = pull.pct != null ? `${pull.pct}%` : "…";
 						return (
 							<>
-								<div className="form-row">
+								<div className="form-row" data-testid="npu-capability-matrix">
 									<div className="form-lbl">
 										<span>NPU · Chat</span>
 										<FieldInfoIcon description="NPU language model. Pick any model — downloads
