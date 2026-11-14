@@ -61,9 +61,15 @@ export function ggmlProfileOptions(profiles: GgmlProfileRow[] | null | undefined
 
 type XdnaTable = { pmode: string | null; env: Record<string, string>; host_xrt: string | null }
 
-function xdnaTable(d: GgmlDraft): XdnaTable {
+/** Never sent from the UI, whatever the saved env holds (hal0 pins it). */
+export const GGML_ALWAYS_FIXED = 'GGML_XDNA_PGEMM_GLU_A'
+
+function xdnaTable(d: GgmlDraft, fixed: readonly string[] = []): XdnaTable {
   const env: Record<string, string> = {}
-  for (const [k, v] of Object.entries(d.env || {})) if (v !== '' && v != null) env[k] = v
+  for (const [k, v] of Object.entries(d.env || {})) {
+    if (k === GGML_ALWAYS_FIXED || fixed.includes(k)) continue
+    if (v !== '' && v != null) env[k] = v
+  }
   return { pmode: d.pmode || null, env, host_xrt: d.host_xrt || null }
 }
 
@@ -75,7 +81,7 @@ function sameXdna(a: XdnaTable, b: XdnaTable): boolean {
 
 const xdnaEmpty = (t: XdnaTable) => !t.pmode && !t.host_xrt && Object.keys(t.env).length === 0
 
-export function ggmlCreateBody(d: GgmlDraft): Record<string, unknown> {
+export function ggmlCreateBody(d: GgmlDraft, fixed: readonly string[] = []): Record<string, unknown> {
   const body: Record<string, unknown> = {
     name: d.name,
     type: 'llm',
@@ -86,20 +92,20 @@ export function ggmlCreateBody(d: GgmlDraft): Record<string, unknown> {
     profile: d.profile,
     autoload: d.autoload,
   }
-  const x = xdnaTable(d)
+  const x = xdnaTable(d, fixed)
   if (!xdnaEmpty(x)) body.xdna = x
   if (d.ctxSize != null) body.tune = { ctx_size: d.ctxSize }
   return body
 }
 
-export function ggmlEditBody(d: GgmlDraft, saved: GgmlDraft): Record<string, unknown> {
+export function ggmlEditBody(d: GgmlDraft, saved: GgmlDraft, fixed: readonly string[] = []): Record<string, unknown> {
   const body: Record<string, unknown> = {}
   if (d.model !== saved.model && d.model) body.model = { default: d.model }
   if (d.profile !== saved.profile) body.profile = d.profile
   if (d.autoload !== saved.autoload) body.autoload = d.autoload
   if (d.ctxSize !== saved.ctxSize) body.tune = { ctx_size: d.ctxSize }
-  const x = xdnaTable(d)
-  const s = xdnaTable(saved)
+  const x = xdnaTable(d, fixed)
+  const s = xdnaTable(saved, fixed)
   if (!sameXdna(x, s)) body.xdna = xdnaEmpty(x) ? null : x
   return body
 }

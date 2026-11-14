@@ -89,6 +89,21 @@ describe('ggmlCreateBody', () => {
   })
 })
 
+describe('fixed knobs', () => {
+  const saved = draft({ env: { GGML_XDNA_PGEMM_GLU_A: '1', GGML_XDNA_HEAD: '1' } })
+  it('never sends GLU_A on an unrelated change, even with no catalogue', () => {
+    expect(ggmlEditBody({ ...saved, pmode: 'turbo' }, saved)).toEqual({ xdna: { pmode: 'turbo', env: { GGML_XDNA_HEAD: '1' }, host_xrt: null } })
+  })
+  it('strips catalogue-fixed names and is not dirty on its own', () => {
+    const s2 = draft({ env: { OTHER_PINNED: '1' } })
+    expect(ggmlEditBody({ ...s2, pmode: 'turbo' }, s2, ['OTHER_PINNED'])).toEqual({ xdna: { pmode: 'turbo', env: {}, host_xrt: null } })
+    expect(ggmlEditBody(saved, draft({ env: { GGML_XDNA_HEAD: '1' } }))).toEqual({})
+  })
+  it('strips it on create too', () => {
+    expect(ggmlCreateBody(draft({ env: { GGML_XDNA_PGEMM_GLU_A: '1' } })).xdna).toBeUndefined()
+  })
+})
+
 describe('ggmlEditBody', () => {
   it('sends only the changed key; a pmode change sends the whole xdna table', () => {
     expect(ggmlEditBody(draft({ pmode: 'turbo' }), draft())).toEqual({

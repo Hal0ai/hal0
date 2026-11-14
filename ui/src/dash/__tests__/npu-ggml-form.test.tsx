@@ -260,3 +260,21 @@ describe('per-op requantize hint', () => {
     expect(q('ggml-requant-hint')).not.toBeNull()
   })
 })
+
+describe('fit fallback and fixed knobs in the form', () => {
+  it('falls back to the slot payload fit when the fit map misses the model', () => {
+    box.fit = {}
+    mount({ mode: 'edit', variant: 'engine', slot: { name: 'npu-gguf', state: 'ready', xdna_path: 'per-op', xdna_reason: 'blk.0.ssm_out.weight is Q8_0, not Q5_K' } })
+    expect(q('ggml-requant-hint')).not.toBeNull()
+  })
+
+  it('does not re-send a hand-edited GLU_A on a pmode change', async () => {
+    box.cfg = { model: { default: 'qwen3-4b' }, profile: 'xdna', xdna: { pmode: 'turbo', env: { GGML_XDNA_PGEMM_GLU_A: '1', GGML_XDNA_HEAD: '1' }, host_xrt: null } }
+    mount({ mode: 'edit', variant: 'engine', slot: { name: 'npu-gguf', state: 'stopped' } })
+    click('ggml-pmode-balanced')
+    await act(async () => { q('ggml-save-engine')!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+    await flush()
+    expect(box.edits[0].body).toEqual({ xdna: { pmode: 'balanced', env: { GGML_XDNA_HEAD: '1' }, host_xrt: null } })
+    box.cfg = { model: { default: 'qwen3-4b' }, profile: 'xdna', xdna: { pmode: 'turbo', env: {}, host_xrt: null } }
+  })
+})

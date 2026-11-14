@@ -106,12 +106,13 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
   const profileRow = (profilesQ.data ?? []).find((p) => p.name === d.profile)
   const pmodes = knobsQ.data?.pmodes ?? []
   const envRows = knobsQ.data?.env ?? []
+  const fixedNames = useMemo(() => envRows.filter((k) => k.fixed).map((k) => k.name), [envRows])
 
   const nameErr = mode === 'create' ? ggmlNameError(d.name, names) : null
   const ctxErr = d.ctxSize != null ? ggmlCtxError(d.ctxSize) : null
   const xrtErr = d.host_xrt && !d.host_xrt.startsWith('/') ? 'host_xrt must be an absolute path' : null
   const blocker = engineOnly ? xrtErr : nameErr || (mode === 'create' && !d.model ? 'pick a model' : null) || ctxErr || xrtErr
-  const editBody = mode === 'edit' ? ggmlEditBody(d, saved) : {}
+  const editBody = mode === 'edit' ? ggmlEditBody(d, saved, fixedNames) : {}
   const dirty = engineOnly ? 'xdna' in editBody : Object.keys(editBody).length > 0
   const working = busy || createMut.isPending || editMut.isPending
 
@@ -128,7 +129,7 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
   }
   const create = (start) =>
     run(async () => {
-      await createMut.mutateAsync(ggmlCreateBody(d))
+      await createMut.mutateAsync(ggmlCreateBody(d, fixedNames))
       if (start) {
         try {
           await loadMut.mutateAsync(d.name)
@@ -172,7 +173,10 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
     else next[name] = value
     set({ env: next })
   }
-  const fitRow = fit[d.model]
+  // The fit map can miss the slot's own model (still loading, alias); the slot payload carries it.
+  const fitRow =
+    fit[d.model] ??
+    (mode === 'edit' && d.model === saved.model && slot?.xdna_path ? { xdna_path: slot.xdna_path, reason: slot.xdna_reason || '' } : undefined)
   const profileCtx = profileRow?.ctx_size
   const ctxPlaceholder = `${fmt(profileCtx)} from ${d.profile || 'profile'}`
 
