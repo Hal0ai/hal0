@@ -557,6 +557,11 @@ async def _local_live_stats(request: Request) -> dict[str, Any]:
         # pinned by a forced performance level (gpu-compute.service) and
         # should be captioned, not trusted as load.
         "util_is_forced_high": snap.get("util_is_forced_high"),
+        # NPU power mode (str) and fabric clock (int MHz) for the NPU tab's
+        # status line and the GGML lane's non-turbo banner (#3655). None
+        # when xrt-smi / the fclk sysfs file is absent.
+        "npu_pmode": snap.get("npu_pmode"),
+        "npu_fclk": snap.get("npu_fclk"),
     }
     # cpu_util: non-blocking psutil poll (interval=None reads the running
     # per-interval accumulator seeded at import time). Result is clamped to
