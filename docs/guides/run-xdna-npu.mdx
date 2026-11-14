@@ -161,17 +161,56 @@ allow-list with defaults and docs, so the dashboard renders nothing hardcoded.
 ## Coexistence with FLM
 
 `xdna` and FLM (hal0's default NPU lane, ADR-0003) share one physical NPU.
-Running both is allowed: the spike measured close to zero performance
-impact from an idle FLM slot holding a hardware context while `xdna` runs a
-request. hal0 **warns** rather than refuses when both are up — the same
-warn-not-block shape as the GTT-leak and fabric-clock guards elsewhere —
-and surfaces NPU occupancy on the NPU tab so you can see when the hardware is actually
-contended, rather than just "another NPU slot happens to exist."
+Whether they can run together depends on the model's path:
+
+- **Fused** model (the requantized Qwen3.5-0.8B above): it coexists with FLM.
+  The two time-slice the NPU, and hal0 shows a shared warning and the NPU
+  occupancy on the NPU tab.
+- **Per-op** model (every other GGUF): it needs the whole NPU. On XDNA2
+  hardware, whichever of a per-op slot and FLM starts second fails with
+  `DRM_IOCTL_AMDXDNA_CREATE_HWCTX IOCTL failed (err=-22)`, in either order.
+  hal0 therefore refuses to start one while the other is loaded.
+
+A refused start answers `409` with the error code `slot.npu_conflict`, and the
+slot stays offline (not in error). The error details name the `holders`, the
+slots an opt-in would unload (`unloads`, including FLM's speech-to-text and
+embedding companions), whether a holder is `pinned`, and whether it is still
+loading (`pending`).
+
+To switch lanes, opt in to unloading the holder:
+
+- **Dashboard:** on the NPU tab, starting a slot that conflicts opens a
+  dialog, "Unload *holder* to start *slot*?". Confirm with "Unload and start".
+- **CLI:** `hal0 slot load <name> --unload-npu-holder`, or
+  `hal0 slot restart <name> --unload-npu-holder`.
+- **API:** send `{"unload_npu_holder": true}` in the body of
+  `POST /api/slots/{name}/load` or `POST /api/slots/{name}/restart`. The MCP
+  `slot_load` and `slot_restart` tools take the same `unload_npu_holder`
+  argument.
+
+The opt-in unloads a pinned holder too: a pin guards automatic eviction only,
+and the FLM anchor `npu` is pinned by default. It never unloads a holder whose
+own load is still in flight (pulling, starting or warming); wait for it to
+finish. Requests that arrive through `/v1` never pass the flag, so a request
+that would lazily load a conflicting slot gets the `409` instead of evicting
+the other lane. A restart is checked before anything is stopped, so a refused
+restart leaves the slot as it was.
+
+Autoload is checked when the config is written: a write that would make a
+per-op xdna slot and the FLM anchor both start at boot is refused with the same
+error and `reason: "autoload"`, because systemd starts those units without
+going through the load check. A model hal0 cannot resolve counts as per-op.
+
+FLM serving chat only (no speech-to-text or embeddings) next to a per-op slot
+has not been tested; hal0 assumes it conflicts. See
+[ADR-0059](/docs/adr/0059-npu-perop-exclusion/).
 
 ## See also
 
 - [ADR-0057](/docs/adr/0057-ggml-xdna-optional-npu-runner/) — the full
-  decision record: why this is optional-tier, baked-kernel, warn-not-refuse.
+  decision record: why this is optional-tier and baked-kernel.
+- [ADR-0059](/docs/adr/0059-npu-perop-exclusion/) — why per-op models and
+  FLM exclude each other, with confirm-and-unload.
 - [Strix Halo](/docs/concepts/strix-halo/) — the shared-memory and
   fabric-clock story this hardware also lives inside.
 - [Manage runner images](/docs/guides/manage-runner-images/) — the pin

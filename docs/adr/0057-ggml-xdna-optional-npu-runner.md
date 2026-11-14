@@ -104,6 +104,10 @@ carries the toolchain pins as hal0's own maintenance burden.
    picker).
 
 5. **NPU coexistence with `flm` is warn-and-time-slice, not exclusion.**
+   *Superseded in part by ADR-0059 for per-op models: a per-op xdna slot and
+   the FLM anchor exclude each other (hardware testing showed the second one
+   fails on the device). This decision still holds for fused models.*
+
    Both runtimes share one NPU; the spike measured near-zero perf impact
    from an idle `flm` slot holding a hardware context while `xdna` runs,
    so hal0 does not refuse a load because the other NPU lane is up. It
