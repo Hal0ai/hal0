@@ -112,6 +112,34 @@ GGML_XDNA_ARENA_MB = "512"      # GGML_XDNA_* keys from the allow-list only
 | `env` | Merged into the container environment after the image defaults. Keys outside the `GGML_XDNA_*` allow-list are rejected with a 400 naming the key. `GGML_XDNA_PGEMM_GLU_A` is pinned to `0`: any other value is rejected with a 400 (here or in `[server].env`), and the launch forces `0` even over a hand-edited TOML. |
 | `host_xrt` | Bind-mounted read-only into the container and exported as `HAL0_XDNA_HOST_XRT`, for running a host XRT build instead of the image's. |
 
+## The `xdna` profile and per-slot context
+
+hal0 seeds one `xdna` profile for GGML slots (`src/hal0/config/data/seed_profiles.toml`):
+
+| Key | Value |
+|---|---|
+| `runner` | `xdna` |
+| `ctx_size` | `8192` |
+| `vision` | `off` |
+| `intent` | `GGUF on the NPU (ggml-xdna)` |
+
+It carries no `flags` on purpose. The xdna launch already fixes `--device XDNA0 -ngl 99 -fa on --poll 0 -np 1 --cache-reuse 256` in the slot layer, and a profile flag cannot override those. A slot created with `binary = "xdna"` and no profile takes `xdna`.
+
+The profile's `ctx_size` is the default for every GGML slot. To give one slot its own context, set `[tune].ctx_size` in that slot's config; a slot tune beats the profile, and the xdna runner accepts every tune key except `speculation = "ngram"`. The NPU tab offers 8192, 16384, 32768 and 65536 or a custom value. Hermes needs a context of at least 64,000 tokens (`HERMES_MINIMUM_CONTEXT_LENGTH`), so a slot an agent uses needs 65536 or more.
+
+```toml
+[tune]
+ctx_size = 32768
+```
+
+## The NPU tab
+
+Slots → NPU (`#slots/npu`) is the one place that shows everything on the NPU. The Inference tab keeps a one-line NPU summary (holders, tok/s, a time-sliced chip when more than one slot holds the array) that links to it. The tab shows when the NPU is present or any slot lives on it, and has three sub-tabs:
+
+- **Lanes** — the AIE array and the host status line, then one lane per engine. The FLM lane stages toggles and a chat model and applies them with one config write and one restart. The GGML lane lists the `xdna` slots with their fused or per-op fit, adds, edits, starts, stops and restarts them, and shows a Pull button while the runner image is missing.
+- **Models** — FLM catalogue rows and the registered GGUF models with their fit, size and the slots using each.
+- **Engines & profiles** — the FLM and ggml-xdna images, host readiness, and the NPU profiles.
+
 ## What the API reports
 
 Slot payloads (`GET /api/slots`, `GET /api/slots/{name}`) for `runner == "xdna"`
@@ -128,6 +156,7 @@ reports `single_tenant: false` when more than one holder exists.
 examine` and the active `pp_dpm_fclk` line) — `null` when unreadable, never
 guessed. `GET /api/runners/xdna/knobs` returns the pmode list and the env
 allow-list with defaults and docs, so the dashboard renders nothing hardcoded.
+`GET /api/runners/xdna/fit` returns `{"models": {<model id>: {"xdna_path", "reason"}}}` for every registered GGUF chat model (`?model=<id>` narrows it to one). A row whose file is missing, unreadable or not GGUF still comes back, with `xdna_path: null` and the reason, never a 500. `GET /api/npu/occupancy` also carries `npu_engines` (runner images, FLM version, whether the xdna image is pulled) and `npu_host` (device node, driver loaded, XDNA generation); each field is a real read or `null`.
 
 ## Coexistence with FLM
 
@@ -136,7 +165,7 @@ Running both is allowed: the spike measured close to zero performance
 impact from an idle FLM slot holding a hardware context while `xdna` runs a
 request. hal0 **warns** rather than refuses when both are up — the same
 warn-not-block shape as the GTT-leak and fabric-clock guards elsewhere —
-and surfaces NPU occupancy so you can see when the hardware is actually
+and surfaces NPU occupancy on the NPU tab so you can see when the hardware is actually
 contended, rather than just "another NPU slot happens to exist."
 
 ## See also

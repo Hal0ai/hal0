@@ -312,9 +312,11 @@ flat task list the hook buckets by `status`). Empty board ⇒ all 8 lanes render
 An xdna slot is `runner:'xdna'`, `runtime_family:'llama-server'`,
 `device_class:'npu'`. It is NEVER an FLM-trio anchor: `npu-modality.js`'s
 structural anchor resolution and `slot-shared.js`'s `isNpuSlot` stay
-disjoint from it (see `isXdnaSlot` in `npu-pane.jsx`). It renders as its
-own `XdnaSlotCard` in the NPU occupancy card's RIGHT region and can
-appear alongside an FLM trio anchor on the same NPU array.
+disjoint from it (see `isXdnaSlot` in `src/lib/slotModelFit.ts`, keyed on
+`binary === 'xdna'`). It renders as a card in the GGML lane of the NPU tab
+(`#slots/npu`, `ui/src/dash/npu/GgmlLane.jsx`) and can appear alongside the
+FLM anchor on the same NPU array. The Inference tab shows only a one-line
+NPU summary (`NpuSummaryRow`) linking to the tab.
 
 ## Slot payload (GET /api/slots, GET /api/slots/{name})
 
@@ -339,8 +341,8 @@ GGML_XDNA_* = "<value>"   # keys MUST be in GET /api/runners/xdna/knobs .env[].n
 ```
 
 Written and restarted through the existing slot config PUT + restart flow
-(no new endpoint) — same two-call contract the NPU occupancy card's
-`writeAnchor` uses for FLM pills. UI assumption: `env` values are opaque
+(no new endpoint) — the same two-call contract (config PUT, then restart)
+the NPU tab's FLM lane uses for its staged toggles. UI assumption: `env` values are opaque
 strings; the UI does not attempt to type/coerce them, matching how
 HALOGEN_* profile flags are treated.
 
