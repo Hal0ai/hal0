@@ -77,7 +77,8 @@ def _lines(report: dict[str, Any]) -> list[str]:
     if unfolded:
         out.append(
             f"[yellow]{len(unfolded)} node(s) were written to "
-            f"{escape(str(report.get('bank')))} after the fold-in and never folded: they stay "
+            f"{escape(str(report.get('bank')))} that the fold-in never sent (written after it, or "
+            "dropped by it): they stay "
             "in the old bank, which nothing reads. Re-create one through compat, or ignore "
             "it.[/yellow]"
         )

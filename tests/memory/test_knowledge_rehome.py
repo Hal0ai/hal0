@@ -646,3 +646,28 @@ async def test_a_ledger_that_names_no_sent_files_skips_nothing(
     plan = await rehome(box, owner="claude-code").plan()
     assert [r["code"] for r in plan["refusals"]] == ["nodes_missing"]
     assert plan["not_folded"] == []
+
+
+async def test_a_record_without_page_nodes_and_no_archive_fails_closed(
+    box: Box, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ids file from an earlier build (no ``page_nodes`` key) whose archive is gone
+    cannot say what was sent: an absent node is missing, never skipped as late."""
+    gone = new(_ini(5))
+    box.engine.banks[TARGET]["pages"] = [
+        p for p in box.engine.banks[TARGET]["pages"] if p["id"] != gone
+    ]
+    real_read = fi._read_nofollow
+
+    def read(path: Path) -> bytes:
+        if path.name.endswith(".ids.json"):
+            ids = json.loads(real_read(path))
+            ids.pop("page_nodes", None)
+            return json.dumps(ids).encode()
+        raise OSError("no archive")
+
+    monkeypatch.setattr(fi, "_read_nofollow", read)
+    monkeypatch.setattr(kr, "fi_page_map_rows", lambda _t: {})
+    plan = await rehome(box, owner="claude-code").plan()
+    assert [r["code"] for r in plan["refusals"]] == ["nodes_missing"]
+    assert plan["not_folded"] == []
