@@ -223,3 +223,30 @@ def test_unclassifiable_model_leaves_the_fused_layer_alone() -> None:
 def test_operator_fused_layer_setting_wins_on_a_per_op_model() -> None:
     cfg = _xdna_cfg(xdna={"env": {"GGML_XDNA_FUSED_LAYER": "1"}})
     assert _plan_env(cfg, "per-op")["GGML_XDNA_FUSED_LAYER"] == "1"
+
+
+def _plan_for(runner_key: str | None) -> Any:
+    from hal0.providers.container import _llama_launch_plan
+
+    return _llama_launch_plan(
+        image="img",
+        port=8131,
+        model_path="/m/x.gguf",
+        devices=[],
+        group_ids=[],
+        context_size=4096,
+        runner_key=runner_key,
+    )
+
+
+def test_xdna_health_probe_needs_no_curl() -> None:
+    """#3658: the xdna image has no curl/wget/python3, so its probe cannot use them."""
+    cmd = _plan_for("xdna").health.cmd
+    assert "curl" not in cmd and "wget" not in cmd and "python" not in cmd
+    assert "/dev/tcp/127.0.0.1/8131" in cmd
+    assert not any(ch in cmd for ch in "%$\\")
+
+
+def test_other_runners_keep_the_curl_health_probe() -> None:
+    assert _plan_for("standard").health.cmd == "curl -fsS http://127.0.0.1:8131/health || exit 1"
+    assert _plan_for(None).health.cmd == "curl -fsS http://127.0.0.1:8131/health || exit 1"
