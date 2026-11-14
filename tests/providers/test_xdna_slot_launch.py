@@ -187,3 +187,39 @@ def test_xdna_slot_tune_reaches_the_launch() -> None:
 def test_gpu_slot_has_no_tune_unavailable() -> None:
     d = _xdna_detail(_xdna_cfg(device="gpu-rocm", binary="rocm"))
     assert d["tune_effective"]["tune_unavailable"] == {}
+
+
+def _plan_env(cfg: dict[str, Any], fit_path: str | None) -> dict[str, str]:
+    from hal0.slots.model_fit import XdnaFit
+
+    model_info = {"path": "/models/m.gguf", "_model_key": "m"}
+    fit = XdnaFit(fit_path, "test") if fit_path else None
+    with (
+        patch("hal0.providers.container._resolve_profile", return_value=_profile()),
+        patch("hal0.providers._image.operator_default_image", return_value=None),
+        patch("hal0.providers.container.resolve_npu_device_paths", return_value=[]),
+        patch("hal0.providers.container.resolve_npu_group_ids", return_value=[]),
+        patch(
+            "hal0.slots.model_fit.xdna_model_fit_cached",
+            side_effect=(lambda _p: fit) if fit else OSError("missing"),
+        ),
+    ):
+        return ContainerProvider().container_spec(cfg, model_info).env
+
+
+def test_per_op_model_launches_with_the_fused_layer_off() -> None:
+    """#3656: the fork's fused layer aborts on a per-op model's weight set."""
+    assert _plan_env(_xdna_cfg(), "per-op")["GGML_XDNA_FUSED_LAYER"] == "0"
+
+
+def test_fused_model_keeps_the_fused_layer_default() -> None:
+    assert "GGML_XDNA_FUSED_LAYER" not in _plan_env(_xdna_cfg(), "fused")
+
+
+def test_unclassifiable_model_leaves_the_fused_layer_alone() -> None:
+    assert "GGML_XDNA_FUSED_LAYER" not in _plan_env(_xdna_cfg(), None)
+
+
+def test_operator_fused_layer_setting_wins_on_a_per_op_model() -> None:
+    cfg = _xdna_cfg(xdna={"env": {"GGML_XDNA_FUSED_LAYER": "1"}})
+    assert _plan_env(cfg, "per-op")["GGML_XDNA_FUSED_LAYER"] == "1"
