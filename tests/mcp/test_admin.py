@@ -1970,3 +1970,30 @@ def test_mcp_profile_create_budget_hint_is_integer_only() -> None:
     update = admin.tool_param_schema("profile_update")["properties"]["reasoning_budget"]
     assert create["type"] == "integer"
     assert update["type"] == ["integer", "null"]
+
+
+@pytest.mark.asyncio
+async def test_slot_load_forwards_unload_npu_holder(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """#3666: the opt-in reaches POST /api/slots/{name}/load as a body field."""
+    await admin.dispatch(
+        tool="slot_load",
+        args={"name": "px", "unload_npu_holder": True},
+        client_id="pi",
+        bearer=None,
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    method, url, body, _headers = mock_transport["calls"][-1]
+    assert (method, url) == ("POST", "http://t/api/slots/px/load")
+    assert body == {"unload_npu_holder": True}
+
+
+def test_slot_load_and_restart_document_unload_npu_holder() -> None:
+    for tool in ("slot_load", "slot_restart"):
+        schema = admin.tool_param_schema(tool)
+        prop = schema["properties"]["unload_npu_holder"]
+        assert prop["type"] == "boolean"
+        assert "NPU" in prop["description"]
+    assert "unload_npu_holder" in admin.TOOL_DESCRIPTIONS["slot_load"]

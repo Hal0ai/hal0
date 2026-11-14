@@ -53,6 +53,7 @@ from hal0.dispatcher.lane_pin import (
 from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
 from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.slots.abandon import ClientGoneProbe, abandon_probe
+from hal0.slots.state import SlotNpuConflict
 from hal0.upstreams.filters import apply_filters
 
 if TYPE_CHECKING:
@@ -860,6 +861,9 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
         arbiter.guard_dispatch(slot_name)
     try:
         await slot_manager.load(slot_name)
+    except SlotNpuConflict:
+        # Traffic never unloads the NPU holder; the 409 is the answer (#3666).
+        raise
     except Exception as exc:
         log.warning(
             "v1.backend_aware_load_failed",

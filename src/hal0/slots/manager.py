@@ -3449,7 +3449,15 @@ class SlotManager:
         d = dict(cfg)
         if is_npu_trio_shadow(d):
             return None, None
-        path = await self._npu_xdna_path(d, model_id) if is_xdna_slot(d) else None
+        path: XdnaPath | None = None
+        if is_xdna_slot(d):
+            try:
+                path = await self._npu_xdna_path(d, model_id)
+            except Exception:
+                # Same fail-safe as the peer side: a lookup that raises must not
+                # escape admission (outside ``_load``'s try); per-op is the side
+                # that excludes FLM.
+                path = "per-op"
         return _npu_conflict.npu_role(d, path), path
 
     async def _npu_peers(self, slot_name: str) -> Sequence[NpuPeer]:
@@ -3492,8 +3500,18 @@ class SlotManager:
 
     @staticmethod
     def _npu_conflict_error(slot_name: str, conflict: NpuConflict) -> SlotNpuConflict:
+        if conflict.pending:
+            holders = ", ".join(conflict.holders)
+            message = (
+                f"{holders} is still loading on the NPU; wait for it to finish, or stop it first."
+            )
+        else:
+            message = (
+                f"{conflict.reason}. Pass unload_npu_holder=true to unload "
+                f"{', '.join(conflict.unloads)} and start {slot_name}."
+            )
         return SlotNpuConflict(
-            conflict.reason,
+            message,
             details={
                 "slot": slot_name,
                 "holders": list(conflict.holders),

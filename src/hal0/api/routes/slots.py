@@ -1493,6 +1493,11 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
 # ── lifecycle ──────────────────────────────────────────────────────────────
 
 
+def _unload_npu_holder_flag(body: object) -> bool:
+    """The NPU opt-in (#3666): only the JSON value ``true`` counts."""
+    return isinstance(body, dict) and body.get("unload_npu_holder") is True
+
+
 @router.post("/{name}/load")
 @_invalidates_snapshot
 async def load_slot(name: str, request: Request) -> dict[str, object]:
@@ -1503,6 +1508,10 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
     happily spawns a container that never goes healthy, leaving the
     operator to wait out the 180s health timeout. Empty / None model_id
     is fine: that path falls back to the slot's TOML default.
+
+    ``{"unload_npu_holder": true}`` is the operator's opt-in to unload the FLM
+    anchor (or per-op xdna slot) that holds the NPU; without it a conflict is
+    a 409 ``slot.npu_conflict`` (#3666).
     """
     sm = _get_slot_manager(request)
     body: dict[str, Any] = {}
@@ -1549,7 +1558,9 @@ async def load_slot(name: str, request: Request) -> dict[str, object]:
         # Manual load is operator intent — clear the crash-loop breaker
         # (issue i4) so an ERROR/parked slot always gets a real attempt.
         sm.reset_load_failures(name)
-        snap = await sm.load(name, model_id=model_id)
+        snap = await sm.load(
+            name, model_id=model_id, unload_npu_holder=_unload_npu_holder_flag(body)
+        )
         _rec.after = {"model_id": model_id, "state": _state_value(snap)}
     return _slot_to_dict(snap, request)
 
@@ -1583,8 +1594,12 @@ async def unload_slot(name: str, request: Request, force: bool = False) -> dict[
 @_invalidates_snapshot
 async def restart_slot(name: str, request: Request) -> dict[str, object]:
     sm = _get_slot_manager(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}  # POST without a body is fine
     async with record_action(request, category="slot", action="slot.restart", target=name) as _rec:
-        snap = await sm.restart(name)
+        snap = await sm.restart(name, unload_npu_holder=_unload_npu_holder_flag(body))
         _rec.after = {"state": _state_value(snap)}
     return _slot_to_dict(snap, request)
 

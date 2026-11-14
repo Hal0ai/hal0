@@ -1629,6 +1629,30 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
         },
         "required": ["new_name"],
     },
+    "slot_load": {
+        "properties": {
+            "unload_npu_holder": {
+                "type": "boolean",
+                "description": (
+                    "true = if an FLM anchor or per-op xdna slot holds the NPU, unload it "
+                    "(pinned too) before starting. Default false: a conflict is refused "
+                    "with slot.npu_conflict (409). Never overrides a holder still loading."
+                ),
+            },
+        },
+    },
+    "slot_restart": {
+        "properties": {
+            "unload_npu_holder": {
+                "type": "boolean",
+                "description": (
+                    "true = if an FLM anchor or per-op xdna slot holds the NPU, unload it "
+                    "(pinned too) before starting. Default false: a conflict is refused "
+                    "with slot.npu_conflict (409). Never overrides a holder still loading."
+                ),
+            },
+        },
+    },
     "model_set_default": {
         "properties": {
             "model_id": {"type": "string", "description": "Model id to promote/clear"},
@@ -3320,7 +3344,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "slot_load": (
         "Load a slot (optionally assign a model first). "
-        "Args: name=SLOT name, optional model_id=registered model to load."
+        "Args: name=SLOT name, optional model_id=registered model to load, optional "
+        "unload_npu_holder=true to unload the FLM anchor / per-op xdna slot that holds "
+        "the NPU (otherwise a conflict is refused with slot.npu_conflict)."
     ),
     "slot_unload": "Unload a running slot gracefully.",
     "slot_edit": (
@@ -3433,7 +3459,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_restart": (
         "Restart a slot's systemd unit (gated). Prefer slot_load for a slot in "
         "error state or after a config change — load regenerates the unit; "
-        "restart can time out on errored slots."
+        "restart can time out on errored slots. Optional unload_npu_holder=true, as "
+        "for slot_load."
     ),
     "capability_set": "Assign a capability child to a slot (gated).",
     "config_write": "Update hal0.toml top-level settings (gated).",

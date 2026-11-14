@@ -552,3 +552,50 @@ async def test_peer_whose_model_lookup_raises_is_judged_per_op(
     with pytest.raises(SlotNpuConflict) as exc:
         await sm.load("flm")
     assert exc.value.details["holders"] == ["px"]
+
+
+async def test_incoming_slot_whose_model_lookup_raises_is_judged_per_op(
+    tmp_hal0_home: str, events: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The slot being loaded fails safe to per-op too, instead of escaping admission."""
+    _flm(tmp_hal0_home)
+    _xdna(tmp_hal0_home, "px", 8090, per_op=False)
+    sm = SlotManager()
+    await sm.load("flm")
+
+    async def broken(self: SlotManager, *a: Any, **k: Any) -> dict[str, Any]:
+        raise RuntimeError("registry exploded")
+
+    monkeypatch.setattr(SlotManager, "_resolve_model_info", broken)
+
+    with pytest.raises(SlotNpuConflict) as exc:
+        await sm.load("px")
+    assert exc.value.details["holders"] == ["flm"]
+    assert sm.state("px") == SlotState.OFFLINE
+
+
+async def test_refusal_messages_tell_the_operator_what_to_do(
+    tmp_hal0_home: str, events: list[tuple[str, str]]
+) -> None:
+    _flm(tmp_hal0_home)
+    _flm_shadow(tmp_hal0_home, "flm", "stt", "transcription", 8084)
+    _xdna(tmp_hal0_home, "px", 8090)
+    sm = SlotManager()
+    await sm.load("flm")
+
+    with pytest.raises(SlotNpuConflict) as settled:
+        await sm.load("px")
+    msg = str(settled.value)
+    assert "flm" in msg and "unload_npu_holder" in msg
+    assert "flm-stt" in msg
+    assert settled.value.details["pending"] is False
+
+    # A holder still loading: the opt-in cannot help, so the message says wait/stop.
+    sm._npu_pending["flm"] = "flm"
+    with pytest.raises(SlotNpuConflict) as pend:
+        await sm.load("px", unload_npu_holder=True)
+    pmsg = str(pend.value)
+    assert pend.value.details["pending"] is True
+    assert "still loading on the NPU" in pmsg
+    assert "wait for it to finish, or stop it first" in pmsg
+    assert "unload_npu_holder" not in pmsg

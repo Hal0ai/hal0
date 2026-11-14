@@ -73,7 +73,7 @@ from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
 from hal0.forwarded_headers import forwardable_request_headers
 from hal0.http_client import async_client
-from hal0.slots.state import SlotCrashLooping, SlotState
+from hal0.slots.state import SlotCrashLooping, SlotNpuConflict, SlotState
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 if TYPE_CHECKING:
@@ -1286,6 +1286,10 @@ class Dispatcher:
         # declared device/profile picks the backend.
         try:
             await self._slot_manager.load(slot_name)
+        except SlotNpuConflict:
+            # An NPU refusal (#3666) is an operator decision, not a load that is
+            # still running: surface the 409 rather than a retryable 503.
+            raise
         except SlotCrashLooping:
             # Crash-loop breaker (issue i4): already a retryable 503 with
             # Retry-After — surface it as-is. Must NOT fall through to the
