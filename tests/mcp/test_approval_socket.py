@@ -256,7 +256,7 @@ async def test_a_chmod_failure_closes_the_listener_and_never_fails_the_boot(
 async def test_stop_waits_for_a_slow_handler_up_to_the_bound(
     app: Any, sock_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(approval_socket, "_STOP_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(approval_socket, "_STOP_TIMEOUT_S", 2.0)
     release = asyncio.Event()
     finished = asyncio.Event()
 
@@ -278,7 +278,10 @@ async def test_stop_waits_for_a_slow_handler_up_to_the_bound(
     release.set()
     await stopper
     assert finished.is_set()
-    assert loop.time() - started < 0.3
+    # Released at ~0.1 s, so it returns long before the 2 s bound: it waited for
+    # the handler, not for the bound. A wide bound keeps a loaded runner from
+    # tripping the check.
+    assert loop.time() - started < 1.5
     assert (await request)["status"] == 200
 
 
