@@ -113,12 +113,9 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
   const save = (restart) =>
     run(async () => {
       if (dirty) await editMut.mutateAsync({ name: slot.name, body: editBody })
-      if (restart && (await start.run(slot.name, 'restart', { onSettled: onDone })) === 'prompted') {
-        setPatch({})
-        return
-      }
+      const prompted = restart && (await start.run(slot.name, 'restart', { onSettled: onDone })) === 'prompted'
       setPatch({})
-      onDone?.()
+      if (!prompted) onDone?.()
     })
   // Engine variant: `{xdna}` only; restart when the slot is running (what SlotXdnaBlock did).
   const saveEngine = () =>

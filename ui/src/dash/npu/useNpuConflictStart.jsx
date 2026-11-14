@@ -2,7 +2,7 @@
 // The NPU holds one engine at a time (#3666): starting a per-op xdna slot while FLM is up (or the
 // reverse) is refused. Confirming retries once with `unloadNpuHolder`, which makes the backend
 // unload the holder first. Traffic never passes the flag; only this click does.
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useSlotLoad, useSlotRestart } from '@/api/hooks/useSlots'
 import { ConfirmDialog } from '../primitives.jsx'
 import { npuConflictCopy, npuConflictFromError } from './npu-conflict-pure'
@@ -19,6 +19,8 @@ export function useNpuConflictStart() {
   const loadMut = useSlotLoad()
   const restartMut = useSlotRestart()
   const [ask, setAsk] = useState(null)
+  // Ref mirror of `ask`: a second run() in the same tick must see the open dialog.
+  const asking = useRef(false)
   const [busy, setBusy] = useState(false)
 
   const post = (name, kind, unloadNpuHolder) => {
@@ -27,6 +29,9 @@ export function useNpuConflictStart() {
   }
 
   const run = async (name, kind, opts = {}) => {
+    // One dialog at a time: a second start while it is open must not replace it (that would drop
+    // the first call's onSettled).
+    if (asking.current) return 'prompted'
     try {
       await post(name, kind, false)
       return 'ok'
@@ -37,6 +42,7 @@ export function useNpuConflictStart() {
         toast(err?.message || `${name}: the NPU is busy loading`, 'warn')
         return 'blocked'
       }
+      asking.current = true
       setAsk({ name, kind, c, onSettled: opts.onSettled })
       return 'prompted'
     }
@@ -44,6 +50,7 @@ export function useNpuConflictStart() {
 
   const close = () => {
     const a = ask
+    asking.current = false
     setAsk(null)
     a?.onSettled?.()
   }
@@ -53,9 +60,11 @@ export function useNpuConflictStart() {
     try {
       await post(a.name, a.kind, true)
     } catch (err) {
+      // By design a second slot.npu_conflict on the retry is just this toast: no re-prompt loop.
       toast(err?.message ? `${a.name}: ${err.message}` : `${a.name}: action failed`, 'warn')
     } finally {
       setBusy(false)
+      asking.current = false
       setAsk(null)
       a.onSettled?.()
     }
