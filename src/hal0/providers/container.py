@@ -1196,6 +1196,21 @@ def _llama_argv_segments(
     return [("base", base), ("model", model), ("profile", profile), ("slot", slot)]
 
 
+def _health_cmd(port: int, runner_key: str | None) -> str:
+    """The container health probe for a llama-server slot (#3658).
+
+    Most runner images ship ``curl``. The ``xdna`` image ships neither ``curl``,
+    ``wget`` nor ``python3``, so the curl probe always failed and podman showed
+    a serving xdna slot as ``unhealthy``. xdna instead opens a TCP connection to
+    the slot port with bash's ``/dev/tcp``: it needs no extra binary, and the
+    port only opens once llama-server is listening. The command avoids ``%``,
+    ``$`` and backslashes so Quadlet's unit parsing leaves it alone.
+    """
+    if runner_key == "xdna":
+        return f'bash -c "exec 3<>/dev/tcp/127.0.0.1/{port}" || exit 1'
+    return f"curl -fsS http://127.0.0.1:{port}/health || exit 1"
+
+
 def _llama_launch_plan(
     *,
     image: str,
@@ -1287,7 +1302,7 @@ def _llama_launch_plan(
         port=port,
         # Empty network_mode → loopback publish derived from port by the renderer.
         network_mode="",
-        health=HealthCheck(cmd=f"curl -fsS http://127.0.0.1:{port}/health || exit 1"),
+        health=HealthCheck(cmd=_health_cmd(port, runner_key)),
         ulimits=list(ulimits) if ulimits else [],
     )
 
