@@ -4,6 +4,7 @@ import {
   ggmlCreateBody,
   ggmlCtxError,
   ggmlEditBody,
+  ggmlModelIds,
   ggmlNameError,
   ggmlProfileOptions,
   nextGgmlName,
@@ -126,5 +127,16 @@ describe('ggmlEditBody', () => {
   })
   it('clears the xdna table with null', () => {
     expect(ggmlEditBody(draft(), draft({ pmode: 'turbo', env: { A: '1' } }))).toEqual({ xdna: null })
+  })
+})
+
+describe('ggmlModelIds', () => {
+  const fit = { 'blob-sha-a': { xdna_path: 'fused', reason: '' }, 'tiny.gguf': { xdna_path: 'per-op', reason: '' }, 'embed-x': { xdna_path: null, reason: '' } }
+  it('lists exactly the fit map keys, including a hub-cache row the registry type rules would drop', () => {
+    const models = [{ id: 'blob-sha-a', type: 'llm' }, { id: 'tiny.gguf', type: 'llm' }, { id: 'embed-x', type: 'embedding' }, { id: 'flm-only', type: 'llm' }]
+    expect(ggmlModelIds(models, fit)).toEqual(['blob-sha-a', 'tiny.gguf'])
+  })
+  it('is empty without a fit map', () => {
+    expect(ggmlModelIds([{ id: 'a', type: 'llm' }], null)).toEqual([])
   })
 })

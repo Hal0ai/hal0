@@ -10,20 +10,19 @@ import { useXdnaFit } from '@/api/hooks/useXdnaFit'
 import { useXdnaKnobs } from '@/api/hooks/useXdnaKnobs'
 import './npu-tab.css'
 import { slotButtonPhase } from '../slot-status.js'
-import { compatibleModels } from '../slots/slot-shared.js'
 import {
   GGML_CTX_PRESETS,
   GGML_REQUANT_CMD,
   ggmlCreateBody,
   ggmlCtxError,
   ggmlEditBody,
+  ggmlModelIds,
   ggmlNameError,
   ggmlProfileOptions,
   ggmlRequantHint,
   nextGgmlName,
 } from './ggml-slot-pure'
 
-const XDNA_SLOT = { binary: 'xdna', device: 'npu', device_class: 'npu' }
 const toast = (msg, kind = 'info') => typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
 const fmt = (n) => (n == null ? '—' : Number(n).toLocaleString('en-US'))
 
@@ -82,8 +81,8 @@ export function GgmlSlotForm({ mode, slot, initialModel, onDone, variant = 'full
   const [customCtx, setCustomCtx] = useState('')
   const cmdRef = useRef(null)
 
-  const models = useMemo(() => compatibleModels(modelsQ.data, { type: 'llm', slot: XDNA_SLOT }), [modelsQ.data])
   const fit = fitQ.data ?? {}
+  const models = useMemo(() => ggmlModelIds(modelsQ.data, fitQ.data).map((id) => ({ id })), [modelsQ.data, fitQ.data])
   const profileOpts = ggmlProfileOptions(profilesQ.data)
   const profileRow = (profilesQ.data ?? []).find((p) => p.name === d.profile)
   const pmodes = knobsQ.data?.pmodes ?? []
