@@ -1,7 +1,7 @@
 """hal0-memory — Hermes ``MemoryProvider`` plugin (canonical, shipped source).
 
-Implements the two-bank model (private:hermes + shared, agent-id ``hermes``,
-explicit memory tools). See ``provider.py`` / ``_client.py`` docstrings. This
+Implements hal0's two-bank model (shared by default, private on request; hal0
+picks the bank), agent-id ``hermes``, explicit memory tools. See ``provider.py`` / ``_client.py`` docstrings. This
 plugin is vendored in two byte-identical copies:
 ``src/hal0/agents/hermes/plugins/memory_hindsight/`` is the CANONICAL source
 (importable for unit tests) and

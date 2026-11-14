@@ -302,5 +302,13 @@ def test_schemas_tell_reflect_and_recall_apart() -> None:
     props = REFLECT_SCHEMA["parameters"]["properties"]
     assert props["budget"]["enum"] == ["low", "mid", "high"]
     assert props["tags_match"]["enum"] == ["any", "all", "any_strict", "all_strict", "exact"]
-    assert set(props) == {"query", "budget", "tags", "tags_match", "response_schema", "max_tokens"}
+    assert set(props) == {
+        "query",
+        "budget",
+        "tags",
+        "tags_match",
+        "response_schema",
+        "max_tokens",
+        "project",
+    }
     assert REFLECT_SCHEMA["parameters"]["required"] == ["query"]
