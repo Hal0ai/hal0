@@ -8,6 +8,7 @@ import { useSlots } from '@/api/hooks/useSlots'
 import { useArbiter } from '@/api/hooks/useComfyui'
 import { useMemoryBudget } from '@/api/hooks/useStatsHardware'
 import { slotMemLabel } from './slots/slot-shared.js'
+import { isXdnaSlot } from '@/lib/slotModelFit'
 import { RAIL_GROUPS, railCounts, railFooter, railRows, stateCell } from './slot-rail-pure'
 
 const { useEffect, useMemo, useRef } = React
@@ -71,12 +72,36 @@ export function SlotRail({ onNew }) {
     }
   }, [])
 
-  // GPU/CPU slots are cards in the Inference pane; NPU slots are model rows in the NPU card.
+  // GPU/CPU slots are cards in the Inference pane. An NPU slot lives in the NPU tab's lanes: the
+  // click navigates to #slots/npu/lanes, waits for the tab to render, then scrolls to and flashes
+  // the slot's lane (the GGML card for an xdna slot, the FLM lane for the anchor and its shadows).
   const goToCard = (name) => {
     const n = cssEscape(name)
-    const card =
-      document.querySelector(`[data-testid="infer-slot-${n}"]`) ??
-      document.querySelector(`[data-testid="npu-model-${n}"]`)
+    const slot = slots.find((s) => s.name === name)
+    if (slot && (slot.device_class === 'npu' || slot.device === 'npu')) {
+      const target = isXdnaSlot(slot) ? `ggml-card-${n}` : 'flm-lane'
+      const key = 'go:' + name
+      const find = () => document.querySelector(`[data-testid="${target}"]`)
+      if (!/^#slots\/npu\/lanes/.test(window.location.hash || '')) window.location.hash = 'slots/npu/lanes'
+      let tries = 0
+      const seek = () => {
+        const el = find()
+        if (el) {
+          timers.current.delete(key)
+          el.scrollIntoView({ block: 'nearest' })
+          flash(el, 'card:' + name)
+        } else if (++tries < 20) {
+          timers.current.set(key, setTimeout(seek, 50))
+        } else {
+          timers.current.delete(key)
+        }
+      }
+      const prev = timers.current.get(key)
+      if (prev != null) clearTimeout(prev)
+      seek()
+      return
+    }
+    const card = document.querySelector(`[data-testid="infer-slot-${n}"]`)
     if (!card) return
     card.scrollIntoView({ block: 'nearest' })
     flash(card, 'card:' + name)

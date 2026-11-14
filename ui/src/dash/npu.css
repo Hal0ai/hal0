@@ -359,35 +359,6 @@
   }
 }
 
-.npu-card .rsel-trigger.model-picker {
-  width: 100%;
-  min-width: 0;
-  padding: 6px 10px;
-  border: 1px solid var(--line-strong);
-  border-radius: var(--rad-sm);
-  background: var(--bg-1);
-  color: var(--fg);
-  font-family: var(--jbm);
-  font-size: 11.5px;
-  transition: border-color var(--dur-fast, 0.15s) var(--ease, ease);
-}
-.npu-card .rsel-trigger.model-picker:hover:not([disabled]) {
-  border-color: var(--dev-npu);
-}
-.npu-card .rsel-trigger.model-picker[disabled] {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* Open-dropdown escape hatch (same caveat as `.scard` in engine-panes.css).
-   An ancestor stacking context would otherwise swallow the listbox, an absolutely-
-   positioned popover that must overflow the card:
-     lift the whole NPU tab over the sections after it while a listbox is open. */
-.npu-card:has(.rsel-trigger[aria-expanded='true']) {
-  position: relative;
-  z-index: 20;
-}
-
 /* ── shared/time-sliced grid treatment ────────────────────────────────
    Honesty rule: the hatch marks "more than one holder is on this array",
    never a per-tile load claim. Static diagonal hatch, no extra animation —

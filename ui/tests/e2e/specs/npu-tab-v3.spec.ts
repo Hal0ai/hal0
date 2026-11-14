@@ -85,6 +85,15 @@ test.describe('NPU tab', () => {
     await expect(page.getByTestId('npu-lanes')).toBeVisible()
   })
 
+  test('clicking an NPU slot in the rail opens the NPU lanes and flashes its lane', async ({ page }) => {
+    await setup(page)
+    await page.goto('/#slots')
+    await page.locator('[data-testid="slot-rail-row"][data-slot="npu-gguf"]').click()
+    await expect(page).toHaveURL(/#slots\/npu\/lanes$/)
+    await expect(page.getByTestId('ggml-card-npu-gguf')).toBeVisible()
+    await expect(page.getByTestId('ggml-card-npu-gguf')).toHaveClass(/flash/)
+  })
+
   test('adds a GGML slot from the lane', async ({ page }) => {
     await setup(page)
     const calls: string[] = []
