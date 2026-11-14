@@ -24,8 +24,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 import hal0.api.routes.hardware as hw_mod
+import hal0.api.routes.npu as _npu_routes
 import hal0.providers.npu_columns as npu_columns
 from hal0.slots.state import SlotState
+
+# Captured at import, before the autouse fixture stubs it, for the cache tests.
+_REAL_LOCAL_IMAGE_REFS = _npu_routes._local_image_refs
 
 
 class _FakeSlot:
@@ -507,7 +511,7 @@ def test_engine_facts_are_none_when_every_read_fails(client: TestClient, monkeyp
 def image_store(monkeypatch):
     import hal0.api.routes.npu as npu_mod
 
-    monkeypatch.undo()  # drop the autouse stub of _local_image_refs
+    monkeypatch.setattr(npu_mod, "_local_image_refs", _REAL_LOCAL_IMAGE_REFS)
     monkeypatch.setattr(npu_mod, "_image_store_cache", None)
     monkeypatch.setattr(npu_mod, "_image_refresh_thread", None)
     return npu_mod
