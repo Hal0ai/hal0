@@ -16,7 +16,7 @@ import {
 	useSlotRename,
 } from "@/api/hooks/useSlots";
 import { useHardware } from "@/api/hooks/useHardware";
-import { useModels, usePullJob } from "@/api/hooks/useModels";
+import { useModels } from "@/api/hooks/useModels";
 // Host-truth GTT feasibility signal (993ea3b6, drawer overhaul Task 11d) —
 // feeds the per-row fit chips on the Model picker.
 import { useModelsFeasibility } from "@/api/hooks/useModelsFeasibility";
@@ -83,7 +83,6 @@ import {
 import { statusCopyForSlotState } from "./status-copy";
 import { SlotBreakerChip } from "./breaker-chip.jsx";
 import { ConversionBlockedChip, ConversionBlockedDetail } from "./conversion-blocked-chip.jsx";
-import { npuModalityOn, npuApplyBody } from "./npu-modality.js";
 import { slotModelRow, slotModelId, npuAnchorSlot, compatibleModels } from "./slots/slot-shared.js";
 import { slotEditHash } from './slots-route'
 
@@ -465,55 +464,6 @@ function modelRichOptions({ compatible, cur, has, slotLong, allSlots, verdictChi
 	return opts;
 }
 
-// ── NPU · Chat RichSelect rows ─────────────────────────────────────────────
-// The anchor FLM slot's chat-model picker, styled like the slot card's model
-// picker (inference-pane.jsx modelPickerOptions): line 1 = tag + modality,
-// line 2 = the purple flm runtime chip, plus a download chip for a tag that is
-// not on disk yet (picking one pulls it first). Rows come from the FLM
-// catalogue (/api/slots/flm/models: {model, installed, capabilities}), so
-// installed tags sort ahead of downloadable ones. A current tag missing from
-// the catalogue stays selectable as a bare row, like modelRichOptions does.
-function npuChatRichOptions(chatModels, cur) {
-	const sorted = [...chatModels].sort((a, b) => Number(!!b.installed) - Number(!!a.installed));
-	const opts = [];
-	if (cur && !sorted.some((m) => m.model === cur)) {
-		opts.push({ id: cur, row: cur });
-	}
-	for (const m of sorted) {
-		const caps = Array.isArray(m.capabilities) ? m.capabilities : [];
-		// FLM multimodal chat tags (gemma4-it) also transcribe — the card's
-		// asr modality tag, from FLM's "stt" capability.
-		const modTag = caps.includes("stt") || caps.includes("asr") ? "asr" : null;
-		const name = (
-			<span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{m.model}</span>
-		);
-		const download = !m.installed && <span className="chip">⬇ download</span>;
-		opts.push({
-			id: m.model,
-			row: (
-				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-					{name}
-					<ModalityTag tag={modTag} />
-				</span>
-			),
-			trigger: (
-				<span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-					{name}
-					<ModalityTag tag={modTag} />
-					{download}
-				</span>
-			),
-			desc: (
-				<span className="rsel-desc-line">
-					<span className="chip dev-npu">flm</span>
-					{download}
-				</span>
-			),
-		});
-	}
-	return opts;
-}
-
 // ── Profile RichSelect rows (Task 11c) ────────────────────────────────────
 // name + the runtime it carries (title/chips, via profiles.jsx's shared
 // runtimeChips) + an intent line — mirrors how the Profiles view itself
@@ -695,7 +645,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	const isXdnaSlotEdit = isXdnaSlot(slot);
 	// Full slot list — needed only to resolve a shadow's anchor STRUCTURALLY
 	// (see the NPU-modalities row below); #1637 already pays this same query
-	// in npu-pane.jsx, so react-query serves it from cache here.
+	// by the NPU tab, so react-query serves it from cache here.
 	const slotsQuery = useSlots();
 	// HW grid (spec-hw-slot-ownership §2): BINARY options + fit-check metadata
 	// from system-info (RUNNER_IMAGES). Device is seeded from the model at
@@ -806,132 +756,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 	// `chat_template` is a typed MODEL field in both specs — `resolve_chat_template`
 	// says the per-slot key "is no longer consulted" — so the slot-tier editor
 	// wrote TOML the launch path ignores, and fired a cold restart to apply it.)
-	// Task 3 (NPU modality toggles): asr/embed instant-apply + cold restart for
-	// device=npu slots. Seeded from slot.npu ({asr,embed}); optimistic with
-	// revert-on-error.
-	const [npuAsr, setNpuAsr] = useStateSM(npuModalityOn(slot?.npu, "asr"));
-	const [npuEmbed, setNpuEmbed] = useStateSM(npuModalityOn(slot?.npu, "embed"));
-	const [npuChat, setNpuChat] = useStateSM(npuModalityOn(slot?.npu, "chat"));
-	// #1388: seed from the CONFIGURED tag ([model].default, lifted by
-	// config_enrichment and normalised to `modelDefault`), not the live
-	// `model_id`. useSlots documents model_id as stale for exactly this slot
-	// class — trio slots never load as their own process, so it never
-	// reconciles off the pre-trio GGUF. Every modality toggle re-sends this
-	// value, so seeding it wrong meant an ASR/Embed flip silently rewrote
-	// [model].default to an unrelated GGUF id and cold-restarted the slot.
-	// Live id stays in the chain as a fallback for a slot with no configured
-	// default on disk.
-	const [npuChatModel, setNpuChatModel] = useStateSM(
-		slot?.modelDefault || slot?.model_id || slot?.model || "qwen3:4b",
-	);
-	const [npuPending, setNpuPending] = useStateSM(false);
-	const [npuErr, setNpuErr] = useStateSM(null);
-	const [flmModels, setFlmModels] = useStateSM([]);
-	// Pull-on-select: usePullJob owns one FLM download (SSE progress). pullTarget
-	// remembers which role+tag is downloading so we auto-apply it on completion.
-	const pull = usePullJob();
-	const [pullTarget, setPullTarget] = useStateSM(null); // {role, field, tag} | null
-
-	// Fetch the full FLM catalogue (installed + downloadable) when the NPU slot
-	// editor is open. Extracted so we can re-fetch after a download completes
-	// (the tag flips installed=true).
-	const refreshFlmModels = React.useCallback(() => {
-		fetch("/api/slots/flm/models")
-			.then((r) => r.json())
-			.then((d) => {
-				// Defensive: an empty/degraded payload ({} from a proxy or an API
-				// hiccup) must never leave a non-array here — flmModels.filter on an
-				// object crashed the entire slots view behind the error boundary (C7d).
-				const models = Array.isArray(d?.models)
-					? d.models
-					: Array.isArray(d)
-						? d
-						: [];
-				setFlmModels(models);
-			})
-			.catch(() => {});
-	}, []);
-	React.useEffect(() => {
-		// Anchor only — the trio shadows render no model pickers (their [npu]
-		// section is a pointer at the anchor), so skip the catalogue fetch.
-		if (device !== "npu" || slot?.type !== "llm" || isXdnaSlotEdit) return;
-		refreshFlmModels();
-	}, [slot?.name, device, isXdnaSlotEdit]);
-
-	// Apply an NPU modality/model change and cold-restart the container. Lifted
-	// to component scope (out of the render IIFE) so the pull-completion effect
-	// can call it too. `over` carries only the changed field(s); the rest fall
-	// back to current state — which is also what we revert to on error.
-	const applyNpu = async (over = {}, field = "modality") => {
-		const chat = over.chat ?? npuChat;
-		const asr = over.asr ?? npuAsr;
-		const embed = over.embed ?? npuEmbed;
-		const chatModel = over.chatModel ?? npuChatModel;
-		setNpuPending(true);
-		setNpuErr(null);
-		// [npu] carries the modality toggles (asr/embed are boolean — FLM loads its
-		// one bundled whisper / embed-gemma, no per-role model choice). The chat
-		// model is FLM's positional tag, sent as a nested [model] table so the
-		// backend merge preserves sibling keys (context_size, n_gpu_layers)
-		// instead of clobbering them with a bare string.
-		const body = npuApplyBody({ chat, asr, embed, chatModel });
-		try {
-			await editMut.mutateAsync({ name: slot.name, body });
-			restartMut.mutate(slot.name, {
-				onError: (err) =>
-					window.__hal0Toast &&
-					window.__hal0Toast(
-						`NPU restart failed — ${err?.message || "see logs"}`,
-						"err",
-					),
-			});
-			window.__hal0Toast &&
-				window.__hal0Toast(
-					`${slot.name} NPU ${field} updated — restarting`,
-					"info",
-				);
-		} catch (err) {
-			setNpuChat(npuChat);
-			setNpuAsr(npuAsr);
-			setNpuEmbed(npuEmbed);
-			setNpuChatModel(npuChatModel);
-			setNpuErr(err?.message || "NPU toggle failed");
-		} finally {
-			setNpuPending(false);
-		}
-	};
-
-	// Pick the chat model. Installed → apply immediately. Not-yet-downloaded →
-	// start the FLM pull and remember the target; the completion effect below
-	// auto-applies it once the weights land. (ASR/Embed have no model choice.)
-	const onPickNpuModel = (role, field, tag) => {
-		setNpuChatModel(tag);
-		const entry = flmModels.find((m) => m.model === tag);
-		if (entry && entry.installed === false) {
-			setNpuErr(null);
-			setPullTarget({ role, field, tag });
-			pull.start(tag).catch(() => {}); // failure surfaces via the effect below
-		} else {
-			applyNpu({ [field]: tag }, role);
-		}
-	};
-
-	// Auto-apply a freshly-downloaded model, or surface a failed/cancelled pull.
-	React.useEffect(() => {
-		if (!pullTarget || pull.modelId !== pullTarget.tag) return;
-		if (pull.state === "completed") {
-			refreshFlmModels();
-			applyNpu({ [pullTarget.field]: pullTarget.tag }, pullTarget.role);
-			setPullTarget(null);
-			pull.reset();
-		} else if (pull.state === "failed" || pull.state === "cancelled") {
-			setNpuErr(pull.error?.message || `Download ${pull.state}`);
-			setPullTarget(null);
-			pull.reset();
-		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [pull.state, pull.modelId, pullTarget]);
-
 	// Resolved command provenance — only fetched while the drawer is open.
 	// Falls back gracefully when null (non-llama slots) or on error.
 	const resolvedQuery = useSlotResolved(slot?.name, { enabled: !!open });
@@ -977,17 +801,6 @@ function EditSlotDrawer({ open, slot, onClose }) {
 		setModelEditOpen(false);
 		setProfileDrawer(null);
 		setFieldErrs({});
-		setNpuAsr(npuModalityOn(slot.npu, "asr"));
-		setNpuEmbed(npuModalityOn(slot.npu, "embed"));
-		// Re-seed the chat pill + all three model selects too, so a save +
-		// refetch keeps the drawer in sync with server truth instead of
-		// drifting until the drawer is remounted.
-		setNpuChat(npuModalityOn(slot.npu, "chat"));
-		setNpuChatModel(
-			slot.modelDefault || slot.model_id || slot.model || "qwen3:4b",
-		);
-		setNpuPending(false);
-		setNpuErr(null);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [slot?.name, configEnriched]);
 
@@ -2376,7 +2189,7 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						<div className="form-ctl">
 							<div className="hint">
 								{(() => {
-									// Resolved STRUCTURALLY (#1662, mirrors #1637's npu-pane.jsx
+									// Resolved STRUCTURALLY (#1662, mirrors #1637's anchor
 									// fix) — never by stripping a `-stt`/`-embed` suffix off THIS
 									// slot's own name. `reconcile_trio_slots` names new shadows
 									// after the anchor but never renames pre-existing ones, so a
@@ -2416,137 +2229,25 @@ function EditSlotDrawer({ open, slot, onClose }) {
 						</div>
 					</div>
 				)}
-				{/* NPU capability matrix — replaces Model+Template for NPU slots.
-				    Anchor only (type=llm): the trio shadows have no config of
-				    their own (see the block above). */}
-				{device === "npu" &&
-					!isXdnaSlotEdit &&
-					slot?.type === "llm" &&
-					(() => {
-						// Full catalogue per lane (installed + downloadable) — NOT filtered by
-						// `installed`, so any tag can be picked and pulled on demand. Lane
-						// split by tag family (whisper → ASR, embed → Embed, else Chat).
-						const chatModels = flmModels.filter(
-							(m) =>
-								m.model &&
-								!m.model?.toLowerCase().includes("whisper") &&
-								!m.model?.toLowerCase().includes("embed"),
-						);
-						// True while THIS tag is downloading (used to gate + show progress).
-						const pulling = (tag) => pull.inFlight && pull.modelId === tag;
-						const pullPct = pull.pct != null ? `${pull.pct}%` : "…";
-						return (
-							<>
-								<div className="form-row" data-testid="npu-capability-matrix">
-									<div className="form-lbl">
-										<span>NPU · Chat</span>
-										<FieldInfoIcon description="NPU language model. Pick any model — downloads
-											automatically." />
-									</div>
-									<div className="form-ctl">
-										<span
-											style={{ display: "flex", alignItems: "center", gap: 8 }}
-										>
-											{/* The picker takes the row's spare width; the toggle
-											    keeps its own so its On/Off text never wraps. */}
-											<span style={{ flexShrink: 0 }}>
-												<PillToggle
-													on={npuChat}
-													disabled={npuPending || saving}
-													label="Chat"
-													stateText={npuChat ? "On" : "Off"}
-													onToggle={(next) => {
-														setNpuChat(next);
-														applyNpu({ chat: next }, "chat");
-													}}
-												/>
-											</span>
-											{/* Non-installed tags carry a download chip; picking
-											    one downloads first (onPickNpuModel). */}
-											<span style={{ flex: "1 1 auto", minWidth: 0 }}>
-												<RichSelect
-													className="model-picker"
-													value={npuChatModel}
-													options={npuChatRichOptions(chatModels, npuChatModel)}
-													onChange={(tag) => {
-														if (tag && tag !== npuChatModel)
-															onPickNpuModel("chat", "chatModel", tag);
-													}}
-													disabled={
-														npuPending || saving || !npuChat || pull.inFlight
-													}
-													aria-label="NPU chat model"
-													data-testid="npu-chat-model"
-												/>
-											</span>
-											{pulling(npuChatModel) && (
-												<span style={{ fontSize: 11, color: "var(--accent)" }}>
-													⬇ {pullPct}
-												</span>
-											)}
-										</span>
-									</div>
-								</div>
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>NPU · ASR</span>
-										<FieldInfoIcon description="Speech-to-text on the NPU (whisper). Shares the NPU
-											process." />
-									</div>
-									<div className="form-ctl">
-										<span
-											style={{ display: "flex", alignItems: "center", gap: 8 }}
-										>
-											<PillToggle
-												on={npuAsr}
-												disabled={npuPending || saving || pull.inFlight}
-												label="ASR"
-												stateText={npuAsr ? "On" : "Off"}
-												onToggle={(next) => {
-													setNpuAsr(next);
-													applyNpu({ asr: next }, "ASR");
-												}}
-											/>
-											<span style={{ fontSize: 11, color: "var(--fg-5)" }}>
-												whisper-v3 (fixed)
-											</span>
-										</span>
-									</div>
-								</div>
-								<div className="form-row">
-									<div className="form-lbl">
-										<span>NPU · Embed</span>
-										<FieldInfoIcon description="Text embeddings on the NPU (embed-gemma). Shares the NPU
-											process." />
-									</div>
-									<div className="form-ctl">
-										<span
-											style={{ display: "flex", alignItems: "center", gap: 8 }}
-										>
-											<PillToggle
-												on={npuEmbed}
-												disabled={npuPending || saving || pull.inFlight}
-												label="Embed"
-												stateText={npuEmbed ? "On" : "Off"}
-												onToggle={(next) => {
-													setNpuEmbed(next);
-													applyNpu({ embed: next }, "Embed");
-												}}
-											/>
-											<span style={{ fontSize: 11, color: "var(--fg-5)" }}>
-												embed-gemma (fixed)
-											</span>
-										</span>
-									</div>
-								</div>
-								{npuErr && (
-									<div className="hint" style={{ color: "var(--err)" }}>
-										{npuErr}
-									</div>
-								)}
-							</>
-						);
-					})()}
+				{/* FLM anchor: modality and chat model live on the NPU tab's FLM lane
+				    (staged, applied once), so the drawer keeps profile / port / image /
+				    autoload and points there. */}
+				{device === "npu" && !isXdnaSlotEdit && slot?.type === "llm" && (
+					<div className="form-row" data-testid="npu-lane-pointer">
+						<div className="form-lbl">
+							<span>NPU capabilities</span>
+						</div>
+						<div className="form-ctl">
+							<div className="hint">
+								Chat model and capabilities are on the{" "}
+								<a href="#slots/npu/lanes" data-testid="npu-lane-link">
+									NPU tab
+								</a>
+								.
+							</div>
+						</div>
+					</div>
+				)}
 
 				{/* Task 11a: the two Advanced surfaces this used to be (a controlled
 				    slot-hw-advanced disclosure for image/debug-pin, and

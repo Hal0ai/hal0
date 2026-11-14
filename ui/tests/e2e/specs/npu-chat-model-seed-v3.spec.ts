@@ -1,26 +1,15 @@
 /**
- * npu-chat-model-seed-v3 — the NPU chat tag comes from the CONFIGURED default,
- * not the live `model_id` (#1388).
+ * npu-chat-model-seed-v3 — the FLM lane's chat tag comes from the CONFIGURED default, not the
+ * live `model_id` (#1388).
  *
- * Every NPU modality toggle routes through `applyNpu`, which attaches
- * `model.default` alongside the `npu` table. It sourced that tag from
- * `slot.model_id` — which `useSlots.ts` documents as *stale for exactly this
- * slot class*:
- *
- *   "the intended FLM tag even when the live `model_id` is stale on the
- *    pre-trio GGUF (trio slots never load as their own process, so `model_id`
- *    never reconciles)"
- *
- * …and for which it already exposes the correct value as `modelDefault`
- * (normalised from `model_default`, which `config_enrichment` lifts from the
- * slot TOML). The drawer never read it.
- *
- * Consequence: flipping ASR or Embed — controls with no business touching the
- * chat model at all — rewrote `[model].default` to an unrelated GGUF id and
- * cold-restarted the slot. Silent config corruption on NPU boxes.
+ * `useSlots.ts` documents `model_id` as stale for exactly this slot class (trio slots never load
+ * as their own process, so it never reconciles off the pre-trio GGUF); the configured tag is
+ * `[model].default`. Flipping ASR or Embed — controls with no business touching the chat model —
+ * must never rewrite `[model].default` to an unrelated id. These cases drove the Slots drawer's
+ * capability matrix until the matrix moved to the NPU tab's FLM lane (final-review item 4); the
+ * lane stages toggles and applies once, so each case stages, applies and reads the one PUT.
  */
 import { test, expect, type Page } from '../fixtures/apiMock'
-import { pickRichOption } from '../fixtures/richSelect'
 
 /** The tag the operator configured, in the slot TOML. */
 const CONFIGURED = 'qwen3:8b'
@@ -61,11 +50,15 @@ async function seedSlots(page: Page, slots: any[]) {
   }, slots)
 }
 
-async function captureConfig(page: Page) {
+/** The anchor's saved config (GET) and every PUT body (captured). */
+async function captureConfig(page: Page, saved: any) {
   const puts: any[] = []
   await page.route('**/api/slots/npu/config', async (route) => {
-    if (route.request().method() === 'PUT') puts.push(route.request().postDataJSON())
-    await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    if (route.request().method() === 'PUT') {
+      puts.push(route.request().postDataJSON())
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(saved) })
   })
   await page.route('**/api/slots/npu/restart', (route) =>
     route.fulfill({ status: 202, contentType: 'application/json', body: '{}' }),
@@ -83,82 +76,81 @@ async function stubFlm(page: Page, models: any[]) {
   )
 }
 
-const lane = (page: Page, label: string) =>
-  page.locator('.drawer .form-row', { hasText: label })
+const SAVED = { name: 'npu', npu: { chat: true, asr: false, embed: false }, model: { default: CONFIGURED } }
 
-test.describe('NPU chat-model seeding (#1388)', () => {
+test.describe('FLM lane chat-model seeding (#1388)', () => {
   test('an ASR toggle never rewrites the configured chat tag', async ({ page }) => {
-    const puts = await captureConfig(page)
-    await stubFlm(page, [{ model: CONFIGURED, installed: true }])
+    const puts = await captureConfig(page, SAVED)
+    await stubFlm(page, [{ model: CONFIGURED, installed: true, capabilities: ['chat'] }])
     await seedSlots(page, [NPU_SLOT])
 
-    await page.goto('/#slots/edit/npu')
-    await lane(page, 'NPU · ASR').getByRole('switch').click()
+    await page.goto('/#slots/npu')
+    await page.getByTestId('flm-cap-asr').click()
+    await page.getByTestId('flm-apply').click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].npu).toEqual({ chat: true, asr: true, embed: false })
     // The whole point: the stale live id must never reach the wire.
     expect(JSON.stringify(puts[0])).not.toContain(STALE_LIVE)
-    if (puts[0].model !== undefined) {
-      expect(puts[0].model).toEqual({ default: CONFIGURED })
-    }
+    expect(puts[0].model).toEqual({ default: CONFIGURED })
   })
 
   test('an Embed toggle never rewrites the configured chat tag', async ({ page }) => {
-    const puts = await captureConfig(page)
-    await stubFlm(page, [{ model: CONFIGURED, installed: true }])
+    const puts = await captureConfig(page, SAVED)
+    await stubFlm(page, [{ model: CONFIGURED, installed: true, capabilities: ['chat'] }])
     await seedSlots(page, [NPU_SLOT])
 
-    await page.goto('/#slots/edit/npu')
-    await lane(page, 'NPU · Embed').getByRole('switch').click()
+    await page.goto('/#slots/npu')
+    await page.getByTestId('flm-cap-embed').click()
+    await page.getByTestId('flm-apply').click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].npu).toEqual({ chat: true, asr: false, embed: true })
     expect(JSON.stringify(puts[0])).not.toContain(STALE_LIVE)
+    expect(puts[0].model).toEqual({ default: CONFIGURED })
   })
 
   test('the chat lane displays the configured tag, not the live id', async ({ page }) => {
-    await captureConfig(page)
+    await captureConfig(page, SAVED)
     await stubFlm(page, [
-      { model: CONFIGURED, installed: true },
-      { model: 'flm-other', installed: true },
+      { model: CONFIGURED, installed: true, capabilities: ['chat'] },
+      { model: 'flm-other', installed: true, capabilities: ['chat'] },
     ])
     await seedSlots(page, [NPU_SLOT])
 
-    await page.goto('/#slots/edit/npu')
-    // An operator must be able to see what a toggle is about to send.
-    await expect(lane(page, 'NPU · Chat').getByTestId('npu-chat-model')).toContainText(CONFIGURED)
+    await page.goto('/#slots/npu')
+    // An operator must be able to see what an apply is about to send.
+    await expect(page.getByTestId('flm-chat-model')).toHaveValue(CONFIGURED)
   })
 
   test('an explicit chat-model pick still wins over the seed', async ({ page }) => {
-    const puts = await captureConfig(page)
+    const puts = await captureConfig(page, SAVED)
     await stubFlm(page, [
-      { model: CONFIGURED, installed: true },
-      { model: 'flm-other', installed: true },
+      { model: CONFIGURED, installed: true, capabilities: ['chat'] },
+      { model: 'flm-other', installed: true, capabilities: ['chat'] },
     ])
     await seedSlots(page, [NPU_SLOT])
 
-    await page.goto('/#slots/edit/npu')
-    await pickRichOption(lane(page, 'NPU · Chat').getByTestId('npu-chat-model'), 'flm-other')
+    await page.goto('/#slots/npu')
+    await page.getByTestId('flm-chat-model').selectOption('flm-other')
+    await page.getByTestId('flm-apply').click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].model).toEqual({ default: 'flm-other' })
   })
 
   test('falls back to the live id when no configured default exists', async ({ page }) => {
-    // A slot with no [model].default on disk has nothing better to offer;
-    // the fallback chain must not regress to the "qwen3:4b" constant while a
-    // real live id is available.
-    const puts = await captureConfig(page)
-    await stubFlm(page, [{ model: STALE_LIVE, installed: true }])
+    // A slot with no [model].default on disk has nothing better to offer; the fallback chain must
+    // not regress to a constant while a real live id is available.
+    const puts = await captureConfig(page, { name: 'npu', npu: { chat: true, asr: false, embed: false } })
+    await stubFlm(page, [{ model: STALE_LIVE, installed: true, capabilities: ['chat'] }])
     await seedSlots(page, [{ ...NPU_SLOT, model_default: undefined }])
 
-    await page.goto('/#slots/edit/npu')
-    await lane(page, 'NPU · ASR').getByRole('switch').click()
+    await page.goto('/#slots/npu')
+    await page.getByTestId('flm-cap-asr').click()
+    await page.getByTestId('flm-apply').click()
 
     await expect.poll(() => puts.length).toBe(1)
-    if (puts[0].model !== undefined) {
-      expect(puts[0].model).toEqual({ default: STALE_LIVE })
-    }
+    expect(puts[0].model).toEqual({ default: STALE_LIVE })
   })
 })

@@ -165,10 +165,13 @@ describe('slot drawer on an xdna slot', () => {
     act(() => root.unmount())
   })
 
-  it('still renders the FLM matrix and fetches the catalogue for an FLM anchor', () => {
+  it('an FLM anchor gets a pointer to the NPU tab, no capability matrix, no catalogue fetch', () => {
     const { root } = mount(FLM)
-    expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/slots/flm/models'))).toBe(true)
-    expect(byId('npu-capability-matrix')).not.toBeNull()
+    expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/slots/flm/models'))).toBe(false)
+    expect(byId('npu-capability-matrix')).toBeNull()
+    expect(byId('npu-chat-model')).toBeNull()
+    expect(byId('npu-lane-pointer')).not.toBeNull()
+    expect((byId('npu-lane-link') as HTMLAnchorElement).getAttribute('href')).toBe('#slots/npu/lanes')
     act(() => root.unmount())
   })
 })

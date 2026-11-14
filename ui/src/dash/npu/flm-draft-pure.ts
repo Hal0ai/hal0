@@ -19,7 +19,8 @@ type AnchorSlot = { npu?: Record<string, unknown> | null; modelDefault?: unknown
  *  (the `-FLM` suffix of a pre-#1629 id is dropped), as the occupancy card has always done. */
 export function savedFlm(anchorCfg: AnchorCfg, anchorSlot: AnchorSlot): SavedFlm {
   const npu = anchorCfg?.npu ?? anchorSlot?.npu ?? {}
-  const raw = anchorCfg?.model?.default ?? anchorSlot?.modelDefault ?? anchorSlot?.model_id ?? anchorSlot?.model ?? null
+  // `||`: useSlots normalises an absent default to '', which must fall through to the live ids.
+  const raw = anchorCfg?.model?.default || anchorSlot?.modelDefault || anchorSlot?.model_id || anchorSlot?.model || null
   const chatModel = typeof raw === 'string' && raw ? raw.replace(/-FLM$/, '') : null
   return {
     chat: npuModalityOn(npu, 'chat'),
