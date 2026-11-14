@@ -361,3 +361,194 @@ async def test_error_flm_whose_unit_is_gone_does_not_block(
 
     snap = await sm.load("px")
     assert snap.state == SlotState.READY
+
+
+# ── fix round 1 ───────────────────────────────────────────────────────────────
+
+
+async def test_duplicate_load_leaving_early_keeps_the_siblings_reservation(
+    tmp_hal0_home: str, events: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two loads of px are admitted; L1 leaves early, L2 is still before STARTING.
+
+    L1's exit must not drop L2's reservation: an FLM load arriving while L2 sits
+    in ``_check_load`` has to see px as pending, not as an OFFLINE slot.
+    """
+    _flm(tmp_hal0_home)
+    _xdna(tmp_hal0_home, "px", 8090)
+    sm = SlotManager()
+    entered, gate, both_admitted = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    abandoned = iter([True])
+    admissions: list[str] = []
+    real_admit = sm._admit_npu_for_load
+
+    async def admit(slot_name: str, *a: Any, **k: Any) -> None:
+        await real_admit(slot_name, *a, **k)
+        admissions.append(slot_name)
+        if admissions.count("px") == 2:
+            both_admitted.set()
+
+    async def is_abandoned() -> bool:
+        # L1 leaves only once L2 is admitted too, so L2 holds a reservation.
+        if next(abandoned, False):
+            await both_admitted.wait()
+            return True
+        return False
+
+    async def gated_check(self: SlotManager, cfg: Any, *a: Any, **k: Any) -> None:
+        if cfg.get("name") == "px":
+            entered.set()
+            await gate.wait()
+
+    monkeypatch.setattr("hal0.slots.manager.is_abandoned", is_abandoned)
+    monkeypatch.setattr(SlotManager, "_check_load", gated_check)
+    monkeypatch.setattr(sm, "_admit_npu_for_load", admit)
+
+    async def scenario() -> None:
+        l1 = asyncio.create_task(sm.load("px"))
+        l2 = asyncio.create_task(sm.load("px"))
+        await entered.wait()
+        assert l1.done() and sm.state("px") == SlotState.OFFLINE
+        with pytest.raises(SlotNpuConflict) as exc:
+            await sm.load("flm", unload_npu_holder=True)
+        assert exc.value.details["pending"] is True
+        gate.set()
+        await asyncio.gather(l1, l2)
+
+    await asyncio.wait_for(scenario(), timeout=5.0)
+    assert sm.state("px") == SlotState.READY
+    assert sm.state("flm") == SlotState.OFFLINE
+    assert _spawns(events) == ["px"]
+    assert sm._npu_pending == {}
+
+
+async def test_opt_in_never_unloads_a_holder_still_warming(
+    tmp_hal0_home: str, events: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _flm(tmp_hal0_home)
+    _xdna(tmp_hal0_home, "px", 8090)
+    sm = SlotManager()
+    warming, gate = asyncio.Event(), asyncio.Event()
+
+    async def gated_ready(self: SlotManager, slot_name: str, *a: Any, **k: Any) -> SlotState:
+        if slot_name == "flm":
+            warming.set()
+            await gate.wait()
+        return SlotState.READY
+
+    monkeypatch.setattr(SlotManager, "_await_ready", gated_ready)
+
+    async def scenario() -> None:
+        flm = asyncio.create_task(sm.load("flm"))
+        await warming.wait()
+        assert sm.state("flm") == SlotState.WARMING
+        with pytest.raises(SlotNpuConflict) as exc:
+            await sm.load("px", unload_npu_holder=True)
+        assert exc.value.details["pending"] is True
+        assert exc.value.details["holders"] == ["flm"]
+        gate.set()
+        await flm
+
+    await asyncio.wait_for(scenario(), timeout=5.0)
+    assert sm.state("flm") == SlotState.READY
+    assert sm.state("px") == SlotState.OFFLINE
+    assert _stops(events) == []
+
+
+async def test_slot_that_went_down_while_queued_is_rechecked_under_the_lock(
+    tmp_hal0_home: str, events: list[tuple[str, str]], container_stub: FakeContainerProvider
+) -> None:
+    """px was READY when its load checked, then went down and FLM came up meanwhile."""
+    _flm(tmp_hal0_home)
+    _xdna(tmp_hal0_home, "px", 8090)
+    sm = SlotManager()
+    await sm.load("px")
+    events.clear()
+
+    lock = sm._lock("px")
+    await lock.acquire()
+    task = asyncio.create_task(sm.load("px", unload_npu_holder=True))
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert not task.done()
+    await sm._transition("px", SlotState.OFFLINE, force=True)
+    container_stub.active.discard("px")
+    await sm._transition("flm", SlotState.READY, model_id="gemma3-4b-FLM", force=True)
+    container_stub.active.add("flm")
+    lock.release()
+
+    with pytest.raises(SlotNpuConflict):
+        await asyncio.wait_for(task, timeout=5.0)
+    assert sm.state("px") == SlotState.OFFLINE
+    assert sm.state("flm") == SlotState.READY
+    assert events == []
+    assert sm._npu_pending == {}
+
+
+async def test_swap_fused_to_per_op_beside_flm_is_refused_before_anything_changes(
+    tmp_hal0_home: str, events: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _flm(tmp_hal0_home)
+    _xdna(tmp_hal0_home, "fx", 8091, per_op=False)
+
+    async def path_by_model(self: SlotManager, cfg: Any, model_id: str | None) -> str:
+        return "per-op" if model_id == "perop-m" else "fused"
+
+    monkeypatch.setattr(SlotManager, "_npu_xdna_path", path_by_model)
+    sm = SlotManager()
+    await sm.load("flm")
+    await sm.load("fx")
+    events.clear()
+    persisted: list[str] = []
+
+    async def persist(self: SlotManager, slot_name: str, model_id: str) -> None:
+        persisted.append(model_id)
+
+    monkeypatch.setattr(SlotManager, "_persist_model_default", persist)
+
+    with pytest.raises(SlotNpuConflict):
+        await sm.swap("fx", "perop-m")
+
+    assert persisted == []
+    cfg = await sm._load_slot_config("fx")
+    assert cfg["model"]["default"] == "qwen3-1.7b"
+    assert sm.state("fx") == SlotState.READY
+    assert sm.state("flm") == SlotState.READY
+    assert events == []
+
+
+async def test_failed_holder_unload_releases_the_reservation(
+    tmp_hal0_home: str, events: list[tuple[str, str]], container_stub: FakeContainerProvider
+) -> None:
+    _flm(tmp_hal0_home)
+    _xdna(tmp_hal0_home, "px", 8090)
+    sm = SlotManager()
+    await sm.load("flm")
+    container_stub.fail_unload = RuntimeError("systemctl stop wedged")
+
+    with pytest.raises(RuntimeError, match="stop wedged"):
+        await sm.load("px", unload_npu_holder=True)
+
+    assert sm._npu_pending == {}
+    assert sm.state("px") == SlotState.OFFLINE
+    assert not _failures(sm, "px")
+    assert "px" not in _spawns(events)
+
+
+async def test_peer_whose_model_lookup_raises_is_judged_per_op(
+    tmp_hal0_home: str, events: list[tuple[str, str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One bad peer lookup yields a verdict (per-op, the safe side), not a raw error."""
+    _flm(tmp_hal0_home)
+    _xdna(tmp_hal0_home, "px", 8090, per_op=False)
+    sm = SlotManager()
+    await sm.load("px")
+
+    async def broken(self: SlotManager, *a: Any, **k: Any) -> dict[str, Any]:
+        raise RuntimeError("registry exploded")
+
+    monkeypatch.setattr(SlotManager, "_resolve_model_info", broken)
+
+    with pytest.raises(SlotNpuConflict) as exc:
+        await sm.load("flm")
+    assert exc.value.details["holders"] == ["px"]

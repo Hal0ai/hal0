@@ -161,3 +161,17 @@ def test_live_and_pending_holders_together_report_pending() -> None:
     assert c is not None
     assert c.holders == ("a", "b")
     assert c.pending is True
+
+
+@pytest.mark.parametrize("state", [SlotState.PULLING, SlotState.STARTING, SlotState.WARMING])
+def test_in_flight_holder_is_pending(state: SlotState) -> None:
+    """A holder whose own load is still running is pending: the opt-in never unloads it."""
+    c = find_npu_conflict("x", _xdna("x"), "per-op", [_peer(FLM, state)], {})
+    assert c is not None and c.pending is True and c.holders == ("flm",)
+    c2 = find_npu_conflict("flm", FLM, None, [_peer(_xdna("a"), state, path="per-op")], {})
+    assert c2 is not None and c2.pending is True
+
+
+def test_unloading_holder_is_not_pending() -> None:
+    c = find_npu_conflict("x", _xdna("x"), "per-op", [_peer(FLM, SlotState.UNLOADING)], {})
+    assert c is not None and c.pending is False

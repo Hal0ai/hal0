@@ -616,8 +616,12 @@ class SlotManager:
         # in ``_npu_pending`` under its role, so a concurrent opposite load
         # sees it (as ``pending``) instead of an OFFLINE slot. Released by
         # ``_release_npu_pending`` wherever ``_release_fabric_pending`` is.
+        # Reservations are per call (``_npu_holds`` keeps each load's token):
+        # two loads of one slot are both admitted, and the one that leaves
+        # first must not drop the reservation the other still relies on.
         self._npu_admission_lock: asyncio.Lock = asyncio.Lock()
         self._npu_pending: dict[str, NpuRole] = {}
+        self._npu_holds: dict[str, set[object]] = {}
         self._admission_lock: asyncio.Lock = asyncio.Lock()
         self._idle_monitor_interval_s: float = idle_monitor_interval_s
         # Idle/eviction background loop (P3-slots §1b) — SlotReaper owns its
@@ -2014,17 +2018,20 @@ class SlotManager:
         # the holder(s) through ``unload()``, which takes THEIR locks, and must
         # do so holding neither the admission lock nor this one. A loaded slot
         # skips it (the per-request hot path; it already holds what it holds).
+        npu_token = object()
         npu_admitted = False
         if self._current_state(slot_name) not in _READY_STATES:
-            await self._admit_npu_for_load(slot_name, model_id, unload_holder=unload_npu_holder)
+            await self._admit_npu_for_load(
+                slot_name, model_id, unload_holder=unload_npu_holder, token=npu_token
+            )
             npu_admitted = True
-        async with self._npu_reservation(slot_name), self._lock(slot_name):
+        async with self._npu_reservation(slot_name, npu_token), self._lock(slot_name):
             if not npu_admitted and self._current_state(slot_name) not in _READY_STATES:
                 # The slot was loaded at the check above and went down while
                 # this call queued for the lock. Check now, under the lock, but
                 # never unload from here: that would nest a holder's lock
                 # inside this one.
-                await self._admit_npu_locked(slot_name, model_id)
+                await self._admit_npu_locked(slot_name, model_id, token=npu_token)
             # The client that asked for this load may have gone while it queued
             # for the lock (behind another load, usually). Start nothing on its
             # behalf: not a cold load, not the stale-WARMING recovery below,
@@ -2261,7 +2268,7 @@ class SlotManager:
                     # the opposite device class if this slot later errors out
                     # further down and is retried.
                     self._release_fabric_pending(slot_name)
-                    self._release_npu_pending(slot_name)
+                    self._release_npu_pending(slot_name, npu_token)
                     await self._spawn_locked(slot_name, cfg, resolved_model, model_info=model_info)
                     await self._transition(
                         slot_name,
@@ -2333,7 +2340,7 @@ class SlotManager:
                 # applies: this re-raise is unchanged, only the state side
                 # effects are.
                 self._release_fabric_pending(slot_name)
-                self._release_npu_pending(slot_name)
+                self._release_npu_pending(slot_name, npu_token)
                 await self._transition(
                     slot_name,
                     SlotState.OFFLINE,
@@ -2343,7 +2350,7 @@ class SlotManager:
                 raise
             except Exception as exc:
                 self._release_fabric_pending(slot_name)
-                self._release_npu_pending(slot_name)
+                self._release_npu_pending(slot_name, npu_token)
                 error_message = str(exc)
                 gate_extra: dict[str, Any] = {}
                 if isinstance(exc, SlotOutputSanityFailed):
@@ -3448,7 +3455,9 @@ class SlotManager:
     async def _npu_peers(self, slot_name: str) -> Sequence[NpuPeer]:
         """The other NPU slots as the conflict rule sees them.
 
-        An ERROR slot whose unit is still running is presented as live, as
+        A peer in :data:`~hal0.slots.npu_conflict.NPU_HOLDING_STATES` holds
+        the NPU; the rule reports one still loading as ``pending``. An ERROR
+        slot whose unit is still running is presented as live (READY), as
         ``_guard_fabric_clock`` treats it: an FLM anchor in a crash loop is
         restarted by systemd and takes the NPU each time it comes up.
         """
@@ -3460,7 +3469,7 @@ class SlotManager:
             if cfg is None or cfg.get("device") != "npu":
                 continue
             state = s.state
-            live = state in LIVE_COUNTERPART_STATES
+            live = state in _npu_conflict.NPU_HOLDING_STATES
             if state is SlotState.ERROR:
                 try:
                     live = await self._is_active(s.name)
@@ -3470,7 +3479,13 @@ class SlotManager:
                     state = SlotState.READY
             path: XdnaPath | None = None
             if live and is_xdna_slot(cfg):
-                path = await self._npu_xdna_path(cfg, s.model_id or _model_default(cfg))
+                try:
+                    path = await self._npu_xdna_path(cfg, s.model_id or _model_default(cfg))
+                except Exception:
+                    # One peer whose model lookup fails must not turn every NPU
+                    # admission into a raw error; per-op is the side that
+                    # excludes FLM.
+                    path = "per-op"
             pinned = live and await self.is_pinned(s.name)
             peers.append(NpuPeer(name=s.name, cfg=cfg, state=state, pinned=pinned, xdna_path=path))
         return peers
@@ -3504,19 +3519,21 @@ class SlotManager:
         model_id: str | None,
         *,
         unload_holder: bool,
+        token: object,
     ) -> None:
         """Admit *slot_name* onto the NPU or raise :class:`SlotNpuConflict`.
 
         Under ``_npu_admission_lock`` this scans the other slots and, when the
-        load may go ahead, reserves the slot in ``_npu_pending`` so a
+        load may go ahead, reserves the slot under *token* so a
         concurrent opposite load sees it as ``pending``. With ``unload_holder``
         a conflict that is not pending is resolved by unloading
         ``conflict.unloads`` (the holder and, for FLM, its shadows) AFTER the
         reservation is made and the admission lock released. ``unload()``
         enforces no pin (only the HTTP route does), so a pinned holder goes
         too. The caller must hold no slot lock and must release the
-        reservation (:meth:`_release_npu_pending`) once STARTING is visible or
-        the load ends; a failed holder unload releases it here.
+        reservation (:meth:`_release_npu_pending` with the same *token*) once
+        STARTING is visible or the load ends; a failed holder unload releases
+        it here.
         """
         # The role needs only this slot's config and model, so a slot that is
         # not on the NPU never queues on the admission lock.
@@ -3531,6 +3548,7 @@ class SlotManager:
                     extra={"slot": slot_name, "holders": list(conflict.holders)},
                 )
                 raise self._npu_conflict_error(slot_name, conflict)
+            self._npu_holds.setdefault(slot_name, set()).add(token)
             self._npu_pending[slot_name] = role
         if conflict is None:
             return
@@ -3542,18 +3560,20 @@ class SlotManager:
             for name in conflict.unloads:
                 await self.unload(name)
         except BaseException:
-            self._release_npu_pending(slot_name)
+            self._release_npu_pending(slot_name, token)
             raise
 
     async def _admit_npu_for_load(
-        self, slot_name: str, model_id: str | None, *, unload_holder: bool
+        self, slot_name: str, model_id: str | None, *, unload_holder: bool, token: object
     ) -> None:
         """``_load``'s admission, outside the slot lock; a refusal leaves the slot OFFLINE."""
         cfg = await self._maybe_load_config(slot_name)
         if cfg is None:
             return  # the load itself reports the unreadable config
         try:
-            await self._admit_npu(slot_name, cfg, model_id, unload_holder=unload_holder)
+            await self._admit_npu(
+                slot_name, cfg, model_id, unload_holder=unload_holder, token=token
+            )
         except SlotNpuConflict:
             # ``_admit_npu`` raises before it reserves, so there is nothing of
             # this call's to release. A held slot lock means another caller is
@@ -3565,13 +3585,15 @@ class SlotManager:
                     await self._settle_npu_refusal(slot_name, cfg)
             raise
 
-    async def _admit_npu_locked(self, slot_name: str, model_id: str | None) -> None:
+    async def _admit_npu_locked(
+        self, slot_name: str, model_id: str | None, *, token: object
+    ) -> None:
         """``_load``'s admission when it must run under the slot lock: never unloads."""
         cfg = await self._maybe_load_config(slot_name)
         if cfg is None:
             return
         try:
-            await self._admit_npu(slot_name, cfg, model_id, unload_holder=False)
+            await self._admit_npu(slot_name, cfg, model_id, unload_holder=False, token=token)
         except SlotNpuConflict:
             await self._settle_npu_refusal(slot_name, cfg)
             raise
@@ -3617,17 +3639,28 @@ class SlotManager:
         if conflict.pending or not unload_holder:
             raise self._npu_conflict_error(slot_name, conflict)
 
-    def _release_npu_pending(self, slot_name: str) -> None:
-        """Drop *slot_name*'s NPU reservation, if any (see :meth:`_admit_npu`)."""
-        self._npu_pending.pop(slot_name, None)
+    def _release_npu_pending(self, slot_name: str, token: object) -> None:
+        """Drop the reservation *token* holds on *slot_name* (see :meth:`_admit_npu`).
+
+        The slot stays reserved while any other load of it still holds one.
+        Releasing a token that holds nothing (already released, or a call
+        that never reserved) is a no-op.
+        """
+        holds = self._npu_holds.get(slot_name)
+        if holds is None:
+            return
+        holds.discard(token)
+        if not holds:
+            del self._npu_holds[slot_name]
+            self._npu_pending.pop(slot_name, None)
 
     @contextlib.asynccontextmanager
-    async def _npu_reservation(self, slot_name: str) -> AsyncIterator[None]:
-        """Release *slot_name*'s NPU reservation however ``_load`` leaves."""
+    async def _npu_reservation(self, slot_name: str, token: object) -> AsyncIterator[None]:
+        """Release this ``_load`` call's NPU reservation however it leaves."""
         try:
             yield
         finally:
-            self._release_npu_pending(slot_name)
+            self._release_npu_pending(slot_name, token)
 
     async def terminate(self, slot_name: str, *, timeout_s: float | None = None) -> None:
         """Stop the slot's container unit and deregister its upstream.

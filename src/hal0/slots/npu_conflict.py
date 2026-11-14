@@ -22,6 +22,16 @@ NpuRole = Literal["flm", "per-op"]
 
 _FUSED_LAYER_KEY = "GGML_XDNA_FUSED_LAYER"
 
+#: A holder in one of these states has a load of its own still running. It
+#: counts as ``pending``: the opt-in never unloads around an in-flight load.
+NPU_IN_FLIGHT_STATES: frozenset[SlotState] = frozenset(
+    {SlotState.PULLING, SlotState.STARTING, SlotState.WARMING}
+)
+
+#: States in which a peer holds, or is about to take, the NPU: the live set
+#: shared with the fabric-clock guard, plus PULLING (a load that will start).
+NPU_HOLDING_STATES: frozenset[SlotState] = LIVE_COUNTERPART_STATES | {SlotState.PULLING}
+
 
 def xdna_launch_env(cfg: Mapping[str, Any]) -> dict[str, str]:
     """The env an xdna slot launches with: defaults < ``[server].env`` < ``[xdna].env``.
@@ -110,9 +120,10 @@ def find_npu_conflict(
 ) -> NpuConflict | None:
     """The conflict ``name`` would cause by loading, or ``None``.
 
-    ``peers`` are the other slots; only those in a live state
-    (:data:`LIVE_COUNTERPART_STATES`) hold the NPU. ``pending`` maps slot name
-    to ``"flm"`` or ``"per-op"`` for loads reserved but not yet visible.
+    ``peers`` are the other slots; only those in :data:`NPU_HOLDING_STATES`
+    hold the NPU. ``pending`` maps slot name to ``"flm"`` or ``"per-op"`` for
+    loads reserved but not yet visible. The verdict is ``pending`` when any
+    holder is reserved or in :data:`NPU_IN_FLIGHT_STATES`; UNLOADING is not.
     """
     if is_npu_trio_shadow(dict(cfg)):
         return None
@@ -124,7 +135,7 @@ def find_npu_conflict(
         p
         for p in peers
         if p.name != name
-        and p.state in LIVE_COUNTERPART_STATES
+        and p.state in NPU_HOLDING_STATES
         and roles_conflict(mine, npu_role(p.cfg, p.xdna_path))
     ]
     pend = [n for n, role in pending.items() if n != name and roles_conflict(mine, role)]
@@ -145,8 +156,8 @@ def find_npu_conflict(
                 if p.cfg.get("served_by") == holder and p.name not in unloads:
                     unloads.append(p.name)
     # Any in-flight holder makes the whole conflict pending: the opt-in must
-    # never unload around a load that has not published its state yet.
-    is_pending = bool(pend)
+    # never unload around a load still running, published or reserved.
+    is_pending = bool(pend) or any(p.state in NPU_IN_FLIGHT_STATES for p in live)
     what = "FLM anchor" if holder_role == "flm" else "per-op xdna slot"
     reason = f"{name} needs the whole NPU, which {what} {', '.join(holders)} holds" + (
         " (load in flight)" if is_pending else ""
