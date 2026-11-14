@@ -62,6 +62,10 @@
 
 /* ── Lanes: array band + FLM lane ─────────────────────────────────────────── */
 .npt-lanes { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+/* Two equal columns (FLM | GGML) on wide screens; one column below 980px. */
+.npt-cols, .npt-models, .npt-engines { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; min-width: 0; }
+.npt-cols { gap: 16px; }
+.npt-lane { container-type: inline-size; }
 .npt-band { display: flex; flex-wrap: wrap; gap: 20px 28px; align-items: center; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--rad-lg); background: var(--bg-1); }
 .npt-band-stats { display: flex; flex-direction: column; gap: 12px; }
 .npt-band-grid { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
@@ -116,6 +120,7 @@
 .npt-kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 0; font-family: var(--jbm); font-size: 11.5px; }
 .npt-kv dt { color: var(--fg-3); }
 .npt-kv dd { margin: 0; color: var(--fg); }
+@container (max-width: 640px) { .npt-cap { grid-template-columns: auto 1fr; } .npt-bundled, .npt-sel, .npt-mx { grid-column: 2; text-align: left; } }
 @media (max-width: 720px) { .npt-cap { grid-template-columns: auto 1fr; } .npt-bundled, .npt-sel, .npt-mx { grid-column: 2; text-align: left; } }
 
 /* GGML slot form (GgmlSlotForm.jsx) */
@@ -143,7 +148,6 @@
 .ggml-requant-cmd code { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: nowrap; }
 
 /* Models sub-tab */
-.npt-models { display: flex; flex-direction: column; gap: 14px; }
 .npt-msec { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: var(--rad-md, 6px); }
 .npt-msec-flm { border-left: 3px solid var(--dev-npu); }
 .npt-msec-ggml { border-left: 3px solid var(--npu-s1); }
@@ -153,7 +157,15 @@
 .npt-mrow .btn.on { outline: 1px solid var(--fg-3); }
 
 /* Engines & profiles */
-.npt-engines { display: flex; flex-direction: column; gap: 12px; }
+/* Readiness left (spanning both rows), FLM + xdna engines stacked right, profiles full width. */
+.npt-engines > [data-testid='npu-readiness'] { grid-column: 1; grid-row: 1 / span 2; }
+.npt-engines > [data-testid='npu-engine-flm'] { grid-column: 2; grid-row: 1; }
+.npt-engines > [data-testid='npu-engine-xdna'] { grid-column: 2; grid-row: 2; }
+.npt-engines > [data-testid='npu-profiles'] { grid-column: 1 / -1; }
+@media (max-width: 980px) {
+  .npt-cols, .npt-models, .npt-engines { grid-template-columns: minmax(0, 1fr); }
+  .npt-engines > [data-testid] { grid-column: auto !important; grid-row: auto !important; }
+}
 .npt-ready.ok { color: var(--ok); }
 .npt-ready.warn { color: var(--warn); }
 .npt-ready.unknown { color: var(--fg-3); }
