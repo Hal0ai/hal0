@@ -291,8 +291,9 @@ class KnowledgeRehome(fi.FoldIn):
             if in_project and holder_name != folder_name:
                 refuse(
                     "other_project",
-                    f"{root.get('name')!r} ({nid}) is in {holder_name}, not {folder_name}; it "
-                    "is left where it is",
+                    f"{root.get('name')!r} ({nid}) is already in {holder_name}, not {folder_name}; "
+                    "rehome does not move a subtree out of another project's folder, so nothing "
+                    "is changed",
                 )
             tops.append(
                 {
@@ -518,7 +519,19 @@ class KnowledgeRehome(fi.FoldIn):
 
         nodes = f"{bank_path(target)}/knowledge-base/nodes"
         stamped = cleared = moved = 0
-        # 1. Stamp every page that needs it, where compat cannot see it yet (its
+        # 1. Empty what was built under the old trigger first, so a page is never
+        #    shown scoped but still holding content built under its old trigger.
+        for page in work["pages"]:
+            if not page["clear"]:
+                continue
+            await self._json(
+                "POST",
+                f"{bank_path(target)}/mental-models/{page['model_id']}/clear",
+                what="clearing a knowledge page",
+                bank=target,
+            )
+            cleared += 1
+        # 2. Stamp every page that needs it, where compat cannot see it yet (its
         #    subtree is outside the folder) or cannot see it anyway (no stamp).
         for page in work["pages"]:
             if page["stamped"] and not page["subtree_moving"]:
@@ -531,17 +544,6 @@ class KnowledgeRehome(fi.FoldIn):
                 bank=target,
             )
             stamped += 1
-        # 2. Empty what was built under the old trigger.
-        for page in work["pages"]:
-            if not page["clear"]:
-                continue
-            await self._json(
-                "POST",
-                f"{bank_path(target)}/mental-models/{page['model_id']}/clear",
-                what="clearing a knowledge page",
-                bank=target,
-            )
-            cleared += 1
         # 3. Move each subtree with its root, renamed where the folder holds its name.
         for top in work["tops"]:
             if top["state"] != "move":
