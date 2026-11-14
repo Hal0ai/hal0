@@ -79,6 +79,8 @@ def _stub_footprint(monkeypatch):
     # facts call _prime_facts() after stubbing.
     monkeypatch.setattr(_npu_routes, "_facts_cache", (time.monotonic(), _npu_routes._none_facts()))
     monkeypatch.setattr(_npu_routes, "_facts_refresh_thread", None)
+    monkeypatch.setattr(_npu_routes, "_cache_generation", 0)
+    monkeypatch.setattr(_npu_routes, "_image_store_gen", 0)
     yield
     npu_columns.invalidate_columns_cache()
 
@@ -554,6 +556,8 @@ def image_store(monkeypatch):
     monkeypatch.setattr(npu_mod, "_local_image_refs", _REAL_LOCAL_IMAGE_REFS)
     monkeypatch.setattr(npu_mod, "_image_store_cache", None)
     monkeypatch.setattr(npu_mod, "_image_refresh_thread", None)
+    monkeypatch.setattr(npu_mod, "_cache_generation", 0)
+    monkeypatch.setattr(npu_mod, "_image_store_gen", 0)
     return npu_mod
 
 
@@ -643,6 +647,8 @@ def test_occupancy_tags_synthesized_rows_with_their_anchor(client: TestClient, m
 def facts_cache(monkeypatch):
     monkeypatch.setattr(_npu_routes, "_facts_cache", None)
     monkeypatch.setattr(_npu_routes, "_facts_refresh_thread", None)
+    monkeypatch.setattr(_npu_routes, "_cache_generation", 0)
+    monkeypatch.setattr(_npu_routes, "_image_store_gen", 0)
     return _npu_routes
 
 
@@ -761,11 +767,19 @@ def test_inflight_refresh_started_before_invalidate_does_not_repopulate(monkeypa
     assert npu_mod._image_store_cache is None  # the stale read was discarded
 
 
-def test_pull_job_terminal_state_invalidates_npu_caches(monkeypatch):
-    from hal0.api.routes import npu as npu_mod
-    from hal0.registry import runner_pull_jobs
+def test_facts_refresh_started_before_invalidate_does_not_repopulate(facts_cache, monkeypatch):
+    import threading
 
-    calls: list[int] = []
-    monkeypatch.setattr(npu_mod, "invalidate_engine_caches", lambda: calls.append(1))
-    runner_pull_jobs._invalidate_npu_caches()
-    assert calls == [1]
+    gate = threading.Event()
+
+    def slow_facts():
+        gate.wait(5)
+        return {}, {}  # pre-pull snapshot
+
+    monkeypatch.setattr(facts_cache, "_engine_facts_sync", slow_facts)
+    t = threading.Thread(target=facts_cache._refresh_facts)
+    t.start()
+    facts_cache.invalidate_engine_caches()  # pull finished mid-read
+    gate.set()
+    t.join(timeout=5)
+    assert facts_cache._facts_cache is None  # the stale read was discarded

@@ -204,6 +204,11 @@ def test_pull_lifecycle_start_status_complete(
         ]
     )
 
+    invalidations: list[int] = []
+    monkeypatch.setattr(
+        "hal0.api.routes.npu.invalidate_engine_caches", lambda: invalidations.append(1)
+    )
+
     resp = client.post("/api/runner-images/cpu/pull")
     assert resp.status_code == 202
     job_id = resp.json()["id"]
@@ -212,6 +217,19 @@ def test_pull_lifecycle_start_status_complete(
     status = client.get("/api/runner-images/cpu/pull/status")
     assert status.status_code == 200
     assert status.json()["state"] in ("queued", "running", "completed")
+
+    # #3645: once the job is terminal the NPU tab's cached "image pulled" fact
+    # is dropped, exactly once.
+    import time
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if client.get("/api/runner-images/cpu/pull/status").json()["state"] == "completed":
+            break
+        time.sleep(0.02)
+    while time.monotonic() < deadline and not invalidations:
+        time.sleep(0.02)
+    assert invalidations == [1]
 
     pulls = client.get("/api/runner-images/pulls/list")
     assert pulls.status_code == 200
@@ -1667,11 +1685,16 @@ class TestDeleteRunnerImageTag:
         self._seed(client)
         monkeypatch.setattr("hal0.api.routes.runner_images._slot_image_usage", lambda: {})
         calls = self._fake_remove_image(monkeypatch, "removed")
+        invalidations: list[int] = []
+        monkeypatch.setattr(
+            "hal0.api.routes.npu.invalidate_engine_caches", lambda: invalidations.append(1)
+        )
 
         resp = client.delete(f"/api/runner-images/{self.IMAGE_ID}/tags/0824")
         assert resp.status_code == 200
         assert resp.json() == {"removed": True, "outcome": "removed"}
         assert calls == ["ghcr.io/hal0ai/hal0-runner-standard:0824"]
+        assert invalidations == [1]  # #3645: NPU "image pulled" cache dropped
 
         detail = client.get(f"/api/runner-images/{self.IMAGE_ID}").json()
         assert all(t["tag"] != "0824" for t in detail["tags"])

@@ -726,11 +726,14 @@ async def delete_runner_image_tag(image_id: str, tag: str, request: Request) -> 
             )
         # "removed" or "missing": the seam agrees the bytes are gone (or
         # already were) — update the catalogue to match.
-        from hal0.api.routes.npu import invalidate_engine_caches
-
-        invalidate_engine_caches()  # the NPU tab's "image pulled" fact is now stale
         old_local_path = image.local_path
         catalogue_removed = store.remove_tag(image_id, tag)
+        # The NPU tab's "image pulled" fact is now stale. Best effort: the bytes
+        # and catalogue are already updated, so this must never fail the route.
+        with contextlib.suppress(Exception):
+            from hal0.api.routes.npu import invalidate_engine_caches
+
+            invalidate_engine_caches()
         rec.after = {"outcome": outcome, "catalogue_removed": catalogue_removed}
         if not catalogue_removed:
             # The seam agrees the bytes are gone, but the catalogue had no
