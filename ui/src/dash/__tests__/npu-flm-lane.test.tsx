@@ -13,20 +13,21 @@ const { box } = vi.hoisted(() => ({
     edits: [] as { name: string; body: Record<string, unknown> }[],
     restarts: [] as string[],
     creates: [] as Record<string, unknown>[],
-    cfg: { npu: { chat: true, asr: false, embed: false }, model: { default: 'gemma4-it:e4b' } } as Record<string, unknown>,
+    cfg: { npu: { chat: true, asr: false, embed: false }, model: { default: 'gemma4-it:e4b' } } as Record<string, unknown> | undefined,
     catalog: [
-      { model: 'gemma4-it:e4b', installed: true, capabilities: ['chat'] },
+      { model: 'gemma4-it:e4b', installed: true, capabilities: ['chat', 'stt'] },
       { model: 'qwen3:8b', installed: false, capabilities: ['chat'] },
       { model: 'whisper-v3:turbo', installed: true, capabilities: ['stt'] },
       { model: 'embed-gemma:300m', installed: true, capabilities: ['embed'] },
     ],
+    pull: { state: 'idle', modelId: null as string | null, error: null as { message: string } | null },
     pullStart: vi.fn(),
     toasts: [] as string[],
   },
 }))
 
 vi.mock('@/api/hooks/useSlots', () => ({
-  useSlotConfig: () => ({ data: box.cfg }),
+  useSlotConfig: () => ({ data: box.cfg as Record<string, unknown> | undefined }),
   useSlotEdit: () => ({
     isPending: false,
     mutateAsync: async (a: { name: string; body: Record<string, unknown> }) => {
@@ -42,7 +43,7 @@ vi.mock('@/api/hooks/useFlmCatalog', () => ({
   useFlmCatalog: () => ({ data: { models: box.catalog, probe_ok: true } }),
 }))
 vi.mock('@/api/hooks/useModels', () => ({
-  usePullJob: () => ({ start: box.pullStart, state: 'idle', modelId: null, error: null, pct: null, reset: () => {} }),
+  usePullJob: () => ({ start: box.pullStart, ...box.pull, pct: null, reset: () => {} }),
 }))
 
 const { FlmLane } = await import('../npu/FlmLane')
@@ -68,6 +69,7 @@ beforeEach(() => {
   box.toasts.length = 0
   box.cfg = { npu: { chat: true, asr: false, embed: false }, model: { default: 'gemma4-it:e4b' } }
   box.pullStart.mockReset()
+  box.pull = { state: 'idle', modelId: null, error: null }
   ;(window as unknown as { __hal0Toast: (m: string) => void }).__hal0Toast = (m) => { box.toasts.push(m) }
   host = document.createElement('div')
   document.body.appendChild(host)
@@ -133,6 +135,79 @@ describe('FlmLane', () => {
     expect(q('flm-applybar')).toBeTruthy()
   })
 
+  const pickQwen = () =>
+    act(() => {
+      const sel = q('flm-chat-model') as unknown as HTMLSelectElement
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(sel, 'qwen3:8b')
+      sel.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+  it('pull completes → one PUT, one restart, draft cleared', async () => {
+    box.pullStart.mockResolvedValue({})
+    render()
+    pickQwen()
+    click('flm-apply')
+    await flush()
+    expect(box.edits).toHaveLength(0)
+    box.pull = { state: 'running', modelId: 'qwen3:8b', error: null }
+    render()
+    expect(box.edits).toHaveLength(0)
+    box.pull = { state: 'completed', modelId: 'qwen3:8b', error: null }
+    render()
+    await flush()
+    expect(box.edits).toEqual([
+      { name: 'flm', body: { npu: { chat: true, asr: false, embed: false }, model: { default: 'qwen3:8b' } } },
+    ])
+    expect(box.restarts).toEqual(['flm'])
+    expect(q('flm-applybar')).toBeNull()
+  })
+
+  it('pull state failed → no PUT, error shown, draft kept', async () => {
+    box.pullStart.mockResolvedValue({})
+    render()
+    pickQwen()
+    click('flm-apply')
+    await flush()
+    box.pull = { state: 'failed', modelId: 'qwen3:8b', error: { message: 'disk full' } }
+    render()
+    await flush()
+    expect(box.edits).toHaveLength(0)
+    expect(q('flm-error')?.textContent).toContain('disk full')
+    expect(q('flm-applybar')).toBeTruthy()
+  })
+
+  it('config changing during a download → no PUT, toast, draft dropped', async () => {
+    box.pullStart.mockResolvedValue({})
+    render()
+    pickQwen()
+    click('flm-apply')
+    await flush()
+    box.pull = { state: 'running', modelId: 'qwen3:8b', error: null }
+    render()
+    box.cfg = { npu: { chat: true, asr: true, embed: false }, model: { default: 'gemma4-it:e4b' } }
+    render()
+    await flush()
+    expect(box.toasts).toContain('FLM settings changed elsewhere, staged changes dropped')
+    box.pull = { state: 'completed', modelId: 'qwen3:8b', error: null }
+    render()
+    await flush()
+    expect(box.edits).toHaveLength(0)
+    expect(box.restarts).toHaveLength(0)
+    expect(q('flm-applybar')).toBeNull()
+    expect(q('flm-error')).toBeNull()
+  })
+
+  it('config still loading → controls disabled, no false drop when it arrives', () => {
+    box.cfg = undefined
+    render()
+    expect((q('flm-cap-asr') as HTMLButtonElement).disabled).toBe(true)
+    box.cfg = { npu: { chat: true, asr: false, embed: false }, model: { default: 'gemma4-it:e4b' } }
+    render()
+    click('flm-cap-asr')
+    expect(q('flm-applybar')).toBeTruthy()
+    expect(box.toasts).toHaveLength(0)
+  })
+
   it('no anchor → Create FLM slot button posts the flm profile', () => {
     render(<Harness slotList={[]} />)
     click('flm-create')
@@ -148,6 +223,7 @@ describe('FlmLane', () => {
   it('STT and Embed show the bundled model text', () => {
     render()
     expect(q('flm-row-asr')?.textContent).toContain('whisper-v3:turbo')
+    expect(q('flm-row-asr')?.textContent).not.toContain('gemma4-it:e4b')
     expect(q('flm-row-embed')?.textContent).toContain('embed-gemma:300m')
   })
 })

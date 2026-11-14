@@ -18,14 +18,18 @@ import { capEnabled, cfgFingerprint, draftBody, draftCount, pickChatModel, saved
 const toast = (msg, kind = 'info') =>
   typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
 
+const DRIFT = 'flm-config-drift'
 const CAPS = [
   { cap: 'chat', label: 'Chat' },
-  { cap: 'asr', label: 'Speech-to-text', shadow: 'flm-stt', catCaps: ['stt', 'asr', 'transcription'] },
-  { cap: 'embed', label: 'Embeddings', shadow: 'flm-embed', catCaps: ['embed', 'embedding'] },
+  { cap: 'asr', label: 'Speech-to-text', shadow: 'flm-stt', catCaps: ['stt'] },
+  { cap: 'embed', label: 'Embeddings', shadow: 'flm-embed', catCaps: ['embed'] },
 ]
 
 function bundledModel(catalog, catCaps) {
-  const row = (catalog?.models ?? []).find((m) => (m.capabilities ?? []).some((c) => catCaps.includes(c)))
+  // Real rows can carry several capabilities (a chat model that also does stt): the bundled
+  // model is the one that is NOT chat-capable.
+  const rows = (catalog?.models ?? []).filter((m) => (m.capabilities ?? []).some((c) => catCaps.includes(c)))
+  const row = rows.find((m) => !(m.capabilities ?? []).includes('chat'))
   return row?.model ?? null
 }
 
@@ -87,10 +91,15 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
   const [err, setErr] = useState(null)
 
   // Review Focus 1: drop a draft the moment the anchor's saved config moves under it.
+  const cfgReady = cfg !== undefined
   const fp = cfgFingerprint(cfg)
+  const fpNow = useRef(fp)
+  fpNow.current = fp
   const fpAtStage = useRef(null)
-  const applying = useRef(false)
+  const writing = useRef(false)
+  const waiter = useRef(null)
   useEffect(() => {
+    if (!cfgReady) return // a loading config is not a baseline
     if (count === 0) {
       fpAtStage.current = null
       return
@@ -99,16 +108,21 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
       fpAtStage.current = fp
       return
     }
-    if (fpAtStage.current !== fp && !applying.current) {
+    if (fpAtStage.current !== fp && !writing.current) {
       fpAtStage.current = null
+      // a download in flight must not go on to write over the newer config
+      if (waiter.current) {
+        const w = waiter.current
+        waiter.current = null
+        w.reject(new Error(DRIFT))
+      }
       setErr(null)
       setDraft({})
       toast('FLM settings changed elsewhere, staged changes dropped', 'warn')
     }
-  }, [fp, count, setDraft])
+  }, [fp, count, cfgReady, setDraft])
 
   // Review Focus 2: wait for the download of a staged model before writing anything.
-  const waiter = useRef(null)
   useEffect(() => {
     const w = waiter.current
     if (!w || pull.modelId !== w.tag) return
@@ -143,13 +157,16 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
   const apply = async () => {
     if (busy || count === 0) return
     setErr(null)
-    applying.current = true
     try {
       if (draft.chatModel && !installed(draft.chatModel)) {
         setBusy('pulling')
         await pullAndWait(draft.chatModel)
       }
+      // The config may have moved while the download ran: the drift effect rejects the wait then,
+      // and this re-check covers a change that landed with the completion itself.
+      if (fpAtStage.current !== fpNow.current) throw new Error(DRIFT)
       setBusy('writing')
+      writing.current = true
       await editMut.mutateAsync({ name: anchor.name, body: draftBody(draft, saved) })
       fpAtStage.current = null
       setDraft({})
@@ -158,9 +175,9 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
         onError: (e) => toast(`NPU restart failed — ${e?.message || 'see logs'}`, 'warn'),
       })
     } catch (e) {
-      setErr(e?.message || 'Apply failed')
+      if (e?.message !== DRIFT) setErr(e?.message || 'Apply failed')
     } finally {
-      applying.current = false
+      writing.current = false
       setBusy(null)
     }
   }
@@ -212,7 +229,7 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
                 aria-label={label}
                 className={`npt-toggle${on ? ' on' : ''}${stagedKeys(cap) ? ' pending' : ''}`}
                 data-testid={`flm-cap-${cap}`}
-                disabled={!!busy || !enabled}
+                disabled={!!busy || !enabled || !cfgReady}
                 title={enabled ? undefined : 'Pick a chat model first'}
                 onClick={() => setDraft((d) => toggleCap(d, saved, cap))}
               />
@@ -226,7 +243,7 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
                   data-testid="flm-chat-model"
                   aria-label="FLM chat model"
                   value={chatModel ?? ''}
-                  disabled={!!busy || !capOn('chat')}
+                  disabled={!!busy || !cfgReady || !capOn('chat')}
                   onChange={(e) => e.target.value && setDraft((d) => pickChatModel(d, saved, e.target.value))}
                 >
                   {!chatModel && <option value="">No model</option>}
