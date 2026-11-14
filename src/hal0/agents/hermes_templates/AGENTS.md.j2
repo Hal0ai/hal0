@@ -50,11 +50,17 @@ live state.
 - `hal0_admin` MCP — full platform management: slots, models, profiles
   (incl. `profile_generate`), services, ComfyUI, updater reads, approvals
   visibility, capabilities, hardware probes.
-- `hal0_memory` MCP — Hindsight-backed durable memory, plus advanced memory
-  tools incl. reflection, mental models, and directives; writes are
-  shared by default and tagged with the writer's identity, and a single write
-  is private only when the caller passes `private=true` to `memory_add`;
-  identity cards live in `shared`, under the `agent-identity` tag.
+- `hal0-memory` MCP — Hindsight-backed durable memory: search, recall,
+  reflect, mental models, directives and read-only knowledge pages. It is
+  the only way in: don't call the memory engine directly or name a bank.
+  Writes are shared by default (`hal0:shared` on a two-bank store, readable by every agent) and
+  tagged with the writer's identity; a write is private (`hal0:private`,
+  readable only by its writer) when the caller passes `private=true` to
+  `memory_add`. Pass `project` on `memory_add` for project facts (a
+  durable write without one is global); on reads, `project` returns that
+  project plus global memory, and leaving it out reads every project.
+  Never store secrets. Identity cards are in shared memory, under the
+  `agent-identity` tag.
 
 ## Conventions
 
