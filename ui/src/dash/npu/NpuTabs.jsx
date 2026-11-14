@@ -6,7 +6,7 @@
 //
 // NpuTabs owns the FLM draft (`flmDraft`): the Lanes panel edits it, and the Models panel's
 // "Use for chat" stages into it, so both see one staged set. `onSwitchTab` lets Models jump to
-// Lanes. The panels here are stubs; later tasks fill them.
+// Lanes. The Engines panel is still a stub.
 //
 // No NPU (probe says absent) and no NPU slot → the "No NPU on this box" panel. NPU slots with a
 // failed probe keep the shell (degraded): lanes stay operable.
@@ -17,6 +17,7 @@ import { useStatsHardware } from '@/api/hooks/useStatsHardware'
 import { ArrayBand } from './ArrayBand.jsx'
 import { FlmLane } from './FlmLane.jsx'
 import { GgmlLane } from './GgmlLane.jsx'
+import { NpuModelsPanel } from './NpuModelsPanel.jsx'
 import { NPU_TABS, npuStatusParts, npuTabVisible, validNpuTab } from './npu-pure'
 
 const IDS = NPU_TABS.map((t) => t.id)
@@ -37,9 +38,6 @@ function LanesPanel({ draft, setDraft, occ, hw, slots }) {
       <GgmlLane slots={slots} occ={occ} hw={hw} />
     </div>
   )
-}
-function ModelsPanel() {
-  return <div data-testid="npu-models-stub" />
 }
 function EnginesPanel() {
   return <div data-testid="npu-engines-stub" />
@@ -175,7 +173,7 @@ export function NpuTabs({ sub, slots = [] }) {
         <LanesPanel draft={flmDraft} setDraft={setFlmDraft} occ={occ} hw={hwQ.data} slots={slots} />
       </div>
       <div role="tabpanel" id="npu-panel-models" className="npt-panel" aria-labelledby="npu-tab-models" hidden={tab !== 'models'}>
-        <ModelsPanel setFlmDraft={setFlmDraft} onSwitchTab={select} occ={occ} />
+        <NpuModelsPanel slots={slots} setFlmDraft={setFlmDraft} onSwitchTab={select} />
       </div>
       <div role="tabpanel" id="npu-panel-engines" className="npt-panel" aria-labelledby="npu-tab-engines" hidden={tab !== 'engines'}>
         <EnginesPanel occ={occ} />

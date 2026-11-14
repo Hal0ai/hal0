@@ -141,3 +141,13 @@
 .ggml-requant { display: flex; flex-direction: column; gap: 6px; }
 .ggml-requant-cmd { display: flex; align-items: center; gap: 8px; }
 .ggml-requant-cmd code { flex: 1 1 auto; min-width: 0; overflow-x: auto; white-space: nowrap; }
+
+/* Models sub-tab */
+.npt-models { display: flex; flex-direction: column; gap: 14px; }
+.npt-msec { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: var(--rad-md, 6px); }
+.npt-msec-flm { border-left: 3px solid var(--dev-npu); }
+.npt-msec-ggml { border-left: 3px solid var(--npu-s1); }
+.npt-mbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.npt-mrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+.npt-mrow .npt-mname { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.npt-mrow .btn.on { outline: 1px solid var(--fg-3); }

@@ -54,7 +54,7 @@ function savedDraft(mode, slot, cfg, names, initialModel) {
   }
 }
 
-function copyText(text, el) {
+export function copyText(text, el) {
   const select = () => {
     if (el && window.getSelection) {
       const r = document.createRange()

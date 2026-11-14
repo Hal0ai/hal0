@@ -13,7 +13,7 @@ import { SlotControls, slotCtrlPhase } from '../inference-pane.jsx'
 import { slotIndicatorFromPhase } from '../slot-status.js'
 import { npuAnchorSlot } from '../slots/slot-shared.js'
 import { slotEditHash } from '../slots-route'
-import { capEnabled, cfgFingerprint, draftBody, draftCount, pickChatModel, savedFlm, toggleCap } from './flm-draft-pure'
+import { bundledFlmModel, capEnabled, cfgFingerprint, draftBody, draftCount, pickChatModel, savedFlm, toggleCap } from './flm-draft-pure'
 
 const toast = (msg, kind = 'info') =>
   typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
@@ -24,14 +24,6 @@ const CAPS = [
   { cap: 'asr', label: 'Speech-to-text', shadow: 'flm-stt', catCaps: ['stt'] },
   { cap: 'embed', label: 'Embeddings', shadow: 'flm-embed', catCaps: ['embed'] },
 ]
-
-function bundledModel(catalog, catCaps) {
-  // Real rows can carry several capabilities (a chat model that also does stt): the bundled
-  // model is the one that is NOT chat-capable.
-  const rows = (catalog?.models ?? []).filter((m) => (m.capabilities ?? []).some((c) => catCaps.includes(c)))
-  const row = rows.find((m) => !(m.capabilities ?? []).includes('chat'))
-  return row?.model ?? null
-}
 
 function describeDraft(draft, saved) {
   const out = []
@@ -256,7 +248,7 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
                 </select>
               ) : (
                 <span className="npt-bundled">
-                  {bundledModel(catalog, catCaps) ?? '—'} <em>· bundled with FLM</em>
+                  {bundledFlmModel(catalog, catCaps) ?? '—'} <em>· bundled with FLM</em>
                 </span>
               )}
               <span className="npt-mx">

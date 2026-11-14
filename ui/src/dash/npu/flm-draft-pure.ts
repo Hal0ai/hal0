@@ -71,3 +71,14 @@ export function draftBody(draft: FlmDraft, saved: SavedFlm): Record<string, unkn
 export function cfgFingerprint(anchorCfg: AnchorCfg): string {
   return JSON.stringify({ npu: anchorCfg?.npu ?? null, model: anchorCfg?.model?.default ?? null })
 }
+
+/** The bundled (non-chat) row serving a capability: real rows can carry several capabilities, so
+ *  the bundled model is the one that is NOT chat-capable. */
+export function bundledFlmModel(
+  catalog: { models?: Array<{ model: string; capabilities?: string[] }> } | null | undefined,
+  catCaps: string[],
+): string | null {
+  const rows = (catalog?.models ?? []).filter((m) => (m.capabilities ?? []).some((c) => catCaps.includes(c)))
+  const row = rows.find((m) => !(m.capabilities ?? []).includes('chat'))
+  return row?.model ?? null
+}
