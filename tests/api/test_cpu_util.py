@@ -114,3 +114,23 @@ class TestCpuUtilUnavailable:
         assert resp.status_code == 200
         # None values are skipped by the merge loop — cpu_util absent or None.
         assert resp.json().get("cpu_util") is None
+
+
+class TestNpuPmodeFclkForwarded:
+    """#3655: /api/stats/hardware must forward npu_pmode and npu_fclk."""
+
+    def test_both_keys_reach_response(self, client: TestClient) -> None:
+        class _Stub(_MinimalStatsStub):
+            def snapshot(self) -> dict:
+                return {"ram_used_gb": 2.0, "npu_pmode": "turbo", "npu_fclk": 2000}
+
+        client.app.state.hardware_stats = _Stub()
+        body = client.get("/api/stats/hardware").json()
+        assert body["npu_pmode"] == "turbo"
+        assert body["npu_fclk"] == 2000
+
+    def test_absent_values_do_not_break_response(self, client: TestClient) -> None:
+        _wire_stats(client)
+        body = client.get("/api/stats/hardware").json()
+        assert body.get("npu_pmode") is None  # null values are omitted by the merge
+        assert body.get("npu_fclk") is None
