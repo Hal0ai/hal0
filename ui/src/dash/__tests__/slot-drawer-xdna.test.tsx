@@ -143,7 +143,8 @@ describe('slot drawer on an xdna slot', () => {
     const { root } = mount(XDNA)
     expect(fetchSpy.mock.calls.some((c) => String(c[0]).includes('/api/slots/flm/models'))).toBe(false)
     expect(byId('npu-capability-matrix')).toBeNull()
-    expect(document.body.textContent).toContain('Model')
+    expect(document.querySelector('[data-testid="slot-model-swap"], [aria-label="Model for gguf-npu"]')).not.toBeNull()
+    expect(byId('slot-profile')).not.toBeNull()
     act(() => root.unmount())
   })
 
