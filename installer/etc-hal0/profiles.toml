@@ -2,7 +2,7 @@
 #
 # Seed profiles are VIRTUAL: the built-in catalog (chat / agent / utility /
 # coding / brain / cpu-chat / embedding / reranking / flm / kokoro / moonshine
-# / qwen3-tts / comfyui) lives in code (config/data/seed_profiles.toml) and is
+# / qwen3-tts / comfyui / halogen / xdna) lives in code (config/data/seed_profiles.toml) and is
 # overlaid on every load. It is intentionally NOT materialised here so that a
 # re-tuned seed — new flags, a bumped toolbox image — reaches every install on
 # upgrade instead of being frozen by a stale on-disk copy. hal0-api serves the

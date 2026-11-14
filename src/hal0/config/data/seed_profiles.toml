@@ -8,8 +8,8 @@
 # model carries (a paired drafter, else its MTP heads) when the runner
 # supports it, "ngram" uses n-gram lookup, "off" never speculates) and an
 # optional `runner` (the profile-carried runtime). No seed sets
-# `speculation`: the default is "auto". Only `halogen` sets `runner`: its engine
-# is one family, so the seed names its own; every other seed leaves the runner
+# `speculation`: the default is "auto". `halogen` and `xdna` set `runner`: each
+# engine is one family, so the seed names its own; every other seed leaves the runner
 # to the slot's binary.
 #
 # What a profile never carries:
@@ -161,3 +161,14 @@ flags = "HALOGEN_KV_POOL_POSITIONS=262144 HALOGEN_KV_SLOTS=2 HALOGEN_MAX_TOK=163
 ctx_size = 262144
 vision = "auto"
 intent = "Qwen3.8-Flash-Next on halogen · share-a-third layout (one full conversation warm; about 70 GiB on ht43)"
+
+[profile.xdna]
+# ggml-xdna llama.cpp runner on the AMD NPU (ADR-0057). No `flags` on purpose:
+# hal0's xdna launch already fixes `--device XDNA0 -ngl 99 -fa on --poll 0
+# -np 1 --cache-reuse 256` in the slot layer (providers/container.py), and
+# those win over profile flags. GGML_XDNA_PGEMM_GLU_A=0 and OMP_WAIT_POLICY
+# are image-level environment, not profile tuning.
+runner = "xdna"
+ctx_size = 8192
+vision = "off"
+intent = "GGUF on the NPU (ggml-xdna)"

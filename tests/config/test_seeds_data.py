@@ -43,6 +43,7 @@ KEEP_NAMES = {
     "qwen3-tts",
     "comfyui",
     "halogen",
+    "xdna",
 }
 _EXPECTED_PROFILE_COUNT = len(KEEP_NAMES)
 _EXPECTED_STACK_SLUGS = {"saber", "forge", "pi"}

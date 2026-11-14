@@ -248,6 +248,13 @@ def test_halogen_opt_in_then_opt_out_clears_the_runner(
     assert "peonist" not in _resolve_image_ref(cfg, None)
 
 
+def test_xdna_profile_apply_moves_the_slot_to_the_npu(tmp_hal0_home: str) -> None:
+    cfg = _llm_cfg(device="gpu-vulkan")
+    cfg = reconcile_slot_updates(cfg, {"profile": "xdna"})
+    assert cfg["binary"] == "xdna"
+    assert cfg["device"] == "npu"
+
+
 def test_clearing_the_profile_clears_a_runner_it_cannot_launch(tmp_hal0_home: str) -> None:
     cfg = _llm_cfg(profile="halogen", binary="halogen")
     cfg = reconcile_slot_updates(cfg, {"profile": None})
