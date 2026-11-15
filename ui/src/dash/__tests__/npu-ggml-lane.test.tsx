@@ -13,6 +13,7 @@ const { box } = vi.hoisted(() => ({
     loads: [] as string[],
     unloads: [] as string[],
     restarts: [] as string[],
+    edits: [] as Array<{ name: string; body: unknown }>,
     pullStart: vi.fn(),
     drawer: null as null | { open: boolean; mode: string; slot?: { name: string } },
   },
@@ -21,7 +22,21 @@ const { box } = vi.hoisted(() => ({
 vi.mock('@/api/hooks/useSlots', () => ({
   useSlotLoad: () => ({ mutate: (n: string) => box.loads.push(n), mutateAsync: async (n: string) => { box.loads.push(n); return {} } }),
   useSlotUnload: () => ({ mutate: (n: string) => box.unloads.push(n) }),
+  useSlotEdit: () => ({ isPending: false, mutateAsync: async (a: { name: string; body: unknown }) => { box.edits.push(a); return {} } }),
   useSlotRestart: () => ({ mutate: (n: string) => box.restarts.push(n), mutateAsync: async (n: string) => { box.restarts.push(n); return {} } }),
+}))
+vi.mock('@/api/hooks/useModels', () => ({
+  useModels: () => ({ data: [{ id: 'qwen3-4b', type: 'llm', quant: 'Q4_K_M', installed: true }, { id: 'qwen35-0.8b', type: 'llm', installed: true }, { id: 'llama-74b', type: 'llm', installed: false }] }),
+}))
+vi.mock('@/api/hooks/useXdnaFit', () => ({
+  useXdnaFit: () => ({
+    data: {
+      'qwen3-4b': { xdna_path: 'fused', reason: '' },
+      'qwen35-0.8b': { xdna_path: 'per-op', reason: 'x' },
+      'llama-74b': { xdna_path: 'per-op', reason: '', npu_ok: false, npu_note: '74B is too large for the NPU' },
+      'bge-reranker': { xdna_path: null, reason: 'not gguf' },
+    },
+  }),
 }))
 vi.mock('@/api/hooks/useRunnerImages', () => ({
   useRunnerImagePullJob: () => ({ start: box.pullStart, state: 'idle', pct: null, error: null, inFlight: false }),
@@ -51,6 +66,7 @@ beforeEach(() => {
   box.loads.length = 0
   box.unloads.length = 0
   box.restarts.length = 0
+  box.edits.length = 0
   box.pullStart.mockReset()
   host = document.createElement('div')
   document.body.appendChild(host)
@@ -67,10 +83,12 @@ describe('GgmlLane', () => {
     expect(host.querySelectorAll('[data-testid^="ggml-card-"]').length).toBe(2)
     expect(q('ggml-card-npu-gguf')!.textContent).toContain(':8101')
     expect(q('ggml-card-npu-gguf')!.textContent).toContain('qwen3-4b')
-    expect(q('ggml-npu-gguf-fit')!.textContent).toBe('✓ fused')
+    expect(q('ggml-npu-gguf-fit')!.textContent).toBe('fused')
     expect(q('ggml-npu-gguf-why')).toBeNull()
-    expect(q('ggml-card-npu-gguf')!.textContent).toContain('1 override')
-    expect(q('ggml-card-npu-gguf')!.textContent).toContain('21')
+    expect(q('ggml-card-npu-gguf')!.textContent).toContain('1 knob')
+    expect(q('ggml-mx-npu-gguf')!.textContent).toContain('21')
+    expect(q('ggml-mx-npu-gguf')!.textContent).toContain('310 ms ttft')
+    expect(q('ggml-mx-npu-gguf-2')!.textContent).toBe('stopped')
   })
 
   it('pulled:false disables Add and shows the pull banner; Pull starts the xdna image', () => {
@@ -96,8 +114,38 @@ describe('GgmlLane', () => {
     render()
     expect(q('ggml-npu-gguf-fix')).toBeNull()
     expect(q('ggml-npu-gguf-2-fit')!.textContent).toBe('per-op')
-    expect(q('ggml-npu-gguf-2-why')!.textContent).toBe('ssm_out q4_k')
+    expect(q('ggml-npu-gguf-2-why')!.textContent).toBe('Per-op path: ssm_out is Q4_K, not Q5_K. Correct, slower decode.')
     expect(q('ggml-npu-gguf-2-fix')).not.toBeNull()
+  })
+
+  it('each card has a model dropdown; impractical rows are hidden until "show all"', () => {
+    render()
+    const pick = q('ggml-model-pick-npu-gguf')!
+    expect(pick).not.toBeNull()
+    act(() => pick.click())
+    const opts = () => Array.from(host.querySelectorAll('[role="option"]')).map((o) => o.textContent ?? '')
+    expect(opts().some((t) => t.includes('qwen35-0.8b'))).toBe(true)
+    expect(opts().some((t) => t.includes('llama-74b'))).toBe(false)
+    expect(opts().some((t) => t.includes('bge-reranker'))).toBe(false)
+    act(() => q('ggml-pick-all-npu-gguf')!.click())
+    expect(opts().some((t) => t.includes('llama-74b') && t.includes('74B is too large'))).toBe(true)
+    expect(q('ggml-pick-dl-llama-74b')).not.toBeNull()
+  })
+
+  it('picking a model edits the slot and restarts it when running', async () => {
+    render()
+    act(() => q('ggml-model-pick-npu-gguf')!.click())
+    await act(async () => { host.querySelector<HTMLElement>('[data-option-id="qwen35-0.8b"]')!.click() })
+    expect(box.edits).toEqual([{ name: 'npu-gguf', body: { model: { default: 'qwen35-0.8b' } } }])
+    expect(box.restarts).toEqual(['npu-gguf'])
+  })
+
+  it('picking a model on a stopped slot edits without restarting', async () => {
+    render()
+    act(() => q('ggml-model-pick-npu-gguf-2')!.click())
+    await act(async () => { host.querySelector<HTMLElement>('[data-option-id="qwen3-4b"]')!.click() })
+    expect(box.edits.length).toBe(1)
+    expect(box.restarts).toEqual([])
   })
 
   it('Add opens the drawer in create mode; Edit opens it in edit mode with the slot', () => {

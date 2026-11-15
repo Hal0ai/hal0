@@ -10,6 +10,10 @@ import { ENDPOINTS } from '../endpoints'
 export interface XdnaFitRow {
   xdna_path: 'fused' | 'per-op' | null
   reason: string
+  /** false = too large or the wrong kind to be practical on the NPU (a 74B model, a reranker). Absent = ok. */
+  npu_ok?: boolean
+  /** Why `npu_ok` is false. */
+  npu_note?: string | null
 }
 export type XdnaFit = Record<string, XdnaFitRow>
 

@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ggmlPerOpLine,
+  ggmlPickerRows,
+  ggmlVisibleRows,
   GGML_CTX_PRESETS,
   ggmlCreateBody,
   ggmlCtxError,
@@ -157,5 +160,50 @@ describe('xdnaBlocker', () => {
     expect(xdnaBlocker({ xdna_path: 'fused', reason: 'x' })).toBeNull()
     expect(xdnaBlocker({ xdna_path: null, reason: 'not a GGUF file' })).toBeNull()
     expect(perOp('something new')).toBeNull()
+  })
+})
+
+describe('ggml card model picker', () => {
+  const fit = {
+    a: { xdna_path: 'fused', reason: '' },
+    b: { xdna_path: 'per-op', reason: "architecture 'lfm2' is not 'qwen35'", npu_ok: true },
+    big: { xdna_path: 'per-op', reason: '', npu_ok: false, npu_note: '74B too large' },
+    rr: { xdna_path: null, reason: 'not gguf' },
+    emb: { xdna_path: 'fused', reason: '' },
+  }
+  const models = [
+    { id: 'a', type: 'llm', quant: 'Q4_K_M', size: '2.1 GB', installed: true },
+    { id: 'big', type: 'llm', installed: false },
+    { id: 'emb', type: 'embedding' },
+  ]
+
+  it('lists non-null paths, drops non-llm registry rows, and carries chips data', () => {
+    const rows = ggmlPickerRows(models, fit)
+    expect(rows.map((r) => r.id)).toEqual(['a', 'b', 'big'])
+    expect(rows[0]).toMatchObject({ path: 'fused', quant: 'Q4_K_M', size: '2.1 GB', installed: true, npuOk: true })
+    expect(rows[2]).toMatchObject({ installed: false, npuOk: false, npuNote: '74B too large' })
+  })
+
+  it('a missing npu_ok is ok, and a row absent from the registry counts as installed', () => {
+    const rows = ggmlPickerRows([], { a: { xdna_path: 'fused', reason: '' } })
+    expect(rows[0]).toMatchObject({ npuOk: true, installed: true, npuNote: null })
+  })
+
+  it('hides npu_ok:false rows unless showAll, but keeps the current model', () => {
+    const rows = ggmlPickerRows(models, fit)
+    expect(ggmlVisibleRows(rows, false).rows.map((r) => r.id)).toEqual(['a', 'b'])
+    expect(ggmlVisibleRows(rows, false).hidden).toBe(1)
+    expect(ggmlVisibleRows(rows, true).rows.map((r) => r.id)).toEqual(['a', 'b', 'big'])
+    expect(ggmlVisibleRows(rows, false, 'big')).toMatchObject({ hidden: 0 })
+    expect(ggmlVisibleRows(rows, false, 'big').rows.map((r) => r.id)).toEqual(['a', 'b', 'big'])
+  })
+
+  it('ggmlPerOpLine turns each model_fit reason into one sentence', () => {
+    expect(ggmlPerOpLine({ xdna_path: 'per-op', reason: "architecture 'lfm2' is not 'qwen35'" })).toBe('Per-op path: architecture lfm2, not qwen35. Correct, slower decode.')
+    expect(ggmlPerOpLine({ xdna_path: 'per-op', reason: 'embedding_length 2048 is not 1024' })).toContain('embedding width 2048, not 1024')
+    expect(ggmlPerOpLine({ xdna_path: 'per-op', reason: 'blk.0.ssm_out.weight is Q4_K, not Q5_K' })).toContain('ssm_out is Q4_K, not Q5_K')
+    expect(ggmlPerOpLine({ xdna_path: 'per-op', reason: 'odd' })).toBe('Per-op path: odd')
+    expect(ggmlPerOpLine({ xdna_path: 'fused', reason: '' })).toBeNull()
+    expect(ggmlPerOpLine(null)).toBeNull()
   })
 })

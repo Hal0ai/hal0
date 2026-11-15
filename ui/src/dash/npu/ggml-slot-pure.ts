@@ -161,3 +161,65 @@ export function ggmlModelIds(
     return !m || m.type === 'llm'
   })
 }
+
+/** One row of a GGML slot card's model dropdown. */
+export interface GgmlPickerRow {
+  id: string
+  path: 'fused' | 'per-op'
+  reason: string
+  quant: string | null
+  size: string | null
+  /** false = the registry lists it but the file is not on disk yet. */
+  installed: boolean
+  /** false = the backend marks it impractical on the NPU (`npu_ok`); a missing field is ok. */
+  npuOk: boolean
+  npuNote: string | null
+}
+
+type FitLike = { xdna_path: string | null; reason?: string; npu_ok?: boolean; npu_note?: string | null }
+type RegLike = { id: string; type?: string; quant?: string | null; size?: string | null; installed?: boolean }
+
+/** Models an xdna slot can run: fit rows with a non-null `xdna_path` (the backend's authority for
+ *  "GGUF chat model that runs on the NPU"), minus registry rows known to be a non-llm type. */
+export function ggmlPickerRows(models: RegLike[] | null | undefined, fit: Record<string, FitLike> | null | undefined): GgmlPickerRow[] {
+  const reg = new Map((models ?? []).map((m) => [m.id, m]))
+  const rows: GgmlPickerRow[] = []
+  for (const [id, f] of Object.entries(fit ?? {})) {
+    if (!f || (f.xdna_path !== 'fused' && f.xdna_path !== 'per-op')) continue
+    const m = reg.get(id)
+    if (m && m.type && m.type !== 'llm') continue
+    rows.push({
+      id,
+      path: f.xdna_path,
+      reason: f.reason || '',
+      quant: m?.quant || null,
+      size: m?.size || null,
+      installed: m ? m.installed !== false : true,
+      npuOk: f.npu_ok !== false,
+      npuNote: f.npu_note || null,
+    })
+  }
+  return rows
+}
+
+/** Rows the dropdown lists: `npu_ok === false` rows are hidden unless `showAll`. The slot's current
+ *  model always stays listed so the closed trigger can name it. */
+export function ggmlVisibleRows(rows: GgmlPickerRow[], showAll: boolean, current?: string | null): { rows: GgmlPickerRow[]; hidden: number } {
+  const hidden = rows.filter((r) => !r.npuOk && r.id !== current).length
+  return { rows: showAll ? rows : rows.filter((r) => r.npuOk || r.id === current), hidden }
+}
+
+/** One plain sentence for the card's per-op line, from the model_fit.py reason. Null for a fused or
+ *  unknown row. An unrecognised reason is passed through verbatim. */
+export function ggmlPerOpLine(row: { xdna_path: string | null; reason?: string } | null | undefined): string | null {
+  if (!row || row.xdna_path !== 'per-op') return null
+  const r = row.reason || ''
+  const tail = 'Correct, slower decode.'
+  let m = /^architecture '([^']*)' is not '([^']*)'/.exec(r)
+  if (m) return `Per-op path: architecture ${m[1] || '?'}, not ${m[2]}. ${tail}`
+  m = /^embedding_length (\S+) is not (\d+)/.exec(r)
+  if (m) return `Per-op path: embedding width ${m[1]}, not ${m[2]}. ${tail}`
+  m = /ssm_out\.weight is (.+), not Q5_K/.exec(r)
+  if (m) return `Per-op path: ssm_out is ${m[1]}, not Q5_K. ${tail}`
+  return r ? `Per-op path: ${r}` : `Per-op path. ${tail}`
+}
