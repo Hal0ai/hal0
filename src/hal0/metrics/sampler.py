@@ -9,6 +9,8 @@ sensor access:
   * :func:`hal0.hardware.gpu_view.sample` for the box-wide GPU memory /
     utilization / GTT reading.
   * :func:`hal0.api.routes.power._probe_power` for hwmon power/thermal.
+  * :class:`hal0.hardware.npu_residency.NpuResidencyMeter` for the NPU duty
+    cycle (fleet row ``npu_util``; NULL on a box without an NPU).
   * :func:`hal0.api.routes.slots._scrape_llama_metrics` for per-slot
     ``inflight``/``kv_used`` (llama-server ``/metrics`` + ``/slots``).
 
@@ -43,6 +45,7 @@ import structlog
 
 from hal0.db.repository import now_iso
 from hal0.hardware import gpu_view
+from hal0.hardware.npu_residency import NpuResidencyMeter
 
 if TYPE_CHECKING:
     from hal0.metrics.writer import MetricsWriter
@@ -95,6 +98,7 @@ class SlotSampler:
         writer: MetricsWriter,
         interval_s: float = 5.0,
         registry: Any | None = None,
+        npu_meter: NpuResidencyMeter | None = None,
     ) -> None:
         self._slot_manager = slot_manager
         self._writer = writer
@@ -102,6 +106,9 @@ class SlotSampler:
         self._registry = registry
         self._task: asyncio.Task[None] | None = None
         self._last_state: dict[str, str] = {}
+        # The sampler's own duty meter (the /api/stats/hardware route keeps
+        # another), so each tick's reading covers exactly one interval.
+        self._npu_meter = npu_meter if npu_meter is not None else NpuResidencyMeter()
 
     def start(self) -> None:
         if self._task is not None:
@@ -142,6 +149,10 @@ class SlotSampler:
         except Exception:  # pragma: no cover -- defensive
             gpu_sample = None
         power = await _probe_power_snapshot()
+        try:
+            npu_util = await asyncio.to_thread(self._npu_meter.read)
+        except Exception:  # pragma: no cover -- defensive
+            npu_util = None
 
         fleet_row = {
             "ts": ts,
@@ -151,7 +162,7 @@ class SlotSampler:
             "gtt_bytes": _mb_to_bytes(gpu_sample.gtt_used_mb) if gpu_sample else None,
             "ram_bytes": None,
             "gpu_util": gpu_sample.gpu_busy if gpu_sample else None,
-            "npu_util": None,
+            "npu_util": npu_util,
             "power_w": power.get("gpu_power_w"),
             "temp_c": power.get("gpu_temp_c"),
             "inflight": None,

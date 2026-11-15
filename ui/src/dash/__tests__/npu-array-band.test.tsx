@@ -2,10 +2,15 @@
 // The array band: who holds the columns, and the shared (time-sliced) treatment.
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
 ;(globalThis as unknown as { React: typeof React }).React = React
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+
+vi.mock('@/api/hooks/useSlotActivity', () => ({
+  ACTIVITY_WINDOWS: ['5m', '15m', '1h'],
+  useSlotActivity: () => ({ data: undefined, isLoading: false, isError: false }),
+}))
 
 const { ArrayBand } = await import('../npu/ArrayBand')
 
@@ -37,8 +42,8 @@ describe('ArrayBand shared treatment', () => {
     expect(q('aie-grid')!.getAttribute('data-shared')).toBe('true')
     expect(q('aie-grid')!.className).toContain('shared')
     expect(q('npu-array-foot')!.textContent).toContain('shared · time-sliced')
-    expect(q('npu-holders')!.textContent).toContain('flm')
-    expect(q('npu-holders')!.textContent).toContain('npu-gguf')
+    expect(q('npu-lane-row-flm')!.textContent).toContain('4 · shared')
+    expect(q('npu-lane-row-npu-gguf')!.textContent).toContain('GGML')
   })
   it('one holder: not shared, plain foot', () => {
     render([occ('flm', 'flm', [0, 1, 2, 3, 4, 5, 6, 7])], [flm])

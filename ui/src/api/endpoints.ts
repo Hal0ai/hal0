@@ -183,6 +183,9 @@ export const ENDPOINTS = {
   // to "—" on 404/network error as a defensive floor, not because the
   // route is missing.
   statsRequests: '/api/stats/requests',
+  // Per-slot activity over 5m/15m/1h, 60 buckets: token rate, requests, TTFT p50, plus fleet
+  // GPU/NPU duty (src/hal0/metrics/read.py::slot_activity).
+  statsActivity: '/api/stats/activity',
   // W6: agent approvals SSE stream (polled list hook is primary; SSE for future).
   agentApprovalsStream: '/api/agent/approvals/events',
 
