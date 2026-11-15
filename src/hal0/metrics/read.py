@@ -28,6 +28,12 @@ _WINDOW_TO_TIMEDELTA = {
 _WINDOW_TO_BUCKETS = {"1h": (24, 150), "24h": (24, 3600), "7d": (21, 28800)}
 
 
+# window -> (bucket count, bucket width in seconds) for slot_activity(); the
+# activity charts on the NPU band and the Overview draw these 60 buckets.
+_ACTIVITY_WINDOWS = {"5m": (60, 5), "15m": (60, 15), "1h": (60, 60)}
+_ACTIVITY_DEFAULT_WINDOW = "15m"
+
+
 def _parse_ts(raw: Any) -> datetime | None:
     """Parse a stored ISO timestamp; naive values are taken as UTC."""
     try:
@@ -331,3 +337,128 @@ def requests_rollup(
 
 
 __all__ = ["models_health", "requests_rollup", "stats_summary", "system_stats"]
+
+
+def slot_activity(
+    db_path: Path | str | None = None,
+    *,
+    window: str = _ACTIVITY_DEFAULT_WINDOW,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """``GET /api/stats/activity`` payload: per-slot load and fleet duty in equal buckets.
+
+    ``window`` is ``5m`` | ``15m`` | ``1h`` (anything else reads as ``15m``);
+    each is 60 buckets. Per slot, from ``request_metric``:
+
+      - ``tps``: token rate per bucket. Each request's completion tokens are
+        spread evenly over its generation time (``total_ms`` minus
+        ``ttft_ms``, ending at the row's ``ts``) and only the part inside the
+        window is charted. A request still streaming appears once it ends.
+      - ``requests`` / ``errors`` / ``ttft_p50_ms``: over requests that ended
+        in the window; ``tokens`` is their completion total.
+
+    ``fleet.gpu_util`` / ``fleet.npu_util`` are the mean of the sampler's
+    ``__fleet__`` rows per bucket, ``None`` where no reading landed.
+    Unmigrated or empty DB: empty buckets, never a 500.
+    """
+    if window not in _ACTIVITY_WINDOWS:
+        window = _ACTIVITY_DEFAULT_WINDOW
+    buckets, bucket_s = _ACTIVITY_WINDOWS[window]
+    span_s = buckets * bucket_s
+    end_dt = now if now is not None else datetime.now(UTC)
+    start_dt = end_dt - timedelta(seconds=span_s)
+    w0 = start_dt.timestamp()
+
+    def _bucket(t: float) -> int:
+        return min(buckets - 1, max(0, int((t - w0) // bucket_s)))
+
+    with connect(db_path) as conn:
+        request_rows = _safe_query(
+            conn,
+            "SELECT ts, slot_id, completion_tokens, ttft_ms, total_ms, ok FROM request_metric "
+            "WHERE ts >= ? AND slot_id IS NOT NULL",
+            (start_dt.isoformat(),),
+        )
+        fleet_rows = _safe_query(
+            conn,
+            "SELECT ts, gpu_util, npu_util FROM slot_sample "
+            "WHERE slot_id = '__fleet__' AND ts >= ?",
+            (start_dt.isoformat(),),
+        )
+
+    token_bins: dict[str, list[float]] = {}
+    stats: dict[str, dict[str, Any]] = {}
+    for row in request_rows:
+        ended = _parse_ts(row["ts"])
+        if ended is None:
+            continue
+        end = ended.timestamp()
+        if end < w0:
+            continue
+        slot = row["slot_id"]
+        bins = token_bins.setdefault(slot, [0.0] * buckets)
+        st = stats.setdefault(slot, {"requests": 0, "errors": 0, "tokens": 0, "ttft": []})
+        st["requests"] += 1
+        if not row["ok"]:
+            st["errors"] += 1
+        if row["ttft_ms"] is not None:
+            st["ttft"].append(float(row["ttft_ms"]))
+        tokens = row["completion_tokens"] or 0
+        if tokens <= 0:
+            continue
+        st["tokens"] += tokens
+        total_s = (row["total_ms"] or 0.0) / 1000.0
+        ttft_s = (row["ttft_ms"] or 0.0) / 1000.0
+        gen_s = total_s - ttft_s if 0.0 < ttft_s < total_s else total_s
+        if gen_s <= 0.0:
+            bins[_bucket(end)] += tokens
+            continue
+        gen_start = end - gen_s
+        per_s = tokens / gen_s
+        for b in range(_bucket(gen_start), _bucket(end) + 1):
+            lo = max(gen_start, w0 + b * bucket_s)
+            hi = min(end, w0 + (b + 1) * bucket_s)
+            if hi > lo:
+                bins[b] += per_s * (hi - lo)
+
+    slots_out: dict[str, Any] = {}
+    for slot, bins in token_bins.items():
+        st = stats[slot]
+        tps = [round(v / bucket_s, 2) for v in bins]
+        slots_out[slot] = {
+            "tps": tps,
+            "peak_tps": max(tps),
+            "tokens": st["tokens"],
+            "requests": st["requests"],
+            "errors": st["errors"],
+            "ttft_p50_ms": _percentile(st["ttft"], 0.50),
+        }
+
+    sums: dict[str, list[float]] = {"gpu_util": [0.0] * buckets, "npu_util": [0.0] * buckets}
+    counts: dict[str, list[int]] = {"gpu_util": [0] * buckets, "npu_util": [0] * buckets}
+    for row in fleet_rows:
+        sampled = _parse_ts(row["ts"])
+        if sampled is None or sampled.timestamp() < w0:
+            continue
+        b = _bucket(sampled.timestamp())
+        for key in ("gpu_util", "npu_util"):
+            if row[key] is not None:
+                sums[key][b] += float(row[key])
+                counts[key][b] += 1
+    fleet = {
+        key: [
+            round(sums[key][b] / counts[key][b], 3) if counts[key][b] else None
+            for b in range(buckets)
+        ]
+        for key in sums
+    }
+
+    return {
+        "window": window,
+        "window_s": span_s,
+        "bucket_s": bucket_s,
+        "buckets": buckets,
+        "end": end_dt.isoformat(),
+        "fleet": fleet,
+        "slots": slots_out,
+    }

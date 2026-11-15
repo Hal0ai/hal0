@@ -1,16 +1,18 @@
 // The NPU array band (Slots → NPU → Lanes, top): duty gauge, claimed columns, throughput and the
-// 4×8 AIE grid. Every readout is a real field or "—"; per-tile load is never claimed — the grid
+// 4×8 AIE grid on the left; on the right, lane activity over time and one row per lane
+// (NpuActivity). Every readout is a real field or "—"; per-tile load is never claimed — the grid
 // shows ALLOCATED columns. FLM columns take the NPU hue, ggml-xdna the npu-s1 hue.
 import { useMemo } from 'react'
 import { Gauge, AieGrid, HUES, NPU_COLS, activityLevel } from './aie-grid.jsx'
 import { arrayHolders, arrayOwners, arrayShared } from './array-pure'
 import { npuHolders, npuToks } from './npu-pure'
+import { npuLaneRows } from './npu-activity-pure'
+import { NpuActivity } from './NpuActivity.jsx'
 
 const ENGINE_HUE = {
   flm: { hue: 'var(--dev-npu)', glow: 'var(--npu-s0-glow)', line: 'var(--npu-s0-line)', dim: 'var(--npu-s0-dim)', fg: 'var(--npu-s0-fg)' },
   xdna: HUES[1],
 }
-const ENGINE_LABEL = { flm: 'FLM', xdna: 'GGML' }
 
 export function ArrayBand({ occ, hw, slots }) {
   const owners = useMemo(() => arrayOwners(occ?.slots, slots), [occ?.slots, slots])
@@ -25,6 +27,7 @@ export function ArrayBand({ occ, hw, slots }) {
   }, [owners])
   const holders = useMemo(() => arrayHolders(occ?.slots, slots), [occ?.slots, slots])
   const shared = arrayShared(holders)
+  const laneRows = useMemo(() => npuLaneRows(occ?.slots, slots, undefined, shared), [occ?.slots, slots, shared])
 
   const colsAvailable = occ?.columns_available !== false
   const colsTotal = occ?.cols_total || NPU_COLS
@@ -82,20 +85,8 @@ export function ArrayBand({ occ, hw, slots }) {
         <div className="aie-foot" data-testid="npu-array-foot">
           {shared ? 'shared · time-sliced — allocated columns, not per-tile utilisation' : 'allocated columns — not per-tile utilisation'}
         </div>
-        <div className="npt-holders" data-testid="npu-holders">
-          {holders.length ? (
-            holders.map((h) => (
-              <span className="npt-holder" key={h.name}>
-                <span className="sw" style={{ background: ENGINE_HUE[h.engine].hue }} />
-                {h.name}
-                <small>{ENGINE_LABEL[h.engine]}</small>
-              </span>
-            ))
-          ) : (
-            <span className="npt-hint">Nothing holds the NPU. Start a lane below.</span>
-          )}
-        </div>
       </div>
+      <NpuActivity rows={laneRows} hues={ENGINE_HUE} />
     </div>
     </>
   )

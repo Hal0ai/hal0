@@ -300,3 +300,112 @@ class TestModelsHealth:
         assert row["backend_url"] == "http://127.0.0.1:8081"
         assert row["ttft_ms_p50_24h"] == 120.0
         assert row["tps_decode_p50_24h"] == 45.0
+
+
+class TestSlotActivity:
+    """``slot_activity`` -- per-slot token rate / requests / TTFT and fleet duty, bucketed."""
+
+    NOW = datetime(2026, 11, 15, 12, 0, 0, tzinfo=UTC)
+
+    def _db(self, tmp_path: Path) -> Path:
+        db = tmp_path / "t.db"
+        with connect(db) as conn:
+            migrate(conn)
+        return db
+
+    def _request(
+        self,
+        conn,
+        *,
+        end: datetime,
+        slot: str,
+        tokens: int | None,
+        total_ms: float,
+        ttft_ms: float | None = None,
+        ok: int = 1,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO request_metric (ts, request_id, slot_id, completion_tokens, ttft_ms, "
+            "total_ms, ok) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (end.isoformat(), f"r-{end.timestamp()}-{slot}", slot, tokens, ttft_ms, total_ms, ok),
+        )
+
+    def test_unmigrated_db_returns_empty_buckets(self, tmp_path: Path) -> None:
+        out = metrics_read.slot_activity(tmp_path / "fresh.db", window="5m", now=self.NOW)
+        assert out["window"] == "5m"
+        assert out["buckets"] == 60
+        assert out["bucket_s"] == 5
+        assert out["slots"] == {}
+        assert out["fleet"]["npu_util"] == [None] * 60
+        assert out["fleet"]["gpu_util"] == [None] * 60
+
+    def test_unknown_window_falls_back_to_15m(self, tmp_path: Path) -> None:
+        out = metrics_read.slot_activity(self._db(tmp_path), window="3d", now=self.NOW)
+        assert out["window"] == "15m"
+        assert out["bucket_s"] == 15
+
+    def test_tokens_spread_over_generation_time(self, tmp_path: Path) -> None:
+        """100 tokens generated over the last 10 s (ttft excluded) fill the last two 5 s buckets."""
+        db = self._db(tmp_path)
+        with connect(db) as conn:
+            self._request(
+                conn, end=self.NOW, slot="flm", tokens=100, total_ms=12_000, ttft_ms=2_000
+            )
+        out = metrics_read.slot_activity(db, window="5m", now=self.NOW)
+        tps = out["slots"]["flm"]["tps"]
+        assert tps[-1] == 10.0  # 50 tokens / 5 s
+        assert tps[-2] == 10.0
+        assert sum(tps[:-2]) == 0
+        assert out["slots"]["flm"]["peak_tps"] == 10.0
+        assert out["slots"]["flm"]["tokens"] == 100
+
+    def test_requests_errors_and_ttft_p50_per_slot(self, tmp_path: Path) -> None:
+        db = self._db(tmp_path)
+        with connect(db) as conn:
+            for i, ttft in enumerate((100.0, 200.0, 300.0)):
+                end = self.NOW - timedelta(seconds=30 * (i + 1))
+                self._request(
+                    conn, end=end, slot="npu-fast", tokens=10, total_ms=1_000, ttft_ms=ttft
+                )
+            self._request(conn, end=self.NOW, slot="npu-fast", tokens=None, total_ms=50, ok=0)
+            # Outside the 5 m window: not counted.
+            self._request(
+                conn,
+                end=self.NOW - timedelta(minutes=10),
+                slot="npu-fast",
+                tokens=10,
+                total_ms=1_000,
+            )
+        lane = metrics_read.slot_activity(db, window="5m", now=self.NOW)["slots"]["npu-fast"]
+        assert lane["requests"] == 4
+        assert lane["errors"] == 1
+        assert lane["ttft_p50_ms"] == 200.0
+
+    def test_request_started_before_the_window_counts_only_its_overlap(
+        self, tmp_path: Path
+    ) -> None:
+        db = self._db(tmp_path)
+        start = self.NOW - timedelta(minutes=5)
+        with connect(db) as conn:
+            # 20 s of generation, half before the window opens.
+            self._request(
+                conn, end=start + timedelta(seconds=10), slot="flm", tokens=200, total_ms=20_000
+            )
+        lane = metrics_read.slot_activity(db, window="5m", now=self.NOW)["slots"]["flm"]
+        assert lane["tokens"] == 200
+        assert sum(t * 5 for t in lane["tps"]) == 100.0  # only the in-window half is charted
+
+    def test_fleet_duty_is_the_bucket_mean_and_null_without_samples(self, tmp_path: Path) -> None:
+        db = self._db(tmp_path)
+        with connect(db) as conn:
+            for offset, npu in ((1, 0.2), (2, 0.6)):
+                ts = (self.NOW - timedelta(seconds=offset)).isoformat()
+                conn.execute(
+                    "INSERT INTO slot_sample (ts, slot_id, state, npu_util, gpu_util) "
+                    "VALUES (?, '__fleet__', 'n/a', ?, 0.5)",
+                    (ts, npu),
+                )
+        fleet = metrics_read.slot_activity(db, window="5m", now=self.NOW)["fleet"]
+        assert fleet["npu_util"][-1] == 0.4
+        assert fleet["gpu_util"][-1] == 0.5
+        assert fleet["npu_util"][:-1] == [None] * 59

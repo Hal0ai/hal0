@@ -145,3 +145,42 @@ class TestSlotSamplerTick:
         assert events[0]["from_state"] == "offline"
         assert events[0]["to_state"] == "ready"
         assert events[0]["duration_ms"] is None
+
+
+class _StubMeter:
+    def __init__(self, value: float | None) -> None:
+        self.value = value
+
+    def read(self) -> float | None:
+        return self.value
+
+
+class TestSlotSamplerNpuDuty:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("duty", [0.4, None])
+    async def test_fleet_row_carries_the_meter_reading(
+        self, writer: _FakeWriter, duty: float | None
+    ) -> None:
+        sampler = SlotSampler(
+            slot_manager=_FakeSlotManager([]),
+            writer=writer,
+            interval_s=5.0,
+            npu_meter=_StubMeter(duty),
+        )
+        with (
+            patch(
+                "hal0.metrics.sampler.gpu_view.sample",
+                return_value=type(
+                    "S", (), {"vram_used_mb": None, "gtt_used_mb": None, "gpu_busy": None}
+                )(),
+            ),
+            patch(
+                "hal0.metrics.sampler._probe_power_snapshot",
+                new=AsyncMock(return_value={"gpu_power_w": None, "gpu_temp_c": None}),
+            ),
+        ):
+            await sampler.tick()
+
+        (_, row) = writer.rows[0]
+        assert row["slot_id"] == "__fleet__"
+        assert row["npu_util"] == duty  # no NPU -> NULL, never 0

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -27,6 +26,7 @@ from hal0.config.loader import load_hardware_info
 from hal0.hardware import gpu_view
 from hal0.hardware.gpu_name import gpu_display_name
 from hal0.hardware.gpu_view import GPUMemorySample
+from hal0.hardware.npu_residency import NpuResidencyMeter
 from hal0.hardware.uptime import read_uptime_s
 from hal0.providers import podman_introspect
 from hal0.providers.podman_introspect import PodmanImagesResult
@@ -56,51 +56,14 @@ _now = time.monotonic
 _PVE_CONFIGURE_HINT = "Configure /etc/hal0/proxmox.json to see host pressure."
 
 # ── NPU active-residency util ─────────────────────────────────────────────────
-# Sysfs counters are monotonically increasing millisecond accumulators.
-# We compute Δactive / (Δactive + Δsuspended) between successive calls.
-# Monkeypatchable in tests — point at a tmp dir with the two counter files.
-_NPU_PM_ROOT: Path = Path("/sys/class/accel/accel0/device/power")
-_npu_pm_prev: tuple[int, int] | None = None  # (active_ms, suspended_ms)
+# This route's own meter: the metrics sampler keeps a separate one, so neither
+# shortens the other's interval. Tests swap it for a meter on a tmp dir.
+_NPU_METER = NpuResidencyMeter()
 
 
 def _npu_residency_util() -> float | None:
-    """Return NPU active-residency fraction [0.0, 1.0] or None.
-
-    Reads runtime_active_time and runtime_suspended_time from the kernel
-    runtime-PM sysfs counters for accel0 and computes the duty-cycle delta
-    since the previous call.  Returns None on the first call (need two
-    samples for a delta), on any I/O / parse error, or when the counter
-    denominator is zero / a reset is detected.
-    """
-    global _npu_pm_prev
-    try:
-        active_ms = int((_NPU_PM_ROOT / "runtime_active_time").read_text().strip())
-        suspended_ms = int((_NPU_PM_ROOT / "runtime_suspended_time").read_text().strip())
-    except Exception:
-        # Missing path, permission error, or non-integer content — honest None.
-        return None
-
-    prev = _npu_pm_prev
-    _npu_pm_prev = (active_ms, suspended_ms)
-
-    if prev is None:
-        # First call: cache the sample, can't compute a delta yet.
-        return None
-
-    da = active_ms - prev[0]
-    ds = suspended_ms - prev[1]
-
-    if da < 0 or ds < 0:
-        # Counter reset (e.g. driver reload) — reset cache, return None.
-        _npu_pm_prev = (active_ms, suspended_ms)
-        return None
-
-    denom = da + ds
-    if denom <= 0:
-        # No time elapsed between reads.
-        return None
-
-    return max(0.0, min(1.0, da / denom))
+    """NPU duty cycle [0.0, 1.0] since this route's previous read, or None."""
+    return _NPU_METER.read()
 
 
 def _flatten_for_ui(info: dict[str, Any], gpu: GPUMemorySample | None = None) -> dict[str, Any]:
@@ -822,6 +785,19 @@ async def stats_requests_endpoint(request: Request, window_s: int = 60) -> Reque
         payload["dedupe"] = bool(single_flight.in_flight_keys())
 
     return RequestsRollup(**payload)
+
+
+@router.get("/stats/activity")
+async def stats_activity_endpoint(request: Request, window: str = "15m") -> dict[str, Any]:
+    """``GET /api/stats/activity`` -- per-slot token rate, requests and TTFT
+    plus fleet GPU/NPU duty, 60 buckets over ``window`` (``5m``|``15m``|``1h``,
+    default ``15m``). See :func:`hal0.metrics.read.slot_activity`.
+    """
+    from hal0.metrics import read as metrics_read
+
+    service = getattr(request.app.state, "metrics_service", None)
+    path = service.writer.db_path if service is not None else None
+    return await asyncio.to_thread(metrics_read.slot_activity, path, window=window)
 
 
 @router.get("/system-stats")

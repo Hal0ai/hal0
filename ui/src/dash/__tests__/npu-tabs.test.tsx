@@ -26,6 +26,7 @@ vi.mock('@/api/hooks/useProfiles', () => ({ useProfiles: () => ({ data: [], isLo
 vi.mock('../profiles.jsx', () => ({ ProfileDrawer: () => null }))
 vi.mock('@/api/hooks/useXdnaFit', () => ({ useXdnaFit: () => ({ data: {} }) }))
 vi.mock('@/api/hooks/useModels', () => ({ useModels: () => ({ data: [] }), usePullJob: () => ({ start: async () => {}, state: 'idle', modelId: null, error: null, pct: null }) }))
+vi.mock('@/api/hooks/useSlotActivity', () => ({ ACTIVITY_WINDOWS: ['5m', '15m', '1h'], useSlotActivity: () => ({ data: undefined, isLoading: false, isError: false }) }))
 
 const { NpuTabs } = await import('../npu/NpuTabs')
 
