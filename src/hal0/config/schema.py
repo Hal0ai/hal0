@@ -3317,8 +3317,9 @@ class MemoryCompatConfig(BaseModel):
             "extracted again: hours of the memory model's time on a local "
             "slot. A commit-log retain sooner than this after the last one "
             "accepted here is answered 429 with Retry-After; the plugin logs "
-            "it and carries on. The time is kept in hal0-api's memory, so a "
-            "restart lets the next one through. 0 turns the limit off."
+            "it and carries on. After a restart of hal0-api the stored "
+            "document's last write in the engine counts as the last retain. "
+            "0 turns the limit off."
         ),
     )
 
