@@ -173,3 +173,94 @@ def test_pooled_decoder_embedding_model_is_not_npu_ok(tmp_path: Path) -> None:
 def test_pooling_none_is_still_text_generation(tmp_path: Path) -> None:
     path = write_gguf(tmp_path / "m.gguf", "llama", uints={"llama.pooling_type": 0})
     assert xdna_model_fit(path).npu_ok is True
+
+
+# ── architectures the runner's llama.cpp build cannot load ─────────────────
+
+
+def test_unknown_architecture_cannot_load(tmp_path: Path) -> None:
+    fit = xdna_model_fit(write_gguf(tmp_path / "m.gguf", "lfm3"))
+    assert fit.xdna_path is None
+    assert fit.reason == "the xdna runner's llama.cpp build has no 'lfm3' architecture"
+    assert fit.npu_ok is False
+    assert fit.npu_note == fit.reason
+
+
+def test_lfm2_still_loads_per_op(tmp_path: Path) -> None:
+    fit = xdna_model_fit(write_gguf(tmp_path / "m.gguf", "lfm2"))
+    assert fit.xdna_path == "per-op"
+    assert fit.npu_ok is True
+
+
+def test_fused_unchanged_by_arch_check(tmp_path: Path) -> None:
+    fit = xdna_model_fit(write_gguf(tmp_path / "m.gguf", "qwen35", **_FUSED_KW))
+    assert fit.xdna_path == "fused"
+
+
+def test_known_arch_table_is_the_pinned_fork_set() -> None:
+    from hal0.slots.xdna_archs import XDNA_KNOWN_ARCHS
+
+    # Regenerate with scripts/gen_xdna_archs.py when the runner pin moves.
+    assert {"llama", "qwen35", "lfm2", "lfm2moe"} <= XDNA_KNOWN_ARCHS
+    assert "lfm3" not in XDNA_KNOWN_ARCHS
+    assert "(unknown)" not in XDNA_KNOWN_ARCHS
+
+
+def test_slot_guard_refuses_unknown_arch_on_xdna_slot_only(tmp_path: Path) -> None:
+    from hal0.slots.model_fit import xdna_slot_model_unloadable
+
+    registry = {"lfm3-x": {"path": str(write_gguf(tmp_path / "m.gguf", "lfm3"))}}
+
+    class Reg:
+        def get(self, mid: str):
+            return registry.get(mid)
+
+    xdna = {"binary": "xdna", "device": "npu"}
+    msg = xdna_slot_model_unloadable("npu-ggml", xdna, "lfm3-x", Reg())
+    assert msg is not None
+    assert "lfm3-x" in msg and "'lfm3'" in msg
+    # Not an xdna slot, unknown model, unreadable file, known arch: never judged.
+    assert xdna_slot_model_unloadable("chat", {"device": "gpu-rocm"}, "lfm3-x", Reg()) is None
+    assert xdna_slot_model_unloadable("npu-ggml", xdna, "nope", Reg()) is None
+    bad = tmp_path / "bad.gguf"
+    bad.write_bytes(b"junk" * 8)
+    registry["bad"] = {"path": str(bad)}
+    assert xdna_slot_model_unloadable("npu-ggml", xdna, "bad", Reg()) is None
+    registry["ok"] = {"path": str(write_gguf(tmp_path / "ok.gguf", "lfm2"))}
+    assert xdna_slot_model_unloadable("npu-ggml", xdna, "ok", Reg()) is None
+
+
+def test_xdna_arch_table_matches_the_pinned_runner_image():
+    """The arch table must be regenerated when the xdna runner pin moves.
+
+    The image tag starts with the short fork commit (``72f6dfa-r…``). A stale
+    table would refuse architectures the new runner can load, or accept ones it
+    cannot, so a pin bump without ``scripts/gen_xdna_archs.py`` fails here.
+    """
+    import json
+    from pathlib import Path
+
+    from hal0.slots.xdna_archs import XDNA_RUNNER_LLAMA_CPP_REF
+
+    manifest = json.loads((Path(__file__).resolve().parents[2] / "manifest.json").read_text())
+    tags = [
+        entry.get("tag", "")
+        for entry in _walk(manifest)
+        if isinstance(entry, dict) and "hal0-runner-xdna" in str(entry.get("image", ""))
+    ]
+    assert tags, "no xdna runner pin found in manifest.json"
+    for tag in tags:
+        assert XDNA_RUNNER_LLAMA_CPP_REF.startswith(tag.split("-", 1)[0]), (
+            f"xdna runner pinned at {tag!r} but xdna_archs.py was generated from "
+            f"{XDNA_RUNNER_LLAMA_CPP_REF[:12]}; run scripts/gen_xdna_archs.py"
+        )
+
+
+def _walk(node):
+    yield node
+    if isinstance(node, dict):
+        for v in node.values():
+            yield from _walk(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk(v)

@@ -1158,13 +1158,15 @@ async def _guard_model_fits_slot(
     if not model_id or cfg is None:
         return
     from hal0.slots.config_write import check_model_fits_slot
-    from hal0.slots.model_fit import slot_model_runtime_mismatch
+    from hal0.slots.model_fit import slot_model_runtime_mismatch, xdna_slot_model_unloadable
 
     registry = getattr(request.app.state, "model_registry", None)
 
     def _check() -> str | None:
         check_model_fits_slot(name, cfg, model_id, registry)
-        return slot_model_runtime_mismatch(name, cfg, model_id, registry)
+        return slot_model_runtime_mismatch(
+            name, cfg, model_id, registry
+        ) or xdna_slot_model_unloadable(name, cfg, model_id, registry)
 
     mismatch = await asyncio.to_thread(_check)
     if mismatch:
