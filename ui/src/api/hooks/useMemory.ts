@@ -317,6 +317,10 @@ export interface MemoryExtractionLimits {
   task_retries: number
   retry_backoff_s: number
   worker_slots: number
+  // #3700: per-type worker-slot reservations; absent from an older hal0-api.
+  retain_reserved_slots?: number
+  consolidation_reserved_slots?: number
+  refresh_reserved_slots?: number
 }
 
 // #2353: ExtractionThroughput.as_dict() (hal0/memory/extraction_env.py) — what
@@ -351,6 +355,9 @@ export interface MemoryGraphUpdate {
   extraction_task_retries?: number
   extraction_retry_backoff_s?: number
   extraction_worker_slots?: number
+  retain_reserved_slots?: number
+  consolidation_reserved_slots?: number
+  refresh_reserved_slots?: number
 }
 
 // ADR-0023 §3: when the extraction slot changes, the PUT response carries a
