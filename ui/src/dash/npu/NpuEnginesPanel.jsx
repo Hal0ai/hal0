@@ -25,7 +25,7 @@ function CopyCmd({ cmd, testid }) {
   )
 }
 
-export function NpuEnginesPanel({ occ, hw, slots = [], flmDirty = false }) {
+export function NpuEnginesPanel({ occ, hw, slots = [] }) {
   const profQ = useProfiles()
   const catQ = useFlmCatalog()
   const [drawer, setDrawer] = useState(null)
@@ -91,16 +91,10 @@ export function NpuEnginesPanel({ occ, hw, slots = [], flmDirty = false }) {
             <span className="npt-hint" data-testid={`npu-profile-${p.name}-usedby`}>
               {p.usedBy.length === 0 ? 'unused' : p.usedBy.map((n, i) => {
                 const slot = (slots ?? []).find((x) => x.name === n)
-                // An xdna slot edits in the page (like the GGML lane). An FLM slot's drawer is a
-                // route change, which would drop the staged FLM changes: blocked while staged.
+                // An xdna slot edits in the page (like the GGML lane); an FLM slot opens its drawer.
                 if (slot && isXdnaSlot(slot)) {
                   return (
                     <span key={n}>{i > 0 && ', '}<a href={slotEditHash(n)} data-testid={`npu-used-${n}`} onClick={(e) => { e.preventDefault(); setGgml(slot) }}>{n}</a></span>
-                  )
-                }
-                if (flmDirty) {
-                  return (
-                    <span key={n}>{i > 0 && ', '}<span className="npt-link-disabled" aria-disabled="true" data-testid={`npu-used-${n}`} title="Apply or discard the staged FLM changes first">{n}</span></span>
                   )
                 }
                 return (

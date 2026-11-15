@@ -160,7 +160,7 @@ test.describe('FLM model scoping + NPU tab chat model', () => {
     await expect(page.getByTestId('flm-row-embed')).toContainText('embed-gemma:300m')
   })
 
-  test('picking a chat model stages it; Apply writes the anchor config then restarts it', async ({ page }) => {
+  test('picking a chat model asks first, then writes the anchor config and restarts it', async ({ page }) => {
     await setup(page)
     const calls: string[] = []
     let putBody: any = null
@@ -180,7 +180,7 @@ test.describe('FLM model scoping + NPU tab chat model', () => {
     await page.getByTestId('flm-chat-model').click()
     await page.locator('[data-option-id="gemma3:1b"]').click()
     expect(calls).toEqual([])
-    await page.getByTestId('flm-apply').click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Switch and restart FLM' }).click()
     await expect.poll(() => calls).toEqual(['PUT config', 'POST restart'])
     expect(putBody).toEqual({
       npu: { chat: true, asr: true, embed: true },

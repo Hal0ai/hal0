@@ -121,7 +121,7 @@ test.describe('NPU tab', () => {
     expect(calls[1]).toBe(`POST /api/slots/${created.name}/load`)
   })
 
-  test('two staged FLM toggles apply with one PUT and one restart', async ({ page }) => {
+  test('an FLM role toggle confirms, then applies with one PUT and one restart', async ({ page }) => {
     await setup(page)
     const puts: any[] = []
     let restarts = 0
@@ -138,30 +138,26 @@ test.describe('NPU tab', () => {
     })
     await page.goto('/#slots/npu')
     await page.getByTestId('flm-row-asr').getByTestId('flm-cap-asr').click()
-    await page.getByTestId('flm-row-embed').getByTestId('flm-cap-embed').click()
-    await expect(page.getByTestId('flm-applybar')).toContainText('2 changes staged')
+    const dlg = page.getByRole('dialog')
+    await expect(dlg).toContainText('Stop speech-to-text?')
+    await expect(dlg).toContainText('chat stops answering')
     expect(puts).toHaveLength(0)
-    await page.getByTestId('flm-apply').click()
+    await dlg.getByRole('button', { name: 'Stop speech-to-text and restart FLM' }).click()
     await expect.poll(() => puts.length).toBe(1)
     await expect.poll(() => restarts).toBe(1)
-    expect(puts[0].npu).toEqual({ chat: true, asr: false, embed: true })
-    await expect(page.getByTestId('flm-applybar')).toHaveCount(0)
+    expect(puts[0].npu).toEqual({ chat: true, asr: false, embed: false })
+    await expect(dlg).toHaveCount(0)
     expect(puts).toHaveLength(1)
     expect(restarts).toBe(1)
   })
 
-  test('the FLM lane Edit opens the drawer and closing it returns to the NPU tab; it is blocked while changes are staged', async ({ page }) => {
+  test('the FLM lane Edit opens the drawer and closing it returns to the NPU tab', async ({ page }) => {
     await setup(page)
     await page.route('**/api/slots/npu/config', (route) =>
       json(route, { name: 'npu', npu: { chat: true, asr: false, embed: false }, model: { default: 'qwen3-0.6b-npu' } }),
     )
     await page.goto('/#slots/npu')
-    await page.getByTestId('flm-cap-asr').click()
-    const edit = page.getByTestId('flm-lane').getByTestId('slot-ctrl-edit')
-    await expect(edit).toBeDisabled()
-    await expect(edit).toHaveAttribute('title', 'Apply or discard the staged FLM changes first')
-    await page.getByTestId('flm-discard').click()
-    await edit.click()
+    await page.getByTestId('flm-lane').getByTestId('slot-ctrl-edit').click()
     await expect(page).toHaveURL(/#slots\/edit\/npu$/)
     await expect(page.locator('.drawer.open')).toBeVisible()
     await page.keyboard.press('Escape')

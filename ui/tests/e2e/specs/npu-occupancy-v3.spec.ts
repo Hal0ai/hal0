@@ -77,9 +77,11 @@ test.describe('NPU tab — array band and FLM lane', () => {
     await expect(tab.locator('.aie-part .pl')).toContainText('npu')
     await expect(tab.locator('.aie-part .pc')).toHaveText('· 8c')
 
-    // FLM lane: the serving dot and the chat row's tok/s from slot.metrics
+    // FLM lane: the chat card's serving dot (the process dot in the header is the other one) and
+    // its tok/s from slot.metrics
     const lane = page.getByTestId('flm-lane')
-    await expect(lane.locator('.sdot.serving')).toHaveCount(1)
+    await expect(lane.locator('.sdot.serving')).toHaveCount(2)
+    await expect(lane.getByTestId('flm-row-chat').locator('.sdot.serving')).toHaveCount(1)
     await expect(lane.getByTestId('flm-row-chat')).toContainText('52')
   })
 
@@ -220,7 +222,7 @@ test.describe('NPU toggles on a model-less anchor (#1661)', () => {
     await page.goto('/#slots/npu')
 
     await page.getByTestId('flm-row-asr').getByTestId('flm-cap-asr').click({ force: true })
-    await expect(page.getByTestId('flm-applybar')).toHaveCount(0)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
     expect(puts.length).toBe(0)
   })
 })

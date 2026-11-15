@@ -86,7 +86,7 @@ test.describe('FLM lane chat-model seeding (#1388)', () => {
 
     await page.goto('/#slots/npu')
     await page.getByTestId('flm-cap-asr').click()
-    await page.getByTestId('flm-apply').click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Start speech-to-text and restart FLM' }).click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].npu).toEqual({ chat: true, asr: true, embed: false })
@@ -102,7 +102,7 @@ test.describe('FLM lane chat-model seeding (#1388)', () => {
 
     await page.goto('/#slots/npu')
     await page.getByTestId('flm-cap-embed').click()
-    await page.getByTestId('flm-apply').click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Start embeddings and restart FLM' }).click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].npu).toEqual({ chat: true, asr: false, embed: true })
@@ -134,7 +134,7 @@ test.describe('FLM lane chat-model seeding (#1388)', () => {
     await page.goto('/#slots/npu')
     await page.getByTestId('flm-chat-model').click()
     await page.locator('[data-option-id="flm-other"]').click()
-    await page.getByTestId('flm-apply').click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Switch and restart FLM' }).click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].model).toEqual({ default: 'flm-other' })
@@ -149,7 +149,7 @@ test.describe('FLM lane chat-model seeding (#1388)', () => {
 
     await page.goto('/#slots/npu')
     await page.getByTestId('flm-cap-asr').click()
-    await page.getByTestId('flm-apply').click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Start speech-to-text and restart FLM' }).click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].model).toEqual({ default: STALE_LIVE })

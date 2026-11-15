@@ -321,7 +321,7 @@ test.describe('FLM lane — NPU modality + chat-model wiring (moved from the slo
     return restarts
   }
 
-  test('W4 — the Embed toggle stages, then PUT /config { npu.embed } + restart on Apply', async ({ page }) => {
+  test('W4 — the Embed toggle confirms, then PUT /config { npu.embed } + restart', async ({ page }) => {
     const puts = await captureConfig(page, 'npu')
     const restarts = await captureRestarts(page, 'npu')
     await stubFlmModels(page, [{ model: 'flm-chat', installed: true }])
@@ -329,10 +329,11 @@ test.describe('FLM lane — NPU modality + chat-model wiring (moved from the slo
 
     await page.goto('/#slots/npu')
     await page.getByTestId('flm-cap-embed').click()
-    // Staged only: nothing is written until Apply.
-    await expect(page.getByTestId('flm-applybar')).toContainText('1 change staged')
+    // FLM is running: nothing is written until the confirm that names the paused roles.
+    const dlg = page.getByRole('dialog')
+    await expect(dlg).toContainText('chat stops answering')
     expect(puts).toEqual([])
-    await page.getByTestId('flm-apply').click()
+    await dlg.getByRole('button', { name: 'Start embeddings and restart FLM' }).click()
 
     await expect.poll(() => puts.length).toBe(1)
     // The whole modality triple rides every write — the backend replaces [npu]
@@ -341,20 +342,26 @@ test.describe('FLM lane — NPU modality + chat-model wiring (moved from the slo
     await expect.poll(() => restarts.length).toBe(1)
   })
 
-  test('W4 — the Chat toggle applies PUT /config { npu.chat: false }', async ({ page }) => {
+  test('W4 — the Chat toggle (the only role on) applies PUT /config { npu.chat: false } and stops FLM', async ({ page }) => {
     const puts = await captureConfig(page, 'npu')
     await captureRestarts(page, 'npu')
+    const unloads: string[] = []
+    await page.route('**/api/slots/npu/unload', async (route) => {
+      unloads.push(route.request().url())
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' })
+    })
     await stubFlmModels(page, [{ model: 'flm-chat', installed: true }])
     await seedSlots(page, [NPU_SLOT, EMBED])
 
     await page.goto('/#slots/npu')
     await page.getByTestId('flm-cap-chat').click()
-    await page.getByTestId('flm-apply').click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Stop FLM' }).click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].npu).toEqual({ chat: false, asr: false, embed: false })
     // Chat off ⇒ no positional model tag is sent.
     expect(puts[0]).not.toHaveProperty('model')
+    await expect.poll(() => unloads.length).toBe(1)
   })
 
   test('W5 — picking an INSTALLED chat model applies { npu, model: { default } }', async ({ page }) => {
@@ -370,7 +377,7 @@ test.describe('FLM lane — NPU modality + chat-model wiring (moved from the slo
     await expect(page.getByTestId('flm-chat-model')).toContainText('flm-chat')
     await page.getByTestId('flm-chat-model').click()
     await page.locator('[data-option-id="flm-chat-xl"]').click()
-    await page.getByTestId('flm-apply').click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Switch and restart FLM' }).click()
 
     await expect.poll(() => puts.length).toBe(1)
     expect(puts[0].npu).toEqual({ chat: true, asr: false, embed: false })
@@ -419,8 +426,9 @@ test.describe('FLM lane — NPU modality + chat-model wiring (moved from the slo
     await picker.click()
     await expect(page.locator('[data-option-id="flm-chat-xl"] .npt-flm-st.dl')).toBeVisible()
     await expect(page.locator('[data-option-id="flm-chat"] .npt-flm-st.ok')).toBeVisible()
-    // Picking a not-installed model downloads it and applies: no Apply click.
+    // Picking a not-installed model asks once, then downloads it and applies.
     await page.locator('[data-option-id="flm-chat-xl"]').click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Download and switch' }).click()
 
     // Pull is fired first; the slot config is NOT written yet.
     await expect(page.getByTestId('flm-pulling')).toBeVisible()

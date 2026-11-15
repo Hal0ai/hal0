@@ -4,8 +4,8 @@
 // A tab change rewrites the URL with replaceState (Back does not fill with tabs). All three panels
 // stay mounted and the inactive ones are hidden, like Image Gen.
 //
-// NpuTabs owns the FLM draft (`flmDraft`), edited on the Lanes panel (the FLM lane's model
-// dropdown stages into it). The Models panel lists only GGUF models.
+// The FLM lane applies each change at once, so nothing is staged across tabs. The Models panel
+// lists only GGUF models.
 //
 // No NPU (probe says absent) and no NPU slot → the "No NPU on this box" panel. NPU slots with a
 // failed probe keep the shell (degraded): lanes stay operable.
@@ -18,7 +18,6 @@ import { FlmLane } from './FlmLane.jsx'
 import { GgmlLane } from './GgmlLane.jsx'
 import { NpuEnginesPanel } from './NpuEnginesPanel.jsx'
 import { NpuModelsPanel } from './NpuModelsPanel.jsx'
-import { draftCount } from './flm-draft-pure'
 import { NPU_TABS, npuStatusParts, npuTabVisible, validNpuTab } from './npu-pure'
 
 const IDS = NPU_TABS.map((t) => t.id)
@@ -31,12 +30,12 @@ function subFromHash() {
 }
 
 // Lanes: the array band on top (full width), then the FLM lane | GGML lane row.
-function LanesPanel({ draft, setDraft, occ, hw, slots }) {
+function LanesPanel({ occ, hw, slots }) {
   return (
     <div className="npt-lanes" data-testid="npu-lanes">
       <ArrayBand occ={occ} hw={hw} slots={slots} />
       <div className="npt-cols">
-        <FlmLane slots={slots} draft={draft} setDraft={setDraft} />
+        <FlmLane slots={slots} />
         <GgmlLane slots={slots} occ={occ} hw={hw} />
       </div>
     </div>
@@ -79,7 +78,6 @@ export function NpuTabs({ sub, slots = [] }) {
   const occ = occQ.data
 
   const [tab, setTab] = useState(() => validNpuTab(sub) ?? 'lanes')
-  const [flmDraft, setFlmDraft] = useState({})
 
   useEffect(() => {
     const next = validNpuTab(sub)
@@ -184,13 +182,13 @@ export function NpuTabs({ sub, slots = [] }) {
       </div>
 
       <div role="tabpanel" id="npu-panel-lanes" className="npt-panel" aria-labelledby="npu-tab-lanes" hidden={tab !== 'lanes'}>
-        <LanesPanel draft={flmDraft} setDraft={setFlmDraft} occ={occ} hw={hwQ.data} slots={slots} />
+        <LanesPanel occ={occ} hw={hwQ.data} slots={slots} />
       </div>
       <div role="tabpanel" id="npu-panel-models" className="npt-panel" aria-labelledby="npu-tab-models" hidden={tab !== 'models'}>
         <NpuModelsPanel slots={slots} occ={occ} />
       </div>
       <div role="tabpanel" id="npu-panel-engines" className="npt-panel" aria-labelledby="npu-tab-engines" hidden={tab !== 'engines'}>
-        <NpuEnginesPanel occ={occ} hw={hwQ.data} slots={slots} flmDirty={draftCount(flmDraft) > 0} />
+        <NpuEnginesPanel occ={occ} hw={hwQ.data} slots={slots} />
       </div>
     </div>
   )
