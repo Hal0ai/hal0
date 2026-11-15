@@ -323,6 +323,7 @@ def _occupancy_absent() -> dict[str, Any]:
         "serving": False,
         "single_tenant": True,
         "columns_available": False,
+        "columns_source": None,
         "slots": [],
     }
 
@@ -479,6 +480,8 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
     columns_available = False
     cols_used = 0
     any_serving = False
+    # "container" (xrt-smi inside a slot) or "host" (the host's xrt-smi, device-wide).
+    columns_source: str | None = None
 
     for s in flm_slots:
         raw_state = str(getattr(s, "state", "") or "").lower()
@@ -508,6 +511,8 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
             probe = await cached_aie_columns(slot_container_name(await slot_token_for(sm, s.name)))
             if probe and probe.get("partitions"):
                 columns_available = True
+                if columns_source != "container":
+                    columns_source = str(probe.get("source") or "container")
                 for part in probe["partitions"]:
                     start = int(part["start_col"])
                     num = int(part["num_cols"])
@@ -649,6 +654,7 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         "serving": any_serving,
         "single_tenant": len(tenant_names) <= 1,
         "columns_available": columns_available,
+        "columns_source": columns_source if columns_available else None,
         "slots": slots_out,
         "shared_warning": npu_shared_warning,
         **await _engine_and_host_facts(),

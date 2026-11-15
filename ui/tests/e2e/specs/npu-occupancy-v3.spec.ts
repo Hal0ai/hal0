@@ -7,7 +7,7 @@
  *      A serving FLM lights the whole 8-column array (single-tenant).
  *   2. The slot card's lifecycle control issues the right slot mutation.
  *   3. Degraded mode (columns_available:false) greys the grid + labels the
- *      gauge "column probe unavailable" — every other signal stays.
+ *      gauge "columns not reported" — every other signal stays.
  *
  * READ path: VITE_MOCK_HAL0=1 short-circuits GET /api/slots and
  * GET /api/npu/occupancy in mockFetch (the latter synthesised by
@@ -124,7 +124,7 @@ test.describe('NPU tab — array band and FLM lane', () => {
     const tab = page.getByTestId('npu-pane')
     await expect(tab).toBeVisible()
     await expect(tab.locator('.aie.degraded')).toBeVisible()
-    await expect(tab.locator('.gauge .sub')).toContainText('column probe unavailable')
+    await expect(tab.locator('.gauge .sub')).toContainText('columns not reported')
     // Review Focus 5: the lane is still operable while the grid is degraded
     await expect(page.getByTestId('flm-lane')).toBeVisible()
   })

@@ -72,3 +72,20 @@ describe('ArrayBand banners', () => {
     expect(q('npu-pmode-banner')).toBeNull()
   })
 })
+
+describe('ArrayBand column readout under the gauge', () => {
+  const sub = () => q('npu-array-band')!.querySelector('.sub')!.textContent
+  it('a container reading shows used/total columns', () => {
+    render([occ('flm', 'flm', [0, 1, 2, 3, 4, 5, 6, 7])], [flm], { columns_source: 'container' })
+    expect(sub()).toBe('8/8 columns')
+  })
+  it('a host reading says the columns are shared', () => {
+    render([occ('flm', 'flm', [0, 1, 2, 3, 4, 5, 6, 7])], [flm], { columns_source: 'host' })
+    expect(sub()).toBe('8/8 columns · shared')
+  })
+  it('no reading says so in plain words', () => {
+    render([occ('flm', 'flm', [0, 1, 2, 3, 4, 5, 6, 7])], [flm], { columns_available: false, columns_source: null })
+    expect(sub()).toBe('columns not reported')
+    expect(host.textContent).not.toContain('probe unavailable')
+  })
+})
