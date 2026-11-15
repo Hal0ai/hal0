@@ -33,9 +33,11 @@ What starts it: hal0-api at boot and on a ``memory.refresh.*`` save
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -116,7 +118,9 @@ def enforce_trigger(
     return out, replaced
 
 
-def bank_config_updates(policy: Any, config: Mapping[str, Any] | None) -> dict[str, Any]:
+def bank_config_updates(
+    policy: Any, config: Mapping[str, Any] | None, *, owns_auto_off: bool = False
+) -> dict[str, Any]:
     """The ``PATCH .../config`` updates that bring one bank to ``policy``. Pure.
 
     ``config`` is the engine's ``GET .../config`` answer (``config`` is the
@@ -124,8 +128,11 @@ def bank_config_updates(policy: Any, config: Mapping[str, Any] | None) -> dict[s
     differ are returned, so an empty dict means the bank is already there.
 
     ``enable_auto_consolidation`` is set to ``false`` for scheduled
-    consolidation and cleared (JSON null, the engine's "server default"
-    tombstone) for continuous, rather than set ``true``: a bank override of
+    consolidation. For continuous it is cleared (JSON null, the engine's
+    "server default" tombstone) only when ``owns_auto_off`` says hal0 set
+    that override itself: an override someone else set (an operator turning
+    consolidation off to drain a backlog) is left alone and reported
+    (:func:`foreign_auto_off`). It is never set ``true``: a bank override of
     ``true`` would beat the engine-wide ``false`` the maintenance isolation
     drop-in sets while a fold-in or embedder switch runs
     (:mod:`hal0.memory.engine_maintenance`).
@@ -147,9 +154,61 @@ def bank_config_updates(policy: Any, config: Mapping[str, Any] | None) -> dict[s
     if consolidation == "scheduled":
         if override is not False:
             updates[AUTO_CONSOLIDATION_KEY] = False
-    elif override is not None:
+    elif override is not None and owns_auto_off:
         updates[AUTO_CONSOLIDATION_KEY] = None
     return updates
+
+
+def foreign_auto_off(
+    bank: str, policy: Any, config: Mapping[str, Any] | None, *, owns_auto_off: bool
+) -> str | None:
+    """A note when the bank's auto-consolidation is off by an override hal0
+    did not set while the policy wants it continuous, else ``None``."""
+    _, _, _, consolidation = _policy_fields(policy)
+    if consolidation != "continuous" or owns_auto_off:
+        return None
+    answer: Mapping[str, Any] = config if isinstance(config, Mapping) else {}
+    raw = answer.get("overrides")
+    overrides: Mapping[str, Any] = raw if isinstance(raw, Mapping) else {}
+    if overrides.get(AUTO_CONSOLIDATION_KEY) is False:
+        return (
+            f"auto-consolidation is off on {bank} by an override hal0 did not set; "
+            "hal0 leaves it alone"
+        )
+    return None
+
+
+# ── which overrides hal0 wrote ─────────────────────────────────────────────
+
+
+def owned_state_path() -> Path:
+    """``/var/lib/hal0/state/memory-refresh-policy.json`` (under ``HAL0_HOME`` in a sandbox):
+    the banks whose ``enable_auto_consolidation = false`` hal0 itself set."""
+    from hal0.config.paths import var_lib
+
+    return var_lib() / "state" / "memory-refresh-policy.json"
+
+
+def load_owned_auto_off(path: Path | None = None) -> set[str]:
+    try:
+        data = json.loads((path or owned_state_path()).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    banks = data.get("auto_consolidation_off") if isinstance(data, dict) else None
+    return {b for b in banks if isinstance(b, str)} if isinstance(banks, list) else set()
+
+
+def save_owned_auto_off(banks: set[str], path: Path | None = None) -> None:
+    target = path or owned_state_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"auto_consolidation_off": sorted(banks)}, sort_keys=True), encoding="utf-8"
+        )
+        tmp.replace(target)
+    except OSError as exc:
+        log.warning("hal0.memory.refresh_policy_state_unsaved", error=str(exc))
 
 
 def trigger_patch(trigger: Mapping[str, Any] | None, policy: Any) -> dict[str, Any] | None:
@@ -178,6 +237,8 @@ class BankPolicyReport:
     skipped: str | None = None
     #: Set when the listing stopped before its end.
     list_error: str | None = None
+    #: Things the operator should know that are not errors (a foreign override).
+    notes: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -246,6 +307,14 @@ async def _bank_exists(call: EngineCall, bank: str) -> bool:
     return any(isinstance(r, dict) and r.get("bank_id") == bank for r in rows or [])
 
 
+async def _model_trigger(call: EngineCall, bank: str, model_id: str) -> Any:
+    try:
+        one = await call("GET", _bank_path(bank, f"/mental-models/{quote(model_id, safe='')}"))
+    except Exception:
+        return None
+    return one.get("trigger") if isinstance(one, dict) else None
+
+
 async def _reconcile_models(
     call: EngineCall, bank: str, policy: Any, report: BankPolicyReport, *, dry_run: bool
 ) -> None:
@@ -269,7 +338,12 @@ async def _reconcile_models(
                 continue
             model_id = item["id"]
             report.models_seen += 1
-            body = trigger_patch(item.get("trigger"), policy)
+            trigger = item.get("trigger")
+            if not isinstance(trigger, dict):
+                # A row listed without its trigger is read on its own before it
+                # is judged; otherwise it would be PATCHed on every run.
+                trigger = await _model_trigger(call, bank, model_id)
+            body = trigger_patch(trigger, policy)
             if body is None or model_id in patched:
                 report.models_unchanged += 1
                 continue
@@ -293,21 +367,39 @@ async def _reconcile_models(
 
 
 async def _reconcile_config(
-    call: EngineCall, bank: str, policy: Any, report: BankPolicyReport, *, dry_run: bool
+    call: EngineCall,
+    bank: str,
+    policy: Any,
+    report: BankPolicyReport,
+    owned: set[str],
+    *,
+    dry_run: bool,
 ) -> None:
+    """The bank's config; ``owned`` (the banks whose auto-consolidation
+    override hal0 set) is updated in place when the write goes through."""
     try:
         config = await call("GET", _bank_path(bank, "/config"))
     except Exception as exc:
         report.config_error = _detail(exc)
         return
-    updates = bank_config_updates(policy, config)
+    mine = bank in owned
+    updates = bank_config_updates(policy, config, owns_auto_off=mine)
     report.config_updates = updates
+    note = foreign_auto_off(bank, policy, config, owns_auto_off=mine)
+    if note:
+        report.notes.append(note)
     if not updates or dry_run:
         return
     try:
         await call("PATCH", _bank_path(bank, "/config"), json_body={"updates": updates})
     except Exception as exc:
         report.config_error = _detail(exc)
+        return
+    if AUTO_CONSOLIDATION_KEY in updates:
+        if updates[AUTO_CONSOLIDATION_KEY] is False:
+            owned.add(bank)
+        else:
+            owned.discard(bank)
 
 
 async def apply_refresh_policy(
@@ -317,6 +409,7 @@ async def apply_refresh_policy(
     *,
     dry_run: bool = False,
     check_write_gate: bool = True,
+    owned_path: Path | None = None,
 ) -> PolicyReport:
     """Bring ``banks`` to ``policy``. Never raises for an engine answer.
 
@@ -326,7 +419,8 @@ async def apply_refresh_policy(
     if the listing failed. A bank the engine does not list is skipped, never
     created. Nothing is written while ``hal0 memory embedder switch`` (or
     another maintenance run) holds the write gate; the report says so in
-    ``deferred``.
+    ``deferred``. ``owned_path`` is where hal0 records the banks whose
+    auto-consolidation override it set (:func:`owned_state_path` by default).
     """
     pages, schedule, floor, consolidation = _policy_fields(policy)
     report = PolicyReport(
@@ -349,6 +443,8 @@ async def apply_refresh_policy(
             report.deferred = exc.message
             report.finished_at = time.time()
             return report
+    owned = load_owned_auto_off(owned_path)
+    owned_before = set(owned)
     for bank in dict.fromkeys(b for b in banks if isinstance(b, str) and b):
         bank_report = BankPolicyReport(bank=bank)
         report.banks.append(bank_report)
@@ -362,7 +458,9 @@ async def apply_refresh_policy(
             bank_report.skipped = "the engine has no such bank"
             continue
         await _reconcile_models(call, bank, policy, bank_report, dry_run=dry_run)
-        await _reconcile_config(call, bank, policy, bank_report, dry_run=dry_run)
+        await _reconcile_config(call, bank, policy, bank_report, owned, dry_run=dry_run)
+    if owned != owned_before and not dry_run:
+        save_owned_auto_off(owned, owned_path)
     report.finished_at = time.time()
     log.info(
         "hal0.memory.refresh_policy_applied",
@@ -377,6 +475,7 @@ async def apply_refresh_policy(
                 "errors": len(b.model_errors),
                 "config": sorted(b.config_updates),
                 "skipped": b.skipped,
+                "notes": b.notes,
             }
             for b in report.banks
         ],
@@ -432,5 +531,9 @@ __all__ = [
     "current_policy",
     "desired_trigger",
     "enforce_trigger",
+    "foreign_auto_off",
+    "load_owned_auto_off",
+    "owned_state_path",
+    "save_owned_auto_off",
     "trigger_patch",
 ]

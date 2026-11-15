@@ -89,6 +89,8 @@ def _result(bank: dict[str, Any], dry_run: bool) -> str:
     else:
         bits.append("config already set")
     out = " · ".join(bits)
+    for note in bank.get("notes") or []:
+        out += f" [yellow]· {escape(str(note))}[/yellow]"
     errors = bank.get("model_errors") or []
     if errors:
         out += f" [red]· {len(errors)} page error(s)[/red]"

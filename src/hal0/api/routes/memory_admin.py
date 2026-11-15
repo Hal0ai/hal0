@@ -1360,6 +1360,29 @@ def _make_handler(method: str, template: str):
     return handler
 
 
+@router.get("/refresh-policy")
+async def refresh_policy_status(request: Request) -> dict[str, Any]:
+    """What hal0-api's refresh-policy task last did (ADR-0060).
+
+    ``running`` is false when the task is not started (memory off, or its
+    environment switch). ``last_report`` is the last reconcile, with each
+    bank's ``notes`` (an auto-consolidation override hal0 did not set);
+    ``consolidation`` is the last scheduled consolidation pass. Reads only
+    hal0-api's memory, never the engine.
+    """
+    runner = getattr(request.app.state, "refresh_policy_runner", None)
+    if runner is None:
+        return {"running": False, "last_report": None, "consolidation": None, "notes": []}
+    report = runner.last_report.to_dict() if runner.last_report is not None else None
+    notes = [n for b in (report or {}).get("banks", []) for n in b.get("notes") or []]
+    return {
+        "running": True,
+        "last_report": report,
+        "consolidation": runner.last_consolidation,
+        "notes": notes,
+    }
+
+
 for _method, _path, _template in _FORWARDS:
     router.add_api_route(
         _path,

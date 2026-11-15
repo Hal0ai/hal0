@@ -198,8 +198,11 @@ def test_bank_config_updates() -> None:
     }
     off = {**settled, "overrides": {"enable_auto_consolidation": False}}
     assert bank_config_updates(_policy(consolidation="scheduled"), off) == {}
-    # ... and continuous clears the override (null), never sets true.
-    assert bank_config_updates(_policy(), off) == {"enable_auto_consolidation": None}
+    # ... and continuous clears the override (null) only when hal0 set it, never sets true.
+    assert bank_config_updates(_policy(), off, owns_auto_off=True) == {
+        "enable_auto_consolidation": None
+    }
+    assert bank_config_updates(_policy(), off) == {}
 
 
 # ── the reconcile against a fake engine ──────────────────────────────────

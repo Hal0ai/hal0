@@ -29,7 +29,7 @@ import contextlib
 import json
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,15 @@ RECONCILE_EVERY_S = 6 * 3600.0
 RETRY_S = 60.0
 #: Per-request budget for the engine calls this task makes.
 ENGINE_TIMEOUT_S = 60.0
+#: Tries of one bank's scheduled consolidation that failed before it was sent
+#: (a refused connection, 429, 5xx) before that run gives up on the bank.
+CONSOLIDATE_ATTEMPTS = 4
+#: A request that timed out may have reached the engine: it is sent again this
+#: many times, then taken as sent.
+TIMEOUT_RETRIES = 1
+#: Wait before retrying a run, doubled per try, capped.
+CONSOLIDATE_BACKOFF_S = 60.0
+CONSOLIDATE_BACKOFF_CAP_S = 15 * 60.0
 #: Environment switch: "0", "false" or "no" keeps the task from starting.
 ENABLE_ENV = "HAL0_MEMORY_REFRESH_POLICY"
 
@@ -126,7 +135,7 @@ class RefreshPolicyRunner:
         self._kick = asyncio.Event()
         self._reconcile_pending = True
         self._next_reconcile_at = 0.0
-        self._mode_seen: str | None = None
+        self._state: dict[str, Any] | None = None
         self.last_report: PolicyReport | None = None
         self.last_consolidation: dict[str, Any] | None = None
 
@@ -182,48 +191,91 @@ class RefreshPolicyRunner:
         self._next_reconcile_at = now + (self._retry_s if unreachable else self._reconcile_every_s)
 
     # ── scheduled consolidation ────────────────────────────────────────
+    #
+    # The state (``self._state``, mirrored to :func:`state_path`):
+    #
+    # * ``mode`` and ``schedule``: what the clock was started for. Either one
+    #   differing from the config (a save, or an edit while hal0-api was down)
+    #   restarts the clock, so a change never fires a catch-up run.
+    # * ``last_run_at``: when the last run finished (or the clock started). A
+    #   fire after it is due.
+    # * ``due_at``, ``done``, ``failed``, ``attempts``, ``timeouts``,
+    #   ``next_try_at``: the run in progress. A bank in ``done`` is never sent
+    #   again for that ``due_at``; one in ``failed`` was given up on.
+    #
+    # Memory is authoritative: a state file that cannot be written is logged,
+    # and the run still advances, so a failed write never repeats a run.
 
     def _path(self) -> Path:
         return self._state_file or state_path()
 
-    def _read_last(self) -> float | None:
+    def _load_state(self) -> dict[str, Any] | None:
         try:
             data = json.loads(self._path().read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
-        value = data.get("last_run_at") if isinstance(data, dict) else None
-        return float(value) if isinstance(value, (int, float)) else None
+        if not isinstance(data, dict) or not isinstance(data.get("last_run_at"), (int, float)):
+            return None
+        return data
 
-    def _write_last(self, at: float, detail: dict[str, Any]) -> None:
+    def _save_state(self) -> None:
         path = self._path()
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(
-                json.dumps({"last_run_at": at, **detail}, sort_keys=True), encoding="utf-8"
-            )
+            tmp.write_text(json.dumps(self._state, sort_keys=True), encoding="utf-8")
             tmp.replace(path)
         except OSError as exc:
             log.warning("hal0.memory.consolidation_schedule_unsaved", error=str(exc))
 
+    def _start_clock(self, now: float, mode: str, schedule: str, reason: str) -> None:
+        self._state = {
+            "mode": mode,
+            "schedule": schedule,
+            "last_run_at": now,
+            "reason": reason,
+            "due_at": None,
+        }
+        self._save_state()
+
     async def _consolidation_tick(self, now: float) -> None:
         policy = self._policy()
         mode = str(getattr(policy, "consolidation", "continuous"))
-        switched = self._mode_seen is not None and self._mode_seen != mode
-        self._mode_seen = mode
+        schedule = str(getattr(policy, "consolidation_schedule", ""))
+        if self._state is None:
+            self._state = self._load_state()
+            if self._state is not None:
+                # A file written before the mode and schedule were recorded counts as this config.
+                self._state.setdefault("mode", mode)
+                self._state.setdefault("schedule", schedule)
+        state = self._state
+        if state is None:
+            self._start_clock(now, mode, schedule, "clock started")
+            return
+        if state.get("mode") != mode or (mode == "scheduled" and state.get("schedule") != schedule):
+            # A new mode or schedule starts the clock: the first run is its next fire.
+            self._start_clock(now, mode, schedule, "config changed")
+            return
         if mode != "scheduled":
             return
-        last = self._read_last()
-        if last is None or switched:
-            # Start the clock: the first run is the next time the schedule fires.
-            self._write_last(now, {"reason": "clock started"})
-            return
         try:
-            due_at = previous_fire(policy.consolidation_schedule, datetime.fromtimestamp(now, UTC))
+            due = previous_fire(schedule, datetime.fromtimestamp(now, UTC)).timestamp()
         except CronError as exc:
             log.warning("hal0.memory.consolidation_schedule_invalid", error=str(exc))
             return
-        if due_at.timestamp() <= last:
+        in_progress = state.get("due_at")
+        if isinstance(in_progress, (int, float)) and due > in_progress:
+            log.warning(
+                "hal0.memory.scheduled_consolidation_superseded",
+                due_at=in_progress,
+                pending=self._pending(state),
+            )
+            in_progress = None
+        if not isinstance(in_progress, (int, float)):
+            if due <= float(state["last_run_at"]):
+                return
+            state.update(due_at=due, done=[], failed=[], attempts={}, timeouts={}, next_try_at=0.0)
+        if now < float(state.get("next_try_at") or 0.0):
             return
         call = self._engine()
         if call is None:
@@ -232,28 +284,90 @@ class RefreshPolicyRunner:
 
         if read_gate() is not None:
             return  # maintenance holds the engine; the next tick tries again
+        await self._run_due(call, state, now)
+
+    def _pending(self, state: Mapping[str, Any]) -> list[str]:
+        settled = {*state.get("done", []), *state.get("failed", [])}
+        return [b for b in dict.fromkeys(self._banks()) if b not in settled]
+
+    async def _run_due(self, call: EngineCall, state: dict[str, Any], now: float) -> None:
         results: dict[str, Any] = {}
-        retry = False
-        for bank in dict.fromkeys(self._banks()):
+        attempts: dict[str, int] = state.setdefault("attempts", {})
+        timeouts: dict[str, int] = state.setdefault("timeouts", {})
+        done: list[str] = state.setdefault("done", [])
+        failed: list[str] = state.setdefault("failed", [])
+        for bank in self._pending(state):
+            path = f"/v1/default/banks/{quote(bank, safe='')}/consolidate"
             try:
-                out = await call(
-                    "POST", f"/v1/default/banks/{quote(bank, safe='')}/consolidate", json_body=None
-                )
+                out = await call("POST", path, json_body=None)
+            except httpx.TimeoutException as exc:
+                # The request may have reached the engine: retry it once, then
+                # take it as sent rather than queue consolidation after consolidation.
+                timeouts[bank] = timeouts.get(bank, 0) + 1
+                if timeouts[bank] > TIMEOUT_RETRIES:
+                    done.append(bank)
+                    results[bank] = {"assumed_sent": f"{type(exc).__name__}"}
+                else:
+                    results[bank] = {"retry": f"{type(exc).__name__}"}
+                continue
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status != 429 and status < 500:
+                    failed.append(bank)  # the engine refused it; sending it again changes nothing
+                    results[bank] = {"error": f"HTTP {status}"}
+                    continue
+                error = f"HTTP {status}"
+            except Exception as exc:  # connect errors and the like: not sent
+                error = f"{type(exc).__name__}: {exc}"
+            else:
+                done.append(bank)
                 results[bank] = {
                     "operation_id": out.get("operation_id") if isinstance(out, dict) else None,
                     "deduplicated": bool(out.get("deduplicated"))
                     if isinstance(out, dict)
                     else False,
                 }
-            except httpx.HTTPStatusError as exc:
-                results[bank] = {"error": f"HTTP {exc.response.status_code}"}
-            except Exception as exc:
-                results[bank] = {"error": f"{type(exc).__name__}: {exc}"}
-                retry = True
-        self.last_consolidation = {"at": now, "due_at": due_at.timestamp(), "banks": results}
-        log.info("hal0.memory.scheduled_consolidation", due_at=due_at.isoformat(), banks=results)
-        if not retry:
-            self._write_last(now, {"due_at": due_at.timestamp(), "banks": results})
+                continue
+            attempts[bank] = attempts.get(bank, 0) + 1
+            if attempts[bank] >= CONSOLIDATE_ATTEMPTS:
+                failed.append(bank)
+                results[bank] = {"error": error, "gave_up": True}
+                log.error(
+                    "hal0.memory.scheduled_consolidation_gave_up",
+                    bank=bank,
+                    due_at=state.get("due_at"),
+                    attempts=attempts[bank],
+                    error=error,
+                )
+            else:
+                results[bank] = {"retry": error}
+        pending = self._pending(state)
+        self.last_consolidation = {
+            "at": now,
+            "due_at": state.get("due_at"),
+            "banks": results,
+            "done": list(done),
+            "failed": list(failed),
+            "pending": pending,
+        }
+        log.info(
+            "hal0.memory.scheduled_consolidation",
+            due_at=state.get("due_at"),
+            banks=results,
+            pending=pending,
+        )
+        if pending:
+            tries = max(
+                [attempts.get(b, 0) for b in pending] + [timeouts.get(b, 0) for b in pending]
+            )
+            state["next_try_at"] = now + min(
+                CONSOLIDATE_BACKOFF_S * (2 ** max(tries - 1, 0)), CONSOLIDATE_BACKOFF_CAP_S
+            )
+        else:
+            state.update(last_run_at=now, due_at=None, last_result=results)
+            for key in ("done", "failed", "attempts", "timeouts", "next_try_at"):
+                state.pop(key, None)
+        self._save_state()
 
 
 def start_for_app(app: Any) -> tuple[RefreshPolicyRunner | None, asyncio.Task[None] | None]:

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -117,6 +117,35 @@ def test_other_forwards_are_untouched(client: TestClient, recorder: _Recorder) -
     r = client.post("/api/memory/banks/shared/directives", json={"name": "d", "content": "c"})
     assert r.status_code == 200
     assert recorder.bodies[-1] == {"name": "d", "content": "c"}
+
+
+def test_status_route_reports_the_runner_and_its_notes(recorder: _Recorder) -> None:
+    from hal0.memory.refresh_policy import BankPolicyReport, PolicyReport
+
+    app = _app(recorder)
+    with TestClient(app) as c:
+        assert c.get("/api/memory/refresh-policy").json() == {
+            "running": False,
+            "last_report": None,
+            "consolidation": None,
+            "notes": [],
+        }
+
+        class Runner:
+            last_report = PolicyReport(
+                dry_run=False,
+                policy={},
+                trigger={},
+                banks=[BankPolicyReport(bank="hal0:shared", notes=["auto-consolidation is off"])],
+            )
+            last_consolidation: ClassVar[dict[str, Any]] = {"due_at": 1.0, "pending": []}
+
+        app.state.refresh_policy_runner = Runner()
+        body = c.get("/api/memory/refresh-policy").json()
+    assert body["running"] is True
+    assert body["notes"] == ["auto-consolidation is off"]
+    assert body["consolidation"] == {"due_at": 1.0, "pending": []}
+    assert recorder.bodies == []  # the engine is never asked
 
 
 # ── the settings save ───────────────────────────────────────────────────────
