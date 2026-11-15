@@ -3510,3 +3510,46 @@ def test_the_commit_log_hold_can_be_turned_off(
     assert _gitlog(client, key).status_code == 200
     assert _engine_retains(engine) == 2
     assert _compat_state(app).gitlog_retained_at == {}
+
+
+def _stored_gitlog(engine: Engine, hours_ago: float) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    written = (datetime.now(UTC) - timedelta(hours=hours_ago)).isoformat()
+    engine.documents["hal0::shared::gitlog:hal0"] = {
+        "id": "hal0::shared::gitlog:hal0",
+        "bank_id": BANK,
+        "updated_at": written,
+        "tags": ["project:hal0"],
+    }
+
+
+def test_a_restart_does_not_let_a_recent_commit_log_through(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    """The clock is in hal0-api's memory. After a restart the stored document's
+    own age stands in for it, so an update does not cost a full re-extract."""
+    _stored_gitlog(engine, hours_ago=3)
+    held = _gitlog(client, key)
+    assert held.status_code == 429, held.text
+    assert _code(held) == "memory.compat_gitlog_held"
+    wait = int(held.headers["Retry-After"])
+    assert 21 * 3600 - 60 < wait <= 21 * 3600 + 60
+    assert _engine_retains(engine) == 0
+
+
+def test_an_old_stored_commit_log_goes_through_after_a_restart(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    _stored_gitlog(engine, hours_ago=25)
+    assert _gitlog(client, key).status_code == 200
+    assert _engine_retains(engine) == 1
+
+
+def test_a_failed_age_lookup_never_refuses_a_commit_log(
+    client: TestClient, engine: Engine, key: str
+) -> None:
+    path = ENGINE_BANK + "/documents/hal0::shared::gitlog:hal0"
+    engine.overrides[("GET", path)] = httpx.Response(500, json={"detail": "boom"})
+    assert _gitlog(client, key).status_code == 200
+    assert _engine_retains(engine) == 1

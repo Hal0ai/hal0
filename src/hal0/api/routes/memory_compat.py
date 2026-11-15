@@ -79,6 +79,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from urllib.parse import quote
 
@@ -1135,6 +1136,62 @@ def _hold_gitlog(
     return claimed, None
 
 
+#: How long the stored commit-log document's age is looked up for, at most.
+_GITLOG_SEED_TIMEOUT_S = 5.0
+
+
+async def _seed_gitlog_from_engine(
+    provider: Any,
+    state: _CompatState,
+    raw_items: list[Any],
+    wire_items: list[dict[str, Any]],
+    interval_s: int,
+) -> None:
+    """Take a commit-log document's last write from the engine when this
+    process has none.
+
+    :func:`_hold_gitlog` keeps its clock in hal0-api's memory, so a restart (an
+    update, a crash) used to let the next commit log straight through and the
+    engine extracted the whole document again. For a commit-log item whose
+    stored id this process has not seen, the stored document's ``updated_at`` is
+    read from the engine and counted as the last retain. A document the engine
+    does not have, or a lookup that fails, leaves the clock empty, so the retain
+    goes through as before: the hold is an economy, never a reason to refuse.
+    """
+    if interval_s <= 0:
+        return
+    unseen = [
+        str(item["document_id"])
+        for raw, item in zip(raw_items, wire_items, strict=True)
+        if isinstance(raw, dict)
+        and raw.get("strategy") == GITLOG_STRATEGY
+        and str(item["document_id"]) not in state.gitlog_retained_at
+    ]
+    if not unseen:
+        return
+    client = getattr(provider, "hindsight_client", None)
+    if client is None:
+        return
+    bank = quote(str(provider.platform_bank), safe="")
+    for doc in dict.fromkeys(unseen):
+        try:
+            stored = await client.request_json(
+                "GET",
+                f"/v1/default/banks/{bank}/documents/{quote(doc, safe='')}",
+                timeout_s=_GITLOG_SEED_TIMEOUT_S,
+            )
+        except Exception:
+            continue
+        updated = stored.get("updated_at") if isinstance(stored, dict) else None
+        try:
+            written = datetime.fromisoformat(str(updated).replace("Z", "+00:00")).timestamp()
+        except (TypeError, ValueError):
+            continue
+        age = max(0.0, time.time() - written)
+        if age < interval_s and doc not in state.gitlog_retained_at:
+            state.gitlog_retained_at[doc] = time.monotonic() - age
+
+
 def _give_back_gitlog(state: _CompatState, claimed: dict[str, float | None]) -> None:
     """Undo :func:`_hold_gitlog` for a retain the engine did not accept."""
     for doc, before in claimed.items():
@@ -1283,6 +1340,9 @@ async def _retain(bank: str, request: Request, agent: str, *, body_cap: int) -> 
     for item, scope in zip(wire_items, item_scopes, strict=True):
         _namespace_item(item, scope)
 
+    await _seed_gitlog_from_engine(
+        provider, state, items, wire_items, settings.gitlog_min_interval_s
+    )
     gitlog_claimed, gitlog_wait = _hold_gitlog(
         state, items, wire_items, settings.gitlog_min_interval_s
     )
