@@ -141,7 +141,7 @@ hal0 slot edit fast --tune-reset
 ## `hal0 slot` — manage inference slots
 
 Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider` =
-`llama-server|flm|kokoro|moonshine`; `--hardware` = `vulkan|rocm|cpu`.
+`llama-server|flm|kokoro|moonshine`; `--hardware` = `vulkan|rocm|cpu|npu` (`npu` = a GGML xdna slot, see the NPU guide).
 
 | Command | Args | Flags |
 |---|---|---|
@@ -153,8 +153,8 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 | `slot rename <name> <new_name>` | `name`, `new_name` | — |
 | `slot swap <name>` | `name` | `--model`/`-m` (required), `--no-persist`, `--json` |
 | `slot logs <name>` | `name` | `--follow`/`-f` (when hal0-api cannot read the journal it prints the reason and returns instead of waiting), `--lines`/`-n` (default 200, 1-5000) |
-| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--profile` (the tune; default: inferred from `--type`/`--hardware`, and an `llm` slot with none runs the `chat` seed) |
-| `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--provider`, `--hardware`, `--profile` |
+| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--autoload/--no-autoload`, `--profile` (the tune; default: inferred from `--type`/`--hardware`, and an `llm` slot with none runs the `chat` seed) |
+| `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--provider`, `--hardware`, `--profile`, `--autoload/--no-autoload` |
 | `slot delete <name>` | `name` | `--force`/`-f` |
 | `slot show <name>` | `name` | `--json` |
 | `slot metrics [name]` | optional `name` | `--json` |
