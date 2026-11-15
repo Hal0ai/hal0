@@ -228,3 +228,39 @@ def test_slot_guard_refuses_unknown_arch_on_xdna_slot_only(tmp_path: Path) -> No
     assert xdna_slot_model_unloadable("npu-ggml", xdna, "bad", Reg()) is None
     registry["ok"] = {"path": str(write_gguf(tmp_path / "ok.gguf", "lfm2"))}
     assert xdna_slot_model_unloadable("npu-ggml", xdna, "ok", Reg()) is None
+
+
+def test_xdna_arch_table_matches_the_pinned_runner_image():
+    """The arch table must be regenerated when the xdna runner pin moves.
+
+    The image tag starts with the short fork commit (``72f6dfa-r…``). A stale
+    table would refuse architectures the new runner can load, or accept ones it
+    cannot, so a pin bump without ``scripts/gen_xdna_archs.py`` fails here.
+    """
+    import json
+    from pathlib import Path
+
+    from hal0.slots.xdna_archs import XDNA_RUNNER_LLAMA_CPP_REF
+
+    manifest = json.loads((Path(__file__).resolve().parents[2] / "manifest.json").read_text())
+    tags = [
+        entry.get("tag", "")
+        for entry in _walk(manifest)
+        if isinstance(entry, dict) and "hal0-runner-xdna" in str(entry.get("image", ""))
+    ]
+    assert tags, "no xdna runner pin found in manifest.json"
+    for tag in tags:
+        assert XDNA_RUNNER_LLAMA_CPP_REF.startswith(tag.split("-", 1)[0]), (
+            f"xdna runner pinned at {tag!r} but xdna_archs.py was generated from "
+            f"{XDNA_RUNNER_LLAMA_CPP_REF[:12]}; run scripts/gen_xdna_archs.py"
+        )
+
+
+def _walk(node):
+    yield node
+    if isinstance(node, dict):
+        for v in node.values():
+            yield from _walk(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _walk(v)
