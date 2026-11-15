@@ -3286,6 +3286,15 @@ else
         warn "  the npu container slot bundles its own XRT runtime and is unaffected"
     fi
 
+    # libxrt-utils-npu — best-effort. Ships `xrt-smi`, which the operator needs
+    # for `xrt-smi configure --pmode turbo` (ADR-0057) and which hal0 reads the
+    # NPU power mode from (Slots -> NPU -> Engines). Same PPA as libxrt-npu2.
+    if apt-get -o DPkg::Lock::Timeout=120 install -y libxrt-utils-npu >/dev/null 2>&1; then
+        info "libxrt-utils-npu installed (xrt-smi, for the NPU power mode)"
+    else
+        warn "libxrt-utils-npu not available — hal0 cannot read the NPU power mode (no xrt-smi)"
+    fi
+
     # NB: the FLM runtime libs are NOT pre-installed by hand anymore —
     # `apt-get install ./fastflowlm_*.deb` (below) pulls the exact versions
     # THIS .deb declares from the host's repos. That's why the build must match

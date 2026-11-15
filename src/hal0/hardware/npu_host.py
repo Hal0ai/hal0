@@ -11,11 +11,10 @@ that cannot be read is ``None``, so the UI can say "unknown" and why.
 Everything is blocking file I/O on tiny files; callers run it from the cached
 facts refresh thread (``hal0.api.routes.npu``), never from the request path.
 
-One ADR-0057 item has no readable source from inside the container and is
-deliberately not probed here: the power mode. ``xrt-smi`` is not installed on
-the host, the xdna runner image does not ship it, and the amdxdna driver
-exposes no sysfs knob for it. ``Stats.npu_pmode`` still reads it when an
-operator installed ``xrt-smi`` on the host.
+One ADR-0057 item is read elsewhere: the power mode. It needs ``xrt-smi``
+(package ``libxrt-utils-npu``, installed by the installer next to
+``libxrt-npu2``) and is read by ``HardwareStats.npu_pmode``; the amdxdna driver
+exposes no sysfs knob for it.
 """
 
 from __future__ import annotations

@@ -15,6 +15,7 @@ from __future__ import annotations
 import contextlib
 import shutil
 import socket
+import time
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,25 @@ def _port_in_use(port: int, host: str = "127.0.0.1") -> bool:
         s.close()
 
 
+#: How long one ``xrt-smi`` power-mode read is reused by the polled snapshot.
+_NPU_PMODE_TTL_S = 30.0
+
+
+def parse_xrt_smi_pmode(report: str) -> str | None:
+    """The lowercased ``Power Mode`` value from an ``xrt-smi examine`` report.
+
+    Matches only the ``Power Mode`` key (``Power Mode : turbo``); every other
+    line, including ``Model : <board name>``, is ignored. None when absent.
+    """
+    for line in report.splitlines():
+        key, sep, val = line.partition(":")
+        if sep and key.strip().lower() == "power mode":
+            val = val.strip()
+            if val:
+                return val.lower()
+    return None
+
+
 class HardwareStats:
     """Live hardware metrics reader.
 
@@ -70,6 +90,8 @@ class HardwareStats:
         self._gpu_vendor: str | None = None
         # Cached AMD DRM device sysfs dir (the .../cardN/device path), or None.
         self._amd_drm: Path | None = None
+        # (monotonic timestamp, value) of the last xrt-smi power-mode read.
+        self._pmode_cache: tuple[float, str | None] | None = None
 
     def _vendor(self) -> str:
         """Detect GPU vendor exactly once and cache it.
@@ -245,28 +267,37 @@ class HardwareStats:
     def npu_pmode(self) -> str | None:
         """Return the active xdna/XRT power mode, or None.
 
-        Parses ``xrt-smi examine`` (the AMD XRT tool for the XDNA NPU)
-        looking for a ``Power Mode`` / ``Mode`` field. Best-effort: no
-        binary, no device, or an unparseable report all yield None —
-        this never blocks (no retries) and never fabricates a value.
+        Runs ``xrt-smi examine -r platform`` (the AMD XRT tool for the XDNA
+        NPU; Debian/Ubuntu package ``libxrt-utils-npu``) and reads its
+        ``Power Mode`` field. The plain ``examine`` report does not carry the
+        power mode, and only the exact ``Power Mode`` key is accepted: the
+        ``System Configuration`` block's ``Model : <board>`` line must never be
+        read as a mode. Best-effort: no binary, no device, or an unparseable
+        report all yield None -- this never retries and never fabricates.
+
+        The result is cached for :data:`_NPU_PMODE_TTL_S` seconds because
+        :meth:`snapshot` is polled by every dashboard client.
 
         The value is lowercased so it compares equal to the ``[xdna].pmode``
         tokens (``XDNA_PMODES`` in ``hal0.runners.knobs``) the dashboard
-        checks it against; ``xrt-smi`` prints it title-cased (``Turbo``).
+        checks it against.
         """
+        now = time.monotonic()
+        cached = self._pmode_cache
+        if cached is not None and now - cached[0] < _NPU_PMODE_TTL_S:
+            return cached[1]
+        value = self._read_npu_pmode()
+        self._pmode_cache = (now, value)
+        return value
+
+    @staticmethod
+    def _read_npu_pmode() -> str | None:
         if shutil.which("xrt-smi") is None:
             return None
-        rc, out, _ = _run(["xrt-smi", "examine"])
+        rc, out, _ = _run(["xrt-smi", "examine", "-r", "platform"])
         if rc != 0 or not out:
             return None
-        for line in out.splitlines():
-            stripped = line.strip()
-            low = stripped.lower()
-            if (low.startswith("power mode") or low.startswith("mode")) and ":" in stripped:
-                val = stripped.split(":", 1)[1].strip()
-                if val:
-                    return val.lower()
-        return None
+        return parse_xrt_smi_pmode(out)
 
     def npu_fclk(self) -> int | None:
         """Return the active NPU fabric clock reading, or None.

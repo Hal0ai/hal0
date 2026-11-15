@@ -193,3 +193,69 @@ def test_npu_fclk_unparseable_token_is_none(monkeypatch, tmp_path):
     stats = HardwareStats()
     monkeypatch.setattr("hal0.hardware.stats.Path.glob", lambda self, pat: iter([f]))
     assert stats.npu_fclk() is None
+
+
+# Real ``xrt-smi`` 2.25 output from an XDNA2 (Strix Halo) box. The default
+# ``examine`` report has no power mode but does have a ``Model :`` line.
+_XRT_SMI_EXAMINE_DEFAULT = """System Configuration
+  OS Name              : Linux
+  Model                : MS-S1 MAX
+  Processor            : AMD RYZEN AI MAX+ 395 w/ Radeon 8060S
+
+XRT
+  Version              : 2.25.00
+  NPU Firmware Version : 1.1.2.65
+"""
+
+_XRT_SMI_EXAMINE_PLATFORM = """------------------------------
+[0000:c0:00.1] : RyzenAI-npu5
+------------------------------
+Platform
+  Name                   : RyzenAI-npu5 
+  Power Mode             : turbo 
+  Total Columns          : 8 
+
+Estimated Power          : N/A
+"""
+
+
+def test_parse_xrt_smi_pmode_never_reads_the_model_line():
+    from hal0.hardware.stats import parse_xrt_smi_pmode
+
+    assert parse_xrt_smi_pmode(_XRT_SMI_EXAMINE_DEFAULT) is None
+    assert parse_xrt_smi_pmode(_XRT_SMI_EXAMINE_PLATFORM) == "turbo"
+
+
+def test_npu_pmode_asks_for_the_platform_report(monkeypatch):
+    seen: list[list[str]] = []
+
+    def fake_run(argv):
+        seen.append(argv)
+        return (0, _XRT_SMI_EXAMINE_PLATFORM, "")
+
+    stats = HardwareStats()
+    monkeypatch.setattr("hal0.hardware.stats.shutil.which", lambda name: "/usr/bin/xrt-smi")
+    monkeypatch.setattr("hal0.hardware.stats._run", fake_run)
+    assert stats.npu_pmode() == "turbo"
+    assert seen == [["xrt-smi", "examine", "-r", "platform"]]
+
+
+def test_npu_pmode_is_cached_between_polls(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_run(argv):
+        calls["n"] += 1
+        return (0, _XRT_SMI_EXAMINE_PLATFORM, "")
+
+    clock = {"t": 1000.0}
+    stats = HardwareStats()
+    monkeypatch.setattr("hal0.hardware.stats.shutil.which", lambda name: "/usr/bin/xrt-smi")
+    monkeypatch.setattr("hal0.hardware.stats._run", fake_run)
+    monkeypatch.setattr("hal0.hardware.stats.time.monotonic", lambda: clock["t"])
+    assert stats.npu_pmode() == "turbo"
+    clock["t"] += 5
+    assert stats.npu_pmode() == "turbo"
+    assert calls["n"] == 1
+    clock["t"] += 60
+    assert stats.npu_pmode() == "turbo"
+    assert calls["n"] == 2

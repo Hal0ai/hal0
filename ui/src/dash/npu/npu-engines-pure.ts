@@ -14,6 +14,7 @@ export interface ReadinessRow {
 }
 
 export const PMODE_TURBO_CMD = 'sudo xrt-smi configure --pmode turbo'
+export const XRT_SMI_INSTALL_CMD = 'sudo apt install libxrt-utils-npu'
 
 type Hw = { npu_pmode?: string | null; npu_fclk?: number | null } | null | undefined
 
@@ -51,7 +52,7 @@ export function readinessRows(occ: Pick<NpuOccupancy, 'npu_host'> | null | undef
 
   const pmodeRow: ReadinessRow =
     pmode == null
-      ? { id: 'pmode', label: 'Power mode', state: 'unknown', detail: 'hal0 cannot read this: xrt-smi is not installed on the host (the runner image does not ship it either)', command: PMODE_TURBO_CMD }
+      ? { id: 'pmode', label: 'Power mode', state: 'unknown', detail: 'not reported: hal0 reads it with xrt-smi on the host; install it (package libxrt-utils-npu, lemonade-team PPA), then set turbo', command: XRT_SMI_INSTALL_CMD }
       : pmode === 'turbo'
         ? { id: 'pmode', label: 'Power mode', state: 'ok', detail: 'turbo' }
         : { id: 'pmode', label: 'Power mode', state: 'warn', detail: `${pmode}; turbo measured about +15% prefill and +20% decode over the default power mode`, command: PMODE_TURBO_CMD }

@@ -35,7 +35,7 @@
 # if something could not be torn down).
 #
 # What --purge does NOT remove (documented, deliberate): host apt
-# packages other than fastflowlm (libxrt-npu2, ffmpeg, boost, podman
+# packages other than fastflowlm (libxrt-npu2, libxrt-utils-npu, ffmpeg, boost, podman
 # itself) — these are general-purpose system libraries that other
 # software may depend on, so removing them is out of scope. podman/
 # docker themselves are left installed.
@@ -681,7 +681,7 @@ fi
 # specific package, but on a shared box a user may have grown to depend on it,
 # so the conservative default leaves it. Guarded by `command -v apt-get`
 # so non-apt hosts skip cleanly, and every step is fail-soft.
-# NOTE: other host packages install.sh may touch (libxrt-npu2, ffmpeg, boost,
+# NOTE: other host packages install.sh may touch (libxrt-npu2, libxrt-utils-npu, ffmpeg, boost,
 # podman) are general-purpose system libraries and are deliberately NOT removed.
 if [[ "${DEV_MODE}" -eq 0 && "${PURGE}" -eq 1 ]] && command -v apt-get &>/dev/null 2>&1; then
     step "FLM package (--purge)"

@@ -87,11 +87,11 @@ describe('readinessRows', () => {
     expect(none.state).toBe('info')
     expect(none.detail).toContain('runner image')
   })
-  it('pmode unknown carries the honest reason and keeps the copy command', () => {
+  it('pmode unknown says how to get xrt-smi and offers the install command', () => {
     const p = row(readinessRows(occ(FULL), hw({ npu_pmode: null })), 'pmode')
     expect(p.state).toBe('unknown')
-    expect(p.detail).toContain('xrt-smi is not installed')
-    expect(p.command).toBe('sudo xrt-smi configure --pmode turbo')
+    expect(p.detail).toContain('libxrt-utils-npu')
+    expect(p.command).toBe('sudo apt install libxrt-utils-npu')
   })
   it('fabric clock: unheld warns with the host command; held unknown shows MHz as info', () => {
     const w = row(readinessRows(occ({ ...FULL, fclk_held: false, fclk_perf_level: 'auto' }), hw({ npu_fclk: 400 })), 'fclk')
