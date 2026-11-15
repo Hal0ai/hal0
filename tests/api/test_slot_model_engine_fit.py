@@ -192,3 +192,23 @@ def test_gpu_slot_still_swaps_to_gguf(
     client.post("/api/slots/chat/load")
     r = client.post("/api/slots/chat/swap", json={"model_id": "gguf-b"})
     assert r.status_code == 200, r.text
+
+
+def test_put_config_unparseable_arch_onto_xdna_slot_refused(
+    slots: Path, container_stub: dict[str, Any], client: TestClient, tmp_hal0_home: str
+) -> None:
+    from tests.registry.gguf_fixtures import write_gguf
+
+    (Path(tmp_hal0_home) / "models").mkdir(parents=True, exist_ok=True)
+    f = write_gguf(Path(tmp_hal0_home) / "models" / "lfm3-x.gguf", "lfm3")
+    assert client.post("/api/models", json={"id": "lfm3-x", "path": str(f)}).status_code == 201
+    (slots / "ggml.toml").write_text(
+        'name = "ggml"\nport = 8083\ndevice = "npu"\ntype = "llm"\nbinary = "xdna"\n'
+        '[model]\ndefault = "stale-gguf"\n',
+        encoding="utf-8",
+    )
+    r = client.put("/api/slots/ggml/config", json={"model": {"default": "lfm3-x"}})
+    assert r.status_code == 400, r.text
+    assert _code(r) == "slot.model_runtime_mismatch"
+    assert "'lfm3'" in r.json()["error"]["message"]
+    assert "lfm3-x" not in (slots / "ggml.toml").read_text()

@@ -122,6 +122,22 @@ carries the toolchain pins as hal0's own maintenance burden.
    notes citing the Tether fork; the fork's own README was not reachable, so
    revisit with a measured per-size table from the hardware gate.
 
+   *Amendment (2026-11-15, second): architectures the runner cannot parse.*
+   "Never refused outright" governs fused versus per-op, not a model the
+   runner's llama.cpp build cannot read at all. On XDNA2 hardware a
+   `lfm3` GGUF classified `per-op`, passed the slot write guards, and then
+   `llama-server` exited with `unknown model architecture: 'lfm3'` while
+   systemd restart-looped the container and the slot hung in `warming`.
+   `xdna_model_fit` now returns `xdna_path: None` (with `npu_ok` false and the
+   reason as the note) for a `general.architecture` outside the set the
+   runner's build knows, and the slot write guard refuses binding it to an
+   xdna slot (`slot.model_runtime_mismatch`), the same class of positively
+   identified "cannot load" as the halogen runtime mismatch. The set is the
+   `LLM_ARCH_NAMES` table of the fork at the pinned commit, recorded in
+   `src/hal0/slots/xdna_archs.py` and regenerated with
+   `scripts/gen_xdna_archs.py <commit>` whenever the runner pin moves. An
+   unreadable model or a header without an architecture stays unjudged.
+
 5. **NPU coexistence with `flm` is warn-and-time-slice, not exclusion.**
    *Superseded in part by ADR-0059 for per-op models: a per-op xdna slot and
    the FLM anchor exclude each other (hardware testing showed the second one

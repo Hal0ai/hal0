@@ -280,13 +280,27 @@ class XdnaFit:
     ``xdna_path`` is ``\"fused\"`` (the SSM block runs as one fused NPU
     kernel) or ``\"per-op\"`` (falls back to per-operator dispatch); ``reason``
     is a one-line human-readable explanation of which fact decided it.
+    ``None`` is a positively identified "cannot load": the runner's llama.cpp
+    build has no such architecture (see :func:`xdna_arch_unsupported`).
     """
 
-    xdna_path: str
+    xdna_path: str | None
     reason: str
     #: Advisory: False hides the model by default in pickers. Not a refusal.
     npu_ok: bool = True
     npu_note: str | None = None
+
+
+def xdna_arch_unsupported(arch: str) -> str | None:
+    """Why the xdna runner cannot load ``arch``, or ``None`` when it can (or is unknown).
+
+    An empty architecture (header unreadable or missing the key) is not judged.
+    """
+    from hal0.slots.xdna_archs import XDNA_KNOWN_ARCHS
+
+    if not arch or arch in XDNA_KNOWN_ARCHS:
+        return None
+    return f"the xdna runner's llama.cpp build has no {arch!r} architecture"
 
 
 def xdna_model_fit(path: Any) -> XdnaFit:
@@ -296,7 +310,9 @@ def xdna_model_fit(path: Any) -> XdnaFit:
     == \"qwen35\"``), ``embedding_length == 1024``, and the
     ``blk.0.ssm_out.weight`` tensor requantized to Q5_K -- the combination the
     spike measured correctness and throughput numbers against. Anything short
-    of that is ``per-op`` (still a supported, just slower, xdna path).
+    of that is ``per-op`` (still a supported, just slower, xdna path), except
+    an architecture the runner's llama.cpp build does not know at all, which is
+    ``xdna_path=None`` (cannot load; ADR-0057 decision 4, 2026-11-15 amendment).
 
     Raises ``ValueError`` when ``path`` is not a GGUF file: xdna fit is a
     GGUF-metadata question and has nothing to say about other formats (a
@@ -309,6 +325,9 @@ def xdna_model_fit(path: Any) -> XdnaFit:
         raise ValueError(f"{path!s} is not a GGUF file; xdna fit only classifies GGUF models")
 
     arch = str(header.get("general.architecture") or "")
+    unsupported = xdna_arch_unsupported(arch)
+    if unsupported:
+        return XdnaFit(None, unsupported, False, unsupported)
     ok, note = _xdna_npu_advice(path, header, arch)
     if arch != _XDNA_FUSED_ARCH:
         return XdnaFit("per-op", f"architecture {arch!r} is not {_XDNA_FUSED_ARCH!r}", ok, note)
@@ -373,7 +392,42 @@ __all__ = [
     "model_runtime_mismatch",
     "slot_model_runtime_mismatch",
     "slot_runtime_provider",
+    "xdna_arch_unsupported",
     "xdna_fit_cache_clear",
     "xdna_model_fit",
     "xdna_model_fit_cached",
+    "xdna_slot_model_unloadable",
 ]
+
+
+def xdna_slot_model_unloadable(
+    slot_name: str, cfg: Any, model_id: str | None, registry: Any
+) -> str | None:
+    """The write-seam refusal for a model the xdna runner cannot parse.
+
+    Only an xdna slot is judged; the model is looked up in ``registry`` and its
+    GGUF header read. A registry miss, a non-GGUF or unreadable file, or a
+    missing architecture is unknown and returns ``None``.
+    """
+    from hal0.slots.activation import is_xdna_slot
+
+    if not model_id or registry is None or not is_xdna_slot(cfg):
+        return None
+    try:
+        model = registry.get(model_id)
+        path = getattr(model, "path", None) or (
+            model.get("path") if isinstance(model, dict) else None
+        )
+        if not path:
+            return None
+        from hal0.registry.gguf_header import read_gguf_header
+
+        header = read_gguf_header(path)
+    except Exception:
+        return None
+    if header is None:
+        return None
+    reason = xdna_arch_unsupported(str(header.get("general.architecture") or ""))
+    if reason is None:
+        return None
+    return f"model {model_id!r} cannot run on xdna slot {slot_name!r}: {reason}"
