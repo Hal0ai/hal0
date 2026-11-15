@@ -31,18 +31,76 @@ describe('readinessRows', () => {
     expect(w.command).toBe('sudo xrt-smi configure --pmode turbo')
     expect(row(readinessRows(occ(null), hw({ npu_pmode: 'turbo' })), 'pmode').state).toBe('ok')
   })
-  it('firmware, XRT, IOMMU, memlock are always unknown with the requirement', () => {
+  const FULL = {
+    device_node: '/dev/accel/accel0',
+    driver_loaded: true,
+    xdna_gen: 2,
+    firmware_version: '1.1.2.65',
+    firmware_min: '1.1.2.65',
+    firmware_ok: true,
+    cmdline_missing: [],
+    xrt_version: '2.25.0',
+    xrt_min: '2.25.0',
+    xrt_ok: true,
+    memlock: 'unlimited',
+    fclk_held: true,
+    fclk_perf_level: 'high',
+  }
+  it('with no host block, host-derived rows are unknown (not reported)', () => {
     const rows = readinessRows(occ(null), hw())
-    expect(row(rows, 'firmware')).toMatchObject({ state: 'unknown' })
-    expect(row(rows, 'firmware').detail).toContain('1.1.2.65')
-    expect(row(rows, 'xrt').detail).toContain('2.25.0')
-    expect(row(rows, 'iommu').detail).toContain('iommu=pt amd_iommu=on')
-    expect(row(rows, 'memlock').state).toBe('unknown')
+    for (const id of ['firmware', 'xrt', 'iommu', 'memlock']) {
+      expect(row(rows, id).state).toBe('unknown')
+      expect(row(rows, id).detail).toBe('not reported')
+    }
   })
-  it('fclk shows the MHz when read, never ok', () => {
-    const f = row(readinessRows(occ(null), hw({ npu_fclk: 1600 })), 'fclk')
-    expect(f.state).toBe('info')
-    expect(f.detail).toContain('1600')
+  it('all facts good: firmware, XRT, kernel params, memlock, fabric clock are ok', () => {
+    const rows = readinessRows(occ(FULL), hw({ npu_fclk: 2000 }))
+    expect(row(rows, 'firmware')).toMatchObject({ state: 'ok', detail: '1.1.2.65 (needs ≥ 1.1.2.65)' })
+    expect(row(rows, 'xrt').state).toBe('ok')
+    expect(row(rows, 'iommu').state).toBe('ok')
+    expect(row(rows, 'memlock')).toMatchObject({ state: 'ok' })
+    expect(row(rows, 'memlock').detail).toContain('memlock=-1')
+    expect(row(rows, 'fclk')).toMatchObject({ state: 'ok' })
+    expect(row(rows, 'fclk').detail).toContain('2000 MHz')
+  })
+  it('old firmware warns and names the minimum', () => {
+    const f = row(readinessRows(occ({ ...FULL, firmware_version: '1.0.0.63', firmware_ok: false }), hw()), 'firmware')
+    expect(f.state).toBe('warn')
+    expect(f.detail).toContain('1.0.0.63')
+    expect(f.detail).toContain('1.1.2.65')
+  })
+  it('unreadable firmware is unknown with the sysfs path as the reason', () => {
+    const f = row(readinessRows(occ({ ...FULL, firmware_version: null, firmware_ok: null }), hw()), 'firmware')
+    expect(f.state).toBe('unknown')
+    expect(f.detail).toContain('fw_version')
+  })
+  it('kernel params: missing tokens warn naming each, unreadable is unknown', () => {
+    const w = row(readinessRows(occ({ ...FULL, cmdline_missing: ['iommu=pt', 'amd_iommu=on'] }), hw()), 'iommu')
+    expect(w.state).toBe('warn')
+    expect(w.detail).toContain('`iommu=pt`')
+    expect(w.detail).toContain('`amd_iommu=on`')
+    expect(row(readinessRows(occ({ ...FULL, cmdline_missing: null }), hw()), 'iommu').state).toBe('unknown')
+  })
+  it('XRT: below minimum warns; none on the host is info naming the bundled image XRT', () => {
+    expect(row(readinessRows(occ({ ...FULL, xrt_version: '2.19.0', xrt_ok: false }), hw()), 'xrt').state).toBe('warn')
+    const none = row(readinessRows(occ({ ...FULL, xrt_version: null, xrt_ok: null }), hw()), 'xrt')
+    expect(none.state).toBe('info')
+    expect(none.detail).toContain('runner image')
+  })
+  it('pmode unknown carries the honest reason and keeps the copy command', () => {
+    const p = row(readinessRows(occ(FULL), hw({ npu_pmode: null })), 'pmode')
+    expect(p.state).toBe('unknown')
+    expect(p.detail).toContain('xrt-smi is not installed')
+    expect(p.command).toBe('sudo xrt-smi configure --pmode turbo')
+  })
+  it('fabric clock: unheld warns with the host command; held unknown shows MHz as info', () => {
+    const w = row(readinessRows(occ({ ...FULL, fclk_held: false, fclk_perf_level: 'auto' }), hw({ npu_fclk: 400 })), 'fclk')
+    expect(w.state).toBe('warn')
+    expect(w.detail).toContain('hal0-fabric-clock hold')
+    const i = row(readinessRows(occ({ ...FULL, fclk_held: null, fclk_perf_level: null }), hw({ npu_fclk: 1600 })), 'fclk')
+    expect(i.state).toBe('info')
+    expect(i.detail).toContain('1600')
+    expect(row(readinessRows(occ({ ...FULL, fclk_held: null }), hw()), 'fclk').state).toBe('unknown')
   })
 })
 

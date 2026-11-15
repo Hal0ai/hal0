@@ -413,6 +413,10 @@ def _fixed_family_provider(slot_cfg: Mapping[str, Any] | None, profile: Any) -> 
 
 log = logging.getLogger(__name__)
 
+#: ``podman run --ulimit`` values hal0 sets on an ``xdna`` (ggml-xdna) slot
+#: container: the NPU pins weights/buffers, so memlock must be unlimited.
+XDNA_ULIMITS: tuple[str, ...] = ("memlock=-1",)
+
 # P3-quadlet: per-slot units are Podman Quadlet ``.container`` source files
 # dropped here; podman's systemd generator turns each into a
 # ``hal0-slot@<token>.service`` on ``daemon-reload``. Root-owned by design
@@ -2063,7 +2067,7 @@ class ContainerProvider(Provider):
             # factored into hal0.providers._gpu so neither drifts.
             devices = [p for p in resolve_npu_device_paths() if _dev_node_exists(p)]
             group_ids = resolve_npu_group_ids()
-            ulimits = ["memlock=-1"]
+            ulimits = list(XDNA_ULIMITS)
 
         # gpu_index visibility env (per device family), merged UNDER the
         # slot's [server].env so an operator's explicit key always wins.

@@ -505,10 +505,41 @@ def test_occupancy_reports_npu_engines_and_host(client: TestClient, monkeypatch)
     }
     assert "hal0-runner-xdna" in body["npu_engines"]["xdna"]["image"]
     assert body["npu_host"] == {
+        **_npu_routes._none_host(),
         "device_node": "/dev/accel/accel0",
         "driver_loaded": True,
         "xdna_gen": 2,
     }
+
+
+def test_occupancy_passes_host_readiness_facts_through(client: TestClient, monkeypatch):
+    readiness = {
+        "firmware_version": "1.1.2.65",
+        "firmware_ok": True,
+        "cmdline_missing": [],
+        "xrt_version": "2.25.0",
+        "xrt_ok": True,
+        "memlock": "unlimited",
+        "fclk_held": True,
+        "fclk_perf_level": "high",
+    }
+    _stub_engine_facts(
+        monkeypatch,
+        refs=set(),
+        host={
+            "device_node": "/dev/accel/accel0",
+            "driver_loaded": True,
+            "xdna_gen": 2,
+            **readiness,
+        },
+    )
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value=None))
+    _wire(client, [])
+    host = client.get("/api/npu/occupancy").json()["npu_host"]
+    for key, val in readiness.items():
+        assert host[key] == val
+    assert host["firmware_min"] == "1.1.2.65"
+    assert host["xrt_min"] == "2.25.0"
 
 
 def test_absent_occupancy_still_reports_engines(client: TestClient, monkeypatch):
@@ -523,7 +554,10 @@ def test_absent_occupancy_still_reports_engines(client: TestClient, monkeypatch)
     assert body["present"] is False
     assert body["npu_engines"]["xdna"]["pulled"] is False
     assert "flm" in body["npu_engines"]["flm"]["image"]
-    assert body["npu_host"] == {"device_node": None, "driver_loaded": False, "xdna_gen": None}
+    assert body["npu_host"] == {
+        **_npu_routes._none_host(),
+        "driver_loaded": False,
+    }
 
 
 def test_engine_facts_are_none_when_every_read_fails(client: TestClient, monkeypatch):
@@ -543,7 +577,7 @@ def test_engine_facts_are_none_when_every_read_fails(client: TestClient, monkeyp
         "flm": {"image": None, "version": None},
         "xdna": {"image": None, "tag": None, "pulled": None},
     }
-    assert body["npu_host"] == {"device_node": None, "driver_loaded": None, "xdna_gen": None}
+    assert body["npu_host"] == _npu_routes._none_host()
 
 
 # ── image-store cache: stale-while-revalidate, single-flight ─────────────────
