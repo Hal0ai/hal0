@@ -453,6 +453,7 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.compat.max_outstanding_operations": {"apply_class": "immediate", "services": []},
     "memory.compat.max_outstanding_bytes": {"apply_class": "immediate", "services": []},
     "memory.compat.max_item_bytes": {"apply_class": "immediate", "services": []},
+    "memory.compat.gitlog_min_interval_s": {"apply_class": "immediate", "services": []},
     # [realtime] — every key is read live off app.state.hal0_config.realtime
     # on each WS connect (routes/realtime.py), which the settings PUT
     # refreshes in place, so all of them apply immediately.
