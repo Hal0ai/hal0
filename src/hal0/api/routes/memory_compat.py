@@ -507,6 +507,9 @@ class _CompatState:
     #: process make one folder. One lock per project: a slow engine call for
     #: one project's folder does not hold up another project's first write.
     knowledge_folder_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    #: Stored document id -> when a commit-log retain of it was last let
+    #: through (``time.monotonic``). See :func:`_hold_gitlog`.
+    gitlog_retained_at: dict[str, float] = field(default_factory=dict)
 
     def knowledge_folder_lock(self, slug: str) -> asyncio.Lock:
         return self.knowledge_folder_locks.setdefault(slug, asyncio.Lock())
@@ -1075,6 +1078,85 @@ def _namespace_item(item: dict[str, Any], scope: _Scope) -> None:
         item["metadata"][CLIENT_DOCUMENT_ID_KEY] = client_id
 
 
+#: The strategy the plugin names on its one commit-log document per project.
+GITLOG_STRATEGY = "gitlog"
+
+
+def _hold_gitlog(
+    state: _CompatState,
+    raw_items: list[Any],
+    wire_items: list[dict[str, Any]],
+    interval_s: int,
+) -> tuple[dict[str, float | None], int | None]:
+    """Let one retain's commit-log documents through, or say how long to wait.
+
+    A commit-log document is the plugin's last 300 commit messages, newest
+    first, under one id per project (``gitlog:`` is a shared prefix, so every
+    client of a project writes the same stored id). The engine matches stored
+    chunks by position, so the document is extracted again in full each time
+    it is sent with a new commit on top: see
+    ``[memory.compat] gitlog_min_interval_s``.
+
+    Returns the stored ids let through, each with the time it held before (so
+    a retain the engine never accepts can give the place back), and ``None``;
+    or nothing and the seconds until every held document may be sent again.
+    The strategy is read off what the client sent, not what reaches the
+    engine, so a bank without a ``gitlog`` strategy is held to it too.
+    """
+    if interval_s <= 0:
+        return {}, None
+    ids = [
+        str(item["document_id"])
+        for raw, item in zip(raw_items, wire_items, strict=True)
+        if isinstance(raw, dict) and raw.get("strategy") == GITLOG_STRATEGY
+    ]
+    if not ids:
+        return {}, None
+    now = time.monotonic()
+    waits = [
+        interval_s - (now - last)
+        for doc in ids
+        if (last := state.gitlog_retained_at.get(doc)) is not None and now - last < interval_s
+    ]
+    if waits:
+        return {}, max(1, int(max(waits) + 0.999))
+    claimed: dict[str, float | None] = {}
+    for doc in ids:
+        claimed[doc] = state.gitlog_retained_at.get(doc)
+        state.gitlog_retained_at[doc] = now
+    return claimed, None
+
+
+def _give_back_gitlog(state: _CompatState, claimed: dict[str, float | None]) -> None:
+    """Undo :func:`_hold_gitlog` for a retain the engine did not accept."""
+    for doc, before in claimed.items():
+        if before is None:
+            state.gitlog_retained_at.pop(doc, None)
+        else:
+            state.gitlog_retained_at[doc] = before
+
+
+def _gitlog_held(wait_s: int, headers: dict[str, str]) -> Response:
+    """429 for a commit-log retain sent again too soon, with ``Retry-After``.
+
+    The plugin turns a 429 into an error that its commit-log ingest logs and
+    moves past; it does not wait out ``Retry-After`` and send again.
+    """
+    body = {
+        "error": {
+            "code": "memory.compat_gitlog_held",
+            "message": (
+                "this project's commit log was retained recently; it is taken at most "
+                "once per [memory.compat] gitlog_min_interval_s"
+            ),
+            "details": {"retry_after_s": wait_s},
+        }
+    }
+    return JSONResponse(
+        content=body, status_code=429, headers={**headers, "Retry-After": str(wait_s)}
+    )
+
+
 @router.post(_BANK + "/memories")
 async def retain(bank: str, request: Request, agent: str = _CALLER) -> Response:
     """Retain: the engine's ``POST .../memories``, through the write envelope.
@@ -1193,14 +1275,21 @@ async def _retain(bank: str, request: Request, agent: str, *, body_cap: int) -> 
     for item, scope in zip(wire_items, item_scopes, strict=True):
         _namespace_item(item, scope)
 
-    # An admitted operation is counted from here on, so that retains of one
-    # client running side by side cannot each find the quota free. It is
-    # given back if the engine never accepts it.
-    counted = asynchronous and await _admit_operation(
-        request, provider, agent, engine_operation, visible_operation, size
+    gitlog_claimed, gitlog_wait = _hold_gitlog(
+        state, items, wire_items, settings.gitlog_min_interval_s
     )
+    if gitlog_wait is not None:
+        return _gitlog_held(gitlog_wait, headers)
+
     accepted = False
+    counted = False
     try:
+        # An admitted operation is counted from here on, so that retains of
+        # one client running side by side cannot each find the quota free. It
+        # is given back if the engine never accepts it.
+        counted = asynchronous and await _admit_operation(
+            request, provider, agent, engine_operation, visible_operation, size
+        )
         # The same rule every other hal0 writer runs first (#1903): an
         # extraction slot too small for the extraction prompt can never
         # process a retain.
@@ -1237,6 +1326,8 @@ async def _retain(bank: str, request: Request, agent: str, *, body_cap: int) -> 
             started.accepted = True
         elif counted:
             state.operations_of(agent).pop(engine_operation, None)
+        if not accepted:
+            _give_back_gitlog(state, gitlog_claimed)
     # The engine's answer names no document today; any string in it is still
     # cleared of this client's stored-id prefixes before it is passed on.
     answer = _without_stored_ids(dict(out.get("engine_response") or {}), agent)

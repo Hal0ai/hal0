@@ -3303,6 +3303,24 @@ class MemoryCompatConfig(BaseModel):
             "The request body is capped at 48 MiB whatever this is set to."
         ),
     )
+    gitlog_min_interval_s: int = Field(
+        default=86400,
+        ge=0,
+        le=30 * 86400,
+        description=(
+            "The shortest time between two retains of one project's commit-log "
+            "document (strategy 'gitlog'). The plugin re-sends its last 300 "
+            "commit messages as one document whenever a session starts on a "
+            "HEAD it has not sent, and every worktree and branch has its own "
+            "HEAD. The engine matches stored chunks by position, so one new "
+            "commit at the top changes every chunk and the whole document is "
+            "extracted again: hours of the memory model's time on a local "
+            "slot. A commit-log retain sooner than this after the last one "
+            "accepted here is answered 429 with Retry-After; the plugin logs "
+            "it and carries on. The time is kept in hal0-api's memory, so a "
+            "restart lets the next one through. 0 turns the limit off."
+        ),
+    )
 
     @field_validator("shared_document_prefixes", mode="before")
     @classmethod
