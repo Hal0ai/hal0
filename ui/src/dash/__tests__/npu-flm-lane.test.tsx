@@ -145,6 +145,28 @@ describe('FlmLane role toggles', () => {
     expect(box.restarts).toHaveLength(0)
   })
 
+  it('after a write the toggles stay locked until the refetched config differs', async () => {
+    render()
+    click('flm-cap-asr')
+    pressButton('Start speech-to-text and restart FLM')
+    await flush()
+    expect(box.edits).toHaveLength(1)
+    // Same config as before the write: still the stale baseline, so locked.
+    render()
+    expect((q('flm-cap-embed') as HTMLButtonElement).disabled).toBe(true)
+    box.cfg = { npu: { chat: true, asr: true, embed: false }, model: { default: 'gemma4-it:e4b' } }
+    render()
+    await flush()
+    expect((q('flm-cap-embed') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('the chat model dropdown is disabled while chat is off', () => {
+    box.cfg = { npu: { chat: false, asr: false, embed: false }, model: { default: 'gemma4-it:e4b' } }
+    render()
+    const trigger = q('flm-chat-model') as HTMLButtonElement
+    expect(trigger.disabled || trigger.getAttribute('aria-disabled') === 'true').toBe(true)
+  })
+
   it('config still loading → toggles disabled', () => {
     box.cfg = undefined
     render()
