@@ -84,6 +84,8 @@ STATUS_FAILED = "failed"
 #: is the parent of ``retain`` and is listed for a batch that failed before it
 #: was split; split parents are left out of every read (``exclude_parents``).
 EXTRACTION_TASK_TYPES = frozenset({"retain", "batch_retain", "file_convert_retain"})
+#: ``task_type`` values that are ingest: what ``queue.oldest_waiting_s`` ages.
+RETAIN_TASK_TYPES = frozenset({"retain", "batch_retain"})
 
 TOP_ERRORS_MAX = 5
 ERROR_MESSAGE_MAX_CHARS = 160
@@ -249,6 +251,10 @@ class OperationsRead:
     #: Age of the oldest row that is due. A waiting row whose ``next_retry_at``
     #: is still ahead was put off on purpose and is not counted as stuck.
     oldest_s: float | None = None
+    #: The same for retain / batch_retain rows only: what an operator reads as
+    #: ingest lag. ``oldest_s`` also sees refresh and consolidation work, which
+    #: can sit for hours without anything being stuck.
+    oldest_retain_s: float | None = None
     #: Rows the read needed were left unread at the cap.
     truncated: bool = False
     complete: bool = False
@@ -256,7 +262,7 @@ class OperationsRead:
     _seen: int = 0
 
     def absorb(self, rows: list[Any], status: str, now: float, *, keep: bool) -> int:
-        """Take one page in; returns how many of its rows are due."""
+        """Take one page in; returns how many of its due rows are retains."""
         due = 0
         for row in rows:
             if not isinstance(row, dict) or str(row.get("status", "")).lower() != status:
@@ -268,10 +274,15 @@ class OperationsRead:
             retry_at = _epoch(row.get("next_retry_at"))
             if created is None or (retry_at is not None and retry_at > now):
                 continue
-            due += 1
             age = round(max(0.0, now - created), 1)
             if self.oldest_s is None or age > self.oldest_s:
                 self.oldest_s = age
+            task_type = row.get("task_type") or row.get("operation_type")
+            if task_type is not None and task_type not in RETAIN_TASK_TYPES:
+                continue
+            due += 1
+            if self.oldest_retain_s is None or age > self.oldest_retain_s:
+                self.oldest_retain_s = age
         return due
 
 
@@ -297,7 +308,7 @@ async def read_operations(
     (``ORDER BY created_at DESC``). So the count never needs a second page,
     and the oldest row is on the last one: :data:`WANT_OLDEST` reads the first
     page for the total and then walks back from the end until a page holds a
-    row that is due. :data:`WANT_ROWS` reads forward to the end, because a
+    due retain (the oldest due row of any type is kept on the way). :data:`WANT_ROWS` reads forward to the end, because a
     failure's time is its last update, which the order says nothing about.
     Every read stops at ``cap`` rows and sets ``truncated`` if it needed more.
 
@@ -421,6 +432,8 @@ class _Bank:
     consolidation_pending: int | None = None
     consolidation_failed: int | None = None
     stats_complete: bool = False
+    #: Two-bank only: left behind by the fold-in. Listed, never counted.
+    retired: bool = False
     waiting: OperationsRead = field(default_factory=OperationsRead)
     failed: OperationsRead = field(default_factory=OperationsRead)
     knowledge: KnowledgeRead = field(default_factory=KnowledgeRead)
@@ -559,6 +572,21 @@ def _extraction_failures(banks: list[_Bank], now: float) -> tuple[int, list[dict
     return failures, [{"message": message, "count": count} for message, count in ranked]
 
 
+def _live_bank_ids(provider: Any) -> frozenset[str] | None:
+    """The engine banks the layout serves, or ``None`` when every bank is live.
+
+    Two-bank (ADR-0058): the platform bank and the private bank, as the
+    provider was built from the layout record and ``[memory]``. Any other
+    bank in the engine is retired by the fold-in: nothing writes to it and
+    its content already lives in the two. The old layouts have no retired
+    banks, so they keep counting every bank.
+    """
+    if getattr(provider, "two_bank", False) is not True:
+        return None
+    ids = {getattr(provider, "platform_bank", None), getattr(provider, "private_bank", None)}
+    return frozenset(i for i in ids if isinstance(i, str) and i)
+
+
 def _known_sum(values: list[int | None]) -> int:
     return sum(v for v in values if v is not None)
 
@@ -621,7 +649,15 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
         )
     except Exception:
         bank_list = None
-    banks = _bank_entries(bank_list) if isinstance(bank_list, list) else []
+    all_banks = _bank_entries(bank_list) if isinstance(bank_list, list) else []
+    live_ids = _live_bank_ids(provider)
+    for bank in all_banks:
+        bank.retired = live_ids is not None and bank.bank_id not in live_ids
+    # Queue, knowledge and verdict figures are the live banks'. A retired bank
+    # is read for its size only; its queue never drains and would be counted
+    # twice with the content folded into the live banks.
+    banks = [b for b in all_banks if not b.retired]
+    retired = [b for b in all_banks if b.retired]
 
     cfg = None
     with contextlib.suppress(Exception):
@@ -635,6 +671,8 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
     if cfg is not None:
         work.append(("extraction", _read_extraction(request, cfg.memory.graph, extraction)))
         work.append(("embedder", _read_embedder(cfg.memory.models, embedder)))
+    for bank in retired:
+        work.append(("stats", _read_stats(reader, bank)))
     for bank in banks:
         work.append(("stats", _read_stats(reader, bank)))
         work.append(
@@ -664,7 +702,8 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
             await asyncio.gather(*late, return_exceptions=True)
 
     failures_6h, top_errors = _extraction_failures(banks, now)
-    oldest = [b.waiting.oldest_s for b in banks if b.waiting.oldest_s is not None]
+    oldest = [b.waiting.oldest_retain_s for b in banks if b.waiting.oldest_retain_s is not None]
+    oldest_any = [b.waiting.oldest_s for b in banks if b.waiting.oldest_s is not None]
     waiting_total = _known_sum([b.waiting.count for b in banks])
     failed_total = _known_sum([b.failed.count for b in banks])
     status = embedder.get("status")
@@ -681,7 +720,7 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
         partial.add(SECTION_QUEUE)
     if not listed or not all(b.knowledge.complete for b in banks):
         partial.add(SECTION_KNOWLEDGE)
-    if not listed or not all(b.stats_complete for b in banks):
+    if not listed or not all(b.stats_complete for b in all_banks):
         partial.add(SECTION_BANKS)
 
     successes = [b.knowledge for b in banks if b.knowledge.last_success is not None]
@@ -715,6 +754,7 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
             "waiting": waiting_total,
             "failed": failed_total,
             "oldest_waiting_s": max(oldest) if oldest else None,
+            "oldest_waiting_any_s": max(oldest_any) if oldest_any else None,
             "consolidation_pending": _known_sum([b.consolidation_pending for b in banks]),
             "consolidation_failed": _known_sum([b.consolidation_failed for b in banks]),
             "by_bank": [
@@ -722,7 +762,8 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
                     "bank_id": b.bank_id,
                     "waiting": b.waiting.count,
                     "failed": b.failed.count,
-                    "oldest_waiting_s": b.waiting.oldest_s,
+                    "oldest_waiting_s": b.waiting.oldest_retain_s,
+                    "oldest_waiting_any_s": b.waiting.oldest_s,
                 }
                 for b in banks
             ],
@@ -732,10 +773,17 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
         SECTION_BANKS: {
             # ADR-0058 decision 7: from the layout record, via the provider.
             "layout": str(getattr(provider, "layout", None) or BANK_LAYOUT_DEFAULT),
-            "total": len(banks) if listed else None,
-            "facts": _known_sum([b.facts for b in banks]) if listed else None,
+            "total": len(all_banks) if listed else None,
+            "facts": _known_sum([b.facts for b in all_banks]) if listed else None,
+            "retired": len(retired),
             "list": [
-                {"bank_id": b.bank_id, "facts": b.facts, "documents": b.documents} for b in banks
+                {
+                    "bank_id": b.bank_id,
+                    "facts": b.facts,
+                    "documents": b.documents,
+                    "retired": b.retired,
+                }
+                for b in all_banks
             ],
         },
         # Filled from the write gate by a later change (ADR-0058, decision 4).

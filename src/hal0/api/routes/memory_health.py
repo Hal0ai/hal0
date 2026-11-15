@@ -16,16 +16,24 @@ Response::
                   failures_6h, top_errors: [{message, count}]},
      embedder: {recorded: {provider, model}, configured: {provider, model},
                 mixed, needs_switch, conflict, informational},
-     queue: {waiting, failed, oldest_waiting_s, consolidation_pending,
-             consolidation_failed,
-             by_bank: [{bank_id, waiting, failed, oldest_waiting_s}], truncated},
+     queue: {waiting, failed, oldest_waiting_s, oldest_waiting_any_s,
+             consolidation_pending, consolidation_failed,
+             by_bank: [{bank_id, waiting, failed, oldest_waiting_s,
+                        oldest_waiting_any_s}], truncated},
      knowledge: {pages, pages_stale, models, models_stale, refresh_failed,
                  last_success_at},
      banks: {layout: "legacy_unified" | "legacy_split" | "two_bank", total, facts,
-             list: [{bank_id, facts, documents}]},
+             retired, list: [{bank_id, facts, documents, retired}]},
      writes: null,
      steps: [{id, state: "current" | "waiting" | "clear", waits_on,
               reason_code, figures}]}
+
+``oldest_waiting_s`` is the oldest due retain (``retain`` / ``batch_retain``),
+the ingest lag; ``oldest_waiting_any_s`` is the oldest due operation of any type.
+On the ``two_bank`` layout ``queue``, ``knowledge`` and the verdict count the
+platform and private banks only: every other bank is retired by the fold-in,
+is listed in ``banks.list`` with ``retired: true``, and counts toward
+``banks.total`` and ``banks.facts`` alone. The old layouts count every bank.
 
 ``partial`` names the sections whose reads did not all finish; their figures
 are what was read, and the verdict is decided from them. With the engine

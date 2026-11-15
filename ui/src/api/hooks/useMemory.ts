@@ -569,14 +569,17 @@ export interface MemoryHealthQueueBank {
   waiting: number | null
   failed: number | null
   oldest_waiting_s: number | null
+  oldest_waiting_any_s?: number | null
 }
 
 export interface MemoryHealthQueue {
   /** Operations in the engine's `pending` state, across banks. Split parent batches are left out. */
   waiting: number
   failed: number
-  /** Age of the oldest waiting operation that is due. `null` when none is. */
+  /** Age of the oldest waiting retain that is due (ingest lag). `null` when none is. */
   oldest_waiting_s: number | null
+  /** Age of the oldest due operation of any type, refreshes and consolidation included. */
+  oldest_waiting_any_s?: number | null
   /** Source memories still to be consolidated, and those whose consolidation failed. */
   consolidation_pending: number
   consolidation_failed: number
@@ -598,7 +601,14 @@ export interface MemoryHealthBanks {
   layout: 'per_bank' | string
   total: number | null
   facts: number | null
-  list: Array<{ bank_id: string; facts: number | null; documents: number | null }>
+  /** Banks the two-bank layout retired; listed with `retired: true`, never counted in the queue. */
+  retired?: number
+  list: Array<{
+    bank_id: string
+    facts: number | null
+    documents: number | null
+    retired?: boolean
+  }>
 }
 
 /**

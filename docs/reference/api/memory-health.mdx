@@ -74,11 +74,12 @@ in the [REST API index](/docs/reference/api/rest-api/).
 | `extraction.top_errors` | Up to 5 groups of those failures' messages, most frequent first. See [Error messages](#error-messages). |
 | `embedder` | The embedder the store was built with against the configured one (`GET /api/memory/models` has the full record). `informational` is `true` when the two differ only because `[memory.models]` still holds its shipped default: the ordinary upgraded box, which needs nothing. |
 | `queue.waiting`, `.failed` | Operations in the engine's `pending` and `failed` states, across banks. A batch that was split into child operations is counted by its children, so these are lower than the bank stats' `pending_operations` and `failed_operations`, which count both. |
-| `queue.oldest_waiting_s` | Age in seconds of the oldest waiting operation that is due. An operation the engine put off (its `next_retry_at` is still ahead) is not counted as stuck. |
+| `queue.oldest_waiting_s` | Age in seconds of the oldest waiting retain (`retain` or `batch_retain`) that is due: the ingest lag. An operation the engine put off (its `next_retry_at` is still ahead) is not counted as stuck. |
+| `queue.oldest_waiting_any_s` | The same for an operation of any type, mental-model refreshes and consolidation included. |
 | `queue.consolidation_pending`, `.consolidation_failed` | Source memories still to be consolidated into observations, and those whose consolidation failed, summed from the bank stats. |
 | `queue.truncated` | `true` when a bank holds more failed operations than the 2,000 that are read. Counts stay exact (they are the engine's totals); `failures_6h` and `top_errors` are then a floor. |
 | `knowledge` | Knowledge pages and mental models across banks, how many are stale, how many have a failed last refresh, and when a refresh last finished. A page or model that was created and never refreshed does not count as a finished refresh. |
-| `banks` | `layout` is the store's bank layout from its layout record: `two_bank`, `legacy_unified` or `legacy_split` ([Memory banks](/docs/concepts/memory-banks)). `facts` and `documents` per bank, and the totals. |
+| `banks` | `layout` is the store's bank layout from its layout record: `two_bank`, `legacy_unified` or `legacy_split` ([Memory banks](/docs/concepts/memory-banks)). `facts` and `documents` per bank, and the totals. On `two_bank`, a bank other than the platform and private banks was retired by the fold-in: it is listed with `retired: true` (`retired` counts them) and is left out of `queue`, `knowledge` and the verdict. |
 
 A row in `queue.by_bank` or `banks.list` holds `null` for a figure that could not be
 read; its section is then named in `partial`.
