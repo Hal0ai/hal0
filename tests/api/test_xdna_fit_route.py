@@ -84,3 +84,11 @@ def test_fit_includes_extensionless_gguf_blob_and_skips_halogen(fit_client: Test
     models = fit_client.get("/api/runners/xdna/fit").json()["models"]
     assert models["blob-chat"]["xdna_path"] == "per-op"
     assert "halo-chat" not in models
+
+
+def test_fit_rows_carry_advisory_npu_fields(fit_client: TestClient) -> None:
+    models = fit_client.get("/api/runners/xdna/fit").json()["models"]
+    assert models["lfm2-chat"]["npu_ok"] is True
+    assert models["lfm2-chat"]["npu_note"] is None
+    assert models["missing-chat"]["npu_ok"] is False
+    assert models["missing-chat"]["npu_note"]

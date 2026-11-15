@@ -103,6 +103,25 @@ carries the toolchain pins as hal0's own maintenance burden.
    `format_arch = "gguf"` runner declaration already steers the model
    picker).
 
+   *Amendment (2026-11-15): advisory NPU suitability.* The fit row also
+   carries `npu_ok` and `npu_note`. `npu_ok` is false for (a) models that
+   are not text generators (an encoder `general.architecture` such as
+   `bert`, `nomic-bert`, `jina-bert-v2` or `modern-bert`, or a
+   `<arch>.pooling_type` above 0, which marks embedding and reranker heads),
+   and (b) GGUFs whose file size exceeds **6 GiB**. Both are hints for the
+   dropdown (hidden by default, note shown on reveal), not refusals:
+   `xdna_path` is unchanged and nothing refuses a load. The size ceiling is
+   **advisory, not a hardware limit**; no source states one. It is chosen
+   from throughput: the ggml-xdna GEMV streams weights at about 31 GB/s, and
+   on a Ryzen AI MAX+ 395 the measured decode was 9B Q4_K_M (~5.5 GiB)
+   18.8 t/s and 9B Q8_0 (~9.5 GiB) 12.4 t/s, with a per-op Qwen3.5-0.8B
+   Q8_0 at 7.0 t/s in the spike; 6 GiB keeps the interactive band. File size
+   is total weights, so a MoE counts every expert: expert matmuls
+   (`MUL_MAT_ID`) are host work in the comparable NPU fork, so active
+   parameters do not buy NPU speed. The evidence is the local NPU research
+   notes citing the Tether fork; the fork's own README was not reachable, so
+   revisit with a measured per-size table from the hardware gate.
+
 5. **NPU coexistence with `flm` is warn-and-time-slice, not exclusion.**
    *Superseded in part by ADR-0059 for per-op models: a per-op xdna slot and
    the FLM anchor exclude each other (hardware testing showed the second one

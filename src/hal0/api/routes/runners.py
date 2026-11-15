@@ -50,7 +50,9 @@ async def get_xdna_fit(request: Request, model: str | None = None) -> dict[str, 
     """Fused vs per-op xdna fit for every registered GGUF chat model.
 
     A row whose file is missing/unreadable/not GGUF is still returned, with
-    ``xdna_path: null`` and the reason -- never a 500.
+    ``xdna_path: null`` and the reason -- never a 500. ``npu_ok`` / ``npu_note``
+    are advisory (non-text-generation or over the size ceiling; ADR-0057
+    amendment): a hint for pickers, never a refusal.
     """
     from hal0.slots.model_fit import xdna_model_fit_cached
 
@@ -71,9 +73,20 @@ async def get_xdna_fit(request: Request, model: str | None = None) -> dict[str, 
         for m in rows:
             try:
                 fit = xdna_model_fit_cached(m.path)
-                out[m.id] = {"xdna_path": fit.xdna_path, "reason": fit.reason}
+                out[m.id] = {
+                    "xdna_path": fit.xdna_path,
+                    "reason": fit.reason,
+                    "npu_ok": fit.npu_ok,
+                    "npu_note": fit.npu_note,
+                }
             except (OSError, ValueError) as exc:
-                out[m.id] = {"xdna_path": None, "reason": str(exc) or type(exc).__name__}
+                reason = str(exc) or type(exc).__name__
+                out[m.id] = {
+                    "xdna_path": None,
+                    "reason": reason,
+                    "npu_ok": False,
+                    "npu_note": reason,
+                }
         return out
 
     out = await asyncio.to_thread(_fit_rows)
