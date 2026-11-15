@@ -216,3 +216,4 @@
 .npt-lane-ggml .npt-gadd:disabled { opacity: .5; cursor: not-allowed; }
 .npt-lane-ggml .npt-gadd:focus-visible { outline: 2px solid var(--npu-s1); outline-offset: 2px; }
 .npt-lane-ggml .npt-gfoot { margin: 0; font-size: 12px; color: var(--fg-3); }
+.npt-lane-ggml .npt-gcards { grid-template-columns: minmax(0, 1fr); }
