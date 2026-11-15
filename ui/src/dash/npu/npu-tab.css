@@ -198,3 +198,22 @@
 .npt-summary-link:hover { text-decoration: underline; }
 .npt-summary-link:focus-visible { outline: 2px solid var(--dev-npu); outline-offset: 2px; }
 .npt-link-disabled { color: var(--fg-5); cursor: not-allowed; }
+
+/* ===== GGML lane cards (GgmlLane.jsx, GgmlModelPicker.jsx) — keep separate from the FLM-lane rules ===== */
+.npt-lane-ggml .npt-gcard { gap: 10px; }
+.npt-lane-ggml .npt-ghead { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.npt-lane-ggml .npt-gport { font-family: var(--jbm); font-size: 11.5px; color: var(--fg-3); }
+.npt-lane-ggml .npt-gstate { font-family: var(--jbm); font-size: 11.5px; color: var(--fg-2); }
+.npt-lane-ggml .npt-gmodelrow { min-width: 0; }
+.npt-lane-ggml .npt-gpick { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.npt-lane-ggml .npt-gpick .model-picker { max-width: 100%; }
+.npt-lane-ggml .npt-gpick-all { padding: 0; border: 0; background: none; color: var(--fg-3); font-family: var(--jbm); font-size: 11px; cursor: pointer; text-decoration: underline dotted; }
+.npt-lane-ggml .npt-gpick-all:hover { color: var(--fg); }
+.npt-lane-ggml .npt-gwhy { font-size: 12px; color: var(--fg-3); }
+.npt-lane-ggml .npt-gmx { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.npt-lane-ggml .npt-gadd { width: 100%; padding: 10px; border: 1px dashed var(--line); border-radius: var(--rad-md, 6px); background: transparent; color: var(--fg-2); font-size: 13px; cursor: pointer; }
+.npt-lane-ggml .npt-gadd:hover:not(:disabled) { border-color: var(--npu-s1); color: var(--fg); }
+.npt-lane-ggml .npt-gadd:disabled { opacity: .5; cursor: not-allowed; }
+.npt-lane-ggml .npt-gadd:focus-visible { outline: 2px solid var(--npu-s1); outline-offset: 2px; }
+.npt-lane-ggml .npt-gfoot { margin: 0; font-size: 12px; color: var(--fg-3); }
+.npt-lane-ggml .npt-gcards { grid-template-columns: minmax(0, 1fr); }

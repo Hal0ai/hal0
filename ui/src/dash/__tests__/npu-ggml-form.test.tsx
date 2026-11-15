@@ -72,6 +72,10 @@ let host: HTMLDivElement
 let root: Root
 const q = (id: string) => host.querySelector(`[data-testid="${id}"]`) as HTMLElement | null
 const click = (id: string) => act(() => { q(id)!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+const pick = (id: string) => {
+  click('ggml-model-pick-form')
+  act(() => { host.querySelector<HTMLElement>(`[data-option-id="${id}"]`)!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
+}
 const flush = () => act(async () => { await Promise.resolve() })
 function typeInto(id: string, value: string) {
   const el = q(id) as HTMLInputElement
@@ -107,7 +111,7 @@ describe('create', () => {
     const done = vi.fn()
     mount({ mode: 'create', onDone: done })
     expect((q('ggml-name') as HTMLInputElement).value).toBe('npu-gguf-2')
-    click('ggml-model-qwen3-4b')
+    pick('qwen3-4b')
     click('ggml-ctx-65536')
     click('ggml-pmode-turbo')
     await act(async () => { q('ggml-create-start')!.dispatchEvent(new MouseEvent('click', { bubbles: true })) })
@@ -153,8 +157,10 @@ describe('create', () => {
 
   it('lists fit chips per model and a context placeholder from the profile', () => {
     mount({ mode: 'create', onDone: () => {} })
-    expect(q('ggml-model-qwen3-4b')!.querySelector('[data-fit]')!.getAttribute('data-fit')).toBe('fused')
-    expect(q('ggml-model-big-moe')!.querySelector('[data-fit]')!.getAttribute('data-fit')).toBe('none')
+    click('ggml-model-pick-form')
+    const opts = Array.from(host.querySelectorAll('[role="option"]'))
+    expect(opts.find((o) => o.getAttribute('data-option-id') === 'qwen3-4b')!.textContent).toContain('fused')
+    expect(opts.some((o) => o.getAttribute('data-option-id') === 'big-moe')).toBe(false)
     expect((q('ggml-ctx-custom') as HTMLInputElement).placeholder).toBe('8,192 from xdna')
     expect(q('ggml-ctx-row')!.textContent).toContain('Hermes needs at least 64K')
   })
@@ -261,12 +267,6 @@ describe('per-op fit chips', () => {
     expect(q('ggml-form-fix')).toBeNull()
   })
 
-  it('the model list carries the chips but never a "copy fix" button inside the option button', () => {
-    box.fit = { 'qwen3-4b': { xdna_path: 'per-op', reason: 'blk.0.ssm_out.weight is Q8_0, not Q5_K' } }
-    mount({ mode: 'create', onDone: () => {} })
-    expect(q('ggml-model-qwen3-4b-why')!.textContent).toBe('ssm_out q8_0')
-    expect(q('ggml-model-qwen3-4b-fix')).toBeNull()
-  })
 
   it('shows in the engine variant and survives a rejected clipboard write', async () => {
     box.fit = { 'qwen3-4b': { xdna_path: 'per-op', reason: 'blk.0.ssm_out.weight is Q6_K, not Q5_K' } }
@@ -316,16 +316,18 @@ describe('config still loading', () => {
 })
 
 describe('model list follows the fit map (#3647)', () => {
-  it('offers exactly the fit map keys: a registry llm row outside it has no button, a fit key the registry lacks has one', () => {
+  it('offers the fit map keys with a path: a registry llm row outside it is absent, a fit key the registry lacks is listed', () => {
     box.models = [
       ...box.models,
       { id: 'orphan-llm', type: 'llm', installed: true, runtime: 'llama-server', labels: [] },
     ]
     box.fit = { ...box.fit, 'hub-blob-sha': { xdna_path: 'fused', reason: '' } }
     mount({ mode: 'create', onDone: () => {} })
-    expect(q('ggml-model-orphan-llm')).toBeNull()
-    expect(q('ggml-model-hub-blob-sha')).not.toBeNull()
-    expect(q('ggml-model-qwen3-4b')).not.toBeNull()
+    click('ggml-model-pick-form')
+    const ids = Array.from(host.querySelectorAll('[role="option"]')).map((o) => o.getAttribute('data-option-id'))
+    expect(ids).not.toContain('orphan-llm')
+    expect(ids).toContain('hub-blob-sha')
+    expect(ids).toContain('qwen3-4b')
   })
 })
 
