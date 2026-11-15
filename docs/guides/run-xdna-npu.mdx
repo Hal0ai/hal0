@@ -125,6 +125,13 @@ hal0 seeds one `xdna` profile for GGML slots (`src/hal0/config/data/seed_profile
 
 It carries no `flags` on purpose. The xdna launch already fixes `--device XDNA0 -ngl 99 -fa on --poll 0 -np 1 --cache-reuse 256` in the slot layer, and a profile flag cannot override those. A slot created with `binary = "xdna"` and no profile takes `xdna`.
 
+From the CLI, `--hardware npu` sends the same request the NPU tab does (`runtime=container`, `binary=xdna`, `device=npu`, profile `xdna`) through `POST /api/slots`, so the NPU-exclusion guards still apply:
+
+```bash
+hal0 slot create npu-fast --hardware npu --model qwen3.5-0.8b-so5 --port 8095 --no-autoload
+hal0 slot edit npu-fast --hardware npu --profile xdna-long   # retarget an existing slot
+```
+
 The profile's `ctx_size` is the default for every GGML slot. To give one slot its own context, set `[tune].ctx_size` in that slot's config; a slot tune beats the profile, and the xdna runner accepts every tune key except `speculation = "ngram"`. The NPU tab offers 8192, 16384, 32768 and 65536 or a custom value. Hermes needs a context of at least 64,000 tokens (`HERMES_MINIMUM_CONTEXT_LENGTH`), so a slot an agent uses needs 65536 or more.
 
 ```toml

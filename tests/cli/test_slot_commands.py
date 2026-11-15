@@ -487,3 +487,93 @@ def test_slot_restart_unload_npu_holder_flag_sends_true(monkeypatch: pytest.Monk
     result = runner.invoke(slot_commands.app, ["restart", "px", "--unload-npu-holder"])
     assert result.exit_code == 0, result.output
     assert seen["body"] == {"unload_npu_holder": True}
+
+
+# --- GGML NPU (xdna) slots from the CLI ---------------------------------
+
+
+@pytest.fixture
+def post_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+
+    def fake_post(path: str, *, json: dict[str, Any] | None = None, **kw: Any) -> dict[str, Any]:
+        seen["path"] = path
+        seen["body"] = json
+        return {"port": (json or {}).get("port")}
+
+    monkeypatch.setattr(slot_commands, "_api_unreachable", lambda _u: False)
+    monkeypatch.setattr(slot_commands, "api_post", fake_post)
+    monkeypatch.setattr(slot_commands, "api_get", lambda *_a, **_k: [])
+    return seen
+
+
+def test_cli_slot_create_npu_matches_the_npu_tab_payload(post_capture: dict[str, Any]) -> None:
+    from hal0.cli.slot_commands import app
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "create", "npu-fast", "--hardware", "npu", "--model", "qwen3.5-0.8b-so5",
+            "--port", "8095", "--no-autoload",
+        ],
+    )  # fmt: skip
+    assert result.exit_code == 0, result.output
+    assert post_capture["path"] == "/api/slots"
+    assert post_capture["body"] == {
+        "name": "npu-fast",
+        "type": "llm",
+        "runtime": "container",
+        "binary": "xdna",
+        "device": "npu",
+        "model": "qwen3.5-0.8b-so5",
+        "profile": "xdna",
+        "port": 8095,
+        "autoload": False,
+    }
+
+
+def test_cli_slot_create_npu_explicit_profile_wins(post_capture: dict[str, Any]) -> None:
+    from hal0.cli.slot_commands import app
+
+    result = CliRunner().invoke(
+        app,
+        ["create", "g", "--hardware", "npu", "-m", "m", "-p", "8096", "--profile", "xdna-long"],
+    )
+    assert result.exit_code == 0, result.output
+    assert post_capture["body"]["profile"] == "xdna-long"
+    assert "autoload" not in post_capture["body"]
+
+
+def test_cli_slot_create_gpu_payload_is_unchanged(post_capture: dict[str, Any]) -> None:
+    from hal0.cli.slot_commands import app
+
+    result = CliRunner().invoke(
+        app, ["create", "p", "--hardware", "vulkan", "-m", "m", "-p", "8097"]
+    )
+    assert result.exit_code == 0, result.output
+    body = post_capture["body"]
+    assert body["device"] == "gpu-vulkan"
+    assert body["model"] == {"default": "m"}
+    assert "binary" not in body and "runtime" not in body and "autoload" not in body
+
+
+def test_cli_slot_edit_hardware_npu_retargets_to_xdna(put_capture: dict[str, Any]) -> None:
+    from hal0.cli.slot_commands import app
+
+    result = CliRunner().invoke(app, ["edit", "g", "--hardware", "npu"])
+    assert result.exit_code == 0, result.output
+    assert put_capture["path"] == "/api/slots/g/config"
+    assert put_capture["body"] == {
+        "device": "npu",
+        "runtime": "container",
+        "binary": "xdna",
+        "profile": "xdna",
+    }
+
+
+def test_cli_slot_edit_autoload_only(put_capture: dict[str, Any]) -> None:
+    from hal0.cli.slot_commands import app
+
+    result = CliRunner().invoke(app, ["edit", "g", "--no-autoload"])
+    assert result.exit_code == 0, result.output
+    assert put_capture["body"] == {"autoload": False}

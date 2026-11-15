@@ -108,6 +108,15 @@ class SlotHardware(StrEnum):
     vulkan = "vulkan"
     rocm = "rocm"
     cpu = "cpu"
+    npu = "npu"
+
+
+#: ``--hardware npu`` is the GGML NPU (xdna) slot (ADR-0057), not a plain
+#: device swap: it also sets ``runtime=container`` + ``binary=xdna`` and
+#: defaults the profile to ``xdna``. This is exactly what the NPU tab's
+#: ``ggmlCreateBody`` (ui/src/dash/npu/ggml-slot-pure.ts) sends.
+_NPU_HARDWARE = SlotHardware.npu.value
+_XDNA_DEFAULT_PROFILE = "xdna"
 
 
 #: The `device` enum (gpu-vulkan / gpu-rocm / cpu / npu) derives from the
@@ -119,6 +128,7 @@ _HARDWARE_TO_DEVICE: dict[str, str] = {
     "vulkan": "gpu-vulkan",
     "rocm": "gpu-rocm",
     "cpu": "cpu",
+    "npu": "npu",
 }
 
 
@@ -605,9 +615,12 @@ def slot_create(
         None,
         "--hardware",
         help=(
-            "Hardware backend: vulkan | rocm | cpu. "
+            "Hardware backend: vulkan | rocm | cpu | npu. "
             "Default: auto-detected from /etc/hal0/hardware.json (rocm if no probe). "
-            "The `device` field is derived: vulkan→gpu-vulkan, rocm→gpu-rocm, cpu→cpu."
+            "The `device` field is derived: vulkan→gpu-vulkan, rocm→gpu-rocm, cpu→cpu. "
+            "`npu` makes a GGML NPU slot (ADR-0057): runtime=container, binary=xdna, "
+            "device=npu, profile defaults to `xdna`; pair with --no-autoload to "
+            "keep it from starting at boot alongside FLM."
         ),
         case_sensitive=False,
     ),
@@ -633,8 +646,14 @@ def slot_create(
             "--type/--hardware — embedding → embedding (--embedding), "
             "reranking → reranking (--reranking), tts/transcription → the "
             "engine hal0 ships for that device (none is inferred where it "
-            "ships none). llm and image slots infer none."
+            "ships none). llm and image slots infer none. With --hardware npu "
+            "the default is `xdna`."
         ),
+    ),
+    autoload: bool | None = typer.Option(
+        None,
+        "--autoload/--no-autoload",
+        help="Start the slot at boot (default: the server's default).",
     ),
 ) -> None:
     """Create a new slot config (POST /api/slots)."""
@@ -657,8 +676,19 @@ def slot_create(
     # type/device (#1830); an explicit name always wins. Never send an empty
     # placeholder — that reads as a deliberate operator choice and suppresses
     # the inference.
-    if profile:
+    if hw == _NPU_HARDWARE:
+        # Same payload as the NPU tab (GGML slot form), through the same
+        # POST /api/slots chokepoint, so the per-op/FLM guards (ADR-0059)
+        # and the fit check apply unchanged.
+        body["runtime"] = "container"
+        body["binary"] = "xdna"
+        body.pop("provider", None)
+        body["model"] = model
+        body["profile"] = profile or _XDNA_DEFAULT_PROFILE
+    elif profile:
         body["profile"] = profile
+    if autoload is not None:
+        body["autoload"] = autoload
     if port is not None:
         body["port"] = port
     else:
@@ -694,7 +724,11 @@ def slot_edit(
         None,
         "--hardware",
         case_sensitive=False,
-        help="Change the slot's hardware backend (vulkan | rocm | cpu).",
+        help=(
+            "Change the slot's hardware backend (vulkan | rocm | cpu | npu). "
+            "`npu` retargets it to a GGML NPU slot (runtime=container, binary=xdna, "
+            "device=npu, profile `xdna` unless --profile is given)."
+        ),
     ),
     profile: str | None = typer.Option(
         None,
@@ -738,6 +772,11 @@ def slot_edit(
         False,
         "--tune-reset",
         help="Drop every per-slot tune override; the slot follows its profile again.",
+    ),
+    autoload: bool | None = typer.Option(
+        None,
+        "--autoload/--no-autoload",
+        help="Change whether the slot starts at boot.",
     ),
 ) -> None:
     """Update one or more slot config fields (PUT /api/slots/{name}/config).
@@ -783,12 +822,13 @@ def slot_edit(
         and profile is None
         and not tune
         and not tune_reset
+        and autoload is None
     ):
         console.print(
             "[bold yellow]No fields provided.[/bold yellow]  "
             "Pass at least one of --model, --port, --provider, "
             "--hardware, --profile, --ctx, --thinking, --reasoning-effort, "
-            "--reasoning-budget, --vision, --speculation, --tune-reset."
+            "--reasoning-budget, --vision, --speculation, --tune-reset, --autoload."
         )
         raise typer.Exit(code=2)
 
@@ -803,8 +843,14 @@ def slot_edit(
         payload["provider"] = str(provider)
     if profile is not None:
         payload["profile"] = profile
+    if autoload is not None:
+        payload["autoload"] = autoload
     if hardware is not None:
         payload["device"] = _HARDWARE_TO_DEVICE.get(hardware.value, hardware.value)
+        if hardware.value == _NPU_HARDWARE:
+            payload["runtime"] = "container"
+            payload["binary"] = "xdna"
+            payload.setdefault("profile", _XDNA_DEFAULT_PROFILE)
     if model is not None:
         try:
             cfg = api_get(f"/api/slots/{name}/config")
