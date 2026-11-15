@@ -52,7 +52,7 @@ function GgmlCard({ slot, hostPmode, pickerRows, onEdit }) {
   return (
     <div className="npt-gcard" data-testid={`ggml-card-${nm}`}>
       <div className="npt-ghead">
-        <span className={`ldot ${ind.cls}`} />
+        <span className={`sdot ${ind.cls}`} title={ind.tooltip} aria-label={ind.tooltip} />
         <span className="npt-gname">{nm}</span>
         {slot.port ? <span className="npt-gport">:{slot.port}</span> : null}
         <span className="npt-gstate">{ind.label ?? ind.cls}</span>

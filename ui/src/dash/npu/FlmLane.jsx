@@ -212,7 +212,7 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
           <span className="npt-eng flm">FLM</span>
           <span className="npt-sub">FastFlowLM · one process{anchor.port ? ` · :${anchor.port}` : ''}</span>
         </div>
-        <span className={`ldot ${ind.cls}`} />
+        <span className={`sdot ${ind.cls}`} title={ind.tooltip} aria-label={ind.tooltip} />
         <span className="npt-state" data-testid="flm-state">{ind.label ?? ind.cls}</span>
         <SlotControls
           phase={slotCtrlPhase(anchor)}
