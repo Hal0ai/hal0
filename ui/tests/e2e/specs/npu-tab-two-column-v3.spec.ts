@@ -70,7 +70,6 @@ test.describe('NPU tab two-column layout', () => {
 
     await page.goto('/#slots/npu/models')
     await expect(page.getByTestId('gguf-models')).toBeVisible()
-    await expectSideBySide(page, 'flm-models', 'gguf-models')
 
     await page.goto('/#slots/npu/engines')
     await expect(page.getByTestId('npu-profiles')).toBeVisible()
@@ -97,7 +96,6 @@ test.describe('NPU tab two-column layout', () => {
 
     await page.goto('/#slots/npu/models')
     await expect(page.getByTestId('gguf-models')).toBeVisible()
-    await expectStacked(page, 'flm-models', 'gguf-models')
 
     await page.goto('/#slots/npu/engines')
     await expect(page.getByTestId('npu-profiles')).toBeVisible()

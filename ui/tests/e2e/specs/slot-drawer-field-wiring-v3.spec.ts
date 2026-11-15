@@ -367,8 +367,9 @@ test.describe('FLM lane — NPU modality + chat-model wiring (moved from the slo
     await seedSlots(page, [NPU_SLOT, EMBED])
 
     await page.goto('/#slots/npu')
-    await expect(page.getByTestId('flm-chat-model')).toHaveValue('flm-chat')
-    await page.getByTestId('flm-chat-model').selectOption('flm-chat-xl')
+    await expect(page.getByTestId('flm-chat-model')).toContainText('flm-chat')
+    await page.getByTestId('flm-chat-model').click()
+    await page.locator('[data-option-id="flm-chat-xl"]').click()
     await page.getByTestId('flm-apply').click()
 
     await expect.poll(() => puts.length).toBe(1)
@@ -413,12 +414,13 @@ test.describe('FLM lane — NPU modality + chat-model wiring (moved from the slo
 
     await seedSlots(page, [NPU_SLOT, EMBED])
     await page.goto('/#slots/npu')
-    // Non-installed tags are offered with a "download" suffix rather than hidden.
+    // Non-installed tags are offered under "Download on pick" with a download icon, not hidden.
     const picker = page.getByTestId('flm-chat-model')
-    await expect(picker.locator('option[value="flm-chat-xl"]')).toContainText('download')
-    await expect(picker.locator('option[value="flm-chat"]')).not.toContainText('download')
-    await picker.selectOption('flm-chat-xl')
-    await page.getByTestId('flm-apply').click()
+    await picker.click()
+    await expect(page.locator('[data-option-id="flm-chat-xl"] .npt-flm-st.dl')).toBeVisible()
+    await expect(page.locator('[data-option-id="flm-chat"] .npt-flm-st.ok')).toBeVisible()
+    // Picking a not-installed model downloads it and applies: no Apply click.
+    await page.locator('[data-option-id="flm-chat-xl"]').click()
 
     // Pull is fired first; the slot config is NOT written yet.
     await expect(page.getByTestId('flm-pulling')).toBeVisible()

@@ -217,3 +217,16 @@
 .npt-lane-ggml .npt-gadd:focus-visible { outline: 2px solid var(--npu-s1); outline-offset: 2px; }
 .npt-lane-ggml .npt-gfoot { margin: 0; font-size: 12px; color: var(--fg-3); }
 .npt-lane-ggml .npt-gcards { grid-template-columns: minmax(0, 1fr); }
+
+/* ── FLM lane model dropdown (FlmModelPicker.jsx) ─ FLM-lane rules; GGML-lane rules live above ── */
+.npt-flm-picker { display: block; min-width: 0; }
+.npt-flm-picker .rsel-trigger { padding: 4px 8px; font-size: 12px; }
+.npt-flm-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.npt-flm-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--jbm); }
+.npt-flm-st { display: inline-flex; flex-shrink: 0; }
+.npt-flm-st.ok { color: var(--ok); }
+.npt-flm-st.dl { color: var(--accent); }
+.rsel-option:has(.npt-flm-grp) { opacity: 1; padding-top: 8px; padding-bottom: 2px; border-bottom: none; background: transparent; }
+.npt-flm-grp { font-family: var(--jbm); font-size: 10.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--fg-3); }
+.npt-flm-pull { display: flex; align-items: center; gap: 10px; font-family: var(--jbm); font-size: 11.5px; color: var(--fg-2); }
+.npt-flm-pull progress { flex: 0 1 180px; height: 6px; accent-color: var(--dev-npu); }

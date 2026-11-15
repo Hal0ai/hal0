@@ -4,9 +4,8 @@
 // A tab change rewrites the URL with replaceState (Back does not fill with tabs). All three panels
 // stay mounted and the inactive ones are hidden, like Image Gen.
 //
-// NpuTabs owns the FLM draft (`flmDraft`): the Lanes panel edits it, and the Models panel's
-// "Use for chat" stages into it, so both see one staged set. `onSwitchTab` lets Models jump to
-// Lanes.
+// NpuTabs owns the FLM draft (`flmDraft`), edited on the Lanes panel (the FLM lane's model
+// dropdown stages into it). The Models panel lists only GGUF models.
 //
 // No NPU (probe says absent) and no NPU slot → the "No NPU on this box" panel. NPU slots with a
 // failed probe keep the shell (degraded): lanes stay operable.
@@ -188,7 +187,7 @@ export function NpuTabs({ sub, slots = [] }) {
         <LanesPanel draft={flmDraft} setDraft={setFlmDraft} occ={occ} hw={hwQ.data} slots={slots} />
       </div>
       <div role="tabpanel" id="npu-panel-models" className="npt-panel" aria-labelledby="npu-tab-models" hidden={tab !== 'models'}>
-        <NpuModelsPanel slots={slots} occ={occ} setFlmDraft={setFlmDraft} onSwitchTab={select} />
+        <NpuModelsPanel slots={slots} occ={occ} />
       </div>
       <div role="tabpanel" id="npu-panel-engines" className="npt-panel" aria-labelledby="npu-tab-engines" hidden={tab !== 'engines'}>
         <NpuEnginesPanel occ={occ} hw={hwQ.data} slots={slots} flmDirty={draftCount(flmDraft) > 0} />
