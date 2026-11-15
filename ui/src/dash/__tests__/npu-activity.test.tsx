@@ -31,7 +31,12 @@ const payload = (slots: Record<string, unknown>, npu: Array<number | null> = [nu
 
 let host: HTMLDivElement
 let root: Root
-const render = (rows: unknown[]) => act(() => root.render(<NpuActivity rows={rows as never} hues={HUES} />))
+const render = (rows: Array<{ name: string; engine: string }>, extraChart: Array<{ name: string; engine: string }> = []) =>
+  act(() =>
+    root.render(
+      <NpuActivity rows={rows as never} chartLanes={[...rows.map((r) => ({ name: r.name, engine: r.engine })), ...extraChart] as never} hues={HUES} />,
+    ),
+  )
 const q = (id: string) => host.querySelector(`[data-testid="${id}"]`) as HTMLElement | null
 
 beforeEach(() => {
@@ -62,6 +67,20 @@ describe('NpuActivity', () => {
     const bands = [...host.querySelectorAll('[data-lane]')].map((g) => g.getAttribute('data-lane'))
     expect(bands).toEqual(['flm', 'npu-fast'])
     expect(q('npu-activity-empty')).toBeNull()
+  })
+
+  it('a lane stopped since its traffic keeps its band, but no table row', () => {
+    state.data = payload({ flm: lane([4, 8]), 'npu-fast': lane([6, 0]) })
+    render([row('flm', 'flm')], [{ name: 'npu-fast', engine: 'xdna' }])
+    const bands = [...host.querySelectorAll('[data-lane]')].map((g) => g.getAttribute('data-lane'))
+    expect(bands).toEqual(['flm', 'npu-fast'])
+    expect(q('npu-lane-row-npu-fast')).toBeNull()
+  })
+
+  it('GPU slots in the payload never reach the NPU chart', () => {
+    state.data = payload({ flm: lane([4, 8]), agent: lane([30, 30]) })
+    render([row('flm', 'flm')])
+    expect([...host.querySelectorAll('[data-lane]')].map((g) => g.getAttribute('data-lane'))).toEqual(['flm'])
   })
 
   it('empty window says so', () => {

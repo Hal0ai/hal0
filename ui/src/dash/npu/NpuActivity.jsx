@@ -12,9 +12,11 @@ const ENGINE_LABEL = { flm: 'FLM', xdna: 'GGML' }
 /**
  * @param {object} props
  * @param {import('./npu-activity-pure').NpuLaneRow[]} props.rows  from npuLaneRows (activity left null)
+ * @param {Array<{name: string, engine: 'flm' | 'xdna'}>} props.chartLanes  every NPU lane, up or
+ *   not: a lane stopped since its traffic still belongs in the window's chart
  * @param {Record<string, {hue: string}>} props.hues  engine → colour tokens
  */
-export function NpuActivity({ rows, hues }) {
+export function NpuActivity({ rows, chartLanes, hues }) {
   const [win, setWin] = useState('15m')
   const [focus, setFocus] = useState(null)
   const actQ = useSlotActivity(win)
@@ -24,12 +26,13 @@ export function NpuActivity({ rows, hues }) {
     () => rows.map((r) => ({ ...r, activity: act?.slots?.[r.name] ?? null })),
     [rows, act],
   )
-  // Only lanes that moved tokens in the window get a band (STT/embed rows stay table-only).
+  // Every NPU lane that moved tokens in the window gets a band, including one stopped since
+  // (STT/embed rows move no tokens and stay table-only).
   const { paths, yMax } = useMemo(() => {
-    const charted = lanes.filter((l) => l.activity && l.activity.tps.some((v) => v > 0))
-    return stackSeries(charted.map((l) => ({ key: l.name, values: l.activity.tps })), CHART_H)
-  }, [lanes])
-  const hueOf = Object.fromEntries(lanes.map((l) => [l.name, hues[l.engine]?.hue ?? 'var(--dev-npu)']))
+    const charted = chartLanes.filter((l) => act?.slots?.[l.name]?.tps.some((v) => v > 0))
+    return stackSeries(charted.map((l) => ({ key: l.name, values: act.slots[l.name].tps })), CHART_H)
+  }, [chartLanes, act])
+  const hueOf = Object.fromEntries(chartLanes.map((l) => [l.name, hues[l.engine]?.hue ?? 'var(--dev-npu)']))
   const duty = dutyCells(act?.fleet?.npu_util)
   const ticks = windowTicks(win)
 
