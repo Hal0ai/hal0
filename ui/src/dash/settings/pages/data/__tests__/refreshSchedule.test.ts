@@ -73,15 +73,36 @@ describe('presets in local time', () => {
     expect(cronFromPreset({ kind: 'weekly', day: 0, time: '05:00' }, 330)).toBe('30 23 * * 6')
   })
 
-  it('reads every N hours, and moves the minute in a half-hour zone', () => {
-    expect(presetFromCron('0 */6 * * *', 120)).toEqual({ kind: 'hours', every: 6, minute: 0 })
-    expect(presetFromCron('0 */4 * * *', -330)).toEqual({ kind: 'hours', every: 4, minute: 30 })
-    expect(cronFromPreset({ kind: 'hours', every: 4, minute: 30 }, -330)).toBe('0 */4 * * *')
+  it('reads every N hours with the local hours they really run at', () => {
+    // UTC 00, 06, 12, 18 are local 02, 08, 14, 20 at UTC+2: from 02:00.
+    expect(presetFromCron('0 */6 * * *', 120)).toEqual({ kind: 'hours', every: 6, start: 2, minute: 0 })
+    // UTC 00, 04, ... are local 18:30, 22:30, ... at UTC-5:30: from 02:30.
+    expect(presetFromCron('0 */4 * * *', -330)).toEqual({ kind: 'hours', every: 4, start: 2, minute: 30 })
+    expect(presetFromCron('15 * * * *', 60)).toEqual({ kind: 'hours', every: 1, start: 0, minute: 15 })
+  })
+
+  it('anchors every N hours on the UTC hour of the chosen local start', () => {
+    // Local 01:00, 07:00, 13:00, 19:00 at UTC+2 is UTC 23, 05, 11, 17.
+    expect(cronFromPreset({ kind: 'hours', every: 6, start: 1, minute: 0 }, 120)).toBe('0 5/6 * * *')
+    expect(nextFire('0 5/6 * * *', utc(2026, 11, 15, 14, 7))?.toISOString()).toBe(
+      utc(2026, 11, 15, 17, 0).toISOString(),
+    )
+    expect(cronFromPreset({ kind: 'hours', every: 6, start: 0, minute: 0 }, 0)).toBe('0 */6 * * *')
+    expect(cronFromPreset({ kind: 'hours', every: 1, start: 0, minute: 5 }, 0)).toBe('5 * * * *')
+    expect(cronFromPreset({ kind: 'hours', every: 6, start: 6, minute: 0 }, 0)).toBeNull()
   })
 
   it('calls anything else custom', () => {
-    for (const expr of ['0 3 1 * *', '0 1,13 * * *', '0 */5 * * *', '*/10 * * * *', 'garbage']) {
+    for (const expr of ['0 3 1 * *', '0 1,13 * * *', '0 */5 * * *', '0 8/6 * * *', '*/10 * * * *', 'garbage']) {
       expect(presetFromCron(expr, 0).kind).toBe('custom')
+    }
+  })
+
+  it.each([0, 60, -300, 330, 345, -570, 840])('round-trips every-N-hours presets at offset %i', (offset) => {
+    for (const expr of ['0 */6 * * *', '0 3/6 * * *', '30 1/4 * * *', '0 11/12 * * *', '45 * * * *', '10 1/2 * * *']) {
+      const preset = presetFromCron(expr, offset)
+      expect(preset.kind).toBe('hours')
+      expect(cronFromPreset(preset, offset)).toBe(expr)
     }
   })
 
@@ -102,8 +123,8 @@ describe('presets in local time', () => {
   it('says a preset in words', () => {
     expect(presetWords({ kind: 'daily', time: '03:00' })).toBe('every day at 03:00')
     expect(presetWords({ kind: 'weekly', day: 1, time: '04:30' })).toBe('every Monday at 04:30')
-    expect(presetWords({ kind: 'hours', every: 6, minute: 0 })).toBe('every 6 hours, on the hour')
-    expect(presetWords({ kind: 'hours', every: 1, minute: 5 })).toBe('every hour, at 05 past')
+    expect(presetWords({ kind: 'hours', every: 6, start: 2, minute: 0 })).toBe('every 6 hours from 02:00')
+    expect(presetWords({ kind: 'hours', every: 1, start: 0, minute: 5 })).toBe('every hour, at 05 past')
     expect(presetWords({ kind: 'custom', cron: '0 3 1 * *' })).toBe('on the schedule 0 3 1 * * (UTC)')
   })
 

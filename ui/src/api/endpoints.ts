@@ -354,6 +354,8 @@ export const ENDPOINTS = {
   // status → { enabled, extraction_slot, slot_resolves, available_slots, ... }
   // PUT body → { enabled?, extraction_slot? }
   memoryGraphStatus: '/api/memory/graph/status',
+  // ADR-0060: what hal0-api's refresh-policy task last did (routes/memory_admin.py).
+  memoryRefreshPolicy: '/api/memory/refresh-policy',
   memoryGraph: '/api/memory/graph',
   // Bulk-requeue every failed extraction/consolidation op across banks.
   memoryGraphRetry: '/api/memory/graph/retry',

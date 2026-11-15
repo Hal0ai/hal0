@@ -1048,6 +1048,13 @@ describe('the refresh interval', () => {
     expect(host.textContent).not.toMatch(/mental_model_min_refresh_interval_seconds|14400/)
   })
 
+  it('points at the refresh settings that decide each page (ADR-0060)', () => {
+    const { host } = render()
+    const hint = byId(host, 'ma-kn-interval-policy')!
+    expect(textOf(hint)).toContain('Settings → Memory → Knowledge page refresh')
+    expect(hint.querySelector('a')!.getAttribute('href')).toBe('#settings/memory')
+  })
+
   it('offers the five choices', () => {
     const { host } = render()
     click(select(host))

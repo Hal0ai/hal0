@@ -172,12 +172,16 @@ export function nextFire(expression: string, after: Date): Date | null {
 // ── presets in local time ─────────────────────────────────────────────────────
 
 export const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-/** The "every N hours" choices: the divisors of 24, so every run is the same time each day. */
+/**
+ * The "every N hours" choices: the divisors of 24, so the runs fall at the same hours every day.
+ * Which hours those are is the preset's `start`: the first run after local midnight, so
+ * `start` is `0..every-1`. The cron is anchored on the UTC hour that start is (`M H/N * * *`).
+ */
 export const HOUR_STEPS = [1, 2, 3, 4, 6, 8, 12]
 
 export type Preset =
   | { kind: 'daily'; time: string }
-  | { kind: 'hours'; every: number; minute: number }
+  | { kind: 'hours'; every: number; start: number; minute: number }
   | { kind: 'weekly'; day: number; time: string }
   | { kind: 'custom'; cron: string }
 
@@ -218,14 +222,16 @@ export function presetFromCron(expression: string, offsetMinutes: number): Prese
   if (domf !== '*' || monf !== '*') return custom
   const minute = single(cron.minutes)
   if (minute === null || !DIGITS.test(mf)) return custom
-  const step = /^\*\/(\d+)$/.exec(hf)
+  const step = hf === '*' ? ['*', '0', '1'] : /^(\*|\d+)\/(\d+)$/.exec(hf)
   if (step && dowf === '*') {
-    const every = Number(step[1])
-    // Every N hours with N a divisor of 24 is the same set of hours in every zone with a
-    // whole-hour offset; with a half-hour zone the minute moves, so say it in local terms.
-    if (!HOUR_STEPS.includes(every)) return custom
-    const local = shift(minute, offsetMinutes % 60)
-    return { kind: 'hours', every, minute: local.minutes % 60 }
+    const every = Number(step[2])
+    const anchor = step[1] === '*' ? 0 : Number(step[1])
+    // Only a whole cycle is a preset: `8/6` is 08, 14, 20 and never 02.
+    if (!HOUR_STEPS.includes(every) || anchor >= every) return custom
+    // The run hours in local time are the UTC ones moved by the offset; the first after
+    // local midnight is the start.
+    const local = shift(anchor * 60 + minute, offsetMinutes).minutes
+    return { kind: 'hours', every, start: Math.floor(local / 60) % every, minute: local % 60 }
   }
   const hour = single(cron.hours)
   if (hour === null || !DIGITS.test(hf)) return custom
@@ -240,10 +246,15 @@ export function presetFromCron(expression: string, offsetMinutes: number): Prese
 export function cronFromPreset(preset: Preset, offsetMinutes: number): string | null {
   if (preset.kind === 'custom') return cronError(preset.cron) === null ? parseCron(preset.cron).expression : null
   if (preset.kind === 'hours') {
-    if (!HOUR_STEPS.includes(preset.every)) return null
-    if (!Number.isInteger(preset.minute) || preset.minute < 0 || preset.minute > 59) return null
-    const utc = shift(preset.minute, -(offsetMinutes % 60))
-    return `${utc.minutes % 60} */${preset.every} * * *`
+    const { every, start, minute } = preset
+    if (!HOUR_STEPS.includes(every)) return null
+    if (!Number.isInteger(minute) || minute < 0 || minute > 59) return null
+    if (!Number.isInteger(start) || start < 0 || start >= every) return null
+    const utc = shift(start * 60 + minute, -offsetMinutes).minutes
+    const anchor = Math.floor(utc / 60) % every
+    const m = utc % 60
+    if (every === 1) return `${m} * * * *`
+    return anchor === 0 ? `${m} */${every} * * *` : `${m} ${anchor}/${every} * * *`
   }
   const minutes = timeMinutes(preset.time)
   if (minutes === null) return null
@@ -259,8 +270,8 @@ export function presetWords(preset: Preset): string {
   if (preset.kind === 'daily') return `every day at ${preset.time}`
   if (preset.kind === 'weekly') return `every ${WEEKDAYS[preset.day]} at ${preset.time}`
   if (preset.kind === 'hours') {
-    const at = preset.minute === 0 ? 'on the hour' : `at ${two(preset.minute)} past`
-    return preset.every === 1 ? `every hour, ${at}` : `every ${preset.every} hours, ${at}`
+    if (preset.every === 1) return preset.minute === 0 ? 'every hour, on the hour' : `every hour, at ${two(preset.minute)} past`
+    return `every ${preset.every} hours from ${two(preset.start)}:${two(preset.minute)}`
   }
   return `on the schedule ${preset.cron} (UTC)`
 }

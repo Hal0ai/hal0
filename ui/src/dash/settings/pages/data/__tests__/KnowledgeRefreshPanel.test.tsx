@@ -9,7 +9,16 @@ import { cleanup, click, mount } from '../../../../memory-area/shared/test-harne
 // SRow renders its `sub` through the FieldInfoIcon window global.
 ;(globalThis as any).FieldInfoIcon = ({ description }: any) => <span data-sub={description} />
 
-const state: { live: any; sent: any[]; response: any } = { live: null, sent: [], response: {} }
+const state: { live: any; sent: any[]; response: any; notes: string[] } = {
+  live: null,
+  sent: [],
+  response: {},
+  notes: [],
+}
+
+vi.mock('@/api/hooks/useMemory', () => ({
+  useMemoryRefreshPolicy: () => ({ data: { running: true, notes: state.notes } }),
+}))
 
 vi.mock('../../../data/settingsClient.js', () => ({
   useSettingsClient: () => ({
@@ -49,6 +58,7 @@ function radio(host: HTMLElement, group: string, id: string) {
 beforeEach(() => {
   state.live = { memory: { refresh: { pages: 'scheduled', schedule: '0 3 * * *', min_interval_s: 86400, consolidation: 'continuous', consolidation_schedule: '0 2 * * *' } } }
   state.sent = []
+  state.notes = []
   state.response = { _hal0: { refresh_policy: { reconcile: 'queued' } } }
   ;(window as any).__hal0Toast = vi.fn()
 })
@@ -99,6 +109,8 @@ describe('KnowledgeRefreshPanel', () => {
     setValue(q(host, 'mem-refresh-schedule-kind')!, 'hours')
     setValue(q(host, 'mem-refresh-schedule-every')!, '4')
     expect(q(host, 'mem-refresh-schedule-utc')!.textContent).toBe('0 */4 * * *')
+    setValue(q(host, 'mem-refresh-schedule-start')!, '3')
+    expect(q(host, 'mem-refresh-schedule-utc')!.textContent).toBe('0 3/4 * * *')
     setValue(q(host, 'mem-refresh-schedule-kind')!, 'custom')
     setValue(q(host, 'mem-refresh-schedule-cron')!, '0 3 1')
     expect(q(host, 'mem-refresh-schedule-error')).not.toBeNull()
@@ -117,6 +129,22 @@ describe('KnowledgeRefreshPanel', () => {
       ;(q(host, 'mem-refresh-save') as HTMLButtonElement).click()
     })
     expect(state.sent).toEqual([{ memory: { refresh: { consolidation: 'scheduled' } } }])
+  })
+
+  it('every N hours starts at the chosen local hour', () => {
+    const { host } = render(120)
+    setValue(q(host, 'mem-refresh-schedule-kind')!, 'hours')
+    setValue(q(host, 'mem-refresh-schedule-every')!, '6')
+    setValue(q(host, 'mem-refresh-schedule-start')!, '1')
+    // Local 01, 07, 13, 19 at UTC+2 are UTC 23, 05, 11, 17.
+    expect(q(host, 'mem-refresh-schedule-utc')!.textContent).toBe('0 5/6 * * *')
+    expect(q(host, 'mem-refresh-schedule-words')!.textContent).toBe('every 6 hours from 01:00')
+  })
+
+  it("shows the reconcile's notes, such as an override hal0 did not set", () => {
+    state.notes = ['auto-consolidation is off on hal0:shared by an override hal0 did not set; hal0 leaves it alone']
+    const { host } = render()
+    expect(q(host, 'mem-refresh-note')!.textContent).toContain('hal0:shared')
   })
 
   it('reset puts the form back', () => {

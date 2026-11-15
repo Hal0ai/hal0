@@ -7,6 +7,7 @@
 // the PUT body) is refreshSchedule.ts.
 import { useEffect, useMemo, useState } from 'react'
 import { useSettingsClient } from '../../data/settingsClient.js'
+import { useMemoryRefreshPolicy } from '@/api/hooks/useMemory'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { _advInputStyle } from '../../shared/SchemaRow.jsx'
@@ -65,7 +66,8 @@ export function ScheduleEditor({ value, onChange, disabled = false, testid, offs
     const time = preset.kind === 'daily' || preset.kind === 'weekly' ? preset.time : '03:00'
     if (kind === 'daily') apply({ kind, time })
     else if (kind === 'weekly') apply({ kind, day: preset.kind === 'weekly' ? preset.day : 0, time })
-    else if (kind === 'hours') apply({ kind, every: preset.kind === 'hours' ? preset.every : 6, minute: 0 })
+    else if (kind === 'hours')
+      apply({ kind, every: preset.kind === 'hours' ? preset.every : 6, start: preset.kind === 'hours' ? preset.start : 0, minute: 0 })
     else apply({ kind: 'custom', cron: value })
   }
 
@@ -120,12 +122,27 @@ export function ScheduleEditor({ value, onChange, disabled = false, testid, offs
               aria-label="Every"
               value={preset.every}
               disabled={disabled}
-              onChange={(e) => apply({ ...preset, every: Number(e.target.value) })}
+              onChange={(e) => {
+                const every = Number(e.target.value)
+                apply({ ...preset, every, start: preset.start % every })
+              }}
               style={inputStyle}
               data-testid={`${testid}-every`}
             >
               {HOUR_STEPS.map((n) => (
                 <option key={n} value={n}>{n === 1 ? 'every hour' : `every ${n} hours`}</option>
+              ))}
+            </select>
+            <select
+              aria-label="Starting at (your time)"
+              value={preset.start}
+              disabled={disabled}
+              onChange={(e) => apply({ ...preset, start: Number(e.target.value) })}
+              style={inputStyle}
+              data-testid={`${testid}-start`}
+            >
+              {Array.from({ length: preset.every }, (_, h) => (
+                <option key={h} value={h}>{`from ${String(h).padStart(2, '0')}:00`}</option>
               ))}
             </select>
             <input
@@ -175,6 +192,8 @@ export function ScheduleEditor({ value, onChange, disabled = false, testid, offs
 
 export function KnowledgeRefreshPanel({ registry, offsetMinutes, now }) {
   const { settings, update } = useSettingsClient()
+  const status = useMemoryRefreshPolicy()
+  const notes = Array.isArray(status.data?.notes) ? status.data.notes : []
   const liveRefresh = settings.data?.memory?.refresh || null
   const liveKey = JSON.stringify(liveRefresh)
   const initial = useMemo(() => formFromLive(liveRefresh), [liveKey]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -311,6 +330,11 @@ export function KnowledgeRefreshPanel({ registry, offsetMinutes, now }) {
           actions={badge('consolidation_schedule')}
         />
       )}
+      {notes.map((note) => (
+        <div key={note} className="s-row mono" role="status" data-testid="mem-refresh-note" style={{ display: 'block', fontSize: 11, color: 'var(--warn)' }}>
+          ⚠ {note}
+        </div>
+      ))}
       <div className="s-row" style={{ display: 'block', fontSize: 11, color: 'var(--fg-3)', lineHeight: 1.5 }}>
         To run refreshes on another slot than retains, set{' '}
         <span className="mono">[memory.lanes.mental_model_refresh] virtual_model</span>.
