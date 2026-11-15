@@ -218,6 +218,61 @@ def _ggml_type_name(ttype: int | None) -> str:
     return _GGML_TYPE_NAMES.get(ttype, f"type {ttype}")
 
 
+#: ADVISORY size ceiling for an NPU text-generation candidate: GGUF file
+#: size (total weights, so a MoE counts every expert). Not a hardware limit --
+#: no source states one. Basis: ggml-xdna GEMV streams weights at ~31 GB/s and
+#: the measured Strix Halo decode is 9B Q4_K_M ~5.5 GiB at 18.8 t/s, 9B Q8_0
+#: ~9.5 GiB at 12.4 t/s (npu-research-2026-11 notes, Tether fork). 6 GiB keeps
+#: the interactive (>~15 t/s) band; ADR-0057 amendment. Never refuses a load.
+_XDNA_ADVISORY_MAX_BYTES = 6 * 1024**3
+
+#: ``general.architecture`` values that are encoder / embedding / reranker
+#: models, not autoregressive text generators.
+_XDNA_NON_TEXTGEN_ARCHS = frozenset(
+    {
+        "bert",
+        "nomic-bert",
+        "nomic-bert-moe",
+        "jina-bert-v2",
+        "jina-bert-v3",
+        "modern-bert",
+        "neo-bert",
+        "eurobert",
+        "t5encoder",
+        "wavtokenizer-dec",
+    }
+)
+
+
+def _non_textgen_note(header: dict[str, Any], arch: str) -> str | None:
+    if arch in _XDNA_NON_TEXTGEN_ARCHS:
+        return (
+            f"architecture {arch!r} is an embedding/reranker encoder, not a text-generation model"
+        )
+    pooling = header.get(f"{arch}.pooling_type")
+    if isinstance(pooling, int) and pooling > 0:
+        return "pooled embedding/reranker model, not a text-generation model"
+    return None
+
+
+def _xdna_npu_advice(path: Any, header: dict[str, Any], arch: str) -> tuple[bool, str | None]:
+    """The advisory ``(npu_ok, npu_note)`` pair; never gates ``xdna_path``."""
+    note = _non_textgen_note(header, arch)
+    if note:
+        return False, note
+    try:
+        size = os.stat(path).st_size
+    except OSError:
+        return True, None
+    if size > _XDNA_ADVISORY_MAX_BYTES:
+        gib = size / 1024**3
+        return False, (
+            f"{gib:.1f} GiB of weights is above the {_XDNA_ADVISORY_MAX_BYTES // 1024**3} GiB "
+            "advisory NPU size; decode would be slow"
+        )
+    return True, None
+
+
 @dataclass(frozen=True)
 class XdnaFit:
     """The xdna (ggml-xdna NPU runner) classification for a GGUF model.
@@ -229,6 +284,9 @@ class XdnaFit:
 
     xdna_path: str
     reason: str
+    #: Advisory: False hides the model by default in pickers. Not a refusal.
+    npu_ok: bool = True
+    npu_note: str | None = None
 
 
 def xdna_model_fit(path: Any) -> XdnaFit:
@@ -251,14 +309,17 @@ def xdna_model_fit(path: Any) -> XdnaFit:
         raise ValueError(f"{path!s} is not a GGUF file; xdna fit only classifies GGUF models")
 
     arch = str(header.get("general.architecture") or "")
+    ok, note = _xdna_npu_advice(path, header, arch)
     if arch != _XDNA_FUSED_ARCH:
-        return XdnaFit("per-op", f"architecture {arch!r} is not {_XDNA_FUSED_ARCH!r}")
+        return XdnaFit("per-op", f"architecture {arch!r} is not {_XDNA_FUSED_ARCH!r}", ok, note)
 
     embedding_length = header.get(f"{arch}.embedding_length")
     if embedding_length != _XDNA_FUSED_EMBEDDING_LENGTH:
         return XdnaFit(
             "per-op",
             f"embedding_length {embedding_length!r} is not {_XDNA_FUSED_EMBEDDING_LENGTH}",
+            ok,
+            note,
         )
 
     tensor_type = read_gguf_tensor_type_by_name(path, _XDNA_FUSED_TENSOR)
@@ -266,12 +327,16 @@ def xdna_model_fit(path: Any) -> XdnaFit:
         return XdnaFit(
             "per-op",
             f"{_XDNA_FUSED_TENSOR} is {_ggml_type_name(tensor_type)}, not Q5_K",
+            ok,
+            note,
         )
 
     return XdnaFit(
         "fused",
         f"{_XDNA_FUSED_ARCH} architecture, embedding_length "
         f"{_XDNA_FUSED_EMBEDDING_LENGTH}, {_XDNA_FUSED_TENSOR} is Q5_K",
+        ok,
+        note,
     )
 
 

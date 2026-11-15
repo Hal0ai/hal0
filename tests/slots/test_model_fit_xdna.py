@@ -115,3 +115,61 @@ def test_cached_fit_still_raises_for_non_gguf(tmp_path: Path) -> None:
     path.write_bytes(b"not a gguf file" * 4)
     with pytest.raises(ValueError, match="GGUF"):
         xdna_model_fit_cached(path)
+
+
+# ── advisory npu_ok / npu_note (ADR-0057 amendment) ────────────────────────
+
+_GIB = 1024**3
+
+
+def _sparse(path: Path, size: int) -> Path:
+    with open(path, "r+b") as f:
+        f.truncate(size)
+    return path
+
+
+def test_small_text_model_is_npu_ok(tmp_path: Path) -> None:
+    fit = xdna_model_fit(write_gguf(tmp_path / "m.gguf", "lfm2"))
+    assert fit.npu_ok is True
+    assert fit.npu_note is None
+
+
+def test_fused_model_is_npu_ok(tmp_path: Path) -> None:
+    fit = xdna_model_fit(write_gguf(tmp_path / "m.gguf", "qwen35", **_FUSED_KW))
+    assert (fit.xdna_path, fit.npu_ok, fit.npu_note) == ("fused", True, None)
+
+
+def test_at_the_ceiling_is_ok_and_above_is_not(tmp_path: Path) -> None:
+    at = _sparse(write_gguf(tmp_path / "at.gguf", "llama"), 6 * _GIB)
+    over = _sparse(write_gguf(tmp_path / "over.gguf", "llama"), 6 * _GIB + 1)
+    assert xdna_model_fit(at).npu_ok is True
+    fit = xdna_model_fit(over)
+    assert fit.npu_ok is False
+    assert "advisory" in (fit.npu_note or "")
+    # advisory only: the path classification is unchanged, never refused.
+    assert fit.xdna_path == "per-op"
+
+
+def test_large_moe_is_not_npu_ok_by_total_file_size(tmp_path: Path) -> None:
+    path = _sparse(write_gguf(tmp_path / "moe.gguf", "qwen35moe"), 22 * _GIB)
+    fit = xdna_model_fit(path)
+    assert fit.npu_ok is False
+    assert fit.xdna_path == "per-op"
+
+
+@pytest.mark.parametrize("arch", ["bert", "nomic-bert", "jina-bert-v2", "modern-bert"])
+def test_encoder_architectures_are_not_npu_ok(tmp_path: Path, arch: str) -> None:
+    fit = xdna_model_fit(write_gguf(tmp_path / "m.gguf", arch))
+    assert fit.npu_ok is False
+    assert "not a text-generation" in (fit.npu_note or "")
+    assert fit.xdna_path == "per-op"
+
+
+def test_pooled_decoder_embedding_model_is_not_npu_ok(tmp_path: Path) -> None:
+    path = write_gguf(tmp_path / "m.gguf", "qwen3", uints={"qwen3.pooling_type": 3})
+    assert xdna_model_fit(path).npu_ok is False
+
+
+def test_pooling_none_is_still_text_generation(tmp_path: Path) -> None:
+    path = write_gguf(tmp_path / "m.gguf", "llama", uints={"llama.pooling_type": 0})
+    assert xdna_model_fit(path).npu_ok is True
