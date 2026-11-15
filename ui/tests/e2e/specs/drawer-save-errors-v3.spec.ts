@@ -189,16 +189,14 @@ test.describe('Slot drawer — rejected writes', () => {
     const embedSwitch = page.getByTestId('flm-cap-embed')
     await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
     await embedSwitch.click()
-    await expect(embedSwitch).toHaveAttribute('aria-checked', 'true')
-    await page.getByTestId('flm-apply').click()
+    await page.getByRole('dialog').getByRole('button', { name: 'Start embeddings and restart FLM' }).click()
 
     // Error surfaced on the lane…
     await expect(page.getByTestId('flm-error')).toContainText('another device=npu llm slot is already enabled')
-    // …nothing restarted, and the staged change is kept so the operator can discard or retry.
+    // …nothing restarted, and the toggle still shows the saved state so the operator can retry.
     await expect.poll(() => puts).toBe(1)
     expect(restarts).toBe(0)
-    await expect(page.getByTestId('flm-applybar')).toContainText('1 change staged')
-    await expect(embedSwitch).toHaveAttribute('aria-checked', 'true')
+    await expect(embedSwitch).toHaveAttribute('aria-checked', 'false')
   })
 })
 

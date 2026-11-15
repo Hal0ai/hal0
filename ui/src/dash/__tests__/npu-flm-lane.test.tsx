@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
-// FLM lane: staged changes, one write + one restart, drop-on-external-change, pull-before-write.
-import React, { act, useState } from 'react'
+// FLM lane: one card per role; a toggle or model pick applies at once (confirm while FLM runs),
+// one write + one restart/start/stop, pull-before-write, abandon a download on external change.
+import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
@@ -12,6 +13,8 @@ const { box } = vi.hoisted(() => ({
   box: {
     edits: [] as { name: string; body: Record<string, unknown> }[],
     restarts: [] as string[],
+    loads: [] as string[],
+    unloads: [] as string[],
     creates: [] as Record<string, unknown>[],
     cfg: { npu: { chat: true, asr: false, embed: false }, model: { default: 'gemma4-it:e4b' } } as Record<string, unknown> | undefined,
     catalog: [
@@ -36,8 +39,8 @@ vi.mock('@/api/hooks/useSlots', () => ({
   }),
   useSlotRestart: () => ({ isPending: false, mutate: (n: string) => box.restarts.push(n), mutateAsync: async (n: string) => { box.restarts.push(n); return {} } }),
   useSlotCreate: () => ({ isPending: false, mutate: (b: Record<string, unknown>) => box.creates.push(b) }),
-  useSlotLoad: () => ({ mutate: () => {}, mutateAsync: async () => ({}) }),
-  useSlotUnload: () => ({ mutate: () => {} }),
+  useSlotLoad: () => ({ mutate: (n: string) => box.loads.push(n), mutateAsync: async (n: string) => { box.loads.push(n); return {} } }),
+  useSlotUnload: () => ({ mutate: (n: string) => box.unloads.push(n) }),
 }))
 vi.mock('@/api/hooks/useFlmCatalog', () => ({
   useFlmCatalog: () => ({ data: { models: box.catalog, probe_ok: true } }),
@@ -48,25 +51,26 @@ vi.mock('@/api/hooks/useModels', () => ({
 
 const { FlmLane } = await import('../npu/FlmLane')
 
-const slots = [
+const running = [
   { name: 'flm', type: 'llm', device_class: 'npu', model_id: 'gemma4-it:e4b', container_status: 'running', container_health: true },
   { name: 'flm-stt', type: 'transcription', device_class: 'npu' },
 ]
+const stopped = [{ name: 'flm', type: 'llm', device_class: 'npu', model_id: 'gemma4-it:e4b', container_status: 'stopped' }]
 let host: HTMLDivElement
 let root: Root
-function Harness({ slotList = slots }: { slotList?: unknown[] }) {
-  const [draft, setDraft] = useState({})
-  return <FlmLane slots={slotList as never} draft={draft} setDraft={setDraft} />
-}
 const q = (id: string) => host.querySelector(`[data-testid="${id}"]`) as HTMLElement | null
 const click = (id: string) => act(() => { q(id)!.click() })
-const flush = () => act(async () => { await Promise.resolve(); await Promise.resolve() })
+const flush = () => act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve() })
+// The confirm is a portalled Modal: look in the whole document.
+const confirmText = () => document.querySelector('[data-testid="flm-confirm"]')?.textContent ?? null
+const pressButton = (label: string) => {
+  const b = Array.from(document.querySelectorAll('button')).find((x) => x.textContent?.trim() === label)
+  if (!b) throw new Error(`no button "${label}"`)
+  act(() => { b.click() })
+}
 
 beforeEach(() => {
-  box.edits.length = 0
-  box.restarts.length = 0
-  box.creates.length = 0
-  box.toasts.length = 0
+  for (const k of ['edits', 'restarts', 'loads', 'unloads', 'creates', 'toasts'] as const) box[k].length = 0
   box.cfg = { npu: { chat: true, asr: false, embed: false }, model: { default: 'gemma4-it:e4b' } }
   box.pullStart.mockReset()
   box.pull = { state: 'idle', modelId: null, error: null }
@@ -79,89 +83,93 @@ afterEach(() => {
   act(() => root.unmount())
   host.remove()
 })
-const render = (el = <Harness />) => act(() => { root.render(el) })
+const render = (slotList: unknown[] = running) => act(() => { root.render(<FlmLane slots={slotList as never} />) })
 
-describe('FlmLane', () => {
-  it('two staged toggles then Apply → one PUT, one restart', async () => {
+// The model dropdown is the shared RichSelect: open it, then click an option.
+const pick = (id: string) => {
+  act(() => { q('flm-chat-model')!.click() })
+  act(() => { (host.querySelector(`[data-option-id="${id}"]`) as HTMLElement).click() })
+}
+
+describe('FlmLane role toggles', () => {
+  it('running FLM: a toggle asks first, naming the roles that pause, then one PUT and one restart', async () => {
     render()
     click('flm-cap-asr')
-    click('flm-cap-embed')
-    expect(q('flm-applybar')?.textContent).toContain('2 changes staged')
     expect(box.edits).toHaveLength(0)
-    click('flm-apply')
+    expect(confirmText()).toContain('chat stops answering')
+    pressButton('Start speech-to-text and restart FLM')
     await flush()
     expect(box.edits).toEqual([
-      { name: 'flm', body: { npu: { chat: true, asr: true, embed: true }, model: { default: 'gemma4-it:e4b' } } },
+      { name: 'flm', body: { npu: { chat: true, asr: true, embed: false }, model: { default: 'gemma4-it:e4b' } } },
     ])
     expect(box.restarts).toEqual(['flm'])
-    expect(q('flm-applybar')).toBeNull()
+    expect(confirmText()).toBeNull()
   })
 
-  it('Discard sends nothing and clears the bar', () => {
+  it('Cancel sends nothing', () => {
     render()
-    click('flm-cap-asr')
-    click('flm-discard')
+    click('flm-cap-embed')
+    pressButton('Cancel')
     expect(box.edits).toHaveLength(0)
     expect(box.restarts).toHaveLength(0)
-    expect(q('flm-applybar')).toBeNull()
+    expect(confirmText()).toBeNull()
   })
 
-  it('anchor config changing while staged drops the draft with a toast', () => {
+  it('turning off the last running role writes it and stops FLM', async () => {
     render()
-    click('flm-cap-asr')
-    expect(q('flm-applybar')).toBeTruthy()
-    box.cfg = { npu: { chat: true, asr: false, embed: true }, model: { default: 'gemma4-it:e4b' } }
-    render()
-    expect(q('flm-applybar')).toBeNull()
-    expect(box.toasts).toContain('FLM settings changed elsewhere, staged changes dropped')
-    expect(box.edits).toHaveLength(0)
-  })
-
-  // The model dropdown is the shared RichSelect: open it, then click an option.
-  const pick = (id: string) => {
-    act(() => { q('flm-chat-model')!.click() })
-    act(() => { (host.querySelector(`[data-option-id="${id}"]`) as HTMLElement).click() })
-  }
-  const pickQwen = () => pick('qwen3:8b')
-
-  it('uninstalled model whose pull fails → no PUT, no restart, error shown, bar kept', async () => {
-    box.pullStart.mockRejectedValue(new Error('download exploded'))
-    render()
-    pickQwen()
+    click('flm-cap-chat')
+    expect(confirmText()).toContain('FLM stops')
+    pressButton('Stop FLM')
     await flush()
-    expect(box.pullStart).toHaveBeenCalledWith('qwen3:8b')
-    expect(box.edits).toHaveLength(0)
+    expect(box.edits[0].body).toMatchObject({ npu: { chat: false, asr: false, embed: false } })
+    expect(box.unloads).toEqual(['flm'])
     expect(box.restarts).toHaveLength(0)
-    expect(q('flm-error')?.textContent).toContain('download exploded')
-    expect(q('flm-applybar')).toBeTruthy()
   })
 
-  it('picking a not-installed model downloads and applies without pressing Apply, with progress on the card', async () => {
-    box.pullStart.mockResolvedValue({})
-    render()
-    pickQwen()
+  it('stopped FLM: turning a role on writes and starts FLM without asking', async () => {
+    render(stopped)
+    click('flm-cap-asr')
     await flush()
-    expect(box.pullStart).toHaveBeenCalledWith('qwen3:8b')
-    expect(q('flm-pull-progress')?.textContent).toContain('Downloading qwen3:8b')
-    box.pull = { state: 'completed', modelId: 'qwen3:8b', error: null }
-    render()
+    expect(confirmText()).toBeNull()
+    expect(box.edits).toHaveLength(1)
+    expect(box.loads).toEqual(['flm'])
+    expect(box.restarts).toHaveLength(0)
+  })
+
+  it('stopped FLM: turning a role off only writes', async () => {
+    render(stopped)
+    click('flm-cap-chat')
     await flush()
     expect(box.edits).toHaveLength(1)
-    expect(box.restarts).toEqual(['flm'])
-    expect(q('flm-pull-progress')).toBeNull()
+    expect(box.loads).toHaveLength(0)
+    expect(box.restarts).toHaveLength(0)
   })
 
-  it('picking an installed model only stages it: no download, no write until Apply', async () => {
-    box.catalog.push({ model: 'gemma4-it:e2b', installed: true, capabilities: ['chat', 'stt'] })
+  it('config still loading → toggles disabled', () => {
+    box.cfg = undefined
     render()
-    pick('gemma4-it:e2b')
-    await flush()
-    expect(box.pullStart).not.toHaveBeenCalled()
-    expect(box.edits).toHaveLength(0)
-    expect(q('flm-applybar')?.textContent).toContain('chat model gemma4-it:e2b')
-    box.catalog.pop()
+    expect((q('flm-cap-asr') as HTMLButtonElement).disabled).toBe(true)
+    expect((q('flm-cap-chat') as HTMLButtonElement).disabled).toBe(true)
   })
 
+  it('a role that is off shows a grey dot and "off" on its card', () => {
+    render()
+    expect(q('flm-row-embed')?.textContent).toContain('off')
+    expect(q('flm-row-embed')?.querySelector('.sdot')?.className).toContain('offline')
+    expect(q('flm-row-chat')?.querySelector('.sdot')?.className).not.toContain('offline')
+  })
+
+  it('STT and Embed cards carry their shadow names and the bundled model', () => {
+    render()
+    expect(q('flm-row-asr')?.textContent).toContain('flm-stt')
+    expect(q('flm-row-asr')?.textContent).toContain('whisper-v3:turbo')
+    expect(q('flm-row-asr')?.textContent).not.toContain('gemma4-it:e4b')
+    expect(q('flm-row-embed')?.textContent).toContain('flm-embed')
+    expect(q('flm-row-embed')?.textContent).toContain('embed-gemma:300m')
+  })
+})
+
+describe('FlmLane chat model', () => {
   it('the dropdown offers only chat models, installed ones under their own header', () => {
     render()
     act(() => { q('flm-chat-model')!.click() })
@@ -169,14 +177,28 @@ describe('FlmLane', () => {
     expect(ids).toEqual(['__hdr-installed', 'gemma4-it:e4b', '__hdr-download', 'qwen3:8b'])
   })
 
-  it('pull completes → one PUT, one restart, draft cleared', async () => {
+  it('running FLM, installed model: asks, then one PUT and one restart, no download', async () => {
+    box.catalog.push({ model: 'gemma4-it:e2b', installed: true, capabilities: ['chat', 'stt'] })
+    render()
+    pick('gemma4-it:e2b')
+    expect(confirmText()).not.toContain('downloads first')
+    pressButton('Switch and restart FLM')
+    await flush()
+    expect(box.pullStart).not.toHaveBeenCalled()
+    expect(box.edits[0].body).toMatchObject({ model: { default: 'gemma4-it:e2b' } })
+    expect(box.restarts).toEqual(['flm'])
+    box.catalog.pop()
+  })
+
+  it('running FLM, not installed: confirm, download with progress, then one PUT and one restart', async () => {
     box.pullStart.mockResolvedValue({})
     render()
-    pickQwen()
+    pick('qwen3:8b')
+    expect(confirmText()).toContain('downloads first')
+    pressButton('Download and switch')
     await flush()
-    expect(box.edits).toHaveLength(0)
-    box.pull = { state: 'running', modelId: 'qwen3:8b', error: null }
-    render()
+    expect(box.pullStart).toHaveBeenCalledWith('qwen3:8b')
+    expect(q('flm-pull-progress')?.textContent).toContain('Downloading qwen3:8b')
     expect(box.edits).toHaveLength(0)
     box.pull = { state: 'completed', modelId: 'qwen3:8b', error: null }
     render()
@@ -185,99 +207,89 @@ describe('FlmLane', () => {
       { name: 'flm', body: { npu: { chat: true, asr: false, embed: false }, model: { default: 'qwen3:8b' } } },
     ])
     expect(box.restarts).toEqual(['flm'])
-    expect(q('flm-applybar')).toBeNull()
+    expect(q('flm-pull-progress')).toBeNull()
   })
 
-  it('pull state failed → no PUT, error shown, draft kept', async () => {
+  it('a download that fails to start → no PUT, no restart, error shown', async () => {
+    box.pullStart.mockRejectedValue(new Error('download exploded'))
+    render()
+    pick('qwen3:8b')
+    pressButton('Download and switch')
+    await flush()
+    expect(box.edits).toHaveLength(0)
+    expect(box.restarts).toHaveLength(0)
+    expect(q('flm-error')?.textContent).toContain('download exploded')
+  })
+
+  it('pull state failed → no PUT, error shown', async () => {
     box.pullStart.mockResolvedValue({})
     render()
-    pickQwen()
+    pick('qwen3:8b')
+    pressButton('Download and switch')
     await flush()
     box.pull = { state: 'failed', modelId: 'qwen3:8b', error: { message: 'disk full' } }
     render()
     await flush()
     expect(box.edits).toHaveLength(0)
     expect(q('flm-error')?.textContent).toContain('disk full')
-    expect(q('flm-applybar')).toBeTruthy()
   })
 
-  it('config changing during a download → no PUT, toast, draft dropped', async () => {
+  it('config changing during a download → nothing written, toast', async () => {
     box.pullStart.mockResolvedValue({})
     render()
-    pickQwen()
+    pick('qwen3:8b')
+    pressButton('Download and switch')
     await flush()
     box.pull = { state: 'running', modelId: 'qwen3:8b', error: null }
     render()
     box.cfg = { npu: { chat: true, asr: true, embed: false }, model: { default: 'gemma4-it:e4b' } }
     render()
     await flush()
-    expect(box.toasts).toContain('FLM settings changed elsewhere, staged changes dropped')
     box.pull = { state: 'completed', modelId: 'qwen3:8b', error: null }
     render()
     await flush()
     expect(box.edits).toHaveLength(0)
     expect(box.restarts).toHaveLength(0)
-    expect(q('flm-applybar')).toBeNull()
+    expect(box.toasts.some((t) => t.includes('changed elsewhere'))).toBe(true)
     expect(q('flm-error')).toBeNull()
   })
 
-  it('config still loading → controls disabled, no false drop when it arrives', () => {
-    box.cfg = undefined
-    render()
-    expect((q('flm-cap-asr') as HTMLButtonElement).disabled).toBe(true)
-    box.cfg = { npu: { chat: true, asr: false, embed: false }, model: { default: 'gemma4-it:e4b' } }
-    render()
-    click('flm-cap-asr')
-    expect(q('flm-applybar')).toBeTruthy()
-    expect(box.toasts).toHaveLength(0)
+  it('stopped FLM: a pick writes without asking and does not start FLM', async () => {
+    box.catalog.push({ model: 'gemma4-it:e2b', installed: true, capabilities: ['chat', 'stt'] })
+    render(stopped)
+    pick('gemma4-it:e2b')
+    await flush()
+    expect(confirmText()).toBeNull()
+    expect(box.edits).toHaveLength(1)
+    expect(box.restarts).toHaveLength(0)
+    expect(box.loads).toHaveLength(0)
+    box.catalog.pop()
   })
+})
 
+describe('FlmLane anchor', () => {
   it('no anchor → Create FLM slot button posts the flm profile', () => {
-    render(<Harness slotList={[]} />)
+    render([])
     click('flm-create')
     expect(box.creates).toEqual([{ name: 'flm', type: 'llm', runtime: 'container', device: 'npu', profile: 'flm' }])
   })
 
   it('create falls back to flm-npu (npu is a reserved Slots tab), then flm-npu-2', () => {
-    render(<Harness slotList={[{ name: 'flm', type: 'llm', device_class: 'gpu' }]} />)
+    render([{ name: 'flm', type: 'llm', device_class: 'gpu' }])
     click('flm-create')
     expect(box.creates[0]).toMatchObject({ name: 'flm-npu' })
     box.creates.length = 0
-    render(<Harness slotList={[{ name: 'flm', type: 'llm', device_class: 'gpu' }, { name: 'flm-npu', type: 'llm', device_class: 'gpu' }]} />)
+    render([{ name: 'flm', type: 'llm', device_class: 'gpu' }, { name: 'flm-npu', type: 'llm', device_class: 'gpu' }])
     click('flm-create')
     expect(box.creates[0]).toMatchObject({ name: 'flm-npu-2' })
   })
 
-  it('Apply on a STOPPED anchor writes the config and does not restart it', async () => {
-    render(<Harness slotList={[{ name: 'flm', type: 'llm', device_class: 'npu', model_id: 'gemma4-it:e4b', container_status: 'stopped' }]} />)
-    click('flm-cap-asr')
-    click('flm-apply')
-    await flush()
-    expect(box.edits).toHaveLength(1)
-    expect(box.restarts).toEqual([])
-    expect(q('flm-applybar')).toBeNull()
-  })
-
-  it('Edit is disabled while FLM changes are staged, and opens the drawer with a return to the tab otherwise', async () => {
+  it('Edit opens the drawer with a return to the tab', async () => {
     window.location.hash = '#slots/npu/lanes'
     render()
-    const edit = () => q('slot-ctrl-edit') as HTMLButtonElement
-    expect(edit().disabled).toBe(false)
-    click('flm-cap-asr')
-    expect(edit().disabled).toBe(true)
-    expect(edit().title).toBe('Apply or discard the staged FLM changes first')
-    click('flm-discard')
-    expect(edit().disabled).toBe(false)
     click('slot-ctrl-edit')
     expect(window.location.hash).toBe('#slots/flm')
     const { takeSlotDrawerReturn } = await import('../slots-route')
     expect(takeSlotDrawerReturn('flm')).toBe('#slots/npu/lanes')
-  })
-
-  it('STT and Embed show the bundled model text', () => {
-    render()
-    expect(q('flm-row-asr')?.textContent).toContain('whisper-v3:turbo')
-    expect(q('flm-row-asr')?.textContent).not.toContain('gemma4-it:e4b')
-    expect(q('flm-row-embed')?.textContent).toContain('embed-gemma:300m')
   })
 })

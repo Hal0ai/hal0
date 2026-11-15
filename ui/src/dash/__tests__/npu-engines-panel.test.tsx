@@ -79,15 +79,8 @@ describe('NpuEnginesPanel', () => {
     expect(q('ggml-drawer')?.dataset).toMatchObject({ mode: 'edit', slot: 'gg1' })
     expect(window.location.hash).toBe('#slots/npu/engines')
   })
-  it('an FLM slot in used-by leaves the tab, but not while FLM changes are staged', () => {
-    render({ occ: {}, hw: {}, flmDirty: true })
-    const blocked = q('npu-used-flm1')!
-    expect(blocked.tagName).toBe('SPAN')
-    expect(blocked.getAttribute('aria-disabled')).toBe('true')
-    expect(blocked.title).toBe('Apply or discard the staged FLM changes first')
-    act(() => blocked.click())
-    expect(window.location.hash).not.toBe('#slots/flm1')
-    render({ occ: {}, hw: {}, flmDirty: false })
+  it('an FLM slot in used-by opens its drawer', () => {
+    render({ occ: {}, hw: {} })
     expect(q('npu-used-flm1')!.tagName).toBe('A')
     act(() => q('npu-used-flm1')!.click())
     expect(window.location.hash).toBe('#slots/flm1')

@@ -1,14 +1,17 @@
-// The FLM lane (Slots → NPU → Lanes): one anchor slot process serves chat + STT + embed.
-// Toggles and the chat model are STAGED in `draft` (owned by NpuTabs) and applied together:
-// one config write, one restart. Two guards:
-//   · the anchor's [npu]/[model] changing elsewhere (another tab, the drawer) drops the draft
-//     with a toast, so a stale draft never overwrites newer config;
-//   · a staged chat model that is not installed is downloaded first; if that fails nothing is
-//     written or restarted, the draft stays and the error shows on the lane.
+// The FLM lane (Slots → NPU → Lanes): one FLM process serves chat, speech-to-text and embeddings,
+// drawn as one card per role. The lane header starts, stops and restarts the process; each role
+// card has its own on/off toggle, and the chat card picks the chat model.
+//
+// A toggle or a model pick applies at once (one config write, then one restart). While FLM runs,
+// that restart pauses the other running roles, so a confirm names them first; turning off the last
+// running role stops FLM. With FLM stopped nothing is interrupted: turning a role on starts FLM,
+// anything else only saves. A model that is not installed downloads first; if the anchor's config
+// changes while it downloads, nothing is written (another tab or the drawer got there first).
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useFlmCatalog } from '@/api/hooks/useFlmCatalog'
 import { usePullJob } from '@/api/hooks/useModels'
 import { useSlotConfig, useSlotCreate, useSlotEdit, useSlotUnload } from '@/api/hooks/useSlots'
+import { ConfirmDialog } from '../primitives.jsx'
 import { SlotControls, slotCtrlPhase } from '../inference-pane.jsx'
 import { slotIndicatorFromPhase } from '../slot-status.js'
 import { npuAnchorSlot } from '../slots/slot-shared.js'
@@ -16,26 +19,27 @@ import { openSlotEditFromNpu } from '../slots-route'
 import { FlmModelPicker } from './FlmModelPicker.jsx'
 import { formatFlmSize } from './npu-models-pure'
 import { useNpuConflictStart } from './useNpuConflictStart.jsx'
-import { bundledFlmModel, capEnabled, cfgFingerprint, draftBody, draftCount, pickChatModel, savedFlm, toggleCap } from './flm-draft-pure'
+import {
+  bundledFlmModel,
+  capEnabled,
+  cfgFingerprint,
+  draftBody,
+  flmRoleIndicator,
+  planModelPick,
+  planRoleToggle,
+  savedFlm,
+} from './flm-draft-pure'
 
 const toast = (msg, kind = 'info') =>
   typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
 
 const DRIFT = 'flm-config-drift'
-const CAPS = [
-  { cap: 'chat', label: 'Chat' },
-  { cap: 'asr', label: 'Speech-to-text', shadow: 'flm-stt', catCaps: ['stt'] },
-  { cap: 'embed', label: 'Embeddings', shadow: 'flm-embed', catCaps: ['embed'] },
+// The non-chat roles, each served by the anchor's process and shown on its `-stt` / `-embed`
+// shadow slot (src/hal0/slots/npu/trio.py).
+const SHADOW_ROLES = [
+  { cap: 'asr', suffix: 'stt', label: 'speech-to-text', route: '/v1/audio', catCaps: ['stt'], audio: true },
+  { cap: 'embed', suffix: 'embed', label: 'embeddings', route: '/v1/embeddings', catCaps: ['embed'], audio: false },
 ]
-
-function describeDraft(draft, saved) {
-  const out = []
-  for (const { cap, label } of CAPS) {
-    if (cap in draft) out.push(`${label} ${draft[cap] ? 'on' : 'off'}`)
-  }
-  if (draft.chatModel) out.push(`chat model ${draft.chatModel}`)
-  return out.join(' · ') || ''
-}
 
 function CreateFlm({ slots }) {
   const create = useSlotCreate()
@@ -65,13 +69,29 @@ function CreateFlm({ slots }) {
   )
 }
 
-export function FlmLane({ slots, draft, setDraft }) {
+export function FlmLane({ slots }) {
   const anchor = npuAnchorSlot(slots)
   if (!anchor) return <CreateFlm slots={slots} />
-  return <FlmLaneBody anchor={anchor} draft={draft} setDraft={setDraft} />
+  return <FlmLaneBody anchor={anchor} />
 }
 
-function FlmLaneBody({ anchor, draft, setDraft }) {
+function RoleToggle({ cap, label, on, disabled, title, onToggle }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={`${label} role`}
+      className={`npt-toggle${on ? ' on' : ''}`}
+      data-testid={`flm-cap-${cap}`}
+      disabled={disabled}
+      title={title}
+      onClick={onToggle}
+    />
+  )
+}
+
+function FlmLaneBody({ anchor }) {
   const cfgQ = useSlotConfig(anchor.name)
   const catQ = useFlmCatalog()
   const editMut = useSlotEdit()
@@ -80,45 +100,33 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
   const pull = usePullJob()
 
   const cfg = cfgQ.data
+  const cfgReady = cfg !== undefined
   const saved = useMemo(() => savedFlm(cfg, anchor), [cfg, anchor])
   const catalog = catQ.data
-  const count = draftCount(draft)
   const [busy, setBusy] = useState(null) // null | 'pulling' | 'writing'
+  const [pullTag, setPullTag] = useState(null)
   const [err, setErr] = useState(null)
+  const [ask, setAsk] = useState(null) // { plan, confirm } awaiting the operator
 
-  // Review Focus 1: drop a draft the moment the anchor's saved config moves under it.
-  const cfgReady = cfg !== undefined
   const fp = cfgFingerprint(cfg)
   const fpNow = useRef(fp)
   fpNow.current = fp
-  const fpAtStage = useRef(null)
   const writing = useRef(false)
   const waiter = useRef(null)
-  useEffect(() => {
-    if (!cfgReady) return // a loading config is not a baseline
-    if (count === 0) {
-      fpAtStage.current = null
-      return
-    }
-    if (fpAtStage.current == null) {
-      fpAtStage.current = fp
-      return
-    }
-    if (fpAtStage.current !== fp && !writing.current) {
-      fpAtStage.current = null
-      // a download in flight must not go on to write over the newer config
-      if (waiter.current) {
-        const w = waiter.current
-        waiter.current = null
-        w.reject(new Error(DRIFT))
-      }
-      setErr(null)
-      setDraft({})
-      toast('FLM settings changed elsewhere, staged changes dropped', 'warn')
-    }
-  }, [fp, count, cfgReady, setDraft])
 
-  // Review Focus 2: wait for the download of a staged model before writing anything.
+  // A download in flight is abandoned when the anchor's config moves under it: writing the picked
+  // model afterwards would overwrite the newer config.
+  const fpAtPull = useRef(null)
+  useEffect(() => {
+    if (!cfgReady || !waiter.current || writing.current) return
+    if (fpAtPull.current != null && fpAtPull.current !== fp) {
+      const w = waiter.current
+      waiter.current = null
+      w.reject(new Error(DRIFT))
+    }
+  }, [fp, cfgReady])
+
+  // Wait for the picked model's download before writing anything.
   useEffect(() => {
     const w = waiter.current
     if (!w || pull.modelId !== w.tag) return
@@ -153,38 +161,52 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
   const ind = slotIndicatorFromPhase(anchor)
   const up = ['serving', 'ready', 'idle', 'loaded', 'warming', 'stale'].includes(ind.cls)
 
-  const apply = async (d = draft) => {
-    if (busy || draftCount(d) === 0) return
+  // One config write, then what the plan says to do with the process.
+  const apply = async (plan) => {
+    if (busy) return
     setErr(null)
-    // A pick that applies at once has no staged baseline yet (the drift effect sets it a render
-    // later): take it now so the re-check below compares against the config as it was clicked.
-    if (fpAtStage.current == null) fpAtStage.current = fpNow.current
+    const tag = plan.next.chatModel
     try {
-      if (d.chatModel && !installed(d.chatModel)) {
+      if (tag && !installed(tag)) {
         setBusy('pulling')
-        await pullAndWait(d.chatModel)
+        setPullTag(tag)
+        fpAtPull.current = fpNow.current
+        await pullAndWait(tag)
+        if (fpAtPull.current !== fpNow.current) throw new Error(DRIFT)
       }
-      // The config may have moved while the download ran: the drift effect rejects the wait then,
-      // and this re-check covers a change that landed with the completion itself.
-      if (fpAtStage.current !== fpNow.current) throw new Error(DRIFT)
       setBusy('writing')
       writing.current = true
-      await editMut.mutateAsync({ name: anchor.name, body: draftBody(d, saved) })
-      fpAtStage.current = null
-      setDraft({})
-      if (up) {
-        toast(`${anchor.name} FLM settings updated — restarting`, 'info')
-        start.run(anchor.name, 'restart').catch((e) => toast(`NPU restart failed — ${e?.message || 'see logs'}`, 'warn'))
-      } else {
-        // A restart on a stopped anchor is unload + load: it would start FLM and claim the NPU.
-        toast(`${anchor.name} FLM settings saved — they take effect on the next start`, 'info')
+      await editMut.mutateAsync({ name: anchor.name, body: draftBody(plan.next, saved) })
+      if (plan.after === 'restart') {
+        start.run(anchor.name, 'restart').catch((e) => toast(`FLM restart failed — ${e?.message || 'see logs'}`, 'warn'))
+      } else if (plan.after === 'start') {
+        start.run(anchor.name, 'load').catch((e) => toast(`FLM start failed — ${e?.message || 'see logs'}`, 'warn'))
+      } else if (plan.after === 'stop') {
+        unloadMut.mutate(anchor.name)
+      } else if (!up) {
+        toast(`${anchor.name}: saved — it takes effect when FLM next starts`, 'info')
       }
     } catch (e) {
-      if (e?.message !== DRIFT) setErr(e?.message || 'Apply failed')
+      if (e?.message === DRIFT) toast('FLM settings changed elsewhere while the model downloaded, so nothing was applied', 'warn')
+      else setErr(e?.message || 'Apply failed')
     } finally {
       writing.current = false
+      fpAtPull.current = null
+      setPullTag(null)
       setBusy(null)
     }
+  }
+
+  // A plan with a confirm waits for the operator; one without applies at once.
+  const run = (plan) => {
+    if (!plan) return
+    if (plan.confirm) setAsk(plan)
+    else apply(plan)
+  }
+  const confirmAsk = () => {
+    const plan = ask
+    setAsk(null)
+    if (plan) apply(plan)
   }
 
   const startOrWarn = (kind) =>
@@ -193,17 +215,13 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
   const tps = typeof m.toks === 'number' && m.toks > 0 ? Math.round(m.toks) : null
   const ttft = typeof m.ttft === 'number' && m.ttft > 0 ? Math.round(m.ttft) : null
   const mem = typeof m.mem === 'number' ? Math.round(m.mem * 10) / 10 : null
-  const chatModel = draft.chatModel ?? saved.chatModel
-  const capOn = (cap) => (cap in draft ? draft[cap] : saved[cap])
-  // Picking a model that is not installed stages it and applies at once: download, one config
-  // write, one restart. An installed model is only staged, so it can ride with other toggles.
-  const pickChat = (id) => {
-    const next = pickChatModel(draft, saved, id)
-    setDraft(next)
-    if (id !== saved.chatModel && !installed(id)) apply(next)
-  }
-  const pulling = busy === 'pulling'
-  const stagedKeys = (k) => k in draft
+  const locked = !!busy || !cfgReady
+  const toggle = (cap) => run(planRoleToggle(saved, cap, up))
+  const pickChat = (id) => run(planModelPick(saved, id, installed(id), up))
+
+  const chatInd = flmRoleIndicator(ind, saved.chat, 'chat')
+  const profile = cfg?.profile ? String(cfg.profile) : 'flm'
+  const roleNote = (on) => (!on ? 'off' : up ? 'served by the FLM process' : 'starts with FLM')
 
   return (
     <div className="npt-lane npt-lane-flm" data-testid="flm-lane">
@@ -220,105 +238,119 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
           onStop={() => unloadMut.mutate(anchor.name)}
           onRestart={() => startOrWarn('restart')}
           onLogs={() => window.dispatchEvent(new CustomEvent('hal0:slot-logs', { detail: { name: anchor.name } }))}
-          editDisabled={count > 0}
-          editDisabledTitle="Apply or discard the staged FLM changes first"
           onEdit={() => openSlotEditFromNpu(anchor.name)}
         />
       </div>
-      <div className="npt-hint">One FLM process serves chat, speech-to-text and embeddings together. Changes are staged and applied with one restart.</div>
+      <div className="npt-hint">
+        Each role switches on and off on its own card. FLM is one process, so a change restarts it and the other running roles pause for a few seconds.
+      </div>
 
-      <div className="npt-caps">
-        {CAPS.map(({ cap, label, shadow, catCaps }) => {
-          const enabled = capEnabled(saved, draft, cap)
-          const on = capOn(cap) && enabled
-          return (
-            <div className="npt-cap" key={cap} data-testid={`flm-row-${cap}`}>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={on}
-                aria-label={label}
-                className={`npt-toggle${on ? ' on' : ''}${stagedKeys(cap) ? ' pending' : ''}`}
-                data-testid={`flm-cap-${cap}`}
-                disabled={!!busy || !enabled || !cfgReady}
-                title={enabled ? undefined : 'Pick a chat model first'}
-                onClick={() => setDraft((d) => toggleCap(d, saved, cap))}
-              />
-              <span className="npt-cap-nm">
-                {label}
-                {shadow ? <small>slot {shadow}</small> : null}
+      <div className="npt-gcards">
+        <div className={`npt-gcard${saved.chat ? '' : ' off'}`} data-testid="flm-row-chat">
+          <div className="npt-ghead">
+            <span className={`sdot ${chatInd.cls}`} title={chatInd.tooltip} aria-label={chatInd.tooltip} />
+            <span className="npt-gname">{anchor.name}</span>
+            <span className="npt-gport">chat</span>
+            <span className="npt-gstate">{chatInd.label}</span>
+            <span className="npt-gsp" />
+            <RoleToggle cap="chat" label="chat" on={saved.chat} disabled={locked} onToggle={() => toggle('chat')} />
+          </div>
+          <div className="npt-gmodelrow">
+            <FlmModelPicker
+              models={catalog?.models}
+              cap="chat"
+              value={saved.chatModel ?? null}
+              testid="flm-chat-model"
+              ariaLabel="FLM chat model"
+              disabled={locked}
+              onChange={pickChat}
+            />
+          </div>
+          {busy === 'pulling' && pullTag && (
+            <div className="npt-flm-pull" data-testid="flm-pull-progress">
+              <progress max={100} value={pull.pct != null ? Math.round(pull.pct) : undefined} aria-label={`Downloading ${pullTag}`} />
+              <span data-testid="flm-pulling">
+                Downloading {pullTag}
+                {pull.pct != null ? ` · ${Math.round(pull.pct)}%` : '…'}
+                {pull.total > 0 ? ` · ${formatFlmSize(pull.downloaded) ?? '0 MB'} of ${formatFlmSize(pull.total)}` : ''}
               </span>
-              {cap === 'chat' ? (
-                <FlmModelPicker
-                  models={catalog?.models}
-                  cap="chat"
-                  value={chatModel ?? null}
-                  testid="flm-chat-model"
-                  ariaLabel="FLM chat model"
-                  disabled={!!busy || !cfgReady || !capOn('chat')}
-                  onChange={pickChat}
-                />
+            </div>
+          )}
+          <div className="npt-gchips">
+            <span className="chip mono dev-npu">chat</span>
+            <span className="chip mono">{profile}</span>
+          </div>
+          <div className="npt-gmx" data-testid="flm-mx-chat">
+            {saved.chat && up ? (
+              tps || ttft || mem ? (
+                <>
+                  {tps && <span><b>{tps}</b> t/s</span>}
+                  {ttft && <span>{ttft} ms ttft</span>}
+                  {mem && <span>{mem} GB</span>}
+                </>
               ) : (
-                <span className="npt-bundled">
-                  {bundledFlmModel(catalog, catCaps) ?? '—'} <em>· bundled with FLM</em>
-                </span>
-              )}
-              <span className="npt-mx">
-                {cap === 'chat' && up && on && tps != null ? (
-                  <>
-                    <b>{tps}</b> t/s{ttft != null ? ` · ${ttft} ms` : ''}
-                  </>
-                ) : (
-                  '—'
-                )}
-              </span>
+                '—'
+              )
+            ) : (
+              roleNote(saved.chat)
+            )}
+          </div>
+        </div>
+
+        {SHADOW_ROLES.map((r) => {
+          const enabled = capEnabled(saved, r.cap)
+          // A role needs the chat model's process: with no model it reads off whatever [npu] says.
+          const on = saved[r.cap] && enabled
+          const ri = flmRoleIndicator(ind, on, r.cap)
+          const model = bundledFlmModel(catalog, r.catCaps)
+          return (
+            <div className={`npt-gcard${on ? '' : ' off'}`} key={r.cap} data-testid={`flm-row-${r.cap}`}>
+              <div className="npt-ghead">
+                <span className={`sdot ${ri.cls}`} title={ri.tooltip} aria-label={ri.tooltip} />
+                <span className="npt-gname">{`${anchor.name}-${r.suffix}`}</span>
+                <span className="npt-gport">{r.label}</span>
+                <span className="npt-gstate">{ri.label}</span>
+                <span className="npt-gsp" />
+                <RoleToggle
+                  cap={r.cap}
+                  label={r.label}
+                  on={on}
+                  disabled={locked || !enabled}
+                  title={enabled ? undefined : 'Pick a chat model first'}
+                  onToggle={() => toggle(r.cap)}
+                />
+              </div>
+              <div className="npt-gmodel npt-bundled">
+                {model ?? '—'} <em>· bundled with FLM</em>
+              </div>
+              <div className="npt-gchips">
+                <span className="chip mono dev-npu">{r.label}</span>
+                {r.audio && <span className="chip mono">audio</span>}
+                <span className="chip mono">{r.route}</span>
+              </div>
+              <div className="npt-gmx">{roleNote(on)}</div>
             </div>
           )
         })}
       </div>
 
-      {pulling && (
-        <div className="npt-flm-pull" data-testid="flm-pull-progress">
-          <progress max={100} value={pull.pct != null ? Math.round(pull.pct) : undefined} aria-label={`Downloading ${chatModel}`} />
-          <span>
-            Downloading {chatModel}
-            {pull.pct != null ? ` · ${Math.round(pull.pct)}%` : '…'}
-            {pull.total > 0 ? ` · ${formatFlmSize(pull.downloaded) ?? "0 MB"} of ${formatFlmSize(pull.total)}` : ''}
-          </span>
-        </div>
-      )}
-
-      {count > 0 && (
-        <div className="npt-applybar" data-testid="flm-applybar">
-          <span className="t">
-            <b>
-              {count} change{count > 1 ? 's' : ''} staged.
-            </b>{' '}
-            {describeDraft(draft, saved)}. {up ? `Applying restarts ${anchor.name} and drops in-flight requests.` : `${anchor.name} is stopped: applying saves the change and does not start it.`}
-            {busy === 'pulling' && (
-              <span data-testid="flm-pulling"> Downloading {draft.chatModel}{pull.pct != null ? ` · ${Math.round(pull.pct)}%` : ''}…</span>
-            )}
-          </span>
-          <button type="button" className="btn ghost sm" data-testid="flm-discard" disabled={!!busy} onClick={() => { setErr(null); setDraft({}) }}>
-            Discard
-          </button>
-          <button type="button" className="btn primary sm" data-testid="flm-apply" disabled={!!busy} onClick={() => apply()}>
-            {busy ? 'Applying…' : 'Apply and restart'}
-          </button>
-        </div>
-      )}
       {err && (
         <div className="npt-error" role="alert" data-testid="flm-error">
           {err}
         </div>
       )}
-
-      <dl className="npt-kv">
-        <dt>Profile</dt>
-        <dd>{cfg?.profile ? String(cfg.profile) : '—'}</dd>
-        <dt>RAM</dt>
-        <dd>{up && mem != null ? `${mem} GB` : '—'}</dd>
-      </dl>
+      {ask && (
+        <ConfirmDialog
+          open
+          onCancel={() => setAsk(null)}
+          onConfirm={confirmAsk}
+          title={ask.confirm.title}
+          message={<span data-testid="flm-confirm">{ask.confirm.body}</span>}
+          confirmLabel={ask.confirm.confirmLabel}
+          destructive={false}
+          footerNote={ask.confirm.destructive ? 'In-flight requests on the paused roles fail.' : 'Nothing changes unless you confirm.'}
+        />
+      )}
       {start.dialog}
     </div>
   )
