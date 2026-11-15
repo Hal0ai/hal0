@@ -79,7 +79,7 @@ test.describe('NPU tab — array band and FLM lane', () => {
 
     // FLM lane: the serving dot and the chat row's tok/s from slot.metrics
     const lane = page.getByTestId('flm-lane')
-    await expect(lane.locator('.ldot.serving')).toHaveCount(1)
+    await expect(lane.locator('.sdot.serving')).toHaveCount(1)
     await expect(lane.getByTestId('flm-row-chat')).toContainText('52')
   })
 
