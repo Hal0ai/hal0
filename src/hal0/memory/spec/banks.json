@@ -15,8 +15,9 @@
           "max_tokens": 3000,
           "trigger": {
             "mode": "delta",
-            "refresh_after_consolidation": true,
-            "min_refresh_interval_seconds": 1800,
+            "refresh_after_consolidation": false,
+            "refresh_cron": "0 3 * * *",
+            "min_refresh_interval_seconds": 86400,
             "budget": "low"
           },
           "source_query": "Explain hal0's architecture: components, slots, runtimes, model store, memory system, and how requests flow."
@@ -29,8 +30,9 @@
           "max_tokens": 3000,
           "trigger": {
             "mode": "delta",
-            "refresh_after_consolidation": true,
-            "min_refresh_interval_seconds": 1800,
+            "refresh_after_consolidation": false,
+            "refresh_cron": "0 3 * * *",
+            "min_refresh_interval_seconds": 86400,
             "budget": "low"
           },
           "source_query": "Write a runbook for operating hal0: common commands, deploy/upgrade steps, recovery from known failures."
@@ -43,8 +45,9 @@
           "max_tokens": 2500,
           "trigger": {
             "mode": "delta",
-            "refresh_after_consolidation": true,
-            "min_refresh_interval_seconds": 1800,
+            "refresh_after_consolidation": false,
+            "refresh_cron": "0 3 * * *",
+            "min_refresh_interval_seconds": 86400,
             "budget": "low"
           },
           "source_query": "What known bugs, fragile areas, open problems and failure modes does hal0 have, and their current status?"

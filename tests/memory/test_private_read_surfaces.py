@@ -541,7 +541,14 @@ async def test_agent_created_and_retriggered_models_exclude_other_models(layout)
     out = await p.update_mental_model(
         "mm-alice", client_id="alice", trigger={"fact_types": ["world"]}
     )
-    assert out["trigger"] == {"exclude_mental_models": True, "fact_types": ["world"]}
+    # The timing fields are the refresh policy's (ADR-0060), the defaults here.
+    assert out["trigger"] == {
+        "exclude_mental_models": True,
+        "fact_types": ["world"],
+        "refresh_after_consolidation": False,
+        "refresh_cron": "0 3 * * *",
+        "min_refresh_interval_seconds": 86400,
+    }
 
 
 # ── tags ─────────────────────────────────────────────────────────────────────

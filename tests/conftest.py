@@ -397,6 +397,8 @@ def _isolate_hal0_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """
     monkeypatch.setenv("HAL0_HOME", str(tmp_path))
     monkeypatch.setenv("HAL0_RUNNER_CATALOGUE_SYNC", "0")
+    # No refresh-policy task at app boot (hal0.memory.refresh_runner).
+    monkeypatch.setenv("HAL0_MEMORY_REFRESH_POLICY", "0")
     # App boot runs the Hermes key sweep (hermes_api.ensure_profile_keys),
     # which appends API_SERVER_KEY to profile .env files under HERMES_HOME. A
     # suite run on a box with a live Hermes tree must never touch it.

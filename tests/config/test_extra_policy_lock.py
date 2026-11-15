@@ -86,6 +86,9 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     # The engine-compatible endpoint's three tunables (ADR-0058 decision 4b):
     # a typo must not silently leave a limit at its default.
     "MemoryCompatConfig": "forbid",
+    # When pages refresh and the engine consolidates (ADR-0060): a typo must
+    # not leave every page on the default schedule without a word.
+    "MemoryRefreshConfig": "forbid",
     # Leaf tunables / entries with no legitimate unknown key -> forbid
     "NpuConfig": "forbid",
     # [xdna] table (ggml-xdna NPU runner): pmode/env/host_xrt only; the

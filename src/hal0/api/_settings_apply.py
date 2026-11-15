@@ -454,6 +454,15 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.compat.max_outstanding_bytes": {"apply_class": "immediate", "services": []},
     "memory.compat.max_item_bytes": {"apply_class": "immediate", "services": []},
     "memory.compat.gitlog_min_interval_s": {"apply_class": "immediate", "services": []},
+    # [memory.refresh] — ADR-0060. A save that changes one of these starts the
+    # refresh-policy reconciler in hal0-api (routes/settings.py), which writes
+    # the page triggers and bank config to the engine; the consolidation
+    # schedule is read off app.state.hal0_config on every tick.
+    "memory.refresh.pages": {"apply_class": "immediate", "services": []},
+    "memory.refresh.schedule": {"apply_class": "immediate", "services": []},
+    "memory.refresh.min_interval_s": {"apply_class": "immediate", "services": []},
+    "memory.refresh.consolidation": {"apply_class": "immediate", "services": []},
+    "memory.refresh.consolidation_schedule": {"apply_class": "immediate", "services": []},
     # [realtime] — every key is read live off app.state.hal0_config.realtime
     # on each WS connect (routes/realtime.py), which the settings PUT
     # refreshes in place, so all of them apply immediately.

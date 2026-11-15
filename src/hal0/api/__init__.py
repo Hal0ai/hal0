@@ -1180,6 +1180,8 @@ class BootState:
     stop_memory_reprobe_task: Any = None
     hermes_reconcile_task: asyncio.Task[None] | None = None
     stop_hermes_reconcile_task: Any = None
+    refresh_policy_task: asyncio.Task[None] | None = None
+    stop_refresh_policy_task: Any = None
     bridge_reattach_task: asyncio.Task[int] | None = None
     bridge_maintenance_task: asyncio.Task[None] | None = None
     stop_bridge: Any = None
@@ -2402,6 +2404,28 @@ async def _boot_background_tasks(app: FastAPI, ctx: BootState) -> None:
 
     ctx.stop_memory_reprobe_task = _stop_memory_reprobe_task
 
+    # Knowledge-page refresh policy (ADR-0060): reconciles every page's
+    # refresh trigger with [memory.refresh] once the engine answers, again on
+    # a memory.refresh.* save, and runs scheduled consolidation. Scheduled,
+    # never awaited; a failure to start never blocks the boot.
+    try:
+        from hal0.memory import refresh_runner
+
+        _runner, ctx.refresh_policy_task = refresh_runner.start_for_app(app)
+        if _runner is not None:
+            log.info("hal0.memory.refresh_policy_task_started")
+    except Exception as exc:  # pragma: no cover — defensive
+        log.warning("hal0.memory.refresh_policy_task_start_failed", error=str(exc))
+        app.state.refresh_policy_runner = None
+
+    async def _stop_refresh_policy_task() -> None:
+        if ctx.refresh_policy_task is not None:
+            ctx.refresh_policy_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ctx.refresh_policy_task
+
+    ctx.stop_refresh_policy_task = _stop_refresh_policy_task
+
     # Periodic Hermes upstream reconcile: the boot phase may have probed a
     # gateway that was still starting.
     _start_hermes_reconcile_task(ctx)
@@ -2937,6 +2961,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 ("image_drift_task", ctx.stop_image_drift_task),
                 ("runner_catalogue_sync_task", ctx.stop_runner_catalogue_sync_task),
                 ("memory_reprobe_task", ctx.stop_memory_reprobe_task),
+                ("refresh_policy_task", ctx.stop_refresh_policy_task),
                 ("hermes_reconcile_task", ctx.stop_hermes_reconcile_task),
                 ("bridge", ctx.stop_bridge),
             ):
