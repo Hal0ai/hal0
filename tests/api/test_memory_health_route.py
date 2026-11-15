@@ -327,6 +327,7 @@ def test_a_healthy_box_is_clear_and_fills_the_whole_shape(
         "waiting": 0,
         "failed": 0,
         "oldest_waiting_s": None,
+        "oldest_waiting_any_s": None,
     }
     knowledge = body["knowledge"]
     assert {k: knowledge[k] for k in knowledge if k != "last_success_at"} == {
@@ -343,9 +344,10 @@ def test_a_healthy_box_is_clear_and_fills_the_whole_shape(
         "layout": "legacy_unified",
         "total": 2,
         "facts": 1355,
+        "retired": 0,
         "list": [
-            {"bank_id": "shared", "facts": 1335, "documents": 253},
-            {"bank_id": "coding-agent::repo-1.4", "facts": 20, "documents": 3},
+            {"bank_id": "shared", "facts": 1335, "documents": 253, "retired": False},
+            {"bank_id": "coding-agent::repo-1.4", "facts": 20, "documents": 3, "retired": False},
         ],
     }
     assert body["writes"] is None
@@ -695,6 +697,7 @@ def test_a_slow_bank_makes_its_section_partial(
         "waiting": None,
         "failed": None,
         "oldest_waiting_s": None,
+        "oldest_waiting_any_s": None,
     }
     assert (by_bank["quick"]["waiting"], by_bank["quick"]["failed"]) == (1, 1)
     # What is known still decides the path.
@@ -714,7 +717,12 @@ def test_a_bank_the_engine_errors_on_is_partial_not_a_failure(
     }
     body = _health(client)
     assert body["partial"] == ["queue", "knowledge", "banks"]
-    assert body["banks"]["list"][1] == {"bank_id": "broken", "facts": 10, "documents": None}
+    assert body["banks"]["list"][1] == {
+        "bank_id": "broken",
+        "facts": 10,
+        "documents": None,
+        "retired": False,
+    }
     assert body["queue"]["waiting"] == 1
 
 
@@ -775,7 +783,9 @@ def test_malformed_rows_inside_a_well_formed_list_are_skipped(
     assert (body["queue"]["waiting"], body["queue"]["failed"]) == (3, 1)
     assert 95.0 <= body["queue"]["oldest_waiting_s"] <= 130.0
     assert body["knowledge"]["models"] == 1 and body["knowledge"]["models_stale"] == 0
-    assert body["banks"]["list"] == [{"bank_id": "b", "facts": 10, "documents": None}]
+    assert body["banks"]["list"] == [
+        {"bank_id": "b", "facts": 10, "documents": None, "retired": False}
+    ]
     assert body["queue"]["consolidation_pending"] == 0
 
 
@@ -786,7 +796,13 @@ def test_a_malformed_bank_list_is_partial_everywhere_it_matters(
     body = _health(client)
     assert body["verdict"] == "clear"  # the engine answered /version
     assert body["partial"] == ["extraction", "queue", "knowledge", "banks"]
-    assert body["banks"] == {"layout": "legacy_unified", "total": None, "facts": None, "list": []}
+    assert body["banks"] == {
+        "layout": "legacy_unified",
+        "total": None,
+        "facts": None,
+        "retired": 0,
+        "list": [],
+    }
 
 
 @pytest.mark.parametrize("layout", ["legacy_unified", "legacy_split", "two_bank"])
@@ -812,6 +828,108 @@ def test_the_real_provider_reports_its_layout(engine: _Engine) -> None:
     provider = HindsightProvider(client=rest, two_bank=True, bank="hal0:shared")
     with TestClient(_app(provider, "memory", "agent")) as c:
         assert _health(c)["banks"]["layout"] == "two_bank"
+
+
+def _two_bank_client(engine: _Engine, *, two_bank: bool = True) -> TestClient:
+    from hal0.memory.hindsight_provider import HindsightProvider
+
+    http = httpx.AsyncClient(
+        transport=httpx.MockTransport(engine.handler), base_url="http://127.0.0.1:9177"
+    )
+    rest = HindsightRestClient(http_client=http, api_key="hal0-local-noauth")
+    provider = HindsightProvider(
+        client=rest, two_bank=two_bank, bank="hal0:shared", private_bank="hal0:private"
+    )
+    return TestClient(_app(provider, "memory", "agent"))
+
+
+def _fold_in_engine() -> _Engine:
+    engine = _Engine()
+    engine.add_bank("hal0:shared", ops=[_op("pending", 30.0)], pending_consolidation=4)
+    engine.add_bank("hal0:private")
+    engine.add_bank(
+        "Hal0::Agents",
+        ops=[_op("failed", 100.0, error="boom", changed_s=100.0) for _ in range(63)]
+        + [_op("pending", 50000.0)],
+        models=[_model(stale=True, failed=True)],
+        pending_consolidation=8995,
+        failed_consolidation=7,
+    )
+    return engine
+
+
+def test_two_bank_health_counts_only_the_live_banks(engine: _Engine) -> None:
+    """Retired pre-fold-in banks stay in the engine but never drain: they are
+    listed, flagged, and kept out of the queue, knowledge and the verdict."""
+    with _two_bank_client(_fold_in_engine()) as c:
+        body = _health(c)
+    queue = body["queue"]
+    assert (queue["waiting"], queue["failed"]) == (1, 0)
+    assert queue["consolidation_pending"] == 4
+    assert queue["consolidation_failed"] == 0
+    assert [b["bank_id"] for b in queue["by_bank"]] == ["hal0:shared", "hal0:private"]
+    assert body["knowledge"]["models_stale"] == 0
+    assert body["knowledge"]["refresh_failed"] == 0
+    assert body["verdict"] == "clear"
+    assert _steps(body)["queue"]["state"] == "clear"
+    banks = body["banks"]
+    assert banks["retired"] == 1 and banks["total"] == 3
+    flags = {b["bank_id"]: b["retired"] for b in banks["list"]}
+    assert flags == {"hal0:shared": False, "hal0:private": False, "Hal0::Agents": True}
+
+
+def test_two_bank_health_reads_a_retired_bank_for_its_size_only() -> None:
+    engine = _fold_in_engine()
+    with _two_bank_client(engine) as c:
+        _health(c)
+    assert engine.offsets("Hal0::Agents", "pending") == []
+    assert engine.offsets("Hal0::Agents", "failed") == []
+
+
+def test_legacy_layout_keeps_counting_every_bank() -> None:
+    engine = _fold_in_engine()
+    with _two_bank_client(engine, two_bank=False) as c:
+        body = _health(c)
+    assert (body["queue"]["waiting"], body["queue"]["failed"]) == (2, 63)
+    assert body["queue"]["consolidation_pending"] == 4 + 8995
+    assert body["banks"]["retired"] == 0
+    assert not any(b["retired"] for b in body["banks"]["list"])
+    assert body["verdict"] == "attention"
+
+
+def test_oldest_waiting_is_the_oldest_retain_not_a_refresh(
+    client: TestClient, engine: _Engine
+) -> None:
+    ops = [_op("pending", 60.0), _op("pending", 120.0, task_type="batch_retain")]
+    ops.append(_op("pending", 38000.0, task_type="refresh_mental_model"))
+    engine.add_bank("shared", ops=ops)
+    queue = _health(client)["queue"]
+    assert 120.0 <= queue["oldest_waiting_s"] <= 150.0
+    assert 38000.0 <= queue["oldest_waiting_any_s"] <= 38030.0
+    row = queue["by_bank"][0]
+    assert 120.0 <= row["oldest_waiting_s"] <= 150.0
+    assert row["oldest_waiting_any_s"] >= 38000.0
+
+
+def test_oldest_retain_is_found_past_older_refreshes_on_a_later_page(
+    client: TestClient, engine: _Engine
+) -> None:
+    ops = [_op("pending", 10.0 + i) for i in range(150)]
+    ops += [_op("pending", 40000.0 + i, task_type="refresh_mental_model") for i in range(120)]
+    engine.add_bank("shared", ops=ops)
+    queue = _health(client)["queue"]
+    assert queue["waiting"] == 270
+    assert queue["oldest_waiting_s"] < 200.0
+    assert queue["oldest_waiting_any_s"] >= 40000.0
+
+
+def test_oldest_waiting_is_null_when_only_refreshes_wait(
+    client: TestClient, engine: _Engine
+) -> None:
+    engine.add_bank("shared", ops=[_op("pending", 900.0, task_type="refresh_mental_model")])
+    queue = _health(client)["queue"]
+    assert queue["oldest_waiting_s"] is None
+    assert queue["oldest_waiting_any_s"] >= 900.0
 
 
 # ── cache ────────────────────────────────────────────────────────────────
