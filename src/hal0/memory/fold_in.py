@@ -21,6 +21,8 @@ What hindsight-api 1.2.0 gives it (read in its source, not assumed):
   call (``_import_observations``), and the archive's mental models and
   knowledge pages. It takes no directives and no bank config. ``skip`` leaves
   a document whose id the bank already has alone (``_resolve_target_id``).
+  So the run sets the old banks' config on the targets itself, before the
+  first import (:func:`plan_target_config`, :meth:`FoldIn._configure_targets`).
 * An import cannot add or change tags, so the tags are rewritten in the
   archive before it is imported (:func:`rewrite_archive`).
 * An observation names its source facts by ``(document_id, fact_index)``
@@ -269,6 +271,7 @@ HOOK_POINTS: tuple[str, ...] = (
     "exported:<bank>",
     "rewritten:<bank>",
     "placed:<bank>",
+    "configured",
     "importing:<bank>:<part>",
     "imported:<bank>:<part>",
     "folded:<bank>",
@@ -2428,6 +2431,14 @@ class Journal:
     #: plain name of a page that several banks bring to one
     #: project folder (:meth:`FoldIn._settle_page_names`). Kept in the ledger.
     page_keepers: dict[str, dict[str, str]] = field(default_factory=dict)
+    #: True once the old banks' config was set on the targets
+    #: (:meth:`FoldIn._configure_targets`), after the pre-check and before
+    #: the first import.
+    configured: bool = False
+    #: Per part: the target, the config keys set on it (``set``), the bank
+    #: each came from, the conflicts and the keys the target kept. Key and
+    #: bank names only. Kept in the ledger.
+    target_config: dict[str, dict[str, Any]] = field(default_factory=dict)
     banks: list[BankEntry] = field(default_factory=list)
     error: str | None = None
     updated_at: str | None = None
@@ -2839,6 +2850,126 @@ def _blocker(row: Mapping[str, Any], *, skips: Iterable[str]) -> dict[str, str] 
         "fix": f"name its harness with --map {shlex.quote(bank)}=HARNESS to fold it, or name "
         f"it with --skip {shlex.quote(bank)} to leave it out of the two banks",
     }
+
+
+# ── the targets' bank config ───────────────────────────────────────────────
+#
+# A merge import takes no bank config (``engine/transfer/importer.py``), and a
+# target is created with an empty body (:meth:`FoldIn._ensure_target`), so a
+# target left alone runs on the engine's defaults from the cutover on: the
+# default chunk size where a coding bank's ``gitlog`` strategy had 12000 (every
+# re-sent git log then matches no chunk and is extracted whole again), a
+# refresh floor of 0 (a knowledge-page refresh after every consolidation), no
+# observation scopes. So the run works out each target's config from the
+# banks that fold into it and PATCHes it on before the first import.
+
+#: The per-bank settings carried from the old banks onto the targets: how
+#: memory is extracted, how often pages refresh, how observations are scoped.
+#: Only a source's ``overrides`` (what someone set on that bank) are carried,
+#: never its resolved config, which is mostly the engine's own defaults.
+#: ``enable_auto_consolidation`` is not carried: the isolation drop-in turns
+#: consolidation off for the whole engine during a run
+#: (``HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION=false``, written by
+#: :mod:`hal0.memory.engine_maintenance`), and afterwards the engine's own
+#: setting applies to the two banks. Missions are not carried either: a
+#: target's missions are its own (bank seeding).
+CARRIED_CONFIG_KEYS: tuple[str, ...] = (
+    "retain_strategies",
+    "retain_default_strategy",
+    "retain_extraction_mode",
+    "retain_custom_instructions",
+    "retain_chunk_size",
+    "mental_model_min_refresh_interval_seconds",
+    "observations_mission",
+    "default_observation_scopes",
+)
+
+#: The carried key whose value is merged by name, not taken whole.
+_STRATEGIES_KEY = "retain_strategies"
+
+
+def _same(a: Any, b: Any) -> bool:
+    return json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
+
+
+def plan_target_config(
+    sources: Iterable[Mapping[str, Any]],
+    target_overrides: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The config one target is given, from the banks that fold into it. Pure.
+
+    ``sources`` are ``{"bank", "documents", "overrides"}``: each source bank's
+    document count and the ``overrides`` of its ``GET .../config``.
+    ``target_overrides`` are the target's own overrides now (``None`` or
+    ``{}`` for a target the engine does not have yet).
+
+    The banks are ranked by documents, most first, ties by bank id, so the
+    choice does not depend on the order the engine lists them in or on which
+    banks a run names with ``--bank``. For each of :data:`CARRIED_CONFIG_KEYS`
+    the first ranked bank that sets it wins; ``retain_strategies`` is merged
+    by strategy name, the first ranked bank that has a strategy winning that
+    strategy. A key or strategy another bank sets to something else is a
+    conflict, reported with who won. A key the target already sets is kept
+    as it is (an operator's edit, or an earlier run's), so a re-run or a
+    resume plans nothing new for it.
+
+    Returns ``{"updates", "sources", "conflicts", "kept"}``: ``updates`` is
+    the PATCH body's ``updates`` (empty when there is nothing to set),
+    ``sources`` names the bank behind each key (per strategy for
+    ``retain_strategies``), ``conflicts`` lists ``{"key", "chosen",
+    "others"}`` and ``kept`` the keys the target keeps.
+    """
+    ranked = sorted(
+        (s for s in sources if isinstance(s.get("overrides"), Mapping)),
+        key=lambda s: (-int(s.get("documents") or 0), str(s.get("bank"))),
+    )
+    own = dict(target_overrides or {})
+    wanted: dict[str, Any] = {}
+    chosen: dict[str, Any] = {}
+    conflicts: list[dict[str, Any]] = []
+    for key in CARRIED_CONFIG_KEYS:
+        setters = [s for s in ranked if s["overrides"].get(key) is not None]
+        if not setters:
+            continue
+        if key == _STRATEGIES_KEY:
+            merged: dict[str, Any] = {}
+            by: dict[str, str] = {}
+            for s in setters:
+                strategies = s["overrides"][key]
+                if not isinstance(strategies, Mapping):
+                    continue
+                for name, value in strategies.items():
+                    if name not in merged:
+                        merged[name], by[name] = copy.deepcopy(value), str(s["bank"])
+                        continue
+                    if not _same(merged[name], value):
+                        conflict = next((c for c in conflicts if c["key"] == f"{key}.{name}"), None)
+                        if conflict is None:
+                            conflicts.append(
+                                {"key": f"{key}.{name}", "chosen": by[name], "others": []}
+                            )
+                            conflict = conflicts[-1]
+                        conflict["others"].append(str(s["bank"]))
+            if merged:
+                wanted[key] = merged
+                chosen[key] = dict(sorted(by.items()))
+            continue
+        first = setters[0]
+        wanted[key] = copy.deepcopy(first["overrides"][key])
+        chosen[key] = str(first["bank"])
+        others = [
+            str(s["bank"]) for s in setters[1:] if not _same(s["overrides"][key], wanted[key])
+        ]
+        if others:
+            conflicts.append({"key": key, "chosen": chosen[key], "others": others})
+    updates = {k: v for k, v in wanted.items() if own.get(k) is None}
+    kept = sorted(k for k in wanted if own.get(k) is not None and not _same(own[k], wanted[k]))
+    return {"updates": updates, "sources": chosen, "conflicts": conflicts, "kept": kept}
+
+
+def _config_sources_for(part: str, banks: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The source rows that can send memory to ``part``: a private bank sends only to the private one."""
+    return [dict(b) for b in banks if part == PART_PRIVATE or b.get("class") != CLASS_PRIVATE]
 
 
 class FoldIn(em.EngineMaintenance):
@@ -3397,6 +3528,23 @@ class FoldIn(em.EngineMaintenance):
                 "box to the old layout, because the cutover waits until every bank is folded"
             )
 
+        try:
+            plan["target_config"] = await self._target_config_plan(platform, targets, self._maps)
+        except FoldInError as exc:
+            refuse("engine_error", exc.message)
+            return plan
+        self._note_target_config(plan["target_config"], warnings)
+        if (features or {}).get("bank_config_api") is False and any(
+            row["updates"] for row in plan["target_config"].values()
+        ):
+            refuse(
+                "bank_config_api_off",
+                "the engine's per-bank config API is off (features.bank_config_api on /version), "
+                "so the old banks' config cannot be carried onto the two banks, and they would "
+                "run on the engine's defaults. Set HINDSIGHT_API_ENABLE_BANK_CONFIG_API=true "
+                "for the run",
+            )
+
         plan["disk"] = self._disk_plan(hs_dir, refuse, warnings)
         embedded = plan["totals"]["facts"] + plan["totals"]["observations"]
         plan["estimate_s"] = round(embedded / em.RESTORE_FACTS_PER_S + 3 * 25)
@@ -3845,6 +3993,8 @@ class FoldIn(em.EngineMaintenance):
                 return
             journal.checked = True
             self._save(journal)
+        if not journal.configured:
+            await self._configure_targets(journal)
         for index, entry in enumerate(journal.banks):
             if entry.step in _DONE_STEPS:
                 continue
@@ -4437,6 +4587,110 @@ class FoldIn(em.EngineMaintenance):
     def _part_ids(self, journal: Journal, part: Part) -> dict[str, Any]:
         data = json.loads(self._read_archive_file(journal, _ids_name(part.archive)))
         return data if isinstance(data, dict) else {}
+
+    async def _overrides(self, bank: str) -> dict[str, Any]:
+        config = await self._json(
+            "GET", f"{em.bank_path(bank)}/config", what="reading the config", bank=bank
+        )
+        overrides = config.get("overrides") if isinstance(config, dict) else None
+        return dict(overrides) if isinstance(overrides, dict) else {}
+
+    async def _target_config_plan(
+        self, platform: str, targets: Mapping[str, str], maps: Mapping[str, str]
+    ) -> dict[str, dict[str, Any]]:
+        """Per part, the config its target is given (:func:`plan_target_config`), read live.
+
+        The sources are every foldable bank on the engine, folded by this run
+        or not, so the choice is the same whichever banks a run names. Read
+        the same way by the dry run, by ``--apply`` and by a resume.
+        """
+        ids = await self._bank_ids()
+        bank_targets = [bank for bank in targets.values() if bank != platform]
+        sources: list[dict[str, Any]] = []
+        for bank in ids:
+            cls = classify_bank(bank, platform_bank=platform, targets=bank_targets, maps=maps)
+            if not cls.foldable:
+                continue
+            stats = await self._json(
+                "GET",
+                f"{em.bank_path(bank)}/stats",
+                params={"refresh": "true"},
+                what="reading stats",
+                bank=bank,
+            )
+            documents = stats.get("total_documents") if isinstance(stats, dict) else 0
+            sources.append(
+                {
+                    "bank": bank,
+                    "class": cls.cls,
+                    "documents": int(documents or 0),
+                    "overrides": await self._overrides(bank),
+                }
+            )
+        out: dict[str, dict[str, Any]] = {}
+        for part in _PARTS:
+            target = targets[part]
+            own = await self._overrides(target) if target in ids else {}
+            out[part] = {
+                "target": target,
+                **plan_target_config(_config_sources_for(part, sources), own),
+            }
+        return out
+
+    @staticmethod
+    def _note_target_config(config: Mapping[str, Mapping[str, Any]], warnings: list[str]) -> None:
+        for row in config.values():
+            target = row["target"]
+            for conflict in row["conflicts"]:
+                warnings.append(
+                    f"{target}: {conflict['key']} is set differently on "
+                    f"{', '.join(conflict['others'])}; {conflict['chosen']} (most documents) is "
+                    "carried"
+                )
+            if row["kept"]:
+                warnings.append(
+                    f"{target} already sets {', '.join(row['kept'])}: kept as it is, not "
+                    "replaced by the old banks' values"
+                )
+
+    async def _configure_targets(self, journal: Journal) -> None:
+        """Create each target and PATCH the old banks' config onto it, before any import.
+
+        Planned again from the engine as it is now (the old banks are paused,
+        so this is what the preflight read), so a resume, and a journal
+        written before the step existed, work the same way. Idempotent: a key
+        the target already sets is not planned (:func:`plan_target_config`),
+        so a second pass sends nothing.
+        """
+        plan = await self._target_config_plan(
+            journal.platform_bank or bank_layout.LEGACY_PLATFORM_BANK, journal.targets, journal.maps
+        )
+        for part in _PARTS:
+            row = plan[part]
+            target = row["target"]
+            await self._ensure_target(target)
+            if row["updates"]:
+                self._say(f"setting {target}'s config: {', '.join(sorted(row['updates']))}")
+                await self._json(
+                    "PATCH",
+                    f"{em.bank_path(target)}/config",
+                    body={"updates": row["updates"]},
+                    what="setting the config",
+                    bank=target,
+                )
+            previous = journal.target_config.get(part) or {}
+            # A resume plans nothing for what the first pass set: keep what it set.
+            sent = sorted(set(previous.get("set") or ()) | set(row["updates"]))
+            journal.target_config[part] = {
+                "target": target,
+                "set": sent,
+                "sources": row["sources"],
+                "conflicts": row["conflicts"],
+                "kept": row["kept"],
+            }
+        journal.configured = True
+        self._save(journal)
+        self._hook("configured")
 
     async def _ensure_target(self, target: str) -> None:
         """Create a target bank the engine does not have yet (a merge imports into an existing bank)."""
@@ -5301,6 +5555,15 @@ class FoldIn(em.EngineMaintenance):
             keepers[target] = {**(keepers.get(target) or {}), **rows}
         if keepers:
             ledger["page_keepers"] = keepers
+        # What config each target was given, and from which bank: key and bank
+        # names only. A later run that sets nothing new keeps the earlier line.
+        configs = dict(ledger.get("target_config") or {})
+        for row in journal.target_config.values():
+            target = row["target"]
+            if row.get("set") or target not in configs:
+                configs[target] = {**row, "run_id": journal.run_id}
+        if configs:
+            ledger["target_config"] = configs
         banks = ledger.setdefault("banks", {})
         for entry in journal.banks:
             if entry.step not in _DONE_STEPS:
@@ -5525,6 +5788,7 @@ class FoldIn(em.EngineMaintenance):
                 for e in journal.banks
             ],
             "folded": [e.bank for e in journal.banks if e.step == STEP_FOLDED],
+            "target_config": journal.target_config,
             "archive_dir": journal.archive_dir,
         }
 

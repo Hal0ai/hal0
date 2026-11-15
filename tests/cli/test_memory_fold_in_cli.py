@@ -105,6 +105,33 @@ def test_status_names_the_archives_to_keep() -> None:
     assert "memory-fold-in-x-1" in out.output
 
 
+def test_a_dry_run_shows_the_config_each_target_gets() -> None:
+    FakeFoldIn.plan = {
+        "banks": [],
+        "refusals": [],
+        "warnings": [],
+        "target_config": {
+            "shared": {
+                "target": "hal0:shared",
+                "updates": {"retain_strategies": {}, "observations_mission": "m"},
+                "sources": {
+                    "retain_strategies": {"gitlog": "Hal0::Agents", "survey": "pi-coder"},
+                    "observations_mission": "Hal0::Agents",
+                },
+            },
+            "private": {"target": "hal0:private", "updates": {}, "sources": {}},
+        },
+    }
+    out = runner.invoke(
+        app, ["memory", "migrate", "fold-in"], env={"COLUMNS": "400"}, catch_exceptions=False
+    )
+    assert out.exit_code == 0, out.output
+    text = " ".join(out.output.split())
+    assert "config for hal0:shared: observations_mission from Hal0::Agents" in text
+    assert "retain_strategies (gitlog from Hal0::Agents; survey from pi-coder)" in text
+    assert "config for hal0:private: nothing to set" in text
+
+
 def test_a_refused_dry_run_exits_1() -> None:
     FakeFoldIn.plan = {"banks": [], "refusals": [{"code": "x", "message": "no"}], "warnings": []}
     out = invoke()
