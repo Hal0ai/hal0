@@ -297,6 +297,31 @@ def _bank_notes(rows: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _config_lines(config: dict[str, Any]) -> list[str]:
+    """One line per target: the config the run sets on it, each key with the bank it comes from."""
+    lines: list[str] = []
+    for row in config.values():
+        target = escape(str(row.get("target")))
+        updates = row.get("updates") or {}
+        sources = row.get("sources") or {}
+        if not updates:
+            lines.append(f"config for {target}: nothing to set")
+            continue
+        parts = []
+        for key in sorted(updates):
+            source = sources.get(key)
+            if isinstance(source, dict):
+                by: dict[str, list[str]] = {}
+                for name, bank in sorted(source.items()):
+                    by.setdefault(str(bank), []).append(str(name))
+                origin = "; ".join(f"{', '.join(n)} from {b}" for b, n in sorted(by.items()))
+                parts.append(f"{key} ({escape(origin)})")
+            else:
+                parts.append(f"{key} from {escape(str(source))}")
+        lines.append(f"config for {target}: " + ", ".join(parts))
+    return lines
+
+
 def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
     rows = plan.get("banks") or []
     if rows:
@@ -320,6 +345,7 @@ def _print_plan(plan: dict[str, Any], *, applied: bool) -> None:
         lines.append(
             f"into: {escape(str(targets.get('shared')))} and {escape(str(targets.get('private')))}"
         )
+    lines.extend(_config_lines(plan.get("target_config") or {}))
     owners = plan.get("owners") or {}
     if owners:
         lines.append(

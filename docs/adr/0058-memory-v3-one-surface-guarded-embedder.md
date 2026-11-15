@@ -335,7 +335,11 @@ Two facts about engine 1.2.0, read from its source, shape the decision:
      import (`mode=merge&document_conflict=skip`) takes an archive's
      documents with their facts, the observations whose every source fact it
      imported in the same call, and its mental models and knowledge pages;
-     never directives or bank config. Mental models are keyed by bank and id
+     never directives or bank config. (2026-11-15) So the fold-in sets the
+     old banks' extraction, refresh-floor and observation-scope overrides on
+     each target itself, before the first import. When several banks set a
+     key, the bank with the most documents wins, and a key the target
+     already sets is kept. Mental models are keyed by bank and id
      and inserted without replacing, so a per-repository bank's models are
      given new ids. A bank whose counts do not match after the merge is left
      over, and a partial merge is completed by a re-import with `skip`,

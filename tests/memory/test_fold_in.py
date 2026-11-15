@@ -128,6 +128,10 @@ class FakeEngine:
         self.before_folder_post: Any = None
         #: Per bank: mental_model_history rows the export carries.
         self.model_history: dict[str, list[dict[str, Any]]] = {}
+        #: Per bank: its config overrides (``PATCH .../config`` merges top-level keys).
+        self.config: dict[str, dict[str, Any]] = {}
+        #: ``features.bank_config_api`` on ``/version``.
+        self.bank_config_api = True
 
     # ── state ──
 
@@ -372,7 +376,11 @@ class FakeEngine:
                 200,
                 json={
                     "api_version": "1.2.0",
-                    "features": {"document_export_api": True, "document_import_api": True},
+                    "features": {
+                        "document_export_api": True,
+                        "document_import_api": True,
+                        "bank_config_api": self.bank_config_api,
+                    },
                 },
             )
         if path == "/v1/default/banks":
@@ -449,7 +457,16 @@ class FakeEngine:
         if rest == "/directives":
             return self._page("items", b["directives"], params)
         if rest == "/config":
-            return httpx.Response(200, json={"overrides": {}})
+            overrides = self.config.setdefault(bank, {})
+            if method == "PATCH":
+                updates = json.loads(request.content)["updates"]
+                self.events.append(f"config:{bank}:{','.join(sorted(updates))}")
+                overrides.update(updates)
+            defaults = {"retain_chunk_size": 3000, "mental_model_min_refresh_interval_seconds": 0}
+            return httpx.Response(
+                200,
+                json={"bank_id": bank, "config": {**defaults, **overrides}, "overrides": overrides},
+            )
         if rest == "/knowledge-base/tree":
             return httpx.Response(200, json={"roots": self.tree(bank)})
         if rest == "/knowledge-base/folders" and method == "POST":
@@ -2933,3 +2950,194 @@ async def test_a_built_since_observation_is_counted_once_not_as_a_rebuild_too(bo
     report = next(b for b in result["banks"] if b["bank"] == "shared")["report"]
     assert report["observations"]["not_carried_built_since"] == 1
     assert report["observations_to_rebuild"] == 0
+
+
+# ── the targets' bank config ────────────────────────────────────────────
+
+
+GITLOG_12K = {"gitlog": {"retain_chunk_size": 12000}, "git": {"retain_extraction_mode": "verbose"}}
+
+
+def seed_configs(box: Box) -> None:
+    """The coding bank and Pi set config; the platform bank sets one thing too.
+
+    ``coding-agent::web`` and ``shared`` hold two documents each, so the tie
+    goes to the bank id: ``coding-agent::web`` ranks first. ``pi-coder`` holds one.
+    """
+    e = box.engine
+    e.config["coding-agent::web"] = {
+        "retain_strategies": GITLOG_12K,
+        "retain_default_strategy": "conversation",
+        "mental_model_min_refresh_interval_seconds": 14400,
+        "default_observation_scopes": [["project:*"]],
+        "observations_mission": "what the projects do",
+        # Never carried: the run manages consolidation itself.
+        "enable_auto_consolidation": False,
+        "reflect_mission": "not carried",
+    }
+    e.config["pi-coder"] = {
+        "retain_strategies": {
+            "gitlog": {"retain_chunk_size": 6000},
+            "survey": {"retain_chunk_size": 12000},
+        },
+        "mental_model_min_refresh_interval_seconds": 600,
+    }
+    e.config["shared"] = {"retain_extraction_mode": "concise"}
+
+
+WANTED = {
+    "retain_strategies": {**GITLOG_12K, "survey": {"retain_chunk_size": 12000}},
+    "retain_default_strategy": "conversation",
+    "retain_extraction_mode": "concise",
+    "mental_model_min_refresh_interval_seconds": 14400,
+    "observations_mission": "what the projects do",
+    "default_observation_scopes": [["project:*"]],
+}
+
+
+def test_the_target_config_ranks_banks_by_documents_and_merges_strategies() -> None:
+    sources = [
+        {"bank": "small", "documents": 1, "overrides": {"retain_strategies": {"a": 1, "b": 2}}},
+        {
+            "bank": "big",
+            "documents": 9,
+            "overrides": {
+                "retain_strategies": {"a": 9},
+                "mental_model_min_refresh_interval_seconds": 14400,
+                "observations_mission": None,
+                "enable_auto_consolidation": False,
+            },
+        },
+        {
+            "bank": "also-small",
+            "documents": 1,
+            "overrides": {"mental_model_min_refresh_interval_seconds": 14400},
+        },
+    ]
+    row = fi.plan_target_config(sources)
+    assert row["updates"] == {
+        "retain_strategies": {"a": 9, "b": 2},
+        "mental_model_min_refresh_interval_seconds": 14400,
+    }
+    assert row["sources"] == {
+        "retain_strategies": {"a": "big", "b": "small"},
+        "mental_model_min_refresh_interval_seconds": "big",
+    }
+    # The same value elsewhere is no conflict; a different one is.
+    assert row["conflicts"] == [
+        {"key": "retain_strategies.a", "chosen": "big", "others": ["small"]}
+    ]
+    assert row["kept"] == []
+    # The listing order does not move the choice.
+    assert fi.plan_target_config(list(reversed(sources))) == row
+
+
+def test_the_target_config_keeps_what_the_target_already_sets() -> None:
+    sources = [
+        {
+            "bank": "b",
+            "documents": 1,
+            "overrides": {
+                "mental_model_min_refresh_interval_seconds": 14400,
+                "retain_chunk_size": 6000,
+            },
+        }
+    ]
+    row = fi.plan_target_config(
+        sources, {"mental_model_min_refresh_interval_seconds": 60, "retain_chunk_size": 6000}
+    )
+    assert row["updates"] == {}
+    # Already the same: nothing to say. Set to something else: kept, and said.
+    assert row["kept"] == ["mental_model_min_refresh_interval_seconds"]
+
+
+async def test_a_dry_run_shows_the_config_each_target_gets_and_sets_none(box: Box) -> None:
+    seed_configs(box)
+    plan = await box.fold().preflight()
+    assert plan["refusals"] == []
+    shared, private = plan["target_config"]["shared"], plan["target_config"]["private"]
+    assert shared["target"] == "hal0:shared" and private["target"] == "hal0:private"
+    assert shared["updates"] == WANTED
+    assert shared["sources"]["retain_strategies"] == {
+        "git": "coding-agent::web",
+        "gitlog": "coding-agent::web",
+        "survey": "pi-coder",
+    }
+    assert shared["sources"]["retain_extraction_mode"] == "shared"
+    assert {c["key"] for c in shared["conflicts"]} == {
+        "retain_strategies.gitlog",
+        "mental_model_min_refresh_interval_seconds",
+    }
+    # The private target takes the same: private__brain sets nothing.
+    assert private["updates"] == WANTED
+    assert any("retain_strategies.gitlog" in w and "pi-coder" in w for w in plan["warnings"])
+    assert box.events == []
+    assert "hal0:shared" not in box.engine.banks
+
+
+async def test_apply_sets_the_old_banks_config_on_the_targets_before_any_import(box: Box) -> None:
+    seed_configs(box)
+    result = await box.fold().run()
+    assert result["status"] == "folded"
+    e = box.engine
+    assert e.config["hal0:shared"] == WANTED
+    assert e.config["hal0:private"] == WANTED
+    first_import = next(i for i, ev in enumerate(box.events) if ev.startswith("import:"))
+    configured = [i for i, ev in enumerate(box.events) if ev.startswith("config:")]
+    assert len(configured) == 2 and max(configured) < first_import
+    ledger = fi.load_ledger()["target_config"]
+    assert ledger["hal0:shared"]["set"] == sorted(WANTED)
+    assert ledger["hal0:shared"]["sources"]["mental_model_min_refresh_interval_seconds"] == (
+        "coding-agent::web"
+    )
+    assert result["target_config"]["shared"]["set"] == sorted(WANTED)
+
+
+async def test_a_later_run_sends_no_config_the_targets_already_have(box: Box) -> None:
+    seed_configs(box)
+    await box.fold(only=["coding-agent::web"]).run()
+    assert box.engine.config["hal0:shared"] == WANTED
+    box.events.clear()
+    result = await box.fold().run()
+    assert result["status"] == "folded"
+    assert not [ev for ev in box.events if ev.startswith("config:")]
+    # The ledger keeps what the first run set.
+    assert fi.load_ledger()["target_config"]["hal0:shared"]["set"] == sorted(WANTED)
+
+
+async def test_a_config_the_target_already_sets_is_kept(box: Box) -> None:
+    seed_configs(box)
+    e = box.engine
+    e.banks["hal0:shared"] = empty_bank()
+    e.config["hal0:shared"] = {"mental_model_min_refresh_interval_seconds": 60}
+    plan = await box.fold().preflight()
+    assert plan["target_config"]["shared"]["kept"] == ["mental_model_min_refresh_interval_seconds"]
+    assert any("hal0:shared already sets" in w for w in plan["warnings"])
+    await box.fold().run()
+    assert e.config["hal0:shared"]["mental_model_min_refresh_interval_seconds"] == 60
+    assert e.config["hal0:shared"]["retain_strategies"] == WANTED["retain_strategies"]
+
+
+@pytest.mark.parametrize("point", ["configured", "importing:coding-agent::web:shared"])
+async def test_a_run_killed_around_the_config_step_sets_it_once(box: Box, point: str) -> None:
+    seed_configs(box)
+    await box.kill_at(point)
+    assert box.engine.config["hal0:shared"] == WANTED
+    result = await box.fold().resume()
+    assert result["left"] == []
+    _assert_folded(box)
+    assert [ev for ev in box.events if ev.startswith("config:hal0:shared")] == [
+        "config:hal0:shared:" + ",".join(sorted(WANTED))
+    ]
+    assert result["target_config"]["shared"]["set"] == sorted(WANTED)
+
+
+async def test_refuses_when_the_engine_cannot_take_the_config(box: Box) -> None:
+    seed_configs(box)
+    box.engine.bank_config_api = False
+    plan = await box.fold().preflight()
+    assert "bank_config_api_off" in _codes(plan)
+    # Nothing to carry, nothing to refuse.
+    box.engine.config.clear()
+    plan = await box.fold().preflight()
+    assert "bank_config_api_off" not in _codes(plan)

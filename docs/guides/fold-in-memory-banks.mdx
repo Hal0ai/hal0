@@ -123,6 +123,9 @@ tags are rewritten in the archive first:
   counts them.
 - **Directives are not carried.** A merge import never takes them. The dry
   run lists how many each bank has; recreate the ones you want.
+- **Bank config is carried** (retain strategies, refresh floor, observation
+  scopes). The bank with the most documents wins a key. The dry run shows
+  the plan.
 - **Attachments and invalidated facts cannot be carried.** The engine's
   merge import restores neither (only a whole-bank restore does), so a bank
   whose export holds any is left rather than folded without them. Remove
