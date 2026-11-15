@@ -143,8 +143,8 @@ ctx_size = 32768
 
 Slots → NPU (`#slots/npu`) is the one place that shows everything on the NPU. The Inference tab keeps a one-line NPU summary (holders, tok/s, a time-sliced chip when more than one slot holds the array) that links to it. The tab shows when the NPU is present or any slot lives on it, and has three sub-tabs:
 
-- **Lanes** — the AIE array and the host status line, then one lane per engine. The FLM lane stages toggles and a chat model and applies them with one config write and one restart. The GGML lane lists the `xdna` slots with their fused or per-op fit, adds, edits, starts, stops and restarts them, and shows a Pull button while the runner image is missing.
-- **Models** — FLM catalogue rows and the registered GGUF models with their fit, size and the slots using each.
+- **Lanes** — the AIE array and the host status line, then one lane per engine. The FLM lane stages toggles and a chat model and applies them with one config write and one restart. Its chat model is a dropdown like the one on the inference slot cards: installed models first, then the ones to download, each with a size chip and an audio chip where it applies. Picking a model that is not installed downloads it (progress shows on the lane) and applies at once. The GGML lane lists the `xdna` slots with their fused or per-op fit, adds, edits, starts, stops and restarts them, and shows a Pull button while the runner image is missing.
+- **Models** — the registered GGUF models with their fit, size and the slots using each.
 - **Engines & profiles** — the FLM and ggml-xdna images, host readiness, and the NPU profiles.
 
 ## What the API reports

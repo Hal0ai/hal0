@@ -120,7 +120,7 @@ test.describe('FLM lane chat-model seeding (#1388)', () => {
 
     await page.goto('/#slots/npu')
     // An operator must be able to see what an apply is about to send.
-    await expect(page.getByTestId('flm-chat-model')).toHaveValue(CONFIGURED)
+    await expect(page.getByTestId('flm-chat-model')).toContainText(CONFIGURED)
   })
 
   test('an explicit chat-model pick still wins over the seed', async ({ page }) => {
@@ -132,7 +132,8 @@ test.describe('FLM lane chat-model seeding (#1388)', () => {
     await seedSlots(page, [NPU_SLOT])
 
     await page.goto('/#slots/npu')
-    await page.getByTestId('flm-chat-model').selectOption('flm-other')
+    await page.getByTestId('flm-chat-model').click()
+    await page.locator('[data-option-id="flm-other"]').click()
     await page.getByTestId('flm-apply').click()
 
     await expect.poll(() => puts.length).toBe(1)

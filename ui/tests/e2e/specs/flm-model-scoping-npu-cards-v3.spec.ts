@@ -153,7 +153,8 @@ test.describe('FLM model scoping + NPU tab chat model', () => {
     await page.goto('/#slots/npu')
     const chat = page.getByTestId('flm-chat-model')
     await expect(chat).toBeVisible()
-    await expect(chat.locator('option')).toHaveText(['qwen3:4b', 'gemma3:1b'])
+    await chat.click()
+    await expect(page.locator('[role="option"][data-option-id]:not([aria-disabled="true"])')).toHaveText([/gemma3:1b/, /qwen3:4b/]) // installed group, sorted by family then name
     // STT / Embed load one bundled model with FLM's --asr / --embed: no per-role pick.
     await expect(page.getByTestId('flm-row-asr')).toContainText('whisper-v3:turbo')
     await expect(page.getByTestId('flm-row-embed')).toContainText('embed-gemma:300m')
@@ -176,7 +177,8 @@ test.describe('FLM model scoping + NPU tab chat model', () => {
       return json(route, { name: 'flm' })
     })
     await page.goto('/#slots/npu')
-    await page.getByTestId('flm-chat-model').selectOption('gemma3:1b')
+    await page.getByTestId('flm-chat-model').click()
+    await page.locator('[data-option-id="gemma3:1b"]').click()
     expect(calls).toEqual([])
     await page.getByTestId('flm-apply').click()
     await expect.poll(() => calls).toEqual(['PUT config', 'POST restart'])

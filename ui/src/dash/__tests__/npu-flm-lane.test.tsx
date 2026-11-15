@@ -117,16 +117,17 @@ describe('FlmLane', () => {
     expect(box.edits).toHaveLength(0)
   })
 
+  // The model dropdown is the shared RichSelect: open it, then click an option.
+  const pick = (id: string) => {
+    act(() => { q('flm-chat-model')!.click() })
+    act(() => { (host.querySelector(`[data-option-id="${id}"]`) as HTMLElement).click() })
+  }
+  const pickQwen = () => pick('qwen3:8b')
+
   it('uninstalled model whose pull fails → no PUT, no restart, error shown, bar kept', async () => {
     box.pullStart.mockRejectedValue(new Error('download exploded'))
     render()
-    act(() => {
-      const sel = q('flm-chat-model') as unknown as HTMLSelectElement
-      const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!
-      set.call(sel, 'qwen3:8b')
-      sel.dispatchEvent(new Event('change', { bubbles: true }))
-    })
-    click('flm-apply')
+    pickQwen()
     await flush()
     expect(box.pullStart).toHaveBeenCalledWith('qwen3:8b')
     expect(box.edits).toHaveLength(0)
@@ -135,18 +136,43 @@ describe('FlmLane', () => {
     expect(q('flm-applybar')).toBeTruthy()
   })
 
-  const pickQwen = () =>
-    act(() => {
-      const sel = q('flm-chat-model') as unknown as HTMLSelectElement
-      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(sel, 'qwen3:8b')
-      sel.dispatchEvent(new Event('change', { bubbles: true }))
-    })
+  it('picking a not-installed model downloads and applies without pressing Apply, with progress on the card', async () => {
+    box.pullStart.mockResolvedValue({})
+    render()
+    pickQwen()
+    await flush()
+    expect(box.pullStart).toHaveBeenCalledWith('qwen3:8b')
+    expect(q('flm-pull-progress')?.textContent).toContain('Downloading qwen3:8b')
+    box.pull = { state: 'completed', modelId: 'qwen3:8b', error: null }
+    render()
+    await flush()
+    expect(box.edits).toHaveLength(1)
+    expect(box.restarts).toEqual(['flm'])
+    expect(q('flm-pull-progress')).toBeNull()
+  })
+
+  it('picking an installed model only stages it: no download, no write until Apply', async () => {
+    box.catalog.push({ model: 'gemma4-it:e2b', installed: true, capabilities: ['chat', 'stt'] })
+    render()
+    pick('gemma4-it:e2b')
+    await flush()
+    expect(box.pullStart).not.toHaveBeenCalled()
+    expect(box.edits).toHaveLength(0)
+    expect(q('flm-applybar')?.textContent).toContain('chat model gemma4-it:e2b')
+    box.catalog.pop()
+  })
+
+  it('the dropdown offers only chat models, installed ones under their own header', () => {
+    render()
+    act(() => { q('flm-chat-model')!.click() })
+    const ids = Array.from(host.querySelectorAll('[data-option-id]')).map((e) => e.getAttribute('data-option-id'))
+    expect(ids).toEqual(['__hdr-installed', 'gemma4-it:e4b', '__hdr-download', 'qwen3:8b'])
+  })
 
   it('pull completes → one PUT, one restart, draft cleared', async () => {
     box.pullStart.mockResolvedValue({})
     render()
     pickQwen()
-    click('flm-apply')
     await flush()
     expect(box.edits).toHaveLength(0)
     box.pull = { state: 'running', modelId: 'qwen3:8b', error: null }
@@ -166,7 +192,6 @@ describe('FlmLane', () => {
     box.pullStart.mockResolvedValue({})
     render()
     pickQwen()
-    click('flm-apply')
     await flush()
     box.pull = { state: 'failed', modelId: 'qwen3:8b', error: { message: 'disk full' } }
     render()
@@ -180,7 +205,6 @@ describe('FlmLane', () => {
     box.pullStart.mockResolvedValue({})
     render()
     pickQwen()
-    click('flm-apply')
     await flush()
     box.pull = { state: 'running', modelId: 'qwen3:8b', error: null }
     render()

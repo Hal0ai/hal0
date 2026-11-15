@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { flmCatalogRows, ggufNpuRows } from './npu-models-pure'
+import { flmPickerOptions, formatFlmSize, ggufNpuRows } from './npu-models-pure'
 
 const models = [
   { model: 'qwen3:8b', installed: false, capabilities: ['chat'], family: 'qwen3' },
@@ -8,33 +8,58 @@ const models = [
   { model: 'embed-gemma:300m', installed: true, capabilities: ['embed'], family: 'embed-gemma' },
   { model: 'llama3.2:1b', installed: false, capabilities: ['chat'], family: 'llama3' },
 ]
-const usage = { 'gemma4-it:e4b': 'flm chat', 'whisper-v3:turbo': 'flm stt', 'embed-gemma:300m': 'flm embed' }
-const ids = (r: { model: string }[]) => r.map((x) => x.model)
+const ids = (r: { id: string }[]) => r.map((x) => x.id)
 
-describe('flmCatalogRows', () => {
-  it('lists installed first, then by family', () => {
-    expect(ids(flmCatalogRows(models, { installed: 'all', cap: 'all' }, usage))).toEqual([
-      'embed-gemma:300m',
-      'gemma4-it:e4b',
-      'whisper-v3:turbo',
-      'llama3.2:1b',
-      'qwen3:8b',
-    ])
+describe('flmPickerOptions', () => {
+  const cat = [
+    ...models.map((m) => ({ ...m, size_bytes: 0 })),
+    { model: 'qwen3.5:9b', installed: false, capabilities: ['chat'], family: 'qwen3.5', size_bytes: 6_400_000_000 },
+    { model: 'gemma4-it:e2b', installed: false, capabilities: ['chat', 'stt'], family: 'gemma4', size_bytes: 5_100_000_000 },
+  ]
+  it('chat row: chat-capable models only, installed and download groups sorted by family then name', () => {
+    const g = flmPickerOptions(cat, 'chat')
+    expect(ids(g.installed)).toEqual(['gemma4-it:e4b'])
+    expect(ids(g.download)).toEqual(['gemma4-it:e2b', 'llama3.2:1b', 'qwen3:8b', 'qwen3.5:9b'])
   })
-  it('filters installed only and by capability', () => {
-    expect(ids(flmCatalogRows(models, { installed: 'installed', cap: 'all' }, usage))).toHaveLength(3)
-    expect(ids(flmCatalogRows(models, { installed: 'all', cap: 'stt' }, usage))).toEqual(['gemma4-it:e4b', 'whisper-v3:turbo'])
-    expect(ids(flmCatalogRows(models, { installed: 'installed', cap: 'chat' }, usage))).toEqual(['gemma4-it:e4b'])
+  it('stt row: speech models only (a chat model that hears audio qualifies)', () => {
+    const g = flmPickerOptions(cat, 'stt')
+    expect(ids(g.installed)).toEqual(['gemma4-it:e4b', 'whisper-v3:turbo'])
+    expect(ids(g.download)).toEqual(['gemma4-it:e2b'])
   })
-  it('carries the usage tag, null when unused', () => {
-    const rows = flmCatalogRows(models, { installed: 'all', cap: 'all' }, usage)
-    expect(rows.find((r) => r.model === 'gemma4-it:e4b')!.usedBy).toBe('flm chat')
-    expect(rows.find((r) => r.model === 'qwen3:8b')!.usedBy).toBeNull()
+  it('embed row: embedding models only', () => {
+    const g = flmPickerOptions(cat, 'embed')
+    expect(ids(g.installed)).toEqual(['embed-gemma:300m'])
+    expect(g.download).toEqual([])
   })
-  it('survives a missing family / capabilities', () => {
-    const rows = flmCatalogRows([{ model: 'x', installed: true }] as never, { installed: 'all', cap: 'all' }, {})
-    expect(ids(rows)).toEqual(['x'])
-    expect(flmCatalogRows([{ model: 'x', installed: true }] as never, { installed: 'all', cap: 'chat' }, {})).toEqual([])
+  it('chips: audio on a chat model that also lists stt, size when reported, family', () => {
+    const g = flmPickerOptions(cat, 'chat')
+    expect(g.installed[0]).toMatchObject({ audio: true, installed: true, sizeBytes: null, family: 'gemma4' })
+    const q9 = g.download.find((o) => o.id === 'qwen3.5:9b')!
+    expect(q9).toMatchObject({ audio: false, installed: false, sizeBytes: 6_400_000_000 })
+    // the audio chip belongs to the chat picker: a speech picker row is not "also hears audio"
+    expect(flmPickerOptions(cat, 'stt').installed.every((o) => !o.audio)).toBe(true)
+  })
+  it('always offers the current model, as installed when the catalogue lacks it', () => {
+    const g = flmPickerOptions(cat, 'chat', 'custom:1b')
+    expect(g.installed.find((o) => o.id === 'custom:1b')).toMatchObject({ installed: true, sizeBytes: null })
+    expect(flmPickerOptions(cat, 'chat', 'gemma4-it:e4b').installed).toHaveLength(1)
+  })
+  it('a row without a capabilities field is chat-only; an empty list serves nothing; no catalogue is empty', () => {
+    const bare = [{ model: 'x', installed: true }] as never
+    expect(ids(flmPickerOptions(bare, 'chat').installed)).toEqual(['x'])
+    expect(flmPickerOptions(bare, 'stt').installed).toEqual([])
+    expect(flmPickerOptions([{ model: 'y', installed: true, capabilities: [] }] as never, 'chat').installed).toEqual([])
+    expect(flmPickerOptions(undefined, 'chat')).toEqual({ installed: [], download: [] })
+  })
+})
+
+describe('formatFlmSize', () => {
+  it('formats GB with one decimal, MB below a gigabyte, null when unknown', () => {
+    expect(formatFlmSize(6_400_000_000)).toBe('6.4 GB')
+    expect(formatFlmSize(21_000_000_000)).toBe('21 GB')
+    expect(formatFlmSize(700_000_000)).toBe('700 MB')
+    expect(formatFlmSize(0)).toBeNull()
+    expect(formatFlmSize(undefined)).toBeNull()
   })
 })
 

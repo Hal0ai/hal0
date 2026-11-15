@@ -11,6 +11,8 @@ export interface FlmModel {
   installed: boolean
   capabilities?: string[]
   family?: string | null
+  /** FLM's reported download size; 0 or absent when unknown. */
+  size_bytes?: number
 }
 export interface FlmCatalog {
   models: FlmModel[]

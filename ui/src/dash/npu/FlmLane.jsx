@@ -13,6 +13,8 @@ import { SlotControls, slotCtrlPhase } from '../inference-pane.jsx'
 import { slotIndicatorFromPhase } from '../slot-status.js'
 import { npuAnchorSlot } from '../slots/slot-shared.js'
 import { openSlotEditFromNpu } from '../slots-route'
+import { FlmModelPicker } from './FlmModelPicker.jsx'
+import { formatFlmSize } from './npu-models-pure'
 import { useNpuConflictStart } from './useNpuConflictStart.jsx'
 import { bundledFlmModel, capEnabled, cfgFingerprint, draftBody, draftCount, pickChatModel, savedFlm, toggleCap } from './flm-draft-pure'
 
@@ -151,20 +153,23 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
   const ind = slotIndicatorFromPhase(anchor)
   const up = ['serving', 'ready', 'idle', 'loaded', 'warming', 'stale'].includes(ind.cls)
 
-  const apply = async () => {
-    if (busy || count === 0) return
+  const apply = async (d = draft) => {
+    if (busy || draftCount(d) === 0) return
     setErr(null)
+    // A pick that applies at once has no staged baseline yet (the drift effect sets it a render
+    // later): take it now so the re-check below compares against the config as it was clicked.
+    if (fpAtStage.current == null) fpAtStage.current = fpNow.current
     try {
-      if (draft.chatModel && !installed(draft.chatModel)) {
+      if (d.chatModel && !installed(d.chatModel)) {
         setBusy('pulling')
-        await pullAndWait(draft.chatModel)
+        await pullAndWait(d.chatModel)
       }
       // The config may have moved while the download ran: the drift effect rejects the wait then,
       // and this re-check covers a change that landed with the completion itself.
       if (fpAtStage.current !== fpNow.current) throw new Error(DRIFT)
       setBusy('writing')
       writing.current = true
-      await editMut.mutateAsync({ name: anchor.name, body: draftBody(draft, saved) })
+      await editMut.mutateAsync({ name: anchor.name, body: draftBody(d, saved) })
       fpAtStage.current = null
       setDraft({})
       if (up) {
@@ -190,8 +195,14 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
   const mem = typeof m.mem === 'number' ? Math.round(m.mem * 10) / 10 : null
   const chatModel = draft.chatModel ?? saved.chatModel
   const capOn = (cap) => (cap in draft ? draft[cap] : saved[cap])
-  const chatRows = (catalog?.models ?? []).filter((r) => !r.capabilities || r.capabilities.includes('chat'))
-  const options = chatRows.some((r) => r.model === chatModel) || !chatModel ? chatRows : [{ model: chatModel, installed: true }, ...chatRows]
+  // Picking a model that is not installed stages it and applies at once: download, one config
+  // write, one restart. An installed model is only staged, so it can ride with other toggles.
+  const pickChat = (id) => {
+    const next = pickChatModel(draft, saved, id)
+    setDraft(next)
+    if (id !== saved.chatModel && !installed(id)) apply(next)
+  }
+  const pulling = busy === 'pulling'
   const stagedKeys = (k) => k in draft
 
   return (
@@ -238,22 +249,15 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
                 {shadow ? <small>slot {shadow}</small> : null}
               </span>
               {cap === 'chat' ? (
-                <select
-                  className="npt-sel"
-                  data-testid="flm-chat-model"
-                  aria-label="FLM chat model"
-                  value={chatModel ?? ''}
+                <FlmModelPicker
+                  models={catalog?.models}
+                  cap="chat"
+                  value={chatModel ?? null}
+                  testid="flm-chat-model"
+                  ariaLabel="FLM chat model"
                   disabled={!!busy || !cfgReady || !capOn('chat')}
-                  onChange={(e) => e.target.value && setDraft((d) => pickChatModel(d, saved, e.target.value))}
-                >
-                  {!chatModel && <option value="">No model</option>}
-                  {options.map((r) => (
-                    <option key={r.model} value={r.model}>
-                      {r.model}
-                      {r.installed === false ? ' — download' : ''}
-                    </option>
-                  ))}
-                </select>
+                  onChange={pickChat}
+                />
               ) : (
                 <span className="npt-bundled">
                   {bundledFlmModel(catalog, catCaps) ?? '—'} <em>· bundled with FLM</em>
@@ -273,6 +277,17 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
         })}
       </div>
 
+      {pulling && (
+        <div className="npt-flm-pull" data-testid="flm-pull-progress">
+          <progress max={100} value={pull.pct != null ? Math.round(pull.pct) : undefined} aria-label={`Downloading ${chatModel}`} />
+          <span>
+            Downloading {chatModel}
+            {pull.pct != null ? ` · ${Math.round(pull.pct)}%` : '…'}
+            {pull.total > 0 ? ` · ${formatFlmSize(pull.downloaded) ?? "0 MB"} of ${formatFlmSize(pull.total)}` : ''}
+          </span>
+        </div>
+      )}
+
       {count > 0 && (
         <div className="npt-applybar" data-testid="flm-applybar">
           <span className="t">
@@ -287,7 +302,7 @@ function FlmLaneBody({ anchor, draft, setDraft }) {
           <button type="button" className="btn ghost sm" data-testid="flm-discard" disabled={!!busy} onClick={() => { setErr(null); setDraft({}) }}>
             Discard
           </button>
-          <button type="button" className="btn primary sm" data-testid="flm-apply" disabled={!!busy} onClick={apply}>
+          <button type="button" className="btn primary sm" data-testid="flm-apply" disabled={!!busy} onClick={() => apply()}>
             {busy ? 'Applying…' : 'Apply and restart'}
           </button>
         </div>

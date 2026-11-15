@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
-// NPU Models panel: FLM catalog actions and GGUF rows with NPU fit.
-import React, { act, useState } from 'react'
+// NPU Models panel: GGUF rows with NPU fit. The FLM catalogue list is gone (the FLM lane's
+// model dropdown covers download and launch).
+import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as unknown as { window: typeof globalThis }).window = globalThis
@@ -10,29 +11,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { box } = vi.hoisted(() => ({
   box: {
-    pullStart: vi.fn(),
-    pullState: 'idle',
     drawer: null as null | { open: boolean; mode: string; initialModel?: string; slot?: { name: string } },
     toasts: [] as string[],
   },
 }))
 
-vi.mock('@/api/hooks/useSlots', () => ({
-  useSlotConfig: () => ({ data: { npu: { chat: true }, model: { default: 'gemma4-it:e4b' } } }),
-}))
-vi.mock('@/api/hooks/useFlmCatalog', () => ({
-  useFlmCatalog: () => ({
-    data: {
-      probe_ok: true,
-      models: [
-        { model: 'gemma4-it:e4b', installed: true, capabilities: ['chat'], family: 'gemma4' },
-        { model: 'qwen3:8b', installed: false, capabilities: ['chat'], family: 'qwen3' },
-        { model: 'whisper-v3:turbo', installed: true, capabilities: ['stt'], family: 'whisper' },
-        { model: 'embed-gemma:300m', installed: true, capabilities: ['embed'], family: 'embed' },
-      ],
-    },
-  }),
-}))
 vi.mock('@/api/hooks/useXdnaFit', () => ({
   useXdnaFit: () => ({
     data: {
@@ -50,7 +33,6 @@ vi.mock('@/api/hooks/useModels', () => ({
       { id: 'gemma4-e4b', type: 'llm', size: '6.9 GB', architecture: 'gemma4' },
     ],
   }),
-  usePullJob: () => ({ start: box.pullStart, state: box.pullState, modelId: null, pct: null, inFlight: box.pullState === 'running', error: null }),
 }))
 vi.mock('../npu/GgmlSlotDrawer.jsx', () => ({
   GgmlSlotDrawer: (p: { open: boolean; mode: string; initialModel?: string; slot?: { name: string } }) => {
@@ -68,23 +50,14 @@ const slots = [
 let host: HTMLDivElement
 let root: Root
 const q = (id: string) => host.querySelector(`[data-testid="${id}"]`) as HTMLElement | null
-const switched: string[] = []
-let draftNow: Record<string, unknown> = {}
 let occNow: unknown
 
 function Harness() {
-  const [draft, setDraft] = useState<Record<string, unknown>>({})
-  draftNow = draft
-  return <NpuModelsPanel slots={slots as never} occ={occNow as never} setFlmDraft={setDraft as never} onSwitchTab={(t: string) => switched.push(t)} />
+  return <NpuModelsPanel slots={slots as never} occ={occNow as never} />
 }
 
 beforeEach(() => {
-  box.pullState = 'idle'
-  box.pullStart.mockReset()
-  box.pullStart.mockResolvedValue(undefined)
   box.toasts.length = 0
-  switched.length = 0
-  draftNow = {}
   occNow = undefined
   ;(window as unknown as { __hal0Toast: (m: string) => void }).__hal0Toast = (m) => box.toasts.push(m)
   host = document.createElement('div')
@@ -98,48 +71,16 @@ afterEach(() => {
 })
 
 describe('NpuModelsPanel', () => {
-  it('tags usage: anchor chat model, bundled stt and embed rows', () => {
-    expect(q('flm-row-gemma4-it:e4b')!.textContent).toContain('flm chat')
-    expect(q('flm-row-whisper-v3:turbo')!.textContent).toContain('flm stt')
-    expect(q('flm-row-embed-gemma:300m')!.textContent).toContain('flm embed')
-    expect(q('flm-row-qwen3:8b')!.textContent).not.toContain('flm ')
-  })
-
-  it('"Use for chat" stages the model, switches to Lanes and toasts', () => {
-    act(() => q('flm-use-qwen3:8b')!.click())
-    expect(draftNow).toEqual({ chatModel: 'qwen3:8b' })
-    expect(switched).toEqual(['lanes'])
-    expect(box.toasts.length).toBe(1)
-  })
-
-  it('the current chat model has no "Use for chat"; chat-less rows never do', () => {
-    expect(q('flm-use-gemma4-it:e4b')).toBeNull()
-    expect(q('flm-use-whisper-v3:turbo')).toBeNull()
-  })
-
-  it('Download starts a pull for an uninstalled row only', () => {
-    expect(q('flm-download-gemma4-it:e4b')).toBeNull()
-    act(() => q('flm-download-qwen3:8b')!.click())
-    expect(box.pullStart).toHaveBeenCalledWith('qwen3:8b')
-  })
-
-  it('disables every Download while a pull is in flight', () => {
-    box.pullState = 'running'
-    act(() => root.render(<Harness />))
-    expect((q('flm-download-qwen3:8b') as HTMLButtonElement).disabled).toBe(true)
+  it('no longer lists the FLM catalogue: no per-model download or filter controls', () => {
+    expect(q('flm-models')).toBeNull()
+    expect(host.querySelector('[data-testid^="flm-download-"]')).toBeNull()
+    expect(host.querySelector('[data-testid^="flm-filter-"]')).toBeNull()
+    expect(q('gguf-models')).not.toBeNull()
   })
 
   it('shows the GGUF architecture from the registry row', () => {
     expect(q('gguf-arch-qwen3-4b')!.textContent).toBe('granite')
     expect(q('gguf-arch-qwen35-0.8b')!.textContent).toBe('—')
-  })
-
-  it('filters by installed and capability', () => {
-    act(() => q('flm-filter-installed')!.click())
-    expect(q('flm-row-qwen3:8b')).toBeNull()
-    act(() => q('flm-filter-stt')!.click())
-    expect(q('flm-row-whisper-v3:turbo')).not.toBeNull()
-    expect(q('flm-row-gemma4-it:e4b')).toBeNull()
   })
 
   it('GGUF rows show fit, size, used-by with an edit link; "New slot" opens create with the model', () => {

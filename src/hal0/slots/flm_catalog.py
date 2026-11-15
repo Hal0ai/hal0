@@ -22,7 +22,7 @@ Interface contract:
 
     list_models() -> list[dict[str, Any]]
         ``[{"model": tag, "installed": bool, "capabilities": [...],
-        "family": str}]`` — ``model``/``installed`` keep the dashboard filter
+        "family": str, "size_bytes": int}]`` (``size_bytes`` is 0 when FLM reports none) — ``model``/``installed`` keep the dashboard filter
         contract. Fail-soft: a probe that gave no answer yields ``[]`` rather
         than raising.
 """
@@ -39,6 +39,7 @@ def _model_rows(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "installed": bool(e.get("installed")),
             "capabilities": e.get("capabilities", []),
             "family": e.get("family", ""),
+            "size_bytes": int(e.get("size_bytes") or 0),
         }
         for e in models
         if e.get("tag")
