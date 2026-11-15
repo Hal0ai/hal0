@@ -123,22 +123,9 @@ tags are rewritten in the archive first:
   counts them.
 - **Directives are not carried.** A merge import never takes them. The dry
   run lists how many each bank has; recreate the ones you want.
-- **The old banks' config is set on the two banks before the first import.**
-  A merge import takes no bank config, so the run copies it itself with
-  `PATCH /v1/default/banks/{id}/config`. It carries `retain_strategies`,
-  `retain_default_strategy`, `retain_extraction_mode`,
-  `retain_custom_instructions`, `retain_chunk_size`,
-  `mental_model_min_refresh_interval_seconds`, `observations_mission` and
-  `default_observation_scopes`. Only what was set on a bank is carried, not
-  the engine's defaults. When several banks set a key, the bank with the most
-  documents wins, and ties go to the bank id that sorts first.
-  `retain_strategies` is merged by strategy name, and the same rule picks the
-  winner for each strategy. A `private__<agent>` bank counts only for
-  `hal0:private`. A key the target already sets is kept. The dry run prints
-  the config each target gets and which bank each key comes from, and warns
-  about every conflict. The ledger records the same under `target_config`.
-  `enable_auto_consolidation` and the missions are not carried. The run turns
-  consolidation off for the whole engine while it runs.
+- **Bank config is carried** (retain strategies, refresh floor, observation
+  scopes). The bank with the most documents wins a key. The dry run shows
+  the plan.
 - **Attachments and invalidated facts cannot be carried.** The engine's
   merge import restores neither (only a whole-bank restore does), so a bank
   whose export holds any is left rather than folded without them. Remove
