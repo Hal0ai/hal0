@@ -154,7 +154,7 @@ test.describe('FLM model scoping + NPU tab chat model', () => {
     const chat = page.getByTestId('flm-chat-model')
     await expect(chat).toBeVisible()
     await chat.click()
-    await expect(page.locator('[role="option"][data-option-id]:not([aria-disabled="true"])')).toHaveText([/qwen3:4b/, /gemma3:1b/])
+    await expect(page.locator('[role="option"][data-option-id]:not([aria-disabled="true"])')).toHaveText([/gemma3:1b/, /qwen3:4b/]) // installed group, sorted by family then name
     // STT / Embed load one bundled model with FLM's --asr / --embed: no per-role pick.
     await expect(page.getByTestId('flm-row-asr')).toContainText('whisper-v3:turbo')
     await expect(page.getByTestId('flm-row-embed')).toContainText('embed-gemma:300m')
