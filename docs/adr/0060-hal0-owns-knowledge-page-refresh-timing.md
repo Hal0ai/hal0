@@ -72,9 +72,23 @@ scheduled refreshes.
    tombstone, rather than setting `true`: a bank override of `true` would
    beat the engine-wide `false` that the maintenance isolation drop-in
    (`hal0.memory.engine_maintenance`) sets during a fold-in or an embedder
-   switch. The last run is kept on disk, so a run missed while hal0-api was
-   down runs once at the next start; switching to scheduled starts the clock
-   then and runs nothing at once.
+   switch. It clears only an override hal0 wrote: hal0 records the banks it
+   set `false` (`/var/lib/hal0/state/memory-refresh-policy.json`), and an
+   override someone else set, an operator draining a backlog, is left alone
+   and reported in the reconcile's notes, the CLI and the Settings panel.
+
+   A run is tracked per bank against the fire it is for: a bank that
+   answered is never sent again for that fire. A request that failed before
+   it was sent (a refused connection, 429, 5xx) is retried with a doubling
+   backoff from one minute, capped at 15, up to four tries, then that bank
+   is given up for that fire and logged; a request that timed out may have
+   reached the engine, so it is retried once and then taken as sent; any
+   other 4xx is given up at once. The state is held in memory and mirrored
+   to disk, so a file that cannot be written never repeats a run. The clock
+   records the mode and the schedule it was started for: either differing,
+   from a save or an edit while hal0-api was down, restarts it and runs
+   nothing at once. A run missed while hal0-api was down with the same
+   config runs once at the next start.
 
 5. **hal0 parses cron itself.** hal0 has no cron dependency; a small parser
    (`src/hal0/config/cron.py`) reads the subset hal0 writes and croniter

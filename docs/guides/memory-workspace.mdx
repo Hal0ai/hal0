@@ -232,9 +232,9 @@ from **Settings → Memory → Knowledge page refresh** (`[memory.refresh]` in
 
 - **Scheduled** (the default) refreshes each page once a day at 03:00 UTC,
   and skips a page whose facts have not changed. The schedule can be daily at
-  a time, every few hours, weekly on a day, or a cron expression; the page
-  shows it in your local time with the UTC expression beside it, and the
-  next run.
+  a time, every few hours from a starting hour, weekly on a day, or a cron
+  expression; the page shows it in your local time with the UTC expression
+  beside it, and the next run.
 - **After every consolidation** refreshes a page whenever new facts in its
   scope are consolidated. Pages stay current, but on a busy box most of the
   memory model's time goes to refreshes.
@@ -248,7 +248,9 @@ The same panel sets when the engine consolidates. **Continuous** (the
 default) consolidates as facts arrive. **Scheduled** turns the engine's own
 consolidation off for this box's banks and runs it once on its own schedule
 (02:00 UTC by default), so the memory model is idle the rest of the day;
-recall finds new facts at once, observations follow after the run.
+recall finds new facts at once, observations follow after the run. A bank
+whose consolidation someone turned off by hand stays off when you go back to
+Continuous; the panel says so.
 
 hal0 applies these settings to every page whatever the writer of the page
 asked for: a coding agent's plugin, an MCP tool, the bank spec. It writes

@@ -314,7 +314,8 @@ A page is changed only when one of its three timing fields
 fields are sent: the engine merges them over the stored trigger, so the
 page's scope, mode, budget and fact types stay as they are. A second run
 changes nothing. `--dry-run` reads and says what would change. Nothing is
-written while memory writes are paused. Exit codes: 0 when every bank was
+written while memory writes are paused. A bank whose auto-consolidation is
+off by an override hal0 did not set keeps it, and the result says so. Exit codes: 0 when every bank was
 reconciled; 1 when a page, a bank config or the listing failed, or writes
 are paused.
 
