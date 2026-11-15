@@ -269,6 +269,30 @@ def _reclass_embedder_keys(
     return plan, {**changeset, "changes": changes}
 
 
+#: The settings prefix whose save starts the refresh-policy reconcile (ADR-0060).
+_REFRESH_PREFIX = "memory.refresh."
+
+
+def _kick_refresh_policy(request: Request, cs: Any) -> dict[str, Any] | None:
+    """Start the refresh-policy reconcile when a ``memory.refresh.*`` value changed.
+
+    The reconcile writes every page's trigger and the banks' config to the
+    engine (:mod:`hal0.memory.refresh_runner`); it runs in hal0-api's
+    background task, so the save does not wait on the engine. ``None`` when
+    no such value changed; otherwise ``{"reconcile": "queued"}``, or
+    ``"unavailable"`` when the task is not running (memory off, or turned off
+    by its environment switch) and ``hal0 memory refresh-policy apply`` is
+    the way to apply it.
+    """
+    if not any(c.path.startswith(_REFRESH_PREFIX) for c in cs.changes):
+        return None
+    runner = getattr(request.app.state, "refresh_policy_runner", None)
+    if runner is None:
+        return {"reconcile": "unavailable"}
+    runner.kick()
+    return {"reconcile": "queued"}
+
+
 @router.put("")
 async def update_settings(request: Request) -> dict[str, Any]:
     """Apply a partial update to hal0.toml.
@@ -342,6 +366,8 @@ async def update_settings(request: Request) -> dict[str, Any]:
         if embedder is not None and showcase is not None:
             embedder = await _embedder_status_for(cs)  # the write may have recorded it
 
+    refresh_policy = _kick_refresh_policy(request, cs)
+
     event_bus = getattr(request.app.state, "events", None)
     if event_bus is not None:
         # Surface a footer chip when the operator saves the config. The
@@ -379,6 +405,8 @@ async def update_settings(request: Request) -> dict[str, Any]:
         config_view["_hal0"]["showcase_dropin"] = showcase
     if embedder is not None and embedder_changed:
         config_view["_hal0"]["memory_embedder"] = embedder
+    if refresh_policy is not None:
+        config_view["_hal0"]["refresh_policy"] = refresh_policy
     return config_view
 
 

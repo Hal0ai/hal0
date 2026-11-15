@@ -3349,6 +3349,99 @@ class MemoryCompatConfig(BaseModel):
         return out
 
 
+#: ``[memory.refresh].pages``: when the engine refreshes knowledge pages.
+RefreshPagesMode = Literal["scheduled", "after_consolidation", "manual"]
+#: ``[memory.refresh].consolidation``: when the engine consolidates.
+ConsolidationMode = Literal["continuous", "scheduled"]
+
+
+def _cron_field(value: Any, key: str) -> Any:
+    from hal0.config.cron import CronError, validate_cron
+
+    if not isinstance(value, str):
+        return value
+    try:
+        return validate_cron(value)
+    except CronError as exc:
+        raise ValueError(f"memory.refresh.{key}: {exc}") from None
+
+
+class MemoryRefreshConfig(BaseModel):
+    """[memory.refresh] section of hal0.toml.
+
+    When the memory engine refreshes knowledge pages (its mental models) and
+    when it consolidates (ADR-0060). hal0 writes the page settings onto every
+    page of this box's banks and onto the banks' defaults, and overrides
+    whatever a page writer asks for, so one setting holds for every page.
+    """
+
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+    pages: RefreshPagesMode = Field(
+        default="scheduled",
+        description=(
+            "When knowledge pages refresh. 'scheduled' refreshes each page on "
+            "the schedule below, and only when facts in its scope changed "
+            "since its last refresh. 'after_consolidation' refreshes a page "
+            "after every consolidation round that touched its scope: pages "
+            "stay current, but each refresh is several minutes of the memory "
+            "model's time and a busy box can spend most of it on refreshes. "
+            "'manual' never refreshes a page by itself; a refresh runs only "
+            "when one is asked for. Applies to every page, whatever the page "
+            "asked for when it was written."
+        ),
+    )
+    schedule: str = Field(
+        default="0 3 * * *",
+        description=(
+            "The schedule pages refresh on when pages is 'scheduled': a "
+            "five-field cron expression in UTC (minute hour day-of-month "
+            "month day-of-week). The default is daily at 03:00 UTC. A page "
+            "whose facts have not changed skips the tick."
+        ),
+    )
+    min_interval_s: int = Field(
+        default=86400,
+        ge=0,
+        le=30 * 86400,
+        description=(
+            "The shortest time between two automatic refreshes of one page, "
+            "in seconds. A refresh due sooner waits until the time is up. "
+            "Written to every page and to the banks' default. A refresh asked "
+            "for by hand is not held back. 0 turns the floor off."
+        ),
+    )
+    consolidation: ConsolidationMode = Field(
+        default="continuous",
+        description=(
+            "When the engine consolidates new facts into observations. "
+            "'continuous' consolidates as facts arrive and keeps up with "
+            "intake. 'scheduled' turns the engine's own consolidation off for "
+            "this box's banks and has hal0-api start one run on the schedule "
+            "below, so the memory model is idle the rest of the day; recall "
+            "sees new facts at once, observations only after the run."
+        ),
+    )
+    consolidation_schedule: str = Field(
+        default="0 2 * * *",
+        description=(
+            "The schedule consolidation runs on when consolidation is "
+            "'scheduled': a five-field cron expression in UTC. The default is "
+            "daily at 02:00 UTC, an hour before the default page refresh."
+        ),
+    )
+
+    @field_validator("schedule", mode="before")
+    @classmethod
+    def _schedule(cls, v: Any) -> Any:
+        return _cron_field(v, "schedule")
+
+    @field_validator("consolidation_schedule", mode="before")
+    @classmethod
+    def _consolidation_schedule(cls, v: Any) -> Any:
+        return _cron_field(v, "consolidation_schedule")
+
+
 class MemoryConfig(BaseModel):
     """[memory] section of hal0.toml.
 
@@ -3382,6 +3475,7 @@ class MemoryConfig(BaseModel):
     console: MemoryConsoleConfig = Field(default_factory=MemoryConsoleConfig)
     projects: MemoryProjectsConfig = Field(default_factory=MemoryProjectsConfig)
     compat: MemoryCompatConfig = Field(default_factory=MemoryCompatConfig)
+    refresh: MemoryRefreshConfig = Field(default_factory=MemoryRefreshConfig)
     public_url: str | None = Field(
         default=None,
         description=(

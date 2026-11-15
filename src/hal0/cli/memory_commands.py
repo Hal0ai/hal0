@@ -52,6 +52,7 @@ from hal0.cli.memory_mm_commands import app as mm_app
 from hal0.cli.memory_models_agents_commands import agents_app, models_app
 from hal0.cli.memory_ops_commands import app as ops_app
 from hal0.cli.memory_recall_commands import recall_cmd
+from hal0.cli.memory_refresh_policy_commands import app as refresh_policy_app
 from hal0.cli.memory_spec_commands import app as spec_app
 
 app = typer.Typer(help="Manage hal0 memory (Hindsight engine).")
@@ -79,6 +80,8 @@ app.add_typer(models_app, name="models")
 # itself instead of calling hal0-api.
 app.add_typer(embedder_app, name="embedder")
 app.add_typer(agents_app, name="agents")
+# ``refresh-policy apply`` (ADR-0060): on the box, straight to the engine.
+app.add_typer(refresh_policy_app, name="refresh-policy")
 app.command("recall")(recall_cmd)
 
 #: ``PUT /api/memory/graph`` can restart hindsight-api (daemon-reload + restart,

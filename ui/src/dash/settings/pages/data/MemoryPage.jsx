@@ -27,6 +27,7 @@ import {
 } from './extractionLimits.js'
 import { graphSaveOutcome } from './extractionThroughput.js'
 import { BankFailures, SaveWarnings, ThroughputNote } from './ExtractionThroughputViews.jsx'
+import { KnowledgeRefreshPanel } from './KnowledgeRefreshPanel.jsx'
 
 export function MemoryPage() {
   // R5 data seam: one typed client supplies the merged reload-class registry.
@@ -36,11 +37,12 @@ export function MemoryPage() {
     <div className="s-section">
       <h2>Memory</h2>
       <p className="desc">
-        Memory engine, graph extraction, and second-pass reranking. Changes to the engine
-        require a hal0-api restart; graph and reranker knobs apply live.
+        Memory engine, graph extraction, knowledge page refresh, and second-pass reranking.
+        Changes to the engine require a hal0-api restart; the other settings apply live.
       </p>
       <MemoryEnginePanel registry={registry} />
       <MemoryGraphPanel />
+      <KnowledgeRefreshPanel registry={registry} />
       <MemoryRerankerPanel registry={registry} />
     </div>
   );

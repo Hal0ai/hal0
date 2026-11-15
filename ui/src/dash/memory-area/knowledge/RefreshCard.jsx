@@ -6,7 +6,8 @@
 // that does not start, naming it. While the engine is not answering it is disabled, and says so.
 //
 // The interval is the bank's minimum time between automatic refreshes. Choosing a value saves
-// it at once.
+// it at once. It is only the bank's fallback: hal0 writes every page's own interval, and this
+// one, from [memory.refresh] (ADR-0060), and the card says where to change that.
 import { useId, useState } from 'react'
 import '../memory-area.css'
 import { useBankConfig, useBankConfigUpdate } from '@/api/hooks/useHindsight'
@@ -85,6 +86,12 @@ function RefreshInterval({ bank, blockedReason }) {
       <p className="ma-helper" id={helpId}>
         How long this bank&apos;s pages and models wait after a refresh before the next automatic one. A page
         or model with its own setting keeps it. A refresh started on this tab always runs.
+      </p>
+      {/* ADR-0060: hal0 writes every page's own floor, and puts this one back, from [memory.refresh]. */}
+      <p className="ma-helper" data-testid="ma-kn-interval-policy">
+        Each page carries its own interval and schedule, set in{' '}
+        <a href="#settings/memory">Settings → Memory → Knowledge page refresh</a>, which also puts
+        this value back to its own, so change it there.
       </p>
     </div>
   )

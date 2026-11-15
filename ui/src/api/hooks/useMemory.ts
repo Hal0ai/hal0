@@ -386,6 +386,23 @@ export interface MemoryGraphRetryResponse {
 
 const POLL_MS = 15_000
 
+// GET /api/memory/refresh-policy (ADR-0060). `notes` are per-bank things to know, such as an
+// auto-consolidation override hal0 did not set.
+export interface MemoryRefreshPolicyStatus {
+  running: boolean
+  last_report: Record<string, unknown> | null
+  consolidation: Record<string, unknown> | null
+  notes: string[]
+}
+
+export function useMemoryRefreshPolicy() {
+  return useQuery<MemoryRefreshPolicyStatus>({
+    queryKey: ['memory', 'refresh-policy'],
+    queryFn: () => apiGet<MemoryRefreshPolicyStatus>(ENDPOINTS.memoryRefreshPolicy),
+    refetchInterval: 60_000,
+  })
+}
+
 export function useMemoryGraphStatus() {
   return useQuery<MemoryGraphStatus>({
     queryKey: ['memory', 'graph', 'status'],

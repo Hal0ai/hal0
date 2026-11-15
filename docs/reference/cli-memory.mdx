@@ -292,6 +292,33 @@ record says `two_bank`. Exit codes: 0 when the plan has no refusal or the run
 completed; 1 when it is refused or fails; 2 for a usage error; 130 when
 interrupted.
 
+### `memory refresh-policy apply`
+
+```sh
+hal0 memory refresh-policy apply [--dry-run] [--json] [--api URL]
+```
+
+Writes `[memory.refresh]` ([Configuration schema](/docs/reference/config-schema#memoryrefresh))
+onto the memory engine: the refresh trigger of every knowledge page and mental
+model in this box's banks (the platform bank, and the private bank on a
+two-bank store), and each bank's refresh floor, default page trigger and
+`enable_auto_consolidation`. hal0-api does the same by itself at start, every
+six hours, and whenever a `memory.refresh.*` setting is saved; this command is
+for a `hal0.toml` edited by hand, or a box whose hal0-api is down. It runs on
+the box and talks to the engine directly (`HAL0_HINDSIGHT_URL`, else the
+local engine; `--api` names another).
+
+A page is changed only when one of its three timing fields
+(`refresh_after_consolidation`, `refresh_cron`,
+`min_refresh_interval_seconds`) differs from the policy, and only those
+fields are sent: the engine merges them over the stored trigger, so the
+page's scope, mode, budget and fact types stay as they are. A second run
+changes nothing. `--dry-run` reads and says what would change. Nothing is
+written while memory writes are paused. A bank whose auto-consolidation is
+off by an override hal0 did not set keeps it, and the result says so. Exit codes: 0 when every bank was
+reconciled; 1 when a page, a bank config or the listing failed, or writes
+are paused.
+
 ### `memory migrate platform`
 
 ```sh

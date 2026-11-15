@@ -65,15 +65,16 @@
     ],
     "default_timezone": "America/New_York",
     "consolidation_llm_parallelism": 1,
-    "mental_model_min_refresh_interval_seconds": 1800,
+    "mental_model_min_refresh_interval_seconds": 86400,
     "recall_decision_model_prune": true,
     "recall_decision_model_dedup": true,
     "audit_log_enabled": true,
     "store_document_text": true,
     "knowledge_page_default_trigger": {
       "mode": "delta",
-      "refresh_after_consolidation": true,
-      "min_refresh_interval_seconds": 1800,
+      "refresh_after_consolidation": false,
+      "refresh_cron": "0 3 * * *",
+      "min_refresh_interval_seconds": 86400,
       "budget": "low"
     },
     "consolidation_use_decision_model": true,
@@ -106,8 +107,9 @@
       "max_tokens": 1500,
       "trigger": {
         "mode": "delta",
-        "refresh_after_consolidation": true,
-        "min_refresh_interval_seconds": 1800,
+        "refresh_after_consolidation": false,
+        "refresh_cron": "0 3 * * *",
+        "min_refresh_interval_seconds": 86400,
         "budget": "low"
       },
       "source_query": "What are the user's preferences, communication style, standing rules and corrections for how agents should work with them?"
@@ -119,8 +121,9 @@
       "max_tokens": 2000,
       "trigger": {
         "mode": "delta",
-        "refresh_after_consolidation": true,
-        "min_refresh_interval_seconds": 1800,
+        "refresh_after_consolidation": false,
+        "refresh_cron": "0 3 * * *",
+        "min_refresh_interval_seconds": 86400,
         "budget": "low"
       },
       "source_query": "Describe the homelab: hosts, IPs, containers/VMs, hardware (CPU/GPU/NPU), services, ports, storage paths and how they relate."
@@ -134,8 +137,9 @@
       "max_tokens": 2000,
       "trigger": {
         "mode": "delta",
-        "refresh_after_consolidation": true,
-        "min_refresh_interval_seconds": 1800,
+        "refresh_after_consolidation": false,
+        "refresh_cron": "0 3 * * *",
+        "min_refresh_interval_seconds": 86400,
         "budget": "low"
       },
       "source_query": "What architectural and operational decisions have been made for hal0, when, and why? Include superseded decisions."
@@ -149,8 +153,9 @@
       "max_tokens": 2000,
       "trigger": {
         "mode": "delta",
-        "refresh_after_consolidation": true,
-        "min_refresh_interval_seconds": 1800,
+        "refresh_after_consolidation": false,
+        "refresh_cron": "0 3 * * *",
+        "min_refresh_interval_seconds": 86400,
         "budget": "low"
       },
       "source_query": "What conventions, procedures, deploy steps, repo layout rules and known pitfalls apply when working on hal0?"

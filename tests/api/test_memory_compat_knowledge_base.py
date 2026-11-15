@@ -66,6 +66,13 @@ PAGE_TRIGGER = {
     "tags_match": "all",
     "refresh_after_consolidation": True,
 }
+#: The timing fields every page is written with: the refresh policy's
+#: defaults (``[memory.refresh]``, ADR-0060), whatever the caller sent.
+POLICY_TIMING = {
+    "refresh_after_consolidation": False,
+    "refresh_cron": "0 3 * * *",
+    "min_refresh_interval_seconds": 86400,
+}
 SEED_PAGE = {
     "name": "Core concepts",
     "source_query": "What are the core concepts of this project?",
@@ -382,6 +389,7 @@ def test_the_first_page_creates_the_project_folder_and_goes_through_the_envelope
         "max_tokens": 4096,
         "trigger": {
             **PAGE_TRIGGER,
+            **POLICY_TIMING,
             "tag_groups": [
                 {"tags": ["knowledge:concept"], "match": "all"},
                 {"tags": ["project:hal0", "scope:global"], "match": "any"},
@@ -390,6 +398,8 @@ def test_the_first_page_creates_the_project_folder_and_goes_through_the_envelope
             "exclude_mental_models": True,
         },
     }
+    # The plugin's refresh_after_consolidation was replaced, and it is told so.
+    assert resp.headers["X-hal0-Ignored-Fields"] == "trigger.refresh_after_consolidation"
     # And the page, as the engine stores its trigger, is shown in the tree.
     tree = client.get(_url(KB + "/tree"), headers=_auth(key)).json()
     assert _names(tree["roots"]) == ["Core concepts"]
@@ -463,6 +473,7 @@ def test_forged_tags_and_scope_are_replaced(client: TestClient, engine: Engine, 
     assert sent["tags"] == ["knowledge:concept", "agent:cc", "kind:ephemeral", "project:hal0"]
     assert sent["trigger"] == {
         "tags_match": "any",
+        **POLICY_TIMING,
         "tag_groups": [
             {"tags": ["knowledge:concept"], "match": "any"},
             {"tags": ["project:hal0", "scope:global"], "match": "any"},
@@ -482,6 +493,7 @@ def test_a_page_with_no_tags_is_built_from_the_project_scope(
     body = {"name": "Everything", "source_query": "What is this project?"}
     assert client.post(_url(KB + "/pages"), headers=_auth(key), json=body).status_code == 201
     assert engine.calls[-1].body["trigger"] == {
+        **POLICY_TIMING,
         "tag_groups": [{"tags": ["project:hal0", "scope:global"], "match": "any"}, NOT_PRIVATE],
         "exclude_mental_models": True,
     }
@@ -541,6 +553,7 @@ def test_the_plugins_resync_of_its_own_page_keeps_the_envelope_and_scope(
         "tags": ["knowledge:component", "agent:cc", "kind:durable", "project:hal0"],
         "trigger": {
             "tags_match": "all",
+            **POLICY_TIMING,
             "tag_groups": [
                 {"tags": ["knowledge:component"], "match": "all"},
                 {"tags": ["project:hal0", "scope:global"], "match": "any"},
@@ -560,12 +573,14 @@ def test_a_trigger_only_update_keeps_the_pages_own_tags(
     client: TestClient, engine: Engine, key: str
 ) -> None:
     seed_project_pages(engine)
-    body = {"trigger": {"tags_match": "all_strict", "refresh_cron": "0 3 * * *"}}
+    body = {"trigger": {"tags_match": "all_strict", "refresh_cron": "0 */4 * * *"}}
     resp = client.patch(_url(KB + "/nodes/kp-architecture"), headers=_auth(key), json=body)
     assert resp.status_code == 200
     sent = engine.calls[-1].body
     assert sent["tags"] == ["knowledge:component", "agent:cc", "kind:durable", "project:hal0"]
+    # The schedule is the refresh policy's, not the caller's (ADR-0060).
     assert sent["trigger"]["refresh_cron"] == "0 3 * * *"
+    assert resp.headers["X-hal0-Ignored-Fields"] == "trigger.refresh_cron"
     assert sent["trigger"]["tag_groups"][0] == {
         "tags": ["knowledge:component"],
         "match": "all_strict",

@@ -32,8 +32,9 @@
       "max_tokens": 2000,
       "trigger": {
         "mode": "delta",
-        "refresh_after_consolidation": true,
-        "min_refresh_interval_seconds": 1800,
+        "refresh_after_consolidation": false,
+        "refresh_cron": "0 3 * * *",
+        "min_refresh_interval_seconds": 86400,
         "budget": "low"
       },
       "source_query": "What are this repository's conventions, build/test/lint commands, layout, and the user's standing corrections for agents working in it?"
@@ -45,8 +46,9 @@
       "max_tokens": 2000,
       "trigger": {
         "mode": "delta",
-        "refresh_after_consolidation": true,
-        "min_refresh_interval_seconds": 1800,
+        "refresh_after_consolidation": false,
+        "refresh_cron": "0 3 * * *",
+        "min_refresh_interval_seconds": 86400,
         "budget": "low"
       },
       "source_query": "Describe this repository's architecture: main modules, data flow, external services and key design decisions."

@@ -121,6 +121,33 @@ def _guarded_manifest(
     return out, refused
 
 
+def _with_policy(manifest: dict[str, Any], policy: Any) -> dict[str, Any]:
+    """``manifest`` with the refresh policy's timing (ADR-0060): on every
+    mental model's trigger, the bank's default page trigger and its refresh
+    floor. The template's own values are only what it shipped with."""
+    from hal0.memory.refresh_policy import FLOOR_KEY, desired_trigger, enforce_trigger
+
+    out = dict(manifest)
+    bank_cfg = out.get("bank")
+    if isinstance(bank_cfg, dict):
+        bank_cfg = dict(bank_cfg)
+        bank_cfg[FLOOR_KEY] = desired_trigger(policy)["min_refresh_interval_seconds"]
+        if isinstance(bank_cfg.get("knowledge_page_default_trigger"), dict):
+            bank_cfg["knowledge_page_default_trigger"] = enforce_trigger(
+                bank_cfg["knowledge_page_default_trigger"], policy
+            )[0]
+        out["bank"] = bank_cfg
+    models = out.get("mental_models")
+    if isinstance(models, list):
+        out["mental_models"] = [
+            {**m, "trigger": enforce_trigger(m.get("trigger"), policy)[0]}
+            if isinstance(m, dict)
+            else m
+            for m in models
+        ]
+    return out
+
+
 def _walk(nodes: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for n in nodes or []:
@@ -219,6 +246,7 @@ def apply_spec(
     dry_run: bool = False,
     bank_filter: str | None = None,
     client: httpx.Client | None = None,
+    policy: Any = None,
 ) -> SpecApplyReport:
     """Apply (or dry-run) the bank spec against a live Hindsight API.
 
@@ -229,7 +257,15 @@ def apply_spec(
     One HTTP failure for a bank is captured on its :class:`BankReport`
     (``error``) rather than aborting the whole run, so ``--bank`` isn't
     required just to work around one broken bank.
+
+    ``policy`` is ``[memory.refresh]`` (this box's, by default): every page
+    and mental model the spec writes gets its timing, whatever the template
+    says (:func:`_with_policy`).
     """
+    from hal0.memory.refresh_policy import current_policy, enforce_trigger
+
+    if policy is None:
+        policy = current_policy()
     spec = load_spec(spec_dir)
     report = SpecApplyReport(api=api, dry_run=dry_run)
     with SpecApplyClient(api, client=client) as c:
@@ -243,7 +279,7 @@ def apply_spec(
             report.banks.append(br)
             try:
                 manifest, br.refused = _guarded_manifest(
-                    load_template(spec_dir, tname), role, targets
+                    _with_policy(load_template(spec_dir, tname), policy), role, targets
                 )
                 path = f"/{quote(bank, safe='')}"
                 br.plan = c.call("POST", f"{path}/import", manifest, {"dry_run": "true"})
@@ -281,6 +317,7 @@ def apply_spec(
                         br.folder_created = kb["folder"]
                     pages = {n.get("name"): n for n in nodes if _kind(n) == "page"}
                     for p in kb["pages"]:
+                        p = {**p, "trigger": enforce_trigger(p.get("trigger"), policy)[0]}
                         if p["name"] in pages:
                             pid = pages[p["name"]].get("id") or pages[p["name"]].get("page_id")
                             # A page is changed through its tree node: a 1.x

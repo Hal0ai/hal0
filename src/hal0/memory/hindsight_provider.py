@@ -735,6 +735,14 @@ class RecallResults(list):
         self.source_facts = source_facts
 
 
+def _policy_timing(trigger: dict[str, Any]) -> dict[str, Any]:
+    """``trigger`` with the refresh policy's timing fields (ADR-0060): when a
+    model refreshes is ``[memory.refresh]``'s, not the writer's."""
+    from hal0.memory.refresh_policy import current_policy, enforce_trigger
+
+    return enforce_trigger(trigger, current_policy())[0]
+
+
 class HindsightProvider(MemoryProvider):
     def __init__(
         self,
@@ -3338,7 +3346,7 @@ class HindsightProvider(MemoryProvider):
         max_tokens: int = 2048,
         trigger: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        trigger = self._agent_model_trigger(trigger)
+        trigger = _policy_timing(self._agent_model_trigger(trigger))
         bank = self._bank_of(self._write_namespace(dataset, client_id))
         return await self._call(
             "create_mental_model",
@@ -3386,7 +3394,7 @@ class HindsightProvider(MemoryProvider):
         before = await self._require_readable_model(bank, mental_model_id, caller)
         old_trigger = before.get("trigger") if isinstance(before.get("trigger"), dict) else {}
         if trigger is not None:
-            trigger = self._agent_model_trigger({**old_trigger, **trigger})
+            trigger = _policy_timing(self._agent_model_trigger({**old_trigger, **trigger}))
         if tags is not None or trigger is not None:
             after = {
                 **before,

@@ -90,7 +90,7 @@ from fastapi.responses import JSONResponse
 from hal0.activity import audit_action
 from hal0.api.auth import judged_principal
 from hal0.api.routes.memory import MemoryUnavailable, extraction_ctx_preflight
-from hal0.config.schema import MemoryCompatConfig, MemoryLanesConfig
+from hal0.config.schema import MemoryCompatConfig, MemoryLanesConfig, MemoryRefreshConfig
 from hal0.errors import (
     BadRequest,
     Forbidden,
@@ -148,6 +148,7 @@ from hal0.memory.read_scope import (
     tags_readable,
     unresolved_scope_groups,
 )
+from hal0.memory.refresh_policy import enforce_trigger
 
 router = APIRouter()
 
@@ -581,6 +582,13 @@ def _settings(request: Request) -> MemoryCompatConfig:
     config = getattr(request.app.state, "hal0_config", None)
     compat = getattr(getattr(config, "memory", None), "compat", None)
     return compat if isinstance(compat, MemoryCompatConfig) else _DEFAULT_SETTINGS
+
+
+def _refresh_policy(request: Request) -> MemoryRefreshConfig:
+    """``[memory.refresh]`` as hal0-api holds it, or the shipped defaults (ADR-0060)."""
+    config = getattr(request.app.state, "hal0_config", None)
+    refresh = getattr(getattr(config, "memory", None), "refresh", None)
+    return refresh if isinstance(refresh, MemoryRefreshConfig) else MemoryRefreshConfig()
 
 
 def _reflect_limit(request: Request) -> int:
@@ -2807,9 +2815,11 @@ async def knowledge_base_create_page(bank: str, request: Request, agent: str = _
     max_tokens = _max_tokens_field(body, what)
     labels, leaf = _page_tags(body.get("tags"), scope, what)
     chosen, refused = _caller_trigger(body.get("trigger"), what)
+    # ADR-0060: when a page refreshes is hal0's, whatever the caller asked.
+    chosen, overridden = enforce_trigger(chosen, _refresh_policy(request))
     headers = {
         **scope.headers(),
-        **_ignored([*(n for n in body if n not in _PAGE_FIELDS), *refused]),
+        **_ignored([*(n for n in body if n not in _PAGE_FIELDS), *refused, *overridden]),
     }
     view = await _project_pages(request, provider, scope)
     if isinstance(view, Response):
@@ -2865,6 +2875,10 @@ async def knowledge_base_update_node(
     body = await _read_json(request, cap=MAX_KNOWLEDGE_BODY_BYTES)
     what = "knowledge node update"
     chosen, refused = _caller_trigger(body.get("trigger"), what)
+    overridden: list[str] = []
+    if body.get("trigger") is not None or body.get("tags") is not None:
+        # The trigger is written back whole below: with hal0's timing (ADR-0060).
+        chosen, overridden = enforce_trigger(chosen, _refresh_policy(request))
     wire: dict[str, Any] = {}
     for key in ("name", "source_query"):
         value = _text_field(body, key, what, required=False)
@@ -2875,7 +2889,7 @@ async def knowledge_base_update_node(
         wire["max_tokens"] = max_tokens
     headers = {
         **scope.headers(),
-        **_ignored([*(n for n in body if n not in _NODE_FIELDS), *refused]),
+        **_ignored([*(n for n in body if n not in _NODE_FIELDS), *refused, *overridden]),
     }
     view = await _project_pages(request, provider, scope)
     if isinstance(view, Response):

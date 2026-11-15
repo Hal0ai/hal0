@@ -218,7 +218,12 @@ def test_apply_spec_updates_existing_page_through_its_node(tmp_path):
                 "source_query": "showcase",
                 "tags": ["showcase"],
                 "max_tokens": 1024,
-                "trigger": {"refresh_after_consolidation": True},
+                # The refresh policy's timing, not the template's (ADR-0060).
+                "trigger": {
+                    "refresh_after_consolidation": False,
+                    "refresh_cron": "0 3 * * *",
+                    "min_refresh_interval_seconds": 86400,
+                },
             },
         )
     ]

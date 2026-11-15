@@ -1280,8 +1280,44 @@ async def _annotate_operation(client: Any, bank_id: str, result: Any) -> Any:
     return await annotate_retain_yield(result, _doc)
 
 
+#: The page and mental-model writes whose ``trigger`` timing is hal0's
+#: (ADR-0060): ``POST`` always gets it, ``PATCH`` only when it sends a trigger
+#: (the engine merges a PATCHed trigger over the stored one).
+_TRIGGER_WRITES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("POST", "/v1/default/banks/{bank_id}/mental-models"),
+        ("PATCH", "/v1/default/banks/{bank_id}/mental-models/{model_id}"),
+        ("POST", "/v1/default/banks/{bank_id}/knowledge-base/pages"),
+    }
+)
+#: Named the same as compat's (:data:`hal0.api.routes.memory_compat.IGNORED_FIELDS_HEADER`).
+_IGNORED_FIELDS_HEADER = "X-hal0-Ignored-Fields"
+
+
+def _refresh_policy(request: Request) -> Any:
+    from hal0.config.schema import MemoryRefreshConfig
+
+    config = getattr(request.app.state, "hal0_config", None)
+    refresh = getattr(getattr(config, "memory", None), "refresh", None)
+    return refresh if isinstance(refresh, MemoryRefreshConfig) else MemoryRefreshConfig()
+
+
+def _enforce_trigger_timing(request: Request, method: str, body: Any) -> tuple[Any, list[str]]:
+    """``body`` with the refresh policy's timing fields on its trigger, and
+    the fields that replaced what the caller sent."""
+    if not isinstance(body, dict):
+        return body, []
+    if method == "PATCH" and not isinstance(body.get("trigger"), dict):
+        return body, []
+    from hal0.memory.refresh_policy import enforce_trigger
+
+    trigger, overridden = enforce_trigger(body.get("trigger"), _refresh_policy(request))
+    return {**body, "trigger": trigger}, overridden
+
+
 def _make_handler(method: str, template: str):
     guard = _SHAPE_GUARDS.get((method, template))
+    enforces_timing = (method, template) in _TRIGGER_WRITES
     audit_action = _DELETE_ACTIONS.get(template) if method == "DELETE" else None
     if (method, template) == _CURATE_TEMPLATE:
         audit_action = _CURATE_AUDIT_ACTION
@@ -1290,13 +1326,17 @@ def _make_handler(method: str, template: str):
     # ``memory.writes_paused`` while `hal0 memory embedder switch` runs.
     is_write = engine_call_writes(method, template)
 
-    async def handler(request: Request) -> Any:
+    async def handler(request: Request, response: Response) -> Any:
         if is_write:
             require_writes_allowed()
         client = _client(request)
         segments = _validate_segments(dict(request.path_params))
         upstream = template.format(**segments) if segments else template
         body = await _read_body(request) if method in _BODY_METHODS else None
+        if enforces_timing:
+            body, overridden = _enforce_trigger_timing(request, method, body)
+            if overridden:
+                response.headers[_IGNORED_FIELDS_HEADER] = ",".join(overridden)
         params = dict(request.query_params) or None
         if audit_action is not None:
             # #1024: audit destructive ops with a truthful outcome — the block
@@ -1318,6 +1358,29 @@ def _make_handler(method: str, template: str):
         return result
 
     return handler
+
+
+@router.get("/refresh-policy")
+async def refresh_policy_status(request: Request) -> dict[str, Any]:
+    """What hal0-api's refresh-policy task last did (ADR-0060).
+
+    ``running`` is false when the task is not started (memory off, or its
+    environment switch). ``last_report`` is the last reconcile, with each
+    bank's ``notes`` (an auto-consolidation override hal0 did not set);
+    ``consolidation`` is the last scheduled consolidation pass. Reads only
+    hal0-api's memory, never the engine.
+    """
+    runner = getattr(request.app.state, "refresh_policy_runner", None)
+    if runner is None:
+        return {"running": False, "last_report": None, "consolidation": None, "notes": []}
+    report = runner.last_report.to_dict() if runner.last_report is not None else None
+    notes = [n for b in (report or {}).get("banks", []) for n in b.get("notes") or []]
+    return {
+        "running": True,
+        "last_report": report,
+        "consolidation": runner.last_consolidation,
+        "notes": notes,
+    }
 
 
 for _method, _path, _template in _FORWARDS:

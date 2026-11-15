@@ -195,7 +195,11 @@ pages, mental models and directives, and gives the last refresh that worked.
   one at a time, shows how far it has got, and stops at the first that does
   not start, naming it. **Refresh at most every** sets the bank's minimum
   time between automatic refreshes: one hour, four hours, twelve hours, one
-  day, or every time facts are consolidated. A choice is saved at once.
+  day, or every time facts are consolidated. A choice is saved at once, but
+  every page hal0 writes carries its own floor from **Settings → Memory →
+  Knowledge page refresh**, which wins, and hal0 puts the bank's back to
+  that value the next time it applies the policy
+  ([When pages refresh](#when-pages-refresh)).
 - **Knowledge pages** — the bank's page tree. Folders open and close; a page
   opens in the reader. The tree works from the keyboard (arrows, Home, End,
   Enter).
@@ -217,6 +221,43 @@ The open page or model is in the address (`?bank=…&page=…`).
 
 CLI equivalents: `hal0 memory kb`, `hal0 memory mm` and
 `hal0 memory directive`.
+
+### When pages refresh
+
+A refresh rewrites a page from its facts. It is several calls to the memory
+model and takes minutes, and while it runs, retains and consolidation wait
+for the same model. hal0 decides when every page and mental model refreshes,
+from **Settings → Memory → Knowledge page refresh** (`[memory.refresh]` in
+`hal0.toml`, see the [configuration schema](/docs/reference/config-schema#memoryrefresh)):
+
+- **Scheduled** (the default) refreshes each page once a day at 03:00 UTC,
+  and skips a page whose facts have not changed. The schedule can be daily at
+  a time, every few hours from a starting hour, weekly on a day, or a cron
+  expression; the page shows it in your local time with the UTC expression
+  beside it, and the next run.
+- **After every consolidation** refreshes a page whenever new facts in its
+  scope are consolidated. Pages stay current, but on a busy box most of the
+  memory model's time goes to refreshes.
+- **Manual only** never refreshes a page by itself; use **Refresh** in the
+  reader or `hal0 memory kb refresh`.
+
+**Minimum interval** is the shortest time between two automatic refreshes of
+one page (one day by default). A refresh started by hand is never held back.
+
+The same panel sets when the engine consolidates. **Continuous** (the
+default) consolidates as facts arrive. **Scheduled** turns the engine's own
+consolidation off for this box's banks and runs it once on its own schedule
+(02:00 UTC by default), so the memory model is idle the rest of the day;
+recall finds new facts at once, observations follow after the run. A bank
+whose consolidation someone turned off by hand stays off when you go back to
+Continuous; the panel says so.
+
+hal0 applies these settings to every page whatever the writer of the page
+asked for: a coding agent's plugin, an MCP tool, the bank spec. It writes
+them when hal0-api starts, every six hours, and as soon as you save; `hal0
+memory refresh-policy apply` does it by hand. To run refreshes on a
+different slot from retains, set
+`[memory.lanes.mental_model_refresh].virtual_model`.
 
 ## Operations
 
