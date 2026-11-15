@@ -304,6 +304,7 @@ The knowledge-base routes have their own page: [Knowledge pages](/docs/reference
 | Reflects in flight, all clients | `[memory.compat] max_concurrent_reflects`, 2, and never more than one fewer than the engine runs | `429 memory.compat_busy`, `Retry-After: 15` |
 | Recalls in flight, per client | 2 | `429 memory.compat_busy`, `Retry-After: 5` |
 | Recalls in flight, all clients | `[memory.compat] max_concurrent_recalls`, 4 | `429 memory.compat_busy`, `Retry-After: 5` |
+| Commit-log retains (strategy `gitlog`), per project | one per `[memory.compat] gitlog_min_interval_s`, one day | `429 memory.compat_gitlog_held`, `Retry-After` until the day is up |
 
 The item limit is sized for the largest thing the plugin sends, a whole session transcript.
 
@@ -357,6 +358,7 @@ A failure hal0 raises is the standard envelope `{"error": {"code", "message", "d
 | 405 | `memory.compat_mutation_unsupported` | A write this endpoint does not serve |
 | 413 | `memory.compat_body_too_large`, `memory.compat_too_many_items`, `memory.compat_item_too_large` | See [Limits](#limits) |
 | 429 | `memory.compat_busy` | Too many retains, reflects or recalls in flight, or the client's quota of unfinished retains is used up; `Retry-After` says when to retry |
+| 429 | `memory.compat_gitlog_held` | The project's commit-log document was retained less than `[memory.compat] gitlog_min_interval_s` ago; the plugin logs it and does not resend |
 | 502 | `memory.compat_engine_error` | The engine answered `5xx`, refused hal0's own credential, or answered `404` to a retain. `error.details.upstream_status` has its status |
 | 503 | `memory.engine_unavailable`, `memory.unavailable` | The engine cannot be reached, or hal0 is running on its volatile fallback store |
 | 503 | `memory.writes_paused` | `POST .../memories`, `DELETE .../documents/{id}` and the three knowledge-base writes while `hal0 memory embedder switch` holds the memory write gate, checked before any engine call; `Retry-After: 30`, the same answer as `POST /api/memory/add`. Reads are not gated |

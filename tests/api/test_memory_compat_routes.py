@@ -3428,3 +3428,85 @@ def test_two_bank_compat_listing_holds_back_other_agents_and_other_projects(
     ids = [d["id"] for d in resp.json()["items"]]
     assert ids == ["mine"]
     assert all("hal0:private" not in c.path for c in engine.calls)
+
+
+# ── the commit-log document ─────────────────────────────────────────────────
+
+
+def _gitlog(client: TestClient, key: str, bank: str = URL_BANK) -> httpx.Response:
+    item = _item(
+        content="abc1234 2026-11-15 dev\nfix: one more commit on top",
+        document_id="gitlog:hal0",
+        strategy="gitlog",
+    )
+    return client.post(_url(bank + "/memories"), headers=_auth(key), json={"items": [item]})
+
+
+def _engine_retains(engine: Engine) -> int:
+    return sum(1 for c in engine.calls if c.line == f"POST {ENGINE_BANK}/memories")
+
+
+def test_a_commit_log_sent_again_too_soon_is_held_for_every_client(
+    client: TestClient, engine: Engine, key: str, store: BridgeStore
+) -> None:
+    """The plugin re-sends its whole commit log on every new HEAD, and every
+    worktree has one. The engine re-extracts all of it each time, so a second
+    one within the interval is refused before it reaches the engine."""
+    assert MemoryCompatConfig().gitlog_min_interval_s == 86400
+    engine.strategies = ("conversation", "gitlog")
+    _row, codex = store.add_client("codex", created_by="t")
+
+    assert _gitlog(client, key).status_code == 200
+    assert _engine_retains(engine) == 1
+
+    for caller in (key, codex):  # gitlog: is a shared prefix: one document per project
+        held = _gitlog(client, caller)
+        assert held.status_code == 429, held.text
+        assert _code(held) == "memory.compat_gitlog_held"
+        wait = int(held.headers["Retry-After"])
+        assert 86000 < wait <= 86400
+        assert held.json()["error"]["details"] == {"retry_after_s": wait}
+    assert _engine_retains(engine) == 1
+
+    # Anything else the client sends is not held up by it.
+    other = client.post(
+        _url(URL_BANK + "/memories"),
+        headers=_auth(key),
+        json={"items": [_item(document_id="conversation:s-9", strategy="conversation")]},
+    )
+    assert other.status_code == 200
+    assert _engine_retains(engine) == 2
+
+
+def test_a_commit_log_goes_through_again_once_the_interval_has_passed(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    assert _gitlog(client, key).status_code == 200
+    state = _compat_state(app)
+    [(doc, at)] = state.gitlog_retained_at.items()
+    assert doc == "hal0::shared::gitlog:hal0"
+    state.gitlog_retained_at[doc] = at - 86401
+    assert _gitlog(client, key).status_code == 200
+    assert _engine_retains(engine) == 2
+
+
+def test_a_commit_log_the_engine_refuses_does_not_hold_the_next(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    engine.overrides[("POST", ENGINE_BANK + "/memories")] = httpx.Response(
+        500, json={"detail": "x"}
+    )
+    assert _gitlog(client, key).status_code == 502
+    assert _compat_state(app).gitlog_retained_at == {}
+    del engine.overrides[("POST", ENGINE_BANK + "/memories")]
+    assert _gitlog(client, key).status_code == 200
+
+
+def test_the_commit_log_hold_can_be_turned_off(
+    client: TestClient, engine: Engine, key: str, app: FastAPI
+) -> None:
+    _configure(app, gitlog_min_interval_s=0)
+    assert _gitlog(client, key).status_code == 200
+    assert _gitlog(client, key).status_code == 200
+    assert _engine_retains(engine) == 2
+    assert _compat_state(app).gitlog_retained_at == {}
