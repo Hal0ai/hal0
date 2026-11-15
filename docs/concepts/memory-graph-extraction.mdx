@@ -42,7 +42,7 @@ even on a fresh install, under `[memory.graph]`:
   `extraction_max_tokens` (default `16384`), `extraction_llm_retries`
   (default `1`), `extraction_task_retries` (default `2`) and
   `extraction_retry_backoff_s` (default `120`) and `extraction_worker_slots`
-  (default `4`). The extraction slot is a
+  (default `4`), with its three slot reservations. The extraction slot is a
   shared inference slot, usually one llama-server serving one request at a
   time; Hindsight's own defaults (32 concurrent calls, 64000 completion
   tokens, three retries at each of two layers) let one slow extraction
@@ -76,9 +76,27 @@ even on a fresh install, under `[memory.graph]`:
   `extraction_worker_slots` bounds how many of those queued tasks run at once
   (`HINDSIGHT_API_WORKER_MAX_SLOTS`). Hindsight's own default of 10 can push
   the engine past the memory limit of a small box and get it OOM-killed, so
-  hal0 renders 4: the two slots Hindsight reserves for consolidation plus two
-  for retain. Raise it only on a box with memory to spare; it cannot go below
-  3. `hal0 doctor` shows the value in force.
+  hal0 renders 4. Raise it only on a box with memory to spare; it cannot go
+  below 3. `hal0 doctor` shows the value in force.
+
+  Part of those slots is reserved per task type, and the rest is one shared
+  pool any task may use: `retain_reserved_slots` (default `1`),
+  `consolidation_reserved_slots` (default `2`, Hindsight's own) and
+  `refresh_reserved_slots` (default `0`, for knowledge-page refreshes). A
+  reservation is a floor, not a cap, so the default 4 slots split into 1 for
+  retains, 2 for consolidation and 1 shared. The retain slot exists because
+  refreshes wait for an LLM permit while they hold a worker slot: with
+  Hindsight's defaults (no retain reservation) a queue of refreshes held
+  every shared slot and retains waited for hours. The reservations must leave
+  at least one shared slot. A box held at 3 slots loads with no retain
+  reservation unless it sets one, so it runs as before; raise the total to 4
+  for the retain slot (the floor stays 3 because each slot costs engine
+  memory). Set all four under **Worker slots** on Settings → Data → Memory,
+  which shows the shared pool left as you type; `PUT /api/memory/graph`
+  refuses reservations that leave no shared slot with 400
+  `config.memory_graph_invalid`. Do not also set Hindsight's older
+  `HINDSIGHT_API_WORKER_<TYPE>_MAX_SLOTS` spelling of these keys in another
+  drop-in: Hindsight refuses to start when both spellings of one key are set.
 
   `extraction_max_tokens` must stay strictly above the retain chunk size of
   every bank: the engine refuses each retain into a bank whose chunk size is

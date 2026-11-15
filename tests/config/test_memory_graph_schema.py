@@ -54,6 +54,10 @@ class TestMemoryGraphDefaults:
             "extraction_task_retries",
             "extraction_retry_backoff_s",
             "extraction_worker_slots",
+            # #3700 worker-slot reservations
+            "retain_reserved_slots",
+            "consolidation_reserved_slots",
+            "refresh_reserved_slots",
         }
         assert "route" not in dumped and "upstream" not in dumped
 

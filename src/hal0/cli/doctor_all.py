@@ -3481,11 +3481,15 @@ def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
         return Check(name, title, _WARN, warning)
     if not report.get("checked"):
         return Check(name, title, _WARN, "could not read the hindsight-api unit environment")
-    slots = (report.get("effective") or {}).get("HINDSIGHT_API_WORKER_MAX_SLOTS")
-    llm = (report.get("effective") or {}).get("HINDSIGHT_API_LLM_MAX_CONCURRENT")
+    effective = report.get("effective") or {}
+    slots = effective.get("HINDSIGHT_API_WORKER_MAX_SLOTS")
+    retain = effective.get("HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS")
+    llm = effective.get("HINDSIGHT_API_LLM_MAX_CONCURRENT")
     in_force = ""
     if slots is not None:
         in_force = f" (worker slots {slots}"
+        if retain is not None:
+            in_force += f", {retain} reserved for retain"
         in_force += f", LLM concurrency {llm})" if llm is not None else ")"
     return Check(name, title, _PASS, f"hindsight-api runs with the values hal0 renders{in_force}")
 
