@@ -34,6 +34,7 @@ const toast = (msg, kind = 'info') =>
   typeof window !== 'undefined' && window.__hal0Toast && window.__hal0Toast(msg, kind)
 
 const DRIFT = 'flm-config-drift'
+const AWAIT_CFG_MS = 10_000
 // The non-chat roles, each served by the anchor's process and shown on its `-stt` / `-embed`
 // shadow slot (src/hal0/slots/npu/trio.py).
 const SHADOW_ROLES = [
@@ -107,6 +108,9 @@ function FlmLaneBody({ anchor }) {
   const [pullTag, setPullTag] = useState(null)
   const [err, setErr] = useState(null)
   const [ask, setAsk] = useState(null) // { plan, confirm } awaiting the operator
+  // The config fingerprint as it was before our last write. The controls stay locked until the
+  // refetched config differs from it, so the next change is planned against what was just saved.
+  const [awaitFp, setAwaitFp] = useState(null)
 
   const fp = cfgFingerprint(cfg)
   const fpNow = useRef(fp)
@@ -117,6 +121,16 @@ function FlmLaneBody({ anchor }) {
   // A download in flight is abandoned when the anchor's config moves under it: writing the picked
   // model afterwards would overwrite the newer config.
   const fpAtPull = useRef(null)
+  useEffect(() => {
+    if (awaitFp == null) return undefined
+    if (cfgReady && fp !== awaitFp) {
+      setAwaitFp(null)
+      return undefined
+    }
+    // A refetch that never lands (or lands unchanged) must not lock the lane for good.
+    const t = setTimeout(() => setAwaitFp(null), AWAIT_CFG_MS)
+    return () => clearTimeout(t)
+  }, [awaitFp, fp, cfgReady])
   useEffect(() => {
     if (!cfgReady || !waiter.current || writing.current) return
     if (fpAtPull.current != null && fpAtPull.current !== fp) {
@@ -176,7 +190,9 @@ function FlmLaneBody({ anchor }) {
       }
       setBusy('writing')
       writing.current = true
+      const fpBefore = fpNow.current
       await editMut.mutateAsync({ name: anchor.name, body: draftBody(plan.next, saved) })
+      setAwaitFp(fpBefore)
       if (plan.after === 'restart') {
         start.run(anchor.name, 'restart').catch((e) => toast(`FLM restart failed — ${e?.message || 'see logs'}`, 'warn'))
       } else if (plan.after === 'start') {
@@ -215,7 +231,7 @@ function FlmLaneBody({ anchor }) {
   const tps = typeof m.toks === 'number' && m.toks > 0 ? Math.round(m.toks) : null
   const ttft = typeof m.ttft === 'number' && m.ttft > 0 ? Math.round(m.ttft) : null
   const mem = typeof m.mem === 'number' ? Math.round(m.mem * 10) / 10 : null
-  const locked = !!busy || !cfgReady
+  const locked = !!busy || !cfgReady || awaitFp != null
   const toggle = (cap) => run(planRoleToggle(saved, cap, up))
   const pickChat = (id) => run(planModelPick(saved, id, installed(id), up))
 
@@ -262,7 +278,8 @@ function FlmLaneBody({ anchor }) {
               value={saved.chatModel ?? null}
               testid="flm-chat-model"
               ariaLabel="FLM chat model"
-              disabled={locked}
+              // The write drops [model].default while chat is off, so a pick then would be lost.
+              disabled={locked || !saved.chat}
               onChange={pickChat}
             />
           </div>
