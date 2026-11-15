@@ -50,6 +50,19 @@ export interface NpuOccupancy {
     device_node: string | null
     driver_loaded: boolean | null
     xdna_gen: number | null
+    // ADR-0057 host readiness; every field is null when it could not be read.
+    firmware_version?: string | null
+    firmware_min?: string | null
+    firmware_ok?: boolean | null
+    /** Required kernel params absent from /proc/cmdline; null = unreadable. */
+    cmdline_missing?: string[] | null
+    xrt_version?: string | null
+    xrt_min?: string | null
+    xrt_ok?: boolean | null
+    /** What hal0 configures for xdna slot containers ("unlimited"). */
+    memlock?: string | null
+    fclk_held?: boolean | null
+    fclk_perf_level?: string | null
   } | null
 }
 

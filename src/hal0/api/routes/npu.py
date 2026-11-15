@@ -180,9 +180,17 @@ def _local_image_refs() -> set[str] | None:
 
 
 def _npu_host_probe() -> dict[str, Any]:
+    from hal0.hardware.npu_host import host_readiness
     from hal0.mcp.probes import npu_status
 
-    return npu_status()
+    # The readiness facts (firmware, kernel params, XRT, memlock, fabric clock)
+    # are best-effort and independent of the device probe: a failure in one
+    # leaves the other's keys intact.
+    probed: dict[str, Any] = {}
+    with contextlib.suppress(Exception):
+        probed.update(npu_status())
+    probed.update(host_readiness())
+    return probed
 
 
 def _image_pulled(ref: str, local: set[str] | None) -> bool | None:
@@ -220,11 +228,12 @@ def _engine_facts_sync() -> tuple[dict[str, Any], dict[str, Any]]:
         except Exception:
             xdna_pulled = None
 
-    host: dict[str, Any] = {"device_node": None, "driver_loaded": None, "xdna_gen": None}
+    host = _none_host()
     try:
         probed = _npu_host_probe()
         for key in host:
-            host[key] = probed.get(key)
+            if key in probed:  # an omitted key keeps its default (None, or the ADR minimum)
+                host[key] = probed[key]
     except Exception:
         log.warning("npu.host_probe_failed", exc_info=True)
 
@@ -240,6 +249,18 @@ _facts_cache: tuple[float, dict[str, Any]] | None = None
 _facts_refresh_thread: threading.Thread | None = None
 
 
+def _none_host() -> dict[str, Any]:
+    """The all-unknown ``npu_host`` block (device probe keys + readiness facts)."""
+    from hal0.hardware.npu_host import NPU_READINESS_NONE
+
+    return {
+        "device_node": None,
+        "driver_loaded": None,
+        "xdna_gen": None,
+        **NPU_READINESS_NONE,
+    }
+
+
 def _none_facts() -> dict[str, Any]:
     """The all-``None`` facts shape: what a failed or not-yet-read block reports."""
     return {
@@ -247,7 +268,7 @@ def _none_facts() -> dict[str, Any]:
             "flm": {"image": None, "version": None},
             "xdna": {"image": None, "tag": None, "pulled": None},
         },
-        "npu_host": {"device_node": None, "driver_loaded": None, "xdna_gen": None},
+        "npu_host": _none_host(),
     }
 
 

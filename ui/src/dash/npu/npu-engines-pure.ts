@@ -1,6 +1,6 @@
 // Pure builders for the NPU Engines & profiles sub-tab (Slots → NPU → Engines).
-// Host readiness: only what hal0 can read from inside its container; everything else is
-// `unknown` with the requirement spelled out — a null fact is never `ok`.
+// Host readiness: every row is judged from a fact hal0 read (npu_host / hardware stats);
+// a null fact is `unknown` (or `info`) with the honest reason, never `ok`.
 import type { NpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import type { Profile } from '@/api/hooks/useProfiles'
 
@@ -21,27 +21,71 @@ export function readinessRows(occ: Pick<NpuOccupancy, 'npu_host'> | null | undef
   const host = occ?.npu_host
   const pmode = hw?.npu_pmode ?? null
   const fclk = hw?.npu_fclk ?? null
+  const notReported = 'not reported'
+
+  const fwMin = host?.firmware_min ?? '1.1.2.65'
+  const firmware: ReadinessRow = !host
+    ? { id: 'firmware', label: 'Firmware', state: 'unknown', detail: notReported }
+    : host.firmware_version == null
+      ? { id: 'firmware', label: 'Firmware', state: 'unknown', detail: `needs ≥ ${fwMin}; could not read /sys/class/accel/accel*/device/fw_version` }
+      : host.firmware_ok === false
+        ? { id: 'firmware', label: 'Firmware', state: 'warn', detail: `${host.firmware_version}; the ggml-xdna lane needs ≥ ${fwMin}` }
+        : { id: 'firmware', label: 'Firmware', state: 'ok', detail: `${host.firmware_version} (needs ≥ ${fwMin})` }
+
+  const xrtMin = host?.xrt_min ?? '2.25.0'
+  const xrt: ReadinessRow = !host
+    ? { id: 'xrt', label: 'XRT', state: 'unknown', detail: notReported }
+    : host.xrt_version == null
+      ? { id: 'xrt', label: 'XRT', state: 'info', detail: `no XRT library on the host; GGML slots use the userspace XRT bundled in the xdna runner image (a host copy, ${xrtMin}, only matters with [xdna].host_xrt)` }
+      : host.xrt_ok === false
+        ? { id: 'xrt', label: 'XRT', state: 'warn', detail: `host ${host.xrt_version}; the xdna runner image is built against ${xrtMin}` }
+        : { id: 'xrt', label: 'XRT', state: 'ok', detail: `host ${host.xrt_version} (needs ${xrtMin})` }
+
+  const iommu: ReadinessRow = !host
+    ? { id: 'iommu', label: 'Kernel params', state: 'unknown', detail: notReported }
+    : host.cmdline_missing == null
+      ? { id: 'iommu', label: 'Kernel params', state: 'unknown', detail: 'needs `iommu=pt amd_iommu=on`; could not read /proc/cmdline' }
+      : host.cmdline_missing.length > 0
+        ? { id: 'iommu', label: 'Kernel params', state: 'warn', detail: `missing ${host.cmdline_missing.map((t) => `\`${t}\``).join(' ')} on the host kernel command line` }
+        : { id: 'iommu', label: 'Kernel params', state: 'ok', detail: '`iommu=pt amd_iommu=on` set' }
+
+  const pmodeRow: ReadinessRow =
+    pmode == null
+      ? { id: 'pmode', label: 'Power mode', state: 'unknown', detail: 'hal0 cannot read this: xrt-smi is not installed on the host (the runner image does not ship it either)', command: PMODE_TURBO_CMD }
+      : pmode === 'turbo'
+        ? { id: 'pmode', label: 'Power mode', state: 'ok', detail: 'turbo' }
+        : { id: 'pmode', label: 'Power mode', state: 'warn', detail: `${pmode}; turbo measured about +15% prefill and +20% decode over the default power mode`, command: PMODE_TURBO_CMD }
+
+  const mhz = fclk == null ? null : `${fclk} MHz`
+  const fclkRow: ReadinessRow =
+    host?.fclk_held === true
+      ? { id: 'fclk', label: 'GPU fabric clock', state: 'ok', detail: `${mhz ? `${mhz}, ` : ''}held at the top level (${host.fclk_perf_level ?? 'high'})` }
+      : host?.fclk_held === false
+        ? { id: 'fclk', label: 'GPU fabric clock', state: 'warn', detail: `${mhz ? `${mhz}, ` : ''}not held (${host.fclk_perf_level ?? 'unknown level'}); running GPU slots beside an NPU slot can hang the box (ADR-0054), hold it on the Proxmox host with \`hal0-fabric-clock hold\`` }
+        : fclk == null
+          ? { id: 'fclk', label: 'GPU fabric clock', state: 'unknown', detail: 'could not read the GPU fabric clock from sysfs' }
+          : { id: 'fclk', label: 'GPU fabric clock', state: 'info', detail: `${mhz}; whether it is held could not be read from here (ADR-0054: only the Proxmox host can hold it)` }
+
+  const memlock: ReadinessRow =
+    host?.memlock === 'unlimited'
+      ? { id: 'memlock', label: 'Memlock', state: 'ok', detail: 'hal0 starts GGML slot containers with `--ulimit memlock=-1` (unlimited)' }
+      : { id: 'memlock', label: 'Memlock', state: 'unknown', detail: notReported }
+
   return [
     host?.device_node
       ? { id: 'device', label: 'Device node', state: 'ok', detail: host.device_node }
-      : { id: 'device', label: 'Device node', state: 'unknown', detail: host ? 'no device node found' : 'not reported' },
+      : { id: 'device', label: 'Device node', state: 'unknown', detail: host ? 'no device node found' : notReported },
     host?.driver_loaded == null
-      ? { id: 'driver', label: 'amdxdna driver', state: 'unknown', detail: 'not reported' }
+      ? { id: 'driver', label: 'amdxdna driver', state: 'unknown', detail: notReported }
       : host.driver_loaded
         ? { id: 'driver', label: 'amdxdna driver', state: 'ok', detail: 'loaded' }
         : { id: 'driver', label: 'amdxdna driver', state: 'warn', detail: 'not detected (hal0 may be unable to read the module list from its container)' },
-    { id: 'firmware', label: 'Firmware', state: 'unknown', detail: 'needs ≥ 1.1.2.65; hal0 cannot read host firmware from the container' },
-    { id: 'xrt', label: 'XRT', state: 'unknown', detail: 'needs 2.25.0' },
-    { id: 'iommu', label: 'Kernel params', state: 'unknown', detail: 'needs `iommu=pt amd_iommu=on`' },
-    pmode == null
-      ? { id: 'pmode', label: 'Power mode', state: 'unknown', detail: 'not reported', command: PMODE_TURBO_CMD }
-      : pmode === 'turbo'
-        ? { id: 'pmode', label: 'Power mode', state: 'ok', detail: 'turbo' }
-        : { id: 'pmode', label: 'Power mode', state: 'warn', detail: `${pmode}; turbo measured about +15% prefill and +20% decode over the default power mode`, command: PMODE_TURBO_CMD },
-    fclk == null
-      ? { id: 'fclk', label: 'Fabric clock', state: 'unknown', detail: 'not reported' }
-      : { id: 'fclk', label: 'Fabric clock', state: 'info', detail: `${fclk} MHz (no threshold known; not judged)` },
-    { id: 'memlock', label: 'Memlock', state: 'unknown', detail: 'set on GGML slot containers' },
+    firmware,
+    xrt,
+    iommu,
+    pmodeRow,
+    fclkRow,
+    memlock,
   ]
 }
 
