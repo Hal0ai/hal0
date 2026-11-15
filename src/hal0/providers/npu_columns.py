@@ -2,10 +2,19 @@
 
 The NPU-occupancy dashboard card needs the *honest* AIE column allocation
 for each FLM/NPU slot: which of the Strix Halo XDNA NPU's 8 columns a
-loaded slot actually owns. That allocation is only knowable by exec'ing
-``xrt-smi`` *inside* the running FLM container (the host does not see the
-AIE partition table). The probe is therefore an expensive ``podman exec``
-round-trip, so results are cached with a short TTL.
+loaded slot actually owns. The first probe execs ``xrt-smi`` *inside* the
+running slot container, an expensive ``podman exec`` round-trip, so results are
+cached with a short TTL.
+
+The runner images do not all ship ``xrt-smi``, and then that probe always fails.
+The host's own ``xrt-smi`` (installed with ``libxrt-utils-npu``) sees the same
+device-wide AIE partition table, so it is the second probe
+(:func:`read_host_aie_columns`). It reports the partitions of the whole NPU, not
+of one container: the hardware-context PIDs it lists are the kernel's, which
+inside an LXC guest are not this guest's PIDs, so a partition cannot be tied to a
+slot from the host. A host reading carries ``"source": "host"`` and the caller
+treats its columns as shared by every loaded slot, which is what one partition
+holding several slots' contexts is.
 
 Design mirrors :func:`hal0.slots.capacity._container_cgroup_mem_bytes`:
 
@@ -30,6 +39,7 @@ re-probing.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import time
 from typing import Any
@@ -97,6 +107,9 @@ _now = time.monotonic
 _COL_CACHE_TTL_S = 30.0
 # container_name -> (probed_at_monotonic, value-or-None)
 _COL_CACHE: dict[str, tuple[float, dict[str, Any] | None]] = {}
+# Cache key of the host-side probe (never a container name: those start ``hal0-``).
+_HOST_KEY = ":host:"
+_HOST_TIMEOUT_S = 3.0
 
 
 def _container_runtime() -> str | None:
@@ -243,8 +256,73 @@ async def cached_aie_columns(container_name: str) -> dict[str, Any] | None:
             return value
 
     value = await read_aie_columns(container_name)
+    if value is not None:
+        value = {**value, "source": "container"}
+    else:
+        value = await _cached_host_columns()
     _COL_CACHE[container_name] = (_now(), value)
     return value
+
+
+async def _cached_host_columns() -> dict[str, Any] | None:
+    cached = _COL_CACHE.get(_HOST_KEY)
+    if cached is not None:
+        probed_at, value = cached
+        if (_now() - probed_at) < _COL_CACHE_TTL_S:
+            return value
+    value = await read_host_aie_columns()
+    _COL_CACHE[_HOST_KEY] = (_now(), value)
+    return value
+
+
+async def read_host_aie_columns() -> dict[str, Any] | None:
+    """Probe the AIE partition table with the host's ``xrt-smi``.
+
+    Same report and parser as :func:`read_aie_columns`, run on the host. The
+    JSON goes to a file in a private temporary directory, because ``xrt-smi``
+    will not write JSON to stdout (see :data:`_XRT_SMI_SH`). Returns the parsed
+    partitions with ``"source": "host"``, or ``None`` when ``xrt-smi`` is not
+    installed or the probe fails in any way. Uncached.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    binary = shutil.which("xrt-smi")
+    if binary is None:
+        return None
+    with tempfile.TemporaryDirectory(prefix="hal0-aie-") as tmp:
+        out_path = Path(tmp) / "aie.json"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                binary,
+                "examine",
+                "-r",
+                "aie-partitions",
+                "-f",
+                "JSON",
+                "-o",
+                str(out_path),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except (FileNotFoundError, OSError):
+            return None
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_HOST_TIMEOUT_S)
+        except TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            return None
+        if proc.returncode != 0:
+            return None
+        try:
+            payload = out_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+    parsed = _parse_aie_partitions(payload)
+    return {**parsed, "source": "host"} if parsed is not None else None
 
 
 def invalidate_columns_cache(container_name: str | None = None) -> None:
@@ -265,4 +343,5 @@ __all__ = [
     "cached_aie_columns",
     "invalidate_columns_cache",
     "read_aie_columns",
+    "read_host_aie_columns",
 ]

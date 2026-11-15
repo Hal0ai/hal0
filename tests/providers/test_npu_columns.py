@@ -68,8 +68,17 @@ def _patch_exec(monkeypatch, proc: _FakeProc, counter: list[int] | None = None):
 
 
 @pytest.fixture(autouse=True)
-def _clear_cache():
+def _clear_cache(monkeypatch):
     npu_columns.invalidate_columns_cache()
+    # The host fallback probe is off unless a test turns it on: a box with
+    # xrt-smi installed must not change these results.
+    real_host = npu_columns.read_host_aie_columns
+
+    async def _no_host():
+        return None
+
+    monkeypatch.setattr(npu_columns, "read_host_aie_columns", _no_host)
+    monkeypatch.setattr(npu_columns, "_real_read_host_aie_columns", real_host, raising=False)
     yield
     npu_columns.invalidate_columns_cache()
 
@@ -234,3 +243,98 @@ def test_invalidate_all(monkeypatch):
 
     npu_columns.invalidate_columns_cache()
     assert npu_columns._COL_CACHE == {}
+
+
+# ── host fallback ────────────────────────────────────────────────────────────
+
+
+def test_a_container_reading_is_labelled_container(monkeypatch):
+    _patch_exec(monkeypatch, _FakeProc(stdout=_XRT_JSON_FULL.encode(), returncode=0))
+    got = asyncio.run(npu_columns.cached_aie_columns("hal0-slot-npu"))
+    assert got is not None and got["source"] == "container"
+
+
+def test_a_failed_container_probe_falls_back_to_the_host(monkeypatch):
+    """The runner images do not all ship xrt-smi; the host's sees the same table."""
+    _patch_exec(monkeypatch, _FakeProc(stdout=b"", returncode=127))
+    calls: list[int] = []
+
+    async def _host():
+        calls.append(1)
+        parsed = npu_columns._parse_aie_partitions(_XRT_JSON_FULL)
+        return {**parsed, "source": "host"}
+
+    monkeypatch.setattr(npu_columns, "read_host_aie_columns", _host)
+    monkeypatch.setattr(npu_columns, "_now", lambda: 100.0)
+    a = asyncio.run(npu_columns.cached_aie_columns("hal0-slot-npu"))
+    b = asyncio.run(npu_columns.cached_aie_columns("hal0-slot-flm"))
+    assert a is not None and a["source"] == "host" and a["total"] == 8
+    assert b == a
+    assert len(calls) == 1  # one host probe serves every slot within the TTL
+
+
+class _HostProc:
+    def __init__(self, path_box: dict, *, payload: str | None, returncode: int = 0, hang=False):
+        self._box, self._payload, self.returncode, self._hang = path_box, payload, returncode, hang
+        self.killed = False
+
+    async def wait(self):
+        if self._hang:
+            await asyncio.sleep(10)
+        if self._payload is not None:
+            with open(self._box["path"], "w", encoding="utf-8") as fh:
+                fh.write(self._payload)
+        return self.returncode
+
+    def kill(self):
+        self.killed = True
+
+
+def _patch_host(monkeypatch, *, payload, returncode=0, hang=False, binary="/usr/bin/xrt-smi"):
+    box: dict = {}
+    procs: list[_HostProc] = []
+
+    async def _fake_exec(*args, **kwargs):
+        box["args"] = args
+        box["path"] = args[args.index("-o") + 1]
+        proc = _HostProc(box, payload=payload, returncode=returncode, hang=hang)
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(npu_columns.asyncio, "create_subprocess_exec", _fake_exec)
+    monkeypatch.setattr("shutil.which", lambda name: binary if name == "xrt-smi" else None)
+    return box, procs
+
+
+def test_the_host_probe_reads_the_json_report_from_a_private_file(monkeypatch):
+    box, _ = _patch_host(monkeypatch, payload=_XRT_JSON_FULL)
+    got = asyncio.run(npu_columns._real_read_host_aie_columns())
+    assert got == {
+        "partitions": [{"start_col": 0, "num_cols": 8, "contexts": 1}],
+        "total": 8,
+        "source": "host",
+    }
+    args = box["args"]
+    assert args[:4] == ("/usr/bin/xrt-smi", "examine", "-r", "aie-partitions")
+    assert "-f" in args and args[args.index("-f") + 1] == "JSON"
+    assert "/dev/stdout" not in args
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "binary"),
+    [
+        ({"payload": None, "returncode": 1}, "/usr/bin/xrt-smi"),
+        ({"payload": "not json"}, "/usr/bin/xrt-smi"),
+        ({"payload": _XRT_JSON_FULL}, None),
+    ],
+)
+def test_the_host_probe_fails_soft(monkeypatch, kwargs, binary):
+    _patch_host(monkeypatch, binary=binary, **kwargs)
+    assert asyncio.run(npu_columns._real_read_host_aie_columns()) is None
+
+
+def test_a_hung_host_probe_is_killed(monkeypatch):
+    _, procs = _patch_host(monkeypatch, payload=None, hang=True)
+    monkeypatch.setattr(npu_columns, "_HOST_TIMEOUT_S", 0.05)
+    assert asyncio.run(npu_columns._real_read_host_aie_columns()) is None
+    assert procs and procs[0].killed

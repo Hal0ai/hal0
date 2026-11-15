@@ -139,6 +139,7 @@ def test_occupancy_loaded_columns_available(client: TestClient, monkeypatch):
     body = client.get("/api/npu/occupancy").json()
     assert body["present"] is True
     assert body["columns_available"] is True
+    assert body["columns_source"] == "container"
     assert body["cols_used"] == 8
     assert body["serving"] is True
     assert len(body["slots"]) == 1
@@ -148,6 +149,42 @@ def test_occupancy_loaded_columns_available(client: TestClient, monkeypatch):
     assert slot["state"] == "serving"
     assert slot["cols"] == [0, 1, 2, 3, 4, 5, 6, 7]
     assert slot["gb"] == 2.4
+
+
+def test_occupancy_reports_a_host_reading_as_its_source(client: TestClient, monkeypatch):
+    """A reading from the host's xrt-smi is the whole NPU's table: every loaded
+    slot shares its columns, and the payload says where it came from."""
+    monkeypatch.setattr(hw_mod, "_npu_status", AsyncMock(return_value={"ok": True}))
+    monkeypatch.setattr(
+        npu_columns,
+        "cached_aie_columns",
+        AsyncMock(
+            return_value={
+                "partitions": [{"start_col": 0, "num_cols": 8, "contexts": 15}],
+                "total": 8,
+                "source": "host",
+            }
+        ),
+    )
+    _wire(
+        client,
+        [
+            _FakeSlot("flm", SlotState.READY, model_id="gemma3:4b", metadata={"provider": "flm"}),
+            _FakeSlot(
+                "npu-fast",
+                SlotState.READY,
+                model_id="q",
+                metadata={"provider": "llama-server"},
+                backend="npu",
+            ),
+        ],
+    )
+    body = client.get("/api/npu/occupancy").json()
+    assert body["columns_available"] is True
+    assert body["columns_source"] == "host"
+    assert body["cols_used"] == 8
+    held = [s for s in body["slots"] if s["name"] in ("flm", "npu-fast")]
+    assert len(held) == 2 and all(s["cols"] == list(range(8)) for s in held)
 
 
 # ── (c) loaded + xrt-smi failure → degraded ─────────────────────────────────
@@ -171,6 +208,7 @@ def test_occupancy_degraded_when_probe_fails(client: TestClient, monkeypatch):
     body = client.get("/api/npu/occupancy").json()
     assert body["present"] is True
     assert body["columns_available"] is False
+    assert body["columns_source"] is None
     assert body["cols_used"] == 8
     slot = body["slots"][0]
     assert slot["state"] == "ready"
@@ -235,6 +273,7 @@ def test_occupancy_contract_field_shape(client: TestClient, monkeypatch):
         "serving",
         "single_tenant",
         "columns_available",
+        "columns_source",
         "slots",
         "shared_warning",
         "npu_engines",

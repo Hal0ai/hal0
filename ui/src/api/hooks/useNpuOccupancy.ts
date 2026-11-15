@@ -40,6 +40,8 @@ export interface NpuOccupancy {
   serving: boolean
   single_tenant: boolean
   columns_available: boolean
+  /** Where the column reading came from: xrt-smi in a slot container, or the host's xrt-smi (device-wide, shared by every loaded slot). Null when unavailable. */
+  columns_source?: 'container' | 'host' | null
   slots: NpuOccupancySlot[]
   shared_warning?: string | null
   npu_engines?: {

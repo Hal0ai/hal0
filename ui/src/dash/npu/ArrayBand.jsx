@@ -29,6 +29,11 @@ export function ArrayBand({ occ, hw, slots }) {
   const colsAvailable = occ?.columns_available !== false
   const colsTotal = occ?.cols_total || NPU_COLS
   const colsUsed = typeof occ?.cols_used === 'number' ? occ.cols_used : null
+  // A host reading is the whole NPU's partition table: its columns are shared by every loaded slot.
+  const colsShared = occ?.columns_source === 'host'
+  const colsSub = !colsAvailable
+    ? 'columns not reported'
+    : `${colsUsed ?? '—'}/${colsTotal} columns${colsShared ? ' · shared' : ''}`
   const dutyPct = typeof hw?.npu_util === 'number' ? hw.npu_util * 100 : null
   const tps = npuToks(slots)
   const act = activityLevel(dutyPct, tps ?? 0)
@@ -55,7 +60,7 @@ export function ArrayBand({ occ, hw, slots }) {
       </div>
     )}
     <div className="npt-band" data-testid="npu-array-band">
-      <Gauge pct={dutyPct} label="npu duty" sub={colsAvailable ? `${colsUsed ?? '—'}/${colsTotal} columns` : 'column probe unavailable'} size={150} />
+      <Gauge pct={dutyPct} label="npu duty" sub={colsSub} size={150} />
       <div className="npt-band-stats">
         <div className="aie-stat">
           <div className="sv">
