@@ -1,4 +1,4 @@
-# 0062. Re-admit a slot the admission gate refused once capacity frees
+# 0063. Re-admit a slot the admission gate refused once capacity frees
 
 ## Status
 
@@ -42,16 +42,35 @@ to follow a capacity change, not request arrival.
 2. **Re-admit on the reaper tick.** The idle monitor's loop
    (`SlotReaper._loop`, every `_idle_monitor_interval_s`) runs
    `SlotManager.readmit_refused_once()` after its idle and pressure sweeps.
-   For each slot marked `admission_refused`, it calls `load()` only when all
-   of these hold:
-   - no lifecycle operation holds the slot's lock;
+   The sweep only schedules: each refused slot gets its own tracked task
+   (`SlotManager._readmit_one`), at most one per slot, so a load that takes
+   minutes to come up never holds the reaper's sweeps while memory pressure
+   is at its highest. Stopping the idle monitor cancels those tasks. A slot
+   is scheduled only when:
+   - no lifecycle operation holds the slot's lock, and no earlier retry of it
+     is still running;
    - the crash-loop breaker permits a trial (`_crash_loop_remaining_s == 0`),
      so the existing i4 backoff and park cool-downs still bound the retry
-     rate;
+     rate.
+
+   The task then loads only when:
+   - the GPU arbiter permits the load (`GpuArbiter.permits_background_load`):
+     no switch is running, and the current mode would not refuse the slot's
+     group, so an llm-group slot is never put on the GPU in image mode,
+     pinned or not. The request path enforces the same contract before its
+     lazy-load (`Dispatcher._guard_gpu_image_mode`); `_load` itself does
+     not, so the sweep has to ask;
    - `admission_would_fit()`, a read-only dry run of the admission plan
      (free memory less other reservations, plus what the eviction planner
-     could free from idle, non-pinned slots), says the slot's configured
-     model fits.
+     could free from idle, non-pinned slots), says the model fits. The model
+     probed is the one the load would admit: the configured default after
+     `_resolve_servable_model`, the same substitution `_load` makes.
+
+   The load itself re-checks, under the slot lock and before anything starts,
+   that the slot is still ERROR with the `admission_refused` mark and that the
+   arbiter still permits it. An operator unload anywhere in the window between
+   the sweep's snapshot and the load therefore cancels the retry instead of
+   starting the slot again.
 
    A box that is still short pays nothing: no eviction, no load attempt, no
    breaker count. When the dry run and the real admission disagree, the real
@@ -78,6 +97,11 @@ to follow a capacity change, not request arrival.
 - The status stays 404 rather than becoming `SlotLoadFailed`'s 502, so
   clients and the release-validation contract that key on
   `dispatch.no_route` keep working; the new keys are additive.
+- Re-admission is a background action that may evict idle, non-pinned slots
+  on the reaper's own initiative, exactly as the admission gate would for an
+  operator load. That includes the `agent` anchor when another slot was the
+  refused one. An anchor evicted this way goes OFFLINE, not ERROR, so this
+  sweep does not re-admit it; waking it stays with #2666.
 - The dry run uses the same footprint estimate as the gate, so it can only be
   as accurate as that estimate. When the estimate can't be made, the gate
   fails open and so does the dry run.
