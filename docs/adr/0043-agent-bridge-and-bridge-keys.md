@@ -25,6 +25,14 @@ the first REST surface a bridge key opens besides `GET /api/bridge/me`, and
 the `memory` scope is checked by its handlers, not by the class. See
 "Engine-compatible memory endpoint" below.
 
+**Amended (2026-11-16).** Context point 3 is closed for every caller, not
+only bridge clients: ADR-0062 binds the `X-hal0-Agent` identity to an agent
+identity key (`X-hal0-Agent-Key`) that hal0 writes for its own agents, and a
+reserved name claimed without its key is refused with the same
+`403 bridge.client_name_reserved` as a bridge key under one (#3569). A bare
+header is an audit label and the caller is `anonymous` in memory. Bridge
+principals are unchanged.
+
 The first change under this record ships the keys, the store, the credential
 tier, the REST and CLI surface, the config section and a doctor row. The
 second ships Decisions 8 and 9, the `hal0-agents` server and its run tools;
@@ -570,7 +578,7 @@ the bot findings left on the second change's run tools:
   box. A key does not expire; `hal0 bridge revoke` ends it at once.
 - Memory written through the bridge is the first memory whose namespace is
   bound to a credential: a client can no longer write into another agent's
-  private bank by naming it in a header.
+  private bank by naming it in a header. ADR-0062 (2026-11-16) binds the rest.
 - The first change added no `hal0-agents` server: the lines `hal0 bridge add`
   printed for it pointed at a path that was not mounted, and
   `GET /api/bridge/me` was what proved a key worked. The second change landed

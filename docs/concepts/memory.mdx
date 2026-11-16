@@ -152,9 +152,12 @@ collapsed "nothing addressable" into "nothing requested," which let an
 approval-gated `memory_delete` scoped to a bank the caller couldn't even
 name execute against `shared` instead.
 
-Callers identify themselves via the `X-hal0-Agent` header, and the same
-identity resolves the same memory namespace whether it arrives over REST or
-MCP.
+A caller's memory identity comes from a credential: a bridge key's client
+name, or, for hal0's own agents, `X-hal0-Agent` backed by the agent's identity
+key in `X-hal0-Agent-Key` ([ADR-0062](/docs/adr/0062-memory-identity-from-a-credential)).
+A bare `X-hal0-Agent` header only labels the caller, which then reads and writes
+shared memory as `anonymous`. The same identity resolves the same memory
+namespace whether it arrives over REST or MCP.
 
 Namespaces map onto Hindsight **banks**. On a new install `shared` is
 `hal0:shared` (`[memory] bank`) and every `private:<agent>` is `hal0:private`
@@ -375,8 +378,9 @@ When enabled, memory becomes the shared brain that ties the platform together:
     See [The Memory area](/docs/guides/memory-workspace).
   </Card>
   <Card title="Namespaced writes" icon="setting">
-    Callers identify themselves (via the `X-hal0-Agent` header), so private
-    writes land in the right per-agent scope rather than a shared pool.
+    A caller's identity comes from its credential (a bridge key, or a bundled
+    agent's identity key), so private writes land in that agent's own scope
+    and no caller can read another's by naming it.
   </Card>
   <Card title="Destructive ops are audited" icon="approve-check">
     Bank deletes and every memories / config / document / directive /

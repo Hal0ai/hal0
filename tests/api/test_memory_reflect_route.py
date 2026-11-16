@@ -36,6 +36,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from hal0.agent_identity import identity_headers, key_for
 from hal0.agents.hermes.plugins.memory_hindsight import Hal0MemoryProvider
 from hal0.agents.hermes.plugins.memory_hindsight._client import Hal0MemoryClient
 from hal0.agents.hermes_provision import profile_agent_id
@@ -175,7 +176,7 @@ def test_reflect_reaches_the_engine_scoped_to_the_caller(
             "tags_match": "all_strict",
             "response_schema": schema,
         },
-        headers={"X-hal0-Agent": DISCORD},
+        headers={**identity_headers(DISCORD)},
     )
     assert r.status_code == 200, r.text
     assert r.json() == {"text": "the answer"}
@@ -210,11 +211,13 @@ def test_private_toggle_picks_the_callers_private_bank_when_banks_are_split() ->
     engine = _engine()
     provider = HindsightProvider(client=engine, unified_bank=False)
     with TestClient(_app(provider)) as http:
-        http.post("/api/memory/reflect", json={"query": "q"}, headers={"X-hal0-Agent": "hermes"})
+        http.post(
+            "/api/memory/reflect", json={"query": "q"}, headers={**identity_headers("hermes")}
+        )
         http.post(
             "/api/memory/reflect",
             json={"query": "q"},
-            headers={"X-hal0-Agent": "hermes", "X-hal0-Private": "1"},
+            headers={**identity_headers("hermes"), "X-hal0-Private": "1"},
         )
     banks = [call.kwargs["bank_id"] for call in engine.reflect.await_args_list]
     assert banks == ["shared", "private__hermes"]
@@ -269,7 +272,7 @@ def _reflect_as(agent_id: str, provider: Any) -> str:
         r = http.post(
             "/api/memory/reflect",
             json={"query": "who is the client?"},
-            headers={"X-hal0-Agent": agent_id},
+            headers={**identity_headers(agent_id)},
         )
     assert r.status_code == 200, r.text
     return r.json()["text"]
@@ -344,7 +347,7 @@ def test_a_provider_that_does_not_say_how_its_banks_are_laid_out_is_treated_as_u
 def test_reflect_rejects_malformed_requests(
     http: TestClient, engine: AsyncMock, body: dict[str, Any]
 ) -> None:
-    r = http.post("/api/memory/reflect", json=body, headers={"X-hal0-Agent": "hermes"})
+    r = http.post("/api/memory/reflect", json=body, headers={**identity_headers("hermes")})
     assert r.status_code == 400, r.text
     engine.reflect.assert_not_awaited()
 
@@ -398,7 +401,11 @@ pytestmark = pytest.mark.filterwarnings("ignore:You should not use the 'timeout'
 
 
 def _plugin(http: TestClient, agent_id: str) -> Hal0MemoryProvider:
-    provider = Hal0MemoryProvider(client=Hal0MemoryClient(http_client=http, agent_id=agent_id))
+    provider = Hal0MemoryProvider(
+        client=Hal0MemoryClient(
+            http_client=http, agent_id=agent_id, agent_key=lambda: key_for(agent_id)
+        )
+    )
     provider.initialize(session_id="s1")
     return provider
 

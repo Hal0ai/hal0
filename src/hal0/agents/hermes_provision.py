@@ -2585,6 +2585,13 @@ def _build_config_overlay(
     from hal0.service_identity import service_key
 
     bearer = service_key(prefer="admin")
+    # The identity key backs the X-hal0-Agent claim (#3569): without it the
+    # memory surfaces treat the header as an audit label and refuse a reserved
+    # name (``hermes``) with 403. Derived, so a re-provision writes the same
+    # value back and never rotates it.
+    from hal0.agent_identity import AGENT_KEY_HEADER, key_for
+
+    agent_key = key_for(agent_id)
     for srv in mcp_servers:
         name = srv["name"]
         pairs += [
@@ -2595,6 +2602,8 @@ def _build_config_overlay(
         ]
         if bearer:
             pairs.append((f"mcp_servers.{name}.headers.Authorization", f"Bearer {bearer}"))
+        if agent_key:
+            pairs.append((f"mcp_servers.{name}.headers.{AGENT_KEY_HEADER}", agent_key))
         # X-hal0-Private deliberately does NOT go through `hermes config set`:
         # hermes coerces bare integers on the way in (see _fmt_config_value),
         # so "1" lands in config.yaml as the YAML int 1 — and hermes' own MCP
@@ -3964,13 +3973,14 @@ def _probe_mcp_server(
     from urllib.error import HTTPError, URLError
     from urllib.request import Request
 
+    from hal0.agent_identity import identity_headers
     from hal0.service_identity import open_url, service_key
 
     transport_url = url.rstrip("/") + "/mcp"
     base_headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "X-hal0-Agent": agent_id,
+        **identity_headers(agent_id),
     }
     bearer = service_key(prefer="admin")
     if bearer:
@@ -4168,7 +4178,9 @@ def _probe_mcp_client(
             "tools": [],
             "error": f"venv python missing at {python}",
         }
-    headers: dict[str, str] = {"X-hal0-Agent": agent_id}
+    from hal0.agent_identity import identity_headers
+
+    headers: dict[str, str] = identity_headers(agent_id)
     bearer = service_key(prefer="admin")
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
@@ -5014,7 +5026,9 @@ def _mcp_memory_call(
     else:
         return {"ok": False, "error": f"unsupported method {method!r}"}
 
-    headers = {"Content-Type": "application/json", "X-hal0-Agent": agent_id}
+    from hal0.agent_identity import identity_headers
+
+    headers = {"Content-Type": "application/json", **identity_headers(agent_id)}
     bearer = service_key(prefer="admin")
     if bearer:
         headers["Authorization"] = f"Bearer {bearer}"
@@ -5439,6 +5453,15 @@ def _build_profile_mcp_servers(agent_id: str, *, private: bool = False) -> dict[
     if bearer:
         admin_headers["Authorization"] = f"Bearer {bearer}"
         memory_headers["Authorization"] = f"Bearer {bearer}"
+    # The key that backs the identity claim (#3569, :mod:`hal0.agent_identity`).
+    # Derived, so every sweep writes the same value and a converged profile is
+    # left byte-untouched.
+    from hal0.agent_identity import AGENT_KEY_HEADER, key_for
+
+    agent_key = key_for(agent_id)
+    if agent_key:
+        admin_headers[AGENT_KEY_HEADER] = agent_key
+        memory_headers[AGENT_KEY_HEADER] = agent_key
 
     return {
         "hal0-admin": {
@@ -6011,6 +6034,60 @@ def _profile_wire_desired_for(
         return _deep_merge(fixed, _terminal_profile_keys(base, terminal_enabled=terminal_enabled))
 
     return desired
+
+
+#: The identity grammar the memory surfaces accept for ``X-hal0-Agent``.
+_AGENT_ID_CLAIM_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _agent_key_desired(base: dict[str, Any]) -> dict[str, Any]:
+    """``desired`` that gives hal0's MCP entries in ``base`` their identity key (#3569).
+
+    Only ``hal0-admin`` and ``hal0-memory`` entries that already name an agent
+    in ``X-hal0-Agent`` are touched, and each gets the key for the agent it
+    names. Nothing else in the document changes, so an operator's own servers
+    and hand edits survive.
+    """
+    from hal0.agent_identity import AGENT_KEY_HEADER, key_for
+
+    servers = base.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return {}
+    wanted: dict[str, Any] = {}
+    for name in _MEMORY_REACHING_SERVERS:
+        entry = servers.get(name)
+        headers = entry.get("headers") if isinstance(entry, dict) else None
+        agent = headers.get("X-hal0-Agent") if isinstance(headers, dict) else None
+        if not isinstance(agent, str) or not _AGENT_ID_CLAIM_RE.match(agent):
+            continue
+        key = key_for(agent)
+        if key and headers.get(AGENT_KEY_HEADER) != key:
+            wanted[name] = {"headers": {AGENT_KEY_HEADER: key}}
+    return {"mcp_servers": wanted} if wanted else {}
+
+
+def converge_default_profile_agent_key(home: Path) -> dict[str, Any]:
+    """Give the default profile's hal0 MCP entries their identity key (#3569).
+
+    Named profiles and the hal0-brain profile get the key from their own
+    wiring (:func:`wire_named_profiles`, :func:`_phase_brain_profile_mcp_wire`),
+    which hal0-api re-runs on every start. The default profile's ``config.yaml``
+    is written by provisioning only, so a box upgraded from before #3569 would
+    keep sending a bare ``X-hal0-Agent: hermes`` (refused with 403 on the memory
+    surfaces) until a ``--repair``. hal0-api calls this at startup so the
+    upgrade converges on its own. Derived keys: a converged file is left
+    byte-untouched. Never raises.
+    """
+    try:
+        dir_fd = os.open(home, _DIR_NOFOLLOW)
+    except FileNotFoundError:
+        return {"wired": False, "changed": False, "reason": "hermes home absent"}
+    except OSError as exc:
+        return {"wired": False, "changed": False, "error": _yaml_error_summary(exc)}
+    try:
+        return _merge_profile_config_at(dir_fd, home / "config.yaml", _agent_key_desired)
+    finally:
+        os.close(dir_fd)
 
 
 def wire_named_profiles(

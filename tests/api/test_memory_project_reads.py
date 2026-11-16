@@ -18,6 +18,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from hal0.agent_identity import identity_headers
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory as memory_routes
 from hal0.mcp import memory as memory_mcp
@@ -37,7 +38,7 @@ async def _rest(
         return await client.request(
             method,
             f"http://test/api/memory{path}",
-            headers={"X-hal0-Agent": ME, **(headers or {})},
+            headers={**identity_headers(ME), **(headers or {})},
             **kw,
         )
 

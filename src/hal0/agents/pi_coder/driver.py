@@ -712,8 +712,15 @@ class PiDriver(AgentDriver):
                 existing = {}
         servers = existing.setdefault("mcpServers", {})
         token = bearer_token or self._resolve_service_token()
+        # The identity key backs the X-hal0-Agent claim (#3569): without it hal0
+        # treats ``pi`` (a reserved name) as unproven and refuses the memory
+        # mount with 403. Derived from the box secret, so a re-run writes the
+        # same value; ``None`` only where the secret is unreadable.
+        from hal0.agent_identity import identity_headers
+
+        identity = identity_headers(self.name)
         for name, mount_path in _MANAGED_MCP_SERVERS.items():
-            headers: dict[str, str] = {"X-hal0-Agent": self.name}
+            headers: dict[str, str] = dict(identity)
             if token:
                 headers["Authorization"] = f"Bearer {token}"
             servers[name] = {"url": f"{_api_base()}{mount_path}", "headers": headers}

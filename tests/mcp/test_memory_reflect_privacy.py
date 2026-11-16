@@ -20,6 +20,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from hal0.agent_identity import identity_headers
 from hal0.agents.hermes_provision import profile_agent_id
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory as memory_routes
@@ -330,7 +331,9 @@ def _rest_reflect(provider: Any, agent_id: str, body: dict[str, Any]) -> None:
     app.include_router(memory_routes.router, prefix="/api/memory")
     app.state.memory_provider = provider
     with TestClient(app) as http:
-        response = http.post("/api/memory/reflect", json=body, headers={"X-hal0-Agent": agent_id})
+        response = http.post(
+            "/api/memory/reflect", json=body, headers={**identity_headers(agent_id)}
+        )
     assert response.status_code == 200, response.text
 
 

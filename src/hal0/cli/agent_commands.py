@@ -1585,7 +1585,11 @@ def _uninstall_hermes_memory() -> MemoryUninstallOutcome:
     # semantics: failure is tolerated (memory unreachable shouldn't
     # strand the operator with a half-uninstalled agent).
     url = _api_base()
-    headers = {"Content-Type": "application/json", "X-hal0-Agent": agent_id}
+    # The identity key backs the claim (#3569); without it the reserved name
+    # ``hermes`` is refused with 403 and the card would never be found.
+    from hal0.agent_identity import identity_headers
+
+    headers = {"Content-Type": "application/json", **identity_headers(agent_id)}
 
     def _search_ids() -> list[str] | None:
         """Return matching ids, or ``None`` if the search couldn't run."""
@@ -1995,6 +1999,7 @@ def agent_peers() -> None:
     import urllib.error
     import urllib.request
 
+    from hal0.agent_identity import identity_headers
     from hal0.service_identity import open_url
 
     url = _api_base()
@@ -2016,9 +2021,11 @@ def agent_peers() -> None:
     req = urllib.request.Request(
         f"{url}/api/memory/search",
         data=body,
+        # ``hal0-cli`` is a reserved name: with its identity key when this
+        # process can derive one, else no claim at all (#3569).
         headers={
             "Content-Type": "application/json",
-            "X-hal0-Agent": "hal0-cli",
+            **identity_headers("hal0-cli"),
         },
         method="POST",
     )

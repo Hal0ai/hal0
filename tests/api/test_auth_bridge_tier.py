@@ -564,8 +564,14 @@ def test_memory_identity_is_key_bound(key_with_memory: str) -> None:
     assert cid == "cc"
 
 
-def test_memory_identity_without_a_bridge_key_reads_the_header(store: BridgeStore) -> None:
-    assert client_id_resolver_under(judged_request(headers={"X-hal0-Agent": "hermes"})) == "hermes"
+def test_memory_identity_without_a_bridge_key_needs_the_agent_key(store: BridgeStore) -> None:
+    """#3569: without a bridge key the header is the identity only with its agent key."""
+    from hal0.agent_identity import identity_headers
+
+    assert client_id_resolver_under(judged_request(headers=identity_headers("hermes"))) == "hermes"
+    assert client_id_resolver_under(judged_request(headers={"X-hal0-Agent": "hermes"})) == (
+        "anonymous"
+    )
 
 
 def test_revoked_key_loses_its_identity(store: BridgeStore, key_with_memory: str) -> None:
