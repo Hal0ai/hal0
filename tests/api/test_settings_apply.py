@@ -91,6 +91,7 @@ def test_registry_declares_three_apply_classes() -> None:
         ("memory.engine", "service-restart", [SERVICE_HAL0_API]),
         # [memory.embedding] — hindsight-era reranker knobs (the cognee-era
         # keys were deleted from the schema with the cognee wrapper).
+        ("memory.embedding.rerank_fallback", "service-restart", [SERVICE_HAL0_API]),
         ("memory.embedding.rerank_gateway_url", "service-restart", [SERVICE_HAL0_API]),
         ("memory.embedding.rerank_model", "service-restart", [SERVICE_HAL0_API]),
         ("memory.embedding.rerank_connect_timeout_s", "service-restart", [SERVICE_HAL0_API]),

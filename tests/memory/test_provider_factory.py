@@ -110,3 +110,29 @@ def test_provider_defaults_agree_with_fresh_memory_config():
     del cfg.memory.graph.extraction_slot
     with patch("hal0.memory._build_hindsight_client", return_value=object()):
         assert provider_from_config(cfg).graph_status()["extraction_slot"] == default_slot
+
+
+def _built_reranker(**embedding):
+    cfg = _cfg("hindsight")
+    cfg.memory.embedding.__dict__.update(embedding)
+    with (
+        patch("hal0.memory.HindsightProvider", autospec=True) as mock_cls,
+        patch("hal0.memory._build_hindsight_client", return_value=object()),
+    ):
+        provider_from_config(cfg)
+    return mock_cls.call_args.kwargs["reranker"]
+
+
+def test_factory_empty_rerank_model_means_the_slots_model():
+    rr = _built_reranker(rerank_model="", rerank_fallback=True)
+    assert rr is not None
+    assert rr._model is None  # resolved from the rerank slot at call time
+
+
+def test_factory_explicit_rerank_model_is_kept():
+    rr = _built_reranker(rerank_model="my-reranker", rerank_fallback=True)
+    assert rr._model == "my-reranker"
+
+
+def test_factory_rerank_fallback_off_builds_no_reranker():
+    assert _built_reranker(rerank_model="", rerank_fallback=False) is None

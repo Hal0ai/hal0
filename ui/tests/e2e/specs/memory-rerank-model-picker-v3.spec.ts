@@ -2,7 +2,7 @@
  * memory-rerank-model-picker-v3 — Settings → Memory → Reranker.
  *
  * `memory.embedding.rerank_model` renders as a dropdown, not free text:
- * the builtin (schema default, served without a rerank slot) plus every
+ * the schema default ("" = whatever the rerank slot serves) plus every
  * capability-tagged rerank model from the `catalogs.embed.rerank` catalog,
  * each annotated with its gpu/npu backends. A saved id outside both stays
  * pickable as "(saved)". Free text is not offered — an id the gateway
@@ -10,8 +10,6 @@
  * every recall, silently.
  */
 import { test, expect, json } from '../fixtures/apiMock'
-
-const BUILTIN = 'builtin.jina-reranker-v1-tiny-en-q8'
 
 const CAPS_MOCK = {
   backends: [],
@@ -37,7 +35,7 @@ const CAPS_MOCK = {
 }
 
 test.describe('Memory reranker model picker', () => {
-  test('rerank_model is a dropdown: builtin default + backend-annotated catalog rows', async ({ page }) => {
+  test('rerank_model is a dropdown: slot-model default + backend-annotated catalog rows', async ({ page }) => {
     await page.route('**/api/capabilities', (route) => json(route, CAPS_MOCK))
     await page.goto('/#settings/memory')
 
@@ -45,7 +43,7 @@ test.describe('Memory reranker model picker', () => {
       .filter({ has: page.locator('.k span', { hasText: /^embedding\.rerank_model$/ }) })
     const select = row.locator('select')
     await expect(select).toBeVisible()
-    await expect(select.locator(`option[value="${BUILTIN}"]`)).toHaveText(`${BUILTIN} · builtin (default)`)
+    await expect(select.locator('option[value=""]')).toHaveText("the rerank slot's model (default)")
     await expect(select.locator('option[value="bge-reranker-v2-m3"]')).toHaveText('bge-reranker-v2-m3 · gpu-rocm / npu')
     // No free-text fallback for this key.
     await expect(row.locator('input[type="text"], input:not([type])')).toHaveCount(0)

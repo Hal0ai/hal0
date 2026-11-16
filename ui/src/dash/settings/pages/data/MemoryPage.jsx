@@ -116,6 +116,7 @@ function MemoryRerankerPanel({ registry }) {
 
   const RERANK_MODEL_KEY = "memory.embedding.rerank_model";
   const RERANK_KEYS = [
+    "memory.embedding.rerank_fallback",
     "memory.embedding.rerank_gateway_url",
     RERANK_MODEL_KEY,
     "memory.embedding.rerank_connect_timeout_s",
@@ -124,20 +125,20 @@ function MemoryRerankerPanel({ registry }) {
   const fields = {};
   for (const k of RERANK_KEYS) fields[k] = _schemaField(schema, k);
 
-  // rerank_model picker: the builtin (schema default, served without a rerank
-  // slot) plus every capability-tagged rerank model from the embed.rerank
+  // rerank_model picker: "" (schema default: whatever the rerank slot
+  // serves) plus every capability-tagged rerank model from the embed.rerank
   // catalog, annotated with its gpu/npu backends. A saved id outside both
   // stays pickable as "(saved)" so the operator can see and move off it.
   // Free text is not offered — an id the gateway can't resolve just makes
   // Hal0Reranker fail-soft to fused vector ordering on every recall.
   const capsQuery = useCapabilities();
   const rerankCatalog = capsQuery.data?.catalogs?.embed?.rerank || [];
-  const builtinModel = fields[RERANK_MODEL_KEY]?.default || "builtin.jina-reranker-v1-tiny-en-q8";
+  const slotDefault = fields[RERANK_MODEL_KEY]?.default ?? "";
   const savedModel = _getIn(live, RERANK_MODEL_KEY);
   const modelOptions = [
-    { value: builtinModel, label: `${builtinModel} · builtin (default)` },
+    { value: slotDefault, label: "the rerank slot's model (default)" },
     ...rerankCatalog
-      .filter(m => m.id && m.id !== builtinModel)
+      .filter(m => m.id && m.id !== slotDefault)
       .map(m => {
         const backends = [...new Set((m.backends || []).map(b => String(b.id || "")).filter(Boolean))];
         return { value: m.id, label: backends.length ? `${m.id} · ${backends.join(" / ")}` : m.id };

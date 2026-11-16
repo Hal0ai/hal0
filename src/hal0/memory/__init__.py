@@ -264,14 +264,21 @@ def provider_from_config(cfg: Any) -> MemoryProvider:
     except Exception as exc:  # daemon down at boot → degrade ladder
         log.warning("hal0.memory.hindsight_unavailable", error=str(exc), fallback="pgvector")
         return PgVectorProvider()
-    from hal0.memory.hindsight_provider import Hal0Reranker
+    from hal0.memory.hindsight_provider import Hal0Reranker, rerank_slot_model
     from hal0.memory.projects import registry_from_config
 
-    reranker = Hal0Reranker(
-        base_url=str(embed.rerank_gateway_url),
-        model=str(embed.rerank_model),
-        connect_timeout_s=float(embed.rerank_connect_timeout_s),
-        read_timeout_s=float(embed.rerank_read_timeout_s),
+    # The fallback reranker (only used when recall carries no engine score).
+    # An empty rerank_model means "whatever the rerank slot serves".
+    reranker = (
+        Hal0Reranker(
+            base_url=str(embed.rerank_gateway_url),
+            model=str(embed.rerank_model or "") or None,
+            connect_timeout_s=float(embed.rerank_connect_timeout_s),
+            read_timeout_s=float(embed.rerank_read_timeout_s),
+            slot_model=rerank_slot_model,
+        )
+        if bool(getattr(embed, "rerank_fallback", True))
+        else None
     )
     return HindsightProvider(
         client=client,

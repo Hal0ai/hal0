@@ -54,7 +54,9 @@ def test_rerank_defaults_are_hindsight_era() -> None:
     # Gateway = hal0-api's own OpenAI surface; the dispatcher routes
     # /v1/rerankings to the rerank slot.
     assert cfg.rerank_gateway_url == "http://127.0.0.1:8080"
-    assert cfg.rerank_model == "builtin.jina-reranker-v1-tiny-en-q8"
+    # Empty = "the model the rerank slot serves"; the fallback is on.
+    assert cfg.rerank_model == ""
+    assert cfg.rerank_fallback is True
 
 
 def test_cognee_era_embedding_keys_are_dropped_silently() -> None:

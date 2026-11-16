@@ -211,6 +211,10 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.engine": {"apply_class": "service-restart", "services": [SERVICE_HAL0_API]},
     # [memory.embedding] — hindsight-era reranker knobs, all threaded into
     # Hal0Reranker at startup (memory/__init__.py), hence service-restart.
+    "memory.embedding.rerank_fallback": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     "memory.embedding.rerank_gateway_url": {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
