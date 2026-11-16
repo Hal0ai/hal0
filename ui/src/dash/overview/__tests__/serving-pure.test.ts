@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { laneRows } from '../serving-pure'
+import { laneHues, laneRows } from '../serving-pure'
 import { SERVING_UTILITY, SLOTS, SYS } from './serving-fixtures'
 
 describe('laneRows', () => {
@@ -95,5 +95,17 @@ describe('laneRows', () => {
   it('carries model, port, default flag, class and memory label', () => {
     const agent = laneRows(SLOTS, SYS, undefined)[0].loaded[0]
     expect(agent).toMatchObject({ name: 'agent', model: 'Qwen3.8-27B-MTP', port: 8101, isDefault: true, cls: 'stale', memLabel: '22.0 GB' })
+  })
+})
+
+describe('laneHues', () => {
+  it('first slot in a lane takes the device colour, later ones lighter shades of it', () => {
+    const hues = laneHues(laneRows(SLOTS, SYS, undefined))
+    expect(hues.agent).toBe('var(--dev-vulkan)')
+    expect(hues.utility).toBe('color-mix(in srgb, var(--dev-vulkan) 72%, white)')
+    expect(hues.brain).toBe('color-mix(in srgb, var(--dev-vulkan) 52%, white)')
+    expect(hues.ops).toBe('color-mix(in srgb, var(--dev-vulkan) 36%, white)') // stopped, after the loaded
+    expect(hues.img).toBe('var(--dev-rocm)')
+    expect(hues.flm).toBe('color-mix(in srgb, var(--dev-npu) 52%, white)')
   })
 })

@@ -15,6 +15,11 @@ export interface Tile {
   isDefault: boolean
   cls: Exclude<RailCls, 'paused'>
   stateText: string
+  /** The indicator's own label (ready, serving, warming…), without tok/s. */
+  stateLabel: string
+  /** Live tok/s from the slot's metrics; null when not reported. */
+  toks: number | null
+  inflight: number | null
   memLabel: string
   ctx: { used: number; max: number; pct: number } | null
   caption: string | null
@@ -81,6 +86,9 @@ function buildTile(
     isDefault: !!slot.isDefault,
     cls,
     stateText,
+    stateLabel: label,
+    toks,
+    inflight: isNum(sysSlot?.inflight) ? sysSlot.inflight : null,
     memLabel: slotMemLabel(slot) as string,
     ctx,
     caption,
@@ -107,4 +115,20 @@ export function laneRows(
     else lane.loaded.push(buildTile(slot, ind.cls, ind.label, byName.get(slot.name), perSlot))
   }
   return lanes.filter((l) => l.loaded.length + l.stopped.length > 0)
+}
+
+/** Chart and swatch colour per slot: the lane's device colour, lighter for each further slot in
+ *  the same lane (loaded first, then stopped), so two vulkan slots stay apart in the stacked chart
+ *  and still read as vulkan. */
+const SHADES = [100, 72, 52, 36]
+export function laneHues(lanes: readonly Lane[]): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const lane of lanes) {
+    const names = [...lane.loaded.map((t) => t.name), ...lane.stopped.map((s) => s.name)]
+    names.forEach((name, k) => {
+      const base = `var(--dev-${lane.key})`
+      out[name] = k === 0 ? base : `color-mix(in srgb, ${base} ${SHADES[Math.min(k, SHADES.length - 1)]}%, white)`
+    })
+  }
+  return out
 }

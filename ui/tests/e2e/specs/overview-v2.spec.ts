@@ -290,12 +290,12 @@ test.describe('Overview v2 (#dashboard)', () => {
     await expect(rows.nth(1)).toHaveClass(/\bwarn\b/)
     await expect(rows.nth(1)).toContainText('brain')
     // The slot row offers Restart and View slot (src/dash/notifications.jsx). Logs live on the
-    // Serving now tile, whose actions show on hover or focus.
+    // Serving now slot row, whose actions show on hover or focus.
     await expect(rows.nth(1).getByRole('button', { name: 'Restart' })).toBeVisible()
     await expect(rows.nth(1).getByRole('button', { name: 'View slot' })).toBeVisible()
-    const tile = page.locator('.ov-tile', { hasText: 'brain' })
-    await tile.hover()
-    await expect(tile.locator('.ov-acts button', { hasText: /^logs$/ })).toBeVisible()
+    const row = page.getByTestId('ov-slot-row-brain')
+    await row.hover()
+    await expect(row.locator('.ov-acts button', { hasText: /^logs$/ })).toBeVisible()
   })
 
   test('usage window persists across a reload and drives the request', async ({ page }) => {
@@ -388,7 +388,7 @@ test.describe('Overview v2 (#dashboard)', () => {
     for (const w of widths) expect(w).toBeGreaterThanOrEqual(content - 2)
   })
 
-  test('serving slot is green with a sparkline', async ({ page }) => {
+  test('serving slot is green and gets a band in the activity chart', async ({ page }) => {
     await seedSlots(page, [servingSlot()])
     await page.route('**/api/system-stats', (route) =>
       json(route, {
@@ -397,21 +397,26 @@ test.describe('Overview v2 (#dashboard)', () => {
         slots: [{ slot_id: 'primary', state: 'serving', vram_bytes: null, inflight: 2, kv_used: 120000, ts: '2026-10-29T12:00:00Z' }],
       }),
     )
-    await page.route(/\/api\/stats\/throughput\/history(\?|$)/, (route) =>
+    await page.route(/\/api\/stats\/activity(\?|$)/, (route) =>
       json(route, {
-        window_s: 100,
-        bucket_s: 5,
-        samples: [],
-        per_slot: { primary: [10, 22, 31, 38, 41, 42.5] },
+        window: '15m',
+        window_s: 90,
+        bucket_s: 15,
+        buckets: 6,
+        end: '2026-10-29T12:00:00+00:00',
+        fleet: { gpu_util: [0.4, 0.6, 0.6, 0.7, 0.6, 0.6], npu_util: [null, null, null, null, null, null] },
+        slots: {
+          primary: { tps: [10, 22, 31, 38, 41, 42.5], peak_tps: 42.5, tokens: 2800, requests: 4, errors: 0, ttft_p50_ms: 310 },
+        },
       }),
     )
     await page.goto('/#dashboard')
 
-    const tile = page.locator('.ov-tile', { hasText: 'primary' })
-    await expect(tile).toBeVisible({ timeout: 10_000 })
-    await expect(tile).toHaveClass(/\bserving\b/)
+    const row = page.getByTestId('ov-slot-row-primary')
+    await expect(row).toBeVisible({ timeout: 10_000 })
+    await expect(row).toHaveClass(/\bserving\b/)
 
-    const style = await tile.locator('.ov-dot.serving').evaluate((el) => {
+    const style = await row.locator('.ov-dot.serving').evaluate((el) => {
       const cs = getComputedStyle(el)
       return { animationName: cs.animationName, boxShadow: cs.boxShadow }
     })
@@ -419,6 +424,8 @@ test.describe('Overview v2 (#dashboard)', () => {
     expect(style.animationName).toContain('pulse')
     expect(style.boxShadow).not.toBe('none')
 
-    await expect(tile.locator('svg').first()).toBeVisible()
+    await expect(page.locator('[data-testid="ov-activity"] [data-lane="primary"]')).toHaveCount(1)
+    await expect(row).toContainText('42.5') // peak from the activity payload
+    await expect(page.getByTestId('ov-activity-duty')).toBeVisible() // GPU busy strip
   })
 })
