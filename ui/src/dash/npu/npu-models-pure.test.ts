@@ -109,4 +109,12 @@ describe('flmCatalogRows', () => {
   it('empty for a missing catalogue', () => {
     expect(flmCatalogRows(undefined)).toEqual([])
   })
+  it('carries in_use_by, empty when the catalogue omits it', () => {
+    const rows = flmCatalogRows([
+      { ...cat[1], in_use_by: [{ role: 'chat', slot: 'npu' }] },
+      cat[2],
+    ])
+    expect(rows.find((r) => r.id === 'gemma4-it:e4b')!.inUseBy).toEqual([{ role: 'chat', slot: 'npu' }])
+    expect(rows.find((r) => r.id === 'embed-gemma:300m')!.inUseBy).toEqual([])
+  })
 })
