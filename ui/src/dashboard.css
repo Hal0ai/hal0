@@ -299,7 +299,7 @@ a { color: inherit; text-decoration: none; }
    then glow amber (the accent) on hover / when their surface is active. */
 .tb-launch {
   display: inline-flex;
-  align-items: center;
+  align-items: stretch;   /* the GPU toggle and the launcher button share one height */
   gap: 8px;
 }
 .tb-launch-btn {
@@ -364,8 +364,8 @@ a { color: inherit; text-decoration: none; }
 
 /* Notification bell — icon-only launcher + anchored dropdown panel. */
 .tb-bell-wrap { position: relative; display: inline-flex; }
-/* Topbar bell — the shared .iconbtn idiom (class kept for testids/selectors).
-   Amber is reserved for the live signals: unread state and the open popover. */
+/* Topbar bell — a plain icon: no border, no background box, only the colour moves. The 30px hit
+   area stays. Amber is reserved for the live signals: unread state and the open popover. */
 .tb-bell {
   position: relative;
   display: inline-flex;
@@ -373,20 +373,18 @@ a { color: inherit; text-decoration: none; }
   justify-content: center;
   width: 30px;
   height: 30px;
-  border: 1px solid transparent;
+  padding: 0;
+  border: 0;
   border-radius: var(--rad-sm);
   background: transparent;
   color: var(--fg-3);
   cursor: pointer;
-  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+  transition: color var(--dur-fast) var(--ease);
 }
-.tb-bell:hover { color: var(--fg); background: var(--bg-2); border-color: var(--line); }
+.tb-bell:hover { color: var(--fg); }
+.tb-bell:focus-visible, .tb-docs:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tb-bell.has svg { color: var(--accent); }
-.tb-bell.on {
-  color: var(--accent);
-  border-color: var(--accent-line);
-  background: var(--accent-soft);
-}
+.tb-bell.on { color: var(--accent); }
 .tb-bell-badge {
   position: absolute;
   top: -6px;
@@ -406,23 +404,22 @@ a { color: inherit; text-decoration: none; }
   line-height: 1;
   box-shadow: 0 0 0 2px var(--bg-1);
 }
-/* Documentation launcher — same icon-button chrome as the notification bell. */
-/* Topbar docs link — shared .iconbtn idiom. */
+/* Topbar docs link — a plain icon, like the bell. */
 .tb-docs {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 30px;
   height: 30px;
-  border: 1px solid transparent;
+  border: 0;
   border-radius: var(--rad-sm);
   background: transparent;
   color: var(--fg-3);
   cursor: pointer;
   text-decoration: none;
-  transition: color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+  transition: color var(--dur-fast) var(--ease);
 }
-.tb-docs:hover { color: var(--fg); background: var(--bg-2); border-color: var(--line); }
+.tb-docs:hover { color: var(--fg); }
 /* Session chip (dash/auth/SessionChip.jsx) — "Sign in" while this browser is
    gated to read-only, "Admin · Log out" once signed in. Absent entirely on a
    box that gates nothing. Kept visible on mobile: it is the only standing
@@ -2597,7 +2594,8 @@ select.npu-sel {
   .view-banners { padding: 14px 16px 0; }
   .tb-brand { width: auto; }
   .tb-cmdk { display: none; }   /* command palette folded into the nav drawer on mobile */
-  .tb-launch { display: none; } /* Kanban + Agent Chat launchers: use the nav drawer on mobile */
+  .tb-launch .tb-launch-btn { display: none; } /* Agent Chat launcher: use the nav drawer on mobile (the GPU toggle stays, icons only) */
+  .tb-launch:not(:has(.tb-gpu-wrap)) { display: none; } /* nothing left in the group without a GPU toggle */
   .topbar .tb-menu { display: flex; }
   .tb-eyebrow { display: none; }
   .tiers { grid-template-columns: 1fr; }

@@ -15,11 +15,7 @@ import { useUpdateState } from '@/api/hooks/useUpdates'
 import { useServicesHealth } from '@/api/hooks/useServicesHealth'
 import { slotIndicatorFromPhase } from '../slot-status.js'
 import { serviceTone } from '../status-copy'
-import { isImageGenRoute } from '../slots-route'
-import { useImageRunStore } from '@/stores/useImageRunStore'
-import { useStatusLineActions } from '../image/useStatusLineActions'
-import { ForceStopConfirm, PinConfirm } from './gpu-parts.jsx'
-import { useGpuStatus } from './useGpuStatus'
+import { useGpuState } from './GpuStatusContext.jsx'
 import { GpuSegment } from './GpuSegment.jsx'
 import { GpuPane } from './GpuPane.jsx'
 import { EventsPane, EventRow } from './EventsPane.jsx'
@@ -31,20 +27,16 @@ import { _svcPip } from '../chrome.jsx'
 // The events pane and the collapsed ticker read the journal (`useLogsStream`, /api/journal/stream)
 // and the activity trail (`useActivityStream`) merged into one timeline; the update chip reads
 // `useUpdateState` directly (self-driven).
-export function Dock({ route, param, expanded = false, onToggle }) {
+export function Dock({ expanded = false, onToggle }) {
   // Runtime rollup gives live status + slot readiness counts.
   const L = useRuntimeRollup();
   const health = useHealthSystem();
   const serviceHealth = useServicesHealth();
   const [filters, setFilters] = useState(DOCK_FILTERS_DEFAULT);
   const [footerTab, setFooterTab] = useState("journal");
-  // The GPU state, computed once for the collapsed segment (and, later, the pane). /status polls
-  // at its active cadence on the Image Gen route or while a run of this browser is in flight.
-  const imageRunning = useImageRunStore((s) => s.run?.running === true);
-  const gpu = useGpuStatus({ active: isImageGenRoute(route, param) || imageRunning });
-  // A failed action's message goes when the line's state changes (the kind), not when its text
-  // does: the headline counts seconds and steps.
-  const gpuActions = useStatusLineActions({ resetKey: gpu.view?.kind ?? null });
+  // The GPU state and its actions are the GpuStatusProvider's (above the top bar too), so the
+  // segment, the pane and the top-bar toggle read one poll and share one set of confirms.
+  const { gpu, actions: gpuActions } = useGpuState();
   const openGpu = () => {
     setFooterTab("gpu");
     if (!expanded && onToggle) onToggle();
@@ -292,8 +284,6 @@ export function Dock({ route, param, expanded = false, onToggle }) {
           )}
         </div>
       )}
-      <ForceStopConfirm confirm={gpuActions.confirm} />
-      <PinConfirm confirm={gpuActions.confirm} />
       <div className="foot-chips dock-row">
         <GpuSegment gpu={gpu} actions={gpuActions} onOpen={openGpu} expanded={expanded} />
         {/* slots — one LED pip per ACTIVE slot (stopped slots hidden) + ready

@@ -533,9 +533,10 @@ content-addressed, host-redacted archive you can attach anywhere, and
   — is on by default. The slots page splits into Inference | Image Gen tabs;
   the Image-Gen tab has Generate, Models and Engine sub-tabs: it generates,
   installs image models with a fit meter for this box, shows what a render
-  costs chat, and operates the ComfyUI container. Hold image mode pins the
-  iGPU for generation, with a confirm before Stop image mode drops a running
-  render; those controls are in the dock.
+  costs chat, and operates the ComfyUI container. The top bar's Chat | Image
+  toggle holds image mode (pinning the iGPU for generation, with a confirm) and
+  stops it (with a confirm before it drops a running render); the status and
+  the other controls are in the dock.
 - **The dock** — one status strip on every page: GPU/image-mode state and
   controls, slot and service health, downloads, and the live journal +
   activity feed

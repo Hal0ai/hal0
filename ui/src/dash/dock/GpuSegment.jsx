@@ -1,12 +1,14 @@
 // The GPU segment of the dock's collapsed row: a coloured rule and dot, the headline, the detail
 // and at most two buttons. A render adds a mini progress bar. The state comes from useGpuStatus,
-// the calls from useStatusLineActions (Dock owns both, so the confirm dialogs mount once).
+// the calls from useStatusLineActions (GpuStatusProvider owns both, so the confirm dialogs mount
+// once). It is a status line: Hold and Keep are the top-bar toggle's, and plain chat mode is only
+// "GPU · chat" (dock-pure.ts segmentCopy, segmentActions).
 //
 // It draws with the plain dashboard tokens, not the `--comfy*` accent.
 import { KIND_ANNOUNCEMENT } from '@/dash/image/status-line-pure'
 import { renderPct } from '@/dash/image/status-line-parts-pure'
 import { LABEL } from './gpu-parts.jsx'
-import { segmentActions } from './dock-pure'
+import { segmentActions, segmentCopy } from './dock-pure'
 
 /**
  * @param {{
@@ -21,6 +23,7 @@ export function GpuSegment({ gpu, actions, onOpen, expanded = false }) {
   if (!view) return null
   const pct = view.kind === 'rendering' ? renderPct(gpu.progress) : null
   const buttons = segmentActions(view.actions, gpu.ctx)
+  const copy = segmentCopy(view)
 
   return (
     <div
@@ -47,7 +50,7 @@ export function GpuSegment({ gpu, actions, onOpen, expanded = false }) {
           onClick={onOpen}
         >
           <span className="head-text" data-testid="gpu-status-head">
-            {view.head}
+            {copy.head}
           </span>
         </button>
         {actions.error ? (
@@ -59,9 +62,9 @@ export function GpuSegment({ gpu, actions, onOpen, expanded = false }) {
             {actions.error}
           </span>
         ) : (
-          view.detail && (
+          copy.detail && (
             <span className="det" data-testid="gpu-status-detail">
-              {view.detail}
+              {copy.detail}
             </span>
           )
         )}

@@ -323,26 +323,42 @@ is refused with 409 `capability.model_not_downloaded`. See
 
 ## What a render does to chat
 
-The dock's **GPU segment**, at the bottom of every page (and its **gpu** tab),
-says what the GPU is doing, what the next image costs chat and which buttons
-fit. It reads the GPU arbiter's phase and ComfyUI's queue, so it also shows
-editor-queued renders, and is hidden on a box with no GPU pool reading
-or no ROCm lane. The segment shows at most two buttons; the tab, every action that applies.
+The **GPU mode toggle** in the top bar (Chat | Image, beside Agent Chat) switches
+the GPU between chat and image mode from any page. The dock's **GPU segment**,
+at the bottom of every page (and its **gpu** tab), says what the GPU is doing
+and which buttons fit. Both read the GPU arbiter's phase and ComfyUI's queue, so
+they also show editor-queued renders, and both are hidden on a box with no GPU
+pool reading or no ROCm lane. The segment is a status line: it shows at most two
+buttons (never Hold or Keep, which are the toggle's); the tab, every action that
+applies.
+
+The toggle selects **Chat** in chat mode and while the slots reload, and
+**Image** during a switch, the hand-off, a render, the wait after the last image
+and while pinned (with a lock). A spinner shows on Image while switching and on
+Chat while reloading, and a thin bar under Image follows a render. Hover it for
+what an image costs chat ("Pauses brain and coder (29.3 GB). They reload about
+10 s after the last image."). **Image** in chat mode is Hold, and during the
+wait, the hand-off or a render it is Keep; both ask first in a small popover
+under the toggle ("Pause … and refuse GPU chat until you switch back?"; Escape
+or a click elsewhere cancels). While pinned it does nothing. **Chat** in image
+mode is Stop image mode. For a blocked gate, a refused prompt or a stale engine
+the toggle is hidden and the footer carries the buttons. On a phone the toggle
+shows icons only.
 
 | Headline | When | Buttons |
 |---|---|---|
-| `GPU · chat mode` | The LLM slots hold the GPU. | Hold image mode |
+| `GPU · chat` | The LLM slots hold the GPU. The footer shows only these words; the cost is the toggle's tooltip and the **gpu** tab's. `GPU · chat mode` is the headline in the tab. | none (the toggle's Image) |
 | `Switching to image mode` | Chat replies finish, the GPU slots unload, the engine starts (three step chips). | Cancel, only for a Generate run started in this browser |
-| `Image mode · hand-off` | Holding image mode while a prompt reaches ComfyUI's queue (about 3 seconds after a switch). A render hal0 started, from the dashboard or Open WebUI, reads `Rendering` instead. | Keep image mode |
-| `Rendering · <model> · step n/N` | A render runs, with a progress bar and the elapsed time. `Rendering · <model>` before the first step, `Rendering` with no progress, `Rendering · editor prompt · k queued` for a render only ComfyUI's queue shows. | Cancel render, Keep image mode |
-| `Image mode ends in N s` | The wait after the last image. | Keep image mode |
+| `Image mode · hand-off` | Holding image mode while a prompt reaches ComfyUI's queue (about 3 seconds after a switch). A render hal0 started, from the dashboard or Open WebUI, reads `Rendering` instead. | none (the toggle's Image keeps it) |
+| `Rendering · <model> · step n/N` | A render runs, with a progress bar and the elapsed time. `Rendering · <model>` before the first step, `Rendering` with no progress, `Rendering · editor prompt · k queued` for a render only ComfyUI's queue shows. | Cancel render |
+| `Image mode ends in N s` | The wait after the last image. | none (the toggle's Image keeps it) |
 | `Reloading GPU slots · k of n ready` | The paused slots are loading again, one chip each. | none |
 | `Image mode pinned` | Image mode is held until you unpin it. | Unpin, Stop image mode |
-| `Image mode is on` | Image mode with no phase and no pin, for example just after `hal0-api` restarted. | Keep image mode |
+| `Image mode is on` | Image mode with no phase and no pin, for example just after `hal0-api` restarted. | none (the toggle's Image keeps it) |
 
 A pinned box that is working shows the work, with **Unpin** among its buttons.
 **Keep image mode** pins; **Hold image mode** switches to image mode with a pin.
-Both ask first: a pin makes GPU chat requests (Open WebUI, agents, the API) fail
+They are the toggle's Image click, and the **gpu** tab's buttons. Both ask first: a pin makes GPU chat requests (Open WebUI, agents, the API) fail
 with `503 gpu.image_mode` until you unpin, and the paused GPU slots stay paused.
 **Cancel render** is `POST /api/comfyui/render/cancel`, which also clears
 prompts queued from the editor. **Stop image mode** unpins first when the box is

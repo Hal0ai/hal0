@@ -276,11 +276,13 @@ test.describe('Image Gen setup: first run, install, generate', () => {
       await expect(page.getByTestId('gen-model')).toContainText(MODEL_LABEL)
       await expect(page.getByTestId('fit-chip-gen')).toHaveText('Fits · 42.3 GB to spare')
 
-      // Chat mode: the status line and the button's cost line say what an image costs chat.
-      await expect(head(page)).toHaveText('GPU · chat mode')
+      // Chat mode: the footer only says "GPU · chat"; the button's cost line and the top-bar
+      // toggle's tooltip say what an image costs chat.
+      await expect(head(page)).toHaveText('GPU · chat')
       const cost = 'Pauses brain (9.6 GB). They reload about 10 s after the last image.'
       await expect(page.getByTestId('gen-cost')).toHaveText(cost)
-      await expect(detail(page)).toHaveText(cost)
+      await expect(detail(page)).toHaveCount(0)
+      await expect(page.getByTestId('tb-gpu-toggle')).toHaveAttribute('title', cost)
     })
 
     await test.step('Generate starts the run', async () => {
@@ -505,39 +507,50 @@ test.describe('Image Gen setup: a pinned box', () => {
     // The line leaves "pinned" at once (the click asks for the new state) and counts the grace.
     await expect(head(page)).toHaveText(/^Image mode ends in \d+ s$/)
     await expect(segAction(page, 'unpin')).toHaveCount(0)
-    await expect(segAction(page, 'keep')).toBeVisible()
+    // Image mode is on and not held: the toggle's Image segment is selected, and no pin lock.
+    await expect(page.getByTestId('tb-gpu-image')).toHaveAttribute('aria-checked', 'true')
+    await expect(page.getByTestId('tb-gpu-lock')).toHaveCount(0)
   })
 })
 
 // ── hold ─────────────────────────────────────────────────────────────────────
 
 test.describe('Image Gen setup: holding image mode', () => {
-  test('Hold asks first, and a confirmed Hold posts {mode: "generation", pin: true}', async ({ page }) => {
+  test('Image asks first in a popover, and a confirmed switch posts {mode: "generation", pin: true}', async ({
+    page,
+  }) => {
     const mock = makeImageGenMock({ memory: referenceBoxMemory() })
     await routeImageGen(page, mock)
     await gotoImageGen(page)
-    await expect(head(page)).toHaveText('GPU · chat mode')
+    await expect(head(page)).toHaveText('GPU · chat')
+    // The footer has no Hold: the top-bar toggle owns it.
+    await expect(segAction(page, 'hold')).toHaveCount(0)
 
-    // A pin refuses GPU chat until someone unpins: the button asks before it sends anything.
-    const hold = segAction(page, 'hold')
-    await expect(hold).toHaveText('Hold image mode')
-    await hold.click()
-    const dialog = page.getByRole('dialog')
-    await expect(dialog.getByRole('heading', { name: 'Hold image mode?' })).toBeVisible()
-    await expect(dialog).toContainText(
-      'GPU chat requests (Open WebUI, agents, the API) are refused until you unpin. The paused GPU slots stay paused.',
-    )
+    const toggle = page.getByTestId('tb-gpu-toggle')
+    await expect(toggle).toHaveAttribute('role', 'radiogroup')
+    await expect(page.getByTestId('tb-gpu-chat')).toHaveAttribute('aria-checked', 'true')
+
+    // A pin refuses GPU chat until someone unpins: the toggle asks before it sends anything.
+    const image = page.getByTestId('tb-gpu-image')
+    await image.click()
+    const pop = page.getByTestId('tb-gpu-pop')
+    await expect(pop).toContainText('Pause brain (9.6 GB) and refuse GPU chat until you switch back?')
+    await expect(page.getByRole('dialog', { name: 'Hold image mode?' })).toBeVisible()
     expect(mock.posts, 'nothing was sent before the answer').toEqual([])
 
-    // Declining sends nothing either.
-    await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
-    await expect(dialog).toHaveCount(0)
-    expect(mock.posts, 'a declined Hold sent nothing').toEqual([])
+    // Declining (Cancel, Escape) sends nothing either.
+    await page.getByTestId('tb-gpu-pop-cancel').click()
+    await expect(pop).toHaveCount(0)
+    await image.click()
+    await expect(pop).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(pop).toHaveCount(0)
+    expect(mock.posts, 'a declined switch sent nothing').toEqual([])
 
-    await hold.click()
-    await dialog.getByRole('button', { name: 'Hold image mode', exact: true }).click()
+    await image.click()
+    await page.getByTestId('tb-gpu-pop-confirm').click()
     await expect.poll(() => mock.posts).toEqual([['/api/comfyui/switchover', { mode: 'generation', pin: true }]])
-    await expect(dialog).toHaveCount(0)
+    await expect(pop).toHaveCount(0)
   })
 })
 
