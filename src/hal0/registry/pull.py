@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import grp
 import hashlib
 import json
 import logging
 import os
+import pwd
 import re
 import secrets
 import shutil
@@ -658,6 +660,25 @@ def pull_job_file(model_id: str) -> Path:
     return _pull_jobs_dir() / f"{_sanitise_id(model_id)}.json"
 
 
+def _adopt_service_ownership(path: Path) -> None:
+    """chown a snapshot to ``hal0:hal0`` when written by root (#3532).
+
+    The installer's brain-model pull runs as root; ``mkstemp`` births the file
+    ``root:root 0600``, which ``hal0-api`` (``User=hal0``) cannot read, so the
+    job never shows in ``/api/models/pulls``. The perms table declares
+    ``hal0:hal0 0600`` for ``model-pull-jobs/*.json``. Fail-soft: a missing
+    service account (dev boxes, tests) or a refused chown leaves the file as is.
+    """
+    if os.geteuid() != 0:
+        return
+    try:
+        uid = pwd.getpwnam("hal0").pw_uid
+        gid = grp.getgrnam("hal0").gr_gid
+        os.chown(path, uid, gid)
+    except (KeyError, OSError) as exc:
+        log.warning("model.pull_job_chown_failed path=%s error=%s", path, exc)
+
+
 def persist_pull_job(job: PullJob) -> None:
     """Atomically mirror a pull-job snapshot to disk (best-effort, fail-soft).
 
@@ -682,6 +703,7 @@ def persist_pull_job(job: PullJob) -> None:
                 json.dump(snapshot, f)
                 f.flush()
                 os.fsync(f.fileno())
+            _adopt_service_ownership(tmp_path)
             os.replace(tmp_path, path)
             _fsync_dir(path.parent)
             tmp_path = None
@@ -757,7 +779,8 @@ def sweep_pull_jobs(max_age_days: int = 14) -> int:
 def list_persisted_jobs() -> list[dict[str, Any]]:
     """Read all ``.json`` files from the pull-jobs directory and return a list of dicts.
 
-    Best-effort: malformed or unreadable files are silently skipped.
+    Best-effort: malformed or unreadable files are skipped (unreadable ones are
+    logged, so a permissions drift like #3532 is visible in the journal).
     An absent jobs directory returns an empty list.
     """
     jobs_dir = _pull_jobs_dir()
@@ -769,7 +792,9 @@ def list_persisted_jobs() -> list[dict[str, Any]]:
             data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 results.append(data)
-        except (OSError, ValueError):
+        except OSError as exc:
+            log.warning("model.pull_job_unreadable path=%s error=%s", path, exc)
+        except ValueError:
             continue
     return results
 
