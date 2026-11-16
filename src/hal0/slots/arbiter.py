@@ -499,6 +499,11 @@ class GpuArbiter:
 
         On the GPU is ready for dispatch, or in a loading state (#3056): a slot still
         loading finishes onto the GPU, and one parked in WARMING holds memory there.
+        A slot whose lifecycle lock is held counts too, whatever its state (#3502):
+        a load spends its first steps (teardown of an ERROR unit, the admission
+        evictions) in OFFLINE with the lock held, and still ends on the GPU. The
+        switch waits for it (:meth:`_await_loads`) and then keeps it in the saved set
+        only if it really landed (:meth:`_settle_busy_slots`).
 
         Reads the group cache, in config order. The switch calls it right after
         refreshing the cache from ``iter_configs()``; :meth:`status` calls it
@@ -509,8 +514,22 @@ class GpuArbiter:
         return [
             name
             for name, group in self._group_cache.items()
-            if group == "llm" and self._on_gpu(name)
+            if group == "llm" and (self._on_gpu(name) or self._manager.is_busy(name))
         ]
+
+    def _settle_busy_slots(self, st: dict[str, Any], slots: list[str]) -> list[str]:
+        """Drop from *slots* (and the saved set) the slots that ended off the GPU.
+
+        Runs after :meth:`_await_loads`. A slot taken into the switch only because
+        its lock was held may have been unloading, or its load may have failed: it
+        is not on the GPU now, so there is nothing to unload, and a later restore
+        must not load what an operator just took down.
+        """
+        settled = [s for s in slots if self._on_gpu(s)]
+        if settled != slots:
+            st["saved_llm_slots"] = [s for s in st["saved_llm_slots"] if s in settled]
+            self._persist()
+        return settled
 
     def _on_gpu(self, name: str) -> bool:
         """Ready for dispatch, or in a loading state (see :data:`_LOADING`)."""
@@ -664,9 +683,10 @@ class GpuArbiter:
         self._phase = "unloading"
         deadline = time.monotonic() + _LOAD_WAIT_S
         while True:
-            loading = [
-                s for s in slots if self._manager.state(s) in _LOADING and self._manager.is_busy(s)
-            ]
+            # Any busy slot, whatever its state (#3502): a load holds the lock
+            # from before it leaves OFFLINE, and an unload must finish before
+            # the switch can tell whether the slot is still on the GPU.
+            loading = [s for s in slots if self._manager.is_busy(s)]
             if not loading:
                 return
             if time.monotonic() >= deadline:
@@ -784,6 +804,7 @@ class GpuArbiter:
             await asyncio.sleep(_DRAIN_POLL_S)
 
         await self._await_loads(llm_slots, llm_slots, img_name)
+        llm_slots = self._settle_busy_slots(st, llm_slots)
         await self._unload_for_img(llm_slots, llm_slots, img_name)
 
         # Resident container: when the img slot is already dispatchable
@@ -1442,6 +1463,25 @@ class GpuArbiter:
                 f"dispatching to slot {name!r}",
                 details={"slot": name},
             )
+
+    def permits_background_load(self, slot_name: str) -> bool:
+        """May a load nobody asked for put *slot_name* on the GPU right now?
+
+        For automatic loaders that bypass the request path's
+        :meth:`guard_dispatch` (the admission re-admission sweep, #3502 /
+        ADR-0063). ``False`` while a switch holds the GPU (either direction:
+        the target mode is not settled yet) and whenever :meth:`guard_dispatch`
+        would refuse the slot in the current mode, so an llm-group slot never
+        lands on the GPU in image mode, pinned or not. Slots outside the
+        exclusive split (NPU, CPU) always pass.
+        """
+        if self._switch_lock.locked() or self._entering_img:
+            return self._slot_group(self._resolve_alias(slot_name)) is None
+        try:
+            self.guard_dispatch(slot_name)
+        except (GpuImageMode, GpuInferenceMode):
+            return False
+        return True
 
     def set_pin(self, pinned: bool) -> None:
         """Set or clear the manual pin that holds image mode.
