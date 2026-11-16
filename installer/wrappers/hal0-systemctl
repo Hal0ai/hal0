@@ -251,8 +251,23 @@ validate_dropin_directive() {  # args: kind, "Key=Value" line
           [[ "$evalue" =~ ^[a-z0-9_-]{1,32}$ ]] \
             || die "drop-in rejected: bad ${ename} value: $evalue" ;;
         HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL|HINDSIGHT_API_RERANKER_LOCAL_MODEL|\
-        HINDSIGHT_API_DECISION_MODEL_MODEL)
+        HINDSIGHT_API_DECISION_MODEL_MODEL|HINDSIGHT_API_RERANKER_LITELLM_MODEL)
           [[ "$evalue" =~ ^[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}$ && "$evalue" != *".."* ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        # #3717: remote reranker endpoint ([memory.models].reranker_base_url).
+        # A plain http(s) host[:port][/path]: no userinfo (`@` is outside the
+        # charset), no query, no `..`. Mirrors schema._RERANKER_URL_RE.
+        HINDSIGHT_API_RERANKER_LITELLM_API_BASE|HINDSIGHT_API_RERANKER_TEI_URL)
+          [[ "$evalue" =~ ^https?://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*$ \
+             && "$evalue" != *".."* ]] \
+            || die "drop-in rejected: bad ${ename} value: $evalue" ;;
+        # #3717: reranker caps and timeouts — bare non-negative integers.
+        HINDSIGHT_API_RERANKER_MAX_CANDIDATES|HINDSIGHT_API_RERANKER_MAX_CANDIDATES_LOW|\
+        HINDSIGHT_API_RERANKER_MAX_CANDIDATES_MID|HINDSIGHT_API_RERANKER_MAX_CANDIDATES_HIGH|\
+        HINDSIGHT_API_RERANKER_LOCAL_MAX_CONCURRENT|HINDSIGHT_API_RERANKER_LOCAL_BATCH_SIZE|\
+        HINDSIGHT_API_RERANKER_LOCAL_TIMEOUT|HINDSIGHT_API_RERANKER_LITELLM_TIMEOUT|\
+        HINDSIGHT_API_RERANKER_TEI_HTTP_TIMEOUT)
+          [[ "$evalue" =~ ^[0-9]{1,6}$ ]] \
             || die "drop-in rejected: bad ${ename} value: $evalue" ;;
         HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING|HINDSIGHT_API_LLM_STRICT_SCHEMA|\
         HINDSIGHT_API_RETAIN_LLM_STRICT_SCHEMA|HINDSIGHT_API_CONSOLIDATION_LLM_STRICT_SCHEMA|\

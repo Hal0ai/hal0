@@ -418,6 +418,19 @@ async def get_models(request: Request) -> dict[str, Any]:
         "reranker": {
             "provider": models_cfg.reranker_provider,
             "model": models_cfg.reranker_model,
+            # #3717: the candidate caps and, for a remote provider, where
+            # the engine sends rerank calls. Unset knobs read null (engine
+            # default).
+            "max_candidates": models_cfg.reranker_max_candidates,
+            "max_candidates_low": models_cfg.reranker_max_candidates_low,
+            "max_candidates_mid": models_cfg.reranker_max_candidates_mid,
+            "max_candidates_high": models_cfg.reranker_max_candidates_high,
+            "local_max_concurrent": models_cfg.reranker_local_max_concurrent,
+            "local_batch_size": models_cfg.reranker_local_batch_size,
+            "local_timeout_s": models_cfg.reranker_local_timeout_s,
+            "base_url": models_cfg.reranker_base_url,
+            "api_model": models_cfg.reranker_api_model,
+            "timeout_s": models_cfg.reranker_timeout_s,
         },
         "decision": {
             "enabled": decision_cfg.enabled,
