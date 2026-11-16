@@ -2737,3 +2737,77 @@ def test_nightly_box_on_latest_nightly_sees_no_update() -> None:
     # IS newer than the bare wheel base) — proving the fix must come from the
     # installed side, not from _is_newer.
     assert _is_newer("1.1.0-nightly.20260901025155", "1.1.0") is True
+
+
+# ── release-tree lock (#3711) ──────────────────────────────────────────────────
+
+
+def test_second_stage_during_activate_is_refused_and_tree_survives(
+    synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3711: a stage that starts while another job's activate is re-pipping is refused.
+
+    The box report: two updates to one version overlapped, and the second
+    prepare's extract quarantined ``hal0-<version>/`` to ``.stale-<ts>`` and
+    re-extracted it while the first job's ``pip install`` read it, so that
+    activate failed with rc=1. Here the second stage runs from inside the first
+    activate's venv reinstall, which is exactly where the box collided.
+    """
+    from hal0.updater.updater import (
+        UpdateInProgress,
+        activate_release,
+        release_dir_name,
+        stage_release,
+    )
+
+    version = synthetic_release["version"]
+    asyncio.run(stage_release("stable", version))
+    install = _versioned_install_dir(version)
+    inode_before = install.stat().st_ino
+    seen: dict[str, Any] = {}
+
+    def reinstall_while_other_job_stages(install_dir: Path, *, job_id: str | None = None) -> None:
+        try:
+            asyncio.run(stage_release("stable", version, job_id="second"))
+        except UpdateInProgress as exc:
+            seen["refused"] = exc
+        # The tree pip is reading is still the one this activate swapped in.
+        seen["inode"] = Path(install_dir).stat().st_ino
+
+    monkeypatch.setattr(updater_module, "_reinstall_into_venv", reinstall_while_other_job_stages)
+    activate_release(release_dir_name(version))
+
+    assert isinstance(seen.get("refused"), UpdateInProgress), seen
+    assert seen["refused"].status == 409
+    assert seen["inode"] == inode_before
+    assert not list(install.parent.glob(f"{install.name}.stale-*"))
+
+
+def test_release_tree_lock_refuses_activate_and_discard_while_held(
+    synthetic_release: dict[str, Any], cosign_skip: None
+) -> None:
+    """#3711: activate and discard take the same lock, so neither runs under a stage."""
+    from hal0.updater.updater import (
+        UpdateInProgress,
+        _release_tree_lock,
+        activate_release,
+        discard_release,
+        release_dir_name,
+        stage_release,
+    )
+
+    version = synthetic_release["version"]
+    asyncio.run(stage_release("stable", version))
+    name = release_dir_name(version)
+    with _release_tree_lock("stage", job_id="first"):
+        with pytest.raises(UpdateInProgress):
+            activate_release(name)
+        with pytest.raises(UpdateInProgress):
+            discard_release(name)
+        with pytest.raises(UpdateInProgress):
+            asyncio.run(stage_release("stable", version))
+    # Released on exit: the next primitive gets it.
+    activate_release(name)
+    lock = _versioned_install_dir(version).parent / ".update.lock"
+    assert lock.is_file()
+    assert lock.stat().st_mode & 0o777 == 0o600

@@ -90,6 +90,13 @@ class UpdateEditableRefused(Hal0Error):
     status = 409
 
 
+class UpdateBusy(Hal0Error):
+    """Another update, converge or repair job is already in flight (#3711)."""
+
+    code = "system.update_busy"
+    status = 409
+
+
 class ComponentNotFound(Hal0Error):
     code = "system.component_not_found"
     status = 404
@@ -232,6 +239,49 @@ _UNFINISHED_STATES = ("queued", "running")
 
 #: ``error_code`` of a job that hal0-api stopped running because it restarted.
 INTERRUPTED_CODE = "api_restarted"
+
+
+def _refuse_if_job_in_flight(jobs: dict[str, dict[str, Any]], *, starting: str) -> None:
+    """Refuse a new update job with 409 while another job is queued or running (#3711).
+
+    ``/apply``, ``/prepare`` and ``/commit`` used to queue a job on every call.
+    Two overlapping updates to the same version then raced on the release tree:
+    the second prepare quarantined and re-extracted ``hal0-<version>/`` while
+    the first job's ``activate`` was re-pipping out of it, so that job failed
+    with ``activate (rc=1)`` and the box ended on whichever job activated last.
+    The refusal carries the running job's id so a client can follow it
+    (``GET /status/{job_id}``) instead of starting a second one.
+
+    The registry is shared with component converge and agent repair jobs, and
+    both of those already refuse while an update is in flight, so this closes
+    the last direction. A repair job an earlier hal0-api left ``running`` is
+    reconciled first, the same way the repair route does, so it cannot wedge
+    every later update.
+
+    Callers must not ``await`` between this check and registering their job:
+    with no suspension point in between, two concurrent POSTs cannot both find
+    the registry idle (the converge route's reasoning).
+    """
+    for other in jobs.values():
+        if other.get("phase") == "repair:hermes":
+            # Imported here: the repair module imports this one.
+            from hal0.api.agents.repair import reconcile_stale_repair_job
+
+            reconcile_stale_repair_job(other)
+        if other.get("state") in _UNFINISHED_STATES:
+            job_id = other.get("id")
+            phase = other.get("phase") or "apply"
+            raise UpdateBusy(
+                f"another update job ({job_id}, {phase}) is already {other.get('state')}; "
+                f"wait for it to finish (`hal0 update status`) before starting a {starting}",
+                details={
+                    "job_id": job_id,
+                    "phase": phase,
+                    "state": other.get("state"),
+                    "version": other.get("version"),
+                    "hint": f"poll GET /api/updates/status/{job_id} to follow the running job",
+                },
+            )
 
 
 def _interrupted_error(phase: object) -> str:
@@ -732,6 +782,7 @@ async def apply_update(request: Request) -> dict[str, Any]:
 
     channel = _current_channel(request)
     jobs = _update_jobs(request)
+    _refuse_if_job_in_flight(jobs, starting="apply")
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
         "id": job_id,
@@ -799,6 +850,7 @@ async def prepare_update(request: Request) -> dict[str, Any]:
     version = _body_version(body)
     channel = _current_channel(request)
     jobs = _update_jobs(request)
+    _refuse_if_job_in_flight(jobs, starting="prepare")
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
         "id": job_id,
@@ -843,6 +895,7 @@ async def commit_update(request: Request) -> dict[str, Any]:
         ) from exc
     channel = _current_channel(request)
     jobs = _update_jobs(request)
+    _refuse_if_job_in_flight(jobs, starting="commit")
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
         "id": job_id,
@@ -872,8 +925,7 @@ async def update_status(job_id: str, request: Request) -> dict[str, Any]:
     inside it. It is recorded ``failed`` with ``error_code: "api_restarted"``
     before it is re-seeded into the registry or returned (for every phase), so a
     poll across a restart does not leave a dead ``running`` job behind to refuse
-    every later component converge and repair with 409 (``/apply``, ``/prepare``
-    and ``/commit`` have no busy check). A job whose terminal state
+    every later update, component converge and repair with 409. A job whose terminal state
     reached disk (``applied``, ``failed``, ``prepared``) reloads unchanged: the
     apply and commit jobs persist ``applied`` before the restart they start
     (#1540), so a restart that is part of a job never leaves it unfinished.

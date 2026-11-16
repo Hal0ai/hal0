@@ -1574,3 +1574,89 @@ async def test_hermes_reconcile_skipped_for_other_status(monkeypatch: pytest.Mon
 
     job = await _run_hermes_job(monkeypatch, "noop", reconcile_hermes_upstreams=fake)
     assert "hermes_upstreams" not in job["component_result"]
+
+
+# ── one update job at a time (#3711) ───────────────────────────────────────────
+
+
+def _wait_state(client: TestClient, job_id: str, states: tuple[str, ...]) -> dict:
+    deadline = time.monotonic() + 6.0
+    job: dict = {}
+    while time.monotonic() < deadline:
+        job = client.get(f"/api/updates/status/{job_id}").json()
+        if job.get("state") in states:
+            return job
+        time.sleep(0.02)
+    return job
+
+
+def test_second_update_job_while_one_runs_is_refused_with_its_id(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3711: a second prepare, commit or apply during a running job gets 409.
+
+    Two clients updating at once (``hal0 update --yes`` and the dashboard) used
+    to queue two jobs, and the second prepare re-extracted the release tree
+    under the first job's activate. The refusal names the running job so the
+    client can follow it instead.
+    """
+    import threading
+
+    from hal0.api.routes import updater as u_mod
+
+    release = threading.Event()
+    started = threading.Event()
+
+    async def blocking_prepare(self: object, version: str | None = None) -> dict:
+        import asyncio
+
+        started.set()
+        await asyncio.to_thread(release.wait, 5.0)
+        return {"version": "9.9.9", "install_dir": "/x", "cache_dir": "/y", "notes": None}
+
+    monkeypatch.setattr(u_mod.Updater, "prepare", blocking_prepare)
+
+    first = isolated_client.post("/api/updates/prepare", json={})
+    assert first.status_code == 202, first.text
+    first_id = first.json()["id"]
+    try:
+        assert started.wait(5.0)
+        for path, body in (
+            ("/api/updates/prepare", {}),
+            ("/api/updates/commit", {"version": "9.9.9"}),
+            ("/api/updates/apply", {}),
+        ):
+            r = isolated_client.post(path, json=body)
+            assert r.status_code == 409, (path, r.text)
+            err = r.json()["error"]
+            assert err["code"] == "system.update_busy"
+            assert err["details"]["job_id"] == first_id
+            assert err["details"]["phase"] == "prepare"
+            assert first_id in err["message"]
+        # Nothing was queued by the refused calls.
+        assert list(isolated_client.app.state.update_jobs) == [first_id]
+    finally:
+        release.set()
+
+    assert _wait_state(isolated_client, first_id, ("prepared", "failed"))["state"] == "prepared"
+    # Once it finished, the next update is accepted.
+    r = isolated_client.post("/api/updates/prepare", json={})
+    assert r.status_code == 202, r.text
+
+
+def test_stale_repair_job_does_not_block_an_update(isolated_client: TestClient) -> None:
+    """#3711: a repair an earlier hal0-api left ``running`` is reconciled, not obeyed."""
+    stale_id = "abcdef012345"
+    isolated_client.app.state.update_jobs = {
+        stale_id: {
+            "id": stale_id,
+            "state": "running",
+            "phase": "repair:hermes",
+            "api_pid": -1,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+    }
+    r = isolated_client.post("/api/updates/prepare", json={})
+    assert r.status_code == 202, r.text
+    assert isolated_client.app.state.update_jobs[stale_id]["state"] == "failed"

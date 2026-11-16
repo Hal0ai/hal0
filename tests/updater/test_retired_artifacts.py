@@ -119,7 +119,10 @@ def test_is_a_noop_when_not_root(roots: dict[str, Any], monkeypatch: pytest.Monk
 def test_activate_release_runs_the_sweep() -> None:
     import inspect
 
-    assert "remove_retired_artifacts(job_id=job_id)" in inspect.getsource(U.activate_release)
+    # activate_release takes the release-tree lock (#3711) and runs this body.
+    assert "remove_retired_artifacts(job_id=job_id)" in inspect.getsource(
+        U._activate_release_unlocked
+    )
 
 
 def test_install_sh_runs_the_same_sweep() -> None:

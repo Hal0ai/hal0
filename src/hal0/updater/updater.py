@@ -211,6 +211,13 @@ class UpdateUpgradePathUnsupported(UpdateError):
     status = 400
 
 
+class UpdateInProgress(UpdateError):
+    """Another process is staging or activating a release right now (#3711)."""
+
+    code = "system.update_in_progress"
+    status = 409
+
+
 class UpdateRollbackUnavailable(UpdateError):
     """No previous-version record exists — nothing to roll back to."""
 
@@ -3079,7 +3086,74 @@ def rerender_slot_units(*, job_id: str | None = None) -> int:
 # ``hal0-update`` sudo seam. :class:`hal0.updater.privileged.UpdateSeam` picks.
 
 
+#: Name of the release-tree lock under the install root (#3711). Not a
+#: ``hal0-*`` or ``.stage-*`` name, so no release scan or reaper ever matches it.
+_RELEASE_TREE_LOCK = ".update.lock"
+
+
+@contextlib.contextmanager
+def _release_tree_lock(verb: str, *, job_id: str | None = None) -> Iterator[None]:
+    """Hold the install root's exclusive release-tree lock, or refuse at once (#3711).
+
+    ``stage`` extracts into ``<usr_lib>/hal0-<version>/`` (quarantining whatever
+    is there first) and ``activate`` re-pips out of that same directory. Two
+    updates overlapping on one box used to interleave the two: a second stage
+    renamed the tree aside and re-extracted it while the first job's ``pip
+    install`` was reading it, so the first job failed with ``activate (rc=1)``.
+    Every primitive that writes the release tree takes this lock, so they run
+    one at a time whoever calls them: the hal0-api jobs (whose route also
+    refuses a second job), ``sudo hal0-update`` by hand, and a root
+    ``hal0 update`` that never goes through hal0-api.
+
+    Non-blocking on purpose: a stage can take many minutes, and a second update
+    waiting behind the first would then re-stage the tree the first just
+    activated. Raises :class:`UpdateInProgress` instead.
+
+    The lock file is ``0600`` and opened ``O_NOFOLLOW``: on a shipped box the
+    install root is ``root:root 0755``, so the unprivileged service account can
+    neither create it nor open it to hold the lock and block updates.
+    """
+    root = _usr_lib_root()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / _RELEASE_TREE_LOCK
+    try:
+        fd = os.open(
+            path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), 0o600
+        )
+    except OSError as exc:
+        raise UpdateError(
+            f"cannot open the release-tree lock {path}: {exc}",
+            details={"lock": str(path), "error": str(exc)},
+        ) from exc
+    try:
+        import fcntl
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise UpdateInProgress(
+                f"another hal0 update is staging or activating a release (lock {path}); "
+                "wait for it to finish (`hal0 update status`) and retry",
+                details={"lock": str(path), "verb": verb},
+            ) from exc
+        log.debug("updater.release_lock_acquired", job_id=job_id, verb=verb, lock=str(path))
+        yield
+    finally:
+        os.close(fd)
+
+
 async def stage_release(
+    channel: str,
+    version: str | None = None,
+    *,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """§9 steps 1-6 under the release-tree lock: see :func:`_stage_release_unlocked`."""
+    with _release_tree_lock("stage", job_id=job_id):
+        return await _stage_release_unlocked(channel, version, job_id=job_id)
+
+
+async def _stage_release_unlocked(
     channel: str,
     version: str | None = None,
     *,
@@ -3130,10 +3204,9 @@ async def stage_release(
     # tarball it will never be allowed to activate.
     _enforce_upgrade_floor(manifest, job_id=job_id)
 
-    # Residual: concurrent prepares for the same version share cache/install
-    # paths and are not serialized. A lock redesign is intentionally out of
-    # scope; signed immutable same-version assets limit current release risk
-    # because both prepares authenticate the same publisher-pinned bytes.
+    # Concurrent prepares share cache/install paths; the caller holds the
+    # release-tree lock (:func:`_release_tree_lock`, #3711), so a second stage
+    # or an activate cannot run against this tree while it is being replaced.
 
     # Steps 3-6 all happen inside a root-only staging directory (#1738). The
     # artifact is downloaded, digested, cosign-verified and extracted without
@@ -3927,6 +4000,12 @@ def refresh_path_links(target: Path, *, job_id: str | None = None) -> dict[str, 
 
 
 def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, Any]:
+    """§9 steps 8 + 8b under the release-tree lock: see :func:`_activate_release_unlocked`."""
+    with _release_tree_lock("activate", job_id=job_id):
+        return _activate_release_unlocked(dir_name, job_id=job_id)
+
+
+def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> dict[str, Any]:
     """§9 step 8 + 8b: swap ``current`` to ``<usr_lib>/<dir_name>`` and re-pip it.
 
     THE single activation primitive — :meth:`Updater.commit` and
@@ -4021,6 +4100,12 @@ def activate_release(dir_name: str, *, job_id: str | None = None) -> dict[str, A
 
 
 def discard_release(dir_name: str, *, job_id: str | None = None) -> None:
+    """Remove a staged tree under the release-tree lock: see :func:`_discard_release_unlocked`."""
+    with _release_tree_lock("discard", job_id=job_id):
+        _discard_release_unlocked(dir_name, job_id=job_id)
+
+
+def _discard_release_unlocked(dir_name: str, *, job_id: str | None = None) -> None:
     """Remove a staged ``<usr_lib>/<dir_name>`` tree (rm -rf semantics).
 
     The failure-cleanup primitive: ``commit`` calls it when a config migration
