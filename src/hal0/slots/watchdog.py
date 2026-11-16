@@ -101,6 +101,12 @@ _STALL_CEILING_STRIKES: int = 10
 # sampler and preload eviction all go through status(), so an unthrottled probe
 # would slow every one of those calls for as long as the engine stays silent.
 _STALL_REPROBE_INTERVAL_S: float = 30.0
+# After an automatic `podman network reload --all` repaired a missing DNAT rule
+# (#3724), re-probe /health this many times, this far apart, before parking the
+# slot anyway. netavark rewrites the rules synchronously, so the first probe
+# normally answers; the rest absorb a slow reload on a busy box.
+_DNAT_REPROBE_ATTEMPTS: int = 3
+_DNAT_REPROBE_DELAY_S: float = 2.0
 
 
 class WatchdogHost(Protocol):
@@ -109,6 +115,8 @@ class WatchdogHost(Protocol):
     _fail_watchers: dict[int, asyncio.Task[None]]
     _states: dict[int, SlotStateRecord]
     _serving_count: dict[int, int]
+    #: ``[slots].port_dnat_auto_repair`` (#3724).
+    _port_dnat_auto_repair: bool
 
     def _current_state(self, name: str) -> SlotState: ...
     def _key(self, name: str) -> int: ...
@@ -397,6 +405,15 @@ class SlotWatchdog:
                     if health_failures < _HEALTH_FAIL_STRIKES:
                         # Tolerate a transient blip; a real crash fails again.
                         continue
+                    # Before parking it, ask WHY (#1820, #3724): a healthy
+                    # container behind a published port with no DNAT rule
+                    # reads exactly like a dead server from here. None means
+                    # an automatic network reload brought /health back.
+                    classified = await self._classify_health_fault(slot_name)
+                    if classified is None:
+                        health_failures = 0
+                        continue
+                    message, extra = classified
                     # Confirmed unhealthy → ERROR (red dot, operator cue). The
                     # health endpoint (#783 cr1) then reports degraded and
                     # hal0_slot_up reads health_ok=False (#791). Recoverable —
@@ -406,9 +423,9 @@ class SlotWatchdog:
                     await self._stamp_locked(
                         slot_name,
                         SlotState.ERROR,
-                        message="model server failed /health probe",
+                        message=message,
                         still_faulted=lambda: self._probe_unhealthy(slot_name),
-                        extra={"health_ok": False},
+                        extra=extra,
                     )
                     return
                 # The container unit went inactive while we believed it
@@ -459,6 +476,76 @@ class SlotWatchdog:
         except asyncio.CancelledError:
             # Normal shutdown path — slot left live-state cleanly.
             raise
+
+    async def _classify_health_fault(self, slot_name: str) -> tuple[str, dict[str, Any]] | None:
+        """Classify a confirmed /health failure on an active unit (#1820, #3724).
+
+        Audits the slot's published port with :mod:`hal0.slots.port_dnat` (one
+        read-only snapshot; this only runs at the strike threshold, never on
+        the healthy path). Returns the ERROR ``(message, extra)`` to stamp, or
+        ``None`` when an automatic ``podman network reload --all`` repaired a
+        missing rule and /health answers again.
+
+        * missing rule: one rate-limited reload when
+          ``[slots].port_dnat_auto_repair`` is on, then re-probe; still
+          unreachable (or repair off / rate-limited / failed) parks the slot
+          with ``error_reason = "port_dnat_missing"``.
+        * stale rule: ``error_reason = "port_dnat_stale"``, surfaced only.
+        * anything else, or an audit that cannot run: the generic message.
+        """
+        from hal0.slots import port_dnat
+
+        generic: tuple[str, dict[str, Any]] = (
+            "model server failed /health probe",
+            {"health_ok": False},
+        )
+        cfg = await self._host._maybe_load_config(slot_name)
+        port = _cfg_port(cfg) if cfg else 0
+        if not port:
+            return generic
+        loop = asyncio.get_running_loop()
+        verdict = await loop.run_in_executor(None, port_dnat.audit_port, port)
+        if verdict is None:
+            return generic
+        if verdict.missing:
+            extra: dict[str, Any] = {
+                "health_ok": False,
+                "error_reason": port_dnat.REASON_MISSING,
+                "dnat_port": port,
+            }
+            base = f"published port {port} has no DNAT rule reaching the container"
+            if not getattr(self._host, "_port_dnat_auto_repair", True):
+                return (f"{base} (auto-repair off) — run `hal0 doctor ports --fix`", extra)
+            result = await loop.run_in_executor(
+                None, port_dnat.try_reload, f"slot {slot_name} port {port}"
+            )
+            if not result.ok:
+                why = result.detail or "failed"
+                return (f"{base} (auto-repair: {why}) — run `hal0 doctor ports --fix`", extra)
+            for _ in range(_DNAT_REPROBE_ATTEMPTS):
+                await asyncio.sleep(_DNAT_REPROBE_DELAY_S)
+                if await self.probe_health(slot_name, strict=True):
+                    log.warning(
+                        "slot.port_dnat_repaired",
+                        extra={"slot": slot_name, "port": port},
+                    )
+                    return None
+            return (
+                f"{base}; still unreachable after `podman network reload --all` "
+                "— run `hal0 doctor ports`",
+                extra,
+            )
+        if verdict.corrupt:
+            return (
+                f"published port {port} is shadowed by a stale DNAT rule "
+                f"({verdict.reason()}) — run `hal0 doctor ports --fix`",
+                {
+                    "health_ok": False,
+                    "error_reason": port_dnat.REASON_STALE,
+                    "dnat_port": port,
+                },
+            )
+        return generic
 
     async def is_active(self, slot_name: str) -> bool:
         """Is the slot's container unit live? (systemctl is-active probe).

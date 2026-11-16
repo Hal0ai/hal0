@@ -449,6 +449,7 @@ class SlotManager:
         identity_store: Any | None = None,
         port_authority: Any | None = None,
         fabric_clock_guard: str = "refuse",
+        port_dnat_auto_repair: bool = True,
     ) -> None:
         # Stable-id identity bridge + single port allocator (rework §11.1/§11.2).
         # Both are OPT-IN (default None): a bare ``SlotManager()`` — every unit
@@ -600,6 +601,12 @@ class SlotManager:
             .lower()
         )
         self._fabric_clock_guard: str = policy if policy in ("refuse", "warn", "off") else "refuse"
+        # [slots].port_dnat_auto_repair (#3724): may the watchdog and the
+        # post-recreate recheck run a rate-limited `podman network reload --all`
+        # for a missing DNAT rule? See hal0.slots.port_dnat.
+        self._port_dnat_auto_repair: bool = bool(port_dnat_auto_repair)
+        # Strong refs to in-flight post-recreate DNAT rechecks (fire-and-forget).
+        self._dnat_rechecks: set[asyncio.Task[Any]] = set()
         # Cross-slot admission lock for the fabric-clock guard (review P1):
         # a slot's _guard_fabric_clock check and its publication as a live
         # counterpart (STARTING) are not atomic — without this lock, two
@@ -1524,6 +1531,11 @@ class SlotManager:
             # stamped it; any other transition (leaving ERROR, or a different
             # ERROR) retires it.
             carried_extra.pop("stall_ceiling", None)
+        if not (extra and extra.get("error_reason")):
+            # #3724: a port_dnat_* reason belongs to the one ERROR that stamped
+            # it, like stall_ceiling above.
+            carried_extra.pop("error_reason", None)
+            carried_extra.pop("dnat_port", None)
         if not (extra and extra.get("slow_stop")):
             # #2738: the slow-stop mark belongs to the one ERROR that stamped
             # it; any other transition (including a different ERROR) retires it.
@@ -1671,11 +1683,44 @@ class SlotManager:
         # state.  Done after broadcast so the SSE frame for the transition
         # itself lands before any watcher-induced follow-up frame.
         self._watchdog.update(name, to_state)
+        if (
+            to_state is SlotState.READY
+            and current in (SlotState.STARTING, SlotState.WARMING)
+            and self._port_dnat_auto_repair
+        ):
+            self._schedule_dnat_recheck(name)
         # #2442: any transition ends an adopted-WARMING promotion poll — a
         # load, unload or watchdog verdict now owns the slot. The poll's own
         # WARMING → READY lands here too and is left to return on its own.
         self._cancel_adopt_promoter(name)
         return record
+
+    def _schedule_dnat_recheck(self, name: str) -> None:
+        """Re-check every running container's DNAT rules after a slot came up (#3724).
+
+        A container recreate is the observed trigger for OTHER containers'
+        rules vanishing on netavark's iptables backend, so once a slot reaches
+        READY from a start, audit the whole box in the background and run one
+        rate-limited ``podman network reload --all`` if anything is missing.
+        Fire-and-forget; never blocks or fails the transition.
+        """
+        from hal0.slots import port_dnat
+
+        async def _run() -> None:
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(
+                    None, port_dnat.recheck_after_recreate, f"slot {name} started"
+                )
+            except Exception as exc:
+                log.info("slot.port_dnat_recheck_failed", extra={"slot": name, "error": str(exc)})
+
+        try:
+            task = asyncio.get_running_loop().create_task(_run())
+        except RuntimeError:
+            return
+        self._dnat_rechecks.add(task)
+        task.add_done_callback(self._dnat_rechecks.discard)
 
     async def _broadcast(self, record: SlotStateRecord) -> None:
         """Push a record onto every active SSE subscriber queue."""

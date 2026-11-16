@@ -121,6 +121,8 @@ def test_registry_declares_three_apply_classes() -> None:
         ("slots.default_images", "service-restart", [SERVICE_SLOTS]),
         ("slots.preload_evict_enabled", "service-restart", [SERVICE_HAL0_API]),
         ("slots.preload_evict_headroom_mb", "service-restart", [SERVICE_HAL0_API]),
+        # #3724: SlotManager constructor arg, fixed at create_app time.
+        ("slots.port_dnat_auto_repair", "service-restart", [SERVICE_HAL0_API]),
         # [dispatcher] — same create_app-time wiring as the other two knobs.
         ("dispatcher.direct_read_timeout_s", "service-restart", [SERVICE_HAL0_API]),
         # [memory] — HindsightProvider constructor arg, built once at boot.

@@ -615,6 +615,62 @@ class SystemCtlSeam:
             timeout=timeout,
         )
 
+    def _firewall_argv(self, verb: str) -> list[str] | None:
+        """argv for an argument-less firewall verb, or ``None`` when unreachable.
+
+        The ``hal0`` service account goes through sudo. Root calls the
+        installed wrapper directly (one less hop, no sudoers grant needed).
+        Anyone else, or root on a box without the wrapper (dev, CI), gets
+        ``None`` and the caller decides on its own fallback.
+        """
+        if self._is_hal0_user():
+            return self._seam_argv(verb)
+        if os.geteuid() == 0 and os.access(self._seam_bin, os.X_OK):
+            return [self._seam_bin, verb]
+        return None
+
+    def dnat_snapshot(self, *, timeout: float | None = 20.0) -> str:
+        """Framed read of netavark's DNAT rules on both backends (#3724).
+
+        Read-only ``dnat-snapshot`` verb, no arguments: prints the ``inet
+        netavark`` nft table, the NETAVARK lines of ``iptables -t nat -S`` and
+        root's running containers (name, IPs, published ports) as
+        ``@@<section> <ok|absent>`` blocks that
+        :func:`hal0.system.netavark.parse_snapshot` reads.
+
+        Raises :class:`Hal0SeamMissing` when the wrapper is not reachable from
+        this process, so the caller can read in-process instead;
+        :class:`subprocess.CalledProcessError` when the wrapper refused or
+        failed.
+        """
+        argv = self._firewall_argv("dnat-snapshot")
+        if argv is None:
+            raise Hal0SeamMissing("hal0-systemctl dnat-snapshot not reachable from this process")
+        proc = bounded_call(
+            argv, timeout=timeout, run=self._run, capture_output=True, text=True, check=True
+        )
+        return proc.stdout or ""
+
+    def network_reload(self, *, timeout: float | None = 120.0) -> subprocess.CompletedProcess[str]:
+        """``podman network reload --all`` through the ``network-reload`` verb (#3724).
+
+        Rebuilds every running container's netavark rules without restarting
+        anything; the non-disruptive repair for a MISSING DNAT rule. No
+        argument crosses the boundary. Root without the wrapper (dev box) runs
+        podman directly; a non-root process without the seam goes through sudo
+        and fails loudly rather than silently skipping the repair.
+        """
+        argv = self._firewall_argv("network-reload")
+        if argv is None:
+            argv = (
+                ["podman", "network", "reload", "--all"]
+                if os.geteuid() == 0
+                else self._seam_argv("network-reload")
+            )
+        return bounded_call(
+            argv, timeout=timeout, run=self._run, capture_output=True, text=True, check=True
+        )
+
     def systemctl(
         self,
         *args: str,

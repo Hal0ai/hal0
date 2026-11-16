@@ -1397,6 +1397,7 @@ async def _boot_slot_manager(app: FastAPI, ctx: BootState) -> None:
         preload_evict_enabled=ctx.hal0_config.slots.preload_evict_enabled,
         preload_evict_headroom_mb=ctx.hal0_config.slots.preload_evict_headroom_mb,
         fabric_clock_guard=ctx.hal0_config.slots.fabric_clock_guard,
+        port_dnat_auto_repair=ctx.hal0_config.slots.port_dnat_auto_repair,
     )
 
 

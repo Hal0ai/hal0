@@ -76,9 +76,10 @@
 # independent root oneshot unit (packaging/systemd/hal0-podman-forward.service,
 # no User= — always root), entirely unaffected by hal0-api's User=hal0 flip.
 #
-# STALE-DNAT REPAIR (#1814): `prune-dnat` is the one verb here that touches the
-# firewall. It exists because a container that dies without netavark's teardown
-# running leaves its DNAT rule behind in inet netavark / nv_<netid>_dnat, and
+# STALE-DNAT REPAIR (#1814): `prune-dnat` is the one verb here that DELETES a
+# firewall rule (network-reload, #3724, only has podman rebuild its own). It
+# exists because a container that dies without netavark's teardown running
+# leaves its DNAT rule behind in inet netavark / nv_<netid>_dnat, and
 # nftables is first-match — so that dead rule permanently black-holes the port
 # for every later container. Deleting the handle is root-only, so it cannot be
 # a raw `nft` subprocess from the unprivileged API/CLI. It is NOT a general
@@ -920,6 +921,50 @@ case "$cmd" in
     echo "prunable ${PRUNE_CHAIN} handle ${handle} (dport ${port} -> ${PRUNE_TARGET_IP}, dead)"
     ;;
 
+  dnat-snapshot)              # dnat-snapshot   (#3724, read-only, no arguments)
+    # The privileged READ behind the DNAT audit, for both netavark firewall
+    # backends: the `inet netavark` nft table (netavark with the nftables
+    # driver), the NETAVARK hostport/DN lines of the iptables nat table
+    # (netavark 1.4 / iptables-nft), and root's running containers with their
+    # IPs and published ports. Framed as `@@<section> <ok|absent>` blocks for
+    # hal0.system.netavark.parse_snapshot. Takes NO caller input at all: every
+    # command and --format string below is a literal. Lists, never edits; the
+    # only thing it discloses to the hal0 account is container names, bridge
+    # IPs and published ports — the same facts the slot API already reports.
+    [[ $# -eq 0 ]] || die "dnat-snapshot takes no arguments"
+    if command -v nft >/dev/null 2>&1 && snap_nft="$(nft -a list table inet netavark 2>/dev/null)"; then
+      printf '@@nft ok\n%s\n' "$snap_nft"
+    else
+      printf '@@nft absent\n'
+    fi
+    if command -v iptables >/dev/null 2>&1 && snap_ipt="$(iptables -t nat -S 2>/dev/null)"; then
+      printf '@@iptables ok\n'
+      printf '%s\n' "$snap_ipt" | grep -E '^-[AN] NETAVARK-(HOSTPORT-DNAT|DN-)' || true
+    else
+      printf '@@iptables absent\n'
+    fi
+    command -v podman >/dev/null 2>&1 || die "dnat-snapshot: podman not found"
+    snap_ids="$(podman ps -q 2>/dev/null)" || die "dnat-snapshot: podman ps failed"
+    printf '@@containers ok\n'
+    if [[ -n "$snap_ids" ]]; then
+      # Same literal as netavark.CONTAINER_INSPECT_FORMAT.
+      # shellcheck disable=SC2086 — snap_ids is a newline list of hex ids from podman
+      podman inspect --format '{{.Name}}|{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}|{{json .NetworkSettings.Ports}}' \
+        $snap_ids 2>/dev/null || die "dnat-snapshot: podman inspect failed"
+    fi
+    ;;
+
+  network-reload)             # network-reload   (#3724, no arguments)
+    # `podman network reload --all`: re-runs netavark setup for every RUNNING
+    # container, rebuilding its firewall rules without restarting anything.
+    # The repair for a MISSING DNAT rule (a healthy container whose published
+    # port has no rule left). Literal argv, no caller input: it can only
+    # recreate the rules podman itself already declares for its containers.
+    [[ $# -eq 0 ]] || die "network-reload takes no arguments"
+    command -v podman >/dev/null 2>&1 || die "network-reload: podman not found"
+    exec podman network reload --all
+    ;;
+
   daemon-reload)
     exec systemctl daemon-reload
     ;;
@@ -1055,6 +1100,8 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   check-quadlet [<slot-id>]        validate a .container body (stdin) without writing it
   prune-dnat <port> <handle>       delete ONE stale (dead-target) netavark DNAT rule
   check-dnat <port> <handle>       say whether that rule is prunable, without deleting it
+  dnat-snapshot                    list netavark DNAT rules (nft + iptables) and running containers
+  network-reload                   podman network reload --all (rebuild running containers' rules)
   daemon-reload                    systemctl daemon-reload
   start|stop|restart <slot-id>     systemctl <verb> ${UNIT_PREFIX}<id>.service
   enable|disable <slot-id>         systemctl <verb> ${UNIT_PREFIX}<id>.service
