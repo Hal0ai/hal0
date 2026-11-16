@@ -140,4 +140,7 @@ That does not fit, for four reasons found in the code:
 - ADR-0043: bridge keys stay the credential for remote agents; this record is
   the credential for hal0's own. The reserved-name list is shared.
 - ADR-0005: the `private:<agent>` namespace is reached only by the identity
-  this record defines.
+  this record defines. The one route that reached a Hermes profile's private
+  namespace with another principal's credential, the ADR-0043 Decision 10
+  teach tools (`agent_memory_add` / `agent_memory_search` on `/mcp/agents`),
+  is closed by this change: they read and write the shared namespace only.

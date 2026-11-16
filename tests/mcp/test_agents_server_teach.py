@@ -205,7 +205,9 @@ async def test_agent_memory_add_pins_the_namespace_and_tags_the_client(
     assert out["status"] == "ok" and out["id"] == "m1"
     [call] = dispatcher.calls
     assert call.tool == "memory_add"
-    assert call.client_id == "hermes__coder" and call.private is True
+    # Never the profile's private memory (#3569 review): shared, as the client.
+    assert call.client_id == "cc" and call.private is False
+    assert call.args["dataset"] == "shared"
     assert set(call.args["tags"]) == {"style", "source:bridge:cc"}
 
 
@@ -226,8 +228,8 @@ async def test_agent_memory_search_pins_the_namespace(
     )
     assert out["results"][0]["id"] == "m1"
     [call] = dispatcher.calls
-    assert call.client_id == "hermes" and call.private is True
-    assert call.args == {"query": "tabs", "limit": 10}
+    assert call.client_id == "cc" and call.private is False
+    assert call.args == {"query": "tabs", "limit": 10, "dataset": "shared"}
 
 
 async def test_agent_memory_search_masks_secrets_and_caps_text(
@@ -402,6 +404,9 @@ async def test_an_unexpected_failure_is_bridge_internal_without_its_text(
             raise RuntimeError("psycopg connect failed at postgres://u:p@192.0.2.9/db")
 
         def scoped(self, client_id: str) -> Any:  # type: ignore[override]
+            return self
+
+        def shared(self, client_id: str) -> Any:  # type: ignore[override]
             return self
 
     svc.memory_dispatcher = Boom()

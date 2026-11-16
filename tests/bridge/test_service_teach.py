@@ -3,10 +3,10 @@
 The ``hal0-agents`` tools and any REST projection are thin over these methods, so
 the rules are pinned here:
 
-* **Memory** is written and searched in the agent's own namespace, forced by
-  ``MemoryDispatcher.scoped`` (private mode on, identity fixed): ``private:hermes``
-  for the default profile, ``private:hermes__<profile>`` for ``hermes/<profile>``;
-  ``agent="shared"`` uses the shared bucket with private mode forced *off*. Every
+* **Memory** is written and searched in the shared namespace for every ``agent``,
+  through ``MemoryDispatcher.shared`` under the calling client's own name (private mode
+  forced *off*). A bridge client is never Hermes, so it never reaches
+  ``private:hermes`` or ``private:hermes__<profile>`` (#3569 review, ADR-0062). Every
   write is tagged ``source:bridge:<client>``. A client's own ``agent:``,
   ``visibility:``, ``project:`` and ``source:bridge:`` tags are dropped: the memory
   layer trusts those tags for ownership and visibility (#3136). A memory refusal is
@@ -192,9 +192,10 @@ async def test_memory_add_forced_namespace_and_tag(
     out = await svc.memory_add(cc, agent="hermes/coder", text="fact", tags=["x"])
     call = fake_dispatcher.calls[-1]
     assert call.tool == "memory_add" and call.args["text"] == "fact"
-    assert call.client_id == "hermes__coder" and call.private is True
+    # A profile's private namespace is its own: the bridge writes shared, as itself.
+    assert call.client_id == "cc" and call.private is False
     assert set(call.args["tags"]) == {"x", "source:bridge:cc"}
-    assert "dataset" not in call.args  # the namespace is the dispatcher's, not the caller's
+    assert call.args["dataset"] == "shared"
     assert out["id"] == "m1"
 
     await svc.memory_add(cc, agent="shared", text="f2", tags=None)
@@ -204,12 +205,13 @@ async def test_memory_add_forced_namespace_and_tag(
     assert call.args["tags"] == ["source:bridge:cc"]
 
 
-async def test_memory_add_default_profile_uses_the_hermes_namespace(
+async def test_memory_add_default_profile_stays_out_of_the_hermes_namespace(
     svc: BridgeService, fake_dispatcher: FakeDispatcher, cc: Caller
 ) -> None:
     await svc.memory_add(cc, agent="hermes", text="fact", tags=[])
     call = fake_dispatcher.calls[-1]
-    assert call.client_id == "hermes" and call.private is True
+    assert call.client_id == "cc" and call.private is False
+    assert call.args["dataset"] == "shared"
 
 
 async def test_memory_add_tags_keep_order_and_repeat_nothing(
@@ -306,11 +308,10 @@ async def test_a_client_cannot_write_into_another_agents_private_memory(
     private_hostile, shared_hostile, private_plain = engine.retained()
 
     for stored in (private_hostile, private_plain):
-        assert [t for t in stored["tags"] if t.startswith("agent:")] == ["agent:hermes__coder"]
-        assert "visibility:private" in stored["tags"]
+        # Naming a profile no longer writes its private memory (#3569 review).
+        assert [t for t in stored["tags"] if t.startswith("agent:")] == ["agent:cc"]
+        assert "visibility:private" not in stored["tags"]
         assert "source:bridge:cc" in stored["tags"]
-        assert HindsightProvider._is_visible_to({"tags": stored["tags"]}, "hermes__coder")
-        assert not HindsightProvider._is_visible_to({"tags": stored["tags"]}, "brain")
     assert private_hostile["tags"] == private_plain["tags"]  # the hostile tag changed nothing
 
     assert [t for t in shared_hostile["tags"] if t.startswith("agent:")] == ["agent:cc"]
@@ -354,8 +355,8 @@ async def test_memory_search_forced_namespace(
     out = await svc.memory_search(cc, agent="hermes/coder", query="what", limit=5)
     call = fake_dispatcher.calls[-1]
     assert call.tool == "memory_search"
-    assert call.client_id == "hermes__coder" and call.private is True
-    assert call.args == {"query": "what", "limit": 5}
+    assert call.client_id == "cc" and call.private is False
+    assert call.args == {"query": "what", "limit": 5, "dataset": "shared"}
     assert out["results"][0]["id"] == "m1"
 
     await svc.memory_search(cc, agent="shared", query="what")
@@ -428,17 +429,14 @@ async def test_real_dispatcher_namespaces_survive_a_hostile_request_context(
         await service.memory_search(cc, agent="shared", query="fact")
     finally:
         await service.close()
-    private_add, shared_add = provider.added
-    assert (
-        private_add["dataset"] == "private:hermes__coder"
-        and private_add["client_id"] == "hermes__coder"
-    )
-    assert private_add["source"] == "hermes__coder"
+    profile_add, shared_add = provider.added
+    # Naming a profile writes shared, as the client: never private:hermes__coder.
+    assert profile_add["dataset"] == "shared" and profile_add["client_id"] == "cc"
     # the client's own plain tag passes; the one naming another agent does not
-    assert set(private_add["tags"]) == {"x", "source:bridge:cc"}
+    assert set(profile_add["tags"]) == {"x", "source:bridge:cc"}
     assert shared_add["dataset"] == "shared" and shared_add["client_id"] == "cc"
-    private_search, shared_search = provider.searched
-    assert private_search["dataset"] == ["shared", "private:hermes__coder"]
+    profile_search, shared_search = provider.searched
+    assert profile_search["dataset"] == "shared" and profile_search["client_id"] == "cc"
     assert shared_search["dataset"] == "shared"
 
 
@@ -1240,3 +1238,42 @@ async def test_capabilities_without_a_profile_key_makes_no_request(
         await service.close()
     assert view["api_server_version"] is None and calls == []
     assert view["profile"] == "unkeyed"  # the rest of the view is still served
+
+
+async def test_a_bridge_client_cannot_read_a_hermes_private_note(
+    tmp_path: Path, home: Path, queue: ApprovalQueue, tmp_roots: SimpleNamespace, cc: Caller
+) -> None:
+    """#3569 review, B1: ``agent_memory_search`` used to read ``private:hermes``.
+
+    Against the real dispatcher and a provider that filters with the real
+    visibility rule, a Hermes private note is never returned to a bridge client,
+    whether it names ``hermes``, a profile or ``shared``.
+    """
+    from hal0.memory.read_scope import reflect_visibility_scope, tags_readable
+
+    notes = [
+        {"id": "hermes-private", "tags": ["agent:hermes", "visibility:private"]},
+        {"id": "coder-private", "tags": ["agent:hermes__coder", "visibility:private"]},
+        {"id": "shared", "tags": ["agent:pi"]},
+    ]
+
+    class Filtering:
+        def __init__(self) -> None:
+            self.searched: list[dict[str, Any]] = []
+
+        async def search(self, **kw: Any) -> list[dict[str, Any]]:
+            self.searched.append(kw)
+            groups = reflect_visibility_scope(kw.get("client_id"))
+            datasets = kw.get("dataset")
+            datasets = datasets if isinstance(datasets, list) else [datasets]
+            assert not any(str(d).startswith("private:hermes") for d in datasets), kw
+            return [n for n in notes if tags_readable(groups, n["tags"])]
+
+    provider = Filtering()
+    service, _store = _service(tmp_path, home, queue, tmp_roots, MemoryDispatcher(provider))
+    try:
+        for agent in ("hermes", "hermes/coder", "shared"):
+            out = await service.memory_search(cc, agent=agent, query="q")
+            assert [r["id"] for r in out["results"]] == ["shared"], (agent, out)
+    finally:
+        await service.close()

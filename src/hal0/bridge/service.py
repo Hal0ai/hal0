@@ -102,7 +102,7 @@ from hal0.agents.hermes_api import (
     profile_health,
     served_profiles,
 )
-from hal0.agents.hermes_provision import SKILLS_EXTERNAL_DIRS, profile_agent_id
+from hal0.agents.hermes_provision import SKILLS_EXTERNAL_DIRS
 from hal0.bridge.caller import Caller
 from hal0.bridge.capabilities import FetchJson, capabilities_view
 from hal0.bridge.errors import BridgeError
@@ -783,10 +783,12 @@ class BridgeService:
     ) -> dict[str, Any]:
         """Remember ``text`` for ``agent`` (``hermes``, ``hermes/<profile>`` or ``shared``).
 
-        The note lands in the agent's own private namespace (``private:hermes`` or
-        ``private:hermes__<profile>``), or in ``shared``, and is tagged
-        ``source:bridge:<client>``; the namespace is fixed by the dispatcher, not by
-        anything in the arguments. The client's own ``tags`` are filtered by
+        The note lands in ``shared`` whatever ``agent`` names, and is tagged
+        ``source:bridge:<client>`` (#3569 review, ADR-0062): a bridge client, and
+        every Open WebUI user behind the ``openwebui`` client, is not Hermes, so it
+        never writes or reads a Hermes profile's private namespace. ``agent`` is
+        still checked against the box's profiles. The namespace is fixed by the
+        dispatcher, not by anything in the arguments. The client's own ``tags`` are filtered by
         :func:`_client_tags`: the memory layer takes ownership and visibility from
         ``agent:`` / ``visibility:`` / ``project:`` tags (#3136), so a client cannot
         write any of them. A memory refusal is 422 ``bridge.memory_invalid``
@@ -801,7 +803,11 @@ class BridgeService:
     async def memory_search(
         self, caller: Caller, *, agent: str, query: str, limit: int = 10
     ) -> dict[str, Any]:
-        """Search ``agent``'s memory: its own private namespace and ``shared``; or ``shared`` alone.
+        """Search the shared memory on ``agent``'s behalf; never a Hermes private namespace.
+
+        As with :meth:`memory_add`, every ``agent`` reads ``shared`` (plus, as the
+        memory layer allows any identified caller, notes the calling client itself
+        filed privately); a Hermes profile's ``private:`` notes are never returned.
 
         ``limit`` is clamped to 1..50. Returns the memory layer's ``{status, results}``.
         """
@@ -813,20 +819,21 @@ class BridgeService:
         )
 
     async def _memory_target(self, caller: Caller, agent: str) -> tuple[Any, dict[str, Any]]:
-        """The dispatcher pinned for ``agent`` and the arguments that name its namespace."""
-        if agent == SHARED_AGENT:
-            client_id: str | None = None
-        else:
-            profile = await self._known_profile(agent)
-            client_id = "hermes" if profile == DEFAULT_PROFILE else profile_agent_id(profile)
+        """The dispatcher for ``agent``'s memory calls and the arguments that name its namespace.
+
+        Always the shared namespace under the calling client's own identity: a
+        Hermes profile's private memory belongs to that profile, and a bridge key
+        is a different principal (#3569 review; ADR-0062). ``agent`` must still
+        name ``shared`` or a profile this box has.
+        """
+        if agent != SHARED_AGENT:
+            await self._known_profile(agent)
         base = self.memory_dispatcher
         if base is None:
             raise BridgeError(
                 "bridge.memory_disabled", "memory is not enabled on this box", status=503
             )
-        if client_id is None:
-            return base.shared(caller.name), {"dataset": SHARED_AGENT}
-        return base.scoped(client_id), {}
+        return base.shared(caller.name), {"dataset": SHARED_AGENT}
 
     async def _known_profile(self, agent: str) -> str:
         """The Hermes profile ``agent`` names, if the box has it; else 404 ``bridge.unknown_agent``."""

@@ -259,7 +259,11 @@ ADR-0035 was verified against), shapes the answer:
     to the agent's own namespace (`private:hermes` or
     `private:hermes__<profile>`, or the shared one when asked for), forced by
     `MemoryDispatcher.scoped` (`src/hal0/dispatcher/memory_dispatcher.py:107`)
-    and tagged with the client that wrote them. Skills are listed from hal0's
+    and tagged with the client that wrote them. *Superseded (2026-11-16,
+    ADR-0062):* both now use the shared namespace for every `agent`, through
+    `MemoryDispatcher.shared` under the calling client's name, because a bridge
+    key (and every Open WebUI user behind the `openwebui` client) is not
+    Hermes and must not read Hermes's private notes. Skills are listed from hal0's
     shipped mirror (read-only) and from the drop-in directory
     `/var/lib/hal0/skills`; writes and deletes touch only the drop-in
     directory, validate the skill's frontmatter, refuse symlinks and path
