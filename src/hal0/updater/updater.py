@@ -2047,7 +2047,16 @@ def run_post_activation_migrations(
             # #3492: write the showcase drop-in first without a restart, so a
             # box where both drifted pays for one engine restart, not two.
             showcase = reconcile_showcase_dropin(restart=False)
-            if showcase.get("status") in ("applied", "failed"):
+            if showcase.get("status") == "failed":
+                # #3591: a failed reconcile is a warning, not a breadcrumb. The
+                # event is in _NON_FATAL_MIGRATION_FAILURE_EVENTS, so the update
+                # summary names it with its remedy instead of reporting a clean run.
+                log.warning(
+                    "updater.showcase_dropin_reconcile_failed",
+                    job_id=job_id,
+                    error=showcase.get("error"),
+                )
+            elif showcase.get("status") == "applied":
                 log.info(
                     "updater.showcase_dropin_reconciled",
                     job_id=job_id,
@@ -2059,7 +2068,13 @@ def run_post_activation_migrations(
                 # The extraction reconcile did not reload+restart, so do it
                 # here — reload first, or the engine restarts on the old env.
                 reload_and_restart_hindsight()
-            if dropin.get("status") in ("applied", "failed"):
+            if dropin.get("status") == "failed":
+                log.warning(
+                    "updater.extraction_dropin_reconcile_failed",
+                    job_id=job_id,
+                    error=dropin.get("error"),
+                )
+            elif dropin.get("status") == "applied":
                 log.info(
                     "updater.extraction_dropin_reconciled",
                     job_id=job_id,
@@ -4244,6 +4259,8 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "components.hermes_gateway_regen_failed",
     "updater.api_unit_refresh_failed",
     "updater.podman_forward_unit_refresh_failed",
+    "updater.extraction_dropin_reconcile_failed",
+    "updater.showcase_dropin_reconcile_failed",
 )
 
 

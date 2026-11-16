@@ -489,3 +489,39 @@ def test_the_boot_time_pass_neither_records_nor_renders_the_embedder(
     run_post_activation_migrations(job_id="j1", upgrade_memory_engine_venv=False)
     assert seen == []
     assert _stub_every_pass["showcase_dropin"] == []
+
+
+@pytest.mark.parametrize(
+    ("target", "event"),
+    [
+        ("reconcile_extraction_dropin", "updater.extraction_dropin_reconcile_failed"),
+        ("reconcile_showcase_dropin", "updater.showcase_dropin_reconcile_failed"),
+    ],
+)
+def test_a_failed_dropin_reconcile_is_a_warning_the_update_reports(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_every_pass: dict[str, list[Any]],
+    target: str,
+    event: str,
+) -> None:
+    """#3591: a drop-in reconcile that returns status=failed logged at info and
+    the update reported success. It now logs a warning under an event the
+    update summary scans for, and that event has an operator-facing remedy."""
+    from structlog.testing import capture_logs
+
+    from hal0.cli.update_commands import _MIGRATION_PASS_LABELS
+    from hal0.updater.updater import _NON_FATAL_MIGRATION_FAILURE_EVENTS
+
+    monkeypatch.setattr(
+        f"hal0.memory.extraction_env.{target}",
+        lambda **_k: {"status": "failed", "error": "wrapper rejected env name"},
+    )
+    with capture_logs() as logs:
+        run_post_activation_migrations(job_id="j1")
+
+    failed = [e for e in logs if e["event"] == event]
+    assert failed
+    assert failed[0]["log_level"] == "warning"
+    assert "wrapper rejected env name" in failed[0]["error"]
+    assert event in _NON_FATAL_MIGRATION_FAILURE_EVENTS
+    assert "hal0 update" in _MIGRATION_PASS_LABELS[event]

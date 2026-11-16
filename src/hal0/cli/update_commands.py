@@ -294,6 +294,14 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
         "hal0-podman-forward.service refresh (see journalctl -u hal0-api)"
     ),
     "updater.api_unit_refresh_failed": "hal0-api.service refresh (see hal0 doctor all)",
+    "updater.extraction_dropin_reconcile_failed": (
+        "memory engine extraction drop-in was not updated, so the engine still runs the "
+        "old settings (run: hal0 update again, or save the memory settings)"
+    ),
+    "updater.showcase_dropin_reconcile_failed": (
+        "memory engine showcase drop-in was not updated, so the engine still runs the "
+        "old settings (run: hal0 update again, or save the memory settings)"
+    ),
     "components.hermes_gateway_regen_failed": (
         "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"
     ),
