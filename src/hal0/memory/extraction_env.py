@@ -95,6 +95,8 @@ DROP_IN_PATH = DROP_IN_DIR / "extraction-model.conf"
 #: ``svc-restart hindsight`` arm. A bare ``hindsight-api`` would miss that map and
 #: fall through to an unprivileged (polkit-blocked) systemctl.
 SERVICE = "hindsight-api.service"
+#: The base unit install.sh writes; ``hal0 update`` never rewrites it.
+ENGINE_UNIT_PATH = Path("/etc/systemd/system") / SERVICE
 
 #: Bound on each seam call so a wedged unit can never pin an event-loop thread.
 _SYSTEMCTL_TIMEOUT_S = 60.0
@@ -309,6 +311,14 @@ _ENGINE_DECISION_URL_RE = re.compile(r"^http://127\.0\.0\.1:[0-9]{1,5}$")
 def decision_url_renderable(url: str) -> bool:
     """True when the showcase drop-in can carry ``url`` as the decision base URL."""
     return bool(_ENGINE_DECISION_URL_RE.match(url)) or url == HINDSIGHT_CLOUD_DECISION_URL
+
+
+def engine_unit_installed(path: Path | None = None) -> bool:
+    """True when the ``hindsight-api`` base unit is installed on this box (#3592)."""
+    try:
+        return (path if path is not None else ENGINE_UNIT_PATH).is_file()
+    except OSError:
+        return False
 
 
 def decision_unit_installed(path: Path | None = None) -> bool:
@@ -1089,6 +1099,7 @@ def engine_env_report(
     a stale ``--parallel`` clamp shows up here too). Returns::
 
         {"installed": bool,             # any hal0-managed drop-in exists
+         "unit_installed": bool,        # the base hindsight-api unit exists (#3592)
          "checked": bool,               # a unit env was available to compare
          "drift": [{"key", "expected", "effective"}],
          "legacy_drop_in": str | None,  # zz-h0-98 file still present
@@ -1101,6 +1112,7 @@ def engine_env_report(
     leftover = legacy_path or LEGACY_LLM_CAP_DROP_IN_PATH
     report: dict[str, Any] = {
         "installed": False,
+        "unit_installed": False,
         "checked": False,
         "drift": [],
         "legacy_drop_in": None,
@@ -1113,6 +1125,7 @@ def engine_env_report(
         # Every managed drop-in counts (#3550): a fresh install carries only
         # the showcase drop-in until the first graph-settings save.
         report["installed"] = extraction_present or showcase_present
+        report["unit_installed"] = engine_unit_installed()
         if not report["installed"]:
             return report
         unit = dict(unit_env) if unit_env is not None else dict(show_unit_env() or {})
@@ -1401,12 +1414,16 @@ def reconcile_extraction_dropin(
     plugin's chunks, #3326) would therefore leave the engine on the old cap until
     someone saved the settings by hand.
 
-    Acts only on a box that already has a drop-in: a box without one never ran the
-    memory engine, and writing one is install.sh's job. Never raises. Returns
+    Acts on a box with the memory engine installed: one that already has a drop-in,
+    or one whose base ``hindsight-api`` unit is present but has none yet. The latter
+    is a unit installed before the drop-in carried the worker-slot bound (#3534);
+    ``hal0 update`` never rewrites the base unit, so without the drop-in the engine
+    keeps Hindsight's default of 10 slots (#3592). A box with neither never ran the
+    engine and is left alone. Never raises. Returns
     ``{"status": "skipped"|"converged"|"applied"|"failed", ...}``.
     """
-    if not DROP_IN_PATH.exists():
-        return {"status": "skipped", "reason": "no drop-in on this box"}
+    if not DROP_IN_PATH.exists() and not engine_unit_installed():
+        return {"status": "skipped", "reason": "no memory engine on this box"}
     try:
         from hal0.config.loader import load_hal0_config
 
@@ -2136,6 +2153,7 @@ async def measure_extraction_throughput(
 
 __all__ = [
     "DROP_IN_PATH",
+    "ENGINE_UNIT_PATH",
     "EXTRACTION_FLOOR_ENV",
     "EXTRACTION_MIN_CONTEXT_TOKENS",
     "EXTRACTION_PROMPT_TOKENS",
@@ -2151,6 +2169,7 @@ __all__ = [
     "drop_in_matches",
     "engine_env_report",
     "engine_env_warning",
+    "engine_unit_installed",
     "expected_engine_env",
     "extraction_floor",
     "extraction_model_name",

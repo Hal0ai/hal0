@@ -1063,14 +1063,39 @@ def _write_graph_config(monkeypatch, tmp_path: Path, **graph) -> None:
     monkeypatch.setenv("HAL0_HOME", str(home))
 
 
-def test_reconcile_skips_a_box_without_a_drop_in(monkeypatch, tmp_path: Path):
+def test_reconcile_skips_a_box_without_an_engine(monkeypatch, tmp_path: Path):
+    import hal0.memory.extraction_env as ee
     from hal0.memory.extraction_env import reconcile_extraction_dropin
 
     drop_in = _redirect_drop_in(monkeypatch, tmp_path)
+    monkeypatch.setattr(ee, "ENGINE_UNIT_PATH", tmp_path / "absent.service")
     seam = SystemCtlSeam(run=_forbidden, is_hal0_user=lambda: False)
 
     assert reconcile_extraction_dropin(seam=seam)["status"] == "skipped"
     assert not drop_in.exists()
+
+
+def test_reconcile_writes_the_drop_in_on_a_box_with_the_unit_but_no_drop_in(
+    monkeypatch, tmp_path: Path
+):
+    """#3592: a pre-#3534 unit keeps the engine's 10 worker slots until the
+    drop-in exists, and ``hal0 update`` never rewrites the base unit."""
+    import hal0.memory.extraction_env as ee
+
+    drop_in = _redirect_drop_in(monkeypatch, tmp_path)
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n")
+    monkeypatch.setattr(ee, "ENGINE_UNIT_PATH", unit)
+    _write_graph_config(monkeypatch, tmp_path)
+    drop_in.parent.mkdir(parents=True)
+    calls, run = _seam_recorder()
+    seam = SystemCtlSeam(run=run, is_hal0_user=lambda: False)
+
+    result = ee.reconcile_extraction_dropin(seam=seam)
+
+    assert result["status"] == "applied"
+    assert "HINDSIGHT_API_WORKER_MAX_SLOTS=" in drop_in.read_text()
+    assert ["systemctl", "restart", "hindsight-api.service"] in [c[0] for c in calls]
 
 
 @pytest.mark.parametrize("stale_kind", ["token_cap", "retain_only"])

@@ -3438,6 +3438,19 @@ def check_memory_engine_env(*, report: dict[str, Any] | None = None) -> Check:
     from hal0.memory.extraction_env import engine_env_warning
 
     if not report.get("installed"):
+        if report.get("unit_installed"):
+            # #3592: the engine runs from the base unit alone, which `hal0 update`
+            # never rewrites, so a unit from before #3534 keeps Hindsight's 10
+            # worker slots. Say so instead of reporting a clean box.
+            return Check(
+                name,
+                title,
+                _WARN,
+                "hindsight-api runs on its base unit with no hal0 drop-in, so its worker "
+                "slots and extraction limits are unmanaged (a unit from before #3534 uses "
+                "the engine default of 10 slots); run `hal0 update` or save the memory "
+                "settings to write the drop-in",
+            )
         return Check(
             name, title, _PASS, "no hal0-managed memory engine drop-in installed — nothing to check"
         )
