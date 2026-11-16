@@ -437,9 +437,6 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
         </div>
       )}
       <div className="tb-spacer" />
-      {/* Signed-in state / sign-in entry point. Renders nothing on a box that
-          gates nothing for this browser (keyless or loopback). */}
-      <SessionChip />
       {/* Documentation and notifications: plain icons, no button chrome. */}
       <a
         className="tb-docs"
@@ -453,7 +450,7 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
         {Icons.docs}
       </a>
       <NotificationBell />
-      {/* Launcher group, far right: the GPU mode toggle (Chat | Image) beside the
+      {/* Launcher group: the GPU mode toggle (Chat | Image) beside the
           agent-chat slide-out launcher, one family (same height, border, radius and
           hover glow). (Kanban moved to the sidebar Services zone; ⌘B still opens the
           board. The ⌘K command palette is reachable via its shortcut.) The toggle
@@ -471,6 +468,10 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
           {Icons.brain}<span>Agent Chat</span>
         </button>
       </div>
+      {/* Signed-in state / sign-in entry point, far right of the bar (only the
+          mobile-only menu button sits after it). Renders nothing on a box that
+          gates nothing for this browser (keyless or loopback). */}
+      <SessionChip />
       {/* Mobile-only nav launcher (hidden ≤720px sidebar is gone) → opens NavDrawer. */}
       <button
         className="tb-menu"
