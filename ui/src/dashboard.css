@@ -2597,6 +2597,11 @@ select.npu-sel {
   .tb-launch .tb-launch-btn { display: none; } /* Agent Chat launcher: use the nav drawer on mobile (the GPU toggle stays, icons only) */
   .tb-launch:not(:has(.tb-gpu-wrap)) { display: none; } /* nothing left in the group without a GPU toggle */
   .topbar .tb-menu { display: flex; }
+  /* At phone width the bar holds brand, session chip, Docs, Bell, the GPU toggle and the menu:
+     tighter gaps, and the admin chip keeps its lock icon (titled) without the "Admin" word,
+     so the menu button is not pushed past the right edge. */
+  .topbar { gap: 10px; padding: 0 12px; }
+  .tb-session.admin > span:first-of-type { display: none; }
   .tb-eyebrow { display: none; }
   .tiers { grid-template-columns: 1fr; }
   .slots-grid { grid-template-columns: 1fr; }
