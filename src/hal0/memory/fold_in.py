@@ -4121,7 +4121,8 @@ class FoldIn(em.EngineMaintenance):
           wrote through compat, or the platform bank's), or one the platform
           bank of this run carries there, keeps its name, and every folded
           node of that name is renamed;
-        * otherwise one folded page keeps the plain name: the one the ledger
+        * otherwise one folded page keeps the plain name: the one an earlier
+          run already put in the target under it, else the one the ledger
           recorded as keeper, else the one from the bank whose id names the
           project most directly (``<harness>::<slug>``, then a repository
           name the registry maps to it, then a bank whose project comes from
@@ -4190,8 +4191,17 @@ class FoldIn(em.EngineMaintenance):
             banks = [e.bank for e, _ in cands]
             for bank in {b for b in banks if banks.count(b) > 1}:
                 conflicts.setdefault(bank, []).append(f"{_page_folder_label(slug)}/{lname}")
+            holder = present.get((slug, lname))
+            held = next((e.bank for e, r in cands if str(r["id"]) == holder), None)
             if (slug, lname) in fixed:
                 keeper = fixed[(slug, lname)]
+            elif held is not None:
+                # A page an earlier run folded already holds the name in the
+                # target, and the import never renames a node the target
+                # holds: renaming it here would read as a changed model and
+                # hold back the whole run. Ahead of the ledger, which recorded
+                # no root keeper before #3670.
+                keeper = held
             elif recorded.get(key) in banks:
                 keeper = recorded[key]
             else:
@@ -4226,9 +4236,9 @@ class FoldIn(em.EngineMaintenance):
                     BankLeft(
                         f"bank {entry.bank}: {len(conflicts[entry.bank])} knowledge page "
                         "name(s) cannot be given a place of their own in their folder "
-                        "(their project's, or the root for a page of no project; two of the bank's own pages share a name there, or the renamed "
-                        "name is taken too). Rename one in the old bank, then run the fold-in "
-                        "again",
+                        "(their project's, or the root for a page of no project; two of the "
+                        "bank's own pages share a name there, or the renamed name is taken "
+                        "too). Rename one in the old bank, then run the fold-in again",
                         bank=entry.bank,
                         details={"page_names": sorted(conflicts[entry.bank])},
                     ),

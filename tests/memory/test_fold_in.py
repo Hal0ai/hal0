@@ -2914,6 +2914,39 @@ async def test_two_unplaced_banks_with_one_root_page_name_keep_one_plain(box: Bo
     assert nodes["kp-there"]["name"] == "bank layout"
 
 
+async def test_a_root_page_folded_before_the_root_rule_keeps_its_name_against_a_newer_bank(
+    box: Box,
+) -> None:
+    """A run before #3670 put an unplaced bank's pages at the root under their
+    plain names and recorded no keeper for them. A later run that brings a
+    second unplaced bank with a newer page of that name must leave the name
+    with the page the target already holds: the import never renames an
+    existing node, so renaming the first bank's page would read as a changed
+    model and hold back every bank of the run."""
+    seed_pages(box, "coding-agent::tmp")
+    first = await box.fold(only=["coding-agent::tmp"]).run()
+    assert first["left"] == [], first["banks"]
+    key = f"{fi.ROOT_PAGE_FOLDER}/component map"
+    ledger = fi.load_ledger()
+    assert ledger["page_keepers"]["hal0:shared"].pop(key) == "coding-agent::tmp"
+    fi.ledger_path().write_text(json.dumps(ledger), encoding="utf-8")
+    seed_pages(box, "coding-agent::workdir", prefix="w-")
+    box.engine.banks["coding-agent::workdir"]["models"]["w-mm-map"]["last_refreshed_at"] = (
+        "2026-11-15T00:00:00+00:00"
+    )
+    second = await box.fold().run()
+    assert second["left"] == [], second["banks"]
+    nodes = shared_nodes(box)
+    assert nodes[_new("coding-agent::tmp", "kp-map")]["name"] == "Component map"
+    assert (
+        nodes[_new("coding-agent::workdir", "w-kp-map")]["name"]
+        == "Component map (coding-agent::workdir)"
+    )
+    roots = [p["name"].lower() for p in _root_pages(box).values()]
+    assert len(roots) == len(set(roots))
+    assert fi.load_ledger()["page_keepers"]["hal0:shared"][key] == "coding-agent::tmp"
+
+
 async def test_an_unplaced_bank_whose_renamed_root_name_is_taken_too_is_left_before_import(
     box: Box,
 ) -> None:
