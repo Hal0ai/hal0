@@ -180,13 +180,9 @@ consolidation can hold the default single permit and delay queued retains until
 the call finishes or reaches `llm_timeout_s`.
 
 `extraction_worker_slots` sets `HINDSIGHT_API_WORKER_MAX_SLOTS`, how many
-memory tasks the engine runs at once. Each holds its chunks and embeddings in
-memory; Hindsight's default of 10 got an 11 GiB box OOM-killed, so hal0
-renders 4. The `*_reserved_slots` keys set
-`HINDSIGHT_API_WORKER_{RETAIN,CONSOLIDATION,REFRESH_MENTAL_MODEL}_RESERVED_SLOTS`:
-slots only that task type may take. The rest is one shared pool, and the
-reservations must leave at least one slot in it (else 400). An unset
-`retain_reserved_slots` is `0` when it does not fit, as at 3 slots. See
+memory tasks the engine runs at once; Hindsight's default of 10 got an 11 GiB
+box OOM-killed, so hal0 renders 4. The `*_reserved_slots` keys reserve slots
+for one task type and must leave at least one shared; see
 [Memory graph extraction](/docs/concepts/memory-graph-extraction).
 `hal0 doctor` (row `memory_engine_env`) shows the values in force.
 
