@@ -19,6 +19,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from hal0.agent_identity import identity_headers
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory as memory_routes
 from hal0.mcp import memory as memory_mcp
@@ -380,7 +381,7 @@ async def test_rest_add_reaches_the_engine_enveloped() -> None:
     response = await _rest_add(
         provider,
         {"text": "note", "tags": [SESSION, "session-end", "checkpoint", "hal0"]},
-        {"X-hal0-Agent": "hermes"},
+        {**identity_headers("hermes")},
     )
     assert response.status_code == 200, response.text
     item = engine.item
@@ -396,7 +397,7 @@ async def test_rest_add_with_a_project_tag_reaches_the_engine_project_scoped() -
     response = await _rest_add(
         provider,
         {"text": "note", "tags": ["project:hal0", SESSION, "slots"]},
-        {"X-hal0-Agent": "pi"},
+        {**identity_headers("pi")},
     )
     assert response.status_code == 200, response.text
     item = engine.item
@@ -419,7 +420,7 @@ async def test_rest_private_add_keeps_its_stamp_and_sends_its_private_scope() ->
     response = await _rest_add(
         provider,
         {"text": "note", "tags": ["chat", "agent:hermes"]},
-        {"X-hal0-Agent": "hermes", "X-hal0-Private": "1"},
+        {**identity_headers("hermes"), "X-hal0-Private": "1"},
     )
     assert response.status_code == 200, response.text
     item = engine.item

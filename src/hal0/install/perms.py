@@ -971,6 +971,17 @@ def ownership_table(
             optional=True,
             role="bridge.db-wal",
         ),
+        # agents/identity.bin — the secret every bundled agent's identity key is
+        # derived from (#3569, ADR-0062). hal0-api refuses it unless it is the
+        # service user's own 0600 file; optional: absent until the first key.
+        PermRow(
+            var_lib / "agents" / "identity.bin",
+            state_owner,
+            service_group,
+            0o600,
+            optional=True,
+            role="agents/identity.bin (agent identity key secret)",
+        ),
         PermRow(
             var_lib / "bridge.db-shm",
             state_owner,

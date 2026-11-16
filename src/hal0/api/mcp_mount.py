@@ -301,32 +301,50 @@ def bearer_resolver() -> tuple[str | None, str]:
     return bearer, _bearer_label(bearer) if bearer else "anonymous"
 
 
-def client_id_resolver() -> str:
-    """Return ``client_id`` for the current MCP request (issue #317).
+def _header_claim(headers: Any) -> str | None:
+    """The well-formed ``X-hal0-Agent`` value in ``headers``, else ``None``.
 
-    Identity comes from the ``X-hal0-Agent`` header — the same header the
-    REST memory surface reads (:func:`hal0.api.routes.memory._agent_id`).
-    Before this fix the resolver returned the Bearer token, so MCP callers
-    sending ``X-hal0-Agent`` + ``X-hal0-Private`` collapsed to the
-    ``anonymous`` client and their private writes silently landed in the
-    ``shared`` namespace.
-
-    Validation mirrors the REST side: the value must match
-    ``^[a-zA-Z0-9_\\-]{1,64}$`` and must not carry a ``private:`` prefix
-    (the namespace is reached via :func:`private_resolver`, not by
-    smuggling the prefix through identity). An absent / malformed header
-    falls back to ``"anonymous"`` — the downstream namespace resolver then
-    rejects a ``private`` write with no client_id rather than mis-scoping
-    it.
-
-    A request carrying a bridge client key (ADR-0043) is the exception: its
-    identity is the client's name, bound to the key, and the header is
-    ignored, so a bridge client cannot write as another agent. The name comes
-    from the principal the auth middleware judged and stored on the request
-    (:func:`hal0.api.auth.judged_principal`), not from a second verify. A
-    bridge-shaped bearer without one (a revoke race, a store error, a disabled
-    bridge on a dev-open box) is ``"anonymous"``, never the header's claim.
+    The value must match ``^[a-zA-Z0-9_\\-]{1,64}$`` and must not carry a
+    ``private:`` prefix (the namespace is reached via :func:`private_resolver`,
+    not by smuggling the prefix through identity).
     """
+    raw = headers.get(_AGENT_HEADER)
+    if raw is None:
+        return None
+    candidate = raw.strip()
+    if not candidate or candidate.startswith("private:"):
+        return None
+    if not _AGENT_ID_PATTERN.match(candidate):
+        return None
+    return candidate
+
+
+def client_id_resolver() -> str:
+    """Return ``client_id`` for the current MCP request (issues #317, #3569).
+
+    ``client_id`` is the memory identity: it names the ``private:<id>``
+    namespace a private write lands in and the owner whose
+    ``visibility:private`` notes a read may see. So it comes from a
+    credential, never from a header alone:
+
+    * A request carrying a bridge client key (ADR-0043) is its client's name,
+      bound to the key; the header is ignored, so a bridge client cannot act
+      as another agent. The name comes from the principal the auth middleware
+      judged and stored on the request (:func:`hal0.api.auth.judged_principal`),
+      not from a second verify. A bridge-shaped bearer without one (a revoke
+      race, a store error, a disabled bridge on a dev-open box) is
+      ``"anonymous"``, never the header's claim.
+    * Otherwise the ``X-hal0-Agent`` value is the identity only when the
+      request also carries that agent's identity key in ``X-hal0-Agent-Key``
+      (:mod:`hal0.agent_identity`), which hal0 writes for its own agents.
+    * Any other claim is an audit label and the identity is ``"anonymous"``:
+      shared memory only, and a private write is refused by the namespace
+      resolver rather than mis-scoped. A reserved name claimed without its key
+      never reaches here on ``/mcp/memory``: :func:`guard_agent_claim` refuses
+      it with 403 first.
+    """
+    from hal0.agent_identity import AGENT_KEY_HEADER, CLAIM_VERIFIED, judge_claim
+
     request = _current_mcp_request()
     if request is None:
         return "anonymous"
@@ -335,15 +353,65 @@ def client_id_resolver() -> str:
         return principal.name
     if bears_bridge_key(request):
         return "anonymous"
-    raw = request.headers.get(_AGENT_HEADER)
-    if raw is None:
+    candidate = _header_claim(request.headers)
+    if candidate is None:
         return "anonymous"
-    candidate = raw.strip()
-    if not candidate or candidate.startswith("private:"):
-        return "anonymous"
-    if not _AGENT_ID_PATTERN.match(candidate):
-        return "anonymous"
-    return candidate
+    if judge_claim(candidate, request.headers.get(AGENT_KEY_HEADER)) == CLAIM_VERIFIED:
+        return candidate
+    return "anonymous"
+
+
+def guard_agent_claim(app: ASGIApp) -> ASGIApp:
+    """Wrap a memory MCP mount: refuse a reserved ``X-hal0-Agent`` claimed without its key.
+
+    A request that names one of the identities hal0's own agents use
+    (``hermes``, ``hermes__<profile>``, ``pi``, ...) and carries no matching
+    ``X-hal0-Agent-Key`` gets ``403 bridge.client_name_reserved``, the code a
+    bridge key under a reserved name gets (#3560). A bridge principal is not
+    refused: its identity is its key's name and the header is ignored. Every
+    other request passes through untouched; :func:`client_id_resolver` decides
+    what identity it acts as.
+    """
+    from starlette.responses import JSONResponse
+
+    from hal0.agent_identity import (
+        AGENT_KEY_HEADER,
+        CLAIM_RESERVED,
+        RESERVED_CLAIM_CODE,
+        RESERVED_CLAIM_MESSAGE,
+        judge_claim,
+    )
+
+    async def guarded(scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") == "http":
+            request = Request(scope)
+            candidate = _header_claim(request.headers)
+            if (
+                candidate is not None
+                and judged_principal(scope).tier != "bridge"
+                and not bears_bridge_key(scope)
+                and judge_claim(candidate, request.headers.get(AGENT_KEY_HEADER)) == CLAIM_RESERVED
+            ):
+                log.warning(
+                    "hal0.memory.agent_claim_reserved",
+                    path=scope.get("path"),
+                    claimed_agent=candidate,
+                )
+                response = JSONResponse(
+                    {
+                        "error": {
+                            "code": RESERVED_CLAIM_CODE,
+                            "message": RESERVED_CLAIM_MESSAGE,
+                            "details": {"header": "X-hal0-Agent"},
+                        }
+                    },
+                    status_code=403,
+                )
+                await response(scope, receive, send)
+                return
+        await app(scope, receive, send)
+
+    return guarded
 
 
 _OWUI_CLIENT = "openwebui"
@@ -522,7 +590,7 @@ def mount_mcp_servers(
             provenance_resolver=provenance_resolver,
         )
         memory_server.settings.transport_security = transport_security
-        memory_app: ASGIApp = memory_server.streamable_http_app()
+        memory_app: ASGIApp = guard_agent_claim(memory_server.streamable_http_app())
         app.mount("/mcp/memory", memory_app, name="mcp-memory")
         session_managers.append(memory_server.session_manager)
         mcp_servers["hal0-memory"] = memory_server
@@ -554,6 +622,7 @@ def mount_mcp_servers(
 __all__ = [
     "bearer_resolver",
     "client_id_resolver",
+    "guard_agent_claim",
     "mount_mcp_servers",
     "principal_resolver",
     "private_resolver",

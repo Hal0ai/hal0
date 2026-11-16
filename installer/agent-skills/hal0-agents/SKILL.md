@@ -34,8 +34,8 @@ Auth: Bearer token (set `HAL0_MCP_TOKEN` env var)
 ### Agent Memory
 | Tool | Description |
 |------|-------------|
-| `agent_memory_add` | Add a memory scoped to an agent |
-| `agent_memory_search` | Search agent-scoped memories |
+| `agent_memory_add` | Add a note to the box's shared memory on an agent's behalf (never its private memory) |
+| `agent_memory_search` | Search the box's shared memory (never an agent's private memory) |
 
 ### Skills Management
 | Tool | Description |

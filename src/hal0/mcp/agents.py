@@ -31,8 +31,9 @@ The teach tools (decision 10) leave knowledge behind for a Hermes profile::
     agent_skill_delete   — propose removing a drop-in skill: queued likewise
     agent_capabilities   — a sanitised view of what a Hermes profile can do now
 
-Memory is namespaced by hal0 (``private:hermes``, ``private:hermes__<profile>`` or
-``shared``), never by the caller's arguments or headers; tags the caller sends that
+Memory is namespaced by hal0, never by the caller's arguments or headers: the teach
+tools read and write the shared memory only, and never a Hermes profile's private
+namespace (ADR-0062); tags the caller sends that
 start ``agent:``, ``visibility:``, ``project:`` or ``source:bridge:`` are dropped, because
 the memory layer trusts them for ownership (#3136). A skill write or delete is
 gated: the tool returns ``{status: "pending_approval", approval_id}`` and the
@@ -653,9 +654,9 @@ def _agents_tool_definitions() -> dict[str, Tool]:
         name="agent_memory_add",
         description=(
             "Remember a note for a Hermes agent. agent is 'hermes' (the default profile), "
-            "'hermes/<profile>', or 'shared' (the box's shared memory). The note is stored in "
-            "that agent's own private memory, or in the shared memory for 'shared'; hal0 picks "
-            "the namespace, not you. It is tagged source:bridge:<your client name> along with "
+            "'hermes/<profile>', or 'shared'. The note is stored in the box's shared memory "
+            "whichever agent you name (a Hermes agent's private memory is its own, not "
+            "reachable from here); hal0 picks the namespace, not you. It is tagged source:bridge:<your client name> along with "
             "any tags you pass, except tags that start with agent:, visibility:, project: or "
             "source:bridge: (hal0 owns those, so they are dropped). Returns {status, id, "
             "timestamp}. Refused with bridge.unknown_agent for any other agent and "
@@ -673,9 +674,10 @@ def _agents_tool_definitions() -> dict[str, Tool]:
     @server.tool(
         name="agent_memory_search",
         description=(
-            "Search what a Hermes agent remembers. agent is 'hermes', 'hermes/<profile>' (its "
-            "own private memory and the shared memory) or 'shared' (the shared memory and any "
-            "private memory filed under your own client name). limit is 1 to 50 (default 10). "
+            "Search the box's shared memory for a Hermes agent. agent is 'hermes', "
+            "'hermes/<profile>' or 'shared'; every one reads the shared memory (and any "
+            "private memory filed under your own client name), never a Hermes agent's private "
+            "memory. limit is 1 to 50 (default 10). "
             "Returns {status, results}. A text over 16 KiB is cut and the result then carries "
             "truncated: true."
         ),

@@ -8,8 +8,11 @@ on the 2nd call (one ``AsyncClient`` reused across per-call event loops →
 is reused safely for the session.
 
 Talks to hal0-api's ``/api/memory/*`` routes, NOT the ``/mcp/memory``
-JSON-RPC transport. Identity is carried via ``X-hal0-Agent``;
-there is no Bearer auth on the hal0 LAN.
+JSON-RPC transport. Identity is carried via ``X-hal0-Agent`` and backed by
+``X-hal0-Agent-Key``, the identity key hal0 writes into the profile's
+``config.yaml`` (#3569): without the key hal0 treats the name as an audit label,
+and refuses a reserved one such as ``hermes`` with 403. There is no Bearer auth
+on the hal0 LAN.
 
 Visibility, selected per write by ``X-hal0-Private`` (hal0 picks the bank):
   * ``X-hal0-Private: 1`` → private, readable only by the ``X-hal0-Agent``
@@ -26,6 +29,7 @@ resolves the write target from the headers (PR #366).
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -120,9 +124,14 @@ class Hal0MemoryClient:
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
         read_timeout: float = DEFAULT_READ_TIMEOUT,
         http_client: httpx.Client | None = None,
+        agent_key: Callable[[], str | None] | None = None,
     ) -> None:
         self._base_url = _resolve_base_url(base_url)
         self._agent_id = _resolve_agent_id(agent_id)
+        # Asked on every request, so a key hal0 writes into config.yaml after
+        # this client was built (an upgraded box's first hal0-api start) is
+        # sent from the next call on, with no gateway restart.
+        self._agent_key = agent_key
         self._connect_timeout = connect_timeout
         self._owns_client = http_client is None
         if http_client is None:
@@ -144,12 +153,21 @@ class Hal0MemoryClient:
         return self._agent_id
 
     def _headers(self, *, private: bool) -> dict[str, str]:
-        return {
+        headers = {
             "X-hal0-Agent": self._agent_id,
             "X-hal0-Private": "1" if private else "0",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        key = None
+        if self._agent_key is not None:
+            try:
+                key = self._agent_key()
+            except Exception:  # a broken lookup must never take memory down
+                key = None
+        if key:
+            headers["X-hal0-Agent-Key"] = key
+        return headers
 
     def close(self) -> None:
         if self._owns_client:

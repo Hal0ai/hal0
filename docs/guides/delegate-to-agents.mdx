@@ -224,17 +224,19 @@ These tools change what Hermes knows and can do. They are on the same
 
 ### Memory
 
-`agent_memory_add(agent, text, tags?)` writes a fact to the agent's own
-private memory namespace: `private:hermes` for `hermes`, or
-`private:hermes__<profile>` for `hermes/<profile>`. hal0 forces that namespace
-and tags the entry `source:bridge:<your client>`, so you can always tell what
-the bridge wrote. A tag of yours that starts with `agent:`, `visibility:`,
-`project:` or `source:bridge:` is dropped, because the memory layer reads an
-entry's owner from those. Pass `agent="shared"` to write the shared namespace
-instead.
-`agent_memory_search(agent, query, limit=10)` searches the named agent's own
-private memory plus the shared memory. Pass `agent="shared"` to search the
-shared memory plus any private memory filed under your client's own name.
+`agent_memory_add(agent, text, tags?)` writes a fact to the box's shared
+memory, whichever agent you name (`hermes`, `hermes/<profile>` or `shared`).
+hal0 forces that namespace and tags the entry `source:bridge:<your client>`, so
+you can always tell what the bridge wrote. A tag of yours that starts with
+`agent:`, `visibility:`, `project:` or `source:bridge:` is dropped, because the
+memory layer reads an entry's owner from those.
+`agent_memory_search(agent, query, limit=10)` searches the shared memory plus
+any private memory filed under your client's own name.
+
+A Hermes profile's private memory (`private:hermes`,
+`private:hermes__<profile>`) is not reachable through these tools: your bridge
+key is a different principal from Hermes, so it never reads or writes Hermes's
+private notes ([ADR-0062](/docs/adr/0062-memory-identity-from-a-credential)).
 
 ### Skills
 

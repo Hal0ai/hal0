@@ -134,12 +134,34 @@ class MemoryAgentIdInvalid(Hal0Error):
     status = 400
 
 
+class MemoryAgentNameReserved(Hal0Error):
+    """``X-hal0-Agent`` names a reserved identity and carries no matching key (#3569).
+
+    The same code a bridge key under a reserved client name is refused with
+    (``bridge.client_name_reserved``, #3560): both are a caller trying to act
+    as one of hal0's own agents without that agent's credential.
+    """
+
+    code = "bridge.client_name_reserved"
+    status = 403
+
+
 def _agent_id(request: Request) -> str:
-    """Return the validated ``X-hal0-Agent`` value or ``"anonymous"``.
+    """Return the caller's memory identity: a verified ``X-hal0-Agent`` or ``"anonymous"``.
 
     Mirrors :func:`hal0.api.mcp_mount.client_id_resolver` for the REST
-    surface — both translate the absence of an identity header into the
-    same sentinel so audit + dataset resolution stay consistent.
+    surface — both translate the absence of an identity into the same
+    sentinel so audit + dataset resolution stay consistent.
+
+    The identity names the ``private:<id>`` namespace a private write lands
+    in and the owner whose ``visibility:private`` notes a read may see, so a
+    header alone does not establish it (#3569). The ``X-hal0-Agent`` value is
+    the identity only when ``X-hal0-Agent-Key`` carries that agent's identity
+    key (:mod:`hal0.agent_identity`). A reserved name (``hermes``,
+    ``hermes__<profile>``, ``pi``, ...) without its key is refused with
+    :class:`MemoryAgentNameReserved` (403). Any other unkeyed name is an
+    audit label (``hal0.api._audit`` still records it) and the caller is
+    ``"anonymous"``: shared memory only, and a private write is a 400.
 
     Validation (hardening surfaced by PR #366 review):
 
@@ -172,7 +194,20 @@ def _agent_id(request: Request) -> str:
             "X-hal0-Agent must match [a-zA-Z0-9_-]{1,64}",
             details={"header": "X-hal0-Agent"},
         )
-    return candidate
+    from hal0.agent_identity import (
+        AGENT_KEY_HEADER,
+        CLAIM_RESERVED,
+        CLAIM_VERIFIED,
+        RESERVED_CLAIM_MESSAGE,
+        judge_claim,
+    )
+
+    verdict = judge_claim(candidate, request.headers.get(AGENT_KEY_HEADER))
+    if verdict == CLAIM_VERIFIED:
+        return candidate
+    if verdict == CLAIM_RESERVED:
+        raise MemoryAgentNameReserved(RESERVED_CLAIM_MESSAGE, details={"header": "X-hal0-Agent"})
+    return "anonymous"
 
 
 def _is_private(request: Request) -> bool:

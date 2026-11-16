@@ -294,9 +294,11 @@ that operates the box.
 The bridge above is the recommended route: a key per client, bound to its name
 and revocable on its own. The box's own keys still work on `/mcp/memory` and
 `/mcp/admin`. They are one key shared by every client that holds it, cannot be
-revoked for one client without rotating them for all, and carry whatever
-identity the client's `X-hal0-Agent` header claims. This section and the ones
-after it, through the workstation example, cover that route.
+revoked for one client without rotating them for all, and carry no memory
+identity: the client's `X-hal0-Agent` header labels its calls, but it reads and
+writes shared memory only, never private notes (see Identify with
+X-hal0-Agent, below). This section and the ones after it, through the
+workstation example, cover that route.
 
 Point your MCP client at the Streamable-HTTP endpoint on the hal0 host — the
 mount root itself 405s (no redirect); the working path always ends in `/mcp`:
@@ -354,27 +356,33 @@ so a long-lived MCP or event client must reconnect with the new key. See
 [Revoked streams](/docs/operate/auth#revoked-streams).
 
 <Aside type="tip">
-`X-hal0-Agent` is caller **identity**, not a credential — it stamps the
-audit trail and routes the `private:<agent>` memory namespace, but carries
-no auth weight on its own. When auth is on, a request with a valid
+`X-hal0-Agent` is a caller **label**, not a credential: it stamps the audit
+trail and carries no auth weight. When auth is on, a request with a valid
 `X-hal0-Agent` and no `Authorization` bearer still gets a bare `401`.
 </Aside>
 
 ### Identify with X-hal0-Agent
 
-Caller identity flows on the **`X-hal0-Agent`** request header. The value
-must match `^[a-zA-Z0-9_-]{1,64}$`. It stamps the audit trail and powers
-the `private:<agent>` memory namespace.
+A client names itself in the **`X-hal0-Agent`** request header. The value
+must match `^[a-zA-Z0-9_-]{1,64}$`, and it stamps the audit trail.
 
 ```
 X-hal0-Agent: my-agent
 ```
 
-An absent or malformed header falls back to `anonymous`. Add
-`X-hal0-Private: 1` to opt a memory client into its private namespace —
-writes then land in `private:<agent>` instead of the default `shared`
-dataset (in the two-bank layout `hal0:private`; on an older store the unified bank — see
-[Enable memory](/docs/guides/enable-memory)).
+The header does not give the client a memory identity. Without a bridge key a
+client is `anonymous` in memory: it reads and writes shared memory, sees no
+private notes, and a private write (`X-hal0-Private: 1`) is refused with
+`400 memory.namespace_invalid`. A client that needs its own private memory
+uses a [bridge key](#connect-an-external-mcp-client), whose client
+name is its identity. hal0's own agents (the Hermes profiles and Pi) prove
+theirs with an identity key in `X-hal0-Agent-Key`, which hal0 writes into
+their configuration ([ADR-0062](/docs/adr/0062-memory-identity-from-a-credential)).
+
+The names hal0 reserves for its own agents (`hermes`, `hermes__<profile>`,
+`pi`, any name starting `hal0`, `unknown`) are refused with
+`403 bridge.client_name_reserved` on `/mcp/memory` when sent without their
+identity key.
 
 ### Widen the host and origin allowlists
 
@@ -426,7 +434,6 @@ mcp_servers:
     timeout: 30
     headers:
       X-hal0-Agent: my-workstation-hermes
-      X-hal0-Private: "1"
       Authorization: Bearer <key>   # omit entirely when auth is off
 ```
 

@@ -2080,6 +2080,21 @@ async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
     except Exception as exc:  # seeding must never block startup
         log.warning("brain_profile.mcp_wire_startup_seed_failed", error=str(exc))
 
+    # #3569: the default Hermes profile's hal0 MCP entries carry the identity
+    # key that backs their X-hal0-Agent claim. Provisioning writes it; this
+    # converges a box upgraded from before the key existed, so its private
+    # memory keeps working without a --repair. Local FS only, rewrites only
+    # on a difference (the key is derived, so a converged file is untouched).
+    try:
+        from hal0.agents import hermes_api as _hermes_api_key
+        from hal0.agents.hermes_provision import converge_default_profile_agent_key_on_boot
+
+        await asyncio.to_thread(
+            converge_default_profile_agent_key_on_boot, _hermes_api_key.hermes_home()
+        )
+    except Exception as exc:  # must never block startup
+        log.warning("hermes.default_profile_agent_key_failed", error=str(exc))
+
     # #2304: drop Hermes/brain joins for user-installed MCP servers whose
     # record no longer loads (e.g. refused by the TLS gate after an
     # upgrade). sync_exposure otherwise runs only on MCP mutation routes, so

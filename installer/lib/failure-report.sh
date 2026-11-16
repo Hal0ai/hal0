@@ -849,7 +849,7 @@ _hal0_report_mask_patterns() {
         -e "s#(client_id=)[A-Za-z0-9_.-]{16,}#\\1${m}#gI" \
         -e "s#eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}#${m}#g" \
         -e "s#hal0bk_[a-z0-9_-]+\\.[A-Za-z0-9_-]{20,}#${m}#g" \
-        -e "s#(hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}#${m}#g" \
+        -e "s#(hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-|hal0ak_)[A-Za-z0-9_-]{20,}#${m}#g" \
         -e "s#AKIA[0-9A-Z]{16}#${m}#g" \
         -e "s#[${k}${w}${kw}${v}]##g" \
         -e "s#([*]{3}REDACTED[*]{3})+#${m}#g"

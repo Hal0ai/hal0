@@ -1093,8 +1093,11 @@ replacing it signs every session out. `HttpOnly` + `SameSite=Lax`, 8h TTL
 The HTTP header hal0-api sets on outbound hops to hermes (and that bundled
 agents set on inbound hops to hal0-api). Carries the agent's stable id
 (e.g. `hermes`, `pi`). It is the identity claim on hal0-api (NOT
-Bearer); the browser never sees or sets it. The hal0-memory MCP resolver derives the per-agent
-private namespace from this header.
+Bearer); the browser never sees or sets it. A claim is a memory identity, and
+so the owner of the per-agent private namespace, only when the request also
+carries that agent's identity key in `X-hal0-Agent-Key` (`src/hal0/agent_identity.py`,
+ADR-0062); otherwise it is an audit label and the caller is `anonymous`. A
+bridge key's client name overrides the header on `/mcp/memory`.
 
 ### composite hal0 upstream
 
