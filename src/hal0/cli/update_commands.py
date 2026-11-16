@@ -41,6 +41,7 @@ from hal0.cli._shared import (
     die,
     run_with_progress,
 )
+from hal0.memory.extraction_env import _STALE_WRAPPER_HINT
 from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
 console = Console()
@@ -270,6 +271,21 @@ def _render_notes(notes: dict | None) -> None:
         console.print(Markdown(markdown))
 
 
+def _dropin_label(kind: str) -> str:
+    """Noun-phrase label for a failed memory-engine drop-in reconcile (#3591).
+
+    ``hal0 update`` is a no-op on a box already on the release, and saving the
+    memory settings goes through the same ``hal0-systemctl`` seam, so neither is
+    the first remedy when the seam wrapper is stale. The wrapper hint is reused
+    from the one place that owns it.
+    """
+    return (
+        f"memory engine {kind} drop-in re-render (the engine still runs the old "
+        f"settings; if journalctl shows a hal0-systemctl 'bad cmd' error"
+        f"{_STALE_WRAPPER_HINT}; otherwise save the memory settings to retry)"
+    )
+
+
 #: Human labels for the non-fatal per-pass failure events
 #: run_post_activation_migrations can log (#1960 B2) — keys must match
 #: hal0.updater.updater._NON_FATAL_MIGRATION_FAILURE_EVENTS exactly.
@@ -294,6 +310,12 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
         "hal0-podman-forward.service refresh (see journalctl -u hal0-api)"
     ),
     "updater.api_unit_refresh_failed": "hal0-api.service refresh (see hal0 doctor all)",
+    "updater.extraction_dropin_reconcile_failed": _dropin_label("extraction"),
+    "updater.showcase_dropin_reconcile_failed": _dropin_label("showcase"),
+    "updater.embedder_record_failed": (
+        "memory embedder record (the engine drop-ins were left as they were; "
+        "see journalctl for hal0-api)"
+    ),
     "components.hermes_gateway_regen_failed": (
         "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"
     ),

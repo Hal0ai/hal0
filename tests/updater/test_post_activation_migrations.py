@@ -489,3 +489,134 @@ def test_the_boot_time_pass_neither_records_nor_renders_the_embedder(
     run_post_activation_migrations(job_id="j1", upgrade_memory_engine_venv=False)
     assert seen == []
     assert _stub_every_pass["showcase_dropin"] == []
+
+
+@pytest.mark.parametrize(
+    ("target", "event"),
+    [
+        ("reconcile_extraction_dropin", "updater.extraction_dropin_reconcile_failed"),
+        ("reconcile_showcase_dropin", "updater.showcase_dropin_reconcile_failed"),
+    ],
+)
+def test_a_failed_dropin_reconcile_is_a_warning_the_update_reports(
+    monkeypatch: pytest.MonkeyPatch,
+    _stub_every_pass: dict[str, list[Any]],
+    target: str,
+    event: str,
+) -> None:
+    """#3591: a drop-in reconcile that returns status=failed logged at info and
+    the update reported success. It now logs a warning under an event the
+    update summary scans for, and that event has an operator-facing remedy."""
+    from structlog.testing import capture_logs
+
+    from hal0.cli.update_commands import _MIGRATION_PASS_LABELS
+    from hal0.updater.updater import _NON_FATAL_MIGRATION_FAILURE_EVENTS
+
+    monkeypatch.setattr(
+        f"hal0.memory.extraction_env.{target}",
+        lambda **_k: {"status": "failed", "error": "wrapper rejected env name"},
+    )
+    with capture_logs() as logs:
+        run_post_activation_migrations(job_id="j1")
+
+    failed = [e for e in logs if e["event"] == event]
+    assert failed
+    assert failed[0]["log_level"] == "warning"
+    assert "wrapper rejected env name" in failed[0]["error"]
+    assert event in _NON_FATAL_MIGRATION_FAILURE_EVENTS
+    # The remedy has to work on a box already on the release: `hal0 update` is a
+    # no-op there. The stale-wrapper fix is the one owned by extraction_env.
+    from hal0.memory.extraction_env import _STALE_WRAPPER_HINT
+
+    label = _MIGRATION_PASS_LABELS[event]
+    assert "hal0 update" not in label
+    assert _STALE_WRAPPER_HINT in label
+    assert "save the memory settings" in label
+
+
+def test_drop_in_labels_render_as_a_noun_phrase() -> None:
+    """The CLI prints "! {label} logged a warning", so no label may be a sentence."""
+    from hal0.cli.update_commands import _MIGRATION_PASS_LABELS
+
+    for kind in ("extraction", "showcase"):
+        label = _MIGRATION_PASS_LABELS[f"updater.{kind}_dropin_reconcile_failed"]
+        assert label.startswith(f"memory engine {kind} drop-in re-render (")
+        assert label.endswith(")")
+
+
+def test_a_failed_reload_after_the_showcase_render_is_a_warning(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """#3591: showcase written (restart=False), extraction converged, then the
+    reload/restart fails: the env is on disk but the engine runs the old one."""
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reconcile_showcase_dropin",
+        lambda **_k: {"status": "applied"},
+    )
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reconcile_extraction_dropin",
+        lambda **_k: {"status": "converged"},
+    )
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reload_and_restart_hindsight",
+        lambda: {"daemon_reloaded": False, "restarted": False, "error": "daemon-reload failed"},
+    )
+    with capture_logs() as logs:
+        run_post_activation_migrations(job_id="j1")
+
+    failed = [e for e in logs if e["event"] == "updater.showcase_dropin_reconcile_failed"]
+    assert failed
+    assert failed[0]["log_level"] == "warning"
+    assert failed[0]["error"] == "daemon-reload failed"
+
+
+def test_a_clean_reload_after_the_showcase_render_logs_no_warning(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    from structlog.testing import capture_logs
+
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reconcile_showcase_dropin",
+        lambda **_k: {"status": "applied"},
+    )
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reconcile_extraction_dropin",
+        lambda **_k: {"status": "converged"},
+    )
+    monkeypatch.setattr(
+        "hal0.memory.extraction_env.reload_and_restart_hindsight",
+        lambda: {"daemon_reloaded": True, "restarted": True, "error": None},
+    )
+    with capture_logs() as logs:
+        run_post_activation_migrations(job_id="j1")
+    assert not [e for e in logs if e["log_level"] == "warning" and "dropin" in e["event"]]
+
+
+def test_an_embedder_record_failure_is_its_own_event_and_skips_the_dropins(
+    monkeypatch: pytest.MonkeyPatch, _stub_every_pass: dict[str, list[Any]]
+) -> None:
+    """The exception came from record_store_embedder(), before either drop-in was
+    touched, so it must not log the extraction-drop-in event, and rendering the
+    showcase drop-in without the record would move the store to the default
+    embedder (#3518), so neither reconcile runs."""
+    from structlog.testing import capture_logs
+
+    from hal0.cli.update_commands import _MIGRATION_PASS_LABELS
+    from hal0.updater.updater import _NON_FATAL_MIGRATION_FAILURE_EVENTS
+
+    def _boom() -> None:
+        raise OSError("record dir not writable")
+
+    monkeypatch.setattr("hal0.memory.embedder_record.record_store_embedder", _boom)
+    with capture_logs() as logs:
+        run_post_activation_migrations(job_id="j1")
+
+    events = [e["event"] for e in logs]
+    assert "updater.embedder_record_failed" in events
+    assert "updater.extraction_dropin_reconcile_failed" not in events
+    assert _stub_every_pass["showcase_dropin"] == []
+    assert _stub_every_pass["extraction_dropin"] == []
+    assert "updater.embedder_record_failed" in _NON_FATAL_MIGRATION_FAILURE_EVENTS
+    assert "updater.embedder_record_failed" in _MIGRATION_PASS_LABELS
