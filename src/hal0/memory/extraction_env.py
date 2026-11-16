@@ -353,6 +353,72 @@ _COMPLETION_CAP_OPS = frozenset({"consolidation", "reflect"})
 DEFAULT_OP_COMPLETION_TOKENS = 8192
 
 
+def render_reranker_env(models: MemoryModelsConfig) -> list[str]:
+    """The engine reranker's ``Environment=`` lines from ``[memory.models]`` (#3717).
+
+    ``HINDSIGHT_API_RERANKER_PROVIDER`` and ``HINDSIGHT_API_RERANKER_MAX_CANDIDATES``
+    always render (hal0's cap default, 60, is not the engine's, 300). The rest
+    render only for the provider that reads them, and an optional knob only
+    when it is set, so an unset knob keeps the engine default:
+
+    * ``local`` — ``LOCAL_MODEL`` and ``LOCAL_BUCKET_BATCHING`` (as before), plus
+      ``LOCAL_MAX_CONCURRENT`` / ``LOCAL_BATCH_SIZE`` / ``LOCAL_TIMEOUT``;
+    * ``litellm`` — ``LITELLM_API_BASE`` and ``LITELLM_MODEL`` (the schema makes
+      both required), plus ``LITELLM_TIMEOUT``. The engine POSTs the Cohere
+      body ``{model, query, documents, top_n}`` to ``{base}/rerank`` and reads
+      ``results[].index`` / ``relevance_score``, which is what hal0's own
+      ``/v1/rerank`` returns from the ``rerank`` slot. No API key is rendered:
+      the engine sends none when it is unset;
+    * ``tei`` — ``TEI_URL``, plus ``TEI_HTTP_TIMEOUT``;
+    * ``rrf`` — nothing else.
+
+    The per-budget ``MAX_CANDIDATES_LOW/MID/HIGH`` caps render for every
+    provider when set.
+    """
+    provider = models.reranker_provider
+    lines = [
+        f"Environment=HINDSIGHT_API_RERANKER_PROVIDER={provider}",
+        f"Environment=HINDSIGHT_API_RERANKER_MAX_CANDIDATES={models.reranker_max_candidates}",
+    ]
+    for suffix, cap in (
+        ("LOW", models.reranker_max_candidates_low),
+        ("MID", models.reranker_max_candidates_mid),
+        ("HIGH", models.reranker_max_candidates_high),
+    ):
+        if cap is not None:
+            lines.append(f"Environment=HINDSIGHT_API_RERANKER_MAX_CANDIDATES_{suffix}={cap}")
+
+    if provider == "local":
+        lines += [
+            f"Environment=HINDSIGHT_API_RERANKER_LOCAL_MODEL={models.reranker_model}",
+            "Environment=HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING="
+            + ("true" if models.reranker_bucket_batching else "false"),
+        ]
+        for env, value in (
+            ("LOCAL_MAX_CONCURRENT", models.reranker_local_max_concurrent),
+            ("LOCAL_BATCH_SIZE", models.reranker_local_batch_size),
+            ("LOCAL_TIMEOUT", models.reranker_local_timeout_s),
+        ):
+            if value is not None:
+                lines.append(f"Environment=HINDSIGHT_API_RERANKER_{env}={value}")
+    elif provider == "litellm":
+        lines += [
+            f"Environment=HINDSIGHT_API_RERANKER_LITELLM_API_BASE={models.reranker_base_url}",
+            f"Environment=HINDSIGHT_API_RERANKER_LITELLM_MODEL={models.reranker_api_model}",
+        ]
+        if models.reranker_timeout_s is not None:
+            lines.append(
+                f"Environment=HINDSIGHT_API_RERANKER_LITELLM_TIMEOUT={models.reranker_timeout_s}"
+            )
+    elif provider == "tei":
+        lines.append(f"Environment=HINDSIGHT_API_RERANKER_TEI_URL={models.reranker_base_url}")
+        if models.reranker_timeout_s is not None:
+            lines.append(
+                f"Environment=HINDSIGHT_API_RERANKER_TEI_HTTP_TIMEOUT={models.reranker_timeout_s}"
+            )
+    return lines
+
+
 def render_showcase_env(
     *,
     models: MemoryModelsConfig,
@@ -409,10 +475,7 @@ def render_showcase_env(
         "[Service]",
         f"Environment={EMBEDDINGS_PROVIDER_ENV}={embedder.provider}",
         f"Environment={EMBEDDINGS_MODEL_ENV}={embedder.model}",
-        f"Environment=HINDSIGHT_API_RERANKER_PROVIDER={models.reranker_provider}",
-        f"Environment=HINDSIGHT_API_RERANKER_LOCAL_MODEL={models.reranker_model}",
-        "Environment=HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING="
-        + ("true" if models.reranker_bucket_batching else "false"),
+        *render_reranker_env(models),
     ]
 
     base_url = decision_engine_base_url(decision, unit_installed=decision_unit_installed)

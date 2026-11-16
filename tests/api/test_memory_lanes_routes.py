@@ -443,12 +443,10 @@ def test_models_reports_a_matching_store_as_clean(
     client: TestClient, tmp_path, monkeypatch
 ) -> None:
     from hal0.api.routes import memory_lanes as mod
+    from hal0.config.schema import MemoryModelsConfig
 
-    class _Models:
-        embeddings_provider = "local"
-        embeddings_model = "BAAI/bge-small-en-v1.5"
-        reranker_provider = "local"
-        reranker_model = "hindsight-ai/hs-rerank-1"
+    def _Models() -> MemoryModelsConfig:
+        return MemoryModelsConfig(embeddings_model="BAAI/bge-small-en-v1.5")
 
     class _Decision:
         enabled = False
@@ -538,3 +536,35 @@ def test_client_name_for_keeps_usable_names_and_renames_reserved_ones() -> None:
     assert client_name_for("hal0-cli") == "agent-hal0-cli"
     assert client_name_for("Claude Code") == "claude-code-memory"
     assert client_name_for("---") is None
+
+
+def test_models_reports_the_reranker_caps_and_remote_endpoint(
+    client: TestClient, tmp_path, monkeypatch
+) -> None:
+    """#3717: the reranker block carries the candidate cap and, for a remote
+    provider, the endpoint the engine is pointed at; unset knobs read null."""
+    from hal0.api.routes import memory_lanes as mod
+    from hal0.config.schema import MemoryConfig, MemoryModelsConfig
+
+    class _Cfg:
+        memory = MemoryConfig(
+            models=MemoryModelsConfig(
+                reranker_provider="litellm",
+                reranker_base_url="http://127.0.0.1:8080/v1",
+                reranker_api_model="builtin.jina-reranker-v1-tiny-en-q8",
+                reranker_max_candidates=40,
+            )
+        )
+
+    _store_and_dropin(tmp_path, monkeypatch)
+    monkeypatch.setattr(mod, "load_hal0_config", lambda: _Cfg())
+
+    rr = client.get("/api/memory/models").json()["reranker"]
+
+    assert rr["provider"] == "litellm"
+    assert rr["max_candidates"] == 40
+    assert rr["base_url"] == "http://127.0.0.1:8080/v1"
+    assert rr["api_model"] == "builtin.jina-reranker-v1-tiny-en-q8"
+    assert rr["timeout_s"] is None
+    assert rr["local_max_concurrent"] is None
+    assert rr["max_candidates_low"] is None

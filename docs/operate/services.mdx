@@ -240,6 +240,42 @@ WantedBy=multi-user.target
   say so and nothing is rewritten. `hal0 memory embedder switch <model>` is
   the one way to change it; see
   [Change the embedding model](/docs/guides/enable-memory#change-the-embedding-model).
+- **Reranker** — the engine reranks each recall's candidates. `[memory.models]`
+  sets it, rendered into `showcase-lanes.conf`; a Settings save rewrites the
+  drop-in and restarts the engine. Unset keys keep the engine default.
+
+  ```toml
+  [memory.models]
+  reranker_provider = "local"         # local | litellm | tei | rrf
+  reranker_max_candidates = 60        # engine default 300
+  # reranker_max_candidates_low/_mid/_high = per-budget caps
+  # local only: reranker_local_max_concurrent (4), reranker_local_batch_size (32),
+  #             reranker_local_timeout_s (300, 0 = no ceiling)
+  ```
+
+  The cap matters most: on the in-process CPU cross-encoder, 300 candidates
+  cost 30–40 s per recall, 60 keeps it under a second. To rerank on hal0's own
+  `rerank` slot instead, use the `litellm` provider, which POSTs the Cohere
+  body (`model`, `query`, `documents`, `top_n`) to `{reranker_base_url}/rerank`
+  and reads `results[].index` / `relevance_score`, the shape `/v1/rerank`
+  returns:
+
+  ```toml
+  reranker_provider = "litellm"
+  reranker_base_url = "http://127.0.0.1:8080/v1"
+  reranker_api_model = "builtin.jina-reranker-v1-tiny-en-q8"   # a model the rerank slot serves
+  reranker_timeout_s = 30                                       # engine default 60
+  ```
+
+  `tei` takes a text-embeddings-inference server URL in `reranker_base_url`,
+  and `rrf` turns cross-encoder scoring off. No API key is sent, so the
+  endpoint must accept unauthenticated calls. hal0's gateway does while
+  `[security].require_auth` is off (the default); with it on, it refuses them.
+  A save that names `litellm` or `tei` without a URL, `litellm` without
+  `reranker_api_model`, a URL with credentials or a query string, or another
+  provider is refused. The endpoint has to answer: a rerank call that still
+  errors after the engine's retries fails the recall, so keep the `rerank`
+  slot loaded.
 - **First start** — on a box with no memory store, the installer writes the
   `showcase-lanes.conf` drop-in and the embedder record from
   `[memory.models]` before it starts the engine, so a new store is built with

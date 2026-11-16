@@ -275,6 +275,18 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.models.reranker_provider": {"apply_class": "immediate", "services": []},
     "memory.models.reranker_model": {"apply_class": "immediate", "services": []},
     "memory.models.reranker_bucket_batching": {"apply_class": "immediate", "services": []},
+    # #3717: reranker caps, local knobs and the remote-provider endpoint —
+    # same showcase drop-in re-render + engine restart as the siblings above.
+    "memory.models.reranker_max_candidates": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_max_candidates_low": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_max_candidates_mid": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_max_candidates_high": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_local_max_concurrent": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_local_batch_size": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_local_timeout_s": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_base_url": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_api_model": {"apply_class": "immediate", "services": []},
+    "memory.models.reranker_timeout_s": {"apply_class": "immediate", "services": []},
     "memory.decision.enabled": {"apply_class": "immediate", "services": []},
     "memory.decision.provider": {"apply_class": "immediate", "services": []},
     "memory.decision.model": {"apply_class": "immediate", "services": []},

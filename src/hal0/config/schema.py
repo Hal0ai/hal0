@@ -2807,6 +2807,24 @@ _SHOWCASE_PROVIDER_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 _SHOWCASE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_./:-]{0,159}$")
 _SHOWCASE_VIRTUAL_MODEL_RE = re.compile(r"^hal0/[A-Za-z0-9_.-]{1,64}$")
 _SHOWCASE_EFFORT_RE = re.compile(r"^[a-z]{1,16}$")
+#: Engine reranker providers hal0 can configure end to end (#3717). None needs
+#: a secret: ``local`` runs in-process, ``litellm`` speaks the Cohere-style
+#: ``POST {base}/rerank`` (hal0's own ``/v1/rerank`` among others; the API key
+#: is optional), ``tei`` targets a text-embeddings-inference server, and
+#: ``rrf`` skips cross-encoder scoring altogether.
+RERANKER_PROVIDERS = ("local", "litellm", "tei", "rrf")
+#: Providers that need ``reranker_base_url``.
+RERANKER_REMOTE_PROVIDERS = frozenset({"litellm", "tei"})
+#: hindsight-api 1.2 ``DEFAULT_RERANKER_MAX_CANDIDATES``. hal0's default is
+#: lower: on the CPU cross-encoder 300 candidates cost 30-40 s per recall.
+ENGINE_RERANKER_MAX_CANDIDATES = 300
+#: hal0's own Cohere-style rerank endpoint, as the engine's ``litellm``
+#: provider wants it (it appends ``/rerank``).
+HAL0_RERANK_BASE_URL_EXAMPLE = "http://127.0.0.1:8080/v1"
+#: A plain http(s) URL: host, optional port, optional path. No userinfo (no
+#: credential in hal0.toml), no query, no whitespace. Kept in lockstep with
+#: the showcase arm of ``installer/wrappers/hal0-systemctl``.
+_RERANKER_URL_RE = re.compile(r"^https?://[A-Za-z0-9.-]{1,253}(:[0-9]{1,5})?(/[A-Za-z0-9._~-]+)*$")
 
 
 def _showcase_shape(v: str, pattern: re.Pattern[str], what: str) -> str:
@@ -2824,6 +2842,13 @@ class MemoryModelsConfig(BaseModel):
     CPU models, no external gateway hop. Rendered into
     ``HINDSIGHT_API_EMBEDDINGS_*`` / ``HINDSIGHT_API_RERANKER_*`` env by the
     installer/extraction_env drop-in renderer.
+
+    The reranker can also run off-process (#3717): ``reranker_provider =
+    "litellm"`` with ``reranker_base_url`` / ``reranker_api_model`` sends the
+    Cohere-style rerank call to any compatible endpoint, hal0's own
+    ``/v1/rerank`` (the ``rerank`` slot) included; ``"tei"`` targets a
+    text-embeddings-inference server; ``"rrf"`` turns cross-encoder scoring
+    off. ``reranker_max_candidates`` caps how much of each recall is scored.
     """
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
@@ -2848,16 +2873,161 @@ class MemoryModelsConfig(BaseModel):
         default=True,
         description="HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING.",
     )
+    # #3717: candidate caps, rendered for every provider.
+    reranker_max_candidates: int = Field(
+        default=60,
+        ge=1,
+        le=10000,
+        description=(
+            "HINDSIGHT_API_RERANKER_MAX_CANDIDATES — how many recall candidates "
+            "the reranker scores. The engine default is 300, which costs 30-40 s "
+            "per recall on the CPU cross-encoder; 60 keeps recall under a second."
+        ),
+    )
+    reranker_max_candidates_low: int | None = Field(
+        default=None,
+        ge=1,
+        le=10000,
+        description=(
+            "HINDSIGHT_API_RERANKER_MAX_CANDIDATES_LOW — cap for low-budget "
+            "recalls. Unset uses reranker_max_candidates."
+        ),
+    )
+    reranker_max_candidates_mid: int | None = Field(
+        default=None,
+        ge=1,
+        le=10000,
+        description="HINDSIGHT_API_RERANKER_MAX_CANDIDATES_MID — mid-budget cap.",
+    )
+    reranker_max_candidates_high: int | None = Field(
+        default=None,
+        ge=1,
+        le=10000,
+        description="HINDSIGHT_API_RERANKER_MAX_CANDIDATES_HIGH — high-budget cap.",
+    )
+    # In-process cross-encoder knobs; unset keeps the engine default.
+    reranker_local_max_concurrent: int | None = Field(
+        default=None,
+        ge=1,
+        le=64,
+        description=(
+            "HINDSIGHT_API_RERANKER_LOCAL_MAX_CONCURRENT — concurrent local "
+            "rerank calls (engine default 4). 'local' provider only."
+        ),
+    )
+    reranker_local_batch_size: int | None = Field(
+        default=None,
+        ge=1,
+        le=1024,
+        description=(
+            "HINDSIGHT_API_RERANKER_LOCAL_BATCH_SIZE — pairs per predict() call "
+            "(engine default 32). 'local' provider only."
+        ),
+    )
+    reranker_local_timeout_s: int | None = Field(
+        default=None,
+        ge=0,
+        le=3600,
+        description=(
+            "HINDSIGHT_API_RERANKER_LOCAL_TIMEOUT — ceiling for one recall's "
+            "local rerank, seconds (engine default 300; 0 disables). 'local' "
+            "provider only."
+        ),
+    )
+    # Remote providers ('litellm', 'tei').
+    reranker_base_url: str | None = Field(
+        default=None,
+        description=(
+            "Remote reranker endpoint. 'litellm': the base the engine POSTs "
+            "{base}/rerank to in the Cohere wire format — "
+            f"{HAL0_RERANK_BASE_URL_EXAMPLE} is hal0's own rerank slot. 'tei': "
+            "the text-embeddings-inference server URL. Required for both, "
+            "ignored for 'local' and 'rrf'. No credentials in the URL."
+        ),
+    )
+    reranker_api_model: str | None = Field(
+        default=None,
+        description=(
+            "HINDSIGHT_API_RERANKER_LITELLM_MODEL — the model id sent in each "
+            "rerank request. Required for 'litellm'; for hal0's own endpoint, "
+            "a model the rerank slot serves."
+        ),
+    )
+    reranker_timeout_s: int | None = Field(
+        default=None,
+        ge=1,
+        le=600,
+        description=(
+            "Remote reranker HTTP timeout, seconds: "
+            "HINDSIGHT_API_RERANKER_LITELLM_TIMEOUT (engine default 60) or "
+            "HINDSIGHT_API_RERANKER_TEI_HTTP_TIMEOUT (engine default 30)."
+        ),
+    )
 
     @field_validator("embeddings_provider", "reranker_provider")
     @classmethod
     def _showcase_provider(cls, v: str) -> str:
         return _showcase_shape(v, _SHOWCASE_PROVIDER_RE, "provider")
 
+    @field_validator("reranker_provider")
+    @classmethod
+    def _reranker_provider_known(cls, v: str) -> str:
+        if v not in RERANKER_PROVIDERS:
+            raise ValueError(
+                f"memory.models.reranker_provider must be one of "
+                f"{list(RERANKER_PROVIDERS)}, got {v!r}"
+            )
+        return v
+
     @field_validator("embeddings_model", "reranker_model")
     @classmethod
     def _showcase_model(cls, v: str) -> str:
         return _showcase_shape(v, _SHOWCASE_MODEL_RE, "model id")
+
+    @field_validator("reranker_api_model")
+    @classmethod
+    def _reranker_api_model_shape(cls, v: str | None) -> str | None:
+        if not v:
+            return None
+        return _showcase_shape(v, _SHOWCASE_MODEL_RE, "reranker_api_model")
+
+    @field_validator("reranker_base_url")
+    @classmethod
+    def _reranker_base_url_shape(cls, v: str | None) -> str | None:
+        if not v:
+            return None
+        v = v.rstrip("/")
+        if "@" in v:
+            raise ValueError(
+                "memory.models.reranker_base_url must not carry credentials (user:pass@host)"
+            )
+        if not _RERANKER_URL_RE.fullmatch(v) or ".." in v:
+            raise ValueError(
+                f"memory.models.reranker_base_url {v!r} must be a plain "
+                "http(s)://host[:port][/path] URL (no query, no spaces, no '..')"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _reranker_combination(self) -> MemoryModelsConfig:
+        provider = self.reranker_provider
+        if provider in RERANKER_REMOTE_PROVIDERS and not self.reranker_base_url:
+            hint = (
+                f"for hal0's own rerank slot: {HAL0_RERANK_BASE_URL_EXAMPLE}"
+                if provider == "litellm"
+                else "the text-embeddings-inference server URL"
+            )
+            raise ValueError(
+                f"memory.models.reranker_provider = {provider!r} needs "
+                f"memory.models.reranker_base_url ({hint})"
+            )
+        if provider == "litellm" and not self.reranker_api_model:
+            raise ValueError(
+                "memory.models.reranker_provider = 'litellm' needs "
+                "memory.models.reranker_api_model (the rerank model id the "
+                "endpoint serves)"
+            )
+        return self
 
 
 class MemoryDecisionConfig(BaseModel):

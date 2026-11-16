@@ -95,11 +95,12 @@ Environment=HINDSIGHT_API_WORKER_MAX_SLOTS=4
 # just works; verification was only ever a startup nicety.)
 Environment=HINDSIGHT_API_SKIP_LLM_VERIFICATION=true
 
-# Embeddings + reranker are LOCAL (bundled BGE 384-d + MiniLM cross-encoder) —
-# the full `hindsight-api` package default. No external embed/rerank config needed.
-# (P2-5 may repoint the reranker at the rerank slot's bge-reranker-v2-m3 for §4b.)
-# CT 105 has no NVIDIA GPU (Strix Halo iGPU only) — force CPU so torch/onnx don't
-# probe for CUDA. The bundled CUDA torch wheels are unused dead weight on this box.
+# The in-process embedder and reranker run on CPU. Which models they load, and
+# whether the reranker runs in-process at all, is [memory.models] in hal0.toml,
+# rendered into the showcase-lanes.conf drop-in (a remote reranker, such as
+# hal0's own rerank slot, is set there too). Force CPU so torch/onnx never probe
+# for a CUDA device: the local models are sized for CPU, and the GPU belongs to
+# the inference slots. A GPU-backed reranker is a slot, not this process.
 Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU=true
 Environment=HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU=true
 
