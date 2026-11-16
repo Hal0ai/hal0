@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import functools
 import logging
 import os
 import time
@@ -403,6 +404,15 @@ _SLOW_STOP_CONVERGED_MESSAGE = "stop took longer than the terminate budget; conv
 _HALOGEN_REPROBE_PAUSE_S = 3.0
 
 
+class _ReadmitWithdrawn(Exception):
+    """A re-admission found the slot no longer wants one (#3502, ADR-0063).
+
+    Raised inside ``SlotManager._load(readmit=True)`` before anything starts
+    or is stamped, so the slot's state and breaker are left exactly as the
+    operator or the last transition left them.
+    """
+
+
 class SlotManager:
     """Manages the lifecycle of all hal0 inference slots.
 
@@ -533,6 +543,9 @@ class SlotManager:
         # presence is the "adopted, not cold-loading" marker: only adoption
         # starts one, and any later transition cancels it.
         self._adopt_promoters: dict[int, asyncio.Task[None]] = {}
+        # #3502 / ADR-0063: one in-flight re-admission per slot. The reaper
+        # tick only schedules these, so a slow load never stalls its sweeps.
+        self._readmit_tasks: dict[int, asyncio.Task[bool]] = {}
         # #2738 — background finishers for stops that outlived the budget.
         self._slow_stop_tasks: set[asyncio.Task[None]] = set()
         # Push-driven failure detector (P3-slots §1b-watchdog) — see watchdog.py.
@@ -983,6 +996,7 @@ class SlotManager:
         "_cfg_cache",
         "_fail_watchers",
         "_adopt_promoters",
+        "_readmit_tasks",
         "_serving_count",
         "_dispatch_tickets",
         "_load_failures",
@@ -2088,9 +2102,14 @@ class SlotManager:
         model_id: str | None = None,
         *,
         unload_npu_holder: bool = False,
+        readmit: bool = False,
     ) -> Slot:
         slot_name = self._resolve_alias(slot_name)
         self._ensure_known(slot_name)
+        if readmit:
+            # Cheap early exit; the check under the lock below is the one
+            # that counts.
+            self._check_readmit_still_wanted(slot_name)
         # NPU admission (#3666) runs BEFORE this slot's lock: the opt-in unloads
         # the holder(s) through ``unload()``, which takes THEIR locks, and must
         # do so holding neither the admission lock nor this one. A loaded slot
@@ -2118,6 +2137,14 @@ class SlotManager:
             if self._current_state(slot_name) not in _READY_STATES and await is_abandoned():
                 log.info("slot.load_skipped_client_gone", extra={"slot": slot_name})
                 return await self.status(slot_name)
+            if readmit:
+                # #3502 / ADR-0063: the re-admission sweep decided on a snapshot
+                # taken several awaits ago. Under the lock, nothing can move the
+                # slot any more, so re-check that it is still the refused slot
+                # the sweep meant to retry. An operator unload in between left
+                # it OFFLINE without the mark, and load() accepts OFFLINE, so
+                # without this the sweep would start a slot someone took down.
+                self._check_readmit_still_wanted(slot_name)
             cfg = await self._load_slot_config(slot_name)
             resolved_model = model_id or _model_default(cfg)
 
@@ -2509,7 +2536,7 @@ class SlotManager:
                 # new enum value — wire/state-machine compatible) so the UI
                 # can render "parked — manual restart required".
                 if isinstance(exc, PreloadEvictionFailed):
-                    # #3502 / ADR-0062: the admission gate refused the load
+                    # #3502 / ADR-0063: the admission gate refused the load
                     # before anything started. Mark it so the reaper's
                     # re-admission sweep retries it once capacity frees;
                     # nothing else would: the slot never reached WARMING, so
@@ -4765,8 +4792,9 @@ class SlotManager:
         )
 
     async def stop_idle_monitor(self) -> None:
-        """Cancel the idle-monitor task if running.  Idempotent."""
+        """Cancel the idle-monitor task and any re-admission it started.  Idempotent."""
         await self._reaper.stop()
+        await self._cancel_readmit_tasks()
 
     async def _evict_timeout_for(self, slot_name: str) -> float | None:
         """See :meth:`hal0.slots.reaper.SlotReaper.evict_timeout_for`."""
@@ -4869,68 +4897,151 @@ class SlotManager:
         await self._reaper.pressure_evict_once()
 
     async def readmit_refused_once(self) -> tuple[str, ...]:
-        """Retry every slot the admission gate refused, once it would fit (#3502).
+        """Schedule a retry of every slot the admission gate refused (#3502).
 
-        ADR-0062. A load refused by :func:`hal0.slots.preload_evict.admit`
+        ADR-0063. A load refused by :func:`hal0.slots.preload_evict.admit`
         leaves the slot in ERROR with ``error_reason = "admission_refused"``
         and nothing started, so no fail-watcher owns it and a request only
         retries it when it names the slot's bound model. The reaper calls this
-        on every tick. A refused slot is retried only when all of these hold:
+        on every tick.
 
-        * no lifecycle operation holds its lock;
-        * the crash-loop breaker permits a trial (its backoff and park
-          cool-downs still apply, so an estimate that keeps disagreeing with
-          the real admission backs off to the park ceiling);
-        * a dry run of the admission plan
-          (:func:`hal0.slots.preload_evict.admission_would_fit`) says the
-          slot's configured model fits, counting idle, non-pinned slots the
-          gate may evict. A box that is still short pays nothing: no
-          eviction, no load attempt, no breaker count.
+        This only schedules: each retry runs as its own tracked task
+        (:meth:`_readmit_one`), at most one per slot, so a load that takes
+        minutes to come up never holds the reaper's idle and pressure sweeps
+        while it allocates. A slot is scheduled when no lifecycle operation
+        holds its lock, no earlier retry of it is still running, and the
+        crash-loop breaker permits a trial. The task then decides whether to
+        load (see :meth:`_readmit_one`).
 
-        An operator unload (ERROR to OFFLINE) or a successful load retires the
-        mark, so this never revives a slot someone took down. Returns the
-        names it re-admitted, in sweep order.
+        Returns the names it scheduled, in sweep order.
         """
-        readmitted: list[str] = []
+        scheduled: list[str] = []
         for key, rec in list(self._states.items()):
             if rec.state != SlotState.ERROR or rec.extra.get("error_reason") != ADMISSION_REFUSED:
                 continue
             name = self._name_for_key(key)
             if not name or self.is_busy(name):
                 continue
+            running = self._readmit_tasks.get(key)
+            if running is not None and not running.done():
+                continue
             failures, last_failure = self._load_failures.get(key, (0, 0.0))
             if _crash_loop_remaining_s(failures, last_failure) > 0:
                 continue
-            try:
-                cfg = await self._load_slot_config(name)
-            except (SlotConfigError, SlotNotFound):
-                continue
-            model_id = _model_default(cfg)
-            if not model_id:
-                continue
-            try:
-                fits = await _admission_would_fit(self, slot_name=name, model_id=model_id)
-            except Exception as exc:  # a probe failure must not kill the sweep
-                log.warning(
-                    "slot.admission_readmit_probe_failed",
-                    extra={"slot": name, "error": str(exc)},
-                )
-                continue
-            if not fits:
-                log.debug("slot.admission_readmit_still_short", extra={"slot": name})
-                continue
-            log.info("slot.admission_readmit", extra={"slot": name, "model_id": model_id})
-            try:
-                await self.load(name)
-            except Exception as exc:
-                # load() stamped ERROR (and the breaker) itself.
-                log.warning(
-                    "slot.admission_readmit_failed",
-                    extra={"slot": name, "error": str(exc), "error_type": type(exc).__name__},
-                )
-                continue
-            readmitted.append(name)
-        return tuple(readmitted)
+            task = asyncio.create_task(self._readmit_one(name), name=f"hal0-readmit-{name}")
+            self._readmit_tasks[key] = task
+            task.add_done_callback(functools.partial(self._forget_readmit_task, key))
+            scheduled.append(name)
+        return tuple(scheduled)
+
+    def _forget_readmit_task(self, key: int, task: asyncio.Task[bool]) -> None:
+        if self._readmit_tasks.get(key) is task:
+            self._readmit_tasks.pop(key, None)
+        if not task.cancelled() and task.exception() is not None:
+            log.warning(
+                "slot.admission_readmit_crashed",
+                extra={"slot": self._name_for_key(key), "error": str(task.exception())},
+            )
+
+    async def _cancel_readmit_tasks(self) -> None:
+        """Cancel every in-flight re-admission (idle-monitor shutdown)."""
+        tasks = [t for t in self._readmit_tasks.values() if not t.done()]
+        self._readmit_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    def _readmit_blocked_by_arbiter(self, slot_name: str) -> bool:
+        """True when the GPU arbiter's exclusive mode forbids loading *slot_name*.
+
+        The request path refuses llm-group dispatch in image mode before it
+        lazy-loads (``Dispatcher._guard_gpu_image_mode``); ``_load`` itself has
+        no such guard, so the re-admission sweep, the one automatic loader
+        outside the request path, asks the arbiter itself (ADR-0063).
+        """
+        try:
+            return not self.arbiter.permits_background_load(slot_name)
+        except Exception as exc:  # an unreadable arbiter state must not load blind
+            log.warning(
+                "slot.admission_readmit_arbiter_unreadable",
+                extra={"slot": slot_name, "error": str(exc)},
+            )
+            return True
+
+    def _check_readmit_still_wanted(self, slot_name: str) -> None:
+        """Raise :class:`_ReadmitWithdrawn` unless *slot_name* may be re-admitted now.
+
+        Still wanted means: still ERROR, still carrying the admission-refusal
+        mark, and the GPU arbiter's mode permits the load.
+        """
+        rec = self._states.get(self._key(slot_name))
+        if (
+            rec is None
+            or rec.state != SlotState.ERROR
+            or rec.extra.get("error_reason") != ADMISSION_REFUSED
+        ):
+            raise _ReadmitWithdrawn(f"{slot_name} is no longer an admission-refused slot")
+        if self._readmit_blocked_by_arbiter(slot_name):
+            raise _ReadmitWithdrawn(f"the GPU arbiter's mode holds the GPU away from {slot_name}")
+
+    async def _readmit_one(self, name: str) -> bool:
+        """Retry one admission-refused slot when it would fit now (#3502, ADR-0063).
+
+        Loads only when all of these hold:
+
+        * the slot is still ERROR with the refusal mark and the GPU arbiter
+          permits it (an llm-group slot is never loaded in image mode);
+        * a dry run of the admission plan
+          (:func:`hal0.slots.preload_evict.admission_would_fit`) says the model
+          the load would actually admit fits, counting idle, non-pinned slots
+          the gate may evict. That model is the configured default after
+          :meth:`_resolve_servable_model`, the same substitution ``_load``
+          makes, so a stale configured id cannot fail the probe open. A box
+          that is still short pays nothing: no eviction, no load attempt, no
+          breaker count.
+
+        The load re-checks the first condition under the slot lock, so an
+        operator unload (ERROR to OFFLINE retires the mark) at any point before
+        the load starts cancels the retry. Returns ``True`` when it loaded.
+        """
+        try:
+            self._check_readmit_still_wanted(name)
+            cfg = await self._load_slot_config(name)
+        except _ReadmitWithdrawn:
+            return False
+        except (SlotConfigError, SlotNotFound):
+            return False
+        model_id = _model_default(cfg)
+        if not model_id:
+            return False
+        model_id = self._resolve_servable_model(model_id, cfg)
+        try:
+            fits = await _admission_would_fit(self, slot_name=name, model_id=model_id)
+        except Exception as exc:  # a probe failure must not crash the retry
+            log.warning(
+                "slot.admission_readmit_probe_failed",
+                extra={"slot": name, "error": str(exc)},
+            )
+            return False
+        if not fits:
+            log.debug("slot.admission_readmit_still_short", extra={"slot": name})
+            return False
+        log.info("slot.admission_readmit", extra={"slot": name, "model_id": model_id})
+        try:
+            await self._load(name, readmit=True)
+        except _ReadmitWithdrawn as exc:
+            log.info("slot.admission_readmit_withdrawn", extra={"slot": name, "reason": str(exc)})
+            return False
+        except Exception as exc:
+            # _load stamped ERROR (and the breaker) itself.
+            log.warning(
+                "slot.admission_readmit_failed",
+                extra={"slot": name, "error": str(exc), "error_type": type(exc).__name__},
+            )
+            return False
+        return True
 
     async def is_pinned(self, slot_name: str) -> bool:
         """True when *slot_name* is exempt from eviction (§21.10 operator pin).

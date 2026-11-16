@@ -100,7 +100,7 @@ log = logging.getLogger(__name__)
 _DEFAULT_HEADROOM_MB: float = 1024.0
 
 #: ``error_reason`` stamped on the ERROR record of a slot whose load this gate
-#: refused (#3502, ADR-0062). The slot never started; the reaper re-admits it
+#: refused (#3502, ADR-0063). The slot never started; the reaper re-admits it
 #: once :func:`admission_would_fit` says capacity has freed.
 ADMISSION_REFUSED = "admission_refused"
 

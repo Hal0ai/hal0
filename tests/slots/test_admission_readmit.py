@@ -7,7 +7,7 @@ retried an ERROR slot that never reached WARMING, and capability routing's
 rule-9 default answered a bare ``404 dispatch.no_route`` naming the caller's
 model. The anchor stayed dead for 11 hours on a real box.
 
-ADR-0062 records the behaviour: the refusal is stamped
+ADR-0063 records the behaviour: the refusal is stamped
 ``error_reason = "admission_refused"``; the reaper's periodic tick
 (:meth:`SlotManager.readmit_refused_once`) retries it only once the breaker
 permits a trial AND a dry run of the admission plan says the model would
@@ -69,6 +69,21 @@ class _Free:
         return self.mb
 
 
+async def _sweep(sm: SlotManager) -> tuple[str, ...]:
+    """One reaper tick's re-admission, run to completion.
+
+    ``readmit_refused_once`` only schedules the per-slot retries; this awaits
+    them and returns the names that were actually loaded.
+    """
+    scheduled = await sm.readmit_refused_once()
+    tasks = {name: sm._readmit_tasks[sm._key(name)] for name in scheduled}
+    done = []
+    for name, task in tasks.items():
+        if await task:
+            done.append(name)
+    return tuple(done)
+
+
 def _age_breaker(sm: SlotManager, name: str, by_s: float = 3600.0) -> None:
     key = sm._key(name)
     failures, last = sm._load_failures[key]
@@ -116,7 +131,7 @@ async def test_refused_slot_is_not_retried_while_capacity_is_still_short(
     failures_before = sm._load_failures[sm._key("agent")][0]
     loads_before = len(container_stub.load_calls)
 
-    readmitted = await sm.readmit_refused_once()
+    readmitted = await _sweep(sm)
 
     assert readmitted == ()
     assert (await sm.status("agent")).state == SlotState.ERROR
@@ -135,7 +150,7 @@ async def test_refused_slot_is_readmitted_once_capacity_frees(
     _age_breaker(sm, "agent")
 
     free.mb = 8000.0  # operator unpinned/unloaded something; the model fits now
-    readmitted = await sm.readmit_refused_once()
+    readmitted = await _sweep(sm)
 
     assert readmitted == ("agent",)
     slot = await sm.status("agent")
@@ -165,7 +180,7 @@ async def test_readmission_counts_evictable_idle_slots_as_capacity(
     _age_breaker(sm, "agent")
 
     # Still serving → still not a candidate → no retry.
-    assert await sm.readmit_refused_once() == ()
+    assert await _sweep(sm) == ()
 
     # code goes quiet; its 6000 MiB footprint is now freeable by admission.
     sm._serving_count[sm._key("code")] = 0
@@ -181,7 +196,7 @@ async def test_readmission_counts_evictable_idle_slots_as_capacity(
 
     monkeypatch.setattr(sm, "_probe_host_free_mb", _evicted_frees)
 
-    assert await sm.readmit_refused_once() == ("agent",)
+    assert await _sweep(sm) == ("agent",)
     assert (await sm.status("agent")).state in (SlotState.READY, SlotState.IDLE)
 
 
@@ -195,7 +210,7 @@ async def test_readmission_respects_the_breaker_backoff(
     # Not aged: the i4 backoff still holds the slot.
     free.mb = 8000.0
 
-    assert await sm.readmit_refused_once() == ()
+    assert await _sweep(sm) == ()
     assert (await sm.status("agent")).state == SlotState.ERROR
 
 
@@ -216,7 +231,7 @@ async def test_other_load_failures_are_not_readmitted(
     _age_breaker(sm, "agent")
     monkeypatch.setattr(sm, "_probe_host_free_mb", _Free(1e9))
 
-    assert await sm.readmit_refused_once() == ()
+    assert await _sweep(sm) == ()
     assert sm.state("agent") == SlotState.ERROR
 
 
@@ -233,7 +248,7 @@ async def test_operator_unload_retires_the_refusal(
         _age_breaker(sm, "agent")
     free.mb = 8000.0
 
-    assert await sm.readmit_refused_once() == ()
+    assert await _sweep(sm) == ()
     assert sm.state("agent") == SlotState.OFFLINE
 
 
@@ -266,6 +281,223 @@ async def test_reaper_tick_drives_readmission(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls, "the reaper tick must call readmit_refused_once"
+
+
+# ── review findings on #3735 ─────────────────────────────────────────────────
+
+
+def _set_gpu_mode(sm: SlotManager, mode: str, *, pinned: bool = False) -> None:
+    st = sm.arbiter._load_state()
+    st["mode"] = mode
+    st["pinned"] = pinned
+    sm.arbiter._persist()
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+async def test_readmission_never_loads_an_llm_slot_in_image_mode(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    pinned: bool,
+) -> None:
+    """Finding 1: the arbiter's exclusive image mode holds the GPU, and the
+    sweep is not allowed to put an llm-group slot back on it, even when the
+    image-mode unloads made the dry run see enough free memory."""
+    free = _Free(100.0)
+    sm = await _refuse(slot_root, monkeypatch, free)
+    _age_breaker(sm, "agent")
+    _set_gpu_mode(sm, "img", pinned=pinned)
+    free.mb = 8000.0  # the image-mode switch unloaded the LLM set
+    loads_before = len(container_stub.load_calls)
+
+    assert await _sweep(sm) == ()
+    assert sm.state("agent") == SlotState.ERROR
+    assert len(container_stub.load_calls) == loads_before
+
+    # Back in LLM mode the same refusal is re-admitted.
+    _set_gpu_mode(sm, "llm")
+    assert await _sweep(sm) == ("agent",)
+    assert sm.state("agent") in (SlotState.READY, SlotState.IDLE)
+
+
+async def test_readmission_waits_out_a_running_gpu_switch(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 1: mid-switch the target mode is not settled; no GPU load."""
+    free = _Free(100.0)
+    sm = await _refuse(slot_root, monkeypatch, free)
+    _age_breaker(sm, "agent")
+    free.mb = 8000.0
+    async with sm.arbiter._switch_lock:
+        assert await _sweep(sm) == ()
+    assert sm.state("agent") == SlotState.ERROR
+    assert await _sweep(sm) == ("agent",)
+
+
+async def test_a_slow_readmit_load_does_not_stall_the_reaper_sweeps(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 2: the tick schedules the retry and returns; the idle and
+    pressure sweeps keep running while the load comes up, and a second tick
+    does not start a second load of the same slot."""
+    free = _Free(100.0)
+    sm = await _refuse(slot_root, monkeypatch, free)
+    _age_breaker(sm, "agent")
+    free.mb = 8000.0
+
+    release = asyncio.Event()
+    real_load = sm._load
+    load_starts: list[str] = []
+
+    async def _slow_load(name: str, *args: Any, **kwargs: Any) -> Any:
+        load_starts.append(name)
+        await release.wait()
+        return await real_load(name, *args, **kwargs)
+
+    monkeypatch.setattr(sm, "_load", _slow_load)
+
+    sweeps: list[int] = []
+
+    async def _count_sweep() -> None:
+        sweeps.append(1)
+
+    async def _noop() -> None:
+        return None
+
+    rp = sm._reaper
+    monkeypatch.setattr(rp, "sweep_idle_once", _count_sweep)
+    monkeypatch.setattr(rp, "pressure_evict_once", _noop)
+    sm._idle_monitor_interval_s = 0.0
+
+    # Bounded, so a regression that awaits the load inline fails, not hangs.
+    async with asyncio.timeout(10):
+        loop_task = asyncio.create_task(rp._loop())
+        try:
+            for _ in range(200):
+                await asyncio.sleep(0)
+                if len(sweeps) >= 5 and load_starts:
+                    break
+            assert load_starts == ["agent"], "one retry, started off the reaper task"
+            assert len(sweeps) >= 5, "the sweeps must keep ticking while the load is pending"
+            assert not release.is_set()
+            release.set()
+            task = sm._readmit_tasks.get(sm._key("agent"))
+            if task is not None:
+                await task
+        finally:
+            loop_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await loop_task
+    assert load_starts == ["agent"]
+    assert sm.state("agent") in (SlotState.READY, SlotState.IDLE)
+
+
+async def test_stopping_the_idle_monitor_cancels_a_pending_readmission(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    free = _Free(100.0)
+    sm = await _refuse(slot_root, monkeypatch, free)
+    _age_breaker(sm, "agent")
+    free.mb = 8000.0
+    never = asyncio.Event()
+
+    async def _stuck_probe(*_a: Any, **_k: Any) -> bool:
+        await never.wait()
+        return True
+
+    monkeypatch.setattr("hal0.slots.manager._admission_would_fit", _stuck_probe)
+    assert await sm.readmit_refused_once() == ("agent",)
+    task = sm._readmit_tasks[sm._key("agent")]
+    await asyncio.sleep(0)
+    await sm.stop_idle_monitor()
+    assert task.cancelled()
+    assert not sm._readmit_tasks
+
+
+async def test_an_unload_during_the_probe_cancels_the_readmission(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 3: the operator unloads the slot while the dry run awaits."""
+    free = _Free(100.0)
+    sm = await _refuse(slot_root, monkeypatch, free)
+    _age_breaker(sm, "agent")
+    free.mb = 8000.0
+    loads_before = len(container_stub.load_calls)
+
+    async def _probe_then_unload(*_a: Any, **_k: Any) -> bool:
+        await sm.unload("agent")
+        return True
+
+    monkeypatch.setattr("hal0.slots.manager._admission_would_fit", _probe_then_unload)
+
+    assert await _sweep(sm) == ()
+    assert sm.state("agent") == SlotState.OFFLINE
+    assert len(container_stub.load_calls) == loads_before
+
+
+async def test_an_unload_before_the_load_takes_its_lock_cancels_the_readmission(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 3: the last window. ``_load`` awaits the NPU admission before it
+    takes the slot lock; an unload that lands there must still win, so the
+    re-check has to run under the lock, not before ``load()``."""
+    free = _Free(100.0)
+    sm = await _refuse(slot_root, monkeypatch, free)
+    _age_breaker(sm, "agent")
+    free.mb = 8000.0
+    loads_before = len(container_stub.load_calls)
+    real_admit = sm._admit_npu_for_load
+
+    async def _admit_then_unload(slot_name: str, *args: Any, **kwargs: Any) -> Any:
+        await sm.unload("agent")
+        return await real_admit(slot_name, *args, **kwargs)
+
+    monkeypatch.setattr(sm, "_admit_npu_for_load", _admit_then_unload)
+
+    assert await _sweep(sm) == ()
+    assert sm.state("agent") == SlotState.OFFLINE
+    assert len(container_stub.load_calls) == loads_before
+
+
+async def test_the_probe_sizes_the_model_the_load_would_admit(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finding 4: a stale configured id with no size metadata would fail the
+    dry run open; the load then substitutes a model with a known footprint
+    that still doesn't fit, and the real gate evicts and refuses again. The
+    probe must size the substitute, exactly as ``_load`` does."""
+    free = _Free(100.0)
+    sm = await _refuse(slot_root, monkeypatch, free)
+    _age_breaker(sm, "agent")
+
+    monkeypatch.setattr(sm, "_resolve_servable_model", lambda _mid, _cfg: "substitute-24b")
+
+    async def _info(model_id: str | None, *, provider: str | None = None) -> dict[str, Any]:
+        if model_id == "substitute-24b":
+            return {"size_bytes": 24000 * 1024 * 1024}
+        return {}  # the stale configured id: no size metadata
+
+    monkeypatch.setattr(sm, "_resolve_model_info", _info)
+    key = sm._key("agent")
+    failures_before = sm._load_failures[key][0]
+    loads_before = len(container_stub.load_calls)
+
+    assert await _sweep(sm) == ()
+    assert sm.state("agent") == SlotState.ERROR
+    assert sm._load_failures[key][0] == failures_before, "no refused trial counted"
+    assert len(container_stub.load_calls) == loads_before
 
 
 # ── the 404 names the broken slot ────────────────────────────────────────────

@@ -1443,6 +1443,25 @@ class GpuArbiter:
                 details={"slot": name},
             )
 
+    def permits_background_load(self, slot_name: str) -> bool:
+        """May a load nobody asked for put *slot_name* on the GPU right now?
+
+        For automatic loaders that bypass the request path's
+        :meth:`guard_dispatch` (the admission re-admission sweep, #3502 /
+        ADR-0063). ``False`` while a switch holds the GPU (either direction:
+        the target mode is not settled yet) and whenever :meth:`guard_dispatch`
+        would refuse the slot in the current mode, so an llm-group slot never
+        lands on the GPU in image mode, pinned or not. Slots outside the
+        exclusive split (NPU, CPU) always pass.
+        """
+        if self._switch_lock.locked() or self._entering_img:
+            return self._slot_group(self._resolve_alias(slot_name)) is None
+        try:
+            self.guard_dispatch(slot_name)
+        except (GpuImageMode, GpuInferenceMode):
+            return False
+        return True
+
     def set_pin(self, pinned: bool) -> None:
         """Set or clear the manual pin that holds image mode.
 

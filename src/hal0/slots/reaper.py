@@ -327,7 +327,7 @@ class SlotReaper:
                 except Exception as exc:
                     log.warning("slot.pressure_sweep_failed", extra={"error": str(exc)})
                 try:
-                    # #3502 / ADR-0062: after the sweeps above have freed what
+                    # #3502 / ADR-0063: after the sweeps above have freed what
                     # they free, retry any load the admission gate refused.
                     await host.readmit_refused_once()
                 except Exception as exc:
