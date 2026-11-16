@@ -1010,7 +1010,7 @@ def shadow_state(modality_active: Any, anchor_state: str | None) -> str:
 
     A shadow has no process of its own: the anchor's FLM child serves its role
     while that role is on (``npu_modality_active``, which config_enrichment
-    lifts from the anchor's ``[npu]`` table or its legacy load_* keys). So it is
+    lifts from the anchor's ``[npu]`` table or its pre-1.0 load_* keys). So it is
     exactly as live as the anchor while its role is on, and ``offline``
     otherwise. Its own SlotManager state is always ``offline``, which showed a
     working STT lane as stopped wherever the UI read it directly.
