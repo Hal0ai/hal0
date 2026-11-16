@@ -12,6 +12,7 @@
 #   bash scripts/deploy.sh [--ref origin/main] [--no-restart] [--no-build] [--force]
 #
 # Steps:
+#   0. Refuse a copied (non-editable) install — see "0." below (#3475)
 #   1. Fetch + hard-reset the working tree to the target ref
 #   2. Rebuild the dashboard (clean: wipe dist + vite cache; npm ci only when
 #      package-lock changed in this pull, else just rebuild)
@@ -95,6 +96,41 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO_ROOT"
+
+# ── 0. Refuse a copied (non-editable) install ─────────────────────────────────
+# This script resets a checkout and restarts the service; it only changes what
+# the backend serves when the venv imports hal0 FROM this checkout (editable).
+# The installer's FHS layout pip-installs a plain copy under site-packages, so
+# a reset + restart there leaves the old code running while every later check
+# looks green (#3475; /api/status.build_sha is None without a .git above the
+# imported tree, so it cannot catch this, and it is legitimately empty on an
+# editable root-owned checkout the hal0 user cannot read .git from). Resolve
+# where the interpreter of the service we restart imports hal0 from, and refuse
+# before touching anything. Interpreter, in order: HAL0_VENV_PYTHON; the python
+# beside the ExecStart binary of --service= (the venv that actually serves);
+# /usr/lib/hal0/venv/bin/python. No venv found = nothing to check (plain dev tree).
+venv_python="${HAL0_VENV_PYTHON:-}"
+if [[ -z "$venv_python" ]] && command -v systemctl >/dev/null 2>&1; then
+    exec_bin="$(systemctl show -p ExecStart --value "$SERVICE" 2>/dev/null \
+        | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -1 || true)"
+    if [[ -n "$exec_bin" && -x "$(dirname "$exec_bin")/python" ]]; then
+        venv_python="$(dirname "$exec_bin")/python"
+    fi
+fi
+venv_python="${venv_python:-/usr/lib/hal0/venv/bin/python}"
+if [[ -x "$venv_python" ]]; then
+    served_pkg="$(cd / && "$venv_python" -I -c \
+        'import importlib.util as u; s = u.find_spec("hal0"); print(s.origin if s and s.origin else "")' \
+        2>/dev/null || true)"
+    [[ -z "$served_pkg" ]] || served_pkg="$(readlink -f "$served_pkg" 2>/dev/null || echo "$served_pkg")"
+    repo_real="$(readlink -f "$REPO_ROOT")"
+    if [[ -z "$served_pkg" ]]; then
+        die "cannot tell where ${venv_python} imports hal0 from — refusing to claim a deploy. Use: hal0 update --channel <channel> (or installer/install.sh)"
+    elif [[ "$served_pkg" != "$repo_real"/* ]]; then
+        die "the served venv (${venv_python}) imports hal0 from ${served_pkg}, not this checkout (copied, non-editable install) — a reset + restart here would NOT change the running code. Use: hal0 update --channel <channel> (or installer/install.sh)"
+    fi
+    info "served package is this checkout (editable): ${served_pkg}"
+fi
 
 # ── 1. Sync source ────────────────────────────────────────────────────────────
 step "1. Sync source → ${REF}"
@@ -238,6 +274,10 @@ info "gateway healthy at ${url} (serving ${served:-?})"
 # against what we just checked out catches a stuck-on-old-code worker that a
 # bare `git rev-parse HEAD` (this script's old success message) could never
 # see (#1550/H7).
+# build_sha is legitimately empty on an editable root-owned checkout (hal0-api
+# runs as User=hal0 and git refuses the foreign-owned repo), so an empty value is
+# "unverified", not a failure: step 0 already refused the copied layout.
+verified=0
 if [[ "$DO_RESTART" -ne 1 ]]; then
     warn "build-identity check skipped (--no-restart) — served code may predate this deploy"
 elif ! command -v jq >/dev/null 2>&1; then
@@ -246,12 +286,17 @@ else
     served_sha="$(printf '%s' "$status_body" | jq -r '.build_sha // empty' 2>/dev/null || true)"
     expected_sha="$(git rev-parse --short=12 HEAD)"
     if [[ -z "$served_sha" ]]; then
-        warn "served build reports no build_sha (non-git install?) — cannot verify identity"
+        warn "served build reports no build_sha (the service user may not read this checkout's .git) — build identity not verified"
     elif [[ "$served_sha" == "$expected_sha" ]]; then
         info "served build matches deployed commit (${served_sha})"
+        verified=1
     else
         die "served build_sha (${served_sha}) != deployed commit (${expected_sha}) — ${SERVICE} did not pick up the new code; check: journalctl -u ${SERVICE} -n 50"
     fi
 fi
 
-info "deploy complete @ $(git rev-parse --short HEAD)"
+if [[ "$verified" -eq 1 ]]; then
+    info "deploy complete @ $(git rev-parse --short HEAD)"
+else
+    warn "deploy finished @ $(git rev-parse --short HEAD) — served build identity NOT verified"
+fi
