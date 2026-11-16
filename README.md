@@ -31,17 +31,22 @@ process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-> **v1.8.0 is the current stable release** (2026-11-03). It adds the agent
+> **v1.8.0 is the current stable release** (2026-11-16). It adds the agent
 > bridge, Open WebUI's tools and shared memory, an installer component
-> checklist, an opt-in rootless podman box, slot tune overrides and the
-> optional halogen runner, and it makes the Operator Board the Hermes kanban.
+> checklist, an opt-in rootless podman box, slot tune overrides, the
+> optional halogen and `xdna` runners, an NPU tab and memory v3 (Hindsight
+> 1.2.0, one Memory area, two banks, a guarded embedder switch), and it makes
+> the Operator Board the Hermes kanban.
 > It updates with an ordinary `hal0 update` from any 1.5.0 or later box; a
 > 1.3.x or 1.4.x box steps through 1.5.0 first. Read the 1.8.0 **Breaking**
 > and **Migrations** notes in [CHANGELOG.md](CHANGELOG.md) before you take
 > it: `hal0 agent upgrade` is now `sudo hal0 update component pi`, approval
 > decisions need a signed-in session or root, a slot file that still carries
-> tuning keys refuses to launch (and `hal0 update` exits 2 naming it), and
-> schema migration 015 drops the retired model tuning after writing a backup.
+> tuning keys refuses to launch (and `hal0 update` exits 2 naming it),
+> schema migration 015 drops the retired model tuning after writing a backup,
+> the memory embedder changes only through `hal0 memory embedder switch`, and
+> an existing memory store stays on its banks until `hal0 memory migrate
+> fold-in` moves it.
 > The project has followed semver since v1.0.0; a minor release's
 > **Breaking** notes flag behaviour changes an operator or a script may
 > notice. Upgrades start at 1.5.0; on anything older, read
@@ -51,8 +56,9 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > WebUI with hal0's tools and shared Hindsight memory; an installer that
 > shows a component checklist (`--bare` for inference only); `install.sh
 > --box` for a rootless podman install; per-slot tune overrides; the optional
-> halogen runner; Hindsight 1.1.0; and the Hermes kanban as the Operator
-> Board. See [What's new](#whats-new) and
+> halogen runner; Hindsight 1.2.0 with one Memory area, two banks and a
+> guarded embedder switch; an NPU tab and the optional `xdna` NPU runner;
+> and the Hermes kanban as the Operator Board. See [What's new](#whats-new) and
 > [Upgrading to 1.8.0](#upgrading-to-180).
 
 > **⚡ The installer is the whole setup.** There is no separate first-run
@@ -263,9 +269,18 @@ from zero.
   ADR-0046.
 - **halogen**, an optional external-image runner for Qwen3.8-Flash-Next on
   Strix Halo, pinned by digest. ADR-0047.
-- **Hindsight 1.1.0**, typed profile reasoning knobs, narrowable model and
-  capability lists, and approval decisions that need a session or root
-  (ADR-0048).
+- **Memory v3.** The Hindsight engine moves to 1.2.0; the dashboard has one
+  Memory area (Health, Facts, Knowledge, Operations, Agents); a new install
+  keeps memory in `hal0:shared` and `hal0:private`, and `hal0 memory migrate
+  fold-in` moves an existing store there; `hal0 memory embedder switch` is
+  the one way to change the embedder; coding agents write through
+  `/api/memory/compat`; and hal0 decides when knowledge pages refresh.
+  ADR-0058, ADR-0060.
+- **An NPU tab and the optional `xdna` runner.** Slots → NPU shows the FLM
+  and GGML lanes with live activity, and `xdna` runs plain GGUF models on the
+  AMD XDNA2 NPU beside FLM. ADR-0057, ADR-0059.
+- Typed profile reasoning knobs, narrowable model and capability lists, and
+  approval decisions that need a session or root (ADR-0048).
 
 ### Shipped in 1.7.1
 
@@ -1067,8 +1082,15 @@ later. Before you take it:
   model tuning; when any of it holds a value, hal0 first writes
   `/var/lib/hal0/backups/hal0-pre-015-<timestamp>.db`. Rollback to 1.7.x
   still works.
-- **The memory engine moves to Hindsight 1.1.0.** The upgrade copies
+- **The memory engine moves to Hindsight 1.2.0.** The upgrade copies
   `.pg0` to `.pg0.pre-1.0.0` and needs 1.5 times its size free.
+- **An existing memory store keeps its banks and embedder.** Nothing moves
+  until you run `sudo hal0 memory migrate fold-in --apply` (dry run without
+  `--apply`); `hal0 memory embedder switch` is a separate, optional step.
+  Saving a different embedder in `hal0.toml` no longer changes it.
+- **Behind a reverse proxy, set `HAL0_OPENWEBUI_PUBLIC_URL` and
+  `HAL0_COMFYUI_PUBLIC_URL`** in `/etc/hal0/api.env`; the dashboard no
+  longer links `<proxy host>:3001` and `:8188`.
 
 ### Upgrading to 1.7.1
 
