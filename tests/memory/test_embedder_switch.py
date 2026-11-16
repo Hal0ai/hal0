@@ -128,6 +128,13 @@ class FakeEngine:
         #: Banks whose restore writes the right counts but the wrong content.
         self.lossy_restore: set[str] = set()
         self.lossy_everywhere: set[str] = set()
+        #: Called with a restore's source and target bank: ``"after"`` loses
+        #: the engine's answer once it took the restore in (its worker runs),
+        #: ``"before"`` drops the connection before it did, ``None`` answers.
+        self.lose_import_answer: Any = None
+        #: A restore whose worker is still running has already created its
+        #: target bank and written part of it, as hindsight-api 1.2.0's does.
+        self.partial_while_running = False
         #: Engine restarts so far; the process holding the port changes with each.
         self.restarts = 0
         self.writes: list[tuple[str, str]] = []
@@ -339,7 +346,13 @@ class FakeEngine:
         q = self.queue.get(bank, {})
         rows = (
             [
-                {"id": op, "operation_id": op, "task_type": "transfer", "status": "completed"}
+                {
+                    "id": op,
+                    "operation_id": op,
+                    "task_type": "import_bank" if op.startswith("imp") else "export_bank",
+                    "operation_type": "import_bank" if op.startswith("imp") else "export_bank",
+                    "status": self.ops.get(op, {}).get("status", "completed"),
+                }
                 for op in self.m(bank)["ops"]
             ]
             + [
@@ -450,6 +463,9 @@ class FakeEngine:
             assert bank in self.banks, "the engine records a restore against an existing bank"
             if target in self.banks:
                 return httpx.Response(409, json={"detail": "bank exists"})
+            lose = self.lose_import_answer(source, target) if self.lose_import_answer else None
+            if lose == "before":
+                raise httpx.ReadError("connection reset before the upload was taken in")
             if self.on_restore is not None:
                 self.on_restore(source)
             self.events.append(
@@ -488,8 +504,12 @@ class FakeEngine:
             self.m(bank)["ops"].insert(0, op_id)
             if stuck:
                 self.ops[op_id].update(land=land, polls_left=self.stuck_polls)
+                if self.partial_while_running:
+                    self.banks[target] = _counts(1, docs=1)
             else:
                 land()
+            if lose == "after":
+                raise httpx.ReadTimeout("the engine took the restore in; its answer was lost")
             return httpx.Response(202, json={"operation_id": op_id})
         if bank not in self.banks:
             return httpx.Response(404, json={"detail": "bank not found"})
@@ -2291,6 +2311,117 @@ async def test_resume_waits_for_a_restore_into_the_own_id_that_still_runs(box: B
     restores = [e for e in box.events if e.startswith("restore:Hal0::Beta->Hal0::Beta via ")]
     assert len(restores) == 1, "the restore that was running is the one kept"
     _assert_switched(box)
+
+
+async def _lost_answer_placing_beta(box: Box, when: str) -> es.Journal:
+    """A run whose restore of Hal0::Beta into its own id never got its answer (#3606).
+
+    ``"after"``: the engine took the restore in and its worker goes on writing
+    the bank under its own id; ``"before"``: the connection dropped before the
+    engine saw it.
+    """
+    box.engine.partial_while_running = True
+
+    def lose(source: str, target: str) -> str | None:
+        if source == target == "Hal0::Beta":
+            box.engine.lose_import_answer = None
+            if when == "after":
+                box.engine.stuck_restore.add("Hal0::Beta")
+            return when
+        return None
+
+    box.engine.lose_import_answer = lose
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+    assert err.value.resumable and err.value.bank == "Hal0::Beta"
+    assert "starting the restore into Hal0::Beta failed" in err.value.message
+    journal = es.load_journal()
+    assert journal is not None
+    beta = journal.banks[1]
+    assert beta.step == es.STEP_PLACING
+    assert beta.restore_op is not None, "the restore is journalled before it is sent"
+    assert beta.restore_op["target"] == "Hal0::Beta"
+    return journal
+
+
+async def test_resume_waits_for_a_restore_whose_answer_was_lost(box: Box) -> None:
+    """#3606: the engine runs a restore the journal has no id for; nothing deletes its bank."""
+    journal = await _lost_answer_placing_beta(box, "after")
+    scratch = es.scratch_bank_id(journal.run_id)
+    running = [k for k, op in box.engine.ops.items() if op["status"] == "processing"]
+    assert len(running) == 1
+    assert "Hal0::Beta" in box.engine.banks, "its worker has started writing the bank"
+    before = len(box.events)
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(None).resume()
+
+    assert err.value.resumable and err.value.bank == "Hal0::Beta"
+    assert f"operation {running[0]}) is still processing" in err.value.message
+    assert not any(e.startswith(("cancel:", "delete:", "restore:")) for e in box.events[before:]), (
+        "nothing is cancelled, deleted or restored while the restore runs"
+    )
+    op = es.load_journal().banks[1].restore_op  # type: ignore[union-attr]
+    assert op is not None and op["bank"] == scratch and op["target"] == "Hal0::Beta"
+    assert op["id"] is None, "every restore that may be it is looked for again"
+
+    box.engine.finish(running[0])
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "switched"
+    restores = [e for e in box.events if e.startswith("restore:Hal0::Beta->Hal0::Beta via ")]
+    assert len(restores) == 1, "the restore that was running is the one kept"
+    _assert_switched(box)
+
+
+async def test_resume_restores_again_when_the_lost_restore_never_reached_the_engine(
+    box: Box,
+) -> None:
+    journal = await _lost_answer_placing_beta(box, "before")
+    assert "Hal0::Beta" not in box.engine.banks
+    before = len(box.events)
+
+    result = await box.switch(None).resume()
+
+    scratch = es.scratch_bank_id(journal.run_id)
+    assert f"restore:Hal0::Beta->Hal0::Beta via {scratch}" in box.events[before:]
+    assert result["status"] == "switched"
+    _assert_switched(box)
+
+
+async def test_rollback_does_not_sweep_a_copy_a_lost_restore_still_writes(box: Box) -> None:
+    """A rebuild whose answer was lost: the rollback waits for it before it deletes the copy."""
+    temps: list[str] = []
+
+    def lose(source: str, target: str) -> str | None:
+        if source == "gamma" and target != source:
+            box.engine.lose_import_answer = None
+            box.engine.stuck_restore.add("gamma")
+            temps.append(target)
+            return "after"
+        return None
+
+    box.engine.partial_while_running = True
+    box.engine.lose_import_answer = lose
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch().run()
+
+    assert temps and temps[0] in box.engine.banks, "the lost rebuild is still writing its copy"
+    assert f"delete:{temps[0]}" not in box.events, "a copy being written is never swept"
+    assert "still processing" in err.value.message
+    journal = es.load_journal()
+    assert journal is not None and journal.phase == es.PHASE_ROLLBACK_FAILED
+
+    running = [k for k, op in box.engine.ops.items() if op["status"] == "processing"]
+    assert len(running) == 1
+    box.engine.stuck_restore.clear()
+    box.engine.finish(running[0])
+    result = await box.switch(None).resume()
+
+    assert result["status"] == "rolled_back"
+    assert f"delete:{temps[0]}" in box.events
+    _assert_rolled_back(box)
 
 
 async def test_a_restore_someone_else_cancelled_is_trusted_ended_only_after_a_restart(

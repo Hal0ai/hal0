@@ -264,7 +264,8 @@ class MaintenanceBank(Protocol):
     archive: str | None
     counts: dict[str, int]
     #: ``{"bank", "id", "target", "engine_pid", "engine_invocation"}`` of a
-    #: restore that may still be running (see :meth:`EngineMaintenance._restore`).
+    #: restore that may still be running (see :meth:`EngineMaintenance._restore`);
+    #: ``id`` is ``None`` while its answer has not been read (#3606).
     restore_op: dict[str, Any] | None
 
 
@@ -2351,12 +2352,26 @@ class EngineMaintenance:
         none is a bug in the caller. The engine records a restore against the
         bank named in the URL, which must therefore exist while the target
         must not: ``via`` is that bank, the original by default.
+
+        The restore is journalled before it is sent, without an operation
+        id: an answer lost after the engine took the restore in (a timeout, a
+        dropped connection, a stop before the id is saved) leaves its worker
+        writing ``target_id`` with nothing else to say so, and
+        :meth:`_await_restore` then finds that worker on ``via`` (#3606).
         """
         assert embedder is not None
         await self._ensure_engine(
             embedder, port=journal.private_port, run_id=journal.run_id, journal=journal
         )
         url_bank = via or entry.bank
+        entry.restore_op = {
+            "bank": url_bank,
+            "id": None,
+            "target": target_id,
+            "engine_pid": self._engine_pid(journal),
+            "engine_invocation": self._invocation(),
+        }
+        self._save(journal)
         try:
             with self._archive_dir_fd(journal) as dfd:
                 fd = os.open(str(entry.archive), os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
@@ -2384,13 +2399,7 @@ class EngineMaintenance:
         operation_id = str((body or {}).get("operation_id") or "")
         if not operation_id:
             raise self._error_type("the restore returned no operation id", bank=entry.bank)
-        entry.restore_op = {
-            "bank": url_bank,
-            "id": operation_id,
-            "target": target_id,
-            "engine_pid": self._engine_pid(journal),
-            "engine_invocation": self._invocation(),
-        }
+        entry.restore_op["id"] = operation_id
         self._save(journal)
         budget = self._restore_budget(entry)
         try:
@@ -2544,6 +2553,60 @@ class EngineMaintenance:
         self._hook("paused")
         await self._settle(journal)
 
+    async def _unanswered_restores(
+        self, journal: MaintenanceJournal, entry: MaintenanceBank, op: Mapping[str, Any]
+    ) -> list[str]:
+        """The restores that may be the one ``op`` sent without hearing back (#3606).
+
+        The engine lists an operation by the bank it is recorded against and
+        not by its target, so every ``import_bank`` row on ``op["bank"]``
+        that may still write is taken for it: the live ones, which
+        :meth:`_await_restore` then waits for, and, unless the engine has
+        restarted since the send (which ends every worker), a ``cancelled``
+        one from this run's time on, which Hindsight lets go on writing. The
+        engine is private while a run restores, so nothing but the run sends
+        these. No such row means the engine never took the restore in. A
+        recording bank that is gone hides its rows, so it is believed idle
+        only after a restart.
+        """
+        bank = str(op["bank"])
+        target = op.get("target") or entry.bank
+        restarted = self._engine_restarted_since(journal, op)
+        if bank not in set(await self._bank_ids()):
+            if restarted:
+                return []
+            raise self._error_type(
+                f"a restore of {entry.bank} into {target} was sent, but its answer was lost "
+                f"and {bank}, the bank it is recorded against, is gone, so "
+                f"{self.names.actor} cannot tell whether {target} is still being written; "
+                "nothing was deleted or restored again. Restart the engine (`systemctl "
+                f"restart {SERVICE}`), which ends every restore, then run "
+                f"`{self.names.command} --resume`",
+                bank=entry.bank,
+            )
+        rows = await self._list_all(
+            f"{bank_path(bank)}/operations",
+            {"type": "import_bank"},
+            key="operations",
+            what="listing the restores",
+            bank=entry.bank,
+        )
+        since = _iso_time(journal.started_at)
+        found: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict) or operation_type(row) != "import_bank":
+                continue
+            status = row.get("status")
+            op_id = str(row.get("operation_id") or row.get("id") or "")
+            if not op_id:
+                continue
+            seen = operation_time(row)
+            # A row cancelled before this run began is no restore of this run's.
+            ours = since is None or seen is None or seen >= since
+            if status in _OP_LIVE or (status == "cancelled" and not restarted and ours):
+                found.append(op_id)
+        return found
+
     async def _await_restore(self, journal: MaintenanceJournal, entry: MaintenanceBank) -> None:
         """Wait until ``entry``'s restore, if one may still run, has ended. Never cancel it.
 
@@ -2565,6 +2628,22 @@ class EngineMaintenance:
         op = entry.restore_op
         if not op:
             return
+        if op.get("id"):
+            await self._await_restore_op(journal, entry, op)
+        else:
+            # Sent, but its answer never reached the journal: whatever restore
+            # the engine runs on that bank may be it, and each is waited for.
+            # The record stays without an id until all have ended, so a stop
+            # in between looks for every one of them again.
+            for found in await self._unanswered_restores(journal, entry, op):
+                await self._await_restore_op(journal, entry, {**op, "id": found})
+        entry.restore_op = None
+        self._save(journal)
+
+    async def _await_restore_op(
+        self, journal: MaintenanceJournal, entry: MaintenanceBank, op: Mapping[str, Any]
+    ) -> None:
+        """Wait for the one restore ``op`` names (see :meth:`_await_restore`)."""
         path = f"{bank_path(op['bank'])}/operations/{quote(op['id'], safe='')}"
         target = op.get("target") or entry.bank
         budget = 2 * self._restore_budget(entry)
@@ -2614,8 +2693,6 @@ class EngineMaintenance:
                 )
             await self._sleep(delay)
             delay = min(self.t.poll_s, delay * 1.5)
-        entry.restore_op = None
-        self._save(journal)
 
 
 __all__ = [
