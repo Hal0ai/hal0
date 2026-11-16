@@ -103,7 +103,7 @@ _THEME_SRC = Path(__file__).resolve().parent / "themes" / "hal0.json"
 # pi-mcp-adapter pin (spec D2) — the generic MCP proxy layer used for
 # hal0-memory (and anything else the operator points it at). Bump in
 # lockstep with installer/agents/pi.sh and scripts/smoke-pi.sh.
-_ADAPTER_PIN = "npm:pi-mcp-adapter@5.3.0"
+_ADAPTER_PIN = "npm:pi-mcp-adapter@7.0.1"
 
 # Every version of the adapter hal0 manages, so a re-pin replaces an older
 # entry rather than leaving two adapters in ``packages``.

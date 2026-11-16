@@ -244,7 +244,7 @@ def client_pi(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestC
     link = _fake_npm_tree(tmp_path)
     script = tmp_path / "pi.sh"
     script.write_text(
-        'PI_PKG="@earendil-works/pi-coding-agent@1.2.0"\nADAPTER_PKG="pi-mcp-adapter@5.3.0"\n'
+        'PI_PKG="@earendil-works/pi-coding-agent@1.5.2"\nADAPTER_PKG="pi-mcp-adapter@7.0.1"\n'
     )
     # A home that does not exist is unreadable even to root, which a literal
     # ``/root`` is not.
@@ -266,7 +266,7 @@ def client_pi_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator
     """No agents installed; the Pi installer script still pins its versions."""
     script = tmp_path / "pi.sh"
     script.write_text(
-        'PI_PKG="@earendil-works/pi-coding-agent@1.2.0"\nADAPTER_PKG="pi-mcp-adapter@5.3.0"\n'
+        'PI_PKG="@earendil-works/pi-coding-agent@1.5.2"\nADAPTER_PKG="pi-mcp-adapter@7.0.1"\n'
     )
     monkeypatch.setattr(overview_route, "pi_script", lambda: script)
     yield from _build_client(monkeypatch, [])
@@ -332,7 +332,7 @@ def test_overview_pi_installed_behind_pin(client_pi):
     assert body["kind"] == "cli" and body["phase"] == "installed"
     assert body["version"] == {
         "installed": {"pi": "0.84.4", "adapter": "2.31.0"},
-        "pin": {"pi": "1.2.0", "adapter": "5.3.0"},
+        "pin": {"pi": "1.5.2", "adapter": "7.0.1"},
         "update_available": True,
     }
     assert body["commands"]["upgrade"] == "sudo hal0 update component pi"
@@ -361,7 +361,7 @@ def test_overview_pi_not_installed_returns_pin_only(client_pi_empty):
         "phase": "not_installed",
         "version": {
             "installed": None,
-            "pin": {"pi": "1.2.0", "adapter": "5.3.0"},
+            "pin": {"pi": "1.5.2", "adapter": "7.0.1"},
             "update_available": False,
         },
         "commands": {"install": "sudo hal0 agent install pi"},

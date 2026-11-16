@@ -28,8 +28,8 @@
 
 set -eu
 
-PI_PKG="@earendil-works/pi-coding-agent@1.2.0"
-ADAPTER_PKG="pi-mcp-adapter@5.3.0"
+PI_PKG="@earendil-works/pi-coding-agent@1.5.2"
+ADAPTER_PKG="pi-mcp-adapter@7.0.1"
 
 info()  { printf '[pi] %s\n' "$*"; }
 die()   { printf '[pi] ERROR: %s\n' "$*" >&2; exit 1; }
