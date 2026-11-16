@@ -62,13 +62,14 @@ export const PIN_CONFIRM_BODY =
 /**
  * The confirm that asks before Hold or Keep pins image mode. Mount one wherever
  * `useStatusLineActions().run('hold' | 'keep')` can be called.
- * @param {{ confirm: { open: boolean, kind: string | null, accept: () => void, decline: () => void } }} props
+ * Shut while the ask is the caller's own (`confirm.via === 'popover'`: the top-bar toggle draws it).
+ * @param {{ confirm: { open: boolean, kind: string | null, via?: string, accept: () => void, decline: () => void } }} props
  */
 export function PinConfirm({ confirm }) {
   const copy = PIN_CONFIRM[confirm.kind]
   return (
     <ConfirmDialog
-      open={confirm.open && copy != null}
+      open={confirm.open && copy != null && confirm.via !== 'popover'}
       onCancel={confirm.decline}
       onConfirm={confirm.accept}
       title={copy?.title ?? ''}

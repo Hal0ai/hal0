@@ -103,7 +103,20 @@ vi.mock('@/api/hooks/useRuntimes', async (importOriginal) => ({
   useSystemInfo: () => ({ data: { backends: {} } }),
 }))
 
-const { Dock } = await import('../dock/Dock.jsx')
+const { Dock: DockBar } = await import('../dock/Dock.jsx')
+const { GpuStatusProvider } = await import('../dock/GpuStatusContext.jsx')
+const { GpuModeToggle } = await import('../dock/GpuModeToggle.jsx')
+
+// The dock as main.jsx mounts it: under the provider that owns the GPU state, with the top bar's
+// mode toggle beside it (the same state, one poll, one set of confirms).
+function Dock({ route, param, ...rest }: { route: string; param: string; expanded: boolean; onToggle: () => void }) {
+  return (
+    <GpuStatusProvider route={route} param={param}>
+      <GpuModeToggle />
+      <DockBar {...rest} />
+    </GpuStatusProvider>
+  )
+}
 const { GpuGateBlockedBanner } = await import('../dock/GpuGateBlockedBanner.jsx')
 const { clearDismissedRefusal, useStatusLineActions } = await import('../image/useStatusLineActions')
 const { ForceStopConfirm } = await import('../dock/gpu-parts.jsx')
@@ -342,11 +355,31 @@ describe('the dock GPU segment', () => {
     expect(seg().querySelector('.mini')).not.toBeNull()
   })
 
-  it('hold asks first, and a confirmed hold calls switchover with pin', async () => {
+  it('the segment is status only: plain chat mode says "GPU · chat" and has no Hold', () => {
     mount(dock())
-    await click(button('Hold image mode', seg()))
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat')
+    expect(byId('gpu-status-detail')).toBeNull()
+    expect(seg().querySelectorAll('button')).toHaveLength(1)
+    expect(byId('gpu-status-action-hold')).toBeNull()
+  })
+
+  it('the segment keeps Cancel render but not Keep while a render runs', () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering', image_jobs: 1 })
+    mount(dock())
+    expect(Array.from(seg().querySelectorAll('.acts button')).map((b) => b.getAttribute('data-testid'))).toEqual([
+      'gpu-status-action-cancel_render',
+    ])
+  })
+
+  it("the GPU tab's Hold asks first in the dialog, and a confirmed hold calls switchover with pin", async () => {
+    mount(open())
+    await click(byId('dock-tab-gpu'))
+    await click(byId('gpu-status-action-hold'))
     // Nothing is sent before the answer.
     expect(calls).toEqual([])
+    // The dialog is the pane's own question: the toggle's popover stays shut.
+    expect(byId('tb-gpu-pop')).toBeNull()
+    expect(document.querySelectorAll('.modal-shell')).toHaveLength(1)
     expect(dialogTitle()).toBe('Hold image mode?')
     expect(dialogBody()).toBe(PIN_BODY)
     expect(foot('Cancel')).toBeTruthy()
@@ -369,15 +402,15 @@ describe('the dock GPU segment', () => {
   it("shows a failed action's message in the segment detail while collapsed", async () => {
     box.fail = new Error('GPU is in image mode already')
     mount(dock())
-    await click(button('Hold image mode', seg()))
-    await click(foot('Hold image mode'))
+    await click(byId('tb-gpu-image'))
+    await click(byId('tb-gpu-pop-confirm'))
     const detail = byId('gpu-status-detail')!
     expect(detail.getAttribute('role')).toBe('alert')
     expect(detail.closest('button')).toBeNull()
     expect(detail.classList.contains('err')).toBe(true)
     expect(detail.textContent).toBe('GPU is in image mode already')
     // The buttons come back so it can be tried again.
-    expect(button('Hold image mode', seg())!.disabled).toBe(false)
+    expect((byId('tb-gpu-image') as HTMLButtonElement).disabled).toBe(false)
     // One alert in the dock, and it is the segment's detail.
     const alerts = document.querySelectorAll('[data-testid="dock"] [role="alert"]')
     expect(alerts).toHaveLength(1)
@@ -726,8 +759,8 @@ describe('a failed action in the dock', () => {
   it("drops the message once the box is in another state", async () => {
     box.fail = new Error('The GPU is busy')
     const host = mount(dock())
-    await click(button('Hold image mode', seg()))
-    await click(foot('Hold image mode'))
+    await click(byId('tb-gpu-image'))
+    await click(byId('tb-gpu-pop-confirm'))
     expect(document.querySelector('[role="alert"]')!.textContent).toBe('The GPU is busy')
 
     // The poll lands: a render has started. The old alert is about a state that is gone.
@@ -744,8 +777,8 @@ describe('a failed action in the dock', () => {
     box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
     box.fail = new Error('The pin was refused')
     mount(dock())
-    await click(byId('gpu-status-action-keep'))
-    await click(foot('Keep image mode on'))
+    await click(byId('tb-gpu-image'))
+    await click(byId('tb-gpu-pop-confirm'))
     expect(document.querySelector('[role="alert"]')!.textContent).toBe('The pin was refused')
     act(() => {
       vi.advanceTimersByTime(3000)
@@ -753,6 +786,190 @@ describe('a failed action in the dock', () => {
     // The headline moved (8 s to 5 s); the state did not.
     expect(byId('gpu-status-head')!.textContent).toBe('Image mode ends in 5 s')
     expect(document.querySelector('[role="alert"]')!.textContent).toBe('The pin was refused')
+  })
+})
+
+// The top bar's Chat | Image toggle, over the same state and actions as the dock.
+describe('the top-bar GPU mode toggle', () => {
+  const group = () => byId('tb-gpu-toggle')!
+  const radio = (id: 'chat' | 'image') => byId(`tb-gpu-${id}`) as HTMLButtonElement
+  const checked = () => (['chat', 'image'] as const).filter((id) => radio(id).getAttribute('aria-checked') === 'true')
+  const key = (k: string) =>
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }))
+    })
+
+  it('is a radiogroup named "GPU mode", with Chat selected in chat mode and the cost as its tooltip', () => {
+    mount(dock())
+    expect(group().getAttribute('role')).toBe('radiogroup')
+    expect(group().getAttribute('aria-label')).toBe('GPU mode')
+    expect(radio('chat').getAttribute('role')).toBe('radio')
+    expect(checked()).toEqual(['chat'])
+    // The segments are named by aria-label, so the icon-only phone layout keeps its names.
+    expect(radio('chat').getAttribute('aria-label')).toBe('Chat')
+    expect(radio('image').getAttribute('aria-label')).toBe('Image')
+    expect(group().getAttribute('title')).toBe(
+      'Pauses brain and coder (29.3 GB). They reload about 10 s after the last image.',
+    )
+    // The selected segment is the one tab stop.
+    expect([radio('chat').tabIndex, radio('image').tabIndex]).toEqual([0, -1])
+  })
+
+  it('is hidden without a gpu and without an image engine', () => {
+    box.memory = memoryBody(null)
+    mount(dock())
+    expect(byId('tb-gpu-toggle')).toBeNull()
+    box.memory = memoryBody()
+    box.models = { models: [], engine: { available: false, reason: null }, store: { free_gb: 1, path: '/m' } }
+    mount(dock())
+    expect(byId('tb-gpu-toggle')).toBeNull()
+  })
+
+  it.each([
+    ['blocked', () => statusBody({ gate: { state: 'no_credential' } })],
+    ['refused', () => statusBody({ gate_refusal: { at: 1_700_000_000, reason: 'busy' } })],
+    ['stale', () => statusBody({ gate: { state: 'stale', version_seen: '0' } })],
+  ])('leaves the %s kind to the footer', (_kind, body) => {
+    box.status = body()
+    mount(dock())
+    expect(byId('tb-gpu-toggle')).toBeNull()
+    // The footer still shows the line.
+    expect(byId('dock-gpu-segment')).not.toBeNull()
+  })
+
+  it('Image asks in a popover under the toggle, not a dialog, and names what pauses', async () => {
+    mount(dock())
+    await click(radio('image'))
+    expect(calls).toEqual([])
+    expect(document.querySelector('.modal-shell')).toBeNull()
+    const pop = byId('tb-gpu-pop')!
+    expect(pop.getAttribute('role')).toBe('dialog')
+    expect(pop.textContent).toContain('Pause brain and coder (29.3 GB) and refuse GPU chat until you switch back?')
+    expect(byId('tb-gpu-pop-confirm')!.textContent).toBe('Switch to Image')
+    // It hangs off the toggle's own wrapper.
+    expect(pop.parentElement).toBe(group().parentElement)
+    await click(byId('tb-gpu-pop-confirm'))
+    expect(calls).toEqual([['switchover', { mode: 'generation', pin: true }]])
+    expect(byId('tb-gpu-pop')).toBeNull()
+  })
+
+  it('Escape and a press outside close the popover and send nothing', async () => {
+    mount(dock())
+    await click(radio('image'))
+    expect(byId('tb-gpu-pop')).not.toBeNull()
+    key('Escape')
+    await act(async () => {})
+    expect(byId('tb-gpu-pop')).toBeNull()
+
+    await click(radio('image'))
+    expect(byId('tb-gpu-pop')).not.toBeNull()
+    await act(async () => {
+      document.body.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    })
+    expect(byId('tb-gpu-pop')).toBeNull()
+    expect(calls).toEqual([])
+    // Nothing is stuck: it can be asked again.
+    await click(radio('image'))
+    expect(byId('tb-gpu-pop')).not.toBeNull()
+  })
+
+  it('a press inside the popover does not close it', async () => {
+    mount(dock())
+    await click(radio('image'))
+    await act(async () => {
+      byId('tb-gpu-pop')!.dispatchEvent(new Event('pointerdown', { bubbles: true }))
+    })
+    expect(byId('tb-gpu-pop')).not.toBeNull()
+  })
+
+  it('Image is selected during grace, and a click keeps (after the same question)', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
+    mount(dock())
+    expect(checked()).toEqual(['image'])
+    expect(group().getAttribute('data-side')).toBe('image')
+    await click(radio('image'))
+    expect(byId('tb-gpu-pop')!.querySelector('p')!.textContent).toBe(
+      'Refuse GPU chat until you switch back? The paused GPU slots stay paused.',
+    )
+    await click(byId('tb-gpu-pop-confirm'))
+    expect(calls).toEqual([['pin', { pinned: true }]])
+  })
+
+  it('pinned shows a lock, and Image does nothing', async () => {
+    box.arbiter = envelope({ mode: 'img', pinned: true })
+    mount(dock())
+    expect(checked()).toEqual(['image'])
+    expect(radio('image').querySelector('[data-testid="tb-gpu-lock"]')).not.toBeNull()
+    await click(radio('image'))
+    expect(byId('tb-gpu-pop')).toBeNull()
+    expect(calls).toEqual([])
+  })
+
+  it('Chat in image mode stops: it unpins first, then switches back', async () => {
+    box.arbiter = envelope({ mode: 'img', pinned: true })
+    mount(dock())
+    await click(radio('chat'))
+    expect(calls).toEqual([
+      ['pin', { pinned: false }],
+      ['switchover', { mode: 'inference' }],
+    ])
+  })
+
+  it('Chat while a render runs keeps the force-stop confirm', async () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering', image_jobs: 1 })
+    mount(dock())
+    await click(radio('chat'))
+    expect(calls).toEqual([])
+    expect(document.querySelectorAll('.modal-shell')).toHaveLength(1)
+    expect(document.querySelector('.modal-shell')!.textContent).toMatch(/render/i)
+    await click(foot('Stop and cancel render'))
+    expect(calls).toEqual([['switchover', { mode: 'inference', force: true }]])
+  })
+
+  it('Chat in chat mode does nothing', async () => {
+    mount(dock())
+    await click(radio('chat'))
+    expect(calls).toEqual([])
+    expect(byId('tb-gpu-pop')).toBeNull()
+  })
+
+  it('shows a spinner on Image while switching and on Chat while reloading', () => {
+    box.arbiter = envelope({ mode: 'llm', phase: 'unloading', switching: true })
+    const host = mount(dock())
+    expect(checked()).toEqual(['image'])
+    expect(radio('image').querySelector('[data-testid="tb-gpu-spinner"]')).not.toBeNull()
+    expect(radio('chat').querySelector('[data-testid="tb-gpu-spinner"]')).toBeNull()
+
+    box.arbiter = envelope({ mode: 'llm', phase: 'reloading' })
+    rerender(host, dock())
+    expect(checked()).toEqual(['chat'])
+    expect(radio('chat').querySelector('[data-testid="tb-gpu-spinner"]')).not.toBeNull()
+    expect(radio('image').querySelector('[data-testid="tb-gpu-spinner"]')).toBeNull()
+  })
+
+  it('draws the render progress under Image only while rendering', () => {
+    box.arbiter = envelope({ mode: 'img', phase: 'rendering', image_jobs: 1 })
+    box.status = statusBody({
+      queue: { running: 1, pending: 0 },
+      progress: { model: 'flux-dev', step: 5, total: 20, node: '9', elapsed_s: 3, prompt_id: 'p' },
+    })
+    const host = mount(dock())
+    expect(byId('tb-gpu-progress')!.style.transform).toBe('scaleX(0.25)')
+    box.arbiter = envelope({ mode: 'llm' })
+    box.status = statusBody()
+    rerender(host, dock())
+    expect(byId('tb-gpu-progress')).toBeNull()
+  })
+
+  it('arrow keys move focus between the segments without choosing', () => {
+    mount(dock())
+    radio('chat').focus()
+    act(() => {
+      radio('chat').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))
+    })
+    expect(document.activeElement).toBe(radio('image'))
+    expect(calls).toEqual([])
+    expect(byId('tb-gpu-pop')).toBeNull()
   })
 })
 
@@ -835,7 +1052,7 @@ describe('gate refusal in the dock', () => {
     expect(byId('gpu-status-detail')!.querySelector('b')).toBeNull()
 
     await click(byId('gpu-status-action-dismiss'))
-    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat mode')
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat')
     expect(window.localStorage.getItem(DISMISS_KEY)).toBe(String(AT))
   })
 
@@ -843,7 +1060,7 @@ describe('gate refusal in the dock', () => {
     window.localStorage.setItem(DISMISS_KEY, String(AT))
     box.status = statusBody({ gate_refusal: { at: AT, reason: 'old' } })
     mount(dock())
-    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat mode')
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat')
 
     box.status = statusBody({ gate_refusal: { at: AT + 60, reason: 'new' } })
     mount(dock())
@@ -856,7 +1073,7 @@ describe('gate refusal in the dock', () => {
     mount(dock())
     expect(byId('gpu-status-head')!.textContent).toBe('GPU gate refused a prompt · 14:15')
     await click(byId('gpu-status-action-dismiss'))
-    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat mode')
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat')
   })
 
   it('dismisses for the session when storage reads fine but cannot write', async () => {
@@ -867,7 +1084,7 @@ describe('gate refusal in the dock', () => {
     await click(byId('gpu-status-action-dismiss'))
     // Nothing was stored, and it must not come straight back.
     expect(window.localStorage.getItem(DISMISS_KEY)).toBeNull()
-    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat mode')
+    expect(byId('gpu-status-head')!.textContent).toBe('GPU · chat')
 
     // A newer refusal still shows.
     box.status = statusBody({ gate_refusal: { at: AT + 1860, reason: 'again' } })
@@ -962,34 +1179,36 @@ describe('the dock GPU segment, restored status-line cases', () => {
 
   it('a declined hold sends nothing', async () => {
     mount(dock())
-    await click(button('Hold image mode', seg()))
-    await click(foot('Cancel'))
+    await click(byId('tb-gpu-image'))
+    await click(byId('tb-gpu-pop-cancel'))
     expect(calls).toEqual([])
+    expect(byId('tb-gpu-pop')).toBeNull()
     expect(document.querySelector('.modal-shell')).toBeNull()
-    // Nothing is left pending: the button is there to try again.
-    expect(button('Hold image mode', seg())!.disabled).toBe(false)
+    // Nothing is left pending: the toggle is there to try again.
+    expect((byId('tb-gpu-image') as HTMLButtonElement).disabled).toBe(false)
   })
 
   it('keep asks first, and a confirmed keep pins the image mode that is on', async () => {
     box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
     mount(dock())
     expect(byId('gpu-status-head')!.textContent).toMatch(/^Image mode ends in \d+ s$/)
-    await click(button('Keep image mode', seg()))
+    await click(byId('tb-gpu-image'))
     expect(calls).toEqual([])
-    expect(dialogTitle()).toBe('Keep image mode on?')
-    expect(dialogBody()).toBe(PIN_BODY)
-    expect(foot('Cancel')).toBeTruthy()
-    await click(foot('Keep image mode on'))
+    expect(byId('tb-gpu-pop')!.textContent).toContain('Refuse GPU chat until you switch back?')
+    expect(byId('tb-gpu-pop-cancel')).toBeTruthy()
+    await click(byId('tb-gpu-pop-confirm'))
     expect(calls).toEqual([['pin', { pinned: true }]])
+    expect(byId('tb-gpu-pop')).toBeNull()
     expect(document.querySelector('.modal-shell')).toBeNull()
   })
 
   it('a declined keep sends nothing', async () => {
     box.arbiter = envelope({ mode: 'img', phase: 'grace', restore_at: Date.now() / 1000 + 8 })
     mount(dock())
-    await click(button('Keep image mode', seg()))
-    await click(foot('Cancel'))
+    await click(byId('tb-gpu-image'))
+    await click(byId('tb-gpu-pop-cancel'))
     expect(calls).toEqual([])
+    expect(byId('tb-gpu-pop')).toBeNull()
     expect(document.querySelector('.modal-shell')).toBeNull()
   })
 

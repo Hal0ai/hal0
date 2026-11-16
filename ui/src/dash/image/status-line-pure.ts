@@ -170,6 +170,33 @@ function imageModeOn(arbiter: ArbiterState | null | undefined): boolean {
 
 // ── cost and wait lines ──────────────────────────────────────────────────────
 
+// The slots an image would pause and what they hold: the one reading of "what image costs chat"
+// that costLine's sentence and the top-bar toggle's confirm both draw from.
+//   names  the unload set, in the order the arbiter sent it
+//   gb     the sum of the `memory.gpu.this_box` rows of those slots; null when none has a row
+// null when the set is unknown or empty.
+export interface PauseFacts {
+  names: string[]
+  gb: number | null
+}
+
+export function pauseFacts(
+  unloadSet: readonly string[] | null | undefined,
+  memory: MemoryBudgetJson | null | undefined,
+): PauseFacts | null {
+  if (!unloadSet || unloadSet.length === 0) return null
+  const known = (memory?.gpu?.this_box ?? []).filter((row) => unloadSet.includes(row.slot))
+  return {
+    names: [...unloadSet],
+    gb: known.length > 0 ? known.reduce((sum, row) => sum + row.gb, 0) : null,
+  }
+}
+
+/** "a, b and c (29.3 GB)", or without the figure when no slot has a memory row. */
+export function pauseLabel(facts: PauseFacts): string {
+  return `${nameList(facts.names)}${facts.gb != null ? ` (${fmtGb(facts.gb)} GB)` : ''}`
+}
+
 // What the next image costs chat, one line per sentence group.
 //
 //   chat mode, known set    Pauses {a, b and c} ({gb} GB). They reload about 10 s after the last image.
@@ -189,14 +216,8 @@ export function costLine(
   if (imageModeOn(arbiter)) {
     lines.push(COST_IMAGE_ON)
   } else if (unloadSet) {
-    if (unloadSet.length === 0) {
-      lines.push(COST_NO_SLOTS)
-    } else {
-      const known = (memory?.gpu?.this_box ?? []).filter((row) => unloadSet.includes(row.slot))
-      const gb = known.reduce((sum, row) => sum + row.gb, 0)
-      const figure = known.length > 0 ? ` (${fmtGb(gb)} GB)` : ''
-      lines.push(`Pauses ${nameList(unloadSet)}${figure}. ${COST_RELOAD}`)
-    }
+    const facts = pauseFacts(unloadSet, memory)
+    lines.push(facts ? `Pauses ${pauseLabel(facts)}. ${COST_RELOAD}` : COST_NO_SLOTS)
   }
   const draining = arbiter?.drain_in_flight ?? 0
   if (draining > 0) {

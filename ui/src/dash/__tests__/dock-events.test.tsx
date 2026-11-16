@@ -95,7 +95,17 @@ vi.mock('@/api/hooks/useRuntimes', async (importOriginal) => ({
   useSystemInfo: () => ({ data: { backends: {} } }),
 }))
 
-const { Dock } = await import('../dock/Dock.jsx')
+const { Dock: DockBar } = await import('../dock/Dock.jsx')
+const { GpuStatusProvider } = await import('../dock/GpuStatusContext.jsx')
+
+// The dock as main.jsx mounts it: under the provider that owns the GPU state.
+function Dock({ route, param, ...rest }: { route: string; param: string; expanded: boolean; onToggle: () => void }) {
+  return (
+    <GpuStatusProvider route={route} param={param}>
+      <DockBar {...rest} />
+    </GpuStatusProvider>
+  )
+}
 
 // ── fixtures ─────────────────────────────────────────────────────────────────
 

@@ -172,14 +172,26 @@ export function filterEvents(events: readonly DockEvent[], f: DockFilters): Dock
   })
 }
 
-/** The actions the dock's status segment can draw: the ones with nothing to call are dropped
- *  before the cap, so a missing editor link never costs the segment a real button. */
+/** Plain chat mode in the footer segment is only "GPU · chat": what an image costs is the top-bar
+ *  toggle's tooltip and the GPU tab's, not a sentence on every page. */
+export const SEGMENT_HEAD_CHAT = 'GPU · chat'
+
+/** The footer segment's words: the line's headline and detail, except in plain chat mode. */
+export function segmentCopy(view: { kind: string; head: string; detail: string }): { head: string; detail: string } {
+  return view.kind === 'chat' ? { head: SEGMENT_HEAD_CHAT, detail: '' } : { head: view.head, detail: view.detail }
+}
+
+/** The actions the dock's status segment can draw. Hold and Keep are the top-bar toggle's (the
+ *  segment is status, and the toggle is shown in every state that offers either), so they are
+ *  dropped. Then the ones with nothing to call are dropped before the cap, so a missing editor link
+ *  never costs the segment a real button. */
 export function segmentActions(
   actions: readonly StatusAction[],
   ctx: { editorUrl?: string | null; onCancel?: (() => void) | null },
 ): StatusAction[] {
   return actions
     .filter((a) => {
+      if (a === 'hold' || a === 'keep') return false
       if (a === 'open_editor') return !!ctx.editorUrl
       if (a === 'cancel') return !!ctx.onCancel
       return true

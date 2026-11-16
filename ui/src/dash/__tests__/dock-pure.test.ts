@@ -13,6 +13,7 @@ import {
   newRows,
   actorLabel,
   segmentActions,
+  segmentCopy,
   sevOf,
   shortTime,
   slotOfEvent,
@@ -152,9 +153,23 @@ describe('dock-pure', () => {
 
   it('segment actions apply the pane filter before the slice', () => {
     expect(segmentActions(['open_editor', 'dismiss'], { editorUrl: null })).toEqual(['dismiss'])
-    expect(segmentActions(['cancel', 'keep', 'stop'], { onCancel: null })).toEqual(['keep', 'stop'])
-    expect(segmentActions(['hold'], { editorUrl: 'http://x' })).toEqual(['hold'])
-    expect(segmentActions(['hold', 'keep', 'stop'], {})).toEqual(['hold', 'keep'])
+    expect(segmentActions(['cancel', 'unpin', 'stop'], { onCancel: null })).toEqual(['unpin', 'stop'])
+    expect(segmentActions(['unpin', 'stop', 'dismiss'], {})).toEqual(['unpin', 'stop'])
+  })
+
+  it('segment actions leave Hold and Keep to the top-bar toggle', () => {
+    expect(segmentActions(['hold'], { editorUrl: 'http://x' })).toEqual([])
+    expect(segmentActions(['cancel_render', 'keep'], {})).toEqual(['cancel_render'])
+    expect(segmentActions(['keep'], {})).toEqual([])
+    // Hold and Keep do not take a slot from the buttons behind them.
+    expect(segmentActions(['hold', 'keep', 'stop', 'dismiss'], {})).toEqual(['stop', 'dismiss'])
+  })
+
+  it('segment copy shortens plain chat mode and keeps every other line as it is', () => {
+    const chat = { kind: 'chat', head: 'GPU · chat mode', detail: 'Pauses brain (20 GB).' }
+    expect(segmentCopy(chat)).toEqual({ head: 'GPU · chat', detail: '' })
+    const grace = { kind: 'grace', head: 'Image mode ends in 5 s', detail: 'Reloads.' }
+    expect(segmentCopy(grace)).toEqual({ head: grace.head, detail: grace.detail })
   })
 
   it('export filters carry severity, a single activity category and the slot term', () => {

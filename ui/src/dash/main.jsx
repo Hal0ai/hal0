@@ -34,6 +34,7 @@ import Benchmarks from './Benchmarks'
 import { MemoryArea } from './memory-area/MemoryArea.jsx'
 import { legacyMemoryRedirect } from './memory-area/memory-route-pure'
 import { Dock } from './dock/Dock.jsx'
+import { GpuStatusProvider } from './dock/GpuStatusContext.jsx'
 import { GpuGateBlockedBanner } from './dock/GpuGateBlockedBanner.jsx'
 import { slotsSub } from './slots-route'
 
@@ -349,7 +350,7 @@ function App() {
   };
 
   return (
-    <>
+    <GpuStatusProvider route={route} param={param}>
       <div className="app">
         <TopBar
           route={route}
@@ -387,8 +388,6 @@ function App() {
           a new release is installed.
         */}
         <Dock
-          route={route}
-          param={param}
           expanded={footerOpen}
           onToggle={() => setFooterOpen(o => !o)}
         />
@@ -470,7 +469,7 @@ function App() {
           <TweakButton onClick={() => go("dashboard")}>Jump to Dashboard</TweakButton>
         </TweakSection>
       </TweaksPanel>
-    </>
+    </GpuStatusProvider>
   );
 }
 

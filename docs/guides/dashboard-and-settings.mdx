@@ -151,11 +151,13 @@ The dock is the console's one status surface, at the bottom of every page. It
 pushes the page up when it opens and never covers it. Always visible, one row
 shows:
 
-- the **GPU segment** — a headline and a one-line detail from the GPU arbiter
-  (`GPU · chat mode`, `Rendering · <model> · step n/N`, …) and up to two
-  buttons for what fits right now (Hold, Keep, Unpin, Stop image mode, Cancel,
-  Restart engine, Dismiss). Click the headline for the **gpu** tab. A box with
-  no GPU pool reading or no image engine shows no segment,
+- the **GPU segment** — a status line from the GPU arbiter (`GPU · chat`,
+  or a headline and a one-line detail such as `Rendering · <model> · step n/N`)
+  and up to two buttons for what fits right now (Unpin, Stop image mode,
+  Cancel, Cancel render, Restart engine, Dismiss). Hold and Keep are the
+  **GPU mode toggle** in the top bar (Chat | Image, beside Agent Chat). Click
+  the headline for the **gpu** tab. A box with no GPU pool reading or no image
+  engine shows no segment and no toggle,
 - a **slots** group — one pip per active slot (colored by state) and a
   ready count,
 - a **services** group — one pip per backing service and a ready count

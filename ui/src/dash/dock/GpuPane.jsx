@@ -3,7 +3,7 @@
 // Left, the status line's own words and buttons (the same ones the Image Gen pane draws) plus the
 // extras that are always there: restart, the engine log and the editor. Right, the arbiter, the
 // engine and the pool as plain rows. The state comes from useGpuStatus and the calls from
-// useStatusLineActions (Dock owns both, so the confirm dialogs mount once). The segment's hidden
+// useStatusLineActions (GpuStatusProvider owns both, so the confirm dialogs mount once). The segment's hidden
 // phrase is the dock's one live region: this pane adds none.
 //
 // It draws with the plain dashboard tokens, not the `--comfy*` accent.

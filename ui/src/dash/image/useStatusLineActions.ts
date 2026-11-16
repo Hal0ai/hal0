@@ -20,7 +20,9 @@
 // hook cannot draw it: `confirm` carries its state (`kind` says which question) and
 // `<ForceStopConfirm confirm={confirm} />` and `<PinConfirm confirm={confirm} />`
 // (dock/gpu-parts.jsx) draw them. Whoever calls `run('stop', ...)` mounts the first, whoever
-// calls `run('hold' | 'keep')` the second.
+// calls `run('hold' | 'keep')` the second. The pin question may be drawn another way:
+// `ctx.confirmVia: 'popover'` marks the ask as the caller's own (the top-bar toggle's popover), and
+// `<PinConfirm>` then stays shut; the caller answers through the same `confirm.accept` / `decline`.
 
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -42,7 +44,12 @@ export interface StatusActionCtx {
   refusalAt?: number | null
   // Aborts this browser's own Generate run (the `cancel` action).
   onCancel?: () => void
+  // Who draws the hold / keep question: the shared dialog (default) or the caller's popover.
+  confirmVia?: ConfirmVia
 }
+
+/** Who draws a confirm: `<PinConfirm>`'s dialog, or the caller's own surface. */
+export type ConfirmVia = 'dialog' | 'popover'
 
 /** Which question the confirm asks. */
 export type ConfirmKind = 'stop' | 'hold' | 'keep'
@@ -52,6 +59,8 @@ export interface ActionConfirm {
   open: boolean
   /** The action waiting for an answer; null while nothing is asked. */
   kind: ConfirmKind | null
+  /** Who draws the question; `<PinConfirm>` stays shut for `popover`. */
+  via: ConfirmVia
   accept: () => void
   decline: () => void
 }
@@ -145,14 +154,14 @@ export function useStatusLineActions({ resetKey = null }: { resetKey?: unknown }
     keyRef.current = resetKey
   }, [resetKey])
   const error = failure && Object.is(failure.key, resetKey) ? failure.message : null
-  const [asking, setAsking] = useState<ConfirmKind | null>(null)
+  const [asking, setAsking] = useState<{ kind: ConfirmKind; via: ConfirmVia } | null>(null)
   const answer = useRef<((ok: boolean) => void) | null>(null)
   const running = useRef(false)
 
-  const ask = (kind: ConfirmKind) =>
+  const ask = (kind: ConfirmKind, via: ConfirmVia = 'dialog') =>
     new Promise<boolean>((resolve) => {
       answer.current = resolve
-      setAsking(kind)
+      setAsking({ kind, via })
     })
   const settle = (ok: boolean) => {
     const resolve = answer.current
@@ -171,11 +180,11 @@ export function useStatusLineActions({ resetKey = null }: { resetKey?: unknown }
       switch (action) {
         case 'hold':
           // A pin refuses GPU chat until someone unpins: ask before anything is sent.
-          if (!(await ask('hold'))) return
+          if (!(await ask('hold', ctx.confirmVia))) return
           await switchover.mutateAsync({ mode: 'generation', pin: true })
           break
         case 'keep':
-          if (!(await ask('keep'))) return
+          if (!(await ask('keep', ctx.confirmVia))) return
           await pin.mutateAsync({ pinned: true })
           break
         case 'unpin':
@@ -221,7 +230,8 @@ export function useStatusLineActions({ resetKey = null }: { resetKey?: unknown }
 
   const confirm: ActionConfirm = {
     open: asking != null,
-    kind: asking,
+    kind: asking?.kind ?? null,
+    via: asking?.via ?? 'dialog',
     accept: () => settle(true),
     decline: () => settle(false),
   }

@@ -16,6 +16,7 @@ import { useConfigUrls } from '@/api/hooks/useConfigUrls'
 import { PROXY_NEEDS_PUBLIC_URL, publicUrlHint } from '@/api/publicUrlHint'
 import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 import { SessionChip } from './auth/SessionChip.jsx'
+import { GpuModeToggle } from './dock/GpuModeToggle.jsx'
 import { NAV_GROUPS as SETTINGS_NAV_GROUPS, VALID_IDS as SETTINGS_IDS } from './settings/SettingsNav.jsx'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { npuTabVisible } from './npu/npu-pure'
@@ -436,22 +437,10 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
         </div>
       )}
       <div className="tb-spacer" />
-      {/* Primary launcher — the agent-chat slide-out. (Kanban moved to the
-          sidebar Services zone; ⌘B still opens the board. The ⌘K command
-          palette is reachable via its shortcut.) White icon by default,
-          glowing amber on hover/active. */}
-      <div className="tb-launch">
-        <button
-          className={"tb-launch-btn tb-brain" + (chatOn ? " on" : "")}
-          data-testid="tb-launch-chat"
-          onClick={onAgentChat}
-          title="Open the agent chat"
-          aria-pressed={chatOn}
-        >
-          {Icons.brain}<span>Agent Chat</span>
-        </button>
-      </div>
-      {/* Documentation — opens the hosted docs in a new tab. */}
+      {/* Signed-in state / sign-in entry point. Renders nothing on a box that
+          gates nothing for this browser (keyless or loopback). */}
+      <SessionChip />
+      {/* Documentation and notifications: plain icons, no button chrome. */}
       <a
         className="tb-docs"
         data-testid="tb-docs"
@@ -463,10 +452,25 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
       >
         {Icons.docs}
       </a>
-      {/* Signed-in state / sign-in entry point. Renders nothing on a box that
-          gates nothing for this browser (keyless or loopback). */}
-      <SessionChip />
       <NotificationBell />
+      {/* Launcher group, far right: the GPU mode toggle (Chat | Image) beside the
+          agent-chat slide-out launcher, one family (same height, border, radius and
+          hover glow). (Kanban moved to the sidebar Services zone; ⌘B still opens the
+          board. The ⌘K command palette is reachable via its shortcut.) The toggle
+          renders nothing without a GPU line; on phones the launcher hides and the
+          toggle drops its labels. */}
+      <div className="tb-launch">
+        <GpuModeToggle />
+        <button
+          className={"tb-launch-btn tb-brain" + (chatOn ? " on" : "")}
+          data-testid="tb-launch-chat"
+          onClick={onAgentChat}
+          title="Open the agent chat"
+          aria-pressed={chatOn}
+        >
+          {Icons.brain}<span>Agent Chat</span>
+        </button>
+      </div>
       {/* Mobile-only nav launcher (hidden ≤720px sidebar is gone) → opens NavDrawer. */}
       <button
         className="tb-menu"
