@@ -447,6 +447,11 @@ class Journal:
     #: row moved since then ran on the target. A journal written before #3604
     #: has none; a rollback then counts from ``started_at``.
     flipped_at: str | None = None
+    #: The engine's own work it queued and parked during the run, which a
+    #: check after the flip read the bank beside instead of refusing (#3722),
+    #: as ``{"bank", "type", "id", "status", "due_at"}``. Left alone.
+    #: Absent from a journal written before it existed and then empty.
+    parked: list[dict[str, Any]] = field(default_factory=list)
     version: int = JOURNAL_VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -1527,6 +1532,8 @@ class EmbedderSwitch(em.EngineMaintenance):
             if found["error"]:
                 self._say(f"the journal was read from its mirror {found['source']}")
             self._run_journal = journal
+            if journal.flip_started:
+                self._tolerate_own_parked(journal)
             target = Embedder(journal.target["provider"], journal.target["model"])
             if self._target is not None and self._target != target:
                 raise SwitchRefused(
@@ -1635,6 +1642,7 @@ class EmbedderSwitch(em.EngineMaintenance):
         journal.flip_started = True
         journal.flipped_at = self._now().astimezone(UTC).isoformat()
         self._save(journal)
+        self._tolerate_own_parked(journal)
         # ``mixed`` until the swap is done: from here the engine embeds with
         # the target while every bank still holds the old model's vectors.
         embedder_record.save_embedder_record(
@@ -1646,6 +1654,33 @@ class EmbedderSwitch(em.EngineMaintenance):
             target, port=journal.private_port, run_id=journal.run_id, journal=journal
         )
         self._hook("flipped")
+
+    def _tolerate_own_parked(self, journal: Journal) -> None:
+        """From the flip on, read a bank beside work the engine parked during this run (#3722).
+
+        The run restarts the engine to isolate it and again on the target,
+        and restores every bank twice. The engine answers both with automatic
+        mental-model refreshes of its own, and parks them on a bank whose
+        models have a minimum refresh interval, for hours. Every check after
+        the flip (the restore's own read, the rebuilt copy, the original
+        before its delete, the bank in its own id) then reads the bank beside
+        any parked operation queued since ``journal.started_at``
+        (:meth:`~hal0.memory.engine_maintenance.EngineMaintenance._own_parked`):
+        it has not started, so the comparison holds. It is left alone and
+        reported (``journal.parked``). Parked work from before the run is
+        still refused by the preflight, and work parked before the flip still
+        stops the run while it is cheap to undo.
+        """
+        self._parked_from = _parse_time(journal.started_at)
+        for ref in journal.parked:
+            self._parked_seen.setdefault(str(ref.get("id")), dict(ref))
+
+    def _note_parked(self, ref: Mapping[str, Any]) -> None:
+        super()._note_parked(ref)
+        journal = self._run_journal
+        if journal is not None:
+            journal.parked.append(dict(ref))
+            self._save(journal)
 
     async def _restore_all(self, journal: Journal) -> None:
         journal.phase = PHASE_RESTORING
@@ -2167,6 +2202,20 @@ class EmbedderSwitch(em.EngineMaintenance):
         write_gate.lift_gate()
         self._say("memory writes resumed")
         warnings = [f"{e.bank}: {e.note}" for e in journal.banks if e.note]
+        if journal.parked:
+            warnings.append(
+                "the engine parked work of its own during the switch, which it queued in answer "
+                "to the switch's restarts and restores: "
+                + "; ".join(
+                    f"{r.get('type')} on {r.get('bank')} (operation {r.get('id')}, due at "
+                    f"{r.get('due_at')})"
+                    for r in journal.parked
+                )
+                + ". It had not started, so the checks read each bank beside it. The switch "
+                "neither waited for it nor cancelled it. Work parked on an original or a rebuilt "
+                "copy went with that bank when the switch deleted it; the bank under its own id "
+                "keeps its mental models and their triggers, and those queue the refresh again"
+            )
         if strays:
             warnings.append(
                 f"bank(s) {', '.join(strays)} appeared during the switch and were not rebuilt, "
@@ -2196,6 +2245,7 @@ class EmbedderSwitch(em.EngineMaintenance):
                 for e in journal.banks
             ],
             "warnings": warnings,
+            "parked_operations": list(journal.parked),
             "config_note": config_note,
             "archive_dir": journal.archive_dir,
             "delete_archives": f"rm -r {journal.archive_dir}",

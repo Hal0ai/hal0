@@ -20,6 +20,7 @@ import io
 import json
 import re
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -1069,6 +1070,51 @@ async def test_apply_folds_every_bank_and_cuts_over(box: Box) -> None:
     for target, archive in e.imports:
         if target == "hal0:shared":
             assert "visibility:private" not in json.dumps(archive)
+
+
+def _parked_refresh(op_id: str, *, created: datetime | None = None) -> dict[str, Any]:
+    """An automatic refresh the engine parked for the rest of a four-hour floor."""
+    now = datetime.now(UTC)
+    return {
+        "id": op_id,
+        "operation_id": op_id,
+        "operation_type": "refresh_mental_model",
+        "status": "pending",
+        "created_at": (created or now).isoformat(),
+        "updated_at": now.isoformat(),
+        "next_retry_at": (now + timedelta(seconds=14400)).isoformat(),
+    }
+
+
+async def test_a_refresh_the_engine_parks_on_a_target_after_an_import_does_not_stop_the_run(
+    box: Box,
+) -> None:
+    # #3722: the import's facts are consolidated, the engine then refreshes
+    # the target's mental models by itself, and parks the refresh for the
+    # rest of the target's floor. It has not started; the check goes on.
+    def hook(point: str) -> None:
+        if point == "imported:coding-agent::web:shared":
+            box.engine.own_ops.setdefault("hal0:shared", []).append(_parked_refresh("op-own"))
+
+    result = await box.fold(hook=hook).run()
+
+    assert result["status"] == "folded"
+    assert [r["id"] for r in result["parked_operations"]] == ["op-own"]
+    assert box.engine.own_ops["hal0:shared"][0]["status"] == "pending", "never cancelled"
+    _assert_folded(box)
+
+
+async def test_a_refresh_parked_on_a_target_since_before_the_run_still_stops_it(box: Box) -> None:
+    def hook(point: str) -> None:
+        if point == "imported:coding-agent::web:shared":
+            old = datetime.now(UTC) - timedelta(hours=1)
+            box.engine.own_ops.setdefault("hal0:shared", []).append(
+                _parked_refresh("op-old", created=old)
+            )
+
+    with pytest.raises(fi.FoldInError, match=r"parked its own refresh_mental_model on hal0:shared"):
+        await box.fold(hook=hook).run()
+    assert box.engine.own_ops["hal0:shared"][0]["status"] == "pending", "never cancelled"
 
 
 async def test_a_bank_whose_ids_are_taken_leaves_the_run_with_nothing_imported(box: Box) -> None:
