@@ -4084,6 +4084,14 @@ def test_memory_engine_env_passes_when_engine_not_installed() -> None:
     assert check.status == "pass"
 
 
+def test_memory_engine_env_warns_when_unit_runs_without_a_drop_in() -> None:
+    """#3592: the base unit alone is unmanaged defaults, not "nothing to check"."""
+    check = da.check_memory_engine_env(report={"installed": False, "unit_installed": True})
+    assert check.status == "warn"
+    assert "10" in check.detail
+    assert "hal0 update" in check.detail
+
+
 def test_memory_engine_env_passes_when_unit_matches() -> None:
     report = {"installed": True, "checked": True, "drift": [], "legacy_drop_in": None}
     assert da.check_memory_engine_env(report=report).status == "pass"
