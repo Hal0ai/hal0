@@ -525,6 +525,15 @@ def _iso_time(raw: Any) -> datetime | None:
     return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
 
 
+def operation_created(op: Mapping[str, Any]) -> datetime | None:
+    """When an operation row was queued (its ``created_at``); ``None`` when it does not read.
+
+    Unlike :func:`operation_time`, a deferral does not move it: hindsight-api
+    1.2.0 parks a row by updating ``next_retry_at`` and ``updated_at`` only.
+    """
+    return _iso_time(op.get("created_at"))
+
+
 def parked_until(op: Mapping[str, Any]) -> datetime | None:
     """When a pending operation the engine has parked becomes due; ``None`` when it is not parked.
 
@@ -1365,6 +1374,14 @@ class EngineMaintenance:
         self._now = now or (lambda: datetime.now(UTC))
         self._progress = progress or (lambda _msg: None)
         self._hook = hook or (lambda _point: None)
+        #: Set by a subclass once the run's own work may make the engine queue
+        #: and park work of its own (#3722): a quiet read then lets through
+        #: parked work queued at or after this time (:meth:`_own_parked`).
+        #: ``None``: every parked operation raises, as it always has.
+        self._parked_from: datetime | None = None
+        #: The parked operations a quiet read let through, by id, as
+        #: :func:`operation_ref` with ``due_at``. Never waited for, never cancelled.
+        self._parked_seen: dict[str, dict[str, Any]] = {}
 
     def _refusal(self, message: str) -> MaintenanceError:
         """The error raised when the run cannot start, before anything changed."""
@@ -1590,6 +1607,9 @@ class EngineMaintenance:
         :meth:`_parked_error` at once, or with ``parked_ok`` the read is
         returned with those operations under ``"parked"``. A parked row has
         not started, so it cannot have moved the bank since it was parked.
+        Without ``parked_ok`` the read is returned the same way when every
+        parked operation is the engine's answer to the run's own work
+        (:meth:`_own_parked`).
         """
         if self._no_wait:
             return await self.bank_state(bank)
@@ -1609,7 +1629,7 @@ class EngineMaintenance:
             now = self._clock()
             if own:
                 parked = self._parked_past(own, start + self.t.engine_ops_s)
-                if parked and parked_ok:
+                if parked and (parked_ok or self._own_parked(bank, parked)):
                     # Wait on for the rest of the engine's work, not for this.
                     if len(parked) == len(own):
                         return state | {"parked": [op for op, _due in parked]}
@@ -1756,6 +1776,45 @@ class EngineMaintenance:
                 out.append((op, due))
         return out
 
+    def _own_parked(self, bank: str, parked: list[tuple[dict[str, Any], datetime]]) -> bool:
+        """Whether every one of ``parked`` was queued during this run; each is then noted.
+
+        hindsight-api 1.2.0 parks only an automatic mental-model refresh
+        (``memory_engine.py`` ``_handle_refresh_mental_model``), and queues one
+        by itself at every engine start (``engine/maintenance.py``, the
+        scheduled refresh) and after it consolidates (``consolidator.py``).
+        A run that restarts the engine and imports into a bank sets both off,
+        and a bank with a minimum refresh interval then has one parked for
+        hours (#3722). Once :attr:`_parked_from` is set, a parked operation
+        queued at or after it is that answer: it has not started, so the bank
+        can still be read and compared. One queued before it, or whose
+        ``created_at`` does not read, is not let through: the run's preflight
+        refused every parked operation, so that one is not this run's.
+        """
+        since = self._parked_from
+        if since is None:
+            return False
+        for op, _due in parked:
+            created = operation_created(op)
+            if created is None or created < since:
+                return False
+        for op, due in parked:
+            ref = operation_ref(bank, op) | {"due_at": due.astimezone(UTC).isoformat()}
+            if ref["id"] not in self._parked_seen:
+                self._parked_seen[ref["id"]] = ref
+                self._note_parked(ref)
+        return True
+
+    def _note_parked(self, ref: Mapping[str, Any]) -> None:
+        """Say once that a parked operation was let through (:meth:`_own_parked`)."""
+        due = _iso_time(ref.get("due_at"))
+        when = due.astimezone(UTC).isoformat(timespec="seconds") if due else "later"
+        self._say(
+            f"the engine has parked its own {ref.get('type')} on {ref.get('bank')} (operation "
+            f"{ref.get('id')}) until {when}; it has not started, so the check goes on without "
+            "it. It is left alone, not waited for and not cancelled"
+        )
+
     def _raise_if_parked(self, bank: str, own: list[dict[str, Any]], deadline: float) -> None:
         """Raise :meth:`_parked_error` when any of ``own`` is parked past ``deadline``.
 
@@ -1855,7 +1914,10 @@ class EngineMaintenance:
 
         The engine's own work (:data:`ENGINE_OPERATION_TYPES`) is waited for
         up to ``engine_ops_s``, and named when it does not end; work it has
-        parked past that raises at once, naming when it is due.
+        parked past that raises at once, naming when it is due, unless it is
+        the engine's answer to the run's own work (:meth:`_own_parked`) and
+        nothing else is live: a parked row has not started, so nothing of it
+        is running into the delete.
         """
         start = self._clock()
         deadline = start + self.t.quiet_s
@@ -1865,6 +1927,9 @@ class EngineMaintenance:
                 return
             own = await self._engine_work(bank, state)
             if own:
+                parked = self._parked_past(own, start + self.t.engine_ops_s)
+                if parked and len(parked) == len(own) and self._own_parked(bank, parked):
+                    return
                 self._raise_if_parked(bank, own, start + self.t.engine_ops_s)
                 if self._clock() >= start + self.t.engine_ops_s:
                     raise self._engine_work_error(bank, own)

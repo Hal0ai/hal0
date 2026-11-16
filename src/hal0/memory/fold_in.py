@@ -3995,6 +3995,15 @@ class FoldIn(em.EngineMaintenance):
             self._save(journal)
         if not journal.configured:
             await self._configure_targets(journal)
+        # From the first import on, the engine answers the run's own imports
+        # (and its restarts) with automatic mental-model refreshes, which it
+        # parks for hours on a target with a minimum refresh interval. A read
+        # of a target after an import goes on beside one queued during this
+        # run: it has not started (#3722). Parked work from before the run is
+        # still refused by the preflight.
+        self._parked_from = datetime.fromisoformat(journal.started_at)
+        if self._parked_from.tzinfo is None:
+            self._parked_from = self._parked_from.replace(tzinfo=UTC)
         for index, entry in enumerate(journal.banks):
             if entry.step in _DONE_STEPS:
                 continue
@@ -5617,10 +5626,15 @@ class FoldIn(em.EngineMaintenance):
         if journal.pending or journal.blocking or any(e.step != STEP_FOLDED for e in journal.banks):
             journal.phase = PHASE_RELEASING
             self._save(journal)
-            return await self._end_without_cutover(journal)
-        journal.phase = PHASE_CUTTING_OVER
-        self._save(journal)
-        return await self._cutover(journal)
+            result = await self._end_without_cutover(journal)
+        else:
+            journal.phase = PHASE_CUTTING_OVER
+            self._save(journal)
+            result = await self._cutover(journal)
+        if self._parked_seen:
+            # Read beside, never waited for or cancelled (:meth:`_own_parked`).
+            result["parked_operations"] = list(self._parked_seen.values())
+        return result
 
     async def _cutover_blockers(self, journal: Journal) -> list[dict[str, str]]:
         """Every bank on the engine that holds the cutover back, with what to do about it.

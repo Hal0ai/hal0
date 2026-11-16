@@ -529,9 +529,13 @@ bank, so look at `--status` first.
 - The engine can park its own work: an automatic mental-model refresh due
   within the model's minimum refresh interval (30 minutes in hal0's seed
   banks) waits, queued, until that interval is over. When parked work is due
-  later than the switch would wait, the switch does not wait: it stops at
-  once, names the operation and when it is due, and tells you to run it
-  again after that time.
+  later than the switch would wait, and was there before the run or is
+  parked before the move to the new model, the switch stops at once, names
+  it and when it is due, and tells you to run it again after that time.
+  After the move, parked work the engine queued during the run (its answer
+  to the run's restarts and restores) has not started, so the checks read
+  the bank beside it. It is not waited for or cancelled, and is listed in
+  the result (`parked_operations`) and a warning.
 - A refresh or a consolidation on an original bank while the engine runs the
   new model embeds with the new model. If the run is then undone, any refresh
   or consolidation activity on an original after the switch to the new model,

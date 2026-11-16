@@ -4369,6 +4369,120 @@ async def test_work_parked_on_an_original_after_the_flip_marks_a_rollback(
     assert box.record().mixed is True
 
 
+#: A floor of four hours, as a test box had on its shared bank (#3722).
+FLOOR_S = 14400
+
+
+async def test_a_refresh_the_engine_parks_after_the_switchs_own_restores_does_not_stop_it(
+    box: Box,
+) -> None:
+    """#3722: the run rebuilt every bank, then rolled back at its last check.
+
+    The engine answers the switch's restarts and restores with automatic
+    mental-model refreshes and parks them for the rest of the floor: on the
+    rebuilt copy, on the original, and on the bank restored into its own id.
+    None of them has started, so every check reads its bank beside them.
+    """
+    parked: list[str] = []
+
+    def park(bank: str) -> None:
+        op_id = f"op-own-{len(parked)}"
+        parked.append(op_id)
+        box.engine.engine_op(bank, op_id, seconds=None, parked_s=FLOOR_S)
+
+    def on_restore(source: str) -> None:
+        if source != "alpha":
+            return
+        journal = es.load_journal()
+        assert journal is not None
+        if not parked:
+            # The rebuilt copy's restore, and the original beside it.
+            park(es.temp_bank_id("alpha", journal.run_id))
+            park("alpha")
+        else:
+            # The restore into its own id.
+            park("alpha")
+
+    box.engine.on_restore = on_restore
+    said: list[str] = []
+
+    result = await box.switch(progress=said.append).run()
+
+    assert result["status"] == "switched"
+    assert len(parked) == 3
+    assert [r["id"] for r in result["parked_operations"]] == parked
+    assert all(r["type"] == "refresh_mental_model" for r in result["parked_operations"])
+    (warning,) = result["warnings"]
+    assert all(op_id in warning for op_id in parked)
+    assert "neither waited for it nor cancelled it" in warning
+    assert [r["id"] for r in _final_journal()["parked"]] == parked
+    rows = [op for ops in box.engine.engine_ops.values() for op in ops]
+    assert {op["id"]: op["status"] for op in rows} == dict.fromkeys(parked, "pending"), (
+        "never cancelled"
+    )
+    assert not any(e.startswith("cancel:") for e in box.events)
+    assert sum("op-own-1" in m and "it has not started" in m for m in said) == 1, (
+        "said once, not on every read"
+    )
+    _assert_switched(box)
+
+
+async def test_a_refresh_parked_on_an_original_once_every_bank_is_rebuilt_does_not_stop_it(
+    box: Box,
+) -> None:
+    # The run on the test box: every bank exported and rebuilt, then the
+    # check before the swap found the engine's parked refresh on an original.
+    def hook(point: str) -> None:
+        if point == "restored:gamma":
+            box.engine.engine_op("alpha", "op-on-original", seconds=None, parked_s=FLOOR_S)
+
+    result = await box.switch(hook=hook).run()
+
+    assert result["status"] == "switched"
+    assert [r["id"] for r in result["parked_operations"]] == ["op-on-original"]
+    assert result["parked_operations"][0]["bank"] == "alpha"
+    assert box.engine.engine_ops["alpha"][0]["status"] == "pending", "never cancelled"
+    _assert_switched(box)
+
+
+async def test_parked_work_from_before_the_run_is_still_refused_at_the_preflight(
+    box: Box,
+) -> None:
+    # Work the operator (or the engine) queued before the run is not the
+    # run's own: the preflight refuses it before anything is paused, even
+    # though the checks after the flip read beside parked work of the run's.
+    box.engine.engine_op("alpha", "op-before-run", seconds=None, parked_s=FLOOR_S)
+
+    with pytest.raises(es.SwitchRefused) as err:
+        await box.switch().run()
+
+    assert _codes(err.value.plan) == ["engine_operation_parked"]
+    assert "op-before-run" in err.value.message
+    assert box.events == [], "nothing paused, nothing exported"
+    assert box.engine.engine_ops["alpha"][0]["status"] == "pending", "and not cancelled"
+
+
+async def test_parked_work_queued_before_the_run_began_is_refused_after_the_flip_too(
+    box: Box,
+) -> None:
+    # Only work queued since the run began is let through: a parked row
+    # whose created_at is older was not queued in answer to this run.
+    def hook(point: str) -> None:
+        if point == "flipped":
+            box.engine.engine_op("gamma", "op-old", seconds=None, parked_s=FLOOR_S)
+            row = box.engine.engine_ops["gamma"][0]
+            row["created_at"] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+
+    with pytest.raises(es.SwitchError) as err:
+        await box.switch(hook=hook).run()
+
+    assert "parked its own refresh_mental_model on gamma (operation op-old)" in err.value.message
+    final = _final_journal()
+    assert final["phase"] == es.PHASE_ROLLED_BACK
+    assert final["parked"] == []
+    assert box.engine.engine_ops["gamma"][0]["status"] == "pending", "and not cancelled"
+
+
 # ── which of the engine's work marks a rollback ─────────────────────────────
 
 
