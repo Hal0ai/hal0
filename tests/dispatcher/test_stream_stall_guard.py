@@ -45,14 +45,10 @@ class _EndlessStream(httpx.AsyncByteStream):
         *,
         gap: float,
         burst: int | None = None,
-        hiccup: tuple[int, float] | None = None,
     ) -> None:
         self._chunk = chunk
         self._gap = gap
         self._burst = burst
-        # ``(after_n_chunks, seconds)``: one extra pause that models a loaded
-        # runner delaying the event loop (coverage tracing, noisy neighbour).
-        self._hiccup = hiccup
         self.closed = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:  # type: ignore[override]
@@ -62,8 +58,6 @@ class _EndlessStream(httpx.AsyncByteStream):
                 await asyncio.sleep(3600)  # opened, then silent forever
                 continue
             await asyncio.sleep(self._gap)
-            if self._hiccup is not None and emitted == self._hiccup[0]:
-                await asyncio.sleep(self._hiccup[1])
             emitted += 1
             yield self._chunk
 
@@ -201,10 +195,16 @@ async def test_well_behaved_stream_is_untouched() -> None:
 @pytest.mark.asyncio
 async def test_guard_can_be_disabled_with_zero() -> None:
     """``0`` disables a bound — the escape hatch for a deliberate long stream."""
-    # The 0.2 s hiccup mid-stream stands in for scheduler latency on a loaded
-    # CI runner (#3664); the idle bound must be wide enough to ride it out.
-    upstream = _EndlessStream(_GARBAGE_CHUNK, gap=0.02, burst=20, hiccup=(10, 0.2))
-    dispatcher = _dispatcher(upstream, total=0.0, idle=0.6)
+    # ``gap=0`` makes the burst immune to scheduler latency (#3664). Each chunk
+    # waits on ``asyncio.sleep(0)``, which puts the task straight back on the
+    # ready queue, so the event loop resumes it before it can run the idle
+    # timeout's callback, however long a loaded runner stalls the loop. A real
+    # gap raced the idle bound on wall-clock time and cut the burst short on
+    # CI (19 of 20 at idle 0.15 s, then 10 of 20 at idle 0.6 s). The stream
+    # still runs for the full idle bound after the burst, so a total bound
+    # that treated 0.0 as "zero seconds" would still cut it at the first chunk.
+    upstream = _EndlessStream(_GARBAGE_CHUNK, gap=0.0, burst=20)
+    dispatcher = _dispatcher(upstream, total=0.0, idle=0.5)
     try:
         resp = await dispatcher.forward(_call())
         body = await _drain(resp)
