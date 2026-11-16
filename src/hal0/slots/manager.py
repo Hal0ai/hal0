@@ -78,7 +78,12 @@ from hal0.slots.drift import load_would_restart as _load_would_restart
 from hal0.slots.layout import is_id_stem, resolve_slot_stem, shadowed_slot_files
 from hal0.slots.npu.trio import is_npu_trio_shadow
 from hal0.slots.npu.trio import reconcile_trio_slots as _npu_reconcile_trio_slots
-from hal0.slots.preload_evict import _DEFAULT_HEADROOM_MB
+from hal0.slots.preload_evict import (
+    _DEFAULT_HEADROOM_MB,
+    ADMISSION_REFUSED,
+    PreloadEvictionFailed,
+)
+from hal0.slots.preload_evict import admission_would_fit as _admission_would_fit
 from hal0.slots.preload_evict import admit as _preload_admit
 from hal0.slots.profile_adopt import type_implied_profile
 from hal0.slots.reaper import _EVICT_AFTER_S, _IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S, SlotReaper
@@ -1466,6 +1471,27 @@ class SlotManager:
         """
         return self.state(name) in self._DISPATCHABLE_STATES
 
+    def error_detail(self, name: str) -> dict[str, Any] | None:
+        """The ERROR record's evidence for *name*, or ``None`` when it is not in ERROR.
+
+        Synchronous, for the dispatch path (#3502): a request that capability
+        routing lands on a slot with no upstream says WHY when the slot is
+        broken — ``state``, ``load_error`` (the record's message) and, when
+        the failure carried one, ``error_reason``.
+        """
+        resolved = self._resolve_alias(name)
+        if self._current_state(resolved) != SlotState.ERROR:
+            return None
+        rec = self._states.get(self._key(resolved))
+        detail: dict[str, Any] = {
+            "state": SlotState.ERROR.value,
+            "load_error": rec.message if rec is not None else "",
+        }
+        reason = rec.extra.get("error_reason") if rec is not None else None
+        if reason:
+            detail["error_reason"] = reason
+        return detail
+
     def is_busy(self, name: str) -> bool:
         """Return ``True`` while a load, unload, restart or swap holds *name*'s lock.
 
@@ -2482,6 +2508,13 @@ class SlotManager:
                 # backoff/park gate above. ``parked`` rides ``extra`` (not a
                 # new enum value — wire/state-machine compatible) so the UI
                 # can render "parked — manual restart required".
+                if isinstance(exc, PreloadEvictionFailed):
+                    # #3502 / ADR-0062: the admission gate refused the load
+                    # before anything started. Mark it so the reaper's
+                    # re-admission sweep retries it once capacity frees;
+                    # nothing else would: the slot never reached WARMING, so
+                    # no fail-watcher owns it.
+                    gate_extra["error_reason"] = ADMISSION_REFUSED
                 key = self._key(slot_name)
                 failures = self._load_failures.get(key, (0, 0.0))[0] + 1
                 self._load_failures[key] = (failures, time.monotonic())
@@ -4834,6 +4867,70 @@ class SlotManager:
     async def _pressure_evict_once(self) -> None:
         """See :meth:`hal0.slots.reaper.SlotReaper.pressure_evict_once`."""
         await self._reaper.pressure_evict_once()
+
+    async def readmit_refused_once(self) -> tuple[str, ...]:
+        """Retry every slot the admission gate refused, once it would fit (#3502).
+
+        ADR-0062. A load refused by :func:`hal0.slots.preload_evict.admit`
+        leaves the slot in ERROR with ``error_reason = "admission_refused"``
+        and nothing started, so no fail-watcher owns it and a request only
+        retries it when it names the slot's bound model. The reaper calls this
+        on every tick. A refused slot is retried only when all of these hold:
+
+        * no lifecycle operation holds its lock;
+        * the crash-loop breaker permits a trial (its backoff and park
+          cool-downs still apply, so an estimate that keeps disagreeing with
+          the real admission backs off to the park ceiling);
+        * a dry run of the admission plan
+          (:func:`hal0.slots.preload_evict.admission_would_fit`) says the
+          slot's configured model fits, counting idle, non-pinned slots the
+          gate may evict. A box that is still short pays nothing: no
+          eviction, no load attempt, no breaker count.
+
+        An operator unload (ERROR to OFFLINE) or a successful load retires the
+        mark, so this never revives a slot someone took down. Returns the
+        names it re-admitted, in sweep order.
+        """
+        readmitted: list[str] = []
+        for key, rec in list(self._states.items()):
+            if rec.state != SlotState.ERROR or rec.extra.get("error_reason") != ADMISSION_REFUSED:
+                continue
+            name = self._name_for_key(key)
+            if not name or self.is_busy(name):
+                continue
+            failures, last_failure = self._load_failures.get(key, (0, 0.0))
+            if _crash_loop_remaining_s(failures, last_failure) > 0:
+                continue
+            try:
+                cfg = await self._load_slot_config(name)
+            except (SlotConfigError, SlotNotFound):
+                continue
+            model_id = _model_default(cfg)
+            if not model_id:
+                continue
+            try:
+                fits = await _admission_would_fit(self, slot_name=name, model_id=model_id)
+            except Exception as exc:  # a probe failure must not kill the sweep
+                log.warning(
+                    "slot.admission_readmit_probe_failed",
+                    extra={"slot": name, "error": str(exc)},
+                )
+                continue
+            if not fits:
+                log.debug("slot.admission_readmit_still_short", extra={"slot": name})
+                continue
+            log.info("slot.admission_readmit", extra={"slot": name, "model_id": model_id})
+            try:
+                await self.load(name)
+            except Exception as exc:
+                # load() stamped ERROR (and the breaker) itself.
+                log.warning(
+                    "slot.admission_readmit_failed",
+                    extra={"slot": name, "error": str(exc), "error_type": type(exc).__name__},
+                )
+                continue
+            readmitted.append(name)
+        return tuple(readmitted)
 
     async def is_pinned(self, slot_name: str) -> bool:
         """True when *slot_name* is exempt from eviction (§21.10 operator pin).

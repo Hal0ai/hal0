@@ -261,6 +261,7 @@ class ReaperHost(Protocol):
     async def _load_slot_config(self, name: str) -> dict[str, Any]: ...
     async def _transition(self, name: str, to_state: SlotState, **kw: Any) -> SlotStateRecord: ...
     async def unload(self, name: str) -> Slot: ...
+    async def readmit_refused_once(self) -> tuple[str, ...]: ...
 
 
 class SlotReaper:
@@ -312,7 +313,7 @@ class SlotReaper:
             await task
 
     async def _loop(self) -> None:
-        """Periodically sweep READY slots for idle-timeout and pressure."""
+        """Sweep READY slots for idle-timeout and pressure, then re-admit refused loads."""
         host = self._host
         try:
             while True:
@@ -325,6 +326,12 @@ class SlotReaper:
                     await self.pressure_evict_once()
                 except Exception as exc:
                     log.warning("slot.pressure_sweep_failed", extra={"error": str(exc)})
+                try:
+                    # #3502 / ADR-0062: after the sweeps above have freed what
+                    # they free, retry any load the admission gate refused.
+                    await host.readmit_refused_once()
+                except Exception as exc:
+                    log.warning("slot.admission_readmit_sweep_failed", extra={"error": str(exc)})
         except asyncio.CancelledError:
             raise
 

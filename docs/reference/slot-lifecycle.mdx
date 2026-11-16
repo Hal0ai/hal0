@@ -171,6 +171,26 @@ slot card and the Edit-slot drawer's state strip: amber "retry in Ns" while
 backing off, red "parked · N failures" once parked, and a neutral "trial
 pending" during the half-open window.
 
+### A load the admission gate refused
+
+Pre-load eviction (`preload_evict`) refuses a load with
+`slot.preload_evict_insufficient` (507) when the model still doesn't fit after
+evicting every idle, non-pinned slot. Nothing starts, the slot goes to `ERROR`
+with `metadata.error_reason = "admission_refused"`, and the failure counts on the
+breaker like any other.
+
+hal0 retries a refused slot by itself (ADR-0062). On every idle-monitor tick, after
+its idle and pressure sweeps, the reaper re-runs the admission as a dry run, without
+evicting anything. It calls `load()` again only when the breaker permits a trial
+and the slot's configured model would fit, counting the idle slots the gate may
+evict. A box that is still short pays nothing for the check. Unloading the slot
+retires the mark and stops the retries.
+
+A request that capability routing sends to an `ERROR` slot still answers
+`404 dispatch.no_route`, but the body names the slot: `details.slot`,
+`details.state`, `details.load_error` and, when set, `details.error_reason`, next
+to the existing `model`, `path` and `legacy_error`.
+
 ## Container image status
 
 `image_status` on a slot snapshot is one of `present`, `pulling`, `missing`,

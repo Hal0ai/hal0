@@ -1012,11 +1012,28 @@ class Dispatcher:
                 path=path,
                 error=exc.message,
             )
-            raise NoRouteFound(
+            message = (
                 f"model {model_id!r} not found in registry, no upstream advertised it, "
-                f"and legacy slot resolution failed",
-                details={"model": model_id, "path": path, "legacy_error": exc.message},
-            ) from exc
+                f"and legacy slot resolution failed"
+            )
+            details: dict[str, Any] = {
+                "model": model_id,
+                "path": path,
+                "legacy_error": exc.message,
+            }
+            broken = self._broken_slot_detail(exc)
+            if broken is not None:
+                # #3502: the slot capability routing picked is in ERROR (an
+                # admission refusal, a crashed load). Name it, its state and
+                # its load error, in the SlotLoadFailed vocabulary, instead of
+                # a "not found" that reads like a caller typo.
+                slot = broken["slot"]
+                message = (
+                    f"capability routing selected slot {slot!r}, which is in "
+                    f"{broken['state']}: {broken['load_error'] or 'no load error recorded'}"
+                )
+                details.update(broken)
+            raise NoRouteFound(message, details=details) from exc
         except Hal0Error:
             # Typed errors are caller-meaningful: re-raise unchanged.
             raise
@@ -1351,6 +1368,27 @@ class Dispatcher:
                     },
                 },
             )
+
+    def _broken_slot_detail(self, exc: LegacyResolutionFailed) -> dict[str, Any] | None:
+        """``slot``/``state``/``load_error`` for a capability pick that is in ERROR (#3502).
+
+        ``None`` when there is no slot manager, the pick names no slot, or the
+        slot is anywhere but ERROR (offline and never-loaded keep the plain
+        no-route body; #2666 owns waking those).
+        """
+        if self._slot_manager is None:
+            return None
+        slot = (exc.details or {}).get("slot")
+        detail_of = getattr(self._slot_manager, "error_detail", None)
+        if not isinstance(slot, str) or not slot or detail_of is None:
+            return None
+        try:
+            detail = detail_of(slot)
+        except Exception:  # a status read must never mask the routing error
+            return None
+        if not isinstance(detail, dict) or not detail:
+            return None
+        return {"slot": slot, **detail}
 
     def _check_slot_ready_for_dispatch(self, call: UpstreamCall) -> None:
         """Raise a typed error if the target slot isn't ready to serve.
