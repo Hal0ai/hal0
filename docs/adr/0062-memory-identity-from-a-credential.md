@@ -95,11 +95,21 @@ That does not fit, for four reasons found in the code:
      wiring, which hal0-api re-runs on every start and on its periodic
      upstream reconcile. The default profile gets it from provisioning and,
      on an upgraded box, from `converge_default_profile_agent_key`, which
-     hal0-api runs at startup.
-   - The Hermes memory provider reads the key from the `hal0-memory` (or
-     `hal0-admin`) entry of its own profile's `config.yaml` that names its own
-     agent id, re-reading the file when it changes, so a key written after
-     the gateway started is sent from the next call on.
+     hal0-api runs at startup. The provisioning overlay layers it through the
+     YAML deep-merge, never through `hermes config set` argv, which any local
+     user can read in `/proc`.
+   - Each profile is keyed only for the identity its location implies
+     (`hermes` for the default profile, `hermes__<name>` for a named one, the
+     brain constant for `hal0-brain`); an entry naming any other identity is
+     left without a key. A profile that uses the hal0 memory provider also
+     gets `hal0: {agent_key: {agent, key}}`, and so does one opted out of
+     hal0's MCP wiring (`hal0: {wire_mcp: false}`), whose own memory still
+     needs it.
+   - The Hermes memory provider reads the key from `hal0.agent_key`, else
+     from the `hal0-memory` (or `hal0-admin`) entry of its own profile's
+     `config.yaml`, using only a record that names its own agent id. It
+     re-reads the file when it changes, so a key written after the gateway
+     started is sent from the next call on.
    - Pi: `~/.pi/agent/mcp.json` gets the key whenever the driver writes it
      (`sudo hal0 agent install pi`, `sudo hal0 update component pi`).
    - The `hal0 agent` CLI and the provisioner's own probes send it when they
@@ -127,8 +137,8 @@ That does not fit, for four reasons found in the code:
   boot that wrote the default profile's key, `try-restart`s the gateway and
   the agent unit so both load the new config and plugin. Between hal0-api's
   start and that restart, the old plugin's bare `X-hal0-Agent: hermes` gets
-  403 on REST memory. If the restart fails (the seam refuses it), the log line
-  `hermes.default_profile_agent_key_written` names the units, and a restart
+  403 on REST memory. If the restart fails (the seam refuses it), the warning
+  `hermes.default_profile_agent_key_restart_failed` names the units, and a restart
   of `hermes-gateway` or `hal0 agent reprovision hermes --repair` finishes it.
 - Pi needs `sudo hal0 update component pi` (Pi lives in the installing user's
   home, which hal0-api cannot write). Until then its `hal0-memory` server gets
