@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { flmPickerOptions, formatFlmSize, ggufNpuRows } from './npu-models-pure'
+import { flmCatalogRows, flmPickerOptions, formatFlmSize, ggufNpuRows } from './npu-models-pure'
 
 const models = [
   { model: 'qwen3:8b', installed: false, capabilities: ['chat'], family: 'qwen3' },
@@ -89,5 +89,24 @@ describe('ggufNpuRows', () => {
   it('a fit row without a registry entry still shows, with no size', () => {
     const rows = ggufNpuRows([] as never, { z: { xdna_path: null, reason: 'file missing' } } as never, [])
     expect(rows).toEqual([{ id: 'z', arch: null, size: null, fit: null, reason: 'file missing', usedBy: [] }])
+  })
+})
+
+describe('flmCatalogRows', () => {
+  const cat = [
+    { model: 'qwen3.5:9b', installed: false, capabilities: ['chat'], family: 'qwen3.5', size_bytes: 6_400_000_000 },
+    { model: 'gemma4-it:e4b', installed: true, capabilities: ['chat', 'stt'], family: 'gemma4', size_bytes: 4_000_000_000 },
+    { model: 'embed-gemma:300m', installed: true, capabilities: ['embed'], family: 'embed-gemma' },
+  ]
+  it('one row per model across roles, installed first, audio from the chat+stt rows', () => {
+    const rows = flmCatalogRows(cat)
+    expect(rows.map((r) => r.id)).toEqual(['embed-gemma:300m', 'gemma4-it:e4b', 'qwen3.5:9b'])
+    const g = rows.find((r) => r.id === 'gemma4-it:e4b')!
+    expect(g.caps).toEqual(['chat', 'stt'])
+    expect(g.audio).toBe(true)
+    expect(rows.find((r) => r.id === 'qwen3.5:9b')!.installed).toBe(false)
+  })
+  it('empty for a missing catalogue', () => {
+    expect(flmCatalogRows(undefined)).toEqual([])
   })
 })

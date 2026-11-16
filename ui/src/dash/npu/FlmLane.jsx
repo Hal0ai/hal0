@@ -258,7 +258,8 @@ function FlmLaneBody({ anchor }) {
         />
       </div>
       <div className="npt-hint">
-        Each role switches on and off on its own card. FLM is one process, so a change restarts it and the other running roles pause for a few seconds.
+        Each role switches on and off on its own card. FLM is one process, so a change restarts it and the other running roles pause for a few seconds.{' '}
+        <a href="#models/flm" data-testid="flm-catalogue-link">FLM model catalogue</a>
       </div>
 
       <div className="npt-gcards">
