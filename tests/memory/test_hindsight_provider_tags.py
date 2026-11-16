@@ -181,7 +181,9 @@ async def test_private_write_ignores_caller_observation_scopes():
     p = _provider()
     for scopes in (["per_tag"][0], [["topic:cats"]], "combined"):
         await p.add("x", dataset="private:alice", client_id="alice", observation_scopes=scopes)
-        assert "observation_scopes" not in p._client.retained[-1]
+        assert p._client.retained[-1]["observation_scopes"] == [
+            ["agent:alice", "visibility:private"]
+        ]
 
 
 @pytest.mark.asyncio

@@ -2086,21 +2086,20 @@ class HindsightProvider(MemoryProvider):
             item["entities"] = entities
         # A private note must not feed an observation another agent can read,
         # so on a private write the caller's scopes (any form) are ignored.
-        # Two-bank: the write is sent with its writer's own scope,
+        # Both layouts: the write is sent with its writer's own scope,
         # ``[agent:<id>, visibility:private(, project:<slug>)]``; the engine
         # consolidates an explicit scope only with observations that carry
         # every one of its tags and writes the observation with exactly those
-        # tags, so it stays this agent's and stays private. Legacy unified:
-        # the engine default applies, as before (#3547 is held off there by
-        # ``spec apply``). Every other write is sent with the envelope's scope
+        # tags, so it stays this agent's and stays private. In the unified
+        # bank this also keeps a bank default such as the shared spec's
+        # ``[["project:*"]]`` from applying, which would drop the private tags
+        # from the observation (#3547). Every other write is sent with the envelope's scope
         # unless the caller chose one: one scope per ``project:`` tag when it
         # carries any, else ``shared``, the one untagged scope
         # (``project:unresolved`` is not a project for this). Either way
         # per-call tags stop splitting observations into silos.
-        if self._two_bank and requested_private:
+        if (self._two_bank or self._unified_bank) and requested_private:
             observation_scopes = _private_observation_scopes(out_tags)
-        elif self._unified_bank and requested_private:
-            observation_scopes = None
         else:
             observation_scopes = resolve_observation_scopes(
                 _strip_reserved_scopes(observation_scopes), out_tags
