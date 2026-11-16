@@ -1232,7 +1232,7 @@ def test_brain_phase_fails_closed_when_an_off_box_cannot_gate_it(
     monkeypatch.setattr(
         hp,
         "_merge_profile_config",
-        lambda path, desired: {"wired": False, "changed": False, "error": "read-only"},
+        lambda path, desired, **_kw: {"wired": False, "changed": False, "error": "read-only"},
     )
     state = hp.BootstrapState(hermes_home=str(tmp_path), terminal_enabled=False)
     out = hp._phase_brain_profile_mcp_wire(hp._StepCtx(state=state, io=hp.InstallIO()))

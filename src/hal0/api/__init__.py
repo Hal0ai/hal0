@@ -2087,23 +2087,11 @@ async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
     # on a difference (the key is derived, so a converged file is untouched).
     try:
         from hal0.agents import hermes_api as _hermes_api_key
-        from hal0.agents.hermes_provision import (
-            converge_default_profile_agent_key,
-            try_restart_hermes_consumers,
-        )
+        from hal0.agents.hermes_provision import converge_default_profile_agent_key_on_boot
 
-        key_result = await asyncio.to_thread(
-            converge_default_profile_agent_key, _hermes_api_key.hermes_home()
+        await asyncio.to_thread(
+            converge_default_profile_agent_key_on_boot, _hermes_api_key.hermes_home()
         )
-        if key_result.get("changed"):
-            # The gateway and the agent unit load config.yaml (and the memory
-            # provider plugin ``hal0 update`` just mirrored) in their own
-            # process, so they are bounced once, here, on the one boot that
-            # wrote the key. try-restart leaves a stopped unit stopped.
-            failed = await asyncio.to_thread(try_restart_hermes_consumers)
-            log.info("hermes.default_profile_agent_key_written", restart_failed=failed)
-        elif key_result.get("error"):
-            log.warning("hermes.default_profile_agent_key_failed", error=key_result["error"])
     except Exception as exc:  # must never block startup
         log.warning("hermes.default_profile_agent_key_failed", error=str(exc))
 

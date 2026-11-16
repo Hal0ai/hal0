@@ -319,9 +319,10 @@ _KEY_SERVERS = ("hal0-memory", "hal0-admin")
 def _read_agent_key(path: str, agent_id: str) -> str | None:
     """The identity key hal0 wrote for ``agent_id`` into the profile's config.yaml (#3569).
 
-    hal0 puts ``X-hal0-Agent-Key`` beside ``X-hal0-Agent`` on its own MCP
-    entries (``mcp_servers.hal0-memory`` / ``hal0-admin``). The key is used
-    only from an entry that names this client's own agent, so a hand-edited
+    hal0 writes ``hal0: {agent_key: {agent, key}}`` for every profile that uses
+    this provider, and puts ``X-hal0-Agent-Key`` beside ``X-hal0-Agent`` on its
+    own MCP entries (``mcp_servers.hal0-memory`` / ``hal0-admin``). The key is used
+    only from a record or entry that names this client's own agent, so a hand-edited
     entry for another identity is never borrowed. ``None`` when there is no
     such entry or the file cannot be read: the request then goes without a
     key, and hal0 treats the name as an audit label. Never raises.
@@ -334,7 +335,17 @@ def _read_agent_key(path: str, agent_id: str) -> str | None:
         data = yaml.safe_load(text)
     except Exception:
         return None
-    servers = data.get("mcp_servers") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    # ``hal0.agent_key`` is written for every profile that uses this provider,
+    # including one opted out of hal0's MCP wiring (``hal0.wire_mcp: false``).
+    hal0 = data.get("hal0")
+    record = hal0.get("agent_key") if isinstance(hal0, dict) else None
+    if isinstance(record, dict) and record.get("agent") == agent_id:
+        key = record.get("key")
+        if isinstance(key, str) and key.strip():
+            return key.strip()
+    servers = data.get("mcp_servers")
     if not isinstance(servers, dict):
         return None
     for name in _KEY_SERVERS:

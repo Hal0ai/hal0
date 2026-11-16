@@ -2585,13 +2585,10 @@ def _build_config_overlay(
     from hal0.service_identity import service_key
 
     bearer = service_key(prefer="admin")
-    # The identity key backs the X-hal0-Agent claim (#3569): without it the
-    # memory surfaces treat the header as an audit label and refuse a reserved
-    # name (``hermes``) with 403. Derived, so a re-provision writes the same
-    # value back and never rotates it.
-    from hal0.agent_identity import AGENT_KEY_HEADER, key_for
-
-    agent_key = key_for(agent_id)
+    # The identity key that backs X-hal0-Agent (#3569) is NOT set here: argv is
+    # world-readable in /proc while ``hermes config set`` runs. It is layered by
+    # the YAML deep-merge instead (:func:`_agent_key_desired`, applied in
+    # ``_phase_config_write``).
     for srv in mcp_servers:
         name = srv["name"]
         pairs += [
@@ -2602,8 +2599,6 @@ def _build_config_overlay(
         ]
         if bearer:
             pairs.append((f"mcp_servers.{name}.headers.Authorization", f"Bearer {bearer}"))
-        if agent_key:
-            pairs.append((f"mcp_servers.{name}.headers.{AGENT_KEY_HEADER}", agent_key))
         # X-hal0-Private deliberately does NOT go through `hermes config set`:
         # hermes coerces bare integers on the way in (see _fmt_config_value),
         # so "1" lands in config.yaml as the YAML int 1 — and hermes' own MCP
@@ -2730,7 +2725,11 @@ def _apply_config_set(
                 )  # nosec B603 — argv from local config
             applied += 1
         except (subprocess.SubprocessError, OSError) as exc:
-            errors.append(f"{key}: {exc}")
+            # str(CalledProcessError) carries the argv, a bearer included; this
+            # string reaches PhaseResult.reason, provision.json and the log.
+            from hal0.redaction import redact_secret_shapes
+
+            errors.append(f"{key}: {redact_secret_shapes(str(exc))}")
     return applied, errors
 
 
@@ -3794,7 +3793,13 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
                         saved_backend=saved_backend,
                     ),
                 ),
-                _persona_prompt_layer(system_prompt),
+                _deep_merge(
+                    _persona_prompt_layer(system_prompt),
+                    # The identity key (#3569), layered here and never through
+                    # ``hermes config set`` argv. Computed from the file as it is
+                    # now, after the config-set calls named the agent.
+                    _agent_key_desired(_parse_yaml_config(pre_merge) or {}, state.agent_id),
+                ),
             ),
             overrides_path=OVERRIDES_PATH,
             persona_names=_hal0_persona_display_names(state),
@@ -5584,7 +5589,10 @@ def _open_profiles_root(home: Path) -> int:
 
 
 def _merge_profile_config(
-    path: Path, desired: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]]
+    path: Path,
+    desired: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    identity_agent: str | None = None,
 ) -> dict[str, Any]:
     """Deep-merge hal0's keys into one profile ``config.yaml`` (path form).
 
@@ -5599,7 +5607,7 @@ def _merge_profile_config(
     except OSError as exc:
         return {"wired": False, "changed": False, "error": _yaml_error_summary(exc)}
     try:
-        return _merge_profile_config_at(dir_fd, path, desired)
+        return _merge_profile_config_at(dir_fd, path, desired, identity_agent=identity_agent)
     finally:
         os.close(dir_fd)
 
@@ -5630,8 +5638,14 @@ def _merge_profile_config_at(
     desired: dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]],
     *,
     still_named: Callable[[], bool] | None = None,
+    identity_agent: str | None = None,
 ) -> dict[str, Any]:
     """Deep-merge hal0's keys into the ``config.yaml`` inside directory ``dir_fd``.
+
+    ``identity_agent`` is the memory identity this profile's location implies;
+    its identity key (:func:`_agent_key_desired`) is merged after the opt-out
+    filter, because a profile opted out of hal0's MCP wiring still needs it for
+    the memory it uses (#3569 review, S6).
 
     Every file operation is relative to the verified directory descriptor and
     refuses symlinks (``O_NOFOLLOW``), the file must be regular (a FIFO would
@@ -5704,8 +5718,10 @@ def _merge_profile_config_at(
                     # the backend gate is what keeps the terminal tool away from
                     # the gateway's side agents in THIS profile too (#2878).
                     wanted = {k: v for k, v in wanted.items() if k in ("terminal", "hal0", "agent")}
-                    if not wanted:
-                        return {"wired": False, "changed": False, "reason": "opted out"}
+                if identity_agent is not None:
+                    wanted = _deep_merge(wanted, _agent_key_desired(base, identity_agent))
+                if opted_out and not wanted:
+                    return {"wired": False, "changed": False, "reason": "opted out"}
                 merged = _deep_merge(base, wanted)
                 changed = merged != base
                 if not changed:
@@ -6040,30 +6056,65 @@ def _profile_wire_desired_for(
 _AGENT_ID_CLAIM_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
-def _agent_key_desired(base: dict[str, Any]) -> dict[str, Any]:
-    """``desired`` that gives hal0's MCP entries in ``base`` their identity key (#3569).
+#: The memory identity of the default Hermes profile (``BootstrapState.agent_id``).
+DEFAULT_PROFILE_AGENT_ID = "hermes"
 
-    Only ``hal0-admin`` and ``hal0-memory`` entries that already name an agent
-    in ``X-hal0-Agent`` are touched, and each gets the key for the agent it
-    names. Nothing else in the document changes, so an operator's own servers
-    and hand edits survive.
+#: Where hal0 records a profile's identity key for the memory provider plugin
+#: (``hal0: {agent_key: {agent, key}}``), read when no hal0 MCP entry carries it.
+PROFILE_AGENT_KEY_KEY = "agent_key"
+
+
+def _uses_hal0_memory(base: dict[str, Any]) -> bool:
+    memory = base.get("memory")
+    return isinstance(memory, dict) and memory.get("provider") == "hal0-memory"
+
+
+def _agent_key_desired(base: dict[str, Any], expected: str) -> dict[str, Any]:
+    """The identity-key keys a profile ``config.yaml`` needs for agent ``expected`` (#3569).
+
+    ``expected`` is the identity the caller derived from where the file lives
+    (``hermes`` for the default profile, ``hermes__<name>`` for a named one),
+    never what the file says (#3569 review, S4): a ``hal0-admin`` /
+    ``hal0-memory`` entry whose ``X-hal0-Agent`` names anyone else gets no key.
+    Each entry that names ``expected`` gets ``X-hal0-Agent-Key``, and a profile
+    that uses the hal0 memory provider gets ``hal0.agent_key`` for the plugin,
+    which a profile opted out of hal0's MCP wiring still needs for its own
+    memory (S6). Nothing else in the document changes.
     """
     from hal0.agent_identity import AGENT_KEY_HEADER, key_for
 
+    if not _AGENT_ID_CLAIM_RE.match(expected):
+        return {}
     servers = base.get("mcp_servers")
-    if not isinstance(servers, dict):
+    named = [
+        name
+        for name in _MEMORY_REACHING_SERVERS
+        if isinstance(servers, dict)
+        and isinstance(servers.get(name), dict)
+        and isinstance(servers[name].get("headers"), dict)
+        and servers[name]["headers"].get("X-hal0-Agent") == expected
+    ]
+    plugin = _uses_hal0_memory(base)
+    if not named and not plugin:
+        return {}
+    key = key_for(expected)
+    if not key:
         return {}
     wanted: dict[str, Any] = {}
-    for name in _MEMORY_REACHING_SERVERS:
-        entry = servers.get(name)
-        headers = entry.get("headers") if isinstance(entry, dict) else None
-        agent = headers.get("X-hal0-Agent") if isinstance(headers, dict) else None
-        if not isinstance(agent, str) or not _AGENT_ID_CLAIM_RE.match(agent):
-            continue
-        key = key_for(agent)
-        if key and headers.get(AGENT_KEY_HEADER) != key:
-            wanted[name] = {"headers": {AGENT_KEY_HEADER: key}}
-    return {"mcp_servers": wanted} if wanted else {}
+    entries = {
+        name: {"headers": {AGENT_KEY_HEADER: key}}
+        for name in named
+        if servers[name]["headers"].get(AGENT_KEY_HEADER) != key
+    }
+    if entries:
+        wanted["mcp_servers"] = entries
+    if plugin:
+        hal0 = base.get("hal0")
+        current = hal0.get(PROFILE_AGENT_KEY_KEY) if isinstance(hal0, dict) else None
+        record = {"agent": expected, "key": key}
+        if current != record:
+            wanted["hal0"] = {PROFILE_AGENT_KEY_KEY: record}
+    return wanted
 
 
 def converge_default_profile_agent_key(home: Path) -> dict[str, Any]:
@@ -6085,9 +6136,42 @@ def converge_default_profile_agent_key(home: Path) -> dict[str, Any]:
     except OSError as exc:
         return {"wired": False, "changed": False, "error": _yaml_error_summary(exc)}
     try:
-        return _merge_profile_config_at(dir_fd, home / "config.yaml", _agent_key_desired)
+        return _merge_profile_config_at(
+            dir_fd, home / "config.yaml", lambda _base: {}, identity_agent=DEFAULT_PROFILE_AGENT_ID
+        )
     finally:
         os.close(dir_fd)
+
+
+def converge_default_profile_agent_key_on_boot(
+    home: Path, *, restart: Callable[[], list[str]] | None = None
+) -> dict[str, Any]:
+    """hal0-api's startup step: converge the default profile's key, bounce Hermes once.
+
+    The gateway and the agent unit load ``config.yaml`` (and the memory
+    provider plugin ``hal0 update`` just mirrored) in their own process, so
+    they are ``try-restart``ed on the one boot that wrote the key; a stopped
+    unit stays stopped. A unit that does not restart keeps the old config and
+    plugin, and its REST memory calls get 403 until it does, so that is a
+    warning naming the remedy (#3569 review, S8). Never raises.
+    """
+    result = converge_default_profile_agent_key(home)
+    if result.get("error"):
+        log.warning("hermes.default_profile_agent_key_failed", error=result["error"])
+        return result
+    if not result.get("changed"):
+        return result
+    failed = (restart or try_restart_hermes_consumers)()
+    result["restart_failed"] = failed
+    if failed:
+        log.warning(
+            "hermes.default_profile_agent_key_restart_failed",
+            units=failed,
+            remedy="systemctl restart hermes-gateway, or hal0 agent reprovision hermes --repair",
+        )
+    else:
+        log.info("hermes.default_profile_agent_key_written")
+    return result
 
 
 def wire_named_profiles(
@@ -6157,6 +6241,7 @@ def wire_named_profiles(
                             profile_agent_id(name), terminal_enabled=terminal_enabled
                         ),
                         still_named=lambda n=name, d=dir_fd: _same_inode(root_fd, n, d),
+                        identity_agent=profile_agent_id(name),
                     )
                 finally:
                     os.close(dir_fd)
@@ -6250,7 +6335,9 @@ def _phase_brain_profile_mcp_wire(ctx: _StepCtx) -> PhaseResult:
     )
     backend_before = _terminal_backend_in_config(_read_text_or_none(path))
     result = _merge_profile_config(
-        path, _profile_wire_desired_for(BRAIN_PROFILE_AGENT_ID, terminal_enabled=terminal_enabled)
+        path,
+        _profile_wire_desired_for(BRAIN_PROFILE_AGENT_ID, terminal_enabled=terminal_enabled),
+        identity_agent=BRAIN_PROFILE_AGENT_ID,
     )
     backend_changed = _terminal_backend_in_config(_read_text_or_none(path)) != backend_before
     if result.get("error"):

@@ -477,3 +477,173 @@ def test_no_key_for_a_name_a_bridge_client_may_hold(name: str) -> None:
     forged = agent_identity._derive(secret, name)
     assert not agent_identity.verify(name, forged)
     assert agent_identity.judge_claim(name, forged) == agent_identity.CLAIM_UNVERIFIED
+
+
+# ── convergence keys only the identity the location implies (review S4, S6) ──
+
+
+def _write_config(home: Path, config: dict[str, Any]) -> Path:
+    import yaml
+
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / "config.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    return path
+
+
+def _read_config(path: Path) -> dict[str, Any]:
+    import yaml
+
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def test_default_profile_convergence_keys_only_hermes(tmp_path: Path) -> None:
+    """A default-profile entry naming another identity never gets that identity's key."""
+    from hal0.agents import hermes_provision as hp
+
+    path = _write_config(
+        tmp_path / "home",
+        {
+            "mcp_servers": {
+                "hal0-memory": {"url": "u", "headers": {"X-hal0-Agent": "pi"}},
+                "hal0-admin": {"url": "u", "headers": {"X-hal0-Agent": "hermes__coder"}},
+            }
+        },
+    )
+    hp.converge_default_profile_agent_key(tmp_path / "home")
+    servers = _read_config(path)["mcp_servers"]
+    assert "X-hal0-Agent-Key" not in servers["hal0-memory"]["headers"]
+    assert "X-hal0-Agent-Key" not in servers["hal0-admin"]["headers"]
+
+
+def test_agent_key_desired_ignores_a_foreign_name() -> None:
+    from hal0.agents import hermes_provision as hp
+
+    base = {"mcp_servers": {"hal0-memory": {"headers": {"X-hal0-Agent": "pi"}}}}
+    assert hp._agent_key_desired(base, "hermes__coder") == {}
+
+
+def test_an_opted_out_profile_that_uses_hal0_memory_keeps_its_key(tmp_path: Path) -> None:
+    """``hal0: {wire_mcp: false}`` opts out of the wiring, not out of the profile's own memory."""
+    from hal0.agents import hermes_provision as hp
+    from hal0.agents.hermes.plugins.memory_hindsight import provider as plugin
+
+    home = tmp_path / "hermes"
+    path = _write_config(
+        home / "profiles" / "lab",
+        {
+            "hal0": {"wire_mcp": False},
+            "memory": {"provider": "hal0-memory"},
+            "mcp_servers": {
+                "hal0-memory": {"url": "u", "headers": {"X-hal0-Agent": "hermes__lab"}},
+                "mine": {"url": "m", "headers": {"X-hal0-Agent": "hermes__lab"}},
+            },
+        },
+    )
+    report = hp.wire_named_profiles(home, terminal_enabled=None)
+    assert "lab" not in report.get("errors", {}), report
+    data = _read_config(path)
+    key = agent_identity.key_for("hermes__lab")
+    assert data["hal0"]["agent_key"] == {"agent": "hermes__lab", "key": key}
+    assert data["hal0"]["wire_mcp"] is False
+    assert data["mcp_servers"]["hal0-memory"]["headers"]["X-hal0-Agent-Key"] == key
+    assert "X-hal0-Agent-Key" not in data["mcp_servers"]["mine"]["headers"]  # not hal0's
+    assert set(data["mcp_servers"]) == {"hal0-memory", "mine"}  # wiring still opted out
+    assert plugin._read_agent_key(str(path), "hermes__lab") == key
+
+
+def test_an_opted_out_profile_without_hal0_memory_gets_no_key(tmp_path: Path) -> None:
+    from hal0.agents import hermes_provision as hp
+
+    home = tmp_path / "hermes"
+    path = _write_config(
+        home / "profiles" / "discord",
+        {"hal0": {"wire_mcp": False}, "memory": {"provider": "other"}},
+    )
+    hp.wire_named_profiles(home, terminal_enabled=None)
+    assert "agent_key" not in (_read_config(path).get("hal0") or {})
+
+
+def test_the_plugin_reads_the_hal0_record_first(tmp_path: Path) -> None:
+    from hal0.agents.hermes.plugins.memory_hindsight import provider as plugin
+
+    path = _write_config(
+        tmp_path / "p",
+        {"hal0": {"agent_key": {"agent": "hermes__x", "key": "hal0ak_" + "r" * 43}}},
+    )
+    assert plugin._read_agent_key(str(path), "hermes__x") == "hal0ak_" + "r" * 43
+    assert plugin._read_agent_key(str(path), "hermes") is None
+
+
+# ── the key never rides argv; a failed restart is a warning (review S7, S8) ──
+
+
+def test_the_overlay_never_puts_the_key_on_the_command_line() -> None:
+    from hal0.agents import hermes_provision as hp
+
+    agent_identity.key_for("hermes")  # a secret exists, so a key could be derived
+    pairs = hp._build_config_overlay(
+        primary={
+            "model_id": "m",
+            "backend_url": "http://127.0.0.1:8080/v1",
+            "context_length": 16384,
+        },
+        chat_slots=[],
+        delegation=None,
+        auxiliary_tasks={},
+        mcp_servers=hp._default_mcp_servers(),
+        agent_id="hermes",
+        live_resolve_enabled=False,
+    )
+    assert pairs
+    assert not any("X-hal0-Agent-Key" in key for key, _value in pairs)
+    assert not any(str(value).startswith("hal0ak_") for _key, value in pairs)
+
+
+def test_config_set_errors_are_redacted(tmp_path: Path) -> None:
+    import subprocess
+
+    from hal0.agents import hermes_provision as hp
+
+    secret = "hal0ak_" + "s" * 43
+
+    def run(argv: list[str], **_kw: Any) -> None:
+        raise subprocess.CalledProcessError(1, argv)
+
+    home = tmp_path / "hermes"
+    home.mkdir()
+    _applied, errors = hp._apply_config_set(
+        [("x.headers.Authorization", f"Bearer {secret}")],
+        hermes_bin=tmp_path / "hermes-bin",
+        hermes_home=home,
+        run=run,
+    )
+    assert errors and secret not in errors[0]
+
+
+def test_a_failed_restart_after_writing_the_key_is_a_warning(tmp_path: Path) -> None:
+    from structlog.testing import capture_logs
+
+    from hal0.agents import hermes_provision as hp
+
+    _write_config(
+        tmp_path / "home",
+        {"mcp_servers": {"hal0-memory": {"url": "u", "headers": {"X-hal0-Agent": "hermes"}}}},
+    )
+    with capture_logs() as logs:
+        result = hp.converge_default_profile_agent_key_on_boot(
+            tmp_path / "home", restart=lambda: ["hermes-gateway.service"]
+        )
+    assert result["changed"] is True
+    warned = [e for e in logs if e["event"] == "hermes.default_profile_agent_key_restart_failed"]
+    assert warned and warned[0]["log_level"] == "warning"
+    assert warned[0]["units"] == ["hermes-gateway.service"]
+    # Converged: the next boot restarts nothing.
+    calls: list[int] = []
+
+    def restart() -> list[str]:
+        calls.append(1)
+        return []
+
+    again = hp.converge_default_profile_agent_key_on_boot(tmp_path / "home", restart=restart)
+    assert again["changed"] is False and calls == []
