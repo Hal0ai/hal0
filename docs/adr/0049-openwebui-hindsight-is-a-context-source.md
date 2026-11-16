@@ -5,7 +5,7 @@
 **ACCEPTED (2026-11-02).** Implements shared-memory recall in the chat
 companion without replacing its document RAG.
 
-Amended by [ADR-0059](0059-openwebui-file-context-capability-pin.md): Open
+Amended by [ADR-0061](0061-openwebui-file-context-capability-pin.md): Open
 WebUI 0.13 gated the files/RAG handler on the `file_context` model
 capability and flipped that default off, so decision 4's path needs hal0 to
 pin the capability on. The decision itself stands.

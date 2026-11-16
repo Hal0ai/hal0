@@ -1,4 +1,4 @@
-# ADR-0059: hal0 pins Open WebUI's `file_context` capability on
+# ADR-0061: hal0 pins Open WebUI's `file_context` capability on
 
 ## Status
 

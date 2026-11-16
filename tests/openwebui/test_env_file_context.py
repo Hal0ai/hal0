@@ -6,7 +6,7 @@ for an ordinary web chat (native function calling plus a session id). hal0's
 Hindsight Filter injects the recalled memory through exactly that handler
 (ADR-0049), so on 0.13 the injected context would silently stop reaching
 the model. hal0 therefore pins the capability on through Open WebUI's own
-``DEFAULT_MODEL_METADATA`` environment variable (ADR-0059).
+``DEFAULT_MODEL_METADATA`` environment variable (ADR-0061).
 
 The value is a JSON object, so it has to arrive at the container byte for
 byte: the file is read by podman's ``--env-file`` and by systemd's
@@ -53,7 +53,7 @@ def test_the_pin_reaches_the_container_through_systemd(tmp_path: Path) -> None:
 def test_an_operator_hand_edit_wins_over_the_shipped_default(tmp_path: Path) -> None:
     """hal0 owns this key only as a shipped default, so a hand edit sticks."""
     target = tmp_path / "openwebui.env"
-    target.write_text(f'{KEY}=' + '{"capabilities":{"file_context":false}}\n', encoding="utf-8")
+    target.write_text(f"{KEY}=" + '{"capabilities":{"file_context":false}}\n', encoding="utf-8")
     write_openwebui_env(target, preserve_existing=True)
     env = parse_podman_env(target.read_text(encoding="utf-8"))
     assert json.loads(env[KEY])["capabilities"]["file_context"] is False

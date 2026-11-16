@@ -44,7 +44,7 @@ that handler (ADR-0049), so on 0.13 the injected context would silently
 stop reaching the model. ``DEFAULT_MODEL_METADATA`` is the environment
 knob upstream reads for the global model defaults; hal0 pins
 ``capabilities.file_context`` to true so the recall path keeps working, and
-a per-model capability still wins upstream (ADR-0059).
+a per-model capability still wins upstream (ADR-0061).
 
 Exposure (#1515). OpenWebUI runs in its open-by-default posture — no login
 page; hal0's own optional key auth (KB-1) gates the hal0 API only and does
@@ -200,7 +200,7 @@ _DEFAULT_OPENWEBUI_ENV: dict[str, str] = {
     # it stays one line, and it is read straight from the environment
     # (``DEFAULT_MODEL_METADATA``) because hal0 runs Open WebUI with
     # ``ENABLE_PERSISTENT_CONFIG=False``. A per-model capability still wins
-    # upstream, so an operator can opt a model out (ADR-0059).
+    # upstream, so an operator can opt a model out (ADR-0061).
     "DEFAULT_MODEL_METADATA": '{"capabilities":{"file_context":true}}',
     "ENABLE_OLLAMA_API": "False",
     "ENABLE_OPENAI_API": "True",
