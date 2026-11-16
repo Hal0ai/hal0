@@ -167,8 +167,8 @@
 .ov-srow .ov-ctx .ov-track { width: 56px; }
 .ov-srow .ov-cap { color: var(--fg-4); font-size: 10px; }
 .ov-srow .ov-ctxc { position: relative; }
-.ov-srow .ov-acts { position: absolute; top: 50%; right: 14px; transform: translateY(-50%); display: flex; gap: 4px; padding-left: 8px; background: var(--bg-2); opacity: 0; }
-.ov-srow:hover .ov-acts, .ov-srow:focus-within .ov-acts { opacity: 1; }
+.ov-srow .ov-acts { position: absolute; top: 50%; right: 14px; transform: translateY(-50%); display: flex; gap: 4px; padding-left: 8px; background: var(--bg-2); opacity: 0; pointer-events: none; }
+.ov-srow:hover .ov-acts, .ov-srow:focus-within .ov-acts { opacity: 1; pointer-events: auto; }
 .ov-srow .ov-acts .ov-btn { padding: 1px 6px; background: var(--bg-1); }
 .ov-stopped-row td { border-top: 0; padding-top: 0; padding-bottom: 10px; }
 .ov-stopped { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; font-family: var(--jbm); font-size: 10.5px; color: var(--fg-4); }

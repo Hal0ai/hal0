@@ -10,7 +10,7 @@ export interface NpuLaneRow {
   model: string | null
   /** "8", "8 · shared", or "shares flm" for a row riding its anchor's process. */
   cols: string
-  /** Live tok/s from the slot's own metrics; null when not generating or not reported. */
+  /** Live tok/s from the slot's own metrics while it is serving; null otherwise. */
   nowToks: number | null
   lastUsedAge: number | null
   activity: SlotActivityLane | null
@@ -43,7 +43,8 @@ export function npuLaneRows(
         role: roleOf(o),
         model: o.model ?? null,
         cols: o.served_by ? `shares ${o.served_by}` : n ? `${n}${shared ? ' · shared' : ''}` : '—',
-        nowToks: typeof toks === 'number' && toks > 0 ? toks : null,
+        // Only while serving: the backend keeps a slot's last sample after it goes idle.
+        nowToks: o.state === 'serving' && typeof toks === 'number' && toks > 0 ? toks : null,
         lastUsedAge: o.last_used_age_s ?? null,
         activity: activity?.[o.name] ?? null,
       }

@@ -46,8 +46,10 @@ function SlotRow({ tile, hue, activity, focused, onFocus, onGo, onUnload, onLogs
         {tile.stateLabel}
         {tile.inflight ? <span className="ov-infl"> · {tile.inflight} in flight</span> : null}
       </td>
-      <td className="num" style={tile.toks ? { color: hue } : undefined}>
-        {tile.toks ? fmtRate(tile.toks) : '—'}
+      {/* Live rate only while serving: the backend keeps a slot's last sample after it goes idle,
+          so a ready slot would otherwise show its old speed as current. */}
+      <td className="num" style={tile.cls === 'serving' && tile.toks ? { color: hue } : undefined}>
+        {tile.cls === 'serving' ? fmtRate(tile.toks) : '—'}
       </td>
       <td className="num">{activity ? fmtRate(activity.peak_tps) : '—'}</td>
       <td className="num">

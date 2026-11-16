@@ -130,6 +130,20 @@ describe('OvServingNow', () => {
     expect(r.textContent).toContain('2 in flight')
   })
 
+  it('a ready slot shows no live rate even when its metrics keep the last sample', () => {
+    slotsData = SLOTS.map((s) => (s.name === 'agent' ? { ...s, metrics: { toks: 31 } } : s))
+    mount()
+    const cells = [...row('agent')!.querySelectorAll('td.num')].map((td) => td.textContent)
+    expect(cells[0]).toBe('—')
+  })
+
+  it('hidden row actions take no taps', async () => {
+    const { readFileSync } = await import(/* @vite-ignore */ ['node', 'fs'].join(':') as string)
+    const css = readFileSync(`${(globalThis as any).process.cwd()}/src/dash/overview/overview.css`, 'utf8')
+    expect(css).toMatch(/\.ov-srow \.ov-acts \{[^}]*opacity: 0;[^}]*pointer-events: none/)
+    expect(css).toMatch(/\.ov-srow:hover \.ov-acts, \.ov-srow:focus-within \.ov-acts \{[^}]*pointer-events: auto/)
+  })
+
   it('warming and error rows count as loaded and carry their state class', () => {
     slotsData = [
       { name: 'a', device: 'gpu-vulkan', state: 'ready', type: 'llm' },
