@@ -1115,20 +1115,29 @@ async def _download_one(
                     if resume_from > 0:
                         hasher = hashlib.sha256()
                         resume_from = 0
-                    # Content-Length is absent on chunked / content-encoded
-                    # responses (#3428). Fall back to HF's X-Linked-Size (the
-                    # real LFS object size), then to a size already known from
-                    # the repo tree, so the UI keeps a % / rate / ETA.
+                    # Content-Length is absent on chunked responses (#3428).
+                    # Fall back to HF's X-Linked-Size (the real LFS object
+                    # size), which Hugging Face sends on the resolve redirect
+                    # hop rather than on the CDN response, so walk the redirect
+                    # history too. The final response's own Content-Length
+                    # still wins; a size already known from the repo tree is
+                    # kept when neither header is usable.
                     advertised = 0
-                    for header in ("content-length", "x-linked-size"):
-                        raw = resp.headers.get(header)
-                        if raw:
+                    for r in (resp, *reversed(resp.history)):
+                        for header in ("content-length", "x-linked-size"):
+                            if r is not resp and header == "content-length":
+                                continue
+                            raw = r.headers.get(header)
+                            if not raw:
+                                continue
                             try:
                                 advertised = int(raw)
                             except ValueError:
                                 advertised = 0
                             if advertised > 0:
                                 break
+                        if advertised > 0:
+                            break
                     if advertised > 0:
                         rec.bytes_total = advertised
                     job.bytes_total = base_total + rec.bytes_total

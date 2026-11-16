@@ -836,6 +836,57 @@ async def test_run_pull_total_falls_back_to_linked_size_without_content_length(
     assert job.state == "completed"
 
 
+@pytest.mark.asyncio
+async def test_run_pull_total_reads_linked_size_from_redirect_hop_without_content_length(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3428: Hugging Face sends X-Linked-Size on the resolve 302, and the CDN
+    200 it lands on has neither it nor Content-Length. The total must come from
+    the redirect history of a followed redirect."""
+    body = _payload(1024 * 1024)
+    first_chunk_written = asyncio.Event()
+    continue_download = asyncio.Event()
+
+    class PausedStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield body[: 512 * 1024]
+            first_chunk_written.set()
+            await continue_download.wait()
+            yield body[512 * 1024 :]
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        if req.url.host == "huggingface.co":
+            return httpx.Response(
+                302,
+                headers={
+                    "Location": "https://cdn.example.test/blob",
+                    "X-Linked-Size": str(len(body)),
+                },
+            )
+        return httpx.Response(200, stream=PausedStream())
+
+    monkeypatch.setattr("hal0.registry.pull._SSE_MIN_INTERVAL_S", 0.0)
+    job = make_job("no-clen-redirect")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
+    task = asyncio.create_task(
+        run_pull(
+            job,
+            hf_repo="Hal0ai/no-clen-GGUF",
+            hf_file="no-clen.gguf",
+            registry=ModelRegistry(),
+            client=client,
+        )
+    )
+    try:
+        await asyncio.wait_for(first_chunk_written.wait(), timeout=2)
+        assert job.bytes_total == len(body)
+    finally:
+        continue_download.set()
+        await task
+        await client.aclose()
+    assert job.state == "completed"
+
+
 # ── MR-4: disk-space preflight before streaming ──────────────────────────────
 
 
