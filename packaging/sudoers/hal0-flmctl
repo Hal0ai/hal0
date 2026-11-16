@@ -10,6 +10,7 @@
 #   exec-list <token>               flm list -j in the running hal0-slot-<token>
 #   run-list <image> <store>        flm list -j in a one-shot container
 #   run-pull <image> <store> <tag>  flm pull <tag> in a one-shot container
+#   run-remove <image> <store> <tag> flm remove <tag> in a one-shot container
 #   stop-pull <tag>                 remove that tag's pull container, if any
 #   check-tag <tag>                 side-effect-free validator probe
 #

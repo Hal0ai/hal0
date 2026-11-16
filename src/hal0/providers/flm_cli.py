@@ -24,6 +24,8 @@ Where each command runs:
   (verified on Strix Halo, #2993). There is no host fallback: a host pull is
   the bug this module exists to remove, and without the image the slot cannot
   serve the weights anyway. :class:`FLMRunnerUnavailableError` says so.
+* ``flm remove`` — a one-shot ``podman run --rm`` too, like ``pull``, so it
+  removes from the store the slot mounts. No host fallback either.
 * ``flm validate`` stays on the host (:func:`hal0.providers.flm.flm_validate`):
   it gates the NPU lane during setup, before any runner image is pulled, and it
   checks host facts (driver, firmware, memlock) that the container shares.
@@ -212,6 +214,29 @@ def pull_invocation(target: FlmTarget, tag: str, *, launcher: list[str] | None) 
     return FlmInvocation("run", [*launcher, "run-pull", target.image, target.store, tag])
 
 
+def remove_invocation(target: FlmTarget, tag: str, *, launcher: list[str] | None) -> FlmInvocation:
+    """The one-shot ``flm remove <tag>`` in the slot's image. Never the host binary.
+
+    Same route as :func:`pull_invocation` and for the same reason: the slot's
+    image and store decide which directory FastFlowLM removes, so the remove
+    reaches exactly the weights the slot serves. ``flm remove`` needs no NPU
+    device, so it can run while the slot serves another tag.
+    """
+    if not is_valid_flm_tag(tag):
+        raise FLMRunnerUnavailableError(
+            f"{tag!r} is not an FLM model tag (family:variant).",
+            details={"tag": tag},
+        )
+    if launcher is None:
+        raise FLMRunnerUnavailableError(
+            "FLM models are removed inside the flm runner image, and this process "
+            f"cannot reach it: {SEAM_BIN} is missing or this user has no grant for it. "
+            "Run `sudo hal0 doctor` to check the privileged seams.",
+            details={"tag": tag, "seam": SEAM_BIN},
+        )
+    return FlmInvocation("run", [*launcher, "run-remove", target.image, target.store, tag])
+
+
 def flm_list_output[T](
     *,
     parse: Callable[[str], T | None],
@@ -293,6 +318,14 @@ def flm_pull_invocation(tag: str, *, target: FlmTarget | None = None) -> tuple[F
     return pull_invocation(tgt, tag, launcher=_launcher()), tgt.store
 
 
+def flm_remove_invocation(
+    tag: str, *, target: FlmTarget | None = None
+) -> tuple[FlmInvocation, str]:
+    """``(invocation, store)`` for removing ``tag`` from the serving slot's store."""
+    tgt = target if target is not None else resolve_target()
+    return remove_invocation(tgt, tag, launcher=_launcher()), tgt.store
+
+
 __all__ = [
     "FLM_TAG_RE",
     "RC_IMAGE_MISSING",
@@ -304,9 +337,11 @@ __all__ = [
     "flm_list_output",
     "flm_pull_invocation",
     "flm_pull_stop_argv",
+    "flm_remove_invocation",
     "is_valid_flm_tag",
     "list_invocations",
     "pull_invocation",
+    "remove_invocation",
     "resolve_target",
     "stop_pull_invocation",
 ]

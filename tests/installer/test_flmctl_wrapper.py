@@ -132,6 +132,23 @@ def test_run_pull_execs_the_one_shot_with_the_slot_mount(podman, store: Path) ->
     ]
 
 
+def test_run_remove_execs_the_one_shot_with_the_slot_mount(podman, store: Path) -> None:
+    run, log = podman
+    proc = run("run-remove", IMAGE, str(store), "llama3.2:1b")
+    assert proc.returncode == 0, proc.stderr
+    assert _calls(log) == [
+        f"image exists -- {IMAGE}",
+        _oneshot(store, "remove", "llama3.2:1b"),
+    ]
+
+
+def test_run_remove_missing_image_is_rc_70(podman, store: Path) -> None:
+    run, log = podman
+    proc = run("run-remove", IMAGE, str(store), "llama3.2:1b", FAKE_IMAGE_RC="1")
+    assert proc.returncode == 70
+    assert _calls(log) == [f"image exists -- {IMAGE}"]
+
+
 def test_run_list_execs_the_one_shot(podman, store: Path) -> None:
     run, log = podman
     proc = run("run-list", IMAGE, str(store))
@@ -236,6 +253,7 @@ def test_bad_tags_fail_both_sides(podman, store: Path, tag: str) -> None:
     run, log = podman
     assert run("check-tag", tag).returncode == 64
     assert run("run-pull", IMAGE, str(store), tag).returncode == 64
+    assert run("run-remove", IMAGE, str(store), tag).returncode == 64
     assert not flm_cli.is_valid_flm_tag(tag)
     assert _calls(log) == []
 
@@ -292,6 +310,7 @@ def test_bad_token_is_rejected_before_podman(podman, token: str) -> None:
     [
         ["run-list", IMAGE],
         ["run-pull", IMAGE, "/tmp"],
+        ["run-remove", IMAGE, "/tmp"],
         ["exec-list"],
         ["exec-list", "a", "b"],
         ["rm", "x"],
@@ -314,7 +333,14 @@ def test_help_lists_exactly_the_verbs() -> None:
         for line in proc.stdout.splitlines()
         if line.startswith("  ") and not line.strip()[0].isdigit()
     }
-    assert verbs == {"exec-list", "run-list", "run-pull", "stop-pull", "check-tag"}
+    assert verbs == {
+        "exec-list",
+        "run-list",
+        "run-pull",
+        "run-remove",
+        "stop-pull",
+        "check-tag",
+    }
 
 
 def test_sudoers_grant_is_pinned_to_the_wrapper() -> None:
