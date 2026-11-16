@@ -12,6 +12,7 @@
 #   bash scripts/deploy.sh [--ref origin/main] [--no-restart] [--no-build] [--force]
 #
 # Steps:
+#   0. Refuse a copied (non-editable) install — see "0." below (#3475)
 #   1. Fetch + hard-reset the working tree to the target ref
 #   2. Rebuild the dashboard (clean: wipe dist + vite cache; npm ci only when
 #      package-lock changed in this pull, else just rebuild)
@@ -95,6 +96,30 @@ while [[ $# -gt 0 ]]; do
 done
 
 cd "$REPO_ROOT"
+
+# ── 0. Refuse a copied (non-editable) install ─────────────────────────────────
+# This script resets a checkout and restarts the service; it only changes what
+# the backend serves when the venv imports hal0 FROM this checkout (editable).
+# The installer's FHS layout pip-installs a plain copy under site-packages, so
+# a reset + restart there leaves the old code running while every later check
+# looks green (#3475; /api/status.build_sha is None without a .git above the
+# imported tree, so it cannot catch this). Resolve where the served interpreter
+# imports hal0 from and refuse before touching anything. HAL0_VENV_PYTHON
+# overrides the interpreter; no venv found = nothing to check (plain dev tree).
+venv_python="${HAL0_VENV_PYTHON:-/usr/lib/hal0/venv/bin/python}"
+if [[ -x "$venv_python" ]]; then
+    served_pkg="$(cd / && "$venv_python" -I -c \
+        'import importlib.util as u; s = u.find_spec("hal0"); print(s.origin if s and s.origin else "")' \
+        2>/dev/null || true)"
+    served_pkg="$(readlink -f "$served_pkg" 2>/dev/null || echo "$served_pkg")"
+    repo_real="$(readlink -f "$REPO_ROOT")"
+    if [[ -z "$served_pkg" ]]; then
+        die "cannot tell where ${venv_python} imports hal0 from — refusing to claim a deploy. Use: hal0 update --channel <channel> (or installer/install.sh)"
+    elif [[ "$served_pkg" != "$repo_real"/* ]]; then
+        die "the served venv imports hal0 from ${served_pkg}, not this checkout (copied, non-editable install) — a reset + restart here would NOT change the running code. Use: hal0 update --channel <channel> (or installer/install.sh)"
+    fi
+    info "served package is this checkout (editable): ${served_pkg}"
+fi
 
 # ── 1. Sync source ────────────────────────────────────────────────────────────
 step "1. Sync source → ${REF}"
@@ -246,7 +271,7 @@ else
     served_sha="$(printf '%s' "$status_body" | jq -r '.build_sha // empty' 2>/dev/null || true)"
     expected_sha="$(git rev-parse --short=12 HEAD)"
     if [[ -z "$served_sha" ]]; then
-        warn "served build reports no build_sha (non-git install?) — cannot verify identity"
+        die "served build reports no build_sha — cannot verify the running process executes this code (copied install? use hal0 update --channel <channel>)"
     elif [[ "$served_sha" == "$expected_sha" ]]; then
         info "served build matches deployed commit (${served_sha})"
     else
