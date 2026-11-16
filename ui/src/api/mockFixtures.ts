@@ -2074,6 +2074,10 @@ function buildMemoryGraphStatus() {
       task_retries: 2,
       retry_backoff_s: 120,
       worker_slots: 4,
+      // #3700 worker-slot reservations
+      retain_reserved_slots: 1,
+      consolidation_reserved_slots: 2,
+      refresh_reserved_slots: 0,
     },
     in_flight: 0,
     builds_ok: 0,

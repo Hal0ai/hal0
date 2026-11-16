@@ -171,8 +171,15 @@ class ExtractionLimits:
       and ten concurrent tasks (chunking, embedding, graph writes) took the
       engine to several GiB resident and into the memory cgroup's OOM killer
       on an 11 GiB box (#3534). Held at or above
-      :data:`WORKER_SLOTS_FLOOR` by the schema: Hindsight reserves two slots
-      for consolidation, so a bound at or below that leaves retain none.
+      :data:`WORKER_SLOTS_FLOOR` by the schema.
+    * ``retain_reserved_slots`` / ``consolidation_reserved_slots`` /
+      ``refresh_reserved_slots`` -> ``HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS``,
+      ``..._CONSOLIDATION_RESERVED_SLOTS`` and
+      ``..._REFRESH_MENTAL_MODEL_RESERVED_SLOTS`` (#3700): slots of
+      ``worker_slots`` only that task type may take. The rest is one shared
+      pool. Each is a floor, not a cap. Without a retain reservation, page
+      refreshes waiting for an LLM permit held every shared slot and retains
+      waited for hours. The schema keeps at least one slot shared.
 
     ``HINDSIGHT_API_RETAIN_WALL_TIMEOUT`` is not a field: it is derived from
     ``llm_timeout_s`` and ``llm_retries`` by :func:`retain_wall_timeout_s`.
@@ -184,6 +191,9 @@ class ExtractionLimits:
     task_retries: int = 2
     retry_backoff_s: int = 120
     worker_slots: int = 4
+    retain_reserved_slots: int = 1
+    consolidation_reserved_slots: int = 2
+    refresh_reserved_slots: int = 0
 
     @classmethod
     def from_config(cls, cfg: MemoryGraphConfig) -> ExtractionLimits:
@@ -194,15 +204,20 @@ class ExtractionLimits:
             task_retries=cfg.extraction_task_retries,
             retry_backoff_s=cfg.extraction_retry_backoff_s,
             worker_slots=cfg.extraction_worker_slots,
+            retain_reserved_slots=cfg.retain_reserved_slots,
+            consolidation_reserved_slots=cfg.consolidation_reserved_slots,
+            refresh_reserved_slots=cfg.refresh_reserved_slots,
         )
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)
 
 
-#: Smallest ``worker_slots`` hal0 renders. Hindsight reserves 2 worker slots for
-#: consolidation (``WORKER_SLOT_TYPE_DEFAULTS`` in its config); the rest form
-#: the shared pool retain draws from, so 2 would leave retain no slot at all.
+#: Smallest ``worker_slots`` hal0 renders: consolidation's default reservation
+#: of 2 (``WORKER_SLOT_TYPE_DEFAULTS`` in Hindsight's config) plus one shared
+#: slot. Not raised to 4 for the retain reservation (#3700): each slot costs
+#: engine memory (#3534), so a box held at 3 keeps 3 and its unset retain
+#: reservation is 0 (``MemoryGraphConfig._fit_unset_retain_reservation``).
 WORKER_SLOTS_FLOOR = 3
 
 #: Floor for the retain wall limit: hindsight-api's own default (1 h). hal0 never
@@ -260,6 +275,9 @@ _DROP_IN_TEMPLATE = (
     "Environment=HINDSIGHT_API_WORKER_MAX_RETRIES={task_retries}\n"
     "Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS={retry_backoff_s}\n"
     "Environment=HINDSIGHT_API_WORKER_MAX_SLOTS={worker_slots}\n"
+    "Environment=HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS={retain_reserved_slots}\n"
+    "Environment=HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS={consolidation_reserved_slots}\n"
+    "Environment=HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_RESERVED_SLOTS={refresh_reserved_slots}\n"
     "Environment=HINDSIGHT_API_RETAIN_WALL_TIMEOUT={wall_timeout_s}\n"
 )
 
@@ -652,6 +670,9 @@ def render_drop_in(
         task_retries=int(lim.task_retries),
         retry_backoff_s=int(lim.retry_backoff_s),
         worker_slots=int(lim.worker_slots),
+        retain_reserved_slots=int(lim.retain_reserved_slots),
+        consolidation_reserved_slots=int(lim.consolidation_reserved_slots),
+        refresh_reserved_slots=int(lim.refresh_reserved_slots),
         wall_timeout_s=retain_wall_timeout_s(timeout_s, lim.llm_retries),
     )
 
@@ -1137,6 +1158,9 @@ def engine_env_report(
 #: What an unset managed key means to the engine, for the doctor sentence.
 _UNSET_NOTES = {
     "HINDSIGHT_API_WORKER_MAX_SLOTS": "engine default 10",
+    "HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS": "engine default 0",
+    "HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS": "engine default 2",
+    "HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_RESERVED_SLOTS": "engine default 0",
     "HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS": "engine default uncapped",
     "HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS": "engine default uncapped",
 }

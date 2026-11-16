@@ -620,6 +620,9 @@ def test_graph_status_echoes_the_extraction_limits(
         "task_retries": 2,
         "retry_backoff_s": 120,
         "worker_slots": 4,
+        "retain_reserved_slots": 1,
+        "consolidation_reserved_slots": 2,
+        "refresh_reserved_slots": 0,
     }
 
 
@@ -728,6 +731,45 @@ def test_put_out_of_range_limit_is_rejected_before_anything_changes(
         r = client.put("/api/memory/graph", json={"extraction_max_tokens": 1000})
     assert r.status_code == 400, r.text
     assert "extraction_max_tokens" in r.text
+    apply_mock.assert_not_called()
+    assert stub_wrapper.set_calls == []
+
+
+# ── #3700: worker-slot reservations ──────────────────────────────────────────
+
+
+def test_put_reservation_change_propagates_with_the_new_reservations(
+    client: TestClient, stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    with patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock:
+        apply_mock.return_value = {"slot": "utility", "written": True, "error": None}
+        r = client.put(
+            "/api/memory/graph",
+            json={
+                "extraction_worker_slots": 6,
+                "retain_reserved_slots": 2,
+                "refresh_reserved_slots": 1,
+            },
+        )
+    assert r.status_code == 200, r.text
+    apply_mock.assert_called_once_with(
+        "utility",
+        timeout_s=300,
+        limits=ExtractionLimits(worker_slots=6, retain_reserved_slots=2, refresh_reserved_slots=1),
+    )
+    limits = client.get("/api/memory/graph/status").json()["extraction_limits"]
+    assert (limits["retain_reserved_slots"], limits["refresh_reserved_slots"]) == (2, 1)
+
+
+def test_put_lowering_the_slots_below_the_reservations_is_refused(
+    client: TestClient, stub_wrapper: StubWrapper
+) -> None:
+    """The PUT merges onto the stored section, so 3 slots against the stored
+    retain 1 + consolidation 2 leaves no shared slot: 400, nothing applied."""
+    with patch("hal0.memory.extraction_env.apply_extraction_slot") as apply_mock:
+        r = client.put("/api/memory/graph", json={"extraction_worker_slots": 3})
+    assert r.status_code == 400, r.text
+    assert "leave no shared slot" in r.text
     apply_mock.assert_not_called()
     assert stub_wrapper.set_calls == []
 

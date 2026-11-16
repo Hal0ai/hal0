@@ -262,6 +262,9 @@ def test_apply_threads_limits_into_drop_in_and_status(monkeypatch, tmp_path: Pat
         "task_retries": 2,
         "retry_backoff_s": 120,
         "worker_slots": 4,
+        "retain_reserved_slots": 1,
+        "consolidation_reserved_slots": 2,
+        "refresh_reserved_slots": 0,
     }
     text = drop_in.read_text()
     assert "HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=2" in text
@@ -2274,6 +2277,111 @@ def test_engine_env_warning_names_a_missing_key_as_unset_with_update_remedy():
     assert "None" not in warning
     assert "unset (engine default 10; hal0 renders 4)" in warning
     assert "hal0 update" in warning and "daemon-reload" not in warning
+
+
+# ── worker-slot reservations (#3700) ─────────────────────────────────────────
+
+_RESERVATION_KEYS = (
+    "HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS",
+    "HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS",
+    "HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_RESERVED_SLOTS",
+)
+
+
+def test_render_drop_in_carries_the_worker_slot_reservations():
+    out = render_drop_in()
+    assert "Environment=HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS=1\n" in out
+    assert "Environment=HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS=2\n" in out
+    assert "Environment=HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_RESERVED_SLOTS=0\n" in out
+
+    tuned = ExtractionLimits(
+        worker_slots=8,
+        retain_reserved_slots=2,
+        consolidation_reserved_slots=1,
+        refresh_reserved_slots=3,
+    )
+    out = render_drop_in(limits=tuned)
+    assert "Environment=HINDSIGHT_API_WORKER_MAX_SLOTS=8\n" in out
+    assert "Environment=HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS=2\n" in out
+    assert "Environment=HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS=1\n" in out
+    assert "Environment=HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_RESERVED_SLOTS=3\n" in out
+
+
+def test_extraction_limits_carry_the_reservations_from_config():
+    from hal0.config.schema import MemoryGraphConfig
+
+    cfg = MemoryGraphConfig(
+        extraction_worker_slots=8,
+        retain_reserved_slots=2,
+        consolidation_reserved_slots=1,
+        refresh_reserved_slots=3,
+    )
+    limits = ExtractionLimits.from_config(cfg)
+    assert (
+        limits.worker_slots,
+        limits.retain_reserved_slots,
+        limits.consolidation_reserved_slots,
+        limits.refresh_reserved_slots,
+    ) == (8, 2, 1, 3)
+
+
+def test_engine_env_report_sees_a_drop_in_without_the_reservations(tmp_path: Path):
+    """A box still on a pre-#3700 drop-in: the unit lacks the three keys, so
+    doctor and graph status report them unset with the update remedy."""
+    from hal0.memory import extraction_env as ee
+
+    paths = _report_paths(tmp_path)
+    mem = _memory_cfg()
+    paths["drop_in_path"].write_text("x")
+    expected = ee.expected_engine_env(mem, include_showcase=False, slots_dir=tmp_path)
+    assert [expected[k] for k in _RESERVATION_KEYS] == ["1", "2", "0"]
+    unit = {k: v for k, v in expected.items() if k not in _RESERVATION_KEYS}
+
+    report = ee.engine_env_report(mem, unit_env=unit, slots_dir=tmp_path, **paths)
+
+    assert {d["key"] for d in report["drift"]} == set(_RESERVATION_KEYS)
+    warning = ee.engine_env_warning(report)
+    assert warning is not None
+    assert (
+        "HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS unset (engine default 0; hal0 renders 1)"
+        in warning
+    )
+
+
+def test_a_pre_3700_drop_in_reads_as_drift_so_update_rerenders_it(tmp_path: Path, monkeypatch):
+    from hal0.memory import extraction_env as ee
+
+    old = ee.render_drop_in().replace(
+        "Environment=HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS=1\n", ""
+    )
+    path = tmp_path / "extraction-model.conf"
+    path.write_text(old, encoding="utf-8")
+    monkeypatch.setattr(ee, "DROP_IN_PATH", path)
+    assert ee.drop_in_matches() is False
+
+
+def test_shipped_hindsight_unit_carries_the_reservation_defaults():
+    """A fresh box runs the base unit until its first graph save, so the unit
+    must already reserve the retain slot rather than run the engine's 0."""
+    import re
+
+    from hal0.config.schema import MemoryGraphConfig
+
+    unit = (
+        Path(__file__).resolve().parents[2] / "installer" / "systemd" / "hindsight-api.service"
+    ).read_text()
+    cfg = MemoryGraphConfig()
+    for name, value in zip(
+        ("HINDSIGHT_API_WORKER_MAX_SLOTS", *_RESERVATION_KEYS),
+        (
+            cfg.extraction_worker_slots,
+            cfg.retain_reserved_slots,
+            cfg.consolidation_reserved_slots,
+            cfg.refresh_reserved_slots,
+        ),
+        strict=True,
+    ):
+        assert re.findall(rf"^Environment={name}=(\d+)$", unit, re.M) == [str(value)]
 
 
 def _showcase_env_map(lanes) -> dict[str, str]:

@@ -2342,14 +2342,114 @@ class MemoryGraphConfig(BaseModel):
             "each running task also holds its chunks, embeddings and graph "
             "writes in memory. Hindsight's own default of 10 took the engine to "
             "several GiB resident and into the OOM killer on an 11 GiB box, so "
-            "hal0 renders 4. The floor is 3: Hindsight reserves 2 slots for "
-            "consolidation, so a lower bound leaves retain none. Worker-wide "
-            "like extraction_task_retries. Applied via the hindsight-api "
-            "drop-in; the daemon restarts to pick it up. An operator-set "
-            "HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS greater than or "
-            "equal to this value makes Hindsight refuse to start."
+            "hal0 renders 4. Part of these slots is reserved per task type "
+            "(retain_reserved_slots, consolidation_reserved_slots, "
+            "refresh_reserved_slots); the rest is one shared pool any task "
+            "may use, and the reservations must leave at least one slot in "
+            "it. The floor is 3. Worker-wide like extraction_task_retries. "
+            "Applied via the hindsight-api drop-in; the daemon restarts to "
+            "pick it up."
         ),
     )
+    # #3700: per-type worker-slot reservations. Hindsight 1.2 reads
+    # HINDSIGHT_API_WORKER_<TYPE>_RESERVED_SLOTS for each task type
+    # (WORKER_SLOT_TYPE_DEFAULTS in hindsight_api/config.py: consolidation 2,
+    # every other type 0). A reservation is a floor, never a cap: a type
+    # draws on its reserved slots first and on the shared pool after them.
+    # With retain at 0, page refreshes waiting for an LLM permit held every
+    # shared slot and retains waited for hours.
+    retain_reserved_slots: int = Field(
+        default=1,
+        ge=0,
+        le=31,
+        description=(
+            "Worker slots only retains may use "
+            "(HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS), so new memories are "
+            "stored even while page refreshes or consolidation hold every "
+            "shared slot. A floor, not a cap: retains also use free shared "
+            "slots. When hal0.toml does not set it and extraction_worker_slots "
+            "has no room for it (3 slots with consolidation's 2), it is 0 "
+            "instead of 1. Applied via the hindsight-api drop-in; the daemon "
+            "restarts to pick it up."
+        ),
+    )
+    consolidation_reserved_slots: int = Field(
+        default=2,
+        ge=0,
+        le=31,
+        description=(
+            "Worker slots only consolidation may use "
+            "(HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS). 2 is "
+            "Hindsight's own default. A floor, not a cap. Applied via the "
+            "hindsight-api drop-in; the daemon restarts to pick it up."
+        ),
+    )
+    refresh_reserved_slots: int = Field(
+        default=0,
+        ge=0,
+        le=31,
+        description=(
+            "Worker slots only knowledge-page (mental model) refreshes may use "
+            "(HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_RESERVED_SLOTS). 0, "
+            "Hindsight's own default, leaves refreshes to the shared pool. A "
+            "floor, not a cap. Applied via the hindsight-api drop-in; the "
+            "daemon restarts to pick it up."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fit_unset_retain_reservation(cls, data: Any) -> Any:
+        """Shrink an UNSET ``retain_reserved_slots`` to what the slots allow (#3700).
+
+        A hal0.toml written before the reservations existed may hold
+        ``extraction_worker_slots = 3``: consolidation's 2 plus the new retain
+        default of 1 would leave no shared slot, and the section would stop
+        loading after an update. A value the operator set is never changed;
+        :meth:`_reservations_leave_a_shared_slot` judges it.
+        """
+        if not isinstance(data, dict) or "retain_reserved_slots" in data:
+            return data
+        fields = cls.model_fields
+        try:
+            slots = int(
+                data.get("extraction_worker_slots", fields["extraction_worker_slots"].default)
+            )
+            others = int(
+                data.get(
+                    "consolidation_reserved_slots", fields["consolidation_reserved_slots"].default
+                )
+            ) + int(data.get("refresh_reserved_slots", fields["refresh_reserved_slots"].default))
+        except (TypeError, ValueError):
+            return data  # field validation reports the bad value
+        room = slots - 1 - others
+        default = fields["retain_reserved_slots"].default
+        if room >= default:
+            return data
+        return {**data, "retain_reserved_slots": max(0, room)}
+
+    @model_validator(mode="after")
+    def _reservations_leave_a_shared_slot(self) -> MemoryGraphConfig:
+        # Hindsight refuses to start when the reservations exceed
+        # WORKER_MAX_SLOTS; hal0 also keeps one shared slot so every task type
+        # without a reservation (graph maintenance, imports, a refresh at 0)
+        # can still run.
+        reserved = (
+            self.retain_reserved_slots
+            + self.consolidation_reserved_slots
+            + self.refresh_reserved_slots
+        )
+        if reserved > self.extraction_worker_slots - 1:
+            raise ValueError(
+                "memory.graph worker-slot reservations leave no shared slot: "
+                f"retain {self.retain_reserved_slots} + consolidation "
+                f"{self.consolidation_reserved_slots} + refresh "
+                f"{self.refresh_reserved_slots} = {reserved}, but "
+                f"extraction_worker_slots = {self.extraction_worker_slots} allows "
+                f"at most {self.extraction_worker_slots - 1} reserved (one slot "
+                "stays shared). Lower a reservation or raise extraction_worker_slots."
+            )
+        return self
 
     @field_validator("extraction_slot")
     @classmethod

@@ -1,7 +1,8 @@
 // Settings ▸ Data ▸ Memory — extraction limits (#1834), the pure part.
 //
 // The six [memory.graph].extraction_* knobs cap how hard Hindsight may drive
-// the shared extraction slot. This module holds what the panel needs that is
+// the shared extraction slot, and the three *_reserved_slots (#3700) split
+// the engine's worker slots between task types. This module holds what the panel needs that is
 // not React: the field table (status key ↔ PUT key, bounds, copy) and the
 // validation / diff logic, so both are unit-tested without a DOM. Bounds
 // mirror hal0.config.schema.MemoryGraphConfig exactly; the server is the
@@ -53,16 +54,63 @@ export const EXTRACTION_LIMIT_FIELDS = [
     fallback: 120,
     sub: 'Seconds a failed queued task waits before it is requeued (10–3600), so a retry does not land on a slot still busy with the attempt that timed out. Worker-wide',
   },
+  // #3700: the "Worker slots" group — the total and three per-type
+  // reservations. A reservation is a floor, not a cap: that task type may
+  // also use free shared slots. The rest of the total is the shared pool.
   {
     key: 'worker_slots',
     putKey: 'extraction_worker_slots',
-    label: 'Worker slots',
+    group: 'slots',
+    label: 'Total slots',
     min: 3,
     max: 32,
     fallback: 4,
-    sub: 'Queued memory tasks the engine runs at once (3–32). Each holds chunks and embeddings in memory, so a high value can exhaust RAM on a small box; the engine reserves 2 slots for consolidation',
+    sub: 'Memory tasks (retain, consolidation, page refresh) the engine runs at once (3–32). Each holds chunks and embeddings in memory, so a high value can exhaust RAM on a small box',
+  },
+  {
+    key: 'retain_reserved_slots',
+    putKey: 'retain_reserved_slots',
+    group: 'slots',
+    reservation: true,
+    label: 'Reserved for retain',
+    min: 0,
+    max: 31,
+    fallback: 1,
+    sub: 'Slots only retains may take, so new memories are still stored while page refreshes or consolidation hold every shared slot. 0 lets retains wait behind them',
+  },
+  {
+    key: 'consolidation_reserved_slots',
+    putKey: 'consolidation_reserved_slots',
+    group: 'slots',
+    reservation: true,
+    label: 'Reserved for consolidation',
+    min: 0,
+    max: 31,
+    fallback: 2,
+    sub: 'Slots only consolidation may take, so observations keep being merged while the shared pool is busy. 2 is Hindsight\'s own default',
+  },
+  {
+    key: 'refresh_reserved_slots',
+    putKey: 'refresh_reserved_slots',
+    group: 'slots',
+    reservation: true,
+    label: 'Reserved for page refresh',
+    min: 0,
+    max: 31,
+    fallback: 0,
+    sub: 'Slots only knowledge-page refreshes may take. 0 leaves refreshes to the shared pool',
   },
 ]
+
+/**
+ * Does this status payload report the #3700 reservations? An API from before
+ * them reports the other limits only; the panel then leaves the reservation
+ * inputs out and never sends their keys.
+ * @param {{extraction_limits?: Record<string, number>} | null | undefined} status
+ */
+export function reservationsSupported(status) {
+  return limitsSupported(status) && typeof status.extraction_limits.retain_reserved_slots === 'number'
+}
 
 /**
  * Does this status payload carry the limits at all? An API that predates
@@ -82,9 +130,13 @@ export function limitsSupported(status) {
  */
 export function limitsFormFromStatus(status) {
   const src = (status && status.extraction_limits) || {}
+  const withReservations = reservationsSupported(status)
   /** @type {Record<string, string>} */
   const out = {}
   for (const f of EXTRACTION_LIMIT_FIELDS) {
+    // A server without the reservations gets no reservation keys at all, so
+    // nothing below validates, diffs or sends them.
+    if (f.reservation && !withReservations) continue
     const v = src[f.key]
     out[f.key] = String(typeof v === 'number' ? v : f.fallback)
   }
@@ -97,6 +149,10 @@ export function limitsFormValidity(form) {
   /** @type {Record<string, boolean>} */
   const out = {}
   for (const f of EXTRACTION_LIMIT_FIELDS) {
+    if (f.reservation && form[f.key] === undefined) {
+      out[f.key] = true
+      continue
+    }
     const raw = String(form[f.key] ?? '').trim()
     const n = Number(raw)
     out[f.key] = /^\d+$/.test(raw) && n >= f.min && n <= f.max
@@ -104,8 +160,38 @@ export function limitsFormValidity(form) {
   return out
 }
 
+/**
+ * The shared pool the reservations leave, by the server's rule
+ * (MemoryGraphConfig._reservations_leave_a_shared_slot): the three
+ * reservations together may take at most total - 1 slots. `null` when the
+ * form has no reservations (older server) or a number does not parse yet
+ * (the per-field check reports that one).
+ * @param {Record<string, string>} form
+ * @returns {{total: number, reserved: number, shared: number, ok: boolean, message: string} | null}
+ */
+export function workerSlotPool(form) {
+  const fields = EXTRACTION_LIMIT_FIELDS.filter(f => f.group === 'slots')
+  if (fields.some(f => f.reservation && form[f.key] === undefined)) return null
+  /** @type {Record<string, number>} */
+  const n = {}
+  for (const f of fields) {
+    const raw = String(form[f.key] ?? '').trim()
+    if (!/^\d+$/.test(raw)) return null
+    n[f.key] = Number(raw)
+  }
+  const total = n.worker_slots
+  const reserved = fields.filter(f => f.reservation).reduce((sum, f) => sum + n[f.key], 0)
+  const shared = total - reserved
+  const ok = shared >= 1
+  const message = ok
+    ? `${shared} shared slot${shared === 1 ? '' : 's'} left for everything else (${reserved} of ${total} reserved)`
+    : `The reservations take ${reserved} of ${total} slots. Keep at least one shared: reserve at most ${Math.max(0, total - 1)}, or raise the total`
+  return { total, reserved, shared, ok, message }
+}
+
 export function limitsFormAllValid(form) {
-  return Object.values(limitsFormValidity(form)).every(Boolean)
+  const pool = workerSlotPool(form)
+  return Object.values(limitsFormValidity(form)).every(Boolean) && (pool === null || pool.ok)
 }
 
 /**
@@ -125,7 +211,8 @@ export function limitsPutBody(form, status) {
   if (!limitsSupported(status)) return body
   const current = status.extraction_limits
   for (const f of EXTRACTION_LIMIT_FIELDS) {
-    const raw = String(form[f.key] ?? '').trim()
+    if (form[f.key] === undefined) continue // not on this server's form
+    const raw = String(form[f.key]).trim()
     if (!/^\d+$/.test(raw)) continue // Number('') is 0 — never a change
     const n = Number(raw)
     const was = typeof current[f.key] === 'number' ? current[f.key] : f.fallback

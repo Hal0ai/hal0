@@ -24,6 +24,8 @@ import {
   limitsFormValidity,
   limitsPutBody,
   limitsSupported,
+  reservationsSupported,
+  workerSlotPool,
 } from './extractionLimits.js'
 import { graphSaveOutcome } from './extractionThroughput.js'
 import { BankFailures, SaveWarnings, ThroughputNote } from './ExtractionThroughputViews.jsx'
@@ -215,7 +217,7 @@ function MemoryRerankerPanel({ registry }) {
 // (available_slots / slot_resolves) and propagates the change into the
 // hindsight-api drop-in + restart, reporting a propagation error if that
 // restart fails (ADR-0023 §3).
-function MemoryGraphPanel() {
+export function MemoryGraphPanel() {
   const statusQuery = useMemoryGraphStatus();
   const updateGraph = useUpdateMemoryGraph();
   const retryFailed = useRetryFailedExtractions();
@@ -266,6 +268,28 @@ function MemoryGraphPanel() {
   // An API older than the limits echoes none: show them read-only with a
   // note rather than as defaults in force.
   const limitsOk = limitsSupported(st);
+  // #3700: the shared pool the reservations leave, by the server's rule.
+  const slotPool = workerSlotPool(limits);
+  const limitBad = f =>
+    (!limitsValidity[f.key] && !!limits[f.key]) || (f.group === "slots" && !!slotPool && !slotPool.ok);
+  const renderLimit = f => (
+    <SRow
+      key={f.key}
+      k={f.label}
+      sub={f.sub}
+      v={
+        <input
+          type="number" min={f.min} max={f.max} value={limits[f.key]} disabled={!st || !limitsOk}
+          onChange={e => setLimits(prev => ({...prev, [f.key]: e.target.value}))}
+          placeholder={String(f.fallback)}
+          className="mono"
+          data-testid={`mem-graph-limit-${f.key}`}
+          aria-invalid={limitBad(f) || undefined}
+          style={{..._advInputStyle, width: 100, borderColor: limitBad(f) ? "var(--err)" : "var(--line)"}}
+        />
+      }
+    />
+  );
   const dirty = !!st && (
     enabled !== !!st.enabled
     || target !== engineTargetValue(st)
@@ -416,23 +440,34 @@ function MemoryGraphPanel() {
           This hal0-api does not report extraction limits — update it to set them. Hindsight is running with its own defaults.
         </div>
       )}
-      {EXTRACTION_LIMIT_FIELDS.map(f => (
-        <SRow
-          key={f.key}
-          k={f.label}
-          sub={f.sub}
-          v={
-            <input
-              type="number" min={f.min} max={f.max} value={limits[f.key]} disabled={!st || !limitsOk}
-              onChange={e => setLimits(prev => ({...prev, [f.key]: e.target.value}))}
-              placeholder={String(f.fallback)}
-              className="mono"
-              data-testid={`mem-graph-limit-${f.key}`}
-              style={{..._advInputStyle, width: 100, borderColor: limitsValidity[f.key] || !limits[f.key] ? "var(--line)" : "var(--err)"}}
-            />
-          }
-        />
-      ))}
+      {EXTRACTION_LIMIT_FIELDS.filter(f => f.group !== "slots").map(renderLimit)}
+      {/* #3700: how the engine's worker slots split between task types.
+          Same PUT, same drop-in + restart. */}
+      <div className="mono" style={{fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--fg-4)", padding: "10px 12px 2px"}}>
+        Worker slots
+        <FieldInfoIcon description="hal0.toml [memory.graph].extraction_worker_slots and *_reserved_slots · a reservation is a floor, not a cap: those slots wait for that task type, and every type may also use the shared pool" />
+      </div>
+      <div className="mono" data-testid="mem-graph-slots-help" style={{fontSize: 10.5, color: "var(--fg-3)", padding: "2px 12px 6px", lineHeight: 1.5}}>
+        The engine runs this many memory tasks at once. A reserved slot is held for one kind of task, so that kind keeps
+        running when the others fill every free slot. The slots nobody reserves are one shared pool any task can use.
+        Saving rewrites the hindsight-api drop-in and restarts the engine.
+      </div>
+      {EXTRACTION_LIMIT_FIELDS.filter(f => f.group === "slots" && (!f.reservation || limits[f.key] !== undefined)).map(renderLimit)}
+      {st && limitsOk && !reservationsSupported(st) && (
+        <div className="mono" data-testid="mem-graph-reservations-unsupported" style={{fontSize: 10.5, color: "var(--warn)", padding: "2px 12px 6px"}}>
+          This hal0-api does not report worker-slot reservations — update it to set them.
+        </div>
+      )}
+      {slotPool && (
+        <div
+          className="mono"
+          role={slotPool.ok ? undefined : "alert"}
+          data-testid="mem-graph-slots-shared"
+          style={{fontSize: 11, color: slotPool.ok ? "var(--fg-3)" : "var(--err)", padding: "2px 12px 6px"}}
+        >
+          {slotPool.ok ? slotPool.message : `⚠ ${slotPool.message}`}
+        </div>
+      )}
       {st && (
         <SRow
           k="Extraction health"

@@ -4104,6 +4104,24 @@ def test_memory_engine_env_pass_shows_the_worker_slots_in_force() -> None:
     assert "worker slots 4" in detail and "LLM concurrency 2" in detail
 
 
+def test_memory_engine_env_pass_shows_the_retain_reservation_in_force() -> None:
+    # #3700: the slot only retains may take is what keeps retains moving
+    # while refreshes hold the shared pool, so the pass line names it.
+    report = {
+        "installed": True,
+        "checked": True,
+        "drift": [],
+        "legacy_drop_in": None,
+        "effective": {
+            "HINDSIGHT_API_WORKER_MAX_SLOTS": "4",
+            "HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS": "1",
+            "HINDSIGHT_API_LLM_MAX_CONCURRENT": "2",
+        },
+    }
+    detail = da.check_memory_engine_env(report=report).detail
+    assert "worker slots 4, 1 reserved for retain, LLM concurrency 2" in detail
+
+
 def test_memory_engine_env_warns_on_drift_with_the_numbers() -> None:
     report = {
         "installed": True,
