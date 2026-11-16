@@ -18,7 +18,10 @@ Deleting the file revokes every agent key at once; the next write of a key
 creates a new secret.
 
 Remote agents use a bridge key instead (ADR-0043), whose name is its identity.
-The names hal0's own agents use are reserved there, so the two never meet.
+The names hal0's own agents use are reserved there, and only those names get an
+identity key (:func:`key_for` and :func:`verify` refuse any other), so the two
+never meet. The secret is trusted only as a regular 0600 file owned by root or
+the service user, and only those two may create it; a refused secret is logged.
 
 This module sits below ``hal0.api`` and imports only config paths and the
 perms table. NEVER log or echo a key or the secret.
@@ -31,10 +34,16 @@ import contextlib
 import hashlib
 import hmac
 import os
+import pwd
 import secrets
+import stat
 import tempfile
 from pathlib import Path
 from typing import Final
+
+import structlog
+
+log = structlog.get_logger("hal0.agent_identity")
 
 #: The request header that carries an agent identity key.
 AGENT_KEY_HEADER: Final[str] = "X-hal0-Agent-Key"
@@ -47,7 +56,7 @@ _DOMAIN: Final[bytes] = b"hal0-agent-identity/v1\x00"
 _SECRET_ENV: Final[str] = "HAL0_AGENT_IDENTITY_SECRET_PATH"
 _SECRET_NAME: Final[str] = "identity.bin"
 
-_cache: tuple[str, int, int, bytes] | None = None
+_cache: tuple[str, object, bytes] | None = None
 
 
 def secret_path() -> Path:
@@ -60,33 +69,113 @@ def secret_path() -> Path:
     return paths.var_lib() / "agents" / _SECRET_NAME
 
 
+def _service_uid() -> int | None:
+    """The ``hal0`` service account's uid, or ``None`` where no such account exists."""
+    try:
+        return pwd.getpwnam("hal0").pw_uid
+    except KeyError:
+        return None
+
+
+def _trusted_owners() -> set[int]:
+    """Who may own the secret: root and the service user.
+
+    On a box with no ``hal0`` account (a development checkout, CI) there is no
+    hal0-api to lock out, so the current user is accepted too.
+    """
+    service = _service_uid()
+    return {0, service} if service is not None else {0, os.geteuid(), os.getuid()}
+
+
+def _may_create() -> bool:
+    """Only root or the service user may mint the secret (#3569 review, S3).
+
+    Anyone else (an operator in the ``hal0`` group running the CLI) would leave
+    a file hal0-api cannot read, which locks every bundled agent out of its
+    private memory. With no ``hal0`` account on the box, see :func:`_trusted_owners`.
+    """
+    euid = os.geteuid()
+    service = _service_uid()
+    return euid == 0 or (service is None or euid == service)
+
+
+#: The last refusal logged, so a bad secret is reported once, not per request.
+_refused: tuple[str, object] | None = None
+
+
+def _refuse(path: Path, reason: str, marker: object) -> None:
+    global _refused
+    if _refused == (str(path), marker):
+        return
+    _refused = (str(path), marker)
+    log.error(
+        "hal0.agent_identity.secret_refused",
+        path=str(path),
+        reason=reason,
+        remedy=(
+            "every bundled agent's private memory is refused until this is fixed: give the "
+            f"file to the hal0 user with mode 0600, or delete {path} so hal0-api writes a "
+            "new one and re-keys the agents on its next start"
+        ),
+    )
+
+
 def _read_secret(path: Path) -> bytes | None:
+    """The secret at ``path``, or ``None`` when it is missing or not trustworthy.
+
+    Opened without following a link. Refused, with one error log line per
+    state (#3569 review, S1 and S2), when it is not a regular file, is owned by
+    anyone but root or the service user, is readable or writable by group or
+    others, is shorter than 32 bytes, or cannot be read. A missing file is not
+    an error: no key was ever handed out.
+    """
     global _cache
     try:
-        st = path.stat()
-    except OSError:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
         return None
-    cached = _cache
-    if cached is not None and cached[:3] == (str(path), st.st_mtime_ns, st.st_size):
-        return cached[3]
+    except OSError as exc:
+        _refuse(path, f"cannot open it ({type(exc).__name__}: {exc.strerror})", exc.errno)
+        return None
     try:
-        data = path.read_bytes()
-    except OSError:
-        return None
-    if len(data) < 32:
-        return None
-    _cache = (str(path), st.st_mtime_ns, st.st_size, data)
+        st = os.fstat(fd)
+        marker = (st.st_ino, st.st_mtime_ns, st.st_size, st.st_uid, st.st_mode)
+        cached = _cache
+        if cached is not None and cached[:2] == (str(path), marker):
+            return cached[2]
+        if not stat.S_ISREG(st.st_mode):
+            _refuse(path, "it is not a regular file", marker)
+            return None
+        if st.st_uid not in _trusted_owners():
+            _refuse(path, f"it is owned by uid {st.st_uid}, not root or hal0", marker)
+            return None
+        if st.st_mode & 0o077:
+            _refuse(path, f"its mode is {stat.S_IMODE(st.st_mode):04o}, not 0600", marker)
+            return None
+        try:
+            data = os.read(fd, 4096)
+        except OSError as exc:
+            _refuse(path, f"cannot read it ({exc.strerror})", marker)
+            return None
+        if len(data) < 32:
+            _refuse(path, f"it holds {len(data)} bytes, fewer than 32", marker)
+            return None
+    finally:
+        os.close(fd)
+    _cache = (str(path), marker, data)
     return data
 
 
 def _create_secret(path: Path) -> bytes | None:
     """Write a new secret at ``path``, or ``None`` when this process may not.
 
-    The service user (or any non-root caller that can write the directory, a
-    test's ``HAL0_HOME``) creates the directory and the file. Root creates the
-    file only inside an existing directory and hands it to that directory's
-    owner, so ``hal0-api`` can always read what a root provisioning run wrote.
+    Only root or the service user creates it (:func:`_may_create`). The service
+    user creates the directory too; root creates the file only inside an
+    existing directory and hands it to that directory's owner, so hal0-api can
+    always read what a root provisioning run wrote.
     """
+    if not _may_create():
+        return None
     is_root = os.geteuid() == 0
     parent = path.parent
     try:
@@ -97,6 +186,8 @@ def _create_secret(path: Path) -> bytes | None:
 
             ensure_shared_dir(parent, mode=AGENTS_DIR_MODE)
         owner = parent.stat()
+        if is_root and owner.st_uid not in _trusted_owners():
+            return None
         fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=parent)
     except OSError:
         return None
@@ -146,10 +237,22 @@ def key_for(agent_id: str) -> str | None:
     caller then sends the bare header, and the next run by hal0-api or root
     fills the key in.
     """
-    if not agent_id:
+    if not agent_id or not _keyable(agent_id):
         return None
     secret = _secret(create=True)
     return _derive(secret, agent_id) if secret is not None else None
+
+
+def _keyable(agent_id: str) -> bool:
+    """Only the names hal0 reserves for its own agents get an identity key (#3569 review, S5).
+
+    Every other name is one a bridge client may hold, and a bridge client's
+    identity comes from its bridge key alone; an identity key for it would open
+    that client's private memory on REST, where bridge keys are refused.
+    """
+    from hal0.bridge.keys import is_reserved_name
+
+    return agent_id != "anonymous" and is_reserved_name(agent_id)
 
 
 def verify(agent_id: str, presented: str | None) -> bool:
@@ -158,6 +261,8 @@ def verify(agent_id: str, presented: str | None) -> bool:
     Never creates the secret: with none on disk no key was ever handed out.
     """
     if not agent_id or not presented or not presented.startswith(KEY_PREFIX):
+        return False
+    if not _keyable(agent_id):
         return False
     secret = _secret(create=False)
     if secret is None:

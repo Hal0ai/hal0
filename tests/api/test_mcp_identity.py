@@ -35,13 +35,13 @@ def patch_request(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_client_id_from_agent_header(patch_request) -> None:
-    patch_request(identity_headers("bob"))
-    assert mcp_mount.client_id_resolver() == "bob"
+    patch_request(identity_headers("hermes__bob"))
+    assert mcp_mount.client_id_resolver() == "hermes__bob"
 
 
 def test_client_id_from_a_bare_header_is_anonymous(patch_request) -> None:
     """#3569: a header alone is an audit label, not an identity."""
-    patch_request({"X-hal0-Agent": "bob"})
+    patch_request({"X-hal0-Agent": "hermes__bob"})
     assert mcp_mount.client_id_resolver() == "anonymous"
 
 
@@ -56,7 +56,7 @@ def test_client_id_anonymous_outside_request(patch_request) -> None:
 
 
 def test_client_id_rejects_private_prefix(patch_request) -> None:
-    patch_request({"X-hal0-Agent": "private:bob"})
+    patch_request({"X-hal0-Agent": "private:hermes__bob"})
     assert mcp_mount.client_id_resolver() == "anonymous"
 
 
@@ -75,11 +75,11 @@ def test_private_resolver_reads_header(patch_request) -> None:
 
 def test_private_write_lands_in_agent_namespace(patch_request) -> None:
     """End-to-end #317: X-hal0-Agent + private → private:<agent>, not shared."""
-    patch_request({**identity_headers("bob"), "X-hal0-Private": "1"})
+    patch_request({**identity_headers("hermes__bob"), "X-hal0-Private": "1"})
     client_id = mcp_mount.client_id_resolver()
     private = mcp_mount.private_resolver()
     dataset = resolve_write_dataset(None, private=private, client_id=client_id)
-    assert dataset == "private:bob"
+    assert dataset == "private:hermes__bob"
 
 
 # ── per-call ``private`` cannot reach another agent's namespace ──────────────

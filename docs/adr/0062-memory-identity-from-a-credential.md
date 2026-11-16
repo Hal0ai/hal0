@@ -81,7 +81,13 @@ That does not fit, for four reasons found in the code:
    process that may do neither sends the bare header, or, for a reserved name,
    no header at all (`identity_headers`). Deleting the file revokes every
    agent key at once; the next write of a key creates a new secret. The
-   `hal0ak_` prefix joins the redactor's token prefixes.
+   `hal0ak_` prefix joins the redactor's token prefixes. The secret is used
+   only as a regular file (opened without following a link) of at least 32
+   bytes, owned by root or `hal0`, with no group or other bits; anything else
+   is refused and logged once as `hal0.agent_identity.secret_refused`. Only
+   root or `hal0` may create it. Keys exist only for reserved names
+   (`is_reserved_name`): every other name is one a bridge client may hold,
+   and its identity comes from its bridge key alone.
 4. **hal0 writes the key for its own agents.**
    - Hermes, every profile: `X-hal0-Agent-Key` sits beside `X-hal0-Agent` on
      the `hal0-admin` and `hal0-memory` entries of the profile's

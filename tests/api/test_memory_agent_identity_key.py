@@ -392,3 +392,88 @@ def test_memory_client_puts_the_key_on_every_request() -> None:
     client.search("q")
     assert "x-hal0-agent-key" not in seen[0]
     assert seen[1]["x-hal0-agent-key"] == "hal0ak_" + "k" * 43
+
+
+# ── the secret is trusted only when it is the service user's, 0600 (review S1-S3) ──
+
+
+def _secret_bytes() -> bytes:
+    agent_identity.key_for("hermes")
+    return agent_identity.secret_path().read_bytes()
+
+
+def test_an_unreadable_secret_fails_closed_and_says_so() -> None:
+    from structlog.testing import capture_logs
+
+    _secret_bytes()
+    path = agent_identity.secret_path()
+    os.chmod(path, 0)
+    try:
+        with capture_logs() as logs:
+            assert agent_identity.key_for("hermes") is None  # no new, predictable key
+            assert not agent_identity.verify("hermes", "hal0ak_" + "x" * 43)
+    finally:
+        os.chmod(path, 0o600)
+    if os.geteuid() != 0:  # root reads a mode-0 file; the mode check still refuses it
+        assert any(e["event"] == "hal0.agent_identity.secret_refused" for e in logs)
+
+
+def test_a_loose_secret_is_refused() -> None:
+    from structlog.testing import capture_logs
+
+    key = agent_identity.key_for("hermes")
+    os.chmod(agent_identity.secret_path(), 0o644)
+    with capture_logs() as logs:
+        assert not agent_identity.verify("hermes", key)
+        assert not agent_identity.verify("hermes", key)
+    refused = [e for e in logs if e["event"] == "hal0.agent_identity.secret_refused"]
+    assert len(refused) == 1 and "0644" in refused[0]["reason"]  # logged once, not per call
+    os.chmod(agent_identity.secret_path(), 0o600)
+    assert agent_identity.verify("hermes", key)
+
+
+def test_a_short_or_linked_secret_is_refused(tmp_path: Path) -> None:
+    key = agent_identity.key_for("hermes")
+    path = agent_identity.secret_path()
+    real = tmp_path / "elsewhere.bin"
+    real.write_bytes(path.read_bytes())
+    os.chmod(real, 0o600)
+    path.unlink()
+    path.symlink_to(real)
+    assert not agent_identity.verify("hermes", key)
+    path.unlink()
+    path.write_bytes(b"short")
+    os.chmod(path, 0o600)
+    assert not agent_identity.verify("hermes", key)
+
+
+def test_a_foreign_owned_secret_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = agent_identity.key_for("hermes")
+    monkeypatch.setattr(agent_identity, "_trusted_owners", lambda: {0, os.geteuid() + 4242})
+    monkeypatch.setattr(agent_identity, "_cache", None)
+    assert not agent_identity.verify("hermes", key)
+
+
+def test_only_root_or_the_service_user_creates_the_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator in the hal0 group must not mint a file hal0-api cannot read (S3)."""
+    if os.geteuid() == 0:
+        pytest.skip("root may always create it")
+    monkeypatch.setattr(agent_identity, "_service_uid", lambda: os.geteuid() + 4242)
+    assert agent_identity.key_for("hermes") is None
+    assert not agent_identity.secret_path().exists()
+    assert not agent_identity.secret_path().parent.exists()
+
+
+# ── keys exist only for the names hal0's own agents use (review S5) ──────────
+
+
+@pytest.mark.parametrize("name", ["openwebui", "claude-code", "rvskeptic", "anonymous"])
+def test_no_key_for_a_name_a_bridge_client_may_hold(name: str) -> None:
+    assert agent_identity.key_for(name) is None
+    agent_identity.key_for("hermes")  # a secret exists
+    secret = agent_identity.secret_path().read_bytes()
+    forged = agent_identity._derive(secret, name)
+    assert not agent_identity.verify(name, forged)
+    assert agent_identity.judge_claim(name, forged) == agent_identity.CLAIM_UNVERIFIED

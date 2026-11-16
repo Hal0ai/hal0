@@ -50,6 +50,12 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         lambda self, candidates: {"status": "minted", "key": "hal0bk_pi-coder.test"},
     )
     monkeypatch.delenv("HAL0_API_URL", raising=False)
+    # The agent identity key (#3569): the suite fakes euid 0, and root mints the
+    # secret only inside an existing directory, so give it one.
+    (tmp_path / "identity").mkdir()
+    monkeypatch.setenv(
+        "HAL0_AGENT_IDENTITY_SECRET_PATH", str(tmp_path / "identity" / "identity.bin")
+    )
     return tmp_path
 
 
@@ -100,6 +106,11 @@ def test_install_writes_mcp_config(home: Path) -> None:
     assert memory["url"] == "http://127.0.0.1:8080/mcp/memory/mcp"
     assert memory["headers"]["Authorization"] == "Bearer tok123"
     assert memory["headers"]["X-hal0-Agent"] == "pi"
+    # The identity key that backs the claim (#3569).
+    from hal0.agent_identity import key_for
+
+    assert memory["headers"]["X-hal0-Agent-Key"] == key_for("pi")
+    assert admin["headers"]["X-hal0-Agent-Key"] == key_for("pi")
 
 
 def test_mcp_config_written_mode_0600(home: Path) -> None:

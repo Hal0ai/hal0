@@ -159,14 +159,14 @@ def test_add_default_writes_to_shared_no_headers(
 def test_add_accepts_the_private_document_id_a_private_add_returned(
     client: TestClient, stub_wrapper: StubWrapper
 ) -> None:
-    headers = {**identity_headers("alice"), "X-hal0-Private": "1"}
+    headers = {**identity_headers("hermes__alice"), "X-hal0-Private": "1"}
     r = client.post(
         "/api/memory/add",
-        json={"text": "again", "document_id": "private:alice:notes"},
+        json={"text": "again", "document_id": "private:hermes__alice:notes"},
         headers=headers,
     )
     assert r.status_code == 200, r.text
-    assert stub_wrapper.add_calls[0]["document_id"] == "private:alice:notes"
+    assert stub_wrapper.add_calls[0]["document_id"] == "private:hermes__alice:notes"
 
 
 def test_add_refuses_a_private_document_id_on_a_shared_write(
@@ -174,8 +174,8 @@ def test_add_refuses_a_private_document_id_on_a_shared_write(
 ) -> None:
     r = client.post(
         "/api/memory/add",
-        json={"text": "x", "document_id": "private:alice:notes"},
-        headers={**identity_headers("alice")},
+        json={"text": "x", "document_id": "private:hermes__alice:notes"},
+        headers={**identity_headers("hermes__alice")},
     )
     assert r.status_code == 400, r.text
     assert stub_wrapper.add_calls == []
@@ -184,33 +184,33 @@ def test_add_refuses_a_private_document_id_on_a_shared_write(
 def test_add_private_header_promotes_dataset_to_caller_namespace(
     client: TestClient, stub_wrapper: StubWrapper
 ) -> None:
-    """``X-hal0-Agent: hermes-agent`` + ``X-hal0-Private: 1`` → writes
-    land under ``private:hermes-agent`` (issue #317 main repro)."""
+    """``X-hal0-Agent: hermes__agent`` + ``X-hal0-Private: 1`` → writes
+    land under ``private:hermes__agent`` (issue #317 main repro)."""
     r = client.post(
         "/api/memory/add",
         json={"text": "probe", "tags": ["probe"]},
-        headers={**identity_headers("hermes-agent"), "X-hal0-Private": "1"},
+        headers={**identity_headers("hermes__agent"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     call = stub_wrapper.add_calls[0]
-    assert call["dataset"] == "private:hermes-agent"
+    assert call["dataset"] == "private:hermes__agent"
     # ADR-0005 §5 — source is server-injected from the agent header.
-    assert call["source"] == "hermes-agent"
+    assert call["source"] == "hermes__agent"
 
 
 def test_add_explicit_private_dataset_passthrough(
     client: TestClient, stub_wrapper: StubWrapper
 ) -> None:
-    """Explicit ``dataset=private:hermes-agent`` body field is honored
+    """Explicit ``dataset=private:hermes__agent`` body field is honored
     when the agent header matches — mirrors the MCP ``dataset`` arg."""
     r = client.post(
         "/api/memory/add",
-        json={"text": "probe", "dataset": "private:hermes-agent"},
-        headers={**identity_headers("hermes-agent"), "X-hal0-Private": "1"},
+        json={"text": "probe", "dataset": "private:hermes__agent"},
+        headers={**identity_headers("hermes__agent"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     call = stub_wrapper.add_calls[0]
-    assert call["dataset"] == "private:hermes-agent"
+    assert call["dataset"] == "private:hermes__agent"
 
 
 def test_add_private_mode_wins_over_body_dataset(
@@ -222,11 +222,11 @@ def test_add_private_mode_wins_over_body_dataset(
     r = client.post(
         "/api/memory/add",
         json={"text": "secret", "dataset": "shared"},
-        headers={**identity_headers("hermes-agent"), "X-hal0-Private": "1"},
+        headers={**identity_headers("hermes__agent"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     call = stub_wrapper.add_calls[0]
-    assert call["dataset"] == "private:hermes-agent"
+    assert call["dataset"] == "private:hermes__agent"
 
 
 def test_add_explicit_shared_dataset_passthrough_no_private(
@@ -237,12 +237,12 @@ def test_add_explicit_shared_dataset_passthrough_no_private(
     r = client.post(
         "/api/memory/add",
         json={"text": "ident card", "dataset": "shared"},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code == 200, r.text
     call = stub_wrapper.add_calls[0]
     assert call["dataset"] == "shared"
-    assert call["source"] == "hermes-agent"
+    assert call["source"] == "hermes__agent"
 
 
 def test_add_retired_dataset_rejected(client: TestClient, stub_wrapper: StubWrapper) -> None:
@@ -251,7 +251,7 @@ def test_add_retired_dataset_rejected(client: TestClient, stub_wrapper: StubWrap
     r = client.post(
         "/api/memory/add",
         json={"text": "ident card", "dataset": "agents"},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code == 400, r.text
     assert "retired" in r.text
@@ -279,7 +279,7 @@ def test_add_caller_supplied_source_rejected(client: TestClient, stub_wrapper: S
     r = client.post(
         "/api/memory/add",
         json={"text": "x", "source": "fake-agent"},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code >= 400
     assert stub_wrapper.add_calls == []
@@ -293,7 +293,7 @@ def test_add_missing_text_is_400_not_500(client: TestClient, stub_wrapper: StubW
     r = client.post(
         "/api/memory/add",
         json={"body": "wrong field name"},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] != "system.internal"
@@ -306,7 +306,7 @@ def test_add_caller_supplied_source_is_400_not_500(
     r = client.post(
         "/api/memory/add",
         json={"text": "x", "source": "fake-agent"},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] != "system.internal"
@@ -323,25 +323,25 @@ def test_search_private_mode_expands_to_both_namespaces(
     r = client.post(
         "/api/memory/search",
         json={"query": "probe"},
-        headers={**identity_headers("hermes-agent"), "X-hal0-Private": "1"},
+        headers={**identity_headers("hermes__agent"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     call = stub_wrapper.search_calls[0]
-    assert call["dataset"] == ["shared", "private:hermes-agent"]
+    assert call["dataset"] == ["shared", "private:hermes__agent"]
 
 
 def test_search_explicit_private_dataset(client: TestClient, stub_wrapper: StubWrapper) -> None:
-    """Explicit ``dataset=private:hermes-agent`` flows through; the
+    """Explicit ``dataset=private:hermes__agent`` flows through; the
     REST handler does not collapse the namespace before passing to the
     wrapper (the wrapper enforces cross-client read isolation)."""
     r = client.post(
         "/api/memory/search",
-        json={"query": "probe", "dataset": "private:hermes-agent"},
-        headers={**identity_headers("hermes-agent"), "X-hal0-Private": "1"},
+        json={"query": "probe", "dataset": "private:hermes__agent"},
+        headers={**identity_headers("hermes__agent"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     call = stub_wrapper.search_calls[0]
-    assert call["dataset"] == "private:hermes-agent"
+    assert call["dataset"] == "private:hermes__agent"
 
 
 def test_search_default_no_headers_is_shared(client: TestClient, stub_wrapper: StubWrapper) -> None:
@@ -365,11 +365,11 @@ def test_list_private_mode_expands_to_both_namespaces(
     the "Identity rules mirror /search" contract this route documents)."""
     r = client.get(
         "/api/memory/list",
-        headers={**identity_headers("hermes-agent"), "X-hal0-Private": "1"},
+        headers={**identity_headers("hermes__agent"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     call = stub_wrapper.list_calls[0]
-    assert call["dataset"] == ["shared", "private:hermes-agent"]
+    assert call["dataset"] == ["shared", "private:hermes__agent"]
 
 
 def test_list_explicit_dataset_query_param(client: TestClient, stub_wrapper: StubWrapper) -> None:
@@ -390,12 +390,12 @@ def test_list_bank_alias_resolves_own_private_bucket(
     worked example — resolves once the caller's identity actually IS that
     agent (``X-hal0-Agent`` + ``X-hal0-Private: 1``)."""
     r = client.get(
-        "/api/memory/list?bank=private__hermes-agent",
-        headers={**identity_headers("hermes-agent"), "X-hal0-Private": "1"},
+        "/api/memory/list?bank=private__hermes__agent",
+        headers={**identity_headers("hermes__agent"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     call = stub_wrapper.list_calls[0]
-    assert call["dataset"] == "private:hermes-agent"
+    assert call["dataset"] == "private:hermes__agent"
 
 
 def test_list_bank_alias_private_prefix_rejected_without_private_header(
@@ -405,7 +405,7 @@ def test_list_bank_alias_private_prefix_rejected_without_private_header(
     without ``X-hal0-Private: 1`` still 400s — the alias is sugar for
     spelling a namespace, not a bypass of the private-mode toggle that is
     "the only path in" to the private namespace (namespace.py)."""
-    r = client.get("/api/memory/list?bank=private__hermes-agent")
+    r = client.get("/api/memory/list?bank=private__hermes__agent")
     assert r.status_code >= 400
     assert stub_wrapper.list_calls == []
 
@@ -418,15 +418,15 @@ def test_list_bank_alias_cannot_address_another_agents_private_bank(
     bucket, never the named one — the closed-set namespace rule (module
     docstring, ``hal0.memory.namespace``) has no escape hatch for naming
     another agent's private bucket, by alias or otherwise. This is the
-    repro from #1669: alice requesting ``bank=private__hermes-agent``
+    repro from #1669: hermes__alice requesting ``bank=private__hermes__agent``
     must never see hermes's bucket."""
     r = client.get(
-        "/api/memory/list?bank=private__hermes-agent",
-        headers={**identity_headers("alice"), "X-hal0-Private": "1"},
+        "/api/memory/list?bank=private__hermes__agent",
+        headers={**identity_headers("hermes__alice"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     call = stub_wrapper.list_calls[0]
-    assert call["dataset"] == "private:alice"
+    assert call["dataset"] == "private:hermes__alice"
 
 
 # ── /api/memory/delete ─────────────────────────────────────────────────────
@@ -439,11 +439,11 @@ def test_delete_passes_ids_unchanged(client: TestClient, stub_wrapper: StubWrapp
     r = client.post(
         "/api/memory/delete",
         json={"ids": ["a", "b"]},
-        headers={**identity_headers("hermes-agent"), "X-hal0-Private": "1"},
+        headers={**identity_headers("hermes__agent"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     assert stub_wrapper.delete_calls == [
-        {"ids": ["a", "b"], "client_id": "hermes-agent", "dataset": None}
+        {"ids": ["a", "b"], "client_id": "hermes__agent", "dataset": None}
     ]
     assert r.json() == {"deleted": 2}
 
@@ -460,13 +460,13 @@ def test_delete_is_audited(stub_wrapper: StubWrapper, tmp_path: Any) -> None:
         r = c.post(
             "/api/memory/delete",
             json={"ids": ["a", "b"]},
-            headers={**identity_headers("hermes-agent")},
+            headers={**identity_headers("hermes__agent")},
         )
         assert r.status_code == 200, r.text
     rows = audit.query(action="memory.items.delete")
     assert rows, "expected a memory.items.delete audit row"
     assert rows[0]["outcome"] == "ok"
-    assert rows[0]["actor"] == "mcp:hermes-agent"
+    assert rows[0]["actor"] == "mcp:hermes__agent"
     assert rows[0]["target"] == "a,b"
 
 
@@ -538,7 +538,7 @@ def test_add_body_private_dataset_without_private_header_rejected(
     r = client.post(
         "/api/memory/add",
         json={"text": "x", "dataset": "private:other"},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "memory.namespace_invalid"
@@ -579,23 +579,23 @@ def test_cross_client_private_writes_not_visible_to_other_agents(
     r = client.post(
         "/api/memory/add",
         json={"text": "A's secret"},
-        headers={**identity_headers("agent-a"), "X-hal0-Private": "1"},
+        headers={**identity_headers("hermes__a"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
-    assert stub_wrapper.add_calls[0]["dataset"] == "private:agent-a"
+    assert stub_wrapper.add_calls[0]["dataset"] == "private:hermes__a"
 
     # Agent B searches without the private header.
     r2 = client.post(
         "/api/memory/search",
         json={"query": "secret"},
-        headers={**identity_headers("agent-b")},
+        headers={**identity_headers("hermes__b")},
     )
     assert r2.status_code == 200, r2.text
     # Agent B's resolved read scope is just ``shared`` — the route does
     # not unilaterally union in any other agent's private namespace.
     search_call = stub_wrapper.search_calls[-1]
     assert search_call["dataset"] == "shared"
-    assert "private:agent-a" not in (
+    assert "private:hermes__a" not in (
         search_call["dataset"]
         if isinstance(search_call["dataset"], list)
         else [search_call["dataset"]]
@@ -610,18 +610,18 @@ def test_search_route_passes_resolved_client_id_to_wrapper(
 ) -> None:
     """REST search route must thread X-hal0-Agent through as client_id so
     the wrapper's _allowed_read_datasets honors per-call identity.
-    Without this, hermes-agent writes to private:hermes-agent but
+    Without this, hermes__agent writes to private:hermes__agent but
     memory_search returns 0 because the singleton wrapper drops
-    private:hermes-agent as "another client's private".
+    private:hermes__agent as "another client's private".
     """
     r = client.post(
         "/api/memory/search",
         json={"query": "hi"},
-        headers={**identity_headers("hermes-agent"), "X-hal0-Private": "1"},
+        headers={**identity_headers("hermes__agent"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     sc = stub_wrapper.search_calls[-1]
-    assert sc["client_id"] == "hermes-agent"
+    assert sc["client_id"] == "hermes__agent"
 
 
 def test_list_route_passes_resolved_client_id_to_wrapper(
@@ -630,11 +630,11 @@ def test_list_route_passes_resolved_client_id_to_wrapper(
     """REST list route mirrors search — must thread client_id."""
     r = client.get(
         "/api/memory/list",
-        headers={**identity_headers("hermes-agent"), "X-hal0-Private": "1"},
+        headers={**identity_headers("hermes__agent"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     lc = stub_wrapper.list_calls[-1]
-    assert lc["client_id"] == "hermes-agent"
+    assert lc["client_id"] == "hermes__agent"
 
 
 def test_add_route_passes_resolved_client_id_to_wrapper(
@@ -646,13 +646,13 @@ def test_add_route_passes_resolved_client_id_to_wrapper(
     r = client.post(
         "/api/memory/add",
         json={"text": "secret"},
-        headers={**identity_headers("agent-a"), "X-hal0-Private": "1"},
+        headers={**identity_headers("hermes__a"), "X-hal0-Private": "1"},
     )
     assert r.status_code == 200, r.text
     ac = stub_wrapper.add_calls[-1]
-    assert ac["client_id"] == "agent-a"
-    assert ac["source"] == "agent-a"
-    assert ac["dataset"] == "private:agent-a"
+    assert ac["client_id"] == "hermes__a"
+    assert ac["source"] == "hermes__a"
+    assert ac["dataset"] == "private:hermes__a"
 
 
 def test_anonymous_call_passes_no_client_id(client: TestClient, stub_wrapper: StubWrapper) -> None:
@@ -675,7 +675,7 @@ def test_add_document_id_passes_through(client: TestClient, stub_wrapper: StubWr
     r = client.post(
         "/api/memory/add",
         json={"text": "turn 2", "document_id": "conv-42"},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code == 200, r.text
     assert stub_wrapper.add_calls[0]["document_id"] == "conv-42"
@@ -688,7 +688,7 @@ def test_add_document_id_bad_grammar_rejected(
     r = client.post(
         "/api/memory/add",
         json={"text": "x", "document_id": "../escape"},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code == 400, r.text
     assert not stub_wrapper.add_calls
@@ -699,7 +699,7 @@ def test_add_unknown_namespace_rejected(client: TestClient, stub_wrapper: StubWr
     r = client.post(
         "/api/memory/add",
         json={"text": "x", "dataset": "smoke-gemma4-e4b-v2"},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code == 400, r.text
     assert not stub_wrapper.add_calls
@@ -709,7 +709,7 @@ def test_delete_dataset_directs_sweep(client: TestClient, stub_wrapper: StubWrap
     r = client.post(
         "/api/memory/delete",
         json={"ids": ["d1"], "dataset": "shared"},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code == 200, r.text
     assert stub_wrapper.delete_calls[0]["dataset"] == "shared"
@@ -721,7 +721,7 @@ def test_delete_without_dataset_keeps_default_sweep(
     r = client.post(
         "/api/memory/delete",
         json={"ids": ["d1"]},
-        headers={**identity_headers("hermes-agent")},
+        headers={**identity_headers("hermes__agent")},
     )
     assert r.status_code == 200, r.text
     assert stub_wrapper.delete_calls[0]["dataset"] is None
