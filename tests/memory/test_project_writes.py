@@ -250,8 +250,8 @@ async def test_caller_metadata_keys_are_not_overwritten() -> None:
 
 
 async def test_a_private_project_write_keeps_the_private_scope_guard() -> None:
-    """A private note in the unified bank is sent with no observation scope,
-    project or not, so its observations keep ``visibility:private``."""
+    """A private note in the unified bank is sent with its own private scope,
+    project or not, so its observations keep ``visibility:private`` (#3547)."""
     engine, provider = _wired()
     await provider.add(
         "secret",
@@ -269,7 +269,10 @@ async def test_a_private_project_write_keeps_the_private_scope_guard() -> None:
         "visibility:private",
     ]
     assert without["tags"] == ["agent:alice", "kind:durable", "scope:global", "visibility:private"]
-    assert "observation_scopes" not in with_project and "observation_scopes" not in without
+    assert with_project["observation_scopes"] == [
+        ["agent:alice", "visibility:private", "project:atlas"]
+    ]
+    assert without["observation_scopes"] == [["agent:alice", "visibility:private"]]
 
 
 @pytest.mark.parametrize(
@@ -284,13 +287,18 @@ async def test_a_private_project_write_keeps_the_private_scope_guard() -> None:
         {"tags": ["checkpoint"], "project": "atlas"},
     ],
 )
-async def test_a_private_write_sends_no_observation_scope_whatever_its_project(kwargs) -> None:
+async def test_a_private_write_sends_its_private_observation_scope_whatever_its_project(
+    kwargs,
+) -> None:
     """Private, in the unified bank: the project is tagged, ``visibility:private``
-    is the last tag, and no observation scope is sent in any combination."""
+    is the last tag, and every observation scope sent carries it in any combination."""
     engine, provider = _wired()
     await provider.add("secret", dataset="private:alice", client_id="alice", **kwargs)
     item = engine.item
-    assert "observation_scopes" not in item
+    assert item["observation_scopes"]
+    assert all(
+        scope[:2] == ["agent:alice", "visibility:private"] for scope in item["observation_scopes"]
+    )
     assert item["tags"][-1] == "visibility:private"
     assert item["tags"].count("visibility:private") == 1
     assert "agent:alice" in item["tags"]
@@ -471,8 +479,10 @@ async def test_mcp_private_add_with_a_project_in_the_legacy_unified_bank() -> No
         "project:atlas",
         "visibility:private",
     ]
-    # Legacy unified: the engine default applies, exactly as before.
-    assert "observation_scopes" not in engine.item
+    # #3547: the private write names its own scope, so a bank default never applies.
+    assert engine.item["observation_scopes"] == [
+        ["agent:pi-coder", "visibility:private", "project:atlas"]
+    ]
 
 
 async def test_mcp_add_refuses_a_project_that_is_not_a_string() -> None:
@@ -717,7 +727,9 @@ async def test_retain_items_keeps_the_private_write_scope_guard() -> None:
             "project:atlas",
             "visibility:private",
         ]
-        assert "observation_scopes" not in item
+        assert item["observation_scopes"] == [
+            ["agent:alice", "visibility:private", "project:atlas"]
+        ]
     assert first["document_id"] == "private:alice:doc-1"
     assert out["document_ids"][0] == "private:alice:doc-1"
 

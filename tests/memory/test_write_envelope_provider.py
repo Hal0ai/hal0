@@ -272,19 +272,25 @@ async def test_an_explicit_scope_wins_over_the_project_scope(explicit) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_private_write_in_the_unified_bank_sends_no_scope() -> None:
-    """Neither the untagged scope nor a project scope carries
-    ``visibility:private``; a private note must not feed either."""
+async def test_a_private_write_in_the_unified_bank_sends_its_own_private_scope() -> None:
+    """#3547: the bank default (the shared spec's ``[["project:*"]]``) keeps
+    only the project tag on an observation, dropping ``visibility:private``.
+    A private write carries an explicit scope of its own tags so the default
+    never applies, whatever scope the caller asked for."""
     p = _unified()
     await p.add("secret", dataset="private:alice", client_id="alice")
     await p.add("secret", dataset="private:alice", client_id="alice", observation_scopes="shared")
     await p.add("secret", dataset="private:alice", tags=["project:hal0"], client_id="alice")
-    assert [rec["tags"][-1] for rec in p._client.retained] == ["visibility:private"] * 3
-    assert all("observation_scopes" not in rec for rec in p._client.retained)
+    scopes = [rec["observation_scopes"] for rec in p._client.retained]
+    assert scopes == [
+        [["agent:alice", "visibility:private"]],
+        [["agent:alice", "visibility:private"]],
+        [["agent:alice", "visibility:private", "project:hal0"]],
+    ]
 
 
 @pytest.mark.asyncio
-async def test_a_private_write_with_list_form_scopes_sends_no_scope() -> None:
+async def test_a_private_write_with_list_form_scopes_ignores_the_callers_scope() -> None:
     """A caller's list-form scope is dropped whole on a private write, the
     harmless entry along with the one naming another agent."""
     p = _unified()
@@ -294,7 +300,7 @@ async def test_a_private_write_with_list_form_scopes_sends_no_scope() -> None:
         client_id="alice",
         observation_scopes=[["agent:victim"], ["project:hal0"]],
     )
-    assert "observation_scopes" not in p._client.retained[-1]
+    assert p._client.retained[-1]["observation_scopes"] == [["agent:alice", "visibility:private"]]
 
 
 @pytest.mark.asyncio
@@ -408,7 +414,7 @@ async def test_rest_add_without_identity_is_tagged_unknown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rest_private_add_keeps_its_stamp_and_sends_no_scope() -> None:
+async def test_rest_private_add_keeps_its_stamp_and_sends_its_private_scope() -> None:
     engine, provider = _wired()
     response = await _rest_add(
         provider,
@@ -419,7 +425,7 @@ async def test_rest_private_add_keeps_its_stamp_and_sends_no_scope() -> None:
     item = engine.item
     assert item["tags"] == ["agent:hermes", "kind:ephemeral", "visibility:private"]
     assert item["metadata"]["lifecycle"] == "chat"
-    assert "observation_scopes" not in item
+    assert item["observation_scopes"] == [["agent:hermes", "visibility:private"]]
 
 
 def _mcp(provider: HindsightProvider, *, private: bool = False):
@@ -467,10 +473,10 @@ async def test_mcp_add_forwards_an_explicit_observation_scope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_private_add_keeps_its_stamp_and_sends_no_scope() -> None:
+async def test_mcp_private_add_keeps_its_stamp_and_sends_its_private_scope() -> None:
     engine, provider = _wired()
     out = await _mcp(provider)("memory_add", {"text": "note", "tags": ["chat"], "private": True})
     assert out["status"] == "ok", out
     item = engine.item
     assert item["tags"] == ["agent:pi-coder", "kind:ephemeral", "visibility:private"]
-    assert "observation_scopes" not in item
+    assert item["observation_scopes"] == [["agent:pi-coder", "visibility:private"]]

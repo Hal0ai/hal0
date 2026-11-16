@@ -229,15 +229,16 @@ async def test_a_two_bank_shared_write_may_not_claim_a_private_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_legacy_unified_private_write_keeps_the_engine_default_scope() -> None:
-    """Unchanged on an upgraded store: no scope is sent (#3547 is held off
-    there by ``spec apply``)."""
+async def test_the_legacy_unified_private_write_sends_its_own_private_scope() -> None:
+    """On an upgraded store the write names its own private scope, so a bank
+    default never applies to it (#3547)."""
     engine = Engine()
     await provider(UNIFIED, engine).add(
         "a note", dataset=f"private:{ME}", document_id="n1", client_id=ME
     )
     item = engine.retained[0]
-    assert item["bank_id"] == "shared" and "observation_scopes" not in item
+    assert item["bank_id"] == "shared"
+    assert item["observation_scopes"] == [[f"agent:{ME}", "visibility:private"]]
     assert item["document_id"] == f"private:{ME}:n1"
 
 
