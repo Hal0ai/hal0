@@ -312,6 +312,53 @@ def _config_stat_key(path: str) -> tuple[int, int] | str | None:
     return (st.st_mtime_ns, st.st_size)
 
 
+#: hal0's MCP entries in a profile's config.yaml that carry the identity key.
+_KEY_SERVERS = ("hal0-memory", "hal0-admin")
+
+
+def _read_agent_key(path: str, agent_id: str) -> str | None:
+    """The identity key hal0 wrote for ``agent_id`` into the profile's config.yaml (#3569).
+
+    hal0 writes ``hal0: {agent_key: {agent, key}}`` for every profile that uses
+    this provider, and puts ``X-hal0-Agent-Key`` beside ``X-hal0-Agent`` on its
+    own MCP entries (``mcp_servers.hal0-memory`` / ``hal0-admin``). The key is used
+    only from a record or entry that names this client's own agent, so a hand-edited
+    entry for another identity is never borrowed. ``None`` when there is no
+    such entry or the file cannot be read: the request then goes without a
+    key, and hal0 treats the name as an audit label. Never raises.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        import yaml
+
+        data = yaml.safe_load(text)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    # ``hal0.agent_key`` is written for every profile that uses this provider,
+    # including one opted out of hal0's MCP wiring (``hal0.wire_mcp: false``).
+    hal0 = data.get("hal0")
+    record = hal0.get("agent_key") if isinstance(hal0, dict) else None
+    if isinstance(record, dict) and record.get("agent") == agent_id:
+        key = record.get("key")
+        if isinstance(key, str) and key.strip():
+            return key.strip()
+    servers = data.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return None
+    for name in _KEY_SERVERS:
+        entry = servers.get(name)
+        headers = entry.get("headers") if isinstance(entry, dict) else None
+        if not isinstance(headers, dict) or headers.get("X-hal0-Agent") != agent_id:
+            continue
+        key = headers.get("X-hal0-Agent-Key")
+        if isinstance(key, str) and key.strip():
+            return key.strip()
+    return None
+
+
 class _BadProject(ValueError):
     """A tool call's ``project`` was not a string."""
 
@@ -566,7 +613,10 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
             )
         else:
             agent_id = os.environ.get("HAL0_AGENT_ID") or config.get("agent_id")
-        self._client = Hal0MemoryClient(base_url=base_url, agent_id=agent_id)
+        self._agent_key_cache = None
+        self._client = Hal0MemoryClient(
+            base_url=base_url, agent_id=agent_id, agent_key=self._agent_key_now
+        )
 
     def shutdown(self) -> None:
         if self._client is None:
@@ -590,6 +640,19 @@ class Hal0MemoryProvider(MemoryProvider):  # type: ignore[misc]
 
     def _agent_id(self) -> str:
         return self._client.agent_id if self._client else _DEFAULT_AGENT_ID
+
+    def _agent_key_now(self) -> str | None:
+        """This agent's identity key from the profile's config.yaml, re-read when the file changes."""
+        path = _memory_private_config_path(self._hermes_home)
+        key = _config_stat_key(path)
+        agent_id = self._agent_id()
+        cached = getattr(self, "_agent_key_cache", None)
+        if key != "error" and cached is not None and cached[0] == (key, agent_id):
+            return cached[1]
+        value = _read_agent_key(path, agent_id)
+        if key != "error":
+            self._agent_key_cache = ((key, agent_id), value)
+        return value
 
     def _source_event_key(self, *parts: str, session_id: str = "") -> str:
         """Stable idempotency key so server-side dedup drops duplicate captures.

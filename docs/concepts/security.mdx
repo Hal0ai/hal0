@@ -194,10 +194,23 @@ sessions (8 hours, or 30 days with Remember me). Details: [Revoked streams](/doc
 
 ## Agent identity and gated actions
 
-hal0's agent and memory surfaces resolve caller identity from the
-`X-hal0-Agent` request header (validated to a bounded `[a-zA-Z0-9_-]` id),
-and the same identity resolves the same memory namespace whether it arrives
-over REST or MCP. Privileged or destructive agent actions are **gated**:
+A caller names itself in the `X-hal0-Agent` request header (validated to a
+bounded `[a-zA-Z0-9_-]` id). On its own that header is a claim, not a
+credential: it labels the audit trail, and in memory the caller is
+`anonymous`, with shared memory only and no private notes. A memory identity,
+the owner of `private:<agent>` notes, needs a credential
+([ADR-0062](/docs/adr/0062-memory-identity-from-a-credential)):
+
+- a **bridge key**, whose client name is the identity (the header is ignored);
+- or, for hal0's own agents (the Hermes profiles and Pi), the agent's
+  **identity key** in `X-hal0-Agent-Key`, which hal0 writes into their
+  configuration and derives from a secret in `/var/lib/hal0/agents/identity.bin`.
+
+A name hal0 reserves for its own agents (`hermes`, `hermes__<profile>`, `pi`,
+any `hal0…`) claimed without its key is refused with
+`403 bridge.client_name_reserved` on `/mcp/memory` and `/api/memory/*`. The
+same identity resolves the same memory namespace whether it arrives over REST
+or MCP. Privileged or destructive agent actions are **gated**:
 rather than executing immediately, they enqueue an approval that a human
 clears from the dashboard, the CLI, or via the approval API. See
 [Agents](/docs/concepts/agents) for how personas, tool gating, and the

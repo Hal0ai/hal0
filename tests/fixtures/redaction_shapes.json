@@ -554,6 +554,10 @@
     [
       "see hal0bk_ci-runner.Wq9sk-qqqqqqqqqqqqqqqqqqqqqqqq in the log",
       "Wq9"
+    ],
+    [
+      "sent hal0ak_Q2v9Xk-Lm3Np8Rt5Yw1Za6Bc4De7Fg0Hj2Kl9Mn5Pq8Rs3 to hal0",
+      "Q2v9Xk-Lm3Np8Rt5Yw1Za6Bc4De7Fg0Hj2Kl9Mn5Pq8Rs3"
     ]
   ],
   "keep": [
@@ -581,7 +585,8 @@
     "see https://example.com/docs and ftp://host/file",
     "max_tokens=\"5\"",
     "tokenizer='Qwen/Qwen3-8B'",
-    "the hal0bk_ prefix names a bridge key"
+    "the hal0bk_ prefix names a bridge key",
+    "the hal0ak_ prefix names an agent identity key"
   ],
   "exact": [
     [

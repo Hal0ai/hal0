@@ -28,6 +28,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from hal0.agent_identity import identity_headers, key_for
 from hal0.agents.hermes.plugins.memory_hindsight import Hal0MemoryProvider
 from hal0.agents.hermes.plugins.memory_hindsight._client import Hal0MemoryClient
 from hal0.agents.hermes_provision import profile_agent_id
@@ -36,7 +37,10 @@ from hal0.api.routes import memory as memory_routes
 from hal0.memory.hindsight_provider import HindsightProvider
 from hal0.memory.pgvector_provider import PgVectorProvider
 
-PRIVATE = {"X-hal0-Agent": "hermes", "X-hal0-Private": "1"}
+
+def _private() -> dict[str, str]:
+    """Hermes's private-write headers, with its identity key (#3569)."""
+    return {**identity_headers("hermes"), "X-hal0-Private": "1"}
 
 
 def _app(provider: Any) -> FastAPI:
@@ -85,7 +89,7 @@ def test_append_document_id_is_document_id_plus_append(
     r = http.post(
         "/api/memory/add",
         json={"text": "turn 2", "append_document_id": "hermes-s1"},
-        headers=PRIVATE,
+        headers=_private(),
     )
     assert r.status_code == 200, r.text
     (call,) = wrapper.add_calls
@@ -109,7 +113,7 @@ def test_append_document_id_has_exactly_one_meaning(
     r = http.post(
         "/api/memory/add",
         json={"text": "x", "append_document_id": "hermes-s1", **extra},
-        headers=PRIVATE,
+        headers=_private(),
     )
     assert r.status_code == 400, r.text
     assert r.json()["error"]["code"] == "memory.append_document_id_conflict"
@@ -130,7 +134,7 @@ def test_a_private_append_document_id_needs_a_private_write(
 ) -> None:
     body = {"text": "x", "append_document_id": "private:hermes:hermes-s1"}
     assert http.post("/api/memory/add", json=body).status_code == 400
-    assert http.post("/api/memory/add", json=body, headers=PRIVATE).status_code == 200
+    assert http.post("/api/memory/add", json=body, headers=_private()).status_code == 200
     assert wrapper.add_calls[0]["document_id"] == "private:hermes:hermes-s1"
 
 
@@ -200,7 +204,7 @@ def test_the_route_does_not_acknowledge_on_the_providers_behalf(
 ) -> None:
     """The route forwarded the mode; this provider reported nothing. The
     response must not claim the append happened."""
-    r = http.post("/api/memory/add", json=body, headers=PRIVATE)
+    r = http.post("/api/memory/add", json=body, headers=_private())
     assert r.status_code == 200, r.text
     assert wrapper.add_calls[0]["update_mode"] == "append"
     assert "update_mode" not in r.json()
@@ -212,7 +216,7 @@ def test_the_hindsight_provider_acknowledges_what_it_sent_to_the_engine() -> Non
         appended = http.post(
             "/api/memory/add",
             json={"text": "x", "append_document_id": "hermes-s1"},
-            headers=PRIVATE,
+            headers=_private(),
         )
         plain = http.post("/api/memory/add", json={"text": "x", "document_id": "notes"})
     assert appended.json()["update_mode"] == "append"
@@ -227,7 +231,7 @@ def test_the_volatile_fallback_does_not_acknowledge() -> None:
         r = http.post(
             "/api/memory/add",
             json={"text": "x", "append_document_id": "hermes-s1"},
-            headers=PRIVATE,
+            headers=_private(),
         )
     assert r.status_code == 200, r.text
     assert "update_mode" not in r.json()
@@ -237,7 +241,11 @@ def test_the_volatile_fallback_does_not_acknowledge() -> None:
 
 
 def _plugin(http: TestClient, *, agent_id: str, session_id: str) -> Hal0MemoryProvider:
-    provider = Hal0MemoryProvider(client=Hal0MemoryClient(http_client=http, agent_id=agent_id))
+    provider = Hal0MemoryProvider(
+        client=Hal0MemoryClient(
+            http_client=http, agent_id=agent_id, agent_key=lambda: key_for(agent_id)
+        )
+    )
     provider.initialize(session_id=session_id)
     return provider
 

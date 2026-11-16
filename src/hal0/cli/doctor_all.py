@@ -2550,6 +2550,71 @@ def check_openwebui_mcp(
     return Check(key, label, _PASS, f"{len(have)} connection(s) rendered for scopes: {scopes}")
 
 
+def check_agent_identity_secret(*, path: Path | None = None) -> Check:
+    """The agent identity secret is the hal0 user's own 0600 file (#3569, ADR-0062).
+
+    hal0-api derives every bundled agent's ``X-hal0-Agent-Key`` from
+    ``/var/lib/hal0/agents/identity.bin`` and refuses the file unless it is a
+    regular file of at least 32 bytes, owned by root or ``hal0``, with no group
+    or other bits. A refused secret means Hermes and Pi lose their private
+    memory and their reserved names get 403, so the row names the fix. It only
+    ``lstat``s the file: it never reads, creates or re-permissions it.
+
+    * Missing: PASS, "not created yet" (hal0-api writes it the first time it
+      keys a bundled agent, at its next start).
+    * A link, not a regular file, too short, a mode with group or other bits,
+      or (when the ``hal0`` account exists) an owner other than ``hal0``:
+      WARN with the remedy.
+
+    ADVISORY (never critical): only the bundled agents' private memory depends on it.
+    """
+    from hal0.agent_identity import secret_path
+
+    key, label = "agent-identity-secret", "Agent identity secret"
+    secret = path if path is not None else secret_path()
+    remedy = (
+        "; fix with `sudo hal0 doctor perms --fix`, or delete the file so hal0-api writes a "
+        "new one and re-keys the agents at its next start (hal0 agent reprovision hermes "
+        "--repair, sudo hal0 update component pi)"
+    )
+    try:
+        st = os.lstat(secret)
+    except FileNotFoundError:
+        return Check(
+            key, label, _PASS, f"not created yet ({secret} is written when hal0-api keys an agent)"
+        )
+    except OSError as exc:
+        return Check(key, label, _WARN, f"cannot stat {secret}: {exc}; run hal0 doctor as root")
+    problems: list[str] = []
+    if stat.S_ISLNK(st.st_mode):
+        problems.append(f"{secret} is a symlink, which hal0-api refuses")
+    elif not stat.S_ISREG(st.st_mode):
+        problems.append(f"{secret} is not a regular file")
+    else:
+        mode = stat.S_IMODE(st.st_mode)
+        if mode & 0o077:
+            problems.append(f"{secret} is mode {mode:o}, expected 600")
+        owner = _resolve_uid(_BRIDGE_DB_OWNER)
+        if owner is not None and st.st_uid not in (owner, 0):
+            problems.append(f"{secret} is owned by uid {st.st_uid}, expected hal0")
+        elif owner is not None and st.st_uid == 0:
+            problems.append(
+                f"{secret} is owned by root, so hal0-api cannot read it (expected hal0)"
+            )
+        if st.st_size < 32:
+            problems.append(f"{secret} holds {st.st_size} bytes, fewer than 32")
+    if problems:
+        return Check(
+            key,
+            label,
+            _WARN,
+            "; ".join(problems)
+            + "; hal0-api refuses it, so Hermes and Pi have no private memory"
+            + remedy,
+        )
+    return Check(key, label, _PASS, f"{secret}: regular file, owner and mode 0600 OK")
+
+
 def check_bridge_store(
     *,
     path: Path | None = None,
@@ -4387,6 +4452,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hermes_profiles_mcp(auth=auth_payload),
         check_hermes_default_memory(),
         check_hermes_brain_memory(),
+        check_agent_identity_secret(),
         check_bridge_store(api_running=payloads["health"] is not None),
         check_agent_bridge(base=base),
         check_openwebui_mcp(),

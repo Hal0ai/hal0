@@ -33,7 +33,7 @@ Authorization: Bearer <key>
 
 Both keys live in `/etc/hal0/api.env` on this host (owner-only, `0600`) — read them out-of-band; `hal0 auth status` reports only whether a key is configured, never its value.
 
-**`X-hal0-Agent` is identity, not a credential.** It stamps the audit trail and routes the `private:<agent>` memory namespace — it carries no auth weight and does not substitute for `Authorization`. When auth is on, a request with a valid `X-hal0-Agent` but no bearer still gets a bare `401`.
+**`X-hal0-Agent` is a label, not a credential.** It stamps the audit trail; it carries no auth weight, does not substitute for `Authorization`, and on its own gives no private memory (a client that needs its own private notes uses a bridge key: `hal0 bridge add <name>`). When auth is on, a request with a valid `X-hal0-Agent` but no bearer still gets a bare `401`.
 
 ### Rotating a key
 
@@ -109,8 +109,8 @@ Any MCP-compatible client with HTTP transport support. Key requirements:
 
 - **Transport:** `http` (plain POST, NOT streamable-http or SSE)
 - **URL suffix:** Always ends with `/mcp` (e.g. `/mcp/admin/mcp`, not `/mcp/admin`)
-- **Headers:** Set `X-hal0-Agent: <your-agent-id>` for identity routing
-- **Memory namespace:** Writes are shared by default. Set `X-hal0-Private: 1` to make every write from this client private, or pass `private=true` on one `memory_add` call. Never name a `private:<agent>` dataset yourself
+- **Headers:** Set `X-hal0-Agent: <your-agent-id>` to label your calls in the audit trail. Do not use a name hal0 reserves for its own agents (`hermes`, `hermes__*`, `pi`, `hal0*`): without their identity key it is refused with 403
+- **Memory namespace:** Writes are shared. Private memory (`X-hal0-Private: 1`, or `private=true` on one `memory_add` call) needs a bridge key, whose client name is the owner; with only a box key a private write is refused. Never name a `private:<agent>` dataset yourself
 
 ## Verification
 

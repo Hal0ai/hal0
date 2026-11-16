@@ -17,6 +17,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from hal0.agent_identity import identity_headers
 from hal0.api.middleware import error_codes
 from hal0.api.routes import memory as memory_routes
 from hal0.errors import BadRequest, MemoryEngineUnavailable
@@ -361,7 +362,7 @@ async def _rest_add(
         return await client.post(
             "http://test/api/memory/add",
             json=body,
-            headers={"X-hal0-Agent": "pi", **(headers or {})},
+            headers={**identity_headers("pi"), **(headers or {})},
         )
 
 

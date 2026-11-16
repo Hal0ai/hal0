@@ -860,7 +860,7 @@ def _mask_quoted_values(pattern: re.Pattern[str], line: str, log: bool) -> str:
 # both read. ui/src/sentry.ts and installer/lib/failure-report.sh mirror the
 # generic prefixes as one literal pattern.
 _BRIDGE_KEY_PREFIX: Final[str] = "hal0bk_"
-_TOKEN_PREFIX: Final[str] = r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-)"
+_TOKEN_PREFIX: Final[str] = r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-|hal0ak_)"
 _TOKEN_BODY: Final[str] = r"[A-Za-z0-9_-]"
 _AWS_KEY_PREFIX: Final[str] = "AKIA"
 _AWS_KEY_BODY: Final[str] = r"[0-9A-Z]"

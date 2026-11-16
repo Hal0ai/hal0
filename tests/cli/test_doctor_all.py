@@ -1495,6 +1495,11 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(
         da,
+        "check_agent_identity_secret",
+        lambda **_kw: Check("agent-identity-secret", "Agent identity secret", "pass", "stubbed"),
+    )
+    monkeypatch.setattr(
+        da,
         "check_bridge_store",
         lambda **_kw: Check("bridge-store", "Agent bridge store", "pass", "stubbed"),
     )
@@ -1697,7 +1702,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     assert set(projects_kwargs) == {"memory", "base"}
     assert set(owners_kwargs) == {"memory", "base"}
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-52:] == [
+    assert keys[-53:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1727,6 +1732,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hermes_profiles_mcp",
         "hermes_default_memory",
         "hermes_brain_memory",
+        "agent-identity-secret",
         "bridge-store",
         "agent-bridge",
         "openwebui_mcp",
@@ -2515,8 +2521,22 @@ def _profiles_home(tmp_path, **profiles):
         d = home / "profiles" / name
         d.mkdir(parents=True)
         if text is not None:
-            (d / "config.yaml").write_text(text)
+            (d / "config.yaml").write_text(text.replace(_KEY_SLOT, _coder_key()))
     return home
+
+
+#: Stands for hermes__coder's identity key (#3569) in the fixtures below. The
+#: key is derived from the per-test secret, so it is filled in when a config is
+#: written, not when this module is imported.
+_KEY_SLOT = "@@AGENT_KEY@@"
+
+
+def _coder_key() -> str:
+    from hal0.agent_identity import key_for
+
+    key = key_for("hermes__coder")
+    assert key is not None
+    return key
 
 
 def _wired_yaml() -> str:
@@ -2529,10 +2549,12 @@ def _wired_yaml() -> str:
         "mcp_servers:\n"
         "  hal0-admin:\n    type: http\n    url: http://127.0.0.1:8080/mcp/admin/mcp\n"
         "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '0'\n"
+        f"      X-hal0-Agent-Key: {_KEY_SLOT}\n"
         "      Authorization: Bearer k\n"
         f"    timeout: {admin_t}\n"
         "  hal0-memory:\n    type: http\n    url: http://127.0.0.1:8080/mcp/memory/mcp\n"
         "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '0'\n"
+        f"      X-hal0-Agent-Key: {_KEY_SLOT}\n"
         "      Authorization: Bearer k\n"
         f"    timeout: {mem_t}\n"
     )
@@ -2708,6 +2730,7 @@ def test_generation_extras_passes_when_generation_matches(tmp_path, monkeypatch)
 def test_profiles_mcp_treats_non_mapping_headers_as_missing_auth(tmp_path) -> None:
     broken = _WIRED.replace(
         "    headers:\n      X-hal0-Agent: hermes__coder\n      X-hal0-Private: '0'\n"
+        f"      X-hal0-Agent-Key: {_KEY_SLOT}\n"
         "      Authorization: Bearer k\n",
         "    headers: invalid\n",
         1,

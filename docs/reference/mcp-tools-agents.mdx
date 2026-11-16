@@ -35,7 +35,7 @@ The teach tools leave knowledge behind for a Hermes profile. They do not start a
 
 | Tool | Required | Returns |
 |---|---|---|
-| `agent_memory_add` | `agent`, `text` | `{status, id, timestamp}`. Remembers `text` in the agent's own private memory, or in the shared memory for `shared`. Optional: `tags`, a list of strings |
+| `agent_memory_add` | `agent`, `text` | `{status, id, timestamp}`. Remembers `text` in the box's shared memory, whichever agent is named. Optional: `tags`, a list of strings |
 | `agent_memory_search` | `agent`, `query` | `{status, results}`. `limit` is 1 to 50 (default 10) |
 | `agent_skills_list` | none | `{skills: [{name, source, category, description, mtime, files, broken}]}`: the skills Hermes loads, `source` being `shipped` (hal0's own, read-only) or `dropin` (the operator's); `broken` is `true` for a skill whose frontmatter cannot be read |
 | `agent_skill_get` | `name` | `{name, source, category, skill_md, files}`: the `SKILL.md` text and the names of the supporting files, whose content is not returned. The text passes through the log redactor, so a placeholder the push check permits, such as `HF_TOKEN=...`, comes back as `HF_TOKEN=***REDACTED***`, and it is cut at 16 KiB with `truncated: true`. It is not an exact copy: a client must not prepare a replacement from it as it stands |
@@ -45,7 +45,7 @@ The teach tools leave knowledge behind for a Hermes profile. They do not start a
 
 ### Memory
 
-hal0, not the caller, picks the namespace: `hermes` writes to `private:hermes`, `hermes/<profile>` to `private:hermes__<profile>`, and `shared` to the box's shared memory. A search of `hermes` or `hermes/<profile>` reads that private memory and the shared memory; a search of `shared` reads the shared memory and any private memory filed under the calling client's own name (`private:<client>`). Neither takes the namespace from the request's headers, so a caller cannot promote a write into another namespace.
+hal0, not the caller, picks the namespace: `hermes`, `hermes/<profile>` and `shared` all write to the box's shared memory, and a search of any of them reads the shared memory and any private memory filed under the calling client's own name (`private:<client>`). A Hermes profile's private memory (`private:hermes`, `private:hermes__<profile>`) is never reachable through these tools: a bridge client, and every Open WebUI user behind the `openwebui` client, is a different principal from Hermes ([ADR-0062](/docs/adr/0062-memory-identity-from-a-credential)). `agent` must still name `shared` or a profile the box has. Neither takes the namespace from the request's headers, so a caller cannot promote a write into another namespace.
 
 Every note carries the tag `source:bridge:<client>`. A tag the client sends that starts with `agent:`, `visibility:`, `project:` or `source:bridge:` (compared case-insensitively) is dropped: the memory layer reads a note's owner and visibility from those tags, so a client could otherwise plant a note in another agent's private memory.
 

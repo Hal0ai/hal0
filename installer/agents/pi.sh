@@ -37,6 +37,19 @@ die()   { printf '[pi] ERROR: %s\n' "$*" >&2; exit 1; }
 HAL0_AGENT_DATA_DIR="${HAL0_AGENT_DATA_DIR:-/var/lib/hal0/agents/pi}"
 HAL0_API_URL="${HAL0_API_URL:-http://127.0.0.1:8080}"
 
+# /var/lib/hal0/agents belongs to the hal0 service user (the perms table's
+# agents/ row, mode 0711): hal0-api keeps the agent identity secret there
+# (#3569). A plain `mkdir -p` as root would leave the parent root-owned on a
+# box that installs Pi before Hermes, so it is created (or handed back) first.
+AGENTS_ROOT="$(dirname "$HAL0_AGENT_DATA_DIR")"
+if [ "$(id -u)" -eq 0 ] && id hal0 >/dev/null 2>&1; then
+    hal0_group="$(getent group hal0 >/dev/null 2>&1 && echo hal0 || id -gn hal0)"
+    if [ ! -d "$AGENTS_ROOT" ]; then
+        install -d -o hal0 -g "$hal0_group" -m 0711 "$AGENTS_ROOT"
+    elif [ "$(stat -c %u "$AGENTS_ROOT")" -eq 0 ] && [ "$AGENTS_ROOT" = /var/lib/hal0/agents ]; then
+        chown hal0:"$hal0_group" "$AGENTS_ROOT"
+    fi
+fi
 mkdir -p "$HAL0_AGENT_DATA_DIR"
 
 command -v npm >/dev/null 2>&1 || die "npm not found on PATH. Install Node.js first."

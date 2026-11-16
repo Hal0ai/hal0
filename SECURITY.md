@@ -158,7 +158,11 @@ What the design does and does not do:
 - The bridge asks for a credential even when `[security].require_auth` is off.
   A box with no bridge clients accepts no bridge key at all.
 - A bridge client's memory identity is the name in its key, not the
-  `X-hal0-Agent` header, which stays unverified for every other caller.
+  `X-hal0-Agent` header. For every other caller the header is a label: it is
+  a memory identity only with that agent's identity key (`X-hal0-Agent-Key`,
+  which hal0 writes for its own agents; ADR-0062), and a reserved name sent
+  without it is refused with 403. Without one the caller reads no private
+  notes.
 - A bridge key does not make the same-UID risk above smaller: the bundled
   agent, and anything else running as `hal0`, can still open `bridge.db`. It
   holds hashes, not keys, but an attacker with the `hal0` account does not need
