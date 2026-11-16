@@ -1084,7 +1084,9 @@ async def test_stop_answer_with_a_terminal_status_is_not_copied(
 async def test_stop_clears_a_pending_clarification_and_its_timer(
     svc_factory: SvcFactory, planner: Planner, fake: FakeHermes, cc: Caller
 ) -> None:
-    svc = svc_factory(timing=WatcherTiming(backoff_s=(0.01,), clarify_timeout_s=0.1))
+    # The timer must not fire before stop_run lands: at 0.1 s it raced the stop under coverage
+    # on 3.14 (main CI 43776643283) and the run ended "clarification unanswered" instead.
+    svc = svc_factory(timing=WatcherTiming(backoff_s=(0.01,), clarify_timeout_s=1.0))
     planner.plan(frames=_clarify, pending_clarify="clr1")
     v = await svc.start_run(cc, agent="hermes", input="?")
     asked = await svc.wait_run(cc, v["run_id"], timeout_s=5)
@@ -1092,7 +1094,7 @@ async def test_stop_clears_a_pending_clarification_and_its_timer(
 
     stopped = await svc.stop_run(cc, v["run_id"])
     assert stopped["status"] == "stopping" and stopped["pending"] is None
-    later = await svc.wait_run(cc, v["run_id"], timeout_s=0.4)  # well past the clarify timeout
+    later = await svc.wait_run(cc, v["run_id"], timeout_s=1.5)  # well past the clarify timeout
     assert later["timed_out"] is True and later["error"] is None
     assert len(_posts(fake, "/stop")) == 1  # the timer posted no second stop
 
