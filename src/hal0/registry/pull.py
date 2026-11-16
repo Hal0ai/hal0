@@ -1115,13 +1115,23 @@ async def _download_one(
                     if resume_from > 0:
                         hasher = hashlib.sha256()
                         resume_from = 0
-                    content_length = resp.headers.get("content-length")
-                    if content_length:
-                        try:
-                            rec.bytes_total = int(content_length)
-                        except ValueError:
-                            rec.bytes_total = 0
-                        job.bytes_total = base_total + rec.bytes_total
+                    # Content-Length is absent on chunked / content-encoded
+                    # responses (#3428). Fall back to HF's X-Linked-Size (the
+                    # real LFS object size), then to a size already known from
+                    # the repo tree, so the UI keeps a % / rate / ETA.
+                    advertised = 0
+                    for header in ("content-length", "x-linked-size"):
+                        raw = resp.headers.get(header)
+                        if raw:
+                            try:
+                                advertised = int(raw)
+                            except ValueError:
+                                advertised = 0
+                            if advertised > 0:
+                                break
+                    if advertised > 0:
+                        rec.bytes_total = advertised
+                    job.bytes_total = base_total + rec.bytes_total
                     rec.bytes_done = 0
                     job.bytes_downloaded = base_done
                     mode = "wb"
