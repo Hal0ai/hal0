@@ -286,6 +286,15 @@ def _dropin_label(kind: str) -> str:
     )
 
 
+#: The ``hal0-update`` twin of :data:`hal0.memory.extraction_env._STALE_WRAPPER_HINT`
+#: (#3738): a seam verb newer than the installed wrapper exits "bad cmd", and only
+#: an installer run refreshes the wrapper on a box already on the release.
+_STALE_UPDATE_WRAPPER_HINT = (
+    " — the installed /usr/lib/hal0/bin/hal0-update predates this verb; "
+    "re-run the installer (`sudo bash install.sh`) to refresh the seam wrapper"
+)
+
+
 #: Human labels for the non-fatal per-pass failure events
 #: run_post_activation_migrations can log (#1960 B2) — keys must match
 #: hal0.updater.updater._NON_FATAL_MIGRATION_FAILURE_EVENTS exactly.
@@ -308,7 +317,7 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
     "updater.kokoro_bundle_pull_failed": "kokoro-v1 bundle pull (run: hal0 model pull kokoro-v1)",
     "updater.openwebui_unit_refresh_failed": (
         "hal0-openwebui.service refresh (run: sudo /usr/lib/hal0/bin/hal0-update "
-        "refresh-openwebui-unit)"
+        f"refresh-openwebui-unit; if it reports 'bad cmd'{_STALE_UPDATE_WRAPPER_HINT})"
     ),
     "updater.podman_forward_unit_refresh_failed": (
         "hal0-podman-forward.service refresh (see journalctl -u hal0-api)"

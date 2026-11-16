@@ -345,8 +345,7 @@ class UpdateSeam:
         ``{"openwebui_unit": <outcome>}``.
         """
         if self.routed:
-            # Up to two systemctl calls of 30 s each on the root side.
-            return self._invoke("refresh-openwebui-unit", timeout=_SHORT_TIMEOUT * 2)
+            return self._invoke("refresh-openwebui-unit", timeout=_SHORT_TIMEOUT)
         return {
             "openwebui_unit": refresh_openwebui_unit(
                 _current_symlink().resolve(), job_id=self._job_id
@@ -546,7 +545,7 @@ def main(argv: list[str] | None = None) -> int:
         if verb == "refresh-openwebui-unit":
             # No arguments cross this boundary, and the same root-owned test as
             # refresh-api-unit, because root copies the unit from that tree into
-            # /etc/systemd/system and restarts it.
+            # /etc/systemd/system.
             if rest:
                 raise UpdateError(
                     "refresh-openwebui-unit takes no arguments", details={"argv": rest}

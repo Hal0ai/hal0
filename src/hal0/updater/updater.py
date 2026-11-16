@@ -3770,10 +3770,16 @@ def refresh_openwebui_unit(target: Path, *, job_id: str | None = None) -> str:
     Privileged-side only (a no-op unless euid 0) and best-effort. Writes only
     when the bytes differ, then ``daemon-reload``; a failed reload puts the
     previous file back, because a later run compares bytes and a file systemd
-    never loaded would read as ``"unchanged"`` forever. A changed unit is then
-    ``try-restart``-ed, so a running Open WebUI picks it up and a stopped one
-    stays down. Returns ``"installed"``, ``"unchanged"``, ``"skipped"`` or
-    ``"failed"``.
+    never loaded would read as ``"unchanged"`` forever. It NEVER restarts
+    ``hal0-openwebui.service``: an update must not bounce the running container
+    for a unit refresh. The new unit takes effect at Open WebUI's next start, or
+    at the try-restart the component arm performs when it moves the pin or
+    re-renders the env. ``StartLimit*=`` changes apply at the ``daemon-reload``.
+
+    An installed unit that references the image but carries no single agreed
+    digest (a hand edit of one of its two pins) is held: copying the release text
+    would put it on the release pin before any pull. Returns ``"installed"``,
+    ``"unchanged"``, ``"skipped"`` or ``"failed"``.
     """
     if os.geteuid() != 0:
         return "skipped"
@@ -3799,6 +3805,15 @@ def refresh_openwebui_unit(target: Path, *, job_id: str | None = None) -> str:
         installed = dst.read_text(encoding="utf-8")
         desired = src.read_text(encoding="utf-8")
         digest = image_pin.parse_pinned_digest(installed)
+        if digest is None and image_pin.find_owui_digests(installed):
+            log.warning(
+                "updater.openwebui_unit_held",
+                job_id=job_id,
+                path=str(dst),
+                remedy="the unit's image pins disagree; make them match, or run "
+                "hal0 update component openwebui --target <digest>",
+            )
+            return "skipped"
         if digest is not None:
             desired, _ = image_pin.repin_unit_text(desired, digest)
         if desired == installed:
@@ -3824,17 +3839,12 @@ def refresh_openwebui_unit(target: Path, *, job_id: str | None = None) -> str:
                 error=str(exc),
             )
         return "failed"
-    # try-restart: an Open WebUI the operator stopped stays down. --no-block,
-    # because ExecStartPre pulls the image and must not hold the update.
-    restart_error = _systemctl_error("try-restart", "--no-block", image_pin.OPENWEBUI_UNIT_NAME)
-    if restart_error is not None:
-        log.warning(
-            "updater.openwebui_unit_restart_failed",
-            job_id=job_id,
-            error=restart_error,
-            detail="unit refreshed; it takes effect at the next start",
-        )
-    log.info("updater.openwebui_unit_refreshed", job_id=job_id, path=str(dst))
+    log.info(
+        "updater.openwebui_unit_refreshed",
+        job_id=job_id,
+        path=str(dst),
+        detail="not restarted; the new unit takes effect at the next start",
+    )
     return "installed"
 
 

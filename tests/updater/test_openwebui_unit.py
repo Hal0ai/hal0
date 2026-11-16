@@ -112,7 +112,7 @@ def test_box_without_open_webui_is_not_given_one(
     assert run.calls == []
 
 
-def test_refreshes_a_stale_unit_and_try_restarts(
+def test_refreshes_a_stale_unit_and_never_restarts(
     monkeypatch: pytest.MonkeyPatch, unit_dst: Path, release: Path
 ) -> None:
     unit_dst.write_text(OLD_SHAPE, encoding="utf-8")
@@ -122,10 +122,7 @@ def test_refreshes_a_stale_unit_and_try_restarts(
     assert updater_mod.refresh_openwebui_unit(release) == "installed"
 
     assert unit_dst.read_text(encoding="utf-8") == SHIPPED
-    assert run.calls == [
-        ["systemctl", "daemon-reload"],
-        ["systemctl", "try-restart", "--no-block", UNIT],
-    ]
+    assert run.calls == [["systemctl", "daemon-reload"]]
 
 
 def test_matching_unit_is_left_alone_and_not_restarted(
@@ -229,15 +226,20 @@ def test_failed_reload_restores_and_reports_failed(
     assert run.calls == [["systemctl", "daemon-reload"]]
 
 
-@pytest.mark.parametrize("kwargs", [{"fail": ("try-restart",)}, {"hang": ("try-restart",)}])
-def test_failed_restart_keeps_the_refresh(
-    monkeypatch: pytest.MonkeyPatch, unit_dst: Path, release: Path, kwargs: dict[str, Any]
+def test_unit_with_disagreeing_pins_is_held(
+    monkeypatch: pytest.MonkeyPatch, unit_dst: Path, release: Path
 ) -> None:
-    unit_dst.write_text(OLD_SHAPE, encoding="utf-8")
-    _patch_run(monkeypatch, FakeRun(**kwargs))
+    """No single agreed digest: copying would land the release pin before a pull."""
+    one_pin_edited = OLD_SHAPE.replace(image_pin.OPENWEBUI_IMAGE_PIN, OVERRIDE, 1)
+    assert image_pin.find_owui_digests(one_pin_edited)
+    assert image_pin.parse_pinned_digest(one_pin_edited) is None
+    unit_dst.write_text(one_pin_edited, encoding="utf-8")
+    run = FakeRun()
+    _patch_run(monkeypatch, run)
 
-    assert updater_mod.refresh_openwebui_unit(release) == "installed"
-    assert unit_dst.read_text(encoding="utf-8") == SHIPPED
+    assert updater_mod.refresh_openwebui_unit(release) == "skipped"
+    assert unit_dst.read_text(encoding="utf-8") == one_pin_edited
+    assert run.calls == []
 
 
 def test_write_failure_is_reported_and_not_raised(
@@ -407,4 +409,7 @@ def test_a_failed_refresh_is_named_in_the_update_summary() -> None:
 
     event = "updater.openwebui_unit_refresh_failed"
     assert event in updater_mod._NON_FATAL_MIGRATION_FAILURE_EVENTS
-    assert "refresh-openwebui-unit" in _MIGRATION_PASS_LABELS[event]
+    label = _MIGRATION_PASS_LABELS[event]
+    assert "refresh-openwebui-unit" in label
+    assert "hal0-update predates this verb" in label
+    assert "install.sh" in label

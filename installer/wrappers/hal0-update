@@ -238,7 +238,8 @@ usage: hal0-update <command> [args]
   refresh-podman-forward           refresh + enable hal0-podman-forward.service from
                                    the active release (leaves a masked unit alone)
   refresh-openwebui-unit           refresh hal0-openwebui.service from the active
-                                   release, keeping its image pin (try-restart only)
+                                   release, keeping its image pin (daemon-reload
+                                   only, never restarts it)
 EOF
     ;;
 

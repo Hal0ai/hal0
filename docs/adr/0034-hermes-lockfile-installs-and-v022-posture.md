@@ -346,9 +346,10 @@ board executor harvests are unchanged at NEW.
      `--target` override); moving the pin stays with the openwebui component arm,
      which pulls before it repins. It writes atomically only when the bytes
      differ, runs `systemctl daemon-reload` (a failed reload puts the previous
-     file back), then `systemctl try-restart --no-block`, so a stopped Open WebUI
-     stays down. It does not create the unit on a box that has none, holds a unit
-     that is a symlink (a mask or an operator-managed file), and never touches
+     file back), and **never restarts Open WebUI**: the new unit takes effect at
+     its next start or at the component arm's try-restart. It does not create the
+     unit on a box that has none, holds a unit that is a symlink (a mask or an
+     operator-managed file) or whose image pins disagree, and never touches
      `hal0-openwebui.service.d/` drop-ins.
 7. **New: hal0 turns session pruning off.** The config overlay writes
    `sessions.auto_prune: false` at the pin bump, so an upgrade deletes no
