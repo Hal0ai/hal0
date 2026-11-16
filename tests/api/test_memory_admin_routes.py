@@ -465,6 +465,25 @@ def test_operation_retry_and_consolidate_forward(client: TestClient, recorder: _
     assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/consolidate"
 
 
+def test_operation_discard_uses_terminal_delete_not_cancel(
+    client: TestClient, recorder: _Recorder
+) -> None:
+    """Discarding a failed op must hit the engine's ``/delete`` route.
+
+    The bare ``DELETE .../operations/{id}`` is the engine's cancel, which
+    409s on a failed row ("only 'pending' and 'processing' operations can be
+    cancelled"), so the Operations tab could never clear failed work.
+    """
+    r = client.delete("/api/memory/banks/shared/operations/op-1/delete")
+    assert r.status_code == 200
+    assert recorder.requests[-1]["method"] == "DELETE"
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/operations/op-1/delete"
+
+    r = client.delete("/api/memory/banks/shared/operations/op-2")
+    assert r.status_code == 200
+    assert recorder.requests[-1]["path"] == "/v1/default/banks/shared/operations/op-2"
+
+
 def test_operation_get_flags_zero_fact_retain(client: TestClient, recorder: _Recorder) -> None:
     """#2030: the single-op poll target must say when a completed retain
     learned nothing — a bare `completed`/`error_message: null` for a retain

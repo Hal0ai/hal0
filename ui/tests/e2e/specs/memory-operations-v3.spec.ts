@@ -106,14 +106,14 @@ async function routeHealthExtractionClear(page: Page) {
 /** Record every retry and discard request, and answer each as the engine does. */
 async function routeMutations(page: Page) {
   const sent = { retried: [] as string[], discarded: [] as string[] }
-  await page.route(/\/api\/memory\/banks\/[^/]+\/operations\/[^/]+(\/retry)?$/, (route) => {
+  await page.route(/\/api\/memory\/banks\/[^/]+\/operations\/[^/]+(\/retry|\/delete)?$/, (route) => {
     const request = route.request()
     const path = new URL(request.url()).pathname
     if (request.method() === 'POST' && path.endsWith('/retry')) {
       sent.retried.push(path)
       return json(route, { success: true })
     }
-    if (request.method() === 'DELETE') {
+    if (request.method() === 'DELETE' && path.endsWith('/delete')) {
       sent.discarded.push(path)
       return json(route, { success: true })
     }
@@ -340,12 +340,12 @@ test.describe('backlog, with storing memories failing', () => {
     expect(sent.discarded.filter((path) => path.startsWith('/api/memory/banks/big/operations/'))).toHaveLength(
       FAILED_IN_BIG,
     )
-    expect(sent.discarded).toContain('/api/memory/banks/ingest/operations/op-ing-8990')
+    expect(sent.discarded).toContain('/api/memory/banks/ingest/operations/op-ing-8990/delete')
     expect(sent.retried).toEqual([])
   })
 
   test('a discard that the engine refuses stops and says so in a sentence', async ({ page }) => {
-    await page.route(/\/api\/memory\/banks\/[^/]+\/operations\/[^/]+$/, (route) =>
+    await page.route(/\/api\/memory\/banks\/[^/]+\/operations\/[^/]+\/delete$/, (route) =>
       route.request().method() === 'DELETE'
         ? json(route, { error: { code: 'memory.engine_error', message: 'hindsight-api is not responding' } }, 503)
         : route.fallback(),

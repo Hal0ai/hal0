@@ -1172,6 +1172,14 @@ _FORWARDS: tuple[tuple[str, str, str], ...] = (
         "/banks/{bank_id}/operations/{operation_id}",
         "/v1/default/banks/{bank_id}/operations/{operation_id}",
     ),
+    # The bare DELETE above is the engine's *cancel* (pending/processing only;
+    # 409 on a terminal row). Removing a failed/cancelled/completed record is
+    # this separate engine route (hindsight-api >= 1.2.0).
+    (
+        "DELETE",
+        "/banks/{bank_id}/operations/{operation_id}/delete",
+        "/v1/default/banks/{bank_id}/operations/{operation_id}/delete",
+    ),
     (
         "POST",
         "/banks/{bank_id}/operations/{operation_id}/retry",
@@ -1237,6 +1245,7 @@ _DELETE_ACTIONS: dict[str, str] = {
     "/v1/default/banks/{bank_id}/documents/{document_id}": "memory.document.delete",
     "/v1/default/banks/{bank_id}/directives/{directive_id}": "memory.directive.delete",
     "/v1/default/banks/{bank_id}/operations/{operation_id}": "memory.operation.delete",
+    "/v1/default/banks/{bank_id}/operations/{operation_id}/delete": "memory.operation.discard",
     "/v1/default/banks/{bank_id}/mental-models/{model_id}": "memory.mental_model.delete",
 }
 

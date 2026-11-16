@@ -329,6 +329,10 @@ export const ENDPOINTS = {
     `/api/memory/banks/${encodeURIComponent(bank)}/operations`,
   memoryBankOperationRetry: (bank: string, id: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/operations/${encodeURIComponent(id)}/retry`,
+  // Removes a terminal (failed/cancelled/completed) record. The bare
+  // DELETE on the operation is the engine's cancel and 409s on a failed row.
+  memoryBankOperationDelete: (bank: string, id: string) =>
+    `/api/memory/banks/${encodeURIComponent(bank)}/operations/${encodeURIComponent(id)}/delete`,
   memoryBankConsolidate: (bank: string) =>
     `/api/memory/banks/${encodeURIComponent(bank)}/consolidate`,
   // Memory v2 (Bank workspace UI) — tags in use + the curatable unit list,
