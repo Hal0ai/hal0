@@ -1876,6 +1876,10 @@ class PostActivationResult(tuple):
         return obj
 
 
+class _SkipDropinReconcile(Exception):
+    """The embedder record failed, so the drop-in reconcile is skipped."""
+
+
 def run_post_activation_migrations(
     min_data_version: int = 1,
     *,
@@ -2042,7 +2046,15 @@ def run_post_activation_migrations(
             # record, so an upgraded store stays on its own model instead of
             # moving to the [memory.models] default. A box with no store has
             # nothing to record here.
-            record_store_embedder()
+            try:
+                record_store_embedder()
+            except Exception as exc:
+                # Rendering the showcase drop-in without the record would move
+                # an upgraded store to the default embedder (#3518), so leave
+                # both drop-ins as they are. The cause is the record, not a
+                # drop-in, so it gets its own event and label.
+                log.warning("updater.embedder_record_failed", job_id=job_id, error=str(exc))
+                raise _SkipDropinReconcile from exc
 
             # #3492: write the showcase drop-in first without a restart, so a
             # box where both drifted pays for one engine restart, not two.
@@ -2067,7 +2079,15 @@ def run_post_activation_migrations(
             if showcase.get("status") == "applied" and dropin.get("status") != "applied":
                 # The extraction reconcile did not reload+restart, so do it
                 # here — reload first, or the engine restarts on the old env.
-                reload_and_restart_hindsight()
+                reloaded = reload_and_restart_hindsight()
+                if reloaded.get("error"):
+                    # The new showcase env is on disk but the engine never
+                    # picked it up: the same silent miss as a failed render.
+                    log.warning(
+                        "updater.showcase_dropin_reconcile_failed",
+                        job_id=job_id,
+                        error=reloaded["error"],
+                    )
             if dropin.get("status") == "failed":
                 log.warning(
                     "updater.extraction_dropin_reconcile_failed",
@@ -2081,6 +2101,8 @@ def run_post_activation_migrations(
                     status=dropin["status"],
                     error=dropin.get("error"),
                 )
+        except _SkipDropinReconcile:
+            pass  # already logged as updater.embedder_record_failed
         except Exception as exc:
             log.warning("updater.extraction_dropin_reconcile_failed", job_id=job_id, error=str(exc))
             # Non-fatal: the engine keeps its current cap and saving the graph
@@ -4261,6 +4283,7 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.podman_forward_unit_refresh_failed",
     "updater.extraction_dropin_reconcile_failed",
     "updater.showcase_dropin_reconcile_failed",
+    "updater.embedder_record_failed",
 )
 
 
