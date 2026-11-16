@@ -49,9 +49,6 @@ pass, but a few things are worth doing or checking. The full list is in the
   `409 capability.model_not_downloaded`. Pull first
   (`POST /api/models/{id}/pull`), or stage the selection with
   `enabled: false`.
-- **Hard-refresh an open dashboard tab** if layout saves start failing:
-  `PUT /api/user/dashboard-layout` now accepts only the v3 body and answers an
-  older cached bundle with `422 layout.invalid`.
 - **Rolling back to 1.2.0 after writing an MCP server record.** 1.3.0 writes
   installed-server records in a new shape (a `[tools]` policy table, with the
   old tool count moved to `tools_count`), and 1.2.0 cannot validate it: the
@@ -120,6 +117,13 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   free; it restores both if 1.1.0 does not come up. New memory writes from
   Hermes profiles and the brain are shared by default; older notes stay
   private.
+- **The dashboard can no longer save a layout.** 1.3.0 still accepted
+  `PUT /api/user/dashboard-layout` (v3 body only, `422 layout.invalid` for an
+  older cached bundle). The Overview page replaced the customisable widget
+  board, and 1.8.0 removed the endpoint and its store, so the dashboard layout
+  is no longer persisted and there is nothing to refresh
+  ([ADR-0044](/docs/adr/0044-the-overview-is-the-operators-briefing)). A
+  `dashboard-layout.json` left on disk by an older box is unmanaged.
 
 ## Upgrading to 1.7.1
 

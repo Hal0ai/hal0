@@ -69,6 +69,7 @@ Root model `Hal0Config`, `extra="allow"`.
 | `publish_host` | str | `"127.0.0.1"` | non-empty, no whitespace/`:`/`/` |
 | `network_mode` | str | `""` | must be `""` or `"host"` |
 | `default_images` | dict[str,str] | `{}` | keys must be a `RUNNER_IMAGES` runner key (`standard`, `cpu`, `cuda`, `halogen`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`) — any other key is a config error; values must be non-empty image refs; sending `null` for a runner key clears its override |
+| `fabric_clock_guard` | str | `"refuse"` | one of `refuse`, `warn`, `off`. Policy when an NPU slot would load beside a GPU slot while the AMD GPU fabric clock is not held at its top DPM level: `refuse` blocks the load and names the host-side fix, `warn` loads and records a warning, `off` skips the check. An unreadable clock always warns. Env override `HAL0_FABRIC_CLOCK_GUARD` (ADR-0054) |
 
 ### `[dispatcher]`
 
@@ -81,6 +82,11 @@ Root model `Hal0Config`, `extra="allow"`.
 | `stream_total_timeout_s` | float | `900.0` | `0.0-86400.0` (`0` disables) |
 | `stream_idle_timeout_s` | float | `300.0` | `0.0-86400.0` (`0` disables) |
 | `prefetch_parallel_cap` | int | `4` | `>= 1` |
+| `admission_wait_timeout_s` | float | `1800.0` | `1.0-86400.0`. Only `POST /v1/systemone` reads it; chat keeps its own 1800.0-second default (#3632). |
+
+Admission waits only for slots with an effective `max_inflight` (explicit, or
+`1` on FLM/ggml-xdna); on timeout the request is `503` with `Retry-After`
+([ADR-0056](/docs/adr/0056-serial-backend-admission)).
 
 `stream_total_timeout_s` / `stream_idle_timeout_s` are the streaming **stall
 guard**: a chatty never-terminating upstream resets the transport read timer
@@ -136,6 +142,8 @@ override: `HAL0_FLM_MODELS_DIR`.
 | `priority` | table | — | see below |
 | `embedding` | table | — | see below |
 | `projects` | table | — | see below |
+| `compat` | table | — | see below |
+| `lanes` | table | — | see below |
 
 #### `[memory.graph]`
 
@@ -263,13 +271,8 @@ these keys is saved through the Settings API; `hal0 memory refresh-policy
 apply` applies it by hand. Which slot runs a refresh is
 `[memory.lanes.mental_model_refresh].virtual_model`, not this table.
 
-#### `[memory.lanes.<op>]` output caps
-
-`<op>` is one of `retain`, `consolidation`, `reflect`, `mental_model_refresh`.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `max_completion_tokens` | int | unset; `consolidation` and `reflect` then render `8192` | `0-131072`; `0` leaves the engine uncapped. Rendered as `HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS` or `HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS`. Mental-model refresh runs through reflect, so the reflect cap bounds it; a mental model whose `max_tokens` is near the cap leaves no headroom, because the engine fails the call on `finish_reason=length` instead of truncating, and on a thinking model reasoning tokens count inside the cap. Setting it on `retain` (use `[memory.graph].extraction_max_tokens`) or on `mental_model_refresh` is refused |
+`[memory.lanes]` and `[memory.lanes.<op>]` are on
+[Config schema: memory lanes](/docs/reference/config-schema-memory-lanes/).
 
 ### `[updates]`
 
