@@ -171,7 +171,7 @@ export function retryOperation(bank: string, id: string): Promise<unknown> {
 }
 
 export function discardOperation(bank: string, id: string): Promise<unknown> {
-  return apiDelete(`${ENDPOINTS.memoryBankOperations(bank)}/${encodeURIComponent(id)}`)
+  return apiDelete(ENDPOINTS.memoryBankOperationDelete(bank, id))
 }
 
 /**

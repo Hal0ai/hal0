@@ -561,6 +561,7 @@ DESTRUCTIVE_MEMORY_ROUTES: frozenset[tuple[str, str]] = frozenset(
         ("DELETE", "/api/memory/banks/{bank_id}/memories"),
         ("DELETE", "/api/memory/banks/{bank_id}/mental-models/{model_id}"),
         ("DELETE", "/api/memory/banks/{bank_id}/operations/{operation_id}"),
+        ("DELETE", "/api/memory/banks/{bank_id}/operations/{operation_id}/delete"),
         ("POST", "/api/memory/delete"),
         # Engine passthrough (Hindsight 1.2 showcase). DELETE is narrowed in
         # memory_lanes._check_method to a single directive / mental model;
