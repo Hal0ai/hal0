@@ -114,6 +114,7 @@ __all__ = [
     "PreloadEvictionPlan",
     "admission_would_fit",
     "admit",
+    "plan_admission",
     "select_eviction_order",
 ]
 
@@ -428,24 +429,27 @@ async def _gather_candidates(host: PreloadEvictHost, *, exclude: str) -> list[Ca
     return out
 
 
-async def admission_would_fit(host: PreloadEvictHost, *, slot_name: str, model_id: str) -> bool:
-    """Dry run of :func:`admit`: would loading ``model_id`` into ``slot_name`` fit now?
+async def plan_admission(
+    host: PreloadEvictHost, *, slot_name: str, model_id: str
+) -> PreloadEvictionPlan | None:
+    """Dry run of :func:`admit`: the plan it would make for ``model_id`` now.
 
     Read-only — evicts nothing and reserves nothing. Counts the memory free
     now (less other slots' admission reservations) plus what the eviction
     plan could free from idle, non-pinned resident slots, exactly as
-    :func:`admit` would plan it. The re-admission sweep (#3502) asks this
-    before it retries a refused slot, so a box that is still short never
-    loses an idle slot to a load that would be refused again.
+    :func:`admit` would plan it. The re-admission sweep (#3502, ADR-0063)
+    asks this before it retries a refused slot, so a box that is still short
+    never loses an idle slot to a load that would be refused again, and it
+    keeps the plan to compare with the real gate's answer.
 
-    ``True`` when the gate is disabled or the footprint cannot be estimated:
+    ``None`` when the gate is disabled or the footprint cannot be estimated:
     :func:`admit` fails open in both cases, so it would not refuse.
     """
     if not host._preload_evict_enabled:
-        return True
+        return None
     needed_mb = await _estimate_incoming_footprint_mb(host, model_id, slot_name=slot_name)
     if needed_mb <= 0:
-        return True
+        return None
     headroom_mb = host._preload_evict_headroom_mb
     async with host._admission_lock:
         reserved_by_others = sum(
@@ -453,12 +457,27 @@ async def admission_would_fit(host: PreloadEvictHost, *, slot_name: str, model_i
         )
         free_mb = host._probe_host_free_mb() - reserved_by_others
     if free_mb >= needed_mb + headroom_mb:
-        return True
+        return PreloadEvictionPlan(
+            needed_mb=needed_mb,
+            headroom_mb=headroom_mb,
+            initial_free_mb=free_mb,
+            projected_free_mb=free_mb,
+            selected=(),
+            fits=True,
+        )
     candidates = await _gather_candidates(host, exclude=slot_name)
-    plan = select_eviction_order(
+    return select_eviction_order(
         candidates, needed_mb=needed_mb, headroom_mb=headroom_mb, free_mb=free_mb
     )
-    return plan.fits
+
+
+async def admission_would_fit(host: PreloadEvictHost, *, slot_name: str, model_id: str) -> bool:
+    """``True`` when :func:`admit` would admit ``model_id`` into ``slot_name`` now.
+
+    See :func:`plan_admission`; a gate that would fail open counts as fitting.
+    """
+    plan = await plan_admission(host, slot_name=slot_name, model_id=model_id)
+    return plan is None or plan.fits
 
 
 @contextlib.asynccontextmanager

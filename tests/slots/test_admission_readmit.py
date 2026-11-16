@@ -25,6 +25,7 @@ import pytest
 
 from hal0.dispatcher.router import Dispatcher, NoRouteFound
 from hal0.slots import reaper
+from hal0.slots.arbiter import GpuMode
 from hal0.slots.manager import SlotManager
 from hal0.slots.preload_evict import ADMISSION_REFUSED, PreloadEvictionFailed
 from hal0.slots.state import SlotState
@@ -39,7 +40,14 @@ def _reset_lru_deprecation_state() -> None:
     reaper._lru_flag_warned.clear()
 
 
-def _write_slot(root: Path, name: str, *, port: int, pinned: bool | None = None) -> None:
+def _write_slot(
+    root: Path,
+    name: str,
+    *,
+    port: int,
+    pinned: bool | None = None,
+    autoload: bool | None = None,
+) -> None:
     lines = [
         f'name = "{name}"',
         f"port = {port}",
@@ -48,6 +56,8 @@ def _write_slot(root: Path, name: str, *, port: int, pinned: bool | None = None)
     ]
     if pinned is not None:
         lines.append(f"pinned = {'true' if pinned else 'false'}")
+    if autoload is not None:
+        lines.append(f"autoload = {'true' if autoload else 'false'}")
     lines += ["[model]", 'default = "qwen3-4b-q4_k_m"', ""]
     (root / f"{name}.toml").write_text("\n".join(lines), encoding="utf-8")
 
@@ -407,11 +417,11 @@ async def test_stopping_the_idle_monitor_cancels_a_pending_readmission(
     free.mb = 8000.0
     never = asyncio.Event()
 
-    async def _stuck_probe(*_a: Any, **_k: Any) -> bool:
+    async def _stuck_probe(*_a: Any, **_k: Any) -> Any:
         await never.wait()
-        return True
+        return None
 
-    monkeypatch.setattr("hal0.slots.manager._admission_would_fit", _stuck_probe)
+    monkeypatch.setattr("hal0.slots.manager._plan_admission", _stuck_probe)
     assert await sm.readmit_refused_once() == ("agent",)
     task = sm._readmit_tasks[sm._key("agent")]
     await asyncio.sleep(0)
@@ -432,11 +442,11 @@ async def test_an_unload_during_the_probe_cancels_the_readmission(
     free.mb = 8000.0
     loads_before = len(container_stub.load_calls)
 
-    async def _probe_then_unload(*_a: Any, **_k: Any) -> bool:
+    async def _probe_then_unload(*_a: Any, **_k: Any) -> Any:
         await sm.unload("agent")
-        return True
+        return None  # the gate would fail open: "fits"
 
-    monkeypatch.setattr("hal0.slots.manager._admission_would_fit", _probe_then_unload)
+    monkeypatch.setattr("hal0.slots.manager._plan_admission", _probe_then_unload)
 
     assert await _sweep(sm) == ()
     assert sm.state("agent") == SlotState.OFFLINE
@@ -498,6 +508,187 @@ async def test_the_probe_sizes_the_model_the_load_would_admit(
     assert sm.state("agent") == SlotState.ERROR
     assert sm._load_failures[key][0] == failures_before, "no refused trial counted"
     assert len(container_stub.load_calls) == loads_before
+
+
+# ── re-review findings on #3735 ──────────────────────────────────────────────
+
+
+async def test_a_switch_into_image_mode_waits_for_a_readmission_already_past_its_check(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1: once the under-lock check passes, ``_load`` sits in OFFLINE with the
+    slot lock held (ERROR teardown, ``_check_load``, the admission evictions)
+    before it reaches STARTING. A switch into image mode that starts in that
+    window must wait for the load and unload it, not leave an LLM on the GPU
+    under ``mode=img``."""
+    (slot_root / "img.toml").write_text(
+        "\n".join(
+            [
+                'name = "img"',
+                "port = 8188",
+                'provider = "comfyui"',
+                "[model]",
+                'default = "sdxl-turbo"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    free = _Free(100.0)
+    sm = await _refuse(slot_root, monkeypatch, free)
+    container_stub.active.add("img")
+    await sm._transition("img", SlotState.READY, force=True)
+    _age_breaker(sm, "agent")
+    free.mb = 8000.0
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_check = sm._check_load
+
+    async def _blocked_check(cfg: Any, *args: Any, **kwargs: Any) -> None:
+        if str(cfg.get("name") if isinstance(cfg, dict) else "") == "agent":
+            entered.set()
+            await release.wait()
+        await real_check(cfg, *args, **kwargs)
+
+    monkeypatch.setattr(sm, "_check_load", _blocked_check)
+
+    async with asyncio.timeout(10):
+        assert await sm.readmit_refused_once() == ("agent",)
+        readmit = sm._readmit_tasks[sm._key("agent")]
+        await entered.wait()
+        assert sm.state("agent") == SlotState.OFFLINE
+        assert sm.is_busy("agent")
+
+        switch = asyncio.create_task(sm.arbiter.ensure_img())
+        for _ in range(20):
+            await asyncio.sleep(0)
+        release.set()
+        await switch
+        await readmit
+
+    assert sm.arbiter.mode is GpuMode.IMG
+    assert sm.state("agent") not in (SlotState.READY, SlotState.IDLE, SlotState.SERVING)
+
+
+async def test_a_switch_does_not_save_a_busy_slot_that_ends_off_the_gpu(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1 follow-through: a slot taken into the switch only because its lock was
+    held, whose load then fails, is not kept in the saved set, so the restore
+    does not load what never came up."""
+    (slot_root / "img.toml").write_text(
+        "\n".join(
+            [
+                'name = "img"',
+                "port = 8188",
+                'provider = "comfyui"',
+                "[model]",
+                'default = "sdxl-turbo"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    free = _Free(100.0)
+    sm = await _refuse(slot_root, monkeypatch, free)
+    container_stub.active.add("img")
+    await sm._transition("img", SlotState.READY, force=True)
+    _age_breaker(sm, "agent")
+    free.mb = 8000.0
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _failing_check(cfg: Any, *args: Any, **kwargs: Any) -> None:
+        entered.set()
+        await release.wait()
+        raise RuntimeError("runtime refused the load")
+
+    monkeypatch.setattr(sm, "_check_load", _failing_check)
+
+    async with asyncio.timeout(10):
+        await sm.readmit_refused_once()
+        readmit = sm._readmit_tasks[sm._key("agent")]
+        await entered.wait()
+        switch = asyncio.create_task(sm.arbiter.ensure_img())
+        for _ in range(20):
+            await asyncio.sleep(0)
+        release.set()
+        await switch
+        assert await readmit is False
+
+    assert sm.arbiter.mode is GpuMode.IMG
+    assert "agent" not in sm.arbiter.saved_llm_slots
+
+
+async def test_a_lazily_loaded_slot_is_not_readmitted_in_the_background(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N1: only slots meant to be up without a request (the type's default,
+    pinned, autoload) are re-admitted. A plain on-demand slot waits for the
+    next request that names it."""
+    _write_slot(slot_root, "code", port=8085, pinned=True)
+    _write_slot(slot_root, "chat", port=8083, autoload=False)
+    sm = SlotManager(preload_evict_headroom_mb=0.0)
+    await sm.load("code")
+    free = _Free(100.0)
+    monkeypatch.setattr(sm, "_resolve_model_info", _stub_model_info(4000.0))
+    monkeypatch.setattr(sm, "_probe_host_free_mb", free)
+    with pytest.raises(PreloadEvictionFailed):
+        await sm.load("chat")
+    _age_breaker(sm, "chat")
+    free.mb = 8000.0
+    loads_before = len(container_stub.load_calls)
+
+    assert await _sweep(sm) == ()
+    assert sm.state("chat") == SlotState.ERROR
+    assert len(container_stub.load_calls) == loads_before
+
+    # The same slot with autoload on is re-admitted.
+    _write_slot(slot_root, "chat", port=8083, autoload=True)
+    sm._cfg_cache.pop(sm._key("chat"), None)
+    assert await _sweep(sm) == ("chat",)
+
+
+async def test_a_plan_the_real_gate_disagrees_with_is_logged(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """N2: the dry run said it fits, the real gate refused; say by how much."""
+    free = _Free(100.0)
+    sm = await _refuse(slot_root, monkeypatch, free)
+    _age_breaker(sm, "agent")
+    from hal0.slots.preload_evict import PreloadEvictionPlan
+
+    async def _optimistic(*_a: Any, **_k: Any) -> PreloadEvictionPlan:
+        return PreloadEvictionPlan(
+            needed_mb=4000.0,
+            headroom_mb=0.0,
+            initial_free_mb=100.0,
+            projected_free_mb=4100.0,
+            selected=(),
+            fits=True,
+        )
+
+    monkeypatch.setattr("hal0.slots.manager._plan_admission", _optimistic)
+    with caplog.at_level("WARNING", logger="hal0.slots.manager"):
+        assert await _sweep(sm) == ()
+    rec = next(
+        r for r in caplog.records if r.getMessage() == "slot.admission_readmit_plan_mismatch"
+    )
+    assert rec.planned_free_mb == 4100.0
+    assert rec.actual_free_mb == 100.0
+    assert rec.shortfall_mb > 3800.0
+    assert rec.actual_needed_mb is not None
 
 
 # ── the 404 names the broken slot ────────────────────────────────────────────

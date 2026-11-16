@@ -55,7 +55,7 @@ from hal0.slots._cfg_helpers import (
     heal_missing_llm_type,
 )
 from hal0.slots.abandon import abandon_probe, is_abandoned, wait_for_load
-from hal0.slots.activation import is_xdna_slot
+from hal0.slots.activation import autoload_enabled, is_xdna_slot
 from hal0.slots.config_write import (
     _cfg_effective_backend,
     _cfg_effective_provider,
@@ -84,8 +84,8 @@ from hal0.slots.preload_evict import (
     ADMISSION_REFUSED,
     PreloadEvictionFailed,
 )
-from hal0.slots.preload_evict import admission_would_fit as _admission_would_fit
 from hal0.slots.preload_evict import admit as _preload_admit
+from hal0.slots.preload_evict import plan_admission as _plan_admission
 from hal0.slots.profile_adopt import type_implied_profile
 from hal0.slots.reaper import _EVICT_AFTER_S, _IDLE_AFTER_S, _IDLE_MONITOR_INTERVAL_S, SlotReaper
 from hal0.slots.reaper import is_pinned as _reaper_is_pinned
@@ -402,6 +402,18 @@ _SLOW_STOP_CONVERGED_MESSAGE = "stop took longer than the terminate budget; conv
 # Pause before the single re-probe of a halogen sentinel that hit a transport
 # error or 5xx. Module-level so tests can zero it.
 _HALOGEN_REPROBE_PAUSE_S = 3.0
+
+
+def _meant_to_be_up(name: str, cfg: dict[str, Any]) -> bool:
+    """True for a slot that should be up without a request (ADR-0063).
+
+    The type's default slot (``default = true``, the anchor), a pinned slot
+    (:func:`hal0.slots.reaper.is_pinned`, which covers the default-pinned
+    anchor names) and a slot that boot-starts
+    (:func:`hal0.slots.activation.autoload_enabled`). Only these are
+    re-admitted in the background after an admission refusal.
+    """
+    return cfg.get("default") is True or _reaper_is_pinned(name, cfg) or autoload_enabled(cfg)
 
 
 class _ReadmitWithdrawn(Exception):
@@ -5016,16 +5028,23 @@ class SlotManager:
         model_id = _model_default(cfg)
         if not model_id:
             return False
+        if not _meant_to_be_up(name, cfg):
+            # ADR-0063: a slot that only loads on request (no anchor flag, no
+            # pin, no autoload) waits for the next request that names it.
+            # Re-admitting it here would evict idle slots in the background
+            # for a model nobody has asked for since the refusal.
+            log.debug("slot.admission_readmit_skipped_lazy", extra={"slot": name})
+            return False
         model_id = self._resolve_servable_model(model_id, cfg)
         try:
-            fits = await _admission_would_fit(self, slot_name=name, model_id=model_id)
+            plan = await _plan_admission(self, slot_name=name, model_id=model_id)
         except Exception as exc:  # a probe failure must not crash the retry
             log.warning(
                 "slot.admission_readmit_probe_failed",
                 extra={"slot": name, "error": str(exc)},
             )
             return False
-        if not fits:
+        if plan is not None and not plan.fits:
             log.debug("slot.admission_readmit_still_short", extra={"slot": name})
             return False
         log.info("slot.admission_readmit", extra={"slot": name, "model_id": model_id})
@@ -5033,6 +5052,27 @@ class SlotManager:
             await self._load(name, readmit=True)
         except _ReadmitWithdrawn as exc:
             log.info("slot.admission_readmit_withdrawn", extra={"slot": name, "reason": str(exc)})
+            return False
+        except PreloadEvictionFailed as exc:
+            # The dry run plans with estimated candidate footprints; the real
+            # gate re-reads free memory after each unload. When they disagree
+            # the breaker bounds the cost to one trial per cool-down, but say
+            # how far apart they were so a systematic gap shows up.
+            actual = exc.details or {}
+            log.warning(
+                "slot.admission_readmit_plan_mismatch",
+                extra={
+                    "slot": name,
+                    "model_id": model_id,
+                    "planned_evict": [c.name for c in plan.selected] if plan else [],
+                    "planned_free_mb": round(plan.projected_free_mb, 1) if plan else None,
+                    "planned_needed_mb": round(plan.needed_mb, 1) if plan else None,
+                    "actual_evicted": actual.get("evicted"),
+                    "actual_free_mb": actual.get("free_mb"),
+                    "actual_needed_mb": actual.get("needed_mb"),
+                    "shortfall_mb": actual.get("shortfall_mb"),
+                },
+            )
             return False
         except Exception as exc:
             # _load stamped ERROR (and the breaker) itself.

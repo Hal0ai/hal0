@@ -118,6 +118,10 @@ class _ArbiterSlotManager:
     def check_crash_loop_gate(self, _name: str) -> None:
         return None
 
+    def is_busy(self, _name: str) -> bool:
+        # No lifecycle operation in this double ever holds a slot lock.
+        return False
+
     def _config_file(self, name: str) -> Path:
         return self._tmp / "slots" / f"{name}.toml"
 
