@@ -1665,93 +1665,58 @@ def check_ports(slots: Any) -> Check:
     return Check("ports", "Slot ports", _PASS, f"{len(bound)} bound: {', '.join(map(str, bound))}")
 
 
-def check_port_dnat(slots: Any, audit: Callable[..., Any] | None = None) -> Check:
-    """Stale netavark DNAT rules on published slot ports (#1814).
+def check_port_dnat(slots: Any, reader: Callable[[], Any] | None = None) -> Check:
+    """Netavark DNAT rules behind every published port (#1814, #3724).
 
-    A container that dies without netavark's teardown running leaves its DNAT
-    rule behind in ``inet netavark``. nftables is first-match, so that dead rule
-    permanently shadows the live one and the port black-holes even though the
-    container is healthy. Two heuristic-free signals — more than one DNAT rule
-    for a port, or a first match pointing at an IP no running container holds.
+    Backend-aware: reads the ``inet netavark`` nftables table or, on netavark
+    1.4 (Ubuntu 24.04), the iptables-nft ``nat`` chains (#3237). Three
+    heuristic-free signals, each a ``fail``:
 
-    ``warn``, not ``fail``, when the audit can't run at all (no netavark table,
-    no ``nft``, no ``podman``, or the slots payload never arrived): the absence
-    of evidence is not evidence of corruption. Real corruption is a ``fail``
-    and names ``hal0 doctor ports --fix``.
+    * **missing** — a running container publishes host port N but no DNAT rule
+      for N reaches its IP. Healthy container, dead port (#3724).
+    * **duplicate** — more than one DNAT rule for a port.
+    * **dead first match** — the winning rule targets an IP no running
+      container holds; it shadows the live rule (#1814).
+
+    ``warn`` when the audit can't run (no netavark rules on either backend, no
+    ``podman``, or the slots payload never arrived): absence of evidence is not
+    evidence of corruption. Every ``fail`` names ``hal0 doctor ports --fix``.
     """
     label = "Port DNAT rules"
     if not isinstance(slots, list):
         return Check("port_dnat", label, _WARN, "no slots payload — run `hal0 doctor ports`")
     ports = sorted({int(s["port"]) for s in slots if isinstance(s, dict) and s.get("port")})
-    if not ports:
-        return Check("port_dnat", label, _PASS, "no slot ports bound yet")
 
     from hal0.system import netavark
 
     try:
-        rules = netavark.read_dnat_rules()
-        live = netavark.read_live_container_ips()
+        snapshot = (reader or netavark.read_snapshot)()
     except (netavark.NetavarkUnavailable, OSError, subprocess.SubprocessError) as exc:
-        # No ``inet netavark`` table: netavark 1.4 keeps its rules in the
-        # iptables-nft ``nat`` table instead (#3237). Only warn if that
-        # backend lacks the rules too.
-        try:
-            published = netavark.read_iptables_dnat_ports()
-        except (netavark.NetavarkUnavailable, OSError, subprocess.SubprocessError):
-            return Check("port_dnat", label, _WARN, f"audit unavailable: {exc}")
-        # A stopped slot has no container, hence no rule by design; ComfyUI
-        # runs with network_mode="host" (providers/comfyui.py), so it never
-        # publishes through netavark. Judge only loaded, netavark-published
-        # slots (arbiter.py:302 is the existing image-slot test).
-        from hal0.slots.state import is_dispatchable_state
+        if not ports:
+            return Check("port_dnat", label, _PASS, "no slot ports bound yet")
+        return Check("port_dnat", label, _WARN, f"audit unavailable: {exc}")
 
-        judged = sorted(
-            {
-                int(s["port"])
-                for s in slots
-                if isinstance(s, dict)
-                and s.get("port")
-                and is_dispatchable_state(s.get("state") or "")
-                and s.get("type") != "image"
-                and str(s.get("provider") or "").lower() != "comfyui"
-            }
-        )
-        if not judged:
-            return Check(
-                "port_dnat",
-                label,
-                _PASS,
-                "no loaded netavark-published slots (netavark iptables backend)",
-            )
-        missing = [p for p in judged if p not in published]
-        if missing:
-            return Check(
-                "port_dnat",
-                label,
-                _WARN,
-                f"no DNAT rule for port(s) {', '.join(map(str, missing))} "
-                "(netavark iptables backend)",
-            )
-        return Check(
-            "port_dnat",
-            label,
-            _PASS,
-            f"{len(judged)} loaded port(s) have a DNAT rule (netavark iptables backend; "
-            "stale-rule audit needs the nft table)",
-        )
-
-    verdicts = (audit or netavark.audit_ports)(ports, rules, live)
-    corrupt = [v for v in verdicts if v.corrupt]
-    if not corrupt:
-        return Check("port_dnat", label, _PASS, f"{len(ports)} port(s) clean in the netavark table")
-    stale = sum(len(v.stale) for v in corrupt)
-    names = ", ".join(str(v.port) for v in corrupt)
+    verdicts = netavark.audit_snapshot(snapshot, ports)
+    missing = [v for v in verdicts if v.missing]
+    stale = [v for v in verdicts if v.corrupt]
+    backend = f"netavark {snapshot.backend} backend"
+    if not missing and not stale:
+        if not verdicts:
+            return Check("port_dnat", label, _PASS, f"no published ports ({backend})")
+        return Check("port_dnat", label, _PASS, f"{len(verdicts)} port(s) clean ({backend})")
+    parts: list[str] = []
+    if missing:
+        names = ", ".join(f"{v.owner.name}:{v.port}" for v in missing if v.owner)
+        parts.append(f"no DNAT rule for {names}")
+    if stale:
+        count = sum(len(v.stale) for v in stale)
+        names = ", ".join(str(v.port) for v in stale)
+        parts.append(f"{count} stale DNAT rule(s) black-holing port(s) {names}")
     return Check(
         "port_dnat",
         label,
         _FAIL,
-        f"{stale} stale DNAT rule(s) black-holing port(s) {names} "
-        "— repair with `hal0 doctor ports --fix`",
+        f"{'; '.join(parts)} ({backend}) — repair with `hal0 doctor ports --fix`",
     )
 
 

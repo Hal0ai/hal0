@@ -49,11 +49,16 @@ the detector and the repair for boxes that already accumulated leaks.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import subprocess
+import threading
+import time
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
 #: The nft table netavark owns. Fixed by netavark itself, not configurable.
 NETAVARK_TABLE = "inet netavark"
@@ -79,25 +84,39 @@ _DNAT_RULE_RE = re.compile(
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
+log = logging.getLogger(__name__)
+
+#: The two firewall drivers netavark can publish ports through. netavark >= 1.13
+#: on most distros writes the ``inet netavark`` nftables table; netavark 1.4
+#: (Ubuntu 24.04's podman 4.9.3) writes iptables-nft ``nat`` chains instead
+#: (#3237, #3724).
+BACKEND_NFTABLES = "nftables"
+BACKEND_IPTABLES = "iptables"
+
 
 @dataclass(frozen=True, slots=True)
 class DnatRule:
-    """One netavark DNAT rule, as parsed from ``nft -a list table``."""
+    """One netavark DNAT rule, from either firewall backend.
+
+    ``handle`` is the nftables rule handle — the only thing the ``prune-dnat``
+    seam verb can delete by. iptables has no handles, so an iptables rule
+    carries ``handle=None`` and its ``-A`` line in ``spec`` instead (shown to
+    the operator as the manual ``iptables -t nat -D`` line; never executed).
+    """
 
     chain: str
     dport: int
     target_ip: str
     target_port: int
-    handle: int
+    handle: int | None
     daddr: str | None = None
+    spec: str | None = None
 
     def render(self) -> str:
         """Human-readable one-liner for doctor output and repair receipts."""
         guard = f"{self.daddr} " if self.daddr else ""
-        return (
-            f"{guard}dport {self.dport} -> {self.target_ip}:{self.target_port} "
-            f"(handle {self.handle})"
-        )
+        where = f"(handle {self.handle})" if self.handle is not None else f"({self.chain})"
+        return f"{guard}dport {self.dport} -> {self.target_ip}:{self.target_port} {where}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,10 +130,33 @@ class PortVerdict:
     port: int
     rules: tuple[DnatRule, ...]
     live_ips: frozenset[str]
+    #: The running container that publishes this host port, when one does.
+    owner: LiveContainer | None = None
 
     @property
     def first_match(self) -> DnatRule | None:
         return self.rules[0] if self.rules else None
+
+    @property
+    def missing(self) -> bool:
+        """A running container publishes this port, but no DNAT rule reaches it.
+
+        The #3724 black hole: the container is healthy and conmon still holds
+        the host port, but the rule netavark installed for it is gone, so
+        connections sit in the accept queue and time out. Unambiguous — the
+        container's publication and its address both come from podman, and the
+        rule table is read in full. ``podman network reload --all`` rebuilds
+        every running container's rules without restarting anything.
+        """
+        owner = self.owner
+        if owner is None or not owner.ips:
+            return False
+        return not any(r.target_ip in owner.ips for r in self.rules)
+
+    @property
+    def broken(self) -> bool:
+        """Any finding at all: stale (``corrupt``) or ``missing``."""
+        return self.corrupt or self.missing
 
     @property
     def duplicate(self) -> bool:
@@ -145,9 +187,13 @@ class PortVerdict:
 
     def reason(self) -> str:
         """One-line explanation, or ``""`` when the port is clean."""
-        if not self.corrupt:
+        if not self.broken:
             return ""
         parts: list[str] = []
+        if self.missing:
+            assert self.owner is not None
+            ips = ", ".join(sorted(self.owner.ips))
+            parts.append(f"no DNAT rule reaches {self.owner.name} ({ips})")
         if self.duplicate:
             parts.append(f"{len(self.rules)} DNAT rules (netavark emits exactly 1 per container)")
         if self.dead_first_match:
@@ -233,31 +279,396 @@ def read_dnat_rules(*, runner: Runner = subprocess.run, timeout: float = 10.0) -
     return parse_dnat_rules(out)
 
 
-#: One DNAT rule from ``iptables -t nat -S`` on the iptables-nft backend
-#: (netavark 1.4 / Ubuntu 24.04): ``-A NETAVARK-DN-<hash> … --dport 8081 -j DNAT
-#: --to-destination 10.88.0.80:8081``. Only the published port is kept.
-_IPTABLES_DNAT_RE = re.compile(
-    r"^-A\s+NETAVARK-DN-\S+\s.*--dport\s+(?P<dport>\d{1,5})\s.*-j\s+DNAT\b"
+# ── the iptables-nft backend (netavark 1.4, #3237 / #3724) ────────────────────
+#
+# netavark 1.4 publishes a port with TWO rules in the iptables ``nat`` table::
+#
+#   -A NETAVARK-HOSTPORT-DNAT -p tcp -m tcp --dport 8087 -m comment ... -j NETAVARK-DN-1D87...
+#   -A NETAVARK-DN-1D87... -p tcp -m tcp --dport 8087 -j DNAT --to-destination 10.88.0.19:8087
+#
+# The first is the per-port jump out of the hostport chain, the second the
+# per-network DNAT. Traffic reaches the DNAT only through the jump, and in the
+# #3724 capture it was the JUMPS that had vanished for every container except
+# the two most recently recreated. So on this backend a DNAT rule counts only
+# when a hostport jump for its port leads into its chain; a DN-chain rule with
+# no jump in front of it routes nothing.
+
+#: ``-A NETAVARK-HOSTPORT-DNAT … -j NETAVARK-DN-<hash>``: the jump into a
+#: network's DNAT chain. Its port guard is ``--dport N`` or ``--dports a,b:c``.
+_IPT_JUMP_RE = re.compile(
+    r"^-A\s+NETAVARK-HOSTPORT-DNAT\s+(?P<body>.*?)\s*-j\s+(?P<chain>NETAVARK-DN-\S+)"
+)
+_IPT_PORTS_RE = re.compile(r"--dports?\s+(?P<ports>[0-9,:]+)")
+#: ``-A NETAVARK-DN-<hash> … --dport N … -j DNAT --to-destination IP:PORT``.
+_IPT_DNAT_RE = re.compile(
+    r"^-A\s+(?P<chain>NETAVARK-DN-\S+)\s+(?P<body>.*?)\s*-j\s+DNAT\s+"
+    r"--to-destination\s+(?P<target_ip>\d{1,3}(?:\.\d{1,3}){3}):(?P<target_port>\d{1,5})\s*$"
+)
+_IPT_DPORT_RE = re.compile(r"--dport\s+(?P<dport>\d{1,5})\b")
+_IPT_DADDR_RE = re.compile(r"(?:^|\s)-d\s+(?P<daddr>\d{1,3}(?:\.\d{1,3}){3})(?:/32)?\b")
+
+#: Marks the iptables backend as present: netavark creates this chain the first
+#: time it publishes a port and never removes it.
+IPTABLES_HOSTPORT_CHAIN = "NETAVARK-HOSTPORT-DNAT"
+
+
+def _expand_ports(spec: str) -> frozenset[int]:
+    ports: set[int] = set()
+    for part in spec.split(","):
+        lo, _, hi = part.partition(":")
+        if not lo.isdigit():
+            continue
+        if hi.isdigit():
+            ports.update(range(int(lo), int(hi) + 1))
+        else:
+            ports.add(int(lo))
+    return frozenset(ports)
+
+
+def parse_iptables_dnat_rules(iptables_output: str) -> list[DnatRule]:
+    """Parse ``iptables -t nat -S`` into the DNAT rules traffic can reach.
+
+    Returned in evaluation order: hostport jumps in chain order, then the DNAT
+    rules inside each jumped-to chain in their own order. A jump with no port
+    guard reaches every rule in its chain.
+    """
+    jumps: list[tuple[str, frozenset[int] | None]] = []
+    by_chain: dict[str, list[DnatRule]] = {}
+    for raw in iptables_output.splitlines():
+        line = raw.strip()
+        jump = _IPT_JUMP_RE.match(line)
+        if jump:
+            guard = _IPT_PORTS_RE.search(jump.group("body"))
+            jumps.append(
+                (jump.group("chain"), _expand_ports(guard.group("ports")) if guard else None)
+            )
+            continue
+        m = _IPT_DNAT_RE.match(line)
+        if m is None:
+            continue
+        dport = _IPT_DPORT_RE.search(m.group("body"))
+        if dport is None:
+            continue
+        daddr = _IPT_DADDR_RE.search(" " + m.group("body"))
+        by_chain.setdefault(m.group("chain"), []).append(
+            DnatRule(
+                chain=m.group("chain"),
+                dport=int(dport.group("dport")),
+                target_ip=m.group("target_ip"),
+                target_port=int(m.group("target_port")),
+                handle=None,
+                daddr=daddr.group("daddr") if daddr else None,
+                spec=line,
+            )
+        )
+    reachable: list[DnatRule] = []
+    seen: set[int] = set()
+    for chain, ports in jumps:
+        for rule in by_chain.get(chain, ()):
+            if (ports is None or rule.dport in ports) and id(rule) not in seen:
+                seen.add(id(rule))
+                reachable.append(rule)
+    return reachable
+
+
+# ── running containers and their published ports ─────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class LiveContainer:
+    """A running container: its name, addresses and published host ports."""
+
+    name: str
+    ips: frozenset[str]
+    host_ports: frozenset[int] = field(default_factory=frozenset)
+
+
+#: The literal ``podman inspect`` format both the root-side wrapper verb and the
+#: direct (root / dev) reader use, so one parser serves both. One line per
+#: container: ``name|ip ip |{"8080/tcp":[{"HostIp":"","HostPort":"3001"}]}``.
+#: Mirrored byte-for-byte in installer/wrappers/hal0-systemctl (dnat-snapshot).
+CONTAINER_INSPECT_FORMAT = (
+    "{{.Name}}|{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"
+    "|{{json .NetworkSettings.Ports}}"
 )
 
-
-def parse_iptables_dnat_ports(iptables_output: str) -> set[int]:
-    """Published ports that have a netavark DNAT rule in ``iptables -t nat -S``."""
-    return {
-        int(m.group("dport"))
-        for line in iptables_output.splitlines()
-        if (m := _IPTABLES_DNAT_RE.match(line.strip()))
-    }
+_IPV4_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
 
 
-def read_iptables_dnat_ports(*, runner: Runner = subprocess.run, timeout: float = 10.0) -> set[int]:
-    """DNAT-published ports under the iptables-nft backend. Raises
-    :class:`NetavarkUnavailable` when ``iptables`` is missing or fails."""
+def parse_containers(inspect_output: str) -> list[LiveContainer]:
+    """Parse :data:`CONTAINER_INSPECT_FORMAT` lines. Malformed lines are skipped."""
+    containers: list[LiveContainer] = []
+    for line in inspect_output.splitlines():
+        parts = line.strip().split("|", 2)
+        if len(parts) != 3 or not parts[0]:
+            continue
+        name, ips_field, ports_field = parts
+        ips = frozenset(t for t in ips_field.split() if _IPV4_RE.fullmatch(t))
+        host_ports: set[int] = set()
+        try:
+            ports = json.loads(ports_field) if ports_field.strip() else {}
+        except ValueError:
+            ports = {}
+        if isinstance(ports, dict):
+            for bindings in ports.values():
+                for binding in bindings or ():
+                    hp = str((binding or {}).get("HostPort") or "")
+                    if hp.isdigit() and 1 <= int(hp) <= 65535:
+                        host_ports.add(int(hp))
+        containers.append(
+            LiveContainer(name=name.lstrip("/"), ips=ips, host_ports=frozenset(host_ports))
+        )
+    return containers
+
+
+# ── the snapshot: one privileged read, both backends ──────────────────────────
+#
+# The audit needs three root-only reads: the nft table, the iptables nat table,
+# and root's running containers. hal0-api runs as the unprivileged ``hal0``
+# account, so on a provisioned box they come from ONE read-only seam verb,
+# ``hal0-systemctl dnat-snapshot`` (no arguments), which prints them as framed
+# sections. A root process (``hal0 doctor`` run by an admin) calls the same
+# wrapper directly, and a box without the wrapper (dev, CI) runs the same three
+# commands in-process and frames them identically, so one parser serves all.
+
+#: Section header the wrapper and :func:`collect_snapshot_text` emit:
+#: ``@@<nft|iptables|containers> <ok|absent>``.
+_SECTION_RE = re.compile(r"^@@(?P<name>nft|iptables|containers)\s+(?P<status>ok|absent)\s*$")
+
+
+@dataclass(frozen=True, slots=True)
+class DnatSnapshot:
+    """The live netavark DNAT rules plus the running containers they serve."""
+
+    backend: str
+    rules: tuple[DnatRule, ...]
+    containers: tuple[LiveContainer, ...]
+
+    @property
+    def live_ips(self) -> frozenset[str]:
+        return frozenset(ip for c in self.containers for ip in c.ips)
+
+
+def _split_sections(text: str) -> dict[str, str | None]:
+    sections: dict[str, str | None] = {}
+    current: str | None = None
+    lines: list[str] = []
+    for line in text.splitlines():
+        m = _SECTION_RE.match(line)
+        if m:
+            if current is not None:
+                sections[current] = "\n".join(lines)
+            current, lines = None, []
+            if m.group("status") == "absent":
+                sections[m.group("name")] = None
+            else:
+                current = m.group("name")
+            continue
+        if current is not None:
+            lines.append(line)
+    if current is not None:
+        sections[current] = "\n".join(lines)
+    return sections
+
+
+def parse_snapshot(text: str) -> DnatSnapshot:
+    """Parse framed snapshot text and pick the backend netavark is using.
+
+    The nftables table wins when it exists and holds DNAT rules, or when no
+    iptables hostport chain exists either; otherwise the iptables chain decides.
+    Raises :class:`NetavarkUnavailable` when there is neither, or when the
+    container listing is missing (without it nothing can be judged).
+    """
+    sections = _split_sections(text)
+    listing = sections.get("containers")
+    if listing is None:
+        raise NetavarkUnavailable("running-container listing unavailable")
+    containers = tuple(parse_containers(listing))
+    nft = sections.get("nft")
+    ipt = sections.get("iptables")
+    nft_rules = parse_dnat_rules(nft) if nft is not None else []
+    ipt_present = ipt is not None and f"-N {IPTABLES_HOSTPORT_CHAIN}" in ipt
+    if nft is not None and (nft_rules or not ipt_present):
+        return DnatSnapshot(BACKEND_NFTABLES, tuple(nft_rules), containers)
+    if ipt is not None and ipt_present:
+        return DnatSnapshot(BACKEND_IPTABLES, tuple(parse_iptables_dnat_rules(ipt)), containers)
+    raise NetavarkUnavailable(
+        f"no `{NETAVARK_TABLE}` nftables table and no {IPTABLES_HOSTPORT_CHAIN} iptables chain"
+    )
+
+
+def _try(runner: Runner, argv: Sequence[str], timeout: float) -> str | None:
     try:
-        out = _run(runner, ["iptables", "-t", "nat", "-S"], timeout=timeout)
-    except FileNotFoundError as exc:
-        raise NetavarkUnavailable(f"iptables not found: {exc}") from exc
-    return parse_iptables_dnat_ports(out)
+        proc = runner(  # nosec B603 — fixed argv, no shell
+            list(argv), capture_output=True, text=True, check=False, timeout=timeout
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return (proc.stdout or "") if proc.returncode == 0 else None
+
+
+_IPT_KEEP_RE = re.compile(r"^-[AN]\s+NETAVARK-(HOSTPORT-DNAT|DN-)")
+
+
+def collect_snapshot_text(*, runner: Runner = subprocess.run, timeout: float = 15.0) -> str:
+    """The in-process equivalent of ``hal0-systemctl dnat-snapshot``.
+
+    Used where the wrapper is not installed (dev, CI) and the process can read
+    the firewall itself. Same framing, same commands, so :func:`parse_snapshot`
+    cannot tell the two apart.
+    """
+    out: list[str] = []
+    nft = _try(runner, ["nft", "-a", "list", "table", *NETAVARK_TABLE.split()], timeout)
+    out += ["@@nft absent"] if nft is None else ["@@nft ok", nft]
+    ipt = _try(runner, ["iptables", "-t", "nat", "-S"], timeout)
+    if ipt is None:
+        out.append("@@iptables absent")
+    else:
+        out += ["@@iptables ok", *(ln for ln in ipt.splitlines() if _IPT_KEEP_RE.match(ln))]
+    ids = _try(runner, ["podman", "ps", "-q"], timeout)
+    if ids is None:
+        out.append("@@containers absent")
+    elif not ids.split():
+        out.append("@@containers ok")
+    else:
+        inspected = _try(
+            runner,
+            ["podman", "inspect", "--format", CONTAINER_INSPECT_FORMAT, *ids.split()],
+            timeout,
+        )
+        out += ["@@containers absent"] if inspected is None else ["@@containers ok", inspected]
+    return "\n".join(out) + "\n"
+
+
+def read_snapshot(
+    *,
+    runner: Runner = subprocess.run,
+    seam: Any | None = None,
+    timeout: float = 20.0,
+) -> DnatSnapshot:
+    """Read the live DNAT snapshot. Raises :class:`NetavarkUnavailable`.
+
+    Routes through the ``dnat-snapshot`` seam verb when the wrapper is reachable
+    (the ``hal0`` service account via sudo, or root directly); falls back to
+    in-process reads otherwise.
+    """
+    from hal0.system.seam import Hal0SeamMissing, SystemCtlSeam
+
+    the_seam = seam if seam is not None else SystemCtlSeam()
+    try:
+        text = the_seam.dnat_snapshot(timeout=timeout)
+    except Hal0SeamMissing:
+        text = collect_snapshot_text(runner=runner, timeout=timeout)
+    except subprocess.CalledProcessError as exc:
+        raise NetavarkUnavailable(
+            f"dnat-snapshot failed ({exc.returncode}): {(exc.stderr or '').strip()}"
+        ) from exc
+    except Exception as exc:  # SeamTimeout, OSError, … — never a finding
+        raise NetavarkUnavailable(f"dnat-snapshot failed: {exc}") from exc
+    return parse_snapshot(text)
+
+
+def audit_snapshot(snapshot: DnatSnapshot, ports: Iterable[int] = ()) -> list[PortVerdict]:
+    """Classify every port a running container publishes, plus ``ports``. Pure.
+
+    Covers the three signals: ``missing`` (a publisher with no rule reaching
+    it), and the two stale ones, ``duplicate`` and ``dead_first_match``.
+    """
+    owners: dict[int, LiveContainer] = {}
+    for container in snapshot.containers:
+        for port in container.host_ports:
+            owners.setdefault(port, container)
+    live = snapshot.live_ips
+    by_port: dict[int, list[DnatRule]] = {}
+    for rule in snapshot.rules:
+        by_port.setdefault(rule.dport, []).append(rule)
+    return [
+        PortVerdict(port=p, rules=tuple(by_port.get(p, ())), live_ips=live, owner=owners.get(p))
+        for p in sorted(set(ports) | set(owners))
+    ]
+
+
+# ── the missing-rule repair: ``podman network reload --all`` ──────────────────
+#
+# A missing rule has exactly one non-disruptive repair: ``podman network reload
+# --all`` re-runs netavark setup for every running container and so rebuilds
+# every rule, without restarting anything. It is box-wide, so unattended
+# callers (the slot watchdog, the post-recreate recheck) share one rate limit:
+# at most one automatic reload per :data:`RELOAD_MIN_INTERVAL_S`, box-wide. An
+# operator's ``hal0 doctor ports --fix`` is not rate-limited.
+#
+# Stale rules (``duplicate`` / ``dead_first_match``) are NEVER auto-repaired:
+# on nftables a reload does not remove a leaked rule (it appends another), and
+# deleting one is the operator's ``--fix`` decision (#1820).
+
+#: Minimum spacing between two AUTOMATIC reloads, process-wide.
+RELOAD_MIN_INTERVAL_S: float = 600.0
+
+
+class ReloadGate:
+    """Rate limit for unattended ``network reload`` calls. Thread-safe."""
+
+    def __init__(
+        self,
+        min_interval_s: float = RELOAD_MIN_INTERVAL_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._min_interval_s = min_interval_s
+        self._clock = clock
+        self._last: float | None = None
+        self._lock = threading.Lock()
+
+    def try_acquire(self) -> bool:
+        """Claim the next reload slot; ``False`` while the window is closed."""
+        with self._lock:
+            now = self._clock()
+            if self._last is not None and now - self._last < self._min_interval_s:
+                return False
+            self._last = now
+            return True
+
+    def reset(self) -> None:
+        with self._lock:
+            self._last = None
+
+
+#: The one box-wide gate every automatic reload goes through.
+RELOAD_GATE = ReloadGate()
+
+
+@dataclass(frozen=True, slots=True)
+class ReloadResult:
+    """What an automatic reload attempt did."""
+
+    attempted: bool
+    ok: bool
+    detail: str = ""
+
+
+def auto_reload(
+    *, trigger: str, gate: ReloadGate | None = None, seam: Any | None = None
+) -> ReloadResult:
+    """Run ONE rate-limited ``podman network reload --all`` and log it.
+
+    For unattended callers only. Never raises: a failed or refused reload is a
+    :class:`ReloadResult`, and the caller decides what the slot looks like.
+    """
+    from hal0.system.seam import SystemCtlSeam
+
+    the_gate = gate if gate is not None else RELOAD_GATE
+    if not the_gate.try_acquire():
+        log.info("netavark.network_reload_rate_limited", extra={"trigger": trigger})
+        return ReloadResult(attempted=False, ok=False, detail="rate-limited")
+    the_seam = seam if seam is not None else SystemCtlSeam()
+    log.warning("netavark.network_reload", extra={"trigger": trigger})
+    try:
+        the_seam.network_reload()
+    except Exception as exc:
+        detail = str(getattr(exc, "stderr", None) or exc).strip()
+        log.warning("netavark.network_reload_failed", extra={"trigger": trigger, "error": detail})
+        return ReloadResult(attempted=True, ok=False, detail=detail)
+    log.warning("netavark.network_reload_done", extra={"trigger": trigger})
+    return ReloadResult(attempted=True, ok=True)
 
 
 def read_live_container_ips(*, runner: Runner = subprocess.run, timeout: float = 15.0) -> set[str]:
@@ -362,17 +773,33 @@ def read_netns_durability(
 
 
 __all__ = [
+    "BACKEND_IPTABLES",
+    "BACKEND_NFTABLES",
+    "CONTAINER_INSPECT_FORMAT",
     "DNAT_CHAIN_RE",
     "LINGER_DIR",
     "NETAVARK_TABLE",
+    "RELOAD_GATE",
+    "RELOAD_MIN_INTERVAL_S",
     "DnatRule",
+    "DnatSnapshot",
+    "LiveContainer",
     "NetavarkUnavailable",
     "NetnsDurability",
     "PortVerdict",
+    "ReloadGate",
+    "ReloadResult",
     "audit_ports",
+    "audit_snapshot",
+    "auto_reload",
+    "collect_snapshot_text",
     "parse_container_ips",
+    "parse_containers",
     "parse_dnat_rules",
+    "parse_iptables_dnat_rules",
+    "parse_snapshot",
     "read_dnat_rules",
     "read_live_container_ips",
     "read_netns_durability",
+    "read_snapshot",
 ]

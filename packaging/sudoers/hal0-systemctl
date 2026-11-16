@@ -22,7 +22,7 @@
 # into the generated system unit, so an ExecStartPre= plus this helper's own
 # daemon-reload + start verbs was a one-shot root exec.
 #
-# FIREWALL REPAIR (#1814): prune-dnat is the only verb that touches nftables.
+# FIREWALL REPAIR (#1814): prune-dnat is the only verb that deletes an nftables rule.
 # It deletes ONE stale netavark DNAT rule — the leaked, dead-target rule that
 # first-match-shadows a slot's live rule and black-holes its published port.
 # The caller passes two integers and nothing else: the root side re-derives the
@@ -31,6 +31,12 @@
 # belongs to a running container. So the grant cannot add a rule, cannot
 # redirect a port, cannot reach the filter/masquerade chains, and cannot break
 # a working published port — only remove rules that already route nowhere.
+#
+# DNAT AUDIT + RELOAD (#3724): dnat-snapshot is a read-only listing (nft table,
+# NETAVARK iptables nat lines, running containers' IPs/ports) and
+# network-reload runs `podman network reload --all`. Neither takes an argument;
+# the reload can only rebuild the rules podman already declares for its running
+# containers.
 #
 # WHAT THIS GRANT DOES *NOT* CLAIM: it is not a sandbox around slot content.
 # Slots run under rootful podman, and a slot's [Container] section legitimately

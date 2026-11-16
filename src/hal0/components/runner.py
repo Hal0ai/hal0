@@ -131,7 +131,23 @@ def converge_component(
             result = {**result, "note": existing["note"]}
 
     record_component_result(comp.id, result)
+    if comp.id == "openwebui" and not diagnose_only:
+        _recheck_port_dnat("component openwebui converged")
     return result
+
+
+def _recheck_port_dnat(trigger: str) -> None:
+    """After an applying OpenWebUI converge (it may recreate the container),
+    re-check every running container's DNAT rules (#3724). Best-effort."""
+    try:
+        from hal0.config.loader import load_hal0_config
+        from hal0.slots import port_dnat
+
+        if not load_hal0_config().slots.port_dnat_auto_repair:
+            return
+        port_dnat.recheck_after_recreate(trigger)
+    except Exception as exc:
+        log.info("components.port_dnat_recheck_failed", error=str(exc))
 
 
 def converge_components(

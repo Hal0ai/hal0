@@ -2291,10 +2291,15 @@ def doctor_profiles(
 # ── hal0 doctor ports — the drill-down the roll-up's Slot ports row names ─────
 
 
-def _render_dnat(verdicts: list[Any]) -> None:
-    """Print the per-port netavark DNAT table (#1814)."""
-    table = Table(title="Netavark DNAT rules (published slot ports)", box=None, pad_edge=False)
+def _render_dnat(verdicts: list[Any], backend: str) -> None:
+    """Print the per-port netavark DNAT table (#1814, #3724)."""
+    table = Table(
+        title=f"Netavark DNAT rules (published ports, {backend} backend)",
+        box=None,
+        pad_edge=False,
+    )
     table.add_column("port", justify="right")
+    table.add_column("container")
     table.add_column("rules", justify="right")
     table.add_column("first match")
     table.add_column("verdict")
@@ -2302,14 +2307,15 @@ def _render_dnat(verdicts: list[Any]) -> None:
     for v in verdicts:
         first = v.first_match
         target = f"{first.target_ip}:{first.target_port}" if first else "—"
-        if not v.rules:
-            verdict = "[dim]no rule (slot not running)[/dim]"
-        elif v.corrupt:
+        if v.broken:
             verdict = f"[red]{v.reason()}[/red]"
+        elif not v.rules:
+            verdict = "[dim]no rule (nothing running on it)[/dim]"
         else:
             verdict = "[green]ok[/green]"
         table.add_row(
-            f"[red]{v.port}[/red]" if v.corrupt else str(v.port),
+            f"[red]{v.port}[/red]" if v.broken else str(v.port),
+            v.owner.name if v.owner else "—",
             str(len(v.rules)),
             target,
             verdict,
@@ -2318,13 +2324,14 @@ def _render_dnat(verdicts: list[Any]) -> None:
 
 
 def _repair_dnat(verdicts: list[Any]) -> tuple[int, int]:
-    """Delete every stale DNAT handle behind a corrupt port. Returns (ok, failed).
+    """Delete every stale nftables DNAT handle behind a corrupt port. Returns (ok, failed).
 
     Deletes highest-handle-first *within* a port so an earlier delete can never
     renumber a handle we are about to use — nft handles are stable, but the
     ordering costs nothing and removes the question. Live-targeted rules are
     never candidates (see :attr:`PortVerdict.stale`), so a working slot cannot
-    be cut by a repair run.
+    be cut by a repair run. nftables backend only: iptables rules carry no
+    handle (see :func:`_print_iptables_stale`).
     """
     from hal0.system.seam import SystemCtlSeam
 
@@ -2333,7 +2340,8 @@ def _repair_dnat(verdicts: list[Any]) -> tuple[int, int]:
     for verdict in verdicts:
         if not verdict.corrupt:
             continue
-        for rule in sorted(verdict.stale, key=lambda r: r.handle, reverse=True):
+        prunable = [r for r in verdict.stale if r.handle is not None]
+        for rule in sorted(prunable, key=lambda r: r.handle, reverse=True):
             try:
                 seam.prune_dnat(verdict.port, rule.handle)
             except Exception as exc:
@@ -2349,13 +2357,47 @@ def _repair_dnat(verdicts: list[Any]) -> tuple[int, int]:
     return ok, failed
 
 
+def _print_iptables_stale(verdicts: list[Any]) -> None:
+    """Name the manual delete for stale iptables rules; never run it.
+
+    The ``prune-dnat`` seam verb is nftables-only by design (it deletes by
+    handle, which iptables has none of), and a stale rule is never repaired
+    automatically (#1820). Print the exact ``-D`` line so the operator can.
+    """
+    for verdict in verdicts:
+        for rule in verdict.stale:
+            if rule.spec:
+                console.print(
+                    f"    port {verdict.port}: sudo iptables -t nat "
+                    f"{rule.spec.replace('-A ', '-D ', 1)}"
+                )
+
+
+def _network_reload() -> bool:
+    """``podman network reload --all`` through the seam. True on success."""
+    from hal0.system.seam import SystemCtlSeam
+
+    try:
+        SystemCtlSeam().network_reload()
+    except Exception as exc:
+        detail = getattr(exc, "stderr", None) or str(exc)
+        console.print(f"[red]✗[/red]  podman network reload --all failed: {str(detail).strip()}")
+        return False
+    console.print(
+        "[green]✓[/green]  ran `podman network reload --all` "
+        "(rebuilt every running container's rules; nothing restarted)"
+    )
+    return True
+
+
 @app.command("ports")
 def doctor_ports(
     fix: bool = typer.Option(
         False,
         "--fix",
         help=(
-            "Delete the stale netavark DNAT rules found by the audit "
+            "Repair what the DNAT audit found: rebuild missing rules with "
+            "`podman network reload --all` and delete stale nftables rules "
             "(privileged, routed through the hal0-systemctl seam)."
         ),
     ),
@@ -2372,18 +2414,23 @@ def doctor_ports(
     a timeout here, naming the budget it exceeded, rather than as the endpoint
     being down.
 
-    It then audits the nftables DNAT rules netavark publishes those ports with
-    (#1814). A container that dies without netavark's teardown running leaves
-    its DNAT rule behind, and because nftables is first-match, that dead rule
-    permanently shadows the correct one — the port answers nothing while the
-    container inside is perfectly healthy. Two signals, both unambiguous and
-    heuristic-free: more than one DNAT rule for a port, or a first-match rule
-    targeting an IP no running container holds.
+    It then audits the DNAT rules netavark publishes every running container's
+    ports with, on either firewall backend: the ``inet netavark`` nftables
+    table, or the iptables-nft ``nat`` chains of netavark 1.4 (#3237). Three
+    signals, all unambiguous and heuristic-free:
 
-    ``--fix`` is the explicit repair. It is never a side effect of the audit:
-    deleting nftables rules is privileged and destructive, so it happens only
-    when an operator asks. Only rules whose target is already dead are deleted,
-    so a healthy port cannot be cut.
+    * **missing** (#3724): a running container publishes a port but no DNAT
+      rule reaches it. The container is healthy, the port is a black hole.
+    * **duplicate** (#1814): more than one DNAT rule for a port.
+    * **dead first match** (#1814): the winning rule targets an IP no running
+      container holds, shadowing the correct one.
+
+    ``--fix`` is the explicit repair, never a side effect of the audit. A
+    missing rule is rebuilt with ``podman network reload --all``, which re-runs
+    netavark setup for every running container without restarting any. A stale
+    nftables rule is deleted by handle; only rules whose target is already dead
+    are candidates, so a healthy port cannot be cut. A stale iptables rule is
+    named with its manual ``iptables -t nat -D`` line instead.
 
     Exit codes:
       0 — no collisions and no DNAT corruption (or every finding was repaired).
@@ -2412,19 +2459,30 @@ def doctor_ports(
     rows = [s for s in slots if isinstance(s, dict)]
     bound = [(str(s.get("name") or "?"), int(s["port"])) for s in rows if s.get("port")]
 
+    by_port: dict[int, list[str]] = {}
+    for name, port in bound:
+        by_port.setdefault(port, []).append(name)
+
     if not bound:
         console.print(
             f"[green]✓[/green]  no slot ports bound yet ({len(rows)} slot(s) configured)."
         )
-        raise typer.Exit(0)
+    else:
+        _render_slot_ports(bound, by_port)
 
+    collisions = {p: names for p, names in by_port.items() if len(names) > 1}
+    for port, names in sorted(collisions.items()):
+        console.print(f"\n[red]✗[/red]  port {port} claimed by {len(names)}: {', '.join(names)}")
+    if bound and not collisions:
+        console.print(f"\n[green]✓[/green]  {len(bound)} port(s) bound, no collisions.")
+
+    _audit_dnat(sorted(by_port), fix=fix, collisions=bool(collisions))
+
+
+def _render_slot_ports(bound: list[tuple[str, int]], by_port: dict[int, list[str]]) -> None:
     table = Table(title="Slot ports", box=None, pad_edge=False)
     table.add_column("slot")
     table.add_column("port", justify="right")
-
-    by_port: dict[int, list[str]] = {}
-    for name, port in bound:
-        by_port.setdefault(port, []).append(name)
 
     for name, port in sorted(bound, key=lambda r: r[1]):
         clash = len(by_port[port]) > 1
@@ -2434,45 +2492,49 @@ def doctor_ports(
         )
     console.print(table)
 
-    collisions = {p: names for p, names in by_port.items() if len(names) > 1}
-    for port, names in sorted(collisions.items()):
-        console.print(f"\n[red]✗[/red]  port {port} claimed by {len(names)}: {', '.join(names)}")
-    if not collisions:
-        console.print(f"\n[green]✓[/green]  {len(bound)} port(s) bound, no collisions.")
 
-    # ── netavark DNAT audit (#1814) ──────────────────────────────────────────
+def _audit_dnat(slot_ports: list[int], *, fix: bool, collisions: bool) -> None:
+    """The netavark DNAT half of ``hal0 doctor ports`` (#1814, #3724). Exits."""
     from hal0.system.netavark import (
+        BACKEND_NFTABLES,
         NetavarkUnavailable,
-        audit_ports,
-        read_dnat_rules,
-        read_live_container_ips,
+        audit_snapshot,
+        read_snapshot,
     )
 
+    base_rc = 1 if collisions else 0
     try:
-        rules = read_dnat_rules()
-        live_ips = read_live_container_ips()
+        snapshot = read_snapshot()
     except (NetavarkUnavailable, OSError, subprocess.SubprocessError) as exc:
-        # No netavark table / no podman / no nft is not a finding — a box that
-        # publishes nothing through netavark has nothing to audit. Say so and
-        # keep the collision verdict as the exit code.
+        # No netavark rules on either backend / no podman is not a finding — a
+        # box that publishes nothing through netavark has nothing to audit. Say
+        # so and keep the collision verdict as the exit code.
         console.print(f"\n[dim]·[/dim]  netavark DNAT audit skipped: {exc}")
-        raise typer.Exit(1 if collisions else 0) from None
+        raise typer.Exit(base_rc) from None
 
-    verdicts = audit_ports(sorted(by_port), rules, live_ips)
+    verdicts = audit_snapshot(snapshot, slot_ports)
     console.print()
-    _render_dnat(verdicts)
+    _render_dnat(verdicts, snapshot.backend)
 
-    corrupt = [v for v in verdicts if v.corrupt]
-    if not corrupt:
-        console.print("\n[green]✓[/green]  netavark DNAT rules are clean on every bound port.")
-        raise typer.Exit(1 if collisions else 0)
+    missing = [v for v in verdicts if v.missing]
+    stale = [v for v in verdicts if v.corrupt]
+    if not missing and not stale:
+        console.print("\n[green]✓[/green]  netavark DNAT rules are clean on every published port.")
+        raise typer.Exit(base_rc)
 
-    stale_total = sum(len(v.stale) for v in corrupt)
-    console.print(
-        f"\n[red]✗[/red]  {len(corrupt)} port(s) have stale netavark DNAT rules "
-        f"({stale_total} dead rule(s)). nftables is first-match, so a leaked rule "
-        "black-holes the port even when the container is healthy."
-    )
+    if missing:
+        names = ", ".join(f"{v.owner.name}:{v.port}" for v in missing if v.owner)
+        console.print(
+            f"\n[red]✗[/red]  {len(missing)} published port(s) have no DNAT rule: {names}. "
+            "The containers are running, but connections to these ports go nowhere."
+        )
+    if stale:
+        stale_total = sum(len(v.stale) for v in stale)
+        console.print(
+            f"\n[red]✗[/red]  {len(stale)} port(s) have stale netavark DNAT rules "
+            f"({stale_total} dead rule(s)). Rules are first-match, so a leaked rule "
+            "black-holes the port even when the container is healthy."
+        )
     if not fix:
         console.print(
             "    Repair with `hal0 doctor ports --fix` (privileged: routed through "
@@ -2481,11 +2543,36 @@ def doctor_ports(
         raise typer.Exit(1)
 
     console.print()
-    ok, failed = _repair_dnat(corrupt)
-    console.print(f"\n[bold]pruned {ok} stale rule(s), {failed} failure(s).[/bold]")
-    if failed or not ok:
+    failed = 0
+    if stale:
+        if snapshot.backend == BACKEND_NFTABLES:
+            ok, bad = _repair_dnat(stale)
+            console.print(f"\n[bold]pruned {ok} stale rule(s), {bad} failure(s).[/bold]")
+            failed += bad
+        else:
+            console.print(
+                "[yellow]![/yellow]  stale iptables rules are not deleted automatically; "
+                "remove them by hand:"
+            )
+            _print_iptables_stale(stale)
+    if missing and not _network_reload():
+        failed += 1
+
+    # Re-audit: the reload is box-wide, and the verdict that matters is the
+    # table after the repair, not the count of commands that returned 0.
+    try:
+        after = audit_snapshot(read_snapshot(), slot_ports)
+    except (NetavarkUnavailable, OSError, subprocess.SubprocessError) as exc:
+        console.print(f"\n[yellow]![/yellow]  could not re-read the rules after repair: {exc}")
+        raise typer.Exit(1) from None
+    remaining = [v for v in after if v.broken]
+    if failed or remaining:
+        if remaining:
+            console.print()
+            _render_dnat(remaining, snapshot.backend)
         raise typer.Exit(1)
-    raise typer.Exit(1 if collisions else 0)
+    console.print("\n[green]✓[/green]  netavark DNAT rules are clean after repair.")
+    raise typer.Exit(base_rc)
 
 
 # ── hal0 doctor all — read-only evidence roll-up (§21.4) ──────────────────────

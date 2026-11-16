@@ -1899,6 +1899,20 @@ class SlotsConfig(BaseModel):
             "refuses. Overridable per-process with HAL0_FABRIC_CLOCK_GUARD."
         ),
     )
+    port_dnat_auto_repair: bool = Field(
+        default=True,
+        description=(
+            "Let hal0 repair a MISSING netavark DNAT rule on its own (#3724): "
+            "when a running slot fails /health because its published port has "
+            "no DNAT rule reaching the container, or a slot start leaves another "
+            "running container's port without one, run `podman network reload "
+            "--all` (rebuilds every running container's rules, restarts "
+            "nothing) at most once per 10 minutes box-wide, then re-probe. Stale "
+            "rules are never auto-repaired. Set to false to only report "
+            "(error_reason port_dnat_missing) and leave the repair to "
+            "`hal0 doctor ports --fix`."
+        ),
+    )
     publish_host: str = Field(
         default="127.0.0.1",
         description=(

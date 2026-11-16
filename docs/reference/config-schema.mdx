@@ -66,10 +66,11 @@ Root model `Hal0Config`, `extra="allow"`.
 | `evict_pressure_mb` | int | `8192` | `>= 0` |
 | `preload_evict_enabled` | bool | `true` | — |
 | `preload_evict_headroom_mb` | int | `1024` | `>= 0` |
+| `port_dnat_auto_repair` | bool | `true` | — |
 | `publish_host` | str | `"127.0.0.1"` | non-empty, no whitespace/`:`/`/` |
 | `network_mode` | str | `""` | must be `""` or `"host"` |
-| `default_images` | dict[str,str] | `{}` | keys must be a `RUNNER_IMAGES` runner key (`standard`, `cpu`, `cuda`, `halogen`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`) — any other key is a config error; values must be non-empty image refs; sending `null` for a runner key clears its override |
-| `fabric_clock_guard` | str | `"refuse"` | one of `refuse`, `warn`, `off`. Policy when an NPU slot would load beside a GPU slot while the AMD GPU fabric clock is not held at its top DPM level: `refuse` blocks the load and names the host-side fix, `warn` loads and records a warning, `off` skips the check. An unreadable clock always warns. Env override `HAL0_FABRIC_CLOCK_GUARD` (ADR-0054) |
+| `default_images` | dict[str,str] | `{}` | keys must be a `RUNNER_IMAGES` runner key (`standard`, `cpu`, `cuda`, `halogen`, `flm`, `kokoro`, `moonshine`, `qwen3tts`, `comfyui`) (any other key is a config error); values are non-empty image refs; `null` clears a runner's override |
+| `fabric_clock_guard` | str | `"refuse"` | one of `refuse`, `warn`, `off`. Policy when an NPU slot would load beside a GPU slot while the AMD GPU fabric clock is below its top DPM level: `refuse` blocks it, naming the host-side fix, `warn` loads with a warning, `off` skips the check. An unreadable clock always warns. Env override `HAL0_FABRIC_CLOCK_GUARD` (ADR-0054) |
 
 ### `[dispatcher]`
 

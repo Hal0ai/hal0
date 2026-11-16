@@ -153,7 +153,8 @@ def _reject_privileged_systemctl(argv: object) -> None:
         # nothing, and never touch systemd or the firewall. Running the real
         # script IS the point for those (tests/installer's #1716 + #1740 +
         # #1814 suites exercise the root-side allow-lists against the shipped
-        # bash), and none needs sudo or root.
+        # bash), and none needs sudo or root. `dnat-snapshot` (#3724) is the
+        # same: a pure listing, exercised against stub nft/iptables/podman.
         seam_verb = next((p for p in inner[1:] if not p.startswith("-")), "")
         if seam_verb and seam_verb not in {
             "help",
@@ -161,6 +162,7 @@ def _reject_privileged_systemctl(argv: object) -> None:
             "check-dropin",
             "check-quadlet",
             "check-dnat",
+            "dnat-snapshot",
         }:
             raise AssertionError(
                 f"test tried to run the hal0-systemctl privilege seam for real: {parts!r}. "
@@ -228,6 +230,27 @@ def _suite_account_is_trusted(monkeypatch: pytest.MonkeyPatch) -> None:
     from hal0.security import nofollow
 
     monkeypatch.setattr(nofollow, "_trusted_uids", lambda: frozenset({0, _REAL_EUID}))
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_port_dnat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the slot-side DNAT audit (#3724) off the host's real firewall.
+
+    The watchdog audits a slot's port at its /health strike threshold, and
+    every slot start schedules a box-wide recheck. Unstubbed, a test would
+    shell out to nft/iptables/podman on the developer's machine (and could
+    reload its networks). The audit reports "unavailable" instead, which is
+    the generic path every existing test expects; DNAT tests override this
+    with their own fake snapshot.
+    """
+    from hal0.slots import port_dnat
+    from hal0.system import netavark
+
+    def _unavailable() -> netavark.DnatSnapshot:
+        raise netavark.NetavarkUnavailable("test suite: no firewall")
+
+    monkeypatch.setattr(port_dnat, "_read_snapshot", _unavailable)
+    netavark.RELOAD_GATE.reset()
 
 
 @pytest.fixture(autouse=True)

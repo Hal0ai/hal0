@@ -426,6 +426,11 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "apply_class": "service-restart",
         "services": [SERVICE_HAL0_API],
     },
+    # Same create_app-time SlotManager constructor arg (#3724).
+    "slots.port_dnat_auto_repair": {
+        "apply_class": "service-restart",
+        "services": [SERVICE_HAL0_API],
+    },
     # [dispatcher] — same create_app-time wiring as the other two entries.
     "dispatcher.direct_read_timeout_s": {
         "apply_class": "service-restart",
