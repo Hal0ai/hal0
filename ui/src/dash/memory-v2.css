@@ -130,7 +130,12 @@
 .mvi-banner{display:flex;align-items:center;gap:8px;padding:10px 14px;background:color-mix(in srgb,var(--warn) 10%,transparent);border-bottom:1px solid color-mix(in srgb,var(--warn) 25%,transparent);color:var(--warn);font:500 11.5px var(--jbm)}
 .mvi-sec{display:block;padding:12px 14px;border-bottom:1px solid var(--line-soft,#1C1C1C)}
 .mvi-sec:last-child{border-bottom:0}
-.mvi-top{display:flex;align-items:center;gap:6px;margin-bottom:10px}
+/* The fact's type + tags row wraps: long tags (project:…, source:git-log, kind:…) used to run
+   past the inspector's edge and scroll it sideways. A tag longer than the panel breaks inside
+   itself rather than overflowing. The close button stays pinned top-right whatever wraps. */
+.mvi-top{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-bottom:10px;padding-right:30px}
+.mvi-top .mv-tag{max-width:100%;overflow-wrap:anywhere}
+.mvi-top .mvi-x{position:absolute;top:0;right:0}
 .mvi-top .sp{flex:1}
 .mvi-x{background:transparent;border:1px solid var(--line);border-radius:4px;color:var(--fg-4);width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
 .mvi-x:hover{border-color:var(--line-strong,#3A3A3A);color:var(--fg-2)}
