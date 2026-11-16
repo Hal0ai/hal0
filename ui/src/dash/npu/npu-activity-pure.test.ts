@@ -21,10 +21,11 @@ describe('npuLaneRows', () => {
     expect([ggml.role, ggml.engine]).toEqual(['chat', 'xdna'])
     expect(npuLaneRows(occ, [], undefined, false)[0].cols).toBe('8')
   })
-  it('live tok/s from the slot metrics, null when idle; activity by name', () => {
+  it('live tok/s from the slot metrics while serving, null when idle; activity by name', () => {
     const lane = { tps: [1], peak_tps: 1, tokens: 1, requests: 2, errors: 0, ttft_p50_ms: 300 }
+    const serving = (occ as unknown as Array<Record<string, unknown>>).map((o) => (o.name === 'flm' ? { ...o, state: 'serving' } : o)) as never
     const rows = npuLaneRows(
-      occ,
+      serving,
       [{ name: 'flm', metrics: { toks: 18.2 } }, { name: 'npu-fast', metrics: { toks: 0 } }],
       { flm: lane },
       false,
@@ -34,5 +35,10 @@ describe('npuLaneRows', () => {
     expect(rows[2].nowToks).toBeNull()
     expect(rows[2].activity).toBeNull()
     expect(rows[1].lastUsedAge).toBe(250)
+  })
+  it('a lane back at ready drops its last sample instead of showing it as live', () => {
+    // The backend keeps a slot's last tok/s after the request ends.
+    const rows = npuLaneRows(occ, [{ name: 'flm', metrics: { toks: 18.2 } }], undefined, false)
+    expect(rows[0].nowToks).toBeNull()
   })
 })
