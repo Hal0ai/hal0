@@ -409,3 +409,27 @@ class TestSlotActivity:
         assert fleet["npu_util"][-1] == 0.4
         assert fleet["gpu_util"][-1] == 0.5
         assert fleet["npu_util"][:-1] == [None] * 59
+
+    def test_rows_after_now_are_ignored(self, tmp_path: Path) -> None:
+        """A row written after ``now`` was captured never lands in the last bucket."""
+        db = self._db(tmp_path)
+        later = self.NOW + timedelta(seconds=10)
+        with connect(db) as conn:
+            self._request(conn, end=later, slot="flm", tokens=50, total_ms=1_000)
+            conn.execute(
+                "INSERT INTO slot_sample (ts, slot_id, state, npu_util) "
+                "VALUES (?, '__fleet__', 'n/a', 0.9)",
+                (later.isoformat(),),
+            )
+        out = metrics_read.slot_activity(db, window="5m", now=self.NOW)
+        assert out["slots"] == {}
+        assert out["fleet"]["npu_util"][-1] is None
+
+    def test_ttft_equal_to_total_puts_the_tokens_at_the_end(self, tmp_path: Path) -> None:
+        """A 30 s wait then the whole answer at once: one bucket, not six."""
+        db = self._db(tmp_path)
+        with connect(db) as conn:
+            self._request(conn, end=self.NOW, slot="flm", tokens=1, total_ms=30_000, ttft_ms=30_000)
+        tps = metrics_read.slot_activity(db, window="5m", now=self.NOW)["slots"]["flm"]["tps"]
+        assert tps[-1] == 0.2  # 1 token / 5 s bucket
+        assert sum(1 for v in tps if v > 0) == 1

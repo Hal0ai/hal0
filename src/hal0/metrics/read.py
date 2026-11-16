@@ -368,6 +368,7 @@ def slot_activity(
     end_dt = now if now is not None else datetime.now(UTC)
     start_dt = end_dt - timedelta(seconds=span_s)
     w0 = start_dt.timestamp()
+    w1 = end_dt.timestamp()
 
     def _bucket(t: float) -> int:
         return min(buckets - 1, max(0, int((t - w0) // bucket_s)))
@@ -376,14 +377,14 @@ def slot_activity(
         request_rows = _safe_query(
             conn,
             "SELECT ts, slot_id, completion_tokens, ttft_ms, total_ms, ok FROM request_metric "
-            "WHERE ts >= ? AND slot_id IS NOT NULL",
-            (start_dt.isoformat(),),
+            "WHERE ts >= ? AND ts <= ? AND slot_id IS NOT NULL",
+            (start_dt.isoformat(), end_dt.isoformat()),
         )
         fleet_rows = _safe_query(
             conn,
             "SELECT ts, gpu_util, npu_util FROM slot_sample "
-            "WHERE slot_id = '__fleet__' AND ts >= ?",
-            (start_dt.isoformat(),),
+            "WHERE slot_id = '__fleet__' AND ts >= ? AND ts <= ?",
+            (start_dt.isoformat(), end_dt.isoformat()),
         )
 
     token_bins: dict[str, list[float]] = {}
@@ -393,7 +394,9 @@ def slot_activity(
         if ended is None:
             continue
         end = ended.timestamp()
-        if end < w0:
+        # The SQL bounds compare ISO strings; re-check on parsed times so a
+        # row written after ``now`` was captured never lands in the last bucket.
+        if end < w0 or end > w1:
             continue
         slot = row["slot_id"]
         bins = token_bins.setdefault(slot, [0.0] * buckets)
@@ -409,7 +412,8 @@ def slot_activity(
         st["tokens"] += tokens
         total_s = (row["total_ms"] or 0.0) / 1000.0
         ttft_s = (row["ttft_ms"] or 0.0) / 1000.0
-        gen_s = total_s - ttft_s if 0.0 < ttft_s < total_s else total_s
+        # TTFT equal to the total: every token arrived at once, at the end.
+        gen_s = total_s - ttft_s if 0.0 < ttft_s <= total_s else total_s
         if gen_s <= 0.0:
             bins[_bucket(end)] += tokens
             continue
@@ -438,7 +442,7 @@ def slot_activity(
     counts: dict[str, list[int]] = {"gpu_util": [0] * buckets, "npu_util": [0] * buckets}
     for row in fleet_rows:
         sampled = _parse_ts(row["ts"])
-        if sampled is None or sampled.timestamp() < w0:
+        if sampled is None or not w0 <= sampled.timestamp() <= w1:
             continue
         b = _bucket(sampled.timestamp())
         for key in ("gpu_util", "npu_util"):

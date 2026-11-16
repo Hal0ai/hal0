@@ -28,6 +28,10 @@ export function ArrayBand({ occ, hw, slots }) {
   const holders = useMemo(() => arrayHolders(occ?.slots, slots), [occ?.slots, slots])
   const shared = arrayShared(holders)
   const laneRows = useMemo(() => npuLaneRows(occ?.slots, slots, undefined, shared), [occ?.slots, slots, shared])
+  const chartLanes = useMemo(
+    () => (occ?.slots ?? []).map((o) => ({ name: o.name, engine: o.engine === 'xdna' ? 'xdna' : 'flm' })),
+    [occ?.slots],
+  )
 
   const colsAvailable = occ?.columns_available !== false
   const colsTotal = occ?.cols_total || NPU_COLS
@@ -86,7 +90,7 @@ export function ArrayBand({ occ, hw, slots }) {
           {shared ? 'shared · time-sliced — allocated columns, not per-tile utilisation' : 'allocated columns — not per-tile utilisation'}
         </div>
       </div>
-      <NpuActivity rows={laneRows} hues={ENGINE_HUE} />
+      <NpuActivity rows={laneRows} chartLanes={chartLanes} hues={ENGINE_HUE} />
     </div>
     </>
   )
