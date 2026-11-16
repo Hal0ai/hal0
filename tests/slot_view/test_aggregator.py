@@ -1580,3 +1580,61 @@ class TestTuneLiftIsValidated:
         )
         d = await _ctx_view(cfg, 8000)
         assert d["tune"] == {"vision": "off"}
+
+
+class TestShadowState:
+    """FLM trio shadows report their anchor's state while their role is on (CT105:
+    flm-stt read "offline" while serving transcriptions, because the slot's own
+    SlotManager state is always offline)."""
+
+    def test_role_on_takes_the_anchor_state(self) -> None:
+        assert sv_mod.shadow_state(True, "idle") == "idle"
+        assert sv_mod.shadow_state(True, "serving") == "serving"
+
+    def test_role_off_or_unknown_is_offline(self) -> None:
+        assert sv_mod.shadow_state(False, "ready") == "offline"
+        assert sv_mod.shadow_state(None, "ready") == "offline"
+        assert sv_mod.shadow_state(True, None) == "offline"
+
+    async def test_snapshot_gives_each_shadow_its_role_state(
+        self, no_mem: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        configs = [
+            _llm_cfg(name="flm", device="npu", npu={"asr": True, "embed": False}),
+            {
+                "name": "flm-stt",
+                "device": "npu",
+                "type": "transcription",
+                "model": {"default": "whisper-v3"},
+            },
+            {
+                "name": "flm-embed",
+                "device": "npu",
+                "type": "embedding",
+                "model": {"default": "embed-gemma"},
+            },
+        ]
+        sm = FakeSlotManager(
+            slots=[
+                _slot("flm", SlotState.IDLE, model_id="gemma4-it:e4b"),
+                _slot("flm-stt", SlotState.OFFLINE, model_id=None),
+                _slot("flm-embed", SlotState.OFFLINE, model_id=None),
+            ],
+            configs=configs,
+        )
+        running = {"container_status": "running", "container_health": True}
+
+        async def fake_container_enrichment(*_a: Any, **_k: Any) -> dict[str, dict[str, Any]]:
+            return {
+                "flm": dict(running),
+                "flm-stt": {**running, "served_by": "flm"},
+                "flm-embed": {**running, "served_by": "flm"},
+            }
+
+        monkeypatch.setattr(sv_mod, "container_enrichment", fake_container_enrichment)
+        by_name = {v.name: v.payload for v in await _agg(sm).snapshot()}
+        assert by_name["flm"]["state"] == "idle"
+        assert by_name["flm-stt"]["state"] == "idle"  # asr on: as live as the anchor
+        assert by_name["flm-embed"]["state"] == "offline"  # embed off
+        assert by_name["flm-embed"]["container_status"] == "stopped"
+        assert by_name["flm-stt"]["container_status"] == "running"

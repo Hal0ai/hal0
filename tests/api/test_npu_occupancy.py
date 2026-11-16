@@ -856,3 +856,18 @@ def test_facts_refresh_started_before_invalidate_does_not_repopulate(facts_cache
     gate.set()
     t.join(timeout=5)
     assert facts_cache._facts_cache is None  # the stale read was discarded
+
+
+def test_occupancy_reads_npu_roles_from_the_slot_config_not_a_name_path(
+    client: TestClient, monkeypatch
+):
+    """Slot configs are named by token (1.toml, …), so the anchor's [npu] table comes from
+    iter_configs by slot name. A slot object without an ``npu`` attribute still gets its
+    STT row when the config turns asr on (CT105: flm-stt was missing from the band)."""
+    _wire_ready_anchor(client, monkeypatch, npu=None)
+    client.app.state.slot_manager.iter_configs = AsyncMock(
+        return_value=[{"name": "npu", "device": "npu", "type": "llm", "npu": {"asr": True}}]
+    )
+    names = {s["name"] for s in client.get("/api/npu/occupancy").json()["slots"]}
+    assert "npu-stt" in names
+    assert "npu-embed" not in names  # embed stays off

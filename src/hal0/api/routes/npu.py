@@ -22,8 +22,6 @@ import contextlib
 import copy
 import threading
 import time
-import tomllib
-from pathlib import Path
 from typing import Any
 
 import structlog
@@ -38,11 +36,6 @@ from hal0.slots.naming import slot_container_name, slot_token_for
 log = structlog.get_logger(__name__)
 
 router = APIRouter()
-
-
-def _slots_dir() -> Path:
-    """Return /etc/hal0/slots/ — the TOML config directory."""
-    return Path("/etc/hal0/slots")
 
 
 # Strix Halo XDNA NPU geometry — fixed silicon: 4 rows by 8 cols = 32 AIE
@@ -424,6 +417,10 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
     # xdna slots (ADR-0057), named from their config: their device is npu, so
     # the backend mirror alone could read as FLM on an older state record.
     xdna_names: set[str] = set()
+    # Slot configs by name. Config files are named by slot token (1.toml, …),
+    # not by slot name, so the [npu] table must come from here, never from a
+    # guessed <name>.toml path.
+    cfg_by_name: dict[str, dict[str, Any]] = {}
     if sm is not None:
         try:
             all_slots = await sm.list()
@@ -432,11 +429,12 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         try:
             from hal0.slots.activation import is_xdna_slot
 
-            xdna_names = {
-                str(cfg.get("name") or "")
+            cfg_by_name = {
+                str(cfg.get("name") or ""): cfg
                 for cfg in await sm.iter_configs()
-                if isinstance(cfg, dict) and is_xdna_slot(cfg)
+                if isinstance(cfg, dict)
             }
+            xdna_names = {name for name, cfg in cfg_by_name.items() if is_xdna_slot(cfg)}
         except Exception:
             xdna_names = set()
         for s in all_slots:
@@ -542,23 +540,10 @@ async def npu_occupancy(request: Request) -> dict[str, Any]:
         # Synthesise virtual sub-slots for STT + embed so the NPU pane
         # shows three glowing cards when the FLM trio is running.
         npu_cfg = getattr(s, "npu", None) or {}
-        # The slot object may not carry the [npu] table — read from the TOML.
         if not npu_cfg:
-            try:
-                toml_path = _slots_dir() / f"{s.name}.toml"
-                if toml_path.exists():
-                    raw = tomllib.loads(toml_path.read_text())
-                    npu_cfg = raw.get("npu") or {}
-            except Exception:
-                pass
+            cfg = cfg_by_name.get(s.name) or {}
+            npu_cfg = cfg.get("npu") if isinstance(cfg.get("npu"), dict) else {}
 
-        # Virtual subs ride coresident with the FLM anchor: the [npu] toggle
-        # (asr/embed) IS the operator control — the single `flm serve` child
-        # serves them, so they're live whenever the modality is on and the
-        # anchor is loaded. (The old code gated on the shadow slot's own
-        # `enabled` flag, which reads false in embed/STT-primary mode where
-        # the operator disables chat but the modality is still served — so
-        # the sub-card wrongly showed "off"/dim.)
         if npu_cfg.get("asr"):
             stt_live = is_loaded
             stt_age = _last_used_age_s(request.app.state, s.name + "-stt")

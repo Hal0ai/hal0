@@ -79,6 +79,7 @@ __all__ = [
     "resolve_ctx_effective",
     "resolve_tune_effective",
     "serialize_slot",
+    "shadow_state",
     "synthesize_upstream_entries",
     "unconverted_slot_files",
     "xdna_enrichment",
@@ -1004,6 +1005,21 @@ async def container_enrichment(
     return out
 
 
+def shadow_state(modality_active: Any, anchor_state: str | None) -> str:
+    """The state an FLM trio shadow (``flm-stt`` / ``flm-embed``) should report.
+
+    A shadow has no process of its own: the anchor's FLM child serves its role
+    while that role is on (``npu_modality_active``, which config_enrichment
+    lifts from the anchor's ``[npu]`` table or its legacy load_* keys). So it is
+    exactly as live as the anchor while its role is on, and ``offline``
+    otherwise. Its own SlotManager state is always ``offline``, which showed a
+    working STT lane as stopped wherever the UI read it directly.
+    """
+    if modality_active is not True:
+        return "offline"
+    return str(anchor_state or "offline")
+
+
 # ── synthetic upstream entries ───────────────────────────────────────────────
 
 
@@ -1218,6 +1234,23 @@ class SlotViewAggregator:
                 blocked = conversion_blocked(cfg)
                 if blocked is not None:
                     payload["conversion_blocked"] = blocked
+
+        # Trio shadows take their state from the anchor and their role flag
+        # (shadow_state). container_enrichment only lends them the anchor's
+        # container status, and setdefault above keeps their own "offline".
+        payload_by_name = {str(p["name"]): p for p in payloads}
+        for payload in payloads:
+            anchor_name = payload.get("served_by")
+            if not anchor_name:
+                continue
+            anchor_payload = payload_by_name.get(str(anchor_name)) or {}
+            payload["state"] = shadow_state(
+                payload.get("npu_modality_active"), anchor_payload.get("state")
+            )
+            if payload["state"] == "offline":
+                # A role that is off is not served, whatever the anchor's container does.
+                payload["container_status"] = "stopped"
+                payload["container_health"] = False
 
         # Per-slot resident memory (model weights + KV-cache estimate) so the
         # dashboard memory map (W4) attributes a real footprint per slot. Only
