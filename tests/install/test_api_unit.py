@@ -448,6 +448,7 @@ def test_first_update_refreshes_through_the_incoming_seam_verb(box, monkeypatch,
     monkeypatch.setattr(
         updater_mod, "converge_podman_forward_unit", lambda *, job_id=None: "skipped"
     )
+    monkeypatch.setattr(updater_mod, "converge_openwebui_unit", lambda *, job_id=None: "skipped")
     stop = RuntimeError("the fatal conversion stops the sequence here")
 
     def conversion(**_kw):

@@ -213,6 +213,11 @@ case "${cmd}" in
     exec "${PY}" -I -m hal0.updater.privileged refresh-podman-forward
     ;;
 
+  refresh-openwebui-unit)     # no arguments: refresh hal0-openwebui.service from current
+    [[ $# -eq 0 ]] || die "refresh-openwebui-unit takes no arguments"
+    exec "${PY}" -I -m hal0.updater.privileged refresh-openwebui-unit
+    ;;
+
   discard)                    # discard <hal0-VERSION>   (rm -rf semantics)
     dir_name="${1:-}"; validate_dir_name "${dir_name}"
     exec "${PY}" -I -m hal0.updater.privileged discard "${dir_name}"
@@ -232,6 +237,9 @@ usage: hal0-update <command> [args]
                                    (daemon-reload only, never restarts it)
   refresh-podman-forward           refresh + enable hal0-podman-forward.service from
                                    the active release (leaves a masked unit alone)
+  refresh-openwebui-unit           refresh hal0-openwebui.service from the active
+                                   release, keeping its image pin (daemon-reload
+                                   only, never restarts it)
 EOF
     ;;
 

@@ -2002,6 +2002,7 @@ def run_post_activation_migrations(
         converge_api_unit(job_id=job_id)
         if converge_podman_forward:
             converge_podman_forward_unit(job_id=job_id)
+        converge_openwebui_unit(job_id=job_id)
 
     # The runner-system conversion (ADR-0028) runs FIRST and is fatal: it
     # rewrites raw TOML before anything validates config, because a removed
@@ -3737,6 +3738,140 @@ def converge_podman_forward_unit(*, job_id: str | None = None) -> str:
     return outcome
 
 
+#: Where the installer writes the Open WebUI unit; a module constant so tests redirect it.
+OPENWEBUI_UNIT_DST = Path("/etc/systemd/system/hal0-openwebui.service")
+
+
+def refresh_openwebui_unit(target: Path, *, job_id: str | None = None) -> str:
+    """Refresh ``hal0-openwebui.service`` from the activated release (#3526).
+
+    ``install.sh`` used to be the only writer of this unit, so an upgraded box
+    kept the one from its first install, and a fix to the packaged unit (#3524
+    moved ``StartLimit*=`` into ``[Unit]``) never reached it.
+
+    Called only from a fresh interpreter of the activated release, by way of
+    :func:`converge_openwebui_unit`, and deliberately NOT from
+    :func:`activate_release`, for the reason :func:`refresh_podman_forward_unit`
+    gives.
+
+    The image digest is NOT this function's to move. The copied text is re-pinned
+    to the digest the installed unit already carries, which is the release pin or
+    the operator's ``hal0 update component openwebui --target`` override.
+    :func:`hal0.components.openwebui_arm.converge_openwebui` runs later in the same
+    update and moves the pin in its own order (pull, repin, try-restart), so a
+    failed pull never strands the unit on an image the box does not have.
+
+    A box with no installed unit is skipped (installing Open WebUI is the
+    installer's call), and so is an installed unit that is a symlink: a mask is
+    the operator's opt-out and any other link is a file the operator manages.
+    ``hal0-openwebui.service.d/`` drop-ins are never touched; they are where a
+    local change belongs, because the unit file itself is replaced.
+
+    Privileged-side only (a no-op unless euid 0) and best-effort. Writes only
+    when the bytes differ, then ``daemon-reload``; a failed reload puts the
+    previous file back, because a later run compares bytes and a file systemd
+    never loaded would read as ``"unchanged"`` forever. It NEVER restarts
+    ``hal0-openwebui.service``: an update must not bounce the running container
+    for a unit refresh. The new unit takes effect at Open WebUI's next start, or
+    at the try-restart the component arm performs when it moves the pin or
+    re-renders the env. ``StartLimit*=`` changes apply at the ``daemon-reload``.
+
+    An installed unit that references the image but carries no single agreed
+    digest (a hand edit of one of its two pins) is held: copying the release text
+    would put it on the release pin before any pull. Returns ``"installed"``,
+    ``"unchanged"``, ``"skipped"`` or ``"failed"``.
+    """
+    if os.geteuid() != 0:
+        return "skipped"
+    from hal0.openwebui import image_pin
+
+    src = target / "packaging" / "systemd" / image_pin.OPENWEBUI_UNIT_NAME
+    dst = OPENWEBUI_UNIT_DST
+    if not src.is_file():
+        log.info("updater.openwebui_unit_absent", job_id=job_id, src=str(src))
+        return "skipped"
+    if dst.is_symlink():
+        log.warning(
+            "updater.openwebui_unit_held",
+            job_id=job_id,
+            path=str(dst),
+            remedy="the unit is a link (masked or operator-managed); hal0 leaves it alone",
+        )
+        return "skipped"
+    if not dst.is_file():
+        log.info("updater.openwebui_unit_not_installed", job_id=job_id, path=str(dst))
+        return "skipped"
+    try:
+        installed = dst.read_text(encoding="utf-8")
+        desired = src.read_text(encoding="utf-8")
+        digest = image_pin.parse_pinned_digest(installed)
+        if digest is None and image_pin.find_owui_digests(installed):
+            log.warning(
+                "updater.openwebui_unit_held",
+                job_id=job_id,
+                path=str(dst),
+                remedy="the unit's image pins disagree; make them match, or run "
+                "hal0 update component openwebui --target <digest>",
+            )
+            return "skipped"
+        if digest is not None:
+            desired, _ = image_pin.repin_unit_text(desired, digest)
+        if desired == installed:
+            return "unchanged"
+        _write_unit_atomic(dst, desired)
+    except (OSError, ValueError) as exc:
+        log.warning("updater.openwebui_unit_refresh_failed", job_id=job_id, error=str(exc))
+        return "failed"
+    reload_error = _systemctl_error("daemon-reload")
+    if reload_error is not None:
+        log.warning(
+            "updater.openwebui_unit_refresh_failed",
+            job_id=job_id,
+            error=f"daemon-reload: {reload_error}",
+        )
+        try:
+            _write_unit_atomic(dst, installed)
+        except OSError as exc:
+            log.warning(
+                "updater.openwebui_unit_restore_failed",
+                job_id=job_id,
+                path=str(dst),
+                error=str(exc),
+            )
+        return "failed"
+    log.info(
+        "updater.openwebui_unit_refreshed",
+        job_id=job_id,
+        path=str(dst),
+        detail="not restarted; the new unit takes effect at the next start",
+    )
+    return "installed"
+
+
+def converge_openwebui_unit(*, job_id: str | None = None) -> str:
+    """Refresh ``hal0-openwebui.service`` from the activated release (#3526).
+
+    Same route as :func:`converge_podman_forward_unit`: a fresh interpreter of the
+    just-activated code, through the ``hal0-update`` wrapper the outgoing
+    ``activate_release`` has already refreshed, so it works on the first update
+    from a release that has never heard of it. Never raises.
+    """
+    from hal0.updater.privileged import UpdateSeam
+
+    try:
+        outcome = str(
+            UpdateSeam(job_id=job_id).refresh_openwebui_unit().get("openwebui_unit", "failed")
+        )
+    except Exception as exc:
+        log.warning("updater.openwebui_unit_refresh_failed", job_id=job_id, error=str(exc))
+        return "failed"
+    if outcome == "failed":
+        log.warning(
+            "updater.openwebui_unit_refresh_failed", job_id=job_id, error="root side failed"
+        )
+    return outcome
+
+
 #: Where systemd unit files live; a module constant so tests redirect it.
 SYSTEMD_UNIT_DIR = Path("/etc/systemd/system")
 
@@ -4278,6 +4413,7 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.memory_engine_upgrade_failed",
     "updater.components_converge_failed",
     "updater.kokoro_bundle_pull_failed",
+    "updater.openwebui_unit_refresh_failed",
     "components.hermes_gateway_regen_failed",
     "updater.api_unit_refresh_failed",
     "updater.podman_forward_unit_refresh_failed",
@@ -5130,11 +5266,13 @@ __all__ = [
     "assert_trusted_release_dir",
     "check_outstanding_migrations",
     "converge_api_unit",
+    "converge_openwebui_unit",
     "converge_podman_forward_unit",
     "discard_release",
     "fetch_release_manifest",
     "refresh_api_unit",
     "refresh_gpu_perms_unit",
+    "refresh_openwebui_unit",
     "refresh_path_links",
     "refresh_podman_forward_unit",
     "refresh_privileged_wrappers",

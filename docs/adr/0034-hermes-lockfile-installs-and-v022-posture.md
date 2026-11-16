@@ -336,6 +336,21 @@ board executor harvests are unchanged at NEW.
      `/dev/null` the verb logs a hold and changes nothing. Root-equivalence is as
      above: the verb takes no input and adds no capability beyond what the
      `hal0` account already has through `hal0-update`.
+   - **Amendment (2026-11-16, #3526): `hal0 update` also refreshes
+     `hal0-openwebui.service` through a new `refresh-openwebui-unit` verb.**
+     Same route and shape as `refresh-podman-forward`: no arguments, no sudoers
+     change, a fresh root interpreter of the activated code from
+     `run_post_activation_migrations`, and the unit is read only from the tree
+     `current` names after `assert_trusted_release_dir`. The verb keeps the image
+     digest the installed unit already carries (the release pin or an operator
+     `--target` override); moving the pin stays with the openwebui component arm,
+     which pulls before it repins. It writes atomically only when the bytes
+     differ, runs `systemctl daemon-reload` (a failed reload puts the previous
+     file back), and **never restarts Open WebUI**: the new unit takes effect at
+     its next start or at the component arm's try-restart. It does not create the
+     unit on a box that has none, holds a unit that is a symlink (a mask or an
+     operator-managed file) or whose image pins disagree, and never touches
+     `hal0-openwebui.service.d/` drop-ins.
 7. **New: hal0 turns session pruning off.** The config overlay writes
    `sessions.auto_prune: false` at the pin bump, so an upgrade deletes no
    session history. Retention policy is a later decision with its own
