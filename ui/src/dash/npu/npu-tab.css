@@ -70,37 +70,8 @@
 .npt-band-stats { display: flex; flex-direction: column; gap: 12px; }
 .npt-band-grid { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 
-/* Band, right half: lane activity chart + lane table (NpuActivity.jsx). */
+/* Band, right half: lane activity (NpuActivity.jsx); chart + table rules in ../activity-chart.css. */
 .npt-act { flex: 1 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 8px; padding-left: 24px; border-left: 1px solid var(--line-soft); }
-.npt-act-h { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.npt-act-ttl { margin: 0; font-family: var(--jbm); font-size: 10.5px; font-weight: 500; letter-spacing: .14em; text-transform: uppercase; color: var(--fg-3); }
-.npt-act-note { font-family: var(--jbm); font-size: 11px; color: var(--fg-3); }
-.npt-act-gap { flex: 1 1 auto; }
-.npt-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-.npt-seg button { min-width: 44px; height: 26px; padding: 0 10px; border: 0; background: transparent; color: var(--fg-3); font-family: var(--jbm); font-size: 11px; cursor: pointer; }
-.npt-seg button.on { background: var(--bg-4); color: var(--fg); }
-.npt-seg button:focus-visible { outline: 2px solid var(--dev-npu); outline-offset: -2px; }
-.npt-act-chart { display: flex; gap: 8px; }
-.npt-act-plot { position: relative; flex: 1 1 auto; min-width: 0; height: 96px; border-bottom: 1px solid var(--line); background: linear-gradient(var(--line-soft), var(--line-soft)) 0 0 / 100% 1px no-repeat, linear-gradient(var(--line-soft), var(--line-soft)) 0 48px / 100% 1px no-repeat; }
-.npt-act-plot svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
-.npt-act-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--fg-3); }
-.npt-act-y { width: 30px; height: 96px; display: flex; flex-direction: column; justify-content: space-between; font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3); }
-.npt-act-duty { display: grid; grid-template-columns: repeat(60, minmax(0, 1fr)); gap: 1px; height: 8px; margin-right: 38px; }
-.npt-act-duty span { background: var(--dev-npu); border-radius: 1px; }
-.npt-act-x { display: flex; justify-content: space-between; margin-right: 38px; font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3); }
-.npt-act-tablewrap { overflow-x: auto; margin-top: 4px; }
-.npt-act-table { width: 100%; border-collapse: collapse; font-family: var(--jbm); font-size: 11.5px; }
-.npt-act-table th { padding: 4px 8px; font-size: 9.5px; font-weight: 500; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-3); text-align: left; white-space: nowrap; }
-.npt-act-table td { padding: 6px 8px; border-top: 1px solid var(--line-soft); color: var(--fg-2); white-space: nowrap; }
-.npt-act-table th:first-child, .npt-act-table td:first-child { padding-left: 0; }
-.npt-act-table th:last-child, .npt-act-table td:last-child { padding-right: 0; }
-.npt-act-table .num { text-align: right; }
-.npt-act-table td:first-child { color: var(--fg); }
-.npt-act-table td .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; vertical-align: -1px; }
-.npt-act-table td small { margin-left: 8px; font-size: 10px; color: var(--fg-3); }
-.npt-act-table .role { color: var(--fg-3); }
-.npt-act-table .err { color: var(--err); }
-.npt-act-table tr.on td { background: var(--bg-3); }
 .npt-hint { font-size: 12px; color: var(--fg-3); }
 
 .npt-lane { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border: 1px solid var(--line); border-top: 2px solid var(--dev-npu); border-radius: var(--rad-lg); background: var(--bg-1); min-width: 0; }

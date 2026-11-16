@@ -1,0 +1,31 @@
+/* Stacked activity chart + lane table (ActivityChart.jsx), shared by the NPU array band and the
+   Overview's Serving now card. */
+.act-h { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.act-ttl { margin: 0; font-family: var(--jbm); font-size: 10.5px; font-weight: 500; letter-spacing: .14em; text-transform: uppercase; color: var(--fg-3); }
+.act-note { font-family: var(--jbm); font-size: 11px; color: var(--fg-3); }
+.act-gap { flex: 1 1 auto; }
+.act-seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.act-seg button { min-width: 44px; height: 26px; padding: 0 10px; border: 0; background: transparent; color: var(--fg-3); font-family: var(--jbm); font-size: 11px; cursor: pointer; }
+.act-seg button.on { background: var(--bg-4); color: var(--fg); }
+.act-seg button:focus-visible { outline: 2px solid var(--fg-3); outline-offset: -2px; }
+.act-chart { display: flex; gap: 8px; }
+.act-plot { position: relative; flex: 1 1 auto; min-width: 0; height: 96px; border-bottom: 1px solid var(--line); background: linear-gradient(var(--line-soft), var(--line-soft)) 0 0 / 100% 1px no-repeat, linear-gradient(var(--line-soft), var(--line-soft)) 0 48px / 100% 1px no-repeat; }
+.act-plot svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.act-empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--fg-3); }
+.act-y { width: 30px; height: 96px; display: flex; flex-direction: column; justify-content: space-between; font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3); }
+.act-strip { display: grid; grid-template-columns: repeat(60, minmax(0, 1fr)); gap: 1px; height: 8px; margin-right: 38px; }
+.act-strip span { border-radius: 1px; }
+.act-x { display: flex; justify-content: space-between; margin-right: 38px; font-family: var(--jbm); font-size: 9.5px; color: var(--fg-3); }
+.act-tablewrap { overflow-x: auto; }
+.act-table { width: 100%; border-collapse: collapse; font-family: var(--jbm); font-size: 11.5px; }
+.act-table th { padding: 4px 8px; font-size: 9.5px; font-weight: 500; letter-spacing: .12em; text-transform: uppercase; color: var(--fg-3); text-align: left; white-space: nowrap; }
+.act-table td { padding: 6px 8px; border-top: 1px solid var(--line-soft); color: var(--fg-2); white-space: nowrap; }
+.act-table th:first-child, .act-table td:first-child { padding-left: 0; }
+.act-table th:last-child, .act-table td:last-child { padding-right: 0; }
+.act-table .num { text-align: right; }
+.act-table td:first-child { color: var(--fg); }
+.act-table td .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; vertical-align: -1px; }
+.act-table td small { margin-left: 8px; font-size: 10px; color: var(--fg-3); }
+.act-table .role { color: var(--fg-3); }
+.act-table .err { color: var(--err); }
+.act-table tr.on td { background: var(--bg-3); }

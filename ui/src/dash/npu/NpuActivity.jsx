@@ -3,10 +3,10 @@
 // Every figure is a real field or "—": the chart and the req/TTFT columns come from
 // /api/stats/activity, "tok/s" from the slot's live metrics, "last used" from occupancy.
 import { useMemo, useState } from 'react'
-import { ACTIVITY_WINDOWS, useSlotActivity } from '@/api/hooks/useSlotActivity'
-import { ageLabel, dutyCells, fmtMs, fmtRate, stackSeries, windowTicks } from '../activity-chart-pure'
+import { useSlotActivity } from '@/api/hooks/useSlotActivity'
+import { ageLabel, dutyCells, fmtMs, fmtRate } from '../activity-chart-pure'
+import { ActivityChart, ActivityWindowSwitch } from '../ActivityChart.jsx'
 
-const CHART_H = 96
 const ENGINE_LABEL = { flm: 'FLM', xdna: 'GGML' }
 
 /**
@@ -26,82 +26,38 @@ export function NpuActivity({ rows, chartLanes, hues }) {
     () => rows.map((r) => ({ ...r, activity: act?.slots?.[r.name] ?? null })),
     [rows, act],
   )
-  // Every NPU lane that moved tokens in the window gets a band, including one stopped since
-  // (STT/embed rows move no tokens and stay table-only).
-  const { paths, yMax } = useMemo(() => {
-    const charted = chartLanes.filter((l) => act?.slots?.[l.name]?.tps.some((v) => v > 0))
-    return stackSeries(charted.map((l) => ({ key: l.name, values: act.slots[l.name].tps })), CHART_H)
-  }, [chartLanes, act])
   const hueOf = Object.fromEntries(chartLanes.map((l) => [l.name, hues[l.engine]?.hue ?? 'var(--dev-npu)']))
+  // Every NPU lane that moved tokens in the window gets a band, including one stopped since
+  // (STT/embed rows move no tokens and stay table-only). GPU slots in the payload never do.
+  const series = useMemo(
+    () =>
+      chartLanes
+        .filter((l) => act?.slots?.[l.name]?.tps.some((v) => v > 0))
+        .map((l) => ({ key: l.name, values: act.slots[l.name].tps, hue: hues[l.engine]?.hue ?? 'var(--dev-npu)' })),
+    [chartLanes, act, hues],
+  )
   const duty = dutyCells(act?.fleet?.npu_util)
-  const ticks = windowTicks(win)
 
   return (
     <div className="npt-act" data-testid="npu-activity">
-      <div className="npt-act-h">
-        <h3 className="npt-act-ttl">Activity</h3>
-        <span className="npt-act-note">
-          tok/s per lane, stacked{act ? ` · ${act.bucket_s}s buckets` : ''}
-        </span>
-        <span className="npt-act-gap" />
-        <div className="npt-seg" role="group" aria-label="Time window">
-          {ACTIVITY_WINDOWS.map((w) => (
-            <button
-              key={w}
-              type="button"
-              aria-pressed={win === w}
-              className={win === w ? 'on' : undefined}
-              onClick={() => setWin(w)}
-              data-testid={`npu-activity-win-${w}`}
-            >
-              {w}
-            </button>
-          ))}
-        </div>
+      <div className="act-h">
+        <h3 className="act-ttl">Activity</h3>
+        <span className="act-note">tok/s per lane, stacked{act ? ` · ${act.bucket_s}s buckets` : ''}</span>
+        <span className="act-gap" />
+        <ActivityWindowSwitch value={win} onChange={setWin} testid="npu-activity" />
       </div>
-
-      <div className="npt-act-chart">
-        <div className="npt-act-plot">
-          <svg viewBox={`0 0 1000 ${CHART_H}`} preserveAspectRatio="none" aria-hidden="true">
-            {paths.map((p) => {
-              const dim = focus && focus !== p.key
-              return (
-                <g key={p.key} data-lane={p.key}>
-                  <path d={p.area} style={{ fill: hueOf[p.key], fillOpacity: dim ? 0.06 : 0.26 }} />
-                  <path d={p.line} style={{ fill: 'none', stroke: hueOf[p.key], strokeOpacity: dim ? 0.2 : 1, strokeWidth: 1.5, vectorEffect: 'non-scaling-stroke' }} />
-                </g>
-              )
-            })}
-          </svg>
-          {!paths.length && (
-            <div className="npt-act-empty" data-testid="npu-activity-empty">
-              {actQ.isError ? 'Activity unavailable.' : actQ.isLoading ? '—' : 'No NPU traffic in this window.'}
-            </div>
-          )}
-        </div>
-        <div className="npt-act-y" aria-hidden="true">
-          <span>{yMax}</span>
-          <span>{yMax / 2}</span>
-          <span>0</span>
-        </div>
-      </div>
-
-      {duty && (
-        <div className="npt-act-duty" data-testid="npu-activity-duty" title="NPU duty per bucket (runtime-PM residency)">
-          {duty.map((c, i) => (
-            <span key={i} style={{ opacity: c.opacity }} />
-          ))}
-        </div>
-      )}
-      <div className="npt-act-x" aria-hidden="true">
-        {ticks.map((t) => (
-          <span key={t}>{t}</span>
-        ))}
-      </div>
+      <ActivityChart
+        series={series}
+        focus={focus}
+        window={win}
+        testid="npu-activity"
+        emptyText={actQ.isError ? 'Activity unavailable.' : actQ.isLoading ? '—' : 'No NPU traffic in this window.'}
+        strip={duty ? { cells: duty, color: 'var(--dev-npu)', title: 'NPU duty per bucket (runtime-PM residency)' } : null}
+      />
 
       {lanes.length ? (
-        <div className="npt-act-tablewrap">
-          <table className="npt-act-table" data-testid="npu-lanes-table">
+        <div className="act-tablewrap">
+          <table className="act-table" data-testid="npu-lanes-table">
             <thead>
               <tr>
                 <th scope="col">Lane</th>

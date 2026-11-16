@@ -48,6 +48,7 @@ import '@fontsource/jetbrains-mono/600.css'
 import './dashboard.css'
 import './dash/engine-panes.css'
 import './dash/npu.css'
+import './dash/activity-chart.css'
 // Memory v2 (Bank workspace UI, task C1) — mv-*/mvi-* namespaced view
 // styles for the fact workspace the Memory area's Facts tab mounts.
 import './dash/memory-v2.css'
