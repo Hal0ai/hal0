@@ -16,8 +16,9 @@ Maps hal0's engine-neutral MemoryProvider contract onto the shared
 * ``add`` routes to Hindsight **retain** so background consolidation fires.
 * **Multi-bank recall fan-out** (Task P1-3): Hindsight recall is per-bank,
   client-orchestrated; we fan out to the caller's allowed banks and merge
-  under one reranked token budget (recall returns NO numeric score, so the
-  union is re-ranked via the :8086 reranker; §4b precedence is the tiebreak).
+  under one token budget, ordered by the engine's own ``scores.final``; when
+  no result carries one, the union is re-ranked by the fallback reranker
+  (:class:`Hal0Reranker`); §4b precedence is the tiebreak).
 * **Live ``degraded`` flag** (#1301): reports whether the daemon is answering
   *right now*, driven by observed transport failures on every engine call —
   not a boot-time constant. The boot probe in ``hal0.memory`` decides which
@@ -266,13 +267,56 @@ def _bank_namespace(bank: str, platform_bank: str = _SHARED) -> str:
     return bank.replace("__", ":")
 
 
+#: How long a rerank-capability lookup is trusted before it is re-checked.
+#: Short, so a model loaded (or cleared) later is picked up within seconds,
+#: yet a recall burst never re-reads the slot config more than once.
+_RERANK_RECHECK_S = 15.0
+
+#: The slot the dispatcher pins every ``/v1/rerankings`` request to
+#: (``hal0.dispatcher._capability_resolve``, rule 2).
+_RERANK_SLOT = "rerank"
+
+
+def rerank_slot_model() -> str | None:
+    """The model bound to the ``rerank`` slot, or ``None`` when it serves none.
+
+    Reads the slot's TOML in-process (no network): the slot is activated by
+    binding ``[model].default`` and not otherwise (``hal0.slots.activation``),
+    and the dispatcher drops a model-less slot from routing, so ``None`` means
+    ``POST /v1/rerankings`` cannot be answered. Works for name-keyed and
+    id-keyed slot layouts alike.
+    """
+    from hal0.config import paths
+    from hal0.config.loader import load_slot_config
+    from hal0.slots.activation import slot_model_id
+    from hal0.slots.layout import resolve_slot_stem
+
+    try:
+        stem = resolve_slot_stem(paths.slots_config_dir(), _RERANK_SLOT)
+        if stem is None:
+            return None
+        cfg = load_slot_config(stem)
+        return slot_model_id(cfg.model_dump()) or None
+    except Exception:
+        return None
+
+
 class Hal0Reranker:
-    """Async reranker over hal0-api's OpenAI surface (Cohere-style ``/v1/rerankings``).
+    """Async fallback reranker over hal0-api's OpenAI surface (Cohere-style ``/v1/rerankings``).
 
     POSTs {model, query, documents} to ``{base_url}/v1/rerankings`` (served by
     the rerank container slot via the dispatcher) and returns the raw
     ``results`` list (``[{"index", "relevance_score"}, ...]``, NOT pre-sorted)
     that HindsightProvider._rerank_union maps onto the cross-bank union.
+
+    Model: an explicit ``model`` wins; otherwise the model the rerank slot is
+    bound to (``slot_model``, re-checked every :data:`_RERANK_RECHECK_S`).
+
+    Skip fast: when ``slot_model`` reports no rerank capability (slot absent or
+    no model bound) the call returns ``[]`` with no network round trip and no
+    connect timeout, logging once per process; the next re-check picks up a
+    model loaded later.
+
     Fail-soft: returns [] on any error (gateway down, model load fail, bad
     shape, timeout) so recall falls back to fused order.
     """
@@ -281,23 +325,56 @@ class Hal0Reranker:
         self,
         *,
         base_url: str = "http://127.0.0.1:8080",
-        model: str = "builtin.jina-reranker-v1-tiny-en-q8",
+        model: str | None = None,
         connect_timeout_s: float = 1.0,
         read_timeout_s: float = 8.0,
+        slot_model: Callable[[], str | None] | None = None,
     ) -> None:
         self._base_url = str(base_url or "").rstrip("/")
-        self._model = model
+        self._model = (model or "").strip() or None
         self._connect_timeout_s = float(connect_timeout_s)
         self._read_timeout_s = float(read_timeout_s)
+        self._slot_model = slot_model
+        self._checked_at = float("-inf")
+        self._cached: str | None = None
+        self._skip_logged = False
+
+    def resolve_model(self) -> str | None:
+        """The model id to send, or ``None`` when there is no rerank capability.
+
+        Cheap: at most one slot-config read per :data:`_RERANK_RECHECK_S`.
+        """
+        if self._slot_model is None:
+            return self._model  # no capability probe wired: explicit model or let the gateway pick
+        now = time.monotonic()
+        if now - self._checked_at >= _RERANK_RECHECK_S:
+            self._cached = self._slot_model()
+            self._checked_at = now
+        if self._cached is None:
+            return None
+        return self._model or self._cached
 
     async def rerank(self, query: str, documents: list[str]) -> list[dict[str, Any]]:
         if not self._base_url or not documents:
             return []
+        model = self.resolve_model()
+        if self._slot_model is not None and model is None:
+            if not self._skip_logged:
+                self._skip_logged = True
+                log.info(
+                    "hal0.memory.rerank_fallback_skipped",
+                    reason="the rerank slot serves no model",
+                )
+            return []
+        if model is not None:
+            self._skip_logged = False
         import httpx
 
         from hal0.http_client import async_client
 
-        payload = {"model": self._model, "query": query, "documents": list(documents)}
+        payload: dict[str, Any] = {"query": query, "documents": list(documents)}
+        if model is not None:
+            payload["model"] = model
         timeout = httpx.Timeout(
             connect=self._connect_timeout_s, read=self._read_timeout_s, write=2.0, pool=None
         )
@@ -2689,7 +2766,7 @@ class HindsightProvider(MemoryProvider):
         Modern (0.8.x) Hindsight returns a native per-result ``scores.final``
         — a combined reranker + recency/temporal ranking score — so that is
         used for cross-bank merge ordering whenever at least one result in
-        the union carries one; the :8086 reranker only runs as a FALLBACK
+        the union carries one; the fallback reranker (:class:`Hal0Reranker`) only runs
         when the engine gave us nothing to rank by (an older Hindsight, or a
         response shape that omitted ``scores``). The §4b precedence ladder
         is always the tiebreak.
@@ -2778,7 +2855,7 @@ class HindsightProvider(MemoryProvider):
 
         # Native scores (Hindsight 0.8.x RecallScores.final) are the engine's
         # own combined ranking signal, computed the same way per bank — trust
-        # them across the fan-out and skip the :8086 fallback entirely when
+        # them across the fan-out and skip the fallback reranker entirely when
         # present, rather than clobbering a real signal with a second opinion.
         if not any(isinstance(item.get("score"), (int, float)) for item in union):
             union = await self._rerank_union(query, union)
@@ -2915,7 +2992,7 @@ class HindsightProvider(MemoryProvider):
         """§4b ladder: shared/curated observations rank above raw private
         facts. Lower tuple sorts first. Second element is negative score
         (native ``scores.final`` when the engine supplied one, else the
-        :8086 fallback reranker's score) so higher score sorts earlier
+        fallback reranker's score) so higher score sorts earlier
         within the same tier.
         """
         is_observation = item.get("type") == "observation"
@@ -4062,7 +4139,7 @@ class HindsightProvider(MemoryProvider):
         ``score`` carries the engine's native ``scores.final`` (RecallScores,
         0.8.x+) when present — the comment this replaced ("Hindsight recall
         returns no numeric score") is stale; ``recall()`` only falls back to
-        the :8086 reranker when the whole union comes back without one (an
+        the fallback reranker when the whole union comes back without one (an
         older Hindsight). ``entities``/``source_fact_ids`` are the per-result
         mention/provenance lists RecallResult already carries — additive keys,
         harmless to every caller that only reads ``id``/``text``/``score``.

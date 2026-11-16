@@ -2710,18 +2710,22 @@ class AgentConfig(BaseModel):
 
 
 class MemoryEmbeddingConfig(BaseModel):
-    """[memory.embedding] section of hal0.toml — Hindsight-era rerank knobs.
+    """[memory.embedding] section of hal0.toml — Hindsight-era fallback-rerank knobs.
 
     ADR-0023 made Hindsight the platform memory engine. Hindsight embeds
     server-side with its own bundled model, so hal0 no longer pins an
-    embedding model here; what remains configurable is the second-pass
-    reranker hal0 runs over cross-bank recall results
+    embedding model here; what remains configurable is the FALLBACK
+    reranker hal0 runs over cross-bank recall results when the engine
+    returned no ``scores.final`` for any of them
     (:class:`hal0.memory.hindsight_provider.Hal0Reranker`):
 
+      - ``rerank_fallback`` — switch the fallback off entirely.
       - ``rerank_gateway_url`` — the OpenAI-surface gateway the reranker
         POSTs ``/v1/rerankings`` to (hal0-api's dispatcher, which routes
         to the rerank slot).
-      - ``rerank_model`` — the rerank model id sent in the request body.
+      - ``rerank_model`` — optional override of the rerank model id sent
+        in the request body; empty means the model the ``rerank`` slot is
+        bound to.
       - ``rerank_connect_timeout_s`` / ``rerank_read_timeout_s`` — the
         HTTP budgets; failures fall through to fused vector ordering,
         never blocking recall.
@@ -2735,6 +2739,14 @@ class MemoryEmbeddingConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
 
+    rerank_fallback: bool = Field(
+        default=True,
+        description=(
+            "Run the fallback reranker when recall results carry no engine "
+            "score (an engine without ``scores.final``). It is skipped with "
+            "no network call while the ``rerank`` slot serves no model."
+        ),
+    )
     rerank_gateway_url: str = Field(
         default="http://127.0.0.1:8080",
         description=(
@@ -2744,10 +2756,11 @@ class MemoryEmbeddingConfig(BaseModel):
         ),
     )
     rerank_model: str = Field(
-        default="builtin.jina-reranker-v1-tiny-en-q8",
+        default="",
         description=(
-            "Rerank model id sent to the gateway. Must resolve to a model "
-            "the rerank slot serves (see /v1/models on the gateway)."
+            "Rerank model id sent to the gateway. Empty (the default) sends "
+            "the model the ``rerank`` slot is bound to. Set it only to "
+            "override that; it must resolve to a model the slot serves."
         ),
     )
     rerank_connect_timeout_s: float = Field(
@@ -2775,7 +2788,7 @@ class MemoryEmbeddingConfig(BaseModel):
         ),
     )
 
-    @field_validator("rerank_gateway_url", "rerank_model")
+    @field_validator("rerank_gateway_url")
     @classmethod
     def rerank_fields_nonempty(cls, v: str, info: Any) -> str:
         if not v or not v.strip():

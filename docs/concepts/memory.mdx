@@ -300,22 +300,28 @@ Two concepts sit alongside plain facts:
 
 ## Reranking
 
-Recall unions results across banks under one token budget, then re-ranks
-that union so the most relevant facts surface first. Configured under
-`[memory.embedding]` in `hal0.toml`:
+Recall unions results across banks under one token budget and orders the
+union by the engine's own score. Only when the engine returns no score for
+any result (an older engine) does hal0 run a fallback reranker over the
+union. It is configured under `[memory.embedding]` in `hal0.toml`:
 
+- `rerank_fallback` (default `true`) — set `false` to never run the fallback
+  reranker.
 - `rerank_gateway_url` (default `http://127.0.0.1:8080`) — the
   OpenAI-compatible gateway the reranker POSTs `/v1/rerankings` to (hal0-api
   itself by default, whose dispatcher routes to the `rerank` capability
   slot).
-- `rerank_model` (default `builtin.jina-reranker-v1-tiny-en-q8`) — the model
-  id sent to the gateway.
+- `rerank_model` (default empty) — the model id sent to the gateway. Empty
+  sends the model the `rerank` slot is bound to. Set it only to override
+  that. While the `rerank` slot serves no model (the default install ships
+  it without one) the fallback is skipped with no network call, and the
+  skip is logged once.
 - `rerank_connect_timeout_s` / `rerank_read_timeout_s` (defaults `1.0` /
   `8.0`) — HTTP budgets. A timeout or an unreachable reranker never blocks
   recall: it fails soft back to the fused vector ordering.
 
 The dashboard's Settings → Data → Memory page has a picker for `rerank_model`: the
-schema default is offered as "builtin", plus every model in the
+schema default is offered as "the rerank slot's model", plus every model in the
 capabilities catalog tagged for reranking (labelled with its serving
 backend), plus whatever is currently saved if it's outside both lists. Free
 text isn't offered — an id the gateway can't resolve just makes every recall

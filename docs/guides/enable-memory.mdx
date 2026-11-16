@@ -213,20 +213,25 @@ writes are gated on this check.
 
 ## Reranking
 
-Recall from more than one bank goes through a second-pass reranker before
-it's returned, configured under `[memory.embedding]`:
+Recall from more than one bank is ordered by the engine's own score. When
+the engine returns none, a fallback reranker runs instead, configured under
+`[memory.embedding]`:
 
 ```toml
 [memory.embedding]
+rerank_fallback = true
 rerank_gateway_url = "http://127.0.0.1:8080"
-rerank_model = "builtin.jina-reranker-v1-tiny-en-q8"
+rerank_model = ""   # empty = the model the rerank slot is bound to
 rerank_connect_timeout_s = 1.0
 rerank_read_timeout_s = 8.0
 ```
 
-`rerank_model` must resolve to a model the `rerank` capability slot serves.
+Leave `rerank_model` empty to use whatever the `rerank` capability slot
+serves; set it only to override, and it must then resolve to a model that
+slot serves. While the slot has no model bound the fallback is skipped
+without a network call.
 The dashboard's Reranker panel gives you a picker instead of free text: the
-schema default labelled "builtin", every model the capabilities catalog
+schema default labelled "the rerank slot's model", every model the capabilities catalog
 tags for reranking (with its serving backend), and — if you've saved
 something outside both — that value labelled "(saved)" so you can see and
 move off it. A model id the gateway can't resolve doesn't error; it just

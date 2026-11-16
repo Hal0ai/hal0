@@ -199,8 +199,9 @@ hold-budget setting: the later gate derives it from half the memory engine's
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
+| `rerank_fallback` | bool | `true` | |
 | `rerank_gateway_url` | str | `"http://127.0.0.1:8080"` | non-empty |
-| `rerank_model` | str | `"builtin.jina-reranker-v1-tiny-en-q8"` | non-empty |
+| `rerank_model` | str | `""` (the `rerank` slot's model) | |
 | `rerank_connect_timeout_s` | float | `1.0` | `0.05-10.0` |
 | `rerank_read_timeout_s` | float | `8.0` | `0.05-60.0` |
 

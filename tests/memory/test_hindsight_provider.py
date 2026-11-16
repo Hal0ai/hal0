@@ -429,6 +429,140 @@ async def test_hal0_reranker_failsoft_returns_empty_on_error():
     assert out == []
 
 
+def _mock_reranker_http(monkeypatch, handler):
+    import httpx
+
+    transport = httpx.MockTransport(handler)
+    orig = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: orig(transport=transport))
+
+
+@pytest.mark.asyncio
+async def test_hal0_reranker_sends_the_rerank_slots_model(monkeypatch):
+    import json
+
+    import httpx
+
+    from hal0.memory.hindsight_provider import Hal0Reranker
+
+    seen: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"results": [{"index": 1, "relevance_score": 0.4}]})
+
+    _mock_reranker_http(monkeypatch, handler)
+    rr = Hal0Reranker(slot_model=lambda: "bge-reranker-v2-m3-q4_k_m")
+    out = await rr.rerank("q", ["a", "b"])
+    assert out == [{"index": 1, "relevance_score": 0.4}]
+    assert seen[0]["model"] == "bge-reranker-v2-m3-q4_k_m"
+
+
+@pytest.mark.asyncio
+async def test_hal0_reranker_explicit_model_overrides_the_slot_model(monkeypatch):
+    import json
+
+    import httpx
+
+    from hal0.memory.hindsight_provider import Hal0Reranker
+
+    seen: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, json={"results": []})
+
+    _mock_reranker_http(monkeypatch, handler)
+    rr = Hal0Reranker(model="my-reranker", slot_model=lambda: "bge-reranker-v2-m3-q4_k_m")
+    await rr.rerank("q", ["a", "b"])
+    assert seen[0]["model"] == "my-reranker"
+
+
+@pytest.mark.asyncio
+async def test_hal0_reranker_skips_without_network_when_slot_serves_no_model(monkeypatch):
+    import httpx
+
+    from hal0.memory import hindsight_provider as hp
+
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"results": []})
+
+    _mock_reranker_http(monkeypatch, handler)
+    logged: list[str] = []
+    monkeypatch.setattr(hp.log, "info", lambda event, **kw: logged.append(event))
+
+    # An explicit model does not make an offline slot answerable.
+    rr = hp.Hal0Reranker(model="my-reranker", slot_model=lambda: None)
+    assert await rr.rerank("q", ["a", "b"]) == []
+    assert await rr.rerank("q", ["a", "b"]) == []
+    assert calls == []
+    assert logged == ["hal0.memory.rerank_fallback_skipped"]  # once per process
+
+
+@pytest.mark.asyncio
+async def test_hal0_reranker_picks_up_a_model_loaded_later(monkeypatch):
+    import httpx
+
+    from hal0.memory import hindsight_provider as hp
+
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"results": [{"index": 0, "relevance_score": 1.0}]})
+
+    _mock_reranker_http(monkeypatch, handler)
+    state = {"model": None}
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(hp.time, "monotonic", lambda: clock["t"])
+    rr = hp.Hal0Reranker(slot_model=lambda: state["model"])
+
+    assert await rr.rerank("q", ["a", "b"]) == []
+    assert calls == []
+    state["model"] = "bge-reranker-v2-m3-q4_k_m"
+    # Within the re-check window the cached "no capability" answer holds.
+    assert await rr.rerank("q", ["a", "b"]) == []
+    clock["t"] += hp._RERANK_RECHECK_S + 1
+    assert await rr.rerank("q", ["a", "b"]) == [{"index": 0, "relevance_score": 1.0}]
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_hal0_reranker_failsoft_when_the_call_errors(monkeypatch):
+    import httpx
+
+    from hal0.memory.hindsight_provider import Hal0Reranker
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "slot loading"})
+
+    _mock_reranker_http(monkeypatch, handler)
+    rr = Hal0Reranker(slot_model=lambda: "bge-reranker-v2-m3-q4_k_m")
+    assert await rr.rerank("q", ["a", "b"]) == []
+
+
+def test_rerank_slot_model_reads_the_bound_model(tmp_path, monkeypatch):
+    from hal0.config import paths
+    from hal0.memory.hindsight_provider import rerank_slot_model
+
+    monkeypatch.setattr(paths, "slots_config_dir", lambda: tmp_path)
+    assert rerank_slot_model() is None  # no rerank slot at all
+
+    (tmp_path / "rerank.toml").write_text(
+        'name = "rerank"\ntype = "reranking"\nport = 8086\nprofile = "reranking"\n'
+    )
+    assert rerank_slot_model() is None  # seeded, no [model].default
+
+    (tmp_path / "rerank.toml").write_text(
+        'name = "rerank"\ntype = "reranking"\nport = 8086\nprofile = "reranking"\n'
+        '[model]\ndefault = "bge-reranker-v2-m3-q4_k_m"\n'
+    )
+    assert rerank_slot_model() == "bge-reranker-v2-m3-q4_k_m"
+
+
 @pytest.mark.asyncio
 async def test_list_items_fans_out_real_endpoint():
     """list_items fans out to shared + own private; excludes foreign private."""
