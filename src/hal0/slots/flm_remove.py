@@ -109,7 +109,7 @@ _FLM_ASR_TAG = "whisper-v3:turbo"
 
 
 def _as_tag(model_id: str) -> str:
-    """FLM's ``family:variant`` tag for ``model_id`` (a legacy ``<tag>-FLM`` id maps back)."""
+    """FLM's ``family:variant`` tag for ``model_id`` (an older ``<tag>-FLM`` id maps back)."""
     model_id = (model_id or "").strip()
     if model_id.endswith("-FLM"):
         from hal0.providers.flm import flm_id_to_tag
