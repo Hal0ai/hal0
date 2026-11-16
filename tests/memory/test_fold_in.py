@@ -2821,6 +2821,122 @@ async def test_a_ct105_run_killed_around_the_renames_completes_with_resume(
     assert len({p["name"].lower() for p in under}) == 15
 
 
+def _root_pages(box: Box) -> dict[str, dict[str, Any]]:
+    return {
+        str(p["id"]): p
+        for p in box.engine.banks["hal0:shared"]["pages"]
+        if p["kind"] == "page" and not p.get("parent_id")
+    }
+
+
+async def test_an_unplaced_banks_page_named_as_a_platform_root_page_is_renamed_not_dropped(
+    box: Box,
+) -> None:
+    """#3670: ``coding-agent::tmp`` resolves to no project, so its pages stay at
+    the target's root, where the platform bank's own root pages land too. A
+    page's name is unique per parent at the root as well
+    (``uq_kp_folder_pagename``): the platform page keeps its name and the
+    folded one is renamed, instead of being dropped by the import and leaving
+    the bank on every run."""
+    seed_pages(box, "coding-agent::tmp")
+    shared = box.engine.banks["shared"]
+    shared["models"]["mm-plat"] = {
+        "id": "mm-plat",
+        "name": "Component map",
+        "tags": [],
+        "content": "the platform's",
+    }
+    shared["pages"] = [
+        {
+            "id": "kp-plat",
+            "kind": "page",
+            "name": "Component map",
+            "parent_id": None,
+            "mental_model_id": "mm-plat",
+        }
+    ]
+    result = await box.fold().run()
+    assert result["left"] == [], result["banks"]
+    assert result["cut_over"] is True
+    roots = sorted(p["name"] for p in _root_pages(box).values())
+    assert roots == ["Component map", "Component map (coding-agent::tmp)"]
+    folded = shared_nodes(box)[_new("coding-agent::tmp", "kp-map")]
+    assert folded["parent_id"] is None
+    assert folded["name"] == "Component map (coding-agent::tmp)"
+    model = box.engine.banks["hal0:shared"]["models"][folded["mental_model_id"]]
+    assert model["name"] == "Component map (coding-agent::tmp)"
+    entry = next(b for b in result["banks"] if b["bank"] == "coding-agent::tmp")
+    assert entry["report"]["knowledge_pages"]["unplaced"] == 2
+    assert entry["report"]["knowledge_pages"]["renamed"] == 1
+    keepers = fi.load_ledger()["page_keepers"]["hal0:shared"]
+    assert keepers[f"{fi.ROOT_PAGE_FOLDER}/component map"] == "shared"
+
+
+async def test_two_unplaced_banks_with_one_root_page_name_keep_one_plain(box: Box) -> None:
+    """The reference box: ``coding-agent::tmp`` and ``coding-agent::workdir``
+    both resolve to no project and both bring the plugin's standard pages to the
+    root, next to a root page the target already holds."""
+    seed_pages(box, "coding-agent::tmp")
+    seed_pages(box, "coding-agent::workdir", prefix="w-")
+    box.engine.banks["coding-agent::workdir"]["models"]["w-mm-map"]["last_refreshed_at"] = (
+        "2026-11-01T00:00:00+00:00"
+    )
+    target = box.engine.banks.setdefault("hal0:shared", empty_bank())
+    target["models"]["mm-there"] = {
+        "id": "mm-there",
+        "name": "Bank layout",
+        "tags": [],
+        "content": "already at the root",
+    }
+    target["pages"] += [
+        {
+            "id": "kp-there",
+            "kind": "page",
+            "name": "bank layout",
+            "parent_id": None,
+            "mental_model_id": "mm-there",
+        }
+    ]
+    result = await box.fold().run()
+    assert result["left"] == [], result["banks"]
+    assert result["cut_over"] is True
+    nodes = shared_nodes(box)
+    assert nodes[_new("coding-agent::tmp", "kp-map")]["name"] == "Component map"
+    assert (
+        nodes[_new("coding-agent::workdir", "w-kp-map")]["name"]
+        == "Component map (coding-agent::workdir)"
+    )
+    roots = [p["name"].lower() for p in _root_pages(box).values()]
+    assert len(roots) == len(set(roots))
+    # A page inside a bank's own folder is unique under that folder already.
+    assert nodes[_new("coding-agent::tmp", "kp-init")]["name"] == "Bank layout"
+    assert nodes[_new("coding-agent::workdir", "w-kp-init")]["name"] == "Bank layout"
+    assert nodes["kp-there"]["name"] == "bank layout"
+
+
+async def test_an_unplaced_bank_whose_renamed_root_name_is_taken_too_is_left_before_import(
+    box: Box,
+) -> None:
+    seed_pages(box, "coding-agent::tmp")
+    target = box.engine.banks.setdefault("hal0:shared", empty_bank())
+    target["pages"] += [
+        {"id": "kp-a", "kind": "page", "name": "Component map", "parent_id": None},
+        {
+            "id": "kp-b",
+            "kind": "page",
+            "name": "Component map (coding-agent::tmp)",
+            "parent_id": None,
+        },
+    ]
+    result = await box.fold().run()
+    assert "coding-agent::tmp" in result["left"]
+    note = next(b["note"] for b in result["banks"] if b["bank"] == "coding-agent::tmp")
+    assert "the renamed name is taken too" in note
+    assert box.engine.imports == []
+    left_ids = json.loads(Path(note.rsplit(" ", 1)[-1]).read_text())
+    assert left_ids["coding-agent::tmp"]["page_names"] == ["root/component map (coding-agent::tmp)"]
+
+
 def test_a_renamed_name_fits_the_engines_column() -> None:
     assert fi.renamed_page_name("Component map", "pi-coder") == "Component map (pi-coder)"
     long = fi.renamed_page_name("x" * 300, "coding-agent::hal0-mono")
