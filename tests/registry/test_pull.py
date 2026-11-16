@@ -2541,3 +2541,59 @@ async def test_run_pull_draft_404_leaves_no_pairing(tmp_hal0_home: str) -> None:
         await client.aclose()
     assert job.state == "failed"
     _assert_no_pairing(registry, job)
+
+
+def test_persist_pull_job_chowns_to_service_account_when_root(monkeypatch, tmp_path) -> None:
+    """#3532: a root-written snapshot must be handed to hal0:hal0."""
+    import grp
+    import os
+    import pwd
+    from types import SimpleNamespace
+
+    from hal0.registry import pull as pull_mod
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(pwd, "getpwnam", lambda _n: SimpleNamespace(pw_uid=4242))
+    monkeypatch.setattr(grp, "getgrnam", lambda _n: SimpleNamespace(gr_gid=4343))
+    calls: list[tuple] = []
+    monkeypatch.setattr(os, "chown", lambda p, u, g: calls.append((str(p), u, g)))
+
+    pull_mod.persist_pull_job(pull_mod.make_job("user.Chown"))
+
+    assert calls and calls[0][1:] == (4242, 4343)
+    assert pull_mod.pull_job_file("user.Chown").exists()
+
+
+def test_persist_pull_job_skips_chown_when_not_root(monkeypatch, tmp_path) -> None:
+    import os
+
+    from hal0.registry import pull as pull_mod
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    monkeypatch.setattr(os, "geteuid", lambda: 1000)
+    calls: list[tuple] = []
+    monkeypatch.setattr(os, "chown", lambda *a: calls.append(a))
+    pull_mod.persist_pull_job(pull_mod.make_job("user.NoChown"))
+    assert calls == []
+
+
+def test_list_persisted_jobs_logs_unreadable_snapshot(monkeypatch, tmp_path, caplog) -> None:
+    """#3532: an unreadable snapshot is logged, not silently dropped."""
+    from pathlib import Path
+
+    from hal0.registry import pull as pull_mod
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path))
+    pull_mod.persist_pull_job(pull_mod.make_job("user.Locked"))
+    real = Path.read_text
+
+    def fake(self, *a, **k):
+        if self.name.endswith(".json"):
+            raise PermissionError(13, "denied")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", fake)
+    with caplog.at_level("WARNING"):
+        assert pull_mod.list_persisted_jobs() == []
+    assert "model.pull_job_unreadable" in caplog.text
