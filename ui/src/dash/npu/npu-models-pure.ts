@@ -53,6 +53,34 @@ export function flmPickerOptions(models: FlmModel[] | null | undefined, cap: Flm
   }
 }
 
+export interface FlmCatalogRow extends FlmPickerOption {
+  /** The roles the model serves, spelled as the catalogue spells them. */
+  caps: FlmPickerCap[]
+}
+
+/** One row per catalogue model across every modality (Models → FLM). Built from
+ *  `flmPickerOptions`, so size, family, installed and audio read exactly as the lane dropdown
+ *  reads them. Installed first, then by family and name. */
+export function flmCatalogRows(models: FlmModel[] | null | undefined): FlmCatalogRow[] {
+  const byId = new Map<string, FlmCatalogRow>()
+  for (const cap of ['chat', 'stt', 'embed'] as const) {
+    const g = flmPickerOptions(models, cap)
+    for (const o of [...g.installed, ...g.download]) {
+      const hit = byId.get(o.id)
+      if (hit) {
+        hit.caps.push(cap)
+        hit.audio = hit.audio || o.audio
+      } else byId.set(o.id, { ...o, caps: [cap] })
+    }
+  }
+  return [...byId.values()].sort(
+    (a, b) =>
+      Number(b.installed) - Number(a.installed) ||
+      (a.family ?? '￿').localeCompare(b.family ?? '￿') ||
+      a.id.localeCompare(b.id),
+  )
+}
+
 /** `6.4 GB`, `640 MB`; null when the catalogue gave no size. */
 export function formatFlmSize(bytes: number | null | undefined): string | null {
   if (typeof bytes !== 'number' || !(bytes > 0)) return null

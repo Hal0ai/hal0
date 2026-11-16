@@ -15,6 +15,9 @@ import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useComfyuiFiles } from '@/api/hooks/useComfyui'
 import { ImageFilesTab } from '@/dash/image/ImageFilesTab.jsx'
+import { FlmModelsTab } from '@/dash/FlmModelsTab.jsx'
+import { useFlmCatalog } from '@/api/hooks/useFlmCatalog'
+import { flmCatalogRows } from '@/dash/npu/npu-models-pure'
 import { imageFileCount } from '@/dash/image/image-files-pure'
 import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
@@ -61,7 +64,7 @@ function usePageReset(deps) {
 }
 
 // ── ModelsView ─────────────────────────────────────────────────────────
-const MODEL_TABS = ["inference", "image", "upstream", "profiles"];
+const MODEL_TABS = ["inference", "image", "upstream", "flm", "profiles"];
 // `modelParam` mirrors SlotsView's slotParam: #models/profiles deep-links
 // the Profiles tab (runner-catalogue-v2 — Profiles moved here from Slots).
 function ModelsView({ modelParam = null }) {
@@ -223,6 +226,9 @@ function ModelsView({ modelParam = null }) {
   }
 
   const pullsList = usePullsList();
+  // FLM: the catalogue is not registry rows; react-query serves the tab's own query from cache.
+  const flmCatalog = useFlmCatalog();
+  const flmTotal = useMemoM(() => flmCatalogRows(flmCatalog.data?.models).length, [flmCatalog.data]);
 
   // ── Render ──────────────────────────────────────────────────────────
   const tabLabel = tab === "inference" ? `Inference Models${inferenceRows.length ? ` · ${inferenceRows.length}` : ""}`
@@ -238,7 +244,7 @@ function ModelsView({ modelParam = null }) {
             second vh below the tab bar. */}
         <h1>{tab === "profiles" ? "Profiles" : "Models"}</h1>
         <span className="vh-spacer" />
-        {tab === "profiles" || tab === "image" ? (
+        {tab === "profiles" || tab === "image" || tab === "flm" ? (
           null
         ) : (
           <>
@@ -301,6 +307,16 @@ function ModelsView({ modelParam = null }) {
         </button>
         <button
           role="tab"
+          aria-selected={tab === "flm"}
+          className={"slot-tab" + (tab === "flm" ? " on" : "")}
+          data-testid="models-tab-flm"
+          onClick={() => { window.location.hash = "#models/flm"; }}
+        >
+          <span>FLM</span>
+          <span className="slot-tab-ct num">{flmTotal}</span>
+        </button>
+        <button
+          role="tab"
           aria-selected={tab === "profiles"}
           className={"slot-tab" + (tab === "profiles" ? " on" : "")}
           onClick={() => { window.location.hash = "#models/profiles"; }}
@@ -313,6 +329,8 @@ function ModelsView({ modelParam = null }) {
         window.ProfilesView ? <window.ProfilesView /> : null
       ) : tab === "image" ? (
         <ImageFilesTab />
+      ) : tab === "flm" ? (
+        <FlmModelsTab />
       ) : (
       <div className="models-layout" style={{marginTop: 18}}>
         {/* ── List (toolbar + rows) ── */}
