@@ -1557,8 +1557,10 @@ class _Placement:
     #: ``None`` for a node left outside every project folder.
     nodes: dict[str, dict[str, Any]]
     #: ``[slug, lower-cased name, new id]`` of every page directly in a project
-    #: folder: only a page's name is unique in a folder (``uq_kp_folder_pagename``
-    #: is ``WHERE kind = 'page'``), so folders are not listed.
+    #: folder, and ``[ROOT_PAGE_FOLDER, ...]`` of every page left at the root:
+    #: only a page's name is unique in a folder, the root included
+    #: (``uq_kp_folder_pagename`` is ``WHERE kind = 'page'``), so folders are
+    #: not listed.
     names: list[list[str]]
 
     def ids(self) -> dict[str, Any]:
@@ -1697,6 +1699,10 @@ def _place_pages(
                 names.append([slug, str(page.get("name") or "").lower(), new_of[old]])
         else:
             row["parent_id"] = None
+            # Unplaced, at the target's root, where the platform bank's root
+            # pages and every other unplaced bank's land too (#3670).
+            if page.get("kind") == "page":
+                names.append([ROOT_PAGE_FOLDER, str(page.get("name") or "").lower(), new_of[old]])
         rows.append(row)
         nodes[old] = {
             "id": new_of[old],
@@ -1766,9 +1772,22 @@ def _place_pages(
     )
 
 
+#: The "slug" of the target's root in the page-name rows
+#: (:attr:`_Placement.names`, :meth:`FoldIn._settle_page_names`): pages a fold
+#: leaves at the root share one name space there, as a project folder's do.
+#: Empty, so it is never a project's slug.
+ROOT_PAGE_FOLDER = ""
+
+
+def _page_folder_label(slug: str) -> str:
+    """How a page-name folder is named in a report: ``project:<slug>``, or ``root``."""
+    return "root" if slug == ROOT_PAGE_FOLDER else f"project:{slug}"
+
+
 def _platform_page_names(pages: list[dict[str, Any]]) -> list[list[str]]:
     """``[slug, lower-cased name, id]`` of every page a platform bank carries directly
-    in a root ``project:<slug>`` folder: what a coding bank's pages may not clash with."""
+    in a root ``project:<slug>`` folder, and ``[ROOT_PAGE_FOLDER, ...]`` of every
+    page it carries at the root: what a coding bank's pages may not clash with."""
     from hal0.memory.knowledge_pages import KNOWLEDGE_FOLDER_PREFIX
 
     folders = {
@@ -1782,6 +1801,10 @@ def _platform_page_names(pages: list[dict[str, Any]]) -> list[list[str]]:
         [folders[str(p["parent_id"])], str(p.get("name") or "").lower(), str(p.get("id"))]
         for p in pages
         if p.get("kind") == "page" and p.get("parent_id") and str(p.get("parent_id")) in folders
+    ] + [
+        [ROOT_PAGE_FOLDER, str(p.get("name") or "").lower(), str(p.get("id"))]
+        for p in pages
+        if p.get("kind") == "page" and not p.get("parent_id")
     ]
 
 
@@ -4098,7 +4121,8 @@ class FoldIn(em.EngineMaintenance):
           wrote through compat, or the platform bank's), or one the platform
           bank of this run carries there, keeps its name, and every folded
           node of that name is renamed;
-        * otherwise one folded page keeps the plain name: the one the ledger
+        * otherwise one folded page keeps the plain name: the one an earlier
+          run already put in the target under it, else the one the ledger
           recorded as keeper, else the one from the bank whose id names the
           project most directly (``<harness>::<slug>``, then a repository
           name the registry maps to it, then a bank whose project comes from
@@ -4111,6 +4135,11 @@ class FoldIn(em.EngineMaintenance):
         a renamed name the folder already holds. Renames are written into the
         bank's shared archive and its ids (:meth:`_apply_page_names`) before
         the clash checks, so those compare what will be sent.
+
+        The target's root is one more such folder (:data:`ROOT_PAGE_FOLDER`):
+        a coding bank whose project does not resolve (``coding-agent::tmp``)
+        leaves its pages there, beside the platform bank's root pages and
+        every other unplaced bank's, under the same index (#3670).
         """
         target = journal.targets.get(PART_SHARED)
         if not target:
@@ -4142,8 +4171,8 @@ class FoldIn(em.EngineMaintenance):
                     candidates.setdefault((str(slug), str(lname)), []).append((entry, row))
         if not candidates:
             return
-        present = await self._project_page_names(target)
-        #: Per project folder, every lower-cased name that will be in it.
+        present = await self._project_page_names(target, root=True)
+        #: Per project folder (and the root), every lower-cased name that will be in it.
         taken: dict[str, set[str]] = {}
         for (slug, lname), node_id in present.items():
             if node_id not in ours:
@@ -4161,9 +4190,18 @@ class FoldIn(em.EngineMaintenance):
             key = f"{slug}/{lname}"
             banks = [e.bank for e, _ in cands]
             for bank in {b for b in banks if banks.count(b) > 1}:
-                conflicts.setdefault(bank, []).append(f"project:{slug}/{lname}")
+                conflicts.setdefault(bank, []).append(f"{_page_folder_label(slug)}/{lname}")
+            holder = present.get((slug, lname))
+            held = next((e.bank for e, r in cands if str(r["id"]) == holder), None)
             if (slug, lname) in fixed:
                 keeper = fixed[(slug, lname)]
+            elif held is not None:
+                # A page an earlier run folded already holds the name in the
+                # target, and the import never renames a node the target
+                # holds: renaming it here would read as a changed model and
+                # hold back the whole run. Ahead of the ledger, which recorded
+                # no root keeper before #3670.
+                keeper = held
             elif recorded.get(key) in banks:
                 keeper = recorded[key]
             else:
@@ -4185,7 +4223,9 @@ class FoldIn(em.EngineMaintenance):
                 )
                 names = taken.setdefault(slug, set())
                 if name.lower() in names or (slug, name.lower()) in candidates:
-                    conflicts.setdefault(entry.bank, []).append(f"project:{slug}/{name.lower()}")
+                    conflicts.setdefault(entry.bank, []).append(
+                        f"{_page_folder_label(slug)}/{name.lower()}"
+                    )
                 names.add(name.lower())
         self._save(journal)
         for entry in live:
@@ -4195,10 +4235,10 @@ class FoldIn(em.EngineMaintenance):
                     entry,
                     BankLeft(
                         f"bank {entry.bank}: {len(conflicts[entry.bank])} knowledge page "
-                        "name(s) cannot be given a place of their own in their project "
-                        "folder (two of the bank's own pages share a name there, or the renamed "
-                        "name is taken too). Rename one in the old bank, then run the fold-in "
-                        "again",
+                        "name(s) cannot be given a place of their own in their folder "
+                        "(their project's, or the root for a page of no project; two of the "
+                        "bank's own pages share a name there, or the renamed name is taken "
+                        "too). Rename one in the old bank, then run the fold-in again",
                         bank=entry.bank,
                         details={"page_names": sorted(conflicts[entry.bank])},
                     ),
@@ -4212,7 +4252,9 @@ class FoldIn(em.EngineMaintenance):
         entry: BankEntry, row: Mapping[str, Any], slug: str, registry: Any
     ) -> tuple[int, float, str]:
         """Sort key of a candidate to keep a plain name: lowest wins (:meth:`_settle_page_names`)."""
-        if entry.project == slug:
+        if slug == ROOT_PAGE_FOLDER:
+            direct = 2
+        elif entry.project == slug:
             direct = 0
         elif entry.project is not None and (
             resolve_project(bank_segment=entry.project, registry=registry, coding=True).slug == slug
@@ -4777,9 +4819,12 @@ class FoldIn(em.EngineMaintenance):
             stack.extend((child, here) for child in node.get("children") or [])
         return out
 
-    async def _project_page_names(self, bank: str) -> dict[tuple[str, str], str]:
+    async def _project_page_names(
+        self, bank: str, *, root: bool = False
+    ) -> dict[tuple[str, str], str]:
         """``(slug, lower-cased name) -> page id`` of every page directly in a root
         ``project:<slug>`` folder of ``bank``: the names a carried page may not take.
+        With ``root``, every page at the root too, under :data:`ROOT_PAGE_FOLDER`.
 
         Only pages: ``uq_kp_folder_pagename`` is ``WHERE kind = 'page'``. When
         a project has several root folders of its name (:meth:`_project_folder`),
@@ -4790,14 +4835,19 @@ class FoldIn(em.EngineMaintenance):
         if bank not in await self._bank_ids():
             return {}
         out: dict[tuple[str, str], str] = {}
-        for root in await self._tree_roots(bank):
-            if not isinstance(root, dict) or root.get("kind") != "folder":
+        for top in await self._tree_roots(bank):
+            if not isinstance(top, dict):
                 continue
-            name = str(root.get("name") or "")
+            if root and top.get("kind") == "page" and isinstance(top.get("id"), str):
+                out.setdefault((ROOT_PAGE_FOLDER, str(top.get("name") or "").lower()), top["id"])
+                continue
+            if top.get("kind") != "folder":
+                continue
+            name = str(top.get("name") or "")
             if not name.startswith(KNOWLEDGE_FOLDER_PREFIX):
                 continue
             slug = name[len(KNOWLEDGE_FOLDER_PREFIX) :]
-            for child in root.get("children") or []:
+            for child in top.get("children") or []:
                 if (
                     isinstance(child, dict)
                     and child.get("kind") == "page"
