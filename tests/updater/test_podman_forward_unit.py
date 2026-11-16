@@ -268,6 +268,7 @@ def test_first_update_reaches_the_root_side_through_the_migration_child(
     trusted: list[Path] = []
     monkeypatch.setattr(privileged, "assert_trusted_release_dir", trusted.append)
     monkeypatch.setattr(updater_mod, "converge_api_unit", lambda *, job_id=None: "skipped")
+    monkeypatch.setattr(updater_mod, "converge_openwebui_unit", lambda *, job_id=None: "skipped")
     argvs = _route_seam_to_root_side(monkeypatch)
 
     def conversion(**_kw: Any) -> None:
@@ -286,6 +287,7 @@ def test_first_update_reaches_the_root_side_through_the_migration_child(
 def test_boot_net_does_not_touch_the_unit(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str | None] = []
     monkeypatch.setattr(updater_mod, "converge_api_unit", lambda *, job_id=None: "skipped")
+    monkeypatch.setattr(updater_mod, "converge_openwebui_unit", lambda *, job_id=None: "skipped")
     monkeypatch.setattr(
         updater_mod, "converge_podman_forward_unit", lambda *, job_id=None: seen.append(job_id)
     )
@@ -303,6 +305,7 @@ def test_boot_net_does_not_touch_the_unit(monkeypatch: pytest.MonkeyPatch) -> No
 def test_kwarg_skips_the_seam(monkeypatch: pytest.MonkeyPatch) -> None:
     """install.sh's path: --no-start must not touch the firewall."""
     monkeypatch.setattr(updater_mod, "converge_api_unit", lambda *, job_id=None: "skipped")
+    monkeypatch.setattr(updater_mod, "converge_openwebui_unit", lambda *, job_id=None: "skipped")
     argvs = _route_seam_to_root_side(monkeypatch)
 
     def conversion(**_kw: Any) -> None:

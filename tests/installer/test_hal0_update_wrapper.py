@@ -129,6 +129,12 @@ def test_refresh_podman_forward_forwards_no_arguments(installed: Path) -> None:
     assert argv == ["-I", "-m", "hal0.updater.privileged", "refresh-podman-forward"]
 
 
+def test_refresh_openwebui_unit_forwards_no_arguments(installed: Path) -> None:
+    rc, argv, _ = _run(installed, "refresh-openwebui-unit")
+    assert rc == 0
+    assert argv == ["-I", "-m", "hal0.updater.privileged", "refresh-openwebui-unit"]
+
+
 def test_isolated_mode_is_always_used(installed: Path) -> None:
     """`-I` drops PYTHON* env vars, user site, and the CWD from sys.path.
 
@@ -142,6 +148,7 @@ def test_isolated_mode_is_always_used(installed: Path) -> None:
         ("hermes-gateway",),
         ("refresh-api-unit",),
         ("refresh-podman-forward",),
+        ("refresh-openwebui-unit",),
     ):
         _, argv, _ = _run(installed, *args)
         assert argv[0] == "-I"
@@ -163,6 +170,7 @@ def test_help_lists_exactly_the_granted_verbs(installed: Path) -> None:
         "hermes-gateway",
         "refresh-api-unit",
         "refresh-podman-forward",
+        "refresh-openwebui-unit",
     ):
         assert verb in proc.stdout
 
@@ -349,6 +357,8 @@ def test_check_activate_discard_do_not_resolve_releases_url(
         ("refresh-api-unit", "--unit", "x"),
         ("refresh-podman-forward", "/etc/passwd"),
         ("refresh-podman-forward", "--unit", "x"),
+        ("refresh-openwebui-unit", "/etc/passwd"),
+        ("refresh-openwebui-unit", "--unit", "x"),
     ],
 )
 def test_bad_input_is_refused_before_the_interpreter_runs(

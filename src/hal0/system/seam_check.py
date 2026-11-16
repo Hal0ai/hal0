@@ -89,7 +89,7 @@ SEAMS: tuple[SeamSpec, ...] = (
         required=True,
         role=(
             "self-update (stage / activate / discard / hermes-gateway / refresh-api-unit / "
-            "refresh-podman-forward)"
+            "refresh-podman-forward / refresh-openwebui-unit)"
         ),
     ),
     SeamSpec("hal0-agentenv", probe=None, required=False, role="bundled-agent env files"),
