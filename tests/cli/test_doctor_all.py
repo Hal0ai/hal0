@@ -1495,6 +1495,11 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(
         da,
+        "check_agent_identity_secret",
+        lambda **_kw: Check("agent-identity-secret", "Agent identity secret", "pass", "stubbed"),
+    )
+    monkeypatch.setattr(
+        da,
         "check_bridge_store",
         lambda **_kw: Check("bridge-store", "Agent bridge store", "pass", "stubbed"),
     )
@@ -1697,7 +1702,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     assert set(projects_kwargs) == {"memory", "base"}
     assert set(owners_kwargs) == {"memory", "base"}
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-52:] == [
+    assert keys[-53:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1727,6 +1732,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hermes_profiles_mcp",
         "hermes_default_memory",
         "hermes_brain_memory",
+        "agent-identity-secret",
         "bridge-store",
         "agent-bridge",
         "openwebui_mcp",

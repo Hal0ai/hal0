@@ -647,3 +647,109 @@ def test_a_failed_restart_after_writing_the_key_is_a_warning(tmp_path: Path) -> 
 
     again = hp.converge_default_profile_agent_key_on_boot(tmp_path / "home", restart=restart)
     assert again["changed"] is False and calls == []
+
+
+# ── a root-created secret belongs to hal0, even under a root-owned dir (verification) ──
+
+
+def test_pi_first_root_hands_the_secret_and_its_dir_to_hal0(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``installer/agents/pi.sh`` used to ``mkdir -p`` ``/var/lib/hal0/agents`` as root,
+    so on a box that installs Pi before Hermes the directory was root's. Root
+    must give the secret, and that directory, to the hal0 account, never to
+    the directory's owner, or hal0-api refuses the secret on its next start."""
+    parent = agent_identity.secret_path().parent
+    parent.mkdir(parents=True)
+    me = (os.getuid(), os.getgid())
+    real_stat = os.stat
+    chowned: list[tuple[str, int, int]] = []
+
+    class _RootOwned:
+        def __init__(self, st: os.stat_result) -> None:
+            self._st = st
+
+        def __getattr__(self, name: str) -> Any:
+            if name == "st_uid":
+                return 0
+            if name == "st_gid":
+                return 0
+            return getattr(self._st, name)
+
+    def fake_stat(path: Any, *args: Any, **kwargs: Any) -> Any:
+        st = real_stat(path, *args, **kwargs)
+        return _RootOwned(st) if Path(path) == parent else st
+
+    def fake_chown(path: Any, uid: int, gid: int, **_kw: Any) -> None:
+        chowned.append((str(path), uid, gid))
+
+    monkeypatch.setattr(agent_identity.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(agent_identity, "_service_ids", lambda: me)
+    monkeypatch.setattr(agent_identity, "_service_uid", lambda: me[0])
+    monkeypatch.setattr(agent_identity.os, "stat", fake_stat)
+    monkeypatch.setattr(agent_identity.os, "chown", fake_chown)
+
+    key = agent_identity.key_for("pi")
+
+    assert key is not None
+    assert chowned == [(str(parent), *me)]  # the root-owned directory goes to hal0
+    st = real_stat(agent_identity.secret_path())
+    assert (st.st_uid, st.st_gid) == me  # and so does the secret
+    assert stat.S_IMODE(st.st_mode) == 0o600
+
+
+def test_pi_installer_creates_the_agents_dir_as_hal0_before_its_own_dir() -> None:
+    """The installer side of the same ordering bug: pi.sh hands the agents root to hal0
+    before its ``mkdir -p`` can create it as root."""
+    script = (Path(__file__).resolve().parents[2] / "installer" / "agents" / "pi.sh").read_text()
+    create = script.index('install -d -o hal0 -g "$hal0_group" -m 0711 "$AGENTS_ROOT"')
+    handback = script.index('chown hal0:"$hal0_group" "$AGENTS_ROOT"')
+    mkdir = script.index('mkdir -p "$HAL0_AGENT_DATA_DIR"')
+    assert create < mkdir and handback < mkdir
+
+
+def test_the_perms_table_declares_the_secret() -> None:
+    from hal0.install import perms
+
+    rows = [r for r in perms.ownership_table() if str(r.target).endswith("agents/identity.bin")]
+    assert len(rows) == 1
+    assert rows[0].mode == 0o600 and rows[0].optional
+
+
+# ── the doctor row ───────────────────────────────────────────────────────────
+
+
+def test_doctor_identity_secret_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.cli import doctor_all as da
+
+    monkeypatch.setattr(da, "_resolve_uid", lambda _user: os.getuid())
+    secret = tmp_path / "identity.bin"
+
+    missing = da.check_agent_identity_secret(path=secret)
+    assert (missing.key, missing.status) == ("agent-identity-secret", "pass")
+    assert "not created yet" in missing.detail
+
+    secret.write_bytes(b"x" * 32)
+    os.chmod(secret, 0o600)
+    ok = da.check_agent_identity_secret(path=secret)
+    assert ok.status == "pass" and "0600 OK" in ok.detail
+
+    os.chmod(secret, 0o644)
+    loose = da.check_agent_identity_secret(path=secret)
+    assert loose.status == "warn" and "mode 644" in loose.detail
+    assert "hal0 doctor perms --fix" in loose.detail
+
+    os.chmod(secret, 0o600)
+    secret.write_bytes(b"short")
+    short = da.check_agent_identity_secret(path=secret)
+    assert short.status == "warn" and "fewer than 32" in short.detail
+
+    link = tmp_path / "link.bin"
+    link.symlink_to(secret)
+    linked = da.check_agent_identity_secret(path=link)
+    assert linked.status == "warn" and "symlink" in linked.detail
+
+    monkeypatch.setattr(da, "_resolve_uid", lambda _user: os.getuid() + 4242)
+    secret.write_bytes(b"x" * 32)
+    foreign = da.check_agent_identity_secret(path=secret)
+    assert foreign.status == "warn" and "expected hal0" in foreign.detail

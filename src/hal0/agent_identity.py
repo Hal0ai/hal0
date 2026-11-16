@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import grp
 import hashlib
 import hmac
 import os
@@ -75,6 +76,19 @@ def _service_uid() -> int | None:
         return pwd.getpwnam("hal0").pw_uid
     except KeyError:
         return None
+
+
+def _service_ids() -> tuple[int, int] | None:
+    """``(uid, gid)`` of the ``hal0`` service account (its ``hal0`` group when there is one)."""
+    try:
+        account = pwd.getpwnam("hal0")
+    except KeyError:
+        return None
+    try:
+        gid = grp.getgrnam("hal0").gr_gid
+    except KeyError:
+        gid = account.pw_gid
+    return account.pw_uid, gid
 
 
 def _trusted_owners() -> set[int]:
@@ -171,8 +185,12 @@ def _create_secret(path: Path) -> bytes | None:
 
     Only root or the service user creates it (:func:`_may_create`). The service
     user creates the directory too; root creates the file only inside an
-    existing directory and hands it to that directory's owner, so hal0-api can
-    always read what a root provisioning run wrote.
+    existing directory. Root hands the file to the ``hal0`` account whenever it
+    exists, and the directory too when it is root-owned: ``installer/agents/pi.sh``
+    runs ``mkdir -p`` there as root, so on a box that installs Pi before Hermes the
+    directory is root's, and a secret handed to the directory's owner would be one
+    hal0-api refuses (#3569 verification). Without a ``hal0`` account the file
+    goes to the directory's owner.
     """
     if not _may_create():
         return None
@@ -186,7 +204,15 @@ def _create_secret(path: Path) -> bytes | None:
 
             ensure_shared_dir(parent, mode=AGENTS_DIR_MODE)
         owner = parent.stat()
-        if is_root and owner.st_uid not in _trusted_owners():
+        target = (owner.st_uid, owner.st_gid)
+        service = _service_ids() if is_root else None
+        if service is not None:
+            target = service
+            if owner.st_uid == 0:
+                # The hal0 user must be able to open the secret and to create
+                # one after a revoke; the declared table mode stays (0711).
+                os.chown(parent, *service, follow_symlinks=False)
+        elif is_root and owner.st_uid not in _trusted_owners():
             return None
         fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=parent)
     except OSError:
@@ -196,7 +222,7 @@ def _create_secret(path: Path) -> bytes | None:
     try:
         os.fchmod(fd, 0o600)
         if is_root:
-            os.fchown(fd, owner.st_uid, owner.st_gid)
+            os.fchown(fd, *target)
         os.write(fd, secret)
         os.fsync(fd)
         os.close(fd)

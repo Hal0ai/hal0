@@ -85,7 +85,11 @@ That does not fit, for four reasons found in the code:
    only as a regular file (opened without following a link) of at least 32
    bytes, owned by root or `hal0`, with no group or other bits; anything else
    is refused and logged once as `hal0.agent_identity.secret_refused`. Only
-   root or `hal0` may create it. Keys exist only for reserved names
+   root or `hal0` may create it; root hands the file, and a root-owned
+   `agents/` directory, to the `hal0` user and group (the Pi installer, which
+   may run before Hermes, also creates `agents/` as `hal0`). The perms table
+   declares the file, and the `agent-identity-secret` doctor row reports it.
+   Keys exist only for reserved names
    (`is_reserved_name`): every other name is one a bridge client may hold,
    and its identity comes from its bridge key alone.
 4. **hal0 writes the key for its own agents.**
