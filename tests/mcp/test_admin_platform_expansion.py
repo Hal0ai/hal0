@@ -236,6 +236,13 @@ _GATED_CASES: list[tuple[str, dict[str, Any], str, str, dict[str, Any] | None]] 
         None,
     ),
     (
+        "flm_model_remove",
+        {"tag": "qwen3:0.6b"},
+        "DELETE",
+        "http://t/api/slots/flm/models/qwen3%3A0.6b",
+        None,
+    ),
+    (
         "comfyui_file_delete",
         {"subdir": "checkpoints", "relpath": "mine.safetensors"},
         "DELETE",

@@ -2,7 +2,7 @@
 // FLM picker options come from the closed FastFlowLM catalogue (one dropdown per modality on the
 // FLM lane); GGUF rows (Slots → NPU → Models) from the registry joined to the ggml-xdna fit map
 // (GET /api/runners/xdna/fit, whose keys are the GGUF llm rows).
-import type { FlmModel } from '@/api/hooks/useFlmCatalog'
+import type { FlmModel, FlmModelUse } from '@/api/hooks/useFlmCatalog'
 import type { XdnaFit } from '@/api/hooks/useXdnaFit'
 
 export interface FlmPickerOption {
@@ -56,6 +56,8 @@ export function flmPickerOptions(models: FlmModel[] | null | undefined, cap: Flm
 export interface FlmCatalogRow extends FlmPickerOption {
   /** The roles the model serves, spelled as the catalogue spells them. */
   caps: FlmPickerCap[]
+  /** FLM roles configured or serving it (the catalogue's `in_use_by`); empty when free. */
+  inUseBy: FlmModelUse[]
 }
 
 /** One row per catalogue model across every modality (Models → FLM). Built from
@@ -63,6 +65,10 @@ export interface FlmCatalogRow extends FlmPickerOption {
  *  reads them. Installed first, then by family and name. */
 export function flmCatalogRows(models: FlmModel[] | null | undefined): FlmCatalogRow[] {
   const byId = new Map<string, FlmCatalogRow>()
+  const uses = new Map<string, FlmModelUse[]>()
+  for (const m of models ?? []) {
+    if (m.model && Array.isArray(m.in_use_by)) uses.set(m.model, m.in_use_by)
+  }
   for (const cap of ['chat', 'stt', 'embed'] as const) {
     const g = flmPickerOptions(models, cap)
     for (const o of [...g.installed, ...g.download]) {
@@ -70,7 +76,7 @@ export function flmCatalogRows(models: FlmModel[] | null | undefined): FlmCatalo
       if (hit) {
         hit.caps.push(cap)
         hit.audio = hit.audio || o.audio
-      } else byId.set(o.id, { ...o, caps: [cap] })
+      } else byId.set(o.id, { ...o, caps: [cap], inUseBy: uses.get(o.id) ?? [] })
     }
   }
   return [...byId.values()].sort(

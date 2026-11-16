@@ -100,8 +100,14 @@ above.
 
 The **FLM** tab (`#models/flm`) lists the FastFlowLM catalogue for the NPU:
 each model's size, whether it takes audio, and whether it is installed, with
-a Download button for the ones that are not. Which model the FLM process
-serves is still chosen on the NPU page's Lanes tab.
+a Download button for the ones that are not. An installed model has a Remove
+button, which asks first and names the space it frees, then deletes the
+model's files with `flm remove` in the FLM runner image. Remove is disabled
+while an FLM role (chat, embedding, speech-to-text or decision) is set to that
+model or serving it, and while it is downloading; switch the role first.
+Deleting an FLM model from the model list does not free its files, so use this
+button for that. Which model the FLM process serves is still chosen on the NPU
+page's Lanes tab.
 
 The **Profiles** tab lives alongside Inference / Image / Upstream / FLM at the
 top of the Models view (`#models/profiles`) — that's where you manage the

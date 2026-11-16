@@ -230,6 +230,7 @@ the slot's current name; an unknown id returns `404 slot.not_found`.
 |---|---|
 | `model_pull` | `POST /api/models/{model_id}/pull` |
 | `model_delete` | `DELETE /api/models/{model_id}` |
+| `flm_model_remove` | `DELETE /api/slots/flm/models/{tag}` — runs `flm remove <tag>` in the FLM runner image; refused (409) while an FLM role is configured or serving the tag, or while a pull of it runs |
 | `model_register` | `POST /api/models` |
 | `model_add` | `POST /api/models/add-from-path` |
 | `model_store_set` | `POST /api/settings/models/store` |

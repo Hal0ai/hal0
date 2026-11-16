@@ -1,6 +1,6 @@
 #!/bin/bash
 # hal0-flmctl — privileged seam for running the FastFlowLM CLI (`flm list`,
-# `flm pull`) inside the pinned `flm` runner image (#2993, ADR-0036).
+# `flm pull`, `flm remove`) inside the pinned `flm` runner image (#2993, ADR-0036).
 #
 # Background: FLM model pulls and the FLM catalogue probe used to run the HOST
 # /usr/bin/flm from the FastFlowLM .deb. Only install.sh installs that .deb,
@@ -29,7 +29,8 @@
 #     What runs inside is NOT the image's choice, though: the entrypoint is
 #     pinned below to tini -> /opt/fastflowlm/bin/flm, so whatever image is
 #     named, the only path the one-shot can start is that image's
-#     /opt/fastflowlm/bin/flm, with the fixed `list -j` / `pull <tag>` argv.
+#     /opt/fastflowlm/bin/flm, with the fixed `list -j` / `pull <tag>` /
+#     `remove <tag>` argv.
 #     A caller-chosen image owns that file, so this pins the argv and the
 #     path, not what the binary does;
 #   * the host FLM STORE directory (run-*) — absolute, a closed charset with no
@@ -41,7 +42,8 @@
 #     the serving slot's. The store's location is runtime config ([models].flm_store in
 #     hal0.toml, which the hal0 account itself writes), so there is no
 #     root-owned record to pin it to; the boundary below does not rely on it;
-#   * an FLM model TAG (run-pull, stop-pull) — family:variant, no leading '-'.
+#   * an FLM model TAG (run-pull, run-remove, stop-pull) — family:variant, no
+#     leading '-'.
 #
 # HONEST BOUNDARY. The one-shot containers run with the hal0 ACCOUNT'S OWN
 # identity, resolved here from the passwd/group databases and never from the
@@ -303,6 +305,19 @@ case "$cmd" in
     exec_oneshot "$1" --name="$(pull_name "$3")" --replace -- pull "$3"
     ;;
 
+  run-remove)              # args: image store tag -> one-shot `flm remove <tag>`
+    [[ $# -eq 3 ]] || die "run-remove takes exactly three arguments"
+    validate_image_ref "$1"
+    validate_tag "$3"
+    resolve_service_identity
+    validate_store "$2"
+    require_podman
+    require_image "$1"
+    # Same identity and mount as run-pull: flm deletes only the tag's own
+    # directory under the store, with the hal0 account's own write rights.
+    exec_oneshot "$1" -- remove "$3"
+    ;;
+
   stop-pull)               # arg: tag -> remove hal0-flm-pull-<tag> if present
     [[ $# -eq 1 ]] || die "stop-pull takes exactly one argument"
     validate_tag "$1"
@@ -319,11 +334,12 @@ case "$cmd" in
   help|"")
     cat <<EOF
 usage: hal0-flmctl <command> [args]
-  exec-list <token>              flm list -j inside the running hal0-slot-<token>
-  run-list <image> <store>       flm list -j in a one-shot container of <image>
-  run-pull <image> <store> <tag> flm pull <tag> in a one-shot container of <image>
-  stop-pull <tag>                remove the pull container for <tag>, if any
-  check-tag <tag>                validate a model tag only (no podman call)
+  exec-list <token>                flm list -j inside the running hal0-slot-<token>
+  run-list <image> <store>         flm list -j in a one-shot container of <image>
+  run-pull <image> <store> <tag>   flm pull <tag> in a one-shot container of <image>
+  run-remove <image> <store> <tag> flm remove <tag> in a one-shot container of <image>
+  stop-pull <tag>                  remove the pull container for <tag>, if any
+  check-tag <tag>                  validate a model tag only (no podman call)
 
 exit codes:
   0    flm exited 0 (exec'd verbs pass flm's own exit code through)

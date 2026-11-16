@@ -174,6 +174,8 @@ export const ENDPOINTS = {
   xdnaFit: '/api/runners/xdna/fit',
   // FastFlowLM closed catalogue (installed + downloadable).
   flmModels: '/api/slots/flm/models',
+  // DELETE: `flm remove <tag>` in the FLM runner image (409 while an FLM role holds it).
+  flmModel: (tag: string) => `/api/slots/flm/models/${encodeURIComponent(tag)}`,
   statsThroughputHistory: '/api/stats/throughput/history',
   // W6 opt-in cards: power/thermal (§5 spike confirmed amdgpu hwmon).
   statsPower: '/api/stats/power',

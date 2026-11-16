@@ -91,8 +91,11 @@ async def list_flm_models(request: Request):
          case, and correct on default-store boxes.
 
     Shape: ``{"models": [{"model": tag, "installed": bool,
-    "capabilities": [...], "family": str}]}`` — ``model``/``installed`` keep the
-    dashboard filter contract. The container-exec + host-probe fan-out lives in
+    "capabilities": [...], "family": str, "size_bytes": int,
+    "in_use_by": [{"role", "slot"}]}]}`` — ``model``/``installed`` keep the
+    dashboard filter contract. ``in_use_by`` names the FLM roles (chat, embed,
+    asr, decision) configured or serving the tag, which is what
+    ``DELETE /api/slots/flm/models/{tag}`` refuses on (empty when free). The container-exec + host-probe fan-out lives in
     :func:`hal0.slots.flm_catalog.catalog`. ``probe_ok`` is false only when
     the underlying FLM probe gave no answer.
     """
@@ -100,7 +103,78 @@ async def list_flm_models(request: Request):
     # loop (#2334). ``models`` stays fail-soft for the dashboard; probe_ok
     # lets automation distinguish an empty catalog from an unanswered probe.
     catalog = await asyncio.to_thread(_flm_catalog.catalog)
+    if catalog:
+        from hal0.providers.flm_cli import _slot_configs
+        from hal0.slots.flm_remove import flm_tags_in_use
+
+        live = await _live_slot_models(request)
+        used = flm_tags_in_use(await asyncio.to_thread(_slot_configs), live)
+        catalog = [{**row, "in_use_by": used.get(row["model"], [])} for row in catalog]
     return {"models": catalog if catalog is not None else [], "probe_ok": catalog is not None}
+
+
+async def _live_slot_models(request: Request) -> list[tuple[str, str | None]]:
+    """``(slot name, model id)`` for every slot that is not offline; ``[]`` if unreadable."""
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        return []
+    try:
+        return [(s.name, s.model_id) for s in await sm.list() if s.state != "offline"]
+    except Exception as exc:
+        log.warning("flm.live_slots_unread", error=str(exc))
+        return []
+
+
+@router.delete("/flm/models/{tag}")
+async def remove_flm_model(tag: str, request: Request) -> dict[str, Any]:
+    """Delete a downloaded FLM model's files with ``flm remove <tag>``.
+
+    Runs in a one-shot container of the FLM slot's runner image against the
+    store the slot mounts (``hal0-flmctl run-remove``), the same route an FLM
+    pull takes. On success the tag's registry row and finished pull job are
+    dropped and the catalogue cache is reset, so the next
+    ``GET /api/slots/flm/models`` reads it as not installed.
+
+    Response: ``{"tag", "removed", "path", "bytes_freed", "registry_removed",
+    "warnings"}`` (``warnings`` are flm's own, e.g. installed tags built on
+    this one). Refusals, all before anything runs:
+
+    * 422 ``flm.invalid_tag`` — not a ``family:variant`` tag;
+    * 409 ``flm.model_in_use`` — an FLM role (chat, embed, asr, decision) is
+      configured or serving it; ``error.details.in_use_by`` lists
+      ``{role, slot}``;
+    * 409 ``flm.pull_running`` — a pull of the tag is queued or running;
+    * 409 ``model.deleting`` — another remove of the tag is running;
+    * 404 ``flm.model_not_found`` / 409 ``flm.model_not_installed`` — the
+      catalogue does not list it, or not as downloaded.
+
+    502 ``flm.remove_failed`` when flm ran but the files are still there (flm
+    1.0.12 exits 0 on a failed remove, so the directory is checked); 503
+    ``model.flm_runner_unavailable`` when the seam cannot be reached.
+    """
+    from hal0.slots import flm_remove as _flm_remove
+
+    live = await _live_slot_models(request)
+    async with record_action(
+        request, category="model", action="flm.model_remove", target=tag
+    ) as rec:
+        result = await _flm_remove.remove_flm_model(
+            tag,
+            registry=getattr(request.app.state, "model_registry", None),
+            jobs=getattr(request.app.state, "model_pull_jobs", None),
+            live=live,
+        )
+        rec.after = result
+    event_bus = getattr(request.app.state, "events", None)
+    if event_bus is not None:
+        await event_bus.emit(
+            "model.deleted",
+            "info",
+            f"model:{tag}",
+            f"{tag}: removed from the NPU store",
+            data={"id": tag, "affected_slots": [], "bytes_freed": result["bytes_freed"]},
+        )
+    return result
 
 
 class NotImplementedYet(Hal0Error):

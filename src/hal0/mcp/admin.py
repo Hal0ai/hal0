@@ -603,6 +603,8 @@ GATED_TOOLS: frozenset[str] = frozenset(
         # Model
         "model_pull",
         "model_delete",
+        # Deletes a downloaded FLM model's files (flm remove in the runner image).
+        "flm_model_remove",
         "model_register",
         "model_add",
         "model_store_set",
@@ -908,6 +910,7 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "GET:/api/slots/{name}/config": ("slot_config",),
     "GET:/api/slots/{name}/voices": ("slot_voices",),
     "GET:/api/slots/flm/models": ("flm_model_list",),
+    "DELETE:/api/slots/flm/models/{tag}": ("flm_model_remove",),
     "POST:/api/slots/{name}/pull": ("slot_pull_image",),
     "GET:/api/slots/{name}/pull/status": ("slot_pull_status",),
     # ── Models long-tail ─────────────────────────────────────────────────────
@@ -3071,6 +3074,10 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "flm_model_list": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    # Deletes the model's files outright; a repeat finds it not installed (409).
+    "flm_model_remove": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+    ),
     "slot_pull_status": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
@@ -3538,6 +3545,12 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "slot_config": "Return a slot's TOML config as a dict. Args: name.",
     "slot_voices": "List a TTS slot's available voices (proxies the slot's own voices endpoint).",
     "flm_model_list": "Full FLM catalog for NPU model dropdowns (model, installed, capabilities, family).",
+    "flm_model_remove": (
+        "Delete a downloaded FLM (NPU) model's files with flm remove (gated). Args: tag "
+        "(path; the family:variant tag from flm_model_list, e.g. qwen3:0.6b). Refused (409) "
+        "while an FLM role (chat, embed, asr, decision) is configured or serving it, or while "
+        "a pull of it runs."
+    ),
     "slot_pull_status": "Poll a slot's container-image pull progress. Args: name.",
     "model_validate": (
         "Dry-run screen a candidate model write (create or edit) without persisting anything. "

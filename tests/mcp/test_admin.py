@@ -266,6 +266,8 @@ def test_destructive_tools_match_gated_destructive_set() -> None:
         # one file of the ComfyUI models tree.
         "comfyui_model_remove",
         "comfyui_file_delete",
+        # FLM model removal deletes the model's directory in the NPU store.
+        "flm_model_remove",
     }
     destructive_per_annotation = {
         name for name, ann in admin._ANNOTATIONS.items() if ann.destructiveHint
