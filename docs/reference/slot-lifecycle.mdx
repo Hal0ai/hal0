@@ -179,13 +179,17 @@ evicting every idle, non-pinned slot. Nothing starts, the slot goes to `ERROR`
 with `metadata.error_reason = "admission_refused"`, and the failure counts on the
 breaker like any other.
 
-hal0 retries a refused slot by itself (ADR-0063). On every idle-monitor tick, after
-its idle and pressure sweeps, the reaper starts a background retry for each refused
-slot whose breaker permits a trial, one at a time per slot, so a slow load never
+hal0 retries a refused slot by itself (ADR-0063) when the slot is meant to be up
+without a request: the type's default slot, a pinned slot or an `autoload` slot. A
+plain on-demand slot waits for the next request that names it. On every idle-monitor
+tick, after its idle and pressure sweeps, the reaper starts a background retry for
+each such slot whose breaker permits a trial, one at a time per slot, so a slow load never
 holds up the sweeps. The retry re-runs the admission as a dry run, without evicting
 anything, for the model the load would actually use. It loads only when that model
 would fit, counting the idle slots the gate may evict, and when the GPU arbiter
-allows it: an LLM slot is never loaded while the GPU is in image mode. A box that is
+allows it: an LLM slot is never loaded while the GPU is in image mode. A switch
+into image mode waits for any LLM slot whose load is already under way, then
+unloads it. A box that is
 still short pays nothing for the check. A successful retry may evict idle,
 non-pinned slots, as any load through the gate can. Unloading the slot retires the
 mark and stops the retries, even when the retry was already on its way.

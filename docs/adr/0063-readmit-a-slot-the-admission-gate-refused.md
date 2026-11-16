@@ -47,6 +47,13 @@ to follow a capacity change, not request arrival.
    minutes to come up never holds the reaper's sweeps while memory pressure
    is at its highest. Stopping the idle monitor cancels those tasks. A slot
    is scheduled only when:
+   - the slot is meant to be up without a request: the type's default slot
+     (`default = true`, the anchor), a pinned slot (explicit `pinned = true`
+     or a default-pinned anchor name) or a slot that boot-starts
+     (`autoload = true`, or the absent-key default derived from a bound
+     model). A plain on-demand slot keeps its mark but is left for the next
+     request that names it: re-admitting it in the background would evict
+     idle slots for a model nobody has asked for since the refusal;
    - no lifecycle operation holds the slot's lock, and no earlier retry of it
      is still running;
    - the crash-loop breaker permits a trial (`_crash_loop_remaining_s == 0`),
@@ -72,10 +79,24 @@ to follow a capacity change, not request arrival.
    the sweep's snapshot and the load therefore cancels the retry instead of
    starting the slot again.
 
+   The arbiter closes the window after that check on its own side. Once the
+   check passes, `_load` spends its first steps (teardown of the ERROR unit,
+   `_check_load`, the admission evictions) in OFFLINE with the slot lock held.
+   A switch into image mode counts any llm-group slot whose lock is held as
+   on its way onto the GPU, whatever its state: it waits for it
+   (`_await_loads`, bounded by `_LOAD_WAIT_S` with the existing rollback),
+   then unloads it if it landed and drops it from the saved set if it did
+   not. This covers an operator load in the same window too. Withdrawing
+   inside the admission gate instead would not work: by then the slot has
+   gone OFFLINE and lost its mark, so it would never be retried.
+
    A box that is still short pays nothing: no eviction, no load attempt, no
    breaker count. When the dry run and the real admission disagree, the real
    refusal counts on the breaker as before, and retries back off to the park
-   ceiling.
+   ceiling. The dry run plans with estimated candidate footprints while the
+   real gate re-reads free memory after each unload, so they can differ; the
+   retry logs `slot.admission_readmit_plan_mismatch` with the planned
+   evictions and free memory next to the gate's actual figures.
 
 3. **Name the broken slot in the 404.** When capability routing raises
    `LegacyResolutionFailed` for a slot that is in ERROR, the
