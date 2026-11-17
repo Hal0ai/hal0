@@ -310,3 +310,31 @@ def test_probe_deeply_nested_body_is_not_a_500(
     assert res.status_code == 200
     assert res.json()["ok"] is False
     assert KEY not in res.text
+
+
+def test_probe_scrubs_a_json_escaped_key_from_parsed_model_ids(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Every character \u-escaped: the raw text never holds the key, the parsed id does.
+    escaped = "".join(f"\\u{ord(ch):04x}" for ch in KEY)
+    body = '{"data": [{"id": "echo-' + escaped + '"}, {"id": "plain"}]}'
+    _wire(
+        monkeypatch,
+        lambda r: httpx.Response(200, text=body, headers={"content-type": "application/json"}),
+    )
+    res = client.post("/api/providers/probe", json={"url": "https://p.example/v1", "key": KEY})
+    assert res.status_code == 200, res.text
+    assert res.json()["ok"] is True
+    assert KEY not in res.text
+    assert [m["id"] for m in res.json()["models"]] == ["echo-***", "plain"]
+
+
+@pytest.mark.parametrize("status", [201, 203, 299])
+def test_probe_any_2xx_is_ok(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    _wire(monkeypatch, lambda r: httpx.Response(status, json={"data": [{"id": "m"}]}))
+    res = client.post("/api/providers/probe", json={"url": "https://p.example/v1", "key": KEY})
+    assert res.json()["ok"] is True, res.text
+    assert res.json()["status"] == status
+    assert [m["id"] for m in res.json()["models"]] == ["m"]

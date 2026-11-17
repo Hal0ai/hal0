@@ -24,6 +24,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
@@ -231,6 +232,21 @@ def _redact_secret(text: str, key: str) -> str:
 
 def _parse_json(text: str) -> Any:
     return json.loads(text)
+
+
+def _scrub_parsed(value: Any, scrub: Callable[[str], str]) -> Any:
+    """``value`` with ``scrub`` applied to every string in it, keys included.
+
+    Scrubbing the raw text is not enough: JSON can spell the key with ``\\u``
+    escapes, which only decode into the key once parsed.
+    """
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, list):
+        return [_scrub_parsed(v, scrub) for v in value]
+    if isinstance(value, dict):
+        return {scrub(k): _scrub_parsed(v, scrub) for k, v in value.items()}
+    return value
 
 
 def _probe_transport_error(exc: BaseException) -> str:
@@ -990,14 +1006,14 @@ class UpstreamRegistry:
                 status, "response too large or in an unsupported encoding", started, resp_headers
             )
         text = scrub(decoded.decode("utf-8", errors="replace"))
-        if status != 200:
+        if not 200 <= status < 300:
             excerpt = text[:_PROBE_ERROR_EXCERPT].strip()
             message = f"HTTP {status} {reason}".strip()
             if excerpt:
                 message = f"{message}: {excerpt}"
             return fail(status, message, started, resp_headers)
         try:
-            payload = _parse_json(text)
+            payload = _scrub_parsed(_parse_json(text), scrub)
         except ValueError:
             return fail(status, "response was not JSON", started, resp_headers)
         log.debug("upstream.probe_ok", host=target.split("/")[2], status=status)
