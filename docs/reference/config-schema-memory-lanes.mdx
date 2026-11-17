@@ -98,10 +98,18 @@ reported as `unmanaged`: it keeps working, `enable` and `disable` act on it,
 
 **Upgrading to this release.** The default of `provider` changed from
 `"local"` to `"off"`, and most `hal0.toml` files carry the old default
-written out. The first update converts it once: a `local` (written or left to
-the default) with no `hal0-hs-decide` unit becomes `off`, and one with a unit
-is written as `local`, so a working lane stays on. The update's component
-table says which happened.
+written out. Config migration v6 converts it once (`meta.schema_version` is
+the record that it ran):
+
+- `enabled = false` is never changed, whatever else is set.
+- `provider = "local"`, written or left to the old default, with no
+  `hal0-hs-decide` unit: becomes `off` (an absent value already reads as
+  `off` and stays absent).
+- The same with the unit installed: written as `local`, so a working lane
+  stays on. `enabled` is not touched.
+- `hindsight-cloud`, `off`, or an explicit `base_url`: left alone.
+
+The update summary lists the conversion.
 
 Measured on one box: a 640 MB venv and a 1.5 GB model, a few minutes to
 build, 2.7 GB of RAM at peak, and about 5 s per request of 3,000 to 5,000

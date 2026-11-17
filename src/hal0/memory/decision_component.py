@@ -247,10 +247,6 @@ def _build_stamp_path(venv: Path) -> Path:
     return venv / "hal0-build.json"
 
 
-def _conversion_marker() -> Path:
-    return var_lib() / "state" / "memory-decision-provider.converted"
-
-
 def packaged_server_script() -> Path:
     """``packaging/hindsight-decision/hs_decide_serve.py`` in the running tree.
 
@@ -494,68 +490,6 @@ def set_provider(provider: str, *, path: Path | None = None) -> bool:
             write_toml_atomic(target, raw)
     log.info("memory.decision_provider_set", provider=provider)
     return True
-
-
-def convert_provider_default(
-    *, job_id: str | None = None, path: Path | None = None, unit_path: Path | None = None
-) -> dict[str, Any]:
-    """One-time conversion for the ``local`` → ``off`` default change (#3757).
-
-    ``save_hal0_config`` writes every default out, so most boxes carry
-    ``provider = "local"`` from the old default with no server behind it, and
-    a box that relied on the old default with a hand-installed unit would lose
-    its lane to the new one. Once per box: a stored or defaulted ``local``
-    with no unit becomes ``off``; with a unit it is written as ``local``
-    explicitly. Any other stored value is left alone. Never raises.
-    """
-    from hal0.config import paths
-    from hal0.config.loader import _read_toml
-
-    marker = _conversion_marker()
-    if marker.exists():
-        return {"status": "skipped", "reason": "already converted"}
-    target = path or paths.hal0_toml()
-    try:
-        raw = _read_toml(target)
-    except Exception as exc:
-        return {"status": "skipped", "reason": f"hal0.toml unreadable: {exc}"}
-    stored = (raw.get("memory") or {}).get("decision") or {}
-    provider = stored.get("provider", "local")  # absent = the old default
-    outcome: dict[str, Any] = {"status": "unchanged", "from": provider, "to": provider}
-    if provider == "local":
-        has_unit = (unit_path or DECISION_UNIT_PATH).is_file()
-        to = "local" if has_unit else "off"
-        try:
-            set_provider(to, path=target)
-        except Exception as exc:
-            log.warning("updater.memory_decision_conversion_failed", error=str(exc))
-            return {"status": "failed", "error": str(exc)}
-        outcome = {"status": "converted", "from": "local", "to": to, "unit": has_unit}
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(json.dumps({**outcome, "job_id": job_id, "ts": time.time()}))
-    except OSError as exc:
-        log.warning("updater.memory_decision_conversion_marker_failed", error=str(exc))
-    log.info("updater.memory_decision_provider_converted", job_id=job_id, **outcome)
-    return outcome
-
-
-def _conversion_note(job_id: str | None) -> str | None:
-    """The update-summary line for a conversion this same update made."""
-    if job_id is None:
-        return None
-    try:
-        data = json.loads(_conversion_marker().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if data.get("job_id") != job_id or data.get("status") != "converted":
-        return None
-    if data.get("to") == "off":
-        return (
-            '[memory.decision].provider set to "off": no decision server is installed '
-            f'(the old default was "local"). `{INSTALL_COMMAND}` turns it on'
-        )
-    return '[memory.decision].provider written as "local": a decision server is installed'
 
 
 # ── Build ────────────────────────────────────────────────────────────────────
@@ -829,14 +763,9 @@ def converge_memory_decision(
 
     state, label = install_state(unit_path=unit_path)
     pinned = pinned_label()
-    note = _conversion_note(job_id)
     if action != "remove" and not install:
         if state == NOT_INSTALLED:
-            out: dict[str, Any] = {
-                "status": "skipped",
-                "reason": f"not installed (opt-in: {INSTALL_COMMAND})",
-            }
-            return {**out, "note": note} if note else out
+            return {"status": "skipped", "reason": f"not installed (opt-in: {INSTALL_COMMAND})"}
         if state == UNMANAGED:
             return {"status": UNMANAGED, "note": UNMANAGED_NOTE}
         if not apply:
@@ -1146,7 +1075,6 @@ __all__ = [
     "TORCH_VERSION",
     "component_installed",
     "converge_memory_decision",
-    "convert_provider_default",
     "install_state",
     "installed_label",
     "parse_unit_params",

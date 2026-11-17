@@ -106,7 +106,7 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Schema version for migrations.  Bumped when a backwards-incompatible
 # config-shape change lands.  See PLAN.md §5 Tier 3.
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 # Capabilities-file schema version. Independent of ``hal0.toml``'s
 # ``meta.schema_version``. v2 (since v0.2) means CapabilitySelection uses

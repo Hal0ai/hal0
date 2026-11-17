@@ -343,9 +343,11 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
     "components.hermes_gateway_regen_failed": (
         "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"
     ),
-    "updater.memory_decision_conversion_failed": (
-        "[memory.decision].provider default conversion (set it with "
-        "`hal0 memory decision enable` or `disable`)"
+    # Config migration v6 (#3757): a note, not a failure.
+    "updater.memory_decision_provider_converted": (
+        '[memory.decision].provider conversion (the old "local" default became "off" '
+        "with no decision server installed, or was written out because one is; "
+        "`hal0 memory decision install` or `enable` turns the lane on)"
     ),
 }
 

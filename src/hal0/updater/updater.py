@@ -2029,18 +2029,6 @@ def run_post_activation_migrations(
 
     migration_info = _maybe_run_config_migrations(min_data_version, job_id=job_id)
 
-    # #3757: [memory.decision].provider's default went "local" -> "off". Once
-    # per box: a "local" with no decision server behind it becomes "off", and
-    # one with a server is written as "local" so the new default cannot turn
-    # it off. The engine drop-in renders the same either way, so this needs
-    # no engine restart. The component row of the same update names it.
-    try:
-        from hal0.memory.decision_component import convert_provider_default
-
-        convert_provider_default(job_id=job_id)
-    except Exception as exc:
-        log.warning("updater.memory_decision_conversion_failed", job_id=job_id, error=str(exc))
-
     # The hindsight-api drop-in is written only by a graph-settings save, so a
     # config step that changes an extraction limit (v3, #3326) must be carried to
     # it here. An actual update only: a boot-time restart of the engine is a
@@ -4436,7 +4424,8 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     # lane limit or adopted a hand-made drop-in value (config migration v5).
     "updater.lane_limits_converted",
     "updater.lane_limits_adopt_skipped",
-    "updater.memory_decision_conversion_failed",
+    # Not a failure: config migration v6 changed [memory.decision].provider.
+    "updater.memory_decision_provider_converted",
 )
 
 

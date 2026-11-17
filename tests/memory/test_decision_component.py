@@ -520,43 +520,13 @@ def test_remove_still_reconciles_when_teardown_fails(box: dict[str, Any]) -> Non
     assert box["reconciled"] == 2 and box["providers"][-1] == "off"
 
 
-# ── the local -> off default conversion ──────────────────────────────────────
+# ── provider writes ──────────────────────────────────────────────────────────
 
 
 def _toml(tmp_path: Path, body: str) -> Path:
     path = tmp_path / "hal0.toml"
     path.write_text(body)
     return path
-
-
-@pytest.mark.parametrize(
-    ("body", "has_unit", "want"),
-    [
-        ('[memory.decision]\nprovider = "local"\n', False, "off"),
-        ("[memory]\nenabled = true\n", False, "off"),  # relied on the old default
-        ('[memory.decision]\nprovider = "local"\n', True, "local"),
-        ("", True, "local"),
-        ('[memory.decision]\nprovider = "hindsight-cloud"\n', False, "hindsight-cloud"),
-        ('[memory.decision]\nprovider = "off"\n', True, "off"),
-    ],
-)
-def test_conversion_once_per_box(
-    tmp_hal0_home: str, tmp_path: Path, body: str, has_unit: bool, want: str
-) -> None:
-    toml = _toml(tmp_path, body)
-    unit = tmp_path / "unit.service"
-    if has_unit:
-        unit.write_text("[Service]\n")
-    first = dc.convert_provider_default(job_id="j1", path=toml, unit_path=unit)
-    data = tomllib.loads(toml.read_text())
-    assert data.get("memory", {}).get("decision", {}).get("provider", "off") == want
-    assert first["status"] in ("converted", "unchanged")
-    assert (
-        dc.convert_provider_default(job_id="j2", path=toml, unit_path=unit)["status"] == "skipped"
-    )
-    if first["status"] == "converted" and want == "off":
-        assert "hal0 memory decision install" in dc._conversion_note("j1")
-        assert dc._conversion_note("j2") is None
 
 
 def test_set_provider_keeps_the_rest_of_the_file(tmp_hal0_home: str, tmp_path: Path) -> None:
