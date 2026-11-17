@@ -347,7 +347,13 @@ def test_a_healthy_box_is_clear_and_fills_the_whole_shape(
         "retired": 0,
         "list": [
             {"bank_id": "shared", "facts": 1335, "documents": 253, "retired": False, "role": None},
-            {"bank_id": "coding-agent::repo-1.4", "facts": 20, "documents": 3, "retired": False, "role": None},
+            {
+                "bank_id": "coding-agent::repo-1.4",
+                "facts": 20,
+                "documents": 3,
+                "retired": False,
+                "role": None,
+            },
         ],
     }
     assert body["writes"] is None
