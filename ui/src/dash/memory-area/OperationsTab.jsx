@@ -32,6 +32,7 @@ import {
 import {
   BULK_CAP,
   banksForFilter,
+  liveBankIds,
   lastCompletedAt,
   plainError,
   queueFigures,
@@ -154,7 +155,8 @@ function Ready({ area, healthQuery, health }) {
   const [run, startBulk] = useBulkRun(refresh)
 
   // When the last operation finished: asked for only once the queue is known to be clear.
-  const scopeBanks = bank !== null ? [bank] : bankIds
+  const allBankIds = liveBankIds(bankIds, report?.banks?.list)
+  const scopeBanks = bank !== null ? [bank] : allBankIds
   const finished = useOperationLists(scopeBanks, { status: 'completed', limit: 1, enabled: clear })
   const lastDone = clear ? lastCompletedAt(finished.entries) : null
 
@@ -186,7 +188,7 @@ function Ready({ area, healthQuery, health }) {
   const stripLoading =
     health.kind === 'loading' || (bank !== null && statsQuery.data === undefined && !statsQuery.isError)
   // The banks a many-at-once action touches: the one in scope, or every bank with a failure.
-  const failedBanks = bank !== null ? [bank] : banksForFilter('failed', bankIds, queue?.by_bank ?? null)
+  const failedBanks = bank !== null ? [bank] : banksForFilter('failed', allBankIds, queue?.by_bank ?? null)
 
   return (
     <Frame state={health.kind === 'ready' ? (clear ? 'clear' : 'ready') : health.kind}>
@@ -228,7 +230,7 @@ function Ready({ area, healthQuery, health }) {
       />
       <OperationsList
         bank={bank}
-        bankIds={bankIds}
+        bankIds={allBankIds}
         byBank={queue?.by_bank ?? null}
         blocked={!!report?.cause}
         healthHref={healthHref}

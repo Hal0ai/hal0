@@ -319,6 +319,20 @@ export function mergeOperationLists(
   return { rows: kept, total, capped: total === null || kept.length < total }
 }
 
+/**
+ * The banks "all banks" reads: the ones the health answer does not mark retired. A retired bank's
+ * queue never drains and its content lives in the live banks, so it is read only when chosen.
+ * Without a health answer every bank is read.
+ */
+export function liveBankIds(
+  bankIds: string[],
+  healthBanks: Array<{ bank_id: string; retired?: boolean }> | null | undefined,
+): string[] {
+  if (!healthBanks) return bankIds
+  const retired = new Set(healthBanks.filter((b) => b.retired).map((b) => b.bank_id))
+  return retired.size === 0 ? bankIds : bankIds.filter((id) => !retired.has(id))
+}
+
 /** The banks a filter has rows in, so a quiet bank is not asked for nothing. */
 export function banksForFilter(
   filter: OperationFilter,
