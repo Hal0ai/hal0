@@ -28,7 +28,7 @@ import os
 import stat
 import tomllib
 from collections.abc import MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,9 @@ log = structlog.get_logger(__name__)
 
 RETIRED_SUFFIX = ".retired"
 BACKUP_SUFFIX = ".pre-convert"
+DEFER_REASONS = frozenset(
+    {"unreachable", "no_models", "no_valid_models", "backup_failed", "write_failed"}
+)
 _LOG_ID_CAP = 20
 
 
@@ -56,6 +59,8 @@ class ConvertResult:
     """Provider unreachable, listed nothing, or the write failed; retried next boot."""
     folded_provider_rows: int
     """``providers.toml`` entries whose selection was applied to a converted row."""
+    deferred_reasons: dict[str, str] = field(default_factory=dict, compare=False)
+    """Row name -> why it was deferred; one of :data:`DEFER_REASONS`."""
 
 
 @dataclass(frozen=True)
@@ -256,6 +261,13 @@ async def convert_legacy_upstreams(
 
     converted: list[str] = []
     deferred: list[str] = []
+    reasons: dict[str, str] = {}
+
+    def defer(name: str, reason: str, **fields: Any) -> None:
+        deferred.append(name)
+        reasons[name] = reason
+        log.info("upstreams.convert.deferred", name=name, reason=reason, **fields)
+
     settled: set[str] = set()  # rows that need no further word from providers.toml
     folded = 0
     backup_ok: bool | None = None  # decided at the first write of the run
@@ -269,8 +281,7 @@ async def convert_legacy_upstreams(
             payload = None
         discovered = parse_models_payload(payload, get_preset(current.catalog_id or ""))
         if not discovered:
-            deferred.append(name)
-            log.info("upstreams.convert.deferred", name=name, reason="no_models")
+            defer(name, "unreachable" if payload is None else "no_models")
             continue
         picked = selections.models.get(name) if selections is not None else None
         rows, skipped = _model_rows(current, discovered, picked)
@@ -282,8 +293,7 @@ async def convert_legacy_upstreams(
                 reasons=sorted(set(skipped)),
             )
         if not rows:
-            deferred.append(name)
-            log.info("upstreams.convert.deferred", name=name, reason="no_valid_models")
+            defer(name, "no_valid_models")
             continue
         if backup_ok is None:
             try:
@@ -293,21 +303,21 @@ async def convert_legacy_upstreams(
                 backup_ok = False
                 log.warning("upstreams.convert.backup_failed", error=type(exc).__name__)
         if not backup_ok:
-            deferred.append(name)
-            log.info("upstreams.convert.deferred", name=name, reason="no_backup")
+            defer(name, "backup_failed")
             continue
         try:
             registry.apply_persistent_patch(
                 name, {"models": rows, "curated": True, "model_filters": None}
             )
         except Exception as exc:
-            deferred.append(name)
             fields: dict[str, Any] = {"error": type(exc).__name__}
             if isinstance(exc, ValidationError):
                 fields["locations"] = sorted(
                     {".".join(str(p) for p in e["loc"]) for e in exc.errors()}
                 )[:_LOG_ID_CAP]
-            log.warning("upstreams.convert.deferred", name=name, **fields)
+            deferred.append(name)
+            reasons[name] = "write_failed"
+            log.warning("upstreams.convert.deferred", name=name, reason="write_failed", **fields)
             continue
         converted.append(name)
         if picked and selections is not None:
@@ -344,7 +354,7 @@ async def convert_legacy_upstreams(
         if not waiting and _upstreams_all_curated(selections.names):
             _retire(providers_toml)
 
-    return ConvertResult(tuple(converted), tuple(deferred), folded)
+    return ConvertResult(tuple(converted), tuple(deferred), folded, reasons)
 
 
 async def sync_new_models(
@@ -410,4 +420,4 @@ async def sync_new_models(
     return len(added)
 
 
-__all__ = ["ConvertResult", "convert_legacy_upstreams", "sync_new_models"]
+__all__ = ["DEFER_REASONS", "ConvertResult", "convert_legacy_upstreams", "sync_new_models"]

@@ -1090,7 +1090,12 @@ class UpstreamRegistry:
         style = (auth_style or "bearer").lower()
         stripped = key.strip()
         normal = normalise_key(style, auth_header, key)
-        sent, token = normal if normal is not None else (stripped, stripped)
+        if normal is not None:
+            sent, token = normal
+        else:  # refused input still goes out as given; keep the bare token redacted too
+            sent = token = stripped
+            if stripped.lower().startswith("bearer "):
+                token = stripped[7:].strip()
         headers = build_auth_headers(style, auth_header, sent)
         headers["Accept-Encoding"] = "identity"
         secrets = {s for s in (key, stripped, sent, token) if s}

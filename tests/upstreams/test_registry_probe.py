@@ -381,3 +381,15 @@ async def test_probe_redacts_lowercase_percent_escapes(monkeypatch: pytest.Monke
     out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key="sk/abc+def==")
     assert "sk%2f" not in out["error"].lower()
     assert "***" in out["error"]
+
+
+async def test_probe_redacts_the_bare_token_of_a_refused_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Inner whitespace: normalise_key refuses it, a direct caller still sends it.
+    _wire(monkeypatch, lambda r: httpx.Response(401, text="echo sk-bare and more"))
+    out = await UpstreamRegistry().probe(
+        url=URL, auth_style="header", auth_header="X-Token", key="Bearer sk-bare and more"
+    )
+    assert "sk-bare" not in out["error"]
+    assert "sk-bare" not in repr(out["headers"])

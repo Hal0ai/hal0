@@ -857,6 +857,19 @@ async def patch_upstream_model(
     return next(r for r in _merged_rows(updated, discovered) if r["id"] == model_id)
 
 
+def _deferred_warning(u: Any, reason: str | None) -> str:
+    """Operator-facing text for a row the converter left alone; no key, URL or error text."""
+    if reason in ("backup_failed", "write_failed"):
+        return (
+            "the config file could not be written, so the row was not converted; check the hal0 log"
+        )
+    if reason == "no_valid_models":
+        return "the provider's model list had no usable ids, so the row was not converted"
+    if reason in ("unreachable", "no_models"):
+        return f"the provider returned no models; {_why_unreachable(u)}"
+    return "the row changed while it was being converted; refresh again"
+
+
 def _why_unreachable(u: Any) -> str:
     """Class-wise hint for an empty provider answer; never carries a key or a URL."""
     if not u.url:
@@ -881,20 +894,22 @@ async def refresh_upstream_models(name: str, request: Request) -> dict[str, Any]
         from hal0.upstreams import convert
 
         warning: str | None = None
+        reason: str | None = None
         try:
-            await convert.convert_legacy_upstreams(
+            result = await convert.convert_legacy_upstreams(
                 request.app.state.upstreams,
                 providers_toml=paths.etc() / "providers.toml",
                 model_cache=getattr(request.app.state, "upstream_models", None),
                 discovery=_discovery_cache(request),
                 only=name,
             )
+            reason = result.deferred_reasons.get(name)
         except Exception as exc:
             _log.warning("upstream.refresh_convert_failed", name=name, error=type(exc).__name__)
             warning = f"conversion failed ({type(exc).__name__}); the row was not changed"
         u = _lookup_upstream(request, name)
         if warning is None and not u.curated:
-            warning = f"the provider returned no models; {_why_unreachable(u)}"
+            warning = _deferred_warning(u, reason)
         return await _listing(request, u, warning=warning)
     return await _listing(request, u, force=True)
 

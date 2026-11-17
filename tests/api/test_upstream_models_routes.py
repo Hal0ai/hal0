@@ -632,13 +632,47 @@ def test_refresh_reports_a_conversion_failure(
     assert "disk on fire" not in body["warning"]
 
 
-def test_refresh_warns_when_the_provider_gave_no_models(client: TestClient) -> None:
+def test_refresh_warns_to_check_url_and_key_when_unreachable(client: TestClient) -> None:
     _fresh(client)
     _add(client)
     _down(client)
     body = client.post("/api/upstreams/mm/refresh").json()
     assert body["stale"] is True
-    assert "no models" in body["warning"]
+    assert "check the url and key" in body["warning"]
+
+
+def test_refresh_write_failure_blames_the_config_file_not_the_provider(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hal0.config.loader as loader
+
+    _fresh(client)  # the provider answers fine
+    _add(client)
+
+    def boom(*a: Any, **k: Any) -> None:
+        raise OSError("/secret/path disk full")
+
+    monkeypatch.setattr(loader, "save_upstreams_config", boom)
+    body = client.post("/api/upstreams/mm/refresh").json()
+    assert body["curated"] is False
+    assert "could not be written" in body["warning"] and "hal0 log" in body["warning"]
+    assert "check the url and key" not in body["warning"]
+    assert "/secret/path" not in body["warning"] and URL not in body["warning"]
+
+
+@pytest.mark.parametrize(
+    ("payload", "needle"),
+    [
+        ({"data": []}, "check the url and key"),
+        ({"data": [{"id": " "}]}, "no usable ids"),
+    ],
+)
+def test_refresh_warning_matches_what_the_provider_returned(
+    client: TestClient, payload: Any, needle: str
+) -> None:
+    _fresh(client, payload)
+    _add(client)
+    assert needle in client.post("/api/upstreams/mm/refresh").json()["warning"]
 
 
 def test_refresh_has_no_warning_normally(client: TestClient) -> None:
