@@ -21,7 +21,11 @@ def _wire(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], ht
 
     def wrapped(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return handler(request)
+        built = handler(request)
+        # Serve it as a live stream, like a real transport, so ``aiter_raw`` works.
+        return httpx.Response(
+            built.status_code, headers=built.headers, stream=httpx.ByteStream(built.content)
+        )
 
     def factory(**kwargs: Any) -> httpx.AsyncClient:
         kwargs["transport"] = httpx.MockTransport(wrapped)
@@ -155,9 +159,9 @@ def test_probe_does_not_register_or_write(
 
     _wire(monkeypatch, lambda r: httpx.Response(200, json={"data": [{"id": "m"}]}))
     reg = client.app.state.upstreams
-    cache = getattr(client.app.state, "upstream_models", None)
+    cache = client.app.state.upstream_models
     names_before = sorted(u.name for u in reg.list())
-    cache_before = dict(cache) if cache is not None else None
+    cache_before = dict(cache)
     etc = paths.etc()
     watched = [etc / "upstreams.toml", etc / "api.env"]
     before = [(p.exists(), p.read_bytes() if p.exists() else b"") for p in watched]
@@ -166,8 +170,7 @@ def test_probe_does_not_register_or_write(
     assert res.status_code == 200
 
     assert sorted(u.name for u in reg.list()) == names_before
-    if cache is not None:
-        assert dict(cache) == cache_before
+    assert dict(cache) == cache_before
     after = [(p.exists(), p.read_bytes() if p.exists() else b"") for p in watched]
     assert after == before
     assert KEY not in "".join(os.environ.values())
@@ -194,4 +197,75 @@ def test_probe_never_returns_or_logs_the_key(
 def test_probe_error_excerpt_is_capped(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     _wire(monkeypatch, lambda r: httpx.Response(500, text="y" * 5000))
     res = client.post("/api/providers/probe", json={"url": "https://p.example/v1"})
-    assert len(res.json()["error"]) < 400
+    assert len(res.json()["error"]) <= 300
+
+
+def test_probe_bad_port_is_400_never_500(client: TestClient) -> None:
+    res = client.post("/api/providers/probe", json={"url": "http://h:abc/v1", "key": KEY})
+    assert res.status_code == 400
+    assert KEY not in res.text
+
+
+def test_probe_arbitrary_transport_exception_is_ok_false(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError(f"weird {KEY}")
+
+    _wire(monkeypatch, boom)
+    res = client.post("/api/providers/probe", json={"url": "https://p.example/v1", "key": KEY})
+    assert res.status_code == 200
+    assert res.json()["ok"] is False
+    assert KEY not in res.text
+
+
+@pytest.mark.parametrize("bad_key", ["abc\u00e9def", "has space", "tab\tkey", "new\nline"])
+def test_probe_rejects_non_ascii_or_whitespace_key_with_fixed_message(
+    client: TestClient, bad_key: str
+) -> None:
+    res = client.post("/api/providers/probe", json={"url": "https://p.example/v1", "key": bad_key})
+    assert res.status_code == 400
+    assert "ascii" not in res.text.lower() or "printable ASCII" in res.text
+    assert "codec" not in res.text
+    assert bad_key not in res.text and "\\u00e9" not in res.text
+    assert "position" not in res.text
+
+
+def test_probe_accepts_bearer_prefixed_key(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _wire(monkeypatch, lambda r: httpx.Response(200, json={"data": []}))
+    res = client.post(
+        "/api/providers/probe", json={"url": "https://p.example/v1", "key": f"Bearer {KEY}"}
+    )
+    assert res.status_code == 200
+    assert seen[0].headers["authorization"] == f"Bearer {KEY}"
+
+
+def test_probe_header_style_requires_header_name(client: TestClient) -> None:
+    res = client.post(
+        "/api/providers/probe",
+        json={"url": "https://p.example/v1", "auth_style": "header", "key": KEY},
+    )
+    assert res.status_code == 400
+    assert "auth_header" in res.text
+    assert KEY not in res.text
+
+
+def test_probe_requires_json_content_type(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _wire(monkeypatch, lambda r: httpx.Response(200, json={"data": []}))
+    res = client.post(
+        "/api/providers/probe",
+        content='{"url": "https://p.example/v1"}',
+        headers={"content-type": "text/plain"},
+    )
+    assert res.status_code == 415
+    assert seen == []
+
+
+def test_probe_shares_the_auth_style_constant() -> None:
+    from hal0.api.routes import providers
+
+    assert providers.KNOWN_AUTH_STYLES is registry_mod.KNOWN_AUTH_STYLES

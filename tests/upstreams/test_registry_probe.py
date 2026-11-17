@@ -27,7 +27,13 @@ def _wire(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], ht
 
     def wrapped(request: httpx.Request) -> httpx.Response:
         seen.append(request)
-        return handler(request)
+        built = handler(request)
+        if not built.is_stream_consumed:
+            return built
+        # Serve it as a live stream, like a real transport, so ``aiter_raw`` works.
+        return httpx.Response(
+            built.status_code, headers=built.headers, stream=httpx.ByteStream(built.content)
+        )
 
     def factory(**kwargs: Any) -> httpx.AsyncClient:
         kwargs["transport"] = httpx.MockTransport(wrapped)
@@ -184,3 +190,90 @@ async def test_probe_leaves_environment_and_registry_untouched(
     await reg.probe(url=URL, auth_style="bearer", key=KEY)
     assert dict(os.environ) == before
     assert reg.list() == []
+
+
+# ── review round: hardening ──────────────────────────────────────────────────
+
+
+async def test_probe_bad_port_is_a_url_error_not_a_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _wire(monkeypatch, lambda r: httpx.Response(200, json={}))
+    with pytest.raises(registry_mod.ProbeUrlError) as info:
+        await UpstreamRegistry().probe(url="http://h:abc/v1", auth_style="bearer", key=KEY)
+    assert seen == []
+    assert KEY not in str(info.value)
+
+
+async def test_probe_swallows_arbitrary_exceptions(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError(f"weird {KEY} {request.headers}")
+
+    _wire(monkeypatch, boom)
+    out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key=KEY)
+    assert out["ok"] is False
+    assert KEY not in repr(out)
+
+
+async def test_probe_invalid_url_inside_httpx_is_ok_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.InvalidURL(f"bad {KEY}")
+
+    _wire(monkeypatch, boom)
+    out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key=KEY)
+    assert out["ok"] is False
+    assert KEY not in repr(out)
+
+
+async def test_probe_error_is_at_most_300_chars(monkeypatch: pytest.MonkeyPatch) -> None:
+    _wire(monkeypatch, lambda r: httpx.Response(500, text="y" * 5000))
+    out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key=KEY)
+    assert len(out["error"]) <= 300
+
+
+async def test_probe_key_with_bearer_prefix_is_not_doubled_and_token_redacted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _wire(monkeypatch, lambda r: httpx.Response(401, text=f"bad token {KEY}"))
+    out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key=f"bEaReR {KEY}")
+    assert seen[0].headers["authorization"] == f"Bearer {KEY}"
+    assert KEY not in repr(out)
+
+
+async def test_probe_redacts_url_encoded_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    key = "sk/abc+def=="
+    _wire(monkeypatch, lambda r: httpx.Response(401, text="echo sk%2Fabc%2Bdef%3D%3D"))
+    out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key=key)
+    assert "sk%2Fabc" not in out["error"]
+    assert "***" in out["error"]
+
+
+async def test_probe_caps_compressed_body_by_decoded_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import gzip
+
+    bomb = gzip.compress(b"0" * (registry_mod.PROBE_MAX_BODY_BYTES * 4))
+    assert len(bomb) < registry_mod.PROBE_MAX_BODY_BYTES
+    _wire(
+        monkeypatch,
+        lambda r: httpx.Response(
+            200, stream=httpx.ByteStream(bomb), headers={"content-encoding": "gzip"}
+        ),
+    )
+    out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key=KEY)
+    assert out["ok"] is False
+    assert "too large" in out["error"]
+
+
+async def test_probe_accepts_gzip_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    import gzip
+
+    body = gzip.compress(b'{"data": [{"id": "m1"}]}')
+    seen = _wire(
+        monkeypatch,
+        lambda r: httpx.Response(
+            200, stream=httpx.ByteStream(body), headers={"content-encoding": "gzip"}
+        ),
+    )
+    out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key=KEY)
+    assert out["ok"] is True
+    assert seen[0].headers["accept-encoding"] == "identity"

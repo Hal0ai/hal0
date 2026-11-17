@@ -119,12 +119,37 @@ RESERVED_UPSTREAM_NAME = "hal0"
 
 
 #: Auth styles :func:`build_auth_headers` knows how to render.
-_KNOWN_AUTH_STYLES = frozenset({"bearer", "anthropic", "header", "none"})
+KNOWN_AUTH_STYLES = frozenset({"bearer", "anthropic", "header", "none"})
 
 #: Upper bound on a probed ``/models`` body; a hostile endpoint cannot make the
 #: dialog's server-side fetch buffer more than this.
 PROBE_MAX_BODY_BYTES = 2 * 1024 * 1024
 _PROBE_ERROR_EXCERPT = 300
+
+
+class ProbeUrlError(ValueError):
+    """An unusable probe URL. The message is fixed text and never echoes the URL or key."""
+
+
+def _decode_capped(raw: bytes, encoding: str) -> bytes | None:
+    """Decode a gzip/deflate body without ever holding more than the cap.
+
+    ``None`` means the decoded body exceeds :data:`PROBE_MAX_BODY_BYTES` or the
+    encoding is unsupported/corrupt.
+    """
+    import zlib
+
+    enc = encoding.strip().lower()
+    if enc in ("", "identity"):
+        return raw
+    if enc not in ("gzip", "x-gzip", "deflate"):
+        return None
+    wbits = zlib.MAX_WBITS | 16 if enc != "deflate" else zlib.MAX_WBITS
+    try:
+        out = zlib.decompressobj(wbits).decompress(raw, PROBE_MAX_BODY_BYTES + 1)
+    except zlib.error:
+        return None
+    return out if len(out) <= PROBE_MAX_BODY_BYTES else None
 
 
 def build_auth_headers(style: str, header_name: str, key: str) -> dict[str, str]:
@@ -156,14 +181,18 @@ def build_auth_headers(style: str, header_name: str, key: str) -> dict[str, str]
 
 
 def _redact_secret(text: str, key: str) -> str:
-    """Replace every occurrence of ``key`` in ``text`` with ``***``.
+    """Replace every occurrence of ``key`` (and its URL-encoded form) with ``***``.
 
     An empty key redacts nothing (it means "no auth header"); a short key is
     redacted like any other.
     """
     if not key:
         return text
-    return text.replace(key, "***")
+    from urllib.parse import quote
+
+    text = text.replace(key, "***")
+    encoded = quote(key, safe="")
+    return text.replace(encoded, "***") if encoded != key else text
 
 
 def _probe_transport_error(exc: BaseException) -> str:
@@ -179,22 +208,24 @@ def _probe_transport_error(exc: BaseException) -> str:
 
 
 def _probe_url(url: str) -> str:
-    """Validate a probe target and return its ``/models`` URL; ``ValueError`` if unusable.
+    """Validate a probe target and return its ``/models`` URL; ``ProbeUrlError`` if unusable.
 
-    Only http/https with a host and no embedded credentials. Loopback and LAN
-    hosts stay allowed (Ollama, a peer hal0). The message never echoes the URL.
+    Only http/https with a host, a valid port and no embedded credentials.
+    Loopback and LAN hosts stay allowed (Ollama, a peer hal0). The message
+    never echoes the URL.
     """
     from urllib.parse import urlsplit
 
     try:
         parts = urlsplit((url or "").strip())
         host = parts.hostname
-    except ValueError as exc:
-        raise ValueError("url is not a valid http(s) URL") from exc
+        parts.port  # noqa: B018 - raises ValueError on a non-numeric/out-of-range port
+    except ValueError:
+        raise ProbeUrlError("url is not a valid http(s) URL") from None
     if parts.scheme not in ("http", "https") or not host:
-        raise ValueError("url must be an http:// or https:// URL with a host")
+        raise ProbeUrlError("url must be an http:// or https:// URL with a host")
     if parts.username or parts.password:
-        raise ValueError("url must not contain embedded credentials")
+        raise ProbeUrlError("url must not contain embedded credentials")
     return url.strip().rstrip("/") + "/models"
 
 
@@ -751,7 +782,7 @@ class UpstreamRegistry:
                 "/etc/hal0/api.env, then restart hal0-api.",
                 details={"name": u.name, "auth_style": style, "env": u.auth_value_env},
             )
-        if style not in _KNOWN_AUTH_STYLES:
+        if style not in KNOWN_AUTH_STYLES:
             log.debug("upstream.unknown_auth_style", name=u.name, style=style)
         return build_auth_headers(style, u.auth_header, key)
 
@@ -993,13 +1024,18 @@ class UpstreamRegistry:
         ``os.environ`` or returned. Every provider-derived string (error text,
         response headers, the decoded body) has the key replaced with ``***``.
         Redirects are not followed and the body read stops at
-        :data:`PROBE_MAX_BODY_BYTES`. Raises ``ValueError`` for an unusable URL.
+        :data:`PROBE_MAX_BODY_BYTES`. Raises :class:`ProbeUrlError` for an unusable URL (before the key is bound);
+        any other failure is returned as ``ok: false`` with fixed-vocabulary text.
         """
         target = _probe_url(url)
         style = (auth_style or "bearer").lower()
         stripped = key.strip()
-        headers = build_auth_headers(style, auth_header, stripped)
-        secrets = {s for s in (key, stripped) if s}
+        token = stripped
+        if style == "bearer" and stripped.lower().startswith("bearer "):
+            token = stripped[7:].strip()
+        headers = build_auth_headers(style, auth_header, token)
+        headers["Accept-Encoding"] = "identity"
+        secrets = {s for s in (key, stripped, token) if s}
 
         def scrub(text: str) -> str:
             for secret in secrets:
@@ -1015,7 +1051,7 @@ class UpstreamRegistry:
                 "latency_ms": round((time.monotonic() - started) * 1000, 1),
                 "payload": None,
                 "headers": resp_headers or {},
-                "error": scrub(error),
+                "error": scrub(error)[:_PROBE_ERROR_EXCERPT],
             }
 
         started = time.monotonic()
@@ -1031,7 +1067,9 @@ class UpstreamRegistry:
                 chunks: list[bytes] = []
                 size = 0
                 too_large = False
-                async for chunk in resp.aiter_bytes():
+                # Raw (still-encoded) bytes: the cap bounds memory before any
+                # decompression happens.
+                async for chunk in resp.aiter_raw():
                     size += len(chunk)
                     if size > PROBE_MAX_BODY_BYTES:
                         too_large = True
@@ -1039,12 +1077,17 @@ class UpstreamRegistry:
                     chunks.append(chunk)
                 status = resp.status_code
                 reason = resp.reason_phrase
-        except (httpx.HTTPError, OSError) as exc:
+        except Exception as exc:
             return fail(None, _probe_transport_error(exc), started, None)
 
         if too_large:
             return fail(status, "response too large", started, resp_headers)
-        text = scrub(b"".join(chunks).decode("utf-8", errors="replace"))
+        decoded = _decode_capped(b"".join(chunks), resp_headers.get("content-encoding", ""))
+        if decoded is None:
+            return fail(
+                status, "response too large or in an unsupported encoding", started, resp_headers
+            )
+        text = scrub(decoded.decode("utf-8", errors="replace"))
         if status != 200:
             excerpt = text[:_PROBE_ERROR_EXCERPT].strip()
             message = f"HTTP {status} {reason}".strip()

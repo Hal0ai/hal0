@@ -40,7 +40,9 @@ from hal0.upstreams.catalog import reseed_curated_cache
 from hal0.upstreams.discovery import parse_models_payload
 from hal0.upstreams.presets import get_preset, load_presets, preset_to_api
 from hal0.upstreams.registry import (
+    KNOWN_AUTH_STYLES,
     RESERVED_UPSTREAM_NAME,
+    ProbeUrlError,
     UpstreamAlreadyExists,
     UpstreamNotFound,
     UpstreamProtected,
@@ -73,6 +75,11 @@ class UpstreamProtectedHTTP(Hal0Error):
 class UpstreamConflictHTTP(Hal0Error):
     code = "upstream.already_exists"
     status = 409
+
+
+class UnsupportedMediaTypeHTTP(Hal0Error):
+    code = "upstream.unsupported_media_type"
+    status = 415
 
 
 class UpstreamInvalidHTTP(Hal0Error):
@@ -577,7 +584,6 @@ async def providers_catalog() -> dict[str, dict[str, Any]]:
     return {pid: preset_to_api(p) for pid, p in load_presets().items()}
 
 
-_PROBE_AUTH_STYLES = frozenset({"bearer", "anthropic", "header", "none"})
 _RATE_LIMIT_FIELDS = ("limit_requests", "remaining_requests", "limit_tokens", "remaining_tokens")
 
 
@@ -595,6 +601,14 @@ class ProviderProbeBody(BaseModel):
     auth_style: str | None = Field(default=None)
     auth_header: str | None = Field(default=None)
     key: SecretStr | None = Field(default=None, repr=False)
+
+
+def _probe_key_ok(key: str) -> bool:
+    """Printable ASCII, no inner whitespace; one leading ``Bearer `` prefix is tolerated."""
+    token = key.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token.isascii() and all(0x21 <= ord(ch) <= 0x7E for ch in token)
 
 
 def _rate_limit_values(preset: Any, headers: dict[str, str]) -> dict[str, int | None]:
@@ -620,6 +634,10 @@ async def probe_provider(request: Request) -> dict[str, Any]:
     error, which would echo the offending ``input``, can carry the key.
     ``models[].canonical_id`` is always null: no provider name exists yet.
     """
+    # A cross-site form can send text/plain without a CORS preflight; refusing
+    # anything but JSON stops it driving a blind server-side GET.
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+        raise UnsupportedMediaTypeHTTP("content-type must be application/json")
     try:
         raw = await request.json()
         body = ProviderProbeBody.model_validate(raw)
@@ -644,20 +662,24 @@ async def probe_provider(request: Request) -> dict[str, Any]:
     if not url:
         raise UpstreamInvalidHTTP("url is required (or supply a catalog_id with a known base_url)")
     auth_style = body.auth_style or (preset.auth if preset is not None else "") or "bearer"
-    if auth_style.lower() not in _PROBE_AUTH_STYLES:
+    if auth_style.lower() not in KNOWN_AUTH_STYLES:
         raise UpstreamInvalidHTTP(
-            f"unknown auth_style {auth_style!r}", details={"known": sorted(_PROBE_AUTH_STYLES)}
+            f"unknown auth_style {auth_style!r}", details={"known": sorted(KNOWN_AUTH_STYLES)}
         )
     auth_header = body.auth_header or (
         preset.auth_header_name if preset is not None and preset.auth == "header" else ""
     )
+    if auth_style.lower() == "header" and not auth_header.strip():
+        raise UpstreamInvalidHTTP("auth_style 'header' needs an auth_header name")
     key = body.key.get_secret_value() if body.key is not None else ""
+    if not _probe_key_ok(key):
+        raise UpstreamInvalidHTTP("key must be printable ASCII without whitespace")
 
     try:
         result = await request.app.state.upstreams.probe(
             url=url, auth_style=auth_style, auth_header=auth_header, key=key
         )
-    except ValueError as exc:
+    except ProbeUrlError as exc:
         raise UpstreamInvalidHTTP(str(exc)) from None
 
     models: list[dict[str, Any]] = []
