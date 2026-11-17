@@ -685,3 +685,112 @@ async def test_unmatched_picks_are_logged_by_id(tmp_hal0_home: str, monkeypatch)
 
     done = _events(logs, "upstreams.convert.converted")
     assert done[0]["unmatched_picks"] == ["gone", "zz"]
+
+
+# ── sync_new_models: newly offered ids become switched-off rows ──────────────
+
+
+def _curated_row(name: str, *rows: tuple[str, bool]) -> str:
+    models = "".join(
+        f'[[upstream.models]]\nid = "{mid}"\nenabled = {str(on).lower()}\n' for mid, on in rows
+    )
+    return _row(name, "curated = true\n" + models)
+
+
+async def test_sync_adds_a_new_id_as_a_disabled_row(tmp_hal0_home: str, monkeypatch) -> None:
+    from hal0.upstreams.convert import sync_new_models
+
+    registry, path = _boot(_curated_row("mm", ("a", True), ("b", False)))
+    _serve(
+        monkeypatch,
+        registry,
+        {"mm": {"data": [{"id": "a"}, {"id": "b"}, {"id": "c", "context_length": 8192}]}},
+    )
+    model_cache: dict[str, list[str]] = {"mm": ["a"]}
+    discovery = DiscoveryCache()
+
+    added = await sync_new_models(registry, "mm", model_cache=model_cache, discovery=discovery)
+
+    assert added == 1
+    disk = _disk(path, "mm")
+    assert [(m["id"], m["enabled"]) for m in disk["models"]] == [
+        ("a", True),
+        ("b", False),
+        ("c", False),
+    ]
+    assert disk["models"][2]["context"] == 8192
+    assert [m.id for m in registry.get("mm").models] == ["a", "b", "c"]
+    assert model_cache["mm"] == ["a"]  # a new row is off: routing is unchanged
+    assert discovery.get("mm") is not None
+
+
+async def test_sync_writes_nothing_when_nothing_is_new(tmp_hal0_home: str, monkeypatch) -> None:
+    from hal0.upstreams.convert import sync_new_models
+
+    registry, path = _boot(_curated_row("mm", ("a", True), ("b", False)))
+    before = path.read_bytes()
+    _serve(monkeypatch, registry, {"mm": _ids("b", "a")})
+
+    assert await sync_new_models(registry, "mm") == 0
+    assert path.read_bytes() == before
+
+
+async def test_sync_never_writes_for_an_unreachable_provider(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    from hal0.upstreams.convert import sync_new_models
+
+    registry, path = _boot(_curated_row("mm", ("a", True)))
+    before = path.read_bytes()
+
+    async def boom(name: str) -> Any:
+        raise OSError("unreachable")
+
+    monkeypatch.setattr(registry, "fetch_model_payload", boom)
+    assert await sync_new_models(registry, "mm") == 0
+    _serve(monkeypatch, registry, {})  # answers None
+    assert await sync_new_models(registry, "mm") == 0
+    assert path.read_bytes() == before
+
+
+async def test_sync_skips_invalid_ids(tmp_hal0_home: str, monkeypatch) -> None:
+    from hal0.upstreams.convert import sync_new_models
+
+    registry, path = _boot(_curated_row("mm", ("a", True)))
+    _serve(monkeypatch, registry, {"mm": _ids("a", " ", "new", "new")})
+
+    assert await sync_new_models(registry, "mm") == 1
+    assert [m["id"] for m in _disk(path, "mm")["models"]] == ["a", "new"]
+
+
+async def test_sync_ignores_an_uncurated_row(tmp_hal0_home: str, monkeypatch) -> None:
+    from hal0.upstreams.convert import sync_new_models
+
+    registry, path = _boot(_row("plain"))
+    before = path.read_bytes()
+    calls = _serve(monkeypatch, registry, {"plain": _ids("x")})
+
+    assert await sync_new_models(registry, "plain") == 0
+    assert calls == []
+    assert path.read_bytes() == before
+
+
+async def test_boot_phase_syncs_already_curated_providers(tmp_hal0_home: str, monkeypatch) -> None:
+    from hal0.api import _boot_upstream_conversion
+
+    registry, path = _boot(_curated_row("mm", ("a", True)) + _row("plain"))
+    calls = _serve(monkeypatch, registry, {"mm": _ids("a", "z"), "plain": _ids("p")})
+    model_cache: dict[str, list[str]] = {}
+    app, ctx = _boot_ctx(registry, model_cache)
+
+    await _boot_upstream_conversion(app, ctx)
+    await ctx.upstream_conversion_task
+
+    assert [(m["id"], m["enabled"]) for m in _disk(path, "mm")["models"]] == [
+        ("a", True),
+        ("z", False),
+    ]
+    # "plain" was converted from its own listing and is not fetched again.
+    assert sorted(calls) == ["mm", "plain"]
+    assert app.state.upstream_discovery.get("mm") is not None
+    await ctx.stop_upstream_conversion_task()

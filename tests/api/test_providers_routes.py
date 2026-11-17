@@ -718,3 +718,32 @@ def test_patch_upstream_refuses_a_reserved_auth_value_env(client: TestClient) ->
     assert response.status_code == 400, response.text
     assert response.json()["error"]["code"] == "upstream.invalid"
     assert client.app.state.upstreams.get("custom").auth_value_env == "CUSTOM_KEY"
+
+
+def test_patch_keeps_the_discovery_entry_unless_the_endpoint_changes(client: TestClient) -> None:
+    from hal0.upstreams.discovery import DiscoveredModel
+
+    _seed_upstreams(client)
+    _seed_openrouter_in_toml(client)
+    discovery = client.app.state.upstream_discovery
+    listing = [DiscoveredModel(id="m", type="chat", type_source="guess")]
+
+    discovery.put("openrouter", listing)
+    for body in ({"advertise_models": False}, {"timeout_seconds": 30.0}, {"enabled": True}):
+        assert client.patch("/api/upstreams/openrouter", json=body).status_code == 200
+        assert discovery.get("openrouter") is not None, body
+
+    # Re-sending the current url is not a change.
+    url = client.app.state.upstreams.get("openrouter").url
+    assert client.patch("/api/upstreams/openrouter", json={"url": url}).status_code == 200
+    assert discovery.get("openrouter") is not None
+
+    for body in (
+        {"url": "https://other.example.invalid/v1"},
+        {"auth_value_env": "OTHER_EXAMPLE_KEY"},
+        {"auth_style": "header", "auth_header": "x-api-key"},
+    ):
+        discovery.put("openrouter", listing)
+        resp = client.patch("/api/upstreams/openrouter", json=body)
+        assert resp.status_code == 200, resp.text
+        assert discovery.get("openrouter") is None, body

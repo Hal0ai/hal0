@@ -338,6 +338,11 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
     return out
 
 
+# Fields that decide which listing a provider answers with: a change to any of
+# them makes a stored discovery entry stale.
+_DISCOVERY_IDENTITY_FIELDS = ("url", "auth_style", "auth_header", "auth_value_env", "catalog_id")
+
+
 class UpstreamPatchBody(BaseModel):
     """Body for ``PATCH /api/upstreams/{name}``.
 
@@ -468,8 +473,10 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
         # is always the enabled list, whatever flipped.
         reseed_curated_cache(upstreams, model_cache, name)
     discovery = getattr(request.app.state, "upstream_discovery", None)
-    if discovery is not None:
-        discovery.drop(name)  # url or credentials may have changed
+    if discovery is not None and any(
+        getattr(u, f, None) != getattr(updated, f, None) for f in _DISCOVERY_IDENTITY_FIELDS
+    ):
+        discovery.drop(name)  # a listing from another endpoint or account is stale
 
     _audit_log.info(
         "upstream.patch",

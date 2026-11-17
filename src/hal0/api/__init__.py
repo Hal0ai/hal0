@@ -171,7 +171,7 @@ from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.store import ModelRegistry
 from hal0.security.exposure import COMPAT_MEMORY_PREFIX
 from hal0.slots.manager import SlotManager
-from hal0.upstreams.catalog import reseed_curated_cache
+from hal0.upstreams.catalog import participates, reseed_curated_cache
 from hal0.upstreams.discovery import DiscoveryCache
 from hal0.upstreams.huggingface import hf_token_from_env
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
@@ -1346,7 +1346,9 @@ async def _run_upstream_conversion(
     """Convert pre-catalog upstream rows once their providers answer; never raises.
 
     Unreachable providers are deferred (row untouched, retried next boot), so
-    this is safe to run on every boot. Cancellation is the one thing that passes
+    this is safe to run on every boot. Afterwards each other curated provider's
+    listing is fetched once and newly offered models are stored as switched-off
+    rows (:func:`hal0.upstreams.convert.sync_new_models`). Cancellation is the one thing that passes
     through, so shutdown can stop it.
     """
     from hal0.config import paths
@@ -1369,6 +1371,17 @@ async def _run_upstream_conversion(
             deferred=len(result.deferred),
             folded_provider_rows=result.folded_provider_rows,
         )
+    # Keep every other curated provider's rows current: models it has started
+    # offering become switched-off rows. A row converted just now came from the
+    # same listing, so it is skipped.
+    # sync_new_models logs and swallows its own failures.
+    names = [u.name for u in registry.list() if participates(u) and u.name not in result.converted]
+    await asyncio.gather(
+        *(
+            convert.sync_new_models(registry, name, model_cache=model_cache, discovery=discovery)
+            for name in names
+        )
+    )
 
 
 async def _boot_upstream_conversion(app: FastAPI, ctx: BootState) -> None:

@@ -13,9 +13,13 @@ that row exactly as it was and never stops the others.
 
 It also retires the old ``providers.toml`` store, whose per-provider model
 selection is folded into the matching rows. The file is renamed, never deleted.
+
+:func:`sync_new_models` is not part of the one-time conversion: it keeps a
+curated provider's rows current (boot and the refresh route call it) and
+outlives the rest of this module.
 """
 
-# HAL0-SUNSET: v2.0.0  — one-time conversion of pre-catalog upstream rows; delete the module, its boot phase and its tests once every supported box has run it.
+# HAL0-SUNSET: v2.0.0  — one-time conversion of pre-catalog upstream rows; delete the module (moving sync_new_models out first), its boot phase and its tests once every supported box has run it.
 
 from __future__ import annotations
 
@@ -36,7 +40,7 @@ from hal0.upstreams.catalog import canonical_id, enabled_ids, participates, rese
 from hal0.upstreams.discovery import DiscoveredModel, DiscoveryCache, parse_models_payload
 from hal0.upstreams.filters import is_advertised
 from hal0.upstreams.presets import get_preset
-from hal0.upstreams.registry import Upstream, UpstreamRegistry
+from hal0.upstreams.registry import Upstream, UpstreamRegistry, _models_to_config
 
 log = structlog.get_logger(__name__)
 
@@ -103,30 +107,32 @@ def _read_selections(path: Path | None) -> _Selections | None:
     return _Selections({k: frozenset(v) for k, v in models.items()}, entries)
 
 
-def _model_rows(
-    row: Upstream, discovered: list[DiscoveredModel], picked: frozenset[str] | None
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Per-model rows for the patch, plus the reason class of each id left out.
+def _row_data(m: DiscoveredModel, enabled: bool) -> dict[str, Any]:
+    return {
+        "id": m.id,
+        "enabled": enabled,
+        "type": m.type,
+        "context": m.context,
+        "price_in": m.price_in,
+        "price_out": m.price_out,
+        "price_unit": m.price_unit,
+    }
 
-    A ``providers.toml`` pick beats the old filters. An id the row schema would
-    reject (blank, duplicate) is skipped rather than failing the whole row.
+
+def _valid_rows(
+    candidates: list[tuple[DiscoveredModel, bool]], seen: set[str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Row dicts for ``(model, enabled)`` pairs, plus the reason class of each id left out.
+
+    An id the row schema would reject (blank, duplicate, or already in
+    ``seen``) is skipped rather than failing the whole write. ``seen`` grows.
     """
     from hal0.config.schema import UpstreamModelEntry
 
     out: list[dict[str, Any]] = []
     skipped: list[str] = []
-    seen: set[str] = set()
-    for m in discovered:
-        enabled = m.id in picked if picked else is_advertised(m.id, row.model_filters)
-        data = {
-            "id": m.id,
-            "enabled": enabled,
-            "type": m.type,
-            "context": m.context,
-            "price_in": m.price_in,
-            "price_out": m.price_out,
-            "price_unit": m.price_unit,
-        }
+    for m, enabled in candidates:
+        data = _row_data(m, enabled)
         if m.id in seen:
             skipped.append("duplicate_id")
             continue
@@ -138,6 +144,20 @@ def _model_rows(
         seen.add(m.id)
         out.append(data)
     return out, skipped
+
+
+def _model_rows(
+    row: Upstream, discovered: list[DiscoveredModel], picked: frozenset[str] | None
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Per-model rows for the patch, plus the reason class of each id left out.
+
+    A ``providers.toml`` pick beats the old filters.
+    """
+    pairs = [
+        (m, m.id in picked if picked else is_advertised(m.id, row.model_filters))
+        for m in discovered
+    ]
+    return _valid_rows(pairs, set())
 
 
 def _backup_upstreams(src: Path) -> None:
@@ -322,4 +342,67 @@ async def convert_legacy_upstreams(
     return ConvertResult(tuple(converted), tuple(deferred), folded)
 
 
-__all__ = ["ConvertResult", "convert_legacy_upstreams"]
+async def sync_new_models(
+    registry: UpstreamRegistry,
+    name: str,
+    *,
+    model_cache: MutableMapping[str, list[str]] | None = None,
+    discovery: DiscoveryCache | None = None,
+) -> int:
+    """Store each model a curated provider newly offers as a switched-off row.
+
+    Fetches the provider's model list once. Every offered id with no stored row
+    is added with ``enabled = false`` (type, context and prices from the
+    listing) in one persistent write; existing rows are never changed or
+    removed, and nothing is written when nothing is new. Failures (unreachable,
+    empty answer, a failed write) are logged and return ``0``. Only providers
+    that take part in catalog routing are synced. ``discovery`` receives the
+    parsed listing; ``model_cache`` is reseeded after a write.
+
+    Returns the number of rows added.
+    """
+    row = registry.get(name)
+    if row is None or not participates(row):
+        return 0
+    try:
+        payload = await registry.fetch_model_payload(name)
+    except Exception as exc:
+        log.info("upstreams.sync.fetch_failed", name=name, error=type(exc).__name__)
+        return 0
+    discovered = parse_models_payload(payload, get_preset(row.catalog_id or ""))
+    if not discovered:
+        log.info("upstreams.sync.no_models", name=name)
+        return 0
+    if discovery is not None:
+        discovery.put(name, discovered)
+    current = registry.get(name)
+    if current is None or not participates(current):
+        return 0  # changed while we were fetching: not ours to touch
+    stored = {m.id for m in current.models}
+    added, skipped = _valid_rows([(m, False) for m in discovered if m.id not in stored], stored)
+    if skipped:
+        log.warning(
+            "upstreams.sync.skipped_models",
+            name=name,
+            count=len(skipped),
+            reasons=sorted(set(skipped)),
+        )
+    if not added:
+        return 0
+    try:
+        registry.apply_persistent_patch(name, {"models": _models_to_config(current.models) + added})
+    except Exception as exc:
+        log.warning("upstreams.sync.write_failed", name=name, error=type(exc).__name__)
+        return 0
+    if model_cache is not None:
+        reseed_curated_cache(registry, model_cache, name)
+    log.info(
+        "upstreams.sync.added_models",
+        name=name,
+        added=len(added),
+        ids=[r["id"] for r in added][:_LOG_ID_CAP],
+    )
+    return len(added)
+
+
+__all__ = ["ConvertResult", "convert_legacy_upstreams", "sync_new_models"]
