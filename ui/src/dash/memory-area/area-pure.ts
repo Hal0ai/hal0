@@ -111,6 +111,28 @@ export function engineFromHealth(view: HealthView): EngineState {
 
 // ── Banks ─────────────────────────────────────────────────────────────────────
 
+/** What a bank is in the two-bank layout: the shared one, the private one, or a leftover. */
+export type BankRole = 'shared' | 'private' | 'retired'
+
+/**
+ * The role of each bank the health answer lists. A bank the answer flags `retired` is retired;
+ * of the live ones, the two the layout names are told apart by the end of their id after a separator
+ * (`hal0:shared`, `hal0:private`, or the same under a name the operator chose). A bank with no
+ * role is left out, and nothing is guessed while the answer has not arrived.
+ */
+export function bankRoles(view: HealthView): Record<string, BankRole> {
+  const roles: Record<string, BankRole> = {}
+  const list = view?.kind === 'ready' || view?.kind === 'unreachable' ? view.report.banks?.list : null
+  if (!Array.isArray(list)) return roles
+  for (const bank of list) {
+    if (!isRecord(bank) || typeof bank.bank_id !== 'string') continue
+    if (bank.retired === true) roles[bank.bank_id] = 'retired'
+    else if (/[:_.-]shared$/i.test(bank.bank_id)) roles[bank.bank_id] = 'shared'
+    else if (/[:_.-]private$/i.test(bank.bank_id)) roles[bank.bank_id] = 'private'
+  }
+  return roles
+}
+
 export interface BankRow {
   id: string
   facts: number | null

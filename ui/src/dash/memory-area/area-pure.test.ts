@@ -4,6 +4,7 @@ import type { MemoryHealth, MemoryHealthReport } from '@/api/hooks/useMemory'
 import { memoryHealthFixture } from '@/api/mockFixtures'
 import {
   bankListMissing,
+  bankRoles,
   bankTotals,
   engineFromHealth,
   engineState,
@@ -356,5 +357,38 @@ describe('metaLine', () => {
     expect(bankListMissing(unlisted)).toBe(true)
     expect(metaLine(unlisted)).toEqual({ kind: 'text', text: 'Engine reachable · bank list not available' })
     expect(bankListMissing(view(healthReport()))).toBe(false)
+  })
+})
+
+describe('bankRoles', () => {
+  const view = (list: Array<{ bank_id: string; retired?: boolean }>): HealthView => ({
+    kind: 'ready',
+    report: {
+      ...healthReport(),
+      banks: { layout: 'two_bank', total: list.length, facts: 0, list: list.map((b) => ({ facts: 1, documents: 1, ...b })) },
+    },
+  })
+
+  it('tells the shared, the private and the retired banks apart', () => {
+    expect(
+      bankRoles(
+        view([
+          { bank_id: 'hal0:shared' },
+          { bank_id: 'hal0:private' },
+          { bank_id: 'Hal0::Agents', retired: true },
+          { bank_id: 'hal0-mono' },
+        ]),
+      ),
+    ).toEqual({ 'hal0:shared': 'shared', 'hal0:private': 'private', 'Hal0::Agents': 'retired' })
+  })
+
+  it('lets the retired flag win over a name', () => {
+    expect(bankRoles(view([{ bank_id: 'old:shared', retired: true }]))).toEqual({ 'old:shared': 'retired' })
+  })
+
+  it('names nothing before the answer arrives or when it has no bank list', () => {
+    expect(bankRoles({ kind: 'loading' })).toEqual({})
+    expect(bankRoles({ kind: 'off' })).toEqual({})
+    expect(bankRoles(undefined as unknown as HealthView)).toEqual({})
   })
 })

@@ -29,6 +29,7 @@ import {
   useQueueHealth,
   useQueueRefresh,
 } from './operations-data'
+import { bankRoles } from './area-pure'
 import {
   BULK_CAP,
   banksForFilter,
@@ -161,9 +162,10 @@ function Ready({ area, healthQuery, health }) {
   const lastDone = clear ? lastCompletedAt(finished.entries) : null
 
   const healthHref = memoryTabHref('health', route)
+  const roles = bankRoles(area.health)
   const scopeBar = (
     <ScopeBar
-      banks={[{ id: ALL_BANKS, label: 'All banks' }, ...bankIds.map((id) => ({ id }))]}
+      banks={[{ id: ALL_BANKS, label: 'All banks' }, ...bankIds.map((id) => ({ id, role: roles[id] }))]}
       bank={bank ?? ALL_BANKS}
       onBankChange={(id) => replaceRoute({ bank: id || null })}
     />

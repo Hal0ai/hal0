@@ -20,6 +20,7 @@ import './memory-area.css'
 import { EmptyState } from './shared/EmptyState.jsx'
 import { GoLink } from './shared/GoLink.jsx'
 import { ScopeBar } from './shared/ScopeBar.jsx'
+import { bankRoles } from './area-pure'
 import { memoryTabHref } from './memory-route-pure'
 import { loadMemoryWorkspace, memoryWorkspaceReady } from '../memory-workspace-modules'
 
@@ -45,6 +46,7 @@ function Card({ children, testId }) {
 /** @param {{ area: object }} props What MemoryArea holds: the route, the engine check, the banks. */
 export function FactsTab({ area }) {
   const { route, replaceRoute, engine, banks, banksLoading, banksFailed, banksQuery } = area
+  const roles = bankRoles(area.health)
   const ready = engine === 'reachable' && !banksLoading && !banksFailed
   const first = banks[0]?.bank_id ?? null
   const listed = !!route.bank && banks.some((b) => b.bank_id === route.bank)
@@ -152,7 +154,11 @@ export function FactsTab({ area }) {
 
   const Workspace = typeof window !== 'undefined' ? window.MemV2Workspace : null
   const scope = (
-    <ScopeBar banks={banks.map((b) => ({ id: b.bank_id }))} bank={route.bank} onBankChange={selectBank} />
+    <ScopeBar
+      banks={banks.map((b) => ({ id: b.bank_id, role: roles[b.bank_id] }))}
+      bank={route.bank}
+      onBankChange={selectBank}
+    />
   )
 
   // The address names a bank the engine does not list (deleted, or mistyped). Its facts are

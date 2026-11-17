@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { createElement } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { SEGMENT_LIMIT, ScopeBar } from './ScopeBar.jsx'
+import { SEGMENT_LIMIT, ScopeBar, focusBankControl } from './ScopeBar.jsx'
 import { cleanup, click, mount } from './test-harness'
 
 afterEach(cleanup)
@@ -64,6 +64,49 @@ describe('ScopeBar', () => {
     const radios = [...host.querySelectorAll('[role="radio"]')]
     expect(radios[0].textContent).toBe('hal0:shared52,955')
     expect(radios[1].textContent).toBe('b')
+  })
+
+  it('marks a bank as shared, private or retired in words, and in its accessible name', () => {
+    const { host } = mount(
+      createElement(ScopeBar, {
+        banks: [
+          { id: 'hal0:shared', role: 'shared' },
+          { id: 'hal0:private', role: 'private' },
+          { id: 'Hal0::Agents', role: 'retired' },
+          { id: 'plain' },
+        ],
+        bank: 'hal0:shared',
+        onBankChange: () => {},
+      }),
+    )
+    const radios = [...host.querySelectorAll<HTMLElement>('[role="radio"]')]
+    expect(radios.map((r) => r.textContent)).toEqual([
+      'hal0:sharedshared',
+      'hal0:privateprivate',
+      'Hal0::Agentsretired',
+      'plain',
+    ])
+    expect(radios.map((r) => r.getAttribute('aria-label'))).toEqual([
+      'hal0:shared, shared',
+      'hal0:private, private',
+      'Hal0::Agents, retired',
+      null,
+    ])
+    expect(radios[2].querySelector('.ma-bank-role')!.getAttribute('title')).toContain('Retired')
+  })
+
+  it('marks the role in the select too once there are many banks', () => {
+    const banks = [...banksOf(SEGMENT_LIMIT), { id: 'hal0:shared', role: 'shared' as const }]
+    const { host } = mount(createElement(ScopeBar, { banks, bank: 'hal0:shared', onBankChange: () => {} }))
+    expect(combo(host, 'Bank')!.textContent).toContain('shared')
+  })
+
+  it('moves focus to the bank control on request', () => {
+    const { host } = mount(
+      createElement(ScopeBar, { banks: banksOf(2), bank: 'Hal0::Bank.2', onBankChange: () => {} }),
+    )
+    focusBankControl()
+    expect((host.ownerDocument.activeElement as HTMLElement).textContent).toBe('Hal0::Bank.2')
   })
 
   it.each([[undefined], [null], [[]]])('renders no project control when projects is %j', (projects) => {
