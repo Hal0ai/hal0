@@ -2048,8 +2048,10 @@ async def test_model_tools_are_registered(queue: ApprovalQueue) -> None:
 
 
 def test_model_tool_classification() -> None:
-    assert {"upstream_model_update", "provider_probe"} <= admin.GATED_TOOLS
-    assert {"upstream_models", "upstream_refresh"} <= admin.AUTONOMOUS_READ_TOOLS
+    # refresh rewrites upstreams.toml on an unconverted row, so it is gated.
+    assert {"upstream_model_update", "provider_probe", "upstream_refresh"} <= admin.GATED_TOOLS
+    assert "upstream_models" in admin.AUTONOMOUS_READ_TOOLS
+    assert "upstream_refresh" not in admin.AUTONOMOUS_READ_TOOLS
     for tool in _MODEL_TOOLS:
         assert tool not in admin.AUTONOMOUS_WRITE_TOOLS
 
@@ -2078,6 +2080,19 @@ def test_upstream_create_lists_every_preset_and_takes_models() -> None:
         assert preset_id in description
         assert preset_id in catalog_hint["description"]
     assert admin.TOOL_PARAM_HINTS["upstream_create"]["properties"]["models"]["type"] == "array"
+
+
+def test_upstream_model_update_schema_requires_its_path_args_and_lists_values() -> None:
+    schema = admin.tool_param_schema("upstream_model_update")
+    assert schema["required"] == ["name", "model_id"]
+    props = schema["properties"]
+    from hal0.config.schema import VALID_PRICE_UNITS
+    from hal0.upstreams.catalog import MODEL_TYPES
+
+    for t in MODEL_TYPES:
+        assert t in props["type"]["description"]
+    for unit in VALID_PRICE_UNITS:
+        assert unit in props["price_unit"]["description"]
 
 
 @pytest.mark.asyncio

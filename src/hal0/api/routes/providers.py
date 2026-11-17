@@ -746,6 +746,7 @@ async def _listing(
         return {
             "name": u.name,
             "curated": False,
+            "protected": True,
             "fetched_at": None,
             "stale": False,
             "warning": warning,
@@ -756,6 +757,7 @@ async def _listing(
         return {
             "name": u.name,
             "curated": False,
+            "protected": False,
             "fetched_at": None,
             "stale": True,
             "warning": warning,
@@ -767,6 +769,7 @@ async def _listing(
     return {
         "name": u.name,
         "curated": True,
+        "protected": False,
         "fetched_at": fetched_at,
         "stale": stale,
         "warning": warning,

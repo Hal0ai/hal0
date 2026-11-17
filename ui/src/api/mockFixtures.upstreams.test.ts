@@ -27,7 +27,7 @@ const ROW_KEYS = [
   'recommended',
   'type',
 ]
-const LISTING_KEYS = ['curated', 'fetched_at', 'models', 'name', 'stale', 'warning']
+const LISTING_KEYS = ['curated', 'fetched_at', 'models', 'name', 'protected', 'stale', 'warning']
 
 describe('mock upstream catalogue', () => {
   const catalog = serve('/api/providers/catalog') as Record<string, Record<string, unknown>>
@@ -90,9 +90,11 @@ describe('mock upstream model listing', () => {
 
 describe('mock upstream mutation fixtures', () => {
   it('patches one row, keeping the id the caller sent', () => {
-    const row = MOCK_MUTATION_FIXTURES.upstreamModelPatch('openrouter', 'qwen/qwen3-coder', {
+    const answer = MOCK_MUTATION_FIXTURES.upstreamModelPatch('openrouter', 'qwen/qwen3-coder', {
       enabled: false,
     })
+    expect(answer.status).toBe(200)
+    const row = answer.body as Record<string, any>
     expect(Object.keys(row).sort()).toEqual(ROW_KEYS)
     expect(row.id).toBe('qwen/qwen3-coder')
     expect(row.enabled).toBe(false)
@@ -101,9 +103,21 @@ describe('mock upstream mutation fixtures', () => {
   it('seeds a row for a model only discovery lists', () => {
     const row = MOCK_MUTATION_FIXTURES.upstreamModelPatch('openrouter', 'new/model', {
       enabled: true,
-    })
+    }).body as Record<string, any>
     expect(row.canonical_id).toBe('openrouter/new/model')
     expect(row.enabled).toBe(true)
+  })
+
+  it('answers a patch on an unconverted upstream with the 409 error envelope', () => {
+    const answer = MOCK_MUTATION_FIXTURES.upstreamModelPatch('corp', 'corp-embed', { enabled: false })
+    expect(answer.status).toBe(409)
+    expect(answer.body).toEqual({
+      error: {
+        code: 'upstream.not_curated',
+        message: expect.stringContaining('not converted yet'),
+        details: { name: 'corp' },
+      },
+    })
   })
 
   it('refreshes a curated row and warns on an unconverted one', () => {

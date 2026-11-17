@@ -504,7 +504,12 @@ def _print_listing(listing: dict[str, Any]) -> None:
     """Render a ``GET /models`` / ``POST /refresh`` body as a table plus notes."""
     name = listing.get("name", "")
     rows = listing.get("models") or []
-    if not listing.get("curated", True):
+    if listing.get("protected"):
+        console.print(
+            f"[dim]{name} is managed elsewhere (agent-managed, slot-backed or reserved): "
+            "these are the models it serves now, and they are read-only here.[/dim]"
+        )
+    elif not listing.get("curated", True):
         console.print(
             f"[yellow]{name} is not converted yet:[/yellow] the rows below are what it "
             f"serves today. Run [bold]hal0 upstream refresh {name}[/bold] when the "

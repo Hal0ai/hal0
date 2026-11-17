@@ -365,6 +365,15 @@ def test_models_uncurated_row_says_so(api: dict[str, Any]) -> None:
     assert "check the url and key" in result.output
 
 
+def test_models_protected_upstream_is_not_called_unconverted(api: dict[str, Any]) -> None:
+    api["get_response"] = {**_LISTING, "name": "hermes", "curated": False, "protected": True}
+    result = runner.invoke(upstream_commands.app, ["models", "hermes"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "not converted" not in result.output
+    assert "read-only" in result.output
+    assert "hal0 upstream refresh" not in result.output
+
+
 def test_enable_patches_the_row_with_only_enabled(api: dict[str, Any]) -> None:
     result = runner.invoke(upstream_commands.app, ["enable", "openrouter", "qwen/qwen3-coder"])
     assert result.exit_code == 0, result.output

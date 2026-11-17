@@ -150,7 +150,6 @@ the slot's current name; an unknown id returns `404 slot.not_found`.
 | `upstream_get` | `GET /api/upstreams/{name}` |
 | `upstream_test` | `POST /api/upstreams/{name}/test` |
 | `upstream_models` | `GET /api/upstreams/{name}/models` — the provider's model rows (enabled, type, context, prices) merged with what it lists; `stale: true` when the provider is unreachable |
-| `upstream_refresh` | `POST /api/upstreams/{name}/refresh` — refetches the model list; converts a not-yet-converted row, and `warning` says why a row was left alone |
 | `service_list` | `GET /api/services` |
 | `service_health` | `GET /api/services/health` |
 | `comfyui_status` | `GET /api/comfyui/status` |
@@ -265,6 +264,7 @@ the slot's current name; an unknown id returns `404 slot.not_found`.
 | `upstream_create` | `POST /api/upstreams` — optional `models` creates a curated row; omitted, the row is uncurated |
 | `upstream_update` | `PATCH /api/upstreams/{name}` |
 | `upstream_delete` | `DELETE /api/upstreams/{name}` |
+| `upstream_refresh` | `POST /api/upstreams/{name}/refresh` — refetches the model list; converts a not-yet-converted row, and `warning` says why a row was left alone |
 | `upstream_model_update` | `PATCH /api/upstreams/{name}/models/{model_id}` — turns one model on or off and sets its type, context or prices; `model_id` is the provider's own id and may contain `/` |
 | `provider_probe` | `POST /api/providers/probe` — checks a base URL and lists its models, saves nothing; takes no key (a probe with a key is the CLI's `hal0 upstream probe --key-env`) |
 | `service_action` | `POST /api/services/{service_id}/action` |

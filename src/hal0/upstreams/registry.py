@@ -5,7 +5,7 @@ close enough for the Dispatcher's forwarding layer).
 
 Two kinds:
   - "slot"    — local inference container managed by SlotManager.
-                Eligible for on-demand warmup.
+                Eligible for on-demand start.
   - "remote"  — external HTTP endpoint (OpenRouter, Anthropic, OpenAI, custom).
                 Lifecycle is owned elsewhere.
 
@@ -14,8 +14,7 @@ wins for any slot that's explicitly listed; missing slots get auto-populated
 from configured slot names and their ports.
 
 Port target: haloai lib/upstreams.py (737 lines).
-Adds: adaptive cold-boot timeout (PLAN.md §5 Tier 1).
-See PLAN.md §3 and §5 Tier 1 ("cold-boot health probe … exponential backoff").
+Adds: per-slot backoff overrides (hardware.json) and the TIER1 timing constants (PLAN.md §5 Tier 1).
 """
 
 from __future__ import annotations
@@ -468,7 +467,7 @@ class UpstreamRegistry:
     dynamic registration for auto-discovered slots.
 
     The class is intentionally synchronous for CRUD operations; the
-    HTTP-touching methods (test/fetch_models/warmup) are async.
+    HTTP-touching methods (test/fetch_models/probe) are async.
     """
 
     def __init__(self) -> None:

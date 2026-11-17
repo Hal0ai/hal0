@@ -121,7 +121,7 @@ A bare id still held by an upstream that has not been converted keeps routing th
 
 | Response | Code | What to do |
 |---|---|---|
-| 404 | `upstream.model_not_enabled` | The model is unknown or switched off on that provider: `hal0 upstream enable <name> <model>`. |
+| 404 | `upstream.model_not_enabled` | The model is switched off on that provider, or the provider's last model listing held it but it was never enabled: `hal0 upstream enable <name> <model>`. |
 | 400 | `upstream.model_ambiguous` | A bare id is enabled on several providers: the message lists the canonical ids; send one of them. |
 
 A key you type may start with `Bearer `: hal0 strips it only for `bearer` auth on the

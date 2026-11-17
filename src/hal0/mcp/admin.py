@@ -180,6 +180,7 @@ from mcp.types import CallToolResult, TextContent
 
 from hal0.api._redact import redact_log_line as _redact_log_line
 from hal0.config.schema import REASONING_BUDGET_MAX
+from hal0.config.schema import VALID_PRICE_UNITS as _VALID_PRICE_UNITS
 from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
@@ -446,11 +447,9 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         # reads above); test probes the provider but changes no state.
         "upstream_get",
         "upstream_test",
-        # Per-model rows: the listing is a pure read; refresh refetches the
-        # provider's list (and runs the one-time conversion of a not-yet-converted
-        # row, with a backup), the same class of probe as upstream_test.
+        # Per-model rows: the listing is a pure read. upstream_refresh is gated
+        # (below): it can rewrite upstreams.toml and change routing.
         "upstream_models",
-        "upstream_refresh",
         # Memory reads — moved out of AUTONOMOUS_WRITE_TOOLS (§4.3): their
         # ToolAnnotations have always said readOnlyHint=True, the
         # classification bucket just hadn't caught up. memory_recall is
@@ -677,6 +676,9 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "upstream_delete",
         # Turning one provider model on or off changes what /v1/* routes.
         "upstream_model_update",
+        # On an unconverted row refresh converts it: rewrites upstreams.toml (with
+        # a backup) and changes what routes.
+        "upstream_refresh",
         # Sends a request to a caller-chosen URL, so it is gated like the other
         # outbound-reaching tools. It takes no key (see TOOL_PARAM_HINTS).
         "provider_probe",
@@ -1646,7 +1648,12 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             "context": {"type": ["integer", "null"], "description": "Context window; null clears"},
             "price_in": {"type": ["number", "null"], "description": "Input price; null clears"},
             "price_out": {"type": ["number", "null"], "description": "Output price; null clears"},
-            "price_unit": {"type": "string", "description": "Price unit, default Mtok"},
+            "price_unit": {
+                "type": "string",
+                "description": "Price unit: "
+                + "|".join(sorted(_VALID_PRICE_UNITS))
+                + " (default Mtok)",
+            },
         },
     },
     "provider_probe": {
@@ -3399,8 +3406,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "the provider lists. Never fails because the provider is down: `stale` says so."
     ),
     "upstream_refresh": (
-        "Refetch an upstream's model list. Converts a not-yet-converted row to per-model "
-        "rows when the provider answers; `warning` says why a row was left alone."
+        "Refetch an upstream's model list (gated). Converts a not-yet-converted row to "
+        "per-model rows when the provider answers, which rewrites upstreams.toml; "
+        "`warning` says why a row was left alone."
     ),
     "upstream_model_update": (
         "Turn one model on or off on a curated upstream and set its type, context or "

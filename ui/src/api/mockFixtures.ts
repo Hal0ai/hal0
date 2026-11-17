@@ -2675,6 +2675,7 @@ function upstreamModelRow(
 type UpstreamListing = {
   name: string
   curated: boolean
+  protected: boolean
   fetched_at: number | null
   stale: boolean
   warning: string | null
@@ -2689,6 +2690,7 @@ function upstreamListing(name: string): UpstreamListing | null {
     return {
       name,
       curated: true,
+      protected: false,
       fetched_at: 1763337600,
       stale: false,
       warning: null,
@@ -2717,6 +2719,7 @@ function upstreamListing(name: string): UpstreamListing | null {
     return {
       name,
       curated: false,
+      protected: false,
       fetched_at: null,
       stale: true,
       warning: null,
@@ -2733,14 +2736,33 @@ function buildUpstreamModels(_url: string, match: RegExpMatchArray) {
   return upstreamListing(decodeURIComponent(match[1]))
 }
 
-/** PATCH /api/upstreams/{name}/models/{model_id}: the changed row. */
+/** HTTP status plus the JSON body a route answers with. */
+type MockHttpAnswer<T> = { status: number; body: T }
+
+/**
+ * PATCH /api/upstreams/{name}/models/{model_id}: 200 with the changed row, or, for an
+ * upstream that is not converted yet, the 409 `upstream.not_curated` error envelope.
+ */
 function upstreamModelPatchResponse(
   name: string,
   modelId: string,
   body: Partial<Pick<UpstreamModelRow, 'enabled' | 'type' | 'context' | 'price_in' | 'price_out' | 'price_unit'>> = {},
-): UpstreamModelRow {
-  const stored = upstreamListing(name)?.models.find((m) => m.id === modelId)
-  return { ...(stored ?? upstreamModelRow(name, modelId)), ...body }
+): MockHttpAnswer<UpstreamModelRow | { error: { code: string; message: string; details: { name: string } } }> {
+  const listing = upstreamListing(name)
+  if (listing && !listing.curated) {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'upstream.not_curated',
+          message: `upstream '${name}' is not converted yet; refresh when the provider is reachable`,
+          details: { name },
+        },
+      },
+    }
+  }
+  const stored = listing?.models.find((m) => m.id === modelId)
+  return { status: 200, body: { ...(stored ?? upstreamModelRow(name, modelId)), ...body } }
 }
 
 /** POST /api/upstreams/{name}/refresh: a curated row only refetches discovery. */

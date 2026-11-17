@@ -197,6 +197,7 @@ def test_list_merges_stored_and_discovered(client: TestClient) -> None:
     body = _models(client)
     assert body["name"] == "mm" and body["curated"] is True
     assert body["stale"] is False and isinstance(body["fetched_at"], float)
+    assert body["protected"] is False
     rows = _by_id(body)
     assert set(rows) == {"qwen/qwen3-coder", "text-embedding-x", "gpt-5-mini"}
     stored = rows["gpt-5-mini"]
@@ -399,6 +400,7 @@ def test_list_on_protected_is_read_only_live_ids(client: TestClient) -> None:
     client.app.state.upstream_models["hermes"] = ["live-a", "live-b"]
     body = _models(client, "hermes")
     assert body["curated"] is False
+    assert body["protected"] is True
     assert [m["id"] for m in body["models"]] == ["live-a", "live-b"]
     assert all(m["enabled"] and m["discovered"] for m in body["models"])
 
