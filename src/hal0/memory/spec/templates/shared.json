@@ -1,12 +1,12 @@
 {
   "version": "1",
   "bank": {
-    "retain_mission": "Extract durable, reusable knowledge about the user, their homelab infrastructure, software projects, decisions, procedures and preferences. Prefer specific facts (hostnames, ports, paths, versions, commands, who decided what and why). Skip pleasantries, transient tool chatter, raw logs and anything that will be stale within a day.",
+    "retain_mission": "Extract technical decisions and rationale, gotchas and fixes, PRs and status changes, conventions, commands, endpoints, flags, incidents and resolutions, and cross-session coordination facts. Ignore routine edits, transient state, secrets, and anything already in git.",
     "observations_mission": "Synthesize stable, evidence-backed beliefs about the user, the homelab (hosts, containers, services, hardware), each software project, and recurring workflows. When newer evidence contradicts an older belief, update the belief and note what changed. Keep observations specific and actionable.",
     "reflect_mission": "You are hal0's long-term memory. Answer from recorded evidence, citing concrete details. Distinguish what was recorded from what is inferred. When memories conflict, prefer the most recent and say so. If memory has nothing relevant, say that plainly instead of guessing.",
     "disposition_skepticism": 4,
-    "disposition_literalism": 3,
-    "disposition_empathy": 2,
+    "disposition_literalism": 4,
+    "disposition_empathy": 1,
     "entity_labels": [
       {
         "key": "category",
@@ -80,7 +80,29 @@
     "consolidation_use_decision_model": true,
     "reflect_use_decision_model": true,
     "mental_model_refresh_use_decision_model": true,
-    "mental_model_delta_use_decision_model": true
+    "mental_model_delta_use_decision_model": true,
+    "enable_observations": true,
+    "retain_strategies": {
+      "conversation": {
+        "retain_extraction_mode": "concise",
+        "retain_chunk_size": 6000
+      },
+      "document": {
+        "retain_extraction_mode": "concise",
+        "retain_chunk_size": 6000
+      },
+      "git": {
+        "retain_extraction_mode": "concise",
+        "retain_chunk_size": 6000
+      },
+      "gitlog": {
+        "retain_extraction_mode": "concise",
+        "retain_chunk_size": 3000
+      },
+      "survey": {
+        "retain_chunk_size": 12000
+      }
+    }
   },
   "directives": [
     {

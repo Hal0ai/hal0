@@ -49,7 +49,24 @@ log = structlog.get_logger(__name__)
 _SHARED = "shared"
 _PRIVATE_HERMES = "private:hermes"
 
+#: The retain strategies a new platform bank starts with (#3760). The coding-agent
+#: plugin names a strategy on every write (``conversation``, ``document``, ``git``,
+#: ``gitlog``, ``survey``); the engine drops a name the bank does not define and
+#: falls back to its 3000-token default chunk. ``survey`` sets only a chunk size,
+#: so it keeps the engine's extraction mode. Every size stays strictly below
+#: ``[memory.graph].extraction_max_tokens`` (default 16384): the engine refuses a
+#: retain whose chunk is not (#3595, :mod:`hal0.memory.retain_chunk_guard`).
+SEED_RETAIN_STRATEGIES: dict[str, dict[str, Any]] = {
+    "conversation": {"retain_extraction_mode": "concise", "retain_chunk_size": 6000},
+    "document": {"retain_extraction_mode": "concise", "retain_chunk_size": 6000},
+    "git": {"retain_extraction_mode": "concise", "retain_chunk_size": 6000},
+    "gitlog": {"retain_extraction_mode": "concise", "retain_chunk_size": 3000},
+    "survey": {"retain_chunk_size": 12000},
+}
+
 #: hal0 namespace -> the bank-template manifest a new box's bank starts with.
+#: ``spec/templates/shared.json`` repeats the shared bank's keys below, and a
+#: test pins the two together.
 SEED_BANKS: dict[str, dict[str, Any]] = {
     _SHARED: {
         "version": "1",
@@ -60,10 +77,23 @@ SEED_BANKS: dict[str, dict[str, Any]] = {
                 "and cross-session coordination facts. Ignore routine edits, transient state, "
                 "secrets, and anything already in git."
             ),
+            "observations_mission": (
+                "Synthesize stable, evidence-backed beliefs about the user, the homelab (hosts, "
+                "containers, services, hardware), each software project, and recurring "
+                "workflows. When newer evidence contradicts an older belief, update the belief "
+                "and note what changed. Keep observations specific and actionable."
+            ),
+            "reflect_mission": (
+                "You are hal0's long-term memory. Answer from recorded evidence, citing "
+                "concrete details. Distinguish what was recorded from what is inferred. When "
+                "memories conflict, prefer the most recent and say so. If memory has nothing "
+                "relevant, say that plainly instead of guessing."
+            ),
             "enable_observations": True,
             "disposition_skepticism": 4,
             "disposition_literalism": 4,
             "disposition_empathy": 1,
+            "retain_strategies": SEED_RETAIN_STRATEGIES,
         },
     },
     _PRIVATE_HERMES: {
@@ -163,6 +193,7 @@ def seed_box(
         from hal0.config.loader import load_hal0_config
 
         memory_cfg = load_hal0_config(Path(toml_path) if toml_path is not None else None).memory
+        policy = memory_cfg.refresh
         targets: dict[str, dict[str, Any]] = {}
         for namespace, manifest in SEED_BANKS.items():
             bank = engine_bank_for(namespace, memory_cfg, layout_path=layout_path)
@@ -182,12 +213,100 @@ def seed_box(
 
             engine = HindsightRestClient.from_env()
         try:
-            return await seed_missing_banks(engine, targets)
+            return await seed_missing_banks(engine, targets, policy)
         finally:
             if own:
                 await engine.aclose()
 
     return asyncio.run(_run()), None
+
+
+STRATEGIES_MISSING = "bank-missing"
+STRATEGIES_HELD = "has-strategies"
+STRATEGIES_PLANNED = "would-write"
+STRATEGIES_WRITTEN = "written"
+
+
+def existing_strategies(config: Any) -> dict[str, Any]:
+    """The ``retain_strategies`` a bank config payload defines (overrides first), else ``{}``."""
+    if not isinstance(config, dict):
+        return {}
+    for section in ("overrides", "config"):
+        found = (config.get(section) or {}).get("retain_strategies")
+        if isinstance(found, dict) and found:
+            return found
+    return {}
+
+
+async def seed_strategies(client: Any, bank: str, *, apply: bool) -> str:
+    """Write ONLY the seed's ``retain_strategies`` onto a live ``bank`` that has none (#3760).
+
+    Nothing else on the bank changes: one ``PATCH .../config`` carrying the
+    one key. Refuses (``has-strategies``) when the bank already defines any
+    strategy, whoever set it, and reports ``bank-missing`` when the engine has
+    no such bank (a new bank is seeded whole by :func:`seed_missing_banks`).
+    Without ``apply`` it only reports ``would-write``.
+    """
+    config = await _get(client, f"/v1/default/banks/{bank}/config")
+    if config is None:
+        return STRATEGIES_MISSING
+    if existing_strategies(config):
+        return STRATEGIES_HELD
+    if not apply:
+        return STRATEGIES_PLANNED
+    await client.request_json(
+        "PATCH",
+        f"/v1/default/banks/{bank}/config",
+        json_body={"updates": {"retain_strategies": SEED_RETAIN_STRATEGIES}},
+    )
+    return STRATEGIES_WRITTEN
+
+
+def seed_strategies_box(
+    *,
+    apply: bool,
+    toml_path: Any = None,
+    state_dir: Any = None,
+    client: Any = None,
+) -> tuple[str, str, str | None]:
+    """``hal0 memory bank seed --strategies-only``: ``(bank, status, deferred)``.
+
+    The bank is this box's platform bank (:func:`engine_bank_for`). ``deferred``
+    is why an ``apply`` was not attempted (an embedder switch is running).
+    Raises :class:`SeedUndecided` when the bank cannot be told.
+    """
+    import asyncio
+    from pathlib import Path
+
+    layout_path = Path(state_dir) / "memory-layout.json" if state_dir is not None else None
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        memory_cfg = load_hal0_config(Path(toml_path) if toml_path is not None else None).memory
+        bank = engine_bank_for(_SHARED, memory_cfg, layout_path=layout_path)
+    except Exception as exc:
+        raise SeedUndecided(str(exc)) from exc
+    if not bank:
+        raise SeedUndecided("this box's layout names no platform bank")
+    if apply:
+        held = switch_in_progress()
+        if held is not None:
+            return bank, "deferred", held
+
+    async def _run() -> str:
+        own = client is None
+        engine = client
+        if own:
+            from hal0.memory.hindsight_client import HindsightRestClient
+
+            engine = HindsightRestClient.from_env()
+        try:
+            return await seed_strategies(engine, bank, apply=apply)
+        finally:
+            if own:
+                await engine.aclose()
+
+    return bank, asyncio.run(_run()), None
 
 
 async def _get(client: Any, path: str, **kwargs: Any) -> Any | None:
@@ -218,7 +337,26 @@ async def _wants_seeding(client: Any, bank: str) -> bool:
     return isinstance(overrides, dict) and not overrides.get("retain_mission")
 
 
-async def seed_missing_banks(client: Any, targets: dict[str, dict[str, Any]]) -> dict[str, str]:
+def _with_floor(manifest: dict[str, Any], policy: Any = None) -> dict[str, Any]:
+    """``manifest`` with the knowledge-page refresh floor of ``[memory.refresh]``
+    (ADR-0060), as ``hal0 memory spec apply`` writes it. ``policy`` is that
+    section (this box's ``hal0.toml`` by default). Unchanged when the policy
+    cannot be read: the seed must not fail on it."""
+    try:
+        from hal0.memory.refresh_policy import FLOOR_KEY, current_policy, desired_trigger
+
+        floor = desired_trigger(current_policy() if policy is None else policy)[
+            "min_refresh_interval_seconds"
+        ]
+    except Exception as exc:
+        log.warning("hal0.memory.bank_seed_floor_unread", error=str(exc))
+        return manifest
+    return {**manifest, "bank": {**manifest["bank"], FLOOR_KEY: floor}}
+
+
+async def seed_missing_banks(
+    client: Any, targets: dict[str, dict[str, Any]], policy: Any = None
+) -> dict[str, str]:
     """Import each manifest in ``targets`` into a bank that :func:`_wants_seeding`.
 
     ``client`` is the Hindsight client (``request_json``) and ``targets`` comes
@@ -232,7 +370,7 @@ async def seed_missing_banks(client: Any, targets: dict[str, dict[str, Any]]) ->
                 out[bank] = SKIPPED
                 continue
             await client.request_json(
-                "POST", f"/v1/default/banks/{bank}/import", json_body=manifest
+                "POST", f"/v1/default/banks/{bank}/import", json_body=_with_floor(manifest, policy)
             )
             out[bank] = SEEDED
         except Exception as exc:  # a heal hook must not take hal0-api down
@@ -285,11 +423,14 @@ def heal_hook(provider: Any) -> Any:
 
 __all__ = [
     "SEED_BANKS",
+    "SEED_RETAIN_STRATEGIES",
     "SeedUndecided",
     "engine_bank_for",
     "heal_hook",
     "seed_box",
     "seed_missing_banks",
+    "seed_strategies",
+    "seed_strategies_box",
     "seed_targets",
     "switch_in_progress",
 ]

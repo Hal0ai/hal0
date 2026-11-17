@@ -3831,6 +3831,95 @@ def check_memory_retain_chunk(
     )
 
 
+def _fetch_platform_bank_config(base: str | None) -> dict[str, Any] | None:
+    """``{"bank": id, "strategies": {...}}`` for this box's platform bank, or ``None``.
+
+    The bank is the one ``hal0 memory bank seed`` names for the shared manifest;
+    its config is read through hal0-api's admin route. A bank the engine has
+    not created yet (404) comes back with ``"missing": True``; any other
+    failure is ``None``.
+    """
+    from urllib.parse import quote
+
+    from hal0.cli._shared import CliApiError, api_get
+    from hal0.config.loader import load_hal0_config
+    from hal0.memory.bank_seed import engine_bank_for, existing_strategies
+
+    try:
+        bank = engine_bank_for("shared", load_hal0_config().memory)
+    except Exception:
+        return None
+    if not bank:
+        return None
+    try:
+        payload = api_get(
+            f"/api/memory/banks/{quote(bank, safe='')}/config", base=base, timeout=15.0
+        )
+    except CliApiError as exc:
+        if exc.status == 404:
+            # Not created yet: the first write or the seed creates it with its
+            # strategies, so there is nothing to warn about.
+            return {"bank": bank, "strategies": {}, "missing": True}
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return {"bank": bank, "strategies": existing_strategies(payload)}
+
+
+def check_memory_retain_strategies(
+    *,
+    memory: dict[str, Any] | None,
+    base: str | None = None,
+    fetch: Callable[[str | None], dict[str, Any] | None] | None = None,
+) -> Check:
+    """The platform bank should define retain strategies (#3760).
+
+    Coding agents name a strategy (``conversation``, ``document``, ``git``,
+    ``gitlog``, ``survey``) on every write, and the engine drops a name the
+    bank does not define: those writes then run on its default 3000-token
+    chunk and generic extraction mode. New boxes seed the strategies; a box
+    whose bank was created before that, or whose strategies a migration lost,
+    has none. Advisory (``warn``), never a failure, and an unreachable engine
+    skips the check, and a platform bank that does not exist yet passes (it is
+    seeded with them when first written). ``hal0 memory bank seed
+    --strategies-only --apply`` writes just the strategies, nothing else.
+    """
+    name, title = "memory_retain_strategies", "Memory retain strategies"
+    if memory is None:
+        return Check(name, title, _WARN, "memory engine status unreachable")
+    if memory.get("engine") in (None, "") or not memory.get("enabled", True):
+        return Check(name, title, _PASS, "memory disabled — nothing to check")
+    if not memory.get("reachable"):
+        return Check(name, title, _PASS, "engine unreachable — see the memory row")
+    found = (fetch or _fetch_platform_bank_config)(base)
+    if found is None:
+        return Check(name, title, _WARN, "could not read the platform bank's configuration")
+    bank, strategies = found.get("bank"), found.get("strategies") or {}
+    if found.get("missing"):
+        return Check(
+            name,
+            title,
+            _PASS,
+            f"platform bank {bank} does not exist yet; it is seeded when created",
+        )
+    if not strategies:
+        return Check(
+            name,
+            title,
+            _WARN,
+            f"platform bank {bank} has no retain strategies: coding-agent writes use the "
+            "engine's default chunk size and extraction mode. "
+            "`hal0 memory bank seed --strategies-only` shows the change, "
+            "`hal0 memory bank seed --strategies-only --apply` writes only the strategies",
+        )
+    return Check(
+        name,
+        title,
+        _PASS,
+        f"platform bank {bank} defines {len(strategies)} retain strategies",
+    )
+
+
 #: ``memory_projects`` warns past this many project slugs in use that the
 #: registry does not know. A handful is what a box looks like before its
 #: operator has confirmed anything; more means the registry is not being kept.
@@ -4473,6 +4562,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_memory_embedder(),
         check_memory_extraction_throughput(memory=payloads["memory"], base=base),
         check_memory_retain_chunk(memory=payloads["memory"], base=base),
+        check_memory_retain_strategies(memory=payloads["memory"], base=base),
         check_memory_decision_lane(memory=payloads["memory"]),
         check_memory_projects(memory=payloads["memory"], base=base),
         check_memory_model_owners(memory=payloads["memory"], base=base),
@@ -4576,6 +4666,7 @@ __all__ = [
     "check_memory_layout",
     "check_memory_projects",
     "check_memory_retain_chunk",
+    "check_memory_retain_strategies",
     "check_model_store",
     "check_ports",
     "check_seams",

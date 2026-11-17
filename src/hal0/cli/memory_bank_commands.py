@@ -344,6 +344,15 @@ def bank_seed_cmd(
         "--state-dir",
         help="State directory holding memory-layout.json (default: this box's).",
     ),
+    strategies_only: bool = typer.Option(
+        False,
+        "--strategies-only",
+        help="Instead of seeding, write only the seed's retain strategies onto the live "
+        "platform bank, and only if it has none. A dry run unless --apply is given.",
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="With --strategies-only: write the change (default: dry run)."
+    ),
     json_out: bool = typer.Option(False, "--json", help="Emit raw JSON instead of lines."),
 ) -> None:
     """Seed this box's default memory banks (ADR-0058 decision 7, #3557).
@@ -362,7 +371,47 @@ def bank_seed_cmd(
     held the seed back; 1 when the banks cannot be told or a bank could not
     be seeded. hal0-api seeds the same banks once it has the engine.
     """
-    from hal0.memory.bank_seed import FAILED, SEEDED, SeedUndecided, seed_box
+    from hal0.memory.bank_seed import (
+        FAILED,
+        SEEDED,
+        STRATEGIES_HELD,
+        STRATEGIES_MISSING,
+        SeedUndecided,
+        seed_box,
+        seed_strategies_box,
+    )
+
+    if apply and not strategies_only:
+        typer.echo("--apply only goes with --strategies-only", err=True)
+        raise typer.Exit(2)
+    if strategies_only:
+        try:
+            bank, status, deferred = seed_strategies_box(
+                apply=apply, toml_path=config, state_dir=state_dir
+            )
+        except SeedUndecided as exc:
+            typer.echo(f"cannot tell which memory bank to repair: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        except Exception as exc:
+            typer.echo(f"could not repair the retain strategies: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        if json_out:
+            typer.echo(
+                jsonlib.dumps(
+                    {"bank": bank, "status": status, "deferred": deferred, "apply": apply},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        elif deferred is not None:
+            typer.echo(f"not writing now: {deferred}")
+        else:
+            typer.echo(f"{bank}: {status}" + ("" if apply else " (dry run; --apply writes)"))
+        if deferred is not None:
+            raise typer.Exit(SEED_EXIT_DEFERRED)
+        if status in (STRATEGIES_HELD, STRATEGIES_MISSING):
+            raise typer.Exit(SEED_EXIT_NOTHING)
+        return
 
     try:
         results, deferred = seed_box(toml_path=config, state_dir=state_dir)
