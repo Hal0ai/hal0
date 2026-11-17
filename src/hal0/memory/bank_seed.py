@@ -221,6 +221,94 @@ def seed_box(
     return asyncio.run(_run()), None
 
 
+STRATEGIES_MISSING = "bank-missing"
+STRATEGIES_HELD = "has-strategies"
+STRATEGIES_PLANNED = "would-write"
+STRATEGIES_WRITTEN = "written"
+
+
+def existing_strategies(config: Any) -> dict[str, Any]:
+    """The ``retain_strategies`` a bank config payload defines (overrides first), else ``{}``."""
+    if not isinstance(config, dict):
+        return {}
+    for section in ("overrides", "config"):
+        found = (config.get(section) or {}).get("retain_strategies")
+        if isinstance(found, dict) and found:
+            return found
+    return {}
+
+
+async def seed_strategies(client: Any, bank: str, *, apply: bool) -> str:
+    """Write ONLY the seed's ``retain_strategies`` onto a live ``bank`` that has none (#3760).
+
+    Nothing else on the bank changes: one ``PATCH .../config`` carrying the
+    one key. Refuses (``has-strategies``) when the bank already defines any
+    strategy, whoever set it, and reports ``bank-missing`` when the engine has
+    no such bank (a new bank is seeded whole by :func:`seed_missing_banks`).
+    Without ``apply`` it only reports ``would-write``.
+    """
+    config = await _get(client, f"/v1/default/banks/{bank}/config")
+    if config is None:
+        return STRATEGIES_MISSING
+    if existing_strategies(config):
+        return STRATEGIES_HELD
+    if not apply:
+        return STRATEGIES_PLANNED
+    await client.request_json(
+        "PATCH",
+        f"/v1/default/banks/{bank}/config",
+        json_body={"updates": {"retain_strategies": SEED_RETAIN_STRATEGIES}},
+    )
+    return STRATEGIES_WRITTEN
+
+
+def seed_strategies_box(
+    *,
+    apply: bool,
+    toml_path: Any = None,
+    state_dir: Any = None,
+    client: Any = None,
+) -> tuple[str, str, str | None]:
+    """``hal0 memory bank seed --strategies-only``: ``(bank, status, deferred)``.
+
+    The bank is this box's platform bank (:func:`engine_bank_for`). ``deferred``
+    is why an ``apply`` was not attempted (an embedder switch is running).
+    Raises :class:`SeedUndecided` when the bank cannot be told.
+    """
+    import asyncio
+    from pathlib import Path
+
+    layout_path = Path(state_dir) / "memory-layout.json" if state_dir is not None else None
+    try:
+        from hal0.config.loader import load_hal0_config
+
+        memory_cfg = load_hal0_config(Path(toml_path) if toml_path is not None else None).memory
+        bank = engine_bank_for(_SHARED, memory_cfg, layout_path=layout_path)
+    except Exception as exc:
+        raise SeedUndecided(str(exc)) from exc
+    if not bank:
+        raise SeedUndecided("this box's layout names no platform bank")
+    if apply:
+        held = switch_in_progress()
+        if held is not None:
+            return bank, "deferred", held
+
+    async def _run() -> str:
+        own = client is None
+        engine = client
+        if own:
+            from hal0.memory.hindsight_client import HindsightRestClient
+
+            engine = HindsightRestClient.from_env()
+        try:
+            return await seed_strategies(engine, bank, apply=apply)
+        finally:
+            if own:
+                await engine.aclose()
+
+    return bank, asyncio.run(_run()), None
+
+
 async def _get(client: Any, path: str, **kwargs: Any) -> Any | None:
     """A GET's JSON, or ``None`` when the engine says the bank is not there."""
     try:
@@ -341,6 +429,8 @@ __all__ = [
     "heal_hook",
     "seed_box",
     "seed_missing_banks",
+    "seed_strategies",
+    "seed_strategies_box",
     "seed_targets",
     "switch_in_progress",
 ]

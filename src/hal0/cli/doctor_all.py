@@ -3836,11 +3836,14 @@ def _fetch_platform_bank_config(base: str | None) -> dict[str, Any] | None:
 
     The bank is the one ``hal0 memory bank seed`` names for the shared manifest;
     its config is read through hal0-api's admin route. A bank the engine has
-    not created yet reads as no strategies.
+    not created yet (404) comes back with ``"missing": True``; any other
+    failure is ``None``.
     """
+    from urllib.parse import quote
+
     from hal0.cli._shared import CliApiError, api_get
     from hal0.config.loader import load_hal0_config
-    from hal0.memory.bank_seed import engine_bank_for
+    from hal0.memory.bank_seed import engine_bank_for, existing_strategies
 
     try:
         bank = engine_bank_for("shared", load_hal0_config().memory)
@@ -3849,18 +3852,18 @@ def _fetch_platform_bank_config(base: str | None) -> dict[str, Any] | None:
     if not bank:
         return None
     try:
-        payload = api_get(f"/api/memory/banks/{bank}/config", base=base, timeout=15.0)
-    except CliApiError:
+        payload = api_get(
+            f"/api/memory/banks/{quote(bank, safe='')}/config", base=base, timeout=15.0
+        )
+    except CliApiError as exc:
+        if exc.status == 404:
+            # Not created yet: the first write or the seed creates it with its
+            # strategies, so there is nothing to warn about.
+            return {"bank": bank, "strategies": {}, "missing": True}
         return None
     if not isinstance(payload, dict):
         return None
-    strategies: dict[str, Any] = {}
-    for section in ("overrides", "config"):
-        found = (payload.get(section) or {}).get("retain_strategies")
-        if isinstance(found, dict) and found:
-            strategies = found
-            break
-    return {"bank": bank, "strategies": strategies}
+    return {"bank": bank, "strategies": existing_strategies(payload)}
 
 
 def check_memory_retain_strategies(
@@ -3877,8 +3880,9 @@ def check_memory_retain_strategies(
     chunk and generic extraction mode. New boxes seed the strategies; a box
     whose bank was created before that, or whose strategies a migration lost,
     has none. Advisory (``warn``), never a failure, and an unreachable engine
-    skips the check. ``hal0 memory spec apply --bank platform`` writes them
-    (it applies the whole packaged spec to that bank, so ``--dry-run`` first).
+    skips the check, and a platform bank that does not exist yet passes (it is
+    seeded with them when first written). ``hal0 memory bank seed
+    --strategies-only --apply`` writes just the strategies, nothing else.
     """
     name, title = "memory_retain_strategies", "Memory retain strategies"
     if memory is None:
@@ -3891,6 +3895,13 @@ def check_memory_retain_strategies(
     if found is None:
         return Check(name, title, _WARN, "could not read the platform bank's configuration")
     bank, strategies = found.get("bank"), found.get("strategies") or {}
+    if found.get("missing"):
+        return Check(
+            name,
+            title,
+            _PASS,
+            f"platform bank {bank} does not exist yet; it is seeded when created",
+        )
     if not strategies:
         return Check(
             name,
@@ -3898,8 +3909,8 @@ def check_memory_retain_strategies(
             _WARN,
             f"platform bank {bank} has no retain strategies: coding-agent writes use the "
             "engine's default chunk size and extraction mode. "
-            "`hal0 memory spec apply --bank platform --dry-run` shows the change, "
-            "`hal0 memory spec apply --bank platform` applies it",
+            "`hal0 memory bank seed --strategies-only` shows the change, "
+            "`hal0 memory bank seed --strategies-only --apply` writes only the strategies",
         )
     return Check(
         name,

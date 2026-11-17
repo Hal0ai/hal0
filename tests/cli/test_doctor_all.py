@@ -4572,7 +4572,7 @@ def test_retain_strategies_warns_when_the_platform_bank_has_none() -> None:
     check = da.check_memory_retain_strategies(memory=_LIVE_MEMORY, fetch=lambda _b: found)
     assert check.status == "warn"
     assert "hal0:shared" in check.detail
-    assert "hal0 memory spec apply --bank platform" in check.detail
+    assert "hal0 memory bank seed --strategies-only --apply" in check.detail
 
 
 def test_retain_strategies_passes_when_the_bank_defines_them() -> None:
@@ -4596,3 +4596,53 @@ def test_retain_strategies_skips_without_a_live_engine() -> None:
         {"enabled": True, "engine": "hindsight", "reachable": False},
     ):
         assert da.check_memory_retain_strategies(memory=memory, fetch=_never).status == "pass"
+
+
+def _real_fetch(monkeypatch, outcome):
+    """Run the real ``_fetch_platform_bank_config`` against a faked ``api_get``."""
+    from types import SimpleNamespace
+
+    from hal0.cli import _shared
+    from hal0.config import loader
+    from hal0.memory import bank_seed
+
+    paths: list[str] = []
+
+    def fake_get(path, **_kw):
+        paths.append(path)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(_shared, "api_get", fake_get)
+    monkeypatch.setattr(loader, "load_hal0_config", lambda *a, **k: SimpleNamespace(memory=None))
+    monkeypatch.setattr(bank_seed, "engine_bank_for", lambda *_a, **_k: "hal0:shared")
+    return da._fetch_platform_bank_config(None), paths
+
+
+def test_fetch_reads_strategies_and_quotes_the_bank_id(monkeypatch) -> None:
+    payload = {"overrides": {"retain_strategies": {"git": {"retain_chunk_size": 6000}}}}
+    found, paths = _real_fetch(monkeypatch, payload)
+    assert found == {"bank": "hal0:shared", "strategies": {"git": {"retain_chunk_size": 6000}}}
+    assert paths == ["/api/memory/banks/hal0%3Ashared/config"]
+
+
+def test_fetch_reports_a_bank_with_no_strategies(monkeypatch) -> None:
+    found, _ = _real_fetch(monkeypatch, {"config": {}, "overrides": {}})
+    assert found == {"bank": "hal0:shared", "strategies": {}}
+
+
+def test_fetch_treats_a_missing_bank_as_not_created_and_the_row_passes(monkeypatch) -> None:
+    from hal0.cli._shared import CliApiError
+
+    found, _ = _real_fetch(monkeypatch, CliApiError("not found", status=404))
+    assert found is not None and found["missing"] is True
+    check = da.check_memory_retain_strategies(memory=_LIVE_MEMORY, fetch=lambda _b: found)
+    assert check.status == "pass" and "does not exist yet" in check.detail
+
+
+def test_fetch_is_none_when_the_engine_cannot_be_reached(monkeypatch) -> None:
+    from hal0.cli._shared import CliApiError
+
+    found, _ = _real_fetch(monkeypatch, CliApiError("connection refused"))
+    assert found is None

@@ -563,3 +563,92 @@ def test_the_packaged_shared_template_agrees_with_the_seed() -> None:
     template = spec_apply.load_template(None, "shared")["bank"]
     for key, value in SHARED["bank"].items():
         assert template[key] == value, key
+
+
+# ── ``hal0 memory bank seed --strategies-only`` (#3760) ──────────────────────
+
+
+class RepairEngine(Engine):
+    def __init__(self, banks=None) -> None:
+        super().__init__(banks)
+        self.patches: list[tuple[str, dict[str, Any]]] = []
+
+    async def request_json(self, method: str, path: str, **kwargs: Any) -> Any:
+        if method == "PATCH":
+            self.patches.append((path, kwargs["json_body"]))
+            return {}
+        return await super().request_json(method, path, **kwargs)
+
+
+def test_strategies_only_dry_run_writes_nothing() -> None:
+    engine = RepairEngine({"hal0:shared": bank(documents=5, retain_mission="mine")})
+    status = asyncio.run(bank_seed.seed_strategies(engine, "hal0:shared", apply=False))
+    assert status == "would-write" and engine.patches == []
+
+
+def test_strategies_only_apply_patches_just_the_strategies() -> None:
+    engine = RepairEngine({"hal0:shared": bank(documents=5, retain_mission="mine")})
+    status = asyncio.run(bank_seed.seed_strategies(engine, "hal0:shared", apply=True))
+    assert status == "written"
+    assert engine.patches == [
+        (
+            "/v1/default/banks/hal0:shared/config",
+            {"updates": {"retain_strategies": bank_seed.SEED_RETAIN_STRATEGIES}},
+        )
+    ]
+    assert engine.imports() == []
+
+
+def test_strategies_only_refuses_a_bank_that_has_any_strategy() -> None:
+    engine = RepairEngine(
+        {"hal0:shared": bank(retain_strategies={"mine": {"retain_chunk_size": 100}})}
+    )
+    status = asyncio.run(bank_seed.seed_strategies(engine, "hal0:shared", apply=True))
+    assert status == "has-strategies" and engine.patches == []
+
+
+def test_strategies_only_does_not_create_a_missing_bank() -> None:
+    engine = RepairEngine()
+    status = asyncio.run(bank_seed.seed_strategies(engine, "hal0:shared", apply=True))
+    assert status == "bank-missing" and engine.patches == [] and engine.banks == {}
+
+
+def test_strategies_only_box_defers_an_apply_during_a_switch(monkeypatch) -> None:
+    from hal0.memory import bank_layout as bl
+
+    _main_box(monkeypatch, bl.BankLayout(bl.LAYOUT_LEGACY, legacy_platform_bank="shared"))
+    monkeypatch.setattr(bank_seed, "switch_in_progress", lambda: "switch running")
+    engine = RepairEngine({"shared": bank()})
+    got = bank_seed.seed_strategies_box(apply=True, client=engine)
+    assert got == ("shared", "deferred", "switch running") and engine.patches == []
+
+
+def test_cli_strategies_only_is_a_dry_run_unless_applied(monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from hal0.cli import memory_bank_commands as cmd
+
+    seen: list[bool] = []
+
+    def fake(**kw):
+        seen.append(kw["apply"])
+        return "hal0:shared", "would-write", None
+
+    monkeypatch.setattr(bank_seed, "seed_strategies_box", fake)
+    res = CliRunner().invoke(cmd.app, ["seed", "--strategies-only"])
+    assert res.exit_code == 0 and "would-write" in res.output and seen == [False]
+    CliRunner().invoke(cmd.app, ["seed", "--strategies-only", "--apply"])
+    assert seen == [False, True]
+    assert CliRunner().invoke(cmd.app, ["seed", "--apply"]).exit_code == 2
+
+
+def test_cli_strategies_only_exits_3_when_the_bank_is_held(monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from hal0.cli import memory_bank_commands as cmd
+
+    monkeypatch.setattr(
+        bank_seed, "seed_strategies_box", lambda **_kw: ("hal0:shared", "has-strategies", None)
+    )
+    res = CliRunner().invoke(cmd.app, ["seed", "--strategies-only", "--apply"])
+    assert res.exit_code == 3
