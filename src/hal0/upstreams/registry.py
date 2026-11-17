@@ -20,10 +20,8 @@ See PLAN.md §3 and §5 Tier 1 ("cold-boot health probe … exponential backoff"
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-import random
 import re
 import threading
 import time
@@ -459,25 +457,6 @@ def upstream_from_entry(entry: UpstreamEntry) -> Upstream:
     )
 
 
-# ── Warmup state ──────────────────────────────────────────────────────────────
-
-
-@dataclass
-class _SlotStats:
-    """Per-slot runtime counters surfaced to the dispatcher / dashboard.
-
-    # TIER2: tps is recomputed on each request; clamped at 0 to avoid the
-    # haloai bug where a process restart reset the histogram counter and the
-    # delta went negative.  When we detect a counter reset we log a warning.
-    """
-
-    tps: float = 0.0
-    """Tokens per second (clamped >= 0)."""
-
-    last_request_at: float = 0.0
-    last_counter: int = 0
-
-
 # ── UpstreamRegistry ──────────────────────────────────────────────────────────
 
 
@@ -494,8 +473,6 @@ class UpstreamRegistry:
 
     def __init__(self) -> None:
         self._upstreams: dict[str, Upstream] = {}
-        self._warmup_locks: dict[str, asyncio.Lock] = {}
-        self._slot_stats: dict[str, _SlotStats] = {}
         # TIER1: per-slot backoff overrides loaded from hardware.json
         self._slot_overrides: dict[str, dict[str, Any]] = {}
         self._client: httpx.AsyncClient | None = None
@@ -535,8 +512,6 @@ class UpstreamRegistry:
         """Remove an upstream by name.  Returns True if it was present."""
         existed = name in self._upstreams
         self._upstreams.pop(name, None)
-        self._warmup_locks.pop(name, None)
-        self._slot_stats.pop(name, None)
         if existed:
             log.info("upstream.remove", name=name)
         return existed
@@ -713,14 +688,6 @@ class UpstreamRegistry:
         self.remove(name)
         return removed_from_toml
 
-    def in_priority_order(self) -> list[Upstream]:
-        """Sort order for dispatcher fallback: slots first, then remotes."""
-        rank = {"slot": 0, "remote": 1}
-        return sorted(
-            self._upstreams.values(),
-            key=lambda u: (rank.get(u.kind, 99), u.name),
-        )
-
     def from_slot(self, slot_name: str) -> Upstream | None:
         """Look up by slot_name (kind=slot)."""
         for u in self._upstreams.values():
@@ -864,133 +831,6 @@ class UpstreamRegistry:
         except (httpx.HTTPError, OSError) as exc:
             log.debug("upstream.health_fail", name=u.name, url=target, error=str(exc))
             return False
-
-    def _get_warmup_lock(self, slot_name: str) -> asyncio.Lock:
-        lock = self._warmup_locks.get(slot_name)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._warmup_locks[slot_name] = lock
-        return lock
-
-    async def warmup(self, u: Upstream) -> bool:
-        """Bring a slot upstream to a healthy state, with TIER1 adaptive backoff.
-
-        Returns True when /health responds 2xx within the total grace window.
-        Returns False if:
-            - kind != "slot" or no slot_name configured
-            - warmup_strategy == "none" (just probe once and return)
-            - total grace elapses without a healthy response
-
-        TIER1: probe interval follows TIER1_BACKOFF_STEPS with ±25% jitter,
-        total grace is `_effective_total_grace_s(u)` (default 180s), and the
-        per-slot override comes from hardware.json. This replaces the haloai
-        hardcoded 2s timeout at lib/upstreams.py:500-520.
-        """
-        if u.kind != "slot" or not u.slot_name:
-            return False
-        if u.warmup_strategy == "none":
-            return await self.health(u)
-
-        lock = self._get_warmup_lock(u.slot_name)
-        async with lock:
-            # Re-check inside the lock — another waiter may have warmed it.
-            if await self.health(u):
-                return True
-
-            steps = self._effective_backoff_steps(u)
-            total_grace = self._effective_total_grace_s(u)
-            deadline = time.monotonic() + total_grace
-            attempt = 0
-            log.info(
-                "upstream.warmup_start",
-                name=u.name,
-                slot=u.slot_name,
-                grace_s=total_grace,
-                steps=list(steps),
-            )
-
-            while True:
-                # TIER1 — exponential step with jitter, capped at the last step.
-                base_step = steps[min(attempt, len(steps) - 1)]
-                jitter = base_step * TIER1_BACKOFF_JITTER_FRAC
-                delay = max(0.0, base_step + random.uniform(-jitter, jitter))
-
-                # Don't oversleep past the grace deadline.
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    log.warning(
-                        "upstream.warmup_timeout",
-                        name=u.name,
-                        slot=u.slot_name,
-                        grace_s=total_grace,
-                        attempts=attempt + 1,
-                    )
-                    return False
-                delay = min(delay, remaining)
-                await asyncio.sleep(delay)
-
-                if await self.health(u):
-                    log.info(
-                        "upstream.warmup_ready",
-                        name=u.name,
-                        slot=u.slot_name,
-                        attempts=attempt + 1,
-                    )
-                    return True
-
-                attempt += 1
-                if time.monotonic() >= deadline:
-                    log.warning(
-                        "upstream.warmup_timeout",
-                        name=u.name,
-                        slot=u.slot_name,
-                        grace_s=total_grace,
-                        attempts=attempt,
-                    )
-                    return False
-
-    # ── Tier 2 stats ──────────────────────────────────────────────────────────
-
-    def record_tokens(self, slot_name: str, token_counter: int, now: float | None = None) -> float:
-        """Update the slot's tps from a monotonic token counter.
-
-        # TIER2: clamps the computed tps at 0 and logs a warning when the
-        # counter resets (haloai lib/slots.py:240-346 — process restart could
-        # send tps negative). Returns the new (clamped) tps.
-        """
-        ts = time.monotonic() if now is None else now
-        stats = self._slot_stats.get(slot_name)
-        if stats is None:
-            stats = _SlotStats(last_counter=token_counter, last_request_at=ts)
-            self._slot_stats[slot_name] = stats
-            return 0.0
-
-        delta_tokens = token_counter - stats.last_counter
-        delta_t = ts - stats.last_request_at
-
-        if delta_tokens < 0:
-            # TIER2 — counter went backwards: process restart or rollover.
-            log.warning(
-                "upstream.tps_counter_reset",
-                slot=slot_name,
-                previous=stats.last_counter,
-                current=token_counter,
-            )
-            stats.tps = 0.0
-        elif delta_t <= 0:
-            # Same instant or clock skew — keep the previous tps but clamp >= 0.
-            stats.tps = max(0.0, stats.tps)
-        else:
-            stats.tps = max(0.0, delta_tokens / delta_t)  # TIER2
-
-        stats.last_counter = token_counter
-        stats.last_request_at = ts
-        return stats.tps
-
-    def get_tps(self, slot_name: str) -> float:
-        """Return the most recently computed tps for a slot, or 0.0 if unknown."""
-        stats = self._slot_stats.get(slot_name)
-        return stats.tps if stats else 0.0
 
     # ── HTTP-touching ops ─────────────────────────────────────────────────────
 

@@ -186,6 +186,12 @@ from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 from hal0.memory.namespace import is_known_namespace
 from hal0.redaction import redact_audit_args as _redact_audit_args_shared
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
+from hal0.upstreams.catalog import MODEL_TYPES as _UPSTREAM_MODEL_TYPES
+from hal0.upstreams.presets import load_presets
+
+#: Preset ids for the upstream tool descriptions, generated so they cannot drift
+#: from the presets file.
+_PRESET_IDS = "|".join(sorted(load_presets()))
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
 #
@@ -440,6 +446,11 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         # reads above); test probes the provider but changes no state.
         "upstream_get",
         "upstream_test",
+        # Per-model rows: the listing is a pure read; refresh refetches the
+        # provider's list (and runs the one-time conversion of a not-yet-converted
+        # row, with a backup), the same class of probe as upstream_test.
+        "upstream_models",
+        "upstream_refresh",
         # Memory reads — moved out of AUTONOMOUS_WRITE_TOOLS (§4.3): their
         # ToolAnnotations have always said readOnlyHint=True, the
         # classification bucket just hadn't caught up. memory_recall is
@@ -664,6 +675,11 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "upstream_create",
         "upstream_update",
         "upstream_delete",
+        # Turning one provider model on or off changes what /v1/* routes.
+        "upstream_model_update",
+        # Sends a request to a caller-chosen URL, so it is gated like the other
+        # outbound-reaching tools. It takes no key (see TOOL_PARAM_HINTS).
+        "provider_probe",
         # memory_delete with len(ids) > 1, or a list/foreign-namespace
         # dataset even for a single id, routes here at call time (#8).
         # Memory — mental-model/directive deletion is destructive, same
@@ -842,6 +858,10 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "PATCH:/api/upstreams/{name}": ("upstream_update",),
     "DELETE:/api/upstreams/{name}": ("upstream_delete",),
     "POST:/api/upstreams/{name}/test": ("upstream_test",),
+    "GET:/api/upstreams/{name}/models": ("upstream_models",),
+    "POST:/api/upstreams/{name}/refresh": ("upstream_refresh",),
+    "PATCH:/api/upstreams/{name}/models/{model_id}": ("upstream_model_update",),
+    "POST:/api/providers/probe": ("provider_probe",),
     # ── Services (platform-management expansion) ───────────────────────────
     "GET:/api/services": ("service_list",),
     "GET:/api/services/health": ("service_health",),
@@ -1589,10 +1609,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             },
             "catalog_id": {
                 "type": "string",
-                "description": (
-                    "Optional provider template: openai|anthropic|openrouter|"
-                    "google_ai_studio|ollama — prefills url/auth"
-                ),
+                "description": (f"Optional provider template ({_PRESET_IDS}) — prefills url/auth"),
             },
             "url": {
                 "type": "string",
@@ -1602,8 +1619,55 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "type": "string",
                 "description": "Env-var NAME for the API key (never the key itself)",
             },
+            "models": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": (
+                    "Optional model rows [{id, enabled, type, context, price_in, price_out, "
+                    "price_unit}]. Present (even []) = curated: only enabled rows route. "
+                    "Omitted = uncurated: routes what the provider lists."
+                ),
+            },
         },
         "required": ["name"],
+    },
+    "upstream_model_update": {
+        "properties": {
+            "name": {"type": "string", "description": "Upstream name"},
+            "model_id": {
+                "type": "string",
+                "description": "Model id as the provider spells it (may contain '/' and ':')",
+            },
+            "enabled": {"type": "boolean", "description": "Route this model (true) or not"},
+            "type": {
+                "type": "string",
+                "description": "Model type: " + "|".join(sorted(_UPSTREAM_MODEL_TYPES)),
+            },
+            "context": {"type": ["integer", "null"], "description": "Context window; null clears"},
+            "price_in": {"type": ["number", "null"], "description": "Input price; null clears"},
+            "price_out": {"type": ["number", "null"], "description": "Output price; null clears"},
+            "price_unit": {"type": "string", "description": "Price unit, default Mtok"},
+        },
+    },
+    "provider_probe": {
+        "properties": {
+            "catalog_id": {
+                "type": "string",
+                "description": f"Provider preset to probe ({_PRESET_IDS})",
+            },
+            "url": {
+                "type": "string",
+                "description": "Base URL (required without catalog_id)",
+            },
+            "auth_style": {
+                "type": "string",
+                "description": "bearer|anthropic|header|none (defaults from the preset)",
+            },
+            "auth_header": {
+                "type": "string",
+                "description": "Header NAME when auth_style is header",
+            },
+        },
     },
     "upstream_update": {
         "properties": {
@@ -2000,9 +2064,9 @@ def _path_arg_refusal(tool: str, key: str, value: Any) -> str | None:
     - text that is not encodable as UTF-8 (a lone surrogate).
 
     The one exception to the ``/`` rule is an argument whose route declares it
-    ``{name:path}`` (:func:`_slash_path_args`; today only ``comfyui_file_delete``'s
-    ``relpath``). It is a relative path, so it may hold ``/`` BETWEEN segments, and every
-    segment must pass the rules above on its own: no empty segment (a leading, trailing or
+    ``{name:path}`` (:func:`_slash_path_args`; today ``comfyui_file_delete``'s ``relpath``
+    and ``upstream_model_update``'s ``model_id``). It is a multi-segment value, so it may
+    hold ``/`` BETWEEN segments, and every segment must pass the rules above on its own: no empty segment (a leading, trailing or
     doubled ``/``), no ``.`` or ``..``, no control or invisible character.
 
     Everything else is percent-encoded by :func:`_format_url`, a ``:path`` argument one
@@ -2902,6 +2966,19 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     "upstream_test": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
     ),
+    "upstream_models": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_refresh": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_model_update": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Requests a caller-chosen URL: the one upstream tool that is open-world.
+    "provider_probe": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+    ),
     "upstream_create": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
     ),
@@ -3307,11 +3384,33 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "upstream_list": "List all configured upstream LLM providers.",
     "upstream_get": "Get one upstream provider's full detail.",
     "upstream_test": "Probe an upstream's reachability and auth status.",
-    "upstream_create": "Register a new remote upstream LLM provider (gated).",
+    "upstream_create": (
+        "Register a new remote upstream LLM provider (gated). `catalog_id` prefills "
+        f"url/auth from a preset ({_PRESET_IDS}). Omit `models` to route everything the "
+        "provider lists (converted on a later upstream_refresh); pass `models` (even "
+        "an empty list) to create it curated, routing only the enabled rows."
+    ),
     "upstream_update": (
         "Update an upstream provider's settings (url/auth/visibility/filters/enabled) (gated)."
     ),
     "upstream_delete": "Remove an upstream provider; its api.env credential is kept (gated).",
+    "upstream_models": (
+        "List an upstream's model rows (enabled, type, context, prices) merged with what "
+        "the provider lists. Never fails because the provider is down: `stale` says so."
+    ),
+    "upstream_refresh": (
+        "Refetch an upstream's model list. Converts a not-yet-converted row to per-model "
+        "rows when the provider answers; `warning` says why a row was left alone."
+    ),
+    "upstream_model_update": (
+        "Turn one model on or off on a curated upstream and set its type, context or "
+        "prices (gated). `model_id` is the provider's own id and may contain '/'."
+    ),
+    "provider_probe": (
+        "Check a base URL and list the provider's models without saving anything (gated). "
+        "Takes no API key, so it can reach keyless providers or confirm a URL; use the "
+        "`hal0 upstream probe --key-env` CLI to probe with a key."
+    ),
     "stack_list": "List every stack, with the active stack + drift status.",
     "stack_status": "Get one stack's detail, active flag, and drift status.",
     "profile_list": "List every profile in the catalog (seed + custom).",

@@ -286,7 +286,8 @@ def test_open_world_tools_are_the_documented_set() -> None:
     runner_image_sync (GHCR discovery probe), mcp_server_install
     (may fetch a manifest from an arbitrary URL), and profile_generate
     (reaches HuggingFace when given hf_repo, like model_inspect). model_inspect_draft
-    reads GGUF headers from the Hub by range (ADR-0031 §2).
+    reads GGUF headers from the Hub by range (ADR-0031 §2). provider_probe
+    requests a caller-chosen base URL.
     Component-updates spec (2026-08-30 §1b) adds update_check — same
     GET /api/updates/check route as updater_check, so the same release-
     manifest fetch applies.
@@ -305,6 +306,7 @@ def test_open_world_tools_are_the_documented_set() -> None:
         "runner_image_sync",
         "mcp_server_install",
         "profile_generate",
+        "provider_probe",
     }
 
 
@@ -2031,3 +2033,82 @@ def test_slot_load_and_restart_document_unload_npu_holder() -> None:
         assert prop["type"] == "boolean"
         assert "NPU" in prop["description"]
     assert "unload_npu_holder" in admin.TOOL_DESCRIPTIONS["slot_load"]
+
+
+# ── per-model upstream tools ──────────────────────────────────────────────────
+
+_MODEL_TOOLS = ("upstream_models", "upstream_refresh", "upstream_model_update", "provider_probe")
+
+
+@pytest.mark.asyncio
+async def test_model_tools_are_registered(queue: ApprovalQueue) -> None:
+    server = admin.build_server(approval_queue=queue, base_url="http://t")
+    registered = {t.name for t in await server.list_tools()}
+    assert set(_MODEL_TOOLS) <= registered
+
+
+def test_model_tool_classification() -> None:
+    assert {"upstream_model_update", "provider_probe"} <= admin.GATED_TOOLS
+    assert {"upstream_models", "upstream_refresh"} <= admin.AUTONOMOUS_READ_TOOLS
+    for tool in _MODEL_TOOLS:
+        assert tool not in admin.AUTONOMOUS_WRITE_TOOLS
+
+
+def test_model_tools_route_to_the_real_routes() -> None:
+    assert admin._REST_MAP["upstream_models"] == ("GET", "/api/upstreams/{name}/models")
+    assert admin._REST_MAP["upstream_refresh"] == ("POST", "/api/upstreams/{name}/refresh")
+    assert admin._REST_MAP["upstream_model_update"][0] == "PATCH"
+    assert admin._REST_MAP["provider_probe"] == ("POST", "/api/providers/probe")
+
+
+def test_provider_probe_schema_takes_no_key() -> None:
+    props = admin.tool_param_schema("provider_probe")["properties"]
+    assert {"catalog_id", "url", "auth_style", "auth_header"} <= set(props)
+    assert not {p for p in props if "key" in p.lower() or "secret" in p.lower()}
+
+
+def test_upstream_create_lists_every_preset_and_takes_models() -> None:
+    from hal0.upstreams.presets import load_presets
+
+    ids = set(load_presets())
+    assert len(ids) >= 11
+    description = admin.TOOL_DESCRIPTIONS["upstream_create"]
+    catalog_hint = admin.TOOL_PARAM_HINTS["upstream_create"]["properties"]["catalog_id"]
+    for preset_id in ids:
+        assert preset_id in description
+        assert preset_id in catalog_hint["description"]
+    assert admin.TOOL_PARAM_HINTS["upstream_create"]["properties"]["models"]["type"] == "array"
+
+
+@pytest.mark.asyncio
+async def test_upstream_model_update_forwards_a_slashed_model_id(
+    mock_transport: dict[str, Any],
+) -> None:
+    result = await admin._execute_tool(
+        tool="upstream_model_update",
+        args={"name": "openrouter", "model_id": "qwen/qwen3-coder:free", "enabled": True},
+        bearer="t",
+        base_url="http://t",
+        memory_dispatcher=None,
+    )
+    assert result == {"ok": "patch"}
+    method, url, body, _headers = mock_transport["calls"][-1]
+    assert method == "PATCH"
+    assert unquote(url) == "http://t/api/upstreams/openrouter/models/qwen/qwen3-coder:free"
+    assert url.count("/models/") == 1
+    assert body == {"enabled": True}
+
+
+@pytest.mark.asyncio
+async def test_upstream_models_refuses_a_slash_in_the_upstream_name(
+    mock_transport: dict[str, Any],
+) -> None:
+    result = await admin._execute_tool(
+        tool="upstream_models",
+        args={"name": "a/b"},
+        bearer="t",
+        base_url="http://t",
+        memory_dispatcher=None,
+    )
+    assert result["status"] == "error"
+    assert mock_transport["calls"] == []

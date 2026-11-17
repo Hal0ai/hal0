@@ -172,6 +172,22 @@ build rejects the new keys, and no remote provider loads. Before rolling back, r
 `upstreams.toml.pre-convert` over `upstreams.toml`. That copy was taken before the first
 conversion, so it does not contain later edits; make them again after the rollback.
 
+### Refreshing a provider
+
+`POST /api/upstreams/{name}/refresh` (or `hal0 upstream refresh <name>`) runs the same
+conversion for one row on demand. When the row is left alone, the response carries a
+`warning` saying why: the provider returned no models, no key or URL is configured, the
+config file could not be written (the backup is made first), or the row changed meanwhile;
+`curated` stays `false` and `stale` is `true`. A curated row only refetches discovery.
+A new upstream created with no `models` is uncurated and converts the same way; one created
+with `models` (even `[]`) is curated from the start.
+
+### Keys
+
+An operator-typed key keeps a leading `Bearer ` only where hal0 would not add one itself:
+it is stripped for `bearer` auth on the `Authorization` header, and a custom-header key is
+sent exactly as typed.
+
 ## Profiles
 
 `hal0.profiles` + `ProfileConfig` — a profile is a reusable, device-agnostic backend

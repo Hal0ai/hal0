@@ -92,6 +92,42 @@ HTTP call.
 
 hal0 also registers upstreams for you. When Hermes is installed, each Hermes profile with an API key appears on the Providers page and in `GET /api/upstreams` as `hermes` or `hermes.<profile>`, with `managed_by` set to `agent:hermes`. These entries are pinned and read-only: an update or delete request is refused with `400 upstream.protected`. Change them on the Hermes side; see [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
 
+## Choose which models are routed
+
+Once an upstream has per-model rows (it is *curated*), only the rows that are enabled
+route; everything else the provider lists is reachable only after you enable it.
+
+```sh
+hal0 upstream models openrouter                       # table: id, enabled, type, context, prices
+hal0 upstream enable openrouter qwen/qwen3-coder      # route a model
+hal0 upstream disable openrouter qwen/qwen3-coder     # stop routing it
+hal0 upstream refresh openrouter                      # refetch the provider's list
+export OPENROUTER_API_KEY=...                         # a probe reads its key from the environment
+hal0 upstream probe --catalog-id openrouter --key-env OPENROUTER_API_KEY
+```
+
+An upstream created without `models` is uncurated: it routes whatever the provider lists,
+as before. `refresh` converts it once the provider answers, writing one row per model. If
+the provider cannot be reached or lists nothing, the row is left as it is and the `warning`
+in the response (printed by the CLI) says why; fix the URL or key and refresh again. Over
+the API, `POST /api/upstreams` with a `models` array (even `[]`) creates a curated upstream
+directly.
+
+Request a model by its canonical id, `<provider>/<id>`, which splits on the first `/`
+(`openrouter/qwen/qwen3-coder` is provider `openrouter`, model `qwen/qwen3-coder`). A bare id
+works when exactly one enabled model has it. `provider/model` counts as canonical only when
+that model is listed on that provider; otherwise the whole string is tried as a bare id.
+A bare id still held by an upstream that has not been converted keeps routing there.
+
+| Response | Code | What to do |
+|---|---|---|
+| 404 | `upstream.model_not_enabled` | The model is unknown or switched off on that provider: `hal0 upstream enable <name> <model>`. |
+| 400 | `upstream.model_ambiguous` | A bare id is enabled on several providers: the message lists the canonical ids; send one of them. |
+
+A key you type may start with `Bearer `: hal0 strips it only for `bearer` auth on the
+`Authorization` header, where it adds the prefix itself. For a custom header (`--auth-style
+header`) the key is sent exactly as typed.
+
 ## Curate which models are advertised
 
 `[upstream.model_filters]` narrows which of an upstream's models show up

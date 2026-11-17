@@ -656,8 +656,12 @@ async def test_comfyui_file_delete_subdir_still_refuses_a_slash(
     assert mock_transport["calls"] == []
 
 
-def test_only_comfyui_file_delete_relpath_may_hold_a_slash() -> None:
-    """Across the whole catalog, '/' is accepted by exactly one path argument.
+def test_only_two_path_arguments_may_hold_a_slash() -> None:
+    """Across the whole catalog, '/' is accepted by exactly two path arguments.
+
+    ``comfyui_file_delete``'s ``relpath`` is a relative file path; ``upstream_model_update``'s
+    ``model_id`` is a provider's own model id (``qwen/qwen3-coder``), which its route declares
+    ``{model_id:path}``.
 
     ``comfyui_workflow_launch`` is the near miss: a second route (the guard that answers a
     malformed workflow name with 404) shares its route id and declares ``{name:path}``, but the
@@ -670,7 +674,11 @@ def test_only_comfyui_file_delete_relpath_may_hold_a_slash() -> None:
         if admin._path_arg_refusal(tool, key, "a/b") is None
     )
 
-    assert accepts_slash == [("comfyui_file_delete", "relpath")]
+    assert accepts_slash == [
+        ("comfyui_file_delete", "relpath"),
+        ("upstream_model_update", "model_id"),
+    ]
+    assert admin._path_arg_refusal("upstream_model_update", "name", "a/b") is not None
     assert admin._path_arg_refusal("comfyui_workflow_launch", "name", "a/b") is not None
     assert admin._path_arg_refusal("comfyui_file_delete", "subdir", "a/b") is not None
 

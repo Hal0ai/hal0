@@ -921,7 +921,7 @@ def _hydrate_upstreams(registry: UpstreamRegistry) -> None:
     """Populate the upstream registry from /etc/hal0/upstreams.toml.
 
     Missing file is fine — fresh installs have an empty registry until
-    the user adds an upstream via the UI or `hal0 upstream add`.  Malformed
+    the user adds an upstream via the UI or `hal0 upstream create`.  Malformed
     files surface a typed ConfigParseError that propagates to the lifespan;
     we log+continue rather than crashing the API so the UI can still load
     and show the config error to the user.

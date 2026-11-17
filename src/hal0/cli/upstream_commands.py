@@ -1,6 +1,7 @@
 """hal0 upstream subcommands — thin HTTP client to the hal0 API.
 
-Provides ``hal0 upstream {list,show,create,update,delete,test}`` plus the
+Provides ``hal0 upstream {list,show,create,update,delete,test}``, the
+per-model commands ``{models,enable,disable,refresh}``, ``probe``, plus the
 ``hal0 upstream credentials set`` noun-subgroup.
 
 Request/response shapes mirror ``hal0.api.routes.providers`` exactly:
@@ -19,7 +20,9 @@ show``/``credentials clear``. The old flat verb has been removed.
 from __future__ import annotations
 
 import json as jsonlib
+import os
 from typing import Any
+from urllib.parse import quote
 
 import typer
 from rich.console import Console
@@ -469,6 +472,214 @@ def test_upstream(
     else:
         err = result.get("error") or result.get("status", "unknown")
         console.print(f"[red]✗[/red] Upstream [bold]{name}[/bold] is unreachable: {err}")
+        raise typer.Exit(1)
+
+
+# ── per-model management ──────────────────────────────────────────────────
+
+
+def _model_path(name: str, model_id: str) -> str:
+    """``/api/upstreams/<name>/models/<id>`` with the id encoded for a ``:path`` route.
+
+    Model ids hold ``/`` (``qwen/qwen3-coder``), ``:`` and ``.``. The server's
+    ``{model_id:path}`` converter takes the slashes as path separators, so they
+    stay literal; anything that would end the path early (``?``, ``#``) or be
+    decoded behind our back (``%``) is percent-encoded.
+    """
+    return f"/api/upstreams/{quote(name, safe='')}/models/{quote(model_id, safe='/:')}"
+
+
+def _cell(value: Any) -> str:
+    return "—" if value is None else str(value)
+
+
+def _price(row: dict[str, Any]) -> str:
+    price_in, price_out = row.get("price_in"), row.get("price_out")
+    if price_in is None and price_out is None:
+        return "—"
+    return f"{_cell(price_in)} / {_cell(price_out)} per {row.get('price_unit') or 'Mtok'}"
+
+
+def _print_listing(listing: dict[str, Any]) -> None:
+    """Render a ``GET /models`` / ``POST /refresh`` body as a table plus notes."""
+    name = listing.get("name", "")
+    rows = listing.get("models") or []
+    if not listing.get("curated", True):
+        console.print(
+            f"[yellow]{name} is not converted yet:[/yellow] the rows below are what it "
+            f"serves today. Run [bold]hal0 upstream refresh {name}[/bold] when the "
+            "provider is reachable."
+        )
+    elif listing.get("stale"):
+        console.print("[yellow]Provider unreachable; discovery data may be out of date.[/yellow]")
+    if warning := listing.get("warning"):
+        console.print(f"[yellow]Warning:[/yellow] {warning}")
+    if not rows:
+        console.print("[dim]No models.[/dim]")
+        return
+    table = Table(title=f"Models on {name}")
+    table.add_column("Model", style="bold", overflow="fold")
+    table.add_column("Enabled")
+    table.add_column("Type")
+    table.add_column("Context", justify="right")
+    table.add_column("Price (in / out)")
+    table.add_column("Discovered")
+    for row in rows:
+        table.add_row(
+            row.get("id", "—"),
+            "✓" if row.get("enabled") else "✗",
+            _cell(row.get("type")),
+            _cell(row.get("context")),
+            _price(row),
+            "✓" if row.get("discovered") else "✗",
+        )
+    console.print(table)
+
+
+@app.command("models")
+def list_models(
+    name: str = typer.Argument(..., help="Upstream name."),
+    json_out: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """List an upstream's model rows merged with what the provider lists."""
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        listing = api_get(f"/api/upstreams/{quote(name, safe='')}/models")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if json_out:
+        console.print(jsonlib.dumps(listing, indent=2))
+        return
+    _print_listing(listing)
+
+
+def _set_model_enabled(name: str, model_id: str, enabled: bool) -> None:
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        api_patch(_model_path(name, model_id), json={"enabled": enabled})
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    state = "enabled" if enabled else "disabled"
+    console.print(f"[green]✓[/green] Model [bold]{model_id}[/bold] on [bold]{name}[/bold] {state}")
+
+
+@app.command("enable")
+def enable_model(
+    name: str = typer.Argument(..., help="Upstream name."),
+    model: str = typer.Argument(..., help="Model id as the provider spells it."),
+) -> None:
+    """Route a model: turn its row on (adds the row if only discovery lists it)."""
+    _set_model_enabled(name, model, True)
+
+
+@app.command("disable")
+def disable_model(
+    name: str = typer.Argument(..., help="Upstream name."),
+    model: str = typer.Argument(..., help="Model id as the provider spells it."),
+) -> None:
+    """Stop routing a model: turn its row off."""
+    _set_model_enabled(name, model, False)
+
+
+@app.command("refresh")
+def refresh_models(
+    name: str = typer.Argument(..., help="Upstream name."),
+    json_out: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """Refetch a provider's model list; converts a not-yet-converted row."""
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        listing = api_post(f"/api/upstreams/{quote(name, safe='')}/refresh")
+    except CliApiError as exc:
+        die(str(exc))
+        return
+    if json_out:
+        console.print(jsonlib.dumps(listing, indent=2))
+        return
+    _print_listing(listing)
+
+
+# ── probe ─────────────────────────────────────────────────────────────────
+
+
+@app.command("probe")
+def probe_provider(
+    catalog_id: str = typer.Option(
+        None, "--catalog-id", "-c", help="Provider preset to probe (e.g. openrouter)."
+    ),
+    base_url: str = typer.Option(None, "--url", "--base-url", help="Base URL to probe."),
+    auth_style: str = typer.Option(
+        None, "--auth-style", help="Auth style: bearer | anthropic | header | none."
+    ),
+    auth_header: str = typer.Option(
+        None, "--auth-header", help="Header NAME when --auth-style header."
+    ),
+    key_env: str = typer.Option(
+        None,
+        "--key-env",
+        help="NAME of an env var holding the API key. The key itself is never an argument.",
+    ),
+    json_out: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
+) -> None:
+    """Check a URL and key and list the provider's models; stores nothing."""
+    if catalog_id is None and base_url is None:
+        die("pass --catalog-id or --url")
+        return
+    body: dict[str, Any] = {}
+    if catalog_id is not None:
+        body["catalog_id"] = catalog_id
+    if base_url is not None:
+        body["url"] = base_url.rstrip("/")
+    if auth_style is not None:
+        body["auth_style"] = auth_style
+    if auth_header is not None:
+        body["auth_header"] = auth_header
+    if key_env is not None:
+        key = os.environ.get(key_env)
+        if not key:
+            die(f"environment variable {key_env} is not set (or is empty); export it and retry")
+            return
+        body["key"] = key
+
+    url = _api_base()
+    if _api_unreachable(url):
+        raise typer.Exit(1)
+    try:
+        result = api_post("/api/providers/probe", json=body)
+    except CliApiError as exc:
+        die(str(exc))
+        return
+
+    if json_out:
+        console.print(jsonlib.dumps(result, indent=2))
+    elif result.get("ok"):
+        latency = result.get("latency_ms")
+        suffix = f" in {latency:.0f} ms" if isinstance(latency, (int, float)) else ""
+        console.print(f"[green]✓[/green] Reachable (HTTP {result.get('status')}){suffix}")
+        limits = {k: v for k, v in (result.get("rate_limit") or {}).items() if v is not None}
+        if limits:
+            console.print(f"[dim]Rate limit: {jsonlib.dumps(limits)}[/dim]")
+        _print_listing(
+            {
+                "name": catalog_id or base_url,
+                "curated": True,
+                "models": [
+                    {**m, "enabled": False, "discovered": True} for m in result.get("models") or []
+                ],
+            }
+        )
+    else:
+        err = result.get("error") or f"HTTP {result.get('status')}"
+        console.print(f"[red]✗[/red] Probe failed: {err}")
+    if not result.get("ok"):
         raise typer.Exit(1)
 
 

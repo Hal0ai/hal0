@@ -103,6 +103,12 @@ export const MOCK_ALLOWLIST: ReadonlyArray<AllowRow> = Object.freeze([
   { re: /^\/api\/runner-images\/pulls\/list$/, key: 'runnerImagesPulls' },
   { re: /^\/api\/runner-images\/downloaded$/, key: 'runnerImagesDownloaded' },
   { re: /^\/api\/runner-images$/, key: 'runnerImages' },
+  // ── Upstream providers: the preset catalogue and one upstream's model rows.
+  // The mutation routes (probe, per-model PATCH, refresh) are never
+  // substituted; their fixtures are MOCK_MUTATION_FIXTURES in ./mockFixtures.ts.
+  // networkFirst so a spec's own page.route answer stays authoritative.
+  { re: /^\/api\/providers\/catalog$/, key: 'providersCatalog', networkFirst: true },
+  { re: /^\/api\/upstreams\/([^/]+)\/models$/, key: 'upstreamModels', networkFirst: true },
   // ── Memory (Hindsight) — engine + bank-scoped surface ────────────
   // Forced-mock + 404-fallback story for the Memory graph overhaul. The
   // bank id is captured as group 1. ORDER MATTERS: the more-specific

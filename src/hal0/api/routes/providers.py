@@ -242,8 +242,9 @@ async def list_upstreams(request: Request) -> list[dict[str, Any]]:
     """Return all configured upstreams (slots + remote providers).
 
     Pulled from ``app.state.upstreams`` — the same registry the dispatcher
-    routes through. Each entry includes the cached model list when one has
-    been fetched (typically primed on first /api/health hit).
+    routes through. Each entry's ``models`` is the cached id list in
+    ``app.state.upstream_models`` for that upstream (a curated upstream's is its
+    enabled ids), empty when nothing is cached for it.
     """
     upstreams = request.app.state.upstreams
     model_cache: dict[str, list[str]] = getattr(request.app.state, "upstream_models", {})
