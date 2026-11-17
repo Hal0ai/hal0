@@ -3337,6 +3337,23 @@ class MemoryReflectLaneConfig(MemoryLaneOpConfig):
     )
 
 
+class MemoryConsolidationLaneConfig(MemoryLaneOpConfig):
+    """``[memory.lanes.consolidation]``: the per-op lane plus the batch size."""
+
+    batch_size: int = Field(
+        default=4,
+        ge=1,
+        le=32,
+        description=(
+            "HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE (#3762): memories "
+            "consolidated per LLM call (1 = no batching). The engine's own "
+            "default is 8, which can overflow the 8192-token output cap "
+            "hal0 renders; a batch that overflows is split and retried, and "
+            "what still fails is counted as failed."
+        ),
+    )
+
+
 class MemoryLanesConfig(BaseModel):
     """[memory.lanes] section of hal0.toml — global + per-op LLM concurrency lanes.
 
@@ -3371,7 +3388,9 @@ class MemoryLanesConfig(BaseModel):
     reasoning_effort: str = Field(default="none", description="HINDSIGHT_API_LLM_REASONING_EFFORT.")
     strict_schema: bool = Field(default=False, description="HINDSIGHT_API_LLM_STRICT_SCHEMA.")
     retain: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
-    consolidation: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    consolidation: MemoryConsolidationLaneConfig = Field(
+        default_factory=MemoryConsolidationLaneConfig
+    )
     reflect: MemoryReflectLaneConfig = Field(default_factory=MemoryReflectLaneConfig)
     mental_model_refresh: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
 
@@ -3380,11 +3399,11 @@ class MemoryLanesConfig(BaseModel):
     def _effort_shape(cls, v: str) -> str:
         return _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
 
-    @field_validator("reflect", mode="before")
+    @field_validator("reflect", "consolidation", mode="before")
     @classmethod
-    def _plain_op_lane_to_reflect(cls, v: object) -> object:
+    def _plain_op_lane_to_subclass(cls, v: object) -> object:
         # Callers that build the lane from the base per-op model keep working.
-        if isinstance(v, MemoryLaneOpConfig) and not isinstance(v, MemoryReflectLaneConfig):
+        if type(v) is MemoryLaneOpConfig:
             return v.model_dump(exclude_unset=True)
         return v
 

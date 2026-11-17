@@ -70,3 +70,13 @@ def test_reflect_wall_timeout_default_and_bounds() -> None:
     for bad in (0, 59, 86401):
         with pytest.raises(ValidationError):
             MemoryConfig(lanes={"reflect": {"wall_timeout_s": bad}})
+
+
+def test_consolidation_batch_size_default_and_bounds() -> None:
+    assert MemoryConfig().lanes.consolidation.batch_size == 4
+    assert (
+        MemoryConfig(lanes={"consolidation": {"batch_size": 8}}).lanes.consolidation.batch_size == 8
+    )
+    for bad in (0, 33):
+        with pytest.raises(ValidationError):
+            MemoryConfig(lanes={"consolidation": {"batch_size": bad}})

@@ -600,6 +600,11 @@ def render_showcase_env(
     # #3759: always rendered, so a box never runs on the engine's 300 s reflect
     # clock, which counts time spent queued for an LLM permit.
     lines.append(f"Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT={lanes.reflect.wall_timeout_s}")
+    # #3762: the engine batches 8 memories per consolidation call, which can
+    # overflow the 8192-token output cap rendered above.
+    lines.append(
+        f"Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE={lanes.consolidation.batch_size}"
+    )
 
     return "\n".join(lines) + "\n"
 

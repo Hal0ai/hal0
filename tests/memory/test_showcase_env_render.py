@@ -194,3 +194,18 @@ def test_reflect_wall_timeout_renders_the_default_and_an_override() -> None:
 def test_a_partial_reflect_table_keeps_the_wall_timeout_default() -> None:
     lanes = MemoryLanesConfig(reflect={"max_concurrent": 2})
     assert _render(lanes, ceiling=2)["HINDSIGHT_API_REFLECT_WALL_TIMEOUT"] == "1800"
+
+
+# ── #3762: consolidation batch size ──
+
+
+def test_consolidation_batch_size_renders_the_default_and_an_override() -> None:
+    key = "HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE"
+    assert _render(MemoryLanesConfig(), ceiling=1)[key] == "4"
+    lanes = MemoryLanesConfig(consolidation={"batch_size": 2})
+    assert _render(lanes, ceiling=1)[key] == "2"
+
+
+def test_a_partial_consolidation_table_keeps_the_batch_size_default() -> None:
+    lanes = MemoryLanesConfig(consolidation={"max_concurrent": 1})
+    assert _render(lanes, ceiling=2)["HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE"] == "4"

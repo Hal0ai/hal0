@@ -35,6 +35,12 @@ const SCHEMA = {
         lanes: {
           type: 'object',
           properties: {
+            consolidation: {
+              type: 'object',
+              properties: {
+                batch_size: { type: 'integer', default: 4, minimum: 1, maximum: 32, description: 'batch' },
+              },
+            },
             reflect: {
               type: 'object',
               properties: {
@@ -54,7 +60,8 @@ const SCHEMA = {
   },
 }
 
-const input = (host: HTMLElement) => host.querySelector('input[type="number"]') as HTMLInputElement
+const inputs = (host: HTMLElement) => Array.from(host.querySelectorAll('input[type="number"]')) as HTMLInputElement[]
+const input = (host: HTMLElement) => inputs(host)[0]
 const save = (host: HTMLElement) => host.querySelector('[data-testid="mem-engine-limits-save"]') as HTMLButtonElement
 
 function setValue(el: HTMLInputElement, value: string) {
@@ -66,7 +73,7 @@ function setValue(el: HTMLInputElement, value: string) {
 }
 
 beforeEach(() => {
-  state.live = { memory: { lanes: { reflect: { wall_timeout_s: 1800 } } } }
+  state.live = { memory: { lanes: { reflect: { wall_timeout_s: 1800 }, consolidation: { batch_size: 4 } } } }
   state.schema = SCHEMA
   state.sent = []
   ;(window as any).__hal0Toast = vi.fn()
@@ -89,6 +96,20 @@ describe('EngineLimitsPanel', () => {
       click(save(host))
     })
     expect(state.sent).toEqual([{ memory: { lanes: { reflect: { wall_timeout_s: 7200 } } } }])
+  })
+
+  it('sends the consolidation batch size and refuses 0', async () => {
+    const { host } = mount(<EngineLimitsPanel registry={{}} />)
+    expect(host.textContent).toContain('Memories per consolidation call')
+    const batch = inputs(host)[1]
+    expect(batch.value).toBe('4')
+    setValue(batch, '0')
+    expect(save(host).disabled).toBe(true)
+    setValue(batch, '2')
+    await act(async () => {
+      click(save(host))
+    })
+    expect(state.sent).toEqual([{ memory: { lanes: { consolidation: { batch_size: 2 } } } }])
   })
 
   it('refuses a value outside the schema bounds', () => {

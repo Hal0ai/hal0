@@ -2,13 +2,15 @@
 //
 // Schema-driven rows (like the reranker panel): the generic settings PUT
 // writes hal0.toml and its apply plan re-renders the engine drop-in. Today:
-// the reflect / knowledge-page wall clock (#3759).
+// the reflect / knowledge-page wall clock (#3759) and the
+// consolidation batch size (#3762).
 import { useState } from 'react'
 import { useSettingsClient } from '../../data/settingsClient.js'
 import { AdvRow, _schemaField, _getIn, _deepMergePatch, _advCoerce } from '../../shared/SchemaRow.jsx'
 
 export const ENGINE_LIMIT_ROWS = [
   { key: 'memory.lanes.reflect.wall_timeout_s', label: 'Reflect and page refresh time limit (s)' },
+  { key: 'memory.lanes.consolidation.batch_size', label: 'Memories per consolidation call' },
 ]
 
 export function EngineLimitsPanel({ registry }) {

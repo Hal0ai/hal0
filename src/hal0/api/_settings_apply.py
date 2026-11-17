@@ -322,6 +322,7 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "services": [],
     },
     "memory.lanes.consolidation.strict_schema": {"apply_class": "immediate", "services": []},
+    "memory.lanes.consolidation.batch_size": {"apply_class": "immediate", "services": []},
     "memory.lanes.consolidation.max_completion_tokens": {
         "apply_class": "immediate",
         "services": [],

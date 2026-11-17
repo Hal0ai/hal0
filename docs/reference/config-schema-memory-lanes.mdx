@@ -39,8 +39,9 @@ The per-operation tables `retain`, `consolidation`, `reflect` and
 | `strict_schema` | bool | unset | Per-op `HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA` override; unset falls back to `[memory.lanes].strict_schema`. |
 | `max_completion_tokens` | int | unset; `consolidation` and `reflect` then render `8192` | `0-131072`; `0` leaves the engine uncapped. Rendered as `HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS` or `HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS`. Mental-model refresh runs through reflect, so the reflect cap bounds it; a mental model whose `max_tokens` is near the cap leaves no headroom, because the engine fails the call on `finish_reason=length` instead of truncating, and on a thinking model reasoning tokens count inside the cap. Setting it on `retain` (use `[memory.graph].extraction_max_tokens`) or on `mental_model_refresh` is refused |
 
-## `[memory.lanes.reflect]` extra keys
+## `[memory.lanes.reflect]` and `[memory.lanes.consolidation]` extra keys
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
 | `[memory.lanes.reflect].wall_timeout_s` | int | `1800` | `60-86400`. Rendered as `HINDSIGHT_API_REFLECT_WALL_TIMEOUT`: the seconds the engine gives one reflect, and one knowledge-page refresh (which runs as a reflect), from start to finish. The clock includes time spent waiting for a language-model permit, so a refresh queued behind consolidation and retain needs headroom. The engine's own default is 300. |
+| `[memory.lanes.consolidation].batch_size` | int | `4` | `1-32`. Rendered as `HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE`: memories consolidated per language-model call (`1` means no batching). The engine's own default is 8, which can overflow the 8192-token output cap; a batch that overflows is split and retried, and what still fails is counted as failed. |

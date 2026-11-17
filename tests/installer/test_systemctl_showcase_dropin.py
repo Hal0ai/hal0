@@ -134,6 +134,8 @@ _HEAD = "[Service]\n"
         "Environment=HINDSIGHT_API_MENTAL_MODEL_REFRESH_MAX_COMPLETION_TOKENS=8192",
         "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT=-1",
         "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT=30m",
+        "Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE=-4",
+        "Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE=four",
         "Environment=HINDSIGHT_API_RETAIN_LLM_MODEL=gpt-4o",
         "Environment=HINDSIGHT_API_RETAIN_LLM_MODEL=hal0/x HINDSIGHT_API_LLM_API_KEY=y",
     ],
@@ -189,4 +191,11 @@ def test_default_body_carries_the_reflect_wall_clock_and_is_accepted() -> None:
     """#3759: the shipped reflect wall clock passes the allow-list."""
     body = _body()
     assert "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT=1800\n" in body
+    _accepts(body)
+
+
+def test_default_body_carries_the_consolidation_batch_size_and_is_accepted() -> None:
+    """#3762: the shipped consolidation batch size passes the allow-list."""
+    body = _body()
+    assert "Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE=4\n" in body
     _accepts(body)
