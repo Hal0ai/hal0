@@ -564,6 +564,14 @@ function clearLine(step: MemoryHealthStep, report: Report): Segment[] {
     if (pages === null || models === null) return ['Nothing is stale and no refresh has failed.']
     const total = pages + models
     if (total === 0) return ['No knowledge pages or mental models yet.']
+    // Under a refresh schedule a stale page waits for its next run and does not open the step.
+    const waiting = (count(report.knowledge?.pages_stale) ?? 0) + (count(report.knowledge?.models_stale) ?? 0)
+    if (waiting > 0) {
+      return [
+        em(plural(waiting, KNOWLEDGE_ONE, KNOWLEDGE_MANY)),
+        waiting === 1 ? ' is waiting for its next scheduled refresh.' : ' are waiting for their next scheduled refresh.',
+      ]
+    }
     return [
       em(plural(total, KNOWLEDGE_ONE, KNOWLEDGE_MANY)),
       total === 1 ? ' is fresh.' : ' are fresh.',

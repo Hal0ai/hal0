@@ -89,6 +89,12 @@ class HealthFacts:
     fold_in_banks: int = 0
     pages_stale: int = 0
     models_stale: int = 0
+    #: Of the stale pages and models, how many have waited longer than the
+    #: refresh policy allows (:func:`hal0.memory.refresh_policy.stale_grace_s`).
+    #: ``None`` means any stale page counts: no schedule is in play.
+    stale_overdue: int | None = None
+    #: The grace behind ``stale_overdue``, in seconds, for the figures.
+    stale_grace_s: float | None = None
     refresh_failed: int = 0
 
 
@@ -186,11 +192,17 @@ def _knowledge(facts: HealthFacts) -> _Check:
     reason: str | None = None
     if facts.refresh_failed > 0:
         reason = REASON_REFRESH_FAILED
-    elif facts.pages_stale > 0 or facts.models_stale > 0:
-        reason = REASON_STALE
+    else:
+        stale = facts.pages_stale + facts.models_stale
+        # Under a schedule a stale page is waiting for its run, not neglected:
+        # only one that has outlived the schedule opens the step.
+        if (facts.stale_overdue if facts.stale_overdue is not None else stale) > 0:
+            reason = REASON_STALE
     figures = {
         "pages_stale": facts.pages_stale,
         "models_stale": facts.models_stale,
+        "stale_overdue": facts.stale_overdue,
+        "stale_grace_s": facts.stale_grace_s,
         "refresh_failed": facts.refresh_failed,
     }
     return STEP_KNOWLEDGE, reason, figures

@@ -500,6 +500,13 @@ describe('buildPath', () => {
       expect(bodyOf(byId(buildPath(single), 'knowledge'))).toBe('1 knowledge page or mental model is fresh.')
     })
 
+    it('says a stale page that has not missed its schedule is waiting, not fresh', () => {
+      const waiting = healthReport({ knowledge: { ...healthReport().knowledge!, pages: 5, models: 2, pages_stale: 1, models_stale: 1 } })
+      expect(bodyOf(byId(buildPath(waiting), 'knowledge'))).toBe('2 knowledge pages and mental models are waiting for their next scheduled refresh.')
+      const one = healthReport({ knowledge: { ...healthReport().knowledge!, pages: 5, models: 2, pages_stale: 0, models_stale: 1 } })
+      expect(bodyOf(byId(buildPath(one), 'knowledge'))).toBe('1 knowledge page or mental model is waiting for its next scheduled refresh.')
+    })
+
     it('says the ordinary upgraded box needs nothing, and a missing record is not called fine', () => {
       const upgraded = healthReport({
         embedder: { ...healthReport().embedder!, recorded: OLD_EMBEDDER_ID, needs_switch: true, informational: true },

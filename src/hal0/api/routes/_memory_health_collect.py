@@ -49,6 +49,7 @@ from hal0.memory import extraction_env as _ee
 from hal0.memory.bank_layout import HEALTH_LEGACY_UNIFIED
 from hal0.memory.embedder_verdict import embedder_verdict
 from hal0.memory.health_path import EXTRACTION_FAILURE_WINDOW_S, HealthFacts
+from hal0.memory.refresh_policy import stale_grace_s
 from hal0.redaction import redact_log_line
 
 log = logging.getLogger(__name__)
@@ -390,12 +391,24 @@ class KnowledgeRead:
     models: int = 0
     models_stale: int = 0
     refresh_failed: int = 0
+    #: Stale items that have waited longer than ``grace_s``. Every stale item
+    #: counts when ``grace_s`` is ``None`` (no schedule in play).
+    stale_overdue: int = 0
+    #: Set by the collector from the refresh policy; see ``stale_grace_s``.
+    grace_s: float | None = None
+    now: float = 0.0
     last_success: float | None = None
     last_success_at: str | None = None
     complete: bool = False
 
     def absorb(self, item: dict[str, Any]) -> None:
         stale = item.get("is_stale") is True
+        if stale:
+            # The engine reports no time for when an item went stale; its last
+            # refresh is the nearest bound. No time at all counts as overdue.
+            since = _epoch(item.get("last_refreshed_at")) or _epoch(item.get("created_at"))
+            if self.grace_s is None or since is None or self.now - since > self.grace_s:
+                self.stale_overdue += 1
         if item.get("is_knowledge_page") is True:
             self.pages += 1
             self.pages_stale += stale
@@ -633,6 +646,16 @@ def _unreachable() -> tuple[dict[str, Any], HealthFacts]:
     return sections, HealthFacts(engine_reachable=False)
 
 
+def _stale_grace(cfg: Any, now: float) -> float | None:
+    """The refresh policy's grace for a stale page, or ``None`` when no schedule is in play."""
+    if cfg is None:
+        return None
+    try:
+        return stale_grace_s(cfg.memory.refresh, datetime.fromtimestamp(now, UTC))
+    except Exception:
+        return None
+
+
 async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
     """Gather the response sections and the facts the path is decided from.
 
@@ -684,7 +707,9 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
         work.append(("embedder", _read_embedder(cfg.memory.models, embedder)))
     for bank in retired:
         work.append(("stats", _read_stats(reader, bank)))
+    grace_s = _stale_grace(cfg, now)
     for bank in banks:
+        bank.knowledge.grace_s, bank.knowledge.now = grace_s, now
         work.append(("stats", _read_stats(reader, bank)))
         work.append(
             (
@@ -739,11 +764,14 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
     pages_stale = sum(b.knowledge.pages_stale for b in banks)
     models_stale = sum(b.knowledge.models_stale for b in banks)
     refresh_failed = sum(b.knowledge.refresh_failed for b in banks)
+    stale_overdue = sum(b.knowledge.stale_overdue for b in banks)
     knowledge: dict[str, Any] = {
         "pages": sum(b.knowledge.pages for b in banks),
         "pages_stale": pages_stale,
         "models": sum(b.knowledge.models for b in banks),
         "models_stale": models_stale,
+        "stale_overdue": stale_overdue,
+        "stale_grace_s": grace_s,
         "refresh_failed": refresh_failed,
         "last_success_at": latest.last_success_at if latest is not None else None,
     }
@@ -812,6 +840,8 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
         embedder=status,
         pages_stale=pages_stale,
         models_stale=models_stale,
+        stale_overdue=stale_overdue if grace_s is not None else None,
+        stale_grace_s=grace_s,
         refresh_failed=refresh_failed,
     )
     log.debug(

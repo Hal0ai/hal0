@@ -37,11 +37,14 @@ import json
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 import structlog
+
+from hal0.config.cron import CronError, previous_fire
 
 log = structlog.get_logger(__name__)
 
@@ -74,6 +77,34 @@ def _policy_fields(policy: Any) -> tuple[str, str, int, str]:
         int(getattr(policy, "min_interval_s", 86400)),
         str(getattr(policy, "consolidation", "continuous")),
     )
+
+
+#: How long past a scheduled run a stale page may wait before it counts as
+#: having missed it: a refresh takes minutes, and the run starts a minute
+#: after its tick at the latest.
+STALE_MARGIN_S = 3600.0
+
+
+def stale_grace_s(policy: Any, now: datetime) -> float | None:
+    """How long a stale page may go without a refresh before health calls it overdue.
+
+    Under ``pages = "scheduled"`` a page is stale from the moment facts in its
+    scope change until the next run, so for most of every day by design. It
+    has missed a run only once its last refresh is older than one schedule
+    interval (the gap between the last two fires of ``schedule``), or the
+    ``min_interval_s`` floor when that is longer, plus :data:`STALE_MARGIN_S`.
+    ``None`` under ``after_consolidation`` and ``manual`` (any stale page
+    counts) and for a schedule that cannot be read.
+    """
+    pages, schedule, floor, _ = _policy_fields(policy)
+    if pages != "scheduled":
+        return None
+    try:
+        last = previous_fire(schedule, now)
+        before = previous_fire(schedule, last - timedelta(minutes=1))
+    except CronError:
+        return None
+    return max((last - before).total_seconds(), float(floor)) + STALE_MARGIN_S
 
 
 def desired_trigger(policy: Any) -> dict[str, Any]:
@@ -522,6 +553,7 @@ __all__ = [
     "AUTO_CONSOLIDATION_KEY",
     "DEFAULT_TRIGGER_KEY",
     "FLOOR_KEY",
+    "STALE_MARGIN_S",
     "TIMING_FIELDS",
     "BankPolicyReport",
     "EngineCall",
@@ -535,5 +567,6 @@ __all__ = [
     "load_owned_auto_off",
     "owned_state_path",
     "save_owned_auto_off",
+    "stale_grace_s",
     "trigger_patch",
 ]

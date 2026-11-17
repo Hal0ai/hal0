@@ -335,6 +335,8 @@ def test_a_healthy_box_is_clear_and_fills_the_whole_shape(
         "pages_stale": 0,
         "models": 1,
         "models_stale": 0,
+        "stale_overdue": 0,
+        "stale_grace_s": 86400.0 + 3600.0,
         "refresh_failed": 0,
     }
     # The latest of the two refreshes that finished.
@@ -1215,3 +1217,59 @@ def test_failed_rows_are_read_in_parallel_within_the_bound() -> None:
     assert client.peak == 3  # overlapping, and never past the reader's bound
     assert out.count == 1000 and out.complete and not out.truncated
     assert [r["id"] for r in out.rows] == [f"op-{i}" for i in range(1000)]  # page order kept
+
+
+# ── stale knowledge under a refresh schedule (#3764) ─────────────────────
+
+
+def test_a_stale_page_waiting_for_its_scheduled_run_is_not_attention(
+    client: TestClient, engine: _Engine
+) -> None:
+    # Default policy: scheduled, daily. Refreshed 2.5 h ago and stale since.
+    engine.add_bank(
+        "shared",
+        models=[
+            _model(page=True, stale=True, refreshed_s=9000.0),
+            _model(stale=True, refreshed_s=9000.0),
+        ],
+    )
+    body = _health(client)
+    knowledge = body["knowledge"]
+    assert (knowledge["pages_stale"], knowledge["models_stale"]) == (1, 1)
+    assert knowledge["stale_overdue"] == 0
+    assert knowledge["stale_grace_s"] == 86400.0 + 3600.0
+    assert body["verdict"] == "clear"
+    assert _steps(body)["knowledge"]["state"] == "clear"
+
+
+def test_a_stale_page_that_missed_a_scheduled_run_opens_knowledge(
+    client: TestClient, engine: _Engine
+) -> None:
+    engine.add_bank(
+        "shared",
+        models=[
+            _model(page=True, stale=True, refreshed_s=3 * 86400.0),
+            _model(stale=True, refreshed_s=9000.0),
+        ],
+    )
+    body = _health(client)
+    assert body["knowledge"]["stale_overdue"] == 1
+    step = _steps(body)["knowledge"]
+    assert (step["state"], step["reason_code"]) == ("current", "knowledge_stale")
+
+
+@pytest.mark.parametrize("mode", ["after_consolidation", "manual"])
+def test_other_policies_keep_every_stale_page_as_attention(
+    client: TestClient, engine: _Engine, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    from hal0.config.loader import load_hal0_config
+    from hal0.config.schema import MemoryRefreshConfig
+
+    cfg = load_hal0_config().model_copy(deep=True)
+    cfg.memory.refresh = MemoryRefreshConfig(pages=mode)
+    monkeypatch.setattr(collect, "load_hal0_config", lambda: cfg)
+    engine.add_bank("shared", models=[_model(page=True, stale=True, refreshed_s=9000.0)])
+    body = _health(client)
+    assert body["knowledge"]["stale_grace_s"] is None
+    step = _steps(body)["knowledge"]
+    assert step["reason_code"] == "knowledge_stale"
