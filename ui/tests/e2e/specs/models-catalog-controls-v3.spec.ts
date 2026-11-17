@@ -181,7 +181,8 @@ test.describe('Models v3 — catalog controls (/models)', () => {
       }),
     )
     await page.goto('/#models')
-    await page.locator('.view .vh button:has-text("Add by HF coords")').click()
+    await page.getByTestId('mdl-add').click()
+    await page.getByTestId('mdl-add-hf').click()
     await page.locator('input[placeholder*="unsloth/Qwen3-8B-GGUF"]').fill('unsloth/Qwen3-8B-GGUF')
     await page.locator('button:has-text("Inspect")').click()
 

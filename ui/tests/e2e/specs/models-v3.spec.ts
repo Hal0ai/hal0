@@ -38,10 +38,17 @@ test.describe('Models v3 (/models)', () => {
     await expect(page.locator('.slot-tab.on:has-text("Inference Models")')).toBeVisible()
   })
 
-  test('exposes Add-by-HF + Search-HF CTAs', async ({ page }) => {
+  test('the Add model menu offers every way to add a model', async ({ page }) => {
     await page.goto('/#models')
-    await expect(page.locator('.view .vh button:has-text("Add by HF coords")')).toBeVisible()
-    await expect(page.locator('.view .vh button:has-text("Search HF")')).toBeVisible()
+    await expect(page.getByTestId('mdl-add-menu')).toHaveCount(0)
+    await page.getByTestId('mdl-add').click()
+    const menu = page.getByTestId('mdl-add-menu')
+    for (const label of ['Add by HF coords', 'Search HF', 'Add by path', 'Scan directory']) {
+      await expect(menu.getByRole('menuitem', { name: label })).toBeVisible()
+    }
+    // Escape closes it without choosing.
+    await page.keyboard.press('Escape')
+    await expect(menu).toHaveCount(0)
   })
 
   test('Profiles tab swaps the page heading in place — no second vh', async ({ page }) => {
@@ -53,11 +60,11 @@ test.describe('Models v3 (/models)', () => {
     await expect(page.locator('.view .vh h1')).toHaveCount(1)
     await expect(page.locator('.view .vh h1')).toHaveText('Profiles')
     // The Models CTAs leave — ProfilesView carries its own actions.
-    await expect(page.locator('.view .vh button:has-text("Add by HF coords")')).toHaveCount(0)
+    await expect(page.getByTestId('mdl-add')).toHaveCount(0)
     // Switching back restores the Models heading + CTAs.
     await page.locator('.slot-tab:has-text("Inference Models")').click()
     await expect(page.locator('.view .vh h1')).toHaveText('Models')
-    await expect(page.locator('.view .vh button:has-text("Add by HF coords")')).toBeVisible()
+    await expect(page.getByTestId('mdl-add')).toBeVisible()
   })
 
   test('simplified filter chips toggle OR semantics', async ({ page }) => {
@@ -149,7 +156,8 @@ test.describe('Models v3 (/models)', () => {
     })
 
     await page.goto('/#models')
-    await page.locator('.view .vh button:has-text("Add by HF coords")').click()
+    await page.getByTestId('mdl-add').click()
+    await page.getByTestId('mdl-add-hf').click()
     await page.locator('input[placeholder*="unsloth/Qwen3-8B-GGUF"]').fill('unsloth/Qwen3-8B-GGUF')
     await page.locator('button:has-text("Inspect")').click()
     await expect(page.locator('.variant-row', { hasText: 'qwen3-8b-q4_k_m.gguf' })).toBeVisible()
@@ -172,7 +180,8 @@ test.describe('Models v3 (/models)', () => {
       }),
     )
     await page.goto('/#models')
-    await page.locator('.view .vh button:has-text("Add by HF coords")').click()
+    await page.getByTestId('mdl-add').click()
+    await page.getByTestId('mdl-add-hf').click()
     await page.locator('input[placeholder*="unsloth/Qwen3-8B-GGUF"]').fill('foo/bar')
     await page.locator('button:has-text("Inspect")').click()
     await expect(page.locator('.err').first()).toContainText('Inspect failed')

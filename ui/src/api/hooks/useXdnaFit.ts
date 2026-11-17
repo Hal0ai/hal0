@@ -17,8 +17,10 @@ export interface XdnaFitRow {
 }
 export type XdnaFit = Record<string, XdnaFitRow>
 
-export function useXdnaFit() {
+/** `enabled: false` for a page that only wants the fit on a box with an NPU. */
+export function useXdnaFit({ enabled = true }: { enabled?: boolean } = {}) {
   return useQuery<XdnaFit>({
+    enabled,
     queryKey: ['runners', 'xdna', 'fit'],
     queryFn: async () => {
       const d = await apiGet<{ models?: XdnaFit } | null>(ENDPOINTS.xdnaFit)

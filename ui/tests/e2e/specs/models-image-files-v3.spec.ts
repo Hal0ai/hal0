@@ -62,7 +62,7 @@ test.describe('Models → Image / ComfyUI file inventory', () => {
     test(`a file listing that is ${label} leaves the Inference tab working and counts 0 on the Image tab`, async ({ page }) => {
       await page.route('**/api/comfyui/files', fulfil)
       await page.goto('/#models')
-      await expect(page.locator('.view .vh button:has-text("Add by HF coords")')).toBeVisible()
+      await expect(page.getByTestId('mdl-add')).toBeVisible()
       await expect(page.locator('.models-layout')).toBeVisible()
       await expect(imageTabCount(page)).toHaveText('0')
     })
