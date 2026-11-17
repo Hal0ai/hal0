@@ -212,7 +212,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     # the bare-name-defaults-to-.service systemctl calls below still resolve
     # it correctly.
     UNITS=(hal0-api hal0-openwebui hal0-podman-forward hal0-caddy hal0-lemonade \
-           hindsight-api hal0-agent@hermes hermes-gateway hal0.target)
+           hindsight-api hal0-hs-decide hal0-agent@hermes hermes-gateway hal0.target)
 
     # Discover any running slot instances
     while IFS= read -r UNIT; do
@@ -353,6 +353,7 @@ for UNIT_FILE in \
     "${UNIT_DIR}/hal0-caddy.service" \
     "${UNIT_DIR}/hal0-lemonade.service" \
     "${UNIT_DIR}/hindsight-api.service" \
+    "${UNIT_DIR}/hal0-hs-decide.service" \
     "${UNIT_DIR}/hal0-slot@.service" \
     "${UNIT_DIR}/hal0-agent@.service" \
     "${UNIT_DIR}/hermes-gateway.service" \

@@ -147,7 +147,58 @@ HINDSIGHT_SHOWCASE_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/showcase-lanes.conf"
 # have placed anything there), never its target.
 HINDSIGHT_LEGACY_CAP_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/zz-h0-98-llm-global-cap.conf"
 
+# #3757: the opt-in local decision model server. The unit is rendered HERE from
+# a literal template; the caller supplies four validated values (model
+# revision, threads, port, max request tokens), never unit text, so this grant
+# cannot change User=, the ExecStart binary, or the 127.0.0.1 bind. The venv and
+# script it runs are hal0-owned and the unit runs them as hal0, so starting it
+# gains no privilege. Twin: hal0.system.seam.render_decision_unit
+# (tests/installer/test_systemctl_decision_unit.py keeps them byte-identical).
+DECISION_UNIT_FILE="${UNIT_DIR}/hal0-hs-decide.service"
+DECISION_HOME="/var/lib/hal0/memory/hindsight-decision"
+DECISION_HF_HOME="/var/lib/hal0/memory/hindsight/hf-cache"
+DECISION_SNAPSHOTS="${DECISION_HF_HOME}/hub/models--hindsight-ai--hs-decide-1-flash/snapshots"
+
 die() { echo "hal0-systemctl: $1" >&2; exit 64; }
+
+validate_int_range() {  # args: name, value, min, max
+  local name="$1" value="$2" lo="$3" hi="$4"
+  [[ "$value" =~ ^[1-9][0-9]{0,5}$ ]] || die "bad ${name}: ${value:-<missing>}"
+  (( value >= lo && value <= hi )) || die "bad ${name}: ${value} (allowed ${lo}-${hi})"
+}
+
+render_decision_unit() {  # args: revision threads port max_tokens (validated here)
+  local rev="$1" threads="$2" port="$3" max_tokens="$4"
+  [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || die "bad model revision: ${rev:-<missing>}"
+  validate_int_range threads "$threads" 1 64
+  validate_int_range port "$port" 1024 65535
+  validate_int_range max_tokens "$max_tokens" 256 32768
+  cat <<EOF
+# Managed by hal0 (hal0 memory decision install). hal0 rewrites this file.
+[Unit]
+Description=hal0 System One decision model (hs-decide-1-flash, CPU)
+After=network.target
+Before=hindsight-api.service
+
+[Service]
+User=hal0
+Group=hal0
+WorkingDirectory=${DECISION_HOME}
+Environment=HF_HOME=${DECISION_HF_HOME}
+Environment=HF_HUB_OFFLINE=1
+Environment=HS_DECIDE_THREADS=${threads}
+ExecStart=${DECISION_HOME}/.venv/bin/python ${DECISION_HOME}/hs_decide_serve.py --model ${DECISION_SNAPSHOTS}/${rev} --host 127.0.0.1 --port ${port} --threads ${threads} --max-tokens ${max_tokens}
+Nice=5
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
 
 validate_slot_id() {   # arg: slot id (the "<id>" in hal0-slot@<id>.service)
   local id="$1"
@@ -888,6 +939,35 @@ case "$cmd" in
     printf '%s' "$DROPIN_BODY"
     ;;
 
+  write-hs-decide-unit)       # write-hs-decide-unit <revision> <threads> <port> <max-tokens>   (#3757)
+    # Renders the unit from the literal template above (no stdin, no unit text
+    # from the caller) and installs it atomically at its one literal path. The
+    # render runs first, into a variable, so a rejected value writes nothing.
+    [[ $# -eq 4 ]] || die "write-hs-decide-unit takes exactly 4 arguments"
+    body="$(render_decision_unit "$1" "$2" "$3" "$4")" || exit 64
+    umask 022
+    tmp="$(mktemp "${DECISION_UNIT_FILE}.XXXXXX")"
+    trap 'rm -f "$tmp"' EXIT
+    printf '%s\n' "$body" > "$tmp"
+    chown root:root "$tmp"
+    chmod 0644 "$tmp"
+    mv -f "$tmp" "$DECISION_UNIT_FILE"
+    trap - EXIT
+    ;;
+
+  check-hs-decide-unit)       # check-hs-decide-unit <revision> <threads> <port> <max-tokens>
+    # Side-effect-free dry run: prints exactly what write-hs-decide-unit would
+    # install, or dies 64 with the reason (the check-dropin posture).
+    [[ $# -eq 4 ]] || die "check-hs-decide-unit takes exactly 4 arguments"
+    body="$(render_decision_unit "$1" "$2" "$3" "$4")" || exit 64
+    printf '%s\n' "$body"
+    ;;
+
+  remove-hs-decide-unit)      # remove-hs-decide-unit   (the one literal path; ok if absent)
+    [[ $# -eq 0 ]] || die "remove-hs-decide-unit takes no arguments"
+    rm -f -- "$DECISION_UNIT_FILE"
+    ;;
+
   check-quadlet)              # check-quadlet [<slot-id>]   (.container body on stdin)
     # Side-effect-free dry run of the #1740 allow-list: validates the optional
     # slot id and the body, then echoes back exactly what a write would
@@ -1057,6 +1137,9 @@ case "$cmd" in
       # not start a gateway the operator stopped), but the svc-* family shares
       # one map.
       hermes-gateway) unit="hermes-gateway.service" ;;
+      # #3757: the opt-in decision model server; its unit file only ever comes
+      # from write-hs-decide-unit's template above.
+      hs-decide) unit="hal0-hs-decide.service" ;;
       *) die "bad service key: ${key:-<missing>}" ;;
     esac
     exec systemctl "${cmd#svc-}" "$unit"
@@ -1103,6 +1186,11 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   write-hindsight-showcase-dropin  write ${HINDSIGHT_SHOWCASE_DROPIN_FILE} (body on stdin)
   check-dropin <gateway|hindsight|showcase>  validate a drop-in body (stdin) without writing it
   check-quadlet [<slot-id>]        validate a .container body (stdin) without writing it
+  write-hs-decide-unit <rev> <threads> <port> <max-tokens>
+                                   render + install ${DECISION_UNIT_FILE}
+  check-hs-decide-unit <rev> <threads> <port> <max-tokens>
+                                   print that unit without writing it
+  remove-hs-decide-unit            delete ${DECISION_UNIT_FILE}
   prune-dnat <port> <handle>       delete ONE stale (dead-target) netavark DNAT rule
   check-dnat <port> <handle>       say whether that rule is prunable, without deleting it
   dnat-snapshot                    list netavark DNAT rules (nft + iptables) and running containers
@@ -1117,7 +1205,7 @@ usage: hal0-systemctl <command> [slot-id|agent-id]
   restart-agent <agent-id>         systemctl restart ${AGENT_UNIT_PREFIX}<id>.service
   try-restart-agent <agent-id>     systemctl try-restart ${AGENT_UNIT_PREFIX}<id>.service (no-op if stopped)
   enable-agent <agent-id>          systemctl enable ${AGENT_UNIT_PREFIX}<id>.service
-  svc-<verb> <openwebui|hindsight|hermes-gateway>
+  svc-<verb> <openwebui|hindsight|hermes-gateway|hs-decide>
                                    systemctl <verb> on the mapped companion unit
   repin-owui <sha256:digest>       rewrite the OpenWebUI companion image pin + daemon-reload
   restart-self                     systemctl restart ${SELF_UNIT}

@@ -103,6 +103,8 @@ COMPANION_SERVICE_UNITS: dict[str, str] = {
     # client-side spelling the unprivileged API's restart fell through to bare
     # systemctl and polkit denied it (#2913).
     "hermes-gateway.service": "hermes-gateway",
+    # #3757: the opt-in local decision model server (hal0.memory.decision_component).
+    "hal0-hs-decide.service": "hs-decide",
 }
 
 #: Fixed, literal drop-in the memory extraction slot / LLM timeout ride on
@@ -118,6 +120,71 @@ HINDSIGHT_SHOWCASE_DROPIN_PATH = HINDSIGHT_DROPIN_DIR / "showcase-lanes.conf"
 #: #3520: the hand-maintained H0-98 drop-in the showcase one replaces. It sorts
 #: later and would win, so installing the showcase drop-in removes it.
 HINDSIGHT_LEGACY_CAP_DROPIN_NAME = "zz-h0-98-llm-global-cap.conf"
+
+# ── Decision model unit (hal0-hs-decide.service, #3757) ──────────────────────
+#
+# The unit file is root-owned like every /etc/systemd/system fragment. The
+# unprivileged hal0-api never sends its text: ``write-hs-decide-unit`` takes
+# four validated values (model revision, threads, port, max request tokens)
+# and the wrapper renders the unit from its own literal template, so the
+# grant cannot change ``User=``, ``ExecStart=``'s binary or the bind address.
+# :func:`render_decision_unit` is the byte-identical Python twin used on the
+# direct (root / dev) branch; tests/installer keep the two in lockstep.
+
+DECISION_UNIT_NAME = "hal0-hs-decide.service"
+DECISION_UNIT_PATH = Path("/etc/systemd/system") / DECISION_UNIT_NAME
+
+_DECISION_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
+
+#: Literal paths the unit points at (the wrapper's template carries the same).
+_DECISION_HOME = "/var/lib/hal0/memory/hindsight-decision"
+_DECISION_HF_HOME = "/var/lib/hal0/memory/hindsight/hf-cache"
+_DECISION_SNAPSHOTS = f"{_DECISION_HF_HOME}/hub/models--hindsight-ai--hs-decide-1-flash/snapshots"
+
+
+def _check_decision_unit_params(revision: str, threads: int, port: int, max_tokens: int) -> None:
+    """Mirror of the wrapper's validation; a fail-fast convenience, not the boundary."""
+    if not isinstance(revision, str) or not _DECISION_REVISION_RE.match(revision):
+        raise ValueError(f"bad model revision: {revision!r}")
+    for name, value, lo, hi in (
+        ("threads", threads, 1, 64),
+        ("port", port, 1024, 65535),
+        ("max_tokens", max_tokens, 256, 32768),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or not lo <= value <= hi:
+            raise ValueError(f"bad {name}: {value!r}")
+
+
+def render_decision_unit(*, revision: str, threads: int, port: int, max_tokens: int) -> str:
+    """The ``hal0-hs-decide.service`` text for these values (validated)."""
+    _check_decision_unit_params(revision, threads, port, max_tokens)
+    return (
+        "# Managed by hal0 (hal0 memory decision install). hal0 rewrites this file.\n"
+        "[Unit]\n"
+        "Description=hal0 System One decision model (hs-decide-1-flash, CPU)\n"
+        "After=network.target\n"
+        "Before=hindsight-api.service\n"
+        "\n"
+        "[Service]\n"
+        "User=hal0\n"
+        "Group=hal0\n"
+        f"WorkingDirectory={_DECISION_HOME}\n"
+        f"Environment=HF_HOME={_DECISION_HF_HOME}\n"
+        "Environment=HF_HUB_OFFLINE=1\n"
+        f"Environment=HS_DECIDE_THREADS={threads}\n"
+        f"ExecStart={_DECISION_HOME}/.venv/bin/python {_DECISION_HOME}/hs_decide_serve.py"
+        f" --model {_DECISION_SNAPSHOTS}/{revision} --host 127.0.0.1 --port {port}"
+        f" --threads {threads} --max-tokens {max_tokens}\n"
+        "Nice=5\n"
+        "Restart=on-failure\n"
+        "RestartSec=5\n"
+        "NoNewPrivileges=yes\n"
+        "PrivateTmp=yes\n"
+        "ProtectSystem=full\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+    )
 
 
 class Hal0SeamMissing(RuntimeError):
@@ -562,6 +629,60 @@ class SystemCtlSeam:
             timeout=timeout,
         )
 
+    def write_decision_unit(
+        self,
+        *,
+        revision: str,
+        threads: int,
+        port: int,
+        max_tokens: int,
+        path: Path = DECISION_UNIT_PATH,
+        timeout: float | None = None,
+    ) -> None:
+        """Install ``hal0-hs-decide.service`` for these values (#3757).
+
+        The seam branch sends only the four values to ``hal0-systemctl
+        write-hs-decide-unit``, which validates them and renders the unit from
+        its own template; ``path`` is honoured only on the direct (root / dev)
+        branch, which writes :func:`render_decision_unit` atomically.
+        """
+        body = render_decision_unit(
+            revision=revision, threads=threads, port=port, max_tokens=max_tokens
+        )
+        if not self._is_hal0_user():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".service.tmp")
+            tmp.write_text(body, encoding="utf-8")
+            tmp.chmod(0o644)
+            tmp.replace(path)
+            return
+        bounded_call(
+            self._seam_argv(
+                "write-hs-decide-unit", revision, str(threads), str(port), str(max_tokens)
+            ),
+            timeout=timeout,
+            run=self._run,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+    def remove_decision_unit(
+        self, *, path: Path = DECISION_UNIT_PATH, timeout: float | None = None
+    ) -> None:
+        """Delete ``hal0-hs-decide.service`` (no-op if absent) — ``remove-hs-decide-unit``."""
+        if not self._is_hal0_user():
+            path.unlink(missing_ok=True)
+            return
+        bounded_call(
+            self._seam_argv("remove-hs-decide-unit"),
+            timeout=timeout,
+            run=self._run,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
     def prune_dnat(
         self,
         port: int,
@@ -751,6 +872,8 @@ __all__ = [
     "AGENT_UNIT_PREFIX",
     "AGENT_UNIT_VERBS",
     "COMPANION_SERVICE_UNITS",
+    "DECISION_UNIT_NAME",
+    "DECISION_UNIT_PATH",
     "HINDSIGHT_DROPIN_DIR",
     "HINDSIGHT_DROPIN_PATH",
     "HINDSIGHT_LEGACY_CAP_DROPIN_NAME",
@@ -763,4 +886,5 @@ __all__ = [
     "bounded_call",
     "is_hal0_service_user",
     "privileged_systemctl",
+    "render_decision_unit",
 ]

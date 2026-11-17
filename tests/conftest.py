@@ -155,6 +155,8 @@ def _reject_privileged_systemctl(argv: object) -> None:
         # #1814 suites exercise the root-side allow-lists against the shipped
         # bash), and none needs sudo or root. `dnat-snapshot` (#3724) is the
         # same: a pure listing, exercised against stub nft/iptables/podman.
+        # `check-hs-decide-unit` (#3757) is pure too: it prints the unit its
+        # argv renders to and writes nothing.
         seam_verb = next((p for p in inner[1:] if not p.startswith("-")), "")
         if seam_verb and seam_verb not in {
             "help",
@@ -163,6 +165,7 @@ def _reject_privileged_systemctl(argv: object) -> None:
             "check-quadlet",
             "check-dnat",
             "dnat-snapshot",
+            "check-hs-decide-unit",
         }:
             raise AssertionError(
                 f"test tried to run the hal0-systemctl privilege seam for real: {parts!r}. "
