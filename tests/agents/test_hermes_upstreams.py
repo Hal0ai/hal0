@@ -149,10 +149,6 @@ async def test_reconcile_real_fetch_authenticates_from_os_environ(
             self.status_code = status
             self._body = body
 
-        @property
-        def is_success(self) -> bool:
-            return 200 <= self.status_code < 300
-
         def json(self) -> dict:
             return self._body
 
