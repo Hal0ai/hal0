@@ -50,6 +50,7 @@ from hal0.memory.namespace import (
 from hal0.memory.retain_chunk_guard import ChunkAudit, audit_bank_chunks
 from hal0.memory.write_gate import require_writes_allowed
 from hal0.normalize.resolver import DEFAULT_CHAINS
+from hal0.upstreams.catalog import curated_model_ids
 
 router = APIRouter()
 
@@ -370,7 +371,9 @@ async def _warm_cold_catalogs(
 
     async def _one(u: Any) -> None:
         try:
-            if fetch is not None:
+            if getattr(u, "curated", False):
+                curated_model_ids(u, cache)  # the enabled list, never the network
+            elif fetch is not None:
                 await fetch(u)
             elif registry is not None and hasattr(registry, "fetch_models"):
                 models = await registry.fetch_models(u.name)

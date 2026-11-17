@@ -436,3 +436,35 @@ async def test_run_flm_pull_cancelled_during_setup_is_marked_cancelled(
         await task
 
     assert job.state == "cancelled", job
+
+
+async def test_models_list_all_never_fetches_for_a_curated_upstream() -> None:
+    """A curated upstream with zero enabled rows stays empty, never network-filled."""
+    from hal0.services import models_service
+    from hal0.upstreams.catalog import UpstreamModel
+    from hal0.upstreams.registry import Upstream
+
+    curated = Upstream(
+        name="mm",
+        kind="remote",
+        url="https://mm.invalid/v1",
+        curated=True,
+        models=(UpstreamModel(id="off", enabled=False),),
+    )
+    fetched: list[str] = []
+
+    async def fetch_models(name: str) -> list[str]:
+        fetched.append(name)
+        return ["whole-network-catalog"]
+
+    registry = types.SimpleNamespace(list=lambda: [])
+    upstreams = types.SimpleNamespace(list=lambda: [curated], fetch_models=fetch_models)
+    cache: dict[str, Any] = {}
+
+    out = await models_service.list_all(
+        registry=registry, upstreams=upstreams, cache=cache, update_state=None
+    )
+
+    assert fetched == []
+    assert cache["mm"] == []
+    assert "whole-network-catalog" not in {m["id"] for m in out["models"]}

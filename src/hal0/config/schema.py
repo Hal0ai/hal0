@@ -10,7 +10,6 @@ Model hierarchy:
       SlotsConfig      — [slots] global slot policy
       DispatcherConfig — [dispatcher] tunables (Tier 2 prefetch timeout)
       TelemetryConfig  — [telemetry] opt-in
-    ProvidersConfig  — providers.toml (external LLM providers)
     UpstreamsConfig  — upstreams.toml (slot + remote upstream catalog)
     SlotConfig       — slots/<name>.toml
       ModelConfig      — [model] section within a slot config
@@ -862,52 +861,6 @@ class SlotConfig(BaseModel):
         return v
 
 
-# ── ProvidersConfig ────────────────────────────────────────────────────────────
-
-
-class ProviderEntry(BaseModel):
-    """One [[provider]] entry in providers.toml.
-
-    ``extra="forbid"`` (P3-schema Part C): typo'd provider keys should raise
-    at load time rather than silently round-trip as dead weight. The
-    containing ``ProvidersConfig`` (the ``[[provider]]`` list) stays
-    ``allow`` for forward-compat.
-    """
-
-    model_config = {"populate_by_name": True, "extra": "forbid"}
-
-    catalog_id: str = Field(
-        ...,
-        description="References an entry in upstreams.integrations._CATALOG.",
-    )
-    name: str = Field(default="", description="User-visible name override.")
-    base_url: str = Field(
-        default="",
-        description="URL override (leave empty to use catalog default).",
-    )
-    auth_value_env: str = Field(
-        default="",
-        description="Env var holding the API key.  Never stored in plain text.",
-    )
-    enabled: bool = Field(default=True)
-    models: list[str] = Field(default_factory=list, description="User-selected model ids.")
-
-    @field_validator("catalog_id")
-    @classmethod
-    def catalog_id_nonempty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("provider catalog_id must not be empty")
-        return v
-
-
-class ProvidersConfig(BaseModel):
-    """Parsed providers.toml."""
-
-    model_config = {"populate_by_name": True, "extra": "allow"}
-
-    provider: list[ProviderEntry] = Field(default_factory=list)
-
-
 # ── ProfileConfig + ProfilesConfig ────────────────────────────────────────────
 
 #: llama.cpp device name per slot backend (the slot's device). The container
@@ -1435,6 +1388,39 @@ class UpstreamModelFilters(BaseModel):
         return not (self.models or self.include or self.exclude)
 
 
+_VALID_MODEL_TYPES = frozenset({"chat", "embed", "rerank", "tts", "stt", "image"})
+
+
+class UpstreamModelEntry(BaseModel):
+    """One [[upstream.models]] row: a model listed under a provider."""
+
+    model_config = {"extra": "forbid"}
+
+    id: str = Field(..., description="Model id as the provider names it.")
+    enabled: bool = Field(default=True)
+    type: str = Field(default="chat", description="chat | embed | rerank | tts | stt | image.")
+    context: int | None = Field(default=None, gt=0)
+    price_in: float | None = Field(default=None, ge=0)
+    price_out: float | None = Field(default=None, ge=0)
+    price_unit: str = Field(default="Mtok")
+
+    @field_validator("id")
+    @classmethod
+    def id_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("upstream model id must not be empty")
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def type_valid(cls, v: str) -> str:
+        if v not in _VALID_MODEL_TYPES:
+            raise ValueError(
+                f"model type {v!r} is not valid; choose from {sorted(_VALID_MODEL_TYPES)}"
+            )
+        return v
+
+
 class UpstreamEntry(BaseModel):
     """One [[upstream]] entry in upstreams.toml.
 
@@ -1459,7 +1445,21 @@ class UpstreamEntry(BaseModel):
         default=True,
         description="When false the upstream is skipped by routing and /v1/models.",
     )
-    model_filters: UpstreamModelFilters | None = Field(default=None)
+    model_filters: UpstreamModelFilters | None = Field(
+        default=None,
+        description="Advertising filters used only by uncurated rows; rejected on a curated row.",
+    )
+    catalog_id: str | None = Field(
+        default=None, description="Provider preset this row was created from, if any."
+    )
+    curated: bool = Field(
+        default=False,
+        description="When true, only the enabled rows in ``models`` are served.",
+    )
+    budget_monthly_usd: float | None = Field(default=None, ge=0)
+    models: list[UpstreamModelEntry] = Field(
+        default_factory=list, description="Per-model rows ([[upstream.models]])."
+    )
     hal0_peer: bool | None = Field(
         default=None,
         description=(
@@ -1535,6 +1535,24 @@ class UpstreamEntry(BaseModel):
         # Catch this at load rather than at dispatch time.
         if self.kind == "slot" and not (self.slot_name and self.slot_name.strip()):
             raise ValueError(f"upstream {self.name!r}: kind='slot' requires slot_name to be set")
+        return self
+
+    @model_validator(mode="after")
+    def model_ids_unique(self) -> UpstreamEntry:
+        seen: set[str] = set()
+        for m in self.models:
+            if m.id in seen:
+                raise ValueError(f"upstream {self.name!r}: duplicate model id {m.id!r}")
+            seen.add(m.id)
+        return self
+
+    @model_validator(mode="after")
+    def curated_excludes_filters(self) -> UpstreamEntry:
+        if self.curated and self.model_filters is not None and not self.model_filters.is_empty():
+            raise ValueError(
+                f"upstream {self.name!r}: curated rows list models in [[upstream.models]]; "
+                "model_filters applies only to uncurated rows and cannot be combined with curated = true"
+            )
         return self
 
     @model_validator(mode="after")
@@ -4993,8 +5011,6 @@ __all__ = [
     "NpuConfig",
     "ProfileConfig",
     "ProfilesConfig",
-    "ProviderEntry",
-    "ProvidersConfig",
     "SecurityConfig",
     "ServerConfig",
     "SlotConfig",

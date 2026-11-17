@@ -40,7 +40,6 @@ from hal0.config.schema import (
     HardwareInfo,
     ProfileConfig,
     ProfilesConfig,
-    ProvidersConfig,
     SlotConfig,
     StackConfig,
     StacksConfig,
@@ -765,33 +764,6 @@ def _unflatten_slot_toml(cfg: SlotConfig) -> dict[str, Any]:
     return out
 
 
-# ── providers.toml ────────────────────────────────────────────────────────────
-
-
-def load_providers_config(path: Path | None = None) -> ProvidersConfig:
-    """Load and validate providers.toml.
-
-    Returns an empty ProvidersConfig if the file does not exist.
-    """
-    target = path if path is not None else paths.etc() / "providers.toml"
-    if not Path(target).exists():
-        return ProvidersConfig()
-    raw = _read_toml(Path(target))
-    try:
-        return ProvidersConfig.model_validate(raw)
-    except Exception as exc:
-        raise ConfigParseError(
-            f"failed to validate providers.toml at {target}: {exc}",
-            details={"path": str(target), "reason": str(exc)},
-        ) from exc
-
-
-def save_providers_config(cfg: ProvidersConfig, path: Path | None = None) -> None:
-    """Atomically write providers.toml."""
-    target = path if path is not None else paths.etc() / "providers.toml"
-    write_toml_atomic(target, cfg.model_dump(mode="python"))
-
-
 # ── upstreams.toml ────────────────────────────────────────────────────────────
 
 
@@ -1165,7 +1137,6 @@ __all__ = [
     "load_hal0_config",
     "load_hardware_info",
     "load_profiles_config",
-    "load_providers_config",
     "load_slot_config",
     "load_slot_config_by_id",
     "load_upstreams_config",
@@ -1175,7 +1146,6 @@ __all__ = [
     "save_hal0_config",
     "save_hardware_info",
     "save_profiles_config",
-    "save_providers_config",
     "save_slot_config",
     "save_upstreams_config",
     "write_toml_atomic",

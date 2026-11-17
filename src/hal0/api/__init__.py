@@ -171,6 +171,8 @@ from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.store import ModelRegistry
 from hal0.security.exposure import COMPAT_MEMORY_PREFIX
 from hal0.slots.manager import SlotManager
+from hal0.upstreams.catalog import participates, reseed_curated_cache
+from hal0.upstreams.discovery import DiscoveryCache
 from hal0.upstreams.huggingface import hf_token_from_env
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
 
@@ -1179,6 +1181,8 @@ class BootState:
     stop_memory_reprobe_task: Any = None
     hermes_reconcile_task: asyncio.Task[None] | None = None
     stop_hermes_reconcile_task: Any = None
+    upstream_conversion_task: asyncio.Task[None] | None = None
+    stop_upstream_conversion_task: Any = None
     refresh_policy_task: asyncio.Task[None] | None = None
     stop_refresh_policy_task: Any = None
     bridge_reattach_task: asyncio.Task[int] | None = None
@@ -1307,7 +1311,17 @@ async def _boot_model_cache(app: FastAPI, ctx: BootState) -> None:
     yet; ``ctx.model_cache`` persists for the life of the process.
     """
 
+    # Discovery results for the UI (``/v1/models`` reads through it).
+    app.state.upstream_discovery = DiscoveryCache()
+    # A curated upstream's entry is its enabled rows; seed it before any request.
+    reseed_curated_cache(ctx.upstreams, ctx.model_cache)
+
     async def _fetch_and_cache(u: Upstream) -> list[str]:
+        current = ctx.upstreams.get(u.name) or u
+        if current.curated:
+            # Never from the network: the enabled list is the whole truth.
+            reseed_curated_cache(ctx.upstreams, ctx.model_cache, current.name)
+            return list(ctx.model_cache.get(current.name, []))
         models = await ctx.upstreams.fetch_models(u.name)
         # Preserve multiplex tags seeded at startup (e.g. embed-gemma /
         # whisper-v3:turbo on FLM slots). Without this, the dispatcher's
@@ -1322,6 +1336,77 @@ async def _boot_model_cache(app: FastAPI, ctx: BootState) -> None:
         return merged
 
     ctx.fetch_and_cache = _fetch_and_cache
+
+
+async def _run_upstream_conversion(
+    registry: UpstreamRegistry,
+    model_cache: dict[str, list[str]],
+    discovery: DiscoveryCache | None,
+) -> None:
+    """Convert pre-catalog upstream rows once their providers answer; never raises.
+
+    Unreachable providers are deferred (row untouched, retried next boot), so
+    this is safe to run on every boot. Afterwards each other curated provider's
+    listing is fetched once and newly offered models are stored as switched-off
+    rows (:func:`hal0.upstreams.convert.sync_new_models`). Cancellation is the one thing that passes
+    through, so shutdown can stop it.
+    """
+    from hal0.config import paths
+    from hal0.upstreams import convert
+
+    try:
+        result = await convert.convert_legacy_upstreams(
+            registry,
+            providers_toml=paths.etc() / "providers.toml",
+            model_cache=model_cache,
+            discovery=discovery,
+        )
+    except Exception as exc:
+        log.warning("upstreams.convert.failed", error=type(exc).__name__)
+        return
+    if result.converted or result.deferred:
+        log.info(
+            "upstreams.convert.done",
+            converted=len(result.converted),
+            deferred=len(result.deferred),
+            folded_provider_rows=result.folded_provider_rows,
+        )
+    # Keep every other curated provider's rows current: models it has started
+    # offering become switched-off rows. A row converted just now came from the
+    # same listing, so it is skipped.
+    # sync_new_models logs and swallows its own failures.
+    names = [u.name for u in registry.list() if participates(u) and u.name not in result.converted]
+    await asyncio.gather(
+        *(
+            convert.sync_new_models(registry, name, model_cache=model_cache, discovery=discovery)
+            for name in names
+        )
+    )
+
+
+async def _boot_upstream_conversion(app: FastAPI, ctx: BootState) -> None:
+    """Phase - convert pre-catalog upstream rows to per-model rows, off the startup path.
+
+    Scheduled, not awaited: boot never waits on a provider. Runs after the
+    model cache exists so a converted row's routing switches without a restart.
+    """
+    registry = ctx.upstreams
+    if registry is not None:
+        ctx.upstream_conversion_task = asyncio.create_task(
+            _run_upstream_conversion(
+                registry, ctx.model_cache, getattr(app.state, "upstream_discovery", None)
+            ),
+            name="upstream-conversion",
+        )
+
+    async def _stop_upstream_conversion_task() -> None:
+        task = ctx.upstream_conversion_task
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    ctx.stop_upstream_conversion_task = _stop_upstream_conversion_task
 
 
 async def _boot_audit_store(app: FastAPI, ctx: BootState) -> None:
@@ -2924,6 +3009,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await _run_boot_phase(report, "registries", lambda: _boot_registries(app, ctx))
     await _run_boot_phase(report, "model_cache", lambda: _boot_model_cache(app, ctx))
+    await _run_boot_phase(
+        report, "upstream_conversion", lambda: _boot_upstream_conversion(app, ctx)
+    )
     await _run_boot_phase(report, "audit_store", lambda: _boot_audit_store(app, ctx))
     await _run_boot_phase(report, "slot_manager", lambda: _boot_slot_manager(app, ctx))
     await _run_boot_phase(report, "dispatcher", lambda: _boot_dispatcher(app, ctx))
@@ -2954,6 +3042,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # booted process. See _boot_brain_lane's docstring.
         await _run_boot_phase(report, "brain_lane", lambda: _boot_brain_lane(app, ctx))
     except BaseException:
+        if ctx.stop_upstream_conversion_task is not None:
+            with contextlib.suppress(Exception):
+                await ctx.stop_upstream_conversion_task()
         if ctx.stop_refresh_task is not None:
             with contextlib.suppress(Exception):
                 await ctx.stop_refresh_task()
@@ -2971,6 +3062,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # Each teardown callback is bounded (#2727): one that never
             # returns must not hold the unwind until systemd's SIGKILL.
             for name, stop in (
+                ("upstream_conversion_task", ctx.stop_upstream_conversion_task),
                 ("refresh_task", ctx.stop_refresh_task),
                 ("gpu_arbiter_idle_loop", ctx.stop_gpu_arbiter_idle_loop),
                 ("image_drift_task", ctx.stop_image_drift_task),

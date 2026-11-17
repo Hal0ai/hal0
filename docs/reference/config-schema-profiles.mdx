@@ -1,6 +1,6 @@
 ---
 title: "Config schema: providers, profiles, stacks & agents"
-description: "The providers.toml, upstreams.toml, profiles.toml, stacks.toml, agents/<name>.toml, hardware.json and manifest.json keys, types, defaults, and constraints — verified against src/hal0/config/schema.py in the v1.0 tree."
+description: "The upstreams.toml, profiles.toml, stacks.toml, agents/<name>.toml, hardware.json and manifest.json keys, types, defaults, and constraints — verified against src/hal0/config/schema.py in the v1.0 tree."
 sidebar:
   order: 21
 ---
@@ -13,23 +13,6 @@ This is the second half of the config schema reference. The first half,
 [Config schema: slot files](/docs/reference/config-schema-slots/). Everything here follows the same conventions: TOML files are
 validated with Pydantic models in `hal0.config.schema`, `hardware.json` and
 `manifest.json` are JSON, and all writes are atomic.
-
-## `providers.toml`
-
-Root model `ProvidersConfig`, `extra="allow"`: `provider: list[ProviderEntry]` (default `[]`).
-
-### `[[provider]]`
-
-`extra="forbid"`.
-
-| Key | Type | Default | Req | Constraints |
-|---|---|---|---|---|
-| `catalog_id` | str | — | **required** | non-empty |
-| `name` | str | `""` | — | display override |
-| `base_url` | str | `""` | — | — |
-| `auth_value_env` | str | `""` | — | name of the env var holding the API key — the key itself is never stored in TOML |
-| `enabled` | bool | `true` | — | — |
-| `models` | list[str] | `[]` | — | — |
 
 ## `upstreams.toml`
 
@@ -53,7 +36,11 @@ Root model `UpstreamsConfig`, `extra="allow"`: `upstream: list[UpstreamEntry]`
 | `warmup_strategy` | str | `"none"` | — | `none, ondemand, always`; aliases `lazy → ondemand`, `eager → always` |
 | `advertise_models` | bool | `true` | — | — |
 | `enabled` | bool | `true` | — | — |
-| `model_filters` | table \| null | `null` | — | see below |
+| `model_filters` | table \| null | `null` | — | see below; only on a row with `curated = false` |
+| `catalog_id` | str \| null | `null` | — | the provider preset the row was created from (`hal0.upstreams.presets`); sets how the provider's model list is read |
+| `curated` | bool | `false` | — | `true`: only the enabled `[[upstream.models]]` rows are served; cannot be combined with a non-empty `model_filters` |
+| `budget_monthly_usd` | float \| null | `null` | — | `>= 0`; stored with the row, not enforced yet |
+| `models` | list | `[]` | — | the `[[upstream.models]]` rows below; ids must be unique per upstream |
 | `hal0_peer` | bool \| null | `null` | — | `null` auto-derives from the URL host: private/loopback hosts are treated as another hal0's dashboard API (pollable for hardware/slot metrics), public hosts never are. Set `true` to opt a public-hostname hal0 peer in. |
 
 `google_query` was a fifth `auth_style` value with no implementation behind
@@ -62,6 +49,23 @@ it — Google AI Studio calls dispatched unauthenticated while the UI showed
 `auth_style = "google_query"` still loads without error, coerced on read to
 `"bearer"` (the style the endpoint it points at actually accepts), with a
 warning logged.
+
+### `[[upstream.models]]`
+
+`extra="forbid"`. One model listed under a provider.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `id` | str | — | **required**; non-empty; the id as the provider names it |
+| `enabled` | bool | `true` | only enabled rows route on a curated provider |
+| `type` | str | `"chat"` | `chat, embed, rerank, tts, stt, image` |
+| `context` | int \| null | `null` | `> 0` |
+| `price_in` | float \| null | `null` | `>= 0`; list price per `price_unit` |
+| `price_out` | float \| null | `null` | `>= 0`; list price per `price_unit` |
+| `price_unit` | str | `"Mtok"` | presets and model discovery write `Mtok`, `Mchar`, `image` or `1k_search`; the loader does not check the value |
+
+A model is turned on by setting `enabled = true` and restarting the API service. See
+[How a model id is routed](/docs/reference/providers-profiles-devices/#how-a-model-id-is-routed).
 
 ### `[[upstream]].model_filters`
 

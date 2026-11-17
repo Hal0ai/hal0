@@ -23,8 +23,6 @@ from hal0.config.schema import (
     HardwareInfo,
     MetaConfig,
     ModelConfig,
-    ProviderEntry,
-    ProvidersConfig,
     ServerConfig,
     SlotConfig,
     SlotsConfig,
@@ -277,37 +275,6 @@ class TestModelConfig:
         ``n_gpu_layers``; the old ``[model]`` tuning keys fail loudly."""
         with pytest.raises(ValidationError, match=key):
             ModelConfig.model_validate({key: value})
-
-
-# ── ProviderEntry / ProvidersConfig ──────────────────────────────────────────
-
-
-class TestProviderEntry:
-    def test_requires_catalog_id(self) -> None:
-        with pytest.raises(ValidationError):
-            ProviderEntry()  # type: ignore[call-arg]
-
-    def test_empty_catalog_id_raises(self) -> None:
-        with pytest.raises(ValidationError) as ei:
-            ProviderEntry(catalog_id="")
-        assert "catalog_id" in str(ei.value)
-
-    def test_valid(self) -> None:
-        p = ProviderEntry(catalog_id="openrouter", name="OpenRouter")
-        assert p.catalog_id == "openrouter"
-        assert p.enabled is True
-
-
-class TestProvidersConfig:
-    def test_default_empty(self) -> None:
-        c = ProvidersConfig()
-        assert c.provider == []
-
-    def test_round_trip(self) -> None:
-        c = ProvidersConfig(provider=[ProviderEntry(catalog_id="x")])
-        d = c.model_dump()
-        c2 = ProvidersConfig.model_validate(d)
-        assert c2.provider[0].catalog_id == "x"
 
 
 # ── UpstreamEntry / UpstreamsConfig ──────────────────────────────────────────

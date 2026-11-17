@@ -29,6 +29,7 @@ from hal0 import __version__
 from hal0.build_info import build_sha
 from hal0.config import paths
 from hal0.slots.state import SlotState
+from hal0.upstreams.catalog import curated_model_ids
 
 log = structlog.get_logger(__name__)
 
@@ -186,7 +187,10 @@ async def get_status(request: Request) -> dict[str, Any]:
     for u in upstreams.list():
         if u.name not in cache:
             try:
-                cache[u.name] = await upstreams.fetch_models(u.name)
+                if getattr(u, "curated", False):
+                    curated_model_ids(u, cache)  # the enabled list, never the network
+                else:
+                    cache[u.name] = await upstreams.fetch_models(u.name)
             except Exception:
                 cache[u.name] = []
 

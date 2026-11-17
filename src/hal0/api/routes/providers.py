@@ -35,7 +35,8 @@ from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
 from hal0.config.schema import UpstreamEntry, UpstreamModelFilters
-from hal0.upstreams.integrations import get_catalog
+from hal0.upstreams.catalog import reseed_curated_cache
+from hal0.upstreams.presets import get_preset, load_presets, preset_to_api
 from hal0.upstreams.registry import (
     RESERVED_UPSTREAM_NAME,
     UpstreamAlreadyExists,
@@ -217,7 +218,7 @@ class UpstreamCreateBody(BaseModel):
     """Body for ``POST /api/upstreams`` — always creates a ``kind="remote"``.
 
     ``catalog_id`` prefills ``url``/``auth_style``/``auth_header`` from the
-    integrations catalog (explicit body fields win over the prefill); without
+    provider presets (explicit body fields win over the prefill); without
     it ``url`` is required. Credentials are NOT accepted here — write the key
     afterwards via ``POST /api/providers/{name}/credentials`` so secrets never
     transit the CRUD surface.
@@ -256,18 +257,16 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
 
     prefill: dict[str, Any] = {}
     if body.catalog_id is not None:
-        entry = get_catalog().get(body.catalog_id)
-        if entry is None:
+        preset = get_preset(body.catalog_id)
+        if preset is None:
             raise UpstreamInvalidHTTP(
                 f"unknown catalog_id {body.catalog_id!r}",
-                details={"catalog_id": body.catalog_id, "known": sorted(get_catalog())},
+                details={"catalog_id": body.catalog_id, "known": sorted(load_presets())},
             )
         prefill = {
-            "url": entry.get("base_url") or None,
-            "auth_style": entry.get("auth") or None,
-            "auth_header": (
-                entry.get("auth_header_name") if entry.get("auth") == "header" else None
-            ),
+            "url": preset.base_url or None,
+            "auth_style": preset.auth or None,
+            "auth_header": (preset.auth_header_name if preset.auth == "header" else None),
             "auth_value_env": f"{body.catalog_id.upper()}_API_KEY",
         }
 
@@ -318,6 +317,11 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
     except UpstreamAlreadyExists as exc:
         raise UpstreamConflictHTTP(str(exc), {"name": name}) from exc
 
+    # A curated upstream's cache entry is its enabled rows (none yet on create).
+    created_cache = getattr(request.app.state, "upstream_models", None)
+    if created_cache is not None:
+        reseed_curated_cache(upstreams, created_cache, created.name)
+
     _audit_log.info(
         "upstream.created",
         name=name,
@@ -332,6 +336,11 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
             f'{{"key": "{created.auth_value_env}", "value": "<secret>"}}'
         )
     return out
+
+
+# Fields that decide which listing a provider answers with: a change to any of
+# them makes a stored discovery entry stale.
+_DISCOVERY_IDENTITY_FIELDS = ("url", "auth_style", "auth_header", "auth_value_env", "catalog_id")
 
 
 class UpstreamPatchBody(BaseModel):
@@ -459,6 +468,16 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
             # never serves stale entries from the in-memory cache.
             model_cache[name] = []
 
+    if model_cache is not None:
+        # Curated rows win over the visibility handling above: the cache entry
+        # is always the enabled list, whatever flipped.
+        reseed_curated_cache(upstreams, model_cache, name)
+    discovery = getattr(request.app.state, "upstream_discovery", None)
+    if discovery is not None and any(
+        getattr(u, f, None) != getattr(updated, f, None) for f in _DISCOVERY_IDENTITY_FIELDS
+    ):
+        discovery.drop(name)  # a listing from another endpoint or account is stale
+
     _audit_log.info(
         "upstream.patch",
         name=name,
@@ -494,6 +513,9 @@ async def delete_upstream(name: str, request: Request) -> dict[str, Any]:
     model_cache = getattr(request.app.state, "upstream_models", None)
     if model_cache is not None:
         model_cache.pop(name, None)
+    discovery = getattr(request.app.state, "upstream_discovery", None)
+    if discovery is not None:
+        discovery.drop(name)
 
     _audit_log.info(
         "upstream.deleted",
@@ -545,12 +567,12 @@ async def test_upstream(name: str, request: Request) -> dict[str, Any]:
 
 @router.get("/providers/catalog")
 async def providers_catalog() -> dict[str, dict[str, Any]]:
-    """Return the static integration catalog (built-in upstream templates).
+    """Return the provider presets (built-in upstream templates).
 
     Used by the "Add upstream" form to populate the dropdown of known
     providers (Anthropic, OpenAI, OpenRouter, hal0 self, custom, …).
     """
-    return get_catalog()
+    return {pid: preset_to_api(p) for pid, p in load_presets().items()}
 
 
 @router.get("/providers")

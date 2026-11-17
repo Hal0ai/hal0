@@ -26,7 +26,8 @@ import os
 import random
 import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -36,6 +37,7 @@ import structlog
 from hal0.config import paths as _paths
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
+from hal0.upstreams.catalog import UpstreamModel
 from hal0.upstreams.filters import ModelFilters
 
 if TYPE_CHECKING:
@@ -180,6 +182,18 @@ class Upstream:
     is.
     """
 
+    catalog_id: str | None = None
+    """Provider preset this row was created from, if any."""
+
+    curated: bool = False
+    """When True only the enabled rows in ``models`` are served."""
+
+    budget_monthly_usd: float | None = None
+    """Optional monthly spend ceiling in USD."""
+
+    models: tuple[UpstreamModel, ...] = ()
+    """Per-model rows (``[[upstream.models]]``)."""
+
     managed_by: str | None = None
     """Owner tag for agent-managed entries (e.g. ``"agent:hermes"``); ``None`` = operator-authored.
     Dataclass-only: dynamic entries never round-trip TOML."""
@@ -232,10 +246,32 @@ def _filters_to_config(value: Any) -> dict[str, list[str]] | None:
     return {"models": list(mf.models), "include": list(mf.include), "exclude": list(mf.exclude)}
 
 
+_MODEL_FIELDS = tuple(f.name for f in dataclass_fields(UpstreamModel))
+
+
+def _models_to_runtime(value: Any) -> tuple[UpstreamModel, ...]:
+    """Normalise per-model rows (entries, dicts, or dataclasses) to runtime form."""
+    out: list[UpstreamModel] = []
+    for m in value or ():
+        if isinstance(m, UpstreamModel):
+            out.append(m)
+            continue
+        data = m if isinstance(m, dict) else m.model_dump()
+        out.append(UpstreamModel(**{k: data[k] for k in _MODEL_FIELDS if k in data}))
+    return tuple(out)
+
+
+def _models_to_config(value: Any) -> list[dict[str, Any]]:
+    """Normalise per-model rows to entry-dump shape (list of dicts)."""
+    return [asdict(m) for m in _models_to_runtime(value)]
+
+
 def _fields_for_entry(fields: dict[str, Any]) -> dict[str, Any]:
     out = dict(fields)
     if "model_filters" in out:
         out["model_filters"] = _filters_to_config(out["model_filters"])
+    if "models" in out:
+        out["models"] = _models_to_config(out["models"])
     return out
 
 
@@ -243,6 +279,8 @@ def _fields_for_dataclass(fields: dict[str, Any]) -> dict[str, Any]:
     out = dict(fields)
     if "model_filters" in out:
         out["model_filters"] = _filters_to_runtime(out["model_filters"])
+    if "models" in out:
+        out["models"] = _models_to_runtime(out["models"])
     return out
 
 
@@ -262,6 +300,10 @@ def upstream_from_entry(entry: UpstreamEntry) -> Upstream:
         enabled=entry.enabled,
         model_filters=_filters_to_runtime(entry.model_filters),
         hal0_peer=entry.hal0_peer,
+        catalog_id=entry.catalog_id,
+        curated=entry.curated,
+        budget_monthly_usd=entry.budget_monthly_usd,
+        models=_models_to_runtime(entry.models),
     )
 
 
@@ -876,15 +918,16 @@ class UpstreamRegistry:
             count = None
         return {"ok": True, "status": 200, "models_count": count, "latency_ms": latency_ms}
 
-    async def fetch_models(self, name: str) -> list[str]:
-        """Return the list of model ids advertised by an upstream's /v1/models.
+    async def fetch_model_payload(self, name: str) -> Any | None:
+        """Return the decoded JSON body of an upstream's ``/models``.
 
-        Empty list on any failure. Does not raise (the dispatcher needs a
-        forgiving aggregation).
+        ``None`` on any failure: unknown upstream, unconfigured credential,
+        transport error, non-2xx status, or a body that is not JSON. Does not
+        raise.
         """
         u = self._upstreams.get(name)
         if u is None:
-            return []
+            return None
         target = u.url.rstrip("/") + "/models"
         try:
             # #1513: auth_headers now raises on an unconfigured credential
@@ -894,7 +937,7 @@ class UpstreamRegistry:
             headers = self.auth_headers(u)
         except UpstreamAuthUnconfigured as exc:
             log.warning("upstream.fetch_models_auth_unconfigured", name=name, detail=str(exc))
-            return []
+            return None
         try:
             c = self._get_client()
             resp = await c.get(
@@ -902,18 +945,25 @@ class UpstreamRegistry:
                 headers=headers,
                 timeout=httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0),
             )
-            if resp.status_code != 200:
+            if not (200 <= resp.status_code < 300):
                 log.debug(
-                    "upstream.fetch_models_non_200",
+                    "upstream.fetch_models_bad_status",
                     name=name,
                     status=resp.status_code,
                 )
-                return []
-            body = resp.json()
+                return None
+            return resp.json()
         except (httpx.HTTPError, OSError, ValueError) as exc:
             log.debug("upstream.fetch_models_fail", name=name, error=str(exc))
-            return []
+            return None
 
+    async def fetch_models(self, name: str) -> list[str]:
+        """Return the list of model ids advertised by an upstream's /v1/models.
+
+        Empty list on any failure. Does not raise (the dispatcher needs a
+        forgiving aggregation).
+        """
+        body = await self.fetch_model_payload(name)
         if isinstance(body, dict):
             data = body.get("data", [])
         elif isinstance(body, list):
