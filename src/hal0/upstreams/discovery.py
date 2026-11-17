@@ -62,11 +62,12 @@ def _price_per_mtok(value: Any) -> float | None:
         return None
     try:
         per_token = float(value)
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
     if not math.isfinite(per_token) or per_token < 0:
         return None
-    return per_token * _PER_MTOK
+    per_mtok = per_token * _PER_MTOK
+    return per_mtok if math.isfinite(per_mtok) else None
 
 
 def _entry_id(entry: Any) -> str | None:

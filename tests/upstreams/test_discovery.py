@@ -92,6 +92,22 @@ def test_bad_price_is_ignored(price: Any) -> None:
     assert (m.price_in, m.price_out) == (None, None)
 
 
+@pytest.mark.parametrize(
+    "price",
+    [10**400, "1" + "0" * 400, "1e999", "-1e999", float("inf"), float("nan"), 1e305, "1e305"],
+)
+def test_huge_or_nonfinite_price_is_ignored(price: Any) -> None:
+    body = {"data": [{"id": "m", "pricing": {"prompt": price, "completion": price}}]}
+    m = parse_models_payload(body, None)[0]
+    assert (m.price_in, m.price_out) == (None, None)
+
+
+@pytest.mark.parametrize("ctx", [10**400, float("inf"), float("nan"), 1.5, -5, 0, None, [], {}])
+def test_odd_context_is_ignored_or_kept_safely(ctx: Any) -> None:
+    out = parse_models_payload({"data": [{"id": "m", "context_length": ctx}]}, None)
+    assert out[0].context in (None, 10**400)
+
+
 def test_bad_context_is_ignored() -> None:
     body = {"data": [{"id": "m", "context_length": "big"}, {"id": "n", "context_length": True}]}
     assert [m.context for m in parse_models_payload(body, None)] == [None, None]

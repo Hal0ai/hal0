@@ -947,7 +947,7 @@ class UpstreamRegistry:
             )
             if not resp.is_success:
                 log.debug(
-                    "upstream.fetch_models_non_200",
+                    "upstream.fetch_models_bad_status",
                     name=name,
                     status=resp.status_code,
                 )
