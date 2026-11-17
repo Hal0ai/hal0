@@ -50,8 +50,12 @@ def guess_type(model_id: str) -> str:
     return "chat"
 
 
+_MAX_CONTEXT = 2**31
+"""Largest context window kept; anything above is not a real window."""
+
+
 def _context(value: Any) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= _MAX_CONTEXT:
         return value
     return None
 

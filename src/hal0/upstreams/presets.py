@@ -150,6 +150,12 @@ def _parse_preset(pid: str, row: Any) -> Preset:
     models = row.get("models", [])
     if not isinstance(models, list):
         raise PresetError(f"{where}: models must be an array of tables")
+    parsed = tuple(_parse_model(pid, m) for m in models)
+    seen: set[str] = set()
+    for m in parsed:
+        if m.id in seen:
+            raise PresetError(f"{where}: model {m.id!r} is listed twice")
+        seen.add(m.id)
     return Preset(
         id=pid,
         name=name,
@@ -159,7 +165,7 @@ def _parse_preset(pid: str, row: Any) -> Preset:
         auth_header_name=_str(row, "auth_header_name", where, ""),
         docs_url=_str(row, "docs_url", where, ""),
         notes=_str(row, "notes", where, ""),
-        models=tuple(_parse_model(pid, m) for m in models),
+        models=parsed,
         rate_limit_headers=dict(headers),
         quirks=tuple(quirks),
         tools=tools,

@@ -64,6 +64,17 @@ def test_malformed_file_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         presets.load_presets.cache_clear()
 
 
+def test_duplicate_model_id_raises() -> None:
+    dup = (
+        '[preset.twice]\nname = "Twice"\ncategory = "cloud"\n'
+        'base_url = "https://x.example/v1"\nauth = "bearer"\n'
+        '[[preset.twice.models]]\nid = "m"\ntype = "chat"\n'
+        '[[preset.twice.models]]\nid = "m"\ntype = "chat"\n'
+    )
+    with pytest.raises(PresetError, match=r"preset 'twice': model 'm' is listed twice"):
+        presets._parse(dup)
+
+
 def test_invalid_toml_raises() -> None:
     with pytest.raises(PresetError):
         presets._parse("not = [valid")
