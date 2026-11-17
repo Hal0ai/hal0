@@ -46,6 +46,7 @@ function Value({ cell, loading }) {
  *     unit?: string,
  *     helper?: import('react').ReactNode,
  *     chip?: import('react').ReactNode,
+ *     href?: string,
  *   }>,
  *   loading?: boolean,
  *   inCard?: boolean,
@@ -65,6 +66,13 @@ export function StatStrip({ label, cells, loading = false, inCard = false, 'data
                 <Value cell={cell} loading={loading} />
               </dd>
               {cell.helper && !loading && <dd className="ma-stat-helper">{cell.helper}</dd>}
+              {cell.href && !loading && (
+                <dd className="ma-stat-helper">
+                  <a className="ma-link" href={cell.href} aria-label={`${cell.label} settings`}>
+                    Settings
+                  </a>
+                </dd>
+              )}
             </div>
           )
         })}

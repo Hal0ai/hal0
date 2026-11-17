@@ -768,6 +768,24 @@ describe('engineStrip', () => {
     ])
   })
 
+  it('links the embedder, reranker and decision tiles to their Models group, and no other tile', () => {
+    const list = cells(healthReport())
+    expect(Object.fromEntries(list.map((c) => [c.id, c.href]))).toEqual({
+      engine: undefined,
+      extraction: undefined,
+      embedder: '#settings/memory/models/embedder',
+      reranker: '#settings/memory/models/reranker',
+      decision: '#settings/memory/models/decision',
+    })
+  })
+
+  it('keeps the decision link when the lane is off or unreachable', () => {
+    const off = cells(healthReport(), GRAPH, { decision: { enabled: true, provider: 'off', reachable: false } })
+    expect(cell(off, 'decision')).toMatchObject({ value: 'Off', chip: null, href: '#settings/memory/models/decision' })
+    const down = cells(healthReport(), GRAPH, { decision: { enabled: true, provider: 'local', reachable: false } })
+    expect(cell(down, 'decision')).toMatchObject({ chip: { tone: 'warn' }, href: '#settings/memory/models/decision' })
+  })
+
   it('reads the engine, extraction and embedder from the health answer', () => {
     const list = cells(healthReport())
     expect(cell(list, 'engine')).toMatchObject({ value: 'Hindsight 1.2.0', chip: { tone: 'ok', word: 'reachable' } })

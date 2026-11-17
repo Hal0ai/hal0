@@ -323,6 +323,12 @@ union. It is configured under `[memory.embedding]` in `hal0.toml`:
   `8.0`) — HTTP budgets. A timeout or an unreachable reranker never blocks
   recall: it fails soft back to the fused vector ordering.
 
+This fallback client is the **Fallback reranker** panel in Settings → Memory. The
+engine's own reranker (`[memory.models]` `reranker_*`), the decision model
+(`[memory.decision]`) and a read-only embedder with its switch command are in
+the **Models** panel above it; saving a reranker or decision change restarts
+the memory engine.
+
 The dashboard's Settings → Data → Memory page has a picker for `rerank_model`: the
 schema default is offered as "the rerank slot's model", plus every model in the
 capabilities catalog tagged for reranking (labelled with its serving

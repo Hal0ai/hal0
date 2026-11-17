@@ -35,7 +35,11 @@ import { RealtimePage } from './pages/integrations/RealtimePage.jsx'
 import { AgentsBrainPage } from './pages/routing/AgentsBrainPage.jsx'
 
 export function SettingsShell({ param }) {
-  const section = param && VALID_IDS.includes(param) ? param : "overview";
+  // `#settings/<section>[/<sub>]`: the sub-path names a spot inside a page (the Memory models
+  // groups, linked from Memory ▸ Health). The section is its first segment.
+  const [head, ...subParts] = String(param || "").split("/");
+  const section = head && VALID_IDS.includes(head) ? head : "overview";
+  const sub = subParts.join("/") || null;
 
   const onSelect = (id) => {
     if (typeof window !== "undefined") window.location.hash = "#settings/" + id;
@@ -52,7 +56,7 @@ export function SettingsShell({ param }) {
       case "capabilities": return <CapabilitiesPage />;
       case "hardware": return <HardwareRuntimesPage />;
       case "storage": return <StoragePage />;
-      case "memory": return <MemoryPage />;
+      case "memory": return <MemoryPage sub={sub} />;
       case "updates": return <UpdatesPage />;
       case "advanced": return <AdvancedPage />;
       case "secrets": return <SecretsPage />;
