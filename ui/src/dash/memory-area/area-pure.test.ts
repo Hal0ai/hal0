@@ -361,7 +361,8 @@ describe('metaLine', () => {
 })
 
 describe('bankRoles', () => {
-  const view = (list: Array<{ bank_id: string; retired?: boolean }>): HealthView => ({
+  type Entry = { bank_id: string; retired?: boolean; role?: 'shared' | 'private' | null }
+  const view = (list: Entry[]): HealthView => ({
     kind: 'ready',
     report: {
       ...healthReport(),
@@ -369,21 +370,25 @@ describe('bankRoles', () => {
     },
   })
 
-  it('tells the shared, the private and the retired banks apart', () => {
+  it('uses the roles the server names, and the retired flag', () => {
     expect(
       bankRoles(
         view([
-          { bank_id: 'hal0:shared' },
-          { bank_id: 'hal0:private' },
-          { bank_id: 'Hal0::Agents', retired: true },
+          { bank_id: 'hal0:shared', role: 'shared' },
+          { bank_id: 'hal0:private', role: 'private' },
+          { bank_id: 'Hal0::Agents', retired: true, role: null },
           { bank_id: 'hal0-mono' },
         ]),
       ),
     ).toEqual({ 'hal0:shared': 'shared', 'hal0:private': 'private', 'Hal0::Agents': 'retired' })
   })
 
-  it('lets the retired flag win over a name', () => {
-    expect(bankRoles(view([{ bank_id: 'old:shared', retired: true }]))).toEqual({ 'old:shared': 'retired' })
+  it('never guesses a role from the end of an id', () => {
+    expect(bankRoles(view([{ bank_id: 'team-shared' }, { bank_id: 'x_private' }, { bank_id: 'hal0:shared' }]))).toEqual({})
+  })
+
+  it('lets the retired flag win', () => {
+    expect(bankRoles(view([{ bank_id: 'old', retired: true, role: 'shared' }]))).toEqual({ old: 'retired' })
   })
 
   it('names nothing before the answer arrives or when it has no bank list', () => {

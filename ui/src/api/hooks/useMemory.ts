@@ -635,6 +635,8 @@ export interface MemoryHealthBanks {
     facts: number | null
     documents: number | null
     retired?: boolean
+    /** Two-bank layout: which live bank this is, by hal0's own configured names. */
+    role?: 'shared' | 'private' | null
   }>
 }
 

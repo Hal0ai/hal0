@@ -117,8 +117,8 @@ describe('bank roles in the scope bar', () => {
         facts: 30,
         retired: 1,
         list: [
-          { bank_id: 'hal0:shared', facts: 10, documents: 1 },
-          { bank_id: 'hal0:private', facts: 10, documents: 1 },
+          { bank_id: 'hal0:shared', facts: 10, documents: 1, role: 'shared' },
+          { bank_id: 'hal0:private', facts: 10, documents: 1, role: 'private' },
           { bank_id: 'Hal0::Agents', facts: 10, documents: 1, retired: true },
         ],
       },

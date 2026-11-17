@@ -115,10 +115,9 @@ export function engineFromHealth(view: HealthView): EngineState {
 export type BankRole = 'shared' | 'private' | 'retired'
 
 /**
- * The role of each bank the health answer lists. A bank the answer flags `retired` is retired;
- * of the live ones, the two the layout names are told apart by the end of their id after a separator
- * (`hal0:shared`, `hal0:private`, or the same under a name the operator chose). A bank with no
- * role is left out, and nothing is guessed while the answer has not arrived.
+ * The role of each bank the health answer lists. The server names the roles from its own
+ * configured bank ids (`role`) and flags a bank it left behind `retired`; a bank the answer says
+ * nothing about gets no role, and no role is ever guessed from the shape of an id.
  */
 export function bankRoles(view: HealthView): Record<string, BankRole> {
   const roles: Record<string, BankRole> = {}
@@ -127,8 +126,7 @@ export function bankRoles(view: HealthView): Record<string, BankRole> {
   for (const bank of list) {
     if (!isRecord(bank) || typeof bank.bank_id !== 'string') continue
     if (bank.retired === true) roles[bank.bank_id] = 'retired'
-    else if (/[:_.-]shared$/i.test(bank.bank_id)) roles[bank.bank_id] = 'shared'
-    else if (/[:_.-]private$/i.test(bank.bank_id)) roles[bank.bank_id] = 'private'
+    else if (bank.role === 'shared' || bank.role === 'private') roles[bank.bank_id] = bank.role
   }
   return roles
 }
