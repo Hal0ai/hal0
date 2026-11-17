@@ -1,0 +1,593 @@
+---
+title: Beginner's guide
+description: A plain-language walkthrough of hal0 from nothing to a working setup — install, first model, slots, profiles, agents, memory and the rest — with what each part is, the few steps that matter, and how to tell it worked.
+sidebar:
+  order: 5
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+This guide takes you from an empty Linux machine to a working hal0 setup:
+a model you can chat with, an agent that can do things for you, and memory
+that carries over between conversations. You do not need homelab or AI
+experience. Terms are explained where they first appear and again in the
+[glossary](#glossary). It is written for hal0 **v1.8.0**.
+
+Go through the stages in order the first time. Each one says what the thing
+is, gives the steps (dashboard first, then the command), tells you how to
+know it worked, names a common stumble, and links to the detailed page.
+
+Run commands in a terminal on the hal0 machine. A command that needs
+administrator rights starts with `sudo`.
+
+## 1. What hal0 is and what you need
+
+### What hal0 is
+
+hal0 turns one Linux machine into a private AI server for your home. The AI
+models run on your own hardware. Nothing is sent to a cloud service unless
+you set one up yourself.
+
+You will meet four parts:
+
+- **The dashboard**, a web page you open from any device on your network.
+- **Models**, the AI files you download.
+- **Slots**, where a model is loaded and runs.
+- **Extras** built on top: agents, memory, image generation, voice, and a
+  chat app called Open WebUI.
+
+Other programs reach hal0 through its **API**, an address they send
+requests to. It is "OpenAI-compatible": most apps that can talk to OpenAI
+can be pointed at your hal0 box instead.
+
+### What you need
+
+- **A 64-bit Intel or AMD computer (x86_64) running Linux** with systemd,
+  the service manager most distributions use. ARM, macOS and native Windows
+  are not supported.
+- **About 20 GB of free disk space**, plus room for models. A small chat
+  model is 2 to 6 GB. Large ones are 20 GB and up.
+- **Ports 8080 and 3001 free.** A port is a numbered door on the machine
+  that one program listens on.
+- **Internet access**, to download hal0 and your models.
+- **A graphics processor (GPU) helps a lot but is not required.** hal0 is
+  built first for AMD hardware, especially "Strix Halo" machines (Ryzen AI
+  Max). Without a usable GPU it runs on the processor (CPU), which is slow
+  for anything but small models.
+
+**VRAM** is the memory on a graphics card. A model has to fit in it to run
+on the GPU. Some machines share one pool between main memory and the GPU;
+that is called **unified memory**.
+
+### Pick how to install
+
+| Your machine | Use | Page |
+|---|---|---|
+| A PC or mini PC mostly for hal0 | Bare metal, straight onto Linux | [Install on bare metal](/docs/getting-started/bare-metal/) |
+| A Proxmox VE server | An LXC container | [Install on Proxmox](/docs/getting-started/proxmox/) |
+| A Linux machine where hal0 should stay apart from the rest | An Incus container | [Install in an Incus container](/docs/getting-started/incus/) |
+| You want everything in one container that runs without root | The rootless podman box (opt-in, new in v1.8.0) | [Install in a rootless podman box](/docs/getting-started/box/) |
+| A Windows PC | WSL2, experimental and CPU-only | [WSL quick start](/docs/getting-started/wsl/) |
+
+An **LXC** is a lightweight Linux container. It behaves like a separate
+machine but shares the host's kernel, so the GPU can be passed into it.
+
+With an AMD GPU, read
+[GPU drivers and memory](/docs/getting-started/drivers/) first.
+**If you are unsure, use bare metal.** It is the default.
+
+## 2. Install
+
+### What this is
+
+The installer downloads hal0, checks that the download is genuine, and sets
+up the hal0 service, the dashboard, a set of empty slots, and the optional
+extras you choose. It checks your machine first and says what is missing.
+
+### Run the installer
+
+<Steps>
+
+1. **Make sure `curl` is installed.** On Debian or Ubuntu:
+
+   ```sh
+   sudo apt-get update && sudo apt-get install -y curl ca-certificates
+   ```
+
+2. **Download the installer and run it.**
+
+   ```sh
+   curl -fsSLO https://hal0.dev/install.sh
+   sudo bash install.sh
+   ```
+
+3. **Wait for the summary box titled "hal0 is ready".** A first install
+   takes several minutes, mostly downloads.
+
+</Steps>
+
+The one-line form, `curl -fsSL https://hal0.dev/install.sh | sudo bash`,
+installs the same thing but **asks no questions** and takes every default,
+because the installer cannot read your keyboard while it is piped in.
+
+### What the installer asks
+
+Pressing Enter always takes the safe default.
+
+1. **Where should downloaded models live?** The default is
+   `/var/lib/hal0/models`.
+2. **HuggingFace token.** Hugging Face is the website most models come
+   from. Open models need no token, so press Enter.
+3. **Which components should be installed?** Answer `a` (or Enter) for the
+   defaults below, `b` for none of them, or `p` to pick row by row.
+
+   | Component | Default | What it is |
+   |---|---|---|
+   | Open WebUI | on | A chat app in your browser |
+   | ComfyUI | on | Image generation. Downloads nothing unless you pick a model |
+   | Hermes agent | on | An agent that can use tools and act for you |
+   | Pi agent | off | A coding agent you run in a terminal |
+   | Hindsight memory | on | Long-term memory for agents |
+   | Brain model | on | A small model (1 to 3 GB) so chat works straight away |
+
+4. **Enable Hermes' terminal tool?** Leave it at No. With it on, the agent
+   can run commands with full control of the machine.
+5. **Download the agent model now?** Offered only when your machine can run
+   it. It is a large model (about 18.5 GB). The default is No.
+6. **Image models to download.** Offered only where the image engine can
+   run. Enter skips it.
+
+A skipped component can be added later, and these choices never remove
+something already installed.
+
+### Open the dashboard
+
+The summary box lists the addresses. Open the **Dashboard** one in a
+browser on any device on the same network:
+
+```text
+http://<address-of-your-hal0-machine>:8080
+```
+
+It opens on **Overview**. The sidebar has the pages this guide uses:
+**Slots**, **Models**, **Agents**, **Memory**, **Services**, **Logs** and
+**Settings**.
+
+<Aside type="caution">
+Out of the box the dashboard has no password and no encryption, so anyone on
+your network can open it. Do not expose port 8080 to the internet.
+[Authentication](/docs/operate/auth/) explains how to add a sign-in.
+</Aside>
+
+### How you know it worked
+
+The dashboard loads and lists slots under **Slots**, and these answer
+without errors:
+
+```sh
+hal0 status
+hal0 slot list
+hal0 doctor verify
+```
+
+### Common stumble
+
+**The install stopped part-way.** The installer is safe to run again. It
+prints the path of its log file, under `/var/log/hal0/`.
+
+### Learn more
+
+[Install hal0](/docs/getting-started/install/) covers every flag.
+[Verify the install](/docs/getting-started/verify/) is the full check.
+
+## 3. Models and slots
+
+### What a model is
+
+A **model** is a large file that has learned to produce text (or images, or
+speech). You download it once and it stays on your disk.
+
+- **GGUF** is the file format hal0's chat models use.
+- **Quantization** is compression. One model is published at several sizes
+  with labels like `Q4_K_M` or `Q8_0`. A lower number is a smaller file that
+  needs less memory and loses a little quality. `Q4` is the usual balance.
+- **Context window** is how much text the model can keep in view at once,
+  counted in **tokens** (roughly three quarters of a word each). A bigger
+  window follows a longer conversation and uses more memory.
+
+Rule of thumb: the file has to fit in your GPU memory with room to spare.
+
+### What a slot is
+
+A **slot** is a named place where one model runs. A model on disk does
+nothing until it is loaded into a slot. Other programs ask for a slot by
+name, so you can swap the model in a slot without reconfiguring them.
+
+A new install creates a set of empty slots. Two matter first:
+
+| Slot | What it is for | After a default install |
+|---|---|---|
+| `brain` | The small helper behind the dashboard's built-in chat | Has a model already |
+| `agent` | Your main chat model. Agents use this one | Empty until you give it a model |
+
+Leave the others (`coder`, `memory`, `embed`, `rerank`, `tts`, `img` and
+more) empty for now.
+
+### Chat with the model you already have
+
+**Dashboard.** Click **Agent Chat** in the top bar and send a message in
+the panel that slides out.
+
+**Command line.** Run `hal0 chat --brain`. `/quit` exits.
+
+### Pull your first model
+
+**Pulling** means downloading a model into hal0's model store. This guide
+uses `qwen3.5-9b`, a general chat model of about 6 GB that wants about 8 GB
+of GPU memory. With less, use `qwen3.5-0.8b` (under 1 GB).
+
+**Dashboard.**
+
+<Steps>
+
+1. Open **Models**. Click **+ Add model**, then **Search HF**.
+2. Type a model name and click **Add** on the result you want.
+3. Click **Inspect**, choose a **Quant**, then click **Pull**.
+4. Watch the **Downloads** panel until it finishes.
+
+</Steps>
+
+**Command line.**
+
+```sh
+hal0 model pull qwen3.5-9b
+```
+
+### Load it into a slot
+
+**Dashboard.** Open **Slots** and find the card named `agent`. Open the
+model dropdown on the card and pick your model. Each entry has a chip that
+says `fits`, `tight` or `won't fit` for this machine. **Stop** on the card
+unloads the slot and frees its memory; **Start** loads it again.
+
+**Command line.**
+
+```sh
+hal0 slot load agent --model qwen3.5-9b
+```
+
+### Send a first chat
+
+**Dashboard.** Click **OpenWebUI** in the **Services** section of the
+sidebar. Pick `agent` in the chat app's model picker and send a message.
+
+**Command line.** Run `hal0 chat`. It talks to the `agent` slot.
+
+**From another program.** Point any OpenAI-compatible app at
+`http://<address>:8080/v1` and use the slot name, `agent`, as the model
+name.
+
+### How you know it worked
+
+`hal0 slot list` shows `agent` in state `ready`, and you get a reply.
+
+### Common stumbles
+
+- **`hal0 chat` fails on a fresh install.** It uses the `agent` slot, which
+  is empty until you load a model. Use `hal0 chat --brain` until then.
+- **The slot ends in an error state.** Read its log with
+  `hal0 slot logs agent`, or the **Logs** button on the slot card.
+
+### Learn more
+
+[Pull and register models](/docs/guides/pull-and-register-models/),
+[Choose models](/docs/guides/choose-models/),
+[Manage slots](/docs/guides/manage-slots/) and
+[Slots](/docs/concepts/slots/).
+
+## 4. Profiles
+
+### What this is
+
+A **profile** is a saved set of launch settings for a slot: the context
+window, whether the model "thinks" before answering, whether it can look at
+images, and the low-level engine flags. hal0 calls this the **tune**.
+
+Each slot names one profile. A model only carries facts about its file;
+everything tunable lives on the profile. So you can swap the model in a slot
+and keep the settings, or run one model two ways with two profiles.
+
+### When to leave the defaults alone
+
+Almost always, at first. hal0 ships **seed** profiles for its slots, such
+as `agent`, `brain`, `coding` and a generic `chat`. Change one only for a
+specific reason, like a different context window.
+
+### Pick or make a profile
+
+**Dashboard.** To pick: open **Slots**, click **Edit** on the slot's card,
+choose a **Profile**, and click **Save**. The slot restarts. To make one:
+open **Models**, then the **Profiles** tab. Seed profiles cannot be edited,
+so click the copy button on a seed's card and change the copy.
+
+**Command line.** This copies the `agent` seed with a 32,768-token context
+window and moves the `agent` slot onto it:
+
+```sh
+hal0 profile list
+hal0 profile create my-agent --from agent --ctx-size 32768
+hal0 slot edit agent --profile my-agent
+```
+
+To change one setting for one slot without making a profile, use the
+**Tune** block in the slot's edit drawer, or for example
+`hal0 slot edit agent --ctx 16384`.
+
+hal0 can also draft a profile for a model. In v1.8.0 that is API-only
+(`POST /api/profiles/generate`), with no dashboard button or command yet.
+
+### How you know it worked
+
+`hal0 profile show my-agent` prints your settings, and the **Profiles** tab
+lists the profile under **Custom profiles** with the slots that use it.
+
+### Common stumble
+
+**A bigger context window made the model stop fitting.** A larger window
+uses more memory. Lower it, or use a smaller model.
+
+### Learn more
+
+[Capabilities and profiles](/docs/concepts/capabilities-and-profiles/) and
+the [profile settings reference](/docs/reference/config-schema-profiles/).
+
+## 5. Agents
+
+### What this is
+
+A chat model only answers. An **agent** is a model plus tools: it can look
+things up, take actions and work through a task in steps. hal0 has three:
+
+- **hal0-brain**, the built-in steward behind **Agent Chat**. It knows
+  about this box. You used it in stage 3.
+- **Hermes**, a general-purpose agent that runs in the background. It is
+  installed by default and uses the model in your `agent` slot.
+- **Pi**, a coding agent you run in a terminal. It is off by default.
+
+### Run Hermes
+
+Hermes needs a model in the `agent` slot, so do stage 3 first.
+
+**Dashboard.** Open **Agents** to see the Hermes card and its status. To
+talk to it, open Open WebUI and pick `hermes-agent` in the model picker.
+
+**Command line.** `hal0 agent list` shows what is installed. To add an
+agent you skipped at install time:
+
+```sh
+sudo hal0 agent install hermes
+sudo hal0 agent install pi
+```
+
+Some actions are **gated**: the agent has to ask you first, and you approve
+or deny the request in the dashboard.
+
+### Delegate a task from another machine
+
+A coding assistant on your own computer, such as Claude Code, can hand a
+task to Hermes on the hal0 box and wait for the result. hal0 calls this the
+**agent bridge**. It works over **MCP** (Model Context Protocol), a standard
+way for AI tools to connect to outside tools and data.
+
+<Steps>
+
+1. **On the hal0 machine, create a key.** The name is yours to choose.
+
+   ```sh
+   hal0 bridge add my-laptop
+   ```
+
+   hal0 prints the key once, then a ready-made `claude mcp add` command for
+   each connection the key opens.
+
+2. **On your own computer, paste those commands.**
+
+3. **Ask your assistant to delegate.** It now has a tool called `agent_run`
+   that starts a task on Hermes.
+
+</Steps>
+
+`hal0 bridge revoke my-laptop` takes the access away again.
+
+### How you know it worked
+
+The Hermes card shows **Serving** or **Ready**, `hermes-agent` answers in
+Open WebUI, and `hal0 bridge runs` lists delegated tasks.
+
+### Common stumble
+
+**`hermes-agent` is missing or does not answer.** Check that the `agent`
+slot is `ready`, then run `hal0 doctor all` and read the Hermes rows.
+
+### Learn more
+
+[Agents](/docs/concepts/agents/), [Run agents](/docs/guides/run-agents/),
+[Delegate work to the Hermes agent](/docs/guides/delegate-to-agents/) and
+[the Operator Board](/docs/guides/operator-board/), a task board for Hermes.
+
+## 6. Memory
+
+### What this is
+
+A model forgets everything when a conversation ends. hal0's **memory** gives
+agents a place to keep facts between conversations and search them later.
+The engine behind it is called **Hindsight**.
+
+Memory is kept in **banks**, separate stores like notebooks. A new install
+has two:
+
+| Bank | What goes in it |
+|---|---|
+| `hal0:shared` | Memory every agent can read and add to |
+| `hal0:private` | Private notes, kept apart for each agent |
+
+### Turn it on
+
+If you kept **Hindsight memory** on in the installer, memory is already
+on. To check, or to switch it:
+
+**Dashboard.** Open **Settings**, then **Memory**, and use the **Memory**
+switch. The change applies when the hal0 service restarts.
+
+**Command line.**
+
+```sh
+hal0 memory status
+hal0 memory enable
+sudo systemctl restart hal0-api
+```
+
+If you installed with `--no-memory`, run the installer again without it.
+
+### What to expect
+
+- **Memory needs a chat model.** The engine uses a model to pull facts out
+  of what is saved: the `memory` slot's, or the `agent` slot's when `memory`
+  has none. With neither, saved items wait and are retried later.
+- **It is not instant**, and an empty memory is normal on day one.
+- **The dashboard shows it.** The **Memory** page has five tabs: **Health**,
+  **Facts**, **Knowledge**, **Operations** and **Agents**.
+
+### How you know it worked
+
+`hal0 memory status` shows **State ON** and **Provider durable**, **Memory**
+appears in the sidebar, and `hal0 memory bank list` lists your banks. Once
+an agent has saved something, `hal0 memory recall "a question"` finds it.
+
+### Common stumble
+
+**`hal0 memory status` says "waiting — no chat model loaded".** Load a model
+into the `agent` slot (stage 3).
+
+### Learn more
+
+[Memory](/docs/concepts/memory/),
+[Memory banks](/docs/concepts/memory-banks/),
+[Enable memory](/docs/guides/enable-memory/) and
+[the Memory area](/docs/guides/memory-workspace/).
+
+## 7. And more
+
+All of these are optional.
+
+### Image generation
+
+hal0 makes images from a text description with an engine called ComfyUI. It
+needs an AMD GPU with ROCm, AMD's compute software; on a machine without
+one, the dashboard says so.
+
+**Dashboard.** Open **Slots**, then the **Image Gen** tab. Its **Models**
+tab offers a recommended model to install. Then open **Generate**, type a
+prompt and click **Generate**.
+
+**Command line.** `hal0 comfyui models list` shows the image models, and
+`hal0 comfyui models install <id>` downloads one.
+
+**Stumble.** Chat models and the image engine share the GPU. The
+**Chat | Image** switch in the top bar moves it between them.
+
+**Learn more.** [Generate images](/docs/guides/generate-images/).
+
+### Voice
+
+Speech to text (**STT**) and text to speech (**TTS**). Open **Settings**,
+then **AI Capabilities**. In the **STT** or **TTS** panel, tick **Enabled**,
+choose a **Model** and save. `hal0 capabilities list` shows what is enabled.
+
+**Learn more.**
+[Speech to text and text to speech](/docs/guides/voice-stt-tts/).
+
+### Open WebUI
+
+A full chat app in your browser, installed and connected for you on port
+3001. Open it with **OpenWebUI** in the sidebar's **Services** section. If
+you skipped it at install time, run `hal0 app install openwebui`.
+
+**Learn more.** [Open WebUI](/docs/guides/open-webui/).
+
+### NPU, if your machine has one
+
+An **NPU** is a small, low-power chip built for AI work, found in AMD Ryzen
+AI processors. hal0 can run small models on it and keep the GPU free. When
+hal0 finds one, an **NPU** tab appears under **Slots**.
+
+**Learn more.** [Run models on the NPU](/docs/guides/run-xdna-npu/).
+
+### Connect external tools over MCP
+
+To let an outside AI tool use hal0, give it a bridge key as in
+[stage 5](#5-agents). By default a key opens hal0's agents and memory.
+
+hal0 can also install extra MCP servers (**Agents**, then **MCP**, or
+`hal0 mcp list`). In v1.8.0 it does not yet let Hermes or hal0-brain call a
+server you installed yourself, and says so if you try.
+
+**Learn more.** [Connect MCP servers](/docs/guides/connect-mcp/).
+
+### Update and roll back
+
+hal0 updates itself from signed releases and keeps the previous version so
+you can go back.
+
+**Dashboard.** Open **Settings**, then **Updates**. **Check** looks for a
+new version, **Install update** applies it, and **Roll back** returns to the
+previous one.
+
+**Command line.**
+
+```sh
+hal0 update --check
+hal0 update
+hal0 update --rollback
+```
+
+`hal0 update` shows the release notes and asks before it changes anything.
+Afterwards the version beside the hal0 logo in the top bar changes.
+
+**Learn more.** [Update and roll back](/docs/guides/update-and-rollback/).
+
+### Get help
+
+| You want to | Dashboard | Command |
+|---|---|---|
+| Run the health checks | **Settings**, **Doctor** | `hal0 doctor all` |
+| Read hal0's own log | **Logs** | `hal0 doctor logs` |
+| Read one slot's log | **Logs** on the slot card | `hal0 slot logs agent` |
+| Collect files for a bug report | | `hal0 doctor bundle` |
+
+`hal0 doctor bundle` writes a folder of diagnostic files with passwords and
+keys masked. It uploads nothing; you choose what to share.
+
+- **Questions and setup help:** the forum at
+  [forum.hal0.dev](https://forum.hal0.dev).
+- **Bugs:** [GitHub issues](https://github.com/Hal0ai/hal0/issues). Say what
+  you did, what you expected and what happened.
+
+**Learn more.** [Logs and activity](/docs/guides/logs-and-activity/) and
+the [command reference](/docs/reference/cli/).
+
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| Bank | A separate store of memories. |
+| Context window | How much text a model can keep in view at once, in tokens. |
+| GGUF | The file format hal0's chat models use. |
+| LXC | A lightweight Linux container that shares the host's kernel. |
+| MCP | Model Context Protocol, a standard way for AI tools to connect to outside tools and data. |
+| NPU | A small, low-power chip built for AI work. |
+| Profile | A saved set of launch settings for a slot. |
+| Quantization | Compression of a model: smaller file, less memory, slightly lower quality. |
+| Slot | A named place where one model runs. |
+| Token | The unit models count text in, roughly three quarters of a word. |
+| VRAM | The memory on a graphics card. |
