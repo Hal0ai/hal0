@@ -106,6 +106,7 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "StackConfig": "forbid",
     "StacksConfig": "forbid",
     "UpstreamModelFilters": "forbid",
+    "UpstreamModelEntry": "forbid",
     "UpstreamEntry": "forbid",
     "MetaConfig": "forbid",
     "SlotsConfig": "forbid",

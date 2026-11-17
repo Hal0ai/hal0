@@ -1435,6 +1435,39 @@ class UpstreamModelFilters(BaseModel):
         return not (self.models or self.include or self.exclude)
 
 
+_VALID_MODEL_TYPES = frozenset({"chat", "embed", "rerank", "tts", "stt", "image"})
+
+
+class UpstreamModelEntry(BaseModel):
+    """One [[upstream.models]] row: a model listed under a provider."""
+
+    model_config = {"extra": "forbid"}
+
+    id: str = Field(..., description="Model id as the provider names it.")
+    enabled: bool = Field(default=True)
+    type: str = Field(default="chat", description="chat | embed | rerank | tts | stt | image.")
+    context: int | None = Field(default=None, gt=0)
+    price_in: float | None = Field(default=None, ge=0)
+    price_out: float | None = Field(default=None, ge=0)
+    price_unit: str = Field(default="Mtok")
+
+    @field_validator("id")
+    @classmethod
+    def id_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("upstream model id must not be empty")
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def type_valid(cls, v: str) -> str:
+        if v not in _VALID_MODEL_TYPES:
+            raise ValueError(
+                f"model type {v!r} is not valid; choose from {sorted(_VALID_MODEL_TYPES)}"
+            )
+        return v
+
+
 class UpstreamEntry(BaseModel):
     """One [[upstream]] entry in upstreams.toml.
 
@@ -1459,7 +1492,21 @@ class UpstreamEntry(BaseModel):
         default=True,
         description="When false the upstream is skipped by routing and /v1/models.",
     )
-    model_filters: UpstreamModelFilters | None = Field(default=None)
+    model_filters: UpstreamModelFilters | None = Field(
+        default=None,
+        description="Legacy advertising filters; rejected on a curated row.",
+    )
+    catalog_id: str | None = Field(
+        default=None, description="Provider preset this row was created from, if any."
+    )
+    curated: bool = Field(
+        default=False,
+        description="When true, only the enabled rows in ``models`` are served.",
+    )
+    budget_monthly_usd: float | None = Field(default=None, ge=0)
+    models: list[UpstreamModelEntry] = Field(
+        default_factory=list, description="Per-model rows ([[upstream.models]])."
+    )
     hal0_peer: bool | None = Field(
         default=None,
         description=(
@@ -1535,6 +1582,24 @@ class UpstreamEntry(BaseModel):
         # Catch this at load rather than at dispatch time.
         if self.kind == "slot" and not (self.slot_name and self.slot_name.strip()):
             raise ValueError(f"upstream {self.name!r}: kind='slot' requires slot_name to be set")
+        return self
+
+    @model_validator(mode="after")
+    def model_ids_unique(self) -> UpstreamEntry:
+        seen: set[str] = set()
+        for m in self.models:
+            if m.id in seen:
+                raise ValueError(f"upstream {self.name!r}: duplicate model id {m.id!r}")
+            seen.add(m.id)
+        return self
+
+    @model_validator(mode="after")
+    def curated_excludes_filters(self) -> UpstreamEntry:
+        if self.curated and self.model_filters is not None and not self.model_filters.is_empty():
+            raise ValueError(
+                f"upstream {self.name!r}: curated rows list models in [[upstream.models]]; "
+                "model_filters is legacy-only and cannot be combined with curated = true"
+            )
         return self
 
     @model_validator(mode="after")
