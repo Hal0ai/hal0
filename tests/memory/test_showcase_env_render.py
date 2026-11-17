@@ -180,3 +180,17 @@ def test_explicit_global_cap_still_works_exactly_as_before() -> None:
     env = _render(MemoryLanesConfig(llm_max_concurrent=1), ceiling=4)
     assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "1"
     assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == "1"
+
+
+# ── #3759: the reflect / page-refresh wall clock ──
+
+
+def test_reflect_wall_timeout_renders_the_default_and_an_override() -> None:
+    assert _render(MemoryLanesConfig(), ceiling=1)["HINDSIGHT_API_REFLECT_WALL_TIMEOUT"] == "1800"
+    lanes = MemoryLanesConfig(reflect={"wall_timeout_s": 7200})
+    assert _render(lanes, ceiling=1)["HINDSIGHT_API_REFLECT_WALL_TIMEOUT"] == "7200"
+
+
+def test_a_partial_reflect_table_keeps_the_wall_timeout_default() -> None:
+    lanes = MemoryLanesConfig(reflect={"max_concurrent": 2})
+    assert _render(lanes, ceiling=2)["HINDSIGHT_API_REFLECT_WALL_TIMEOUT"] == "1800"

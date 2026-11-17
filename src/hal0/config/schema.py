@@ -3319,6 +3319,24 @@ class MemoryLaneOpConfig(BaseModel):
         return None if v is None else _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
 
 
+class MemoryReflectLaneConfig(MemoryLaneOpConfig):
+    """``[memory.lanes.reflect]``: the per-op lane plus the reflect wall clock."""
+
+    wall_timeout_s: int = Field(
+        default=1800,
+        ge=60,
+        le=86400,
+        description=(
+            "HINDSIGHT_API_REFLECT_WALL_TIMEOUT (#3759): seconds the engine "
+            "gives one reflect, and one knowledge-page refresh (a reflect "
+            "call), from start to finish. The clock includes time spent "
+            "waiting for an LLM permit, so a refresh queued behind "
+            "consolidation and retain needs headroom; the engine's own "
+            "default is 300."
+        ),
+    )
+
+
 class MemoryLanesConfig(BaseModel):
     """[memory.lanes] section of hal0.toml — global + per-op LLM concurrency lanes.
 
@@ -3354,13 +3372,21 @@ class MemoryLanesConfig(BaseModel):
     strict_schema: bool = Field(default=False, description="HINDSIGHT_API_LLM_STRICT_SCHEMA.")
     retain: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
     consolidation: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
-    reflect: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    reflect: MemoryReflectLaneConfig = Field(default_factory=MemoryReflectLaneConfig)
     mental_model_refresh: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
 
     @field_validator("reasoning_effort")
     @classmethod
     def _effort_shape(cls, v: str) -> str:
         return _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
+
+    @field_validator("reflect", mode="before")
+    @classmethod
+    def _plain_op_lane_to_reflect(cls, v: object) -> object:
+        # Callers that build the lane from the base per-op model keep working.
+        if isinstance(v, MemoryLaneOpConfig) and not isinstance(v, MemoryReflectLaneConfig):
+            return v.model_dump(exclude_unset=True)
+        return v
 
     @model_validator(mode="after")
     def _completion_cap_only_where_engine_accepts(self) -> MemoryLanesConfig:

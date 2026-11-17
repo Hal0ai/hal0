@@ -597,6 +597,10 @@ def render_showcase_env(
             if cap:
                 lines.append(f"Environment=HINDSIGHT_API_{prefix}_MAX_COMPLETION_TOKENS={cap}")
 
+    # #3759: always rendered, so a box never runs on the engine's 300 s reflect
+    # clock, which counts time spent queued for an LLM permit.
+    lines.append(f"Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT={lanes.reflect.wall_timeout_s}")
+
     return "\n".join(lines) + "\n"
 
 

@@ -59,3 +59,14 @@ def test_memory_config_round_trips_through_model_dump() -> None:
     dumped = cfg.model_dump(mode="json")
     restored = MemoryConfig(**dumped)
     assert restored == cfg
+
+
+def test_reflect_wall_timeout_default_and_bounds() -> None:
+    assert MemoryConfig().lanes.reflect.wall_timeout_s == 1800
+    assert (
+        MemoryConfig(lanes={"reflect": {"wall_timeout_s": 7200}}).lanes.reflect.wall_timeout_s
+        == 7200
+    )
+    for bad in (0, 59, 86401):
+        with pytest.raises(ValidationError):
+            MemoryConfig(lanes={"reflect": {"wall_timeout_s": bad}})
