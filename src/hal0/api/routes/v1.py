@@ -54,7 +54,10 @@ from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_
 from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.slots.abandon import ClientGoneProbe, abandon_probe
 from hal0.slots.state import SlotNpuConflict
+from hal0.upstreams.catalog import canonical_id, enabled_ids
+from hal0.upstreams.discovery import DiscoveryCache, parse_models_payload
 from hal0.upstreams.filters import apply_filters
+from hal0.upstreams.presets import get_preset
 
 if TYPE_CHECKING:
     from hal0.comfyui.resolve import ResolvedImageModel
@@ -1252,6 +1255,29 @@ async def list_models(
     return {"object": "list", "data": data}
 
 
+async def _discovered_ids(request: Request, name: str) -> list[str]:
+    """Model ids an uncurated upstream advertises, via the discovery cache.
+
+    Refetches only when the cached entry is stale. A failed refetch keeps
+    serving the stale entry; with no entry at all the upstream lists nothing.
+    """
+    upstreams = request.app.state.upstreams
+    cache = getattr(request.app.state, "upstream_discovery", None)
+    if cache is None:
+        cache = DiscoveryCache()
+        request.app.state.upstream_discovery = cache
+    if cache.is_stale(name):
+        try:
+            payload = await upstreams.fetch_model_payload(name)
+        except Exception:
+            payload = None
+        if payload is not None:
+            preset = get_preset(getattr(upstreams.get(name), "catalog_id", None) or "")
+            cache.put(name, parse_models_payload(payload, preset))
+    entry = cache.get(name)
+    return [m.id for m in entry[0]] if entry is not None else []
+
+
 async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[str, Any]]:
     """Build the ``/v1/models`` ``data`` list (see :func:`list_models`).
 
@@ -1387,14 +1413,17 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
             continue
         if not getattr(u, "advertise_models", True):
             continue
-        try:
-            advertised = await upstreams.fetch_models(u.name)
-        except Exception:
-            advertised = []
-        # Per-upstream curation of the discovery catalog only — the dispatch
-        # cache keeps the full list, so filtered-out ids stay addressable.
-        advertised = apply_filters(advertised, getattr(u, "model_filters", None))
-        for mid in advertised:
+        if u.curated:
+            # Listed from config, no network: the enabled rows under their
+            # canonical ids. ``model_filters`` curate a fetched catalog and do
+            # not apply to an operator-chosen list.
+            listed = [canonical_id(u.name, mid) for mid in enabled_ids(u)]
+        else:
+            advertised = await _discovered_ids(request, u.name)
+            # Per-upstream curation of the discovery catalog only — the dispatch
+            # cache keeps the full list, so filtered-out ids stay addressable.
+            listed = apply_filters(advertised, getattr(u, "model_filters", None))
+        for mid in listed:
             if mid in seen:
                 continue
             # A chat slot's raw model id is already covered by its alias

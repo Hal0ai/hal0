@@ -74,6 +74,7 @@ from hal0.errors import Hal0Error
 from hal0.forwarded_headers import forwardable_request_headers
 from hal0.http_client import async_client
 from hal0.slots.state import SlotCrashLooping, SlotNpuConflict, SlotState
+from hal0.upstreams.catalog import participates, resolve_requested_model
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 if TYPE_CHECKING:
@@ -934,11 +935,43 @@ class Dispatcher:
                     model=model_id,
                 )
 
+        # ── Step 1b: curated-upstream catalog ────────────────────────────
+        # A curated upstream serves only the models its operator enabled. This
+        # runs after container preemption, pinned ownership and registry
+        # binding (a local model wins), and before every cache- or
+        # heuristic-based step so a disabled model can never fall through to
+        # the agent slot. ModelNotEnabled / ModelAmbiguous are Hal0Errors and
+        # propagate to the client unchanged. A local slot that advertises the
+        # id itself also wins; the catalog only answers for ids no slot claims.
+        if owner is None and not self._advertised_by_a_local_slot(model_id, lane_slot):
+            resolved = resolve_requested_model(
+                model_id, self._upstreams_in_priority_order(lane_slot)
+            )
+            if resolved is not None:
+                upstream = resolved.upstream
+                call = UpstreamCall(
+                    upstream_name=upstream.name,
+                    target_url=_resolve_target_url(upstream, path),
+                    headers=self._build_headers(request, upstream),
+                    body=_remap_model(body, resolved.model_id),
+                    streaming=streaming,
+                    method=method,
+                    resolved_model=resolved.model_id,
+                    requested_model=original_model,
+                    resolution_path=f"catalog:{upstream.name}",
+                    slot_name=_slot_name_of(upstream),
+                    container_slot_name=_container_slot_name_of(upstream),
+                )
+                self._log_decision(call, t0, cache_state="catalog")
+                return call
+
         # ── Step 2: passthrough on warm caches ───────────────────────────
         # Backend-aware loading for slot-backed models is handled at the
         # route layer before dispatch (#430), independent of which upstream
         # wins here.
         for upstream in self._upstreams_in_priority_order(lane_slot):
+            if participates(upstream):
+                continue  # curated: the catalog step above is its only way in
             if model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
                     upstream_name=upstream.name,
@@ -960,11 +993,13 @@ class Dispatcher:
         cold_remotes = [
             u
             for u in self._upstreams_in_priority_order(lane_slot)
-            if u.kind == "remote" and not self._cached_models(u.name)
+            if u.kind == "remote" and not participates(u) and not self._cached_models(u.name)
         ]
         if cold_remotes:
             await self._cold_prefetch(cold_remotes)  # TIER2 + TIER3
             for upstream in self._upstreams_in_priority_order(lane_slot):
+                if participates(upstream):
+                    continue
                 if model_id in self._cached_models(upstream.name):
                     call = UpstreamCall(
                         upstream_name=upstream.name,
@@ -2072,6 +2107,13 @@ class Dispatcher:
             if rank_slot_name(self._slot_manager, slot_name, lane_slot=lane_slot) < bound_key:
                 return True
         return False
+
+    def _advertised_by_a_local_slot(self, model_id: str, lane_slot: str = "") -> bool:
+        """Does a slot-backed upstream already advertise ``model_id`` (warm cache)?"""
+        return any(
+            _slot_of(u) and model_id in self._cached_models(u.name)
+            for u in self._upstreams_in_priority_order(lane_slot)
+        )
 
     def _upstreams_in_priority_order(self, lane_slot: str = "") -> list[Upstream]:
         """Routable upstreams, most-preferred first.

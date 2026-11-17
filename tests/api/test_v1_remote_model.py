@@ -151,10 +151,12 @@ async def test_models_catalog_row_for_an_owned_id_comes_from_its_owner(
     monkeypatch.setattr(hal0_api, "hal0_chat_slot_model_ids", chat_ids)
     monkeypatch.setattr(hal0_api, "_fetch_hal0_composite_models_detailed", composite)
 
-    async def fetch_models(name: str) -> list[str]:
-        return ["agent"] if name == "hermes.agent" else []
+    async def fetch_model_payload(name: str) -> object:
+        return {"data": [{"id": "agent"}]} if name == "hermes.agent" else None
 
-    reg = SimpleNamespace(list=lambda: [owner], get=lambda name: None, fetch_models=fetch_models)
+    reg = SimpleNamespace(
+        list=lambda: [owner], get=lambda name: None, fetch_model_payload=fetch_model_payload
+    )
     registry = SimpleNamespace(has=lambda mid: False, get=lambda mid: None)
     request = SimpleNamespace(
         query_params={},

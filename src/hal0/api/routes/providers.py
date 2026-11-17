@@ -35,6 +35,7 @@ from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
 from hal0.config.schema import UpstreamEntry, UpstreamModelFilters
+from hal0.upstreams.catalog import reseed_curated_cache
 from hal0.upstreams.presets import get_preset, load_presets, preset_to_api
 from hal0.upstreams.registry import (
     RESERVED_UPSTREAM_NAME,
@@ -316,6 +317,11 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
     except UpstreamAlreadyExists as exc:
         raise UpstreamConflictHTTP(str(exc), {"name": name}) from exc
 
+    # A curated upstream's cache entry is its enabled rows (none yet on create).
+    created_cache = getattr(request.app.state, "upstream_models", None)
+    if created_cache is not None:
+        reseed_curated_cache(upstreams, created_cache, created.name)
+
     _audit_log.info(
         "upstream.created",
         name=name,
@@ -457,6 +463,14 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
             # never serves stale entries from the in-memory cache.
             model_cache[name] = []
 
+    if model_cache is not None:
+        # Curated rows win over the visibility handling above: the cache entry
+        # is always the enabled list, whatever flipped.
+        reseed_curated_cache(upstreams, model_cache, name)
+    discovery = getattr(request.app.state, "upstream_discovery", None)
+    if discovery is not None:
+        discovery.drop(name)  # url or credentials may have changed
+
     _audit_log.info(
         "upstream.patch",
         name=name,
@@ -492,6 +506,9 @@ async def delete_upstream(name: str, request: Request) -> dict[str, Any]:
     model_cache = getattr(request.app.state, "upstream_models", None)
     if model_cache is not None:
         model_cache.pop(name, None)
+    discovery = getattr(request.app.state, "upstream_discovery", None)
+    if discovery is not None:
+        discovery.drop(name)
 
     _audit_log.info(
         "upstream.deleted",

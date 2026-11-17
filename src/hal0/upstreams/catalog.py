@@ -6,14 +6,23 @@ only, because ``registry`` imports :class:`UpstreamModel` from here at runtime.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableMapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from hal0.errors import Hal0Error
 
 if TYPE_CHECKING:
     from hal0.upstreams.registry import Upstream
+
+
+class UpstreamLookup(Protocol):
+    """The slice of ``UpstreamRegistry`` that :func:`reseed_curated_cache` reads."""
+
+    def list(self) -> list[Upstream]: ...
+
+    def get(self, name: str) -> Upstream | None: ...
+
 
 MODEL_TYPES: frozenset[str] = frozenset({"chat", "embed", "rerank", "tts", "stt", "image"})
 """Model kinds an upstream row may declare."""
@@ -78,7 +87,8 @@ class Resolved:
     """The id to send to the provider."""
 
 
-def _participates(u: Upstream) -> bool:
+def participates(u: Upstream) -> bool:
+    """Does ``u`` take part in catalog routing (curated, enabled, plain remote)?"""
     return u.curated and u.enabled and u.kind == "remote" and not u.slot_name and not u.managed_by
 
 
@@ -99,7 +109,7 @@ def resolve_requested_model(requested: str, upstreams: Iterable[Upstream]) -> Re
     else is a bare id, matched against every provider's enabled models. Returns
     ``None`` when nothing claims the id.
     """
-    live = {u.name: u for u in upstreams if _participates(u)}
+    live = {u.name: u for u in upstreams if participates(u)}
 
     ref = split_ref(requested)
     if ref is not None and ref[0] in live:
@@ -125,3 +135,29 @@ def resolve_requested_model(requested: str, upstreams: Iterable[Upstream]) -> Re
         if any(m.id == requested and not m.enabled for m in live[name].models):
             raise _not_enabled(name, requested)
     return None
+
+
+def reseed_curated_cache(
+    upstreams: UpstreamLookup,
+    model_cache: MutableMapping[str, list[str]],
+    name: str | None = None,
+) -> None:
+    """Make ``model_cache`` agree with the enabled rows of curated upstreams.
+
+    A curated upstream's cache entry is its enabled ids and never comes from the
+    network. With ``name`` only that upstream is touched; otherwise every curated
+    upstream is. Call it after any change to an upstream or its rows. A named
+    upstream that is gone loses its entry. One that is merely not curated is left
+    alone: its cache is the network's, and a caller that has just switched an
+    upstream to uncurated must drop the stale entry itself.
+    """
+    if name is None:
+        for u in upstreams.list():
+            if u.curated:
+                model_cache[u.name] = list(enabled_ids(u))
+        return
+    u = upstreams.get(name)
+    if u is None:
+        model_cache.pop(name, None)
+    elif u.curated:
+        model_cache[name] = list(enabled_ids(u))

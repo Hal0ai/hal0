@@ -171,6 +171,8 @@ from hal0.registry.runner_image_store import RunnerImageStore
 from hal0.registry.store import ModelRegistry
 from hal0.security.exposure import COMPAT_MEMORY_PREFIX
 from hal0.slots.manager import SlotManager
+from hal0.upstreams.catalog import reseed_curated_cache
+from hal0.upstreams.discovery import DiscoveryCache
 from hal0.upstreams.huggingface import hf_token_from_env
 from hal0.upstreams.registry import Upstream, UpstreamRegistry, upstream_from_entry
 
@@ -1307,7 +1309,17 @@ async def _boot_model_cache(app: FastAPI, ctx: BootState) -> None:
     yet; ``ctx.model_cache`` persists for the life of the process.
     """
 
+    # Discovery results for the UI (``/v1/models`` reads through it).
+    app.state.upstream_discovery = DiscoveryCache()
+    # A curated upstream's entry is its enabled rows; seed it before any request.
+    reseed_curated_cache(ctx.upstreams, ctx.model_cache)
+
     async def _fetch_and_cache(u: Upstream) -> list[str]:
+        current = ctx.upstreams.get(u.name) or u
+        if current.curated:
+            # Never from the network: the enabled list is the whole truth.
+            reseed_curated_cache(ctx.upstreams, ctx.model_cache, current.name)
+            return list(ctx.model_cache.get(current.name, []))
         models = await ctx.upstreams.fetch_models(u.name)
         # Preserve multiplex tags seeded at startup (e.g. embed-gemma /
         # whisper-v3:turbo on FLM slots). Without this, the dispatcher's

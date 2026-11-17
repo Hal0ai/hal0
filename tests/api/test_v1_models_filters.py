@@ -37,10 +37,12 @@ def _seed_remote(client: TestClient, **upstream_kw: object) -> None:
         )
     )
 
-    async def fake_fetch(name: str) -> list[str]:
-        return list(OPENROUTER_MODELS) if name == "openrouter" else []
+    async def fake_payload(name: str) -> object:
+        if name != "openrouter":
+            return None
+        return {"data": [{"id": mid} for mid in OPENROUTER_MODELS]}
 
-    reg.fetch_models = fake_fetch  # type: ignore[method-assign]
+    reg.fetch_model_payload = fake_payload  # type: ignore[method-assign]
 
 
 def _listed_ids(client: TestClient) -> list[str]:
