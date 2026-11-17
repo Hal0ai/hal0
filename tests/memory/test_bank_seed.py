@@ -89,7 +89,7 @@ def test_a_legacy_unified_box_seeds_only_the_platform_bank() -> None:
 
     assert run_hook(provider(engine)) is True
     assert engine.imports() == ["shared"]
-    assert engine.banks["shared"]["overrides"] == SHARED["bank"]
+    assert engine.banks["shared"]["overrides"] == bank_seed._with_floor(SHARED)["bank"]
 
 
 def test_a_renamed_platform_bank_is_the_one_seeded() -> None:
@@ -117,8 +117,8 @@ def test_a_two_bank_box_seeds_both_banks() -> None:
 
     assert run_hook(two_bank(engine)) is True
     assert engine.imports() == ["hal0:shared", "hal0:private"]
-    assert engine.banks["hal0:shared"]["overrides"] == SHARED["bank"]
-    assert engine.banks["hal0:private"]["overrides"] == PRIVATE["bank"]
+    assert engine.banks["hal0:shared"]["overrides"] == bank_seed._with_floor(SHARED)["bank"]
+    assert engine.banks["hal0:private"]["overrides"] == bank_seed._with_floor(PRIVATE)["bank"]
     assert "shared" not in engine.banks and "private__hermes" not in engine.banks
 
 
@@ -342,7 +342,7 @@ def test_seed_box_seeds_the_platform_bank_alone_on_an_old_layout(monkeypatch) ->
     engine = Engine()
     assert bank_seed.seed_box(client=engine) == ({"shared": "seeded"}, None)
     assert engine.imports() == ["shared"]
-    assert engine.banks["shared"]["overrides"] == SHARED["bank"]
+    assert engine.banks["shared"]["overrides"] == bank_seed._with_floor(SHARED)["bank"]
 
 
 def test_seed_box_seeds_both_banks_on_a_two_bank_store(monkeypatch) -> None:
@@ -353,7 +353,7 @@ def test_seed_box_seeds_both_banks_on_a_two_bank_store(monkeypatch) -> None:
     results, deferred = bank_seed.seed_box(client=engine)
     assert deferred is None
     assert results == {"hal0:shared": "seeded", "hal0:private": "seeded"}
-    assert engine.banks["hal0:private"]["overrides"] == PRIVATE["bank"]
+    assert engine.banks["hal0:private"]["overrides"] == bank_seed._with_floor(PRIVATE)["bank"]
     assert "private:hermes" not in engine.banks and "shared" not in engine.banks
 
 
@@ -502,3 +502,64 @@ def test_cli_seed_with_nothing_seeded_exits_3(monkeypatch, results) -> None:
     res = runner.invoke(app, ["seed", "--json"])
     assert res.exit_code == 3
     assert json.loads(res.output)["banks"] == results
+
+
+# ── one seed definition: strategies, template, chunk cap (#3760) ─────────────
+
+
+def test_the_shared_seed_carries_the_coding_agent_strategies() -> None:
+    assert SHARED["bank"]["retain_strategies"] == {
+        "conversation": {"retain_extraction_mode": "concise", "retain_chunk_size": 6000},
+        "document": {"retain_extraction_mode": "concise", "retain_chunk_size": 6000},
+        "git": {"retain_extraction_mode": "concise", "retain_chunk_size": 6000},
+        "gitlog": {"retain_extraction_mode": "concise", "retain_chunk_size": 3000},
+        "survey": {"retain_chunk_size": 12000},
+    }
+    assert "retain_strategies" not in PRIVATE["bank"]
+
+
+def test_a_new_shared_bank_is_imported_with_its_strategies_and_missions() -> None:
+    engine = Engine()
+
+    assert run_hook(two_bank(engine)) is True
+    seeded = engine.banks["hal0:shared"]["overrides"]
+    assert set(seeded["retain_strategies"]) == {
+        "conversation",
+        "document",
+        "git",
+        "gitlog",
+        "survey",
+    }
+    assert seeded["observations_mission"]
+    assert seeded["reflect_mission"]
+    assert seeded["mental_model_min_refresh_interval_seconds"] > 0
+
+
+def test_a_configured_bank_keeps_its_own_strategies() -> None:
+    """A bank holding facts, or one with an operator's mission, is never re-seeded."""
+    mine = {"retain_strategies": {"mine": {"retain_chunk_size": 100}}}
+    engine = Engine(
+        {"hal0:shared": bank(documents=3, **mine), "hal0:private": bank(retain_mission="m")}
+    )
+
+    assert run_hook(two_bank(engine)) is True
+    assert engine.imports() == []
+    assert engine.banks["hal0:shared"]["overrides"] == mine
+
+
+def test_every_seeded_chunk_clears_the_default_extraction_cap() -> None:
+    """The engine refuses a retain whose chunk is not strictly below the cap (#3595)."""
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.memory.retain_chunk_guard import largest_retain_chunk
+
+    cap = MemoryGraphConfig().extraction_max_tokens
+    sizes = [largest_retain_chunk({"overrides": m["bank"]}) for m in bank_seed.SEED_BANKS.values()]
+    assert max(s for s in sizes if s is not None) < cap
+
+
+def test_the_packaged_shared_template_agrees_with_the_seed() -> None:
+    from hal0.memory import spec_apply
+
+    template = spec_apply.load_template(None, "shared")["bank"]
+    for key, value in SHARED["bank"].items():
+        assert template[key] == value, key

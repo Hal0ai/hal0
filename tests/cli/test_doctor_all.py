@@ -1702,7 +1702,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     assert set(projects_kwargs) == {"memory", "base"}
     assert set(owners_kwargs) == {"memory", "base"}
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-53:] == [
+    assert keys[-54:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1753,6 +1753,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "memory_embedder",
         "memory_extraction_throughput",
         "memory_retain_chunk",
+        "memory_retain_strategies",
         "memory_decision_lane",
         "memory_projects",
         "memory_model_owners",
@@ -4561,3 +4562,37 @@ def test_memory_layout_row_warns_while_hal0_api_cannot_settle_it(tmp_path) -> No
     check = da.check_memory_layout(path=tmp_path / "memory-layout.json", memory=payload)
     assert check.status == "warn"
     assert "disk full" in check.detail and "refuses memory writes" in check.detail
+
+
+# ── memory retain strategies (#3760, advisory) ──────────────────────────────
+
+
+def test_retain_strategies_warns_when_the_platform_bank_has_none() -> None:
+    found = {"bank": "hal0:shared", "strategies": {}}
+    check = da.check_memory_retain_strategies(memory=_LIVE_MEMORY, fetch=lambda _b: found)
+    assert check.status == "warn"
+    assert "hal0:shared" in check.detail
+    assert "hal0 memory spec apply --bank platform" in check.detail
+
+
+def test_retain_strategies_passes_when_the_bank_defines_them() -> None:
+    found = {"bank": "hal0:shared", "strategies": {"git": {}, "gitlog": {}}}
+    check = da.check_memory_retain_strategies(memory=_LIVE_MEMORY, fetch=lambda _b: found)
+    assert check.status == "pass" and "2 retain strategies" in check.detail
+
+
+def test_retain_strategies_unreadable_is_a_warn_not_a_pass() -> None:
+    check = da.check_memory_retain_strategies(memory=_LIVE_MEMORY, fetch=lambda _b: None)
+    assert check.status == "warn"
+
+
+def test_retain_strategies_skips_without_a_live_engine() -> None:
+    def _never(_b: object) -> None:  # pragma: no cover — a call here is the bug
+        raise AssertionError("no fetch without a reachable memory engine")
+
+    for memory in (
+        {"enabled": True, "engine": None},
+        {"enabled": False, "engine": "hindsight"},
+        {"enabled": True, "engine": "hindsight", "reachable": False},
+    ):
+        assert da.check_memory_retain_strategies(memory=memory, fetch=_never).status == "pass"
