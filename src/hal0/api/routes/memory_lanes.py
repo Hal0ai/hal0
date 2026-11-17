@@ -187,9 +187,12 @@ async def _decision_health(decision_cfg: Any) -> dict[str, Any]:
     return out
 
 
-def _lane_op(op_cfg: Any, lanes_cfg: Any) -> dict[str, Any]:
+def _lane_op(op: str, op_cfg: Any, lanes_cfg: Any, graph_cap: int) -> dict[str, Any]:
+    from hal0.memory.extraction_env import lane_default_concurrency
+
     return {
-        "max_concurrent": op_cfg.max_concurrent or lanes_cfg.llm_max_concurrent,
+        "max_concurrent": op_cfg.max_concurrent
+        or lane_default_concurrency(lanes_cfg, op, graph_cap),
         "model": op_cfg.virtual_model or "hal0/memory",
     }
 
@@ -243,15 +246,20 @@ async def get_lanes(request: Request) -> dict[str, Any]:
     # hindsight-api unit really carries — a later-sorting drop-in can override
     # hal0's — and ``drift`` lists every managed key where the two disagree.
     # ``effective`` is ``None`` when the unit env cannot be read.
+    graph_cap = cfg.memory.graph.extraction_max_concurrent
     llm: dict[str, Any] = {
         "model": "hal0/memory",
-        "max_concurrent": lanes_cfg.llm_max_concurrent,
+        "max_concurrent": lanes_cfg.llm_max_concurrent or graph_cap,
         "timeout": lanes_cfg.timeout_s,
         "per_op": {
-            "retain": _lane_op(lanes_cfg.retain, lanes_cfg),
-            "consolidation": _lane_op(lanes_cfg.consolidation, lanes_cfg),
-            "reflect": _lane_op(lanes_cfg.reflect, lanes_cfg),
-            "mental_model_refresh": _lane_op(lanes_cfg.mental_model_refresh, lanes_cfg),
+            "retain": _lane_op("retain", lanes_cfg.retain, lanes_cfg, graph_cap),
+            "consolidation": _lane_op(
+                "consolidation", lanes_cfg.consolidation, lanes_cfg, graph_cap
+            ),
+            "reflect": _lane_op("reflect", lanes_cfg.reflect, lanes_cfg, graph_cap),
+            "mental_model_refresh": _lane_op(
+                "mental_model_refresh", lanes_cfg.mental_model_refresh, lanes_cfg, graph_cap
+            ),
         },
         "effective": None,
         "drift": [],

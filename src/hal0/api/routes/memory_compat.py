@@ -91,7 +91,11 @@ from fastapi.responses import JSONResponse
 from hal0.activity import audit_action
 from hal0.api.auth import judged_principal
 from hal0.api.routes.memory import MemoryUnavailable, extraction_ctx_preflight
-from hal0.config.schema import MemoryCompatConfig, MemoryLanesConfig, MemoryRefreshConfig
+from hal0.config.schema import (
+    MemoryCompatConfig,
+    MemoryGraphConfig,
+    MemoryRefreshConfig,
+)
 from hal0.errors import (
     BadRequest,
     Forbidden,
@@ -230,7 +234,7 @@ _EVERY_CLIENT = "*"
 _OPERATION_ID_NAMESPACE = uuid.UUID("6b0f5d1e-3c8a-5e47-9d52-a1c4e7f20b93")
 
 _DEFAULT_SETTINGS = MemoryCompatConfig()
-_DEFAULT_LANES = MemoryLanesConfig()
+_DEFAULT_GRAPH = MemoryGraphConfig()
 
 PROJECT_HEADER = "X-hal0-Project"
 IGNORED_FIELDS_HEADER = "X-hal0-Ignored-Fields"
@@ -618,7 +622,13 @@ def _reflect_limit(request: Request) -> int:
         )
         if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1
     ]
-    engine_slots = min(caps) if caps else _DEFAULT_LANES.llm_max_concurrent
+    memory_cfg = getattr(request.app.state, "hal0_config", None)
+    graph = getattr(getattr(memory_cfg, "memory", None), "graph", None)
+    graph_cap = getattr(graph, "extraction_max_concurrent", None)
+    if not (isinstance(graph_cap, int) and not isinstance(graph_cap, bool) and graph_cap >= 1):
+        graph_cap = _DEFAULT_GRAPH.extraction_max_concurrent
+    # An unset ``llm_max_concurrent`` follows the graph cap (#3758).
+    engine_slots = min(caps) if caps else graph_cap
     return min(configured, max(1, engine_slots - 1))
 
 

@@ -18,7 +18,7 @@ under `[memory.lanes.<op>]`. The engine reads these as its own
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `llm_max_concurrent` | int | `1` | `1-32`. `HINDSIGHT_API_LLM_MAX_CONCURRENT` global cap; rendered as min(this, effective `[memory.graph].extraction_max_concurrent`). |
+| `llm_max_concurrent` | int | unset | `1-32`. `HINDSIGHT_API_LLM_MAX_CONCURRENT` global cap. Unset follows the effective `[memory.graph].extraction_max_concurrent`, and the consolidation lane then takes one fewer (minimum 1) so retain and page refresh always have a permit. An explicit value is rendered as min(this, effective `[memory.graph].extraction_max_concurrent`) and every lane inherits it unchanged. |
 | `timeout_s` | int | `600` | `30-3600`. Not rendered. Engine-wide timeout: `[memory.graph].llm_timeout_s` (`HINDSIGHT_API_LLM_TIMEOUT`); see [#3631](https://github.com/Hal0ai/hal0/issues/3631). |
 | `reasoning_effort` | str | `"none"` | `HINDSIGHT_API_LLM_REASONING_EFFORT`. |
 | `strict_schema` | bool | `false` | `HINDSIGHT_API_LLM_STRICT_SCHEMA`. |

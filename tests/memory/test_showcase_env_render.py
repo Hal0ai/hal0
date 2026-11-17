@@ -125,3 +125,58 @@ def test_render_showcase_env_disabled_ignores_the_unit() -> None:
         decision_unit_installed=True,
     )
     assert "DECISION_MODEL" not in out
+
+
+# ── #3758: one resolved global cap, following the graph ceiling when unset ──
+
+
+def _env(body: str) -> dict[str, str]:
+    return dict(
+        line.removeprefix("Environment=").split("=", 1)
+        for line in body.splitlines()
+        if line.startswith("Environment=")
+    )
+
+
+def _render(lanes: MemoryLanesConfig, ceiling: int | None) -> dict[str, str]:
+    return _env(
+        render_showcase_env(
+            models=MemoryModelsConfig(),
+            decision=MemoryDecisionConfig(),
+            lanes=lanes,
+            ceiling=ceiling,
+            decision_unit_installed=True,
+        )
+    )
+
+
+def test_unset_global_cap_follows_the_graph_ceiling_and_consolidation_takes_one_fewer() -> None:
+    env = _render(MemoryLanesConfig(), ceiling=2)
+    assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "2"
+    assert env["HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT"] == "2"
+    assert env["HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT"] == "2"
+    assert env["HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_MAX_CONCURRENT"] == "2"
+    assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == "1"
+
+
+def test_unset_global_cap_never_drops_consolidation_below_one() -> None:
+    env = _render(MemoryLanesConfig(), ceiling=1)
+    assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == "1"
+
+
+def test_explicit_consolidation_cap_beats_the_derived_one() -> None:
+    lanes = MemoryLanesConfig(consolidation={"max_concurrent": 2})
+    env = _render(lanes, ceiling=3)
+    assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == "2"
+    assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "3"
+
+
+def test_explicit_global_cap_still_works_exactly_as_before() -> None:
+    # Held to the ceiling, and every op inherits it unchanged (no minus one).
+    env = _render(MemoryLanesConfig(llm_max_concurrent=6), ceiling=2)
+    assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "2"
+    assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == "2"
+    env = _render(MemoryLanesConfig(llm_max_concurrent=1), ceiling=4)
+    assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == "1"
+    assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == "1"

@@ -38,7 +38,7 @@ from hal0.api.middleware import error_codes
 from hal0.api.routes import memory_compat
 from hal0.api.routes.memory_compat import _engine_operation_id
 from hal0.bridge.store import BridgeStore, BridgeStoreError
-from hal0.config.schema import MemoryCompatConfig, MemoryLanesConfig
+from hal0.config.schema import MemoryCompatConfig, MemoryGraphConfig
 from hal0.errors import Hal0Error
 from hal0.memory.hindsight_client import REFLECT_TIMEOUT_S, HindsightRestClient
 from hal0.memory.hindsight_provider import HindsightProvider
@@ -3051,7 +3051,7 @@ def test_reflects_here_always_leave_an_engine_slot_for_everyone_else(
 def test_lanes_hal0_cannot_read_are_taken_to_be_the_shipped_single_slot(
     client: TestClient, key: str, app: FastAPI
 ) -> None:
-    assert MemoryLanesConfig().llm_max_concurrent == 1
+    assert MemoryGraphConfig().extraction_max_concurrent == 1
     _configure(app, None, max_concurrent_reflects=8)
     _compat_state(app).in_flight[("reflect", "*")] = 1
     _busy(client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"}), "15")

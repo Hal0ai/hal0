@@ -27,7 +27,7 @@ def test_memory_config_defaults_include_showcase_sections() -> None:
     assert cfg.decision.model == "hs-decide-1-flash"
     assert cfg.decision.port == 9178
 
-    assert cfg.lanes.llm_max_concurrent == 1
+    assert cfg.lanes.llm_max_concurrent is None  # follows [memory.graph] (#3758)
     for op in ("retain", "consolidation", "reflect", "mental_model_refresh"):
         lane = getattr(cfg.lanes, op)
         assert lane.max_concurrent is None  # falls back to the global cap

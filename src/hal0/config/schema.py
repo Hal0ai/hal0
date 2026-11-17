@@ -3269,7 +3269,8 @@ class MemoryLaneOpConfig(BaseModel):
         le=32,
         description=(
             "HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT. Unset falls back to "
-            "[memory.lanes].llm_max_concurrent."
+            "[memory.lanes].llm_max_concurrent (itself defaulting to "
+            "[memory.graph].extraction_max_concurrent; consolidation takes one fewer)."
         ),
     )
     virtual_model: str | None = Field(
@@ -3333,14 +3334,19 @@ class MemoryLanesConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
 
-    llm_max_concurrent: int = Field(
-        default=1,
+    llm_max_concurrent: int | None = Field(
+        default=None,
         ge=1,
         le=32,
         description=(
             "HINDSIGHT_API_LLM_MAX_CONCURRENT — the GLOBAL cap across every "
             "hindsight-api LLM call (retain, consolidation, reflect, "
-            "mental-model-refresh together), independent of any per-op cap."
+            "mental-model-refresh together), independent of any per-op cap. "
+            "Unset follows [memory.graph].extraction_max_concurrent (as held to "
+            "the extraction slot's --parallel), so the one setting the dashboard "
+            "edits drives the whole engine, and the consolidation lane then "
+            "takes one fewer so retain and page refresh always have a permit. "
+            "An explicit value is still held to that same ceiling."
         ),
     )
     timeout_s: int = Field(default=600, ge=30, le=3600, description="HINDSIGHT_API_LLM_TIMEOUT.")

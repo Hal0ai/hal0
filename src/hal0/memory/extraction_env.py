@@ -290,8 +290,11 @@ _DROP_IN_TEMPLATE = (
 #: extraction limits and is rewritten by the `hal0 memory graph` path) so the
 #: two renderers stay independently testable and a graph-only PUT never
 #: clobbers the showcase lanes, or vice versa. systemd merges all `.conf`
-#: files in the `.d` dir, last-Environment-line-wins on duplicate keys, so the
-#: load order between the two is irrelevant: they never set the same key.
+#: files in the `.d` dir, last-Environment-line-wins on duplicate keys, and the
+#: showcase file sorts later, so for the keys both set (``HINDSIGHT_API_LLM_MAX_CONCURRENT`` and
+#: ``HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT``) it wins, which is why
+#: :func:`render_showcase_env` resolves the global cap from the graph ceiling
+#: when ``[memory.lanes].llm_max_concurrent`` is unset (#3758).
 SHOWCASE_DROP_IN_PATH = DROP_IN_DIR / "showcase-lanes.conf"
 
 #: The local decision-model unit (``installer/systemd/hal0-hs-decide.service``).
@@ -373,12 +376,29 @@ LANE_OP_ENV_PREFIX = {
 }
 
 
+#: Global cap rendered when ``[memory.lanes].llm_max_concurrent`` is unset and
+#: no graph ceiling is known (the graph default, ``extraction_max_concurrent``).
+UNSET_LANES_CAP_FALLBACK = 1
+
 #: Ops whose Hindsight 1.2.0 env accepts ``*_MAX_COMPLETION_TOKENS`` (#3596).
 _COMPLETION_CAP_OPS = frozenset({"consolidation", "reflect"})
 
 #: Cap rendered when ``[memory.lanes.<op>].max_completion_tokens`` is unset.
 #: Resolved here, not in the schema, so a partial table keeps it (#3596).
 DEFAULT_OP_COMPLETION_TOKENS = 8192
+
+
+def lane_default_concurrency(lanes: MemoryLanesConfig, op: str, graph_cap: int) -> int:
+    """An op's cap when ``[memory.lanes.<op>].max_concurrent`` is unset (#3758).
+
+    ``graph_cap`` is the cap an unset ``llm_max_concurrent`` follows. An
+    explicit ``llm_max_concurrent`` applies to every op as written; unset, the
+    consolidation lane takes one fewer than the global cap (minimum 1) so
+    retain and page refresh always have a permit.
+    """
+    if lanes.llm_max_concurrent is not None:
+        return lanes.llm_max_concurrent
+    return max(1, graph_cap - 1) if op == "consolidation" else graph_cap
 
 
 def render_reranker_env(models: MemoryModelsConfig) -> list[str]:
@@ -524,7 +544,17 @@ def render_showcase_env(
     def _held(value: int) -> int:
         return value if ceiling is None else min(value, ceiling)
 
-    global_cap = _held(lanes.llm_max_concurrent)
+    # One resolved value feeds the global cap and every op that does not set
+    # its own (#3758). An explicit ``llm_max_concurrent`` is held to the ceiling
+    # as it always was; unset follows the ceiling itself (the extraction
+    # drop-in's effective concurrency), and consolidation then takes one fewer
+    # so retain and page refresh always have a permit.
+    explicit_cap = lanes.llm_max_concurrent
+    if explicit_cap is None:
+        resolved_cap = ceiling if ceiling is not None else UNSET_LANES_CAP_FALLBACK
+    else:
+        resolved_cap = explicit_cap
+    global_cap = _held(resolved_cap)
     lines += [
         f"Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT={global_cap}",
         f"Environment=HINDSIGHT_API_LLM_REASONING_EFFORT={lanes.reasoning_effort}",
@@ -534,9 +564,10 @@ def render_showcase_env(
 
     for op, prefix in LANE_OP_ENV_PREFIX.items():
         op_cfg: MemoryLaneOpConfig = getattr(lanes, op)
-        max_concurrent = (
-            op_cfg.max_concurrent if op_cfg.max_concurrent is not None else lanes.llm_max_concurrent
-        )
+        if op_cfg.max_concurrent is not None:
+            max_concurrent = op_cfg.max_concurrent
+        else:
+            max_concurrent = lane_default_concurrency(lanes, op, global_cap)
         if op_cfg.virtual_model is None:
             max_concurrent = _held(max_concurrent)
         lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MAX_CONCURRENT={max_concurrent}")
