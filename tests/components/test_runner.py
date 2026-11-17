@@ -42,7 +42,16 @@ def test_order_and_flags_update_path() -> None:
     assert calls[0][1] == {"job_id": "j1", "apply": True}
     # pi is unpatched: its real arm reports without changing anything.
     assert results["pi"]["status"] == "skipped"
-    assert set(results) == {"openwebui", "runner-images", "hermes", "pi", "hindsight"}
+    # memory-decision is unpatched too: not installed, so its opt-in arm skips.
+    assert results["memory-decision"]["status"] == "skipped"
+    assert set(results) == {
+        "openwebui",
+        "runner-images",
+        "hermes",
+        "pi",
+        "memory-decision",
+        "hindsight",
+    }
 
 
 def test_boot_path_is_diagnose_only() -> None:
@@ -72,6 +81,7 @@ def test_results_recorded_to_state_store() -> None:
         "runner-images",
         "hermes",
         "pi",
+        "memory-decision",
         "hindsight",
     }
 

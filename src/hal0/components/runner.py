@@ -71,6 +71,10 @@ def _arm_kwargs(
         return {"job_id": job_id, "apply": apply and catalogue_sync}
     if comp.id == "hermes":
         return {"job_id": job_id, "apply": apply and hermes_install}
+    if comp.id == "memory-decision":
+        # Opt-in (#3757): a catalog pass re-converges an installed server but
+        # never installs one; the converge route sets install=True.
+        return {"job_id": job_id, "apply": apply, "install": False}
     return {"job_id": job_id, "apply": apply}
 
 

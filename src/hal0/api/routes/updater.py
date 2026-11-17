@@ -1109,6 +1109,7 @@ async def _run_component_job(
     arm_kwargs: dict[str, Any],
     upstreams: Any = None,
     model_cache: Any = None,
+    app_state: Any = None,
 ) -> None:
     from hal0.components.registry import component_by_id
     from hal0.components.runner import converge_component
@@ -1138,6 +1139,15 @@ async def _run_component_job(
                 )
             except Exception as exc:
                 log.warning("updater.hermes_upstreams_failed", error=str(exc))
+        if component_id == "memory-decision" and app_state is not None:
+            # The arm wrote [memory.decision].provider to hal0.toml itself
+            # (#3757); refresh the settings cache so the dashboard reads it.
+            try:
+                from hal0.config.loader import load_hal0_config
+
+                app_state.hal0_config = load_hal0_config()
+            except Exception as exc:
+                log.warning("updater.config_cache_refresh_failed", error=str(exc))
         job["component_result"] = result
         failed = result.get("status") in (
             "build_failed",
@@ -1223,6 +1233,17 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
                 ) from exc
         if body.get("clear_override") is True:
             arm_kwargs["clear_override"] = True
+    elif component_id == "memory-decision":
+        # Opt-in (#3757): asking for this component by name is the install.
+        # {"action": "remove", "purge_model": bool} removes it instead.
+        arm_kwargs["install"] = True
+        if isinstance(body, dict):
+            action = body.get("action")
+            if action not in (None, "install", "remove"):
+                raise BadRequest("action must be 'install' or 'remove'", details={"action": action})
+            if action == "remove":
+                arm_kwargs["action"] = "remove"
+                arm_kwargs["purge_model"] = body.get("purge_model") is True
 
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {
@@ -1243,6 +1264,7 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
             arm_kwargs,
             upstreams=request.app.state.upstreams,
             model_cache=getattr(request.app.state, "upstream_models", None),
+            app_state=request.app.state,
         ),
     )
     return dict(jobs[job_id])

@@ -404,6 +404,7 @@ async def get_models(request: Request) -> dict[str, Any]:
     # on disk. ``effective`` is what the engine runs (or would start on), and
     # ``conflict`` lists where that disagrees with the record.
     embedder = await asyncio.to_thread(_embedder_status, models_cfg)
+    install_state, unit_active = await asyncio.to_thread(_decision_component_state)
 
     return {
         "embeddings": {
@@ -433,5 +434,23 @@ async def get_models(request: Request) -> dict[str, Any]:
             "provider": decision_cfg.provider,
             "model": decision_cfg.model,
             "reachable": decision_health.get("reachable", False),
+            # #3757: whether the opt-in memory-decision component is installed,
+            # and whether its unit runs (null when systemd cannot be asked), so
+            # the dashboard can say "install it" vs "it is down".
+            "installed": install_state != "not-installed",
+            # not-installed | unmanaged (a hand install) | managed
+            "install_state": install_state,
+            "unit_active": unit_active,
         },
     }
+
+
+def _decision_component_state() -> tuple[str, bool | None]:
+    """``(install_state, unit_active)`` of the ``memory-decision`` component; never raises."""
+    try:
+        from hal0.memory.decision_component import install_state, unit_active
+
+        return install_state()[0], unit_active()
+    except Exception as exc:
+        log.warning("memory.decision_component_probe_failed: %s", exc)
+        return "not-installed", None

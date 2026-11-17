@@ -3544,7 +3544,7 @@ def test_decision_lane_warns_when_local_unit_is_not_installed() -> None:
 
     check = da.check_memory_decision_lane(
         memory=_LIVE_MEMORY,
-        decision=MemoryDecisionConfig(),
+        decision=MemoryDecisionConfig(provider="local"),
         unit_installed=False,
         probe=_no_probe,
     )
@@ -3563,7 +3563,10 @@ def test_decision_lane_passes_when_the_local_server_answers() -> None:
         return True
 
     check = da.check_memory_decision_lane(
-        memory=_LIVE_MEMORY, decision=MemoryDecisionConfig(), unit_installed=True, probe=_probe
+        memory=_LIVE_MEMORY,
+        decision=MemoryDecisionConfig(provider="local"),
+        unit_installed=True,
+        probe=_probe,
     )
     assert check.status == "pass"
     assert probed == ["http://127.0.0.1:9178"]
@@ -3574,7 +3577,7 @@ def test_decision_lane_warns_when_the_installed_server_is_down() -> None:
 
     check = da.check_memory_decision_lane(
         memory=_LIVE_MEMORY,
-        decision=MemoryDecisionConfig(),
+        decision=MemoryDecisionConfig(provider="local"),
         unit_installed=True,
         probe=lambda _u: False,
     )
@@ -3594,7 +3597,7 @@ def test_decision_lane_probes_an_explicit_base_url_without_the_unit() -> None:
 
     check = da.check_memory_decision_lane(
         memory=_LIVE_MEMORY,
-        decision=MemoryDecisionConfig(base_url="http://127.0.0.1:9999/"),
+        decision=MemoryDecisionConfig(provider="local", base_url="http://127.0.0.1:9999/"),
         unit_installed=False,
         probe=_probe,
     )
@@ -3607,7 +3610,7 @@ def test_decision_lane_warns_on_a_base_url_the_drop_in_cannot_carry() -> None:
 
     check = da.check_memory_decision_lane(
         memory=_LIVE_MEMORY,
-        decision=MemoryDecisionConfig(base_url="http://decide.example:9178"),
+        decision=MemoryDecisionConfig(provider="local", base_url="http://decide.example:9178"),
         unit_installed=True,
         probe=_no_probe,
     )
@@ -4646,3 +4649,32 @@ def test_fetch_is_none_when_the_engine_cannot_be_reached(monkeypatch) -> None:
 
     found, _ = _real_fetch(monkeypatch, CliApiError("connection refused"))
     assert found is None
+
+
+# ── #3757: the four decision-lane states, worded for what to do ─────────────
+
+
+def test_decision_lane_four_states_name_the_next_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.config.schema import MemoryDecisionConfig
+    from hal0.memory import decision_component
+
+    local = MemoryDecisionConfig(provider="local")
+    off = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY, decision=MemoryDecisionConfig(), probe=_no_probe
+    )
+    assert off.status == "pass" and "off" in off.detail  # the shipped default
+
+    # The default probe is the component's own installed check.
+    monkeypatch.setattr(decision_component, "component_installed", lambda: False)
+    missing = da.check_memory_decision_lane(memory=_LIVE_MEMORY, decision=local, probe=_no_probe)
+    assert missing.status == "warn"
+    assert "not installed" in missing.detail and "hal0 memory decision install" in missing.detail
+
+    monkeypatch.setattr(decision_component, "component_installed", lambda: True)
+    up = da.check_memory_decision_lane(memory=_LIVE_MEMORY, decision=local, probe=lambda _u: True)
+    assert up.status == "pass" and "on and answering" in up.detail
+
+    down = da.check_memory_decision_lane(
+        memory=_LIVE_MEMORY, decision=local, probe=lambda _u: False
+    )
+    assert down.status == "warn" and "installed but not answering" in down.detail

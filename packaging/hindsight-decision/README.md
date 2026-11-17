@@ -1,32 +1,35 @@
-# hal0-hs-decide packaging (Hindsight 1.2 showcase)
+# hal0-hs-decide packaging (Hindsight decision model)
 
-This directory ships the verified-working CPU "System One" server for
-`hindsight-ai/hs-decide-1-flash` (built and measured on CT143 — see
-`/var/lib/hal0/work/notes/memory-showcase/PLAN.md`).
+This directory ships the CPU "System One" server for
+`hindsight-ai/hs-decide-1-flash`.
 
-- `hs_decide_serve.py` — the server itself. No vLLM: a plain `transformers`
-  forward pass on CPU, reusing the official `hindsight_decision` serving
-  package shipped in the model repo's `serving/` dir (schema / prompt
-  rendering / typed answer shaping stay byte-identical to upstream).
-- The matching unit lives at `installer/systemd/hal0-hs-decide.service`.
+- `hs_decide_serve.py` is the server. It runs a plain `transformers` forward
+  pass on CPU and reuses the official `hindsight_decision` serving package
+  shipped in the model repo's `serving/` directory, so request validation,
+  prompt rendering and answer shaping stay identical to upstream.
 
-## Build (not yet wired into install.sh)
+## Install
+
+The server is the opt-in `memory-decision` component
+(`src/hal0/memory/decision_component.py`, which holds the model revision and
+package pins). Nothing installs it by default:
 
 ```
-python3 -m venv /var/lib/hal0/memory/hindsight-decision/.venv
-. /var/lib/hal0/memory/hindsight-decision/.venv/bin/activate
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install "transformers>=5.16.1" fastapi uvicorn accelerate
-pip install <hs-decide-1-flash snapshot dir>/serving
+hal0 memory decision install     # build, start, and turn the lane on
+hal0 memory decision status
+hal0 memory decision disable     # provider = "off"; the server keeps running
+hal0 memory decision remove      # delete unit + venv; --purge-model drops the model
 ```
 
-Measured on shared CPU (CT143): ~0.36s @ 208 tok, 2.3s @ 1.1k tok,
-6.8s @ 3.4k tok, 25s @ 8.5k tok.
+`install` builds the venv at `/var/lib/hal0/memory/hindsight-decision/.venv`
+with exact versions (torch from the PyTorch CPU index only, the rest from
+PyPI, all held by a constraints file), pulls the pinned revision into the
+memory engine's Hugging Face cache, installs that snapshot's `serving/`
+package (code from the Hugging Face repo that runs as `hal0`; the full-sha
+revision pin is what fixes it), copies this script next to the venv, and
+installs `hal0-hs-decide.service`. The unit is rendered by the
+`hal0-systemctl` wrapper's `write-hs-decide-unit` verb from four validated
+values; there is no unit file in the tree to install by hand.
 
-## Open work
-
-Installer wiring (venv build step, model pre-pull into the memory hf-cache,
-gating via `[memory.decision]`, and an idempotent venv-swap-via-symlink
-pattern per PLAN.md's constraint) is not yet implemented — see the
-`open_questions` in the platform-branch handoff. This directory is the
-verified payload the installer step will drive.
+Measured on one box: venv 640 MB, model 1.5 GB, 2.7 GB peak RSS, about 5 s
+per request of 3,000 to 5,000 input tokens on 8 threads.

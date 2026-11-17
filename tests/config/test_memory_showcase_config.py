@@ -23,7 +23,8 @@ def test_memory_config_defaults_include_showcase_sections() -> None:
     assert cfg.models.reranker_bucket_batching is True
 
     assert cfg.decision.enabled is True
-    assert cfg.decision.provider == "local"
+    # #3757: off until the opt-in memory-decision component is installed.
+    assert cfg.decision.provider == "off"
     assert cfg.decision.model == "hs-decide-1-flash"
     assert cfg.decision.port == 9178
 

@@ -155,6 +155,8 @@ def _reject_privileged_systemctl(argv: object) -> None:
         # #1814 suites exercise the root-side allow-lists against the shipped
         # bash), and none needs sudo or root. `dnat-snapshot` (#3724) is the
         # same: a pure listing, exercised against stub nft/iptables/podman.
+        # `check-hs-decide-unit` (#3757) is pure too: it prints the unit its
+        # argv renders to and writes nothing.
         seam_verb = next((p for p in inner[1:] if not p.startswith("-")), "")
         if seam_verb and seam_verb not in {
             "help",
@@ -163,6 +165,7 @@ def _reject_privileged_systemctl(argv: object) -> None:
             "check-quadlet",
             "check-dnat",
             "dnat-snapshot",
+            "check-hs-decide-unit",
         }:
             raise AssertionError(
                 f"test tried to run the hal0-systemctl privilege seam for real: {parts!r}. "
@@ -602,3 +605,19 @@ def _empty_lane_dropin_dir(
     from hal0.config.migrations import v5
 
     monkeypatch.setattr(v5, "DROP_IN_DIR", tmp_path_factory.mktemp("lane-dropins"))
+
+
+@pytest.fixture(autouse=True)
+def _no_host_decision_unit(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Config migration v6 reads whether the decision unit file exists (#3757).
+
+    Point it at a path that does not exist so no test reads the host's /etc;
+    a test that needs the unit patches ``v6.DECISION_UNIT_PATH`` itself.
+    """
+    from hal0.config.migrations import v6
+
+    monkeypatch.setattr(
+        v6, "DECISION_UNIT_PATH", tmp_path_factory.getbasetemp() / "no-hal0-hs-decide.service"
+    )

@@ -106,7 +106,7 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Schema version for migrations.  Bumped when a backwards-incompatible
 # config-shape change lands.  See PLAN.md §5 Tier 3.
-CURRENT_SCHEMA_VERSION = 5
+CURRENT_SCHEMA_VERSION = 6
 
 # Capabilities-file schema version. Independent of ``hal0.toml``'s
 # ``meta.schema_version``. v2 (since v0.2) means CapabilitySelection uses
@@ -3162,16 +3162,18 @@ class MemoryDecisionConfig(BaseModel):
 
     The decision model (``hs-decide-1-flash``) replaces many of Hindsight's
     LLM calls (recall rank/prune/dedup, consolidation judgments, reflect
-    sufficiency, page delta gating) with a single cheap forward pass. hal0
-    runs it locally as the ``hal0-hs-decide`` CPU System One service
-    (packaging/hindsight-decision/hs_decide_serve.py, unit
-    installer/systemd/hal0-hs-decide.service) on ``port``. The showcase
-    drop-in points hindsight-api at it only while that unit is installed
-    (#3519, ``hal0.memory.extraction_env.decision_engine_base_url``);
-    ``provider = "hindsight"``
-    with ``base_url = http://127.0.0.1:<port>`` is the verified-working local
-    shape (hindsight-api still requires a non-empty, if placeholder, API key
-    even for a local base URL — see ``zz-showcase-1.2.conf``).
+    sufficiency, page delta gating) with a single cheap forward pass.
+
+    ``provider`` is ``"off"`` (the default), ``"local"`` or
+    ``"hindsight-cloud"``. ``"local"`` is the CPU ``hal0-hs-decide`` service on
+    ``port``, built by the opt-in ``memory-decision`` component
+    (``hal0 memory decision install``, :mod:`hal0.memory.decision_component`),
+    which also sets ``provider = "local"``. The showcase drop-in points
+    hindsight-api at it only while its unit is installed (#3519,
+    ``hal0.memory.extraction_env.decision_engine_base_url``), and renders the
+    engine-side provider value ``hindsight`` plus a fixed placeholder API key
+    (the engine wants a non-empty key even for a loopback URL). A
+    ``hal0.toml`` that says ``provider = "local"`` explicitly keeps that value.
     """
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
@@ -3181,11 +3183,11 @@ class MemoryDecisionConfig(BaseModel):
         description="Whether the decision model lane is enabled at all.",
     )
     provider: str = Field(
-        default="local",
+        default="off",
         description=(
-            "'local' (hal0-managed hal0-hs-decide service), 'hindsight-cloud' "
-            "(hosted decision model), or 'off' (engine falls back to its LLM "
-            "lane for decision-gated operations)."
+            "'off' (the default: the engine uses its LLM lane for decision-gated "
+            "operations), 'local' (the hal0-hs-decide service that `hal0 memory "
+            "decision install` builds), or 'hindsight-cloud' (hosted decision model)."
         ),
     )
     model: str = Field(

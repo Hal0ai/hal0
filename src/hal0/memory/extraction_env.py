@@ -74,7 +74,12 @@ from hal0.memory.embedder_record import (
     persist_embedder_record,
     resolve_embedder,
 )
-from hal0.system.seam import HINDSIGHT_LEGACY_CAP_DROPIN_NAME, SeamTimeout, SystemCtlSeam
+from hal0.system.seam import (
+    DECISION_UNIT_PATH,
+    HINDSIGHT_LEGACY_CAP_DROPIN_NAME,
+    SeamTimeout,
+    SystemCtlSeam,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from hal0.config.schema import (
@@ -297,10 +302,10 @@ _DROP_IN_TEMPLATE = (
 #: when ``[memory.lanes].llm_max_concurrent`` is unset (#3758).
 SHOWCASE_DROP_IN_PATH = DROP_IN_DIR / "showcase-lanes.conf"
 
-#: The local decision-model unit (``installer/systemd/hal0-hs-decide.service``).
-#: The installer does not lay it down yet, so its presence is what says the
-#: ``provider = "local"`` decision lane can answer at all (#3519).
-DECISION_UNIT_PATH = Path("/etc/systemd/system/hal0-hs-decide.service")
+# DECISION_UNIT_PATH (imported from hal0.system.seam): the local decision-model
+# unit. Only the opt-in ``memory-decision`` component lays it down
+# (hal0.memory.decision_component, #3757), so its presence is what says the
+# ``provider = "local"`` decision lane can answer at all (#3519).
 
 #: Base URL of the hosted decision model (``provider = "hindsight-cloud"``).
 HINDSIGHT_CLOUD_DECISION_URL = "https://api.hindsight.ai"

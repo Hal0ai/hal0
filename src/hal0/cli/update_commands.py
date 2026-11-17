@@ -343,6 +343,12 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
     "components.hermes_gateway_regen_failed": (
         "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"
     ),
+    # Config migration v6 (#3757): a note, not a failure.
+    "updater.memory_decision_provider_converted": (
+        '[memory.decision].provider conversion (the old "local" default became "off" '
+        "with no decision server installed, or was written out because one is; "
+        "`hal0 memory decision install` or `enable` turns the lane on)"
+    ),
 }
 
 
@@ -1367,7 +1373,19 @@ def _update_pi() -> None:
     console.print(Panel("[bold green]Updated[/bold green] pi", border_style="green"))
 
 
-def _converge_component(component_id: str, body: dict | None = None) -> None:
+def _decision_cli_wait_s() -> float:
+    from hal0.memory.decision_component import CLI_WAIT_S
+
+    return CLI_WAIT_S
+
+
+#: Per-component poll budgets beyond ``_poll_job``'s default. The decision
+#: model's first install pulls CPU torch and a 1.5 GB model (#3757).
+_CONVERGE_POLL_TIMEOUT_S = {"memory-decision": _decision_cli_wait_s()}
+
+
+def _converge_component(component_id: str, body: dict | None = None) -> dict:
+    """Run one component's converge job to a conclusion; returns its result (dies on failure)."""
     try:
         job = api_post(f"/api/updates/components/{component_id}/converge", json=body or {})
     except CliApiError as exc:
@@ -1378,7 +1396,11 @@ def _converge_component(component_id: str, body: dict | None = None) -> None:
         die("server returned no job id")
         return
     console.print(f"[cyan]converging {component_id}:[/cyan] {job_id}")
-    final = _poll_job(job_id, terminal=("applied", "failed"))
+    final = _poll_job(
+        job_id,
+        terminal=("applied", "failed"),
+        timeout_s=_CONVERGE_POLL_TIMEOUT_S.get(component_id, 600.0),
+    )
     result = final.get("component_result") or {}
     if final.get("state") == "applied":
         console.print(
@@ -1392,8 +1414,11 @@ def _converge_component(component_id: str, body: dict | None = None) -> None:
                 border_style="green",
             )
         )
-        return
+        if result.get("note"):
+            console.print(f"[yellow]![/yellow] {component_id}: {escape(str(result['note']))}")
+        return result
     die(
         f"{component_id} converge failed: {final.get('error') or 'unknown error'}"
         + (f" — {result.get('remedy')}" if result.get("remedy") else "")
     )
+    return result

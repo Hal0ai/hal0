@@ -4424,6 +4424,8 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     # lane limit or adopted a hand-made drop-in value (config migration v5).
     "updater.lane_limits_converted",
     "updater.lane_limits_adopt_skipped",
+    # Not a failure: config migration v6 changed [memory.decision].provider.
+    "updater.memory_decision_provider_converted",
 )
 
 
