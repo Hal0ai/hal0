@@ -114,8 +114,9 @@ disambiguation.
 `models` prints one row per model (id, enabled, type, context, prices, whether the provider
 lists it) or the raw listing with `--json`; a `warning` from the server is printed above the
 table. `enable` and `disable` switch one row on a curated upstream; `enable` on a model that
-only discovery lists adds its row. `refresh` refetches the provider's list and, on an
-upstream that has no per-model rows yet, converts it (see
+only discovery lists adds its row. `refresh` refetches the provider's list; on a curated
+upstream it stores each newly offered model as a switched-off row, and on an
+upstream that has no per-model rows yet it converts it (see
 [Providers, profiles & devices](/docs/reference/providers-profiles-devices/)). `probe` checks
 a base URL and key and lists the provider's models without saving anything; the key is read
 only from the environment variable named by `--key-env`, never from an argument, is never

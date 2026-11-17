@@ -3406,8 +3406,9 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "the provider lists. Never fails because the provider is down: `stale` says so."
     ),
     "upstream_refresh": (
-        "Refetch an upstream's model list (gated). Converts a not-yet-converted row to "
-        "per-model rows when the provider answers, which rewrites upstreams.toml; "
+        "Refetch an upstream's model list (gated). On a curated row, stores each model "
+        "the provider newly offers as a switched-off row. Converts a not-yet-converted "
+        "row to per-model rows when the provider answers. Either rewrites upstreams.toml; "
         "`warning` says why a row was left alone."
     ),
     "upstream_model_update": (

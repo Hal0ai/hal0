@@ -264,7 +264,7 @@ the slot's current name; an unknown id returns `404 slot.not_found`.
 | `upstream_create` | `POST /api/upstreams` — optional `models` creates a curated row; omitted, the row is uncurated |
 | `upstream_update` | `PATCH /api/upstreams/{name}` |
 | `upstream_delete` | `DELETE /api/upstreams/{name}` |
-| `upstream_refresh` | `POST /api/upstreams/{name}/refresh` — refetches the model list; converts a not-yet-converted row, and `warning` says why a row was left alone |
+| `upstream_refresh` | `POST /api/upstreams/{name}/refresh` — refetches the model list; on a curated row stores newly offered models as switched-off rows; converts a not-yet-converted row, and `warning` says why a row was left alone |
 | `upstream_model_update` | `PATCH /api/upstreams/{name}/models/{model_id}` — turns one model on or off and sets its type, context or prices; `model_id` is the provider's own id and may contain `/` |
 | `provider_probe` | `POST /api/providers/probe` — checks a base URL and lists its models, saves nothing; takes no key (a probe with a key is the CLI's `hal0 upstream probe --key-env`) |
 | `service_action` | `POST /api/services/{service_id}/action` |

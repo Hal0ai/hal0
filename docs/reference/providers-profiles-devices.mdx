@@ -180,7 +180,9 @@ conversion for one row on demand. When the row is left alone, the response carri
 URL or key is wrong), the provider's list had no usable model ids, the config file or its
 backup could not be written so nothing was converted, the conversion itself failed, or the
 row changed meanwhile; `curated` stays `false` and `stale` is `true`. An agent-managed or
-slot-backed upstream is refused with 409 `upstream.protected`. A curated row only refetches discovery.
+slot-backed upstream is refused with 409 `upstream.protected`. On a curated row, refresh
+refetches the provider's list and stores each model it newly offers as a switched-off row
+(existing rows are not changed); `GET /api/upstreams/{name}/models` never writes.
 A new upstream created with no `models` is uncurated and converts the same way; one created
 with `models` (even `[]`) is curated from the start.
 

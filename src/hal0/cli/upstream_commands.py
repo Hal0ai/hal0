@@ -597,7 +597,7 @@ def refresh_models(
     name: str = typer.Argument(..., help="Upstream name."),
     json_out: bool = typer.Option(False, "--json", help="Output raw JSON instead of a table."),
 ) -> None:
-    """Refetch a provider's model list; converts a not-yet-converted row."""
+    """Refetch a provider's model list; store new models switched off, or convert the row."""
     url = _api_base()
     if _api_unreachable(url):
         raise typer.Exit(1)
