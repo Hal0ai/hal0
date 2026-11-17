@@ -24,6 +24,7 @@ import {
   mergeOperationLists,
   nextTryText,
   operationStatus,
+  operationTarget,
   operationType,
   pageWindow,
   plainError,
@@ -128,6 +129,23 @@ describe('type', () => {
     expect(nextTryText('2026-11-05T12:12:00Z', now)).toBe('next try in 12 min')
     expect(nextTryText('2026-11-05T12:00:30Z', now)).toBe('next try in under 1 min')
     expect(nextTryText('2026-11-05T11:00:00Z', now)).toBe('next try due')
+  })
+})
+
+describe('target', () => {
+  it('prefers a page, then a file, then the tail of a document id', () => {
+    expect(operationTarget({ mental_model_id: 'arch', filename: 'a.md', document_id: 'doc' })!.text).toBe('page arch')
+    expect(operationTarget({ filename: 'a.md', document_id: 'doc' })!.text).toBe('file a.md')
+    expect(operationTarget({ document_id: 'short-id' })).toEqual({ text: 'doc short-id', title: 'Document short-id' })
+    expect(operationTarget({ document_id: 'claude:session-0123456789abcdef' })!.text).toBe('doc …89abcdef')
+  })
+
+  it('is null when the row names nothing, and cuts a long name', () => {
+    expect(operationTarget({})).toBeNull()
+    expect(operationTarget({ document_id: '  ', filename: null, mental_model_id: null })).toBeNull()
+    const long = operationTarget({ filename: 'x'.repeat(80) })!
+    expect(long.text.length).toBeLessThan(40)
+    expect(long.title).toContain('x'.repeat(80))
   })
 })
 

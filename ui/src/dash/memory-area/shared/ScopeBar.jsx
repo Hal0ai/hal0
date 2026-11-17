@@ -18,6 +18,17 @@ export const SEGMENT_LIMIT = 6
 const ALL_PROJECTS = ''
 
 /**
+ * Move focus to the scope bar's bank control (the checked segment, or the select's button), so an
+ * action that needs a bank can hand the reader straight to the place that chooses one.
+ */
+export function focusBankControl() {
+  const control = document.querySelector('[data-testid="ma-scope"] [data-testid="ma-scope-bank"]')
+  const target =
+    control?.querySelector('[tabindex="0"]') ?? control?.querySelector('button, [role="combobox"]') ?? control
+  if (target instanceof HTMLElement) target.focus()
+}
+
+/**
  * @param {{
  *   banks: Array<{id: string, label?: import('react').ReactNode, count?: number|null, ariaLabel?: string}>,
  *   bank: string|null,

@@ -68,7 +68,7 @@ export function BanksCard({ rows, totals, listMissing = false, note = null, onRe
     body = (
       <>
         <div className="ma-table-region" role="region" aria-label="Banks table" tabIndex={0}>
-          <table className="ma-table" data-testid="ma-health-banks">
+          <table className="ma-table ma-table-stack" data-testid="ma-health-banks">
             <thead>
               <tr>
                 <th scope="col">Bank</th>
@@ -83,12 +83,16 @@ export function BanksCard({ rows, totals, listMissing = false, note = null, onRe
               {rows.map((row) => (
                 <tr key={row.id} data-bank={row.id}>
                   <th scope="row">
-                    <a className="ma-link" href={serializeMemoryRoute({ tab: 'facts', bank: row.id })}>
+                    <a
+                      className="ma-link"
+                      href={serializeMemoryRoute({ tab: 'facts', bank: row.id })}
+                      title={row.id}
+                    >
                       {row.id}
                     </a>
                   </th>
                   {COLUMNS.map((column) => (
-                    <td className="ma-num" key={column.key} data-col={column.key}>
+                    <td className="ma-num" key={column.key} data-col={column.key} data-label={column.label}>
                       <Figure value={row[column.key]} />
                     </td>
                   ))}

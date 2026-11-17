@@ -224,7 +224,7 @@ test.describe('backlog, with storing memories failing', () => {
 
     await expect(page.getByTestId('ma-ops-range')).toHaveText('1–25 of 56 operations · page 1 of 3')
     await expect(page.getByTestId('ma-ops-capped')).toHaveText(
-      'These are the newest 56 of 150 operations across the banks. Choose a bank to page through all of its operations.',
+      'These are the newest 56 of 150 operations across the banks. Older ones are listed per bank: pick one bank to page through everything it has. Pick a bank',
     )
   })
 
@@ -367,7 +367,7 @@ test.describe('backlog, with storing memories failing', () => {
     })
     const button = page.getByTestId('ma-ops-consolidate')
     await expect(button).toBeDisabled()
-    await expect(button).toHaveAccessibleDescription('Choose a bank to consolidate it.')
+    await expect(button).toHaveAccessibleDescription('Consolidation works on one bank at a time. Pick a bank to enable it.')
 
     await pickRichOption(scopeBank(page), 'ingest')
     await expect(button).toBeEnabled()

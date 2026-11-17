@@ -117,6 +117,38 @@ export function operationType(op: Pick<BankOperation, 'operation_type' | 'task_t
   return { label: words.charAt(0).toUpperCase() + words.slice(1), raw }
 }
 
+export interface TargetView {
+  /** What the operation works on, short enough for a table cell. */
+  text: string
+  /** The whole name, for a title attribute. */
+  title: string
+}
+
+const TARGET_TAIL = 8
+const TARGET_NAME_MAX = 32
+
+/**
+ * What an operation targets, from the fields the list already carries: a refreshed page's id, a
+ * stored document's id (its tail: the front of an id is usually a shared prefix), or a file name.
+ * `null` when the row names nothing.
+ */
+export function operationTarget(
+  op: Pick<BankOperation, 'document_id' | 'mental_model_id' | 'filename'>,
+): TargetView | null {
+  const clean = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+  const short = (value: string) => (value.length > TARGET_NAME_MAX ? `${value.slice(0, TARGET_NAME_MAX - 1)}…` : value)
+  const model = clean(op.mental_model_id)
+  if (model) return { text: `page ${short(model)}`, title: `Knowledge page ${model}` }
+  const file = clean(op.filename)
+  if (file) return { text: `file ${short(file)}`, title: `File ${file}` }
+  const doc = clean(op.document_id)
+  if (doc) {
+    const tail = doc.length > TARGET_TAIL + 2 ? `…${doc.slice(-TARGET_TAIL)}` : doc
+    return { text: `doc ${tail}`, title: `Document ${doc}` }
+  }
+  return null
+}
+
 /** `retried once`, `retried 3 times`; `null` when the engine has not retried it. */
 export function retriedText(retryCount: unknown): string | null {
   const n = count(retryCount)
