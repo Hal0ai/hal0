@@ -102,6 +102,11 @@ pytestmark = [
 # ── Stub upstream ────────────────────────────────────────────────────────────
 
 STUB_MODEL_ID = "ci-smoke-llama-0.1b"
+# What hal0 lists for it. The fixture's upstream starts with no model rows;
+# hal0 converts it to a per-model catalog at boot (hal0.upstreams.convert) and
+# from then on lists a provider's models as ``provider/id``. The bare id still
+# routes, but the listing, and so Open WebUI's model picker, shows this one.
+LISTED_MODEL_ID = f"ci-smoke/{STUB_MODEL_ID}"
 
 
 def _free_port() -> int:
@@ -264,7 +269,7 @@ def hal0_api(
                 resp = httpx.get(f"http://127.0.0.1:{port}/v1/models", timeout=2.0)
                 if resp.status_code == 200:
                     ids = [m.get("id") for m in resp.json().get("data", [])]
-                    if STUB_MODEL_ID in ids:
+                    if LISTED_MODEL_ID in ids:
                         seen_model = True
                         break
                     last_err = f"models endpoint returned {ids!r}"
@@ -534,13 +539,13 @@ def test_openwebui_reads_prewired_env_and_lists_hal0_models(
         else:
             entries = []
         last_ids = [(e.get("id") or e.get("name") or "") for e in entries if isinstance(e, dict)]
-        if STUB_MODEL_ID in last_ids:
+        if LISTED_MODEL_ID in last_ids:
             return  # 🎉 prewire works end-to-end
 
-        last_err = f"models listed: {last_ids!r} (missing {STUB_MODEL_ID!r})"
+        last_err = f"models listed: {last_ids!r} (missing {LISTED_MODEL_ID!r})"
         time.sleep(2.0)
 
     pytest.fail(
-        f"OpenWebUI never advertised the hal0 model {STUB_MODEL_ID!r}. "
+        f"OpenWebUI never advertised the hal0 model {LISTED_MODEL_ID!r}. "
         f"Last seen: {last_ids!r}. Last error: {last_err!r}."
     )
