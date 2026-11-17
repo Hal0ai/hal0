@@ -217,6 +217,11 @@ function AddModal({ bank, tab0 = 'fact', onClose }) {
               </div>
               <div className="mv-doclist">
                 <span className="mv-cell-k">existing documents</span>
+                {(docsQuery.data?.total ?? 0) > (docsQuery.data?.items?.length ?? 0) && (
+                  <span className="mini" data-testid="mv-doclist-capped">
+                    showing the first {docsQuery.data.items.length} of {docsQuery.data.total}
+                  </span>
+                )}
                 {(docsQuery.data?.items || []).map((doc) => (
                   <div key={doc.id} className="mv-docrow">
                     <span className="nm">{doc.id}</span>
