@@ -125,32 +125,9 @@ import './dash/agents/bridge-clients-card.jsx'
 import './dash/agents/agents-overview.jsx'
 import './dash/agents/agent-view.jsx'
 
-// The fact workspace (window.MemV2Workspace, mounted by the Memory area's
-// Facts tab at #memory/facts) and the modules it is built from. The bridge
-// installs the TanStack-Query hooks on window.__hal0Use* BEFORE they
-// evaluate.
-import './dash/memory-hook-bridge'
-// Memory v2 (Bank workspace UI, task C1) — self-contained shared
-// constants/Icon (window.MemV2), no dependency on chrome.jsx or the hook
-// bridge above. Must load before any Phase C view module that reads
-// window.MemV2.
-import './dash/memory-v2-shared.jsx'
-// Memory v2 BankBar + Add modal (task C3) — reflect, rules (directives +
-// mental models), add-fact/document/directive/model. Publishes
-// window.MemV2BankBar / window.MemV2AddModal; reads window.MemV2 (above,
-// including its TypeBar and Spark) at render time.
-import './dash/memory-bank-bar.jsx'
-// Memory v2 Bank workspace (task C4) — list/filters/sources, inspector +
-// curation, ego focus view. Publishes window.MemV2Workspace, which the
-// Memory area's Facts tab mounts; reads window.MemV2, window.MemV2BankBar
-// (above), and window.MemV2WebGraph (below, guarded) at render time.
-import './dash/memory-bank-workspace.jsx'
-// Memory v2 web graph (task C5) — d3-force full-graph view with link-type
-// lenses and a 120-node salience cap. Publishes window.MemV2WebGraph,
-// which memory-bank-workspace.jsx (above) already render-guards behind
-// `typeof === 'function'` for its 'web' view tab. Uses window.__hal0D3Force
-// only — never imports d3 itself.
-import './dash/memory-web-graph.jsx'
+// The fact workspace (window.MemV2Workspace, mounted by the Memory area's Facts tab) and the
+// modules it is built from, including the d3-force bridge, load on first use through
+// dash/memory-workspace-modules.ts instead of here.
 
 // Operator Board (#board) — a hal0-skinned kanban wired to the Hermes kanban
 // backend via the audited /api/board/* proxy + a live WS + an agent-chat SSE

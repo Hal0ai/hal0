@@ -392,6 +392,7 @@ export interface MemoryGraphRetryResponse {
 }
 
 const POLL_MS = 15_000
+export const GRAPH_IN_FLIGHT_POLL_MS = 5_000
 
 // GET /api/memory/refresh-policy (ADR-0060). `notes` are per-bank things to know, such as an
 // auto-consolidation override hal0 did not set.
@@ -415,8 +416,10 @@ export function useMemoryGraphStatus() {
     queryKey: ['memory', 'graph', 'status'],
     queryFn: () => apiGet<MemoryGraphStatus>(ENDPOINTS.memoryGraphStatus),
     // Poll faster while extraction is in flight so the "extracting…" badge
-    // tracks live progress; back off to the idle cadence otherwise.
-    refetchInterval: (query) => ((query.state.data?.in_flight ?? 0) > 0 ? 3_000 : POLL_MS),
+    // tracks live progress; back off to the idle cadence otherwise. 5 s: the count moves per
+    // finished chunk (seconds apart on a loaded box), so 3 s re-read mostly unchanged numbers,
+    // and on a working box the in-flight state is nearly permanent. Every mount shares this key.
+    refetchInterval: (query) => ((query.state.data?.in_flight ?? 0) > 0 ? GRAPH_IN_FLIGHT_POLL_MS : POLL_MS),
   })
 }
 

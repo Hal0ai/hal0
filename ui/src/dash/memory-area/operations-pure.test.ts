@@ -14,6 +14,7 @@ import {
   PAGE_SIZE,
   bankBreakdown,
   banksForFilter,
+  liveBankIds,
   bulkText,
   clampOffset,
   durationParts,
@@ -553,5 +554,16 @@ describe('many at once', () => {
     expect(
       bulkText({ phase: 'finished', action: 'retry', done: 0, total: 0, error: 'Could not read them.', more: false }),
     ).toBe('Could not read them.')
+  })
+
+  it('leaves retired banks out of the all-banks read', () => {
+    const ids = ['live', 'old', 'other']
+    const list = [
+      { bank_id: 'live', retired: false },
+      { bank_id: 'old', retired: true },
+    ]
+    expect(liveBankIds(ids, list)).toEqual(['live', 'other'])
+    expect(liveBankIds(ids, null)).toEqual(ids)
+    expect(liveBankIds(ids, [{ bank_id: 'live' }])).toEqual(ids)
   })
 })

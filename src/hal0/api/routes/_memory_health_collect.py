@@ -333,6 +333,17 @@ async def read_operations(
             read += len(page)
             found = out.absorb(page, status, now, keep=False) > 0
         out.truncated = not found and start > len(rows)
+    elif more and total is not None and want == WANT_ROWS:
+        # The total names every remaining page, so they are read together (the reader
+        # bounds how many are in flight) rather than one after another.
+        offsets = range(read, min(total, cap), OPERATIONS_PAGE)
+        pages = await asyncio.gather(
+            *(reader.get(path, {**base, "offset": offset}) for offset in offsets)
+        )
+        for page in pages:
+            out.absorb(_operations_page(page)[0], status, now, keep=keep)
+        out.count = total
+        out.truncated = total > cap
     elif more and not (total is not None and want == WANT_COUNT):
         offset = read
         while more and offset < cap:

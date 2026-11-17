@@ -1171,3 +1171,47 @@ def test_lanes_rows_are_read_past_the_first_page(client: TestClient, engine: _En
         "failed": 25,
     }
     assert 2 * 3600.0 <= row["oldest_pending_age_s"] <= 2 * 3600.0 + 30.0
+
+
+# ── page reads run together, within the reader's bound ─────────────────────
+
+
+class _TrackingClient:
+    """Serves ``total`` failed rows page by page and records how many reads overlap."""
+
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.in_flight = 0
+        self.peak = 0
+
+    async def request_json(
+        self, method: str, path: str, *, params: dict[str, Any], timeout_s: float
+    ) -> dict[str, Any]:
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(0.01)
+        finally:
+            self.in_flight -= 1
+        offset, limit = int(params["offset"]), int(params["limit"])
+        rows = [
+            {"id": f"op-{i}", "status": "failed", "created_at": _ago(10.0)}
+            for i in range(offset, min(offset + limit, self.total))
+        ]
+        return {"total": self.total, "operations": rows}
+
+
+def test_failed_rows_are_read_in_parallel_within_the_bound() -> None:
+    async def run() -> tuple[_TrackingClient, collect.OperationsRead]:
+        client = _TrackingClient(total=1000)
+        reader = collect.EngineReader(client, max_concurrent=3)
+        out = collect.OperationsRead()
+        await collect.read_operations(
+            reader, "b", "failed", out, now=time.time(), want=collect.WANT_ROWS
+        )
+        return client, out
+
+    client, out = asyncio.run(run())
+    assert client.peak == 3  # overlapping, and never past the reader's bound
+    assert out.count == 1000 and out.complete and not out.truncated
+    assert [r["id"] for r in out.rows] == [f"op-{i}" for i in range(1000)]  # page order kept

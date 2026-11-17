@@ -62,7 +62,11 @@ function AddModal({ bank, tab0 = 'fact', onClose }) {
   // report rather than inventing one. The list still uses the real hooks.
   const useBankDocuments = window.__hal0UseBankDocuments
   const useDocumentReprocess = window.__hal0UseDocumentReprocess
-  const docsQuery = useBankDocuments ? useBankDocuments(bank) : { data: null }
+  // Read only while the Document tab is showing, and the same first 50 the Sources panel reads
+  // (same query key, so one request serves both) rather than every document of the bank.
+  const docsQuery = useBankDocuments
+    ? useBankDocuments(bank, { limit: 50, enabled: tab === 'document' })
+    : { data: null }
   const reprocess = useDocumentReprocess ? useDocumentReprocess() : { mutate: () => {}, isPending: false }
 
   const submitFact = () => {
@@ -213,6 +217,11 @@ function AddModal({ bank, tab0 = 'fact', onClose }) {
               </div>
               <div className="mv-doclist">
                 <span className="mv-cell-k">existing documents</span>
+                {(docsQuery.data?.total ?? 0) > (docsQuery.data?.items?.length ?? 0) && (
+                  <span className="mini" data-testid="mv-doclist-capped">
+                    showing the first {docsQuery.data.items.length} of {docsQuery.data.total}
+                  </span>
+                )}
                 {(docsQuery.data?.items || []).map((doc) => (
                   <div key={doc.id} className="mv-docrow">
                     <span className="nm">{doc.id}</span>
