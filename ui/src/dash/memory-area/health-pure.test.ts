@@ -850,6 +850,27 @@ describe('engineStrip', () => {
     expect(cell(on, 'decision')).toMatchObject({ value: 'decider', chip: { tone: 'ok', word: 'reachable' } })
   })
 
+  it('draws a decision lane switched off by its provider as Off, not as unreachable', () => {
+    // What a box with `[memory.decision] enabled = true, provider = "off"` answers.
+    const off = cells(healthReport(), GRAPH, {
+      ...modelsAnswer(),
+      decision: { enabled: true, provider: 'off', model: 'hs-decide-1-flash', reachable: false },
+    })
+    expect(cell(off, 'decision')).toMatchObject({ value: 'Off', chip: null })
+  })
+
+  it('warns, without the red of a broken step, when the optional decision server does not answer', () => {
+    const down = cells(healthReport(), GRAPH, {
+      ...modelsAnswer(),
+      decision: { enabled: true, provider: 'local', model: 'hs-decide-1-flash', reachable: false },
+    })
+    expect(cell(down, 'decision')).toMatchObject({
+      value: 'hs-decide-1-flash',
+      helper: 'optional, the extraction model decides until its server answers',
+      chip: { tone: 'warn', word: 'unreachable' },
+    })
+  })
+
   it('reports nothing it was not told', () => {
     const list = cells(healthReport({ extraction: null, embedder: null }), undefined, {})
     for (const id of ['extraction', 'embedder', 'reranker', 'decision']) {

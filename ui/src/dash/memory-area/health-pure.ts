@@ -919,12 +919,26 @@ function decisionCell(decision: unknown): StripCell {
   const base = { id: 'decision' as const, label: 'Decision model' }
   const d = isRecord(decision) ? decision : null
   if (!d || typeof d.enabled !== 'boolean') return { ...base, value: null, helper: null, chip: null }
-  if (!d.enabled) return { ...base, value: 'Off', helper: 'optional component, not enabled', chip: null }
+  // `provider = "off"` switches the lane off with `enabled` left true, and the models read then
+  // answers `reachable: false` for a server nobody asked for. That is Off, not a fault.
+  if (!d.enabled || d.provider === 'off') {
+    return { ...base, value: 'Off', helper: 'optional component, not enabled', chip: null }
+  }
+  if (d.reachable === true) {
+    return {
+      ...base,
+      value: text(d.model) ?? 'Enabled',
+      helper: 'optional component',
+      chip: { tone: 'ok', word: 'reachable' },
+    }
+  }
+  // The lane is optional: with no decision server the engine makes these judgments on the
+  // extraction model, so memory keeps working. A warning, never the red of a broken step.
   return {
     ...base,
     value: text(d.model) ?? 'Enabled',
-    helper: 'optional component',
-    chip: d.reachable === true ? { tone: 'ok', word: 'reachable' } : { tone: 'err', word: 'unreachable' },
+    helper: 'optional, the extraction model decides until its server answers',
+    chip: { tone: 'warn', word: 'unreachable' },
   }
 }
 
