@@ -400,6 +400,26 @@
 
 /* ── Tab row ────────────────────────────────────────────────────────────────── */
 
+/* The row's frame: its edges fade while there is more row beyond them (MemoryArea sets the
+   data attributes from the scroll position), so a clipped tab is a visible cue, not a surprise. */
+.ma-tabs-wrap { position: relative; }
+.ma-tabs-wrap::before,
+.ma-tabs-wrap::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 1px;
+  width: 28px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 1;
+}
+.ma-tabs-wrap::before { left: 0; background: linear-gradient(to right, var(--bg), transparent); }
+.ma-tabs-wrap::after { right: 0; background: linear-gradient(to left, var(--bg), transparent); }
+.ma-tabs-wrap[data-fade-start="true"]::before,
+.ma-tabs-wrap[data-fade-end="true"]::after { opacity: 1; }
+
 /* Tabs are links. The row scrolls sideways when it does not fit; it never wraps. */
 .ma-tabs {
   display: flex;

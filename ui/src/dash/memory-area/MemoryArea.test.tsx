@@ -137,6 +137,63 @@ describe('header', () => {
   })
 })
 
+describe('tab row overflow', () => {
+  const sizes = { scrollWidth: 0, clientWidth: 0 }
+  const saved = new Map<string, PropertyDescriptor | undefined>()
+  const fake = (name: string, get: (el: HTMLElement) => number) => {
+    saved.set(name, Object.getOwnPropertyDescriptor(HTMLElement.prototype, name))
+    Object.defineProperty(HTMLElement.prototype, name, { configurable: true, get() { return get(this as HTMLElement) } })
+  }
+  beforeEach(() => {
+    fake('scrollWidth', () => sizes.scrollWidth)
+    fake('clientWidth', () => sizes.clientWidth)
+    fake('offsetLeft', (el) => (el.getAttribute('href') === '#memory/agents' ? 400 : 0))
+    fake('offsetWidth', () => 80)
+  })
+  afterEach(() => {
+    for (const [name, desc] of saved) {
+      if (desc) Object.defineProperty(HTMLElement.prototype, name, desc)
+      else delete (HTMLElement.prototype as unknown as Record<string, unknown>)[name]
+    }
+    saved.clear()
+  })
+
+  it('fades no edge while the row fits', () => {
+    sizes.scrollWidth = 300
+    sizes.clientWidth = 300
+    const host = render()
+    expect(byId(host, 'ma-tabs-wrap')!.dataset.fadeStart).toBe('false')
+    expect(byId(host, 'ma-tabs-wrap')!.dataset.fadeEnd).toBe('false')
+  })
+
+  it('scrolls the open tab into view and fades the edges that hide more row', () => {
+    sizes.scrollWidth = 600
+    sizes.clientWidth = 300
+    const host = render('#memory/agents')
+    const strip = byId(host, 'ma-tabs')!
+    // 400 - (300 - 80) / 2: the open tab is centred.
+    expect(strip.scrollLeft).toBe(290)
+    expect(byId(host, 'ma-tabs-wrap')!.dataset.fadeStart).toBe('true')
+    expect(byId(host, 'ma-tabs-wrap')!.dataset.fadeEnd).toBe('true')
+  })
+
+  it('shows the end fade at the start of the row and follows the scroll', () => {
+    sizes.scrollWidth = 600
+    sizes.clientWidth = 300
+    const host = render('#memory/health')
+    const wrap = byId(host, 'ma-tabs-wrap')!
+    expect(wrap.dataset.fadeStart).toBe('false')
+    expect(wrap.dataset.fadeEnd).toBe('true')
+    const strip = byId(host, 'ma-tabs')!
+    act(() => {
+      strip.scrollLeft = 300
+      strip.dispatchEvent(new Event('scroll'))
+    })
+    expect(wrap.dataset.fadeStart).toBe('true')
+    expect(wrap.dataset.fadeEnd).toBe('false')
+  })
+})
+
 describe('tab row', () => {
   it('is five real links, in order', () => {
     const host = render()
