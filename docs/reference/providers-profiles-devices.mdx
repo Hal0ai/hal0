@@ -50,13 +50,13 @@ the slot* — this is distinct from the slot's hardware backend (`vulkan`/`rocm`
 
 This is very likely the concept you mean when you say "provider" in a hal0 config
 context — the built-in template registry for cloud/remote LLM APIs
-(`hal0.upstreams.integrations`). The catalog itself is code, never mutated at runtime;
+(`hal0.upstreams.presets`, data in `config/data/provider_presets.toml`). The catalog is never mutated at runtime;
 user config lives in `/etc/hal0/upstreams.toml`.
 
 | Catalog id | Base URL | Auth style | Category | Capabilities |
 |---|---|---|---|---|
 | `openai` | `https://api.openai.com/v1` | `bearer` | cloud | chat, embed, vision, tools, tts, stt |
-| `anthropic` | `https://api.anthropic.com/v1` | `anthropic` (`x-api-key` + `anthropic-version` header) | cloud | chat, vision, tools |
+| `anthropic` | `https://api.anthropic.com/v1` | `bearer` (Anthropic's OpenAI-compatible layer) | cloud | chat, tools |
 | `openrouter` | — | — | cloud | — |
 | `google_ai_studio` | `https://generativelanguage.googleapis.com/v1beta/openai` | `bearer` | cloud | chat, vision |
 | `deepseek` | — | — | cloud | — |

@@ -878,7 +878,7 @@ class ProviderEntry(BaseModel):
 
     catalog_id: str = Field(
         ...,
-        description="References an entry in upstreams.integrations._CATALOG.",
+        description="References a preset id in config/data/provider_presets.toml.",
     )
     name: str = Field(default="", description="User-visible name override.")
     base_url: str = Field(

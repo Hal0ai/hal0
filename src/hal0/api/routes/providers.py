@@ -35,7 +35,7 @@ from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
 from hal0.config.schema import UpstreamEntry, UpstreamModelFilters
-from hal0.upstreams.integrations import get_catalog
+from hal0.upstreams.presets import get_preset, load_presets, preset_to_api
 from hal0.upstreams.registry import (
     RESERVED_UPSTREAM_NAME,
     UpstreamAlreadyExists,
@@ -217,7 +217,7 @@ class UpstreamCreateBody(BaseModel):
     """Body for ``POST /api/upstreams`` — always creates a ``kind="remote"``.
 
     ``catalog_id`` prefills ``url``/``auth_style``/``auth_header`` from the
-    integrations catalog (explicit body fields win over the prefill); without
+    provider presets (explicit body fields win over the prefill); without
     it ``url`` is required. Credentials are NOT accepted here — write the key
     afterwards via ``POST /api/providers/{name}/credentials`` so secrets never
     transit the CRUD surface.
@@ -256,18 +256,16 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
 
     prefill: dict[str, Any] = {}
     if body.catalog_id is not None:
-        entry = get_catalog().get(body.catalog_id)
-        if entry is None:
+        preset = get_preset(body.catalog_id)
+        if preset is None:
             raise UpstreamInvalidHTTP(
                 f"unknown catalog_id {body.catalog_id!r}",
-                details={"catalog_id": body.catalog_id, "known": sorted(get_catalog())},
+                details={"catalog_id": body.catalog_id, "known": sorted(load_presets())},
             )
         prefill = {
-            "url": entry.get("base_url") or None,
-            "auth_style": entry.get("auth") or None,
-            "auth_header": (
-                entry.get("auth_header_name") if entry.get("auth") == "header" else None
-            ),
+            "url": preset.base_url or None,
+            "auth_style": preset.auth or None,
+            "auth_header": (preset.auth_header_name if preset.auth == "header" else None),
             "auth_value_env": f"{body.catalog_id.upper()}_API_KEY",
         }
 
@@ -545,12 +543,12 @@ async def test_upstream(name: str, request: Request) -> dict[str, Any]:
 
 @router.get("/providers/catalog")
 async def providers_catalog() -> dict[str, dict[str, Any]]:
-    """Return the static integration catalog (built-in upstream templates).
+    """Return the provider presets (built-in upstream templates).
 
     Used by the "Add upstream" form to populate the dropdown of known
     providers (Anthropic, OpenAI, OpenRouter, hal0 self, custom, …).
     """
-    return get_catalog()
+    return {pid: preset_to_api(p) for pid, p in load_presets().items()}
 
 
 @router.get("/providers")
