@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -21,7 +20,7 @@ def _seed(client: TestClient, *upstreams: Upstream) -> dict[str, int]:
 
     async def fake_fetch(name: str) -> list[str]:
         calls["fetch_models"] += 1
-        return []
+        return ["gpt-x", "gpt-y"] if name == "plain" else []
 
     async def fake_payload(name: str) -> Any:
         calls["fetch_model_payload"] += 1
@@ -76,33 +75,51 @@ def test_uncurated_provider_listing_unchanged(client: TestClient) -> None:
     assert [r["id"] for r in rows] == ["gpt-x", "gpt-y"]
 
 
-def test_uncurated_listing_refetches_only_when_stale(client: TestClient) -> None:
+def test_uncurated_listing_is_fetched_live_on_every_call(client: TestClient) -> None:
     plain = Upstream(name="plain", kind="remote", url="https://plain.invalid/v1")
     calls = _seed(client, plain)
     _rows(client)
     _rows(client)
-    assert calls["fetch_model_payload"] == 1
-    cache = client.app.state.upstream_discovery
-    models, _at = cache.get("plain")
-    cache.put("plain", models, now=time.time() - 10**7)
-    _rows(client)
-    assert calls["fetch_model_payload"] == 2
+    assert calls["fetch_models"] == 2
+    assert calls["fetch_model_payload"] == 0
 
 
-def test_failed_refetch_serves_the_stale_entry(client: TestClient) -> None:
+def test_uncurated_listing_follows_the_provider_right_away(client: TestClient) -> None:
     plain = Upstream(name="plain", kind="remote", url="https://plain.invalid/v1")
     _seed(client, plain)
-    _rows(client)
-    cache = client.app.state.upstream_discovery
-    models, _at = cache.get("plain")
-    cache.put("plain", models, now=time.time() - 10**7)
+    assert [r["id"] for r in _rows(client) if r["owned_by"] == "plain"] == ["gpt-x", "gpt-y"]
 
-    async def boom(name: str) -> Any:
-        return None
+    async def gone(name: str) -> list[str]:
+        return []
 
-    client.app.state.upstreams.fetch_model_payload = boom
-    rows = [r for r in _rows(client) if r["owned_by"] == "plain"]
-    assert [r["id"] for r in rows] == ["gpt-x", "gpt-y"]
+    client.app.state.upstreams.fetch_models = gone
+    assert [r for r in _rows(client) if r["owned_by"] == "plain"] == []
+
+
+def test_lookup_by_bare_id_answers_with_the_curated_row(client: TestClient) -> None:
+    calls = _seed(client, _curated(("MiniMax-M2.5", True), ("Off", False)))
+    resp = client.get("/v1/models/MiniMax-M2.5")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == "MiniMax-M2.5"
+    assert resp.json()["owned_by"] == "mm"
+    canonical = client.get("/v1/models/mm/MiniMax-M2.5")
+    assert canonical.status_code == 200
+    assert canonical.json()["id"] == "mm/MiniMax-M2.5"
+    assert client.get("/v1/models/Off").status_code == 404
+    assert calls["fetch_model_payload"] == 0
+
+
+def test_memory_alias_lookup_resolves_a_bare_upstream_id(client: TestClient) -> None:
+    from hal0.config.schema import Hal0Config, MemoryConfig, MemoryGraphConfig
+
+    _seed(client, _curated(("MiniMax-M2.5", True)))
+    client.app.state.hal0_config = Hal0Config(
+        memory=MemoryConfig(graph=MemoryGraphConfig(extraction_model="MiniMax-M2.5"))
+    )
+    resp = client.get("/v1/models/hal0/memory")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == "hal0/memory"
+    assert resp.json()["owned_by"] == "mm"
 
 
 def test_disabled_model_request_returns_404_with_its_own_code(client: TestClient) -> None:
@@ -201,20 +218,6 @@ def test_agent_managed_listing_follows_a_changed_payload(client: TestClient) -> 
     payload["data"] = [{"id": "alias-b"}]
     ids = [r["id"] for r in _rows(client) if r["owned_by"] == "hermes.x"]
     assert "alias-b" in ids and "alias-a" not in ids
-
-
-def test_empty_remote_answer_is_refetched_next_call(client: TestClient) -> None:
-    plain = Upstream(name="plain", kind="remote", url="https://plain.invalid/v1")
-    calls = _seed(client, plain)
-    answers: list[Any] = [{"data": []}, {"data": [{"id": "late-model"}]}]
-
-    async def live(name: str) -> Any:
-        calls["fetch_model_payload"] += 1
-        return answers.pop(0)
-
-    client.app.state.upstreams.fetch_model_payload = live
-    assert [r for r in _rows(client) if r["owned_by"] == "plain"] == []
-    assert [r["id"] for r in _rows(client) if r["owned_by"] == "plain"] == ["late-model"]
 
 
 def test_status_never_network_fills_a_curated_cache_entry(client: TestClient) -> None:

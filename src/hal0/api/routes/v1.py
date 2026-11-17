@@ -54,10 +54,14 @@ from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_
 from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.slots.abandon import ClientGoneProbe, abandon_probe
 from hal0.slots.state import SlotNpuConflict
-from hal0.upstreams.catalog import canonical_id, enabled_ids
-from hal0.upstreams.discovery import DiscoveryCache, parse_models_payload
+from hal0.upstreams.catalog import (
+    ModelAmbiguous,
+    Resolved,
+    canonical_id,
+    enabled_ids,
+    resolve_requested_model,
+)
 from hal0.upstreams.filters import apply_filters
-from hal0.upstreams.presets import get_preset
 
 if TYPE_CHECKING:
     from hal0.comfyui.resolve import ResolvedImageModel
@@ -1255,31 +1259,6 @@ async def list_models(
     return {"object": "list", "data": data}
 
 
-async def _discovered_ids(request: Request, name: str) -> list[str]:
-    """Model ids an uncurated upstream advertises, via the discovery cache.
-
-    Only genuine remotes come here. Refetches only when the cached entry is stale. A failed refetch keeps
-    serving the stale entry; with no entry at all the upstream lists nothing.
-    """
-    upstreams = request.app.state.upstreams
-    cache = getattr(request.app.state, "upstream_discovery", None)
-    if cache is None:
-        cache = DiscoveryCache()
-        request.app.state.upstream_discovery = cache
-    if cache.is_stale(name):
-        try:
-            payload = await upstreams.fetch_model_payload(name)
-        except Exception:
-            payload = None
-        if payload is not None:
-            preset = get_preset(getattr(upstreams.get(name), "catalog_id", None) or "")
-            models = parse_models_payload(payload, preset)
-            if models:  # an empty answer is not worth remembering for hours
-                cache.put(name, models)
-    entry = cache.get(name)
-    return [m.id for m in entry[0]] if entry is not None else []
-
-
 async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[str, Any]]:
     """Build the ``/v1/models`` ``data`` list (see :func:`list_models`).
 
@@ -1421,16 +1400,13 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
             # not apply to an operator-chosen list.
             listed = [canonical_id(u.name, mid) for mid in enabled_ids(u)]
         else:
-            if u.kind == "remote" and not u.slot_name and not u.managed_by:
-                advertised = await _discovered_ids(request, u.name)
-            else:
-                # Slot, container-slot and agent-managed upstreams change under
-                # us (a slot swaps models, a profile renames aliases) and nothing
-                # invalidates a cache for them, so they are always read live.
-                try:
-                    advertised = await upstreams.fetch_models(u.name)
-                except Exception:
-                    advertised = []
+            # Uncurated upstreams are read live on every call: a slot swaps
+            # models, a profile renames aliases, and an unconverted remote
+            # advertises exactly what it serves right now.
+            try:
+                advertised = await upstreams.fetch_models(u.name)
+            except Exception:
+                advertised = []
             # Per-upstream curation of the discovery catalog only — the dispatch
             # cache keeps the full list, so filtered-out ids stay addressable.
             listed = apply_filters(advertised, getattr(u, "model_filters", None))
@@ -1497,6 +1473,10 @@ async def get_model(
         if isinstance(entry, dict) and entry.get("id") == model_id:
             return entry
 
+    catalog_entry = _catalog_entry_for(request, model_id, data)
+    if catalog_entry is not None:
+        return {**catalog_entry, "id": model_id}
+
     virtual_entry = await _resolve_virtual_model_entry(request, model_id, data)
     if virtual_entry is not None:
         return virtual_entry
@@ -1507,6 +1487,37 @@ async def get_model(
         f"model {model_id!r} is not advertised by any configured upstream",
         details={"model": model_id},
     )
+
+
+def _catalog_entry_for(
+    request: Request, model_id: str, data: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """The listed row of the curated provider that ``model_id`` routes to.
+
+    ``/v1/models`` lists a curated provider's models as ``provider/id``, but a
+    bare id still routes. This resolves ``model_id`` against stored rows the
+    way the dispatcher's catalog step does and returns that provider's row, so
+    a lookup by a saved bare id keeps answering. ``None`` when the id does not
+    resolve to exactly one enabled row (an ambiguous id has no single row).
+    """
+    upstreams = getattr(request.app.state, "upstreams", None)
+    if upstreams is None:
+        return None
+    try:
+        resolved = resolve_requested_model(model_id, upstreams.list())
+    except ModelAmbiguous:
+        return None
+    if not isinstance(resolved, Resolved):
+        return None
+    wanted = canonical_id(resolved.upstream.name, resolved.model_id)
+    for entry in data:
+        if (
+            isinstance(entry, dict)
+            and entry.get("id") == wanted
+            and entry.get("owned_by") == resolved.upstream.name
+        ):
+            return entry
+    return None
 
 
 async def _resolve_virtual_model_entry(
@@ -1540,7 +1551,9 @@ async def _resolve_virtual_model_entry(
             for entry in data:
                 if isinstance(entry, dict) and entry.get("id") == target:
                     return {**entry, "id": requested}
-            return None
+            # A bare id saved before its provider was curated still resolves.
+            catalog_entry = _catalog_entry_for(request, target, data)
+            return {**catalog_entry, "id": requested} if catalog_entry is not None else None
         model_id = target
     from hal0.normalize.resolver import LiveSlotResolver
 
