@@ -372,7 +372,7 @@ def _build_venv(runner: Runner, new: Path, final: Path) -> str | None:
     return None
 
 
-def _pull_model(runner: Runner, py: str) -> None | str:
+def _pull_model(runner: Runner, py: str) -> str | None:
     """Fetch :data:`MODEL_REVISION` into :func:`hf_home`; ``None`` or the reason."""
     code = (
         "import sys\n"
