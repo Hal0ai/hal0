@@ -116,7 +116,11 @@ converging it. `<id>` is one of `openwebui`, `runner-images`, `hermes`,
 `memory-decision` is opt-in: `hal0 update component memory-decision` installs
 it (CPU PyTorch, a 1.5 GB model, about 2.7 GB of RAM while it serves), and a
 plain `hal0 update` only keeps an installed one on its pins. Its row reads
-`not-installed` until then, which never affects the exit code. See
+`not-installed` until then (`unmanaged` for a server installed by hand),
+which never affects the exit code. The same server is driven by
+`hal0 memory decision install`, `hal0 memory decision status`,
+`hal0 memory decision enable`, `hal0 memory decision disable` and
+`hal0 memory decision remove`. See
 [`[memory.decision]`](/docs/reference/config-schema-memory-lanes/#memorydecision-decision-model).
 
 `sudo hal0 update component pi` re-pins an installed pi and redeploys hal0's extensions into `~/.pi` without touching the extensions you added or your default provider, model and theme. Unlike the other components it runs in the CLI, not the daemon, so it needs root and not a running hal0-api; run it the same way you installed pi. It reruns the pinned installer and refreshes the hal0-memory MCP entry. It refuses, and changes nothing, when pi is not installed, when pi's profile is in a different home than the one it runs in, and when `settings.json` or `mcp.json` is not a JSON object; it takes no `--target` or `--clear-override`. `hal0 update` never re-pins pi; it only reports it. It also points Pi's section of `~/.hindsight/coding-agent.json` at hal0's `/api/memory/compat` with the hal0-managed bridge client `pi-coder`, and prints a line when it minted or rotated that key ([Generated files](/docs/reference/generated-files/)). That file is shared: other Hindsight-backed tools on the box read it too, and only Pi's section is written. The `pi-coder` key also holds the `agents` scope: whoever can read that 0600 file can start Hermes runs.
