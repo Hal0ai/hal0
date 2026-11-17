@@ -67,6 +67,8 @@ class FakeRunner:
     def __call__(self, argv: list[str], **kw: Any) -> subprocess.CompletedProcess:
         self.calls.append(list(argv))
         self.envs.append(kw.get("env"))
+        self.kwargs = getattr(self, "kwargs", [])
+        self.kwargs.append(kw)
         if "hal0.memory.decision_fs" in argv:
             i = argv.index("hal0.memory.decision_fs")
             import io
@@ -243,8 +245,12 @@ def test_fresh_install_builds_pulls_renders_starts_and_turns_the_lane_on(
     assert "torch==2.15.0" in torch
     pip = next(c for c in runner.calls if "transformers==5.23.0" in c)
     assert "--index-url" not in pip and "--extra-index-url" not in pip
-    constraints = (dc.venv_dir() / "hal0-constraints.txt").read_text()
-    assert constraints.splitlines() == ["torch==2.15.0", *dc.PACKAGES]
+    pips = [c for c in runner.calls if "pip" in c]
+    assert len(pips) == 3
+    for call in pips:
+        assert {"--isolated", "--no-input", "--disable-pip-version-check"} <= set(call)
+        assert call[call.index("-c") + 1] == str(dc.CONSTRAINTS_PATH)
+    assert "--no-build-isolation" in pips[-1] and pips[-1][-1].endswith("/serving")
     pull_i = next(i for i, c in enumerate(runner.calls) if "snapshot_download" in " ".join(c))
     assert runner.calls[pull_i][-2:] == [dc.MODEL_REPO, REV]
     assert runner.envs[pull_i]["HF_HOME"] == str(dc.hf_home())
@@ -341,7 +347,6 @@ def test_planted_symlinks_are_replaced_never_written_through(box: dict[str, Any]
     new = dc.venv_dir().with_name(".venv.new")
     outside = box["outside"]
     runner = FakeRunner()
-    runner.plant["venv"] = lambda: _plant(new / "hal0-constraints.txt", outside)
     runner.plant["import"] = lambda: _plant(new / "hal0-build.json", outside)
     _plant(dc.server_script_path(), outside)
     _plant(dc.server_script_path().with_name(".hs_decide_serve.py.tmp"), outside)
@@ -349,7 +354,6 @@ def test_planted_symlinks_are_replaced_never_written_through(box: dict[str, Any]
     assert _converge(box, install=True, runner=runner)["status"] == "installed"
     assert outside.read_text() == "untouched\n"
     for path in (
-        dc.venv_dir() / "hal0-constraints.txt",
         dc.venv_dir() / "hal0-build.json",
         dc.server_script_path(),
     ):
@@ -575,3 +579,92 @@ def test_status_row_for_a_hand_install_is_not_pending(monkeypatch: pytest.Monkey
     snap = status.component_status_snapshot()
     row = next(r for r in snap["components"] if r["id"] == "memory-decision")
     assert row["status"] == "unmanaged" and "adopt" in row["note"]
+
+
+# ── second review: children, reads, pins, hand units ─────────────────────────
+
+
+def test_children_get_an_allow_listed_environment_and_no_stdin(
+    box: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HF_TOKEN", "hf_secret")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://evil.example/simple")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "x")
+    monkeypatch.setenv("https_proxy", "http://proxy.example:3128")
+    runner = FakeRunner()
+    assert _converge(box, install=True, runner=runner)["status"] == "installed"
+    for kw in runner.kwargs:
+        if "input" not in kw:
+            assert kw["stdin"] is subprocess.DEVNULL
+        env = kw["env"]
+        assert "HF_TOKEN" not in env and "AWS_SECRET_ACCESS_KEY" not in env
+        assert not any(k.startswith("PIP_") and k != "PIP_CONFIG_FILE" for k in env)
+        assert env["PIP_CONFIG_FILE"] == os.devnull
+        assert env["https_proxy"] == "http://proxy.example:3128"
+        assert set(env) <= {
+            *dc._ENV_ALLOW,
+            "HOME",
+            "PIP_CONFIG_FILE",
+            "HF_HUB_DISABLE_TELEMETRY",
+            "HF_HOME",
+        }
+
+
+def test_the_constraints_set_pins_every_package_exactly() -> None:
+    lines = [
+        ln for ln in dc.CONSTRAINTS_PATH.read_text().splitlines() if ln and not ln.startswith("#")
+    ]
+    assert len(lines) > 30
+    assert all("==" in ln and ";" not in ln for ln in lines)
+    pinned = dict(ln.split("==", 1) for ln in lines)
+    assert pinned["torch"] == "2.15.0+cpu"
+    for spec in dc.PACKAGES:
+        name, version = spec.split("==")
+        assert pinned[name] == version
+
+
+def test_pinned_label_covers_the_constraints_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = dc.pinned_label()
+    other = tmp_path / "c.txt"
+    other.write_text(dc.CONSTRAINTS_PATH.read_text().replace("tqdm==", "tqdm==9"))
+    monkeypatch.setattr(dc, "CONSTRAINTS_PATH", other)
+    assert dc.pinned_label() != before
+
+
+@pytest.mark.parametrize("kind", ["fifo", "symlink", "dir-symlink", "huge"])
+def test_root_side_reads_refuse_fifos_symlinks_and_oversize(tmp_path: Path, kind: str) -> None:
+    secret = tmp_path / "secret"
+    secret.write_text('{"label": "leaked"}')
+    target = tmp_path / "d" / "hal0-build.json"
+    target.parent.mkdir()
+    if kind == "fifo":
+        os.mkfifo(target)
+    elif kind == "symlink":
+        target.symlink_to(secret)
+    elif kind == "dir-symlink":
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "hal0-build.json").write_text("{}")
+        target = tmp_path / "linked" / "hal0-build.json"
+        (tmp_path / "linked").symlink_to(real)
+    else:
+        target.write_bytes(b"x" * (decision_fs.MAX_READ_BYTES + 1))
+    with pytest.raises(OSError):
+        decision_fs.read_bytes(target)  # returns promptly; a FIFO would hang a plain read
+
+
+def test_a_fifo_build_stamp_reads_as_unmanaged_without_hanging(box: dict[str, Any]) -> None:
+    _install(box)
+    stamp = dc.venv_dir() / "hal0-build.json"
+    stamp.unlink()
+    os.mkfifo(stamp)
+    assert dc.install_state(unit_path=box["unit"])[0] == dc.UNMANAGED
+
+
+def test_adoption_keeps_a_copy_of_the_hand_written_unit(box: dict[str, Any]) -> None:
+    text = _hand_install(box)
+    result = _converge(box, install=True)
+    copy = Path(result["hand_unit_copy"])
+    assert copy.read_text() == text and str(copy) in result["note"]

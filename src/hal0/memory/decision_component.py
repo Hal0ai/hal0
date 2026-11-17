@@ -101,15 +101,41 @@ TORCH_INDEX_URL = "https://download.pytorch.org/whl/cpu"
 #: The version the measured hand install ran (the CPU wheel is ``2.15.0+cpu``).
 TORCH_VERSION = "2.15.0"
 
-#: Exact versions installed from PyPI after torch. torch 2.15.0 and
+#: Top-level packages installed from PyPI after torch. torch 2.15.0 and
 #: transformers 5.23.0 are the measured hand install; the rest are what
-#: resolves with them (``uv pip compile``, Python 3.12 and 3.14, 2026-11-17).
+#: resolves with them. setuptools builds the model's ``serving/`` package
+#: without build isolation, so it comes from this pinned set too.
 PACKAGES: tuple[str, ...] = (
     "transformers==5.23.0",
     "fastapi==0.163.1",
     "uvicorn==0.54.0",
     "accelerate==1.16.0",
     "huggingface-hub==2.4.0",
+    "pydantic==2.14.3",
+    "setuptools==84.2.1",
+)
+
+#: Every package of the venv, transitive ones included, at an exact version
+#: (``uv pip compile`` output; the file header has the command). Applied as a
+#: constraints file to every pip step, and hashed into :func:`pinned_label`.
+CONSTRAINTS_PATH = Path(__file__).with_name("decision_constraints.txt")
+
+#: pip runs with these on every call: no prompts, no user or site config,
+#: no environment-variable configuration.
+_PIP_FLAGS = ("--isolated", "--no-input", "--disable-pip-version-check")
+
+#: Environment names a build child may inherit; everything else is dropped
+#: (no HF_TOKEN, no PIP_*, no credentials).
+_ENV_ALLOW = (
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
 )
 
 #: Modules the built venv must import before it is swapped in.
@@ -125,7 +151,9 @@ _TORCH_VERSION_RE = re.compile(r"^[0-9]+(\.[0-9]+){1,3}(\+[a-z0-9]{1,16})?$")
 CONVERGE_BUDGET_S = 5400.0
 #: What a waiting CLI allows: the converge, then the engine restart that
 #: re-points it (a few seam calls of at most 120 s each), with headroom.
-CLI_WAIT_S = CONVERGE_BUDGET_S + 900.0
+#: A failure past the budget still gets this long to put the previous set back.
+ROLLBACK_BUDGET_S = 900.0
+CLI_WAIT_S = CONVERGE_BUDGET_S + ROLLBACK_BUDGET_S + 900.0
 
 _VENV_TIMEOUT_S = 180.0
 _PIP_TIMEOUT_S = 1800.0
@@ -160,9 +188,25 @@ class _Abort(Exception):
     """A converge step failed; carries the operator-facing reason."""
 
 
+#: The deadline of the converge running in this process, so every seam and
+#: file call can clip its own timeout to it (:func:`_clip`).
+_ACTIVE_DEADLINE: _Deadline | None = None
+
+
+def _clip(timeout_s: float) -> float:
+    """``timeout_s`` held to the running converge's deadline (never below 1 s)."""
+    deadline = _ACTIVE_DEADLINE
+    if deadline is None:
+        return timeout_s
+    return max(1.0, min(timeout_s, deadline.left()))
+
+
 class _Deadline:
     def __init__(self, budget_s: float) -> None:
         self._end = time.monotonic() + budget_s
+
+    def left(self) -> float:
+        return self._end - time.monotonic()
 
     def clip(self, timeout_s: float) -> float:
         left = self._end - time.monotonic()
@@ -226,8 +270,10 @@ def packaged_server_script() -> Path:
 
 
 def _pins_digest() -> str:
+    """Hash of every pin: the index, torch, the top level, the full constraints set."""
     material = "\n".join((TORCH_INDEX_URL, f"torch=={TORCH_VERSION}", *PACKAGES, MODEL_REVISION))
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:8]
+    full = CONSTRAINTS_PATH.read_bytes()
+    return hashlib.sha256(material.encode("utf-8") + b"\0" + full).hexdigest()[:8]
 
 
 def pinned_label() -> str:
@@ -305,14 +351,26 @@ def _run(
     env: Mapping[str, str] | None = None,
     input_bytes: bytes | None = None,
 ) -> subprocess.CompletedProcess:
-    kwargs: dict[str, Any] = {"capture_output": True, "timeout": timeout}
+    kwargs: dict[str, Any] = {"capture_output": True, "timeout": timeout, "env": _child_env(env)}
     if input_bytes is None:
         kwargs["text"] = True
+        kwargs["stdin"] = subprocess.DEVNULL
     else:
         kwargs["input"] = input_bytes
-    if env is not None:
-        kwargs["env"] = {**os.environ, **env}
     return runner(_as_hal0(argv), **kwargs)
+
+
+def _child_env(extra: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The only environment a build child sees: :data:`_ENV_ALLOW`, HOME, ``extra``."""
+    from hal0.system.seam import hal0_service_home
+
+    env = {k: os.environ[k] for k in _ENV_ALLOW if k in os.environ}
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    env["HOME"] = hal0_service_home() if _dropping() else os.environ.get("HOME", "/")
+    env["PIP_CONFIG_FILE"] = os.devnull
+    env["HF_HUB_DISABLE_TELEMETRY"] = "1"
+    env.update(extra or {})
+    return env
 
 
 def _fs(runner: Runner, op: str, *args: str, body: bytes | None = None, mode: int = 0o644) -> None:
@@ -326,7 +384,7 @@ def _fs(runner: Runner, op: str, *args: str, body: bytes | None = None, mode: in
     argv = [sys.executable, "-m", "hal0.memory.decision_fs", op, *args]
     if op == "write":
         argv.append(oct(mode)[2:])
-    proc = _run(runner, argv, timeout=_FS_TIMEOUT_S, input_bytes=body or b"")
+    proc = _run(runner, argv, timeout=_clip(_FS_TIMEOUT_S), input_bytes=body or b"")
     if proc.returncode != 0:
         err = (
             proc.stderr.decode("utf-8", "replace")
@@ -509,10 +567,6 @@ def _interpreter() -> str:
     return shutil.which("python3") or sys.executable
 
 
-def _constraints() -> str:
-    return "".join(f"{p}\n" for p in (f"torch=={TORCH_VERSION}", *PACKAGES))
-
-
 def _build_venv(runner: Runner, new: Path, final: Path, deadline: _Deadline) -> None:
     """Build the server venv at ``new``; raises :class:`_Abort` with the reason.
 
@@ -521,7 +575,8 @@ def _build_venv(runner: Runner, new: Path, final: Path, deadline: _Deadline) -> 
     """
     _fs(runner, "rmtree", str(new))
     py = str(new / "bin" / "python")
-    pip = [py, "-m", "pip", "install", "--no-input", "--disable-pip-version-check"]
+    constraints = str(CONSTRAINTS_PATH)
+    pip = [py, "-m", "pip", "install", *_PIP_FLAGS, "-c", constraints]
 
     def step(argv: list[str], what: str, budget: float, **kw: Any) -> subprocess.CompletedProcess:
         try:
@@ -547,14 +602,10 @@ def _build_venv(runner: Runner, new: Path, final: Path, deadline: _Deadline) -> 
     # The probe ran in a venv hal0 controls: its output is checked, never reused.
     if not _TORCH_VERSION_RE.match(got) or got.split("+", 1)[0] != TORCH_VERSION:
         raise _Abort(f"torch probe reported {got[:40]!r}, not {TORCH_VERSION}")
-    constraints = new / "hal0-constraints.txt"
-    _fs(runner, "write", str(constraints), body=_constraints().encode("utf-8"))
-    step(
-        [*pip, "-c", str(constraints), *PACKAGES], "installing the pinned packages", _PIP_TIMEOUT_S
-    )
+    step([*pip, *PACKAGES], "installing the pinned packages", _PIP_TIMEOUT_S)
     _pull_model(runner, py, deadline)
     step(
-        [*pip, "-c", str(constraints), str(snapshot_dir() / "serving")],
+        [*pip, "--no-build-isolation", str(snapshot_dir() / "serving")],
         "installing the model's serving package",
         _PIP_TIMEOUT_S,
     )
@@ -583,7 +634,7 @@ def _pull_model(runner: Runner, py: str, deadline: _Deadline) -> None:
             runner,
             [py, "-c", code, MODEL_REPO, MODEL_REVISION],
             timeout=deadline.clip(_PULL_TIMEOUT_S),
-            env={"HF_HOME": str(hf_home()), "HF_HUB_DISABLE_TELEMETRY": "1"},
+            env={"HF_HOME": str(hf_home())},
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise _Abort(f"pulling {MODEL_REPO} failed: {exc}") from exc
@@ -597,7 +648,9 @@ def _pull_model(runner: Runner, py: str, deadline: _Deadline) -> None:
 
 
 def _svc(seam: SystemCtlSeam, verb: str, *, check: bool = True) -> None:
-    seam.systemctl("systemctl", verb, DECISION_UNIT_NAME, check=check, timeout=_SYSTEMCTL_TIMEOUT_S)
+    seam.systemctl(
+        "systemctl", verb, DECISION_UNIT_NAME, check=check, timeout=_clip(_SYSTEMCTL_TIMEOUT_S)
+    )
 
 
 def unit_active(seam: SystemCtlSeam | None = None, *, unit_path: Path | None = None) -> bool | None:
@@ -684,8 +737,8 @@ def _write_unit(seam: SystemCtlSeam, params: dict[str, Any], unit_path: Path) ->
     """Write the unit when it differs; True when it changed. Raises seam errors."""
     if _read_unit(unit_path) == render_decision_unit(**params):
         return False
-    seam.write_decision_unit(**params, path=unit_path, timeout=_SYSTEMCTL_TIMEOUT_S)
-    seam.systemctl("systemctl", "daemon-reload", check=True, timeout=_SYSTEMCTL_TIMEOUT_S)
+    seam.write_decision_unit(**params, path=unit_path, timeout=_clip(_SYSTEMCTL_TIMEOUT_S))
+    seam.systemctl("systemctl", "daemon-reload", check=True, timeout=_clip(_SYSTEMCTL_TIMEOUT_S))
     return True
 
 
@@ -698,8 +751,10 @@ def _teardown_unit(seam: SystemCtlSeam, unit_path: Path) -> str | None:
         except _SEAM_ERRORS as exc:
             error = error or f"systemctl {verb} {DECISION_UNIT_NAME}: {_seam_error(exc)}"
     try:
-        seam.remove_decision_unit(path=unit_path, timeout=_SYSTEMCTL_TIMEOUT_S)
-        seam.systemctl("systemctl", "daemon-reload", check=False, timeout=_SYSTEMCTL_TIMEOUT_S)
+        seam.remove_decision_unit(path=unit_path, timeout=_clip(_SYSTEMCTL_TIMEOUT_S))
+        seam.systemctl(
+            "systemctl", "daemon-reload", check=False, timeout=_clip(_SYSTEMCTL_TIMEOUT_S)
+        )
     except _SEAM_ERRORS as exc:
         error = error or f"could not remove {unit_path}: {_seam_error(exc)}"
     return error
@@ -793,20 +848,26 @@ def converge_memory_decision(
         with _converge_lock(runner) as acquired:
             if not acquired:
                 return _busy()
-            if action == "remove":
-                return _remove(seam, runner, unit_path, purge_model)
-            return _converge(
-                seam,
-                runner,
-                http_get,
-                sleep,
-                unit_path,
-                state=state,
-                label=label,
-                install=install,
-                job_id=job_id,
-                deadline=_Deadline(budget_s if budget_s is not None else CONVERGE_BUDGET_S),
-            )
+            global _ACTIVE_DEADLINE
+            deadline = _Deadline(budget_s if budget_s is not None else CONVERGE_BUDGET_S)
+            _ACTIVE_DEADLINE = deadline
+            try:
+                if action == "remove":
+                    return _remove(seam, runner, unit_path, purge_model)
+                return _converge(
+                    seam,
+                    runner,
+                    http_get,
+                    sleep,
+                    unit_path,
+                    state=state,
+                    label=label,
+                    install=install,
+                    job_id=job_id,
+                    deadline=deadline,
+                )
+            finally:
+                _ACTIVE_DEADLINE = None
     except OSError as exc:
         return _failed(f"cannot prepare {decision_dir()}: {exc}", "check the directory, then retry")
 
@@ -831,6 +892,19 @@ def _converge(
         return _failed(f"hal0.toml unreadable: {exc}", "fix hal0.toml, then retry")
 
     txn = _Txn(unit_path, _read_unit(unit_path))
+    hand_copy: Path | None = None
+    if state == UNMANAGED and txn.prev_unit is not None:
+        # Adopting a hand install replaces the operator's unit with hal0's
+        # template, and a rollback re-renders that template from the old
+        # unit's values rather than restoring the file verbatim. Keep a copy.
+        hand_copy = decision_dir() / f"{DECISION_UNIT_NAME}.hand-written"
+        try:
+            _fs(runner, "write", str(hand_copy), body=txn.prev_unit.encode("utf-8"))
+        except OSError as exc:
+            return _failed(
+                f"could not keep a copy of the hand-written unit: {exc}",
+                "fix the directory, then retry",
+            )
     venv = venv_dir()
     new = venv.with_name(".venv.new")
     prev = venv.with_name(".venv.prev")
@@ -904,7 +978,10 @@ def _converge(
             )
     except (_Abort, OSError, *_SEAM_ERRORS) as exc:
         error = str(exc) if isinstance(exc, _Abort | OSError) else _seam_error(exc)
-        return _roll_back(seam, runner, http_get, sleep, txn, error)
+        rolled = _roll_back(seam, runner, http_get, sleep, txn, error)
+        if hand_copy is not None:
+            rolled["hand_unit_copy"] = str(hand_copy)
+        return rolled
 
     with contextlib.suppress(OSError):
         _fs(runner, "rmtree", str(prev))
@@ -920,6 +997,12 @@ def _converge(
         result["from"] = label
     if state == UNMANAGED:
         result["adopted"] = True
+        if hand_copy is not None:
+            result["hand_unit_copy"] = str(hand_copy)
+            result["note"] = (
+                "adopted a hand-installed server: its unit was replaced by hal0's; "
+                f"the previous file is kept at {hand_copy}"
+            )
     if install and (decision.provider != "local" or not decision.enabled):
         error = _set_provider_safely("local")
         if error:
@@ -940,6 +1023,9 @@ def _roll_back(
     error: str,
 ) -> dict[str, Any]:
     """Put venv, script and unit back to the previous working set, and say how it went."""
+    global _ACTIVE_DEADLINE
+    # A failure at the budget's edge still gets time to put things back.
+    _ACTIVE_DEADLINE = _Deadline(ROLLBACK_BUDGET_S)
     remedy = f"check `journalctl -u {DECISION_UNIT_NAME}` and `{STATUS_COMMAND}`, then retry"
     venv = venv_dir()
     prev = venv.with_name(".venv.prev")
@@ -975,10 +1061,10 @@ def _roll_back(
         else:
             try:
                 seam.write_decision_unit(
-                    **txn.prev_params, path=txn.unit_path, timeout=_SYSTEMCTL_TIMEOUT_S
+                    **txn.prev_params, path=txn.unit_path, timeout=_clip(_SYSTEMCTL_TIMEOUT_S)
                 )
                 seam.systemctl(
-                    "systemctl", "daemon-reload", check=True, timeout=_SYSTEMCTL_TIMEOUT_S
+                    "systemctl", "daemon-reload", check=True, timeout=_clip(_SYSTEMCTL_TIMEOUT_S)
                 )
             except _SEAM_ERRORS as exc:
                 problems.append(f"restoring the previous unit failed: {_seam_error(exc)}")

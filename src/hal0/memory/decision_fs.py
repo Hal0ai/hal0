@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+import stat
 import sys
 from pathlib import Path
 
@@ -30,12 +31,29 @@ class UnsafePath(OSError):
     """A path component the operation refuses to follow."""
 
 
+def _untrusted_link_in_parents(path: Path) -> Path | None:
+    """The first parent of ``path`` that is a symlink not owned by root, if any.
+
+    A root-owned link (an operator pointing ``/var/lib/hal0`` at a data disk)
+    is trusted: the ``hal0`` account cannot create one. Any other link is what
+    a compromised ``hal0`` account could plant.
+    """
+    for parent in Path(os.path.abspath(path)).parents:
+        try:
+            st = os.lstat(parent)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(st.st_mode) and st.st_uid != 0:
+            return parent
+    return None
+
+
 def _check_parent(path: Path) -> None:
-    parent = path.parent
-    if parent.is_symlink():
-        raise UnsafePath(f"refusing a symlinked directory: {parent}")
-    if not parent.is_dir():
-        raise UnsafePath(f"not a directory: {parent}")
+    link = _untrusted_link_in_parents(path)
+    if link is not None:
+        raise UnsafePath(f"refusing a path through a symlinked directory: {link}")
+    if not path.parent.is_dir():
+        raise UnsafePath(f"not a directory: {path.parent}")
 
 
 def write_bytes(path: Path, body: bytes, mode: int = 0o644) -> None:
@@ -54,16 +72,44 @@ def write_bytes(path: Path, body: bytes, mode: int = 0o644) -> None:
         raise
 
 
-def read_bytes(path: Path) -> bytes:
-    """Read ``path``, refusing a symlink at the final component."""
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with os.fdopen(fd, "rb") as f:
-        return f.read()
+#: Largest file this module reads (the server script, a build stamp, a unit).
+MAX_READ_BYTES = 4 * 1024 * 1024
+
+
+def read_bytes(path: Path, *, limit: int = MAX_READ_BYTES) -> bytes:
+    """Read a regular file without following, blocking on or over-reading anything.
+
+    Refuses a symlink at the final component (``O_NOFOLLOW``) or a non-root
+    symlink in any parent, opens ``O_NONBLOCK`` so a FIFO cannot
+    park the caller, then requires ``S_ISREG`` and at most ``limit`` bytes.
+    Safe for a root process reading a file in a hal0-owned directory.
+    """
+    path = Path(path)
+    link = _untrusted_link_in_parents(path)
+    if link is not None:
+        raise UnsafePath(f"refusing a path through a symlinked directory: {link}")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise UnsafePath(f"not a regular file: {path}")
+        if st.st_size > limit:
+            raise UnsafePath(f"{path} is larger than {limit} bytes")
+        chunks: list[bytes] = []
+        size = 0
+        while chunk := os.read(fd, 65536):
+            size += len(chunk)
+            if size > limit:
+                raise UnsafePath(f"{path} is larger than {limit} bytes")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
 
 
 def mkdir(path: Path) -> None:
     path = Path(path)
-    if path.is_symlink():
+    if path.is_symlink() or _untrusted_link_in_parents(path) is not None:
         raise UnsafePath(f"refusing a symlinked directory: {path}")
     path.mkdir(parents=True, exist_ok=True)
 
