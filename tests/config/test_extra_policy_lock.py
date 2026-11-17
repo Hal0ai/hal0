@@ -78,6 +78,8 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "MemoryModelsConfig": "ignore",
     "MemoryDecisionConfig": "ignore",
     "MemoryLaneOpConfig": "ignore",
+    "MemoryReflectLaneConfig": "ignore",
+    "MemoryConsolidationLaneConfig": "ignore",
     "MemoryLanesConfig": "ignore",
     "MemoryConsoleConfig": "ignore",
     # The project registry (ADR-0058 decision 4a): three declared keys, so a
