@@ -9,6 +9,8 @@ check the Python seam sends only those values over sudo.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -138,3 +140,81 @@ def test_direct_branch_writes_and_removes_the_file(tmp_path: Path) -> None:
     )
     seam.remove_decision_unit(path=unit)
     assert not unit.exists() and calls == []
+
+
+# ── write-hs-decide-unit keeps a hand-written unit once, root-owned ──────────
+#
+# Runs a neutrally named copy of the shipped wrapper (the conftest guard matches
+# the basename) with UNIT_DIR at a tmp dir and no-op chown/systemctl shims, the
+# test_systemctl_repin_owui.py pattern.
+
+_NOOP = "#!/bin/bash\nexit 0\n"
+
+
+@pytest.fixture
+def wrapper(tmp_path: Path) -> tuple[Path, dict[str, str], Path]:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("chown", "systemctl"):
+        shim = bindir / name
+        shim.write_text(_NOOP)
+        shim.chmod(0o755)
+    copy = tmp_path / "seam-under-test"
+    shutil.copy2(WRAPPER, copy)
+    unit_dir = tmp_path / "units"
+    unit_dir.mkdir()
+    env = {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "UNIT_DIR": str(unit_dir)}
+    return copy, env, unit_dir
+
+
+def _write(wrapper: tuple[Path, dict[str, str], Path], port: str = "9178") -> None:
+    copy, env, _ = wrapper
+    proc = subprocess.run(
+        [str(copy), "write-hs-decide-unit", REV, "8", port, "4096"],
+        capture_output=True, text=True, check=False, env=env,
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_a_hand_written_unit_is_kept_before_the_first_rewrite(
+    wrapper: tuple[Path, dict[str, str], Path],
+) -> None:
+    _, _, units = wrapper
+    hand = "[Service]\nUser=hal0\nExecStart=/opt/x --port 9178\n"
+    (units / "hal0-hs-decide.service").write_text(hand)
+    _write(wrapper)
+    backup = units / "hal0-hs-decide.service.pre-hal0"
+    assert backup.read_text() == hand
+    assert (units / "hal0-hs-decide.service").read_text() == render_decision_unit(
+        revision=REV, threads=8, port=9178, max_tokens=4096
+    )
+    # Later rewrites never touch the kept copy.
+    (units / "hal0-hs-decide.service").write_text("[Service]\nExecStart=/opt/other\n")
+    _write(wrapper, port="9300")
+    assert backup.read_text() == hand
+
+
+def test_a_hal0_rendered_unit_or_a_symlink_is_not_kept(
+    wrapper: tuple[Path, dict[str, str], Path], tmp_path: Path
+) -> None:
+    _, _, units = wrapper
+    _write(wrapper)  # no unit before: nothing to keep
+    _write(wrapper, port="9300")  # hal0's own unit: nothing to keep
+    assert not (units / "hal0-hs-decide.service.pre-hal0").exists()
+    (units / "hal0-hs-decide.service").unlink()
+    secret = tmp_path / "secret"
+    secret.write_text("root only\n")
+    (units / "hal0-hs-decide.service").symlink_to(secret)
+    _write(wrapper)
+    assert not (units / "hal0-hs-decide.service.pre-hal0").exists()
+
+
+def test_the_python_direct_branch_keeps_the_same_copy(tmp_path: Path) -> None:
+    unit = tmp_path / "hal0-hs-decide.service"
+    unit.write_text("[Service]\nExecStart=/opt/x\n")
+    seam = SystemCtlSeam(is_hal0_user=lambda: False)
+    seam.write_decision_unit(revision=REV, threads=8, port=9178, max_tokens=4096, path=unit)
+    seam.write_decision_unit(revision=REV, threads=4, port=9178, max_tokens=4096, path=unit)
+    assert (
+        tmp_path / "hal0-hs-decide.service.pre-hal0"
+    ).read_text() == "[Service]\nExecStart=/opt/x\n"

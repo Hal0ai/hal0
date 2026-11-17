@@ -73,6 +73,7 @@ import structlog
 from hal0.config.paths import var_lib
 from hal0.memory import decision_fs
 from hal0.system.seam import (
+    DECISION_UNIT_BACKUP_SUFFIX,
     DECISION_UNIT_NAME,
     DECISION_UNIT_PATH,
     SeamTimeout,
@@ -458,26 +459,75 @@ def _busy() -> dict[str, Any]:
 # ── Config: provider writes ──────────────────────────────────────────────────
 
 
+class Hal0TomlUnreadable(Exception):
+    """hal0.toml exists but cannot be read safely; nothing was written."""
+
+
+#: hal0.toml is a small text file; anything bigger is not one.
+_HAL0_TOML_MAX_BYTES = 1024 * 1024
+
+
+def _read_hal0_toml(target: Path) -> tuple[dict[str, Any], os.stat_result | None]:
+    """``(raw, stat)`` of hal0.toml, ``({}, None)`` only when it does not exist.
+
+    ``/etc/hal0`` is writable by the hal0 account, so a root caller must not
+    follow a link, block on a FIFO or copy a foreign file's owner: the file is
+    opened ``O_NOFOLLOW|O_NONBLOCK``, must be a regular file under a size cap,
+    and the owner and mode come from that descriptor. Any other failure raises
+    :class:`Hal0TomlUnreadable`.
+    """
+    import stat as stat_mod
+    import tomllib
+
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return {}, None
+    except OSError as exc:
+        raise Hal0TomlUnreadable(f"{target}: {exc}") from exc
+    try:
+        st = os.fstat(fd)
+        if not stat_mod.S_ISREG(st.st_mode):
+            raise Hal0TomlUnreadable(f"{target} is not a regular file")
+        if st.st_size > _HAL0_TOML_MAX_BYTES:
+            raise Hal0TomlUnreadable(f"{target} is larger than {_HAL0_TOML_MAX_BYTES} bytes")
+        chunks = []
+        while chunk := os.read(fd, 65536):
+            chunks.append(chunk)
+            if sum(map(len, chunks)) > _HAL0_TOML_MAX_BYTES:
+                raise Hal0TomlUnreadable(f"{target} grew past {_HAL0_TOML_MAX_BYTES} bytes")
+    except OSError as exc:
+        raise Hal0TomlUnreadable(f"{target}: {exc}") from exc
+    finally:
+        os.close(fd)
+    try:
+        raw = tomllib.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise Hal0TomlUnreadable(f"{target}: {exc}") from exc
+    return raw, st
+
+
 def set_provider(provider: str, *, path: Path | None = None) -> bool:
     """Write ``[memory.decision].provider`` (and ``enabled = true`` for ``local``).
 
     A raw read-modify-write under the hal0.toml lock, so nothing else in the
     file changes and every other default stays unwritten. Keeps the file's
-    mode and owner. True when the file changed.
+    mode and owner. True when the file changed. A file that exists but cannot
+    be read safely raises :class:`Hal0TomlUnreadable` and is left untouched;
+    only a missing file starts from empty.
     """
     import stat as stat_mod
 
     from hal0.config import paths
-    from hal0.config.loader import _read_toml, hal0_config_file_lock, write_toml_atomic
+    from hal0.config.loader import hal0_config_file_lock, write_toml_atomic
 
     target = path or paths.hal0_toml()
     with hal0_config_file_lock(target):
-        try:
-            raw = _read_toml(target)
-            st = target.stat()
-        except Exception:
-            raw, st = {}, None
-        decision = raw.setdefault("memory", {}).setdefault("decision", {})
+        raw, st = _read_hal0_toml(target)
+        memory = raw.setdefault("memory", {})
+        decision = memory.setdefault("decision", {}) if isinstance(memory, dict) else None
+        if not isinstance(decision, dict):
+            raise Hal0TomlUnreadable(f"{target}: [memory.decision] is not a table")
         wanted = {"provider": provider, **({"enabled": True} if provider == "local" else {})}
         if all(decision.get(k) == v for k, v in wanted.items()):
             return False
@@ -539,7 +589,9 @@ def _build_venv(runner: Runner, new: Path, final: Path, deadline: _Deadline) -> 
     step([*pip, *PACKAGES], "installing the pinned packages", _PIP_TIMEOUT_S)
     _pull_model(runner, py, deadline)
     step(
-        [*pip, "--no-build-isolation", str(snapshot_dir() / "serving")],
+        # --no-deps: the package declares pydantic>=2.12, transformers>=5.16.1
+        # and huggingface-hub>=1.0 at this revision, all already in the pinned set.
+        [*pip, "--no-build-isolation", "--no-deps", str(snapshot_dir() / "serving")],
         "installing the model's serving package",
         _PIP_TIMEOUT_S,
     )
@@ -694,12 +746,45 @@ def _teardown_unit(seam: SystemCtlSeam, unit_path: Path) -> str | None:
     return error
 
 
-def _reconcile_engine(seam: SystemCtlSeam) -> dict[str, Any]:
-    """Re-render the engine's showcase drop-in so it points at (or off) the server."""
+def _last_good_memory() -> Any:
+    """The ``[memory]`` config as it loads now, or ``None`` when it does not."""
     try:
-        from hal0.memory.extraction_env import reconcile_showcase_dropin
+        from hal0.config.loader import load_hal0_config
 
-        return reconcile_showcase_dropin(seam=seam)
+        return load_hal0_config().memory
+    except Exception:
+        return None
+
+
+def _reconcile_engine(seam: SystemCtlSeam, fallback: Any = None) -> dict[str, Any]:
+    """Re-render the engine's showcase drop-in so it points at (or off) the server.
+
+    When hal0.toml no longer loads, ``fallback`` (the config loaded earlier in
+    this converge) is rendered instead, so the engine still stops using a
+    server that is gone.
+    """
+    try:
+        from hal0.memory.extraction_env import apply_showcase_dropin, reconcile_showcase_dropin
+
+        result = reconcile_showcase_dropin(seam=seam)
+        if (
+            fallback is not None
+            and result.get("status") == "skipped"
+            and "hal0.toml unreadable" in str(result.get("reason"))
+        ):
+            applied = apply_showcase_dropin(
+                models=fallback.models,
+                decision=fallback.decision,
+                lanes=fallback.lanes,
+                graph=fallback.graph,
+                seam=seam,
+            )
+            result = {
+                "status": "failed" if applied.get("error") else "applied",
+                "from_last_good_config": True,
+                **applied,
+            }
+        return result
     except Exception as exc:  # never fail the component on the engine pass
         log.warning("memory.decision_engine_reconcile_failed", error=str(exc))
         return {"status": "failed", "error": str(exc)}
@@ -708,6 +793,12 @@ def _reconcile_engine(seam: SystemCtlSeam) -> dict[str, Any]:
 def _set_provider_safely(provider: str) -> str | None:
     try:
         set_provider(provider)
+    except Hal0TomlUnreadable as exc:
+        log.warning("memory.decision_provider_write_refused", provider=provider, error=str(exc))
+        return (
+            f"hal0.toml could not be read: {exc}; nothing was changed "
+            f'([memory.decision].provider was not set to "{provider}")'
+        )
     except Exception as exc:
         log.warning("memory.decision_provider_write_failed", provider=provider, error=str(exc))
         return f'could not set [memory.decision].provider = "{provider}": {exc}'
@@ -728,6 +819,9 @@ class _Txn:
         self.script_changed = False
         self.script_had_prev = False
         self.unit_changed = False
+        #: ``[memory]`` as loaded at the start, for an engine re-render when
+        #: hal0.toml stops loading mid-converge.
+        self.last_good: Any = None
 
 
 def converge_memory_decision(
@@ -818,22 +912,19 @@ def _converge(
     try:
         decision = _decision_config()
     except Exception as exc:
-        return _failed(f"hal0.toml unreadable: {exc}", "fix hal0.toml, then retry")
+        return _failed(
+            f"hal0.toml could not be read: {exc}; nothing was changed", "fix hal0.toml, then retry"
+        )
 
     txn = _Txn(unit_path, _read_unit(unit_path))
+    txn.last_good = _last_good_memory()
     hand_copy: Path | None = None
     if state == UNMANAGED and txn.prev_unit is not None:
         # Adopting a hand install replaces the operator's unit with hal0's
-        # template, and a rollback re-renders that template from the old
-        # unit's values rather than restoring the file verbatim. Keep a copy.
-        hand_copy = decision_dir() / f"{DECISION_UNIT_NAME}.hand-written"
-        try:
-            _fs(runner, "write", str(hand_copy), body=txn.prev_unit.encode("utf-8"))
-        except OSError as exc:
-            return _failed(
-                f"could not keep a copy of the hand-written unit: {exc}",
-                "fix the directory, then retry",
-            )
+        # template; write-hs-decide-unit keeps the operator's file, root-owned,
+        # at a fixed path the first time (a rollback re-renders the template
+        # from the old unit's values rather than restoring the file verbatim).
+        hand_copy = unit_path.with_name(unit_path.name + DECISION_UNIT_BACKUP_SUFFIX)
     venv = venv_dir()
     new = venv.with_name(".venv.new")
     prev = venv.with_name(".venv.prev")
@@ -938,7 +1029,7 @@ def _converge(
             result["note"] = f"{error}; turn the lane on with `hal0 memory decision enable`"
     elif not install and (decision.provider != "local" or not decision.enabled):
         result["note"] = "the decision lane is off; `hal0 memory decision enable` turns it on"
-    result["engine"] = _reconcile_engine(seam)
+    result["engine"] = _reconcile_engine(seam, txn.last_good)
     log.info("memory.decision_converged", job_id=job_id, status=result["status"])
     return result
 
@@ -970,7 +1061,7 @@ def _roll_back(
         provider_error = _set_provider_safely("off")
         if provider_error:
             problems.append(provider_error)
-        engine = _reconcile_engine(seam)
+        engine = _reconcile_engine(seam, txn.last_good)
         return _failed(error, remedy, lane="off", restore_problems=problems or None, engine=engine)
 
     try:
@@ -1015,13 +1106,14 @@ def _remove(
 ) -> dict[str, Any]:
     """Lane off and engine re-pointed first, then the unit and venv go."""
     problems: list[str] = []
+    last_good = _last_good_memory()
     provider_error = _set_provider_safely("off")
     if provider_error:
         problems.append(provider_error)
-    _reconcile_engine(seam)
+    _reconcile_engine(seam, last_good)
     teardown = _teardown_unit(seam, unit_path)
     if teardown is not None:
-        engine = _reconcile_engine(seam)
+        engine = _reconcile_engine(seam, last_good)
         return _failed(teardown, "retry; the venv was left in place", engine=engine)
     venv = venv_dir()
     try:
@@ -1040,7 +1132,7 @@ def _remove(
     result: dict[str, Any] = {
         "status": "removed",
         "model_kept": not purge_model,
-        "engine": _reconcile_engine(seam),
+        "engine": _reconcile_engine(seam, last_good),
     }
     if problems:
         result["note"] = "; ".join(problems)

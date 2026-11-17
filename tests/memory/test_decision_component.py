@@ -20,9 +20,10 @@ import pytest
 from hal0.config.schema import MemoryDecisionConfig
 from hal0.memory import decision_component as dc
 from hal0.memory import decision_fs
-from hal0.system.seam import render_decision_unit
+from hal0.system.seam import SystemCtlSeam, render_decision_unit
 
 REV = dc.MODEL_REVISION
+_REAL_SET_PROVIDER = dc.set_provider
 
 
 class FakeSeam:
@@ -40,7 +41,8 @@ class FakeSeam:
 
     def write_decision_unit(self, *, path: Path, timeout: float | None = None, **params: Any):
         self.calls.append(("write-unit", str(params["port"])))
-        path.write_text(render_decision_unit(**params), encoding="utf-8")
+        # The direct branch: writes the unit and keeps a hand-written one.
+        SystemCtlSeam(is_hal0_user=lambda: False).write_decision_unit(**params, path=path)
 
     def remove_decision_unit(self, *, path: Path, timeout: float | None = None):
         self.calls.append(("remove-unit",))
@@ -129,7 +131,7 @@ def box(tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     monkeypatch.setattr(dc, "_MIN_FREE_BYTES", 0)
     monkeypatch.setattr(dc, "_dropping", lambda: False)
 
-    def _reconcile(_seam: Any) -> dict[str, Any]:
+    def _reconcile(_seam: Any, _fallback: Any = None) -> dict[str, Any]:
         state["reconciled"] += 1
         state["events"].append("reconcile")
         return {"status": "applied"}
@@ -637,4 +639,79 @@ def test_adoption_keeps_a_copy_of_the_hand_written_unit(box: dict[str, Any]) -> 
     text = _hand_install(box)
     result = _converge(box, install=True)
     copy = Path(result["hand_unit_copy"])
+    assert copy == box["unit"].with_name("hal0-hs-decide.service.pre-hal0")
     assert copy.read_text() == text and str(copy) in result["note"]
+    assert not (dc.decision_dir() / "hal0-hs-decide.service.hand-written").exists()
+
+
+# ── third review: a broken hal0.toml is never overwritten ────────────────────
+
+
+def _broken(tmp_path: Path, kind: str) -> Path:
+    toml = tmp_path / "hal0.toml"
+    if kind == "malformed":
+        toml.write_text('[meta]\nschema_version = 6\n[memory\nbank = "x"\n')
+    elif kind == "unreadable":
+        toml.write_text("[meta]\nschema_version = 6\n")
+        toml.chmod(0)
+    elif kind == "fifo":
+        os.mkfifo(toml)
+    elif kind == "symlink":
+        other = tmp_path / "root-only.toml"
+        other.write_text('[secret]\nkey = "v"\n')
+        toml.symlink_to(other)
+    return toml
+
+
+@pytest.mark.parametrize("kind", ["malformed", "unreadable", "fifo", "symlink"])
+def test_set_provider_refuses_a_file_it_cannot_read_safely(tmp_path: Path, kind: str) -> None:
+    if kind == "unreadable" and os.geteuid() == 0:
+        pytest.skip("root reads a 0000 file")
+    toml = _broken(tmp_path, kind)
+    before = None if kind == "fifo" else os.lstat(toml)
+    data = toml.read_bytes() if kind in ("malformed", "symlink") else None
+    with pytest.raises(dc.Hal0TomlUnreadable):
+        dc.set_provider("off", path=toml)
+    if kind == "malformed":
+        assert toml.read_bytes() == data
+    if kind == "symlink":
+        assert toml.is_symlink() and (tmp_path / "root-only.toml").read_bytes() == data
+    if before is not None:
+        assert os.lstat(toml).st_mtime_ns == before.st_mtime_ns
+    if kind == "unreadable":
+        toml.chmod(0o600)
+        assert toml.read_text() == "[meta]\nschema_version = 6\n"
+
+
+def test_set_provider_starts_from_empty_only_when_the_file_is_missing(tmp_path: Path) -> None:
+    toml = tmp_path / "hal0.toml"
+    assert dc.set_provider("off", path=toml) is True
+    assert tomllib.loads(toml.read_text()) == {"memory": {"decision": {"provider": "off"}}}
+
+
+@pytest.mark.parametrize("op", ["remove", "rollback"])
+def test_a_broken_hal0_toml_is_left_alone_and_said_so(
+    box: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path, op: str
+) -> None:
+    from hal0.config import paths
+
+    toml = paths.hal0_toml()
+    toml.parent.mkdir(parents=True, exist_ok=True)
+    broken = b"[meta]\nschema_version = 6\n[memory\n"
+    if op == "remove":
+        _install(box)
+    toml.write_bytes(broken)
+    monkeypatch.setattr(dc, "set_provider", _REAL_SET_PROVIDER)  # not the recording fake
+    seam = FakeSeam()
+    if op == "remove":
+        result = _converge(box, action="remove", seam=seam)
+        assert result["status"] == "removed"
+        detail = result["note"]
+    else:
+        result = _converge(box, install=True, seam=seam, http_get=lambda _u: None)
+        assert result["status"] == "build_failed" and result["lane"] == "off"
+        detail = " ".join(result["restore_problems"])
+    assert "hal0.toml could not be read" in detail and "nothing was changed" in detail
+    assert toml.read_bytes() == broken
+    assert ("stop", "hal0-hs-decide.service") in seam.calls
+    assert not box["unit"].exists()

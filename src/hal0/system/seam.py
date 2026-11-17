@@ -133,6 +133,14 @@ HINDSIGHT_LEGACY_CAP_DROPIN_NAME = "zz-h0-98-llm-global-cap.conf"
 
 DECISION_UNIT_NAME = "hal0-hs-decide.service"
 DECISION_UNIT_PATH = Path("/etc/systemd/system") / DECISION_UNIT_NAME
+#: Where ``write-hs-decide-unit`` keeps a hand-written unit, root-owned, the
+#: first time hal0 replaces it (the wrapper's ``DECISION_UNIT_BACKUP_FILE``).
+DECISION_UNIT_BACKUP_SUFFIX = ".pre-hal0"
+DECISION_UNIT_BACKUP_PATH = DECISION_UNIT_PATH.with_name(
+    DECISION_UNIT_NAME + DECISION_UNIT_BACKUP_SUFFIX
+)
+#: First line of every unit hal0 renders; a unit without it is hand-written.
+DECISION_UNIT_HEADER = "# Managed by hal0 (hal0 memory decision install). hal0 rewrites this file."
 
 _DECISION_REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
 
@@ -159,7 +167,7 @@ def render_decision_unit(*, revision: str, threads: int, port: int, max_tokens: 
     """The ``hal0-hs-decide.service`` text for these values (validated)."""
     _check_decision_unit_params(revision, threads, port, max_tokens)
     return (
-        "# Managed by hal0 (hal0 memory decision install). hal0 rewrites this file.\n"
+        f"{DECISION_UNIT_HEADER}\n"
         "[Unit]\n"
         "Description=hal0 System One decision model (hs-decide-1-flash, CPU)\n"
         "After=network.target\n"
@@ -651,6 +659,19 @@ class SystemCtlSeam:
         )
         if not self._is_hal0_user():
             path.parent.mkdir(parents=True, exist_ok=True)
+            # Same rule as the wrapper: keep a hand-written unit once.
+            backup = path.with_name(path.name + DECISION_UNIT_BACKUP_SUFFIX)
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and not backup.exists()
+                and not backup.is_symlink()
+                and path.read_text(encoding="utf-8").split("\n", 1)[0] != DECISION_UNIT_HEADER
+            ):
+                btmp = backup.with_name(backup.name + ".tmp")
+                btmp.write_bytes(path.read_bytes())
+                btmp.chmod(0o644)
+                btmp.replace(backup)
             tmp = path.with_suffix(".service.tmp")
             tmp.write_text(body, encoding="utf-8")
             tmp.chmod(0o644)
@@ -872,6 +893,7 @@ __all__ = [
     "AGENT_UNIT_PREFIX",
     "AGENT_UNIT_VERBS",
     "COMPANION_SERVICE_UNITS",
+    "DECISION_UNIT_BACKUP_PATH",
     "DECISION_UNIT_NAME",
     "DECISION_UNIT_PATH",
     "HINDSIGHT_DROPIN_DIR",

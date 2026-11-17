@@ -155,6 +155,10 @@ HINDSIGHT_LEGACY_CAP_DROPIN_FILE="${HINDSIGHT_DROPIN_DIR}/zz-h0-98-llm-global-ca
 # gains no privilege. Twin: hal0.system.seam.render_decision_unit
 # (tests/installer/test_systemctl_decision_unit.py keeps them byte-identical).
 DECISION_UNIT_FILE="${UNIT_DIR}/hal0-hs-decide.service"
+# Where write-hs-decide-unit keeps a hand-written unit before first replacing
+# it (root-owned, in the root-owned unit directory; systemd ignores the suffix).
+DECISION_UNIT_BACKUP_FILE="${UNIT_DIR}/hal0-hs-decide.service.pre-hal0"
+DECISION_UNIT_HEADER="# Managed by hal0 (hal0 memory decision install). hal0 rewrites this file."
 DECISION_HOME="/var/lib/hal0/memory/hindsight-decision"
 DECISION_HF_HOME="/var/lib/hal0/memory/hindsight/hf-cache"
 DECISION_SNAPSHOTS="${DECISION_HF_HOME}/hub/models--hindsight-ai--hs-decide-1-flash/snapshots"
@@ -946,6 +950,20 @@ case "$cmd" in
     [[ $# -eq 4 ]] || die "write-hs-decide-unit takes exactly 4 arguments"
     body="$(render_decision_unit "$1" "$2" "$3" "$4")" || exit 64
     umask 022
+    # Keep an operator's hand-written unit once, root-owned, at a fixed path,
+    # before hal0 first replaces it: only when the current file is a regular
+    # file hal0 did not write, and no backup exists yet. No caller input.
+    if [[ -f "$DECISION_UNIT_FILE" && ! -L "$DECISION_UNIT_FILE" \
+          && ! -e "$DECISION_UNIT_BACKUP_FILE" && ! -L "$DECISION_UNIT_BACKUP_FILE" ]] \
+       && ! head -n 1 -- "$DECISION_UNIT_FILE" | grep -qxF "$DECISION_UNIT_HEADER"; then
+      btmp="$(mktemp "${DECISION_UNIT_BACKUP_FILE}.XXXXXX")"
+      trap 'rm -f "$btmp"' EXIT
+      cat -- "$DECISION_UNIT_FILE" > "$btmp"
+      chown root:root "$btmp"
+      chmod 0644 "$btmp"
+      mv -f "$btmp" "$DECISION_UNIT_BACKUP_FILE"
+      trap - EXIT
+    fi
     tmp="$(mktemp "${DECISION_UNIT_FILE}.XXXXXX")"
     trap 'rm -f "$tmp"' EXIT
     printf '%s\n' "$body" > "$tmp"
