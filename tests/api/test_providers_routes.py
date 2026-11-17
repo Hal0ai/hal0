@@ -361,7 +361,7 @@ def test_create_upstream_explicit_fields_beat_catalog(client: TestClient) -> Non
     assert response.json()["auth_value_env"] == "LITELLM_KEY"
 
 
-def test_create_upstream_with_filters_and_flags(client: TestClient) -> None:
+def test_create_upstream_with_flags(client: TestClient) -> None:
     _seed_upstreams(client)
     response = client.post(
         "/api/upstreams",
@@ -370,20 +370,31 @@ def test_create_upstream_with_filters_and_flags(client: TestClient) -> None:
             "url": "https://openrouter.ai/api/v1",
             "advertise_models": True,
             "enabled": False,
-            "model_filters": {"include": ["anthropic/*"], "exclude": ["*:free"]},
         },
     )
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["enabled"] is False
-    assert body["model_filters"] == {
-        "models": [],
-        "include": ["anthropic/*"],
-        "exclude": ["*:free"],
-    }
+    assert body["curated"] is True
+    assert body["model_filters"] is None
     row = _toml_rows(client)["curated"]
     assert row["enabled"] is False
-    assert row["model_filters"]["include"] == ["anthropic/*"]
+    assert row["curated"] is True
+
+
+def test_create_upstream_with_filters_is_400(client: TestClient) -> None:
+    """A created row is always curated; advertising filters belong to uncurated rows."""
+    _seed_upstreams(client)
+    response = client.post(
+        "/api/upstreams",
+        json={
+            "name": "curated",
+            "url": "https://openrouter.ai/api/v1",
+            "model_filters": {"include": ["anthropic/*"], "exclude": ["*:free"]},
+        },
+    )
+    assert response.status_code == 400, response.text
+    assert "curated" not in _toml_rows(client)
 
 
 def test_create_upstream_duplicate_409(client: TestClient) -> None:

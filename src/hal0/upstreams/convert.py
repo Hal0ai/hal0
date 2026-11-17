@@ -234,15 +234,20 @@ async def convert_legacy_upstreams(
     providers_toml: Path | None,
     model_cache: MutableMapping[str, list[str]] | None = None,
     discovery: DiscoveryCache | None = None,
+    only: str | None = None,
 ) -> ConvertResult:
     """Convert every reachable uncurated remote row; defer the rest.
+
+    ``only`` limits the run to the one named row (the refresh route). The
+    ``providers.toml`` file is then left in place, since other rows may still
+    need it; the next boot retires it.
 
     ``model_cache`` and ``discovery`` are the live dispatcher cache and the
     discovery cache: when given, a converted row's cache entry is reseeded from
     its enabled rows and its discovered models are stored, so routing leaves
     passthrough without a restart.
     """
-    candidates = [u for u in registry.list() if _is_candidate(u)]
+    candidates = [u for u in registry.list() if _is_candidate(u) and only in (None, u.name)]
     selections = _read_selections(providers_toml)
 
     fetched = await asyncio.gather(
@@ -332,7 +337,7 @@ async def convert_legacy_upstreams(
     if converted:
         _warn_ambiguous_ids(registry)
 
-    if selections is not None and providers_toml is not None:
+    if selections is not None and providers_toml is not None and only is None:
         waiting = ({u.name for u in candidates} & selections.names) - set(converted) - settled
         # The registry can hold slot and agent rows even when upstreams.toml failed to
         # parse, so ask the file itself: keep providers.toml unless every row it names is curated.

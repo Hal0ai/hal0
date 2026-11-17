@@ -7,6 +7,9 @@ Endpoints:
   PATCH  /api/upstreams/{name}           — mutate settings (visibility + structural)
   DELETE /api/upstreams/{name}           — remove a remote upstream
   POST   /api/upstreams/{name}/test      — probe reachability + auth
+  GET    /api/upstreams/{name}/models    — stored model rows merged with discovery
+  PATCH  /api/upstreams/{name}/models/{id} — enable, retype or price one model
+  POST   /api/upstreams/{name}/refresh   — refetch discovery (converts an uncurated row)
   GET    /api/providers/catalog          — static integration catalog
   POST   /api/providers/probe            — check a URL + key and list models, saving nothing
   GET    /api/providers                  — configured providers (alias of upstreams)
@@ -24,20 +27,37 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, Field, SecretStr, ValidationError
+from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator
 
 from hal0.api._env_store import TlsTrustError, is_process_control_env, upsert_env_value
 from hal0.api._redact import redact_config
 from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
-from hal0.config.schema import UpstreamEntry, UpstreamModelFilters
-from hal0.upstreams.catalog import reseed_curated_cache
-from hal0.upstreams.discovery import parse_models_payload
+from hal0.config.schema import (
+    VALID_PRICE_UNITS,
+    UpstreamEntry,
+    UpstreamModelEntry,
+    UpstreamModelFilters,
+)
+from hal0.upstreams.catalog import (
+    MODEL_TYPES,
+    UpstreamModel,
+    canonical_id,
+    enabled_ids,
+    reseed_curated_cache,
+)
+from hal0.upstreams.discovery import (
+    DiscoveredModel,
+    DiscoveryCache,
+    guess_type,
+    parse_models_payload,
+)
 from hal0.upstreams.presets import get_preset, load_presets, preset_to_api
 from hal0.upstreams.registry import (
     KNOWN_AUTH_STYLES,
@@ -70,6 +90,18 @@ class UpstreamNotFoundHTTP(Hal0Error):
 class UpstreamProtectedHTTP(Hal0Error):
     code = "upstream.protected"
     status = 400
+
+
+class UpstreamProtectedWriteHTTP(Hal0Error):
+    """409 - a per-model write on an agent-managed or slot-backed upstream."""
+
+    code = "upstream.protected"
+    status = 409
+
+
+class UpstreamNotCuratedHTTP(Hal0Error):
+    code = "upstream.not_curated"
+    status = 409
 
 
 class UpstreamConflictHTTP(Hal0Error):
@@ -195,6 +227,11 @@ def _serialize_upstream(u: Any, *, last_models: list[str] | None = None) -> dict
         "managed_by": getattr(u, "managed_by", None),
         "pinned": bool(getattr(u, "pinned", False)),
         "owned_models": list(getattr(u, "owned_models", ())),
+        "catalog_id": getattr(u, "catalog_id", None),
+        "curated": bool(getattr(u, "curated", False)),
+        "budget_monthly_usd": getattr(u, "budget_monthly_usd", None),
+        "enabled_count": len(enabled_ids(u)) if hasattr(u, "models") else 0,
+        "models_total": len(getattr(u, "models", ())),
     }
     return redact_config(out)
 
@@ -230,7 +267,8 @@ class UpstreamCreateBody(BaseModel):
     provider presets (explicit body fields win over the prefill); without
     it ``url`` is required. Credentials are NOT accepted here — write the key
     afterwards via ``POST /api/providers/{name}/credentials`` so secrets never
-    transit the CRUD surface.
+    transit the CRUD surface. A new row is always curated: it routes exactly the
+    enabled entries of ``models`` (none when the list is empty).
     """
 
     model_config = {"extra": "forbid"}
@@ -246,6 +284,8 @@ class UpstreamCreateBody(BaseModel):
     advertise_models: bool = Field(default=True)
     enabled: bool = Field(default=True)
     model_filters: UpstreamModelFilters | None = Field(default=None)
+    budget_monthly_usd: float | None = Field(default=None, ge=0)
+    models: list[UpstreamModelEntry] = Field(default_factory=list)
 
 
 @router.post("/upstreams", status_code=201)
@@ -311,6 +351,10 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
                 if body.model_filters is None or body.model_filters.is_empty()
                 else body.model_filters
             ),
+            catalog_id=body.catalog_id,
+            curated=True,
+            budget_monthly_usd=body.budget_monthly_usd,
+            models=body.models,
         )
     except ValidationError as exc:
         raise UpstreamInvalidHTTP(
@@ -326,7 +370,7 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
     except UpstreamAlreadyExists as exc:
         raise UpstreamConflictHTTP(str(exc), {"name": name}) from exc
 
-    # A curated upstream's cache entry is its enabled rows (none yet on create).
+    # A curated upstream's cache entry is its enabled rows.
     created_cache = getattr(request.app.state, "upstream_models", None)
     if created_cache is not None:
         reseed_curated_cache(upstreams, created_cache, created.name)
@@ -496,6 +540,345 @@ async def patch_upstream(name: str, body: UpstreamPatchBody, request: Request) -
     return _serialize_upstream(updated, last_models=(model_cache or {}).get(name))
 
 
+# ── per-model routes ──────────────────────────────────────────────────────────
+
+
+class UpstreamModelPatchBody(BaseModel):
+    """Body for ``PATCH /api/upstreams/{name}/models/{id}``; only sent fields change.
+
+    ``context``, ``price_in`` and ``price_out`` accept ``null`` to clear the value.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    enabled: bool = Field(default=True)
+    type: str = Field(default="chat")
+    context: int | None = Field(default=None, gt=0)
+    price_in: float | None = Field(default=None, ge=0)
+    price_out: float | None = Field(default=None, ge=0)
+    price_unit: str = Field(default="Mtok")
+
+    @field_validator("type")
+    @classmethod
+    def _type_valid(cls, v: str) -> str:
+        if v not in MODEL_TYPES:
+            raise ValueError(f"type must be one of {sorted(MODEL_TYPES)}")
+        return v
+
+    @field_validator("price_unit")
+    @classmethod
+    def _unit_valid(cls, v: str) -> str:
+        if v not in VALID_PRICE_UNITS:
+            raise ValueError(f"price_unit must be one of {sorted(VALID_PRICE_UNITS)}")
+        return v
+
+
+def _lookup_upstream(request: Request, name: str) -> Any:
+    u = request.app.state.upstreams.get(name)
+    if u is None:
+        raise UpstreamNotFoundHTTP(f"upstream {name!r} not found", {"name": name})
+    return u
+
+
+def _is_protected(u: Any) -> bool:
+    """Agent-managed, slot-backed, slot-kind or the reserved name: not editable here."""
+    return bool(
+        getattr(u, "managed_by", None)
+        or u.slot_name
+        or u.kind == "slot"
+        or u.name == RESERVED_UPSTREAM_NAME
+    )
+
+
+def _refuse_protected(u: Any) -> None:
+    if _is_protected(u):
+        owner = getattr(u, "managed_by", None)
+        raise UpstreamProtectedWriteHTTP(
+            f"upstream {u.name!r} is "
+            f"{'managed by ' + owner if owner else 'slot-backed or reserved'}; "
+            "its models are not editable here",
+            details={"name": u.name, "managed_by": owner},
+        )
+
+
+def _discovery_cache(request: Request) -> DiscoveryCache:
+    cache = getattr(request.app.state, "upstream_discovery", None)
+    if cache is None:
+        cache = DiscoveryCache()
+        request.app.state.upstream_discovery = cache
+    return cache
+
+
+async def _discovered(
+    request: Request, u: Any, *, force: bool
+) -> tuple[list[DiscoveredModel], float | None, bool]:
+    """Cached discovery for ``u`` as ``(models, fetched_at, stale)``.
+
+    Refetches when forced or when the cache is past its TTL. A failed or empty
+    refetch keeps whatever the cache holds and reports ``stale``; nothing here
+    raises, so a provider that is down never fails a listing.
+    """
+    cache = _discovery_cache(request)
+    fresh = not force and not cache.is_stale(u.name)
+    if not fresh:
+        try:
+            payload = await request.app.state.upstreams.fetch_model_payload(u.name)
+        except Exception:
+            payload = None
+        models = (
+            parse_models_payload(payload, get_preset(u.catalog_id or ""))
+            if payload is not None
+            else []
+        )
+        if models:  # an empty answer is not worth remembering
+            cache.put(u.name, models)
+            fresh = True
+    entry = cache.get(u.name)
+    return (entry[0], entry[1], not fresh) if entry else ([], None, True)
+
+
+def _row(
+    upstream: str,
+    model_id: str,
+    *,
+    enabled: bool,
+    type_: str,
+    context: int | None,
+    price_in: float | None,
+    price_out: float | None,
+    price_unit: str,
+    discovered: bool,
+    recommended: bool,
+) -> dict[str, Any]:
+    return {
+        "id": model_id,
+        "canonical_id": canonical_id(upstream, model_id),
+        "enabled": enabled,
+        "type": type_,
+        "context": context,
+        "price_in": price_in,
+        "price_out": price_out,
+        "price_unit": price_unit,
+        "discovered": discovered,
+        "recommended": recommended,
+        "in_use_by": [],  # filled by a later lane
+    }
+
+
+def _recommended_ids(u: Any) -> frozenset[str]:
+    preset = get_preset(u.catalog_id or "")
+    return frozenset(m.id for m in preset.models if m.recommended) if preset else frozenset()
+
+
+def _stored_row(u: Any, m: UpstreamModel, d: DiscoveredModel | None, rec: frozenset[str]):
+    """A stored row, its own values first; discovery only fills what is blank."""
+    context = m.context if m.context is not None else (d.context if d else None)
+    price_in, price_out, unit = m.price_in, m.price_out, m.price_unit
+    if d is not None and price_in is None and price_out is None:
+        price_in, price_out, unit = d.price_in, d.price_out, d.price_unit
+    return _row(
+        u.name,
+        m.id,
+        enabled=m.enabled,
+        type_=m.type,
+        context=context,
+        price_in=price_in,
+        price_out=price_out,
+        price_unit=unit,
+        discovered=d is not None,
+        recommended=m.id in rec,
+    )
+
+
+def _merged_rows(u: Any, discovered: list[DiscoveredModel]) -> list[dict[str, Any]]:
+    """Stored rows first, then models only discovery lists (switched off)."""
+    found = {d.id: d for d in discovered}
+    rec = _recommended_ids(u)
+    rows = [_stored_row(u, m, found.get(m.id), rec) for m in u.models]
+    stored = {m.id for m in u.models}
+    for d in discovered:
+        if d.id not in stored:
+            rows.append(
+                _row(
+                    u.name,
+                    d.id,
+                    enabled=False,
+                    type_=d.type,
+                    context=d.context,
+                    price_in=d.price_in,
+                    price_out=d.price_out,
+                    price_unit=d.price_unit,
+                    discovered=True,
+                    recommended=d.id in rec,
+                )
+            )
+    return rows
+
+
+def _live_rows(request: Request, u: Any) -> list[dict[str, Any]]:
+    """Read-only rows for an upstream with no model rows: the ids it serves now."""
+    cache: dict[str, list[str]] = getattr(request.app.state, "upstream_models", {})
+    return [
+        _row(
+            u.name,
+            mid,
+            enabled=True,
+            type_=guess_type(mid),
+            context=None,
+            price_in=None,
+            price_out=None,
+            price_unit="Mtok",
+            discovered=True,
+            recommended=False,
+        )
+        for mid in cache.get(u.name, [])
+    ]
+
+
+async def _listing(request: Request, u: Any, *, force: bool = False) -> dict[str, Any]:
+    if _is_protected(u):
+        return {
+            "name": u.name,
+            "curated": False,
+            "fetched_at": None,
+            "stale": False,
+            "models": _live_rows(request, u),
+        }
+    if not u.curated:
+        # Awaiting conversion: nothing is stored, so show what is served today.
+        return {
+            "name": u.name,
+            "curated": False,
+            "fetched_at": None,
+            "stale": True,
+            "models": _live_rows(request, u),
+        }
+    found, fetched_at, stale = await _discovered(request, u, force=force)
+    # The fetch awaited: read the rows again so a concurrent write is not lost.
+    u = _lookup_upstream(request, u.name)
+    return {
+        "name": u.name,
+        "curated": True,
+        "fetched_at": fetched_at,
+        "stale": stale,
+        "models": _merged_rows(u, found),
+    }
+
+
+@router.get("/upstreams/{name}/models")
+async def list_upstream_models(name: str, request: Request) -> dict[str, Any]:
+    """Stored model rows merged with discovery; never fails because the provider is down."""
+    return await _listing(request, _lookup_upstream(request, name))
+
+
+@router.patch("/upstreams/{name}/models/{model_id:path}")
+async def patch_upstream_model(
+    name: str, model_id: str, body: UpstreamModelPatchBody, request: Request
+) -> dict[str, Any]:
+    """Upsert one model row on a curated upstream and apply it to routing at once.
+
+    A model only discovery lists gets a row seeded from its discovered values,
+    switched off unless the body enables it.
+    """
+    u = _lookup_upstream(request, name)
+    _refuse_protected(u)
+    if not u.curated:
+        raise UpstreamNotCuratedHTTP(
+            f"upstream {name!r} is not converted yet; refresh when the provider is reachable",
+            details={"name": name},
+        )
+    sent = body.model_fields_set
+
+    stored = next((m for m in u.models if m.id == model_id), None)
+    if stored is None:
+        # Refuse a bad id before any network call.
+        try:
+            UpstreamModelEntry(id=model_id)
+        except ValidationError as exc:
+            raise UpstreamInvalidHTTP(
+                "invalid model row",
+                details={"name": name, "errors": _validation_summaries(exc)},
+            ) from exc
+        found, _at, _stale = await _discovered(request, u, force=False)
+        u = _lookup_upstream(request, name)
+        seed = next((d for d in found if d.id == model_id), None)
+        data: dict[str, Any] = {"id": model_id, "enabled": False}
+        if seed is not None:
+            data.update(
+                type=seed.type,
+                context=seed.context,
+                price_in=seed.price_in,
+                price_out=seed.price_out,
+                price_unit=seed.price_unit,
+            )
+        else:
+            data["type"] = guess_type(model_id)
+    else:
+        data = asdict(stored)
+    data.update({k: getattr(body, k) for k in sent})
+
+    try:
+        entry = UpstreamModelEntry.model_validate(data)
+    except ValidationError as exc:
+        raise UpstreamInvalidHTTP(
+            "invalid model row", details={"name": name, "errors": _validation_summaries(exc)}
+        ) from exc
+    rows = [m for m in u.models if m.id != model_id]
+    position = next((i for i, m in enumerate(u.models) if m.id == model_id), len(rows))
+    rows.insert(position, UpstreamModel(**entry.model_dump()))
+
+    upstreams = request.app.state.upstreams
+    try:
+        updated = upstreams.apply_persistent_patch(name, {"models": rows})
+    except ValidationError as exc:
+        raise UpstreamInvalidHTTP(
+            "invalid upstream configuration",
+            details={"name": name, "errors": _validation_summaries(exc)},
+        ) from exc
+    model_cache = getattr(request.app.state, "upstream_models", None)
+    if model_cache is not None:
+        reseed_curated_cache(upstreams, model_cache, name)
+    _audit_log.info(
+        "upstream.model_patch",
+        name=name,
+        model=model_id,
+        fields=sorted(sent),
+        source=request.client.host if request.client else None,
+    )
+    cached = _discovery_cache(request).get(name)
+    discovered = cached[0] if cached else []
+    return next(r for r in _merged_rows(updated, discovered) if r["id"] == model_id)
+
+
+@router.post("/upstreams/{name}/refresh")
+async def refresh_upstream_models(name: str, request: Request) -> dict[str, Any]:
+    """Refetch a provider's model list and return the listing.
+
+    On a curated row only discovery is refetched. On an uncurated, plain remote
+    row the one-time conversion runs for that row first (same rules, backup and
+    warnings as the boot converter). A provider that cannot be reached leaves
+    the row untouched and answers ``stale: true``, not an error.
+    """
+    u = _lookup_upstream(request, name)
+    _refuse_protected(u)
+    if not u.curated:
+        from hal0.upstreams import convert
+
+        try:
+            await convert.convert_legacy_upstreams(
+                request.app.state.upstreams,
+                providers_toml=paths.etc() / "providers.toml",
+                model_cache=getattr(request.app.state, "upstream_models", None),
+                discovery=_discovery_cache(request),
+                only=name,
+            )
+        except Exception as exc:
+            _log.warning("upstream.refresh_convert_failed", name=name, error=type(exc).__name__)
+        u = _lookup_upstream(request, name)
+        return await _listing(request, u)
+    return await _listing(request, u, force=True)
+
+
 @router.delete("/upstreams/{name}")
 async def delete_upstream(name: str, request: Request) -> dict[str, Any]:
     """Delete a remote upstream from the registry and ``upstreams.toml``.
@@ -603,12 +986,26 @@ class ProviderProbeBody(BaseModel):
     key: SecretStr | None = Field(default=None, repr=False)
 
 
-def _probe_key_ok(key: str) -> bool:
-    """Printable ASCII, no inner whitespace; one leading ``Bearer `` prefix is tolerated."""
+_KEY_REFUSAL = "key must be printable ASCII without whitespace"
+
+
+def _normalised_key(key: str) -> str | None:
+    """The bare token in ``key``, or None when it is not a usable key.
+
+    Printable ASCII, no inner whitespace; one leading ``Bearer `` prefix is
+    stripped. Shared by the probe and the credentials route so a key that passed
+    the probe is stored the way it was probed. May return ``""`` (no key).
+    """
     token = key.strip()
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
-    return token.isascii() and all(0x21 <= ord(ch) <= 0x7E for ch in token)
+    if token.isascii() and all(0x21 <= ord(ch) <= 0x7E for ch in token):
+        return token
+    return None
+
+
+def _probe_key_ok(key: str) -> bool:
+    return _normalised_key(key) is not None
 
 
 def _rate_limit_values(preset: Any, headers: dict[str, str]) -> dict[str, int | None]:
@@ -673,7 +1070,7 @@ async def probe_provider(request: Request) -> dict[str, Any]:
         raise UpstreamInvalidHTTP("auth_style 'header' needs an auth_header name")
     key = body.key.get_secret_value() if body.key is not None else ""
     if not _probe_key_ok(key):
-        raise UpstreamInvalidHTTP("key must be printable ASCII without whitespace")
+        raise UpstreamInvalidHTTP(_KEY_REFUSAL)
 
     try:
         result = await request.app.state.upstreams.probe(
@@ -830,20 +1227,17 @@ async def write_provider_credential(
             details={"name": name, "key": key, "expected": expected_env},
         )
 
-    # Reject control chars in the value — a newline would break out of the
-    # quoted api.env line and inject an arbitrary env-var (the file is an
-    # unauthenticated, LAN-writable systemd EnvironmentFile). The shared
-    # writer guards \n/\r too; this catches the wider control-char set with
-    # a clear 400 before we touch the file.
-    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in body.value):
-        raise ProviderCredentialError(
-            "control characters not allowed in credential value",
-            details={"name": name, "key": key},
-        )
+    # Normalise the value exactly as the probe does. Anything that is not
+    # printable ASCII is refused here, which includes the control characters
+    # (a newline would break out of the quoted api.env line and inject an
+    # arbitrary env-var; the file is a LAN-writable systemd EnvironmentFile).
+    token = _normalised_key(body.value)
+    if not token:
+        raise ProviderCredentialError(_KEY_REFUSAL, details={"name": name, "key": key})
 
     api_env = paths.etc() / "api.env"
     try:
-        await asyncio.to_thread(_write_credential_to_api_env, api_env, key, body.value)
+        await asyncio.to_thread(_write_credential_to_api_env, api_env, key, token)
     except ProviderCredentialError:
         raise
     except OSError as exc:
