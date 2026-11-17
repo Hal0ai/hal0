@@ -52,7 +52,7 @@ const FILTERS = [
 
 // The models folder cannot be read by the hal0 user: the server's message, and the two commands
 // that fix it, copyable. The panel is replaced, not annotated: there is no catalog to show.
-function Unreadable({ error, onRetry }) {
+export function Unreadable({ error, onRetry }) {
   // The commands name the path the server says it could not read. Without one there is nothing
   // honest to put in them, so the message and Retry stand alone.
   const path = typeof error.details?.path === 'string' ? error.details.path : ''
@@ -88,7 +88,7 @@ function Unreadable({ error, onRetry }) {
   )
 }
 
-function LoadError({ error, onRetry }) {
+export function LoadError({ error, onRetry }) {
   return (
     <div className="imp" data-testid="imp-panel">
       <div className="imp-fix" data-testid="imp-load-error" role="alert">
@@ -106,7 +106,7 @@ function LoadError({ error, onRetry }) {
 
 // What removing a model deletes and what stays, from the file listing. The server has the last
 // word (it keeps a file another complete model loads); this shows the same rule beforehand.
-function RemoveBody({ plan, filesKnown, filesLoading, error }) {
+export function RemoveBody({ plan, filesKnown, filesLoading, error }) {
   return (
     <div className="imp-rm">
       <h4>Deleted</h4>

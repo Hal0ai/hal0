@@ -11,12 +11,11 @@ import { useModels, usePullsList, usePullJob, useHfSearch, useModelUpdatesCheck,
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
-import { useComfyuiFiles } from '@/api/hooks/useComfyui'
-import { ImageFilesTab } from '@/dash/image/ImageFilesTab.jsx'
+import { useComfyuiModels } from '@/api/hooks/useComfyui'
+import { ImageModelsTab } from '@/dash/image/ImageModelsTab.jsx'
 import { FlmModelsTab } from '@/dash/FlmModelsTab.jsx'
 import { useFlmCatalog } from '@/api/hooks/useFlmCatalog'
 import { flmCatalogRows } from '@/dash/npu/npu-models-pure'
-import { imageFileCount } from '@/dash/image/image-files-pure'
 import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
 import { DownloadRow, DownloadsPane } from '@/dash/models/DownloadsPane.jsx'
@@ -239,13 +238,14 @@ function ModelsView({ modelParam = null }) {
   ];
   const upstreamTotal = modelList.filter(m => isUpstreamModel(m)).length;
 
-  // Image: ComfyUI weight files are not registry rows — the tab is the file
-  // inventory (ImageFilesTab). react-query serves the same query from cache, so
-  // the tab count below costs no second request.
+  // Image: ComfyUI models are not registry rows — the tab is the image catalog
+  // (ImageModelsTab), with the weight files behind its Files switch. react-query
+  // serves the tab's own query from cache, so the count below costs no second request.
   // The count is a label, not worth the page: a failed, still-pending or malformed
-  // listing (a body with no `files`) reads as 0 here, and the tab shows the failure.
-  const imageFiles = useComfyuiFiles();
-  const imageTotal = imageFileCount(imageFiles.data);
+  // catalog (a body with no `models`) reads as 0 here, and the tab shows the failure.
+  const imageCatalog = useComfyuiModels();
+  const imageModels = Array.isArray(imageCatalog.data?.models) ? imageCatalog.data.models : [];
+  const imageTotal = imageModels.length;
 
   // ── Pagination logic ────────────────────────────────────────────────
   const pageReset = usePageReset([tab, q, sortField, sortDir, filterSel, stateSel, runsSel]);
@@ -295,7 +295,31 @@ function ModelsView({ modelParam = null }) {
       setRecheckingFlm(false);
     }
   };
-  const headerCheck = tab === "flm"
+  // Image models are a fixed catalog: checking it is re-reading the catalog (and
+  // with it each model's state on disk), and adding is installing one of its models.
+  const [imageAddSeq, setImageAddSeq] = useStateM(0);
+  const [recheckingImage, setRecheckingImage] = useStateM(false);
+  const onRecheckImage = async () => {
+    setRecheckingImage(true);
+    try {
+      const res = await imageCatalog.refetch();
+      if (res.isError) throw res.error;
+      const rows = Array.isArray(res.data?.models) ? res.data.models : [];
+      toastM(`Image catalog re-read · ${rows.length} model${rows.length === 1 ? "" : "s"}, ${rows.filter(m => m.state === "complete").length} installed`, "info");
+    } catch (e) {
+      toastM(`Could not re-read the image catalog — ${e?.message || "see logs"}`, "err");
+    } finally {
+      setRecheckingImage(false);
+    }
+  };
+  const headerCheck = tab === "image"
+    ? {
+        testid: "mdl-check-image",
+        title: "Re-read the image catalog and what is installed. Image models have no per-model update check.",
+        pending: recheckingImage,
+        onClick: onRecheckImage,
+      }
+    : tab === "flm"
     ? {
         testid: "mdl-check-flm",
         title: "Re-read the FastFlowLM catalogue. FLM has no per-model update check.",
@@ -314,7 +338,9 @@ function ModelsView({ modelParam = null }) {
         pending: forceCheck.isPending,
         onClick: onCheckUpdates,
       };
-  const headerAdd = tab === "flm"
+  const headerAdd = tab === "image"
+    ? [{ label: "Install image model", hint: "Show the catalog models that are not installed yet", onClick: () => setImageAddSeq(n => n + 1) }]
+    : tab === "flm"
     ? [{ label: "Download FLM model", hint: "Show the catalogue models that are not installed yet", onClick: () => setFlmAddSeq(n => n + 1) }]
     : tab === "upstream"
     ? [{ label: "Add upstream", hint: "Add a provider under Slots → Endpoints; its models appear here", onClick: () => { window.location.hash = "#slots/endpoints"; } }]
@@ -335,7 +361,7 @@ function ModelsView({ modelParam = null }) {
             second vh below the tab bar. */}
         <h1>{tab === "profiles" ? "Profiles" : "Models"}</h1>
         <span className="vh-spacer" />
-        {tab === "profiles" || tab === "image" ? (
+        {tab === "profiles" ? (
           null
         ) : (
           <CatalogHeaderActions check={headerCheck} addItems={headerAdd}>
@@ -404,7 +430,7 @@ function ModelsView({ modelParam = null }) {
       {tab === "profiles" ? (
         window.ProfilesView ? <window.ProfilesView /> : null
       ) : tab === "image" ? (
-        <ImageFilesTab />
+        <ImageModelsTab addSeq={imageAddSeq} />
       ) : tab === "flm" ? (
         <FlmModelsTab addSeq={flmAddSeq} />
       ) : (

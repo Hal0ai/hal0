@@ -19,6 +19,11 @@ const TASKS: ReadonlyArray<{ task: string; label: string }> = [
   { task: 'upscale', label: 'Upscale' },
 ]
 
+/** The reader's name for a catalog task key; an unknown key reads as itself. */
+export function taskLabel(task: string): string {
+  return TASKS.find((t) => t.task === task)?.label ?? task
+}
+
 export interface TaskGroup {
   task: string
   label: string

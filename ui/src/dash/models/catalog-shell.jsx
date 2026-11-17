@@ -189,6 +189,7 @@ export function CatalogList({
   note,
   pager,
   testid,
+  sectionTestid = (key) => `mdl-section-${key}`,
 }) {
   return (
     <div className="mdl-list" data-testid={testid}>
@@ -208,7 +209,7 @@ export function CatalogList({
       )}
       {!loading && !error && paged.total === 0 && <div className="mdl-list-msg empty">{empty}</div>}
       {paged.sections.map((s) => (
-        <div key={s.key} data-testid={`mdl-section-${s.key}`}>
+        <div key={s.key} data-testid={sectionTestid(s.key)}>
           <div className="mdl-section-label">{`${s.label} · ${s.total}`}</div>
           {s.rows.map(renderRow)}
         </div>
@@ -350,12 +351,13 @@ export function DetailHeader({ state, name, source, chips }) {
   )
 }
 
-/** The facts grid: `[{ k, v, testid }]`. A missing value reads as a dash. */
+/** The facts grid: `[{ k, v, testid, wrap, wide }]`. A missing value reads as a dash; `wide`
+ *  spans the row and `wrap` breaks a long path. */
 export function DetailFacts({ facts }) {
   return (
     <div className="mdl-detail-meta">
       {facts.map((f) => (
-        <div key={f.k}>
+        <div key={f.k} style={f.wide ? { gridColumn: '1 / -1' } : undefined}>
           <div className="k">{f.k}</div>
           <div className="v" data-testid={f.testid} style={f.wrap ? { wordBreak: 'break-all' } : undefined}>
             {f.v === null || f.v === undefined || f.v === '' ? '—' : f.v}

@@ -1,12 +1,12 @@
 // @vitest-environment happy-dom
 //
-// Models page vs. GET /api/comfyui/files. ModelsView asks for the file listing on
+// Models page vs. GET /api/comfyui/models. ModelsView asks for the image catalog on
 // every visit, only to put a count on the "Image / ComfyUI" tab. That count must never
-// take the whole page down: a body with no `files` (a catch-all or an older proxy
-// answering `{}`) crashed the view with "Cannot read properties of undefined (reading
-// 'length')" and blanked the Inference tab with it. Real hooks and a fetch stub, so the
-// request really goes out and the body really comes back the way the failing e2e
-// run saw it.
+// take the whole page down: a body with no list (a catch-all or an older proxy
+// answering `{}`) once crashed the view with "Cannot read properties of undefined (reading
+// 'length')" and blanked the Inference tab with it, when the count read the file listing.
+// Real hooks and a fetch stub, so the request really goes out and the body really comes
+// back the way the failing e2e run saw it.
 //
 // models.jsx is a window-globals dash module (`const {...} = React` at module top),
 // so the globals are installed before the dynamic import — same pattern as
@@ -34,7 +34,7 @@ type Reply = { status: number; body: unknown }
 
 // What the listing endpoint answers in the test at hand; every other endpoint gets
 // an empty-but-valid body, so the only variable is the one under test.
-let filesReply: Reply = { status: 200, body: {} }
+let catalogReply: Reply = { status: 200, body: {} }
 
 function stubFetch() {
   vi.stubGlobal(
@@ -42,7 +42,7 @@ function stubFetch() {
     vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url, 'http://x')
       let reply: Reply = { status: 200, body: {} }
-      if (url.pathname === '/api/comfyui/files') reply = filesReply
+      if (url.pathname === '/api/comfyui/models') reply = catalogReply
       else if (url.pathname === '/api/models') reply = { status: 200, body: { models: [], count: 0 } }
       else if (url.pathname === '/api/slots') reply = { status: 200, body: { slots: [] } }
       return new Response(JSON.stringify(reply.body), {
@@ -82,27 +82,29 @@ describe('Models page image-tab count', () => {
 
   it.each([
     ['an empty object', { status: 200, body: {} }],
-    ['files that are not a list', { status: 200, body: { root: '/models/comfyui', files: null } }],
+    ['models that are not a list', { status: 200, body: { models: null, engine: { available: true, reason: null } } }],
     ['a server error', { status: 500, body: { detail: 'boom' } }],
-  ])('keeps the page and counts 0 when the listing is %s', async (_label, reply) => {
-    filesReply = reply
+  ])('keeps the page and counts 0 when the catalog is %s', async (_label, reply) => {
+    catalogReply = reply
     const { host, unmount } = await mount()
     expect(host.textContent).not.toContain('This view hit an error')
     // The default Inference tab still rendered its list...
     expect(host.querySelector('.models-layout')).not.toBeNull()
-    // ...and the tab that owns the listing reads 0.
+    // ...and the tab that owns the catalog reads 0.
     expect(imageTabCount(host)).toBe('0')
     await unmount()
   })
 
-  it('counts the files a good listing carries', async () => {
-    filesReply = {
+  it('counts the models a good catalog carries', async () => {
+    catalogReply = {
       status: 200,
       body: {
-        root: '/models/comfyui',
-        files: [
-          { kind: 'checkpoint', subdir: 'checkpoints', relpath: 'a.safetensors', size_bytes: 1, models: [] },
-          { kind: 'vae', subdir: 'vae', relpath: 'b.safetensors', size_bytes: 1, models: [] },
+        engine: { available: true, reason: null },
+        store: { free_gb: 100, path: '/models/comfyui' },
+        recommendation: null,
+        models: [
+          { id: 'flux-schnell', label: 'FLUX.1 schnell', task: 'txt2img', state: 'complete' },
+          { id: 'sdxl', label: 'SDXL', task: 'txt2img', state: 'none' },
         ],
       },
     }
