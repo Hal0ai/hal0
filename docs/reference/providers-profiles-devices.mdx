@@ -82,6 +82,18 @@ selection to the matching row, and renames the file to `providers.toml.retired`.
 file is never deleted, and a rename is skipped if a `.retired` file already exists.
 </Aside>
 
+The same conversion applies to every older remote upstream row that has no per-model rows:
+when its provider answers, hal0 lists the provider's models, writes one row per model and
+marks the row curated. Before the first change of a run, `upstreams.toml` is copied to
+`upstreams.toml.pre-convert` (same mode, never overwritten); if that copy fails, nothing is
+converted that run. A provider that is unreachable or lists nothing is left untouched and
+retried at the next start. Two behaviour changes follow, and each is logged as a warning:
+
+- Models your old `model_filters` hid are now disabled rows. They used to be reachable by
+  name; they return 404 until you enable them.
+- A bare model id enabled on more than one provider is rejected with 400; use the
+  `<provider>/<id>` form (the warning lists the ids to use).
+
 ## Profiles
 
 `hal0.profiles` + `ProfileConfig` — a profile is a reusable, device-agnostic backend

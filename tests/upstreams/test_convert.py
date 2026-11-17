@@ -299,10 +299,15 @@ async def test_existing_retired_file_is_never_overwritten(tmp_hal0_home: str, mo
 async def test_one_failing_row_does_not_stop_the_others(tmp_hal0_home: str, monkeypatch) -> None:
     registry, path = _boot(_row("bad") + "\n" + _row("good"))
     before_bad = _entry("bad")
-    # An id the schema rejects (blank) makes only that row's write fail.
-    _serve(
-        monkeypatch, registry, {"bad": {"data": [{"id": "ok"}, {"id": "  "}]}, "good": _ids("a")}
-    )
+    _serve(monkeypatch, registry, {"bad": _ids("a"), "good": _ids("a")})
+    real = registry.apply_persistent_patch
+
+    def patch(name: str, fields: dict[str, Any], **kw: Any) -> Any:
+        if name == "bad":
+            raise OSError("boom")
+        return real(name, fields, **kw)
+
+    monkeypatch.setattr(registry, "apply_persistent_patch", patch)
 
     result = await convert_legacy_upstreams(registry, providers_toml=None)
 
@@ -457,3 +462,226 @@ async def test_boot_phase_never_raises(tmp_hal0_home: str, monkeypatch) -> None:
     await _boot_upstream_conversion(app, ctx)
     await ctx.upstream_conversion_task  # the task swallows and logs; it does not raise
     await ctx.stop_upstream_conversion_task()
+
+
+# ── review fixes ──────────────────────────────────────────────────────────────
+
+
+def _events(logs: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:
+    return [e for e in logs if e["event"] == event]
+
+
+async def test_malformed_upstreams_toml_keeps_providers_toml(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    etc = paths.etc()
+    etc.mkdir(parents=True, exist_ok=True)
+    (etc / "upstreams.toml").write_text("[[upstream\nbroken")
+    registry = UpstreamRegistry()
+    # What other boot phases register in memory even when hydration failed.
+    registry.add(
+        Upstream(name="primary", kind="slot", url="http://127.0.0.1:8081/v1", slot_name="primary")
+    )
+    registry.add(
+        Upstream(name="hermes.x", kind="remote", url="http://127.0.0.1:9/v1", managed_by="agent:x")
+    )
+    body = '[[provider]]\ncatalog_id = "x"\nname = "mm"\nmodels = ["a"]\n'
+    pt = _providers_toml(body)
+    _serve(monkeypatch, registry, {})
+
+    result = await convert_legacy_upstreams(registry, providers_toml=pt)
+
+    assert result == ConvertResult((), (), 0)
+    assert pt.read_text() == body
+    assert not pt.with_name("providers.toml.retired").exists()
+
+
+async def test_providers_toml_kept_while_a_named_row_is_still_uncurated_on_disk(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    # "mm" is on disk but absent from memory, so this run cannot convert it.
+    registry, _ = _boot(_row("mm"))
+    registry.remove("mm")
+    pt = _providers_toml('[[provider]]\ncatalog_id = "x"\nname = "mm"\nmodels = ["a"]\n')
+
+    await convert_legacy_upstreams(registry, providers_toml=pt)
+
+    assert pt.exists()
+
+
+async def test_disabled_ids_are_warned_per_row(tmp_hal0_home: str, monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    extra = '[upstream.model_filters]\nexclude = ["b*"]\n'
+    registry, _ = _boot(_row("mm", extra) + "\n" + _row("all"))
+    _serve(monkeypatch, registry, {"mm": _ids("a", "b1", "b2"), "all": _ids("x")})
+
+    with capture_logs() as logs:
+        await convert_legacy_upstreams(registry, providers_toml=None)
+
+    warned = _events(logs, "upstreams.convert.disabled_ids")
+    assert [(w["name"], w["disabled"], w["log_level"]) for w in warned] == [("mm", 2, "warning")]
+
+
+async def test_ambiguous_bare_ids_are_warned_with_canonical_ids(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    from structlog.testing import capture_logs
+
+    registry, _ = _boot(_row("b") + "\n" + _row("a"))
+    _serve(monkeypatch, registry, {"a": _ids("gpt", "only-a"), "b": _ids("gpt")})
+
+    with capture_logs() as logs:
+        await convert_legacy_upstreams(registry, providers_toml=None)
+
+    warned = _events(logs, "upstreams.convert.ambiguous_id")
+    assert [(w["model"], w["use"], w["log_level"]) for w in warned] == [
+        ("gpt", ["a/gpt", "b/gpt"], "warning")
+    ]
+
+
+async def test_ambiguous_id_warnings_are_capped(tmp_hal0_home: str, monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    registry, _ = _boot(_row("a") + "\n" + _row("b"))
+    ids = [f"m{i:02d}" for i in range(23)]
+    _serve(monkeypatch, registry, {"a": _ids(*ids), "b": _ids(*ids)})
+
+    with capture_logs() as logs:
+        await convert_legacy_upstreams(registry, providers_toml=None)
+
+    assert len(_events(logs, "upstreams.convert.ambiguous_id")) == 20
+    more = _events(logs, "upstreams.convert.ambiguous_ids_more")
+    assert [m["more"] for m in more] == [3]
+
+
+async def test_no_ambiguity_warning_when_nothing_converted(tmp_hal0_home: str, monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    registry, _ = _boot(
+        _row("a", 'curated = true\n[[upstream.models]]\nid = "g"\n')
+        + "\n"
+        + _row("b", 'curated = true\n[[upstream.models]]\nid = "g"\n')
+    )
+    _serve(monkeypatch, registry, {})
+
+    with capture_logs() as logs:
+        await convert_legacy_upstreams(registry, providers_toml=None)
+
+    assert _events(logs, "upstreams.convert.ambiguous_id") == []
+
+
+async def test_backup_is_made_before_first_write(tmp_hal0_home: str, monkeypatch) -> None:
+    registry, path = _boot(_row("mm"))
+    original = path.read_bytes()
+    path.chmod(0o640)
+    _serve(monkeypatch, registry, {"mm": _ids("a")})
+
+    await convert_legacy_upstreams(registry, providers_toml=None)
+
+    backup = path.with_name("upstreams.toml.pre-convert")
+    assert backup.read_bytes() == original
+    assert backup.stat().st_mode & 0o777 == 0o640
+    assert path.read_bytes() != original
+
+
+async def test_existing_backup_is_never_overwritten(tmp_hal0_home: str, monkeypatch) -> None:
+    registry, path = _boot(_row("mm"))
+    backup = path.with_name("upstreams.toml.pre-convert")
+    backup.write_text("older backup")
+    _serve(monkeypatch, registry, {"mm": _ids("a")})
+
+    result = await convert_legacy_upstreams(registry, providers_toml=None)
+
+    assert result.converted == ("mm",)
+    assert backup.read_text() == "older backup"
+
+
+async def test_no_backup_when_nothing_converts(tmp_hal0_home: str, monkeypatch) -> None:
+    registry, path = _boot(_row("mm"))
+    _serve(monkeypatch, registry, {})
+
+    await convert_legacy_upstreams(registry, providers_toml=None)
+
+    assert not path.with_name("upstreams.toml.pre-convert").exists()
+
+
+async def test_backup_failure_defers_every_row(tmp_hal0_home: str, monkeypatch) -> None:
+    registry, path = _boot(_row("a") + "\n" + _row("b"))
+    before = path.read_bytes()
+    _serve(monkeypatch, registry, {"a": _ids("x"), "b": _ids("y")})
+
+    def nope(_src: Path) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr("hal0.upstreams.convert._backup_upstreams", nope)
+
+    result = await convert_legacy_upstreams(registry, providers_toml=None)
+
+    assert (result.converted, result.deferred) == ((), ("a", "b"))
+    assert path.read_bytes() == before
+
+
+async def test_invalid_model_ids_are_skipped_not_fatal(tmp_hal0_home: str, monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    registry, path = _boot(_row("mm"))
+    _serve(monkeypatch, registry, {"mm": {"data": [{"id": "ok"}, {"id": "  "}, {"id": "fine"}]}})
+
+    with capture_logs() as logs:
+        result = await convert_legacy_upstreams(registry, providers_toml=None)
+
+    assert result.converted == ("mm",)
+    assert [m["id"] for m in _disk(path, "mm")["models"]] == ["ok", "fine"]
+    skipped = _events(logs, "upstreams.convert.skipped_models")
+    assert [(s["name"], s["count"]) for s in skipped] == [("mm", 1)]
+
+
+async def test_row_with_only_invalid_ids_is_deferred(tmp_hal0_home: str, monkeypatch) -> None:
+    registry, path = _boot(_row("mm"))
+    before = path.read_bytes()
+    _serve(monkeypatch, registry, {"mm": {"data": [{"id": " "}]}})
+
+    result = await convert_legacy_upstreams(registry, providers_toml=None)
+
+    assert (result.converted, result.deferred) == ((), ("mm",))
+    assert path.read_bytes() == before
+
+
+async def test_failed_write_logs_validation_error_locations(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    from structlog.testing import capture_logs
+
+    from hal0.config.schema import UpstreamEntry
+
+    registry, _ = _boot(_row("mm"))
+    _serve(monkeypatch, registry, {"mm": _ids("a")})
+
+    def bad_patch(*a: Any, **kw: Any) -> None:
+        UpstreamEntry.model_validate({"kind": "remote"})
+
+    monkeypatch.setattr(registry, "apply_persistent_patch", bad_patch)
+
+    with capture_logs() as logs:
+        result = await convert_legacy_upstreams(registry, providers_toml=None)
+
+    assert result.deferred == ("mm",)
+    failed = _events(logs, "upstreams.convert.deferred")
+    assert failed and "name" in failed[0]["locations"]
+
+
+async def test_unmatched_picks_are_logged_by_id(tmp_hal0_home: str, monkeypatch) -> None:
+    from structlog.testing import capture_logs
+
+    registry, _ = _boot(_row("mm"))
+    pt = _providers_toml(
+        '[[provider]]\ncatalog_id = "x"\nname = "mm"\nmodels = ["a", "gone", "zz"]\n'
+    )
+    _serve(monkeypatch, registry, {"mm": _ids("a")})
+
+    with capture_logs() as logs:
+        await convert_legacy_upstreams(registry, providers_toml=pt)
+
+    done = _events(logs, "upstreams.convert.converted")
+    assert done[0]["unmatched_picks"] == ["gone", "zz"]
