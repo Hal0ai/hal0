@@ -123,6 +123,17 @@ Knowledge-base pages are documents Hindsight 1.2 synthesizes from a bank's memor
 
 `memory models show` lists the embeddings, reranker and decision models from `[memory.models]` and `[memory.decision]`. The embeddings row shows the provider and model the memory store was built with, which is what the engine runs; when `[memory.models]` names a different provider or model, the row says that value is not applied and names `hal0 memory embedder switch`. `memory agents install` wires a coding-agent harness to `hal0-memory`; `--dry-run` prints the installer command and config merge without running or writing anything. `memory spec apply` applies the packaged bank spec (templates, `config_extra`, knowledge-base pages) through Hindsight's `/import`. The spec names roles: `platform` and `private` are this box's banks ([Memory banks](/docs/concepts/memory-banks#bank-spec-and-seeding)). It refuses the per-project observation scope on an old unified bank and the private template's mental models on `hal0:private`, and says so. It is idempotent, and `--dry-run` posts with `dry_run=true`.
 
+### `memory decision`
+
+| Command | Flags |
+|---|---|
+| `memory decision install` | `--yes` |
+| `memory decision status` | `--json` |
+| `memory decision enable` / `disable` | — |
+| `memory decision remove` | `--purge-model`, `--yes` |
+
+The opt-in local decision model ([`[memory.decision]`](/docs/reference/config-schema-memory-lanes/#memorydecision-decision-model)). `install` runs `hal0 update component memory-decision`, then sets `provider = "local"`; as root it builds in-process. `enable` needs it installed; `disable` sets `off` and leaves the server up; `remove` sets `off`, deletes the unit and venv, and keeps the model unless `--purge-model`.
+
 ### `memory embedder switch`
 
 ```sh

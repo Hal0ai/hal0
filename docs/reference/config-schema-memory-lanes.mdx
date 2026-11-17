@@ -1,6 +1,6 @@
 ---
 title: "Config schema: memory lanes"
-description: "The [memory.lanes] tables in hal0.toml: the global LLM concurrency caps and the per-operation overrides and output caps, verified against src/hal0/config/schema.py."
+description: "The [memory.lanes] and [memory.decision] tables in hal0.toml: the global LLM concurrency caps, the per-operation overrides and output caps, and the opt-in decision model, verified against src/hal0/config/schema.py."
 sidebar:
   order: 23
 ---
@@ -54,3 +54,42 @@ Config migration v5 runs once on the first update that carries it; `meta.schema_
 - A hand-made drop-in in the engine's `hindsight-api.service.d/` directory that sets `HINDSIGHT_API_REFLECT_WALL_TIMEOUT` or `HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE` would be silently overridden by the managed `showcase-lanes.conf`. When `hal0.toml` has no value for the matching key, the drop-in's value (inside the bounds above) is copied into `hal0.toml` first, so the box keeps its setting. hal0 never deletes your file: the update says it is now redundant and you can remove it. A value outside the bounds is reported and not copied.
 - The update summary lists both outcomes. A fresh install has neither stored value and follows the defaults.
 - After rolling back to an older release, a settings save there writes `llm_max_concurrent = 1` back, and the conversion does not run again on the way forward; delete the line by hand if you did not choose it.
+
+## `[memory.decision]` decision model
+
+The decision model (`hs-decide-1-flash`) answers the questions Hindsight
+would otherwise put to an LLM: recall ranking and dedup, consolidation
+triage, reflect sufficiency and knowledge-page delta gating. Each answer is
+one forward pass, with no generated text. With the lane off, the engine sends
+those calls to its LLM lane instead, which works but costs an LLM call each.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `true` | `false` turns the lane off whatever `provider` says. |
+| `provider` | str | `"off"` | `off`, `local` or `hindsight-cloud`. `local` is the `hal0-hs-decide` server on this box; `hal0 memory decision install` and `enable` set it. A `hal0.toml` that already says `local` keeps it. |
+| `model` | str | `"hs-decide-1-flash"` | `HINDSIGHT_API_DECISION_MODEL_MODEL`. |
+| `threads` | int | `8` | `1-64`. CPU threads of the local server. |
+| `max_concurrent` | int | `4` | `1-64`. `HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT`. |
+| `max_request_tokens` | int | `4096` | `256-32768`. The engine's request cap and the local server's `--max-tokens`. |
+| `timeout_s` | int | `60` | `5-600`. HTTP timeout of a decision call. |
+| `port` | int | `9178` | Loopback port of the local server. |
+| `base_url` | str | unset | Somewhere else to send decision calls; the engine accepts only `http://127.0.0.1:<port>` or the hosted API. |
+
+The local server is the opt-in `memory-decision` component. Nothing installs
+it by default. `hal0 memory decision install` builds a venv under
+`/var/lib/hal0/memory/hindsight-decision` (CPU PyTorch from the PyTorch CPU
+index, the rest from PyPI), pulls the pinned model revision into the memory
+engine's Hugging Face cache, installs `hal0-hs-decide.service` (runs as
+`hal0`, listens on `127.0.0.1` only, no network at run time), waits for its
+`/health`, and points the engine at it. `hal0 update` keeps an installed one
+on the release's pins and never installs one.
+
+Measured on one box: a 640 MB venv and a 1.5 GB model, a few minutes to
+build, 2.7 GB of RAM at peak, and about 5 s per request of 3,000 to 5,000
+input tokens on 8 threads (16 threads were no faster, 4 were 1.7 times
+slower).
+
+The unit takes `threads`, `port` and `max_request_tokens` from this table
+when it is written. After changing one of them, run `hal0 memory decision
+install` again to rewrite the unit. The commands are in
+[CLI: memory](/docs/reference/cli-memory/#memory-decision).
