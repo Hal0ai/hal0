@@ -332,15 +332,33 @@ _LISTING: dict[str, Any] = {
 }
 
 
-def test_models_prints_table(api: dict[str, Any]) -> None:
+@pytest.fixture(autouse=True)
+def terminal_width(monkeypatch: pytest.MonkeyPatch):
+    """Pin the module console's width (it is built at import, so COLUMNS is ignored).
+
+    Defaults to wide so prose assertions never depend on wrapping; a test may
+    call the returned setter to narrow it.
+    """
+
+    def _set(width: int) -> None:
+        monkeypatch.setattr(upstream_commands.console, "_width", width)
+
+    _set(200)
+    return _set
+
+
+@pytest.mark.parametrize("width", [40, 80, 200])
+def test_models_prints_table(api: dict[str, Any], terminal_width: Any, width: int) -> None:
+    terminal_width(width)
     api["get_response"] = _LISTING
-    result = runner.invoke(upstream_commands.app, ["models", "openrouter"], env={"COLUMNS": "200"})
+    result = runner.invoke(upstream_commands.app, ["models", "openrouter"])
     assert result.exit_code == 0, result.output
     assert api["gets"] == ["/api/upstreams/openrouter/models"]
     assert "qwen/qwen3-coder" in result.output
     assert "meta/llama-3.3:free" in result.output
-    assert "262144" in result.output
-    assert "0.22" in result.output
+    if width >= 80:
+        assert "262144" in result.output
+        assert "0.22" in result.output
 
 
 def test_models_json_is_raw_listing(api: dict[str, Any]) -> None:
@@ -367,7 +385,7 @@ def test_models_uncurated_row_says_so(api: dict[str, Any]) -> None:
 
 def test_models_protected_upstream_is_not_called_unconverted(api: dict[str, Any]) -> None:
     api["get_response"] = {**_LISTING, "name": "hermes", "curated": False, "protected": True}
-    result = runner.invoke(upstream_commands.app, ["models", "hermes"], env={"COLUMNS": "200"})
+    result = runner.invoke(upstream_commands.app, ["models", "hermes"])
     assert result.exit_code == 0, result.output
     assert "not converted" not in result.output
     assert "read-only" in result.output

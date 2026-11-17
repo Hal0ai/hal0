@@ -523,7 +523,9 @@ def _print_listing(listing: dict[str, Any]) -> None:
         console.print("[dim]No models.[/dim]")
         return
     table = Table(title=f"Models on {name}")
-    table.add_column("Model", style="bold", overflow="fold")
+    # The id is copied into `hal0 upstream enable <name> <model>`: never wrap or
+    # crop it; the other columns give way instead.
+    table.add_column("Model", style="bold", no_wrap=True, overflow="ignore")
     table.add_column("Enabled")
     table.add_column("Type")
     table.add_column("Context", justify="right")
