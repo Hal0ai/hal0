@@ -2037,8 +2037,8 @@ known_issues:
       Key-name redaction in hal0.api._redact (is_sensitive_key / redact_config) deliberately
       over-masks any key containing TOKEN, including count keys (#553 over-redact spec in
       _redact.py:46-51; pinned by tests/api/test_redact.py:43 and
-      tests/fixtures/redaction_shapes.json sensitive_keys, which lists max_tokens, #2520;
-      ui/src/sentry.ts:959 "over-masks max_tokens on purpose"). redaction.py:921-927 documents
+      tests/fixtures/redaction_shapes.json sensitive_keys, which lists max_tokens, #2520).
+      redaction.py:921-927 documents
       the count-name exemption (#2466/#2487) as applying only to the TEXT redactors. Nothing a
       user sees or saves is affected: the dashboard reads extraction_limits.max_tokens (4096,
       unmasked) from GET /api/memory/graph/status, and PUT /api/settings refuses every

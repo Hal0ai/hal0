@@ -166,7 +166,7 @@ class ImageGateRefused(Hal0Error):
     The gate (``hal0_gpu_gate``) answers ``/prompt`` with a 503 when hal0 did not
     hand it the GPU. The message is the gate's reason. It is written inside the img
     container, so it is passed through :func:`hal0.comfyui.gate_reason.clean_reason`
-    (encodable, at most 500 characters) before it reaches an envelope, a log or Sentry.
+    (encodable, at most 500 characters) before it reaches an envelope or a log.
     """
 
     code = "image.gate_refused"

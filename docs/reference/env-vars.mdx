@@ -135,22 +135,6 @@ See [Config schema](/docs/reference/config-schema/) for the `[metrics]` TOML tab
 | `HAL0_HINDSIGHT_PROBE_TIMEOUT_S` | `2.0` | Timeout for the Hindsight reachability health check. |
 | `HINDSIGHT_API_TENANT_API_KEY` | `hal0-local-noauth` | — |
 
-## Observability (Sentry)
-
-Optional error/trace reporting (`src/hal0/observability/sentry.py`). hal0 phones
-home to nobody by default: Sentry stays fully inert — no SDK import, no network
-egress — until a DSN is configured. Requires `pip install 'hal0ai[sentry]'` (or
-`uv pip install sentry-sdk`) in addition to setting the DSN.
-
-| Variable | Default | Controls |
-|---|---|---|
-| `HAL0_SENTRY_DSN` | unset (off) | The DSN. This is the **only** switch — there is no separate enable flag to drift out of sync with it. Falls back to the SDK-conventional `SENTRY_DSN` if unset. |
-| `HAL0_SENTRY_ENVIRONMENT` | `development` | Sentry "environment" tag. Deliberately not `production`, so a copied-around DSN doesn't silently pollute a production stream. |
-| `HAL0_SENTRY_SERVER_NAME` | `socket.gethostname()` | Overrides the reported hostname. |
-| `HAL0_SENTRY_TRACES_SAMPLE_RATE` | `0.0` | Float in `[0, 1]`. Transaction tracing is opt-in per install — sampling every transaction on a box serving long-lived streaming requests is expensive. |
-| `HAL0_SENTRY_PROFILES_SAMPLE_RATE` | `0.0` | Float in `[0, 1]`. Same rationale as traces. |
-| `HAL0_SENTRY_DEBUG` | unset (off) | `1`/`true`/`yes` prints the SDK's own transport logging — for diagnosing "why did my event not arrive". |
-
 ## Providers / external services
 
 | Variable | Default | Controls |

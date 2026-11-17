@@ -52,7 +52,6 @@ from hal0.cli.slot_commands import app as slot_app
 from hal0.cli.update_commands import update_app
 from hal0.cli.upstream_commands import app as upstream_app
 from hal0.log_setup import configure_stderr_logging
-from hal0.observability import sentry
 
 console = Console()
 
@@ -190,10 +189,8 @@ def main_callback(
     """hal0 — open-source home AI inference platform."""
     # Runs before any subcommand, so `hal0 bench worker` (the long-lived
     # hal0-bench-worker.service process) and every one-shot CLI call are
-    # both covered by one hook. Unhandled CLI exceptions are then picked up
-    # by the SDK's own excepthook integration. Inert without a DSN.
+    # both covered by one hook.
     _configure_cli_logging()
-    sentry.init_sentry("cli")
 
 
 # ---------------------------------------------------------------------------

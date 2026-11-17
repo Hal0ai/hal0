@@ -27,7 +27,6 @@ from hal0.api._redact import (
     redact_log_line,
     redact_value,
 )
-from hal0.observability.sentry import SENSITIVE_HEADERS
 from hal0.redaction import MASK, redact_secret_shapes, redact_shareable_text, secret_spans
 
 
@@ -1624,14 +1623,12 @@ class TestEscapedOpeningQuote:
         assert out == rf"password=\"{MASK}\" HF_TOKEN={MASK}"
 
 
-# ── #2413: the cases shared with the dashboard's browser-side port ─────────
+# ── #2413: the shared redaction cases ───────────────────────────────────────
 
 
 class TestSharedFixture:
-    """``tests/fixtures/redaction_shapes.json`` is also read by
-    ``ui/src/sentry.test.ts``, which pins ``redactSecrets`` in
-    ``ui/src/sentry.ts``, the hand-port of :func:`redact_log_line`. A case added
-    there is checked against both implementations."""
+    """``tests/fixtures/redaction_shapes.json`` holds the redaction cases read by
+    these tests."""
 
     _CASES = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "redaction_shapes.json").read_text()
@@ -1678,10 +1675,6 @@ class TestSharedFixture:
     @pytest.mark.parametrize("key", _CASES["plain_keys"])
     def test_a_plain_key_name_is_not_sensitive(self, key: str) -> None:
         assert not is_sensitive_key(key)
-
-    def test_the_sensitive_headers_are_the_backend_set(self) -> None:
-        # ui/src/sentry.ts masks the same headers whole; its test reads this list.
-        assert set(self._CASES["sensitive_headers"]) == SENSITIVE_HEADERS
 
 
 # -- secret_spans: where redact_log_line masks, read off the redactor itself ------------------

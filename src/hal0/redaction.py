@@ -58,9 +58,8 @@ SENSITIVE_KEY_RE: Final[re.Pattern[str]] = re.compile(
     # ``accessKey``, ``x-api-key``) are caught too (#2384), still without
     # a bare ``KEY`` substring. installer/lib/failure-report.sh mirrors
     # this pattern; tests/installer/test_failure_report.py pins the two.
-    # ui/src/sentry.ts mirrors it too (``isSensitiveKey``); the
-    # ``sensitive_keys`` / ``plain_keys`` lists in
-    # tests/fixtures/redaction_shapes.json pin that pair.
+    # The ``sensitive_keys`` / ``plain_keys`` lists in
+    # tests/fixtures/redaction_shapes.json pin this pattern.
     r"(?i)(?:SECRET|TOKEN|PASSWORD|PASS|API[_-]?KEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY"
     r"|ENCRYPTION[_-]?KEY|SALT|_KEY$|^KEY$)"
 )
@@ -82,7 +81,7 @@ def is_sensitive_key(key: str) -> bool:
 # U+212A, the ones ``[A-Za-z]`` matches under it), the same class the other
 # name rules use
 # (#2599). Not ``\b``: that reads every Unicode letter and digit as part of
-# the word, which ui/src/sentry.ts cannot reproduce with its ASCII ``\b``.
+# the word.
 _NAME_START: Final[str] = r"(?<![A-Za-z0-9_])"
 
 # Compiled once at import time. Each alternative ends where the secret
@@ -857,8 +856,8 @@ def _mask_quoted_values(pattern: re.Pattern[str], line: str, log: bool) -> str:
 
 # Well-known token prefixes and the characters a token is made of: the one table
 # the shape rules below and :func:`token_head_at_end` (the agent bridge's live edge)
-# both read. ui/src/sentry.ts and installer/lib/failure-report.sh mirror the
-# generic prefixes as one literal pattern.
+# both read. installer/lib/failure-report.sh mirrors the generic prefixes as one
+# literal pattern.
 _BRIDGE_KEY_PREFIX: Final[str] = "hal0bk_"
 _TOKEN_PREFIX: Final[str] = r"(?:hf_|sk-|gh[pousr]_|github_pat_|xox[baprs]-|hal0ak_)"
 _TOKEN_BODY: Final[str] = r"[A-Za-z0-9_-]"
@@ -1245,11 +1244,9 @@ def redact_secret_shapes(line: str) -> str:
     advance). Keeps each key's name, quoting and separator so a reader still
     sees a secret WAS present. Idempotent.
 
-    Change together with ``installer/lib/failure-report.sh`` and, for
-    :func:`redact_log_line`, the browser-side port in ``ui/src/sentry.ts``
-    (#2413): the cases in ``tests/fixtures/redaction_shapes.json`` are checked
-    against both, so a rule changed here needs the port and the fixture
-    updated in the same commit."""
+    Change together with ``installer/lib/failure-report.sh``: the cases in
+    ``tests/fixtures/redaction_shapes.json`` pin this module, so a rule changed
+    here needs the fixture updated in the same commit."""
     return _redact_shapes(line, log=False)
 
 

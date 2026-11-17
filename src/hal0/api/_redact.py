@@ -47,7 +47,7 @@ from hal0.redaction import (
 
 # The key-name pattern lives in hal0.redaction now (so hal0.bridge can use it without importing
 # this package); the old name stays for the mirrors that cite it (installer/lib/failure-report.sh,
-# ui/src/sentry.ts, doctor_bundle).
+# doctor_bundle).
 _SENSITIVE_RE = SENSITIVE_KEY_RE
 
 # ``MASK`` is defined once in hal0.redaction and re-exported above — both

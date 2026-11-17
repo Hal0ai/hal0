@@ -2,7 +2,7 @@
 
 A refusal's reason is written inside the img container, so hal0 treats it as
 untrusted; so are the node names and prompt ids on the render websocket. They reach
-``/status`` and ``/arbiter`` JSON, error envelopes, the ``hal0.error`` log and Sentry,
+``/status`` and ``/arbiter`` JSON, error envelopes, and the ``hal0.error`` log,
 none of which can carry a lone surrogate (``"\\ud800"`` is valid JSON and not valid
 UTF-8: encoding it raises), and none of which should hold an unbounded string.
 """
