@@ -189,6 +189,32 @@ def build_auth_headers(style: str, header_name: str, key: str) -> dict[str, str]
     return {}
 
 
+def normalise_key(style: str, header_name: str, key: str) -> tuple[str, str] | None:
+    """Split an operator-supplied ``key`` into ``(value to send or store, bare token)``.
+
+    A leading ``Bearer `` is stripped only where hal0 itself prepends one: the
+    ``bearer`` style on the ``Authorization`` header. Everywhere else the value
+    is kept verbatim (an operator may need ``X-Authorization: Bearer ...``), but
+    the bare token is still returned so callers can redact it. ``None`` when the
+    token is not printable ASCII without whitespace; one space after a leading
+    ``Bearer`` is allowed in the verbatim styles. ``("", "")`` means no key.
+    """
+    stripped = key.strip()
+    bare = stripped
+    if stripped.lower().startswith("bearer "):
+        bare = stripped[7:].strip()
+    if not (bare.isascii() and all(0x21 <= ord(ch) <= 0x7E for ch in bare)):
+        return None
+    adds_prefix = (style or "bearer").lower() == "bearer" and (
+        (header_name or "Authorization").lower() == "authorization"
+    )
+    if adds_prefix or bare == stripped:
+        return bare, bare
+    if stripped[7:] != bare:  # exactly one space after the prefix
+        return None
+    return stripped, bare
+
+
 def _redact_secret(text: str, key: str) -> str:
     """Replace every occurrence of ``key`` (and its URL-encoded form) with ``***``.
 
@@ -1063,12 +1089,11 @@ class UpstreamRegistry:
     ) -> dict[str, Any]:
         style = (auth_style or "bearer").lower()
         stripped = key.strip()
-        token = stripped
-        if stripped.lower().startswith("bearer "):
-            token = stripped[7:].strip()
-        headers = build_auth_headers(style, auth_header, token)
+        normal = normalise_key(style, auth_header, key)
+        sent, token = normal if normal is not None else (stripped, stripped)
+        headers = build_auth_headers(style, auth_header, sent)
         headers["Accept-Encoding"] = "identity"
-        secrets = {s for s in (key, stripped, token) if s}
+        secrets = {s for s in (key, stripped, sent, token) if s}
 
         def scrub(text: str) -> str:
             for secret in secrets:

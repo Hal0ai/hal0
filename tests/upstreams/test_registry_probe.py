@@ -304,25 +304,43 @@ async def test_probe_any_failure_after_the_request_is_ok_false(
     assert KEY not in repr(out)
 
 
-@pytest.mark.parametrize("style", ["header", "anthropic", "none"])
-async def test_probe_strips_bearer_prefix_for_every_style(
-    monkeypatch: pytest.MonkeyPatch, style: str
+@pytest.mark.parametrize(
+    ("style", "header", "header_sent"),
+    [
+        ("header", "X-Token", "x-token"),
+        ("bearer", "X-Authorization", "x-authorization"),
+        ("anthropic", "", "x-api-key"),
+    ],
+)
+async def test_probe_sends_verbatim_where_hal0_adds_no_prefix(
+    monkeypatch: pytest.MonkeyPatch, style: str, header: str, header_sent: str
 ) -> None:
     seen = _wire(monkeypatch, lambda r: httpx.Response(401, text="echo sk-bare"))
     out = await UpstreamRegistry().probe(
-        url=URL, auth_style=style, auth_header="X-Token", key="Bearer sk-bare"
+        url=URL, auth_style=style, auth_header=header, key="Bearer sk-bare"
     )
+    assert seen[0].headers[header_sent] == "Bearer sk-bare"
+    # the bare token is still scrubbed from what comes back
     assert "sk-bare" not in out["error"]
-    sent = " ".join(seen[0].headers.values())
-    assert "Bearer sk-bare" not in sent
 
 
-async def test_probe_header_style_sends_bare_token(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_probe_none_style_sends_no_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _wire(monkeypatch, lambda r: httpx.Response(401, text="echo sk-bare"))
+    out = await UpstreamRegistry().probe(
+        url=URL, auth_style="none", auth_header="X-Token", key="Bearer sk-bare"
+    )
+    assert "sk-bare" not in " ".join(seen[0].headers.values())
+    assert "sk-bare" not in out["error"]
+
+
+async def test_probe_default_authorization_header_strips_the_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     seen = _wire(monkeypatch, lambda r: httpx.Response(200, json={"data": []}))
     await UpstreamRegistry().probe(
-        url=URL, auth_style="header", auth_header="X-Token", key="Bearer sk-bare"
+        url=URL, auth_style="bearer", auth_header="authorization", key="Bearer sk-bare"
     )
-    assert seen[0].headers["x-token"] == "sk-bare"
+    assert seen[0].headers["authorization"] == "Bearer sk-bare"
 
 
 def test_decode_capped_truncated_gzip_fails() -> None:

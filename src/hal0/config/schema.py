@@ -1390,7 +1390,8 @@ class UpstreamModelFilters(BaseModel):
 
 # Mirrors hal0.upstreams.catalog.MODEL_TYPES (importing it here would pull in the
 # upstreams package, which imports this module); a test keeps the two equal.
-_VALID_MODEL_TYPES = frozenset({"chat", "embed", "rerank", "tts", "stt", "image"})
+VALID_MODEL_TYPES = frozenset({"chat", "embed", "rerank", "tts", "stt", "image"})
+_VALID_MODEL_TYPES = VALID_MODEL_TYPES
 VALID_PRICE_UNITS = frozenset({"Mtok", "Mchar", "image", "1k_search"})
 
 

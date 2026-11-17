@@ -242,6 +242,37 @@ def test_probe_accepts_bearer_prefixed_key(
     assert seen[0].headers["authorization"] == f"Bearer {KEY}"
 
 
+def test_probe_header_style_keeps_the_bearer_prefix(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _wire(monkeypatch, lambda r: httpx.Response(200, json={"data": []}))
+    res = client.post(
+        "/api/providers/probe",
+        json={
+            "url": "https://p.example/v1",
+            "auth_style": "header",
+            "auth_header": "X-Authorization",
+            "key": f"Bearer {KEY}",
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert seen[0].headers["x-authorization"] == f"Bearer {KEY}"
+
+
+def test_probe_header_style_still_refuses_inner_whitespace(client: TestClient) -> None:
+    res = client.post(
+        "/api/providers/probe",
+        json={
+            "url": "https://p.example/v1",
+            "auth_style": "header",
+            "auth_header": "X-Authorization",
+            "key": "Bearer two parts",
+        },
+    )
+    assert res.status_code == 400
+    assert "two parts" not in res.text
+
+
 def test_probe_header_style_requires_header_name(client: TestClient) -> None:
     res = client.post(
         "/api/providers/probe",

@@ -66,6 +66,7 @@ from hal0.upstreams.registry import (
     UpstreamAlreadyExists,
     UpstreamNotFound,
     UpstreamProtected,
+    normalise_key,
 )
 
 _audit_log = structlog.get_logger("hal0.audit")
@@ -267,8 +268,9 @@ class UpstreamCreateBody(BaseModel):
     provider presets (explicit body fields win over the prefill); without
     it ``url`` is required. Credentials are NOT accepted here — write the key
     afterwards via ``POST /api/providers/{name}/credentials`` so secrets never
-    transit the CRUD surface. A new row is always curated: it routes exactly the
-    enabled entries of ``models`` (none when the list is empty).
+    transit the CRUD surface. With ``models`` present (even empty) the row is
+    curated and routes exactly its enabled entries; with ``models`` omitted it is
+    created uncurated, as before per-model rows, and converts later.
     """
 
     model_config = {"extra": "forbid"}
@@ -285,7 +287,7 @@ class UpstreamCreateBody(BaseModel):
     enabled: bool = Field(default=True)
     model_filters: UpstreamModelFilters | None = Field(default=None)
     budget_monthly_usd: float | None = Field(default=None, ge=0)
-    models: list[UpstreamModelEntry] = Field(default_factory=list)
+    models: list[UpstreamModelEntry] | None = Field(default=None)
 
 
 @router.post("/upstreams", status_code=201)
@@ -352,9 +354,9 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
                 else body.model_filters
             ),
             catalog_id=body.catalog_id,
-            curated=True,
+            curated=body.models is not None,
             budget_monthly_usd=body.budget_monthly_usd,
-            models=body.models,
+            models=body.models or [],
         )
     except ValidationError as exc:
         raise UpstreamInvalidHTTP(
@@ -370,7 +372,8 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
     except UpstreamAlreadyExists as exc:
         raise UpstreamConflictHTTP(str(exc), {"name": name}) from exc
 
-    # A curated upstream's cache entry is its enabled rows.
+    # A curated upstream's cache entry is its enabled rows; an uncurated new row
+    # is left to the dispatcher, as before per-model rows.
     created_cache = getattr(request.app.state, "upstream_models", None)
     if created_cache is not None:
         reseed_curated_cache(upstreams, created_cache, created.name)
@@ -735,13 +738,16 @@ def _live_rows(request: Request, u: Any) -> list[dict[str, Any]]:
     ]
 
 
-async def _listing(request: Request, u: Any, *, force: bool = False) -> dict[str, Any]:
+async def _listing(
+    request: Request, u: Any, *, force: bool = False, warning: str | None = None
+) -> dict[str, Any]:
     if _is_protected(u):
         return {
             "name": u.name,
             "curated": False,
             "fetched_at": None,
             "stale": False,
+            "warning": warning,
             "models": _live_rows(request, u),
         }
     if not u.curated:
@@ -751,6 +757,7 @@ async def _listing(request: Request, u: Any, *, force: bool = False) -> dict[str
             "curated": False,
             "fetched_at": None,
             "stale": True,
+            "warning": warning,
             "models": _live_rows(request, u),
         }
     found, fetched_at, stale = await _discovered(request, u, force=force)
@@ -761,6 +768,7 @@ async def _listing(request: Request, u: Any, *, force: bool = False) -> dict[str
         "curated": True,
         "fetched_at": fetched_at,
         "stale": stale,
+        "warning": warning,
         "models": _merged_rows(u, found),
     }
 
@@ -789,20 +797,23 @@ async def patch_upstream_model(
         )
     sent = body.model_fields_set
 
-    stored = next((m for m in u.models if m.id == model_id), None)
-    if stored is None:
-        # Refuse a bad id before any network call.
-        try:
-            UpstreamModelEntry(id=model_id)
-        except ValidationError as exc:
-            raise UpstreamInvalidHTTP(
-                "invalid model row",
-                details={"name": name, "errors": _validation_summaries(exc)},
-            ) from exc
+    try:
+        UpstreamModelEntry(id=model_id)  # refuse a bad id before any network call
+    except ValidationError as exc:
+        raise UpstreamInvalidHTTP(
+            "invalid model row", details={"name": name, "errors": _validation_summaries(exc)}
+        ) from exc
+    seed: DiscoveredModel | None = None
+    if not any(m.id == model_id for m in u.models):
         found, _at, _stale = await _discovered(request, u, force=False)
-        u = _lookup_upstream(request, name)
         seed = next((d for d in found if d.id == model_id), None)
-        data: dict[str, Any] = {"id": model_id, "enabled": False}
+        # The await let other writes land: everything below reads the row again.
+        u = _lookup_upstream(request, name)
+    stored = next((m for m in u.models if m.id == model_id), None)
+    if stored is not None:
+        data: dict[str, Any] = asdict(stored)
+    else:
+        data = {"id": model_id, "enabled": False, "type": guess_type(model_id)}
         if seed is not None:
             data.update(
                 type=seed.type,
@@ -811,10 +822,6 @@ async def patch_upstream_model(
                 price_out=seed.price_out,
                 price_unit=seed.price_unit,
             )
-        else:
-            data["type"] = guess_type(model_id)
-    else:
-        data = asdict(stored)
     data.update({k: getattr(body, k) for k in sent})
 
     try:
@@ -850,6 +857,15 @@ async def patch_upstream_model(
     return next(r for r in _merged_rows(updated, discovered) if r["id"] == model_id)
 
 
+def _why_unreachable(u: Any) -> str:
+    """Class-wise hint for an empty provider answer; never carries a key or a URL."""
+    if not u.url:
+        return "no url is configured"
+    if u.auth_style != "none" and u.auth_value_env and not os.environ.get(u.auth_value_env):
+        return "no key is configured"
+    return "check the url and key, then refresh again"
+
+
 @router.post("/upstreams/{name}/refresh")
 async def refresh_upstream_models(name: str, request: Request) -> dict[str, Any]:
     """Refetch a provider's model list and return the listing.
@@ -864,6 +880,7 @@ async def refresh_upstream_models(name: str, request: Request) -> dict[str, Any]
     if not u.curated:
         from hal0.upstreams import convert
 
+        warning: str | None = None
         try:
             await convert.convert_legacy_upstreams(
                 request.app.state.upstreams,
@@ -874,8 +891,11 @@ async def refresh_upstream_models(name: str, request: Request) -> dict[str, Any]
             )
         except Exception as exc:
             _log.warning("upstream.refresh_convert_failed", name=name, error=type(exc).__name__)
+            warning = f"conversion failed ({type(exc).__name__}); the row was not changed"
         u = _lookup_upstream(request, name)
-        return await _listing(request, u)
+        if warning is None and not u.curated:
+            warning = f"the provider returned no models; {_why_unreachable(u)}"
+        return await _listing(request, u, warning=warning)
     return await _listing(request, u, force=True)
 
 
@@ -989,25 +1009,6 @@ class ProviderProbeBody(BaseModel):
 _KEY_REFUSAL = "key must be printable ASCII without whitespace"
 
 
-def _normalised_key(key: str) -> str | None:
-    """The bare token in ``key``, or None when it is not a usable key.
-
-    Printable ASCII, no inner whitespace; one leading ``Bearer `` prefix is
-    stripped. Shared by the probe and the credentials route so a key that passed
-    the probe is stored the way it was probed. May return ``""`` (no key).
-    """
-    token = key.strip()
-    if token.lower().startswith("bearer "):
-        token = token[7:].strip()
-    if token.isascii() and all(0x21 <= ord(ch) <= 0x7E for ch in token):
-        return token
-    return None
-
-
-def _probe_key_ok(key: str) -> bool:
-    return _normalised_key(key) is not None
-
-
 def _rate_limit_values(preset: Any, headers: dict[str, str]) -> dict[str, int | None]:
     """Parse the preset-declared rate-limit headers; null when absent or not an integer."""
     declared = preset.rate_limit_headers if preset is not None else {}
@@ -1069,7 +1070,7 @@ async def probe_provider(request: Request) -> dict[str, Any]:
     if auth_style.lower() == "header" and not auth_header.strip():
         raise UpstreamInvalidHTTP("auth_style 'header' needs an auth_header name")
     key = body.key.get_secret_value() if body.key is not None else ""
-    if not _probe_key_ok(key):
+    if normalise_key(auth_style, auth_header, key) is None:
         raise UpstreamInvalidHTTP(_KEY_REFUSAL)
 
     try:
@@ -1227,13 +1228,15 @@ async def write_provider_credential(
             details={"name": name, "key": key, "expected": expected_env},
         )
 
-    # Normalise the value exactly as the probe does. Anything that is not
-    # printable ASCII is refused here, which includes the control characters
-    # (a newline would break out of the quoted api.env line and inject an
-    # arbitrary env-var; the file is a LAN-writable systemd EnvironmentFile).
-    token = _normalised_key(body.value)
-    if not token:
+    # Normalise the value exactly as the probe does (same helper, this
+    # upstream's style and header). Anything that is not printable ASCII is
+    # refused, which includes the control characters (a newline would break
+    # out of the quoted api.env line and inject an arbitrary env-var; the file
+    # is a LAN-writable systemd EnvironmentFile).
+    normal = normalise_key(upstream.auth_style, upstream.auth_header, body.value)
+    if normal is None or not normal[0]:
         raise ProviderCredentialError(_KEY_REFUSAL, details={"name": name, "key": key})
+    token = normal[0]
 
     api_env = paths.etc() / "api.env"
     try:

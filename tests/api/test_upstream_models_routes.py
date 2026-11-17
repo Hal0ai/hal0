@@ -15,7 +15,7 @@ from pydantic import ValidationError
 from hal0.config.loader import load_upstreams_config, save_upstreams_config
 from hal0.config.schema import UpstreamEntry, UpstreamModelEntry
 from hal0.dispatcher.router import NoRouteFound
-from hal0.upstreams.catalog import MODEL_TYPES, ModelNotEnabled
+from hal0.upstreams.catalog import MODEL_TYPES, ModelNotEnabled, UpstreamModel
 from hal0.upstreams.registry import Upstream, upstream_from_entry
 from tests.dispatcher.test_router import make_request
 
@@ -75,6 +75,11 @@ def _add(client: TestClient, **kw: Any) -> Upstream:
 
 
 def _create(client: TestClient, **kw: Any) -> dict[str, Any]:
+    """Create through the route; curated unless the test passes ``models=None``."""
+    if kw.get("models", ...) is None:
+        del kw["models"]
+    else:
+        kw.setdefault("models", [])
     body = {"name": "mm", "url": URL, **kw}
     res = client.post("/api/upstreams", json=body)
     assert res.status_code == 201, res.text
@@ -130,14 +135,53 @@ def test_create_never_accepts_a_key(client: TestClient) -> None:
     assert "sk-secret" not in res.text
 
 
-def test_create_without_models_is_curated_and_routes_nothing(client: TestClient) -> None:
+def test_create_with_models_omitted_is_uncurated_and_passes_through(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _fresh(client)
-    out = _create(client)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    out = _create(client, catalog_id="openai", budget_monthly_usd=5.0, models=None)
+    assert out["curated"] is False and out["models_total"] == 0
+    assert out["catalog_id"] == "openai" and out["budget_monthly_usd"] == 5.0
+    row = _toml(client)["upstream"][0]
+    assert row.get("curated", False) is False
+    # the cache is left to the dispatcher, as for any new uncurated row
+    assert "mm" not in client.app.state.upstream_models
+    call = _resolve(client, "gpt-5-mini")
+    assert call.upstream_name == "mm" and call.resolved_model == "gpt-5-mini"
+
+
+def test_create_with_models_omitted_accepts_filters(client: TestClient) -> None:
+    _fresh(client)
+    out = _create(client, model_filters={"include": ["gpt-*"]}, models=None)
+    assert out["curated"] is False
+    assert out["model_filters"]["include"] == ["gpt-*"]
+
+
+def test_create_with_empty_models_is_curated_and_routes_nothing(client: TestClient) -> None:
+    _fresh(client)
+    out = _create(client, models=[])
     assert out["curated"] is True and out["models_total"] == 0
     assert client.app.state.upstream_models["mm"] == []
-    assert _models(client)["models"][0:0] == []  # no stored rows
+    # discovery lists models, but none is enabled: every row is discovered-only and off
+    rows = _models(client)["models"]
+    assert rows and all(m["enabled"] is False for m in rows)
     with pytest.raises(NoRouteFound):
-        _resolve(client, "mm/qwen/qwen3-coder")
+        _resolve(client, "gpt-5-mini")
+
+
+def test_create_with_models_and_filters_is_400(client: TestClient) -> None:
+    _fresh(client)
+    res = client.post(
+        "/api/upstreams",
+        json={
+            "name": "mm",
+            "url": URL,
+            "models": [{"id": "m1"}],
+            "model_filters": {"include": ["gpt-*"]},
+        },
+    )
+    assert res.status_code == 400, res.text
 
 
 # ── list ──────────────────────────────────────────────────────────────────────
@@ -546,3 +590,94 @@ def test_credentials_reject_what_the_probe_rejects(client: TestClient, value: st
     assert res.status_code == 400, res.text
     assert res.json()["error"]["code"] == "provider.credential_write_failed"
     assert "key must be printable ASCII without whitespace" in res.text
+
+
+def test_credentials_keep_the_prefix_for_a_custom_header(
+    client: TestClient, tmp_hal0_home: str
+) -> None:
+    _fresh(client)
+    _create(
+        client,
+        auth_style="header",
+        auth_header="X-Authorization",
+        auth_value_env="MM_API_KEY",
+    )
+    res = client.post(
+        "/api/providers/mm/credentials",
+        json={"key": "MM_API_KEY", "value": "Bearer sk-abc123"},
+    )
+    assert res.status_code == 200, res.text
+    assert os.environ["MM_API_KEY"] == "Bearer sk-abc123"
+    bad = client.post(
+        "/api/providers/mm/credentials",
+        json={"key": "MM_API_KEY", "value": "Bearer two parts"},
+    )
+    assert bad.status_code == 400
+
+
+def test_refresh_reports_a_conversion_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fresh(client)
+    _add(client)
+    from hal0.upstreams import convert
+
+    async def boom(*a: Any, **k: Any) -> None:
+        raise OSError("disk on fire")
+
+    monkeypatch.setattr(convert, "convert_legacy_upstreams", boom)
+    body = client.post("/api/upstreams/mm/refresh").json()
+    assert body["curated"] is False
+    assert "conversion failed" in body["warning"] and "OSError" in body["warning"]
+    assert "disk on fire" not in body["warning"]
+
+
+def test_refresh_warns_when_the_provider_gave_no_models(client: TestClient) -> None:
+    _fresh(client)
+    _add(client)
+    _down(client)
+    body = client.post("/api/upstreams/mm/refresh").json()
+    assert body["stale"] is True
+    assert "no models" in body["warning"]
+
+
+def test_refresh_has_no_warning_normally(client: TestClient) -> None:
+    _fresh(client)
+    _create(client, models=[])
+    assert client.post("/api/upstreams/mm/refresh").json()["warning"] is None
+    assert _models(client)["warning"] is None
+
+
+def test_overlapping_patches_of_a_discovered_only_model_keep_both(
+    client: TestClient,
+) -> None:
+    """A write that lands during the discovery await must not be lost by the next."""
+    _fresh(client)
+    _create(client, models=[])
+    real = client.app.state.upstreams.fetch_model_payload
+    reg = client.app.state.upstreams
+    fired = {"done": False}
+
+    async def racing(name: str) -> Any:
+        if not fired["done"]:
+            fired["done"] = True
+            # another write creates the row while the first PATCH awaits discovery
+            reg.apply_persistent_patch(
+                "mm", {"models": [UpstreamModel(id="gpt-5-mini", enabled=False, context=1234)]}
+            )
+        return await real(name)
+
+    reg.fetch_model_payload = racing  # type: ignore[method-assign]
+    client.app.state.upstream_discovery.drop("mm")
+    res = client.patch("/api/upstreams/mm/models/gpt-5-mini", json={"enabled": True})
+    assert res.status_code == 200, res.text
+    row = _by_id(_models(client))["gpt-5-mini"]
+    assert row["enabled"] is True and row["context"] == 1234
+
+
+def test_presets_share_the_schema_vocabularies() -> None:
+    from hal0.config import schema
+    from hal0.upstreams import presets
+
+    assert presets._MODEL_TYPES == schema._VALID_MODEL_TYPES
+    assert presets._PRICE_UNITS == schema.VALID_PRICE_UNITS
