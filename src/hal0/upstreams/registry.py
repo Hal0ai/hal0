@@ -945,7 +945,7 @@ class UpstreamRegistry:
                 headers=headers,
                 timeout=httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0),
             )
-            if not resp.is_success:
+            if not (200 <= resp.status_code < 300):
                 log.debug(
                     "upstream.fetch_models_bad_status",
                     name=name,
