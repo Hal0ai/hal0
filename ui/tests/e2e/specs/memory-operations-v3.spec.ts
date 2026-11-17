@@ -210,7 +210,8 @@ test.describe('backlog, with storing memories failing', () => {
     await expect(rows(page)).toHaveCount(25)
     // Newest first: the two rows of `ingest` are newer than anything in `big`.
     const first = rows(page).first()
-    await expect(first.locator('th')).toHaveText('Store a document')
+    await expect(first.locator('th')).toHaveText(/^Store a document/)
+    await expect(first.getByTestId('ma-ops-target')).toHaveText(/^doc …/)
     await expect(first.locator('th')).toHaveAttribute('title', 'document_ingest')
     await expect(first.locator('td').nth(0)).toHaveText('ingest')
     await expect(first.locator('time')).toHaveText('6 min ago')
@@ -518,11 +519,15 @@ test.describe('phone width', () => {
     })
     expect(tooWide).toEqual([])
 
-    // The table scrolls inside its own region, which the keyboard can reach.
+    // Below 480 px each row is a card: no column hides behind a sideways scroll, and every
+    // cell is labelled.
     const region = page.getByRole('region', { name: 'Operations table' })
     await expect(region).toHaveAttribute('tabindex', '0')
     const scrolls = await region.evaluate((el) => el.scrollWidth > el.clientWidth)
-    expect(scrolls).toBe(true)
+    expect(scrolls).toBe(false)
+    for (const label of ['Bank', 'Queued', 'Status']) {
+      await expect(rows(page).first().locator(`td[data-label="${label}"]`)).toBeVisible()
+    }
 
     await expect(page.getByTestId('ma-ops-cause')).toBeVisible()
     await page.getByTestId('ma-ops-discard').scrollIntoViewIfNeeded()
