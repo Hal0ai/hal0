@@ -329,6 +329,17 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
         "memory embedder record (the engine drop-ins were left as they were; "
         "see journalctl for hal0-api)"
     ),
+    # Config migration v5 (#3758, #3759, #3762): not failures, notes the operator
+    # should read because the update changed or adopted a stored lane limit.
+    "updater.lane_limits_converted": (
+        "memory lane limit conversion (a stored limit was reset to follow its default, "
+        "or a hand-made drop-in value was adopted into hal0.toml; the drop-in itself "
+        "is untouched and can now be deleted)"
+    ),
+    "updater.lane_limits_adopt_skipped": (
+        "memory lane limit adoption (a hand-made drop-in value could not be copied into "
+        "hal0.toml, so the managed value now applies; the update log names the file)"
+    ),
     "components.hermes_gateway_regen_failed": (
         "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"
     ),

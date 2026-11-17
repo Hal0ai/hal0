@@ -16,6 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from hal0.config.schema import (
+    CURRENT_SCHEMA_VERSION,
     Hal0Config,
     MemoryConfig,
     MemoryGraphConfig,
@@ -154,7 +155,7 @@ class TestLegacyKeyDrop:
 
 def test_fresh_memory_priority_defaults_round_trip() -> None:
     cfg = Hal0Config()
-    assert cfg.meta.schema_version == 4
+    assert cfg.meta.schema_version == CURRENT_SCHEMA_VERSION
     assert cfg.memory.priority.enabled is True
     assert cfg.memory.priority.quiet_gap_s == 30
     assert cfg.memory.priority.max_defer_s == 300

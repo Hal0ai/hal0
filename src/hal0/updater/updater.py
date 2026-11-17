@@ -4420,6 +4420,10 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.extraction_dropin_reconcile_failed",
     "updater.showcase_dropin_reconcile_failed",
     "updater.embedder_record_failed",
+    # Not a failure: an operator-facing note that the update changed a stored
+    # lane limit or adopted a hand-made drop-in value (config migration v5).
+    "updater.lane_limits_converted",
+    "updater.lane_limits_adopt_skipped",
 )
 
 

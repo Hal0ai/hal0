@@ -106,7 +106,7 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Schema version for migrations.  Bumped when a backwards-incompatible
 # config-shape change lands.  See PLAN.md §5 Tier 3.
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 # Capabilities-file schema version. Independent of ``hal0.toml``'s
 # ``meta.schema_version``. v2 (since v0.2) means CapabilitySelection uses
@@ -3269,7 +3269,8 @@ class MemoryLaneOpConfig(BaseModel):
         le=32,
         description=(
             "HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT. Unset falls back to "
-            "[memory.lanes].llm_max_concurrent."
+            "[memory.lanes].llm_max_concurrent (itself defaulting to "
+            "[memory.graph].extraction_max_concurrent; consolidation takes one fewer)."
         ),
     )
     virtual_model: str | None = Field(
@@ -3318,6 +3319,55 @@ class MemoryLaneOpConfig(BaseModel):
         return None if v is None else _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
 
 
+#: What an unset ``[memory.lanes.reflect].wall_timeout_s`` /
+#: ``[memory.lanes.consolidation].batch_size`` mean. Resolved at render time,
+#: not in the field default, so a settings save does not write them into
+#: hal0.toml and a later change of the default reaches existing boxes.
+DEFAULT_REFLECT_WALL_TIMEOUT_S = 1800
+DEFAULT_CONSOLIDATION_BATCH_SIZE = 4
+
+
+class MemoryReflectLaneConfig(MemoryLaneOpConfig):
+    """``[memory.lanes.reflect]``: the per-op lane plus the reflect wall clock."""
+
+    wall_timeout_s: int | None = Field(
+        default=None,
+        ge=60,
+        le=86400,
+        description=(
+            "HINDSIGHT_API_REFLECT_WALL_TIMEOUT (#3759): seconds the engine "
+            "gives one reflect, and one knowledge-page refresh (a reflect "
+            "call), from start to finish. The clock includes time spent "
+            "waiting for an LLM permit, so a refresh queued behind "
+            "consolidation and retain needs headroom; the engine's own "
+            "default is 300. Unset means hal0's default, 1800 "
+            "(DEFAULT_REFLECT_WALL_TIMEOUT_S), resolved when the drop-in is "
+            "rendered so a save never pins it. Keep it above "
+            "[memory.graph].llm_timeout_s: a wall clock shorter than one "
+            "LLM call's timeout cannot let a slow call finish."
+        ),
+    )
+
+
+class MemoryConsolidationLaneConfig(MemoryLaneOpConfig):
+    """``[memory.lanes.consolidation]``: the per-op lane plus the batch size."""
+
+    batch_size: int | None = Field(
+        default=None,
+        ge=1,
+        le=32,
+        description=(
+            "HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE (#3762): memories "
+            "consolidated per LLM call (1 = no batching). The engine's own "
+            "default is 8, which can overflow the 8192-token output cap "
+            "hal0 renders; a batch that overflows is split and retried, and "
+            "what still fails is counted as failed. Unset means hal0's "
+            "default, 4 (DEFAULT_CONSOLIDATION_BATCH_SIZE), resolved when "
+            "the drop-in is rendered so a save never pins it."
+        ),
+    )
+
+
 class MemoryLanesConfig(BaseModel):
     """[memory.lanes] section of hal0.toml — global + per-op LLM concurrency lanes.
 
@@ -3333,28 +3383,43 @@ class MemoryLanesConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
 
-    llm_max_concurrent: int = Field(
-        default=1,
+    llm_max_concurrent: int | None = Field(
+        default=None,
         ge=1,
         le=32,
         description=(
             "HINDSIGHT_API_LLM_MAX_CONCURRENT — the GLOBAL cap across every "
             "hindsight-api LLM call (retain, consolidation, reflect, "
-            "mental-model-refresh together), independent of any per-op cap."
+            "mental-model-refresh together), independent of any per-op cap. "
+            "Unset follows [memory.graph].extraction_max_concurrent (as held to "
+            "the extraction slot's --parallel), so the one setting the dashboard "
+            "edits drives the whole engine, and the consolidation lane then "
+            "takes one fewer so retain and page refresh always have a permit. "
+            "An explicit value is still held to that same ceiling."
         ),
     )
     timeout_s: int = Field(default=600, ge=30, le=3600, description="HINDSIGHT_API_LLM_TIMEOUT.")
     reasoning_effort: str = Field(default="none", description="HINDSIGHT_API_LLM_REASONING_EFFORT.")
     strict_schema: bool = Field(default=False, description="HINDSIGHT_API_LLM_STRICT_SCHEMA.")
     retain: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
-    consolidation: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
-    reflect: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    consolidation: MemoryConsolidationLaneConfig = Field(
+        default_factory=MemoryConsolidationLaneConfig
+    )
+    reflect: MemoryReflectLaneConfig = Field(default_factory=MemoryReflectLaneConfig)
     mental_model_refresh: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
 
     @field_validator("reasoning_effort")
     @classmethod
     def _effort_shape(cls, v: str) -> str:
         return _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
+
+    @field_validator("reflect", "consolidation", mode="before")
+    @classmethod
+    def _plain_op_lane_to_subclass(cls, v: object) -> object:
+        # Callers that build the lane from the base per-op model keep working.
+        if type(v) is MemoryLaneOpConfig:
+            return v.model_dump(exclude_unset=True)
+        return v
 
     @model_validator(mode="after")
     def _completion_cap_only_where_engine_accepts(self) -> MemoryLanesConfig:

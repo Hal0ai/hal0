@@ -33,6 +33,7 @@ import { BankFailures, SaveWarnings, ThroughputNote } from './ExtractionThroughp
 import { KnowledgeRefreshPanel } from './KnowledgeRefreshPanel.jsx'
 import { MemoryModelsPanel } from './MemoryModelsPanel.jsx'
 import { modelsFocus } from './memoryModels'
+import { EngineLimitsPanel } from './EngineLimitsPanel.jsx'
 
 /** @param {{ sub?: string | null }} props `sub` is the settings sub-path (`models/<group>`). */
 export function MemoryPage({ sub = null }) {
@@ -48,6 +49,7 @@ export function MemoryPage({ sub = null }) {
       </p>
       <MemoryEnginePanel registry={registry} />
       <MemoryGraphPanel />
+      <EngineLimitsPanel registry={registry} />
       <KnowledgeRefreshPanel registry={registry} />
       <MemoryModelsPanel registry={registry} focus={modelsFocus(sub)} />
       <MemoryRerankerPanel registry={registry} />

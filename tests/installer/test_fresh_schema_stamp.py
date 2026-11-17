@@ -139,3 +139,11 @@ def test_fresh_seed_keeps_shared_memory_defaults_after_post_activation(tmp_path:
         [venv_python, "-c", code], env=env, capture_output=True, text=True, check=False
     )
     assert migrated.returncode == 0, migrated.stderr
+
+
+def test_current_schema_version_is_the_highest_registered_migration() -> None:
+    """A migration above the constant would run on every fresh install, which is
+    stamped CURRENT_SCHEMA_VERSION; one below it would never run on an upgrade."""
+    from hal0.config.migrations import latest_version
+
+    assert latest_version() == CURRENT_SCHEMA_VERSION

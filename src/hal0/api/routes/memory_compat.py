@@ -91,7 +91,12 @@ from fastapi.responses import JSONResponse
 from hal0.activity import audit_action
 from hal0.api.auth import judged_principal
 from hal0.api.routes.memory import MemoryUnavailable, extraction_ctx_preflight
-from hal0.config.schema import MemoryCompatConfig, MemoryLanesConfig, MemoryRefreshConfig
+from hal0.config.schema import (
+    MemoryCompatConfig,
+    MemoryGraphConfig,
+    MemoryLanesConfig,
+    MemoryRefreshConfig,
+)
 from hal0.errors import (
     BadRequest,
     Forbidden,
@@ -230,7 +235,7 @@ _EVERY_CLIENT = "*"
 _OPERATION_ID_NAMESPACE = uuid.UUID("6b0f5d1e-3c8a-5e47-9d52-a1c4e7f20b93")
 
 _DEFAULT_SETTINGS = MemoryCompatConfig()
-_DEFAULT_LANES = MemoryLanesConfig()
+_DEFAULT_GRAPH = MemoryGraphConfig()
 
 PROJECT_HEADER = "X-hal0-Project"
 IGNORED_FIELDS_HEADER = "X-hal0-Ignored-Fields"
@@ -607,18 +612,27 @@ def _reflect_limit(request: Request) -> int:
     read are taken to be the shipped ones.
     """
     configured = _settings(request).max_concurrent_reflects
-    lanes = getattr(
-        getattr(getattr(request.app.state, "hal0_config", None), "memory", None), "lanes", None
-    )
-    caps = [
-        cap
-        for cap in (
-            getattr(lanes, "llm_max_concurrent", None),
-            getattr(getattr(lanes, "reflect", None), "max_concurrent", None),
-        )
-        if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1
-    ]
-    engine_slots = min(caps) if caps else _DEFAULT_LANES.llm_max_concurrent
+    memory_cfg = getattr(getattr(request.app.state, "hal0_config", None), "memory", None)
+    lanes = getattr(memory_cfg, "lanes", None)
+    graph = getattr(memory_cfg, "graph", None)
+    if isinstance(lanes, MemoryLanesConfig) and isinstance(graph, MemoryGraphConfig):
+        # What the engine is given: the same resolver the drop-in is rendered
+        # from (slot --parallel clamp, explicit-value ceiling) (#3758).
+        from hal0.memory.extraction_env import resolved_lane_caps
+
+        global_cap, per_op = resolved_lane_caps(lanes, graph)
+        engine_slots = min(global_cap, per_op["reflect"])
+    else:
+        # Lanes hal0-api cannot read are taken to be the shipped ones.
+        caps = [
+            cap
+            for cap in (
+                getattr(lanes, "llm_max_concurrent", None),
+                getattr(getattr(lanes, "reflect", None), "max_concurrent", None),
+            )
+            if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1
+        ]
+        engine_slots = min(caps) if caps else _DEFAULT_GRAPH.extraction_max_concurrent
     return min(configured, max(1, engine_slots - 1))
 
 
