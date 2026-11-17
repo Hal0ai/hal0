@@ -9,7 +9,7 @@ from hal0.memory.extraction_env import render_showcase_env
 def test_render_showcase_env_defaults_set_global_and_every_op_cap() -> None:
     out = render_showcase_env(
         models=MemoryModelsConfig(),
-        decision=MemoryDecisionConfig(),
+        decision=MemoryDecisionConfig(provider="local"),
         lanes=MemoryLanesConfig(),
         decision_unit_installed=True,
     )
@@ -31,7 +31,7 @@ def test_render_showcase_env_per_op_override_wins_over_global() -> None:
         reflect={"max_concurrent": 5, "virtual_model": "hal0/utility", "timeout_s": 900},
     )
     out = render_showcase_env(
-        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=lanes
+        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(provider="local"), lanes=lanes
     )
     assert "Environment=HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT=5" in out
     assert "Environment=HINDSIGHT_API_REFLECT_LLM_MODEL=hal0/utility" in out
@@ -51,7 +51,9 @@ def test_render_showcase_env_decision_off_omits_decision_env() -> None:
 
 def test_render_showcase_env_is_deterministic() -> None:
     args = dict(
-        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=MemoryLanesConfig()
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(provider="local"),
+        lanes=MemoryLanesConfig(),
     )
     assert render_showcase_env(**args) == render_showcase_env(**args)
 
@@ -77,7 +79,9 @@ def test_render_showcase_env_probes_the_unit_path_by_default(tmp_path, monkeypat
     unit = tmp_path / "hal0-hs-decide.service"
     monkeypatch.setattr(ee, "DECISION_UNIT_PATH", unit)
     args = dict(
-        models=MemoryModelsConfig(), decision=MemoryDecisionConfig(), lanes=MemoryLanesConfig()
+        models=MemoryModelsConfig(),
+        decision=MemoryDecisionConfig(provider="local"),
+        lanes=MemoryLanesConfig(),
     )
     assert "DECISION_MODEL" not in render_showcase_env(**args)
     unit.write_text("[Unit]\n")
@@ -90,7 +94,7 @@ def test_render_showcase_env_probes_the_unit_path_by_default(tmp_path, monkeypat
 def test_render_showcase_env_explicit_loopback_base_url_renders_as_configured() -> None:
     out = render_showcase_env(
         models=MemoryModelsConfig(),
-        decision=MemoryDecisionConfig(base_url="http://127.0.0.1:9300/"),
+        decision=MemoryDecisionConfig(provider="local", base_url="http://127.0.0.1:9300/"),
         lanes=MemoryLanesConfig(),
         decision_unit_installed=False,
     )
@@ -100,7 +104,7 @@ def test_render_showcase_env_explicit_loopback_base_url_renders_as_configured() 
 def test_render_showcase_env_base_url_the_allow_list_refuses_is_omitted() -> None:
     out = render_showcase_env(
         models=MemoryModelsConfig(),
-        decision=MemoryDecisionConfig(base_url="http://decide.example:9178"),
+        decision=MemoryDecisionConfig(provider="local", base_url="http://decide.example:9178"),
         lanes=MemoryLanesConfig(),
         decision_unit_installed=True,
     )

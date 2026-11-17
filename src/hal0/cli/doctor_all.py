@@ -4093,7 +4093,7 @@ def _decision_config() -> tuple[Any, bool]:
 
     Returns ``(config, read_ok)``. hal0.toml is ``0600``, so for anyone but the
     service user and root the read fails; the row then judges the shipped
-    default (enabled, ``provider = "local"``) and says so.
+    default (``provider = "off"``) and says so.
     """
     from hal0.config.loader import ConfigError, load_hal0_config
     from hal0.config.schema import MemoryDecisionConfig
@@ -4230,16 +4230,16 @@ def check_memory_decision_lane(
 ) -> Check:
     """An enabled ``[memory.decision]`` lane must have a server that answers (#3519).
 
-    The showcase drop-in points hindsight-api at the decision server only
-    when one can answer (``extraction_env.decision_engine_base_url``); this
-    row says which way that went. ``provider = "local"`` needs the
-    ``hal0-hs-decide`` unit, which the installer does not lay down yet: an
-    enabled lane without it WARNs, because the engine then runs with no
-    decision model and every decision-gated call costs an LLM call. A
-    configured server that does not answer ``/health`` WARNs too. The hosted
-    API (``hindsight-cloud``) is not probed. Advisory only: the engine still
-    works, just more expensively.
+    Four states, all advisory (the engine works without a decision model,
+    only more expensively): the lane is off (PASS); on and answering
+    ``/health`` (PASS); ``provider = "local"`` but the opt-in
+    ``memory-decision`` component is not installed (WARN, names
+    ``hal0 memory decision install``); installed but not answering (WARN,
+    names the unit). ``unit_installed`` overrides the component probe
+    (:func:`hal0.memory.decision_component.component_installed`). The hosted
+    API (``hindsight-cloud``) is not probed.
     """
+    from hal0.memory.decision_component import INSTALL_COMMAND, component_installed
     from hal0.memory.extraction_env import (
         HINDSIGHT_CLOUD_DECISION_URL,
         decision_engine_base_url,
@@ -4257,7 +4257,11 @@ def check_memory_decision_lane(
     note = "" if read_ok else " (hal0.toml unreadable as this user; judged the shipped default)"
     if not decision.enabled or decision.provider == "off":
         return Check(name, title, _PASS, f"decision lane off — the engine uses its LLM lane{note}")
-    installed = decision_unit_installed() if unit_installed is None else unit_installed
+    if unit_installed is None:
+        # The venv under /var/lib/hal0 may be unreadable to a non-root operator;
+        # the unit file in /etc is not, and it is what the engine drop-in keys on.
+        unit_installed = component_installed() or decision_unit_installed()
+    installed = unit_installed
     url = decision_engine_base_url(decision, unit_installed=installed)
     if url is None and decision.base_url:
         return Check(
@@ -4274,18 +4278,19 @@ def check_memory_decision_lane(
             name,
             title,
             _WARN,
-            "decision lane is enabled (provider local) but the hal0-hs-decide service is "
-            "not installed, so hindsight-api runs without a decision model and "
-            "decision-gated calls go to the LLM lane — install hal0-hs-decide "
-            "(packaging/hindsight-decision/README.md) and re-save the memory settings, or "
-            f'set [memory.decision].provider = "off"{note}',
+            "decision lane is on (provider local) but the memory-decision component "
+            "(the hal0-hs-decide server) is not installed, so hindsight-api runs without "
+            f"a decision model and decision-gated calls go to the LLM lane — run: "
+            f"{INSTALL_COMMAND}, or turn the lane off with `hal0 memory decision disable` "
+            f'(provider = "off"){note}',
         )
     if url == HINDSIGHT_CLOUD_DECISION_URL:
         return Check(name, title, _PASS, f"hosted decision model at {url} (not probed){note}")
     if (probe or _decision_health_ok)(url):
-        return Check(name, title, _PASS, f"decision server at {url} answers /health{note}")
+        return Check(name, title, _PASS, f"on and answering: decision server at {url}{note}")
     hint = (
-        "check `systemctl status hal0-hs-decide` and its journal"
+        "installed but not answering: check `systemctl status hal0-hs-decide` and its "
+        "journal, or re-run `hal0 memory decision install`"
         if not decision.base_url
         else "check the server behind [memory.decision].base_url"
     )

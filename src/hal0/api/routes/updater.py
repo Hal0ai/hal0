@@ -1223,6 +1223,17 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
                 ) from exc
         if body.get("clear_override") is True:
             arm_kwargs["clear_override"] = True
+    elif component_id == "memory-decision":
+        # Opt-in (#3757): asking for this component by name is the install.
+        # {"action": "remove", "purge_model": bool} removes it instead.
+        arm_kwargs["install"] = True
+        if isinstance(body, dict):
+            action = body.get("action")
+            if action not in (None, "install", "remove"):
+                raise BadRequest("action must be 'install' or 'remove'", details={"action": action})
+            if action == "remove":
+                arm_kwargs["action"] = "remove"
+                arm_kwargs["purge_model"] = body.get("purge_model") is True
 
     job_id = uuid.uuid4().hex[:12]
     jobs[job_id] = {

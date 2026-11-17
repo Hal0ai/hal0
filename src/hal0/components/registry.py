@@ -20,7 +20,7 @@ class ComponentDef:
     name: str
     kind: str  # "container-unit" | "slot-images" | "venv" | "npm-global"
     #: Join key into hal0.services.registry (dashboard rollup); None = no
-    #: service row (runner-images, pi).
+    #: service row (runner-images, pi, memory-decision).
     service_id: str | None
     pinned: Callable[[], str]
     installed: Callable[[], str | None]
@@ -105,6 +105,24 @@ def _pi_converge(**kwargs: Any) -> dict[str, Any]:
     return converge_pi(**kwargs)
 
 
+def _memory_decision_pinned() -> str:
+    from hal0.memory.decision_component import pinned_label
+
+    return pinned_label()
+
+
+def _memory_decision_installed() -> str | None:
+    from hal0.memory.decision_component import installed_label
+
+    return installed_label()
+
+
+def _memory_decision_converge(**kwargs: Any) -> dict[str, Any]:
+    from hal0.memory.decision_component import converge_memory_decision
+
+    return converge_memory_decision(**kwargs)
+
+
 def _hindsight_pinned() -> str:
     from hal0.memory.engine_upgrade import HINDSIGHT_API_PIN
 
@@ -164,6 +182,18 @@ COMPONENTS: tuple[ComponentDef, ...] = (
         pinned=_pi_pinned,
         installed=_pi_installed,
         converge=_pi_converge,
+    ),
+    # Opt-in (#3757): converges only when asked (the converge route passes
+    # install=True), or on a box where it is already installed. Before
+    # hindsight so a rebuilt server is answering when the engine pass runs.
+    ComponentDef(
+        id="memory-decision",
+        name="Memory decision model",
+        kind="venv",
+        service_id=None,
+        pinned=_memory_decision_pinned,
+        installed=_memory_decision_installed,
+        converge=_memory_decision_converge,
     ),
     ComponentDef(
         id="hindsight",

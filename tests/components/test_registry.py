@@ -13,12 +13,14 @@ def test_catalog_ids_and_order() -> None:
         "runner-images",
         "hermes",
         "pi",
+        "memory-decision",
         "hindsight",
     ]
 
 
 def test_component_by_id() -> None:
     assert component_by_id("hindsight").kind == "venv"
+    assert component_by_id("memory-decision").kind == "venv"
     assert component_by_id("nope") is None
 
 

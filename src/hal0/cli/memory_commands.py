@@ -11,6 +11,7 @@ hal0 API. The ``graph`` sub-sub-app maps 1:1 to the routes in
     hal0 memory graph enable [--slot …]                 → PUT  /api/memory/graph (enabled=true …)
     hal0 memory graph disable                           → PUT  /api/memory/graph (enabled=false)
     hal0 memory graph check                             → POST /api/memory/graph/throughput
+    hal0 memory decision install|status|enable|disable|remove   (memory_decision_commands)
 
 ``hal0 memory enable``/``disable`` replace the old ``HAL0_MEMORY_ENABLED``
 env var (removed) — the whole subsystem (Hindsight engine, /mcp/memory,
@@ -43,6 +44,7 @@ from hal0.cli._shared import (
     die,
 )
 from hal0.cli.memory_bank_commands import app as bank_app
+from hal0.cli.memory_decision_commands import app as decision_app
 from hal0.cli.memory_directive_commands import app as directive_app
 from hal0.cli.memory_embedder_commands import app as embedder_app
 from hal0.cli.memory_kb_commands import app as kb_app
@@ -76,6 +78,9 @@ app.add_typer(kb_app, name="kb")
 app.add_typer(knowledge_app, name="knowledge")
 app.add_typer(directive_app, name="directive")
 app.add_typer(models_app, name="models")
+# ``decision install|status|enable|disable|remove`` (#3757): the opt-in
+# local decision model server (the ``memory-decision`` component).
+app.add_typer(decision_app, name="decision")
 # ``embedder switch`` (#3518): the one command here that works on the box
 # itself instead of calling hal0-api.
 app.add_typer(embedder_app, name="embedder")

@@ -397,6 +397,21 @@ def test_models_shape(client: TestClient) -> None:
     assert body["embeddings"]["provider"] == "local"
     assert body["decision"]["model"] == "hs-decide-1-flash"
     assert body["decision"]["reachable"] is False
+    assert body["decision"]["installed"] is False
+
+
+@pytest.mark.parametrize(("installed", "active"), [(True, True), (True, False), (False, None)])
+def test_models_decision_says_installed_and_unit_active(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, installed: bool, active: bool | None
+) -> None:
+    """#3757: the dashboard reads these to say "install it" vs "it is down"."""
+    from hal0.memory import decision_component
+
+    monkeypatch.setattr(decision_component, "component_installed", lambda: installed)
+    monkeypatch.setattr(decision_component, "unit_active", lambda: active)
+    body = client.get("/api/memory/models").json()["decision"]
+    assert body["installed"] is installed and body["unit_active"] is active
+    assert {"enabled", "provider", "model", "reachable"} <= set(body)
 
 
 # ── /api/memory/models: recorded against configured embedder (#3518) ─────────
