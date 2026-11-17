@@ -245,8 +245,12 @@ def test_fresh_install_builds_pulls_renders_starts_and_turns_the_lane_on(
     torch = next(c for c in runner.calls if "--index-url" in c)
     assert torch[torch.index("--index-url") + 1] == dc.TORCH_INDEX_URL
     assert "torch==2.15.0" in torch
+    # The CPU index hosts the torch wheel only: its dependencies are pinned to
+    # versions that index does not carry, so they come from the PyPI step.
+    assert "--no-deps" in torch
     pip = next(c for c in runner.calls if "transformers==5.23.0" in c)
     assert "--index-url" not in pip and "--extra-index-url" not in pip
+    assert "torch==2.15.0" in pip and "--no-deps" not in pip
     pips = [c for c in runner.calls if "pip" in c]
     assert len(pips) == 3
     for call in pips:

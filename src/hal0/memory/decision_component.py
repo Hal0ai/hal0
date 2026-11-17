@@ -96,8 +96,10 @@ MODEL_REPO = "hindsight-ai/hs-decide-1-flash"
 #: before #3757 (``b9a782058d…``) no longer matches a pull.
 MODEL_REVISION = "e2c789026dfd1f7608cafb2ef6a9bb31397af802"
 
-#: CPU-only PyTorch wheels. torch is installed from this index ONLY
-#: (``--index-url``), and then held by the constraints file.
+#: CPU-only PyTorch wheels. The torch wheel alone comes from this index
+#: (``--index-url`` with ``--no-deps``): the index mirrors only some versions
+#: of torch's dependencies, so they are resolved from PyPI by the next step,
+#: at the versions the constraints file pins.
 TORCH_INDEX_URL = "https://download.pytorch.org/whl/cpu"
 #: The version the measured hand install ran (the CPU wheel is ``2.15.0+cpu``).
 TORCH_VERSION = "2.15.0"
@@ -573,7 +575,9 @@ def _build_venv(runner: Runner, new: Path, final: Path, deadline: _Deadline) -> 
 
     step([_interpreter(), "-m", "venv", str(new)], "python3 -m venv", _VENV_TIMEOUT_S)
     step(
-        [*pip, f"torch=={TORCH_VERSION}", "--index-url", TORCH_INDEX_URL],
+        # --no-deps: the CPU index does not carry the pinned versions of torch's
+        # dependencies (filelock, sympy, ...); the PyPI step below installs them.
+        [*pip, "--no-deps", f"torch=={TORCH_VERSION}", "--index-url", TORCH_INDEX_URL],
         "installing CPU torch",
         _PIP_TIMEOUT_S,
     )
@@ -586,7 +590,13 @@ def _build_venv(runner: Runner, new: Path, final: Path, deadline: _Deadline) -> 
     # The probe ran in a venv hal0 controls: its output is checked, never reused.
     if not _TORCH_VERSION_RE.match(got) or got.split("+", 1)[0] != TORCH_VERSION:
         raise _Abort(f"torch probe reported {got[:40]!r}, not {TORCH_VERSION}")
-    step([*pip, *PACKAGES], "installing the pinned packages", _PIP_TIMEOUT_S)
+    # torch is named again so pip resolves its dependencies from PyPI; the
+    # installed CPU wheel already satisfies the requirement and the constraint.
+    step(
+        [*pip, f"torch=={TORCH_VERSION}", *PACKAGES],
+        "installing the pinned packages",
+        _PIP_TIMEOUT_S,
+    )
     _pull_model(runner, py, deadline)
     step(
         # --no-deps: the package declares pydantic>=2.12, transformers>=5.16.1
