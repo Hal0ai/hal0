@@ -10,6 +10,7 @@ from hal0.errors import Hal0Error
 from hal0.upstreams.catalog import (
     ModelAmbiguous,
     ModelNotEnabled,
+    NotEnabled,
     Resolved,
     UpstreamModel,
     resolve_requested_model,
@@ -63,25 +64,50 @@ def test_bare_id_ambiguous_names_candidates(order: int) -> None:
     assert "a/shared" in e.value.message and "b/shared" in e.value.message
 
 
-def test_disabled_canonical_raises_not_enabled() -> None:
+def test_disabled_canonical_is_pending_canonical() -> None:
     mm = _up("mm", UpstreamModel("m", enabled=False))
-    with pytest.raises(ModelNotEnabled) as e:
-        resolve_requested_model("mm/m", [mm])
-    assert e.value.details == {"provider": "mm", "model": "m"}
-    assert "mm" in e.value.message and "m" in e.value.message
+    result = resolve_requested_model("mm/m", [mm])
+    assert isinstance(result, NotEnabled)
+    assert result.canonical is True
+    assert isinstance(result.error, ModelNotEnabled)
+    assert result.error.details == {"provider": "mm", "model": "m"}
+    assert "is not enabled on provider 'mm'" in result.error.message
+    assert "hal0 upstream enable mm m" in result.error.message
 
 
-def test_disabled_bare_raises_not_enabled() -> None:
+def test_disabled_bare_is_pending_bare() -> None:
     mm = _up("mm", UpstreamModel("m", enabled=False))
-    with pytest.raises(ModelNotEnabled) as e:
-        resolve_requested_model("m", [mm])
-    assert e.value.details["model"] == "m"
-    assert e.value.details["provider"] == "mm"
+    result = resolve_requested_model("m", [mm])
+    assert isinstance(result, NotEnabled)
+    assert result.canonical is False
+    assert result.error.details == {"provider": "mm", "model": "m"}
 
 
-def test_unlisted_model_on_known_provider_falls_through() -> None:
+def test_disabled_bare_names_the_alphabetically_first_provider() -> None:
+    b = _up("b", UpstreamModel("m", enabled=False))
+    a = _up("a", UpstreamModel("m", enabled=False))
+    result = resolve_requested_model("m", [b, a])
+    assert isinstance(result, NotEnabled)
+    assert result.error.details["provider"] == "a"
+
+
+def test_unlisted_model_on_named_provider_is_pending_canonical() -> None:
     mm = _up("mm", UpstreamModel("m"))
-    assert resolve_requested_model("mm/nope", [mm]) is None
+    result = resolve_requested_model("mm/nope", [mm])
+    assert isinstance(result, NotEnabled)
+    assert result.canonical is True
+    assert result.error.details == {"provider": "mm", "model": "nope"}
+    assert "is not enabled, or is not offered, on provider 'mm'" in result.error.message
+    assert "hal0 upstream enable mm nope" in result.error.message
+
+
+def test_not_enabled_message_never_names_a_providers_tab() -> None:
+    mm = _up("mm", UpstreamModel("m", enabled=False))
+    for ref in ("mm/m", "m", "mm/nope"):
+        result = resolve_requested_model(ref, [mm])
+        assert isinstance(result, NotEnabled)
+        assert "Providers" not in result.error.message
+        assert "dashboard" in result.error.message
 
 
 def test_unlisted_ref_resolves_as_a_bare_id_elsewhere() -> None:
@@ -98,11 +124,24 @@ def test_listed_ref_beats_a_bare_id_elsewhere() -> None:
     assert resolve_requested_model("openai/gpt-5", [openai, orr]) == Resolved(openai, "gpt-5")
 
 
-def test_listed_but_disabled_ref_raises_even_if_enabled_elsewhere() -> None:
+def test_whole_string_enabled_elsewhere_beats_a_disabled_ref() -> None:
+    # The whole-string bare-id attempt runs before a pending "not enabled".
     openai = _up("openai", UpstreamModel("gpt-5", enabled=False))
     orr = _up("openrouter", UpstreamModel("openai/gpt-5"))
-    with pytest.raises(ModelNotEnabled):
-        resolve_requested_model("openai/gpt-5", [openai, orr])
+    assert resolve_requested_model("openai/gpt-5", [openai, orr]) == Resolved(orr, "openai/gpt-5")
+
+
+def test_disabled_ref_with_whole_string_ambiguous_raises_at_once() -> None:
+    openai = _up("openai", UpstreamModel("gpt-5", enabled=False))
+    a = _up("a", UpstreamModel("openai/gpt-5"))
+    b = _up("b", UpstreamModel("openai/gpt-5"))
+    with pytest.raises(ModelAmbiguous):
+        resolve_requested_model("openai/gpt-5", [openai, a, b])
+
+
+def test_bare_id_with_no_row_anywhere_is_none() -> None:
+    mm = _up("mm", UpstreamModel("m", enabled=False))
+    assert resolve_requested_model("other", [mm]) is None
 
 
 def test_unknown_everywhere_returns_none() -> None:

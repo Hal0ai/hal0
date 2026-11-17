@@ -223,3 +223,20 @@ def test_status_never_network_fills_a_curated_cache_entry(client: TestClient) ->
     assert client.get("/api/status").status_code == 200
     assert client.app.state.model_cache["mm"] == []
     assert calls["fetch_models"] == 0
+
+
+def test_unlisted_model_on_named_provider_returns_404_with_its_own_code(
+    client: TestClient,
+) -> None:
+    _seed(client, _curated(("On", True)))
+    for stream in (False, True):
+        resp = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "mm/Never-Listed",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": stream,
+            },
+        )
+        assert resp.status_code == 404, resp.text
+        assert resp.json()["error"]["code"] == "upstream.model_not_enabled"

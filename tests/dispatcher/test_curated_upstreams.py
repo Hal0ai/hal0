@@ -1,4 +1,9 @@
-"""Curated upstreams: the enabled list gates routing, ahead of every heuristic."""
+"""Curated upstreams: the enabled list gates routing.
+
+An enabled row routes at the catalog step. A "not enabled" answer is a last
+resort: the cache steps still run, and a bare id on a path-routed capability
+(or a hal0 alias) still reaches the local slot, as it does without curation.
+"""
 
 from __future__ import annotations
 
@@ -40,11 +45,28 @@ def _dispatcher(
     extra_cache: dict[str, list[str]] | None = None,
     routes: dict[str, str] | None = None,
     fetch=None,
+    remote_lists: dict[str, list[str]] | None = None,
+    fetched: list[str] | None = None,
 ) -> Dispatcher:
+    """Dispatcher over ``upstreams``.
+
+    ``remote_lists`` is what a cold prefetch of each upstream returns (it fills
+    the cache); ``fetched`` collects the name of every upstream fetched.
+    """
+
     async def online(_u: Upstream) -> bool:
         return True
 
     cache = _cache_for(upstreams, extra_cache)
+    if fetch is None and (remote_lists is not None or fetched is not None):
+
+        async def fetch(u: Upstream) -> list[str]:
+            if fetched is not None:
+                fetched.append(u.name)
+            ids = list((remote_lists or {}).get(u.name, []))
+            cache[u.name] = ids
+            return ids
+
     kwargs = {}
     if fetch is not None:
         kwargs["fetch_models"] = fetch
@@ -98,19 +120,119 @@ async def test_disabled_model_is_404_and_never_reaches_heuristics() -> None:
         await d.dispatch(make_request(), body={"model": "mm/Off-Model", "messages": []})
     assert err.value.status == 404
     assert err.value.code == "upstream.model_not_enabled"
-    with pytest.raises(ModelNotEnabled):
+    with pytest.raises(ModelNotEnabled) as err:
         await d.dispatch(make_request(), body={"model": "Off-Model", "messages": []})
+    assert err.value.details == {"provider": "mm", "model": "Off-Model"}
 
 
 @pytest.mark.asyncio
-async def test_unlisted_model_on_known_provider_falls_through() -> None:
-    d = _dispatcher([make_curated()])
-    with pytest.raises(NoRouteFound):
-        await d.dispatch(make_request(), body={"model": "mm/Never-Listed", "messages": []})
+async def test_unlisted_model_on_named_provider_is_404_not_the_agent_slot() -> None:
     agent = make_slot("agent", "http://127.0.0.1:8081/v1")
     d = _dispatcher([agent, make_curated()], extra_cache={"agent": ["agent-model"]})
-    call = await d.dispatch(make_request(), body={"model": "mm/Never-Listed", "messages": []})
-    assert not call.resolution_path.startswith("catalog:")
+    with pytest.raises(ModelNotEnabled) as err:
+        await d.dispatch(make_request(), body={"model": "mm/Never-Listed", "messages": []})
+    assert err.value.details == {"provider": "mm", "model": "Never-Listed"}
+    assert "not offered" in err.value.message
+
+
+@pytest.mark.asyncio
+async def test_disabled_canonical_ref_is_404() -> None:
+    agent = make_slot("agent", "http://127.0.0.1:8081/v1")
+    d = _dispatcher(
+        [agent, make_curated("mm", ("On", True), ("Off", False))],
+        extra_cache={"agent": ["agent-model"]},
+    )
+    with pytest.raises(ModelNotEnabled) as err:
+        await d.dispatch(make_request(), body={"model": "mm/Off", "messages": []})
+    assert err.value.details == {"provider": "mm", "model": "Off"}
+
+
+# ── "not enabled" is a last resort ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_disabled_bare_embedding_id_reaches_the_local_embed_slot() -> None:
+    embed = make_slot("embed", "http://127.0.0.1:8090/v1")
+    openai = make_curated("openai", ("gpt-5", True), ("text-embedding-3-small", False))
+    d = _dispatcher([embed, openai], extra_cache={"embed": ["nomic-embed-text"]})
+    call = await d.dispatch(
+        make_request("/v1/embeddings"), body={"model": "text-embedding-3-small", "input": "x"}
+    )
+    assert call.upstream_name == "embed"
+    assert call.resolution_path == "legacy_slot:embed"
+
+
+@pytest.mark.asyncio
+async def test_disabled_alias_on_speech_reaches_a_cold_local_tts_slot() -> None:
+    tts = make_slot("tts", "http://127.0.0.1:8880/v1")
+    openai = make_curated("openai", ("gpt-5", True), ("tts-1", False))
+    d = _dispatcher([tts, openai])
+    call = await d.dispatch(
+        make_request("/v1/audio/speech"), body={"model": "tts-1", "input": "hi", "voice": "af"}
+    )
+    assert call.upstream_name == "tts"
+    assert call.resolution_path == "legacy_slot:tts"
+
+
+@pytest.mark.asyncio
+async def test_disabled_alias_on_chat_reaches_the_local_heuristics() -> None:
+    # "tts-1" is a hal0 alias name: it keeps reaching the local heuristics
+    # even when a curated provider stores a disabled row with that id.
+    agent = make_slot("agent", "http://127.0.0.1:8081/v1")
+    mm = make_curated("mm", ("MiniMax-M2.5", True), ("tts-1", False))
+    d = _dispatcher([agent, mm])
+    call = await d.dispatch(make_request(), body={"model": "tts-1", "messages": []})
+    assert call.resolution_path == "legacy_slot:agent"
+
+
+@pytest.mark.asyncio
+async def test_canonical_disabled_embedding_ref_is_404_despite_local_embed_slot() -> None:
+    embed = make_slot("embed", "http://127.0.0.1:8090/v1")
+    openai = make_curated("openai", ("gpt-5", True), ("text-embedding-3-small", False))
+    d = _dispatcher([embed, openai], extra_cache={"embed": ["nomic-embed-text"]})
+    with pytest.raises(ModelNotEnabled) as err:
+        await d.dispatch(
+            make_request("/v1/embeddings"),
+            body={"model": "openai/text-embedding-3-small", "input": "x"},
+        )
+    assert err.value.details == {"provider": "openai", "model": "text-embedding-3-small"}
+
+
+@pytest.mark.asyncio
+async def test_disabled_bare_id_is_found_by_cold_prefetch_of_an_unconverted_remote() -> None:
+    plain = make_remote("plain", "http://plain.invalid/v1")
+    mm = make_curated("mm", ("MiniMax-M2.5", True), ("shared-model", False))
+    fetched: list[str] = []
+    d = _dispatcher([mm, plain], remote_lists={"plain": ["shared-model"]}, fetched=fetched)
+    call = await d.dispatch(make_request(), body={"model": "shared-model", "messages": []})
+    assert call.resolution_path == "passthrough-prefetched:plain"
+    assert fetched == ["plain"]
+
+
+@pytest.mark.asyncio
+async def test_unlisted_ref_is_found_by_cold_prefetch_of_an_unconverted_remote() -> None:
+    orr = make_remote("openrouter", "http://openrouter.invalid/v1")
+    openai = make_curated("openai", ("gpt-4o", True))
+    fetched: list[str] = []
+    d = _dispatcher([openai, orr], remote_lists={"openrouter": ["openai/gpt-5"]}, fetched=fetched)
+    call = await d.dispatch(make_request(), body={"model": "openai/gpt-5", "messages": []})
+    assert call.resolution_path == "passthrough-prefetched:openrouter"
+    assert json.loads(call.body)["model"] == "openai/gpt-5"
+    assert fetched == ["openrouter"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_step_never_fetches() -> None:
+    fetched: list[str] = []
+    agent = make_slot("agent", "http://127.0.0.1:8081/v1")
+    mm = make_curated("mm", ("MiniMax-M2.5", True), ("Off", False))
+    d = _dispatcher([agent, mm], extra_cache={"agent": ["agent-model"]}, fetched=fetched)
+    call = await d.dispatch(make_request(), body={"model": "MiniMax-M2.5", "messages": []})
+    assert call.resolution_path == "catalog:mm"
+    for model in ("Off", "mm/Off", "mm/Never-Listed"):
+        with pytest.raises(ModelNotEnabled):
+            await d.dispatch(make_request(), body={"model": model, "messages": []})
+    assert fetched == []
 
 
 @pytest.mark.asyncio

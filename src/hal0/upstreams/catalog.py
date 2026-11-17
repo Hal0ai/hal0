@@ -92,37 +92,58 @@ def participates(u: Upstream) -> bool:
     return u.curated and u.enabled and u.kind == "remote" and not u.slot_name and not u.managed_by
 
 
-def _not_enabled(provider: str, model: str) -> ModelNotEnabled:
+@dataclass(frozen=True)
+class NotEnabled:
+    """A requested model a taking-part provider stores but has not enabled.
+
+    Returned rather than raised: the router raises :attr:`error` only when no
+    later step routes the request. ``canonical`` says whether the request
+    named the provider (``provider/model``) or was a bare id.
+    """
+
+    error: ModelNotEnabled
+    canonical: bool
+
+
+def _not_enabled(provider: str, model: str, *, listed: bool = True) -> ModelNotEnabled:
+    state = "is not enabled" if listed else "is not enabled, or is not offered,"
     return ModelNotEnabled(
-        f"model {model!r} is not enabled on provider {provider!r}; "
-        "enable it on the provider's model list",
+        f"model {model!r} {state} on provider {provider!r}; enable it with "
+        f"`hal0 upstream enable {provider} {model}` or on the provider's model list "
+        "in the dashboard",
         details={"provider": provider, "model": model},
     )
 
 
-def resolve_requested_model(requested: str, upstreams: Iterable[Upstream]) -> Resolved | None:
-    """Map a requested model id to one curated provider.
+def resolve_requested_model(
+    requested: str, upstreams: Iterable[Upstream]
+) -> Resolved | NotEnabled | None:
+    """Map a requested model id to one curated provider, from stored rows only.
 
     Only curated, enabled, remote upstreams that are neither slot-backed nor
-    agent-managed take part. A ``provider/model`` reference whose model is listed (enabled or
-    not) on a taking-part provider is resolved there, or raises
-    :class:`ModelNotEnabled` when the row is disabled. Anything
-    else - including a ``provider/model`` whose model is not listed on that
-    provider - is a bare id, matched against every provider's enabled models. Returns
-    ``None`` when nothing claims the id.
+    agent-managed take part. In order:
+
+    1. ``provider/model`` naming a taking-part provider with an enabled row
+       for ``model`` resolves there.
+    2. The whole string as a bare id, enabled on exactly one provider, resolves
+       there; enabled on several raises :class:`ModelAmbiguous`.
+    3. A ``provider/model`` from step 1 whose row is disabled or missing is a
+       canonical :class:`NotEnabled`.
+    4. A bare id stored disabled on a taking-part provider is a bare
+       :class:`NotEnabled` naming the alphabetically first such provider.
+
+    Anything else returns ``None``.
     """
     live = {u.name: u for u in upstreams if participates(u)}
 
+    pending: NotEnabled | None = None
     ref = split_ref(requested)
     if ref is not None and ref[0] in live:
         provider, model = ref
-        for row in live[provider].models:
-            if row.id == model:
-                if row.enabled:
-                    return Resolved(live[provider], model)
-                raise _not_enabled(provider, model)
-        # Not listed on that provider: ``requested`` may be a bare id that
-        # merely starts with a provider's name, so keep looking below.
+        row = next((m for m in live[provider].models if m.id == model), None)
+        if row is not None and row.enabled:
+            return Resolved(live[provider], model)
+        pending = NotEnabled(_not_enabled(provider, model, listed=row is not None), canonical=True)
 
     enabled = [u for u in live.values() if requested in enabled_ids(u)]
     if len(enabled) == 1:
@@ -134,9 +155,11 @@ def resolve_requested_model(requested: str, upstreams: Iterable[Upstream]) -> Re
             f"use one of: {', '.join(candidates)}",
             details={"model": requested, "candidates": candidates},
         )
+    if pending is not None:
+        return pending
     for name in sorted(live):
         if any(m.id == requested and not m.enabled for m in live[name].models):
-            raise _not_enabled(name, requested)
+            return NotEnabled(_not_enabled(name, requested), canonical=False)
     return None
 
 
