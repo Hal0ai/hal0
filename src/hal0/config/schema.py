@@ -10,7 +10,6 @@ Model hierarchy:
       SlotsConfig      — [slots] global slot policy
       DispatcherConfig — [dispatcher] tunables (Tier 2 prefetch timeout)
       TelemetryConfig  — [telemetry] opt-in
-    ProvidersConfig  — providers.toml (external LLM providers)
     UpstreamsConfig  — upstreams.toml (slot + remote upstream catalog)
     SlotConfig       — slots/<name>.toml
       ModelConfig      — [model] section within a slot config
@@ -860,52 +859,6 @@ class SlotConfig(BaseModel):
         if v not in _VALID_PROVIDERS:
             raise ValueError(f"provider {v!r} is not valid; choose from {sorted(_VALID_PROVIDERS)}")
         return v
-
-
-# ── ProvidersConfig ────────────────────────────────────────────────────────────
-
-
-class ProviderEntry(BaseModel):
-    """One [[provider]] entry in providers.toml.
-
-    ``extra="forbid"`` (P3-schema Part C): typo'd provider keys should raise
-    at load time rather than silently round-trip as dead weight. The
-    containing ``ProvidersConfig`` (the ``[[provider]]`` list) stays
-    ``allow`` for forward-compat.
-    """
-
-    model_config = {"populate_by_name": True, "extra": "forbid"}
-
-    catalog_id: str = Field(
-        ...,
-        description="References a preset id in config/data/provider_presets.toml.",
-    )
-    name: str = Field(default="", description="User-visible name override.")
-    base_url: str = Field(
-        default="",
-        description="URL override (leave empty to use catalog default).",
-    )
-    auth_value_env: str = Field(
-        default="",
-        description="Env var holding the API key.  Never stored in plain text.",
-    )
-    enabled: bool = Field(default=True)
-    models: list[str] = Field(default_factory=list, description="User-selected model ids.")
-
-    @field_validator("catalog_id")
-    @classmethod
-    def catalog_id_nonempty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("provider catalog_id must not be empty")
-        return v
-
-
-class ProvidersConfig(BaseModel):
-    """Parsed providers.toml."""
-
-    model_config = {"populate_by_name": True, "extra": "allow"}
-
-    provider: list[ProviderEntry] = Field(default_factory=list)
 
 
 # ── ProfileConfig + ProfilesConfig ────────────────────────────────────────────
@@ -5058,8 +5011,6 @@ __all__ = [
     "NpuConfig",
     "ProfileConfig",
     "ProfilesConfig",
-    "ProviderEntry",
-    "ProvidersConfig",
     "SecurityConfig",
     "ServerConfig",
     "SlotConfig",

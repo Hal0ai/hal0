@@ -207,7 +207,7 @@ atomic-write temp files above.
 | `.hal0stack.json` | Portable stack export/import envelope. |
 
 <Aside type="note">
-API keys are **never** stored in TOML config files — `providers.toml`/`upstreams.toml`
+API keys are **never** stored in TOML config files — `upstreams.toml`
 entries only hold the *name* of an environment variable (`auth_value_env`); the actual
 secret value lives in `api.env` (mode `0600`), written atomically via
 `hal0.config.env.write_env_atomic`.

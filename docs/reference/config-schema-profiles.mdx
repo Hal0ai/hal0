@@ -1,6 +1,6 @@
 ---
 title: "Config schema: providers, profiles, stacks & agents"
-description: "The providers.toml, upstreams.toml, profiles.toml, stacks.toml, agents/<name>.toml, hardware.json and manifest.json keys, types, defaults, and constraints — verified against src/hal0/config/schema.py in the v1.0 tree."
+description: "The upstreams.toml, profiles.toml, stacks.toml, agents/<name>.toml, hardware.json and manifest.json keys, types, defaults, and constraints — verified against src/hal0/config/schema.py in the v1.0 tree."
 sidebar:
   order: 21
 ---
@@ -13,23 +13,6 @@ This is the second half of the config schema reference. The first half,
 [Config schema: slot files](/docs/reference/config-schema-slots/). Everything here follows the same conventions: TOML files are
 validated with Pydantic models in `hal0.config.schema`, `hardware.json` and
 `manifest.json` are JSON, and all writes are atomic.
-
-## `providers.toml`
-
-Root model `ProvidersConfig`, `extra="allow"`: `provider: list[ProviderEntry]` (default `[]`).
-
-### `[[provider]]`
-
-`extra="forbid"`.
-
-| Key | Type | Default | Req | Constraints |
-|---|---|---|---|---|
-| `catalog_id` | str | — | **required** | non-empty |
-| `name` | str | `""` | — | display override |
-| `base_url` | str | `""` | — | — |
-| `auth_value_env` | str | `""` | — | name of the env var holding the API key — the key itself is never stored in TOML |
-| `enabled` | bool | `true` | — | — |
-| `models` | list[str] | `[]` | — | — |
 
 ## `upstreams.toml`
 

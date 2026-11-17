@@ -69,19 +69,17 @@ proxy for OpenAI-shape compatibility. Auth styles overall: `bearer, anthropic,
 header, none`.
 </Aside>
 
-Persisted config is a `ProviderEntry` per upstream (see
-[Config schema → providers.toml](/docs/reference/config-schema-profiles/#providerstoml)):
-`catalog_id`, `name`/`base_url` overrides, `auth_value_env` (the **name** of an
-environment variable, never the key itself — the actual secret lives in `api.env`),
-`enabled`, `models`.
+Persisted config is an `UpstreamEntry` per upstream in `upstreams.toml` (see
+[Config schema → upstreams.toml](/docs/reference/config-schema-profiles/#upstreamstoml)):
+`catalog_id`, `url`, `auth_value_env` (the **name** of an environment variable, never
+the key itself — the actual secret lives in `api.env`), `enabled`, and either legacy
+`model_filters` or a curated per-model list.
 
-<Aside type="caution">
-`hal0 upstream` CLI commands (`upstream create`, `upstream credentials set`, etc.) and
-`upstreams.toml`/`UpstreamEntry` are a **separate schema** from `providers.toml`/
-`ProviderEntry` above — both represent "remote provider" concepts but are distinct
-tables with distinct fields (`UpstreamEntry` adds `kind`, `warmup_strategy`,
-`model_filters`; see [Config schema](/docs/reference/config-schema-profiles/#upstreamstoml)).
-Verify which one a given feature actually reads before documenting behavior.
+<Aside type="note">
+Older installs also had a `providers.toml` with a per-provider model selection. It is
+retired: once a provider answers, hal0 converts its row to a curated one, applies that
+selection to the matching row, and renames the file to `providers.toml.retired`. The
+file is never deleted, and a rename is skipped if a `.retired` file already exists.
 </Aside>
 
 ## Profiles

@@ -1181,6 +1181,8 @@ class BootState:
     stop_memory_reprobe_task: Any = None
     hermes_reconcile_task: asyncio.Task[None] | None = None
     stop_hermes_reconcile_task: Any = None
+    upstream_conversion_task: asyncio.Task[None] | None = None
+    stop_upstream_conversion_task: Any = None
     refresh_policy_task: asyncio.Task[None] | None = None
     stop_refresh_policy_task: Any = None
     bridge_reattach_task: asyncio.Task[int] | None = None
@@ -1334,6 +1336,64 @@ async def _boot_model_cache(app: FastAPI, ctx: BootState) -> None:
         return merged
 
     ctx.fetch_and_cache = _fetch_and_cache
+
+
+async def _run_upstream_conversion(
+    registry: UpstreamRegistry,
+    model_cache: dict[str, list[str]],
+    discovery: DiscoveryCache | None,
+) -> None:
+    """Convert legacy upstream rows once their providers answer; never raises.
+
+    Unreachable providers are deferred (row untouched, retried next boot), so
+    this is safe to run on every boot. Cancellation is the one thing that passes
+    through, so shutdown can stop it.
+    """
+    from hal0.config import paths
+    from hal0.upstreams import convert
+
+    try:
+        result = await convert.convert_legacy_upstreams(
+            registry,
+            providers_toml=paths.etc() / "providers.toml",
+            model_cache=model_cache,
+            discovery=discovery,
+        )
+    except Exception as exc:
+        log.warning("upstreams.convert.failed", error=type(exc).__name__)
+        return
+    if result.converted or result.deferred:
+        log.info(
+            "upstreams.convert.done",
+            converted=len(result.converted),
+            deferred=len(result.deferred),
+            folded_provider_rows=result.folded_provider_rows,
+        )
+
+
+async def _boot_upstream_conversion(app: FastAPI, ctx: BootState) -> None:
+    """Phase - convert legacy upstream rows to per-model rows, off the startup path.
+
+    Scheduled, not awaited: boot never waits on a provider. Runs after the
+    model cache exists so a converted row's routing switches without a restart.
+    """
+    registry = ctx.upstreams
+    if registry is not None:
+        ctx.upstream_conversion_task = asyncio.create_task(
+            _run_upstream_conversion(
+                registry, ctx.model_cache, getattr(app.state, "upstream_discovery", None)
+            ),
+            name="upstream-conversion",
+        )
+
+    async def _stop_upstream_conversion_task() -> None:
+        task = ctx.upstream_conversion_task
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    ctx.stop_upstream_conversion_task = _stop_upstream_conversion_task
 
 
 async def _boot_audit_store(app: FastAPI, ctx: BootState) -> None:
@@ -2936,6 +2996,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await _run_boot_phase(report, "registries", lambda: _boot_registries(app, ctx))
     await _run_boot_phase(report, "model_cache", lambda: _boot_model_cache(app, ctx))
+    await _run_boot_phase(
+        report, "upstream_conversion", lambda: _boot_upstream_conversion(app, ctx)
+    )
     await _run_boot_phase(report, "audit_store", lambda: _boot_audit_store(app, ctx))
     await _run_boot_phase(report, "slot_manager", lambda: _boot_slot_manager(app, ctx))
     await _run_boot_phase(report, "dispatcher", lambda: _boot_dispatcher(app, ctx))
@@ -2966,6 +3029,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # booted process. See _boot_brain_lane's docstring.
         await _run_boot_phase(report, "brain_lane", lambda: _boot_brain_lane(app, ctx))
     except BaseException:
+        if ctx.stop_upstream_conversion_task is not None:
+            with contextlib.suppress(Exception):
+                await ctx.stop_upstream_conversion_task()
         if ctx.stop_refresh_task is not None:
             with contextlib.suppress(Exception):
                 await ctx.stop_refresh_task()
@@ -2983,6 +3049,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # Each teardown callback is bounded (#2727): one that never
             # returns must not hold the unwind until systemd's SIGKILL.
             for name, stop in (
+                ("upstream_conversion_task", ctx.stop_upstream_conversion_task),
                 ("refresh_task", ctx.stop_refresh_task),
                 ("gpu_arbiter_idle_loop", ctx.stop_gpu_arbiter_idle_loop),
                 ("image_drift_task", ctx.stop_image_drift_task),

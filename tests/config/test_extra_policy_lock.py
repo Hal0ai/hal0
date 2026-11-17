@@ -26,7 +26,7 @@ Escape-hatch table (why each non-"forbid" entry is intentional):
   - memory models (MemoryGraphConfig, MemoryEmbeddingConfig)
                         -- ignore: deliberate silent drop of retired
                            cognee/route keys on load.
-  - ProvidersConfig/UpstreamsConfig/MemoryConfig/ModelsConfig/AgentConfig/
+  - UpstreamsConfig/MemoryConfig/ModelsConfig/AgentConfig/
     AgentMetadataConfig/AgentMCPConfig/MCPServerConfig
                         -- allow: containers that nest other typed models
                            (list/dict-of-model or model-of-models), kept
@@ -58,7 +58,6 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     "HardwareInfo": "allow",
     "GPUInfo": "allow",
     "NPUInfo": "allow",
-    "ProvidersConfig": "allow",
     "UpstreamsConfig": "allow",
     "MemoryConfig": "allow",
     "ModelsConfig": "allow",
@@ -97,7 +96,6 @@ _EXPECTED_EXTRA_POLICY: dict[str, str] = {
     # write guard screens env keys, so a typo'd top-level key must not pass
     "XdnaConfig": "forbid",
     "ImageGenConfig": "forbid",
-    "ProviderEntry": "forbid",
     "ProfileConfig": "forbid",
     "ProfilesConfig": "forbid",
     "StackModelMeta": "forbid",

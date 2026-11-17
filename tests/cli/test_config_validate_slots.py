@@ -3,7 +3,7 @@
 The daemon's reference scan (``discover.ref_slot_load_failed``) and
 ``hal0 doctor profiles`` ("does not load") both go through
 ``hal0.config.loader.load_slot_config``; validate used to check only
-hal0.toml / upstreams.toml / providers.toml, so a slot file the daemon
+hal0.toml / upstreams.toml, so a slot file the daemon
 refuses on every boot still printed "All configs pass schema validation."
 """
 
