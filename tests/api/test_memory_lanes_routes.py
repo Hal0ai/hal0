@@ -568,3 +568,31 @@ def test_models_reports_the_reranker_caps_and_remote_endpoint(
     assert rr["timeout_s"] is None
     assert rr["local_max_concurrent"] is None
     assert rr["max_candidates_low"] is None
+
+
+def test_lanes_report_what_the_engine_is_given(
+    client: TestClient, recorder: _Recorder, monkeypatch
+) -> None:
+    """#3758: graph 4 on a slot with --parallel 2 is 2 (consolidation 1); an
+    explicit lanes value of 6 under graph 2 is held to 2 for every op."""
+    from hal0.api.routes import memory_lanes as mod
+    from hal0.config.schema import Hal0Config
+    from hal0.memory import extraction_env
+
+    monkeypatch.setattr(extraction_env, "extraction_slot_parallel", lambda graph, **kw: 2)
+
+    cfg = Hal0Config(memory={"graph": {"extraction_max_concurrent": 4}})
+    monkeypatch.setattr(mod, "load_hal0_config", lambda: cfg)
+    llm = client.get("/api/memory/lanes").json()["llm"]
+    assert llm["max_concurrent"] == 2
+    assert llm["per_op"]["reflect"]["max_concurrent"] == 2
+    assert llm["per_op"]["consolidation"]["max_concurrent"] == 1
+
+    cfg = Hal0Config(
+        memory={"graph": {"extraction_max_concurrent": 2}, "lanes": {"llm_max_concurrent": 6}}
+    )
+    monkeypatch.setattr(mod, "load_hal0_config", lambda: cfg)
+    monkeypatch.setattr(extraction_env, "extraction_slot_parallel", lambda graph, **kw: None)
+    llm = client.get("/api/memory/lanes").json()["llm"]
+    assert llm["max_concurrent"] == 2
+    assert {op["max_concurrent"] for op in llm["per_op"].values()} == {2}

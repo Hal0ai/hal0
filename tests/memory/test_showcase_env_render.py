@@ -209,3 +209,45 @@ def test_consolidation_batch_size_renders_the_default_and_an_override() -> None:
 def test_a_partial_consolidation_table_keeps_the_batch_size_default() -> None:
     lanes = MemoryLanesConfig(consolidation={"max_concurrent": 1})
     assert _render(lanes, ceiling=2)["HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE"] == "4"
+
+
+# ── the one resolver (#3758) ──
+
+
+def test_lane_caps_is_what_the_renderer_writes() -> None:
+    from hal0.memory.extraction_env import lane_caps
+
+    for lanes, ceiling in (
+        (MemoryLanesConfig(), 3),
+        (MemoryLanesConfig(llm_max_concurrent=6), 2),
+        (MemoryLanesConfig(reflect={"max_concurrent": 5, "virtual_model": "hal0/utility"}), 2),
+        (MemoryLanesConfig(), None),
+    ):
+        global_cap, per_op = lane_caps(lanes, ceiling)
+        env = _render(lanes, ceiling)
+        assert env["HINDSIGHT_API_LLM_MAX_CONCURRENT"] == str(global_cap)
+        assert env["HINDSIGHT_API_CONSOLIDATION_LLM_MAX_CONCURRENT"] == str(per_op["consolidation"])
+        assert env["HINDSIGHT_API_REFLECT_LLM_MAX_CONCURRENT"] == str(per_op["reflect"])
+
+
+def test_resolved_lane_caps_applies_the_slot_parallel_clamp(monkeypatch) -> None:
+    from hal0.config.schema import MemoryGraphConfig
+    from hal0.memory import extraction_env
+
+    monkeypatch.setattr(extraction_env, "extraction_slot_parallel", lambda graph, **kw: 2)
+    graph = MemoryGraphConfig(extraction_max_concurrent=4)
+    global_cap, per_op = extraction_env.resolved_lane_caps(MemoryLanesConfig(), graph)
+    assert (global_cap, per_op["retain"], per_op["consolidation"]) == (2, 2, 1)
+    global_cap, per_op = extraction_env.resolved_lane_caps(
+        MemoryLanesConfig(llm_max_concurrent=6), MemoryGraphConfig(extraction_max_concurrent=2)
+    )
+    assert (global_cap, per_op["consolidation"]) == (2, 2)
+
+
+def test_unset_wall_timeout_and_batch_size_are_not_pinned_by_a_save() -> None:
+    lanes = MemoryLanesConfig()
+    assert lanes.reflect.wall_timeout_s is None
+    assert lanes.consolidation.batch_size is None
+    dumped = lanes.model_dump(mode="python", exclude_none=True)
+    assert "wall_timeout_s" not in dumped["reflect"]
+    assert "batch_size" not in dumped["consolidation"]

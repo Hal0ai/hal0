@@ -9,8 +9,10 @@ import { useSettingsClient } from '../../data/settingsClient.js'
 import { AdvRow, _schemaField, _getIn, _deepMergePatch, _advCoerce } from '../../shared/SchemaRow.jsx'
 
 export const ENGINE_LIMIT_ROWS = [
-  { key: 'memory.lanes.reflect.wall_timeout_s', label: 'Reflect and page refresh time limit (s)' },
-  { key: 'memory.lanes.consolidation.batch_size', label: 'Memories per consolidation call' },
+  // `fallback` is hal0's default for an unset key (schema DEFAULT_*): the panel
+  // shows it as the effective value, and an empty field clears the key back to it.
+  { key: 'memory.lanes.reflect.wall_timeout_s', label: 'Reflect and page refresh time limit (s)', fallback: 1800 },
+  { key: 'memory.lanes.consolidation.batch_size', label: 'Memories per consolidation call', fallback: 4 },
 ]
 
 export function EngineLimitsPanel({ registry }) {
@@ -60,18 +62,26 @@ export function EngineLimitsPanel({ registry }) {
           <FieldInfoIcon description="hal0.toml [memory.lanes] · limits hal0 renders into the memory engine's drop-in" />
         </div>
       </div>
-      {rows.map(r => (
-        <AdvRow
-          key={r.key}
-          dotKey={r.key}
-          field={fields[r.key]}
-          live={_getIn(live, r.key)}
-          buf={buf[r.key]}
-          onChange={onChange}
-          registry={registry}
-          label={r.label}
-        />
-      ))}
+      {rows.map(r => {
+        const stored = _getIn(live, r.key)
+        const isDefault = stored === undefined || stored === null
+        const note = isDefault
+          ? `Using hal0's default, ${r.fallback}. Leave empty to keep following it.`
+          : `Set in hal0.toml (hal0's default is ${r.fallback}). Empty the field and save to follow the default again.`
+        return (
+          <AdvRow
+            key={r.key}
+            dotKey={r.key}
+            field={fields[r.key]}
+            live={isDefault ? r.fallback : stored}
+            buf={buf[r.key]}
+            onChange={onChange}
+            registry={registry}
+            label={r.label}
+            description={`${fields[r.key]?.description || ''} ${note}`.trim()}
+          />
+        )
+      })}
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '8px 12px 4px' }}>
         {dirtyKeys.length > 0 && (
           <button className="btn ghost sm" onClick={() => setBuf({})}>Reset</button>

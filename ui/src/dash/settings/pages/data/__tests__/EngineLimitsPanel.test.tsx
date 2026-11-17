@@ -38,17 +38,15 @@ const SCHEMA = {
             consolidation: {
               type: 'object',
               properties: {
-                batch_size: { type: 'integer', default: 4, minimum: 1, maximum: 32, description: 'batch' },
+                batch_size: { anyOf: [{ type: 'integer', minimum: 1, maximum: 32 }, { type: 'null' }], default: null, description: 'batch' },
               },
             },
             reflect: {
               type: 'object',
               properties: {
                 wall_timeout_s: {
-                  type: 'integer',
-                  default: 1800,
-                  minimum: 60,
-                  maximum: 86400,
+                  anyOf: [{ type: 'integer', minimum: 60, maximum: 86400 }, { type: 'null' }],
+                  default: null,
                   description: 'reflect wall clock',
                 },
               },
@@ -110,6 +108,28 @@ describe('EngineLimitsPanel', () => {
       click(save(host))
     })
     expect(state.sent).toEqual([{ memory: { lanes: { consolidation: { batch_size: 2 } } } }])
+  })
+
+  it('shows the hal0 default as the effective value when nothing is stored', async () => {
+    state.live = { memory: { lanes: {} } }
+    const { host } = mount(<EngineLimitsPanel registry={{}} />)
+    const [wall, batch] = inputs(host)
+    expect(wall.value).toBe('1800')
+    expect(batch.value).toBe('4')
+    expect(host.innerHTML).toContain('default, 1800')
+    expect(save(host).disabled).toBe(true)
+  })
+
+  it('clears a stored value back to the default with an empty field', async () => {
+    state.live = { memory: { lanes: { reflect: { wall_timeout_s: 7200 } } } }
+    const { host } = mount(<EngineLimitsPanel registry={{}} />)
+    expect(inputs(host)[0].value).toBe('7200')
+    expect(host.innerHTML).toContain('Set in hal0.toml')
+    setValue(inputs(host)[0], '')
+    await act(async () => {
+      click(save(host))
+    })
+    expect(state.sent).toEqual([{ memory: { lanes: { reflect: { wall_timeout_s: null } } } }])
   })
 
   it('refuses a value outside the schema bounds', () => {

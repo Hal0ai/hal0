@@ -388,17 +388,51 @@ _COMPLETION_CAP_OPS = frozenset({"consolidation", "reflect"})
 DEFAULT_OP_COMPLETION_TOKENS = 8192
 
 
-def lane_default_concurrency(lanes: MemoryLanesConfig, op: str, graph_cap: int) -> int:
-    """An op's cap when ``[memory.lanes.<op>].max_concurrent`` is unset (#3758).
+def lane_caps(lanes: MemoryLanesConfig, ceiling: int | None) -> tuple[int, dict[str, int]]:
+    """The global LLM cap and each op's cap, as the engine is given them (#3758).
 
-    ``graph_cap`` is the cap an unset ``llm_max_concurrent`` follows. An
-    explicit ``llm_max_concurrent`` applies to every op as written; unset, the
-    consolidation lane takes one fewer than the global cap (minimum 1) so
-    retain and page refresh always have a permit.
+    The one resolver: the showcase renderer, ``GET /api/memory/lanes`` and the
+    compat reflect limit all call it, so what is reported and used is what is
+    rendered. ``ceiling`` is the extraction drop-in's effective concurrency
+    (:func:`showcase_ceiling`: ``[memory.graph]`` held to the slot's
+    ``--parallel``); ``None`` means no graph config is known.
+
+    * An explicit ``[memory.lanes].llm_max_concurrent`` is held to the ceiling,
+      and every op that sets no cap of its own inherits it unchanged.
+    * Unset follows the ceiling (:data:`UNSET_LANES_CAP_FALLBACK` with none),
+      and the consolidation lane then takes one fewer (minimum 1), so retain
+      and page refresh always have a permit.
+    * An op's own ``max_concurrent`` wins; held to the ceiling unless the op
+      routes to its own ``virtual_model``.
     """
-    if lanes.llm_max_concurrent is not None:
-        return lanes.llm_max_concurrent
-    return max(1, graph_cap - 1) if op == "consolidation" else graph_cap
+
+    def held(value: int) -> int:
+        return value if ceiling is None else min(value, ceiling)
+
+    explicit = lanes.llm_max_concurrent
+    if explicit is None:
+        base = ceiling if ceiling is not None else UNSET_LANES_CAP_FALLBACK
+    else:
+        base = explicit
+    global_cap = held(base)
+    per_op: dict[str, int] = {}
+    for op in LANE_OP_ENV_PREFIX:
+        op_cfg: MemoryLaneOpConfig = getattr(lanes, op)
+        if op_cfg.max_concurrent is not None:
+            cap = op_cfg.max_concurrent
+        elif explicit is None and op == "consolidation":
+            cap = max(1, global_cap - 1)
+        else:
+            cap = global_cap if explicit is None else base
+        per_op[op] = cap if op_cfg.virtual_model is not None else held(cap)
+    return global_cap, per_op
+
+
+def resolved_lane_caps(
+    lanes: MemoryLanesConfig, graph: MemoryGraphConfig
+) -> tuple[int, dict[str, int]]:
+    """:func:`lane_caps` for a live config: the ceiling is the slot-clamped graph limit."""
+    return lane_caps(lanes, showcase_ceiling(graph))
 
 
 def render_reranker_env(models: MemoryModelsConfig) -> list[str]:
@@ -541,20 +575,7 @@ def render_showcase_env(
             "Environment=HINDSIGHT_API_DECISION_MODEL_API_KEY=hal0-local-noauth",
         ]
 
-    def _held(value: int) -> int:
-        return value if ceiling is None else min(value, ceiling)
-
-    # One resolved value feeds the global cap and every op that does not set
-    # its own (#3758). An explicit ``llm_max_concurrent`` is held to the ceiling
-    # as it always was; unset follows the ceiling itself (the extraction
-    # drop-in's effective concurrency), and consolidation then takes one fewer
-    # so retain and page refresh always have a permit.
-    explicit_cap = lanes.llm_max_concurrent
-    if explicit_cap is None:
-        resolved_cap = ceiling if ceiling is not None else UNSET_LANES_CAP_FALLBACK
-    else:
-        resolved_cap = explicit_cap
-    global_cap = _held(resolved_cap)
+    global_cap, op_caps = lane_caps(lanes, ceiling)
     lines += [
         f"Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT={global_cap}",
         f"Environment=HINDSIGHT_API_LLM_REASONING_EFFORT={lanes.reasoning_effort}",
@@ -564,13 +585,7 @@ def render_showcase_env(
 
     for op, prefix in LANE_OP_ENV_PREFIX.items():
         op_cfg: MemoryLaneOpConfig = getattr(lanes, op)
-        if op_cfg.max_concurrent is not None:
-            max_concurrent = op_cfg.max_concurrent
-        else:
-            max_concurrent = lane_default_concurrency(lanes, op, global_cap)
-        if op_cfg.virtual_model is None:
-            max_concurrent = _held(max_concurrent)
-        lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MAX_CONCURRENT={max_concurrent}")
+        lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MAX_CONCURRENT={op_caps[op]}")
         if op_cfg.virtual_model is not None:
             lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MODEL={op_cfg.virtual_model}")
         if op_cfg.timeout_s is not None:
@@ -599,11 +614,22 @@ def render_showcase_env(
 
     # #3759: always rendered, so a box never runs on the engine's 300 s reflect
     # clock, which counts time spent queued for an LLM permit.
-    lines.append(f"Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT={lanes.reflect.wall_timeout_s}")
+    from hal0.config.schema import (
+        DEFAULT_CONSOLIDATION_BATCH_SIZE,
+        DEFAULT_REFLECT_WALL_TIMEOUT_S,
+    )
+
+    wall = lanes.reflect.wall_timeout_s
+    lines.append(
+        "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT="
+        f"{DEFAULT_REFLECT_WALL_TIMEOUT_S if wall is None else wall}"
+    )
     # #3762: the engine batches 8 memories per consolidation call, which can
     # overflow the 8192-token output cap rendered above.
+    batch = lanes.consolidation.batch_size
     lines.append(
-        f"Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE={lanes.consolidation.batch_size}"
+        "Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE="
+        f"{DEFAULT_CONSOLIDATION_BATCH_SIZE if batch is None else batch}"
     )
 
     return "\n".join(lines) + "\n"

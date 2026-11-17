@@ -3553,3 +3553,34 @@ def test_a_failed_age_lookup_never_refuses_a_commit_log(
     engine.overrides[("GET", path)] = httpx.Response(500, json={"detail": "boom"})
     assert _gitlog(client, key).status_code == 200
     assert _engine_retains(engine) == 1
+
+
+def test_reflect_limit_uses_what_the_engine_is_given(
+    client: TestClient, key: str, app: FastAPI, monkeypatch
+) -> None:
+    """#3758: the reflect limit comes from the renderer's resolver, so graph 4 on
+    a slot with --parallel 2 leaves one of two engine slots; an explicit lanes
+    value of 6 under graph 2 is held to 2."""
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import extraction_env
+
+    def limit(memory: MemoryConfig, parallel: int | None) -> int:
+        monkeypatch.setattr(extraction_env, "extraction_slot_parallel", lambda g, **kw: parallel)
+        app.state.hal0_config = types.SimpleNamespace(memory=memory)
+        request = types.SimpleNamespace(app=app)
+        return memory_compat._reflect_limit(request)  # type: ignore[arg-type]
+
+    memory = MemoryConfig(
+        graph={"extraction_max_concurrent": 4}, compat={"max_concurrent_reflects": 8}
+    )
+    assert limit(memory, 2) == 1
+    memory = MemoryConfig(
+        graph={"extraction_max_concurrent": 2},
+        lanes={"llm_max_concurrent": 6},
+        compat={"max_concurrent_reflects": 8},
+    )
+    assert limit(memory, None) == 1
+    memory = MemoryConfig(
+        graph={"extraction_max_concurrent": 4}, compat={"max_concurrent_reflects": 8}
+    )
+    assert limit(memory, None) == 3

@@ -18,7 +18,7 @@ under `[memory.lanes.<op>]`. The engine reads these as its own
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `llm_max_concurrent` | int | unset | `1-32`. `HINDSIGHT_API_LLM_MAX_CONCURRENT` global cap. Unset follows the effective `[memory.graph].extraction_max_concurrent`, and the consolidation lane then takes one fewer (minimum 1) so retain and page refresh always have a permit. An explicit value is rendered as min(this, effective `[memory.graph].extraction_max_concurrent`) and every lane inherits it unchanged. |
+| `llm_max_concurrent` | int | unset | `1-32`. `HINDSIGHT_API_LLM_MAX_CONCURRENT` global cap. Unset follows the effective `[memory.graph].extraction_max_concurrent`, and the consolidation lane then takes one fewer (minimum 1) so retain and page refresh always have a permit. An explicit value is rendered as min(this, effective `[memory.graph].extraction_max_concurrent`) and every lane inherits it unchanged: an explicit global cap gets no automatic "consolidation minus one", so set `[memory.lanes.consolidation].max_concurrent` yourself if you want it. "Effective" means held to the extraction slot's `--parallel`; `GET /api/memory/lanes` reports the same values the drop-in carries. |
 | `timeout_s` | int | `600` | `30-3600`. Not rendered. Engine-wide timeout: `[memory.graph].llm_timeout_s` (`HINDSIGHT_API_LLM_TIMEOUT`); see [#3631](https://github.com/Hal0ai/hal0/issues/3631). |
 | `reasoning_effort` | str | `"none"` | `HINDSIGHT_API_LLM_REASONING_EFFORT`. |
 | `strict_schema` | bool | `false` | `HINDSIGHT_API_LLM_STRICT_SCHEMA`. |
@@ -43,5 +43,13 @@ The per-operation tables `retain`, `consolidation`, `reflect` and
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `[memory.lanes.reflect].wall_timeout_s` | int | `1800` | `60-86400`. Rendered as `HINDSIGHT_API_REFLECT_WALL_TIMEOUT`: the seconds the engine gives one reflect, and one knowledge-page refresh (which runs as a reflect), from start to finish. The clock includes time spent waiting for a language-model permit, so a refresh queued behind consolidation and retain needs headroom. The engine's own default is 300. |
-| `[memory.lanes.consolidation].batch_size` | int | `4` | `1-32`. Rendered as `HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE`: memories consolidated per language-model call (`1` means no batching). The engine's own default is 8, which can overflow the 8192-token output cap; a batch that overflows is split and retried, and what still fails is counted as failed. |
+| `[memory.lanes.reflect].wall_timeout_s` | int | unset (renders `1800`) | `60-86400`. Rendered as `HINDSIGHT_API_REFLECT_WALL_TIMEOUT`: the seconds the engine gives one reflect, and one knowledge-page refresh (which runs as a reflect), from start to finish. The clock includes time spent waiting for a language-model permit, so a refresh queued behind consolidation and retain needs headroom. The engine's own default is 300. Keep it above `[memory.graph].llm_timeout_s`: a wall clock shorter than one language-model call's timeout cannot let a slow call finish, so the call is cut off however long it was allowed. hal0 does not enforce this, because the two keys live in different tables and a box may rely on either. Unset follows hal0's default, and a settings save does not write the default into `hal0.toml`. |
+| `[memory.lanes.consolidation].batch_size` | int | unset (renders `4`) | `1-32`. Rendered as `HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE`: memories consolidated per language-model call (`1` means no batching). The engine's own default is 8, which can overflow the 8192-token output cap; a batch that overflows is split and retried, and what still fails is counted as failed. Unset follows hal0's default, and a settings save does not write it into `hal0.toml`. |
+
+### Upgrading an existing box
+
+Config migration v5 runs once on the first update that carries it; `meta.schema_version` in `hal0.toml` is the record that it ran, so it never runs again.
+
+- A stored `[memory.lanes].llm_max_concurrent = 1` is removed. The old default was 1 and a settings save wrote it, so a stored 1 is almost never a choice, and left in place it would keep clamping the engine to one call. Any other stored value stays and behaves exactly as before. A 1 you set after the update is respected.
+- A hand-made drop-in in the engine's `hindsight-api.service.d/` directory that sets `HINDSIGHT_API_REFLECT_WALL_TIMEOUT` or `HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE` would be silently overridden by the managed `showcase-lanes.conf`. When `hal0.toml` has no value for the matching key, the drop-in's value (inside the bounds above) is copied into `hal0.toml` first, so the box keeps its setting. hal0 never deletes your file: the update says it is now redundant and you can remove it. A value outside the bounds is reported and not copied.
+- The update summary lists both outcomes. A fresh install has neither stored value and follows the defaults.

@@ -62,7 +62,7 @@ def test_memory_config_round_trips_through_model_dump() -> None:
 
 
 def test_reflect_wall_timeout_default_and_bounds() -> None:
-    assert MemoryConfig().lanes.reflect.wall_timeout_s == 1800
+    assert MemoryConfig().lanes.reflect.wall_timeout_s is None  # resolves to 1800 at render
     assert (
         MemoryConfig(lanes={"reflect": {"wall_timeout_s": 7200}}).lanes.reflect.wall_timeout_s
         == 7200
@@ -73,7 +73,7 @@ def test_reflect_wall_timeout_default_and_bounds() -> None:
 
 
 def test_consolidation_batch_size_default_and_bounds() -> None:
-    assert MemoryConfig().lanes.consolidation.batch_size == 4
+    assert MemoryConfig().lanes.consolidation.batch_size is None  # resolves to 4 at render
     assert (
         MemoryConfig(lanes={"consolidation": {"batch_size": 8}}).lanes.consolidation.batch_size == 8
     )

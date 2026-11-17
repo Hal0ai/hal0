@@ -94,6 +94,7 @@ from hal0.api.routes.memory import MemoryUnavailable, extraction_ctx_preflight
 from hal0.config.schema import (
     MemoryCompatConfig,
     MemoryGraphConfig,
+    MemoryLanesConfig,
     MemoryRefreshConfig,
 )
 from hal0.errors import (
@@ -611,24 +612,27 @@ def _reflect_limit(request: Request) -> int:
     read are taken to be the shipped ones.
     """
     configured = _settings(request).max_concurrent_reflects
-    lanes = getattr(
-        getattr(getattr(request.app.state, "hal0_config", None), "memory", None), "lanes", None
-    )
-    caps = [
-        cap
-        for cap in (
-            getattr(lanes, "llm_max_concurrent", None),
-            getattr(getattr(lanes, "reflect", None), "max_concurrent", None),
-        )
-        if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1
-    ]
-    memory_cfg = getattr(request.app.state, "hal0_config", None)
-    graph = getattr(getattr(memory_cfg, "memory", None), "graph", None)
-    graph_cap = getattr(graph, "extraction_max_concurrent", None)
-    if not (isinstance(graph_cap, int) and not isinstance(graph_cap, bool) and graph_cap >= 1):
-        graph_cap = _DEFAULT_GRAPH.extraction_max_concurrent
-    # An unset ``llm_max_concurrent`` follows the graph cap (#3758).
-    engine_slots = min(caps) if caps else graph_cap
+    memory_cfg = getattr(getattr(request.app.state, "hal0_config", None), "memory", None)
+    lanes = getattr(memory_cfg, "lanes", None)
+    graph = getattr(memory_cfg, "graph", None)
+    if isinstance(lanes, MemoryLanesConfig) and isinstance(graph, MemoryGraphConfig):
+        # What the engine is given: the same resolver the drop-in is rendered
+        # from (slot --parallel clamp, explicit-value ceiling) (#3758).
+        from hal0.memory.extraction_env import resolved_lane_caps
+
+        global_cap, per_op = resolved_lane_caps(lanes, graph)
+        engine_slots = min(global_cap, per_op["reflect"])
+    else:
+        # Lanes hal0-api cannot read are taken to be the shipped ones.
+        caps = [
+            cap
+            for cap in (
+                getattr(lanes, "llm_max_concurrent", None),
+                getattr(getattr(lanes, "reflect", None), "max_concurrent", None),
+            )
+            if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1
+        ]
+        engine_slots = min(caps) if caps else _DEFAULT_GRAPH.extraction_max_concurrent
     return min(configured, max(1, engine_slots - 1))
 
 

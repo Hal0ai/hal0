@@ -3319,11 +3319,19 @@ class MemoryLaneOpConfig(BaseModel):
         return None if v is None else _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
 
 
+#: What an unset ``[memory.lanes.reflect].wall_timeout_s`` /
+#: ``[memory.lanes.consolidation].batch_size`` mean. Resolved at render time,
+#: not in the field default, so a settings save does not write them into
+#: hal0.toml and a later change of the default reaches existing boxes.
+DEFAULT_REFLECT_WALL_TIMEOUT_S = 1800
+DEFAULT_CONSOLIDATION_BATCH_SIZE = 4
+
+
 class MemoryReflectLaneConfig(MemoryLaneOpConfig):
     """``[memory.lanes.reflect]``: the per-op lane plus the reflect wall clock."""
 
-    wall_timeout_s: int = Field(
-        default=1800,
+    wall_timeout_s: int | None = Field(
+        default=None,
         ge=60,
         le=86400,
         description=(
@@ -3332,7 +3340,11 @@ class MemoryReflectLaneConfig(MemoryLaneOpConfig):
             "call), from start to finish. The clock includes time spent "
             "waiting for an LLM permit, so a refresh queued behind "
             "consolidation and retain needs headroom; the engine's own "
-            "default is 300."
+            "default is 300. Unset means hal0's default, 1800 "
+            "(DEFAULT_REFLECT_WALL_TIMEOUT_S), resolved when the drop-in is "
+            "rendered so a save never pins it. Keep it above "
+            "[memory.graph].llm_timeout_s: a wall clock shorter than one "
+            "LLM call's timeout cannot let a slow call finish."
         ),
     )
 
@@ -3340,8 +3352,8 @@ class MemoryReflectLaneConfig(MemoryLaneOpConfig):
 class MemoryConsolidationLaneConfig(MemoryLaneOpConfig):
     """``[memory.lanes.consolidation]``: the per-op lane plus the batch size."""
 
-    batch_size: int = Field(
-        default=4,
+    batch_size: int | None = Field(
+        default=None,
         ge=1,
         le=32,
         description=(
@@ -3349,7 +3361,9 @@ class MemoryConsolidationLaneConfig(MemoryLaneOpConfig):
             "consolidated per LLM call (1 = no batching). The engine's own "
             "default is 8, which can overflow the 8192-token output cap "
             "hal0 renders; a batch that overflows is split and retried, and "
-            "what still fails is counted as failed."
+            "what still fails is counted as failed. Unset means hal0's "
+            "default, 4 (DEFAULT_CONSOLIDATION_BATCH_SIZE), resolved when "
+            "the drop-in is rendered so a save never pins it."
         ),
     )
 
