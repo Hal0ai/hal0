@@ -91,5 +91,15 @@ slower).
 
 The unit takes `threads`, `port` and `max_request_tokens` from this table
 when it is written. After changing one of them, run `hal0 memory decision
-install` again to rewrite the unit. The commands are in
-[CLI: memory](/docs/reference/cli-memory/#memory-decision).
+install` again to rewrite the unit.
+
+### The commands
+
+| Command | Flags |
+|---|---|
+| `memory decision install` | `--yes` |
+| `memory decision status` | `--json` |
+| `memory decision enable` / `disable` | — |
+| `memory decision remove` | `--purge-model`, `--yes` |
+
+`install` runs `hal0 update component memory-decision`, then sets `provider = "local"`; run as root, it builds in-process. `enable` needs it installed; `disable` sets `off` and leaves the server up; `remove` sets `off`, deletes the unit and venv, and keeps the model unless `--purge-model`.

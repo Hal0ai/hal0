@@ -125,14 +125,7 @@ Knowledge-base pages are documents Hindsight 1.2 synthesizes from a bank's memor
 
 ### `memory decision`
 
-| Command | Flags |
-|---|---|
-| `memory decision install` | `--yes` |
-| `memory decision status` | `--json` |
-| `memory decision enable` / `disable` | — |
-| `memory decision remove` | `--purge-model`, `--yes` |
-
-The opt-in local decision model ([`[memory.decision]`](/docs/reference/config-schema-memory-lanes/#memorydecision-decision-model)). `install` runs `hal0 update component memory-decision`, then sets `provider = "local"`; as root it builds in-process. `enable` needs it installed; `disable` sets `off` and leaves the server up; `remove` sets `off`, deletes the unit and venv, and keeps the model unless `--purge-model`.
+`memory decision install|status|enable|disable|remove` manages the opt-in local decision model; see [`[memory.decision]`](/docs/reference/config-schema-memory-lanes/#the-commands).
 
 ### `memory embedder switch`
 
