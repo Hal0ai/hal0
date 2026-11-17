@@ -15,12 +15,13 @@
 //
 // The last bank looked at is also written to localStorage, for the Overview page's Memory card.
 // Nothing in this area reads it back.
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import './memory-area.css'
 import { EmptyState } from './shared/EmptyState.jsx'
 import { GoLink } from './shared/GoLink.jsx'
 import { ScopeBar } from './shared/ScopeBar.jsx'
 import { memoryTabHref } from './memory-route-pure'
+import { loadMemoryWorkspace, memoryWorkspaceReady } from '../memory-workspace-modules'
 
 /** The key the Overview page's Memory card reads (dash/overview/memory.jsx). */
 export const LAST_BANK_KEY = 'hal0.mem.bank'
@@ -49,6 +50,20 @@ export function FactsTab({ area }) {
   const listed = !!route.bank && banks.some((b) => b.bank_id === route.bank)
   // A long bank list arrives one page at a time: a bank that is not on this page may still exist.
   const paged = (banksQuery.data?.total ?? 0) > banks.length
+
+  // The workspace modules (and d3-force) load the first time this tab opens.
+  const [, setWorkspaceLoaded] = useState(memoryWorkspaceReady())
+  useEffect(() => {
+    if (memoryWorkspaceReady()) return undefined
+    let alive = true
+    loadMemoryWorkspace().then(
+      () => alive && setWorkspaceLoaded(true),
+      () => {},
+    )
+    return () => {
+      alive = false
+    }
+  }, [])
 
   // An address with no bank is completed in place, so a reload or a copied link names the bank.
   useEffect(() => {
