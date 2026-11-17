@@ -6,8 +6,11 @@ only, because ``registry`` imports :class:`UpstreamModel` from here at runtime.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from hal0.errors import Hal0Error
 
 if TYPE_CHECKING:
     from hal0.upstreams.registry import Upstream
@@ -50,3 +53,75 @@ def enabled_ids(u: Upstream) -> tuple[str, ...]:
     if not u.curated:
         return ()
     return tuple(m.id for m in u.models if m.enabled)
+
+
+class ModelNotEnabled(Hal0Error):
+    """404 - the model is unknown or switched off on the provider."""
+
+    code = "upstream.model_not_enabled"
+    status = 404
+
+
+class ModelAmbiguous(Hal0Error):
+    """400 - a bare model id is enabled on more than one provider."""
+
+    code = "upstream.model_ambiguous"
+    status = 400
+
+
+@dataclass(frozen=True)
+class Resolved:
+    """A requested model mapped to one provider."""
+
+    upstream: Upstream
+    model_id: str
+    """The id to send to the provider."""
+
+
+def _participates(u: Upstream) -> bool:
+    return u.curated and u.enabled and u.kind == "remote" and not u.slot_name and not u.managed_by
+
+
+def _not_enabled(provider: str, model: str) -> ModelNotEnabled:
+    return ModelNotEnabled(
+        f"model {model!r} is not enabled on provider {provider!r}; "
+        "enable it on the provider's model list",
+        details={"provider": provider, "model": model},
+    )
+
+
+def resolve_requested_model(requested: str, upstreams: Iterable[Upstream]) -> Resolved | None:
+    """Map a requested model id to one curated provider.
+
+    Only curated, enabled, remote upstreams that are neither slot-backed nor
+    agent-managed take part. A ``provider/model`` reference naming a taking-part
+    provider is resolved there (or raises :class:`ModelNotEnabled`). Anything
+    else is a bare id, matched against every provider's enabled models. Returns
+    ``None`` when nothing claims the id.
+    """
+    live = {u.name: u for u in upstreams if _participates(u)}
+
+    ref = split_ref(requested)
+    if ref is not None and ref[0] in live:
+        provider, model = ref
+        for row in live[provider].models:
+            if row.id == model:
+                if row.enabled:
+                    return Resolved(live[provider], model)
+                break
+        raise _not_enabled(provider, model)
+
+    enabled = [u for u in live.values() if requested in enabled_ids(u)]
+    if len(enabled) == 1:
+        return Resolved(enabled[0], requested)
+    if enabled:
+        candidates = sorted(canonical_id(u.name, requested) for u in enabled)
+        raise ModelAmbiguous(
+            f"model {requested!r} is enabled on several providers; "
+            f"use one of: {', '.join(candidates)}",
+            details={"model": requested, "candidates": candidates},
+        )
+    for name in sorted(live):
+        if any(m.id == requested and not m.enabled for m in live[name].models):
+            raise _not_enabled(name, requested)
+    return None
