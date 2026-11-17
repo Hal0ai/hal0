@@ -155,7 +155,7 @@ function Ready({ area, healthQuery, health }) {
   const [run, startBulk] = useBulkRun(refresh)
 
   // When the last operation finished: asked for only once the queue is known to be clear.
-  const allBankIds = liveBankIds(bankIds, report?.banks?.list)
+  const allBankIds = liveBankIds(bankIds, report?.bankList)
   const scopeBanks = bank !== null ? [bank] : allBankIds
   const finished = useOperationLists(scopeBanks, { status: 'completed', limit: 1, enabled: clear })
   const lastDone = clear ? lastCompletedAt(finished.entries) : null
@@ -193,6 +193,11 @@ function Ready({ area, healthQuery, health }) {
   return (
     <Frame state={health.kind === 'ready' ? (clear ? 'clear' : 'ready') : health.kind}>
       {scopeBar}
+      {bank === null && allBankIds.length < bankIds.length && (
+        <p className="ma-helper" data-testid="ma-ops-retired-note">
+          All banks leaves out retired banks. They are listed only when chosen above.
+        </p>
+      )}
       {report?.cause && <CauseCard cause={report.cause} route={route} />}
       {clear && <ClearCard bank={bank} lastCompletedAt={lastDone} />}
       {health.kind === 'failed' ? (

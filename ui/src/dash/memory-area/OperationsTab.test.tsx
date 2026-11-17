@@ -254,6 +254,29 @@ describe('loading', () => {
   })
 })
 
+describe('retired banks', () => {
+  const withRetired = () => {
+    m.health = {
+      data: { ...healthBody(), banks: { list: [{ bank_id: 'shared', retired: true }, { bank_id: AGENTS }] } },
+      refetch: vi.fn(),
+    }
+  }
+
+  it('says all banks leaves retired ones out, and does not ask for them', () => {
+    withRetired()
+    const host = render()
+    expect(textOf(byId(host, 'ma-ops-retired-note'))).toContain('listed only when chosen')
+    expect(m.listCalls.flatMap((c) => c.ids)).not.toContain('shared')
+  })
+
+  it('says nothing when no bank is retired, or when a bank is chosen', () => {
+    expect(byId(render(), 'ma-ops-retired-note')).toBeNull()
+    cleanup()
+    withRetired()
+    expect(byId(render(inBank(AGENTS)), 'ma-ops-retired-note')).toBeNull()
+  })
+})
+
 describe('engine unreachable', () => {
   const expectUnreachable = (host: HTMLElement) => {
     expect(state(host)).toBe('unreachable')

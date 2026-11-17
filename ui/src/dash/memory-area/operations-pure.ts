@@ -388,6 +388,8 @@ export interface QueueReport {
   /** A bank held more operations than were read. */
   truncated: boolean
   checkedAt: string | null
+  /** The health answer's per-bank rows, which say which banks are retired. */
+  bankList: Array<{ bank_id: string; retired?: boolean }> | null
 }
 
 /**
@@ -446,6 +448,7 @@ export function readQueueHealth(query: { data?: MemoryHealth | null; isError?: b
     partial: Array.isArray(report.partial) && report.partial.includes('queue'),
     truncated: queue?.truncated === true,
     checkedAt: typeof report.checked_at === 'string' ? report.checked_at : null,
+    bankList: Array.isArray(report.banks?.list) ? report.banks.list : null,
   }
 }
 
