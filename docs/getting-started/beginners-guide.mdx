@@ -515,6 +515,27 @@ you skipped it at install time, run `hal0 app install openwebui`.
 
 **Learn more.** [Open WebUI](/docs/guides/open-webui/).
 
+### Use a cloud model through a provider
+
+hal0 can also send a request to a hosted service such as OpenRouter or OpenAI,
+which hal0 calls a **provider**. You choose which of the provider's models to
+allow, and apps then use them through the same address as your local models.
+
+**Dashboard.** Open **Slots**, then **Endpoints**, and add a provider there.
+The **Upstream Models** tab on the **Models** page lists the models it serves.
+
+**Command line.** `hal0 upstream create openrouter --catalog openrouter
+--auth-env OPENROUTER_API_KEY --api-key <your key>` adds one. Then `hal0
+upstream refresh openrouter` fetches its models and `hal0 upstream enable
+openrouter <model>` allows one.
+
+**Stumble.** A model you have not enabled answers `404
+upstream.model_not_enabled`. Enable it, then ask again as
+`<provider>/<model>`, for example `openrouter/qwen/qwen3-coder`.
+
+**Learn more.**
+[Connect external providers](/docs/guides/connect-external-providers/).
+
 ### NPU, if your machine has one
 
 An **NPU** is a small, low-power chip built for AI work, found in AMD Ryzen

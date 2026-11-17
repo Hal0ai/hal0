@@ -41,7 +41,9 @@ flow is **list → pull → assign**.
    hal0 model list
    ```
 
-   Add `--json` to emit the raw `/api/models` payload for scripting.
+   Add `--json` to emit the raw `/api/models` payload for scripting. To use a
+   hosted model such as OpenRouter's instead of pulling one, see
+   [Connect external providers](/docs/guides/connect-external-providers).
 
 2. **Pull a model** from Hugging Face. The argument is either a curated
    alias (e.g. `qwen3-4b`) or a registered model id:

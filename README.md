@@ -290,6 +290,13 @@ walks through the same steps in plain language.
   uninstall` manage it. Bare metal stays the default. ADR-0051. The Proxmox
   and [Incus](./docs/getting-started/incus.mdx) guides cover an unprivileged
   LXC, which ADR-0050 makes the one container wrapper (no OCI appliance).
+- **A per-model catalog for external providers.** An upstream such as
+  OpenRouter or OpenAI keeps one row per model, and only the models you enable
+  route; `/v1/models` lists them as `<provider>/<id>`. `hal0 upstream
+  models|enable|disable|refresh|probe`, the matching MCP tools and
+  `/api/upstreams/{name}/models` manage the rows, and an existing upstream
+  converts to rows once its provider answers. See
+  [Connect external providers](./docs/guides/connect-external-providers.mdx).
 - **Slot tune overrides.** A sparse `[tune]` table on a slot for context,
   thinking, reasoning effort and budget, vision and speculation, inherited
   from the profile when absent. ADR-0045.
@@ -577,8 +584,9 @@ content-addressed, host-redacted archive you can attach anywhere, and
   the slot form and during install.
 - **Dispatcher** — registry-aware routing, single-flight, cold-cache
   prefetch, and upstream fallback (OpenRouter, Anthropic, OpenAI, Google AI
-  Studio, Ollama, custom OpenAI-shaped endpoints). Mix local + remote
-  per-model in one config.
+  Studio, Ollama, custom OpenAI-shaped endpoints). A remote provider serves
+  only the models you enable on it, requested as `<provider>/<id>` or a bare
+  id. Mix local + remote per-model in one config.
 - **Dashboard** — React 19 + Vite UI for slot/model management,
   hardware-aware configuration, live logs, system health and a built-in chat
   page (popout window + reasoning toggle). SSE-backed status and log tail; a
@@ -1316,8 +1324,9 @@ running on your box. Full version at
   a Benchmarks page (roster / runs / evals / run-queue), shareable bundles
   and leaderboard publishing
 - **Upstream model controls** — external providers (OpenRouter, Anthropic,
-  OpenAI, Google AI Studio, Ollama, custom) with reactive CRUD, per-upstream
-  model filters and an `enabled` kill switch across CLI, MCP and dashboard
+  OpenAI, Google AI Studio, Ollama, custom) with reactive CRUD, a per-model
+  catalog where only enabled models route, a probe, and an `enabled` kill
+  switch across CLI, MCP and API (the dashboard adds, tests and lists them)
 - **Companion services, one surface** — Open WebUI, ComfyUI, Hermes and
   Hindsight from a dashboard Services page with mDNS discovery
 - **FLM trio NPU packing** — chat + ASR + embed coresident on one AMDXDNA

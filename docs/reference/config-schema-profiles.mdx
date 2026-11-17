@@ -62,9 +62,9 @@ warning logged.
 | `context` | int \| null | `null` | `> 0` |
 | `price_in` | float \| null | `null` | `>= 0`; list price per `price_unit` |
 | `price_out` | float \| null | `null` | `>= 0`; list price per `price_unit` |
-| `price_unit` | str | `"Mtok"` | presets and model discovery write `Mtok`, `Mchar`, `image` or `1k_search`; the loader does not check the value |
+| `price_unit` | str | `"Mtok"` | `Mtok, Mchar, image, 1k_search` |
 
-A model is turned on by setting `enabled = true` and restarting the API service. See
+A model is turned on by setting `enabled = true` and restarting the API service, or live with `hal0 upstream enable <name> <model>`. See
 [How a model id is routed](/docs/reference/providers-profiles-devices/#how-a-model-id-is-routed).
 
 ### `[[upstream]].model_filters`
