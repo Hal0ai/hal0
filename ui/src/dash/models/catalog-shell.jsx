@@ -276,7 +276,7 @@ export function StatusChip({ state, testid }) {
  * `state` is a `CatalogState`; `tags` and `menu` are nodes; `badge` sits beside the name.
  * The row is a click target for selection and answers Enter and Space.
  */
-export function CatalogRow({ state, selected, onSelect, name, sub, badge, tags, size, menu, testid, dotTestid, statusTestid, children }) {
+export function CatalogRow({ state, selected, onSelect, name, sub, badge, tags, size, menu, testid, dotTestid, statusTestid, sizeTestid, children }) {
   const pct = state.download ? state.download.pct : null
   return (
     <div
@@ -302,7 +302,7 @@ export function CatalogRow({ state, selected, onSelect, name, sub, badge, tags, 
         <span className="sub">{sub || ''}</span>
       </span>
       <span className="mdl-row-tags">{tags}</span>
-      <span className="sz num">{size || ''}</span>
+      <span className="sz num" data-testid={sizeTestid}>{size || ''}</span>
       <span className="tg">
         <StatusChip state={state} testid={statusTestid} />
       </span>

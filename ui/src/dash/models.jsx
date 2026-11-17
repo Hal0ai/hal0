@@ -7,9 +7,7 @@
 // /api/models/{id}, and the Downloads pane is a thin shell around
 // per-row usePullJob() instances tracked by model_id.
 
-import { useModels, usePullsList, useClearPullJob, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdatesForceCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes, fmtSpeed, fmtEta, pullFileLabel } from '@/api/hooks/useModels'
-import { apiPost } from '@/api/client'
-import { ENDPOINTS } from '@/api/endpoints'
+import { useModels, usePullsList, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdatesForceCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes } from '@/api/hooks/useModels'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
@@ -21,6 +19,7 @@ import { flmCatalogRows } from '@/dash/npu/npu-models-pure'
 import { imageFileCount } from '@/dash/image/image-files-pure'
 import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
+import { DownloadRow, DownloadsPane } from '@/dash/models/DownloadsPane.jsx'
 import { useXdnaFit } from '@/api/hooks/useXdnaFit'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { npuTabVisible } from '@/dash/npu/npu-pure'
@@ -279,7 +278,31 @@ function ModelsView({ modelParam = null }) {
   ];
   const filtered = q.trim() || filterSel.length || stateSel.length || runsSel.length;
 
-  const headerCheck = tab === "upstream"
+  // FLM's catalogue is a closed list with no per-model update check: checking it
+  // is re-reading the catalogue, and adding is downloading one of its models.
+  const [flmAddSeq, setFlmAddSeq] = useStateM(0);
+  const [recheckingFlm, setRecheckingFlm] = useStateM(false);
+  const onRecheckFlm = async () => {
+    setRecheckingFlm(true);
+    try {
+      const res = await flmCatalog.refetch();
+      if (res.isError) throw res.error;
+      const rows = flmCatalogRows(res.data?.models);
+      toastM(`FLM catalogue re-read · ${rows.length} model${rows.length === 1 ? "" : "s"}, ${rows.filter(r => r.installed).length} installed`, "info");
+    } catch (e) {
+      toastM(`Could not re-read the FLM catalogue — ${e?.message || "see logs"}`, "err");
+    } finally {
+      setRecheckingFlm(false);
+    }
+  };
+  const headerCheck = tab === "flm"
+    ? {
+        testid: "mdl-check-flm",
+        title: "Re-read the FastFlowLM catalogue. FLM has no per-model update check.",
+        pending: recheckingFlm,
+        onClick: onRecheckFlm,
+      }
+    : tab === "upstream"
     ? {
         testid: "mdl-check-upstream",
         title: "Ask the upstreams again which models they advertise",
@@ -291,7 +314,9 @@ function ModelsView({ modelParam = null }) {
         pending: forceCheck.isPending,
         onClick: onCheckUpdates,
       };
-  const headerAdd = tab === "upstream"
+  const headerAdd = tab === "flm"
+    ? [{ label: "Download FLM model", hint: "Show the catalogue models that are not installed yet", onClick: () => setFlmAddSeq(n => n + 1) }]
+    : tab === "upstream"
     ? [{ label: "Add upstream", hint: "Add a provider under Slots → Endpoints; its models appear here", onClick: () => { window.location.hash = "#slots/endpoints"; } }]
     : [
         { label: "Add by HF coords", hint: "a repo and a file, pulled into the model store", testid: "mdl-add-hf", onClick: () => setAddOpen(true) },
@@ -310,7 +335,7 @@ function ModelsView({ modelParam = null }) {
             second vh below the tab bar. */}
         <h1>{tab === "profiles" ? "Profiles" : "Models"}</h1>
         <span className="vh-spacer" />
-        {tab === "profiles" || tab === "image" || tab === "flm" ? (
+        {tab === "profiles" || tab === "image" ? (
           null
         ) : (
           <CatalogHeaderActions check={headerCheck} addItems={headerAdd}>
@@ -381,7 +406,7 @@ function ModelsView({ modelParam = null }) {
       ) : tab === "image" ? (
         <ImageFilesTab />
       ) : tab === "flm" ? (
-        <FlmModelsTab />
+        <FlmModelsTab addSeq={flmAddSeq} />
       ) : (
       <div className="models-layout" style={{marginTop: 18}}>
         {/* ── List (toolbar + rows) ── */}
@@ -831,117 +856,6 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
         )}
       </DetailActions>
     </DetailCard>
-  );
-}
-
-// ── DownloadRow ───────────────────────────────────────────────────────
-// One row in the Downloads pane. Owns its own cancelling state via
-// useStateM — must be its own component because it is rendered from a
-// list (jobs.map). Calling a hook inside a .map() callback causes
-// "Rendered more hooks than during the previous render" (React #310)
-// the moment the job list changes length.
-function DownloadRow({ job, clearJob }) {
-  const j = job;
-  const pct = j.bytes_total ? Math.round((j.bytes_downloaded / (j.bytes_total || 1)) * 100) : 0;
-  const isRunning = j.state === 'running';
-  const isQueued = j.state === 'queued';
-  const isCompleted = j.state === 'completed';
-  const isFailed = j.state === 'failed';
-  const isCancelled = j.state === 'cancelled';
-  const [cancelling, setCancelling] = useStateM(false);
-  const doCancel = async () => {
-    setCancelling(true);
-    try {
-      await apiPost(ENDPOINTS.modelPullCancel(j.model_id));
-    } catch (e) {
-      window.__hal0Toast && window.__hal0Toast(
-        `Cancel failed — ${e?.message || "see logs"}`, "err",
-      );
-    } finally {
-      setCancelling(false);
-    }
-  };
-  return (
-    <div style={{padding: "12px 16px", borderBottom: "1px solid var(--line-soft)"}}>
-      <div style={{display: "flex", justifyContent: "space-between", fontFamily: "var(--jbm)", fontSize: 11.5, marginBottom: 6, alignItems: "center", gap: 8}}>
-        <span style={{
-          color: isCompleted ? "var(--ok)" : isCancelled ? "var(--fg-4)" : isFailed ? "var(--err)" : "var(--fg)",
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1,
-        }}>
-          {j.hf_repo || j.model_id}
-          {j.dest_path && <span style={{color: "var(--fg-4)", marginLeft: 6, fontSize: 10}}>→ {j.dest_path}</span>}
-        </span>
-        <span style={{color: isCompleted ? "var(--ok)" : isFailed ? "var(--err)" : "var(--fg-3)", fontSize: 11}}>
-          {isRunning && `${pct}%`}
-          {isQueued && "queued"}
-          {isCompleted && "✓ done"}
-          {isFailed && "failed"}
-          {isCancelled && "cancelled"}
-        </span>
-      </div>
-      {!isCompleted && !isFailed && !isCancelled && (
-        <div className="dl-bar" style={{height: 4, marginBottom: 4}}>
-          <i style={{width: `${pct}%`, background: "var(--accent)"}} />
-        </div>
-      )}
-      {isRunning && (
-        <div style={{display: "flex", justifyContent: "space-between", fontFamily: "var(--jbm)", fontSize: 10, color: "var(--fg-4)", marginBottom: 4}}>
-          <span>
-            {fmtBytes(j.bytes_downloaded)} / {fmtBytes(j.bytes_total)}
-            {pullFileLabel(j.files || []) && ` · ${pullFileLabel(j.files || [])}`}
-          </span>
-          <span>{fmtSpeed(j.speed_bps)} · {fmtEta(j.eta_s)}</span>
-        </div>
-      )}
-      {isFailed && j.error && (
-        <div style={{marginBottom: 6, padding: "6px 10px", background: "var(--err-soft)", border: "1px solid var(--err-line)", borderRadius: "var(--rad-sm)", fontFamily: "var(--jbm)", fontSize: 11, color: "var(--err)"}}>
-          {j.error.message || "Download failed"}
-        </div>
-      )}
-      <div style={{display: "flex", gap: 4}}>
-        {(isRunning || isQueued) && (
-          <button className="btn ghost sm" onClick={doCancel} disabled={cancelling}>
-            {cancelling ? "Cancelling…" : "Cancel"}
-          </button>
-        )}
-        {isFailed && (
-          <>
-            <button className="btn ghost sm" onClick={() => apiPost(ENDPOINTS.modelPull(j.model_id))}>↻ Retry</button>
-            <button className="btn ghost sm" onClick={() => clearJob.mutate(j.model_id)}>Clear</button>
-          </>
-        )}
-        {isCompleted && (
-          <button className="btn ghost sm" onClick={() => clearJob.mutate(j.model_id)}>Dismiss</button>
-        )}
-        {isCancelled && (
-          <button className="btn ghost sm" onClick={() => clearJob.mutate(j.model_id)}>Clear</button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── DownloadsPane ─────────────────────────────────────────────────────
-function DownloadsPane() {
-  const { jobs } = usePullsList();
-  const clearJob = useClearPullJob();
-  return (
-    <div className="mdl-dl">
-      <div className="mdl-dl-h">
-        <span>Downloads</span>
-        <span className="ct mono">{jobs.length}</span>
-      </div>
-      {jobs.length === 0 ? (
-        <div style={{padding: "32px 16px", textAlign: "center", color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>
-          <div style={{marginBottom: 6}}>No active downloads.</div>
-          <div style={{fontSize: 11, color: "var(--fg-5)"}}>Add a model from the catalog or via "Add by HF coords".</div>
-        </div>
-      ) : (
-        jobs.map((j) => (
-          <DownloadRow key={j.job_id || j.model_id} job={j} clearJob={clearJob} />
-        ))
-      )}
-    </div>
   );
 }
 

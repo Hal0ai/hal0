@@ -528,6 +528,7 @@ function useNavItems() {
         match: (route, param) => route === "models" && (!param || param === "inference") },
       { id: "models/image",     label: "Image / ComfyUI" },
       { id: "models/upstream",  label: "Upstream Models" },
+      { id: "models/flm",       label: "FLM" },
       { id: "models/profiles",  label: "Profiles" },
     ] },
     // The Operator Board (#board) is no longer a top-level nav row — it lives
