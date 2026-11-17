@@ -3,6 +3,7 @@
 // PUT body, the states around a save, and the rename of the old Reranker panel.
 import React, { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { QueryClient, QueryClientProvider, useMutation, useQuery } from '@tanstack/react-query'
 
 import { cleanup, click, mount } from '../../../../memory-area/shared/test-harness'
 
@@ -47,33 +48,42 @@ const state: any = {
   live: null,
   sent: [] as any[],
   respond: null as null | (() => Promise<any>),
-  pending: false,
+  reads: 0,
   models: null,
   modelsError: false,
   settingsError: false,
 }
 
+// Real react-query state: the models read and the save are a real query and a real mutation, so
+// "restarting" and "saving" come from state changes, not from a flag the test sets.
 vi.mock('@/api/hooks/useMemory', () => ({
-  useMemoryModels: () => ({
-    data: state.models,
-    isError: state.modelsError,
-    error: state.modelsError ? { message: 'engine down' } : null,
-    refetch: vi.fn(),
-  }),
+  useMemoryModels: () =>
+    useQuery({
+      queryKey: ['memory', 'models'],
+      queryFn: async () => {
+        state.reads += 1
+        if (state.modelsError) throw new Error('engine down')
+        return state.models
+      },
+      retry: false,
+      staleTime: Infinity,
+    }),
 }))
 
 vi.mock('../../../data/settingsClient.js', () => ({
-  useSettingsClient: () => ({
-    settings: { data: state.live, isError: state.settingsError, error: null },
-    schema: { data: SCHEMA },
-    update: {
-      isPending: state.pending,
-      mutateAsync: async (body: unknown) => {
+  useSettingsClient: () => {
+    const m = useMutation({
+      mutationFn: async (body: unknown) => {
         state.sent.push(body)
         return state.respond ? state.respond() : {}
       },
-    },
-  }),
+    })
+    return {
+      settings: { data: state.live, isError: state.settingsError, error: null },
+      schema: { data: SCHEMA },
+      update: { isPending: m.isPending, mutateAsync: m.mutateAsync },
+    }
+  },
 }))
 
 const { MemoryModelsPanel } = await import('../MemoryModelsPanel.jsx')
@@ -97,7 +107,30 @@ async function save(host: HTMLElement, id: string) {
   })
 }
 
-const render = (focus: any = null) => mount(<MemoryModelsPanel registry={{}} focus={focus} />)
+const render = (focus: any = null) =>
+  mount(
+    <QueryClientProvider client={new QueryClient()}>
+      <MemoryModelsPanel registry={{}} focus={focus} />
+    </QueryClientProvider>,
+  )
+
+// react-query notifies on a zero timer, so let one run (the fake clock, if it is on).
+const flush = () =>
+  act(async () => {
+    // A few turns, not one: a loaded CI runner needs more than a single timer to settle.
+    for (let i = 0; i < 5; i += 1) {
+      if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0)
+      else await new Promise((r) => setTimeout(r, 5))
+    }
+  })
+const tick = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
+
+// A save the test settles by hand.
+function holdSave() {
+  let release!: (v?: unknown) => void
+  state.respond = () => new Promise((r) => { release = r })
+  return () => act(async () => { release({}) })
+}
 
 beforeEach(() => {
   state.live = {
@@ -113,16 +146,20 @@ beforeEach(() => {
   }
   state.sent = []
   state.respond = null
-  state.pending = false
+  state.reads = 0
   state.modelsError = false
   state.settingsError = false
   ;(window as any).__hal0Toast = vi.fn()
 })
-afterEach(cleanup)
+afterEach(() => {
+  vi.useRealTimers()
+  cleanup()
+})
 
 describe('MemoryModelsPanel', () => {
-  it('shows the embedder read-only with the switch command and no editable embeddings key', () => {
+  it('shows the embedder read-only with the switch command and no editable embeddings key', async () => {
     const { host } = render()
+    await flush()
     const g = q(host, 'mem-models-embedder')!
     expect(g.textContent).toContain('hindsight-ai/hs-embed-1')
     expect(g.textContent).toContain('built with this model')
@@ -131,9 +168,10 @@ describe('MemoryModelsPanel', () => {
     expect(host.innerHTML).not.toContain('embeddings_')
   })
 
-  it('says when settings ask for a model the store was not built with', () => {
+  it('says when settings ask for a model the store was not built with', async () => {
     state.models.embeddings.model = 'other/embed'
     const { host } = render()
+    await flush()
     expect(q(host, 'mem-models-embedder-note')!.textContent).toContain('other/embed')
   })
 
@@ -245,12 +283,6 @@ describe('MemoryModelsPanel', () => {
     expect(q(host, 'mem-models-reranker-outcome')!.textContent).toContain('restarted')
   })
 
-  it('says the engine is restarting while the save is pending', () => {
-    state.pending = true
-    const { host } = render()
-    expect(q(host, 'mem-models-reranker-restarting')!.textContent).toContain('restarting the memory engine')
-  })
-
   it('offers the decision providers and warns plainly about hindsight-cloud', () => {
     const { host } = render()
     const select = q(host, 'mem-models-decision-provider')!
@@ -269,34 +301,39 @@ describe('MemoryModelsPanel', () => {
     expect(state.sent).toEqual([{ memory: { decision: { threads: 4 } } }])
   })
 
-  it('shows the install command when the local server does not answer, worded for absent fields', () => {
+  it('shows the install command when the local server does not answer, worded for absent fields', async () => {
     state.models.decision.reachable = false
     const { host } = render()
+    await flush()
     expect(q(host, 'mem-models-decision-note')!.textContent).toContain('not installed or not running')
     expect(q(host, 'mem-models-decision-cmd')!.textContent).toContain('sudo hal0 memory decision install')
   })
 
-  it('uses installed and unit_active when the read carries them', () => {
+  it('uses installed and unit_active when the read carries them', async () => {
     state.models.decision = { ...state.models.decision, reachable: false, installed: true, unit_active: false }
     const { host } = render()
+    await flush()
     expect(q(host, 'mem-models-decision-note')!.textContent).toContain('installed but not running')
   })
 
-  it('shows no install command when the server answers or the provider is off', () => {
+  it('shows no install command when the server answers or the provider is off', async () => {
     const a = render()
+    await flush()
     expect(q(a.host, 'mem-models-decision-cmd')).toBeNull()
     cleanup()
     state.models.decision = { enabled: true, provider: 'off', reachable: false }
     state.live.memory.decision.provider = 'off'
     const b = render()
+    await flush()
     expect(q(b.host, 'mem-models-decision-cmd')).toBeNull()
     expect(q(b.host, 'mem-models-decision-status')!.textContent).toBe('off')
   })
 
-  it('says the models read failed and offers a retry, without blocking the reranker form', () => {
+  it('says the models read failed and offers a retry, without blocking the reranker form', async () => {
     state.modelsError = true
     state.models = null
     const { host } = render()
+    await flush()
     expect(q(host, 'mem-models-read-failed')!.textContent).toContain('Could not read the memory models')
     expect(input(host, 'memory.models.reranker_max_candidates')).not.toBeNull()
   })
@@ -330,5 +367,97 @@ describe('MemoryModelsPanel', () => {
     const reset = Array.from(q(host, 'mem-models-reranker')!.querySelectorAll('button')).find((b) => b.textContent === 'Reset')!
     click(reset)
     expect(input(host, 'memory.models.reranker_max_candidates').value).toBe('60')
+  })
+
+  it('shows the restart only in the group that is saving, and holds the other Save with a reason', async () => {
+    const settle = holdSave()
+    const { host } = render()
+    await flush()
+    setValue(input(host, 'memory.models.reranker_max_candidates'), '40')
+    setValue(input(host, 'memory.decision.threads'), '4')
+    act(() => { q(host, 'mem-models-reranker-save')!.click() })
+    await flush()
+    expect(q(host, 'mem-models-reranker-restarting')).not.toBeNull()
+    expect(q(host, 'mem-models-decision-restarting')).toBeNull()
+    const other = q(host, 'mem-models-decision-save') as HTMLButtonElement
+    expect(other.disabled).toBe(true)
+    expect(other.textContent).toBe('Save decision model')
+    expect(q(host, 'mem-models-decision-blocked')!.textContent).toContain('One restart at a time')
+    await settle()
+    expect(q(host, 'mem-models-reranker-restarting')).toBeNull()
+    expect(q(host, 'mem-models-decision-blocked')).toBeNull()
+    expect((q(host, 'mem-models-decision-save') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('drops edits to decision numbers that are disabled when the provider is not local', async () => {
+    const { host } = render()
+    await flush()
+    setValue(input(host, 'memory.decision.threads'), '4')
+    setValue(q(host, 'mem-models-decision-provider')!, 'off')
+    expect(input(host, 'memory.decision.threads').disabled).toBe(true)
+    await save(host, 'mem-models-decision-save')
+    expect(state.sent).toEqual([{ memory: { decision: { provider: 'off' } } }])
+  })
+
+  it('does not count a dropped edit as a change', async () => {
+    const { host } = render()
+    await flush()
+    setValue(q(host, 'mem-models-decision-provider')!, 'off')
+    setValue(q(host, 'mem-models-decision-provider')!, 'local')
+    setValue(input(host, 'memory.decision.threads'), '4')
+    setValue(q(host, 'mem-models-decision-provider')!, 'hindsight-cloud')
+    setValue(q(host, 'mem-models-decision-provider')!, 'local')
+    await save(host, 'mem-models-decision-save')
+    expect(state.sent).toEqual([{ memory: { decision: { threads: 4 } } }])
+  })
+
+  describe('engine restart after a save', () => {
+    it('retries a failed models read with backoff and shows no error while the engine comes back', async () => {
+      vi.useFakeTimers()
+      const { host } = render()
+      await flush()
+      setValue(input(host, 'memory.models.reranker_max_candidates'), '40')
+      // The engine is down from the moment the save lands.
+      state.respond = async () => { state.modelsError = true; return {} }
+      await save(host, 'mem-models-reranker-save')
+      await flush()
+      expect(q(host, 'mem-models-restarting')).not.toBeNull()
+      expect(q(host, 'mem-models-read-failed')).toBeNull()
+      const afterSave = state.reads
+      await tick(1100)
+      expect(state.reads).toBeGreaterThan(afterSave)
+      // Back off: the next retry is not immediate.
+      const n = state.reads
+      await tick(1500)
+      expect(state.reads).toBe(n)
+      // The engine answers: the note goes, the data is read, no error ever showed.
+      state.modelsError = false
+      await tick(10000)
+      expect(q(host, 'mem-models-restarting')).toBeNull()
+      expect(q(host, 'mem-models-read-failed')).toBeNull()
+      expect(q(host, 'mem-models-embedder-model')!.textContent).toContain('hs-embed-1')
+    })
+
+    it('shows the error once the window has run out', async () => {
+      vi.useFakeTimers()
+      const { host } = render()
+      await flush()
+      setValue(input(host, 'memory.models.reranker_max_candidates'), '40')
+      state.respond = async () => { state.modelsError = true; return {} }
+      await save(host, 'mem-models-reranker-save')
+      await flush()
+      expect(q(host, 'mem-models-restarting')).not.toBeNull()
+      await tick(70000)
+      expect(q(host, 'mem-models-restarting')).toBeNull()
+      expect(q(host, 'mem-models-read-failed')).not.toBeNull()
+    })
+
+    it('shows a failed read at once when no save has just landed', async () => {
+      state.modelsError = true
+      const { host } = render()
+      await flush()
+      expect(q(host, 'mem-models-read-failed')).not.toBeNull()
+      expect(q(host, 'mem-models-restarting')).toBeNull()
+    })
   })
 })

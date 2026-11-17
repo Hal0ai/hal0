@@ -38,6 +38,8 @@ import {
   saveErrors,
 } from './memoryModels'
 
+/** How long after a save a failed models read is treated as the engine restarting. */
+export const RESTART_WINDOW_MS = 60_000
 const HEAD = { paddingBottom: 4, borderBottom: '1px solid var(--line)' }
 const MUTED = { fontSize: 11, color: 'var(--fg-3)', lineHeight: 1.5 }
 const PROVIDER_WORDS = {
@@ -123,12 +125,17 @@ function ModelRow({ spec, field, live, buf, error, disabled, onChange, registry 
   )
 }
 
-function SaveBar({ restarts, dirty, canSave, pending, onReset, onSave, label, testid, outcome }) {
+function SaveBar({ restarts, dirty, canSave, pending, blocked, onReset, onSave, label, testid, outcome }) {
   return (
     <>
       {pending && (
         <div className="s-row mono" role="status" data-testid={`${testid}-restarting`} style={{ ...MUTED, color: 'var(--warn)' }}>
           Saving, and restarting the memory engine. Memory is unavailable for a few seconds.
+        </div>
+      )}
+      {blocked && !pending && (
+        <div className="s-row mono" role="status" data-testid={`${testid}-blocked`} style={MUTED}>
+          The memory engine is restarting for the other group's save. One restart at a time: save here once it is done.
         </div>
       )}
       {!pending && outcome && (
@@ -139,7 +146,7 @@ function SaveBar({ restarts, dirty, canSave, pending, onReset, onSave, label, te
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, padding: '8px 12px 4px', flexWrap: 'wrap' }}>
         {restarts && <span className="mono" style={{ ...MUTED, marginRight: 'auto' }}>Saving restarts the memory engine.</span>}
         {dirty && <button type="button" className="btn ghost sm" onClick={onReset}>Reset</button>}
-        <button type="button" className="btn sm" disabled={!canSave} onClick={onSave} data-testid={`${testid}-save`}>
+        <button type="button" className="btn sm" disabled={!canSave} aria-disabled={!canSave} onClick={onSave} data-testid={`${testid}-save`}>
           {pending ? 'Saving…' : label}
         </button>
       </div>
@@ -148,7 +155,7 @@ function SaveBar({ restarts, dirty, canSave, pending, onReset, onSave, label, te
 }
 
 /** One save for one group: the buffer, the diff, the PUT, and what it answered. */
-function useGroupForm({ keysOf, live, field, update, ready, refetch, name, extraMissing }) {
+function useGroupForm({ keysOf, live, field, update, ready, refetch, name, extraMissing, group, saving, setSaving, onSaved }) {
   const [buf, setBuf] = useState({})
   const [outcome, setOutcome] = useState(null)
   const [fieldErrors, setFieldErrors] = useState({})
@@ -156,7 +163,7 @@ function useGroupForm({ keysOf, live, field, update, ready, refetch, name, extra
   const state = formState(keys, buf, live, field)
   const missing = extraMissing ? extraMissing(buf) : {}
   const clientErrors = { ...missing, ...state.invalid }
-  const canSave = ready && state.dirty.length > 0 && Object.keys(clientErrors).length === 0 && !update.isPending
+  const canSave = ready && state.dirty.length > 0 && Object.keys(clientErrors).length === 0 && !update.isPending && !saving
 
   const onChange = (k, v) => {
     setBuf((b) => ({ ...b, [k]: v }))
@@ -172,6 +179,7 @@ function useGroupForm({ keysOf, live, field, update, ready, refetch, name, extra
   const save = async () => {
     setFieldErrors({})
     setOutcome(null)
+    setSaving(group)
     try {
       const resp = await update.mutateAsync(state.patch)
       setBuf({})
@@ -183,6 +191,7 @@ function useGroupForm({ keysOf, live, field, update, ready, refetch, name, extra
         setOutcome({ kind: 'ok', text: `${name} saved. The memory engine restarted with it.` })
         window.__hal0Toast && window.__hal0Toast(`${name} saved`, 'ok')
       }
+      onSaved && onSaved()
       refetch && refetch()
     } catch (e) {
       const owned = keysOf({ ...buf }).map((k) => k.key)
@@ -196,9 +205,11 @@ function useGroupForm({ keysOf, live, field, update, ready, refetch, name, extra
           : `Not saved: ${message}.${extra}`,
       })
       window.__hal0Toast && window.__hal0Toast(`Save failed: ${message}`, 'err')
+    } finally {
+      setSaving(null)
     }
   }
-  return { buf, onChange, reset, save, state, clientErrors, fieldErrors, canSave, outcome }
+  return { buf, onChange, reset, save, state, clientErrors, fieldErrors, canSave, outcome, pending: saving === group, blocked: !!saving && saving !== group }
 }
 
 function EmbedderGroup({ models, focused }) {
@@ -232,13 +243,14 @@ function EmbedderGroup({ models, focused }) {
   )
 }
 
-function RerankerGroup({ settingsData, ready, field, update, registry, refetch, focused }) {
+function RerankerGroup({ settingsData, ready, field, update, registry, refetch, focused, saving, setSaving, onSaved }) {
   const form = useGroupForm({
     keysOf: (buf) => {
       const p = effective(buf, settingsData, PROVIDER_KEY, 'local')
       return [{ key: PROVIDER_KEY, kind: 'string' }, ...RERANKER_BASIC, ...RERANKER_CAPS, ...localKeys(p), ...remoteKeys(p)]
     },
     live: settingsData, field, update, ready, refetch,
+    group: 'reranker', saving, setSaving, onSaved,
     name: 'Engine reranker',
     extraMissing: (buf) => remoteMissing(effective(buf, settingsData, PROVIDER_KEY, 'local'), buf, settingsData),
   })
@@ -281,17 +293,23 @@ function RerankerGroup({ settingsData, ready, field, update, registry, refetch, 
       </details>
       <SaveBar
         restarts testid="mem-models-reranker" label="Save engine reranker"
-        dirty={form.state.dirty.length > 0} canSave={form.canSave} pending={update.isPending}
+        dirty={form.state.dirty.length > 0} canSave={form.canSave} pending={form.pending} blocked={form.blocked}
         onReset={form.reset} onSave={form.save} outcome={form.outcome}
       />
     </Group>
   )
 }
 
-function DecisionGroup({ settingsData, ready, field, update, registry, refetch, models, modelsError, focused }) {
+function DecisionGroup({ settingsData, ready, field, update, registry, refetch, models, modelsError, focused, saving, setSaving, onSaved }) {
   const form = useGroupForm({
-    keysOf: () => [{ key: DECISION_PROVIDER_KEY, kind: 'string' }, ...DECISION_KEYS],
+    // The numbers only apply to the local server and are disabled for another provider, so an
+    // edit made before the provider changed is not part of the save.
+    keysOf: (buf) => [
+      { key: DECISION_PROVIDER_KEY, kind: 'string' },
+      ...(effective(buf, settingsData, DECISION_PROVIDER_KEY, 'local') === 'local' ? DECISION_KEYS : []),
+    ],
     live: settingsData, field, update, ready, refetch, name: 'Decision model',
+    group: 'decision', saving, setSaving, onSaved,
   })
   const provider = effective(form.buf, settingsData, DECISION_PROVIDER_KEY, 'local')
   const status = decisionStatus(models?.decision)
@@ -349,7 +367,7 @@ function DecisionGroup({ settingsData, ready, field, update, registry, refetch, 
       )}
       <SaveBar
         restarts testid="mem-models-decision" label="Save decision model"
-        dirty={form.state.dirty.length > 0} canSave={form.canSave} pending={update.isPending}
+        dirty={form.state.dirty.length > 0} canSave={form.canSave} pending={form.pending} blocked={form.blocked}
         onReset={form.reset} onSave={form.save} outcome={form.outcome}
       />
     </Group>
@@ -367,7 +385,28 @@ export function MemoryModelsPanel({ registry, focus = null }) {
   const field = (k) => _schemaField(schemaData, k)
   const ready = !!settings.data && !!schemaData
   const models = modelsQuery.data
-  const common = { settingsData: settings.data, ready, field, update, registry, refetch: () => modelsQuery.refetch?.() }
+  const [saving, setSaving] = useState(null)
+  // A save restarts the engine, so the models read that follows can fail for a while. For
+  // RESTART_WINDOW_MS after a save that landed, a failed read is "restarting": retried with
+  // backoff, and the error banner waits.
+  const [restartUntil, setRestartUntil] = useState(0)
+  const attempt = useRef(0)
+  const { isError, errorUpdatedAt, isFetching, refetch } = modelsQuery
+  useEffect(() => {
+    if (!restartUntil) return undefined
+    if (!isError) {
+      if (!isFetching) { attempt.current = 0; setRestartUntil(0) }
+      return undefined
+    }
+    if (Date.now() >= restartUntil) { attempt.current = 0; setRestartUntil(0); return undefined }
+    const t = setTimeout(() => { attempt.current += 1; refetch?.() }, Math.min(1000 * 2 ** attempt.current, 8000))
+    return () => clearTimeout(t)
+  }, [restartUntil, isError, errorUpdatedAt, isFetching, refetch])
+  const restarting = restartUntil > 0 && isError
+  const common = {
+    settingsData: settings.data, ready, field, update, registry, refetch: () => modelsQuery.refetch?.(),
+    saving, setSaving, onSaved: () => { attempt.current = 0; setRestartUntil(Date.now() + RESTART_WINDOW_MS) },
+  }
 
   return (
     <div id="memory-models" data-testid="mem-models-panel">
@@ -381,7 +420,12 @@ export function MemoryModelsPanel({ registry, focus = null }) {
           </span>
         </div>
       )}
-      {modelsQuery.isError && (
+      {restarting && (
+        <div className="s-row mono" role="status" data-testid="mem-models-restarting" style={{ ...MUTED, color: 'var(--warn)' }}>
+          The memory engine is restarting. Reading its models again until it answers.
+        </div>
+      )}
+      {modelsQuery.isError && !restarting && (
         <div className="s-row" role="alert" data-testid="mem-models-read-failed" style={{ padding: '8px 12px', display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <span className="mono" style={{ fontSize: 11, color: 'var(--err)' }}>
             Could not read the memory models: {modelsQuery.error?.message || 'is memory enabled on this install?'}. The embedder and the decision server status are unknown.
@@ -394,7 +438,7 @@ export function MemoryModelsPanel({ registry, focus = null }) {
       )}
       <EmbedderGroup models={models} focused={focus === 'embedder'} />
       <RerankerGroup {...common} focused={focus === 'reranker'} />
-      <DecisionGroup {...common} models={models} modelsError={modelsQuery.isError} focused={focus === 'decision'} />
+      <DecisionGroup {...common} models={models} modelsError={modelsQuery.isError && !restarting} focused={focus === 'decision'} />
     </div>
   )
 }
