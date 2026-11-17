@@ -40,7 +40,7 @@ in the [REST API index](/docs/reference/api/rest-api/).
   },
   "knowledge": {
     "pages": 29, "pages_stale": 4, "models": 5, "models_stale": 0,
-    "refresh_failed": 1, "last_success_at": "2026-11-10T21:35:56+00:00"
+    "stale_overdue": 0, "stale_grace_s": 90000.0, "refresh_failed": 1, "last_success_at": "2026-11-10T21:35:56+00:00"
   },
   "banks": {
     "layout": "legacy_unified", "total": 1, "facts": 1335,
@@ -78,7 +78,7 @@ in the [REST API index](/docs/reference/api/rest-api/).
 | `queue.oldest_waiting_any_s` | The same for an operation of any type, mental-model refreshes and consolidation included. |
 | `queue.consolidation_pending`, `.consolidation_failed` | Source memories still to be consolidated into observations, and those whose consolidation failed, summed from the bank stats. |
 | `queue.truncated` | `true` when a bank holds more failed operations than the 2,000 that are read. Counts stay exact (they are the engine's totals); `failures_6h` and `top_errors` are then a floor. |
-| `knowledge` | Knowledge pages and mental models across banks, how many are stale, how many have a failed last refresh, and when a refresh last finished. A page or model that was created and never refreshed does not count as a finished refresh. |
+| `knowledge` | Knowledge pages and mental models across banks, how many are stale, how many of those have waited longer than the refresh schedule allows (`stale_overdue`, against `stale_grace_s`; `stale_grace_s` is `null` and `stale_overdue` counts every stale item when pages do not refresh on a schedule), how many have a failed last refresh, and when a refresh last finished. A page or model that was created and never refreshed does not count as a finished refresh. |
 | `banks` | `layout` is the store's bank layout from its layout record: `two_bank`, `legacy_unified` or `legacy_split` ([Memory banks](/docs/concepts/memory-banks)). `facts` and `documents` per bank, and the totals. On `two_bank`, a bank other than the platform and private banks was retired by the fold-in: it is listed with `retired: true` (`retired` counts them) and is left out of `queue`, `knowledge` and the verdict. |
 
 A row in `queue.by_bank` or `banks.list` holds `null` for a figure that could not be
@@ -114,7 +114,7 @@ before it, because acting on it first would fail or be undone. Every other step 
 | `extraction` | The slot has no model, the LLM endpoint refuses a connection, or a retain failed in the last 6 hours. | `extraction_slot_unresolved`, `extraction_llm_unreachable`, `extraction_recent_failures` | `slot_resolves`, `llm_reachable`, `failures`, `window_s`, `top_errors` |
 | `queue` | Any operation is failed, or the oldest waiting one is older than 30 minutes. | `queue_operations_failed`, `queue_waiting_too_long` | `failed`, `waiting`, `oldest_waiting_s`, `max_waiting_age_s` |
 | `embedder` | The `memory_embedder` row of `hal0 doctor` would warn. Both read one rule. | `embedder_record_unreadable`, `embedder_store_unavailable`, `embedder_conflict`, `embedder_mixed`, `embedder_needs_switch` | `recorded`, `configured`, `mixed`, `conflict`, `reasons`, `informational` |
-| `knowledge` | A knowledge page or mental model is stale, or its last refresh failed. | `knowledge_refresh_failed`, `knowledge_stale` | `pages_stale`, `models_stale`, `refresh_failed` |
+| `knowledge` | A knowledge page or mental model is stale, or its last refresh failed. Under `[memory.refresh] pages = "scheduled"` a stale item opens the step only once its last refresh is older than one schedule interval (or `min_interval_s`, if longer) plus an hour; until then it is waiting for its run. Under `after_consolidation` and `manual` any stale item opens it. | `knowledge_refresh_failed`, `knowledge_stale` | `pages_stale`, `models_stale`, `stale_overdue`, `stale_grace_s`, `refresh_failed` |
 
 A fact that is not known (`null`) never opens a step. The two thresholds travel in
 the figures (`window_s`, `max_waiting_age_s`), so a client does not hard-code them.

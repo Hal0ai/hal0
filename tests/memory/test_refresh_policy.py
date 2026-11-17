@@ -542,3 +542,24 @@ def test_the_shipped_seeds_match_the_default_policy() -> None:
             assert trigger_patch(model["trigger"], _policy()) is None, (name, model["id"])
         floor = (template.get("bank") or {}).get("mental_model_min_refresh_interval_seconds")
         assert floor in (None, wanted["min_refresh_interval_seconds"]), name
+
+
+def test_stale_grace_is_one_schedule_interval_plus_the_margin() -> None:
+    from hal0.memory.refresh_policy import STALE_MARGIN_S, stale_grace_s
+
+    now = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
+    daily = MemoryRefreshConfig(pages="scheduled", schedule="0 3 * * *", min_interval_s=0)
+    assert stale_grace_s(daily, now) == 86400.0 + STALE_MARGIN_S
+    hourly = MemoryRefreshConfig(pages="scheduled", schedule="0 * * * *", min_interval_s=0)
+    assert stale_grace_s(hourly, now) == 3600.0 + STALE_MARGIN_S
+    # The floor holds a refresh back, so it stretches the wait when it is longer.
+    floored = MemoryRefreshConfig(pages="scheduled", schedule="0 * * * *", min_interval_s=7200)
+    assert stale_grace_s(floored, now) == 7200.0 + STALE_MARGIN_S
+
+
+@pytest.mark.parametrize("mode", ["after_consolidation", "manual"])
+def test_stale_grace_is_off_outside_a_schedule(mode: str) -> None:
+    from hal0.memory.refresh_policy import stale_grace_s
+
+    now = datetime(2026, 11, 17, 12, 0, tzinfo=UTC)
+    assert stale_grace_s(MemoryRefreshConfig(pages=mode), now) is None

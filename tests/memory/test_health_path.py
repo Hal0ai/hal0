@@ -320,7 +320,35 @@ def test_knowledge_opens_on_a_stale_item_or_a_failed_refresh(
 ) -> None:
     step = health_path(replace(_FINE, **changes)).steps[4]
     assert (step.id, step.state, step.reason_code) == ("knowledge", C, reason)
-    assert step.figures == {"pages_stale": 0, "models_stale": 0, "refresh_failed": 0, **changes}
+    assert step.figures == {
+        "pages_stale": 0,
+        "models_stale": 0,
+        "stale_overdue": None,
+        "stale_grace_s": None,
+        "refresh_failed": 0,
+        **changes,
+    }
+
+
+def test_a_stale_page_inside_the_schedule_grace_does_not_open_knowledge() -> None:
+    facts = replace(_FINE, pages_stale=2, models_stale=1, stale_overdue=0, stale_grace_s=90000.0)
+    path = health_path(facts)
+    step = path.steps[4]
+    assert (path.verdict, step.state, step.reason_code) == ("clear", K, None)
+    # The stale counts are still reported as figures.
+    assert (step.figures["pages_stale"], step.figures["models_stale"]) == (2, 1)
+    assert step.figures["stale_overdue"] == 0
+
+
+def test_a_page_past_the_schedule_grace_opens_knowledge() -> None:
+    facts = replace(_FINE, pages_stale=2, stale_overdue=1, stale_grace_s=90000.0)
+    step = health_path(facts).steps[4]
+    assert (step.state, step.reason_code) == (C, "knowledge_stale")
+
+
+def test_a_failed_refresh_opens_knowledge_even_inside_the_grace() -> None:
+    facts = replace(_FINE, pages_stale=1, stale_overdue=0, refresh_failed=1)
+    assert health_path(facts).steps[4].reason_code == "knowledge_refresh_failed"
 
 
 # ── the fold-in branch ───────────────────────────────────────────────────
