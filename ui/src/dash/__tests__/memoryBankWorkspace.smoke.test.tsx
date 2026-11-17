@@ -337,7 +337,7 @@ describe('Memory workspace usability (Facts tab)', () => {
     expect(html).toContain('Add a search or filter to reach the rest')
   })
 
-  it('gives the tag map a role, a label and a list of every tag with its count', () => {
+  it('gives the tag map a role, a label and one disclosure for its list', () => {
     const html = render({
       __hal0UseBankStats: () => ({ data: { total_nodes: 10, nodes_by_fact_type: {} } }),
       __hal0UseBankTags: () => ({
@@ -350,10 +350,22 @@ describe('Memory workspace usability (Facts tab)', () => {
       }),
     })
     expect(html).toMatch(/<svg[^>]*role="img"[^>]*aria-label="Tag map: 2 tags/)
-    expect(html).toContain('data-testid="mv-atlas-list"')
-    // Largest first, readable without the picture.
-    expect(html.indexOf('memory, 1,200 facts')).toBeGreaterThan(-1)
-    expect(html.indexOf('memory, 1,200 facts')).toBeLessThan(html.indexOf('project:hal0, 7 facts'))
+    // Collapsed: exactly one tab stop is added (the disclosure), and no hidden control.
+    expect(html).toContain('data-testid="mv-atlas-toggle"')
+    expect(html).toContain('aria-expanded="false"')
+    expect(html).not.toContain('data-testid="mv-atlas-list"')
+    expect(html).not.toContain('sr-only')
+  })
+
+  it('adds one tab stop for the tag map, however many tags there are', () => {
+    const tags = Array.from({ length: 300 }, (_, i) => ({ tag: `tag-${i}`, count: 300 - i }))
+    const html = render({
+      __hal0UseBankStats: () => ({ data: { total_nodes: 10, nodes_by_fact_type: {} } }),
+      __hal0UseBankTags: () => ({ data: { items: tags } }),
+    })
+    const start = html.indexOf('class="mv-atlas"')
+    const mapHtml = html.slice(start, html.indexOf('class="fline sec-div"', start))
+    expect((mapHtml.match(/<button/g) ?? []).length).toBe(1)
   })
 
   it('makes "N more" in the sources list a button', () => {

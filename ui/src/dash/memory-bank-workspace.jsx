@@ -160,6 +160,10 @@ function shortTagLabel(tag) {
 
 function AtlasPanel({ tags, totalFacts, onTag, embed }) {
   const { fmtN } = window.MemV2
+  const [listOpen, setListOpen] = useStateWorkspace(false)
+  const [listAll, setListAll] = useStateWorkspace(false)
+  const byCount = [...tags].sort((a, z) => z.count - a.count)
+  const listed = listAll ? byCount : byCount.slice(0, TAGS_VISIBLE)
   const W = 372,
     H = embed ? 240 : 300
   const placed = []
@@ -196,7 +200,7 @@ function AtlasPanel({ tags, totalFacts, onTag, embed }) {
     <svg
       viewBox={`0 0 ${W} ${H}`}
       role="img"
-      aria-label={`Tag map: ${tags.length} ${tags.length === 1 ? 'tag' : 'tags'}, each bubble sized by its fact count. The same tags are listed below the map.`}
+      aria-label={`Tag map: ${tags.length} ${tags.length === 1 ? 'tag' : 'tags'}, each bubble sized by its fact count. The same tags can be shown as a list below the map.`}
     >
       {placed.map((t, i) => {
         const c = TOPIC_COLORS[i % TOPIC_COLORS.length]
@@ -234,20 +238,44 @@ function AtlasPanel({ tags, totalFacts, onTag, embed }) {
           bank is empty
         </div>
       )}
-      {/* The map's text alternative: every tag and its fact count, largest first. A bubble is
-          only a pointer target, so each entry is also the keyboard way to filter by that tag. */}
+      {/* The map's text alternative: one disclosure (one tab stop) that shows every tag and its
+          fact count as a visible list, capped like the tag chips. Filtering by tag from the
+          keyboard is the chip row below; the list is for reading. */}
       {tags.length > 0 && (
-        <ul className="sr-only" aria-label="Tags and their fact counts" data-testid="mv-atlas-list">
-          {[...tags]
-            .sort((a, z) => z.count - a.count)
-            .map((t) => (
-              <li key={t.tag}>
-                <button type="button" onClick={() => onTag(t.tag)}>
-                  {t.tag}, {fmtN(t.count)} {t.count === 1 ? 'fact' : 'facts'}
+        <div style={{ padding: '0 14px 10px' }}>
+          <button
+            type="button"
+            className="mv-tf"
+            aria-expanded={listOpen}
+            aria-controls="mv-atlas-list"
+            data-testid="mv-atlas-toggle"
+            onClick={() => setListOpen((o) => !o)}
+          >
+            {listOpen ? 'Hide tag list' : 'Show tags as a list'}
+          </button>
+          {listOpen && (
+            <>
+              <ul id="mv-atlas-list" className="num" data-testid="mv-atlas-list" style={{ margin: '8px 0 0', paddingLeft: 18, font: '400 11px var(--jbm)' }}>
+                {listed.map((t) => (
+                  <li key={t.tag}>
+                    {t.tag}, {fmtN(t.count)} {t.count === 1 ? 'fact' : 'facts'}
+                  </li>
+                ))}
+              </ul>
+              {tags.length > TAGS_VISIBLE && (
+                <button
+                  type="button"
+                  className="mv-tf"
+                  style={{ marginTop: 6 }}
+                  data-testid="mv-atlas-more"
+                  onClick={() => setListAll((x) => !x)}
+                >
+                  {listAll ? 'show fewer' : `+${tags.length - TAGS_VISIBLE} more`}
                 </button>
-              </li>
-            ))}
-        </ul>
+              )}
+            </>
+          )}
+        </div>
       )}
     </div>
   )
