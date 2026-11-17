@@ -740,8 +740,20 @@ def _live_rows(request: Request, u: Any) -> list[dict[str, Any]]:
 
 
 async def _listing(
-    request: Request, u: Any, *, force: bool = False, warning: str | None = None
+    request: Request,
+    u: Any,
+    *,
+    force: bool = False,
+    warning: str | None = None,
+    store_new: bool = False,
 ) -> dict[str, Any]:
+    """The model listing of ``u``; read-only unless ``store_new``.
+
+    With ``store_new`` (the refresh route) a fresh discovery answer is also
+    written back: each offered model with no stored row becomes a switched-off
+    row (:func:`hal0.upstreams.convert.sync_new_models`), so the listing shows
+    it from the stored rows.
+    """
     if _is_protected(u):
         return {
             "name": u.name,
@@ -764,6 +776,15 @@ async def _listing(
             "models": _live_rows(request, u),
         }
     found, fetched_at, stale = await _discovered(request, u, force=force)
+    if store_new and not stale:
+        from hal0.upstreams import convert
+
+        await convert.sync_new_models(
+            request.app.state.upstreams,
+            u.name,
+            model_cache=getattr(request.app.state, "upstream_models", None),
+            discovered=found,
+        )
     # The fetch awaited: read the rows again so a concurrent write is not lost.
     u = _lookup_upstream(request, u.name)
     return {
@@ -887,7 +908,9 @@ def _why_unreachable(u: Any) -> str:
 async def refresh_upstream_models(name: str, request: Request) -> dict[str, Any]:
     """Refetch a provider's model list and return the listing.
 
-    On a curated row only discovery is refetched. On an uncurated, plain remote
+    On a curated row discovery is refetched and each model the provider newly
+    offers is stored as a switched-off row (``GET …/models`` never writes). On
+    an uncurated, plain remote
     row the one-time conversion runs for that row first (same rules, backup and
     warnings as the boot converter). A provider that cannot be reached leaves
     the row untouched and answers ``stale: true``, not an error.
@@ -915,7 +938,7 @@ async def refresh_upstream_models(name: str, request: Request) -> dict[str, Any]
         if warning is None and not u.curated:
             warning = _deferred_warning(u, reason)
         return await _listing(request, u, warning=warning)
-    return await _listing(request, u, force=True)
+    return await _listing(request, u, force=True, store_new=True)
 
 
 @router.delete("/upstreams/{name}")

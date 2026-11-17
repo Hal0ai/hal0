@@ -363,10 +363,12 @@ async def sync_new_models(
     *,
     model_cache: MutableMapping[str, list[str]] | None = None,
     discovery: DiscoveryCache | None = None,
+    discovered: list[DiscoveredModel] | None = None,
 ) -> int:
     """Store each model a curated provider newly offers as a switched-off row.
 
-    Fetches the provider's model list once. Every offered id with no stored row
+    Fetches the provider's model list once, unless the caller already holds a
+    fresh listing and passes it as ``discovered``. Every offered id with no stored row
     is added with ``enabled = false`` (type, context and prices from the
     listing) in one persistent write; existing rows are never changed or
     removed, and nothing is written when nothing is new. Failures (unreachable,
@@ -379,17 +381,18 @@ async def sync_new_models(
     row = registry.get(name)
     if row is None or not participates(row):
         return 0
-    try:
-        payload = await registry.fetch_model_payload(name)
-    except Exception as exc:
-        log.info("upstreams.sync.fetch_failed", name=name, error=type(exc).__name__)
-        return 0
-    discovered = parse_models_payload(payload, get_preset(row.catalog_id or ""))
-    if not discovered:
-        log.info("upstreams.sync.no_models", name=name)
-        return 0
-    if discovery is not None:
-        discovery.put(name, discovered)
+    if discovered is None:
+        try:
+            payload = await registry.fetch_model_payload(name)
+        except Exception as exc:
+            log.info("upstreams.sync.fetch_failed", name=name, error=type(exc).__name__)
+            return 0
+        discovered = parse_models_payload(payload, get_preset(row.catalog_id or ""))
+        if not discovered:
+            log.info("upstreams.sync.no_models", name=name)
+            return 0
+        if discovery is not None:
+            discovery.put(name, discovered)
     current = registry.get(name)
     if current is None or not participates(current):
         return 0  # changed while we were fetching: not ours to touch

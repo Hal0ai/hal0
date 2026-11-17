@@ -166,8 +166,13 @@ def test_create_with_empty_models_is_curated_and_routes_nothing(client: TestClie
     # discovery lists models, but none is enabled: every row is discovered-only and off
     rows = _models(client)["models"]
     assert rows and all(m["enabled"] is False for m in rows)
+    # Routing reads stored rows only. A bare id with no row anywhere behaves as
+    # with no curated provider (nothing else serves it here) ...
     with pytest.raises(NoRouteFound):
         _resolve(client, "gpt-5-mini")
+    # ... while naming the provider is an explicit 404.
+    with pytest.raises(ModelNotEnabled):
+        _resolve(client, "mm/gpt-5-mini")
 
 
 def test_create_with_models_and_filters_is_400(client: TestClient) -> None:
@@ -265,7 +270,7 @@ def test_list_unknown_upstream_is_404(client: TestClient) -> None:
 def test_patch_enable_reseeds_routing(client: TestClient) -> None:
     _fresh(client)
     _create(client)
-    with pytest.raises(NoRouteFound):
+    with pytest.raises(ModelNotEnabled):
         _resolve(client, "mm/qwen/qwen3-coder")
     res = client.patch("/api/upstreams/mm/models/qwen/qwen3-coder", json={"enabled": True})
     assert res.status_code == 200, res.text
@@ -457,14 +462,56 @@ def test_refresh_updates_fetched_at(client: TestClient) -> None:
     }
 
 
-def test_refresh_on_curated_does_not_touch_the_file(client: TestClient) -> None:
+def test_refresh_on_curated_stores_newly_offered_models_as_off_rows(client: TestClient) -> None:
+    calls = _fresh(client)
+    _create(client, models=[{"id": "m1"}])
+    path = _etc(client) / "upstreams.toml"
+    before = calls["n"]
+    res = client.post("/api/upstreams/mm/refresh")
+    assert res.status_code == 200, res.text
+    assert calls["n"] == before + 1  # one fetch serves both the listing and the write
+    stored = _toml(client)["upstream"][0]["models"]
+    assert [(m["id"], m["enabled"]) for m in stored] == [
+        ("m1", True),
+        ("qwen/qwen3-coder", False),
+        ("text-embedding-x", False),
+        ("gpt-5-mini", False),
+    ]
+    assert stored[1]["context"] == 262144
+    assert client.app.state.upstream_models["mm"] == ["m1"]  # routing is unchanged
+    rows = _by_id(res.json())
+    assert rows["qwen/qwen3-coder"]["enabled"] is False
+    assert not path.with_name("upstreams.toml.pre-convert").exists()
+
+
+def test_refresh_on_curated_writes_nothing_when_nothing_is_new(client: TestClient) -> None:
+    _fresh(client, payload={"data": [{"id": "m1"}]})
+    _create(client, models=[{"id": "m1"}])
+    path = _etc(client) / "upstreams.toml"
+    before = path.read_bytes()
+    assert client.post("/api/upstreams/mm/refresh").status_code == 200
+    assert path.read_bytes() == before
+
+
+def test_refresh_of_an_unreachable_curated_row_writes_nothing(client: TestClient) -> None:
+    _fresh(client)
+    _create(client, models=[{"id": "m1"}])
+    _down(client)
+    path = _etc(client) / "upstreams.toml"
+    before = path.read_bytes()
+    res = client.post("/api/upstreams/mm/refresh")
+    assert res.status_code == 200 and res.json()["stale"] is True
+    assert path.read_bytes() == before
+
+
+def test_model_listing_never_writes(client: TestClient) -> None:
     _fresh(client)
     _create(client, models=[{"id": "m1"}])
     path = _etc(client) / "upstreams.toml"
     before = path.read_bytes()
-    client.post("/api/upstreams/mm/refresh")
+    rows = _models(client)["models"]
+    assert {m["id"] for m in rows} >= {"m1", "gpt-5-mini"}
     assert path.read_bytes() == before
-    assert not path.with_name("upstreams.toml.pre-convert").exists()
 
 
 def test_refresh_converts_an_uncurated_row(client: TestClient) -> None:
