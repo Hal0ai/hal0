@@ -23,10 +23,6 @@ import { AuthChallengeDrawer } from './auth/AuthChallengeDrawer.jsx'
 // index.html), so a box that's live-updated without a UI rebuild still
 // shows its true version.
 import { useUpdateState } from '@/api/hooks/useUpdates'
-// Optional error reporting (src/sentry.ts). Import is always safe: with no
-// VITE_SENTRY_DSN baked in, captureUiException is a no-op and the SDK chunk is
-// never fetched.
-import { captureUiException } from '@/sentry'
 // Benchmarks page (#benchmarks): a real ES module, imported directly rather
 // than read off a `window.BenchmarksView` global.
 import Benchmarks from './Benchmarks'
@@ -117,11 +113,6 @@ class ViewErrorBoundary extends React.Component {
   componentDidCatch(err, info) {
     // Surface in the console for diagnosis; never re-throw.
     console.error("view crashed:", err, info && info.componentStack);
-    // This boundary swallows the throw to keep the chrome alive, so the
-    // browser's global error handler never sees it — a black-screened view
-    // would be invisible in Sentry without an explicit capture. No-op when
-    // Sentry is off (the shipped default).
-    captureUiException(err, info && info.componentStack);
   }
   render() {
     if (this.state.err) {

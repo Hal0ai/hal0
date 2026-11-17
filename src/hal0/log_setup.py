@@ -6,8 +6,8 @@ variables (``show_locals=True``). hal0 processes hold credentials in locals
 all the time: a request header dict with ``Authorization: Bearer …``, a
 provider API key, a bridge key. Any caught exception that reaches
 ``log.exception(...)`` / ``log.error(..., exc_info=True)`` therefore printed
-them to the journal, where ``systemd-journal`` members, doctor bundles and
-Sentry breadcrumbs could read them (#3137).
+them to the journal, where ``systemd-journal`` members and doctor bundles
+could read them (#3137).
 
 Every ``structlog.configure`` in hal0 goes through here so the renderer is
 built once, with locals off. The exception text itself still goes through

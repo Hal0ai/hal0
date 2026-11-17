@@ -113,15 +113,6 @@ dev = [
   "python-multipart>=0.0.9",
 ]
 
-# Optional error reporting. Deliberately NOT in `dependencies`: hal0 is a
-# self-hosted appliance that phones home to nobody by default, and the
-# absence of the package is a second, physical guarantee of that on top of
-# the "no DSN ⇒ no-op" logic in hal0.observability.sentry. Install with
-# `pip install 'hal0ai[sentry]'` only on boxes you want reporting from.
-sentry = [
-  "sentry-sdk>=2.20",
-]
-
 # Bench load-gen tooling (Phase 3 of the bench overhaul). Deliberately NOT in
 # `dependencies`: the adapters (src/hal0/bench/adapters/) drive the tool via
 # its CLI — nothing imports it — and only a box that runs serving-perf suites
