@@ -8,6 +8,7 @@ Endpoints:
   DELETE /api/upstreams/{name}           — remove a remote upstream
   POST   /api/upstreams/{name}/test      — probe reachability + auth
   GET    /api/providers/catalog          — static integration catalog
+  POST   /api/providers/probe            — check a URL + key and list models, saving nothing
   GET    /api/providers                  — configured providers (alias of upstreams)
   POST   /api/providers/{name}/credentials — write one API key to api.env
 
@@ -28,7 +29,7 @@ from typing import Any
 
 import structlog
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, SecretStr, ValidationError
 
 from hal0.api._env_store import TlsTrustError, is_process_control_env, upsert_env_value
 from hal0.api._redact import redact_config
@@ -36,6 +37,7 @@ from hal0.api.middleware.error_codes import Hal0Error
 from hal0.config import paths
 from hal0.config.schema import UpstreamEntry, UpstreamModelFilters
 from hal0.upstreams.catalog import reseed_curated_cache
+from hal0.upstreams.discovery import parse_models_payload
 from hal0.upstreams.presets import get_preset, load_presets, preset_to_api
 from hal0.upstreams.registry import (
     RESERVED_UPSTREAM_NAME,
@@ -573,6 +575,122 @@ async def providers_catalog() -> dict[str, dict[str, Any]]:
     providers (Anthropic, OpenAI, OpenRouter, hal0 self, custom, …).
     """
     return {pid: preset_to_api(p) for pid, p in load_presets().items()}
+
+
+_PROBE_AUTH_STYLES = frozenset({"bearer", "anthropic", "header", "none"})
+_RATE_LIMIT_FIELDS = ("limit_requests", "remaining_requests", "limit_tokens", "remaining_tokens")
+
+
+class ProviderProbeBody(BaseModel):
+    """Body for ``POST /api/providers/probe``.
+
+    ``key`` is a transient secret: it is held as :class:`SecretStr`, used for
+    one outbound request and never stored, logged or echoed.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    catalog_id: str | None = Field(default=None)
+    url: str | None = Field(default=None)
+    auth_style: str | None = Field(default=None)
+    auth_header: str | None = Field(default=None)
+    key: SecretStr | None = Field(default=None, repr=False)
+
+
+def _rate_limit_values(preset: Any, headers: dict[str, str]) -> dict[str, int | None]:
+    """Parse the preset-declared rate-limit headers; null when absent or not an integer."""
+    declared = preset.rate_limit_headers if preset is not None else {}
+    out: dict[str, int | None] = dict.fromkeys(_RATE_LIMIT_FIELDS)
+    for field_name in _RATE_LIMIT_FIELDS:
+        header = declared.get(field_name)
+        raw = headers.get(header.lower()) if header else None
+        try:
+            out[field_name] = int(raw) if raw is not None else None
+        except ValueError:
+            out[field_name] = None
+    return out
+
+
+@router.post("/providers/probe")
+async def probe_provider(request: Request) -> dict[str, Any]:
+    """Check a base URL and key and list the provider's models; persist nothing.
+
+    Gating matches the other upstream write routes (none per route; the app
+    middleware decides). The body is parsed by hand so that no validation
+    error, which would echo the offending ``input``, can carry the key.
+    ``models[].canonical_id`` is always null: no provider name exists yet.
+    """
+    try:
+        raw = await request.json()
+        body = ProviderProbeBody.model_validate(raw)
+    except ValidationError as exc:
+        # loc + msg only: never ``input``.
+        raise UpstreamInvalidHTTP(
+            "invalid probe request",
+            details={"errors": _validation_summaries(exc)},
+        ) from None
+    except ValueError:
+        raise UpstreamInvalidHTTP("request body must be a JSON object") from None
+
+    preset = None
+    if body.catalog_id is not None:
+        preset = get_preset(body.catalog_id)
+        if preset is None:
+            raise UpstreamInvalidHTTP(
+                f"unknown catalog_id {body.catalog_id!r}",
+                details={"catalog_id": body.catalog_id, "known": sorted(load_presets())},
+            )
+    url = body.url or (preset.base_url if preset is not None else "")
+    if not url:
+        raise UpstreamInvalidHTTP("url is required (or supply a catalog_id with a known base_url)")
+    auth_style = body.auth_style or (preset.auth if preset is not None else "") or "bearer"
+    if auth_style.lower() not in _PROBE_AUTH_STYLES:
+        raise UpstreamInvalidHTTP(
+            f"unknown auth_style {auth_style!r}", details={"known": sorted(_PROBE_AUTH_STYLES)}
+        )
+    auth_header = body.auth_header or (
+        preset.auth_header_name if preset is not None and preset.auth == "header" else ""
+    )
+    key = body.key.get_secret_value() if body.key is not None else ""
+
+    try:
+        result = await request.app.state.upstreams.probe(
+            url=url, auth_style=auth_style, auth_header=auth_header, key=key
+        )
+    except ValueError as exc:
+        raise UpstreamInvalidHTTP(str(exc)) from None
+
+    models: list[dict[str, Any]] = []
+    if result["ok"]:
+        for m in parse_models_payload(result["payload"], preset):
+            models.append(
+                {
+                    "id": m.id,
+                    "canonical_id": None,
+                    "type": m.type,
+                    "type_source": m.type_source,
+                    "context": m.context,
+                    "price_in": m.price_in,
+                    "price_out": m.price_out,
+                    "price_unit": m.price_unit,
+                    "recommended": m.recommended,
+                }
+            )
+    _log.info(
+        "provider.probed",
+        catalog_id=body.catalog_id,
+        ok=result["ok"],
+        status=result["status"],
+        models=len(models),
+    )
+    return {
+        "ok": result["ok"],
+        "status": result["status"],
+        "latency_ms": result["latency_ms"],
+        "models": models,
+        "rate_limit": _rate_limit_values(preset, result["headers"]),
+        "error": result["error"],
+    }
 
 
 @router.get("/providers")

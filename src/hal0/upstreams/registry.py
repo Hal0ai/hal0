@@ -118,6 +118,86 @@ RESERVED_UPSTREAM_NAME = "hal0"
 # ── Upstream dataclass ────────────────────────────────────────────────────────
 
 
+#: Auth styles :func:`build_auth_headers` knows how to render.
+_KNOWN_AUTH_STYLES = frozenset({"bearer", "anthropic", "header", "none"})
+
+#: Upper bound on a probed ``/models`` body; a hostile endpoint cannot make the
+#: dialog's server-side fetch buffer more than this.
+PROBE_MAX_BODY_BYTES = 2 * 1024 * 1024
+_PROBE_ERROR_EXCERPT = 300
+
+
+def build_auth_headers(style: str, header_name: str, key: str) -> dict[str, str]:
+    """Render outbound auth headers for ``style`` from an in-hand ``key``.
+
+    Pure: reads no environment. Shared by :meth:`UpstreamRegistry.auth_headers`
+    (key from ``$auth_value_env``) and :meth:`UpstreamRegistry.probe` (key in
+    transit). An empty ``key`` means "no credential header". Unknown styles
+    yield ``{}``.
+    """
+    style = (style or "bearer").lower()
+    if style == "bearer":
+        if not key:
+            return {}
+        header = header_name or "Authorization"
+        if header.lower() == "authorization" and not key.lower().startswith("bearer "):
+            return {header: f"Bearer {key}"}
+        return {header: key}
+    if style == "anthropic":
+        out: dict[str, str] = {"anthropic-version": "2023-06-01"}
+        if key:
+            out["x-api-key"] = key
+        return out
+    if style == "header":
+        if header_name and key:
+            return {header_name: key}
+        return {}
+    return {}
+
+
+def _redact_secret(text: str, key: str) -> str:
+    """Replace every occurrence of ``key`` in ``text`` with ``***``.
+
+    An empty key redacts nothing (it means "no auth header"); a short key is
+    redacted like any other.
+    """
+    if not key:
+        return text
+    return text.replace(key, "***")
+
+
+def _probe_transport_error(exc: BaseException) -> str:
+    """A short, fixed-vocabulary description; never ``str(exc)`` (it can carry URL/headers)."""
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout contacting provider"
+    cause = exc.__cause__ or exc.__context__
+    if isinstance(exc, ConnectionRefusedError) or isinstance(cause, ConnectionRefusedError):
+        return "connection refused"
+    if isinstance(exc, httpx.ConnectError):
+        return "connection failed"
+    return f"request failed ({type(exc).__name__})"
+
+
+def _probe_url(url: str) -> str:
+    """Validate a probe target and return its ``/models`` URL; ``ValueError`` if unusable.
+
+    Only http/https with a host and no embedded credentials. Loopback and LAN
+    hosts stay allowed (Ollama, a peer hal0). The message never echoes the URL.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit((url or "").strip())
+        host = parts.hostname
+    except ValueError as exc:
+        raise ValueError("url is not a valid http(s) URL") from exc
+    if parts.scheme not in ("http", "https") or not host:
+        raise ValueError("url must be an http:// or https:// URL with a host")
+    if parts.username or parts.password:
+        raise ValueError("url must not contain embedded credentials")
+    return url.strip().rstrip("/") + "/models"
+
+
 @dataclass(frozen=True)
 class Upstream:
     """One routing target.  Frozen — mutable state lives in UpstreamRegistry caches.
@@ -671,24 +751,9 @@ class UpstreamRegistry:
                 "/etc/hal0/api.env, then restart hal0-api.",
                 details={"name": u.name, "auth_style": style, "env": u.auth_value_env},
             )
-        if style == "bearer":
-            if not key:
-                return {}
-            header = u.auth_header or "Authorization"
-            if header.lower() == "authorization" and not key.lower().startswith("bearer "):
-                return {header: f"Bearer {key}"}
-            return {header: key}
-        if style == "anthropic":
-            out: dict[str, str] = {"anthropic-version": "2023-06-01"}
-            if key:
-                out["x-api-key"] = key
-            return out
-        if style == "header":
-            if u.auth_header and key:
-                return {u.auth_header: key}
-            return {}
-        log.debug("upstream.unknown_auth_style", name=u.name, style=style)
-        return {}
+        if style not in _KNOWN_AUTH_STYLES:
+            log.debug("upstream.unknown_auth_style", name=u.name, style=style)
+        return build_auth_headers(style, u.auth_header, key)
 
     # ── HTTP client ───────────────────────────────────────────────────────────
 
@@ -917,6 +982,88 @@ class UpstreamRegistry:
         else:
             count = None
         return {"ok": True, "status": 200, "models_count": count, "latency_ms": latency_ms}
+
+    async def probe(
+        self, *, url: str, auth_style: str, auth_header: str = "", key: str = ""
+    ) -> dict[str, Any]:
+        """Fetch ``{url}/models`` with a transient key, before anything is saved.
+
+        Returns ``{ok, status, latency_ms, payload, headers, error}``. The key
+        lives only in this call: it is never stored, logged, put in
+        ``os.environ`` or returned. Every provider-derived string (error text,
+        response headers, the decoded body) has the key replaced with ``***``.
+        Redirects are not followed and the body read stops at
+        :data:`PROBE_MAX_BODY_BYTES`. Raises ``ValueError`` for an unusable URL.
+        """
+        target = _probe_url(url)
+        style = (auth_style or "bearer").lower()
+        stripped = key.strip()
+        headers = build_auth_headers(style, auth_header, stripped)
+        secrets = {s for s in (key, stripped) if s}
+
+        def scrub(text: str) -> str:
+            for secret in secrets:
+                text = _redact_secret(text, secret)
+            return text
+
+        def fail(
+            status: int | None, error: str, started: float, resp_headers: dict[str, str] | None
+        ) -> dict[str, Any]:
+            return {
+                "ok": False,
+                "status": status,
+                "latency_ms": round((time.monotonic() - started) * 1000, 1),
+                "payload": None,
+                "headers": resp_headers or {},
+                "error": scrub(error),
+            }
+
+        started = time.monotonic()
+        try:
+            async with (
+                async_client(
+                    timeout=httpx.Timeout(connect=3.0, read=8.0, write=3.0, pool=3.0),
+                    follow_redirects=False,
+                ) as c,
+                c.stream("GET", target, headers=headers) as resp,
+            ):
+                resp_headers = {k.lower(): scrub(v) for k, v in resp.headers.items()}
+                chunks: list[bytes] = []
+                size = 0
+                too_large = False
+                async for chunk in resp.aiter_bytes():
+                    size += len(chunk)
+                    if size > PROBE_MAX_BODY_BYTES:
+                        too_large = True
+                        break
+                    chunks.append(chunk)
+                status = resp.status_code
+                reason = resp.reason_phrase
+        except (httpx.HTTPError, OSError) as exc:
+            return fail(None, _probe_transport_error(exc), started, None)
+
+        if too_large:
+            return fail(status, "response too large", started, resp_headers)
+        text = scrub(b"".join(chunks).decode("utf-8", errors="replace"))
+        if status != 200:
+            excerpt = text[:_PROBE_ERROR_EXCERPT].strip()
+            message = f"HTTP {status} {reason}".strip()
+            if excerpt:
+                message = f"{message}: {excerpt}"
+            return fail(status, message, started, resp_headers)
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            return fail(status, "response was not JSON", started, resp_headers)
+        log.debug("upstream.probe_ok", host=target.split("/")[2], status=status)
+        return {
+            "ok": True,
+            "status": status,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "payload": payload,
+            "headers": resp_headers,
+            "error": None,
+        }
 
     async def fetch_model_payload(self, name: str) -> Any | None:
         """Return the decoded JSON body of an upstream's ``/models``.
