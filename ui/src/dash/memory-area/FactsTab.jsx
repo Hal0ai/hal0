@@ -51,19 +51,25 @@ export function FactsTab({ area }) {
   // A long bank list arrives one page at a time: a bank that is not on this page may still exist.
   const paged = (banksQuery.data?.total ?? 0) > banks.length
 
-  // The workspace modules (and d3-force) load the first time this tab opens.
-  const [, setWorkspaceLoaded] = useState(memoryWorkspaceReady())
+  // The workspace modules (and d3-force) load the first time this tab opens. A failed load
+  // (a chunk a deploy has replaced, a dropped connection) is shown and can be tried again.
+  const [workspace, setWorkspace] = useState(memoryWorkspaceReady() ? 'ready' : 'loading')
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
-    if (memoryWorkspaceReady()) return undefined
+    if (memoryWorkspaceReady()) {
+      setWorkspace('ready')
+      return undefined
+    }
     let alive = true
+    setWorkspace('loading')
     loadMemoryWorkspace().then(
-      () => alive && setWorkspaceLoaded(true),
-      () => {},
+      () => alive && setWorkspace('ready'),
+      () => alive && setWorkspace('failed'),
     )
     return () => {
       alive = false
     }
-  }, [])
+  }, [attempt])
 
   // An address with no bank is completed in place, so a reload or a copied link names the bank.
   useEffect(() => {
@@ -168,6 +174,30 @@ export function FactsTab({ area }) {
   return (
     <>
       {scope}
+      {route.bank && workspace === 'loading' && typeof Workspace !== 'function' ? (
+        <Card testId="ma-facts-workspace-loading">
+          <div className="ma-card-body" aria-busy="true">
+            <span className="ma-skel ma-skel-line" aria-hidden="true" />
+            <span className="ma-skel ma-skel-line" aria-hidden="true" />
+            <span className="sr-only">Loading</span>
+          </div>
+        </Card>
+      ) : null}
+      {route.bank && workspace === 'failed' && typeof Workspace !== 'function' ? (
+        <Card testId="ma-facts-workspace-failed">
+          <EmptyState
+            title="This page could not load part of itself"
+            action={
+              <button type="button" className="btn ghost sm" onClick={() => setAttempt((n) => n + 1)}>
+                Try again
+              </button>
+            }
+          >
+            The facts view did not download. If trying again does not help, reload the page: hal0 may have
+            been updated since this page opened.
+          </EmptyState>
+        </Card>
+      ) : null}
       {route.bank && typeof Workspace === 'function' ? (
         <Workspace
           bank={route.bank}
