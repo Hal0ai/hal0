@@ -918,15 +918,16 @@ class UpstreamRegistry:
             count = None
         return {"ok": True, "status": 200, "models_count": count, "latency_ms": latency_ms}
 
-    async def fetch_models(self, name: str) -> list[str]:
-        """Return the list of model ids advertised by an upstream's /v1/models.
+    async def fetch_model_payload(self, name: str) -> Any | None:
+        """Return the decoded JSON body of an upstream's ``/models``.
 
-        Empty list on any failure. Does not raise (the dispatcher needs a
-        forgiving aggregation).
+        ``None`` on any failure: unknown upstream, unconfigured credential,
+        transport error, non-2xx status, or a body that is not JSON. Does not
+        raise.
         """
         u = self._upstreams.get(name)
         if u is None:
-            return []
+            return None
         target = u.url.rstrip("/") + "/models"
         try:
             # #1513: auth_headers now raises on an unconfigured credential
@@ -936,7 +937,7 @@ class UpstreamRegistry:
             headers = self.auth_headers(u)
         except UpstreamAuthUnconfigured as exc:
             log.warning("upstream.fetch_models_auth_unconfigured", name=name, detail=str(exc))
-            return []
+            return None
         try:
             c = self._get_client()
             resp = await c.get(
@@ -944,18 +945,25 @@ class UpstreamRegistry:
                 headers=headers,
                 timeout=httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0),
             )
-            if resp.status_code != 200:
+            if not resp.is_success:
                 log.debug(
                     "upstream.fetch_models_non_200",
                     name=name,
                     status=resp.status_code,
                 )
-                return []
-            body = resp.json()
+                return None
+            return resp.json()
         except (httpx.HTTPError, OSError, ValueError) as exc:
             log.debug("upstream.fetch_models_fail", name=name, error=str(exc))
-            return []
+            return None
 
+    async def fetch_models(self, name: str) -> list[str]:
+        """Return the list of model ids advertised by an upstream's /v1/models.
+
+        Empty list on any failure. Does not raise (the dispatcher needs a
+        forgiving aggregation).
+        """
+        body = await self.fetch_model_payload(name)
         if isinstance(body, dict):
             data = body.get("data", [])
         elif isinstance(body, list):
