@@ -43,13 +43,29 @@ def api(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return state
 
 
-def test_install_converges_then_turns_the_lane_on(api: dict[str, Any]) -> None:
+def test_install_is_one_converge_that_turns_the_lane_on_itself(api: dict[str, Any]) -> None:
     result = runner.invoke(mod.app, ["install", "--yes"])
     assert result.exit_code == 0, result.output
     assert api["converges"] == [("memory-decision", {"action": "install"}, "off")]
-    assert api["puts"] == [
-        ("/api/settings", {"memory": {"decision": {"provider": "local", "enabled": True}}})
-    ]
+    # The converge writes the provider (#3757 review item 7), not the waiting CLI.
+    assert api["puts"] == []
+
+
+def test_install_reports_a_busy_converge(
+    api: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "hal0.cli.update_commands._converge_component",
+        lambda *_a: {"status": "busy", "error": "another memory-decision converge is running"},
+    )
+    result = runner.invoke(mod.app, ["install", "--yes"])
+    assert result.exit_code == 1 and "another" in result.output
+
+
+def test_enable_works_for_a_hand_install(api: dict[str, Any]) -> None:
+    api["decision"].update(installed=True, install_state="unmanaged")
+    assert runner.invoke(mod.app, ["enable"]).exit_code == 0
+    assert api["puts"][-1][1]["memory"]["decision"]["provider"] == "local"
 
 
 def test_enable_refuses_when_not_installed(api: dict[str, Any]) -> None:
@@ -67,15 +83,16 @@ def test_enable_and_disable_flip_the_provider(api: dict[str, Any]) -> None:
 
 
 @pytest.mark.parametrize("purge", [False, True])
-def test_remove_turns_the_lane_off_before_removing(api: dict[str, Any], purge: bool) -> None:
+def test_remove_is_one_converge(api: dict[str, Any], purge: bool) -> None:
     api["decision"].update(installed=True, provider="local")
     args = ["remove", "--yes", *(["--purge-model"] if purge else [])]
     result = runner.invoke(mod.app, args)
     assert result.exit_code == 0, result.output
-    # The engine stops using the server before the server goes away.
+    # The arm turns the lane off and re-points the engine before the teardown.
     assert api["converges"] == [
-        ("memory-decision", {"action": "remove", "purge_model": purge}, "off")
+        ("memory-decision", {"action": "remove", "purge_model": purge}, "local")
     ]
+    assert api["puts"] == []
 
 
 def test_status_says_what_to_do(api: dict[str, Any]) -> None:

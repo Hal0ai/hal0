@@ -22,12 +22,14 @@ hal0 memory decision remove      # delete unit + venv; --purge-model drops the m
 ```
 
 `install` builds the venv at `/var/lib/hal0/memory/hindsight-decision/.venv`
-(CPU torch from the PyTorch CPU index, the rest from PyPI, held to the CPU
-torch by a constraint), pulls the pinned revision into the memory engine's
-Hugging Face cache, copies this script next to the venv, and installs
-`hal0-hs-decide.service`. The unit is rendered by the `hal0-systemctl`
-wrapper's `write-hs-decide-unit` verb from four validated values; there is no
-unit file in the tree to install by hand.
+with exact versions (torch from the PyTorch CPU index only, the rest from
+PyPI, all held by a constraints file), pulls the pinned revision into the
+memory engine's Hugging Face cache, installs that snapshot's `serving/`
+package (code from the Hugging Face repo that runs as `hal0`; the full-sha
+revision pin is what fixes it), copies this script next to the venv, and
+installs `hal0-hs-decide.service`. The unit is rendered by the
+`hal0-systemctl` wrapper's `write-hs-decide-unit` verb from four validated
+values; there is no unit file in the tree to install by hand.
 
 Measured on one box: venv 640 MB, model 1.5 GB, 2.7 GB peak RSS, about 5 s
 per request of 3,000 to 5,000 input tokens on 8 threads.

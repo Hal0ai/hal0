@@ -4240,11 +4240,7 @@ def check_memory_decision_lane(
     API (``hindsight-cloud``) is not probed.
     """
     from hal0.memory.decision_component import INSTALL_COMMAND, component_installed
-    from hal0.memory.extraction_env import (
-        HINDSIGHT_CLOUD_DECISION_URL,
-        decision_engine_base_url,
-        decision_unit_installed,
-    )
+    from hal0.memory.extraction_env import HINDSIGHT_CLOUD_DECISION_URL, decision_engine_base_url
 
     name, title = "memory_decision_lane", "Memory decision lane"
     if memory is not None and (
@@ -4257,11 +4253,10 @@ def check_memory_decision_lane(
     note = "" if read_ok else " (hal0.toml unreadable as this user; judged the shipped default)"
     if not decision.enabled or decision.provider == "off":
         return Check(name, title, _PASS, f"decision lane off — the engine uses its LLM lane{note}")
-    if unit_installed is None:
-        # The venv under /var/lib/hal0 may be unreadable to a non-root operator;
-        # the unit file in /etc is not, and it is what the engine drop-in keys on.
-        unit_installed = component_installed() or decision_unit_installed()
-    installed = unit_installed
+    # install_state (via component_installed) keys on the unit file, the same
+    # fact the engine drop-in and /api/memory/models use, so a hand install
+    # (unmanaged) counts as installed everywhere.
+    installed = component_installed() if unit_installed is None else unit_installed
     url = decision_engine_base_url(decision, unit_installed=installed)
     if url is None and decision.base_url:
         return Check(

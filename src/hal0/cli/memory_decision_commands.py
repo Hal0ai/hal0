@@ -1,17 +1,19 @@
 """``hal0 memory decision`` — the opt-in local decision model server (#3757).
 
-    hal0 memory decision install   → build + start hal0-hs-decide, then provider = "local"
+    hal0 memory decision install   → build + start hal0-hs-decide; the converge sets provider = "local"
     hal0 memory decision status    → component row + /api/memory/models decision block
     hal0 memory decision enable    → [memory.decision].provider = "local" (re-renders the engine)
     hal0 memory decision disable   → [memory.decision].provider = "off"
-    hal0 memory decision remove    → stop + delete the unit and venv, provider = "off"
+    hal0 memory decision remove    → provider = "off", engine re-pointed, then unit + venv deleted
 
 ``install`` and ``remove`` run the ``memory-decision`` component's converge
-arm (:mod:`hal0.memory.decision_component`). Through hal0-api by default, the
-``hal0 update component memory-decision`` path. Run as root they run in this
-process instead, which needs no hal0-systemctl verb and so also works on a
-box whose seam wrapper predates the component. ``enable`` and ``disable`` are
-``PUT /api/settings``, which re-renders the engine's showcase drop-in.
+arm (:mod:`hal0.memory.decision_component`), which also writes the provider,
+so a CLI that stops waiting never leaves the lane half-on. Through hal0-api by
+default, the ``hal0 update component memory-decision`` path. Run as root they
+run in this process instead, which needs no hal0-systemctl verb and so also
+works on a box whose seam wrapper predates the component. ``enable`` and
+``disable`` are ``PUT /api/settings``, which re-renders the engine's showcase
+drop-in; they work on a hand-installed (unmanaged) server too.
 """
 
 from __future__ import annotations
@@ -94,15 +96,16 @@ def _converge(body: dict[str, Any]) -> dict[str, Any]:
         if body.get("action") == "remove":
             kwargs.update(action="remove", purge_model=bool(body.get("purge_model")))
         result = converge_component(comp, **kwargs)
-        if result.get("status") in ("build_failed", "rolled_back"):
-            die(
-                f"{COMPONENT_ID}: {result.get('error') or 'failed'}"
-                + (f" — {result['remedy']}" if result.get("remedy") else "")
-            )
-        return result
-    from hal0.cli.update_commands import _converge_component
+    else:
+        from hal0.cli.update_commands import _converge_component
 
-    return _converge_component(COMPONENT_ID, body)
+        result = _converge_component(COMPONENT_ID, body)
+    if result.get("status") in ("build_failed", "rolled_back", "busy"):
+        die(
+            f"{COMPONENT_ID}: {result.get('error') or result.get('status')}"
+            + (f" — {result['remedy']}" if result.get("remedy") else "")
+        )
+    return result
 
 
 @app.command("install")
@@ -122,15 +125,12 @@ def install_cmd(
             abort=True,
         )
     result = _converge({"action": "install"})
-    if os.geteuid() == 0:
-        console.print(f"[green]{COMPONENT_ID} {result.get('status', 'converged')}[/green]")
-    decision = _models_decision()
-    if decision.get("provider") != "local" or not decision.get("enabled", True):
-        _set_provider("local")
+    if result.get("note"):
+        console.print(f"[yellow]![/yellow] {escape(str(result['note']))}")
     console.print(
         Panel(
-            "[bold green]Decision model installed and on[/bold green]\n"
-            '[dim][memory.decision].provider = "local"; the memory engine now sends its '
+            f"[bold green]Decision model {result.get('status', 'installed')}[/bold green]\n"
+            '[dim][memory.decision].provider = "local"; the memory engine sends its '
             "decision calls to hal0-hs-decide.[/dim]",
             border_style="green",
         )
@@ -152,7 +152,7 @@ def status_cmd(
     table.add_column("key", style="dim")
     table.add_column("value")
     table.add_row("provider", str(decision.get("provider")))
-    table.add_row("installed", "yes" if decision.get("installed") else "no")
+    table.add_row("installed", str(decision.get("install_state") or decision.get("installed")))
     active = decision.get("unit_active")
     table.add_row("service", {True: "active", False: "inactive"}.get(active, "unknown"))
     table.add_row("answering", "yes" if decision.get("reachable") else "no")
@@ -162,6 +162,10 @@ def status_cmd(
     console.print(table)
     if not decision.get("installed"):
         console.print("[dim]install it with: hal0 memory decision install[/dim]")
+    elif decision.get("install_state") == "unmanaged":
+        console.print(
+            "[dim]hand-installed (unmanaged): `hal0 memory decision install` adopts it[/dim]"
+        )
     elif decision.get("provider") != "local":
         console.print("[dim]installed but off — turn it on with: hal0 memory decision enable[/dim]")
 
@@ -205,7 +209,6 @@ def remove_cmd(
             default=False,
             abort=True,
         )
-    _set_provider("off")
     _converge({"action": "remove", "purge_model": purge_model})
     console.print(
         "[green]decision model removed[/green]"

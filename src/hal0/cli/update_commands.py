@@ -343,6 +343,10 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
     "components.hermes_gateway_regen_failed": (
         "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"
     ),
+    "updater.memory_decision_conversion_failed": (
+        "[memory.decision].provider default conversion (set it with "
+        "`hal0 memory decision enable` or `disable`)"
+    ),
 }
 
 
@@ -1367,9 +1371,15 @@ def _update_pi() -> None:
     console.print(Panel("[bold green]Updated[/bold green] pi", border_style="green"))
 
 
+def _decision_cli_wait_s() -> float:
+    from hal0.memory.decision_component import CLI_WAIT_S
+
+    return CLI_WAIT_S
+
+
 #: Per-component poll budgets beyond ``_poll_job``'s default. The decision
 #: model's first install pulls CPU torch and a 1.5 GB model (#3757).
-_CONVERGE_POLL_TIMEOUT_S = {"memory-decision": 3600.0}
+_CONVERGE_POLL_TIMEOUT_S = {"memory-decision": _decision_cli_wait_s()}
 
 
 def _converge_component(component_id: str, body: dict | None = None) -> dict:

@@ -1109,6 +1109,7 @@ async def _run_component_job(
     arm_kwargs: dict[str, Any],
     upstreams: Any = None,
     model_cache: Any = None,
+    app_state: Any = None,
 ) -> None:
     from hal0.components.registry import component_by_id
     from hal0.components.runner import converge_component
@@ -1138,6 +1139,15 @@ async def _run_component_job(
                 )
             except Exception as exc:
                 log.warning("updater.hermes_upstreams_failed", error=str(exc))
+        if component_id == "memory-decision" and app_state is not None:
+            # The arm wrote [memory.decision].provider to hal0.toml itself
+            # (#3757); refresh the settings cache so the dashboard reads it.
+            try:
+                from hal0.config.loader import load_hal0_config
+
+                app_state.hal0_config = load_hal0_config()
+            except Exception as exc:
+                log.warning("updater.config_cache_refresh_failed", error=str(exc))
         job["component_result"] = result
         failed = result.get("status") in (
             "build_failed",
@@ -1254,6 +1264,7 @@ async def converge_component_route(component_id: str, request: Request) -> dict[
             arm_kwargs,
             upstreams=request.app.state.upstreams,
             model_cache=getattr(request.app.state, "upstream_models", None),
+            app_state=request.app.state,
         ),
     )
     return dict(jobs[job_id])

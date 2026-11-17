@@ -110,6 +110,12 @@ def component_status_snapshot() -> dict[str, Any]:
             derived = last["status"]
         elif installed is None:
             derived = "not-installed"
+        elif comp.id == "memory-decision" and installed == "unmanaged":
+            # #3757: a hand-installed server. Not pending: `hal0 update` leaves
+            # it alone, and the note names the command that adopts it.
+            from hal0.memory.decision_component import UNMANAGED_NOTE
+
+            derived, derived_note = "unmanaged", UNMANAGED_NOTE
         elif comp.id == "pi":
             # Advisory: see pin_state. None of its statuses is pending.
             from hal0.components.pi_arm import pin_state

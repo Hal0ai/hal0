@@ -77,12 +77,31 @@ those calls to its LLM lane instead, which works but costs an LLM call each.
 
 The local server is the opt-in `memory-decision` component. Nothing installs
 it by default. `hal0 memory decision install` builds a venv under
-`/var/lib/hal0/memory/hindsight-decision` (CPU PyTorch from the PyTorch CPU
-index, the rest from PyPI), pulls the pinned model revision into the memory
-engine's Hugging Face cache, installs `hal0-hs-decide.service` (runs as
-`hal0`, listens on `127.0.0.1` only, no network at run time), waits for its
-`/health`, and points the engine at it. `hal0 update` keeps an installed one
-on the release's pins and never installs one.
+`/var/lib/hal0/memory/hindsight-decision` with exact versions (torch 2.15.0
+from the PyTorch CPU index only; transformers 5.23.0, fastapi 0.163.1,
+uvicorn 0.54.0, accelerate 1.16.0 and huggingface-hub 2.4.0 from PyPI), pulls
+the model at one full commit sha into the memory engine's Hugging Face cache,
+installs `hal0-hs-decide.service` (runs as `hal0`, listens on `127.0.0.1`
+only, no network at run time), waits for its `/health`, sets `provider =
+"local"` and points the engine at it. `hal0 update` keeps an installed one on
+the release's pins and never installs one.
+
+The build installs the model repository's own `serving/` package into the
+venv. That is code from the Hugging Face repository, and it runs as the `hal0`
+user; the full-sha revision pin is what fixes which code it is.
+
+A failed install leaves no unit and the lane off. A failed update puts the
+previous venv, server script and unit back, restarts the previous server and
+checks it. A server installed by hand (a unit with no hal0 build stamp) is
+reported as `unmanaged`: it keeps working, `enable` and `disable` act on it,
+`hal0 update` leaves it alone, and `install` adopts it.
+
+**Upgrading to this release.** The default of `provider` changed from
+`"local"` to `"off"`, and most `hal0.toml` files carry the old default
+written out. The first update converts it once: a `local` (written or left to
+the default) with no `hal0-hs-decide` unit becomes `off`, and one with a unit
+is written as `local`, so a working lane stays on. The update's component
+table says which happened.
 
 Measured on one box: a 640 MB venv and a 1.5 GB model, a few minutes to
 build, 2.7 GB of RAM at peak, and about 5 s per request of 3,000 to 5,000
@@ -102,4 +121,4 @@ install` again to rewrite the unit.
 | `memory decision enable` / `disable` | — |
 | `memory decision remove` | `--purge-model`, `--yes` |
 
-`install` runs `hal0 update component memory-decision`, then sets `provider = "local"`; run as root, it builds in-process. `enable` needs it installed; `disable` sets `off` and leaves the server up; `remove` sets `off`, deletes the unit and venv, and keeps the model unless `--purge-model`.
+`install` runs `hal0 update component memory-decision`, which also sets `provider = "local"`; run as root, it builds in-process. One converge runs at a time. `enable` needs a server installed (managed or by hand); `disable` sets `off` and leaves the server up; `remove` sets `off`, deletes the unit and venv, and keeps the model unless `--purge-model`.

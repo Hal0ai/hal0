@@ -4656,7 +4656,7 @@ def test_fetch_is_none_when_the_engine_cannot_be_reached(monkeypatch) -> None:
 
 def test_decision_lane_four_states_name_the_next_step(monkeypatch: pytest.MonkeyPatch) -> None:
     from hal0.config.schema import MemoryDecisionConfig
-    from hal0.memory import decision_component, extraction_env
+    from hal0.memory import decision_component
 
     local = MemoryDecisionConfig(provider="local")
     off = da.check_memory_decision_lane(
@@ -4666,7 +4666,6 @@ def test_decision_lane_four_states_name_the_next_step(monkeypatch: pytest.Monkey
 
     # The default probe is the component's own installed check.
     monkeypatch.setattr(decision_component, "component_installed", lambda: False)
-    monkeypatch.setattr(extraction_env, "decision_unit_installed", lambda: False)
     missing = da.check_memory_decision_lane(memory=_LIVE_MEMORY, decision=local, probe=_no_probe)
     assert missing.status == "warn"
     assert "not installed" in missing.detail and "hal0 memory decision install" in missing.detail

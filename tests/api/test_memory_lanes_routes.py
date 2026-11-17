@@ -407,10 +407,12 @@ def test_models_decision_says_installed_and_unit_active(
     """#3757: the dashboard reads these to say "install it" vs "it is down"."""
     from hal0.memory import decision_component
 
-    monkeypatch.setattr(decision_component, "component_installed", lambda: installed)
+    state = "managed" if installed else "not-installed"
+    monkeypatch.setattr(decision_component, "install_state", lambda: (state, None))
     monkeypatch.setattr(decision_component, "unit_active", lambda: active)
     body = client.get("/api/memory/models").json()["decision"]
     assert body["installed"] is installed and body["unit_active"] is active
+    assert body["install_state"] == state
     assert {"enabled", "provider", "model", "reachable"} <= set(body)
 
 
