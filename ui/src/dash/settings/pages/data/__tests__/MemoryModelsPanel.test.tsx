@@ -117,8 +117,11 @@ const render = (focus: any = null) =>
 // react-query notifies on a zero timer, so let one run (the fake clock, if it is on).
 const flush = () =>
   act(async () => {
-    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0)
-    else await new Promise((r) => setTimeout(r, 0))
+    // A few turns, not one: a loaded CI runner needs more than a single timer to settle.
+    for (let i = 0; i < 5; i += 1) {
+      if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0)
+      else await new Promise((r) => setTimeout(r, 5))
+    }
   })
 const tick = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
 
