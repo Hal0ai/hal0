@@ -193,7 +193,11 @@ function AtlasPanel({ tags, totalFacts, onTag, embed }) {
   // tooltip so the tag name/count is still one hover away, not gone.
   const LABEL_MIN_R = 18
   const svg = tags.length > 0 && (
-    <svg viewBox={`0 0 ${W} ${H}`}>
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      role="img"
+      aria-label={`Tag map: ${tags.length} ${tags.length === 1 ? 'tag' : 'tags'}, each bubble sized by its fact count. The same tags are listed below the map.`}
+    >
       {placed.map((t, i) => {
         const c = TOPIC_COLORS[i % TOPIC_COLORS.length]
         const labelled = t.r >= LABEL_MIN_R
@@ -229,6 +233,21 @@ function AtlasPanel({ tags, totalFacts, onTag, embed }) {
         <div className="mv-empty" style={{ padding: 24 }}>
           bank is empty
         </div>
+      )}
+      {/* The map's text alternative: every tag and its fact count, largest first. A bubble is
+          only a pointer target, so each entry is also the keyboard way to filter by that tag. */}
+      {tags.length > 0 && (
+        <ul className="sr-only" aria-label="Tags and their fact counts" data-testid="mv-atlas-list">
+          {[...tags]
+            .sort((a, z) => z.count - a.count)
+            .map((t) => (
+              <li key={t.tag}>
+                <button type="button" onClick={() => onTag(t.tag)}>
+                  {t.tag}, {fmtN(t.count)} {t.count === 1 ? 'fact' : 'facts'}
+                </button>
+              </li>
+            ))}
+        </ul>
       )}
     </div>
   )
@@ -280,6 +299,10 @@ function TopicChips({ tags, topic, setTopic }) {
     </div>
   )
 }
+
+// The row counts the Sources list can show. The list asks the engine for 50 at most, so the last
+// step shows all of them.
+const SOURCE_LIMITS = [5, 15, 25, 50]
 
 function SourcesPanel({ bank, src, setSrc, limit, setLimit, matchCount }) {
   const { fmtN, Icon, MvError } = window.MemV2
@@ -347,7 +370,7 @@ function SourcesPanel({ bank, src, setSrc, limit, setLimit, matchCount }) {
         <span className="sp" />
         {!focused && (
           <div className="mv-rangetabs">
-            {[5, 15, 25, 50].map((n) => (
+            {SOURCE_LIMITS.map((n) => (
               <button key={n} className={n === limit ? 'on' : ''} onClick={() => setLimit(n)}>
                 {n}
               </button>
@@ -373,7 +396,17 @@ function SourcesPanel({ bank, src, setSrc, limit, setLimit, matchCount }) {
           {docs.slice(0, limit).map((d) => (
             <Row key={d.id} d={d} on={false} />
           ))}
-          {docs.length > limit && <div className="mv-more num">{docs.length - limit} more · raise the limit</div>}
+          {docs.length > limit && (
+            <button
+              type="button"
+              className="mv-more num"
+              style={{ display: 'block', width: '100%', background: 'none', border: 0, cursor: 'pointer' }}
+              onClick={() => setLimit(SOURCE_LIMITS.find((n) => n > limit) ?? SOURCE_LIMITS[SOURCE_LIMITS.length - 1])}
+              data-testid="mv-sources-more"
+            >
+              {docs.length - limit} more · show {Math.min(docs.length, SOURCE_LIMITS.find((n) => n > limit) ?? docs.length)}
+            </button>
+          )}
         </>
       )}
     </div>
@@ -1066,7 +1099,7 @@ function Inspector({ bank, sel, setSel, unitsPage }) {
 // `embedded` is passed through to the BankBar (see memory-bank-bar.jsx): inside the Memory
 // area the bar has no bank <select> and no Rules tab.
 function BankWorkspace({ bank, setBank, sel, setSel, embedded = false }) {
-  const { FACT_COLORS } = window.MemV2
+  const { FACT_COLORS, fmtN } = window.MemV2
 
   const [q, setQ] = useStateWorkspace('')
   const [types, setTypes] = useStateWorkspace({ world: true, experience: true, observation: true })
@@ -1237,7 +1270,7 @@ function BankWorkspace({ bank, setBank, sel, setSel, embedded = false }) {
                     {totalMatched ? pageSafe * PAGE_SIZE + 1 : 0}–
                     {Math.min(totalMatched, (pageSafe + 1) * PAGE_SIZE)}
                   </b>{' '}
-                  of {totalMatched} matched
+                  of {fmtN(totalMatched)} matched
                   {/* final-review I2: the server's 2000-row upstream slab can
                       clip the match set — total_matched/paging (and, under
                       sort=salience, the ranking) are only accurate within that
@@ -1245,9 +1278,13 @@ function BankWorkspace({ bank, setBank, sel, setSel, embedded = false }) {
                       salience" cap notice, instead of stating a number the
                       server itself flagged as a floor, not a total. */}
                   {unitsQuery.data?.truncated && (
-                    <span data-testid="mv-units-truncated" style={{ color: 'var(--warn)' }}>
+                    <span data-testid="mv-units-truncated" style={{ color: 'var(--warn)', fontWeight: 600 }}>
                       {' '}
-                      (first 2000 matched — refine filters)
+                      · capped: only the first {fmtN(totalMatched)} matches can be paged through
+                      {typeof stats?.total_nodes === 'number'
+                        ? `; this bank holds ${fmtN(stats.total_nodes)} facts`
+                        : ''}
+                      . Add a search or filter to reach the rest.
                     </span>
                   )}
                 </span>

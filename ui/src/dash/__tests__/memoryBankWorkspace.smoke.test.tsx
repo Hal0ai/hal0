@@ -120,7 +120,8 @@ describe('MemV2Workspace — final-review I2 (truncated slab notice)', () => {
       )
 
       expect(html).toContain('mv-units-truncated')
-      expect(html).toContain('first 2000 matched')
+      expect(html).toContain('only the first 2,000 matches can be paged through')
+      expect(html).toContain('of 2,000 matched')
     } finally {
       ;(globalThis as unknown as { __hal0UseBankUnits: unknown }).__hal0UseBankUnits = realUseBankUnits
     }
@@ -300,5 +301,72 @@ describe('MemV2EgoGraph (smoke)', () => {
 
     expect(html).toContain('mv-ego')
     expect(html).not.toContain('mv-ego-depth')
+  })
+})
+
+describe('Memory workspace usability (Facts tab)', () => {
+  const g = globalThis as unknown as Record<string, unknown>
+  const render = (overrides: Record<string, unknown>) => {
+    const saved = Object.fromEntries(Object.keys(overrides).map((k) => [k, g[k]]))
+    Object.assign(g, overrides)
+    try {
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const MemV2Workspace = (g as unknown as { MemV2Workspace: React.ComponentType<any> }).MemV2Workspace
+      return renderToStaticMarkup(
+        React.createElement(
+          QueryClientProvider,
+          { client: qc },
+          React.createElement(MemV2Workspace, { bank: 'primary', setBank: () => {}, sel: null, setSel: () => {} }),
+        ),
+      )
+    } finally {
+      Object.assign(g, saved)
+    }
+  }
+
+  it('puts the true bank total beside a capped match count', () => {
+    const html = render({
+      __hal0UseBankStats: () => ({ data: { total_nodes: 38412, nodes_by_fact_type: {} } }),
+      __hal0UseBankUnits: () => ({
+        data: { items: [], total_matched: 2000, next_offset: null, truncated: true },
+        isError: false,
+        isLoading: false,
+      }),
+    })
+    expect(html).toContain('this bank holds 38,412 facts')
+    expect(html).toContain('Add a search or filter to reach the rest')
+  })
+
+  it('gives the tag map a role, a label and a list of every tag with its count', () => {
+    const html = render({
+      __hal0UseBankStats: () => ({ data: { total_nodes: 10, nodes_by_fact_type: {} } }),
+      __hal0UseBankTags: () => ({
+        data: {
+          items: [
+            { tag: 'project:hal0', count: 7 },
+            { tag: 'memory', count: 1200 },
+          ],
+        },
+      }),
+    })
+    expect(html).toMatch(/<svg[^>]*role="img"[^>]*aria-label="Tag map: 2 tags/)
+    expect(html).toContain('data-testid="mv-atlas-list"')
+    // Largest first, readable without the picture.
+    expect(html.indexOf('memory, 1,200 facts')).toBeGreaterThan(-1)
+    expect(html.indexOf('memory, 1,200 facts')).toBeLessThan(html.indexOf('project:hal0, 7 facts'))
+  })
+
+  it('makes "N more" in the sources list a button', () => {
+    const docs = Array.from({ length: 9 }, (_, i) => ({
+      id: `doc-${i}`,
+      created_at: '2026-01-01T00:00:00Z',
+      memory_unit_count: 1,
+      text_length: 10,
+    }))
+    const html = render({
+      __hal0UseBankDocuments: () => ({ data: { items: docs, total: 9 }, isError: false, isLoading: false }),
+    })
+    expect(html).toMatch(/<button[^>]*data-testid="mv-sources-more"[^>]*>4 more · show 9<\/button>/)
+    expect(html).not.toContain('raise the limit')
   })
 })
