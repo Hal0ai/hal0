@@ -5,7 +5,7 @@ close enough for the Dispatcher's forwarding layer).
 
 Two kinds:
   - "slot"    — local inference container managed by SlotManager.
-                Eligible for on-demand warmup.
+                Eligible for on-demand start.
   - "remote"  — external HTTP endpoint (OpenRouter, Anthropic, OpenAI, custom).
                 Lifecycle is owned elsewhere.
 
@@ -14,18 +14,17 @@ wins for any slot that's explicitly listed; missing slots get auto-populated
 from configured slot names and their ports.
 
 Port target: haloai lib/upstreams.py (737 lines).
-Adds: adaptive cold-boot timeout (PLAN.md §5 Tier 1).
-See PLAN.md §3 and §5 Tier 1 ("cold-boot health probe … exponential backoff").
+Adds: per-slot backoff overrides (hardware.json) and the TIER1 timing constants (PLAN.md §5 Tier 1).
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-import random
+import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, field, replace
 from dataclasses import fields as dataclass_fields
 from pathlib import Path
@@ -116,6 +115,172 @@ RESERVED_UPSTREAM_NAME = "hal0"
 
 
 # ── Upstream dataclass ────────────────────────────────────────────────────────
+
+
+#: Auth styles :func:`build_auth_headers` knows how to render.
+KNOWN_AUTH_STYLES = frozenset({"bearer", "anthropic", "header", "none"})
+
+#: Upper bound on a probed ``/models`` body; a hostile endpoint cannot make the
+#: dialog's server-side fetch buffer more than this.
+PROBE_MAX_BODY_BYTES = 2 * 1024 * 1024
+_PROBE_ERROR_EXCERPT = 300
+
+
+class ProbeUrlError(ValueError):
+    """An unusable probe URL. The message is fixed text and never echoes the URL or key."""
+
+
+def _decode_capped(raw: bytes, encoding: str) -> bytes | None:
+    """Decode a gzip/deflate body without ever holding more than the cap.
+
+    ``None`` means the decoded body exceeds :data:`PROBE_MAX_BODY_BYTES` or the
+    encoding is unsupported/corrupt.
+    """
+    import zlib
+
+    enc = encoding.strip().lower()
+    if enc in ("", "identity"):
+        return raw
+    if enc not in ("gzip", "x-gzip", "deflate"):
+        return None
+    attempts = (zlib.MAX_WBITS | 16,) if enc != "deflate" else (zlib.MAX_WBITS, -zlib.MAX_WBITS)
+    for wbits in attempts:
+        d = zlib.decompressobj(wbits)
+        try:
+            out = d.decompress(raw, PROBE_MAX_BODY_BYTES + 1)
+        except zlib.error:
+            continue
+        if len(out) > PROBE_MAX_BODY_BYTES:
+            return None
+        # A stream that did not reach its end is truncated; data after the end
+        # is ignored.
+        if d.eof:
+            return out
+    return None
+
+
+def build_auth_headers(style: str, header_name: str, key: str) -> dict[str, str]:
+    """Render outbound auth headers for ``style`` from an in-hand ``key``.
+
+    Pure: reads no environment. Shared by :meth:`UpstreamRegistry.auth_headers`
+    (key from ``$auth_value_env``) and :meth:`UpstreamRegistry.probe` (key in
+    transit). An empty ``key`` means "no credential header". Unknown styles
+    yield ``{}``.
+    """
+    style = (style or "bearer").lower()
+    if style == "bearer":
+        if not key:
+            return {}
+        header = header_name or "Authorization"
+        if header.lower() == "authorization" and not key.lower().startswith("bearer "):
+            return {header: f"Bearer {key}"}
+        return {header: key}
+    if style == "anthropic":
+        out: dict[str, str] = {"anthropic-version": "2023-06-01"}
+        if key:
+            out["x-api-key"] = key
+        return out
+    if style == "header":
+        if header_name and key:
+            return {header_name: key}
+        return {}
+    return {}
+
+
+def normalise_key(style: str, header_name: str, key: str) -> tuple[str, str] | None:
+    """Split an operator-supplied ``key`` into ``(value to send or store, bare token)``.
+
+    A leading ``Bearer `` is stripped only where hal0 itself prepends one: the
+    ``bearer`` style on the ``Authorization`` header. Everywhere else the value
+    is kept verbatim (an operator may need ``X-Authorization: Bearer ...``), but
+    the bare token is still returned so callers can redact it. ``None`` when the
+    token is not printable ASCII without whitespace; one space after a leading
+    ``Bearer`` is allowed in the verbatim styles. ``("", "")`` means no key.
+    """
+    stripped = key.strip()
+    bare = stripped
+    if stripped.lower().startswith("bearer "):
+        bare = stripped[7:].strip()
+    if not (bare.isascii() and all(0x21 <= ord(ch) <= 0x7E for ch in bare)):
+        return None
+    adds_prefix = (style or "bearer").lower() == "bearer" and (
+        (header_name or "Authorization").lower() == "authorization"
+    )
+    if adds_prefix or bare == stripped:
+        return bare, bare
+    if stripped[7:] != bare:  # exactly one space after the prefix
+        return None
+    return stripped, bare
+
+
+def _redact_secret(text: str, key: str) -> str:
+    """Replace every occurrence of ``key`` (and its URL-encoded form) with ``***``.
+
+    An empty key redacts nothing (it means "no auth header"); a short key is
+    redacted like any other.
+    """
+    if not key:
+        return text
+    from urllib.parse import quote
+
+    text = text.replace(key, "***")
+    encoded = quote(key, safe="")
+    if encoded != key:
+        text = re.sub(re.escape(encoded), "***", text, flags=re.IGNORECASE)
+    return text
+
+
+def _parse_json(text: str) -> Any:
+    return json.loads(text)
+
+
+def _scrub_parsed(value: Any, scrub: Callable[[str], str]) -> Any:
+    """``value`` with ``scrub`` applied to every string in it, keys included.
+
+    Scrubbing the raw text is not enough: JSON can spell the key with ``\\u``
+    escapes, which only decode into the key once parsed.
+    """
+    if isinstance(value, str):
+        return scrub(value)
+    if isinstance(value, list):
+        return [_scrub_parsed(v, scrub) for v in value]
+    if isinstance(value, dict):
+        return {scrub(k): _scrub_parsed(v, scrub) for k, v in value.items()}
+    return value
+
+
+def _probe_transport_error(exc: BaseException) -> str:
+    """A short, fixed-vocabulary description; never ``str(exc)`` (it can carry URL/headers)."""
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout contacting provider"
+    cause = exc.__cause__ or exc.__context__
+    if isinstance(exc, ConnectionRefusedError) or isinstance(cause, ConnectionRefusedError):
+        return "connection refused"
+    if isinstance(exc, httpx.ConnectError):
+        return "connection failed"
+    return f"request failed ({type(exc).__name__})"
+
+
+def _probe_url(url: str) -> str:
+    """Validate a probe target and return its ``/models`` URL; ``ProbeUrlError`` if unusable.
+
+    Only http/https with a host, a valid port and no embedded credentials.
+    Loopback and LAN hosts stay allowed (Ollama, a peer hal0). The message
+    never echoes the URL.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit((url or "").strip())
+        host = parts.hostname
+        parts.port  # noqa: B018 - raises ValueError on a non-numeric/out-of-range port
+    except ValueError:
+        raise ProbeUrlError("url is not a valid http(s) URL") from None
+    if parts.scheme not in ("http", "https") or not host:
+        raise ProbeUrlError("url must be an http:// or https:// URL with a host")
+    if parts.username or parts.password:
+        raise ProbeUrlError("url must not contain embedded credentials")
+    return url.strip().rstrip("/") + "/models"
 
 
 @dataclass(frozen=True)
@@ -307,25 +472,6 @@ def upstream_from_entry(entry: UpstreamEntry) -> Upstream:
     )
 
 
-# ── Warmup state ──────────────────────────────────────────────────────────────
-
-
-@dataclass
-class _SlotStats:
-    """Per-slot runtime counters surfaced to the dispatcher / dashboard.
-
-    # TIER2: tps is recomputed on each request; clamped at 0 to avoid the
-    # haloai bug where a process restart reset the histogram counter and the
-    # delta went negative.  When we detect a counter reset we log a warning.
-    """
-
-    tps: float = 0.0
-    """Tokens per second (clamped >= 0)."""
-
-    last_request_at: float = 0.0
-    last_counter: int = 0
-
-
 # ── UpstreamRegistry ──────────────────────────────────────────────────────────
 
 
@@ -337,13 +483,11 @@ class UpstreamRegistry:
     dynamic registration for auto-discovered slots.
 
     The class is intentionally synchronous for CRUD operations; the
-    HTTP-touching methods (test/fetch_models/warmup) are async.
+    HTTP-touching methods (test/fetch_models/probe) are async.
     """
 
     def __init__(self) -> None:
         self._upstreams: dict[str, Upstream] = {}
-        self._warmup_locks: dict[str, asyncio.Lock] = {}
-        self._slot_stats: dict[str, _SlotStats] = {}
         # TIER1: per-slot backoff overrides loaded from hardware.json
         self._slot_overrides: dict[str, dict[str, Any]] = {}
         self._client: httpx.AsyncClient | None = None
@@ -383,8 +527,6 @@ class UpstreamRegistry:
         """Remove an upstream by name.  Returns True if it was present."""
         existed = name in self._upstreams
         self._upstreams.pop(name, None)
-        self._warmup_locks.pop(name, None)
-        self._slot_stats.pop(name, None)
         if existed:
             log.info("upstream.remove", name=name)
         return existed
@@ -561,14 +703,6 @@ class UpstreamRegistry:
         self.remove(name)
         return removed_from_toml
 
-    def in_priority_order(self) -> list[Upstream]:
-        """Sort order for dispatcher fallback: slots first, then remotes."""
-        rank = {"slot": 0, "remote": 1}
-        return sorted(
-            self._upstreams.values(),
-            key=lambda u: (rank.get(u.kind, 99), u.name),
-        )
-
     def from_slot(self, slot_name: str) -> Upstream | None:
         """Look up by slot_name (kind=slot)."""
         for u in self._upstreams.values():
@@ -671,24 +805,9 @@ class UpstreamRegistry:
                 "/etc/hal0/api.env, then restart hal0-api.",
                 details={"name": u.name, "auth_style": style, "env": u.auth_value_env},
             )
-        if style == "bearer":
-            if not key:
-                return {}
-            header = u.auth_header or "Authorization"
-            if header.lower() == "authorization" and not key.lower().startswith("bearer "):
-                return {header: f"Bearer {key}"}
-            return {header: key}
-        if style == "anthropic":
-            out: dict[str, str] = {"anthropic-version": "2023-06-01"}
-            if key:
-                out["x-api-key"] = key
-            return out
-        if style == "header":
-            if u.auth_header and key:
-                return {u.auth_header: key}
-            return {}
-        log.debug("upstream.unknown_auth_style", name=u.name, style=style)
-        return {}
+        if style not in KNOWN_AUTH_STYLES:
+            log.debug("upstream.unknown_auth_style", name=u.name, style=style)
+        return build_auth_headers(style, u.auth_header, key)
 
     # ── HTTP client ───────────────────────────────────────────────────────────
 
@@ -727,133 +846,6 @@ class UpstreamRegistry:
         except (httpx.HTTPError, OSError) as exc:
             log.debug("upstream.health_fail", name=u.name, url=target, error=str(exc))
             return False
-
-    def _get_warmup_lock(self, slot_name: str) -> asyncio.Lock:
-        lock = self._warmup_locks.get(slot_name)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._warmup_locks[slot_name] = lock
-        return lock
-
-    async def warmup(self, u: Upstream) -> bool:
-        """Bring a slot upstream to a healthy state, with TIER1 adaptive backoff.
-
-        Returns True when /health responds 2xx within the total grace window.
-        Returns False if:
-            - kind != "slot" or no slot_name configured
-            - warmup_strategy == "none" (just probe once and return)
-            - total grace elapses without a healthy response
-
-        TIER1: probe interval follows TIER1_BACKOFF_STEPS with ±25% jitter,
-        total grace is `_effective_total_grace_s(u)` (default 180s), and the
-        per-slot override comes from hardware.json. This replaces the haloai
-        hardcoded 2s timeout at lib/upstreams.py:500-520.
-        """
-        if u.kind != "slot" or not u.slot_name:
-            return False
-        if u.warmup_strategy == "none":
-            return await self.health(u)
-
-        lock = self._get_warmup_lock(u.slot_name)
-        async with lock:
-            # Re-check inside the lock — another waiter may have warmed it.
-            if await self.health(u):
-                return True
-
-            steps = self._effective_backoff_steps(u)
-            total_grace = self._effective_total_grace_s(u)
-            deadline = time.monotonic() + total_grace
-            attempt = 0
-            log.info(
-                "upstream.warmup_start",
-                name=u.name,
-                slot=u.slot_name,
-                grace_s=total_grace,
-                steps=list(steps),
-            )
-
-            while True:
-                # TIER1 — exponential step with jitter, capped at the last step.
-                base_step = steps[min(attempt, len(steps) - 1)]
-                jitter = base_step * TIER1_BACKOFF_JITTER_FRAC
-                delay = max(0.0, base_step + random.uniform(-jitter, jitter))
-
-                # Don't oversleep past the grace deadline.
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    log.warning(
-                        "upstream.warmup_timeout",
-                        name=u.name,
-                        slot=u.slot_name,
-                        grace_s=total_grace,
-                        attempts=attempt + 1,
-                    )
-                    return False
-                delay = min(delay, remaining)
-                await asyncio.sleep(delay)
-
-                if await self.health(u):
-                    log.info(
-                        "upstream.warmup_ready",
-                        name=u.name,
-                        slot=u.slot_name,
-                        attempts=attempt + 1,
-                    )
-                    return True
-
-                attempt += 1
-                if time.monotonic() >= deadline:
-                    log.warning(
-                        "upstream.warmup_timeout",
-                        name=u.name,
-                        slot=u.slot_name,
-                        grace_s=total_grace,
-                        attempts=attempt,
-                    )
-                    return False
-
-    # ── Tier 2 stats ──────────────────────────────────────────────────────────
-
-    def record_tokens(self, slot_name: str, token_counter: int, now: float | None = None) -> float:
-        """Update the slot's tps from a monotonic token counter.
-
-        # TIER2: clamps the computed tps at 0 and logs a warning when the
-        # counter resets (haloai lib/slots.py:240-346 — process restart could
-        # send tps negative). Returns the new (clamped) tps.
-        """
-        ts = time.monotonic() if now is None else now
-        stats = self._slot_stats.get(slot_name)
-        if stats is None:
-            stats = _SlotStats(last_counter=token_counter, last_request_at=ts)
-            self._slot_stats[slot_name] = stats
-            return 0.0
-
-        delta_tokens = token_counter - stats.last_counter
-        delta_t = ts - stats.last_request_at
-
-        if delta_tokens < 0:
-            # TIER2 — counter went backwards: process restart or rollover.
-            log.warning(
-                "upstream.tps_counter_reset",
-                slot=slot_name,
-                previous=stats.last_counter,
-                current=token_counter,
-            )
-            stats.tps = 0.0
-        elif delta_t <= 0:
-            # Same instant or clock skew — keep the previous tps but clamp >= 0.
-            stats.tps = max(0.0, stats.tps)
-        else:
-            stats.tps = max(0.0, delta_tokens / delta_t)  # TIER2
-
-        stats.last_counter = token_counter
-        stats.last_request_at = ts
-        return stats.tps
-
-    def get_tps(self, slot_name: str) -> float:
-        """Return the most recently computed tps for a slot, or 0.0 if unknown."""
-        stats = self._slot_stats.get(slot_name)
-        return stats.tps if stats else 0.0
 
     # ── HTTP-touching ops ─────────────────────────────────────────────────────
 
@@ -917,6 +909,122 @@ class UpstreamRegistry:
         else:
             count = None
         return {"ok": True, "status": 200, "models_count": count, "latency_ms": latency_ms}
+
+    async def probe(
+        self, *, url: str, auth_style: str, auth_header: str = "", key: str = ""
+    ) -> dict[str, Any]:
+        """Fetch ``{url}/models`` with a transient key, before anything is saved.
+
+        Returns ``{ok, status, latency_ms, payload, headers, error}``. The key
+        lives only in this call: it is never stored, logged, put in
+        ``os.environ`` or returned. Every provider-derived string (error text,
+        response headers, the decoded body) has the key replaced with ``***``.
+        Redirects are not followed and the body read stops at
+        :data:`PROBE_MAX_BODY_BYTES`. Raises :class:`ProbeUrlError` for an unusable URL (before the key is bound);
+        any other failure is returned as ``ok: false`` with fixed-vocabulary text.
+        """
+        target = _probe_url(url)
+        # Past this point the key is bound; nothing may escape carrying it in a
+        # frame, so every failure becomes a fixed-vocabulary ``ok: false``.
+        started = time.monotonic()
+        try:
+            return await self._probe_run(target, auth_style, auth_header, key)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": None,
+                "latency_ms": round((time.monotonic() - started) * 1000, 1),
+                "payload": None,
+                "headers": {},
+                "error": _probe_transport_error(exc),
+            }
+
+    async def _probe_run(
+        self, target: str, auth_style: str, auth_header: str, key: str
+    ) -> dict[str, Any]:
+        style = (auth_style or "bearer").lower()
+        stripped = key.strip()
+        normal = normalise_key(style, auth_header, key)
+        if normal is not None:
+            sent, token = normal
+        else:  # refused input still goes out as given; keep the bare token redacted too
+            sent = token = stripped
+            if stripped.lower().startswith("bearer "):
+                token = stripped[7:].strip()
+        headers = build_auth_headers(style, auth_header, sent)
+        headers["Accept-Encoding"] = "identity"
+        secrets = {s for s in (key, stripped, sent, token) if s}
+
+        def scrub(text: str) -> str:
+            for secret in secrets:
+                text = _redact_secret(text, secret)
+            return text
+
+        def fail(
+            status: int | None, error: str, started: float, resp_headers: dict[str, str] | None
+        ) -> dict[str, Any]:
+            return {
+                "ok": False,
+                "status": status,
+                "latency_ms": round((time.monotonic() - started) * 1000, 1),
+                "payload": None,
+                "headers": resp_headers or {},
+                "error": scrub(error)[:_PROBE_ERROR_EXCERPT],
+            }
+
+        started = time.monotonic()
+        try:
+            async with (
+                async_client(
+                    timeout=httpx.Timeout(connect=3.0, read=8.0, write=3.0, pool=3.0),
+                    follow_redirects=False,
+                ) as c,
+                c.stream("GET", target, headers=headers) as resp,
+            ):
+                resp_headers = {k.lower(): scrub(v) for k, v in resp.headers.items()}
+                chunks: list[bytes] = []
+                size = 0
+                too_large = False
+                # Raw (still-encoded) bytes: the cap bounds memory before any
+                # decompression happens.
+                async for chunk in resp.aiter_raw():
+                    size += len(chunk)
+                    if size > PROBE_MAX_BODY_BYTES:
+                        too_large = True
+                        break
+                    chunks.append(chunk)
+                status = resp.status_code
+                reason = resp.reason_phrase
+        except Exception as exc:
+            return fail(None, _probe_transport_error(exc), started, None)
+
+        if too_large:
+            return fail(status, "response too large", started, resp_headers)
+        decoded = _decode_capped(b"".join(chunks), resp_headers.get("content-encoding", ""))
+        if decoded is None:
+            return fail(
+                status, "response too large or in an unsupported encoding", started, resp_headers
+            )
+        text = scrub(decoded.decode("utf-8", errors="replace"))
+        if not 200 <= status < 300:
+            excerpt = text[:_PROBE_ERROR_EXCERPT].strip()
+            message = f"HTTP {status} {reason}".strip()
+            if excerpt:
+                message = f"{message}: {excerpt}"
+            return fail(status, message, started, resp_headers)
+        try:
+            payload = _scrub_parsed(_parse_json(text), scrub)
+        except ValueError:
+            return fail(status, "response was not JSON", started, resp_headers)
+        log.debug("upstream.probe_ok", host=target.split("/")[2], status=status)
+        return {
+            "ok": True,
+            "status": status,
+            "latency_ms": round((time.monotonic() - started) * 1000, 1),
+            "payload": payload,
+            "headers": resp_headers,
+            "error": None,
+        }
 
     async def fetch_model_payload(self, name: str) -> Any | None:
         """Return the decoded JSON body of an upstream's ``/models``.

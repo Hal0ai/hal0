@@ -28,7 +28,7 @@ import os
 import stat
 import tomllib
 from collections.abc import MutableMapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +46,9 @@ log = structlog.get_logger(__name__)
 
 RETIRED_SUFFIX = ".retired"
 BACKUP_SUFFIX = ".pre-convert"
+DEFER_REASONS = frozenset(
+    {"unreachable", "no_models", "no_valid_models", "backup_failed", "write_failed"}
+)
 _LOG_ID_CAP = 20
 
 
@@ -56,6 +59,8 @@ class ConvertResult:
     """Provider unreachable, listed nothing, or the write failed; retried next boot."""
     folded_provider_rows: int
     """``providers.toml`` entries whose selection was applied to a converted row."""
+    deferred_reasons: dict[str, str] = field(default_factory=dict, compare=False)
+    """Row name -> why it was deferred; one of :data:`DEFER_REASONS`."""
 
 
 @dataclass(frozen=True)
@@ -234,15 +239,20 @@ async def convert_legacy_upstreams(
     providers_toml: Path | None,
     model_cache: MutableMapping[str, list[str]] | None = None,
     discovery: DiscoveryCache | None = None,
+    only: str | None = None,
 ) -> ConvertResult:
     """Convert every reachable uncurated remote row; defer the rest.
+
+    ``only`` limits the run to the one named row (the refresh route). The
+    ``providers.toml`` file is then left in place, since other rows may still
+    need it; the next boot retires it.
 
     ``model_cache`` and ``discovery`` are the live dispatcher cache and the
     discovery cache: when given, a converted row's cache entry is reseeded from
     its enabled rows and its discovered models are stored, so routing leaves
     passthrough without a restart.
     """
-    candidates = [u for u in registry.list() if _is_candidate(u)]
+    candidates = [u for u in registry.list() if _is_candidate(u) and only in (None, u.name)]
     selections = _read_selections(providers_toml)
 
     fetched = await asyncio.gather(
@@ -251,6 +261,13 @@ async def convert_legacy_upstreams(
 
     converted: list[str] = []
     deferred: list[str] = []
+    reasons: dict[str, str] = {}
+
+    def defer(name: str, reason: str, **fields: Any) -> None:
+        deferred.append(name)
+        reasons[name] = reason
+        log.info("upstreams.convert.deferred", name=name, reason=reason, **fields)
+
     settled: set[str] = set()  # rows that need no further word from providers.toml
     folded = 0
     backup_ok: bool | None = None  # decided at the first write of the run
@@ -264,8 +281,7 @@ async def convert_legacy_upstreams(
             payload = None
         discovered = parse_models_payload(payload, get_preset(current.catalog_id or ""))
         if not discovered:
-            deferred.append(name)
-            log.info("upstreams.convert.deferred", name=name, reason="no_models")
+            defer(name, "unreachable" if payload is None else "no_models")
             continue
         picked = selections.models.get(name) if selections is not None else None
         rows, skipped = _model_rows(current, discovered, picked)
@@ -277,8 +293,7 @@ async def convert_legacy_upstreams(
                 reasons=sorted(set(skipped)),
             )
         if not rows:
-            deferred.append(name)
-            log.info("upstreams.convert.deferred", name=name, reason="no_valid_models")
+            defer(name, "no_valid_models")
             continue
         if backup_ok is None:
             try:
@@ -288,21 +303,21 @@ async def convert_legacy_upstreams(
                 backup_ok = False
                 log.warning("upstreams.convert.backup_failed", error=type(exc).__name__)
         if not backup_ok:
-            deferred.append(name)
-            log.info("upstreams.convert.deferred", name=name, reason="no_backup")
+            defer(name, "backup_failed")
             continue
         try:
             registry.apply_persistent_patch(
                 name, {"models": rows, "curated": True, "model_filters": None}
             )
         except Exception as exc:
-            deferred.append(name)
             fields: dict[str, Any] = {"error": type(exc).__name__}
             if isinstance(exc, ValidationError):
                 fields["locations"] = sorted(
                     {".".join(str(p) for p in e["loc"]) for e in exc.errors()}
                 )[:_LOG_ID_CAP]
-            log.warning("upstreams.convert.deferred", name=name, **fields)
+            deferred.append(name)
+            reasons[name] = "write_failed"
+            log.warning("upstreams.convert.deferred", name=name, reason="write_failed", **fields)
             continue
         converted.append(name)
         if picked and selections is not None:
@@ -332,14 +347,14 @@ async def convert_legacy_upstreams(
     if converted:
         _warn_ambiguous_ids(registry)
 
-    if selections is not None and providers_toml is not None:
+    if selections is not None and providers_toml is not None and only is None:
         waiting = ({u.name for u in candidates} & selections.names) - set(converted) - settled
         # The registry can hold slot and agent rows even when upstreams.toml failed to
         # parse, so ask the file itself: keep providers.toml unless every row it names is curated.
         if not waiting and _upstreams_all_curated(selections.names):
             _retire(providers_toml)
 
-    return ConvertResult(tuple(converted), tuple(deferred), folded)
+    return ConvertResult(tuple(converted), tuple(deferred), folded, reasons)
 
 
 async def sync_new_models(
@@ -348,10 +363,12 @@ async def sync_new_models(
     *,
     model_cache: MutableMapping[str, list[str]] | None = None,
     discovery: DiscoveryCache | None = None,
+    discovered: list[DiscoveredModel] | None = None,
 ) -> int:
     """Store each model a curated provider newly offers as a switched-off row.
 
-    Fetches the provider's model list once. Every offered id with no stored row
+    Fetches the provider's model list once, unless the caller already holds a
+    fresh listing and passes it as ``discovered``. Every offered id with no stored row
     is added with ``enabled = false`` (type, context and prices from the
     listing) in one persistent write; existing rows are never changed or
     removed, and nothing is written when nothing is new. Failures (unreachable,
@@ -364,17 +381,18 @@ async def sync_new_models(
     row = registry.get(name)
     if row is None or not participates(row):
         return 0
-    try:
-        payload = await registry.fetch_model_payload(name)
-    except Exception as exc:
-        log.info("upstreams.sync.fetch_failed", name=name, error=type(exc).__name__)
-        return 0
-    discovered = parse_models_payload(payload, get_preset(row.catalog_id or ""))
-    if not discovered:
-        log.info("upstreams.sync.no_models", name=name)
-        return 0
-    if discovery is not None:
-        discovery.put(name, discovered)
+    if discovered is None:
+        try:
+            payload = await registry.fetch_model_payload(name)
+        except Exception as exc:
+            log.info("upstreams.sync.fetch_failed", name=name, error=type(exc).__name__)
+            return 0
+        discovered = parse_models_payload(payload, get_preset(row.catalog_id or ""))
+        if not discovered:
+            log.info("upstreams.sync.no_models", name=name)
+            return 0
+        if discovery is not None:
+            discovery.put(name, discovered)
     current = registry.get(name)
     if current is None or not participates(current):
         return 0  # changed while we were fetching: not ours to touch
@@ -405,4 +423,4 @@ async def sync_new_models(
     return len(added)
 
 
-__all__ = ["ConvertResult", "convert_legacy_upstreams", "sync_new_models"]
+__all__ = ["DEFER_REASONS", "ConvertResult", "convert_legacy_upstreams", "sync_new_models"]

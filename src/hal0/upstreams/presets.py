@@ -22,13 +22,15 @@ from functools import cache
 from importlib import resources
 from typing import Any
 
+from hal0.config.schema import VALID_MODEL_TYPES, VALID_PRICE_UNITS
+
 _PACKAGE = "hal0.config.data"
 _FILENAME = "provider_presets.toml"
 
 _CATEGORIES = frozenset({"cloud", "local", "peer", "custom"})
 _AUTH_STYLES = frozenset({"bearer", "anthropic", "header", "none"})
-_MODEL_TYPES = frozenset({"chat", "embed", "rerank", "tts", "stt", "image"})
-_PRICE_UNITS = frozenset({"Mtok", "Mchar", "image", "1k_search"})
+_MODEL_TYPES = VALID_MODEL_TYPES
+_PRICE_UNITS = VALID_PRICE_UNITS
 _RATE_LIMIT_KEYS = frozenset(
     {"remaining_requests", "limit_requests", "remaining_tokens", "limit_tokens", "retry_after"}
 )

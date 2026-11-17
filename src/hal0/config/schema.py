@@ -1388,7 +1388,11 @@ class UpstreamModelFilters(BaseModel):
         return not (self.models or self.include or self.exclude)
 
 
-_VALID_MODEL_TYPES = frozenset({"chat", "embed", "rerank", "tts", "stt", "image"})
+# Mirrors hal0.upstreams.catalog.MODEL_TYPES (importing it here would pull in the
+# upstreams package, which imports this module); a test keeps the two equal.
+VALID_MODEL_TYPES = frozenset({"chat", "embed", "rerank", "tts", "stt", "image"})
+_VALID_MODEL_TYPES = VALID_MODEL_TYPES
+VALID_PRICE_UNITS = frozenset({"Mtok", "Mchar", "image", "1k_search"})
 
 
 class UpstreamModelEntry(BaseModel):
@@ -1409,6 +1413,8 @@ class UpstreamModelEntry(BaseModel):
     def id_nonempty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("upstream model id must not be empty")
+        if v != v.strip():
+            raise ValueError("upstream model id must not start or end with whitespace")
         return v
 
     @field_validator("type")
@@ -1417,6 +1423,15 @@ class UpstreamModelEntry(BaseModel):
         if v not in _VALID_MODEL_TYPES:
             raise ValueError(
                 f"model type {v!r} is not valid; choose from {sorted(_VALID_MODEL_TYPES)}"
+            )
+        return v
+
+    @field_validator("price_unit")
+    @classmethod
+    def price_unit_valid(cls, v: str) -> str:
+        if v not in VALID_PRICE_UNITS:
+            raise ValueError(
+                f"price_unit {v!r} is not valid; choose from {sorted(VALID_PRICE_UNITS)}"
             )
         return v
 

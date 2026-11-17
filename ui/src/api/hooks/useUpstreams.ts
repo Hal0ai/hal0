@@ -53,7 +53,7 @@ export interface CatalogEntry {
   default_model: string
   capabilities: string[]
   docs_url: string
-  category: 'cloud' | 'local' | 'custom'
+  category: 'cloud' | 'local' | 'peer' | 'custom'
   notes: string
 }
 

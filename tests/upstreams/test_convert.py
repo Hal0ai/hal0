@@ -794,3 +794,57 @@ async def test_boot_phase_syncs_already_curated_providers(tmp_hal0_home: str, mo
     assert sorted(calls) == ["mm", "plain"]
     assert app.state.upstream_discovery.get("mm") is not None
     await ctx.stop_upstream_conversion_task()
+
+
+async def test_deferred_reasons_name_why_a_listing_was_refused(
+    tmp_hal0_home: str, monkeypatch
+) -> None:
+    from hal0.upstreams.convert import DEFER_REASONS
+
+    registry, _ = _boot(_row("down") + "\n" + _row("empty") + "\n" + _row("junk"))
+    _serve(
+        monkeypatch,
+        registry,
+        {"empty": {"data": []}, "junk": {"data": [{"id": " "}]}},
+    )
+
+    result = await convert_legacy_upstreams(registry, providers_toml=None)
+    assert result.deferred_reasons == {
+        "down": "unreachable",
+        "empty": "no_models",
+        "junk": "no_valid_models",
+    }
+    assert set(result.deferred_reasons.values()) <= DEFER_REASONS
+
+
+async def test_deferred_reason_for_a_failed_write(tmp_hal0_home: str, monkeypatch) -> None:
+    import hal0.config.loader as loader
+
+    registry, _ = _boot(_row("w"))
+    _serve(monkeypatch, registry, {"w": _ids("a")})
+
+    def boom(*a: Any, **kw: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(loader, "save_upstreams_config", boom)
+    result = await convert_legacy_upstreams(registry, providers_toml=None)
+    assert result.deferred_reasons == {"w": "write_failed"}
+
+
+async def test_deferred_reason_for_a_failed_backup(tmp_hal0_home: str, monkeypatch) -> None:
+    registry, _ = _boot(_row("b"))
+    _serve(monkeypatch, registry, {"b": _ids("a")})
+
+    def nope(_src: Path) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr("hal0.upstreams.convert._backup_upstreams", nope)
+    result = await convert_legacy_upstreams(registry, providers_toml=None)
+    assert result.deferred_reasons == {"b": "backup_failed"}
+
+
+async def test_converted_rows_have_no_reason(tmp_hal0_home: str, monkeypatch) -> None:
+    registry, _ = _boot(_row("mm"))
+    _serve(monkeypatch, registry, {"mm": _ids("a")})
+    result = await convert_legacy_upstreams(registry, providers_toml=None)
+    assert result.deferred_reasons == {}
