@@ -30,6 +30,24 @@ describe('BanksCard', () => {
     ])
   })
 
+  it('keeps table semantics when stacked: explicit roles and a label element in every figure cell', () => {
+    const { host } = mount(createElement(BanksCard, { rows, totals }))
+    const table = host.querySelector('[data-testid="ma-health-banks"]')!
+    expect(table.getAttribute('role')).toBe('table')
+    expect([...table.querySelectorAll('thead, tbody')].map((el) => el.getAttribute('role'))).toEqual(['rowgroup', 'rowgroup'])
+    expect([...table.querySelectorAll('tr')].map((el) => el.getAttribute('role'))).toEqual(['row', 'row', 'row'])
+    expect([...table.querySelectorAll('thead th')].map((el) => el.getAttribute('role'))).toEqual(Array(5).fill('columnheader'))
+    const first = table.querySelector('tbody tr')!
+    expect(first.querySelector('th')!.getAttribute('role')).toBe('rowheader')
+    expect([...first.querySelectorAll('td')].map((el) => el.getAttribute('role'))).toEqual(Array(4).fill('cell'))
+    expect([...first.querySelectorAll('td .ma-cell-label')].map((el) => el.textContent)).toEqual([
+      'Facts: ',
+      'Documents: ',
+      'Waiting: ',
+      'Failed: ',
+    ])
+  })
+
   it('keeps a long bank id whole, as the link text and its title', () => {
     const { host } = mount(createElement(BanksCard, { rows, totals }))
     const link = host.querySelector<HTMLAnchorElement>('tbody tr th a')!

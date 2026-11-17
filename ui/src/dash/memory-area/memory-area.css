@@ -769,7 +769,21 @@
    row: the row's name on top, then each figure as "label  value" (the label is the cell's
    `data-label`). Every column stays on screen; nothing scrolls. The header row stays in the
    markup for screen readers and is only hidden from sight. */
+/* The visible label is `::before`, marked decorative (the second `content` is its text
+   alternative: none). The label a screen reader gets is `.ma-cell-label`, a real element inside
+   the cell, so it does not depend on generated content; it is only present in the stacked
+   layout, where the column headers are out of sight. */
+.ma-cell-label { display: none; }
 @media (max-width: 480px) {
+  .ma-cell-label {
+    display: inline;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
   .ma-table-stack { min-width: 0; display: block; }
   .ma-table-stack thead {
     position: absolute;
@@ -800,6 +814,7 @@
   .ma-table-stack tbody th { display: block; padding-bottom: 6px; text-align: left; }
   .ma-table-stack tbody td::before {
     content: attr(data-label);
+    content: attr(data-label) / "";
     flex: none;
     color: var(--fg-3);
     font-size: 9.5px;

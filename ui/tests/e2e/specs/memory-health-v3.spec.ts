@@ -280,7 +280,7 @@ test.describe('below the path', () => {
     await expect(rows).toHaveCount(6)
     const facts = await rows
       .locator('[data-col="facts"]')
-      .evaluateAll((tds) => tds.map((td) => Number((td.textContent || '').replace(/,/g, ''))))
+      .evaluateAll((tds) => tds.map((td) => Number((td.textContent || '').replace(/^[^:]*: /, '').replace(/,/g, ''))))
     expect([...facts].sort((a, b) => b - a)).toEqual(facts)
     await rows.first().locator('a').click()
     await expect(page).toHaveURL(/#memory\/facts\?bank=/)

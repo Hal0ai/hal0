@@ -93,8 +93,8 @@ function Row({ row, now, blocked, blockedId, note, onRetry }) {
   const nextTry = scheduled ? nextTryText(row.next_retry_at, now) : null
   const pending = note?.kind === 'pending'
   return (
-    <tr data-op={row.id} data-status={status.kind}>
-      <th scope="row" title={type.raw || undefined}>
+    <tr data-op={row.id} data-status={status.kind} role="row">
+      <th scope="row" role="rowheader" title={type.raw || undefined}>
         {type.label}
         {target && (
           <span className="ma-ops-target" title={target.title} data-testid="ma-ops-target">
@@ -102,10 +102,12 @@ function Row({ row, now, blocked, blockedId, note, onRetry }) {
           </span>
         )}
       </th>
-      <td className="ma-ops-bank" data-label="Bank" title={row.bank}>
+      <td className="ma-ops-bank" role="cell" data-label="Bank" title={row.bank}>
+        <span className="ma-cell-label">Bank: </span>
         {row.bank}
       </td>
-      <td className="ma-ops-when" data-label="Queued">
+      <td className="ma-ops-when" role="cell" data-label="Queued">
+        <span className="ma-cell-label">Queued: </span>
         {queued ? (
           <time dateTime={row.created_at} title={formatDateTime(row.created_at) ?? undefined}>
             {queued}
@@ -114,7 +116,8 @@ function Row({ row, now, blocked, blockedId, note, onRetry }) {
           <Missing />
         )}
       </td>
-      <td data-label="Status">
+      <td role="cell" data-label="Status">
+        <span className="ma-cell-label">Status: </span>
         <div className="ma-ops-status">
           <StatusChip tone={status.tone}>{status.word}</StatusChip>
           {retried && <span className="ma-ops-note">{retried}</span>}
@@ -131,7 +134,7 @@ function Row({ row, now, blocked, blockedId, note, onRetry }) {
           </p>
         )}
       </td>
-      <td className="ma-ops-act">
+      <td className="ma-ops-act" role="cell">
         {status.kind === 'failed' && (
           <button
             type="button"
@@ -356,19 +359,19 @@ export function OperationsList({ bank, bankIds, byBank, blocked, healthHref, onC
           </p>
         )}
         <div className="ma-table-region" role="region" aria-label="Operations table" tabIndex={0}>
-          <table className="ma-table ma-table-stack ma-ops-table" data-testid="ma-ops-table">
-            <thead>
-              <tr>
-                <th scope="col">Operation</th>
-                <th scope="col">Bank</th>
-                <th scope="col">Queued</th>
-                <th scope="col">Status</th>
-                <th scope="col">
+          <table className="ma-table ma-table-stack ma-ops-table" role="table" data-testid="ma-ops-table">
+            <thead role="rowgroup">
+              <tr role="row">
+                <th scope="col" role="columnheader">Operation</th>
+                <th scope="col" role="columnheader">Bank</th>
+                <th scope="col" role="columnheader">Queued</th>
+                <th scope="col" role="columnheader">Status</th>
+                <th scope="col" role="columnheader">
                   <span className="sr-only">Actions</span>
                 </th>
               </tr>
             </thead>
-            <tbody>
+            <tbody role="rowgroup">
               {rows.map((row) => (
                 <Row
                   key={`${row.bank}/${row.id}`}

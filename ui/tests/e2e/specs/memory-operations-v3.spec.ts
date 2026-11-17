@@ -213,7 +213,7 @@ test.describe('backlog, with storing memories failing', () => {
     await expect(first.locator('th')).toHaveText(/^Store a document/)
     await expect(first.getByTestId('ma-ops-target')).toHaveText(/^doc …/)
     await expect(first.locator('th')).toHaveAttribute('title', 'document_ingest')
-    await expect(first.locator('td').nth(0)).toHaveText('ingest')
+    await expect(first.locator('td').nth(0)).toHaveText(/ingest$/)
     await expect(first.locator('time')).toHaveText('6 min ago')
     await expect(first.locator('time')).toHaveAttribute('title', /^12 Jun 2026, \d\d:\d\d$/)
     await expect(first.locator('.chip')).toHaveText('running')
@@ -281,7 +281,7 @@ test.describe('backlog, with storing memories failing', () => {
     await expect(stat(page, 'waiting').locator('.ma-stat-value')).toHaveText('96operations')
     await expect(page.getByTestId('ma-ops-failed-count')).toHaveText('9 failed operations in big')
     await expect(rows(page)).toHaveCount(25)
-    for (const cell of await rows(page).locator('td.ma-ops-bank').all()) await expect(cell).toHaveText('big')
+    for (const cell of await rows(page).locator('td.ma-ops-bank').all()) await expect(cell).toHaveText(/big$/)
     // The cause is the engine's, not a bank's: it stays.
     await expect(page.getByTestId('ma-ops-cause')).toBeVisible()
   })

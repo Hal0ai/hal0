@@ -592,11 +592,29 @@ describe('the list', () => {
     expect(row.querySelector<HTMLElement>('td.ma-ops-bank')!.title).toBe(LONG)
   })
 
+  it('keeps table semantics when stacked: explicit roles, and a real label element in each cell', () => {
+    m.lists = (ids) => ids.map((bankId) => entry(bankId, bankId === LONG ? [op('l-1', 5, { status: 'failed' })] : []))
+    const host = render()
+    const table = byId(host, 'ma-ops-table')!
+    expect(table.getAttribute('role')).toBe('table')
+    expect([...table.querySelectorAll('thead, tbody')].map((el) => el.getAttribute('role'))).toEqual(['rowgroup', 'rowgroup'])
+    expect([...table.querySelectorAll('tr')].map((el) => el.getAttribute('role'))).toEqual(['row', 'row'])
+    expect([...table.querySelectorAll('thead th')].map((el) => el.getAttribute('role'))).toEqual(Array(5).fill('columnheader'))
+    const row = rowOf(host, 'l-1')
+    expect(row.querySelector('th')!.getAttribute('role')).toBe('rowheader')
+    expect([...row.querySelectorAll('td')].map((el) => el.getAttribute('role'))).toEqual(Array(4).fill('cell'))
+    expect([...row.querySelectorAll('td .ma-cell-label')].map((el) => el.textContent)).toEqual([
+      'Bank: ',
+      'Queued: ',
+      'Status: ',
+    ])
+  })
+
   it('wraps a long bank id instead of cutting it', () => {
     m.lists = (ids) => ids.map((bankId) => entry(bankId, bankId === LONG ? [op('l-1', 5)] : []))
     const host = render()
     const cell = rowOf(host, 'l-1').querySelector('td.ma-ops-bank')!
-    expect(cell.textContent).toBe(LONG)
+    expect(cell.textContent).toBe(`Bank: ${LONG}`)
   })
 
   it('says so when the merged list stops short of every bank’s rows', () => {

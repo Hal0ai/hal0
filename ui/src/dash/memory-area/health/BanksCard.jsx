@@ -68,21 +68,21 @@ export function BanksCard({ rows, totals, listMissing = false, note = null, onRe
     body = (
       <>
         <div className="ma-table-region" role="region" aria-label="Banks table" tabIndex={0}>
-          <table className="ma-table ma-table-stack" data-testid="ma-health-banks">
-            <thead>
-              <tr>
-                <th scope="col">Bank</th>
+          <table className="ma-table ma-table-stack" role="table" data-testid="ma-health-banks">
+            <thead role="rowgroup">
+              <tr role="row">
+                <th scope="col" role="columnheader">Bank</th>
                 {COLUMNS.map((column) => (
-                  <th scope="col" className="ma-num" key={column.key}>
+                  <th scope="col" role="columnheader" className="ma-num" key={column.key}>
                     {column.label}
                   </th>
                 ))}
               </tr>
             </thead>
-            <tbody>
+            <tbody role="rowgroup">
               {rows.map((row) => (
-                <tr key={row.id} data-bank={row.id}>
-                  <th scope="row">
+                <tr key={row.id} data-bank={row.id} role="row">
+                  <th scope="row" role="rowheader">
                     <a
                       className="ma-link"
                       href={serializeMemoryRoute({ tab: 'facts', bank: row.id })}
@@ -92,7 +92,14 @@ export function BanksCard({ rows, totals, listMissing = false, note = null, onRe
                     </a>
                   </th>
                   {COLUMNS.map((column) => (
-                    <td className="ma-num" key={column.key} data-col={column.key} data-label={column.label}>
+                    <td
+                      className="ma-num"
+                      key={column.key}
+                      role="cell"
+                      data-col={column.key}
+                      data-label={column.label}
+                    >
+                      <span className="ma-cell-label">{column.label}: </span>
                       <Figure value={row[column.key]} />
                     </td>
                   ))}

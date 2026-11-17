@@ -57,6 +57,11 @@ describe('memory-area.css', () => {
     }
   })
 
+  it('draws the stacked label as decoration and gives screen readers a real label element', () => {
+    expect(rules).toMatch(/content:\s*attr\(data-label\)\s*\/\s*""/)
+    expect(block('.ma-cell-label')).toMatch(/display:\s*none/)
+  })
+
   it('never removes a focus outline', () => {
     expect(rules).not.toMatch(/outline\s*:\s*(0|none)\b/)
   })
