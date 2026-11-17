@@ -169,3 +169,57 @@ def test_reseed_follows_registry_changes_and_deletes() -> None:
     reseed_curated_cache(reg, cache, "mm")
     assert "mm" not in cache
     assert cache["plain"] == ["from-network"]
+
+
+def test_slot_upstream_listing_follows_a_changed_payload(client: TestClient) -> None:
+    slot = Upstream(name="box", kind="remote", url="http://127.0.0.1:1/v1", slot_name="box")
+    _seed(client, slot)
+    payload: dict[str, Any] = {"data": [{"id": "old-model"}]}
+
+    async def live(name: str) -> list[str]:
+        return [m["id"] for m in payload["data"]]
+
+    client.app.state.upstreams.fetch_models = live
+    assert "old-model" in [r["id"] for r in _rows(client) if r["owned_by"] == "box"]
+    payload["data"] = [{"id": "new-model"}]
+    ids = [r["id"] for r in _rows(client) if r["owned_by"] == "box"]
+    assert "new-model" in ids and "old-model" not in ids
+
+
+def test_agent_managed_listing_follows_a_changed_payload(client: TestClient) -> None:
+    hermes = Upstream(
+        name="hermes.x", kind="remote", url="http://h.invalid/v1", managed_by="agent:hermes"
+    )
+    _seed(client, hermes)
+    payload: dict[str, Any] = {"data": [{"id": "alias-a"}]}
+
+    async def live(name: str) -> list[str]:
+        return [m["id"] for m in payload["data"]]
+
+    client.app.state.upstreams.fetch_models = live
+    assert "alias-a" in [r["id"] for r in _rows(client) if r["owned_by"] == "hermes.x"]
+    payload["data"] = [{"id": "alias-b"}]
+    ids = [r["id"] for r in _rows(client) if r["owned_by"] == "hermes.x"]
+    assert "alias-b" in ids and "alias-a" not in ids
+
+
+def test_empty_remote_answer_is_refetched_next_call(client: TestClient) -> None:
+    plain = Upstream(name="plain", kind="remote", url="https://plain.invalid/v1")
+    calls = _seed(client, plain)
+    answers: list[Any] = [{"data": []}, {"data": [{"id": "late-model"}]}]
+
+    async def live(name: str) -> Any:
+        calls["fetch_model_payload"] += 1
+        return answers.pop(0)
+
+    client.app.state.upstreams.fetch_model_payload = live
+    assert [r for r in _rows(client) if r["owned_by"] == "plain"] == []
+    assert [r["id"] for r in _rows(client) if r["owned_by"] == "plain"] == ["late-model"]
+
+
+def test_status_never_network_fills_a_curated_cache_entry(client: TestClient) -> None:
+    calls = _seed(client, _curated(("Off", False)))
+    client.app.state.model_cache.pop("mm", None)
+    assert client.get("/api/status").status_code == 200
+    assert client.app.state.model_cache["mm"] == []
+    assert calls["fetch_models"] == 0

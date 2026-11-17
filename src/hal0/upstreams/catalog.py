@@ -104,9 +104,11 @@ def resolve_requested_model(requested: str, upstreams: Iterable[Upstream]) -> Re
     """Map a requested model id to one curated provider.
 
     Only curated, enabled, remote upstreams that are neither slot-backed nor
-    agent-managed take part. A ``provider/model`` reference naming a taking-part
-    provider is resolved there (or raises :class:`ModelNotEnabled`). Anything
-    else is a bare id, matched against every provider's enabled models. Returns
+    agent-managed take part. A ``provider/model`` reference whose model is listed (enabled or
+    not) on a taking-part provider is resolved there, or raises
+    :class:`ModelNotEnabled` when the row is disabled. Anything
+    else - including a ``provider/model`` whose model is not listed on that
+    provider - is a bare id, matched against every provider's enabled models. Returns
     ``None`` when nothing claims the id.
     """
     live = {u.name: u for u in upstreams if participates(u)}
@@ -118,8 +120,9 @@ def resolve_requested_model(requested: str, upstreams: Iterable[Upstream]) -> Re
             if row.id == model:
                 if row.enabled:
                     return Resolved(live[provider], model)
-                break
-        raise _not_enabled(provider, model)
+                raise _not_enabled(provider, model)
+        # Not listed on that provider: ``requested`` may be a bare id that
+        # merely starts with a provider's name, so keep looking below.
 
     enabled = [u for u in live.values() if requested in enabled_ids(u)]
     if len(enabled) == 1:
@@ -154,10 +157,21 @@ def reseed_curated_cache(
     if name is None:
         for u in upstreams.list():
             if u.curated:
-                model_cache[u.name] = list(enabled_ids(u))
+                curated_model_ids(u, model_cache)
         return
     u = upstreams.get(name)
     if u is None:
         model_cache.pop(name, None)
     elif u.curated:
-        model_cache[name] = list(enabled_ids(u))
+        curated_model_ids(u, model_cache)
+
+
+def curated_model_ids(u: Upstream, model_cache: MutableMapping[str, list[str]]) -> list[str]:
+    """Store and return a curated upstream's enabled ids as its cache entry.
+
+    The one place a curated entry is written, so callers never fall back to the
+    provider's network list (an empty enabled list is a real answer).
+    """
+    ids = list(enabled_ids(u))
+    model_cache[u.name] = ids
+    return ids

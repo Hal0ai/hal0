@@ -79,11 +79,30 @@ def test_disabled_bare_raises_not_enabled() -> None:
     assert e.value.details["provider"] == "mm"
 
 
-def test_unknown_model_on_known_provider_raises_not_enabled() -> None:
+def test_unlisted_model_on_known_provider_falls_through() -> None:
     mm = _up("mm", UpstreamModel("m"))
-    with pytest.raises(ModelNotEnabled) as e:
-        resolve_requested_model("mm/nope", [mm])
-    assert e.value.details == {"provider": "mm", "model": "nope"}
+    assert resolve_requested_model("mm/nope", [mm]) is None
+
+
+def test_unlisted_ref_resolves_as_a_bare_id_elsewhere() -> None:
+    # A provider named "openai" does not own "openai/gpt-5" when only
+    # openrouter lists that string.
+    openai = _up("openai", UpstreamModel("gpt-4o"))
+    orr = _up("openrouter", UpstreamModel("openai/gpt-5"))
+    assert resolve_requested_model("openai/gpt-5", [openai, orr]) == Resolved(orr, "openai/gpt-5")
+
+
+def test_listed_ref_beats_a_bare_id_elsewhere() -> None:
+    openai = _up("openai", UpstreamModel("gpt-5"))
+    orr = _up("openrouter", UpstreamModel("openai/gpt-5"))
+    assert resolve_requested_model("openai/gpt-5", [openai, orr]) == Resolved(openai, "gpt-5")
+
+
+def test_listed_but_disabled_ref_raises_even_if_enabled_elsewhere() -> None:
+    openai = _up("openai", UpstreamModel("gpt-5", enabled=False))
+    orr = _up("openrouter", UpstreamModel("openai/gpt-5"))
+    with pytest.raises(ModelNotEnabled):
+        resolve_requested_model("openai/gpt-5", [openai, orr])
 
 
 def test_unknown_everywhere_returns_none() -> None:

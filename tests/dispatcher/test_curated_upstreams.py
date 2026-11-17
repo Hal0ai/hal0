@@ -103,11 +103,14 @@ async def test_disabled_model_is_404_and_never_reaches_heuristics() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unlisted_model_on_known_provider_is_404() -> None:
+async def test_unlisted_model_on_known_provider_falls_through() -> None:
+    d = _dispatcher([make_curated()])
+    with pytest.raises(NoRouteFound):
+        await d.dispatch(make_request(), body={"model": "mm/Never-Listed", "messages": []})
     agent = make_slot("agent", "http://127.0.0.1:8081/v1")
     d = _dispatcher([agent, make_curated()], extra_cache={"agent": ["agent-model"]})
-    with pytest.raises(ModelNotEnabled):
-        await d.dispatch(make_request(), body={"model": "mm/Never-Listed", "messages": []})
+    call = await d.dispatch(make_request(), body={"model": "mm/Never-Listed", "messages": []})
+    assert not call.resolution_path.startswith("catalog:")
 
 
 @pytest.mark.asyncio
@@ -162,3 +165,46 @@ async def test_uncurated_remote_still_passes_through_on_warm_cache() -> None:
     call = await d.dispatch(make_request(), body={"model": "other-model", "messages": []})
     assert call.upstream_name == "plain"
     assert call.resolution_path == "passthrough:plain"
+
+
+# ── provider-name collisions with uncurated rows ──────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_warm_uncurated_row_keeps_its_exact_string(enabled: bool) -> None:
+    orr = make_remote("openrouter", "http://openrouter.invalid/v1")
+    openai = make_curated("openai", ("gpt-5", enabled))
+    d = _dispatcher([orr, openai], extra_cache={"openrouter": ["openai/gpt-5"]})
+    call = await d.dispatch(make_request(), body={"model": "openai/gpt-5", "messages": []})
+    assert call.resolution_path == "passthrough:openrouter"
+    assert json.loads(call.body)["model"] == "openai/gpt-5"
+
+
+@pytest.mark.asyncio
+async def test_agent_managed_upstream_row_keeps_its_exact_string() -> None:
+    hermes = Upstream(
+        name="hermes.x", kind="remote", url="http://h.invalid/v1", managed_by="agent:hermes"
+    )
+    openai = make_curated("openai", ("gpt-5", False))
+    d = _dispatcher([hermes, openai], extra_cache={"hermes.x": ["openai/gpt-5"]})
+    call = await d.dispatch(make_request(), body={"model": "openai/gpt-5", "messages": []})
+    assert call.resolution_path == "passthrough:hermes.x"
+
+
+@pytest.mark.asyncio
+async def test_ref_enabled_only_on_another_curated_provider_routes_there() -> None:
+    openai = make_curated("openai", ("gpt-4o", True))
+    orr = make_curated("openrouter", ("openai/gpt-5", True))
+    d = _dispatcher([openai, orr])
+    call = await d.dispatch(make_request(), body={"model": "openai/gpt-5", "messages": []})
+    assert call.resolution_path == "catalog:openrouter"
+    assert json.loads(call.body)["model"] == "openai/gpt-5"
+
+
+@pytest.mark.asyncio
+async def test_listed_disabled_ref_with_no_other_holder_is_404() -> None:
+    openai = make_curated("openai", ("gpt-5", False))
+    d = _dispatcher([openai])
+    with pytest.raises(ModelNotEnabled):
+        await d.dispatch(make_request(), body={"model": "openai/gpt-5", "messages": []})

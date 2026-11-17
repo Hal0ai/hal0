@@ -40,6 +40,7 @@ from hal0.registry.detect import (
     is_halogen_companion,
 )
 from hal0.registry.model import _derive_ns
+from hal0.upstreams.catalog import curated_model_ids
 from hal0.upstreams.filters import apply_filters
 
 log = logging.getLogger(__name__)
@@ -1751,8 +1752,11 @@ async def list_all(
         if not getattr(u, "enabled", True) or not getattr(u, "advertise_models", True):
             continue
         try:
-            ids = cache.get(u.name) or await upstreams.fetch_models(u.name)
-            cache[u.name] = ids
+            if getattr(u, "curated", False):
+                ids = curated_model_ids(u, cache)  # never the network list
+            else:
+                ids = cache.get(u.name) or await upstreams.fetch_models(u.name)
+                cache[u.name] = ids
         except Exception:
             ids = []
         # Same operator curation as /v1/models — the Models page is a

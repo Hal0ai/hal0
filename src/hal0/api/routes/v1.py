@@ -1258,7 +1258,7 @@ async def list_models(
 async def _discovered_ids(request: Request, name: str) -> list[str]:
     """Model ids an uncurated upstream advertises, via the discovery cache.
 
-    Refetches only when the cached entry is stale. A failed refetch keeps
+    Only genuine remotes come here. Refetches only when the cached entry is stale. A failed refetch keeps
     serving the stale entry; with no entry at all the upstream lists nothing.
     """
     upstreams = request.app.state.upstreams
@@ -1273,7 +1273,9 @@ async def _discovered_ids(request: Request, name: str) -> list[str]:
             payload = None
         if payload is not None:
             preset = get_preset(getattr(upstreams.get(name), "catalog_id", None) or "")
-            cache.put(name, parse_models_payload(payload, preset))
+            models = parse_models_payload(payload, preset)
+            if models:  # an empty answer is not worth remembering for hours
+                cache.put(name, models)
     entry = cache.get(name)
     return [m.id for m in entry[0]] if entry is not None else []
 
@@ -1419,7 +1421,16 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
             # not apply to an operator-chosen list.
             listed = [canonical_id(u.name, mid) for mid in enabled_ids(u)]
         else:
-            advertised = await _discovered_ids(request, u.name)
+            if u.kind == "remote" and not u.slot_name and not u.managed_by:
+                advertised = await _discovered_ids(request, u.name)
+            else:
+                # Slot, container-slot and agent-managed upstreams change under
+                # us (a slot swaps models, a profile renames aliases) and nothing
+                # invalidates a cache for them, so they are always read live.
+                try:
+                    advertised = await upstreams.fetch_models(u.name)
+                except Exception:
+                    advertised = []
             # Per-upstream curation of the discovery catalog only — the dispatch
             # cache keeps the full list, so filtered-out ids stay addressable.
             listed = apply_filters(advertised, getattr(u, "model_filters", None))

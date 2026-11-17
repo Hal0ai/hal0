@@ -941,9 +941,10 @@ class Dispatcher:
         # binding (a local model wins), and before every cache- or
         # heuristic-based step so a disabled model can never fall through to
         # the agent slot. ModelNotEnabled / ModelAmbiguous are Hal0Errors and
-        # propagate to the client unchanged. A local slot that advertises the
-        # id itself also wins; the catalog only answers for ids no slot claims.
-        if owner is None and not self._advertised_by_a_local_slot(model_id, lane_slot):
+        # propagate to the client unchanged. An upstream outside the catalog
+        # (slot, uncurated remote, agent-managed) whose warm cache holds the
+        # exact string also wins, so an existing row keeps routing as before.
+        if owner is None and not self._held_by_a_non_catalog_upstream(model_id, lane_slot):
             resolved = resolve_requested_model(
                 model_id, self._upstreams_in_priority_order(lane_slot)
             )
@@ -2108,10 +2109,10 @@ class Dispatcher:
                 return True
         return False
 
-    def _advertised_by_a_local_slot(self, model_id: str, lane_slot: str = "") -> bool:
-        """Does a slot-backed upstream already advertise ``model_id`` (warm cache)?"""
+    def _held_by_a_non_catalog_upstream(self, model_id: str, lane_slot: str = "") -> bool:
+        """Does an upstream outside the catalog advertise ``model_id`` (warm cache)?"""
         return any(
-            _slot_of(u) and model_id in self._cached_models(u.name)
+            not participates(u) and model_id in self._cached_models(u.name)
             for u in self._upstreams_in_priority_order(lane_slot)
         )
 
