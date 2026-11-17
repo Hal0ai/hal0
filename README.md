@@ -31,6 +31,11 @@ process to babysit.
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
+> **New to hal0?** Start with the
+> [Beginner's guide](./docs/getting-started/beginners-guide.mdx): a
+> plain-language walkthrough from install to your first model, slots,
+> profiles, agents and memory.
+
 > **v1.8.0 is the current stable release** (2026-11-16). It adds the agent
 > bridge, Open WebUI's tools and shared memory, an installer component
 > checklist, an opt-in rootless podman box, slot tune overrides, the
@@ -52,29 +57,21 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > notice. Upgrades start at 1.5.0; on anything older, read
 > [Upgrading from an older release](#upgrading-from-an-older-release) first.
 
-> **What 1.8.0 brings:** the agent bridge for remote coding agents; Open
-> WebUI with hal0's tools and shared Hindsight memory; an installer that
-> shows a component checklist (`--bare` for inference only); `install.sh
-> --box` for a rootless podman install; per-slot tune overrides; the optional
-> halogen runner; Hindsight 1.2.0 with one Memory area, two banks and a
-> guarded embedder switch; an NPU tab and the optional `xdna` NPU runner;
-> and the Hermes kanban as the Operator Board. See [What's new](#whats-new) and
-> [Upgrading to 1.8.0](#upgrading-to-180).
-
-> **⚡ The installer is the whole setup.** There is no separate first-run
-> wizard afterwards. `install.sh` asks where models should live, optionally
-> takes a HuggingFace token, seeds every capability slot, downloads the hal0
-> brain steward model, and starts the API. When it finishes, open the
-> dashboard and assign models to slots.
+> **The installer is the whole setup.** There is no separate setup program
+> to run afterwards. On a terminal, `install.sh` shows a component checklist,
+> asks where models should live and optionally takes a Hugging Face token. It
+> seeds the curated slots, downloads the small hal0 brain steward model and
+> starts the API. When it finishes, open the dashboard and assign models to
+> slots.
 
 ## At a glance
 
 | | |
 |---|---|
 | **What it is** | One control plane, `hal0-api` on `:8080`, turning a Linux box into an OpenAI-compatible inference appliance — chat, embeddings, rerank, transcription, speech and image generation, each capability in its own podman container. |
-| **Install** | One `curl \| sudo bash` line. The installer probes hardware, seeds every capability slot, and starts the API — there is no separate setup wizard to run afterward. |
+| **Install** | One `curl \| sudo bash` line. The installer probes hardware, seeds the curated capability slots, and starts the API — there is no separate setup program to run afterward. |
 | **Hardware** | First-class on AMD Strix Halo (ROCm iGPU + XDNA NPU); Vulkan and CPU fallbacks everywhere else, plus experimental CUDA. See [Hardware matrix](docs/reference/hardware-matrix.mdx). |
-| **Platform** | Linux + systemd + podman, including Proxmox LXC. macOS and Windows are not supported today — see [Support matrix](docs/reference/support-matrix.mdx). |
+| **Platform** | Linux + systemd + podman, including Proxmox LXC, Incus and an opt-in rootless podman box. macOS and Windows are not supported today — see [Support matrix](docs/reference/support-matrix.mdx). |
 | **Auth** | Enforcement is off by default (trusted-LAN posture) — opt in with `hal0 auth require on`. Once an admin key is configured, a LAN-bound box also gates mutating routes for off-box callers, even with enforcement off (v1.3.0). No TLS termination; front it with a reverse proxy if it's reachable beyond your LAN. |
 | **Chat UI** | OpenWebUI, prewired, on `:3001` — zero config. Hermes agent profiles appear in its model picker next to your slots. |
 | **Updates** | Cosign-signed tarball releases via `hal0 update`, with one-flag rollback. |
@@ -106,7 +103,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 <td width="33%"><a href="https://hal0.dev/docs/guides/enable-memory/"><img src="https://hal0.dev/screenshots/memory-graph.png" alt="Memory graph" width="100%"></a><br><sub><b>Memory</b> — Hindsight facts and graph extraction.</sub></td>
 </tr>
 <tr>
-<td width="33%"><a href="https://hal0.dev/docs/concepts/architecture/"><img src="https://hal0.dev/screenshots/services-page.png" alt="Services page" width="100%"></a><br><sub><b>Services</b> — Open WebUI, ComfyUI, Hermes, Hindsight, n8n with mDNS.</sub></td>
+<td width="33%"><a href="https://hal0.dev/docs/concepts/architecture/"><img src="https://hal0.dev/screenshots/services-page.png" alt="Services page" width="100%"></a><br><sub><b>Services</b> — Open WebUI, ComfyUI, Hermes and Hindsight with mDNS.</sub></td>
 <td width="33%"><a href="https://hal0.dev/docs/concepts/slots/"><img src="https://hal0.dev/screenshots/stacks-tab.png" alt="Stacks" width="100%"></a><br><sub><b>Stacks</b> — declarative slot + profile + model bundles, applied atomically.</sub></td>
 <td width="33%"><a href="https://hal0.dev/docs/guides/configure/"><img src="https://hal0.dev/screenshots/settings-page.png" alt="Settings" width="100%"></a><br><sub><b>Settings</b> — full <code>hal0.toml</code> parity with an Advanced section.</sub></td>
 </tr>
@@ -124,8 +121,9 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 curl -fsSL https://hal0.dev/install.sh | sudo bash
 ```
 
-That fetches `installer/bootstrap.sh`, which needs `jq` and `cosign` on the
-box. It authenticates the channel manifest before parsing it, sha256- and
+That fetches `installer/bootstrap.sh`, which installs any missing basics
+(`curl`, `jq`, ...) through the box's package manager and uses `cosign`,
+fetching a digest-pinned build when the box has none. It authenticates the channel manifest before parsing it, sha256- and
 Sigstore-bundle-verifies the release tarball, then hands off to
 [`installer/install.sh`](./installer/install.sh). Piped through `bash` it
 never prompts. Re-running it is safe: every provisioning step is idempotent
@@ -145,15 +143,17 @@ curl -fsSL https://hal0.dev/install.sh | sudo HAL0_CHANNEL=preview bash
    free ports.
 2. **Code + venv** — a versioned tree under `/usr/lib/hal0/` with a `current`
    symlink and a shared venv.
-3. **Config** — `/etc/hal0/` with `hal0.toml`, `profiles.toml`, the ten
-   curated slot seeds, and `api.env`.
+3. **Config** — `/etc/hal0/` with `hal0.toml`, `profiles.toml` (your own
+   profiles; the seeded ones live in code), the ten curated slot seeds
+   (`agent`, `brain`, `coder`, `embed`, `flm`, `img`, `memory`, `qwen3tts`,
+   `rerank`, `tts`), and `api.env`. Only `brain` gets a model by default.
 4. **Hardware probe** — writes `/etc/hal0/hardware.json` and prints the
    detected backends.
 5. **Brain steward model** — pulls the curated `lfm2.5-2.6b` (LiquidAI
    LFM2.5-2.6B-Q8_0, ~2.87 GB, 131k context) and binds it to the `brain`
    slot, so the dashboard's steward chat and its tool calls work out of the
-   box. On an interactive terminal only, it then *offers* a larger agent
-   model (15–31 GB, size printed first, default **No**).
+   box. On an interactive terminal only, it then *offers* the larger Qwen3.8
+   27B agent model (about 18.5 GB, size printed first, default **No**).
 6. **Starter image model** — on a box with a ROCm lane for ComfyUI, and on
    an interactive terminal only, it *offers* the image models the API can
    render, each with the GB it still has to download and the pick recommended
@@ -162,7 +162,8 @@ curl -fsSL https://hal0.dev/install.sh | sudo HAL0_CHANNEL=preview bash
    model store.
 7. **Service start** — enables and starts `hal0-api` + `hal0.target`, the
    Hindsight memory engine, OpenWebUI on `:3001`, and the bundled Hermes
-   agent. From 1.6.0, Hermes builds its own immutable release under
+   agent, unless you skipped them (on a terminal a component checklist comes
+   first; see the knobs below). Hermes builds its own immutable release under
    `/var/lib/hal0/hermes/releases/` on a uv-managed CPython 3.14, so that
    step needs network access on a first install. hal0 itself needs Python
    3.12-3.14; the Hindsight engine venv accepts 3.11-3.14.
@@ -192,6 +193,7 @@ Full step list and the complete env-var table:
 | `--no-agents` | Same as `--no-hermes --no-pi` |
 | `--bare` (or `--bare-inference`) | Turn every optional component off: inference only. On a terminal it still asks for the models dir, the Hugging Face token and the optional agent model `[y/N]`; set `HAL0_PULL_AGENT_MODEL=0` and `HAL0_NONINTERACTIVE=1` for a prompt-free bare install |
 | `--no-start` | Provision everything, leave services stopped |
+| `--box` | Opt in to the [rootless podman box](./docs/getting-started/box.mdx): the verified tree is handed to the box launcher instead of installing on the host (consumed by `bootstrap.sh`; `curl ... \| sudo bash -s -- --box`) |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary (see [`installer/README.md`](./installer/README.md#--summary-jsonpath)) |
 
 ### Proxmox VE, one line
@@ -209,12 +211,36 @@ prompts; every parameter has an env-var override (`CTID`, `RAM_MB`,
 `STORAGE`, …). See
 [`scripts/proxmox-ve/README.md`](./scripts/proxmox-ve/README.md).
 
+### Other install paths
+
+- **Bare metal** is the default and what the one-liner does:
+  [bare-metal install](./docs/getting-started/bare-metal.mdx).
+- **Unprivileged LXC or Incus.** hal0 ships no OCI appliance image: an
+  unprivileged system container is the one wrapper, because the slots need
+  systemd and nested podman (ADR-0050). Follow
+  [Proxmox](./docs/getting-started/proxmox.mdx) or
+  [Incus](./docs/getting-started/incus.mdx); an unprivileged container passes
+  the GPU and NPU nodes through too, and the Proxmox script still defaults to
+  privileged.
+- **A rootless podman box (opt-in, new in 1.8.0).** `curl -fsSL
+  https://hal0.dev/install.sh | sudo bash -s -- --box` runs the unchanged
+  installer inside one rootless podman container under a dedicated `hal0box`
+  user, with the host's `hal0` command turned into a thin shim. Manage it with
+  `sudo hal0 box status|start|stop|logs|exec|rebuild`. It has not been run on
+  a true bare-metal AMD host yet; read
+  [Install in a rootless podman box](./docs/getting-started/box.mdx) before
+  choosing it. `hal0 update` never moves an existing install into a box.
+- **WSL:** [WSL install](./docs/getting-started/wsl.mdx).
+
 ### Uninstall
 
 ```sh
 hal0 uninstall                 # prompts before deleting config + model data
 hal0 uninstall --purge         # also wipe /etc/hal0, /var/lib/hal0, the hal0 user and images
 ```
+
+On a box install the host command is `sudo hal0 uninstall` (it keeps the box's
+data unless you pass `--purge`).
 
 ## First ten minutes
 
@@ -236,16 +262,17 @@ curl http://<box>:8080/v1/chat/completions \
   -d '{"model":"<id>","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-`hal0 model pull` streams from Hugging Face into the model registry under the
-`user.*` namespace — a disk-space preflight fails fast before a multi-GB
-pull, and an interrupted pull resumes via HTTP `Range` instead of restarting
-from zero.
+`hal0 model pull` streams from Hugging Face into the model registry — a
+disk-space preflight fails fast before a multi-GB pull, and an interrupted
+pull resumes via HTTP `Range` instead of restarting from zero. New to all of
+this? The [Beginner's guide](./docs/getting-started/beginners-guide.mdx)
+walks through the same steps in plain language.
 
 ## What's new
 
 ### Shipped in 1.8.0
 
-- **The agent bridge.** `hal0 bridge add|list|revoke|rotate|scopes` admits a
+- **The agent bridge.** `hal0 bridge add|list|revoke|rotate|scopes|runs` admits a
   remote coding agent with a revocable `hal0bk_` key bound to its name. The
   `hal0-agents` MCP server delegates runs to the bundled Hermes agent,
   `hal0-memory` shares memory, and `hal0-admin` is there only with
@@ -260,7 +287,9 @@ from zero.
 - **An opt-in rootless podman box.** `install.sh --box` builds a systemd box
   under a dedicated `hal0box` user and runs the unchanged installer in it;
   `sudo hal0 box status|start|stop|logs|exec|rebuild` and `sudo hal0
-  uninstall` manage it. Bare metal stays the default. ADR-0051.
+  uninstall` manage it. Bare metal stays the default. ADR-0051. The Proxmox
+  and [Incus](./docs/getting-started/incus.mdx) guides cover an unprivileged
+  LXC, which ADR-0050 makes the one container wrapper (no OCI appliance).
 - **Slot tune overrides.** A sparse `[tune]` table on a slot for context,
   thinking, reasoning effort and budget, vision and speculation, inherited
   from the profile when absent. ADR-0045.
@@ -268,17 +297,25 @@ from zero.
   audited proxy to the Hermes kanban plugin; hal0 keeps no board of its own.
   ADR-0046.
 - **halogen**, an optional external-image runner for Qwen3.8-Flash-Next on
-  Strix Halo, pinned by digest. ADR-0047.
+  Strix Halo, pinned by digest. ADR-0047. See
+  [Run Flash-Next on halogen](./docs/guides/run-flash-next-on-halogen.mdx).
 - **Memory v3.** The Hindsight engine moves to 1.2.0; the dashboard has one
   Memory area (Health, Facts, Knowledge, Operations, Agents); a new install
   keeps memory in `hal0:shared` and `hal0:private`, and `hal0 memory migrate
   fold-in` moves an existing store there; `hal0 memory embedder switch` is
   the one way to change the embedder; coding agents write through
   `/api/memory/compat`; and hal0 decides when knowledge pages refresh.
-  ADR-0058, ADR-0060.
-- **An NPU tab and the optional `xdna` runner.** Slots → NPU shows the FLM
-  and GGML lanes with live activity, and `xdna` runs plain GGUF models on the
-  AMD XDNA2 NPU beside FLM. ADR-0057, ADR-0059.
+  ADR-0058, ADR-0060. See [Fold in memory banks](./docs/guides/fold-in-memory-banks.mdx).
+- **An NPU tab and the optional `xdna` runner.** Slots → NPU (shown when the
+  box has an NPU or a slot lives on it) has the FLM and GGML lanes with live
+  activity, Models and Engines & profiles; `xdna` runs plain GGUF models on
+  the AMD XDNA2 NPU beside FLM, time-sliced on the shared hardware. Models →
+  FLM lists the FastFlowLM catalogue and removes a downloaded model. ADR-0057,
+  ADR-0059. See [Run the NPU](./docs/guides/run-xdna-npu.mdx).
+- **A new Overview page and a Models page with one catalog shell.** The
+  dashboard opens on an operator's briefing: what the box is doing, what needs
+  you, who is working and how it performed (ADR-0044). Models has Inference
+  Models, Image / ComfyUI, Upstream Models, FLM and Profiles tabs.
 - Typed profile reasoning knobs, narrowable model and capability lists, and
   approval decisions that need a session or root (ADR-0048).
 
@@ -518,17 +555,19 @@ content-addressed, host-redacted archive you can attach anywhere, and
   (`llm | embedding | reranking | transcription | tts | image`), a `device`
   (`gpu-rocm | gpu-vulkan | gpu-cuda | cpu | npu`), a `model`, plus
   `autoload`, an eviction `priority` and an optional `default`. Ten curated
-  slots (`agent`, `brain`, `coder`, `embed`, `flm`, `img`, `qwen3tts`,
-  `rerank`, `tts`, `utility`) are seeded into `/etc/hal0/slots/<name>.toml`
+  slots (`agent`, `brain`, `coder`, `embed`, `flm`, `img`, `memory`,
+  `qwen3tts`, `rerank`, `tts`) are seeded into `/etc/hal0/slots/<name>.toml`
   on install and each gates on its own runtime validation at load time — the
   `flm` NPU slot simply stays grey without FastFlowLM hardware. Add your own
   with `hal0 slot create NAME --type TYPE --model MODEL`. A deliberate
   `hal0 slot delete` is tombstoned, so re-running the installer never
   resurrects it.
-- **Model owns its tune** — the *model*, not the slot, owns
-  `context_size`, `extra_args`, `chat_template`, `profile` and speculation
-  settings. A slot's `[model].context_size` is a ceiling; a model with no stamped tune inherits
-  its profile's template as a floor.
+- **Profile owns the tune** — a *profile* is the whole launch tune (llama-server
+  flags, context window, thinking default, vision, speculation); the *model*
+  holds only facts about its file and the *slot* holds placement (device,
+  layers, threads, port) plus which model and profile it uses (ADR-0029). A
+  slot can override a few fields in a sparse `[tune]` table (context,
+  thinking, reasoning effort and budget, vision, speculation; ADR-0045).
 - **Container runtime** — every slot runs as its own podman container under
   `hal0-slot@<name>.service`, bound to a loopback port (8081–8099 + fixed
   seeds). `hal0-api` on `:8080` is the only control plane. See
@@ -540,13 +579,16 @@ content-addressed, host-redacted archive you can attach anywhere, and
   prefetch, and upstream fallback (OpenRouter, Anthropic, OpenAI, Google AI
   Studio, Ollama, custom OpenAI-shaped endpoints). Mix local + remote
   per-model in one config.
-- **Dashboard** — React 18 + Vite UI for slot/model management,
+- **Dashboard** — React 19 + Vite UI for slot/model management,
   hardware-aware configuration, live logs, system health and a built-in chat
   page (popout window + reasoning toggle). SSE-backed status and log tail; a
   Journal panel streams per-slot container logs from journald. Live
   telemetry — Power & Thermal (GPU clock/temp/power) and per-slot throughput
-  — is on by default. The slots page splits into Inference | Image Gen tabs;
-  the Image-Gen tab has Generate, Models and Engine sub-tabs: it generates,
+  — is on by default. The Overview page is the operator's briefing, the Slots
+  page has Inference, Image Gen, NPU (when the box has one), Endpoints, Runner
+  Images and Stacks tabs, and the Models page has Inference Models, Image /
+  ComfyUI, Upstream Models, FLM and Profiles tabs. The
+  Image-Gen tab has Generate, Models and Engine sub-tabs: it generates,
   installs image models with a fit meter for this box, shows what a render
   costs chat, and operates the ComfyUI container. The top bar's Chat | Image
   toggle holds image mode (pinning the iGPU for generation, with a confirm) and
@@ -556,6 +598,13 @@ content-addressed, host-redacted archive you can attach anywhere, and
   controls, slot and service health, downloads, and the live journal +
   activity feed
 - **Slot rail** — every slot's state beside the Inference pane
+- **Memory area** — one top-level Memory page (Health, Facts, Knowledge,
+  Operations, Agents) over the bundled Hindsight engine, shown while memory is
+  enabled. New installs keep memory in the `hal0:shared` and `hal0:private`
+  banks.
+- **Operator Board** — the Hermes kanban, reached from the sidebar Services
+  zone (or ⌘B); `/api/board/*` is a live proxy to it and needs Hermes
+  installed.
 - **AI Capabilities page** — one settings surface for TTS, STT, embeddings,
   reranking, image generation and the NPU, with per-panel probe-failure
   surfacing instead of a silent grey Save.
@@ -571,7 +620,7 @@ content-addressed, host-redacted archive you can attach anywhere, and
   filtered per request — a tool only appears in the prompt if its target
   slot is enabled and its model carries the required labels.
 - **Companion-service management** — `/api/services` is the declarative
-  source of truth for OpenWebUI, Hermes, Hindsight, ComfyUI and n8n:
+  source of truth for Open WebUI, Hermes, Hindsight and ComfyUI:
   audit-logged systemd lifecycle actions (start/stop/restart/enable/
   disable), mDNS `.local` advertisement, and a dedicated Services page.
   OpenWebUI is prewired at `:3001` with zero config; its Services card shows an Agents chip once Hermes profiles
@@ -604,7 +653,8 @@ are `Hermes-Agent` (service shape, via the hal0-owned `hermes` wrapper —
 side. Install either with `hal0 agent install <name>`. Destructive MCP
 calls (`model_pull`, `slot_delete`, `config_write`, …) gate through a header bell + inbox modal
 in the dashboard, with CLI parity via
-`hal0 agent approvals {list,approve,deny}` (deciding needs `sudo`).
+`hal0 agent approvals {list,approve,deny}` (deciding needs `sudo` or a
+signed-in session; a bare API key gets `403 auth.forbidden`, ADR-0048).
 
 The **hal0-brain steward** is a third, built-in persona wired to the
 dashboard's top-bar agent chat — no install step. It drives the platform
@@ -616,7 +666,7 @@ a `POLICY_NO_LOOSEN` floor keeps destructive and secret-bearing tools
 persona edit can disarm them. Gated calls **pause the turn** for inline
 approve/deny. A `[brain_chat]` config gives operators a hard kill switch, a
 read-only mode, loop-budget knobs and a slot override (run the steward on
-any slot, e.g. `hal0/npu`) from **Settings → Agents / Brain**. The seeded
+any slot, e.g. `hal0/npu`) from **Settings → Agent Chat**. The seeded
 brain model is a native tool-caller, so the steward executes its own calls on
 the `brain` slot out of the box. Binding a larger model to the `agent` slot is
 the optional upgrade path: `[brain_chat] tool_model` (default `hal0/agent`)
@@ -632,7 +682,7 @@ under the unprivileged `hal0` user, pinned to one reviewed upstream commit
 inference, tools and memory. `hal0 agent install hermes` installs it.
 
 - **Immutable releases.** Each build (install, `reprovision --repair`,
-  `upgrade`, update) lands in `/var/lib/hal0/hermes/releases/<id>/`, runs on
+  update) lands in `/var/lib/hal0/hermes/releases/<id>/`, runs on
   a uv-managed CPython 3.14, and is checked (imports, `hermes --help`, an MCP
   probe) before `current` flips. Activation stops the agent and gateway,
   switches, migrates the Hermes config and restarts; a failed re-check flips
@@ -653,6 +703,9 @@ inference, tools and memory. `hal0 agent install hermes` installs it.
   default. Opt a profile out with `hal0: {wire_mcp: false}`.
 - **Approvals in the dashboard.** Gated tool calls from any profile land in
   the dashboard inbox, same as the other agents.
+- **The Operator Board.** The Hermes kanban is the Operator Board
+  (ADR-0046); `hal0 doctor all` has `hermes-kanban`, `hermes-dashboard-token`
+  and `hermes-session-token-pin` rows for it.
 - **Delegation.** `[hermes] delegation_slot` in
   `/etc/hal0/agents/hermes.toml` picks the slot that `delegate_task`
   children run on (default `agent`).
@@ -681,11 +734,14 @@ Profiles are device-agnostic tune templates; they no longer carry an image.
 
 | Capability | Runner (binary) | Device | Profile |
 |---|---|---|---|
-| chat | `standard` (`llama-server`) | `gpu-rocm`, `gpu-vulkan` | `chat`, `chat-long-context`, `dense`, `moe`, `thinking`, `coding`, `brain` |
+| chat | `standard` (`llama-server`) | `gpu-rocm`, `gpu-vulkan` | `chat`, `agent`, `utility`, `coding`, `brain` |
+| memory extraction | `standard` (`llama-server`) | `gpu-rocm`, `gpu-vulkan` | `memory` |
 | chat (NVIDIA, experimental) | `cuda` (`llama-server`) | `gpu-cuda` | `chat` |
 | chat (fallback) | `cpu` (`llama-server`) | `cpu` | `cpu-chat` |
 | embeddings / rerank | `standard` (`llama-server`) | `gpu-rocm`, `gpu-vulkan` | `embedding`, `reranking` |
 | chat + STT + embed (NPU) | `flm` | `npu` | `flm` |
+| GGUF on the NPU (optional) | `xdna` (ggml-xdna `llama-server`) | `npu` | `xdna` |
+| Qwen3.8-Flash-Next (optional) | `halogen` (vendor image, pinned by digest) | `gpu-rocm` | `halogen` |
 | transcription | `moonshine` / the FLM trio above | `cpu` / `npu` | `moonshine` / `flm` |
 | TTS | `kokoro` / `qwen3tts` | `cpu` / `gpu-rocm` | `kokoro` / `qwen3-tts` |
 | image | `comfyui` | `gpu-rocm` | `comfyui` |
@@ -693,17 +749,19 @@ Profiles are device-agnostic tune templates; they no longer carry an image.
 A device also has a *default* profile it resolves to when a slot names none —
 `gpu-rocm`, `gpu-vulkan` and `gpu-cuda` resolve to `chat`, `cpu` to
 `cpu-chat`, `npu` to `flm`. The seeded slots override that where it matters:
-`agent` ships on `dense`, `coder` on `coding`, `brain` on `brain`,
-`utility` on `chat`.
+`agent` ships on `agent`, `coder` on `coding`, `brain` on `brain`,
+`memory` on `memory`, `embed` on `embedding`, `rerank` on `reranking`, `flm`
+on `flm`, `tts` on `kokoro`, `qwen3tts` on `qwen3-tts` and `img` on `comfyui`.
 
 The seeded profile catalog is virtual — it lives in code
 (`SEED_PROFILES`) and is overlaid on every load, so a re-tuned seed reaches
 every install on upgrade instead of being frozen by a stale on-disk copy.
-`/etc/hal0/profiles.toml` is for *your* profiles: `chat`,
-`chat-long-context`, `dense`, `moe`, `thinking`, `coding`, `brain`,
-`embedding`, `reranking`, `cpu-chat`, `flm`, `kokoro`, `moonshine`,
-`qwen3-tts` and `comfyui` are immutable seeds you clone under a new name to
-customize.
+`/etc/hal0/profiles.toml` is for *your* profiles: `chat`, `agent`,
+`utility`, `memory`, `coding`, `brain`, `embedding`, `reranking`, `cpu-chat`,
+`flm`, `kokoro`, `moonshine`, `qwen3-tts`, `comfyui`, `halogen` and `xdna` are
+immutable seeds you clone under a new name to customize. A profile may also
+name its own `runner` (`halogen` and `xdna` do); every other seed leaves the
+runner to the slot's `binary`.
 
 `voice.stt` switches Moonshine (CPU) ⇄ FLM's whisper-v3:turbo (NPU) and
 `voice.tts` switches Kokoro (CPU) ⇄ Qwen3-TTS (GPU) without reconfiguring
@@ -719,7 +777,10 @@ The NPU path is opt-in: the installer places a FastFlowLM `.deb` on the host
 (SHA-pinned per distro — Ubuntu 24.04/25.10/26.04 and Debian 13) for
 device-sanity probes (`flm validate`); inference runs inside the
 `hal0-runner-flm` container. With FLM present the installer seeds the `flm`
-slot, and the NPU trio activates once `flm validate` passes.
+slot, and the NPU trio activates once `flm validate` passes. The optional
+`xdna` runner runs plain GGUF models on the same NPU instead of FLM's curated
+list; the two share the hardware, and the NPU tab asks before it swaps one for
+the other ([Run the NPU](./docs/guides/run-xdna-npu.mdx)).
 
 ### Speculative decoding: drafters
 
@@ -825,12 +886,14 @@ this auth model does not cover. See
 If hal0 runs inside a Proxmox LXC, the container only sees its own cgroup
 slice of memory — other tenants, ZFS ARC and the host kernel draw from the
 same physical DIMMs as GPU GTT but are invisible from inside. To surface
-that, drop a read-only `PVEAuditor` API token into the dashboard's
-Settings → "Proxmox integration" panel. The unified-memory bar then swaps to
-the physical host's DIMM total and adds a muted "Proxmox host" segment for
-other-tenant + kernel pressure. The token is sensitive, stored 0600 at
-`/etc/hal0/proxmox.json`, and never echoed back by the API. Bare-metal and
-VM installs leave the panel off.
+that, give hal0 a read-only `PVEAuditor` API token: `PUT /api/settings/proxmox`
+(with `host`, `user`, `token_name`, `token_value`, optional `port` and
+`verify_ssl`) or write `/etc/hal0/proxmox.json` yourself.
+`POST /api/settings/proxmox/test` checks a candidate without saving it. The
+unified-memory bar then swaps to the physical host's DIMM total and adds a
+muted "Proxmox host" segment for other-tenant + kernel pressure. The token is
+sensitive, stored 0600, and never echoed back by the API. Bare-metal and VM
+installs leave it off. The dashboard has no settings panel for it today.
 
 ## Troubleshooting
 
@@ -872,7 +935,8 @@ Those follow-ups, and what each one is for:
 | `hal0 doctor perms` | Ownership: Hermes runtime state, the editable checkout's group-share, the canonical path-ownership table. | `--fix` (needs root), `--force`/`-f` to skip the prompt |
 | `hal0 doctor models` | Registry paths vs disk, store/roots agreement, unregistered files in the store, FLM store ownership. | `--fix` (needs root), `--force`/`-f` |
 | `hal0 doctor ports` | Which port each slot bound, collisions, corrupt netavark DNAT rules. | `--fix` prunes stale DNAT rules |
-| `hal0 doctor profiles` | Dangling slot→profile references and un-pulled runner images. | — (read-only, `--json`) |
+| `hal0 doctor profiles` | Dangling slot→profile references, un-pulled runner images, halogen checkpoints that cannot load, and slot files that still carry tuning keys (`slot.unconverted`). | `--fix` rewrites `type = "llm"` to the real type on rerank/embed/tts slots (`--json`) |
+| `hal0 doctor wrappers` | The root-owned sudo wrappers, sudoers drop-ins and `/usr/local/bin/hal0` links against the active tree. | `--fix` re-installs them (needs root) |
 | `hal0 doctor toolbox-pull` | Every runner image pinned in `manifest.json` is anonymously pullable from ghcr.io, and its digest matches the pin. | — (`--json`, `--manifest PATH`) |
 | `hal0 doctor logs` | `hal0-api`'s own journal. | `--unit`, `--follow`/`-f`, `--lines`/`-n`, `--level`, `--since` |
 | `hal0 doctor bundle` | Writes a redacted support bundle (system / config / diagnostics / logs). | `--out DIR`, `--no-rocm-smi`, `--include-logs auto\|yes\|no` |
@@ -1073,7 +1137,14 @@ later. Before you take it:
   session (`POST /api/auth/login`) or `sudo hal0 agent approvals approve|deny
   <id>`; a bare API key gets `403 auth.forbidden`.
 - **`hal0 agent upgrade` is now `sudo hal0 update component pi`.** A plain
-  `hal0 update` never re-pins Pi.
+  `hal0 update` never re-pins Pi, and Pi's `hal0-memory` server is refused
+  (`403 bridge.client_name_reserved`) until you run it once.
+- **`hal0 mcp add` and `hal0 mcp remove` are gone.** Use `hal0 mcp install`
+  and `hal0 mcp uninstall`.
+- **Point coding agents at `/api/memory/compat`.** Mint a key with
+  `hal0 bridge add <client> --scope memory`, then run `hal0 memory agents
+  install <harness> --bridge-key-file <file>`; the Memory area's Agents tab
+  shows the steps.
 - **The board needs Hermes.** Cards in the old hal0 board migrate into the
   Hermes kanban at the first board request (or export to
   `board-legacy-export-<timestamp>.json` when Hermes is not installed). Unset
@@ -1188,7 +1259,7 @@ hal0/
 │   ├── runners/      # RUNNER_IMAGES — the runner-image registry
 │   ├── bench/        # benchmark planner, runner, store, publish
 │   └── omni_router/  # client-side tool-calling loop + tool definitions
-├── ui/               # React 18 + TypeScript + Vite + Tailwind 4 dashboard
+├── ui/               # React 19 + TypeScript + Vite + Tailwind 4 dashboard
 ├── installer/        # install.sh (writes /etc/hal0/, systemd units, hal0-api.service)
 │   ├── etc-hal0/     # curated slot seeds + operator profiles.toml
 │   └── systemd/      # hal0-agent@ template units
@@ -1233,8 +1304,9 @@ running on your box. Full version at
 - **hal0-brain steward** — top-bar agent chat driving the
   `hal0-admin` catalog under a per-persona tool policy, pausing turns on
   gated tools for inline approve/deny
-- **Model-owned tuning** — the model, not the slot, owns context size, speculation
-  settings and launch flags; profiles supply a floor, never an override
+- **Profile-owned tuning (1.4)** — a profile is the whole launch tune; the
+  model holds file facts and the slot holds placement, with an optional sparse
+  `[tune]` override on the slot (1.8)
 - **Slot autoload + eviction priority** — binding a model no longer implies
   a boot start, and pressure eviction orders by `priority` instead of an
   opt-in nobody set
@@ -1246,8 +1318,8 @@ running on your box. Full version at
 - **Upstream model controls** — external providers (OpenRouter, Anthropic,
   OpenAI, Google AI Studio, Ollama, custom) with reactive CRUD, per-upstream
   model filters and an `enabled` kill switch across CLI, MCP and dashboard
-- **Companion services, one surface** — Open WebUI, ComfyUI, Hermes,
-  Hindsight and n8n from a dashboard Services page with mDNS discovery
+- **Companion services, one surface** — Open WebUI, ComfyUI, Hermes and
+  Hindsight from a dashboard Services page with mDNS discovery
 - **FLM trio NPU packing** — chat + ASR + embed coresident on one AMDXDNA
   hardware context, toggled from the slot TOML's `[npu]` table
 - **GpuArbiter exclusive image mode** — ComfyUI gets the iGPU to itself; LLM
@@ -1282,6 +1354,17 @@ running on your box. Full version at
 - **Image Gen workspace (1.7)** — Generate, Models and Engine tabs; the GPU's
   state and controls live in the dock at the bottom of every page (1.7.1);
   image mode lasts only while an image renders
+- **Agent bridge (1.8)** — remote coding agents reach `hal0-agents`,
+  `hal0-memory` and, when granted, `hal0-admin` with a revocable `hal0bk_` key
+- **Open WebUI with hal0's tools and shared memory (1.8)** — every chat carries
+  the memory and Hermes delegate tools
+- **Installer component checklist and rootless box (1.8)** — skip any optional
+  component, or opt in to one rootless podman box
+- **Memory v3 (1.8)** — one Memory area, two banks, a guarded embedder switch
+- **NPU tab, `xdna` and halogen runners (1.8)** — FLM and GGML lanes with live
+  activity, plain GGUF on the XDNA2 NPU, and Qwen3.8-Flash-Next on Strix Halo
+- **Operator Board on the Hermes kanban, slot tune overrides, new Overview
+  page (1.8)**
 
 ### Soon
 
