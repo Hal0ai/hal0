@@ -4,9 +4,10 @@ parity for ``/api/memory/models`` and ``/api/memory/agents``.
 ``agents install`` runs the upstream ``hindsight-coding-agents`` installer and
 then sets the harness's own section of ``~/.hindsight/coding-agent.json``
 (``harnesses.<harness>``): hal0's ``/api/memory/compat`` and a bridge key
-(ADR-0058 decision 4b), plus the showcase defaults (``pageTriggerType:
-after-consolidation``, ``observationScopes: shared``, ``retainTags:
-[agent:<harness>]``). The flat keys and other harnesses are left alone.
+(ADR-0058 decision 4b), plus the showcase defaults (``observationScopes: shared``, ``retainTags:
+[agent:<harness>]``) and the plugin's quiet defaults (``autoUpdate: false``,
+``autoReflect: false``, ``codebaseSurvey: false``). The flat keys and other
+harnesses are left alone.
 """
 
 from __future__ import annotations
@@ -240,6 +241,16 @@ def _write_private_json(path: Path, data: dict[str, Any]) -> None:
 
 _FLAT_SERVER_KEYS = ("serverMode", "apiUrl", "apiToken", "apiPort")
 
+#: What an older ``agents install`` wrote for ``pageTriggerType``; hal0 owns
+#: when pages refresh (ADR-0060), so the key is no longer written and this
+#: value, and only this value, is cleaned up.
+_OLD_PAGE_TRIGGER = "after-consolidation"
+
+#: Plugin settings set only when the operator has not chosen a value: a
+#: reflect on every prompt and a repository survey at session start load a
+#: single-GPU box (#3763).
+_QUIET_DEFAULTS = {"autoReflect": False, "codebaseSurvey": False}
+
 
 def _merge_coding_agent_config(
     data: dict[str, Any], harness: str, *, url: str, key: str
@@ -256,11 +267,16 @@ def _merge_coding_agent_config(
             "serverMode": "self-hosted",
             "apiUrl": url,
             "apiToken": key,
-            "pageTriggerType": "after-consolidation",
+            # hal0 pins the plugin version, so its self-update stays off.
+            "autoUpdate": False,
             "observationScopes": "shared",
             "retainTags": sorted(retain_tags),
         }
     )
+    for name, value in _QUIET_DEFAULTS.items():
+        section.setdefault(name, value)
+    if section.get("pageTriggerType") == _OLD_PAGE_TRIGGER:
+        del section["pageTriggerType"]
     harnesses[harness] = section
     return {**data, "harnesses": harnesses}
 

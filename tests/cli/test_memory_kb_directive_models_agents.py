@@ -233,12 +233,43 @@ def test_agents_install_writes_the_harness_section_with_the_key(agents_box):
     assert section["serverMode"] == "self-hosted"
     assert section["apiUrl"] == _COMPAT
     assert section["apiToken"] == "hal0bk_claude-code.k"
-    assert section["pageTriggerType"] == "after-consolidation"
+    assert "pageTriggerType" not in section
+    assert section["autoUpdate"] is False
+    assert section["autoReflect"] is False
+    assert section["codebaseSurvey"] is False
     assert section["observationScopes"] == "shared"
     assert section["retainTags"] == ["agent:claude-code"]
     assert oct(config_path.stat().st_mode & 0o777) == oct(0o600)
     # The key is never echoed back.
     assert "hal0bk_claude-code.k" not in r.output
+
+
+def test_agents_install_keeps_operator_choices_and_drops_only_its_own_trigger(agents_box):
+    config_path, _ = agents_box
+    config_path.write_text(
+        json.dumps(
+            {
+                "harnesses": {
+                    "codex": {"autoUpdate": True, "autoReflect": True, "codebaseSurvey": True},
+                    "cursor": {"pageTriggerType": "after-consolidation"},
+                    "zed": {"pageTriggerType": "every-session"},
+                }
+            }
+        )
+    )
+    for name in ("codex", "cursor", "zed"):
+        r = runner.invoke(
+            memory_commands.app,
+            ["agents", "install", name, "--bridge-key", f"hal0bk_{name}.k"],
+        )
+        assert r.exit_code == 0, r.output
+    h = json.loads(config_path.read_text())["harnesses"]
+    # autoUpdate is always off (hal0 pins the version); the others are the operator's.
+    assert h["codex"]["autoUpdate"] is False
+    assert h["codex"]["autoReflect"] is True
+    assert h["codex"]["codebaseSurvey"] is True
+    assert "pageTriggerType" not in h["cursor"]
+    assert h["zed"]["pageTriggerType"] == "every-session"
 
 
 def test_agents_install_leaves_the_flat_keys_and_other_harnesses_alone(agents_box):
