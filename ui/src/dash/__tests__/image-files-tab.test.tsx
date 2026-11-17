@@ -54,6 +54,9 @@ vi.mock('@/api/hooks/useComfyui', () => ({
   }),
 }))
 
+// The Downloads pane has its own hooks and its own tests; here it is only a neighbour.
+vi.mock('@/dash/models/DownloadsPane.jsx', () => ({ DownloadsPane: () => null }))
+
 const { ImageFilesTab } = await import('../image/ImageFilesTab.jsx')
 
 const CKPT_OWNED = {
@@ -163,7 +166,7 @@ describe('ImageFilesTab', () => {
     // True for an owner that is complete and for one that is only partly installed (whose card
     // offers Install, not Remove): the CLI removes either, the Models tab once it is complete.
     expect(byId('imgf-owned-note')!.textContent).toBe(
-      "Remove the model to delete this file: run hal0 comfyui models remove flux-dev (the Image Gen pane's Models tab offers Remove once the model is fully installed).",
+      "Remove the model to delete this file: run hal0 comfyui models remove flux-dev (the Models view offers Remove once the model is fully installed).",
     )
     act(() => root.unmount())
   })
@@ -229,12 +232,12 @@ describe('ImageFilesTab', () => {
     act(() => root.unmount())
   })
 
-  it('tells an empty inventory to install from the Models tab or with the CLI', () => {
+  it('tells an empty inventory to install from the Models view or with the CLI', () => {
     filesBox.current = { state: 'ok', root: '/models/comfyui', files: [] }
     const { root } = mount()
     const hint = byId('imgf-empty-hint')!
-    // Install is on the Image Gen pane's Models tab now; the CLI is the other way.
-    expect(hint.textContent).toContain("Image Gen pane's Models tab")
+    // Install is one switch away, on this tab's Models view; the CLI is the other way.
+    expect(hint.textContent).toContain('the Models view')
     expect(hint.textContent).toContain('hal0 comfyui models install <id>')
     expect(hint.textContent).toContain('hal0 comfyui models list')
     expect(document.querySelector('a')).toBeNull()

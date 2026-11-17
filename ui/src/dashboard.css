@@ -2446,6 +2446,17 @@ select.npu-sel {
 .mdl-detail-why [role="alert"] { color: var(--err); }
 .mdl-detail-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; font-family: var(--jbm); font-size: 11.5px; color: var(--fg-2); }
 .mdl-detail-confirm > span { flex-basis: 100%; }
+.mdl-dl-row { padding: 12px 16px; border-bottom: 1px solid var(--line-soft); font-family: var(--jbm); font-size: 11.5px; }
+.mdl-dl-line { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; color: var(--fg-3); }
+.mdl-dl-name { color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.mdl-dl-kind { color: var(--fg-4); margin-left: 6px; font-size: 10px; }
+.mdl-dl-sub { font-size: 10px; color: var(--fg-4); margin-bottom: 4px; }
+.mdl-dl-err { margin-bottom: 6px; padding: 6px 10px; background: var(--err-soft); border: 1px solid var(--err-line); border-radius: var(--rad-sm); font-size: 11px; color: var(--err); }
+.mdl-dl-row .err { color: var(--err); }
+.mdl-seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--rad-sm); overflow: hidden; }
+.mdl-seg button { height: 22px; padding: 0 10px; border: 0; background: transparent; color: var(--fg-3); font-family: var(--jbm); font-size: 11px; cursor: pointer; }
+.mdl-seg button:hover { color: var(--fg); }
+.mdl-seg button.on { background: var(--bg-4); color: var(--fg); }
 .mdl-detail-why { flex-basis: 100%; font-family: var(--jbm); font-size: 11px; color: var(--fg-4); line-height: 1.5; }
 @media (prefers-reduced-motion: reduce) {
   .mdl-dot.busy { animation: none; }

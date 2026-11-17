@@ -1,7 +1,14 @@
-// The Models page's Downloads pane: every model pull the server knows about, with progress,
-// cancel, retry and dismiss. It sits under the detail card on each tab that can start a pull
-// (GGUF pulls and FLM downloads are the same pull job), and on Settings → Loaded models.
+// The Models page's Downloads pane: one queue for every kind of model download, with progress,
+// cancel, retry and dismiss. It sits under the detail card on every tab, and on Settings → Loaded
+// models.
+//
+// Two job systems feed it. GGUF pulls and FLM downloads are the same pull job (GET
+// /api/models/pulls). Image-model installs are ComfyUI's own jobs (GET /api/comfyui/jobs): those
+// are listed while they run or after they fail, since a finished install has nothing to dismiss
+// (the server keeps the latest job per model and has no clear call).
 import { useState } from 'react'
+import { isImageJobActive } from '@/api/hooks/imageJobState'
+import { useImageJobCancel, useImageJobs, useImageModelInstall } from '@/api/hooks/useComfyui'
 import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { fmtBytes, fmtEta, fmtSpeed, pullFileLabel, useClearPullJob, usePullsList } from '@/api/hooks/useModels'
@@ -94,24 +101,79 @@ export function DownloadRow({ job, clearJob }) {
 }
 
 // ── DownloadsPane ─────────────────────────────────────────────────────
+// One image-model install. The job names its model by id; the Image tab shows the rest.
+export function ImageJobRow({ job }) {
+  const cancel = useImageJobCancel()
+  const install = useImageModelInstall()
+  const failed = job.state === 'failed'
+  const pct = job.bytes_total > 0 ? Math.round((job.bytes_downloaded / job.bytes_total) * 100) : 0
+  const act = async (run, what) => {
+    try {
+      await run.mutateAsync(job.model_id)
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(`${what} failed — ${e?.message || 'see logs'}`, 'err')
+    }
+  }
+  return (
+    <div className="mdl-dl-row" data-testid={`mdl-dl-image-${job.model_id}`}>
+      <div className="mdl-dl-line">
+        <span className={'mdl-dl-name' + (failed ? ' err' : '')}>
+          {job.model_id}
+          <span className="mdl-dl-kind">image model</span>
+        </span>
+        <span className={failed ? 'err' : ''}>{failed ? 'failed' : job.state === 'queued' ? 'queued' : `${pct}%`}</span>
+      </div>
+      {!failed && (
+        <div className="dl-bar" style={{ height: 4, marginBottom: 4 }}>
+          <i style={{ width: `${pct}%`, background: 'var(--accent)' }} />
+        </div>
+      )}
+      {!failed && job.bytes_total > 0 && (
+        <div className="mdl-dl-sub">
+          {fmtBytes(job.bytes_downloaded)} / {fmtBytes(job.bytes_total)}
+        </div>
+      )}
+      {failed && job.error && <div className="mdl-dl-err">{job.error}</div>}
+      <div style={{ display: 'flex', gap: 4 }}>
+        {failed ? (
+          <button type="button" className="btn ghost sm" disabled={install.isPending} onClick={() => act(install, 'Retry')}>
+            ↻ Retry
+          </button>
+        ) : (
+          <button type="button" className="btn ghost sm" disabled={cancel.isPending} onClick={() => act(cancel, 'Cancel')}>
+            {cancel.isPending ? 'Cancelling…' : 'Cancel'}
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function DownloadsPane() {
   const { jobs } = usePullsList();
   const clearJob = useClearPullJob();
+  const imageJobs = (useImageJobs().data ?? []).filter((j) => isImageJobActive(j) || j.state === 'failed');
+  const total = jobs.length + imageJobs.length;
   return (
-    <div className="mdl-dl">
+    <div className="mdl-dl" data-testid="mdl-downloads">
       <div className="mdl-dl-h">
         <span>Downloads</span>
-        <span className="ct mono">{jobs.length}</span>
+        <span className="ct mono">{total}</span>
       </div>
-      {jobs.length === 0 ? (
+      {total === 0 ? (
         <div style={{padding: "32px 16px", textAlign: "center", color: "var(--fg-4)", fontFamily: "var(--jbm)", fontSize: 12}}>
           <div style={{marginBottom: 6}}>No active downloads.</div>
-          <div style={{fontSize: 11, color: "var(--fg-5)"}}>Add a model from the catalog or via "Add by HF coords".</div>
+          <div style={{fontSize: 11, color: "var(--fg-5)"}}>Model pulls, FLM downloads and image-model installs all show here.</div>
         </div>
       ) : (
-        jobs.map((j) => (
-          <DownloadRow key={j.job_id || j.model_id} job={j} clearJob={clearJob} />
-        ))
+        <>
+          {jobs.map((j) => (
+            <DownloadRow key={j.job_id || j.model_id} job={j} clearJob={clearJob} />
+          ))}
+          {imageJobs.map((j) => (
+            <ImageJobRow key={`image:${j.model_id}`} job={j} />
+          ))}
+        </>
       )}
     </div>
   );
