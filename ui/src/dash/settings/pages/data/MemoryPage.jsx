@@ -30,8 +30,11 @@ import {
 import { graphSaveOutcome } from './extractionThroughput.js'
 import { BankFailures, SaveWarnings, ThroughputNote } from './ExtractionThroughputViews.jsx'
 import { KnowledgeRefreshPanel } from './KnowledgeRefreshPanel.jsx'
+import { MemoryModelsPanel } from './MemoryModelsPanel.jsx'
+import { modelsFocus } from './memoryModels'
 
-export function MemoryPage() {
+/** @param {{ sub?: string | null }} props `sub` is the settings sub-path (`models/<group>`). */
+export function MemoryPage({ sub = null }) {
   // R5 data seam: one typed client supplies the merged reload-class registry.
   const { registry } = useSettingsClient();
 
@@ -39,12 +42,13 @@ export function MemoryPage() {
     <div className="s-section">
       <h2>Memory</h2>
       <p className="desc">
-        Memory engine, graph extraction, knowledge page refresh, and second-pass reranking.
+        Memory engine, graph extraction, knowledge page refresh, the engine's models, and the fallback reranker.
         Changes to the engine require a hal0-api restart; the other settings apply live.
       </p>
       <MemoryEnginePanel registry={registry} />
       <MemoryGraphPanel />
       <KnowledgeRefreshPanel registry={registry} />
+      <MemoryModelsPanel registry={registry} focus={modelsFocus(sub)} />
       <MemoryRerankerPanel registry={registry} />
     </div>
   );
@@ -124,6 +128,13 @@ function MemoryRerankerPanel({ registry }) {
     "memory.embedding.rerank_connect_timeout_s",
     "memory.embedding.rerank_read_timeout_s",
   ];
+  const RERANK_LABELS = {
+    "memory.embedding.rerank_fallback": "Fallback behaviour",
+    "memory.embedding.rerank_gateway_url": "Rerank gateway URL",
+    [RERANK_MODEL_KEY]: "Rerank model",
+    "memory.embedding.rerank_connect_timeout_s": "Connect timeout (s)",
+    "memory.embedding.rerank_read_timeout_s": "Read timeout (s)",
+  };
   const fields = {};
   for (const k of RERANK_KEYS) fields[k] = _schemaField(schema, k);
 
@@ -171,7 +182,7 @@ function MemoryRerankerPanel({ registry }) {
     try {
       await update.mutateAsync(patch);
       setBuf({});
-      window.__hal0Toast && window.__hal0Toast("Reranker settings saved", "ok");
+      window.__hal0Toast && window.__hal0Toast("Fallback reranker settings saved", "ok");
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
     }
@@ -180,10 +191,13 @@ function MemoryRerankerPanel({ registry }) {
   return (
     <div className="s-panel" style={{marginBottom: 12}}>
       <div className="s-row" style={{paddingBottom: 4, borderBottom: "1px solid var(--line)"}}>
-        <div className="k"><span>Reranker</span><FieldInfoIcon description="hal0.toml [memory.embedding] · second-pass ranking after recall" /></div>
+        <div className="k"><span>Fallback reranker</span><FieldInfoIcon description="hal0.toml [memory.embedding] · hal0's own rerank client" /></div>
         <div className="v">
           <a href="#settings/capabilities" className="mono" style={{fontSize: 11, color: "var(--accent)"}}>rerank slot →</a>
         </div>
+      </div>
+      <div className="s-row" data-testid="mem-fallback-rerank-intro" style={{display: "block", fontSize: 11, color: "var(--fg-3)", lineHeight: 1.5}}>
+        hal0's own rerank client, used when the engine's reranker is unavailable. The engine's own reranker is set in Models above.
       </div>
       {RERANK_KEYS.map(k => (
         <AdvRow
@@ -194,6 +208,7 @@ function MemoryRerankerPanel({ registry }) {
           buf={buf[k]}
           onChange={onChange}
           registry={registry}
+          label={RERANK_LABELS[k]}
           options={k === RERANK_MODEL_KEY ? modelOptions : undefined}
         />
       ))}
@@ -202,7 +217,7 @@ function MemoryRerankerPanel({ registry }) {
           <button className="btn ghost sm" onClick={() => setBuf({})}>Reset</button>
         )}
         <button className="btn sm" disabled={!canSave} onClick={doSave}>
-          {update.isPending ? "Saving…" : "Save reranker"}
+          {update.isPending ? "Saving…" : "Save fallback reranker"}
         </button>
       </div>
     </div>

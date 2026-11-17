@@ -57,6 +57,7 @@ function HealthReady({ area, report }) {
           label: cell.label,
           value: cell.value,
           helper: cell.helper,
+          href: cell.href ?? undefined,
           chip: cell.chip ? <StatusChip tone={cell.chip.tone}>{cell.chip.word}</StatusChip> : null,
         }))}
       />

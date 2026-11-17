@@ -1,5 +1,5 @@
 /**
- * memory-rerank-model-picker-v3 — Settings → Memory → Reranker.
+ * memory-rerank-model-picker-v3 — Settings → Memory → Fallback reranker.
  *
  * `memory.embedding.rerank_model` renders as a dropdown, not free text:
  * the schema default ("" = whatever the rerank slot serves) plus every
@@ -40,7 +40,7 @@ test.describe('Memory reranker model picker', () => {
     await page.goto('/#settings/memory')
 
     const row = page.locator('.s-row')
-      .filter({ has: page.locator('.k span', { hasText: /^embedding\.rerank_model$/ }) })
+      .filter({ has: page.locator('.k span', { hasText: /^Rerank model$/ }) })
     const select = row.locator('select')
     await expect(select).toBeVisible()
     await expect(select.locator('option[value=""]')).toHaveText("the rerank slot's model (default)")
@@ -54,8 +54,8 @@ test.describe('Memory reranker model picker', () => {
     await page.goto('/#settings/memory')
 
     const row = page.locator('.s-row')
-      .filter({ has: page.locator('.k span', { hasText: /^embedding\.rerank_model$/ }) })
-    const save = page.getByRole('button', { name: 'Save reranker' })
+      .filter({ has: page.locator('.k span', { hasText: /^Rerank model$/ }) })
+    const save = page.getByRole('button', { name: 'Save fallback reranker' })
     await expect(row.locator('select')).toBeVisible()
     await expect(save).toBeDisabled()
     await row.locator('select').selectOption('bge-reranker-v2-m3')

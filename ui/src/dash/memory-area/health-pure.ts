@@ -822,7 +822,16 @@ export interface StripCell {
   value: string | null
   helper: string | null
   chip: Chip | null
+  /** Where the tile's settings live: Settings ▸ Memory ▸ Models, scrolled to its group. */
+  href?: string
 }
+
+// The Models panel groups in Settings ▸ Memory (settings/pages/data/memoryModels.ts).
+const MODELS_HREF = {
+  embedder: '#settings/memory/models/embedder',
+  reranker: '#settings/memory/models/reranker',
+  decision: '#settings/memory/models/decision',
+} as const
 
 const MODE_WORDS: Record<string, string> = {
   dedicated: 'dedicated slot',
@@ -968,8 +977,8 @@ export function engineStrip(input: {
       chip: { tone: 'ok', word: 'reachable' },
     },
     extractionCell(input.report, input.graph),
-    embedderCell(embedderView(input.report.embedder)),
-    rerankerCell(input.models?.reranker),
-    decisionCell(input.models?.decision),
+    { ...embedderCell(embedderView(input.report.embedder)), href: MODELS_HREF.embedder },
+    { ...rerankerCell(input.models?.reranker), href: MODELS_HREF.reranker },
+    { ...decisionCell(input.models?.decision), href: MODELS_HREF.decision },
   ]
 }

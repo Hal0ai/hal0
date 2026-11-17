@@ -108,6 +108,22 @@ describe('StatStrip', () => {
     expect(value.className).not.toMatch(/\b(ok|warn|err|info)\b/)
   })
 
+  it('draws a link to the cell\'s settings only when the cell has a target', () => {
+    const { host } = mount(
+      createElement(StatStrip, {
+        label: 'Engine facts',
+        cells: [
+          { id: 'engine', label: 'Engine', value: 'Hindsight' },
+          { id: 'reranker', label: 'Reranker', value: 'hs-rerank-1', href: '#settings/memory/models/reranker' },
+        ],
+      }),
+    )
+    expect(cell(host, 'engine').querySelector('a')).toBeNull()
+    const a = cell(host, 'reranker').querySelector('a')!
+    expect(a.getAttribute('href')).toBe('#settings/memory/models/reranker')
+    expect(a.getAttribute('aria-label')).toBe('Reranker settings')
+  })
+
   it('drops its frame inside a card', () => {
     const { host } = mount(createElement(StatStrip, { label: 'Dry run', inCard: true, cells: [] }))
     expect(host.querySelector('dl')!.className).toBe('ma-stats ma-stats-incard')

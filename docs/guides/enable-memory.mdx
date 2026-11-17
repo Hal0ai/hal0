@@ -75,13 +75,13 @@ see [Memory banks](/docs/concepts/memory-banks).
 ## The dashboard's Settings → Memory page
 
 Everything below this section is also available from the dashboard —
-`#settings/memory` — as three panels: **Engine**, **Memory graph
-extraction**, and **Reranker**. Engine and reranker changes save through the
+`#settings/memory` — as panels for the **Engine**, **Memory graph
+extraction**, **Models** (embedder, engine reranker, decision model) and
+**Fallback reranker**. Engine, model and fallback changes save through the
 generic settings API; graph changes go through a dedicated endpoint (see
 below) because it validates the extraction slot against the live slot set
 and propagates the change to `hindsight-api` itself. Changing the engine
-needs a `hal0-api` restart to take effect; graph and reranker changes apply
-live.
+needs a `hal0-api` restart; a Models save restarts the memory engine.
 
 ## The graph-extraction gate
 
