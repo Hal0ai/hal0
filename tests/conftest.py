@@ -592,3 +592,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if "timing" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _empty_lane_dropin_dir(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Config migration v5 reads the engine's drop-in directory; never the host's /etc."""
+    from hal0.config.migrations import v5
+
+    monkeypatch.setattr(v5, "DROP_IN_DIR", tmp_path_factory.mktemp("lane-dropins"))

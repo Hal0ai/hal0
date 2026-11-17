@@ -337,8 +337,8 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
         "is untouched and can now be deleted)"
     ),
     "updater.lane_limits_adopt_skipped": (
-        "memory lane limit adoption (a hand-made drop-in value is outside the allowed range "
-        "and was not copied into hal0.toml)"
+        "memory lane limit adoption (a hand-made drop-in value could not be copied into "
+        "hal0.toml, so the managed value now applies; the update log names the file)"
     ),
     "components.hermes_gateway_regen_failed": (
         "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"
