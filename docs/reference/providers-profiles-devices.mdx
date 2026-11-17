@@ -53,27 +53,34 @@ context — the built-in template registry for cloud/remote LLM APIs
 (`hal0.upstreams.presets`, data in `config/data/provider_presets.toml`). The catalog is never mutated at runtime;
 user config lives in `/etc/hal0/upstreams.toml`.
 
-| Catalog id | Base URL | Auth style | Category | Capabilities |
-|---|---|---|---|---|
-| `openai` | `https://api.openai.com/v1` | `bearer` | cloud | chat, embed, vision, tools, tts, stt |
-| `anthropic` | `https://api.anthropic.com/v1` | `bearer` (Anthropic's OpenAI-compatible layer) | cloud | chat, tools |
-| `openrouter` | — | — | cloud | — |
-| `google_ai_studio` | `https://generativelanguage.googleapis.com/v1beta/openai` | `bearer` | cloud | chat, vision |
-| `deepseek` | — | — | cloud | — |
-| `minimax` | — | — | cloud | — |
-| `ollama` | `http://localhost:11434/v1` | `none` | local | — |
+| Catalog id | Name | Base URL | Auth style | Category | Model kinds |
+|---|---|---|---|---|---|
+| `minimax` | MiniMax | `https://api.minimax.io/v1` | `bearer` | cloud | chat, tools |
+| `openai` | OpenAI | `https://api.openai.com/v1` | `bearer` | cloud | chat, embed, tools |
+| `anthropic` | Anthropic | `https://api.anthropic.com/v1` | `bearer` | cloud | chat, tools |
+| `openrouter` | OpenRouter | `https://openrouter.ai/api/v1` | `bearer` | cloud | chat, tools |
+| `google_ai_studio` | Google AI Studio | `https://generativelanguage.googleapis.com/v1beta/openai` | `bearer` | cloud | chat, embed, tools |
+| `deepseek` | DeepSeek | `https://api.deepseek.com` | `bearer` | cloud | chat, tools |
+| `groq` | Groq | `https://api.groq.com/openai/v1` | `bearer` | cloud | chat, stt, tools |
+| `mistral` | Mistral | `https://api.mistral.ai/v1` | `bearer` | cloud | chat, tools |
+| `ollama` | Ollama | `http://localhost:11434/v1` | `none` | local | chat, tools |
+| `hal0_peer` | hal0 peer | — (you enter the peer's URL) | `bearer` | peer | chat, tools |
+| `custom` | Custom OpenAI-compatible | — (you enter the URL) | `bearer` | custom | chat, tools |
+
+"Model kinds" are the `type` values of the preset's suggested models, plus `tools` when
+the preset allows tool calls (`preset_to_api` in `hal0.upstreams.presets`).
 
 <Aside type="note">
-`anthropic`'s catalog entry speaks the native `/v1/messages` shape only — it needs a
-proxy for OpenAI-shape compatibility. Auth styles overall: `bearer, anthropic,
-header, none`.
+The `anthropic` preset uses Anthropic's OpenAI-compatible endpoint with bearer auth, so
+it needs no proxy. Auth styles overall: `bearer, anthropic, header, none`.
 </Aside>
 
 Persisted config is an `UpstreamEntry` per upstream in `upstreams.toml` (see
 [Config schema → upstreams.toml](/docs/reference/config-schema-profiles/#upstreamstoml)):
 `catalog_id`, `url`, `auth_value_env` (the **name** of an environment variable, never
-the key itself — the actual secret lives in `api.env`), `enabled`, and either legacy
-`model_filters` or a curated per-model list.
+the key itself — the actual secret lives in `api.env`), `enabled`, and either a curated
+per-model list (`curated = true` plus `[[upstream.models]]` rows) or, on a row that has
+not been converted yet, `model_filters`.
 
 <Aside type="note">
 Older installs also had a `providers.toml` with a per-provider model selection. It is
@@ -93,6 +100,77 @@ retried at the next start. Two behaviour changes follow, and each is logged as a
   name; they return 404 until you enable them.
 - A bare model id enabled on more than one provider is rejected with 400; use the
   `<provider>/<id>` form (the warning lists the ids to use).
+
+### Curated providers and per-model rows
+
+A curated provider (`curated = true`) serves only the models whose
+`[[upstream.models]]` row has `enabled = true`. The rows are stored in `upstreams.toml`;
+routing reads them and nothing else, so a request is routed the same way before and after
+a restart. Every start, after the conversion above, hal0 fetches each curated provider's
+model list once in the background and adds each model it offers that has no row yet as a
+row with `enabled = false`. Existing rows are never changed or removed by this, and an
+unreachable provider is skipped. See
+[Config schema → `[[upstream.models]]`](/docs/reference/config-schema-profiles/#upstreammodels)
+for the fields.
+
+To turn a model on with only the config file, set `enabled = true` on its
+`[[upstream.models]]` row in `upstreams.toml`, then restart the API service. Upstreams are
+read at start, so an edit to the file takes effect only after the restart.
+
+```toml
+[[upstream]]
+name = "openai"
+url = "https://api.openai.com/v1"
+auth_value_env = "OPENAI_API_KEY"
+catalog_id = "openai"
+curated = true
+
+[[upstream.models]]
+id = "gpt-5"
+enabled = true          # was false
+type = "chat"
+```
+
+### How a model id is routed
+
+In order, the first rule that applies wins:
+
+1. A local slot, a pinned upstream that owns the id, or a model registry binding.
+2. A curated provider with the model enabled. `<provider>/<id>` names the provider. A bare
+   id matches every curated provider's enabled rows: one match routes there, several are a
+   400 `upstream.model_ambiguous`. When `<provider>/<id>` has no enabled row on that
+   provider, the whole string is tried as a bare id first, so a provider that lists
+   `openai/gpt-5` as its own id (OpenRouter) still serves it. This step is skipped when a
+   slot, an unconverted remote or an agent-managed upstream already advertises the exact
+   string.
+3. Any slot, unconverted remote or agent-managed upstream that advertises the id, fetching
+   the model lists of unconverted remotes whose list is not loaded yet. Curated providers
+   are never fetched here.
+4. If nothing has routed the request and a curated provider stores the model switched off,
+   or the request named `<provider>/<id>` and that provider has no enabled row for it, the
+   answer is a 404 `upstream.model_not_enabled`. The message names the provider and how to
+   enable the model: `hal0 upstream enable <provider> <model>`, or the provider's model
+   list in the dashboard. A **bare** id is not refused here when the request is for
+   embeddings, rerank, speech, transcription or images, or when the id is one of hal0's
+   own alias names (such as `tts-1`): those continue to step 5 and the local slot serves
+   them.
+5. hal0's capability and path rules pick a local slot, as without any curated provider.
+
+### What changes for an existing install
+
+- Ids your old `model_filters` hid become disabled rows (see above).
+- A bare id enabled on several providers needs `<provider>/<id>`.
+- The picks in an old `providers.toml` now decide which models are enabled on the matching
+  row.
+- `/v1/models` lists a converted provider's models as `<provider>/<id>`. A bare id still
+  routes, and `GET /v1/models/{id}` still answers for it.
+
+### Rolling back to an older build
+
+A converted `upstreams.toml` does not load on a build from before this change: the older
+build rejects the new keys, and no remote provider loads. Before rolling back, restore
+`upstreams.toml.pre-convert` over `upstreams.toml`. That copy was taken before the first
+conversion, so it does not contain later edits; make them again after the rollback.
 
 ## Profiles
 
