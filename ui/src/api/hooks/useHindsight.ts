@@ -496,7 +496,7 @@ export interface BankDocument {
 
 export function useBankDocuments(
   bank: string | null,
-  opts?: { q?: string; limit?: number; offset?: number },
+  opts?: { q?: string; limit?: number; offset?: number; enabled?: boolean },
 ) {
   const query = qs({ q: opts?.q, limit: opts?.limit, offset: opts?.offset })
   return useQuery<{ items: BankDocument[]; total: number }>({
@@ -505,7 +505,7 @@ export function useBankDocuments(
       apiGet<{ items: BankDocument[]; total: number }>(
         `${ENDPOINTS.memoryBankDocuments(bank as string)}${query}`,
       ),
-    enabled: !!bank,
+    enabled: !!bank && opts?.enabled !== false,
     staleTime: 10_000,
   })
 }
