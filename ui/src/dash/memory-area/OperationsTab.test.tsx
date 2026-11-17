@@ -554,11 +554,67 @@ describe('the list', () => {
     }
   })
 
+  it('names what a row works on, from the fields the list already has', () => {
+    m.lists = (ids) =>
+      ids.map((bankId) =>
+        bankId === AGENTS
+          ? entry(bankId, [
+              op('t-1', 5, { document_id: 'claude:session-0123456789abcdef' }),
+              op('t-2', 6, { task_type: 'refresh_mental_model', operation_type: 'refresh_mental_model', mental_model_id: 'architecture-notes' }),
+              op('t-3', 7, { filename: 'notes.md' }),
+              op('t-4', 8),
+            ])
+          : entry(bankId, []),
+      )
+    const host = render()
+    const target = (id: string) => rowOf(host, id).querySelector<HTMLElement>('[data-testid="ma-ops-target"]')
+    expect(target('t-1')!.textContent).toBe('doc …89abcdef')
+    expect(target('t-1')!.title).toBe('Document claude:session-0123456789abcdef')
+    expect(target('t-2')!.textContent).toBe('page architecture-notes')
+    expect(target('t-3')!.textContent).toBe('file notes.md')
+    expect(target('t-4')).toBeNull()
+    // The time is the row's own cell, relative, with the exact time on hover.
+    const when = rowOf(host, 't-1').querySelector<HTMLElement>('td.ma-ops-when time')!
+    expect(when.textContent).toBe('5 min ago')
+    expect(when.title).not.toBe('')
+  })
+
+  it('marks every cell with its label so a phone can stack the row, and keeps the bank id in full', () => {
+    m.lists = (ids) => ids.map((bankId) => entry(bankId, bankId === LONG ? [op('l-1', 5)] : []))
+    const host = render()
+    expect(byId(host, 'ma-ops-table')!.classList.contains('ma-table-stack')).toBe(true)
+    const row = rowOf(host, 'l-1')
+    expect([...row.querySelectorAll('td[data-label]')].map((td) => td.getAttribute('data-label'))).toEqual([
+      'Bank',
+      'Queued',
+      'Status',
+    ])
+    expect(row.querySelector<HTMLElement>('td.ma-ops-bank')!.title).toBe(LONG)
+  })
+
+  it('keeps table semantics when stacked: explicit roles, and a real label element in each cell', () => {
+    m.lists = (ids) => ids.map((bankId) => entry(bankId, bankId === LONG ? [op('l-1', 5, { status: 'failed' })] : []))
+    const host = render()
+    const table = byId(host, 'ma-ops-table')!
+    expect(table.getAttribute('role')).toBe('table')
+    expect([...table.querySelectorAll('thead, tbody')].map((el) => el.getAttribute('role'))).toEqual(['rowgroup', 'rowgroup'])
+    expect([...table.querySelectorAll('tr')].map((el) => el.getAttribute('role'))).toEqual(['row', 'row'])
+    expect([...table.querySelectorAll('thead th')].map((el) => el.getAttribute('role'))).toEqual(Array(5).fill('columnheader'))
+    const row = rowOf(host, 'l-1')
+    expect(row.querySelector('th')!.getAttribute('role')).toBe('rowheader')
+    expect([...row.querySelectorAll('td')].map((el) => el.getAttribute('role'))).toEqual(Array(4).fill('cell'))
+    expect([...row.querySelectorAll('td .ma-cell-label')].map((el) => el.textContent)).toEqual([
+      'Bank: ',
+      'Queued: ',
+      'Status: ',
+    ])
+  })
+
   it('wraps a long bank id instead of cutting it', () => {
     m.lists = (ids) => ids.map((bankId) => entry(bankId, bankId === LONG ? [op('l-1', 5)] : []))
     const host = render()
     const cell = rowOf(host, 'l-1').querySelector('td.ma-ops-bank')!
-    expect(cell.textContent).toBe(LONG)
+    expect(cell.textContent).toBe(`Bank: ${LONG}`)
   })
 
   it('says so when the merged list stops short of every bank’s rows', () => {
@@ -574,8 +630,16 @@ describe('the list', () => {
       'a-4',
     ])
     expect(byId(host, 'ma-ops-capped')!.textContent).toBe(
-      'These are the newest 5 of 1,085 operations across the banks. Choose a bank to page through all of its operations.',
+      'These are the newest 5 of 1,085 operations across the banks. Older ones are listed per bank: pick one bank to page through everything it has. Pick a bank',
     )
+  })
+
+  it('hands the reader to the bank picker from the capped notice', () => {
+    m.lists = (ids) =>
+      ids.map((bankId) => (bankId === AGENTS ? entry(bankId, OPS[AGENTS], 1083) : entry(bankId, OPS[bankId] ?? [])))
+    const host = render()
+    click(byId(host, 'ma-ops-capped-pick')!)
+    expect(host.ownerDocument.activeElement?.closest('[data-testid="ma-scope-bank"]')).not.toBeNull()
   })
 
   it('does not claim a merged list is capped when it holds everything', () => {
@@ -1038,8 +1102,22 @@ describe('consolidate now', () => {
     expect(button.className).toBe('btn ghost sm')
     expect(button.disabled).toBe(true)
     expect(host.ownerDocument.getElementById(button.getAttribute('aria-describedby')!)!.textContent).toBe(
-      'Choose a bank to consolidate it.',
+      'Consolidation works on one bank at a time. Pick a bank to enable it.',
     )
+  })
+
+  it('offers the bank picker beside the disabled action, and the picker takes focus', () => {
+    const host = render()
+    const pick = byId(host, 'ma-ops-pick-bank') as HTMLButtonElement
+    expect(pick.textContent).toBe('Pick a bank')
+    click(pick)
+    const active = host.ownerDocument.activeElement as HTMLElement
+    expect(active.closest('[data-testid="ma-scope-bank"]')).not.toBeNull()
+    expect(active.getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('offers no bank picker once a bank is chosen', () => {
+    expect(byId(render(inBank(AGENTS)), 'ma-ops-pick-bank')).toBeNull()
   })
 
   it('queues a consolidation for the chosen bank and says so', () => {

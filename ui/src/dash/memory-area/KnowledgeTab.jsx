@@ -41,6 +41,7 @@ import {
   watchOutcome,
 } from './knowledge-pure'
 import { memoryTabHref } from './memory-route-pure'
+import { bankRoles } from './area-pure'
 import { Directives } from './knowledge/Directives.jsx'
 import { ModelForm, ModelsCard } from './knowledge/ModelsCard.jsx'
 import { PageTree } from './knowledge/PageTree.jsx'
@@ -514,9 +515,10 @@ export function KnowledgeTab({ area }) {
       </Card>
     )
   } else {
+    const roles = bankRoles(area.health)
     const scope = (
       <ScopeBar
-        banks={banks.map((b) => ({ id: b.bank_id }))}
+        banks={banks.map((b) => ({ id: b.bank_id, role: roles[b.bank_id] }))}
         bank={route.bank}
         // What is open belongs to the bank being left.
         onBankChange={(id) => replaceRoute({ bank: id, page: null })}

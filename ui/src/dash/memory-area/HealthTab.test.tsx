@@ -437,7 +437,7 @@ describe('partial and truncated reads', () => {
     )
     const shared = host.querySelector('[data-bank="shared"]')!
     expect(shared.querySelector('[data-col="waiting"] .ma-missing')).not.toBeNull()
-    expect(shared.querySelector('[data-col="failed"]')!.textContent).toBe('–')
+    expect(shared.querySelector('[data-col="failed"]')!.textContent).toBe('Failed: –')
     expect(byId(host, 'ma-health-banks-foot')).not.toBeNull()
   })
 })
@@ -488,8 +488,8 @@ describe('banks table', () => {
     const host = render()
     const bankRows = [...host.querySelectorAll<HTMLElement>('[data-testid="ma-health-banks"] tbody tr')]
     expect(bankRows.map((tr) => tr.dataset.bank)).toEqual(['Hal0::Agents', 'shared', 'coding-agent::ultrareview-1.4'])
-    expect(textOf(bankRows[0].querySelector('[data-col="facts"]'))).toBe('24,530')
-    expect(textOf(bankRows[0].querySelector('[data-col="documents"]'))).toBe('4,100')
+    expect(textOf(bankRows[0].querySelector('[data-col="facts"]'))).toBe('Facts: 24,530')
+    expect(textOf(bankRows[0].querySelector('[data-col="documents"]'))).toBe('Documents: 4,100')
     expect(bankRows[0].querySelector('a')!.getAttribute('href')).toBe('#memory/facts?bank=Hal0::Agents')
   })
 

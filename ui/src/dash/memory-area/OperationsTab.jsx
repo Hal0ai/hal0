@@ -29,6 +29,7 @@ import {
   useQueueHealth,
   useQueueRefresh,
 } from './operations-data'
+import { bankRoles } from './area-pure'
 import {
   BULK_CAP,
   banksForFilter,
@@ -44,7 +45,7 @@ import { OperationsList } from './operations/OperationsList.jsx'
 import { BreakdownCard, CauseCard, ClearCard, QueueStrip } from './operations/QueueSummary.jsx'
 import { EmptyState } from './shared/EmptyState.jsx'
 import { GoLink } from './shared/GoLink.jsx'
-import { ScopeBar } from './shared/ScopeBar.jsx'
+import { ScopeBar, focusBankControl } from './shared/ScopeBar.jsx'
 import { StatusChip } from './shared/StatusChip.jsx'
 
 /** The scope bar's id for "every bank". No bank has an empty id. */
@@ -161,9 +162,10 @@ function Ready({ area, healthQuery, health }) {
   const lastDone = clear ? lastCompletedAt(finished.entries) : null
 
   const healthHref = memoryTabHref('health', route)
+  const roles = bankRoles(area.health)
   const scopeBar = (
     <ScopeBar
-      banks={[{ id: ALL_BANKS, label: 'All banks' }, ...bankIds.map((id) => ({ id }))]}
+      banks={[{ id: ALL_BANKS, label: 'All banks' }, ...bankIds.map((id) => ({ id, role: roles[id] }))]}
       bank={bank ?? ALL_BANKS}
       onBankChange={(id) => replaceRoute({ bank: id || null })}
     />
@@ -240,6 +242,7 @@ function Ready({ area, healthQuery, health }) {
         blocked={!!report?.cause}
         healthHref={healthHref}
         onChanged={refresh}
+        onPickBank={focusBankControl}
       />
     </Frame>
   )

@@ -23,7 +23,8 @@ Response::
      knowledge: {pages, pages_stale, models, models_stale, refresh_failed,
                  last_success_at},
      banks: {layout: "legacy_unified" | "legacy_split" | "two_bank", total, facts,
-             retired, list: [{bank_id, facts, documents, retired}]},
+             retired, list: [{bank_id, facts, documents, retired,
+                              role: "shared" | "private" | null}]},
      writes: null,
      steps: [{id, state: "current" | "waiting" | "clear", waits_on,
               reason_code, figures}]}

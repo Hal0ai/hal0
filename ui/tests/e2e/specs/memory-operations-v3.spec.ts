@@ -210,9 +210,10 @@ test.describe('backlog, with storing memories failing', () => {
     await expect(rows(page)).toHaveCount(25)
     // Newest first: the two rows of `ingest` are newer than anything in `big`.
     const first = rows(page).first()
-    await expect(first.locator('th')).toHaveText('Store a document')
+    await expect(first.locator('th')).toHaveText(/^Store a document/)
+    await expect(first.getByTestId('ma-ops-target')).toHaveText(/^doc …/)
     await expect(first.locator('th')).toHaveAttribute('title', 'document_ingest')
-    await expect(first.locator('td').nth(0)).toHaveText('ingest')
+    await expect(first.locator('td').nth(0)).toHaveText(/ingest$/)
     await expect(first.locator('time')).toHaveText('6 min ago')
     await expect(first.locator('time')).toHaveAttribute('title', /^12 Jun 2026, \d\d:\d\d$/)
     await expect(first.locator('.chip')).toHaveText('running')
@@ -224,7 +225,7 @@ test.describe('backlog, with storing memories failing', () => {
 
     await expect(page.getByTestId('ma-ops-range')).toHaveText('1–25 of 56 operations · page 1 of 3')
     await expect(page.getByTestId('ma-ops-capped')).toHaveText(
-      'These are the newest 56 of 150 operations across the banks. Choose a bank to page through all of its operations.',
+      'These are the newest 56 of 150 operations across the banks. Older ones are listed per bank: pick one bank to page through everything it has. Pick a bank',
     )
   })
 
@@ -280,7 +281,7 @@ test.describe('backlog, with storing memories failing', () => {
     await expect(stat(page, 'waiting').locator('.ma-stat-value')).toHaveText('96operations')
     await expect(page.getByTestId('ma-ops-failed-count')).toHaveText('9 failed operations in big')
     await expect(rows(page)).toHaveCount(25)
-    for (const cell of await rows(page).locator('td.ma-ops-bank').all()) await expect(cell).toHaveText('big')
+    for (const cell of await rows(page).locator('td.ma-ops-bank').all()) await expect(cell).toHaveText(/big$/)
     // The cause is the engine's, not a bank's: it stays.
     await expect(page.getByTestId('ma-ops-cause')).toBeVisible()
   })
@@ -367,7 +368,7 @@ test.describe('backlog, with storing memories failing', () => {
     })
     const button = page.getByTestId('ma-ops-consolidate')
     await expect(button).toBeDisabled()
-    await expect(button).toHaveAccessibleDescription('Choose a bank to consolidate it.')
+    await expect(button).toHaveAccessibleDescription('Consolidation works on one bank at a time. Pick a bank to enable it.')
 
     await pickRichOption(scopeBank(page), 'ingest')
     await expect(button).toBeEnabled()
@@ -518,11 +519,15 @@ test.describe('phone width', () => {
     })
     expect(tooWide).toEqual([])
 
-    // The table scrolls inside its own region, which the keyboard can reach.
+    // Below 480 px each row is a card: no column hides behind a sideways scroll, and every
+    // cell is labelled.
     const region = page.getByRole('region', { name: 'Operations table' })
     await expect(region).toHaveAttribute('tabindex', '0')
     const scrolls = await region.evaluate((el) => el.scrollWidth > el.clientWidth)
-    expect(scrolls).toBe(true)
+    expect(scrolls).toBe(false)
+    for (const label of ['Bank', 'Queued', 'Status']) {
+      await expect(rows(page).first().locator(`td[data-label="${label}"]`)).toBeVisible()
+    }
 
     await expect(page.getByTestId('ma-ops-cause')).toBeVisible()
     await page.getByTestId('ma-ops-discard').scrollIntoViewIfNeeded()

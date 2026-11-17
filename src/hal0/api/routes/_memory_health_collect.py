@@ -611,6 +611,17 @@ def _live_bank_ids(provider: Any) -> frozenset[str] | None:
     return frozenset(i for i in ids if isinstance(i, str) and i)
 
 
+def _bank_role(provider: Any, bank_id: str) -> str | None:
+    """``"shared"`` or ``"private"`` for the two live banks of the two-bank layout, else ``None``."""
+    if getattr(provider, "two_bank", False) is not True:
+        return None
+    if bank_id == getattr(provider, "platform_bank", None):
+        return "shared"
+    if bank_id == getattr(provider, "private_bank", None):
+        return "private"
+    return None
+
+
 def _known_sum(values: list[int | None]) -> int:
     return sum(v for v in values if v is not None)
 
@@ -821,6 +832,9 @@ async def collect(request: Request) -> tuple[dict[str, Any], HealthFacts]:
                     "facts": b.facts,
                     "documents": b.documents,
                     "retired": b.retired,
+                    # Two-bank only: which live bank this is, by the provider's
+                    # own names; ``None`` for a retired bank or an old layout.
+                    "role": _bank_role(provider, b.bank_id),
                 }
                 for b in all_banks
             ],

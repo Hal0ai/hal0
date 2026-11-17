@@ -76,8 +76,8 @@ export function HealthOff() {
   return (
     <section className="card ma-card" aria-label="Summary" data-testid="ma-health-off">
       <EmptyState title="Memory is turned off" action={<GoLink href="#settings/memory">Open engine settings</GoLink>}>
-        Nothing is stored or recalled while memory is off, so there is nothing to check. Turn it on in
-        engine settings.
+        Nothing is stored or recalled while memory is off, so there is nothing to check. Turn on the
+        Memory switch in engine settings; it applies after the API restarts.
       </EmptyState>
     </section>
   )

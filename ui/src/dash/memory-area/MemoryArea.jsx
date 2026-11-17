@@ -75,6 +75,49 @@ function useMemoryRoute() {
   return [route, replaceRoute]
 }
 
+// The tab row scrolls sideways on a phone. This keeps the open tab in view and reports whether
+// there is more row to the left or right, so the strip can fade its edges (an edge fade that
+// follows the scroll is the hint that the row goes on).
+function useTabStrip(activeTab) {
+  const strip = useRef(null)
+  const [edges, setEdges] = useState({ start: false, end: false })
+
+  const measure = useCallback(() => {
+    const el = strip.current
+    if (!el) return
+    const start = el.scrollLeft > 1
+    const end = el.scrollLeft + el.clientWidth < el.scrollWidth - 1
+    setEdges((was) => (was.start === start && was.end === end ? was : { start, end }))
+  }, [])
+
+  // The open tab is scrolled to the middle of the row (the row only, never the page).
+  useEffect(() => {
+    const el = strip.current
+    const tab = el?.querySelector('[aria-current="page"]')
+    if (el && tab && el.scrollWidth > el.clientWidth) {
+      const target = tab.offsetLeft - (el.clientWidth - tab.offsetWidth) / 2
+      el.scrollLeft = Math.max(0, target)
+    }
+    measure()
+  }, [activeTab, measure])
+
+  useEffect(() => {
+    const el = strip.current
+    if (!el) return undefined
+    el.addEventListener('scroll', measure, { passive: true })
+    window.addEventListener('resize', measure)
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
+    observer?.observe(el)
+    return () => {
+      el.removeEventListener('scroll', measure)
+      window.removeEventListener('resize', measure)
+      observer?.disconnect()
+    }
+  }, [measure])
+
+  return [strip, edges]
+}
+
 function MetaLine({ meta }) {
   if (meta.kind === 'loading') {
     return (
@@ -97,6 +140,7 @@ function MetaLine({ meta }) {
  */
 export function MemoryArea({ notice = null }) {
   const [route, replaceRoute] = useMemoryRoute()
+  const [tabStrip, tabEdges] = useTabStrip(route.tab)
 
   const healthQuery = useMemoryHealth()
   const { data: healthData, isError: healthErrored } = healthQuery
@@ -147,7 +191,13 @@ export function MemoryArea({ notice = null }) {
             <h1>Memory</h1>
             <MetaLine meta={meta} />
           </div>
-          <nav className="ma-tabs" aria-label="Memory sections" data-testid="ma-tabs">
+          <div
+            className="ma-tabs-wrap"
+            data-fade-start={tabEdges.start ? 'true' : 'false'}
+            data-fade-end={tabEdges.end ? 'true' : 'false'}
+            data-testid="ma-tabs-wrap"
+          >
+          <nav className="ma-tabs" aria-label="Memory sections" data-testid="ma-tabs" ref={tabStrip}>
             {TABS.map((tab) => (
               <a
                 key={tab.id}
@@ -177,6 +227,7 @@ export function MemoryArea({ notice = null }) {
               </svg>
             </a>
           </nav>
+          </div>
         </div>
 
         {notice}

@@ -20,6 +20,7 @@ import {
   mergeOperationLists,
   nextTryText,
   operationStatus,
+  operationTarget,
   operationType,
   pageWindow,
   plainError,
@@ -83,6 +84,7 @@ function RowError({ error }) {
 
 function Row({ row, now, blocked, blockedId, note, onRetry }) {
   const type = operationType(row)
+  const target = operationTarget(row)
   const status = operationStatus(row.status)
   const queued = formatRelativeTime(row.created_at, now)
   const error = status.kind === 'failed' ? shortError(row.error_message) : null
@@ -91,12 +93,21 @@ function Row({ row, now, blocked, blockedId, note, onRetry }) {
   const nextTry = scheduled ? nextTryText(row.next_retry_at, now) : null
   const pending = note?.kind === 'pending'
   return (
-    <tr data-op={row.id} data-status={status.kind}>
-      <th scope="row" title={type.raw || undefined}>
+    <tr data-op={row.id} data-status={status.kind} role="row">
+      <th scope="row" role="rowheader" title={type.raw || undefined}>
         {type.label}
+        {target && (
+          <span className="ma-ops-target" title={target.title} data-testid="ma-ops-target">
+            {target.text}
+          </span>
+        )}
       </th>
-      <td className="ma-ops-bank">{row.bank}</td>
-      <td className="ma-ops-when">
+      <td className="ma-ops-bank" role="cell" data-label="Bank" title={row.bank}>
+        <span className="ma-cell-label">Bank: </span>
+        {row.bank}
+      </td>
+      <td className="ma-ops-when" role="cell" data-label="Queued">
+        <span className="ma-cell-label">Queued: </span>
         {queued ? (
           <time dateTime={row.created_at} title={formatDateTime(row.created_at) ?? undefined}>
             {queued}
@@ -105,7 +116,8 @@ function Row({ row, now, blocked, blockedId, note, onRetry }) {
           <Missing />
         )}
       </td>
-      <td>
+      <td role="cell" data-label="Status">
+        <span className="ma-cell-label">Status: </span>
         <div className="ma-ops-status">
           <StatusChip tone={status.tone}>{status.word}</StatusChip>
           {retried && <span className="ma-ops-note">{retried}</span>}
@@ -122,14 +134,14 @@ function Row({ row, now, blocked, blockedId, note, onRetry }) {
           </p>
         )}
       </td>
-      <td className="ma-ops-act">
+      <td className="ma-ops-act" role="cell">
         {status.kind === 'failed' && (
           <button
             type="button"
             className="btn ghost sm"
             disabled={blocked || pending}
             aria-describedby={blocked ? blockedId : undefined}
-            aria-label={`Retry: ${type.label}, queued ${queued ?? 'at an unknown time'}`}
+            aria-label={`Retry: ${type.label}${target ? `, ${target.text}` : ''}, queued ${queued ?? 'at an unknown time'}`}
             onClick={() => onRetry(row)}
             data-testid="ma-ops-retry"
           >
@@ -169,7 +181,7 @@ function PageControls({ view, onOffset }) {
   )
 }
 
-function Consolidate({ bank, onChanged }) {
+function Consolidate({ bank, onChanged, onPickBank }) {
   const consolidate = useConsolidateNow()
   const [message, setMessage] = useState('')
   // What it says belongs to the bank it was said about.
@@ -193,13 +205,18 @@ function Consolidate({ bank, onChanged }) {
       </span>
       <ReasonedButton
         className="btn ghost sm"
-        reason={bank ? null : 'Choose a bank to consolidate it.'}
+        reason={bank ? null : 'Consolidation works on one bank at a time. Pick a bank to enable it.'}
         disabled={consolidate.isPending}
         onClick={run}
         data-testid="ma-ops-consolidate"
       >
         {consolidate.isPending ? 'Queueing' : 'Consolidate now'}
       </ReasonedButton>
+      {!bank && onPickBank && (
+        <button type="button" className="btn ghost sm" onClick={onPickBank} data-testid="ma-ops-pick-bank">
+          Pick a bank
+        </button>
+      )}
       <span className="ma-ops-consolidate-status" role="status" data-testid="ma-ops-consolidate-status">
         {message}
       </span>
@@ -215,11 +232,13 @@ function Consolidate({ bank, onChanged }) {
  *   blocked: boolean,
  *   healthHref: string,
  *   onChanged: (bankIds: string[]) => void,
+ *   onPickBank?: () => void,
  * }} props `bank` is the scope: one bank, or null for every bank. `byBank` is the health
  *   answer's per-bank figures, used to leave quiet banks out of a waiting or failed read.
- *   `blocked` holds retry back. `onChanged` re-reads what an action changed.
+ *   `blocked` holds retry back. `onChanged` re-reads what an action changed. `onPickBank` moves focus to
+ *   the scope bar's bank control.
  */
-export function OperationsList({ bank, bankIds, byBank, blocked, healthHref, onChanged }) {
+export function OperationsList({ bank, bankIds, byBank, blocked, healthHref, onChanged, onPickBank }) {
   const headingId = useId()
   const blockedId = useId()
   const [filter, setFilter] = useState('all')
@@ -340,19 +359,19 @@ export function OperationsList({ bank, bankIds, byBank, blocked, healthHref, onC
           </p>
         )}
         <div className="ma-table-region" role="region" aria-label="Operations table" tabIndex={0}>
-          <table className="ma-table ma-ops-table" data-testid="ma-ops-table">
-            <thead>
-              <tr>
-                <th scope="col">Operation</th>
-                <th scope="col">Bank</th>
-                <th scope="col">Queued</th>
-                <th scope="col">Status</th>
-                <th scope="col">
+          <table className="ma-table ma-table-stack ma-ops-table" role="table" data-testid="ma-ops-table">
+            <thead role="rowgroup">
+              <tr role="row">
+                <th scope="col" role="columnheader">Operation</th>
+                <th scope="col" role="columnheader">Bank</th>
+                <th scope="col" role="columnheader">Queued</th>
+                <th scope="col" role="columnheader">Status</th>
+                <th scope="col" role="columnheader">
                   <span className="sr-only">Actions</span>
                 </th>
               </tr>
             </thead>
-            <tbody>
+            <tbody role="rowgroup">
               {rows.map((row) => (
                 <Row
                   key={`${row.bank}/${row.id}`}
@@ -404,7 +423,12 @@ export function OperationsList({ bank, bankIds, byBank, blocked, healthHref, onC
           {capped.total === null
             ? `These are the newest ${plural(capped.shown, 'operation', 'operations')} across the banks. Older ones exist.`
             : `These are the newest ${formatCount(capped.shown)} of ${plural(capped.total, 'operation', 'operations')} across the banks.`}{' '}
-          Choose a bank to page through all of its operations.
+          Older ones are listed per bank: pick one bank to page through everything it has.{' '}
+          {onPickBank && (
+            <button type="button" className="btn ghost sm" onClick={onPickBank} data-testid="ma-ops-capped-pick">
+              Pick a bank
+            </button>
+          )}
         </div>
       )}
       {!loading && !allFailed && failedBanks.length > 0 && (
@@ -413,7 +437,7 @@ export function OperationsList({ bank, bankIds, byBank, blocked, healthHref, onC
           {failedBanks.length === 1 ? 'its operations are' : 'their operations are'} not in this list.
         </div>
       )}
-      <Consolidate bank={bank} onChanged={onChanged} />
+      <Consolidate bank={bank} onChanged={onChanged} onPickBank={onPickBank} />
     </section>
   )
 }

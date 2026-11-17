@@ -254,10 +254,14 @@ test.describe('narrow screen', () => {
     const tops = await row.locator('a.ma-tab').evaluateAll((els) => els.map((el) => el.getBoundingClientRect().top))
     expect(new Set(tops.map((t) => Math.round(t))).size).toBe(1)
     expect(await row.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true)
-    // Nothing pushes the page itself sideways: the wide table scrolls inside its own region.
+    // The row says there is more of it: the end edge fades while the rest is off screen.
+    await expect(page.getByTestId('ma-tabs-wrap')).toHaveAttribute('data-fade-end', 'true')
+    // Nothing pushes the page itself sideways, and the banks table is stacked cards, so no
+    // column (Documents, Waiting, Failed) is cut off.
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
     const region = page.getByRole('region', { name: 'Banks table' })
-    expect(await region.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true)
+    expect(await region.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(false)
+    await expect(page.locator('[data-testid="ma-health-banks"] tbody tr').first().locator('td[data-label="Failed"]')).toBeVisible()
     // The last tab can be reached.
     await tab(page, 'agents').scrollIntoViewIfNeeded()
     await tab(page, 'agents').click()

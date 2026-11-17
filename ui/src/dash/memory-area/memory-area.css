@@ -400,6 +400,26 @@
 
 /* ── Tab row ────────────────────────────────────────────────────────────────── */
 
+/* The row's frame: its edges fade while there is more row beyond them (MemoryArea sets the
+   data attributes from the scroll position), so a clipped tab is a visible cue, not a surprise. */
+.ma-tabs-wrap { position: relative; }
+.ma-tabs-wrap::before,
+.ma-tabs-wrap::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 1px;
+  width: 28px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+  z-index: 1;
+}
+.ma-tabs-wrap::before { left: 0; background: linear-gradient(to right, var(--bg), transparent); }
+.ma-tabs-wrap::after { right: 0; background: linear-gradient(to left, var(--bg), transparent); }
+.ma-tabs-wrap[data-fade-start="true"]::before,
+.ma-tabs-wrap[data-fade-end="true"]::after { opacity: 1; }
+
 /* Tabs are links. The row scrolls sideways when it does not fit; it never wraps. */
 .ma-tabs {
   display: flex;
@@ -685,6 +705,20 @@
 }
 .ma-row:focus-visible { outline-offset: -2px; }
 
+/* A bank's role in the scope bar (shared, private, retired): a small word beside its name. */
+.ma-bank-role {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--fg-3);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.ma-bank-role[data-role="retired"] { border-style: dashed; }
+
 /* ── Table ──────────────────────────────────────────────────────────────────── */
 
 /* A table scrolls sideways inside its card, and the scroll box can be reached by keyboard. */
@@ -728,6 +762,72 @@
 .ma-table .ma-num {
   text-align: right;
   white-space: nowrap;
+}
+
+/* A phone is too narrow for the columns, and a table that scrolls sideways hides the last of them
+   with nothing to say so. Below 480px a table marked `.ma-table-stack` is drawn as one card per
+   row: the row's name on top, then each figure as "label  value" (the label is the cell's
+   `data-label`). Every column stays on screen; nothing scrolls. The header row stays in the
+   markup for screen readers and is only hidden from sight. */
+/* The visible label is `::before`, marked decorative (the second `content` is its text
+   alternative: none). The label a screen reader gets is `.ma-cell-label`, a real element inside
+   the cell, so it does not depend on generated content; it is only present in the stacked
+   layout, where the column headers are out of sight. */
+.ma-cell-label { display: none; }
+@media (max-width: 480px) {
+  .ma-cell-label {
+    display: inline;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .ma-table-stack { min-width: 0; display: block; }
+  .ma-table-stack thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+  .ma-table-stack tbody { display: block; }
+  .ma-table-stack tbody tr {
+    display: block;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .ma-table-stack tbody tr:last-child { border-bottom: 0; }
+  .ma-table-stack tbody th,
+  .ma-table-stack tbody td {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    padding: 3px 0;
+    border-bottom: 0;
+    text-align: right;
+    overflow-wrap: anywhere;
+  }
+  .ma-table-stack tbody th { display: block; padding-bottom: 6px; text-align: left; }
+  .ma-table-stack tbody td::before {
+    content: attr(data-label);
+    content: attr(data-label) / "";
+    flex: none;
+    color: var(--fg-3);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  /* A cell with no label (the actions) has nothing to name; it keeps to the right. */
+  .ma-table-stack tbody td:not([data-label])::before { content: none; }
+  .ma-table-stack tbody td:not([data-label]) { justify-content: flex-end; }
+  .ma-table-stack.ma-ops-table { min-width: 0; }
+  .ma-table-stack.ma-ops-table td.ma-ops-when { white-space: normal; }
+  .ma-table-stack.ma-ops-table td.ma-ops-act:empty { display: none; }
 }
 
 /* ── Loading ────────────────────────────────────────────────────────────────── */
@@ -807,6 +907,15 @@
 .ma-ops-table td.ma-ops-act {
   text-align: right;
   white-space: nowrap;
+}
+/* What the row works on, under its type: a document's id tail, a page, a file. */
+.ma-ops-target {
+  display: block;
+  margin-top: 2px;
+  color: var(--fg-3);
+  font-size: 11px;
+  font-weight: 400;
+  overflow-wrap: anywhere;
 }
 /* The chip, then what else is known about the row's state, in words. */
 .ma-ops-status {

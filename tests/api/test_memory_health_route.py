@@ -348,8 +348,14 @@ def test_a_healthy_box_is_clear_and_fills_the_whole_shape(
         "facts": 1355,
         "retired": 0,
         "list": [
-            {"bank_id": "shared", "facts": 1335, "documents": 253, "retired": False},
-            {"bank_id": "coding-agent::repo-1.4", "facts": 20, "documents": 3, "retired": False},
+            {"bank_id": "shared", "facts": 1335, "documents": 253, "retired": False, "role": None},
+            {
+                "bank_id": "coding-agent::repo-1.4",
+                "facts": 20,
+                "documents": 3,
+                "retired": False,
+                "role": None,
+            },
         ],
     }
     assert body["writes"] is None
@@ -724,6 +730,7 @@ def test_a_bank_the_engine_errors_on_is_partial_not_a_failure(
         "facts": 10,
         "documents": None,
         "retired": False,
+        "role": None,
     }
     assert body["queue"]["waiting"] == 1
 
@@ -786,7 +793,7 @@ def test_malformed_rows_inside_a_well_formed_list_are_skipped(
     assert 95.0 <= body["queue"]["oldest_waiting_s"] <= 130.0
     assert body["knowledge"]["models"] == 1 and body["knowledge"]["models_stale"] == 0
     assert body["banks"]["list"] == [
-        {"bank_id": "b", "facts": 10, "documents": None, "retired": False}
+        {"bank_id": "b", "facts": 10, "documents": None, "retired": False, "role": None}
     ]
     assert body["queue"]["consolidation_pending"] == 0
 
@@ -878,6 +885,9 @@ def test_two_bank_health_counts_only_the_live_banks(engine: _Engine) -> None:
     assert banks["retired"] == 1 and banks["total"] == 3
     flags = {b["bank_id"]: b["retired"] for b in banks["list"]}
     assert flags == {"hal0:shared": False, "hal0:private": False, "Hal0::Agents": True}
+    # The roles are the provider's own bank names, not a guess from the id.
+    roles = {b["bank_id"]: b["role"] for b in banks["list"]}
+    assert roles == {"hal0:shared": "shared", "hal0:private": "private", "Hal0::Agents": None}
 
 
 def test_two_bank_health_reads_a_retired_bank_for_its_size_only() -> None:

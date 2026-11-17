@@ -5,7 +5,7 @@
 import { createElement } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MemoryBank } from '@/api/hooks/useHindsight'
-import { BANKS, ENGINE, makeArea } from './area-test-fixtures'
+import { BANKS, ENGINE, healthReport, makeArea } from './area-test-fixtures'
 import { cleanup, click, mount } from './shared/test-harness'
 
 const { FactsTab, LAST_BANK_KEY } = await import('./FactsTab.jsx')
@@ -104,6 +104,33 @@ describe('switching bank', () => {
     const { host } = render(makeArea({ hash: '#memory/facts?bank=shared', replaceRoute }))
     click(radios(host)[0])
     expect(replaceRoute).not.toHaveBeenCalled()
+  })
+})
+
+describe('bank roles in the scope bar', () => {
+  it('marks the shared, private and retired banks from the health answer', () => {
+    const banks = [{ bank_id: 'hal0:shared' }, { bank_id: 'hal0:private' }, { bank_id: 'Hal0::Agents' }]
+    const health = healthReport({
+      banks: {
+        layout: 'two_bank',
+        total: 3,
+        facts: 30,
+        retired: 1,
+        list: [
+          { bank_id: 'hal0:shared', facts: 10, documents: 1, role: 'shared' },
+          { bank_id: 'hal0:private', facts: 10, documents: 1, role: 'private' },
+          { bank_id: 'Hal0::Agents', facts: 10, documents: 1, retired: true },
+        ],
+      },
+    })
+    const { host } = render(
+      makeArea({ hash: '#memory/facts?bank=hal0:shared', banksQuery: { data: { banks } }, health }),
+    )
+    expect(radios(host).map((r) => r.getAttribute('aria-label'))).toEqual([
+      'hal0:shared, shared',
+      'hal0:private, private',
+      'Hal0::Agents, retired',
+    ])
   })
 })
 
