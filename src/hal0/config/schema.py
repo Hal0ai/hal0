@@ -3820,7 +3820,9 @@ class MemoryConfig(BaseModel):
         default="hindsight",
         description=(
             "Active memory engine. 'hindsight' (default) is the platform "
-            "engine; 'mem0' and 'pgvector' are alternates. The legacy "
+            "engine; 'pgvector' is the in-memory, non-durable fallback. "
+            "'mem0' is accepted but not implemented: hal0 logs a warning and "
+            "runs Hindsight. The legacy "
             "'cognee' value was retired in v1.0.0 (the Cognee store has been "
             "dark since v0.4 and its wrapper was removed) — a hal0.toml "
             "still carrying it must be updated to 'hindsight'."
