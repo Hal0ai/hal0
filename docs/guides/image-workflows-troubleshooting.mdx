@@ -13,7 +13,7 @@ and what a render does to chat. This page covers ComfyUI editor workflows, the
 ## Workflows and the ComfyUI editor
 
 ComfyUI's own editor is where video, image-edit and upscale models run, and
-where you build a workflow of your own. The **Engine** tab's editor card lists a
+where you build a workflow of your own. The editor card on **Slots → Image Gen → Engine** lists a
 chip for each installed model's workflow, plus a `custom` chip for each workflow
 that no catalog model owns, from the workflows folder
 (`<model store>/comfyui/workflows`, where you can drop a `<name>.json`) or
@@ -118,7 +118,7 @@ model store cannot hold what is still to download. The message gives the GB
 needed, less what is already staged, and the GB free. Free space or move the
 model store (Settings → Storage), then install again: the staged bytes resume.
 
-**The Models tab says `The image model folder is not readable`, or an install
+**The Image Gen Models tab says `The image model folder is not readable`, or an install
 answers 409 `comfyui.models_dir_not_writable`.** The hal0 user cannot read or
 write the models tree. The tab shows two commands to run on the host,
 `sudo chgrp -R <hal0 group> <path>` and `sudo chmod -R 2775 <path>`; then

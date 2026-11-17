@@ -43,7 +43,7 @@ across 5 call sites, now unified). `DEFAULT_DEVICE = "gpu-rocm"`.
 | `gpu-vulkan` | GPU (Vulkan) | — | `chat` | Runs anywhere Mesa Vulkan does, and needs only a render node — so it is the lane for a box with no `/dev/kfd`. It is not the seeded default for maturity reasons, not speed ones. LLM slots on this device are gated on a runner image whose digest is Vulkan-gated in `manifest.json` (#1888/#1948). Also the device the non-llama.cpp Vulkan runtimes use (Kokoro, ComfyUI). |
 | `gpu-cuda` | GPU (CUDA) | — | `chat` | NVIDIA GPUs via llama.cpp CUDA — experimental on hal0. |
 | `cpu` | CPU | — | `cpu-chat` | Always available, slow but correct. |
-| `npu` | NPU (FLM) | — | `flm` | AMD XDNA NPU via FastFlowLM — chat/embed/ASR trio on one process. |
+| `npu` | NPU (FLM) | — | `flm` | AMD XDNA NPU via FastFlowLM — chat/embed/ASR trio on one process. A slot on this device that selects the optional `xdna` runner (profile `xdna`) runs a plain GGUF chat model through ggml-xdna instead. |
 
 `VALID_DEVICES` is the frozenset of these 5 ids. A legacy v0.1 `backend` enum
 (`rocm|vulkan|cuda|cpu|flm|moonshine|kokoro`) is deprecated and round-trips for one

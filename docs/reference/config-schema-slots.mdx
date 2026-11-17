@@ -82,10 +82,13 @@ a 400 `slot.removed_key_denied` that names its replacement.
 | `idle_timeout_s` | int | `300` | — | `>= 0`; `0` disables IDLE-TTL eviction for this slot only — pressure and pre-load eviction are separate paths, exempted by `pinned`. `idle_timeout_s` does not apply to the ComfyUI `img` slot, which idle, pressure and pre-load eviction never unload. Read via the raw-dict sweep path (not the typed loader), an out-of-range value there is clamped/floored at read time, not errored — the typed `POST`/`PUT` API path still hard-rejects via pydantic's `ge` |
 | `pinned` | bool | `false` | — | exempts the slot from auto-eviction; blocks manual unload without `force` |
 | `autoload` | bool \| null | `null` | — | `true` → the Quadlet unit gets `[Install] WantedBy=hal0.target` and the slot starts at boot; `false` → unit exists, nothing starts it. `null` (key absent) is the migration shim: derived from a non-empty `model.default`. `POST /api/slots` persists an explicit value (`false`) |
+| `max_inflight` | int \| null | `null` | — | `>= 1`. Per-slot cap on concurrent forwarded requests. Requests wait in a priority queue, the read timeout starts at admission, and a request that waits longer than 1800 s answers `503 dispatch.admission_timeout`. Unset means 1 on FLM and xdna slots (both NPU backends serve one request at a time) and unlimited elsewhere ([ADR-0056](/docs/adr/0056-serial-backend-admission)). |
 | `priority` | int | `50` | — | `0-100`; eviction order, lowest evicted first, `last_used` breaks ties. `100` is *not* a pin — use `pinned`. Read via the raw-dict sweep path, an out-of-range TOML value is clamped to `0-100` at read time, not errored — the typed `POST`/`PUT` API path still hard-rejects via pydantic's `ge`/`le` |
 | `model` | table | — | — | `[model]`, see below |
 | `server` | table | — | — | `[server]`, see below |
 | `npu` | table \| null | `null` | — | `[npu]`, see below |
+| `xdna` | table \| null | `null` | — | `[xdna]`, see below; only on a slot whose `binary` is `xdna` |
+| `tune` | table \| null | `null` | — | sparse overrides, see [Slot `[tune]` table](#slot-tune-table) |
 | `image` (alias `image_gen`) | table | — | — | `[image]`, see below |
 
 There is **no catch-all**: a table or key the schema does not declare is an error, not a place
@@ -142,6 +145,18 @@ A write carrying tuning under `[model]` is rejected with
 model, e.g. `d3:lite`) for a slot that serves decision calls itself. It must
 match `d3:<name>`; the FLM provider then appends `flm serve … --decision <tag>`
 to the slot's command.
+
+### `[xdna]` (nested under a slot)
+
+`extra="forbid"`. Only meaningful on a slot whose `binary` is `xdna`
+(the ggml-xdna NPU runner); the write guard refuses the table on any other slot.
+An absent table is the all-defaults xdna slot.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `pmode` | str \| null | `null` | One of `default`, `turbo`, `balanced`, `powersaver`, `performance`. |
+| `env` | dict[str,str] | `{}` | `GGML_XDNA_*` overrides, screened at write time. `GGML_XDNA_PGEMM_GLU_A` is pinned and any other value is refused with `400 validation.xdna_env_pinned`. |
+| `host_xrt` | str \| null | `null` | Absolute host path to an XRT install, bind-mounted read-only into the container. A relative path is rejected. |
 
 ### `[image]` (nested under a slot, alias for `image_gen`)
 

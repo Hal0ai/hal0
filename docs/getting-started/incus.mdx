@@ -18,11 +18,13 @@ kernel so the iGPU and XDNA NPU pass through as plain device nodes (the
 same mechanism the [Proxmox guide](/docs/getting-started/proxmox/) uses),
 and its root is an ordinary unprivileged uid on the host.
 
-This is not a Docker or Podman "appliance image", and that is deliberate:
-hal0 is itself a container orchestrator. Boxing it in an OCI container
-would need either nested podman inside the image or the host's container
-socket, and the socket is root on the host. A system container gives the
-installer the systemd it expects and keeps the host's root out of reach.
+This is not an OCI "appliance image", and that is deliberate (ADR-0050):
+hal0 is itself a container orchestrator, and an image of its control plane
+would need systemd and nested podman inside it, or the host's container
+socket, which is root on the host. A system container gives the installer the
+systemd it expects and keeps the host's root out of reach. If you would rather
+not run Incus, hal0 also offers an opt-in
+[rootless podman box](/docs/getting-started/box/).
 
 <Aside type="caution" title="Unprivileged is the point">
 Keep `security.privileged=false` (Incus's default). A privileged
@@ -265,14 +267,14 @@ incus exec hal0 -- podman run --rm quay.io/podman/hello
 The loop skips profiles that are not installed, so it is safe on an image
 that has none.
 
-**The installer repairs this itself.** From the release that ships the fix
-tracked in [#3234](https://github.com/Hal0ai/hal0/issues/3234), hal0's
+**The installer repairs this itself.** Since v1.8.0
+([#3234](https://github.com/Hal0ai/hal0/issues/3234)), hal0's
 installer detects this exact failure — `podman run` failing with `: socket:
 permission denied` — but only inside a nested AppArmor policy namespace,
 which is what an unprivileged LXC or Incus container is. It never acts on a
 bare-metal host or in a privileged container. It disables only those of the
 six profiles that exist and carry `flags=(unconfined)`, retries, and prints
-what it changed. Until you are on that release, this check is manual.
+what it changed.
 
 The denial depends on the **host** kernel: it reproduced on a Proxmox VE 9.2
 host running kernel 7.0 and not on a 6.8 kernel, and Ubuntu 26.04 guests were
@@ -375,8 +377,7 @@ Dashboard at `http://<eth0-address>:8080`, Open WebUI at `:3001`. Load a
 model as in [Load your first model](/docs/getting-started/first-model/)
 and check that the slot's backend is `rocm` or `vulkan`, not `cpu`.
 
-A fresh install reported 31 passes, 5 warnings and no failures from
-`hal0 doctor all`. The five warnings were: no capability slots active, the
+A fresh install reported no failures from `hal0 doctor all`. The warnings were: no capability slots active, the
 open-on-LAN auth posture (set an admin key,
 [Authentication](/docs/operate/auth/)), `Port DNAT rules` audit unavailable,
 the agent uid split, and memory extraction speed.

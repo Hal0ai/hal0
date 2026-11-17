@@ -68,8 +68,8 @@ tokens: when `hal0 oauth status` reports the token expired, connect again.
 the registry names a `revoke_url`, and deletes hal0's copy even if that call
 fails.
 
-A Hermes provisioned on 1.3.0 or later has a persona section describing this
-flow — send the consent link, poll `status`, confirm — which it runs through
-`hal0 oauth` shell commands, so it needs the terminal tool (see [Hermes' terminal tool](/docs/guides/run-agents#hermes-terminal-tool--off-by-default)); with
-the tool off, run the steps yourself. On a box provisioned before 1.3.0, run
-`hal0 agent reprovision hermes` first.
+Hermes's persona has a section describing this flow — send the consent link,
+poll `status`, confirm — which it runs through `hal0 oauth` shell commands, so
+it needs the terminal tool (see [Hermes' terminal tool](/docs/guides/run-agents#hermes-terminal-tool--off-by-default));
+with the tool off, run the steps yourself. If the agent does not describe the
+flow, run `hal0 agent reprovision hermes` to rewrite the persona file.

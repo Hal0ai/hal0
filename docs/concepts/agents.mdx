@@ -163,13 +163,46 @@ upgrades or uninstalls Pi, so the card does not run anything: it copies
 `sudo hal0 update component pi` (and the uninstall and reinstall commands) for you
 to run on the box. See [The Agents view](/docs/guides/agents-view#pi).
 
+## The agent bridge
+
+A coding agent that runs somewhere else (Claude Code on a workstation, Codex, a
+CI job) can use the Hermes agent on a hal0 box through the **agent bridge**
+([ADR-0043](/docs/adr/0043-agent-bridge-and-bridge-keys)). `hal0 bridge add
+<name>` mints a revocable key of the form `hal0bk_<name>.<token>`, shown once,
+with the connection lines to paste into the client. The key grants scopes, and
+each scope opens one MCP server:
+
+| Scope | MCP server | What it opens |
+|---|---|---|
+| `agents` | `hal0-agents` at `/mcp/agents` | Start, wait on, steer and stop Hermes runs, and teach it shared memory and drop-in skills. |
+| `memory` | `hal0-memory` at `/mcp/memory` | The shared memory tools. |
+| `admin` | `hal0-admin` at `/mcp/admin` | The admin tool catalog; off unless you grant it. |
+
+A client gets `agents` and `memory` unless you pass `--scope`. A bridge client
+sees only its own runs, at most two at once by default
+(`[bridge].max_concurrent_runs_per_client`). Skill writes and deletes through
+`hal0-agents` are queued in the approval inbox for you to decide rather than
+applied. The key is its own credential tier, `bridge`, which opens these
+surfaces and no other non-open route
+([Security](/docs/concepts/security#the-v10-auth-layer-three-tiers-deny-by-default)).
+Its client name is also its memory identity. `hal0 bridge list`, `rotate`,
+`scopes` and `revoke` manage keys, and `hal0 bridge runs` lists runs.
+`[bridge].enabled` is on by default; with no client added, nothing but the admin
+key can authenticate.
+
+When the Open WebUI unit is installed, hal0-api also creates a managed bridge
+client named `openwebui` and renders its key into Open WebUI's tool-server
+connections, so every chat carries the memory and Hermes delegate tools
+([ADR-0049](/docs/adr/0049-openwebui-hindsight-is-a-context-source)). See
+[Delegate work to the Hermes agent](/docs/guides/delegate-to-agents) for the
+walkthrough.
+
 ## hal0-brain: the steward that drives hal0 itself
 
 Separately from the bundled agent runtime, hal0 runs its own **brain
 steward** — a small, always-available model that chats with the operator and
 routes tool calls against hal0's own curated `hal0-admin` MCP tool catalog,
-not general-purpose coding or chat. It's the mechanism behind features like
-the Operator Board, and it's deliberately kept 1:1 with a small model rather
+not general-purpose coding or chat. It also reads and writes the Operator Board, and it's deliberately kept 1:1 with a small model rather
 than sharing a slot with the general agent's model — the steward handles its
 own tool-call turns, including routing specific rounds to a dedicated
 `tool_model` where that's a better fit than the conversational model.
@@ -285,8 +318,11 @@ unbounded bill.
 
 When the [memory subsystem](/docs/concepts/memory) is enabled, the agent gets
 shared memory tagged with its own identity (a single write can be kept private
-with `private=true`) that it reads and writes through MCP — five tools: `memory_add`, `memory_search`, `memory_list`,
-`memory_delete`, and `memory_recall`. Because memory is opt-in, the agent's
+with `private=true`) that it reads and writes through the `hal0-memory` MCP
+server: the core tools `memory_add`, `memory_search`, `memory_list`,
+`memory_delete` and `memory_recall`, plus reflect, curate, mental-model,
+directive, operation and bank tools (see [MCP tools:
+hal0-memory](/docs/reference/mcp-tools-memory)). Because memory is opt-in, the agent's
 memory surface degrades cleanly when it's off: the per-agent memory stats
 simply report as unavailable rather than erroring, so an install without
 memory still runs the agent normally.

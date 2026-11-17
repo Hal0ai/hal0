@@ -74,7 +74,7 @@ Entries are normalised when the file is loaded. An alias that points at a
 denied name, or back at a name that leads to it, is refused at load. An alias
 whose two sides are the same name once normalised (`"Widgets" = "widgets"`)
 does nothing and is ignored. Changes need a restart of `hal0-api`. See the
-[config schema](/docs/reference/config-schema#memoryprojects).
+[config schema](/docs/reference/config-schema-memory/#memoryprojects).
 
 ## What a write is tagged with
 
@@ -100,13 +100,6 @@ caller sent is dropped: only hal0 stamps it, on a write through
 The decision is also written to the document's metadata, unless the caller
 already set the key: `project` (the slug, several slugs joined by commas, or
 `unresolved`) and `project_source` (`field`, `bank`, `tag` or `denied`).
-
-<Aside type="note">
-Before this change a durable write carried `agent:<id>` and `kind:durable`
-and nothing else from hal0. It now also carries `scope:global` when it has no
-project. A `project:<name>` tag you send is normalised, may be aliased or
-dropped, and is stored after hal0's own tags instead of where you put it.
-</Aside>
 
 ## Observations consolidate per project
 

@@ -101,6 +101,28 @@ documented coverage to every `/api/*` prefix currently mounted (previously 18 of
 roughly 43). `WS /v1/realtime` is documented separately — see
 [Realtime API reference](/docs/reference/api/realtime/).
 
+## Memory routes
+
+Routes under `/api/memory` besides the ones described in the table row above.
+All are ADMIN except `POST /api/memory/context` (CLIENT) and the Open WebUI Filter source (OPEN), as noted in the table.
+
+| Route | Purpose |
+|---|---|
+| `POST /api/memory/add`, `/search`, `/recall`, `/delete`; `GET /api/memory/list` | Write, search, token-budgeted recall, delete by id and a paginated list. `add` takes `project` (or the `X-hal0-Project` header; the body wins). |
+| `POST /api/memory/reflect` | Ask the engine to answer a query from memory (LLM synthesis). |
+| `POST /api/memory/context` | Shared-only, ACL-filtered context for chat retrieval (raw Hindsight chunks, then the facts they do not cover). It is in the CLIENT auth class, like `/mcp/memory`. |
+| `GET /api/memory/openwebui-function/hal0_hindsight_rag.py` | The bundled Open WebUI Filter source, for manual import. OPEN: Open WebUI's importer cannot send a bearer key. |
+| `GET /api/memory/lanes` | Decision-model health, the LLM lane configuration and each bank's queue depth. |
+| `GET /api/memory/agents` | Coding-agent connections and the `hal0 memory agents install` command, plus `console_url` (see [`[memory.console]`](/docs/reference/config-schema-memory/#memoryconsole)). |
+| `GET /api/memory/models` | The configured embeddings, reranker and decision models, the decision server's reachability and the embedder the store was built with. |
+| `GET /api/memory/engine` | The engine card payload; it never errors, so the dashboard can always render. |
+| `/api/memory/engine/{path}` | Allowlisted passthrough to the Hindsight REST API: the exact paths `v1/bank-template-schema`, `version` and `health`, and anything under `v1/default/banks`. `DELETE` is allowed only for a bank's directives and mental models, and a path ending in `delete`, `clear`, `reset`, `wipe` or `purge` is refused. |
+| `GET /api/memory/banks/{bank_id}/stats`, `/profile`, `/units`, `/graph/subgraph`; `PUT /api/memory/banks/{bank_id}/profile` | Per-bank stats, config profile, a ranked fact slice and the graph. |
+| `GET`/`POST /api/memory/banks/{bank_id}/document-transfer` | Export a bank's documents as a ZIP, or import one (`?on_conflict=skip\|replace\|new-id`, default `skip`; answers `202` with an `operation_id` to poll). |
+| `DELETE /api/memory/banks/{bank_id}`, `/memories` | Delete a bank or wipe its memories; both need the `?confirm=` echo. |
+| `GET /api/memory/graph/status`, `/graph/chunk-check`, `/graph/throughput`; `POST /api/memory/graph/throughput`, `/graph/retry`; `PUT /api/memory/graph` | Graph-extraction state and settings. `GET /graph/throughput` returns the last extraction-throughput estimate without probing the slot; `POST` measures one; `POST /graph/retry` requeues every failed extraction and consolidation operation across banks. |
+| `GET /api/memory/health`, `/refresh-policy` | See the [Memory health API reference](/docs/reference/api/memory-health/) and the row above. |
+
 ## Secrets and Proxmox
 
 The `/api/secrets` routes and their server-side validation, and the

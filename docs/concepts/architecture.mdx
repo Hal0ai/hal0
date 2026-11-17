@@ -65,9 +65,14 @@ surface area:
   `Authorization` header.
 - **`/api/*`** — the operator control plane: slots, stacks, models,
   capabilities, profiles, providers, companion services, hardware, health,
-  settings, activity, auth, and more.
-- **`/mcp/admin`** and **`/mcp/memory`** — Model Context Protocol servers
-  mounted as sub-applications so agents and tools can drive hal0 directly.
+  settings, activity, auth, and more. `/api/board/*` is a live proxy to the
+  Hermes kanban, which is the Operator Board: hal0 keeps no board store of its
+  own.
+- **`/mcp/admin`**, **`/mcp/memory`** and **`/mcp/agents`** — Model Context
+  Protocol servers mounted as sub-applications so agents and tools can drive
+  hal0 directly. `/mcp/agents` is the agent bridge's server, mounted while
+  `[bridge].enabled` is on (the default); it is inert until you add a client
+  with `hal0 bridge add`. See [Agents](/docs/concepts/agents#the-agent-bridge).
 - **`/`** — the built dashboard SPA, mounted last so it never shadows an API
   route. Any unmatched non-API path falls back to the SPA's `index.html` so
   client-side routing survives a reload.
@@ -177,7 +182,7 @@ a request went where it did.
 
 1. A client `POST`s to `/v1/chat/completions` with a `model` field — that can
    be a model id, or a **slot alias**: the name of any enabled llm slot, such
-   as `agent` or `utility`.
+   as `agent` or `memory`.
 
 2. The route layer translates a slot alias to the slot's configured model id,
    then asks the dispatcher to resolve the request to an `UpstreamCall`. The
@@ -202,16 +207,17 @@ a request went where it did.
 
 <Aside type="tip">
 Addressing a slot by its **alias** — its slot name, such as `agent` or
-`utility` — is the stable way to pin a co-resident model: the alias doesn't
+`memory` — is the stable way to pin a co-resident model: the alias doesn't
 change when you swap the underlying model. See [Slots](/docs/concepts/slots).
 </Aside>
 
 ## The front ends
 
 hal0-api serves the **dashboard** itself — a React single-page application.
-There is no separate web server to run. The dashboard is where you create and
-operate slots, pull models, pick capabilities, watch live activity, and configure
-the platform.
+There is no separate web server to run. The dashboard opens on the Overview, an
+operator's briefing of what the box is doing, what needs you and who is working.
+It is also where you create and operate slots, pull models, pick capabilities,
+watch live activity, review memory, and configure the platform.
 
 For end-user chat, point **OpenWebUI** (or any OpenAI-compatible client) at
 hal0's `/v1` surface. Because hal0 speaks the OpenAI API, anything that talks to

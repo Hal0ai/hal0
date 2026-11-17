@@ -1,0 +1,40 @@
+---
+title: The Operator Board
+description: The dashboard's kanban board is the Hermes kanban, proxied through hal0-api — lanes, filters, empty states, the hal0 board CLI and the one-time move of old cards.
+sidebar:
+  order: 62
+---
+
+The Operator Board is the Hermes kanban. hal0 keeps no board of its own:
+`/api/board/*` is an audited proxy to the kanban plugin of the bundled Hermes
+agent, so the board needs Hermes installed and running. Open it from the
+**Kanban** link in the sidebar's Services zone, from the command palette, or
+with **⌘B**.
+
+The lanes are Triage, To-do, Scheduled, Ready, In-progress, Blocked, Review and
+Done; **Show archived** adds Archived. Tasks drag between lanes, and a
+selection takes bulk moves (to-do, ready, block, unblock, complete, archive).
+The Tenant and Assignee filters narrow the board, and **New board** creates
+another one. When the board cannot load, the page says why instead of showing
+an empty board: no Hermes installed (`board.not_installed`), Hermes not running
+(`board.unreachable`), or the dashboard token missing (`board.no_token`, fixed
+by restarting the agent). `hal0 doctor all` has matching `hermes-kanban`,
+`hermes-dashboard-token` and `hermes-session-token-pin` rows.
+
+```sh
+hal0 board list [--board <slug>] [--include-archived] [--json]
+hal0 board show <task-id> [--json]
+hal0 board add "<title>" [--body <text>] [--assignee <profile>] [--status triage] [--priority N] [--board <slug>]
+hal0 board move <task-id> <lane>
+```
+
+Cards that a box's old hal0 board held are moved into the Hermes board of the
+same slug, in Triage, at the first board request (or exported to
+`board-legacy-export-<timestamp>.json` in the hal0 state directory when Hermes is
+not installed).
+
+## Related
+
+- [Run agents](/docs/guides/run-agents) — installing and running Hermes, which
+  hosts the board.
+- [The Agents page](/docs/guides/agents-view) — the Hermes card and its console.

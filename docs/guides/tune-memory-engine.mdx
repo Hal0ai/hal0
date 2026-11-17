@@ -1,0 +1,70 @@
+---
+title: Tune the memory engine
+description: The memory engine's worker slots, extraction and engine limits, and the opt-in local decision model server, from Settings → Memory and the hal0 memory decision CLI.
+sidebar:
+  order: 52
+---
+
+Beyond turning memory on ([Enable memory](/docs/guides/enable-memory)), a box's
+memory engine has limits worth knowing: how many tasks it runs at once, how long
+a reflect may take, and whether it uses a small local model for its decision
+calls. All of it lives under Settings → Memory (`#settings/memory`) and in
+`hal0.toml`; a save restarts `hindsight-api`.
+
+## Engine limits and worker slots
+
+Three groups under Settings → Memory bound how hard the engine works.
+Each one writes `hal0.toml` and renders into the `hindsight-api` drop-ins, so
+a save restarts the engine.
+
+- **Worker slots** (`[memory.graph]`): `extraction_worker_slots` is how many
+  queued memory tasks the engine runs at once (default 4, range 3 to 32).
+  `retain_reserved_slots` (default 1), `consolidation_reserved_slots`
+  (default 2) and `refresh_reserved_slots` (default 0) set how many of those
+  slots only that kind of task may take. The reservations plus one shared
+  slot must fit inside the total, and the save is refused otherwise.
+- **Extraction limits** (`[memory.graph]`): the in-flight and token caps
+  described above. The engine's global LLM concurrency follows
+  `extraction_max_concurrent` (held to the extraction slot's `--parallel`)
+  unless you set `[memory.lanes].llm_max_concurrent`; the consolidation lane
+  takes one fewer permit, never below 1.
+- **Engine limits**: `[memory.lanes.reflect].wall_timeout_s` is the time one
+  reflect or knowledge-page refresh gets, queueing for an LLM permit
+  included (default 1800 s, range 60 to 86400), and
+  `[memory.lanes.consolidation].batch_size` is how many memories one
+  consolidation call takes (default 4, range 1 to 32).
+
+## The decision model server
+
+The Hindsight decision model (`hs-decide-1-flash`) answers the engine's
+decision-gated calls (recall pruning, consolidation judgments, reflect
+sufficiency) with one CPU forward pass instead of an LLM call. It is an
+opt-in component: nothing installs it by default, and
+`[memory.decision].provider` is `off` until you do. Without it the extraction
+model makes those judgments.
+
+```sh
+hal0 memory decision install     # build the venv, fetch the model, start hal0-hs-decide, set provider = "local"
+hal0 memory decision status      # provider, installed, service, answering
+hal0 memory decision disable     # provider = "off"; the server keeps running
+hal0 memory decision enable      # provider = "local" again
+hal0 memory decision remove      # stop and delete the unit and venv; add --purge-model to drop the model too
+```
+
+`install` downloads CPU PyTorch (about 640 MB of venv) and the model (about
+1.5 GB), and the server holds about 2.7 GB of RAM while it serves; it asks
+before starting unless you pass `--yes`. Run it again after an update to
+re-converge onto the release's pins. A plain `hal0 update` only keeps an
+installed server on those pins and never installs one. The server binds
+`127.0.0.1` on `[memory.decision].port` (default 9178); `threads` (default 8),
+`max_concurrent` (4), `max_request_tokens` (4096) and `timeout_s` (60) tune it.
+`hal0 doctor` reports the decision row as off, answering, not installed or not
+answering, and Settings → Memory → Models shows the same status in its
+**Decision model** group.
+
+## Related
+
+- [Enable memory](/docs/guides/enable-memory) — turning memory on, the
+  extraction slot and reranking.
+- [The Memory area](/docs/guides/memory-workspace) — the Health tab's tiles
+  link to the matching Models group.

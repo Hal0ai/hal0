@@ -23,7 +23,7 @@ These four terms get used loosely; the code draws sharp lines between them.
   *drives* one. The virtual model it speaks through, `hal0/brain`, resolves
   to the `brain` slot when one is loaded, and falls back to the `agent` slot
   otherwise, via the normal `hal0/<slot>` resolver chain.
-- **An agent** — as of v1.0, Hermes — is a bundled, sandboxed general-purpose
+- **An agent** — Hermes — is a bundled, sandboxed general-purpose
   agent runtime hal0 governs but doesn't build. The brain is not an agent
   runtime: it's hal0's own conversational front end onto hal0's own admin
   API, described in [Agents](/docs/concepts/agents).
@@ -38,7 +38,7 @@ The brain embodies the **`hal0-brain` persona** — a persona TOML in the same
 store Hermes personas live in (see
 [Agents → Personas](/docs/concepts/agents)). `seed_default_personas` writes
 `hal0-brain.toml` unconditionally, both at install time and again on every
-`hal0-api` startup, so the persona is present on every v1.0 box unless an
+`hal0-api` startup, so the persona is present on every box unless an
 operator deletes the file. Its own system prompt and `preferred_model =
 "hal0/brain"` are what the brain actually runs on; the built-in system
 prompt baked into `hal0.brain.chat` is only a fallback, used when the
@@ -56,11 +56,13 @@ catalog](/docs/concepts/capabilities-and-profiles), not the persona. Don't confu
 
 ## The default model, and how to change it
 
-Every fresh v1.0 install pulls the same brain model unconditionally, before
-any hardware fork: **LFM2.5-2.6B, Q8_0** (curated id `lfm2.5-2.6b`,
+A fresh install pulls the same brain model before any hardware fork, unless
+you skip it: **LFM2.5-2.6B, Q8_0** (curated id `lfm2.5-2.6b`,
 `LiquidAI/LFM2.5-2.6B-GGUF`, 2.87 GB), bound to the `brain` slot. It's a
 plain GGUF with no custom tensor types, so it loads on every llama.cpp
-runner hal0 ships.
+runner hal0 ships. `install.sh --no-brain-model` (or `--bare`, which turns every
+optional component off) skips the pull and leaves the `brain` slot without a
+model; pull one later with `hal0 model pull <id>` or from the dashboard.
 
 <Steps>
 1. **At install time**: set `HAL0_BRAIN_MODEL` before running `install.sh` to
@@ -93,7 +95,7 @@ key fails validation rather than being silently ignored.
 | Key | Type | Default | Notes |
 |---|---|---|---|
 | `enabled` | bool | `true` | Hard kill switch — `false` refuses every turn before any model call. |
-| `read_only` | bool | `true` | Refuses every mutating or admin-write tool **server-side**, independent of the persona's own tool policy. The steward's own `memory_add` into shared memory is exempt. Ships `true`: a fresh v1.0 box answers questions and reads state, but cannot mutate the board or write admin config until an operator sets this to `false`. |
+| `read_only` | bool | `true` | Refuses every mutating or admin-write tool **server-side**, independent of the persona's own tool policy. The steward's own `memory_add` into shared memory is exempt. Ships `true`: a fresh box answers questions and reads state, but cannot mutate the board or write admin config until an operator sets this to `false`. |
 | `model` | str | `""` | Chat-model override; empty defers to the persona / `hal0/brain`. |
 | `tool_model` | str | `"hal0/agent"` | Where tool-calling rounds reroute when the chat model can't carry them (see below). `""` on disk is treated as "nobody set this" and coerced back to the default with a logged warning — to genuinely turn routing off, set it to `"off"`, `"none"`, or `"disabled"` explicitly. |
 | `max_rounds` | int | `8` | `1`–`100`. Runaway backstop on the tool loop per turn. |
@@ -123,7 +125,7 @@ the model that owns the tool chain finishes it; the brain's own voice returns
 on the next user turn.
 
 `tool_model` defaults to `hal0/agent`, the always-on anchor from ADR-0023.
-That default has a real gap on a fresh v1.0 box: the `agent` slot ships with
+That default has a real gap on a fresh box: the `agent` slot ships with
 no bound model — it's an explicit, size-disclosed opt-in at install time (15
 to 31 GB) — so the first tool-needing turn on an unmodified install gets a
 plain-English explanation that tool routing has no live target yet, with the
@@ -199,7 +201,7 @@ changes no platform state, and without it a fresh install could not remember
 anything honestly.
 
 <Aside type="tip">
-Because `read_only` ships `true`, a freshly installed v1.0 brain can read and
+Because `read_only` ships `true`, a freshly installed brain can read and
 converse but cannot move a board card, load a slot, or write config until an
 operator flips it — that's a deliberate default, not a bug.
 </Aside>

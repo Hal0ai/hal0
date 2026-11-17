@@ -14,7 +14,7 @@ the dashboard's slot edit drawer, which drives the same API.
 
 ## Tune one slot
 
-Open an LLM slot drawer and use **Tune** to override context, thinking,
+Open an LLM slot drawer (an NPU slot has Tune only on the xdna runtime, not on FastFlowLM) and use **Tune** to override context, thinking,
 effort, budget, vision or speculation. A Profile pill shows the selected
 profile's value and removes that row's override. **Reset to profile** clears
 staged overrides. **Save** persists them: thinking applies to new requests;
@@ -77,10 +77,12 @@ the runtime you pick rather than an independently editable value:
   "Standard · ROCm + Vulkan"), and a "· not pulled" suffix when its image
   hasn't been downloaded yet; picking one shows its one-line description
   underneath. Default-tier runtimes are listed first (ADR-0027). The
-  llama.cpp runtimes as of this release: **Standard** (default; ROCm or
-  Vulkan on AMD GPUs), **CPU** (default; no GPU needed) and the optional
-  **NVIDIA CUDA** (CUDA only) — plus the engines for other slot types: **NPU (FastFlowLM)**, **Kokoro speech**,
-  **Moonshine transcription**, **ComfyUI** and the optional **Qwen3 TTS**.
+  llama.cpp runtimes are **Standard** (default; ROCm or Vulkan on AMD GPUs),
+  **CPU** (default; no GPU needed), the optional **NVIDIA CUDA** (CUDA only)
+  and the optional **NPU (ggml-xdna)**. The engines for other slot types are
+  **NPU (FastFlowLM)**, **Kokoro speech**, **Moonshine transcription**,
+  **ComfyUI**, the optional **Qwen3 TTS** and the optional **halogen
+  (Flash-Next)**.
   A persisted `binary` this box no longer offers for the slot (older
   release, hand-edited TOML) stays selectable as its own "‹binary› · not in
   this catalog" option rather than being silently rewritten. Picking a new
@@ -88,7 +90,7 @@ the runtime you pick rather than an independently editable value:
   restart it.
 - **Lane** — Auto / ROCm / Vulkan pills — only appears when the picked
   runtime actually offers more than one backend. Today that's Standard
-  alone; every other GPU runtime (NVIDIA CUDA, Qwen3 TTS) declares exactly
+  alone; every other GPU runtime (NVIDIA CUDA, Qwen3 TTS, halogen) declares exactly
   one backend, so it has nothing to pick between.
 
 **Threads** is the CPU thread count (`0` = runtime default); **NGL** is GPU

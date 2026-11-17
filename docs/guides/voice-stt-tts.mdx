@@ -23,14 +23,9 @@ hal0 exposes two voice directions through OpenAI-compatible endpoints:
 
 Both are children of the **`voice`** capability: `voice.stt` maps to the
 `stt` slot and `voice.tts` maps to the `tts` slot. Both children are
-now device-keyed engine switches with the same shape. Before this
-redesign, `voice.stt` could only ever run `backend=npu` — any host
-without the XDNA NPU had zero speech-to-text. Reinstating Moonshine as a
-CPU-side STT engine and keying `stt` on device the same way `tts`
-already was closed that gap (see ADR-0001, "Reinstate Moonshine as the
-CPU STT engine", `docs/adr/0001-moonshine-cpu-stt-reinstatement.md` in
-the repository — an internal design record, not published to these
-docs).
+device-keyed engine switches with the same shape. The CPU STT engine is
+recorded in ADR-0001 (`docs/adr/0001-moonshine-cpu-stt-reinstatement.md` in
+the repository, an internal design record not published to these docs).
 
 ## Enable the voice capability
 
@@ -137,13 +132,6 @@ If either file is missing, the slot refuses to start with
 weights at start-up, so an offline box runs Kokoro once the bundle is
 pulled.
 
-On upgrade to 1.4.0, `hal0 update` pulls the bundle once if a slot or
-capability selection uses Kokoro and the store does not have it yet. This
-also replaces the single `model.gguf` an earlier pull left there (the ONNX
-file under the wrong name, with no voices pack). On a box without internet
-access the update still completes; run `hal0 model pull kokoro-v1` once it
-is online. Until then the `tts` slot's error names the same command.
-
 ### Staging the Moonshine weights
 
 The bundle is a directory the loader reads directly — it resolves
@@ -234,8 +222,8 @@ matching field — an explicit value in the request always wins:
 - `default_response_format` — `mp3` / `wav` / `opus` / `flac` / `pcm`,
   injected when the request omits `response_format`.
 
-These are set from the dashboard's Settings → Voice panel and take effect
-immediately — no container restart. The dashboard's voice picker reads a
+These are set in the dashboard under Settings → AI Capabilities, in the TTS
+panel, and take effect immediately — no container restart. The dashboard's voice picker reads a
 live voice list from `GET /api/slots/tts/voices`; if the `tts` slot is
 cold or unreachable, it falls back to a built-in seed list.
 

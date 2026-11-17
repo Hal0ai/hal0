@@ -200,9 +200,12 @@ The per-release upgrade notes (1.3.0, 1.6.0, 1.8.0, 1.7.1, 1.7.0, and upgrading 
 
 ## Component updates
 
-Five components carry their own release-pinned version alongside hal0
-itself: OpenWebUI (the companion container), runner images, Hermes, Pi, and
-Hindsight. None of them float independently — each pin travels *inside*
+Six components carry their own release-pinned version alongside hal0
+itself: OpenWebUI (the companion container), runner images, Hermes, Pi, the
+memory decision model server, and Hindsight. The decision model server is
+opt-in and converges only on a box where it is already installed (see
+[Tune the memory engine](/docs/guides/tune-memory-engine#the-decision-model-server)).
+None of them float independently — each pin travels *inside*
 the hal0 release, so a normal `hal0 update` converges all of them as part of
 applying, except Pi. Pi lives in the home of the user who installed it, so
 `hal0 update` only reports it; re-pin it with `sudo hal0 update component pi`
@@ -275,7 +278,12 @@ If no previous-version record exists, there's nothing to roll back to.
 
 Rollback swaps the code tree only. It does not restore `profiles.toml`,
 slot files or any other config: that is config state, deliberately decoupled
-from the code tree.
+from the code tree. The one exception is the per-slot `[tune]` table
+([ADR-0045](/docs/adr/0045-slots-carry-a-sparse-tune-override-table)): rolling back to a release
+that predates it first copies each slot file, `profiles.toml` and `stacks.toml`
+that carries tune settings to `<file>.bak-<UTC timestamp>`, then removes the
+slot `[tune]` tables, the profile reasoning keys and the stack `tune` entries
+the older release would refuse. A failed rollback puts the stripped keys back.
 
 Rolling back from 1.6.0 to 1.5.x leaves Hermes running on the release 1.6.0 built, and leaves the Hermes build failing until you update again. 1.6.0 records a Python 3.14 interpreter in `/etc/hal0/hermes-python.env`, and 1.5.x accepts only 3.12, so its Hermes converge stops with `Hermes Python must be exactly 3.12: <path> reports 3.14`. The 1.5.x MCP probe also fails against the mcp 2.0 client in the new venv, so every `hal0 update` on 1.5.x reports the Hermes venv as broken and `hal0 agent reprovision hermes` and `hal0 agent reprovision hermes` fail at `mcp_wire`. Do not edit `hermes-python.env` to point 1.5.x at a 3.12 interpreter: 1.5's builder then replaces the release symlink at `/var/lib/hal0/venvs/hermes` with a 0.19.0 venv and leaves a stray `/var/lib/hal0/venvs/hermes.rollback-<pid>` behind. Update back to 1.6.0 instead, which clears these errors.
 
@@ -304,8 +312,7 @@ This is the same `hal0 update component <id>` every release-pinned component
 uses (see [Component updates](#component-updates) above). Plain, it converges
 the bundled OpenWebUI container to whatever pin hal0 carries for it, as a
 plain `hal0 update` would. There is no `--tag` float-to-upstream flag; the pin
-rides hal0 releases like every other component. `hal0 update owui` no longer
-exists.
+rides hal0 releases like every other component.
 
 `--target <digest>` (`sha256:…` or bare 64-hex) pins an explicit digest
 override instead, for holding OWUI outside the release cadence. The
