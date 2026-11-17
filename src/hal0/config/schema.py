@@ -1447,7 +1447,7 @@ class UpstreamEntry(BaseModel):
     )
     model_filters: UpstreamModelFilters | None = Field(
         default=None,
-        description="Legacy advertising filters; rejected on a curated row.",
+        description="Advertising filters used only by uncurated rows; rejected on a curated row.",
     )
     catalog_id: str | None = Field(
         default=None, description="Provider preset this row was created from, if any."
@@ -1551,7 +1551,7 @@ class UpstreamEntry(BaseModel):
         if self.curated and self.model_filters is not None and not self.model_filters.is_empty():
             raise ValueError(
                 f"upstream {self.name!r}: curated rows list models in [[upstream.models]]; "
-                "model_filters is legacy-only and cannot be combined with curated = true"
+                "model_filters applies only to uncurated rows and cannot be combined with curated = true"
             )
         return self
 

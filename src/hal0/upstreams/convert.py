@@ -1,4 +1,4 @@
-"""One-time conversion of legacy upstream rows into curated, per-model rows.
+"""One-time conversion of pre-catalog upstream rows into curated, per-model rows.
 
 An install that predates per-model rows has remote upstreams with no model
 rows (*uncurated*): they pass requests through and advertise whatever their
@@ -14,6 +14,8 @@ that row exactly as it was and never stops the others.
 It also retires the old ``providers.toml`` store, whose per-provider model
 selection is folded into the matching rows. The file is renamed, never deleted.
 """
+
+# HAL0-SUNSET: v2.0.0  — one-time conversion of pre-catalog upstream rows; delete the module, its boot phase and its tests once every supported box has run it.
 
 from __future__ import annotations
 

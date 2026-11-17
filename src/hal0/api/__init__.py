@@ -1343,7 +1343,7 @@ async def _run_upstream_conversion(
     model_cache: dict[str, list[str]],
     discovery: DiscoveryCache | None,
 ) -> None:
-    """Convert legacy upstream rows once their providers answer; never raises.
+    """Convert pre-catalog upstream rows once their providers answer; never raises.
 
     Unreachable providers are deferred (row untouched, retried next boot), so
     this is safe to run on every boot. Cancellation is the one thing that passes
@@ -1372,7 +1372,7 @@ async def _run_upstream_conversion(
 
 
 async def _boot_upstream_conversion(app: FastAPI, ctx: BootState) -> None:
-    """Phase - convert legacy upstream rows to per-model rows, off the startup path.
+    """Phase - convert pre-catalog upstream rows to per-model rows, off the startup path.
 
     Scheduled, not awaited: boot never waits on a provider. Runs after the
     model cache exists so a converted row's routing switches without a restart.
