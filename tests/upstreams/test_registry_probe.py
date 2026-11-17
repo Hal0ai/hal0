@@ -277,3 +277,89 @@ async def test_probe_accepts_gzip_json(monkeypatch: pytest.MonkeyPatch) -> None:
     out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key=KEY)
     assert out["ok"] is True
     assert seen[0].headers["accept-encoding"] == "identity"
+
+
+# ── re-review: structural guard and decode edge cases ────────────────────────
+
+
+async def test_probe_deeply_nested_json_is_ok_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    _wire(monkeypatch, lambda r: httpx.Response(200, content=b"[" * 100000))
+    out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key=KEY)
+    assert out["ok"] is False
+    assert KEY not in repr(out)
+
+
+async def test_probe_any_failure_after_the_request_is_ok_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _wire(monkeypatch, lambda r: httpx.Response(200, json={"data": []}))
+
+    def boom(text: str) -> Any:
+        raise KeyError(f"surprise {KEY}")
+
+    monkeypatch.setattr(registry_mod, "_parse_json", boom)
+    out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key=KEY)
+    assert out["ok"] is False
+    assert out["payload"] is None
+    assert KEY not in repr(out)
+
+
+@pytest.mark.parametrize("style", ["header", "anthropic", "none"])
+async def test_probe_strips_bearer_prefix_for_every_style(
+    monkeypatch: pytest.MonkeyPatch, style: str
+) -> None:
+    seen = _wire(monkeypatch, lambda r: httpx.Response(401, text="echo sk-bare"))
+    out = await UpstreamRegistry().probe(
+        url=URL, auth_style=style, auth_header="X-Token", key="Bearer sk-bare"
+    )
+    assert "sk-bare" not in out["error"]
+    sent = " ".join(seen[0].headers.values())
+    assert "Bearer sk-bare" not in sent
+
+
+async def test_probe_header_style_sends_bare_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = _wire(monkeypatch, lambda r: httpx.Response(200, json={"data": []}))
+    await UpstreamRegistry().probe(
+        url=URL, auth_style="header", auth_header="X-Token", key="Bearer sk-bare"
+    )
+    assert seen[0].headers["x-token"] == "sk-bare"
+
+
+def test_decode_capped_truncated_gzip_fails() -> None:
+    import gzip
+
+    whole = gzip.compress(b'{"data": [' + b"1," * 5000 + b"2]}")
+    assert registry_mod._decode_capped(whole[: len(whole) // 2], "gzip") is None
+    assert registry_mod._decode_capped(whole, "gzip") is not None
+
+
+def test_decode_capped_ignores_trailing_data_after_eof() -> None:
+    import gzip
+
+    body = gzip.compress(b"hello") + b"trailing junk"
+    assert registry_mod._decode_capped(body, "gzip") == b"hello"
+
+
+def test_decode_capped_deflate_zlib_and_raw() -> None:
+    import zlib
+
+    payload = b'{"data": []}'
+    assert registry_mod._decode_capped(zlib.compress(payload), "deflate") == payload
+    co = zlib.compressobj(wbits=-15)
+    raw = co.compress(payload) + co.flush()
+    assert registry_mod._decode_capped(raw, "deflate") == payload
+
+
+def test_decode_capped_raw_deflate_bomb_is_bounded() -> None:
+    import zlib
+
+    co = zlib.compressobj(wbits=-15)
+    raw = co.compress(b"0" * (registry_mod.PROBE_MAX_BODY_BYTES * 4)) + co.flush()
+    assert registry_mod._decode_capped(raw, "deflate") is None
+
+
+async def test_probe_redacts_lowercase_percent_escapes(monkeypatch: pytest.MonkeyPatch) -> None:
+    _wire(monkeypatch, lambda r: httpx.Response(401, text="echo sk%2fabc%2bdef%3d%3d"))
+    out = await UpstreamRegistry().probe(url=URL, auth_style="bearer", key="sk/abc+def==")
+    assert "sk%2f" not in out["error"].lower()
+    assert "***" in out["error"]

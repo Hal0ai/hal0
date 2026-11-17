@@ -269,3 +269,13 @@ def test_probe_shares_the_auth_style_constant() -> None:
     from hal0.api.routes import providers
 
     assert providers.KNOWN_AUTH_STYLES is registry_mod.KNOWN_AUTH_STYLES
+
+
+def test_probe_deeply_nested_body_is_not_a_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _wire(monkeypatch, lambda r: httpx.Response(200, content=b"[" * 100000))
+    res = client.post("/api/providers/probe", json={"url": "https://p.example/v1", "key": KEY})
+    assert res.status_code == 200
+    assert res.json()["ok"] is False
+    assert KEY not in res.text

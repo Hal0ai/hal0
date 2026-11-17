@@ -24,6 +24,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
@@ -144,12 +145,20 @@ def _decode_capped(raw: bytes, encoding: str) -> bytes | None:
         return raw
     if enc not in ("gzip", "x-gzip", "deflate"):
         return None
-    wbits = zlib.MAX_WBITS | 16 if enc != "deflate" else zlib.MAX_WBITS
-    try:
-        out = zlib.decompressobj(wbits).decompress(raw, PROBE_MAX_BODY_BYTES + 1)
-    except zlib.error:
-        return None
-    return out if len(out) <= PROBE_MAX_BODY_BYTES else None
+    attempts = (zlib.MAX_WBITS | 16,) if enc != "deflate" else (zlib.MAX_WBITS, -zlib.MAX_WBITS)
+    for wbits in attempts:
+        d = zlib.decompressobj(wbits)
+        try:
+            out = d.decompress(raw, PROBE_MAX_BODY_BYTES + 1)
+        except zlib.error:
+            continue
+        if len(out) > PROBE_MAX_BODY_BYTES:
+            return None
+        # A stream that did not reach its end is truncated; data after the end
+        # is ignored.
+        if d.eof:
+            return out
+    return None
 
 
 def build_auth_headers(style: str, header_name: str, key: str) -> dict[str, str]:
@@ -192,7 +201,13 @@ def _redact_secret(text: str, key: str) -> str:
 
     text = text.replace(key, "***")
     encoded = quote(key, safe="")
-    return text.replace(encoded, "***") if encoded != key else text
+    if encoded != key:
+        text = re.sub(re.escape(encoded), "***", text, flags=re.IGNORECASE)
+    return text
+
+
+def _parse_json(text: str) -> Any:
+    return json.loads(text)
 
 
 def _probe_transport_error(exc: BaseException) -> str:
@@ -1028,10 +1043,28 @@ class UpstreamRegistry:
         any other failure is returned as ``ok: false`` with fixed-vocabulary text.
         """
         target = _probe_url(url)
+        # Past this point the key is bound; nothing may escape carrying it in a
+        # frame, so every failure becomes a fixed-vocabulary ``ok: false``.
+        started = time.monotonic()
+        try:
+            return await self._probe_run(target, auth_style, auth_header, key)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": None,
+                "latency_ms": round((time.monotonic() - started) * 1000, 1),
+                "payload": None,
+                "headers": {},
+                "error": _probe_transport_error(exc),
+            }
+
+    async def _probe_run(
+        self, target: str, auth_style: str, auth_header: str, key: str
+    ) -> dict[str, Any]:
         style = (auth_style or "bearer").lower()
         stripped = key.strip()
         token = stripped
-        if style == "bearer" and stripped.lower().startswith("bearer "):
+        if stripped.lower().startswith("bearer "):
             token = stripped[7:].strip()
         headers = build_auth_headers(style, auth_header, token)
         headers["Accept-Encoding"] = "identity"
@@ -1095,7 +1128,7 @@ class UpstreamRegistry:
                 message = f"{message}: {excerpt}"
             return fail(status, message, started, resp_headers)
         try:
-            payload = json.loads(text)
+            payload = _parse_json(text)
         except ValueError:
             return fail(status, "response was not JSON", started, resp_headers)
         log.debug("upstream.probe_ok", host=target.split("/")[2], status=status)
