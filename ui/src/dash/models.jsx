@@ -21,6 +21,16 @@ import { flmCatalogRows } from '@/dash/npu/npu-models-pure'
 import { imageFileCount } from '@/dash/image/image-files-pure'
 import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
+import { useXdnaFit } from '@/api/hooks/useXdnaFit'
+import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
+import { npuTabVisible } from '@/dash/npu/npu-pure'
+import {
+  CatalogHeaderActions, CatalogList, CatalogRow, CatalogToolbar, DetailActions, DetailCard, DetailEmpty,
+  DetailFacts, DetailHeader, DetailLine, DetailNone, DetailSection, StatusChip, toggleIn,
+} from '@/dash/models/catalog-shell.jsx'
+import {
+  RUNS_ON_FILTERS, STATE_FILTERS, catalogStatus, matchesStateFilter, npuFitOf, pageSections, runsOn, slotsUsing,
+} from '@/dash/models/catalog-pure'
 
 const { useState: useStateM, useMemo: useMemoM, useEffect: useEffectM } = React;
 
@@ -51,8 +61,6 @@ function modelMatchesFilters(m, filterSel) {
 }
 
 // ── Pagination ─────────────────────────────────────────────────────────
-const PER_PAGE_OPTS = [10, 25, 50, "all"];
-
 function usePageReset(deps) {
   // Refs so we don't cause extra renders — just track last deps value.
   const ref = React.useRef(null);
@@ -65,17 +73,20 @@ function usePageReset(deps) {
 
 // ── ModelsView ─────────────────────────────────────────────────────────
 const MODEL_TABS = ["inference", "image", "upstream", "flm", "profiles"];
+const toastM = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind);
 // `modelParam` mirrors SlotsView's slotParam: #models/profiles deep-links
 // the Profiles tab (runner-catalogue-v2 — Profiles moved here from Slots).
 function ModelsView({ modelParam = null }) {
   const [selId, setSelId] = useStateM(null);
-  // Simplified multi-select OR filters
+  // Three chip groups, each multi-select OR; a row must pass every group.
   const [filterSel, setFilterSel] = useStateM([]);
+  const [stateSel, setStateSel] = useStateM([]);
+  const [runsSel, setRunsSel] = useStateM([]);
   // Sort
   const [sortField, setSortField] = useStateM("name");
   const [sortDir, setSortDir] = useStateM("asc");
   const [q, setQ] = useStateM("");
-  // Tabs: "inference" (default), "image", "upstream", "profiles". Each is
+  // Tabs: "inference" (default), "image", "upstream", "flm", "profiles". Each is
   // hash-routed (#models/<tab>) so the sidebar sub-links track it; bare
   // #models or an unknown param shows Inference (same idiom as SlotsView).
   const tabFromParam = (p) => (MODEL_TABS.includes(p) ? p : "inference");
@@ -113,16 +124,14 @@ function ModelsView({ modelParam = null }) {
   const onCheckUpdates = async () => {
     try {
       const res = await forceCheck.mutateAsync();
-      window.__hal0Toast && window.__hal0Toast(
+      toastM(
         res.updates_available > 0
           ? `${res.updates_available} model update${res.updates_available === 1 ? "" : "s"} available`
           : `All ${res.checked} checked model${res.checked === 1 ? "" : "s"} up to date`,
         "info",
       );
     } catch (e) {
-      window.__hal0Toast && window.__hal0Toast(
-        `Update check failed — ${e?.message || "see logs"}`, "err",
-      );
+      toastM(`Update check failed — ${e?.message || "see logs"}`, "err");
     }
   };
   const updatable = modelList.filter(m => m.installed && m.update_available);
@@ -131,21 +140,29 @@ function ModelsView({ modelParam = null }) {
     try {
       const res = await updateAll.mutateAsync(updatable.map(m => m.id));
       if (res.started.length) {
-        window.__hal0Toast && window.__hal0Toast(
-          `Updating ${res.started.length} model${res.started.length === 1 ? "" : "s"} from Hugging Face`,
-          "info",
-        );
+        toastM(`Updating ${res.started.length} model${res.started.length === 1 ? "" : "s"} from Hugging Face`, "info");
       }
       if (res.failed.length) {
-        window.__hal0Toast && window.__hal0Toast(
-          `${res.failed.length} update${res.failed.length === 1 ? "" : "s"} failed to start — ${res.failed[0].message}`,
-          "err",
-        );
+        toastM(`${res.failed.length} update${res.failed.length === 1 ? "" : "s"} failed to start — ${res.failed[0].message}`, "err");
       }
     } catch (e) {
-      window.__hal0Toast && window.__hal0Toast(
-        `Update all failed — ${e?.message || "see logs"}`, "err",
-      );
+      toastM(`Update all failed — ${e?.message || "see logs"}`, "err");
+    }
+  };
+  // Upstream rows have no file to compare: checking them is asking the upstreams
+  // again which models they advertise.
+  const [recheckingUpstream, setRecheckingUpstream] = useStateM(false);
+  const onRecheckUpstream = async () => {
+    setRecheckingUpstream(true);
+    try {
+      const res = await modelsQuery.refetch();
+      if (res.isError) throw res.error;
+      const n = (res.data ?? []).filter(isUpstreamModel).length;
+      toastM(`${n} upstream model${n === 1 ? "" : "s"} advertised`, "info");
+    } catch (e) {
+      toastM(`Could not re-read the upstream models — ${e?.message || "see logs"}`, "err");
+    } finally {
+      setRecheckingUpstream(false);
     }
   };
 
@@ -160,9 +177,37 @@ function ModelsView({ modelParam = null }) {
 
   const selected = modelList.find(m => m.id === selId) || modelList[0];
 
-  // ── Combined filter (text + OR chips) ───────────────────────────────
+  // ── What each row's status is derived from ──────────────────────────
+  // Who uses a model (slots), whether a pull for it is running, and, on a box
+  // with an NPU, whether ggml-xdna can run it there. The fit is only asked for
+  // when the NPU tab would show (the same gate as Slots → NPU).
+  const slotList = useSlots().data ?? [];
+  const npuOcc = useNpuOccupancy({ poll: false }).data;
+  const npuShown = npuTabVisible(npuOcc, slotList);
+  const xdnaFit = useXdnaFit({ enabled: npuShown }).data;
+  const fitMap = npuShown ? xdnaFit : null;
+  const pullsList = usePullsList();
+  const activePulls = useMemoM(() => {
+    const out = new Map();
+    for (const j of pullsList.jobs) {
+      if (j.state !== "queued" && j.state !== "running") continue;
+      out.set(j.model_id, { pct: j.bytes_total ? (j.bytes_downloaded / j.bytes_total) * 100 : null });
+    }
+    return out;
+  }, [pullsList.jobs]);
+  const stateOf = (m) => ({
+    installed: !!m.installed,
+    remote: isUpstreamModel(m),
+    inUseBy: slotsUsing(slotList, m.id),
+    update: !!(m.installed && m.update_available),
+    download: activePulls.get(m.id) ?? null,
+  });
+
+  // ── Combined filter (text + chip groups) ────────────────────────────
   const fil = m => {
     if (!modelMatchesFilters(m, filterSel)) return false;
+    if (!matchesStateFilter(stateSel, stateOf(m))) return false;
+    if (runsSel.length && !runsSel.some(r => runsOn(m, fitMap).includes(r))) return false;
     if (q.trim()) {
       const needle = q.trim().toLowerCase();
       const hay = `${m.longName || ""} ${m.name || ""} ${m.id || ""} ${m.repo || ""}`.toLowerCase();
@@ -172,17 +217,27 @@ function ModelsView({ modelParam = null }) {
   };
 
   const bySort = rows => sortModels(rows, sortField, sortDir);
+  const used = m => slotsUsing(slotList, m.id).length > 0;
 
   // ── Tab datasets ────────────────────────────────────────────────────
-  // Inference: installed + blessed + user.* (not upstream)
-  const installed = modelList.filter(m => m.installed && !isUpstreamModel(m) && fil(m));
-  const blessed = modelList.filter(m => !m.installed && m.ns === "blessed" && !isUpstreamModel(m) && fil(m));
-  const userNs = modelList.filter(m => m.ns === "pulled" && !m.installed && !isUpstreamModel(m) && fil(m));
-  const inferenceRows = [...bySort(installed), ...bySort(blessed), ...bySort(userNs)];
+  // Inference: installed + blessed + user.* (not upstream). Installed models a
+  // slot references lead the list under "In use".
+  const local = modelList.filter(m => !isUpstreamModel(m) && fil(m));
+  const installed = local.filter(m => m.installed);
+  const inferenceSections = [
+    { key: "inuse", label: "In use", rows: bySort(installed.filter(used)) },
+    { key: "installed", label: "Installed", rows: bySort(installed.filter(m => !used(m))) },
+    { key: "blessed", label: "Available · blessed", rows: bySort(local.filter(m => !m.installed && m.ns === "blessed")) },
+    { key: "userns", label: "user.*", rows: bySort(local.filter(m => !m.installed && m.ns === "pulled")) },
+  ];
+  const inferenceCount = inferenceSections.reduce((n, s) => n + s.rows.length, 0);
 
   // Upstream: only isUpstreamModel
   const upstreamAll = modelList.filter(m => isUpstreamModel(m) && fil(m));
-  const upstreamRows = bySort(upstreamAll);
+  const upstreamSections = [
+    { key: "inuse", label: "In use", rows: bySort(upstreamAll.filter(used)) },
+    { key: "advertised", label: "Advertised", rows: bySort(upstreamAll.filter(m => !used(m))) },
+  ];
   const upstreamTotal = modelList.filter(m => isUpstreamModel(m)).length;
 
   // Image: ComfyUI weight files are not registry rows — the tab is the file
@@ -194,45 +249,56 @@ function ModelsView({ modelParam = null }) {
   const imageTotal = imageFileCount(imageFiles.data);
 
   // ── Pagination logic ────────────────────────────────────────────────
-  const activeRows = tab === "inference" ? inferenceRows : upstreamRows;
-
-  const pageReset = usePageReset([tab, q, sortField, sortDir, filterSel]);
+  const pageReset = usePageReset([tab, q, sortField, sortDir, filterSel, stateSel, runsSel]);
   useEffectM(() => { if (pageReset) setPage(1); }, [pageReset]);
+  const paged = pageSections(tab === "upstream" ? upstreamSections : inferenceSections, page, perPage);
 
-  const totalPages = perPage === "all" ? 1 : Math.max(1, Math.ceil(activeRows.length / perPage));
-  const safePage = Math.min(page, totalPages);
-  const sliced = perPage === "all"
-    ? activeRows
-    : activeRows.slice((safePage - 1) * perPage, safePage * perPage);
-
-  // Section labels for inference tab — re-derive from sliced set so
-  // we only show labels for sections that have visible rows.
-  const slicedInstalled = sliced.filter(m => m.installed);
-  const slicedBlessed = sliced.filter(m => !m.installed && m.ns === "blessed");
-  const slicedUserNs = sliced.filter(m => !m.installed && m.ns === "pulled");
-  // Build sectioned rows preserving original slice order
-  const sectionedInference = [];
-  if (slicedInstalled.length) {
-    sectionedInference.push({ type: "label", text: `Installed · ${installed.length}`, key: "lbl-installed" });
-    for (const m of slicedInstalled) sectionedInference.push({ type: "row", model: m });
-  }
-  if (slicedBlessed.length) {
-    sectionedInference.push({ type: "label", text: `Available · blessed · ${blessed.length}`, key: "lbl-blessed" });
-    for (const m of slicedBlessed) sectionedInference.push({ type: "row", model: m });
-  }
-  if (slicedUserNs.length) {
-    sectionedInference.push({ type: "label", text: `user.* · ${userNs.length}`, key: "lbl-userns" });
-    for (const m of slicedUserNs) sectionedInference.push({ type: "row", model: m });
-  }
-
-  const pullsList = usePullsList();
   // FLM: the catalogue is not registry rows; react-query serves the tab's own query from cache.
   const flmCatalog = useFlmCatalog();
   const flmTotal = useMemoM(() => flmCatalogRows(flmCatalog.data?.models).length, [flmCatalog.data]);
 
   // ── Render ──────────────────────────────────────────────────────────
-  const tabLabel = tab === "inference" ? `Inference Models${inferenceRows.length ? ` · ${inferenceRows.length}` : ""}`
+  const tabLabel = tab === "inference" ? `Inference Models${inferenceCount ? ` · ${inferenceCount}` : ""}`
     : `Upstream Models${upstreamTotal ? ` · ${upstreamTotal}` : ""}`;
+
+  // Upstream rows are neither installed nor downloadable, and have no file to update.
+  const stateChips = tab === "upstream" ? STATE_FILTERS.filter(c => c.id === "inuse") : STATE_FILTERS;
+  const toolbarGroups = [
+    { id: "state", label: "state", chips: stateChips, selected: stateSel, onToggle: id => setStateSel(s => toggleIn(s, id)) },
+    { id: "filter", label: "filter", chips: FILTER_CHIPS, selected: filterSel, onToggle: id => setFilterSel(s => toggleIn(s, id)) },
+    ...(tab === "inference"
+      ? [{
+          id: "runs",
+          label: "runs on",
+          // The NPU chip is only offered on a box that has one.
+          chips: RUNS_ON_FILTERS.filter(c => c.id !== "npu" || npuShown),
+          selected: runsSel,
+          onToggle: id => setRunsSel(s => toggleIn(s, id)),
+        }]
+      : []),
+  ];
+  const filtered = q.trim() || filterSel.length || stateSel.length || runsSel.length;
+
+  const headerCheck = tab === "upstream"
+    ? {
+        testid: "mdl-check-upstream",
+        title: "Ask the upstreams again which models they advertise",
+        pending: recheckingUpstream,
+        onClick: onRecheckUpstream,
+      }
+    : {
+        title: "Compare every installed model against its HuggingFace repo now",
+        pending: forceCheck.isPending,
+        onClick: onCheckUpdates,
+      };
+  const headerAdd = tab === "upstream"
+    ? [{ label: "Add upstream", hint: "Add a provider under Slots → Endpoints; its models appear here", onClick: () => { window.location.hash = "#slots/endpoints"; } }]
+    : [
+        { label: "Add by HF coords", hint: "a repo and a file, pulled into the model store", testid: "mdl-add-hf", onClick: () => setAddOpen(true) },
+        { label: "Search HF", hint: "find a repo on Hugging Face, then add it", testid: "mdl-add-search", onClick: () => setSearchOpen(true) },
+        { label: "Add by path", hint: "register a model file already on disk", testid: "mdl-add-path", onClick: () => setAddByPathOpen(true) },
+        { label: "Scan directory", hint: "register every model file in a folder", testid: "mdl-add-scan", onClick: () => setScanOpen(true) },
+      ];
 
   return (
     <div className="view">
@@ -247,8 +313,8 @@ function ModelsView({ modelParam = null }) {
         {tab === "profiles" || tab === "image" || tab === "flm" ? (
           null
         ) : (
-          <>
-            {updatable.length > 0 ? (
+          <CatalogHeaderActions check={headerCheck} addItems={headerAdd}>
+            {tab === "inference" && updatable.length > 0 && (
               <button
                 className="btn"
                 data-testid="mdl-update-all"
@@ -256,23 +322,8 @@ function ModelsView({ modelParam = null }) {
                 title="Re-pull every installed model whose HuggingFace file has changed"
                 onClick={onUpdateAll}
               >{Icons.download} {updateAll.isPending ? "Starting…" : `Update all (${updatable.length})`}</button>
-            ) : (
-              /* Everything current → the update surface would otherwise be
-                 invisible. Keep an explicit check affordance so the feature is
-                 discoverable and the TTL cache can be bypassed on demand. */
-              <button
-                className="btn ghost"
-                data-testid="mdl-check-updates"
-                disabled={forceCheck.isPending}
-                title="Compare every installed model against its HuggingFace repo now"
-                onClick={onCheckUpdates}
-              >{Icons.download} {forceCheck.isPending ? "Checking…" : "Check updates"}</button>
             )}
-            <button className="btn ghost" onClick={() => setSearchOpen(v => !v)}>{Icons.search} Search HF</button>
-            <button className="btn ghost" onClick={() => setScanOpen(true)}>{Icons.search} Scan directory</button>
-            <button className="btn ghost" onClick={() => setAddByPathOpen(true)}>{Icons.plus} Add by path</button>
-            <button className="btn" onClick={() => setAddOpen(true)}>{Icons.plus} Add by HF coords</button>
-          </>
+          </CatalogHeaderActions>
         )}
       </div>
 
@@ -285,7 +336,7 @@ function ModelsView({ modelParam = null }) {
           onClick={() => { window.location.hash = "#models/inference"; }}
         >
           <span>Inference Models</span>
-          <span className="slot-tab-ct num">{inferenceRows.length}</span>
+          <span className="slot-tab-ct num">{inferenceCount}</span>
         </button>
         <button
           role="tab"
@@ -334,120 +385,51 @@ function ModelsView({ modelParam = null }) {
       ) : (
       <div className="models-layout" style={{marginTop: 18}}>
         {/* ── List (toolbar + rows) ── */}
-        <div className="mdl-list">
-          {/* Toolbar: search + simplified filter chips + sort + clear */}
-          <div className="mdl-toolbar">
-            <input
-              className="input mono mdl-search"
-              placeholder="search name, repo, id…"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
+        <CatalogList
+          toolbar={
+            <CatalogToolbar
+              q={q}
+              onQ={setQ}
+              groups={toolbarGroups}
+              sort={{
+                fields: MODEL_SORT_FIELDS,
+                field: sortField,
+                dir: sortDir,
+                onField: setSortField,
+                onDir: () => setSortDir(d => d === "asc" ? "desc" : "asc"),
+              }}
+              onClear={() => { setFilterSel([]); setStateSel([]); setRunsSel([]); setQ(""); }}
             />
-            <div className="mdl-toolbar-grp">
-              <span className="lbl">filter</span>
-              {FILTER_CHIPS.map(c => (
-                <button
-                  key={c.id}
-                  className={"mdl-chip" + (filterSel.includes(c.id) ? " on" : "")}
-                  data-testid={`mdl-filter-${c.id}`}
-                  onClick={() => setFilterSel(s => s.includes(c.id) ? s.filter(x => x !== c.id) : [...s, c.id])}
-                >{c.label}</button>
-              ))}
-              {(filterSel.length > 0 || q.trim()) && (
-                <button className="mdl-chip mdl-clear" onClick={() => { setFilterSel([]); setQ(""); }}>clear ✕</button>
-              )}
-            </div>
-            <div className="mdl-toolbar-grp mdl-sort-grp">
-              <select
-                className="input mono mdl-sort"
-                data-testid="mdl-sort-field"
-                value={sortField}
-                onChange={e => setSortField(e.target.value)}
-              >
-                {MODEL_SORT_FIELDS.map(f => <option key={f.id} value={f.id}>{f.label}</option>)}
-              </select>
-              <button
-                className="mdl-chip mdl-sort-dir"
-                data-testid="mdl-sort-dir"
-                title={sortDir === "asc" ? "ascending" : "descending"}
-                onClick={() => setSortDir(d => d === "asc" ? "desc" : "asc")}
-              >{sortDir === "asc" ? "↑" : "↓"}</button>
-            </div>
-          </div>
-
-          {/* Header row */}
-          <div className="mdl-list-h">
-            <span>{tabLabel}</span>
-            <span className="ct">· {activeRows.length} shown</span>
-            <span className="right mono">{modelList.length} total · {modelList.filter(m => m.installed).length} on disk · {upstreamTotal} upstream</span>
-          </div>
-
-          {/* Loading / error */}
-          {modelsQuery.isPending && (
-            <div style={{padding: 16, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--fg-4)"}}>Loading models…</div>
+          }
+          title={tabLabel}
+          right={`${modelList.length} total · ${modelList.filter(m => m.installed).length} on disk · ${upstreamTotal} upstream`}
+          paged={paged}
+          loading={modelsQuery.isPending ? "Loading models…" : null}
+          error={modelsQuery.isError ? (modelsQuery.error?.message || "Failed to load models") : null}
+          empty={filtered
+            ? "No models match — adjust the search or filters."
+            : tab === "upstream" ? "No upstream models advertised." : "the catalog is empty."}
+          pager={{ perPage, onPage: setPage, onPerPage: (opt) => { setPerPage(opt); setPage(1); } }}
+          renderRow={m => (
+            <ModelRow
+              key={m.id}
+              model={m}
+              state={stateOf(m)}
+              npuFit={npuFitOf(m.id, fitMap)}
+              selected={selId === m.id}
+              onSelect={() => setSelId(m.id)}
+              onEditModel={setRecipeModel}
+              onDeleteModel={setDelModel}
+            />
           )}
-          {modelsQuery.isError && (
-            <div style={{padding: 16, fontFamily: "var(--jbm)", fontSize: 11, color: "var(--err)"}}>
-              {modelsQuery.error?.message || "Failed to load models"}
-            </div>
-          )}
-
-          {/* Rows */}
-          {!modelsQuery.isPending && !modelsQuery.isError && activeRows.length === 0 && (
-            <div style={{padding: 24, textAlign: "center", fontFamily: "var(--jbm)", fontSize: 12, color: "var(--fg-4)"}}>
-              {q.trim() || filterSel.length
-                ? "No models match — adjust the search or filters."
-                : tab === "upstream" ? "No upstream models advertised." : "the catalog is empty."}
-            </div>
-          )}
-
-          {tab === "inference" ? (
-            sectionedInference.map(item =>
-              item.type === "label"
-                ? <div key={item.key} className="mdl-section-label">{item.text}</div>
-                : <ModelRow key={item.model.id} model={item.model} selected={selId === item.model.id} onSelect={() => setSelId(item.model.id)} onEditModel={setRecipeModel} onDeleteModel={setDelModel} />
-            )
-          ) : (
-            /* upstream tab — flat paginated rows */
-            sliced.map(m => (
-              <ModelRow key={m.id} model={m} selected={selId === m.id} onSelect={() => setSelId(m.id)} onEditModel={setRecipeModel} onDeleteModel={setDelModel} />
-            ))
-          )}
-
-          {/* Pagination footer */}
-          <div className="mdl-pager">
-            <div className="mdl-pager-pages">
-              <button
-                className="mdl-chip"
-                disabled={safePage <= 1}
-                onClick={() => setPage(p => Math.max(1, p - 1))}
-              >← Prev</button>
-              <span className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
-                {perPage === "all" ? "1/1" : `${safePage}/${totalPages}`}
-              </span>
-              <button
-                className="mdl-chip"
-                disabled={safePage >= totalPages}
-                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-              >Next →</button>
-            </div>
-            <div className="mdl-pager-size">
-              <span className="lbl">per page</span>
-              {PER_PAGE_OPTS.map(opt => (
-                <button
-                  key={String(opt)}
-                  className={"mdl-chip" + (perPage === opt ? " on" : "")}
-                  onClick={() => { setPerPage(opt); setPage(1); }}
-                >{opt === "all" ? "All" : opt}</button>
-              ))}
-            </div>
-          </div>
-        </div>
+        />
 
         {/* ── Detail + Downloads ── */}
         <div className="models-sidebar">
           <ModelDetail
             model={selected}
+            state={selected ? stateOf(selected) : undefined}
+            npuFit={selected ? npuFitOf(selected.id, fitMap) : null}
             onDelete={() => setDelModel(selected)}
             onEdit={() => setRecipeModel(selected)}
           />
@@ -534,68 +516,73 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
 }
 
 // ── ModelRow ──────────────────────────────────────────────────────────
+// A registry row on the shared catalog row (catalog-shell.jsx). `state` is what
+// its status chip is derived from (ModelsView's `stateOf`); `npuFit` is the
+// ggml-xdna fit when this box's NPU can run the file.
 // `onEditModel` (new — Stream E kebab menu) opens the model edit drawer
 // directly for THIS row's model, independent of catalog selection.
 // `onDeleteModel` opens the shared DeleteModelDialog (type-the-name confirm,
 // refcounted blob release) for THIS row — only offered for installed local
 // models, mirroring the detail pane's Delete button gate.
-function ModelRow({ model, selected, onSelect, onEditModel, onDeleteModel }) {
+const registryState = (model) => ({
+  installed: !!model.installed,
+  remote: isUpstreamModel(model),
+  update: !!(model.installed && model.update_available),
+});
+function ModelRow({ model, state = registryState(model), npuFit = null, selected, onSelect, onEditModel, onDeleteModel }) {
   const backends = Array.isArray(model.backends) ? model.backends : [];
   const [menuOpen, setMenuOpen] = useStateM(false);
+  const label = model.longName || model.name || model.id;
   return (
-    <div className={"mdl-row" + (selected ? " sel" : "")} onClick={onSelect}>
-      <span className="mdl-row-icon" data-testid={model.installed ? "mdl-row-installed" : "mdl-row-not-installed"}>
-        {model.installed
-          ? <span style={{color: "var(--green)", display: "inline-flex"}}>{Icons.download}</span>
-          : <span style={{color: "var(--fg-5)", display: "inline-flex"}}>{Icons.download}</span>}
-      </span>
-      <span className="nm">
-        {model.longName || model.name || model.id}
-        <span className="sub">{model.repo || ""}</span>
-      </span>
-      <span className="mdl-row-tags">
-        {model.default && (
-          <span
-            className="chip"
-            data-testid="mdl-row-default"
-            title={`Default${model.type ? ` for ${model.type}` : ""} — the model this type falls back to`}
-            style={{color: "var(--ok)", borderColor: "var(--ok)", background: "var(--bg-2)"}}
-          >
-            ✓ default
-          </span>
-        )}
-        {model.type && <span className="chip">{model.type}</span>}
-        {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
-        {isDrafterModel(model) && (
-          <span className="chip info" data-testid="mdl-row-drafter" title={`Paired drafter · ${draftVariantLabel(model.draftVariant)}`}>
-            ⚡ {draftVariantLabel(model.draftVariant)}
-          </span>
-        )}
-        {backends.map(b => (
-          <span key={b} className={"chip dev-" + b}>{b}</span>
-        ))}
-      </span>
-      <span className="sz num">{model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "")}</span>
-      <span className="tg">
-        {isUpstreamModel(model)
-          ? <span className="chip info" title={`Advertised by the "${model.upstream}" upstream — not stored on this host`}>upstream</span>
-          : !model.installed
-            ? <span className="chip" style={{color: model.ns === "blessed" ? "var(--accent)" : "var(--fg-3)", borderColor: model.ns === "blessed" ? "var(--accent-line)" : "var(--line)", background: model.ns === "blessed" ? "var(--accent-soft)" : "transparent"}}>{model.ns}</span>
-            : model.update_available
-              ? <span className="chip amber" data-testid="mdl-row-update" role="status" aria-label="Update available on Hugging Face" title="A newer version of this file is available on Hugging Face">update ↑</span>
-              : null}
-      </span>
-      <span className="mdl-row-kebab">
+    <CatalogRow
+      state={state}
+      selected={selected}
+      onSelect={onSelect}
+      name={label}
+      sub={model.repo || ""}
+      size={model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "")}
+      dotTestid={model.installed ? "mdl-row-installed" : "mdl-row-not-installed"}
+      statusTestid={catalogStatus(state).kind === "update" ? "mdl-row-update" : "mdl-row-status"}
+      tags={
+        <>
+          {model.default && (
+            <span
+              className="chip ok"
+              data-testid="mdl-row-default"
+              title={`Default${model.type ? ` for ${model.type}` : ""} — the model this type falls back to`}
+            >
+              ✓ default
+            </span>
+          )}
+          {model.type && <span className="chip">{model.type}</span>}
+          {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
+          {isDrafterModel(model) && (
+            <span className="chip info" data-testid="mdl-row-drafter" title={`Paired drafter · ${draftVariantLabel(model.draftVariant)}`}>
+              ⚡ {draftVariantLabel(model.draftVariant)}
+            </span>
+          )}
+          {npuFit && (
+            <span className="chip dev-npu" data-testid="mdl-row-npu" title={`Runs on the NPU through ggml-xdna. ${npuFit.reason}`}>
+              npu · {npuFit.xdna_path}
+            </span>
+          )}
+          {backends.map(b => (
+            <span key={b} className={"chip dev-" + b}>{b}</span>
+          ))}
+        </>
+      }
+      menu={
         <button
           type="button"
           className="btn ghost sm"
           data-testid="mdl-row-menu-btn"
           aria-haspopup="menu"
           aria-expanded={menuOpen}
-          aria-label={`Actions for ${model.longName || model.name || model.id}`}
+          aria-label={`Actions for ${label}`}
           onClick={(e) => { e.stopPropagation(); setMenuOpen(o => !o); }}
         >{Icons.more}</button>
-      </span>
+      }
+    >
       {menuOpen && (
         <>
           {/* Full-viewport click-outside dismiss — same idiom as the
@@ -630,24 +617,28 @@ function ModelRow({ model, selected, onSelect, onEditModel, onDeleteModel }) {
           />
         </>
       )}
-    </div>
+    </CatalogRow>
   );
 }
 
 // ── ModelDetail ───────────────────────────────────────────────────────
-function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
+// How a per-op and a fused ggml-xdna model each sit beside the FLM lane on the
+// one NPU (ADR-0059).
+const NPU_COEXIST = {
+  fused: "Can share the NPU with FLM: the two take turns.",
+  "per-op": "Cannot hold the NPU together with FLM. Loading one asks to unload the other.",
+};
+function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStarted }) {
   const pull = usePullJob();
   const slotsQuery = useSlots();
   const swap = useSlotSwap();
   const hfUpdate = useModelUpdateApply();
   const [cancelling, setCancelling] = useStateM(false);
   if (!model) {
-    return (
-      <div className="mdl-detail">
-        <div className="mdl-detail-h" style={{padding: 24, color: "var(--fg-4)"}}>No model selected.</div>
-      </div>
-    );
+    return <DetailEmpty>No model selected.</DetailEmpty>;
   }
+  const rowState = state ?? registryState(model);
+  const upstream = isUpstreamModel(model);
   // ADR-0029: a model carries FILE FACTS only — chat template, jinja, whether
   // the file has MTP heads — plus its native context window (read-only, from
   // metadata). The tune (flags, context, thinking, vision, speculation) lives
@@ -696,48 +687,52 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
   };
 
   return (
-    <div className="mdl-detail">
-      <div className="mdl-detail-h">
-        <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 6}}>
-          <span style={{display: "inline-flex"}}>
-            {model.installed
-              ? <span style={{color: "var(--green)"}}>{Icons.download}</span>
-              : <span style={{color: "var(--fg-5)"}}>{Icons.download}</span>}
-          </span>
-          <div className="nm mono">{model.longName || model.name || model.id}</div>
-          <span style={{marginLeft: "auto", display: "inline-flex", gap: 6}}>
+    <DetailCard>
+      <DetailHeader
+        state={rowState}
+        name={model.longName || model.name || model.id}
+        source={model.repo || model.hf_repo || model.id}
+        chips={
+          <>
             {model.installed && model.update_available && (
               <span className="chip amber" data-testid="mdl-detail-update-badge" role="status" aria-label="Update available on Hugging Face" title="A newer version of this file is available on Hugging Face">update available</span>
             )}
-            {model.installed
-              ? <span className="chip ok">installed</span>
-              : isUpstreamModel(model)
-                ? <span className="chip info">upstream · {model.upstream}</span>
-                : <span className="chip amber">available</span>}
-          </span>
-        </div>
-        <div className="repo">{model.repo || model.hf_repo || model.id}</div>
-      </div>
-      <div className="mdl-detail-meta">
-        <div><div className="k">params</div><div className="v">{model.params || "—"}</div></div>
-        <div><div className="k">size</div><div className="v">{model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : "—")}</div></div>
-        <div><div className="k">quant</div><div className="v" data-testid="mdl-detail-quant">{model.quant || "—"}</div></div>
-        <div><div className="k">type</div><div className="v">{model.type || (model.capabilities?.[0]) || "—"}</div></div>
-        <div><div className="k">device</div><div className="v">{model.device || (model.backends?.[0]) || "—"}</div></div>
-        <div><div className="k">runtime</div><div className="v">{model.runtime || "—"}</div></div>
-        <div><div className="k">namespace</div><div className="v">{model.ns || "—"}</div></div>
-        <div><div className="k">added</div><div className="v">{fmtAdded(model.created)}</div></div>
-        <div><div className="k">origin</div><div className="v">{isUpstreamModel(model) ? `upstream · ${model.upstream}` : "local"}</div></div>
-      </div>
+            {/* The update has its own badge above, so the status here says the rest. */}
+            {upstream
+              ? <span className="chip info">upstream · {model.upstream}</span>
+              : <StatusChip state={{ ...rowState, update: false }} testid="mdl-detail-status" />}
+          </>
+        }
+      />
+      <DetailFacts
+        facts={[
+          { k: "params", v: model.params },
+          { k: "size", v: model.size || (model.size_bytes ? fmtBytes(model.size_bytes) : null) },
+          { k: "quant", v: model.quant, testid: "mdl-detail-quant" },
+          { k: "type", v: model.type || (model.capabilities?.[0]) },
+          { k: "device", v: model.device || (model.backends?.[0]) },
+          { k: "runtime", v: model.runtime },
+          { k: "namespace", v: model.ns },
+          { k: "added", v: fmtAdded(model.created) },
+          { k: "origin", v: upstream ? `upstream · ${model.upstream}` : "local" },
+        ]}
+      />
       <div className="mdl-detail-labels">
         {(model.labels || model.capabilities || []).map(l => <span key={l} className="chip">{l}</span>)}
       </div>
+      {npuFit && (
+        <DetailSection title="NPU fit · ggml-xdna" testid="mdl-npu-fit">
+          <DetailLine k="path">
+            <span className={"chip " + (npuFit.xdna_path === "fused" ? "ok" : "warn")} data-testid="mdl-npu-fit-path">{npuFit.xdna_path}</span>
+          </DetailLine>
+          <div className="mdl-detail-note">{npuFit.reason}</div>
+          <div className="mdl-detail-note">{NPU_COEXIST[npuFit.xdna_path]}</div>
+        </DetailSection>
+      )}
       <div className="mdl-detail-recipe">
         <div className="form-section">File facts</div>
         {recipeRows.length === 0 ? (
-          <div className="mono" style={{fontSize: 12, color: "var(--fg-4)", fontStyle: "italic"}}>
-            No file facts recorded — the launcher reads them from the GGUF.
-          </div>
+          <DetailNone>No file facts recorded — the launcher reads them from the GGUF.</DetailNone>
         ) : recipeRows.map(f => (
           <div key={f.key} className="form-row" data-testid={`mdl-recipe-row-${f.key}`}>
             <div className="form-lbl">
@@ -752,7 +747,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
       </div>
       <UsedByPanel model={model} />
       <OnDiskPanel model={model} />
-      <div className="mdl-detail-actions">
+      <DetailActions>
         {model.installed ? (
           <>
             {model.update_available && (
@@ -817,7 +812,7 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
             <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit options</button>
             <button className="btn danger sm" onClick={onDelete}>{Icons.unload} Delete</button>
           </>
-        ) : isUpstreamModel(model) ? (
+        ) : upstream ? (
           <div className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
             Served remotely by the <span className="chip info">{model.upstream}</span> upstream — not stored on this host.
           </div>
@@ -834,8 +829,8 @@ function ModelDetail({ model, onDelete, onEdit, onPullStarted }) {
             <button className="btn ghost sm" onClick={() => window.open(`https://huggingface.co/${model.hf_repo || model.repo || ""}`, "_blank")}>View on HF →</button>
           </>
         )}
-      </div>
-    </div>
+      </DetailActions>
+    </DetailCard>
   );
 }
 

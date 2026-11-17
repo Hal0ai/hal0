@@ -84,7 +84,8 @@ async function mockInspectAndPulls(
 
 async function openAndInspect(page: import('@playwright/test').Page, repo: string) {
   await page.goto('/#models')
-  await page.locator('button:has-text("Add by HF coords")').first().click()
+  await page.getByTestId('mdl-add').click()
+  await page.getByTestId('mdl-add-hf').click()
   await page.locator('input[placeholder="unsloth/Qwen3-8B-GGUF"]').fill(repo)
   await page.locator('button:has-text("Inspect")').click()
   // Variants render only once the inspect settles.
