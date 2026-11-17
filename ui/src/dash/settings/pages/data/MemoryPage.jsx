@@ -13,6 +13,7 @@ import {
   engineTargetPutBody,
   engineTargetValue,
 } from './engineTarget.js'
+import { ConfirmDialog } from '../../../primitives.jsx'
 import { ApplyBadge } from '../../shared/ApplyBadge.jsx'
 import { SRow } from '../../shared/SRow.jsx'
 import { AdvRow, _schemaField, _getIn, _deepMergePatch, _advCoerce, _advInputStyle } from '../../shared/SchemaRow.jsx'
@@ -64,10 +65,22 @@ const MEMORY_ENGINE_DESC_OVERRIDE =
 // What the Memory switch does, in the panel's own words (memory.enabled is service-restart:
 // consumed once when hal0-api builds the memory subsystem, so `hal0 memory enable|disable`
 // and this switch write the same key).
+//
+// What off does is read off create_app(): no provider is built, so /mcp/memory is not mounted,
+// /api/memory/* answers 503, the admin MCP memory tools answer "memory provider not configured",
+// and /api/status reports memory_enabled false (the Memory pages show it as off). Nothing there
+// stops the engine service or deletes a bank.
 const MEMORY_ENABLED_SUB =
-  "Whether hal0-api builds the memory subsystem at startup. Off removes /mcp/memory, /api/memory/* " +
-  "and the dashboard's Memory pages until it is turned back on; nothing already stored is deleted. " +
-  "Applies after a hal0-api restart.";
+  "Whether hal0-api builds the memory subsystem when it starts. Off: /mcp/memory is not mounted, " +
+  "/api/memory/* answers 503, agents' memory tools fail, and the Memory pages show memory as off. " +
+  "The engine service keeps running and nothing stored is deleted. Applies when hal0-api restarts.";
+
+const MEMORY_OFF_CONSEQUENCES = [
+  "/mcp/memory is not mounted, so agents lose their memory tools (recall, search, add).",
+  "/api/memory/* answers 503, and the dashboard's Memory pages show memory as off.",
+  "The engine service keeps running, and nothing already stored is deleted or changed.",
+  "It takes effect when hal0-api restarts. That restart ends any request in flight, and memory stays on until then.",
+];
 
 export function MemoryEnginePanel({ registry }) {
   const { settings, update, schema: schemaQuery } = useSettingsClient({ schema: true });
@@ -88,15 +101,23 @@ export function MemoryEnginePanel({ registry }) {
   }, [currentEnabled]);
 
   const dirty = engine !== currentEngine || enabled !== currentEnabled;
+  // Turning memory off asks first; turning it on, or any engine change, does not.
+  const turningOff = currentEnabled && !enabled;
+  const [confirmOff, setConfirmOff] = useState(false);
 
   const doSave = async () => {
+    setConfirmOff(false);
     try {
       const patch = {};
       if (engine !== currentEngine) patch.engine = engine;
       if (enabled !== currentEnabled) patch.enabled = enabled;
       await update.mutateAsync({ memory: patch });
       setEngine(engine);
-      window.__hal0Toast && window.__hal0Toast("Memory engine saved — restart hal0-api to apply", "warn");
+      const message =
+        enabled !== currentEnabled
+          ? `Memory will turn ${enabled ? "on" : "off"} when hal0-api restarts${engine !== currentEngine ? " (engine change saved too)" : ""}`
+          : "Memory engine saved — restart hal0-api to apply";
+      window.__hal0Toast && window.__hal0Toast(message, "warn");
     } catch (e) {
       window.__hal0Toast && window.__hal0Toast(`Save failed — ${e?.message || "see logs"}`, "err");
     }
@@ -139,10 +160,27 @@ export function MemoryEnginePanel({ registry }) {
         {dirty && (
           <button className="btn ghost sm" onClick={() => { setEngine(currentEngine); setEnabled(currentEnabled); }}>Reset</button>
         )}
-        <button className="btn sm" disabled={!dirty || update.isPending} onClick={doSave}>
+        <button className="btn sm" disabled={!dirty || update.isPending} onClick={() => (turningOff ? setConfirmOff(true) : doSave())}>
           {update.isPending ? "Saving…" : "Save engine"}
         </button>
       </div>
+      <ConfirmDialog
+        open={confirmOff}
+        onCancel={() => setConfirmOff(false)}
+        onConfirm={doSave}
+        confirmLabel="Turn memory off"
+        title="Turn memory off?"
+        footerNote="Reversible: turn it back on the same way."
+        message={
+          <span data-testid="memory-off-confirm">
+            Saving this sets <span className="mono">memory.enabled = false</span>. After hal0-api restarts:
+            <ul style={{ margin: "10px 0 0", paddingLeft: 18, display: "flex", flexDirection: "column", gap: 6 }}>
+              {MEMORY_OFF_CONSEQUENCES.map(line => <li key={line}>{line}</li>)}
+            </ul>
+          </span>
+        }
+        destructive
+      />
     </div>
   );
 }
