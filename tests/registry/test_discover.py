@@ -32,7 +32,7 @@ def model_root(tmp_path: Path) -> Path:
     root = tmp_path / "models"
     root.mkdir()
     # Chat model — must show up.
-    (root / "qwen3-4b-instruct-q4_k_m.gguf").write_bytes(b"x" * 128)
+    (root / "Qwen3-4B-Q4_K_M.gguf").write_bytes(b"x" * 128)
     # Safetensors variant — must show up.
     (root / "v1-5-pruned-emaonly.safetensors").write_bytes(b"y" * 256)
     # Embed model (capability_guess should be 'embed').
@@ -65,7 +65,7 @@ def test_find_candidates_skips_noise(model_root: Path) -> None:
         known_paths=set(),
     )
     names = {c.path.name for c in candidates}
-    assert "qwen3-4b-instruct-q4_k_m.gguf" in names
+    assert "Qwen3-4B-Q4_K_M.gguf" in names
     assert "v1-5-pruned-emaonly.safetensors" in names
     assert "nomic-embed-text-v1.gguf" in names
     assert "whisper-large-v3.gguf" in names
@@ -102,7 +102,7 @@ def test_suggested_id_normalisation(model_root: Path) -> None:
     )
     by_name = {c.path.name: c for c in candidates}
     # underscores, dots, mixed case all collapse to single hyphens.
-    assert by_name["qwen3-4b-instruct-q4_k_m.gguf"].suggested_id == "qwen3-4b-instruct-q4-k-m"
+    assert by_name["Qwen3-4B-Q4_K_M.gguf"].suggested_id == "qwen3-4b-q4-k-m"
     assert by_name["v1-5-pruned-emaonly.safetensors"].suggested_id == "v1-5-pruned-emaonly"
 
 
@@ -116,7 +116,7 @@ def test_capability_guess(model_root: Path) -> None:
     assert caps["nomic-embed-text-v1.gguf"] == "embed"
     assert caps["whisper-large-v3.gguf"] == "asr"
     # Default for a plain chat filename is 'chat'.
-    assert caps["qwen3-4b-instruct-q4_k_m.gguf"] == "chat"
+    assert caps["Qwen3-4B-Q4_K_M.gguf"] == "chat"
 
 
 def test_capability_guess_classifies_diffusion_media() -> None:
@@ -129,7 +129,7 @@ def test_capability_guess_classifies_diffusion_media() -> None:
     assert _guess_capability("flux1-dev.gguf") == "image"
     assert _guess_capability("sdxl-base-1.0.safetensors") == "image"
     # A plain chat model is still 'chat' — the new branches are last-resort.
-    assert _guess_capability("qwen3-4b-instruct-q4_k_m.gguf") == "chat"
+    assert _guess_capability("Qwen3-4B-Q4_K_M.gguf") == "chat"
 
 
 def test_capability_guess_classifies_rerankers() -> None:
@@ -184,8 +184,8 @@ def test_curated_match_by_filename(model_root: Path) -> None:
         known_paths=set(),
     )
     by_name = {c.path.name: c for c in candidates}
-    # qwen3-4b-instruct-q4_k_m.gguf is the curated qwen3-4b's hf_file.
-    qwen = by_name["qwen3-4b-instruct-q4_k_m.gguf"]
+    # Qwen3-4B-Q4_K_M.gguf is the curated qwen3-4b's hf_file.
+    qwen = by_name["Qwen3-4B-Q4_K_M.gguf"]
     assert qwen.curated_match is not None
     assert qwen.curated_match.id == "qwen3-4b"
     # No curated entry for the embed model in CURATED_MODELS.
@@ -195,14 +195,14 @@ def test_curated_match_by_filename(model_root: Path) -> None:
 
 def test_known_paths_short_circuit(model_root: Path) -> None:
     """Files already in known_paths must not appear in the candidate list."""
-    already = (model_root / "qwen3-4b-instruct-q4_k_m.gguf").resolve()
+    already = (model_root / "Qwen3-4B-Q4_K_M.gguf").resolve()
     candidates = find_candidates(
         roots=[model_root],
         extensions=[".gguf", ".safetensors"],
         known_paths={str(already)},
     )
     names = {c.path.name for c in candidates}
-    assert "qwen3-4b-instruct-q4_k_m.gguf" not in names
+    assert "Qwen3-4B-Q4_K_M.gguf" not in names
 
 
 def test_register_candidate_curated_uses_curated_id(
@@ -213,7 +213,7 @@ def test_register_candidate_curated_uses_curated_id(
         extensions=[".gguf", ".safetensors"],
         known_paths=set(),
     )
-    qwen = next(c for c in candidates if c.path.name == "qwen3-4b-instruct-q4_k_m.gguf")
+    qwen = next(c for c in candidates if c.path.name == "Qwen3-4B-Q4_K_M.gguf")
     model = register_candidate(registry, qwen)
     assert model.id == "qwen3-4b"
     assert "Qwen3" in model.name
@@ -548,7 +548,7 @@ def test_scan_and_register_prune_true_prunes_and_returns_new_keys(
     root = tmp_path / "models"
     root.mkdir()
     # A live model that stays registered on-disk.
-    live = root / "qwen3-4b-instruct-q4_k_m.gguf"
+    live = root / "Qwen3-4B-Q4_K_M.gguf"
     live.write_bytes(b"y" * 128)
     # A stale row whose file was deleted.
     gone = root / "old-model-q4.gguf"
@@ -1439,7 +1439,7 @@ def test_scan_leaves_a_gguf_row_without_halogen_facts(
 ) -> None:
     root = tmp_path / "models"
     root.mkdir()
-    (root / "qwen3-4b-instruct-q4_k_m.gguf").write_bytes(b"x" * 128)
+    (root / "Qwen3-4B-Q4_K_M.gguf").write_bytes(b"x" * 128)
     scan_and_register(registry, ModelsConfig(roots=[str(root)]))
     (m,) = registry.list()
     assert m.provider == "llama-server"
@@ -1481,7 +1481,7 @@ def test_scan_reads_no_gguf_header_for_an_ordinary_gguf(
     """Four bytes per candidate is the whole cost: the walk may meet thousands of files."""
     root = tmp_path / "models"
     root.mkdir()
-    (root / "qwen3-4b-instruct-q4_k_m.gguf").write_bytes(b"GGUF" + b"x" * 124)
+    (root / "Qwen3-4B-Q4_K_M.gguf").write_bytes(b"GGUF" + b"x" * 124)
 
     def boom(*_a: object, **_k: object) -> None:
         raise AssertionError("detect() reads the GGUF header")
