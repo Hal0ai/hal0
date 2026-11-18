@@ -1,1 +1,59 @@
-/* Models → Providers: the Add provider modal (AddProviderModal.jsx). */
+/* Models → Providers: the Add provider modal (AddProviderModal.jsx). Tokens from dashboard.css :root only. */
+.addprov { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.addprov-sec { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.addprov-lbl { font-size: 10.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-3); }
+
+.addprov-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
+.addprov-tile {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px; min-width: 0; text-align: left;
+  padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-2); color: var(--fg);
+  cursor: pointer; font: inherit;
+}
+.addprov-tile b { font-size: 12.5px; font-weight: 600; }
+.addprov-tile span { font-size: 11px; color: var(--fg-3); line-height: 1.35; overflow-wrap: anywhere; }
+.addprov-tile:hover { border-color: var(--line-strong); background: var(--bg-3); }
+.addprov-tile:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.addprov-tile.on { border-color: var(--accent-line); background: var(--accent-soft); }
+
+.addprov-keyrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.addprov-keyrow .input { flex: 1 1 200px; min-width: 0; }
+.addprov-row-field .input { width: 100%; box-sizing: border-box; }
+.addprov-keyrow .input { width: auto; }
+.addprov-err { margin-top: 5px; font-size: 11px; color: var(--err); overflow-wrap: anywhere; }
+.addprov-sub, .addprov-hint { font-size: 11px; color: var(--fg-3); line-height: 1.45; overflow-wrap: anywhere; }
+
+.addprov-result {
+  padding: 8px 11px; border: 1px solid var(--ok-line); border-radius: 8px; background: var(--ok-soft);
+  color: var(--ok); font-size: 12px; overflow-wrap: anywhere;
+}
+.addprov-result.err { border-color: var(--err-line); background: var(--err-soft); color: var(--err); }
+.addprov-result:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+
+.addprov-pick { border: 1px solid var(--line); border-radius: 8px; background: var(--bg-2); min-width: 0; }
+.addprov-pick-h { display: flex; align-items: center; gap: 8px; padding: 8px 11px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.addprov-grow { flex: 1 1 auto; color: var(--fg-3); font-size: 12px; }
+.addprov-search { margin: 8px 11px 0; width: calc(100% - 22px); box-sizing: border-box; }
+.addprov-list { max-height: 280px; overflow: auto; }
+.addprov-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) 84px 54px minmax(60px, auto); gap: 8px; align-items: center;
+  padding: 6px 11px; border-bottom: 1px solid var(--line-soft); font-size: 12px;
+}
+.addprov-row:last-child { border-bottom: none; }
+.addprov-mid { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.addprov-mid b { font-weight: 500; overflow-wrap: anywhere; }
+.addprov-type { padding: 3px 6px; font-size: 11.5px; }
+.addprov-num { text-align: right; color: var(--fg-3); font-size: 11px; white-space: nowrap; }
+.addprov-empty { padding: 12px 11px; color: var(--fg-3); font-size: 11.5px; }
+.addprov-more { margin: 8px 11px; }
+
+.addprov-note { color: var(--fg-3); }
+.addprov-bad { color: var(--err); }
+.addprov-btns { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+@media (max-width: 520px) {
+  .addprov .pf-row { grid-template-columns: 1fr; gap: 4px; }
+  .addprov .pf-row-lbl { padding-top: 0; }
+  .addprov-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .addprov-row .addprov-type { grid-column: 2; justify-self: start; }
+  .addprov-row .addprov-num { grid-column: 2; text-align: left; }
+}
