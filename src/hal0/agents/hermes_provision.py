@@ -71,6 +71,7 @@ from hal0.agents.hermes_layout import (
 )
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
 from hal0.install.perms import SECRETS_DIR_MODE, ensure_shared_dir, state_root_owner
+from hal0.normalize.output_cap import MAX_TOKENS_HEADER
 from hal0.security import nofollow
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 from hal0.slots.state import SlotState, is_dispatchable_state, provider_requires_model
@@ -2297,6 +2298,11 @@ def terminal_tool_enabled(
 # unreadable setting falls back to.
 HAL0_APPROVALS_MODE = "smart"
 
+#: Most tokens one Hermes model call may generate through the hal0 gateway
+#: (#3804). Sent as ``X-hal0-Max-Tokens``; an operator changes it with
+#: ``providers.custom.extra_headers.X-hal0-Max-Tokens`` in overrides.yaml.
+HERMES_MAX_OUTPUT_TOKENS = 8192
+
 
 #: hal0's own MCP servers that can write memory for the caller: hal0-memory,
 #: and hal0-admin whose catalog carries ``memory_add``. A profile's
@@ -2518,15 +2524,24 @@ def _build_config_overlay(
 
     # model.* — the OpenAI-compatible-LAN wiring. ``provider: custom`` is
     # hermes's built-in bucket for Ollama/vLLM/llama.cpp endpoints; hal0 is
-    # that endpoint. max_tokens guards the thinking-model silent-TUI (#635).
+    # that endpoint.
+    #
+    # Output cap (#3804): the pinned Hermes has no reader for a
+    # ``model.max_tokens`` key, and its built-in ``custom`` profile sets no
+    # cap, so a main-loop call went out unbounded and could decode until the
+    # slot's context filled. Hermes does put a provider entry's
+    # ``extra_headers`` on every request to that entry's base_url, so the cap
+    # travels as ``X-hal0-Max-Tokens`` and the hal0 gateway applies it
+    # (hal0.normalize.output_cap). A base_url that points straight at a slot's
+    # llama-server (live-resolve off) bypasses the gateway and stays uncapped.
     # ADR-0023: the canonical default virtual is hal0/agent (was hal0/chat).
     pairs.append(("model.default", _model_default_id(primary["model_id"], live_resolve_enabled)))
     pairs += [
         ("model.provider", "custom"),
         ("model.base_url", base_url),
-        ("model.max_tokens", 8192),
         ("providers.custom.name", "hal0"),
         ("providers.custom.base_url", base_url),
+        (f"providers.custom.extra_headers.{MAX_TOKENS_HEADER}", HERMES_MAX_OUTPUT_TOKENS),
         ("providers.custom.request_timeout_seconds", 300),
         ("providers.custom.stale_timeout_seconds", 900),
     ]

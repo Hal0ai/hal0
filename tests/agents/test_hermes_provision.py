@@ -2173,8 +2173,9 @@ def test_delegation_slot_survives_a_repair_seed_rewrite(
 # #635 wires the `chat` slot (Qwen3-class thinking-on model) as the top-level
 # model with reasoning visible in the TUI. Three Hermes gotchas apply:
 #   1. model.base_url MUST be set (provider:custom requires it) ← already done.
-#   2. model.max_tokens MUST be set — else Qwen3 spends the full budget on
-#      <think> and the content field comes back empty (silent TUI).
+#   2. An output cap MUST be set — else Qwen3 spends the full budget on
+#      <think> and the content field comes back empty (silent TUI). It is
+#      sent as the X-hal0-Max-Tokens gateway header (#3804).
 #   3. display.streaming AND display.show_reasoning BOTH required; without
 #      streaming the TUI hangs on the reasoning block.
 #
@@ -2199,12 +2200,17 @@ def test_overlay_has_streaming_true() -> None:
     assert keys["display.streaming"] is True
 
 
-def test_overlay_has_model_max_tokens() -> None:
-    """model.max_tokens must be a positive int — Qwen3 thinking models silently
-    drain the budget in <think> and return empty content otherwise (#635)."""
-    keys = _build_overlay_keys()
-    max_tokens = keys["model.max_tokens"]
-    assert isinstance(max_tokens, int) and max_tokens > 0
+def test_overlay_sends_the_output_cap_as_a_gateway_header() -> None:
+    """A Hermes model call must be bounded: Qwen3 thinking models drain the
+    budget in <think> otherwise (#635). The pinned Hermes reads no
+    ``model.max_tokens`` key, so the cap rides the provider entry's
+    ``extra_headers``, which Hermes sends on every request, and the hal0
+    gateway applies it (#3804)."""
+    for live_resolve in (True, False):
+        keys = _build_overlay_keys(live_resolve_enabled=live_resolve)
+        cap = keys["providers.custom.extra_headers.X-hal0-Max-Tokens"]
+        assert isinstance(cap, int) and cap > 0
+        assert "model.max_tokens" not in keys
 
 
 def test_overlay_model_base_url_set() -> None:
