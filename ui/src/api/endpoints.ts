@@ -478,7 +478,7 @@ export const ENDPOINTS = {
 
   // ── Upstream providers (external LLM endpoints) ──────────────────
   // GET list / POST create; PATCH settings / DELETE per name; POST test
-  // probes reachability. providersCatalog feeds the "Add upstream" form;
+  // probes reachability. providersCatalog feeds the Add provider tiles;
   // providerCredentials writes ONE api-key to api.env ({key, value} —
   // the secret never transits the upstream CRUD surface).
   upstreams: '/api/upstreams',

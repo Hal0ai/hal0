@@ -1,9 +1,9 @@
 // hal0 v3 dashboard — upstream-provider hooks (upstream controls).
 //
-// Backs Connections → Upstream providers (and the Slots → Endpoints tab).
-// List + create + patch + delete + test, plus the static provider catalog
-// for the "Add upstream" form and the credentials write. Secrets never
-// round-trip: the API returns env-var NAMES and boolean presence only.
+// Backs Models → Providers (the list, the detail panel and the Add provider modal).
+// List + create + patch + delete + test, the per-model listing, switch, refresh and probe,
+// plus the static provider catalog for the Add provider tiles and the credentials write.
+// Secrets never round-trip: the API returns env-var NAMES and boolean presence only.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
