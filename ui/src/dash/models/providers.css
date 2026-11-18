@@ -21,6 +21,7 @@
   color: var(--fg-2); font-family: var(--jbm); font-size: 10.5px; font-weight: 600;
 }
 .prov-name { font-weight: 600; }
+.prov-pname { color: var(--fg-3); font-family: var(--jbm); font-size: 11.5px; overflow-wrap: anywhere; }
 .prov-host { flex: 1 1 120px; min-width: 0; color: var(--fg-4); font-family: var(--jbm); font-size: 11px; overflow-wrap: anywhere; }
 .prov-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 
@@ -90,4 +91,7 @@
   .prov-row { padding-left: 20px; }
   .prov-banner { margin-right: 10px; }
   .prov-meta { justify-content: flex-start; }
+  /* A row is two lines here: the id and its flags, then type, context and price. The callable name
+     is in the detail panel and in the row's accessible name. */
+  .prov-mid small { display: none; }
 }

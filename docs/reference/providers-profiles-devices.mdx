@@ -192,7 +192,10 @@ Everything above is available under **Models → Providers**: the list has a sec
 provider with a switch per model (the `enabled` field of each `[[upstream.models]]` row), the
 **Add provider** dialog creates a curated provider with the rows you ticked, and **Refresh
 model list** is the same refresh; an answer marked `stale`, or carrying a `warning`, means the
-provider could not be reached and is reported as such, not as a success. The provider's
+provider could not be reached and is reported as such, not as a success. A model is tagged
+**gone** only when the listing is known (`fetched_at` set and `stale` false) and the row has
+`discovered: false`; a provider with no stored key cannot fetch its list, so its rows are never
+tagged gone and **Refresh model list** asks for a key instead of calling it. The provider's
 **Routes requests** switch (and the **Switch on** button of a switched-off provider's section)
 sends `PATCH /api/upstreams/{name}` with `{"enabled": false}` or `{"enabled": true}`: the routing
 kill-switch, which removes the provider from dispatch while it is off and leaves its stored
