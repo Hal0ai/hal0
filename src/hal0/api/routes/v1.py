@@ -52,6 +52,7 @@ from hal0.dispatcher.lane_pin import (
 )
 from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
 from hal0.memory.extraction_env import MEMORY_ALIAS
+from hal0.normalize.output_cap import MAX_TOKENS_HEADER, apply_output_cap, parse_output_cap
 from hal0.slots.abandon import ClientGoneProbe, abandon_probe
 from hal0.slots.state import SlotNpuConflict
 from hal0.upstreams.catalog import (
@@ -1622,6 +1623,7 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
     # unconditional request._body=json(body) rewrite would corrupt the
     # multipart upload / inject a meaningless enable_thinking.
     body = await _normalize_chat_body(request, body)
+    body = _apply_output_cap_header(request, body)
     # #3333: on a single-parallel slot, a BACKGROUND (hal0/memory) request
     # yields the slot to any FOREGROUND (user) request already waiting on or
     # running on it, so Hindsight extraction/reflect/consolidation can never
@@ -1643,6 +1645,22 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
             with contextlib.suppress(Exception):
                 request._body = json.dumps(body).encode("utf-8")  # type: ignore[attr-defined]
         return await _dispatch_and_forward(request, dispatcher, body=body)
+
+
+def _apply_output_cap_header(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """Bound the body's output limit at ``X-hal0-Max-Tokens`` when the caller sent one (#3804).
+
+    See :mod:`hal0.normalize.output_cap`. ``request._body`` is rewritten too, for
+    the same reason ``_normalize_chat_body`` rewrites it.
+    """
+    cap = parse_output_cap(request.headers.get(MAX_TOKENS_HEADER))
+    if cap is None:
+        return body
+    capped = apply_output_cap(body, cap)
+    if capped is not body:
+        with contextlib.suppress(Exception):
+            request._body = json.dumps(capped).encode("utf-8")  # type: ignore[attr-defined]
+    return capped
 
 
 def _gate_slot_key(request: Request, body: dict[str, Any]) -> str:
