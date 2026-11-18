@@ -45,6 +45,66 @@ describe('mock upstream catalogue', () => {
   })
 })
 
+const ENTRY_KEYS = [
+  'advertise_models', 'auth_configured', 'auth_header', 'auth_key_present', 'auth_style', 'auth_value_env',
+  'budget_monthly_usd', 'catalog_id', 'curated', 'enabled', 'enabled_count', 'kind', 'managed_by',
+  'model_filters', 'models', 'models_total', 'name', 'owned_models', 'pinned', 'slot_name',
+  'timeout_seconds', 'url', 'warmup_strategy',
+]
+
+describe('mock provider list', () => {
+  const list = serve('/api/upstreams') as Array<Record<string, any>>
+  const byName = (n: string) => list.find((u) => u.name === n)!
+
+  it('is allow-listed and carries the route fields on every entry', () => {
+    expect(list.map((u) => u.name)).toEqual(['minimax', 'openrouter', 'openai', 'corp', 'hermes.coder'])
+    for (const u of list) expect(Object.keys(u).sort()).toEqual(ENTRY_KEYS)
+  })
+
+  it('covers each provider state', () => {
+    expect(byName('minimax')).toMatchObject({ curated: true, auth_key_present: true, enabled_count: 2, models_total: 7 })
+    expect(byName('openrouter')).toMatchObject({ curated: true, models_total: 450 })
+    expect(byName('openai')).toMatchObject({ curated: true, auth_style: 'bearer', auth_key_present: false })
+    expect(byName('corp')).toMatchObject({ curated: false, models_total: 0, managed_by: null })
+    expect(byName('hermes.coder')).toMatchObject({ managed_by: 'agent:hermes' })
+  })
+
+  it('agrees with each listing on the counts', () => {
+    for (const u of list.filter((x) => x.curated)) {
+      const listing = serve(`/api/upstreams/${u.name}/models`) as Record<string, any>
+      expect(u.models_total).toBe(listing.models.length)
+      expect(u.enabled_count).toBe(listing.models.filter((m: any) => m.enabled).length)
+    }
+  })
+
+  it('never carries a key value', () => {
+    expect(JSON.stringify(list)).not.toMatch(/sk-/)
+  })
+})
+
+describe('mock large provider', () => {
+  it('lists more than 300 rows with the route fields, deterministically', () => {
+    const a = serve('/api/upstreams/openrouter/models') as Record<string, any>
+    const b = serve('/api/upstreams/openrouter/models') as Record<string, any>
+    expect(a.models.length).toBeGreaterThanOrEqual(300)
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b))
+    for (const row of a.models) expect(Object.keys(row).sort()).toEqual(ROW_KEYS)
+    expect(new Set(a.models.map((m: any) => m.id)).size).toBe(a.models.length)
+    expect(a.models.some((m: any) => !m.discovered)).toBe(true)
+    expect(a.models.some((m: any) => m.recommended)).toBe(true)
+  })
+})
+
+describe('mock protected provider', () => {
+  it('lists a read-only protected listing and refuses a patch with 409 upstream.protected', () => {
+    const listing = serve('/api/upstreams/hermes.coder/models') as Record<string, any>
+    expect(listing).toMatchObject({ protected: true, curated: false })
+    const answer = MOCK_MUTATION_FIXTURES.upstreamModelPatch('hermes.coder', 'hermes-agent', { enabled: false })
+    expect(answer.status).toBe(409)
+    expect((answer.body as any).error.code).toBe('upstream.protected')
+  })
+})
+
 describe('mock upstream model listing', () => {
   it('answers a curated upstream with the route fields', () => {
     const listing = serve('/api/upstreams/openrouter/models') as Record<string, any>

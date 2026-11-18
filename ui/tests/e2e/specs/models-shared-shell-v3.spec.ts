@@ -114,14 +114,12 @@ test.describe('Models — shared catalog shell', () => {
     await expect(page.locator('.mdl-row')).toHaveCount(2)
   })
 
-  test('the Upstream tab carries Check updates and Add upstream', async ({ page }) => {
-    await page.goto('/#models/upstream')
-    await expect(page.getByTestId('mdl-check-upstream')).toBeVisible()
-    // Upstream rows are never installed or downloadable: only "In use" is offered as a state.
-    await expect(page.getByTestId('mdl-filter-inuse')).toBeVisible()
-    await expect(page.getByTestId('mdl-filter-installed')).toHaveCount(0)
+  test('the Providers tab carries Refresh model lists and Add provider', async ({ page }) => {
+    await page.goto('/#models/providers')
+    await expect(page.getByTestId('providers-tab')).toBeVisible()
+    await expect(page.getByTestId('mdl-check-providers')).toHaveText('Refresh model lists')
     await page.getByTestId('mdl-add').click()
-    await expect(page).toHaveURL(/#slots\/endpoints/)
+    await expect(page.getByTestId('add-provider-modal')).toBeVisible()
   })
 
   test('a row is reachable and selectable from the keyboard', async ({ page }) => {

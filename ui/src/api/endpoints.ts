@@ -5,6 +5,8 @@
 // authoritative when we reconcile against the backend (ADR-0004 for
 // agent surface, etc).
 
+import { modelPath } from '@/dash/models/providers-pure'
+
 export const ENDPOINTS = {
   // ── Slots / status (hal0-api) ────────────────────────────────────
   status: '/api/status',
@@ -483,6 +485,13 @@ export const ENDPOINTS = {
   upstream: (name: string) => `/api/upstreams/${encodeURIComponent(name)}`,
   upstreamTest: (name: string) => `/api/upstreams/${encodeURIComponent(name)}/test`,
   providersCatalog: '/api/providers/catalog',
+  // Per-model provider routes: check a url + key without saving, the model
+  // listing, one model row (ids contain `/`, kept as path separators), refetch.
+  providerProbe: '/api/providers/probe',
+  upstreamModels: (name: string) => `/api/upstreams/${encodeURIComponent(name)}/models`,
+  upstreamModel: (name: string, modelId: string) =>
+    `/api/upstreams/${encodeURIComponent(name)}/models/${modelPath(modelId)}`,
+  upstreamRefresh: (name: string) => `/api/upstreams/${encodeURIComponent(name)}/refresh`,
   providerCredentials: (name: string) =>
     `/api/providers/${encodeURIComponent(name)}/credentials`,
 

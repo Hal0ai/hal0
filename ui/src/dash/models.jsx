@@ -9,6 +9,7 @@
 
 import { useModels, usePullsList, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdatesForceCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes } from '@/api/hooks/useModels'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
+import { isManagedRemote, useUpstreamRefresh, useUpstreams } from '@/api/hooks/useUpstreams'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useComfyuiModels } from '@/api/hooks/useComfyui'
@@ -19,6 +20,10 @@ import { flmCatalogRows } from '@/dash/npu/npu-models-pure'
 import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
 import { DownloadRow, DownloadsPane } from '@/dash/models/DownloadsPane.jsx'
+import { ProvidersTab } from '@/dash/models/ProvidersTab.jsx'
+import { ProviderDetail } from '@/dash/models/ProviderDetail.jsx'
+import { AddProviderModal } from '@/dash/models/AddProviderModal.jsx'
+import { keyState, providerState } from '@/dash/models/providers-pure'
 import { useXdnaFit } from '@/api/hooks/useXdnaFit'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { npuTabVisible } from '@/dash/npu/npu-pure'
@@ -70,7 +75,7 @@ function usePageReset(deps) {
 }
 
 // ── ModelsView ─────────────────────────────────────────────────────────
-const MODEL_TABS = ["inference", "image", "upstream", "flm", "profiles"];
+const MODEL_TABS = ["inference", "image", "providers", "flm", "profiles"];
 const toastM = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind);
 // `modelParam` mirrors SlotsView's slotParam: #models/profiles deep-links
 // the Profiles tab (runner-catalogue-v2 — Profiles moved here from Slots).
@@ -84,10 +89,11 @@ function ModelsView({ modelParam = null }) {
   const [sortField, setSortField] = useStateM("name");
   const [sortDir, setSortDir] = useStateM("asc");
   const [q, setQ] = useStateM("");
-  // Tabs: "inference" (default), "image", "upstream", "flm", "profiles". Each is
+  // Tabs: "inference" (default), "image", "providers", "flm", "profiles". Each is
   // hash-routed (#models/<tab>) so the sidebar sub-links track it; bare
   // #models or an unknown param shows Inference (same idiom as SlotsView).
-  const tabFromParam = (p) => (MODEL_TABS.includes(p) ? p : "inference");
+  // The old `upstream` address forwards to Providers (the history redirect lives in main.jsx).
+  const tabFromParam = (p) => (p === "upstream" ? "providers" : MODEL_TABS.includes(p) ? p : "inference");
   const [tab, setTab] = useStateM(tabFromParam(modelParam));
   useEffectM(() => { setTab(tabFromParam(modelParam)); }, [modelParam]);
   // Pagination
@@ -147,21 +153,41 @@ function ModelsView({ modelParam = null }) {
       toastM(`Update all failed — ${e?.message || "see logs"}`, "err");
     }
   };
-  // Upstream rows have no file to compare: checking them is asking the upstreams
-  // again which models they advertise.
-  const [recheckingUpstream, setRecheckingUpstream] = useStateM(false);
-  const onRecheckUpstream = async () => {
-    setRecheckingUpstream(true);
-    try {
-      const res = await modelsQuery.refetch();
-      if (res.isError) throw res.error;
-      const n = (res.data ?? []).filter(isUpstreamModel).length;
-      toastM(`${n} upstream model${n === 1 ? "" : "s"} advertised`, "info");
-    } catch (e) {
-      toastM(`Could not re-read the upstream models — ${e?.message || "see logs"}`, "err");
-    } finally {
-      setRecheckingUpstream(false);
+  // Providers: the header "Refresh model lists" asks every provider that is switched per model
+  // and can authenticate (a key is set, or none is needed) what it offers now, one after another.
+  const upstreamsQuery = useUpstreams();
+  // Only a count rides on this query here, so a body that is not a list reads as no providers.
+  const providerList = (Array.isArray(upstreamsQuery.data) ? upstreamsQuery.data : []).filter(isManagedRemote);
+  const providersTotal = providerList.length;
+  const upstreamRefresh = useUpstreamRefresh();
+  const [provSel, setProvSel] = useStateM({ provider: null, model: null });
+  const [addProviderOpen, setAddProviderOpen] = useStateM(false);
+  const [refreshingProviders, setRefreshingProviders] = useStateM(false);
+  const onRefreshProviders = async () => {
+    const targets = providerList.filter(
+      u => providerState(u) === "per-model" && ["set", "not-needed"].includes(keyState(u)),
+    );
+    if (!targets.length) {
+      toastM("No provider to refresh — add a provider and choose its models first", "info");
+      return;
     }
+    setRefreshingProviders(true);
+    const failed = [];
+    for (const u of targets) {
+      try {
+        await upstreamRefresh.mutateAsync(u.name);
+      } catch {
+        failed.push(u.name);
+      }
+    }
+    setRefreshingProviders(false);
+    const ok = targets.length - failed.length;
+    toastM(
+      failed.length
+        ? `Refreshed ${ok} of ${targets.length} model lists — could not reach ${failed.join(", ")}`
+        : `Refreshed ${ok} model list${ok === 1 ? "" : "s"}`,
+      failed.length ? "err" : "info",
+    );
   };
 
   // Auto-pick the first installed model on first render so the detail
@@ -230,14 +256,6 @@ function ModelsView({ modelParam = null }) {
   ];
   const inferenceCount = inferenceSections.reduce((n, s) => n + s.rows.length, 0);
 
-  // Upstream: only isUpstreamModel
-  const upstreamAll = modelList.filter(m => isUpstreamModel(m) && fil(m));
-  const upstreamSections = [
-    { key: "inuse", label: "In use", rows: bySort(upstreamAll.filter(used)) },
-    { key: "advertised", label: "Advertised", rows: bySort(upstreamAll.filter(m => !used(m))) },
-  ];
-  const upstreamTotal = modelList.filter(m => isUpstreamModel(m)).length;
-
   // Image: ComfyUI models are not registry rows — the tab is the image catalog
   // (ImageModelsTab), with the weight files behind its Files switch. react-query
   // serves the tab's own query from cache, so the count below costs no second request.
@@ -250,20 +268,16 @@ function ModelsView({ modelParam = null }) {
   // ── Pagination logic ────────────────────────────────────────────────
   const pageReset = usePageReset([tab, q, sortField, sortDir, filterSel, stateSel, runsSel]);
   useEffectM(() => { if (pageReset) setPage(1); }, [pageReset]);
-  const paged = pageSections(tab === "upstream" ? upstreamSections : inferenceSections, page, perPage);
+  const paged = pageSections(inferenceSections, page, perPage);
 
   // FLM: the catalogue is not registry rows; react-query serves the tab's own query from cache.
   const flmCatalog = useFlmCatalog();
   const flmTotal = useMemoM(() => flmCatalogRows(flmCatalog.data?.models).length, [flmCatalog.data]);
 
   // ── Render ──────────────────────────────────────────────────────────
-  const tabLabel = tab === "inference" ? `Inference Models${inferenceCount ? ` · ${inferenceCount}` : ""}`
-    : `Upstream Models${upstreamTotal ? ` · ${upstreamTotal}` : ""}`;
-
-  // Upstream rows are neither installed nor downloadable, and have no file to update.
-  const stateChips = tab === "upstream" ? STATE_FILTERS.filter(c => c.id === "inuse") : STATE_FILTERS;
+  const tabLabel = `Inference Models${inferenceCount ? ` · ${inferenceCount}` : ""}`;
   const toolbarGroups = [
-    { id: "state", label: "state", chips: stateChips, selected: stateSel, onToggle: id => setStateSel(s => toggleIn(s, id)) },
+    { id: "state", label: "state", chips: STATE_FILTERS, selected: stateSel, onToggle: id => setStateSel(s => toggleIn(s, id)) },
     { id: "filter", label: "filter", chips: FILTER_CHIPS, selected: filterSel, onToggle: id => setFilterSel(s => toggleIn(s, id)) },
     ...(tab === "inference"
       ? [{
@@ -326,12 +340,13 @@ function ModelsView({ modelParam = null }) {
         pending: recheckingFlm,
         onClick: onRecheckFlm,
       }
-    : tab === "upstream"
+    : tab === "providers"
     ? {
-        testid: "mdl-check-upstream",
-        title: "Ask the upstreams again which models they advertise",
-        pending: recheckingUpstream,
-        onClick: onRecheckUpstream,
+        testid: "mdl-check-providers",
+        label: "Refresh model lists",
+        title: "Ask each provider which models it offers now. New models arrive switched off.",
+        pending: refreshingProviders,
+        onClick: onRefreshProviders,
       }
     : {
         title: "Compare every installed model against its HuggingFace repo now",
@@ -342,8 +357,8 @@ function ModelsView({ modelParam = null }) {
     ? [{ label: "Install image model", hint: "Show the catalog models that are not installed yet", onClick: () => setImageAddSeq(n => n + 1) }]
     : tab === "flm"
     ? [{ label: "Download FLM model", hint: "Show the catalogue models that are not installed yet", onClick: () => setFlmAddSeq(n => n + 1) }]
-    : tab === "upstream"
-    ? [{ label: "Add upstream", hint: "Add a provider under Slots → Endpoints; its models appear here", onClick: () => { window.location.hash = "#slots/endpoints"; } }]
+    : tab === "providers"
+    ? [{ label: "Add provider", hint: "Connect a provider and choose which of its models to switch on", testid: "mdl-add-provider", onClick: () => setAddProviderOpen(true) }]
     : [
         { label: "Add by HF coords", hint: "a repo and a file, pulled into the model store", testid: "mdl-add-hf", onClick: () => setAddOpen(true) },
         { label: "Search HF", hint: "find a repo on Hugging Face, then add it", testid: "mdl-add-search", onClick: () => setSearchOpen(true) },
@@ -400,12 +415,13 @@ function ModelsView({ modelParam = null }) {
         </button>
         <button
           role="tab"
-          aria-selected={tab === "upstream"}
-          className={"slot-tab" + (tab === "upstream" ? " on" : "")}
-          onClick={() => { window.location.hash = "#models/upstream"; }}
+          aria-selected={tab === "providers"}
+          className={"slot-tab" + (tab === "providers" ? " on" : "")}
+          data-testid="models-tab-providers"
+          onClick={() => { window.location.hash = "#models/providers"; }}
         >
-          <span>Upstream Models</span>
-          <span className="slot-tab-ct num">{upstreamTotal}</span>
+          <span>Providers</span>
+          <span className="slot-tab-ct num">{providersTotal}</span>
         </button>
         <button
           role="tab"
@@ -433,6 +449,13 @@ function ModelsView({ modelParam = null }) {
         <ImageModelsTab addSeq={imageAddSeq} />
       ) : tab === "flm" ? (
         <FlmModelsTab addSeq={flmAddSeq} />
+      ) : tab === "providers" ? (
+      <div className="models-layout" style={{marginTop: 18}}>
+        <ProvidersTab selected={provSel} onSelect={setProvSel} onAdd={() => setAddProviderOpen(true)} />
+        <div className="models-sidebar">
+          <ProviderDetail selected={provSel} onSelect={setProvSel} />
+        </div>
+      </div>
       ) : (
       <div className="models-layout" style={{marginTop: 18}}>
         {/* ── List (toolbar + rows) ── */}
@@ -453,13 +476,13 @@ function ModelsView({ modelParam = null }) {
             />
           }
           title={tabLabel}
-          right={`${modelList.length} total · ${modelList.filter(m => m.installed).length} on disk · ${upstreamTotal} upstream`}
+          right={`${modelList.length} total · ${modelList.filter(m => m.installed).length} on disk`}
           paged={paged}
           loading={modelsQuery.isPending ? "Loading models…" : null}
           error={modelsQuery.isError ? (modelsQuery.error?.message || "Failed to load models") : null}
           empty={filtered
             ? "No models match — adjust the search or filters."
-            : tab === "upstream" ? "No upstream models advertised." : "the catalog is empty."}
+            : "the catalog is empty."}
           pager={{ perPage, onPage: setPage, onPerPage: (opt) => { setPerPage(opt); setPage(1); } }}
           renderRow={m => (
             <ModelRow
@@ -489,6 +512,11 @@ function ModelsView({ modelParam = null }) {
       </div>
       )}
 
+      <AddProviderModal
+        open={addProviderOpen}
+        onClose={() => setAddProviderOpen(false)}
+        onAdded={(name) => { setProvSel({ provider: name, model: null }); setAddProviderOpen(false); }}
+      />
       <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} initialRepo={searchPick} />
       <AddByPathModal open={addByPathOpen} onClose={() => setAddByPathOpen(false)} />
       <ScanDirectoryModal open={scanOpen} onClose={() => setScanOpen(false)} />

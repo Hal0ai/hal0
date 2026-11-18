@@ -2641,7 +2641,7 @@ type UpstreamModelRow = {
   id: string
   canonical_id: string
   enabled: boolean
-  type: string
+  type: 'chat' | 'embed' | 'rerank' | 'tts' | 'stt' | 'image'
   context: number | null
   price_in: number | null
   price_out: number | null
@@ -2682,38 +2682,79 @@ type UpstreamListing = {
   models: UpstreamModelRow[]
 }
 
-// `openrouter` is curated; `corp` is an upstream awaiting conversion (its rows
-// are the ids it serves today, `curated: false`, `stale: true`). Any other name
-// 404s, like the real route's unknown-upstream answer.
+// The mock provider set (names the Providers tab shows):
+//   minimax     per-model, a few rows, key set
+//   openrouter  per-model, 450 rows (generated), key set
+//   openai      per-model, key missing
+//   corp        awaiting conversion (`curated: false`, `stale: true`, rows are the ids it serves today)
+//   hermes.coder agent-managed (`protected: true`, read-only live rows)
+// Any other name 404s, like the real route's unknown-upstream answer.
+
+const MOCK_FETCHED_AT = 1763337600
+
+const PROVIDER_VENDORS = ['qwen', 'meta-llama', 'mistralai', 'google', 'deepseek', 'anthropic', 'cohere', 'nvidia']
+const PROVIDER_CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 1000000]
+
+/**
+ * `count` deterministic model rows for a large provider: no randomness and no clock, so a
+ * snapshot or an e2e run sees the same list every time. Every 17th row is an embedding model,
+ * every 41st is no longer offered (`discovered: false`), every 53rd is recommended, and the
+ * first few are on.
+ */
+function generatedUpstreamModels(upstream: string, count: number, firstIndex = 0): UpstreamModelRow[] {
+  const rows: UpstreamModelRow[] = []
+  for (let n = 0; n < count; n += 1) {
+    const i = firstIndex + n
+    const vendor = PROVIDER_VENDORS[i % PROVIDER_VENDORS.length]
+    const embed = i % 17 === 0
+    const priced = i % 5 !== 0
+    rows.push(
+      upstreamModelRow(upstream, `${vendor}/model-${String(i).padStart(3, '0')}${i % 7 === 0 ? ':free' : ''}`, {
+        enabled: i < firstIndex + 4 && !embed,
+        type: embed ? 'embed' : 'chat',
+        context: PROVIDER_CONTEXTS[i % PROVIDER_CONTEXTS.length],
+        price_in: priced ? Math.round(((i % 40) + 1) * 0.05 * 100) / 100 : null,
+        price_out: priced && !embed ? Math.round(((i % 40) + 1) * 0.2 * 100) / 100 : null,
+        discovered: i % 41 !== 40,
+        recommended: i % 53 === 0,
+      }),
+    )
+  }
+  return rows
+}
+
+function curatedListing(name: string, models: UpstreamModelRow[], over: Partial<UpstreamListing> = {}): UpstreamListing {
+  return { name, curated: true, protected: false, fetched_at: MOCK_FETCHED_AT, stale: false, warning: null, models, ...over }
+}
+
 function upstreamListing(name: string): UpstreamListing | null {
+  if (name === 'minimax') {
+    return curatedListing(name, [
+      upstreamModelRow(name, 'MiniMax-M3', { enabled: true, context: 512000, price_in: 0.4, price_out: 1.6, recommended: true }),
+      upstreamModelRow(name, 'MiniMax-M3.1-Flash', { enabled: true, context: 256000, price_in: 0.1, price_out: 0.4, recommended: true }),
+      upstreamModelRow(name, 'MiniMax-M2.5', { context: 204000, price_in: 0.3, price_out: 1.2 }),
+      upstreamModelRow(name, 'speech-2.8-hd', { type: 'tts', price_in: 100, price_unit: 'Mchar', recommended: true }),
+      upstreamModelRow(name, 'speech-2.8-turbo', { type: 'tts', price_in: 60, price_unit: 'Mchar' }),
+      upstreamModelRow(name, 'embo-01', { type: 'embed', context: 4096, price_in: 0.07 }),
+      upstreamModelRow(name, 'image-01', { type: 'image', price_in: 0.0035, price_unit: 'img' }),
+    ])
+  }
   if (name === 'openrouter') {
-    return {
-      name,
-      curated: true,
-      protected: false,
-      fetched_at: 1763337600,
-      stale: false,
-      warning: null,
-      models: [
-        upstreamModelRow(name, 'qwen/qwen3-coder', {
-          enabled: true,
-          context: 262144,
-          price_in: 0.22,
-          price_out: 0.95,
-        }),
-        upstreamModelRow(name, 'meta-llama/llama-3.3-70b-instruct:free', {
-          context: 131072,
-          price_in: 0,
-          price_out: 0,
-        }),
-        upstreamModelRow(name, 'openai/text-embedding-3-small', {
-          type: 'embed',
-          context: 8191,
-          price_in: 0.02,
-          price_out: 0,
-        }),
-      ],
-    }
+    return curatedListing(name, [
+      upstreamModelRow(name, 'qwen/qwen3-coder', { enabled: true, context: 262144, price_in: 0.22, price_out: 0.95 }),
+      upstreamModelRow(name, 'meta-llama/llama-3.3-70b-instruct:free', { context: 131072, price_in: 0, price_out: 0 }),
+      upstreamModelRow(name, 'openai/text-embedding-3-small', { type: 'embed', context: 8191, price_in: 0.02, price_out: 0 }),
+      ...generatedUpstreamModels(name, 447),
+    ])
+  }
+  if (name === 'openai') {
+    return curatedListing(name, [
+      upstreamModelRow(name, 'gpt-5', { enabled: true, price_in: 1.25, price_out: 10, recommended: true }),
+      upstreamModelRow(name, 'gpt-5-mini', { enabled: true, price_in: 0.25, price_out: 2, recommended: true }),
+      upstreamModelRow(name, 'text-embedding-3-small', { type: 'embed', context: 8191, price_in: 0.02 }),
+      upstreamModelRow(name, 'whisper-1', { type: 'stt' }),
+      upstreamModelRow(name, 'tts-1', { type: 'tts', price_in: 15, price_unit: 'Mchar' }),
+    ])
   }
   if (name === 'corp') {
     return {
@@ -2729,7 +2770,67 @@ function upstreamListing(name: string): UpstreamListing | null {
       ],
     }
   }
+  if (name === 'hermes.coder') {
+    return {
+      name,
+      curated: false,
+      protected: true,
+      fetched_at: null,
+      stale: false,
+      warning: null,
+      models: [upstreamModelRow(name, 'hermes-agent', { enabled: true })],
+    }
+  }
   return null
+}
+
+/** One `GET /api/upstreams` row (`_serialize_upstream`); the key is never present, only env-var names. */
+function upstreamEntry(name: string, over: Record<string, unknown> = {}) {
+  const listing = upstreamListing(name)!
+  const total = listing.curated ? listing.models.length : 0
+  return {
+    name,
+    kind: 'remote',
+    url: `https://${name}.example.com/v1`,
+    auth_style: 'bearer',
+    auth_header: '',
+    auth_value_env: `${name.replace(/[^a-z0-9]/gi, '_').toUpperCase()}_API_KEY`,
+    auth_configured: true,
+    auth_key_present: true,
+    timeout_seconds: 60,
+    slot_name: null,
+    warmup_strategy: 'none',
+    advertise_models: true,
+    enabled: true,
+    model_filters: null,
+    models: listing.models.filter((m) => m.enabled).map((m) => m.id),
+    managed_by: null,
+    pinned: false,
+    owned_models: [] as string[],
+    catalog_id: null as string | null,
+    curated: listing.curated,
+    budget_monthly_usd: null,
+    enabled_count: listing.curated ? listing.models.filter((m) => m.enabled).length : 0,
+    models_total: total,
+    ...over,
+  }
+}
+
+function buildUpstreams() {
+  return [
+    upstreamEntry('minimax', { url: 'https://api.minimax.io/v1', catalog_id: 'minimax' }),
+    upstreamEntry('openrouter', { url: 'https://openrouter.ai/api/v1', catalog_id: 'openrouter' }),
+    upstreamEntry('openai', { url: 'https://api.openai.com/v1', catalog_id: 'openai', auth_key_present: false }),
+    upstreamEntry('corp', { url: 'https://llm.corp.example.com/v1', auth_style: 'none', auth_value_env: '', auth_configured: false, auth_key_present: false }),
+    upstreamEntry('hermes.coder', {
+      url: 'http://127.0.0.1:8642/v1',
+      auth_style: 'none',
+      auth_value_env: '',
+      auth_configured: false,
+      auth_key_present: false,
+      managed_by: 'agent:hermes',
+    }),
+  ]
 }
 
 function buildUpstreamModels(_url: string, match: RegExpMatchArray) {
@@ -2749,6 +2850,18 @@ function upstreamModelPatchResponse(
   body: Partial<Pick<UpstreamModelRow, 'enabled' | 'type' | 'context' | 'price_in' | 'price_out' | 'price_unit'>> = {},
 ): MockHttpAnswer<UpstreamModelRow | { error: { code: string; message: string; details: { name: string } } }> {
   const listing = upstreamListing(name)
+  if (listing?.protected) {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'upstream.protected',
+          message: `upstream '${name}' is managed by an agent and cannot be changed here`,
+          details: { name },
+        },
+      },
+    }
+  }
   if (listing && !listing.curated) {
     return {
       status: 409,
@@ -2866,6 +2979,7 @@ export const MOCK_BUILDERS: Record<string, Builder> = {
   runnerImagesDownloaded: buildRunnerImagesDownloaded,
   runnerImagesPulls: buildRunnerImagesPulls,
   providersCatalog: buildProvidersCatalog,
+  upstreams: buildUpstreams,
   upstreamModels: buildUpstreamModels,
   memoryEngine: buildMemoryEngine,
   memoryHealth: buildMemoryHealth,

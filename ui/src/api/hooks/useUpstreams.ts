@@ -8,6 +8,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../client'
 import { ENDPOINTS } from '../endpoints'
+import type { ModelType } from '@/dash/models/providers-pure'
 
 export interface UpstreamModelFilters {
   models: string[]
@@ -40,6 +41,14 @@ export interface UpstreamEntry {
   /** Model ids a pinned entry owns. */
   owned_models?: string[]
   hint?: string
+  /** Preset this provider was made from; null for a custom one. */
+  catalog_id: string | null
+  /** True once the provider has per-model rows; false while it routes everything. */
+  curated: boolean
+  budget_monthly_usd: number | null
+  /** Models switched on / models the provider has rows for. */
+  enabled_count: number
+  models_total: number
 }
 
 export interface CatalogEntry {
@@ -55,6 +64,19 @@ export interface CatalogEntry {
   docs_url: string
   category: 'cloud' | 'local' | 'peer' | 'custom'
   notes: string
+  tools: boolean
+  quirks: string[]
+  rate_limit_headers: Record<string, string>
+  /** The preset's own model rows (what a fresh provider of this kind offers). */
+  models: Array<{
+    id: string
+    type: ModelType
+    context: number | null
+    price_in: number | null
+    price_out: number | null
+    price_unit: string
+    recommended: boolean
+  }>
 }
 
 // Type aliases (not interfaces) so they satisfy the api client's
@@ -70,6 +92,10 @@ export type UpstreamCreateBody = {
   advertise_models?: boolean
   enabled?: boolean
   model_filters?: UpstreamModelFilters
+  /** Per-model rows; present (even empty) makes the provider per-model. */
+  models?: Array<
+    Pick<UpstreamModelRow, 'id' | 'enabled' | 'type' | 'context' | 'price_in' | 'price_out' | 'price_unit'>
+  >
 }
 
 export type UpstreamPatchBody = {
@@ -84,6 +110,58 @@ export type UpstreamPatchBody = {
   timeout_seconds?: number
   warmup_strategy?: string
 }
+
+/** One row of `GET /api/upstreams/{name}/models` (routes/providers.py `_row`). */
+export interface UpstreamModelRow {
+  id: string
+  /** `<provider>/<id>`; null on a probe row, since no provider exists yet. */
+  canonical_id: string | null
+  enabled: boolean
+  type: ModelType
+  context: number | null
+  price_in: number | null
+  price_out: number | null
+  price_unit: string
+  /** False when the provider no longer lists the model. */
+  discovered: boolean
+  recommended: boolean
+  in_use_by: string[]
+}
+
+export interface UpstreamListing {
+  name: string
+  curated: boolean
+  protected: boolean
+  fetched_at: number | null
+  stale: boolean
+  models: UpstreamModelRow[]
+  /** Shown verbatim when present. */
+  warning?: string | null
+}
+
+/** Body of `POST /api/providers/probe`. `key` is sent once and never kept. */
+export type ProbeBody = {
+  catalog_id?: string
+  url?: string
+  auth_style?: string
+  auth_header?: string
+  key?: string
+}
+
+/** Answer of the probe. Its model rows carry the `_row` fields except `enabled`,
+ * `discovered` and `in_use_by`, plus `type_source`; callers must not rely on those. */
+export interface ProbeResult {
+  ok: boolean
+  status: number | null
+  latency_ms: number
+  models: UpstreamModelRow[]
+  rate_limit: Record<string, number | null>
+  error: string | null
+}
+
+export type ModelPatch = Partial<
+  Pick<UpstreamModelRow, 'enabled' | 'type' | 'context' | 'price_in' | 'price_out' | 'price_unit'>
+>
 
 export interface UpstreamTestResult {
   ok: boolean
@@ -164,5 +242,66 @@ export function useProviderCredentialSet() {
     mutationFn: ({ name, key, value }: { name: string; key: string; value: string }) =>
       apiPost(ENDPOINTS.providerCredentials(name), { key, value }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['upstreams'] }),
+  })
+}
+
+export function useUpstreamModels(name: string | null, opts: { enabled?: boolean } = {}) {
+  return useQuery({
+    queryKey: ['upstream-models', name],
+    queryFn: () => apiGet<UpstreamListing>(ENDPOINTS.upstreamModels(name as string)),
+    enabled: name !== null && (opts.enabled ?? true),
+  })
+}
+
+/**
+ * Switch a model on or off, or correct its type, context or price. The cached
+ * listing is patched at once and put back if the request fails, so a switch
+ * never shows a state the server did not take.
+ */
+export function useUpstreamModelPatch() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ name, modelId, patch }: { name: string; modelId: string; patch: ModelPatch }) =>
+      apiPatch<UpstreamModelRow>(ENDPOINTS.upstreamModel(name, modelId), patch),
+    onMutate: async ({ name, modelId, patch }) => {
+      const key = ['upstream-models', name]
+      await qc.cancelQueries({ queryKey: key })
+      const previous = qc.getQueryData<UpstreamListing>(key)
+      if (previous) {
+        qc.setQueryData<UpstreamListing>(key, {
+          ...previous,
+          models: previous.models.map((m) => (m.id === modelId ? { ...m, ...patch } : m)),
+        })
+      }
+      return { previous }
+    },
+    onError: (_err, { name }, ctx) => {
+      if (ctx?.previous) qc.setQueryData(['upstream-models', name], ctx.previous)
+    },
+    onSettled: (_data, _err, { name }) => {
+      qc.invalidateQueries({ queryKey: ['upstreams'] })
+      qc.invalidateQueries({ queryKey: ['upstream-models', name] })
+    },
+  })
+}
+
+/** Refetch what the provider offers; new models arrive switched off. */
+export function useUpstreamRefresh() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (name: string) => apiPost<UpstreamListing>(ENDPOINTS.upstreamRefresh(name)),
+    onSuccess: (listing, name) => {
+      qc.setQueryData(['upstream-models', name], listing)
+      qc.invalidateQueries({ queryKey: ['upstreams'] })
+    },
+  })
+}
+
+/** Check a url + key and list the models, saving nothing. Never cached: the key
+ * is in the variables, so call `reset()` once the answer is read. */
+export function useProviderProbe() {
+  return useMutation({
+    gcTime: 0,
+    mutationFn: (body: ProbeBody) => apiPost<ProbeResult>(ENDPOINTS.providerProbe, body),
   })
 }
