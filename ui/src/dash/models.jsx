@@ -21,6 +21,9 @@ import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
 import { DownloadRow, DownloadsPane } from '@/dash/models/DownloadsPane.jsx'
 import { ProvidersTab } from '@/dash/models/ProvidersTab.jsx'
+import { TypeGlyph } from '@/dash/models/type-glyph.jsx'
+import { LaneCode } from '@/dash/lane-code.jsx'
+import { laneForBackend } from '@/dash/lane-code-pure'
 import { ProviderDetail } from '@/dash/models/ProviderDetail.jsx'
 import { AddProviderModal } from '@/dash/models/AddProviderModal.jsx'
 import { keyState, providerState, refreshOutcome, refreshSummary } from '@/dash/models/providers-pure'
@@ -632,7 +635,7 @@ function ModelRow({ model, state = registryState(model), npuFit = null, selected
               ✓ default
             </span>
           )}
-          {model.type && <span className="chip">{model.type}</span>}
+          {model.type && <TypeGlyph type={model.type} />}
           {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
           {isDrafterModel(model) && (
             <span className="chip info" data-testid="mdl-row-drafter" title={`Paired drafter · ${draftVariantLabel(model.draftVariant)}`}>
@@ -640,13 +643,17 @@ function ModelRow({ model, state = registryState(model), npuFit = null, selected
             </span>
           )}
           {npuFit && (
-            <span className="chip dev-npu" data-testid="mdl-row-npu" title={`Runs on the NPU through ggml-xdna. ${npuFit.reason}`}>
-              npu · {npuFit.xdna_path}
-            </span>
+            <LaneCode
+              lane="npu"
+              testid="mdl-row-npu"
+              data-xdna-path={npuFit.xdna_path}
+              title={`Runs on the NPU through ggml-xdna (${npuFit.xdna_path}). ${npuFit.reason}`}
+            />
           )}
-          {backends.map(b => (
-            <span key={b} className={"chip dev-" + b}>{b}</span>
-          ))}
+          {backends.map(b => {
+            const lane = laneForBackend(b, model);
+            return lane ? <LaneCode key={b} lane={lane} /> : <span key={b} className="chip">{b}</span>;
+          })}
         </>
       }
       menu={

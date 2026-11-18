@@ -9,6 +9,7 @@ import {
   railGroup,
   railRows,
   stateCell,
+  stateFigure,
   type RailRow,
 } from '../slot-rail-pure'
 
@@ -21,6 +22,7 @@ const row: RailRow = {
   name: 'brain',
   model: 'brain.gguf',
   device: 'gpu-vulkan',
+  lane: 'vulkan',
   group: 'vulkan',
   cls: 'serving',
   label: 'serving',
@@ -153,5 +155,25 @@ describe('railFooter', () => {
     const rows = railRows(slots, ['e'], true)
     expect(railFooter(slots, rows, 12.5)).toEqual({ loadedGb: 3, poolFreeGb: 12.5, paused: 1 })
     expect(railFooter(slots, rows, null).poolFreeGb).toBeNull()
+  })
+})
+
+describe('stateFigure', () => {
+  it('is true only for a serving row with a tok/s figure', () => {
+    expect(stateFigure({ ...row, cls: 'serving', toks: 42 })).toBe(true)
+    expect(stateFigure({ ...row, cls: 'serving', toks: 0 })).toBe(false)
+    expect(stateFigure({ ...row, cls: 'serving', toks: null })).toBe(false)
+    expect(stateFigure({ ...row, cls: 'stale', toks: 42 })).toBe(false)
+  })
+})
+
+describe('row lane', () => {
+  it('carries the lane code key: FLM for an NPU slot, NPU for the xdna runner', () => {
+    const rows = railRows(
+      [slot('brain', 'gpu-rocm', 'ready'), slot('flm', 'npu', 'ready'), slot('gguf', 'npu', 'ready', { binary: 'xdna' })],
+      [],
+      false,
+    )
+    expect(Object.fromEntries(rows.map((r) => [r.name, r.lane]))).toEqual({ brain: 'rocm', flm: 'flm', gguf: 'npu' })
   })
 })

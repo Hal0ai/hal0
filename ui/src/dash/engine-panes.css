@@ -1093,41 +1093,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* ── ONE status vocabulary (round dot) · shared across every slot indicator ──
-   The colours here MUST match the generic .sdot (overhaul.css) and the
-   endpoint .ep-dot (connections.css) so a slot's card, its endpoint row, and
-   its list entry can never show different colours for the same phase:
-   serving = GREEN + glow + pulse (actively processing a request now)
-   ready   = solid YELLOW/amber (loaded, healthy, idle-but-up) — no glow
-   warming = orange + glow + pulse (starting / pulling)
-   error   = red + glow
-   offline = grey, no glow */
-.infer-pane .sdot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--fg-5);
-  flex-shrink: 0;
-}
+/* Slot state dots are the shared .sdot (overhaul.css): one shape and one colour per state, so a
+   slot's card, its endpoint row and its rail entry cannot disagree. The card's phase class for a
+   loaded, idle slot is `ready`; it draws as the shared `stale` dot. */
 .infer-pane .sdot.ready {
   background: var(--hal0-accent);
-}
-.infer-pane .sdot.serving {
-  background: var(--ok);
-  box-shadow: 0 0 8px var(--ok-glow, rgba(111, 207, 151, 0.35));
-  animation: pulse 1.4s ease-in-out infinite;
-}
-.infer-pane .sdot.warming {
-  background: var(--warn);
-  box-shadow: 0 0 8px var(--warn);
-  animation: pulse 1.4s ease-in-out infinite;
-}
-.infer-pane .sdot.error {
-  background: var(--err);
-  box-shadow: 0 0 8px var(--err);
-}
-.infer-pane .sdot.offline {
-  background: var(--fg-5);
 }
 /* port — replaces the old status pill; pushed right, plain mono */
 .infer-pane .sport {
@@ -1283,84 +1253,14 @@
   color: var(--fg-4);
 }
 
-/* device chip + profile pill — the device tag uses a SQUARE swatch (category,
-   not status) + a neutral name, so the device hue never reads as a status dot.
-   Round = status (the .sdot), square = device/category (matches the memory
-   legend swatches). */
-:is(.infer-pane, .npu-pane) .dchip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 7px;
-  border-radius: 3px;
-  font-family: var(--jbm);
-  font-size: 10px;
-  border: 1px solid var(--line);
-  background: var(--bg-1);
-  color: var(--fg-2);
-  white-space: nowrap;
-}
-.infer-pane .dchip .sw {
-  width: 8px;
-  height: 8px;
-  border-radius: var(--rad-xs, 2px);
-  background: var(--dev-cpu);
-  flex-shrink: 0;
-}
-.infer-pane .dchip.vulkan .sw {
-  background: var(--dev-vulkan);
-}
-.infer-pane .dchip.rocm .sw {
-  background: var(--dev-rocm);
-}
-.infer-pane .dchip.npu .sw {
-  background: var(--dev-npu);
-}
-.infer-pane .dchip.cpu .sw {
-  background: var(--dev-cpu);
-}
-/* round .d dot — retained ONLY for the memory-track "iGPU" header label
-   (MemGtt), which is a hue-keyed category badge, not a slot device tag. The
-   `:has(.d)` guard hue-keys that chip while leaving slot device tags (which use
-   the neutral square .sw) untouched. */
-:is(.infer-pane, .npu-pane) .dchip .d {
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-}
-:is(.infer-pane, .npu-pane) .dchip.vulkan:has(.d) {
-  color: var(--dev-vulkan);
-}
-:is(.infer-pane, .npu-pane) .dchip.rocm:has(.d) {
-  color: var(--dev-rocm);
-}
-:is(.infer-pane, .npu-pane) .dchip.npu:has(.d) {
-  color: var(--dev-npu);
-}
-:is(.infer-pane, .npu-pane) .flm-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 7px;
-  border-radius: 3px;
-  font-family: var(--jbm);
-  font-size: 9.5px;
-  letter-spacing: 0.04em;
-  color: var(--dev-npu);
-  border: 1px solid rgba(200, 150, 255, 0.3);
-  background: rgba(200, 150, 255, 0.06);
-}
+/* lane code + profile pill — the lane is the shared .lane-code block (dashboard.css): square =
+   lane, round = state (.sdot). */
 :is(.infer-pane, .npu-pane) .prov {
   display: inline-flex;
-  align-items: stretch;
+  align-items: center;
+  gap: 7px;
 }
-:is(.infer-pane, .npu-pane) .prov .dchip,
-:is(.infer-pane, .npu-pane) .prov .flm-chip {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-/* The profile side of the joined [ device | PROFILE ] tag. It is a RichSelect
+/* The profile picker beside the lane code. It is a RichSelect
    trigger (card-dropdowns Task 2), so `.rsel` — which is `width: 100%` for the
    full-width drawer fields it was written for — is pulled back to the pill's
    own content width and the popover is released from the trigger's narrow
@@ -1376,8 +1276,7 @@
   width: auto;
   padding: 2px 7px;
   border: 1px solid var(--line);
-  border-left: none;
-  border-radius: 0 3px 3px 0;
+  border-radius: var(--rad-xs);
   background: var(--bg-2);
   color: var(--fg-3);
   font-family: var(--jbm);
@@ -1446,8 +1345,8 @@
   width: 26px;
   height: 26px;
   border-radius: var(--rad-sm);
-  border: 1px solid var(--line);
-  background: var(--bg-1);
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--fg-4);
   cursor: pointer;
   transition:
@@ -1455,9 +1354,8 @@
     border-color 0.12s,
     color 0.12s;
 }
-:is(.infer-pane, .npu-pane, .npu-card) .sctrl:hover {
-  border-color: var(--line-strong);
-  background: var(--bg-2);
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl:hover:not(:disabled) {
+  background: var(--bg-3);
   color: var(--fg-2);
 }
 :is(.infer-pane, .npu-pane, .npu-card) .sctrl:disabled {
@@ -1466,23 +1364,20 @@
 }
 :is(.infer-pane, .npu-pane, .npu-card) .sctrl.start {
   color: var(--ok);
-  border-color: var(--ok-line);
 }
-:is(.infer-pane, .npu-pane, .npu-card) .sctrl.start:hover {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl.start:hover:not(:disabled) {
   background: var(--ok-soft);
 }
 :is(.infer-pane, .npu-pane, .npu-card) .sctrl.stop {
   color: var(--err);
-  border-color: var(--err-line);
 }
-:is(.infer-pane, .npu-pane, .npu-card) .sctrl.stop:hover {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl.stop:hover:not(:disabled) {
   background: var(--err-soft);
 }
 :is(.infer-pane, .npu-pane, .npu-card) .sctrl.restart {
   color: var(--comfy);
-  border-color: var(--comfy-line);
 }
-:is(.infer-pane, .npu-pane, .npu-card) .sctrl.restart:hover {
+:is(.infer-pane, .npu-pane, .npu-card) .sctrl.restart:hover:not(:disabled) {
   background: var(--comfy-soft);
 }
 

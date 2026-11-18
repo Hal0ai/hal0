@@ -1,5 +1,5 @@
 /* The slot rail beside the Inference pane (slot-rail.jsx). Tokens only. The status dots are the
-   shared .sdot classes (overhaul.css); the device chips are the shared .chip.dev-* (dashboard.css).
+   shared .sdot classes (overhaul.css); the lane codes are the shared .lane-code (dashboard.css).
    Rail root fills the abs-positioned .dash-side-fill track: header and footer stay put, the body
    scrolls. */
 .slot-rail {
@@ -58,7 +58,8 @@
 .slot-rail .rail-grp .gl { font-size: 10px; letter-spacing: 0.06em; color: var(--fg-3); text-transform: uppercase; }
 .slot-rail .rail-grp .gc { margin-left: auto; font-size: 10px; color: var(--fg-4); }
 
-/* One slot: dot | name + chip | state on the first line, model | memory under them. */
+/* One slot: state dot | name + lane code | tok/s while serving on the first line, model | memory
+   under them. The dot's shape and colour are the state; its word is the row tooltip. */
 .slot-rail .srow {
   position: relative;
   display: grid;
@@ -93,9 +94,6 @@
 }
 .slot-rail .srow .st { grid-column: 3; grid-row: 1; font-size: 11px; color: var(--fg-3); text-align: right; }
 .slot-rail .srow .st.live { color: var(--accent); }
-.slot-rail .srow .st.paused { color: var(--info); }
-.slot-rail .srow .st.warn { color: var(--warn); }
-.slot-rail .srow .st.err { color: var(--err); }
 .slot-rail .srow .mdl {
   grid-column: 2;
   grid-row: 2;
@@ -108,8 +106,7 @@
 }
 .slot-rail .srow .mem { grid-column: 3; grid-row: 2; font-size: 10.5px; color: var(--fg-4); text-align: right; }
 .slot-rail .srow.off .name { color: var(--fg-3); }
-.slot-rail .srow.off .chip { opacity: 0.6; }
-.slot-rail .srow.off .st { color: var(--fg-4); }
+.slot-rail .srow.off .lane-code { opacity: 0.6; }
 
 /* NPU rows pulse in the NPU hue while serving. */
 .slot-rail .srow .sdot.npu.serving { background: var(--dev-npu); box-shadow: 0 0 8px var(--dev-npu); }
