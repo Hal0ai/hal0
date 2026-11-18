@@ -67,8 +67,7 @@ export function sectionRows(
   const offAll = kept
     .filter((m) => !m.enabled)
     .sort((a, b) => Number(b.recommended) - Number(a.recommended) || byId(a, b))
-  const searching = f.q.trim() !== ''
-  const off = searching ? offAll : offAll.slice(0, Math.max(0, offShown))
+  const off = offAll.slice(0, Math.max(0, offShown))
   return { on, off, offTotal: offAll.length, offHidden: offAll.length - off.length }
 }
 

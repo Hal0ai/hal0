@@ -55,12 +55,12 @@ function KeyEditor({ u, onDone }) {
     if (!value) return
     setErr('')
     try {
-      await save.mutateAsync({ name: u.name, key: env, value })
+      await save.save({ name: u.name, key: env, value })
       setValue('')
       toast(`Key saved for ${u.name}`, 'ok')
       onDone()
-    } catch {
-      setErr('Could not save the key. Check that hal0 can write to its key store, then try again.')
+    } catch (e) {
+      setErr(`Could not save the key: ${e?.message || 'unknown error'}. Check the message and try again.`)
     }
   }
   return (
@@ -86,7 +86,8 @@ function KeyEditor({ u, onDone }) {
 }
 
 function ProviderPanel({ u, selected, onSelect, catalog }) {
-  const state = providerState(u)
+  const listing = useUpstreamModels(u.name)
+  const state = providerState(u, listing.data)
   const key = keyState(u)
   const label = providerLabel(u, catalog)
   const test = useUpstreamTest()
@@ -94,7 +95,6 @@ function ProviderPanel({ u, selected, onSelect, catalog }) {
   const refresh = useUpstreamRefresh()
   const del = useUpstreamDelete()
   const upstreams = useUpstreams()
-  const listing = useUpstreamModels(u.name)
   const [editing, setEditing] = useState(false)
   const [confirm, setConfirm] = useState(false)
   const [testLine, setTestLine] = useState(null)
@@ -199,7 +199,7 @@ function ProviderPanel({ u, selected, onSelect, catalog }) {
                   Refresh model list
                 </button>
               )}
-              {key !== 'not-needed' && !editing && (
+              {key !== 'not-needed' && u.auth_value_env && !editing && (
                 <button type="button" className="btn sm" onClick={() => setEditing(true)}>
                   {u.auth_key_present ? 'Replace key' : 'Add key'}
                 </button>
@@ -211,7 +211,10 @@ function ProviderPanel({ u, selected, onSelect, catalog }) {
                 {testLine.text}
               </div>
             )}
-            {editing && <KeyEditor key={u.name} u={u} onDone={() => setEditing(false)} />}
+            {key !== 'not-needed' && !u.auth_value_env && (
+              <div className="prov-msg" data-testid="prov-no-key-slot">This provider has no key slot configured.</div>
+            )}
+            {editing && u.auth_value_env && <KeyEditor key={u.name} u={u} onDone={() => setEditing(false)} />}
           </DetailSection>
           <ConfirmDialog
             open={confirm}
@@ -274,9 +277,9 @@ function PriceEditor({ m, onSave, onCancel }) {
 }
 
 function ModelPanel({ u, modelId, onSelect, catalog }) {
-  const state = providerState(u)
   const label = providerLabel(u, catalog)
   const listing = useUpstreamModels(u.name)
+  const state = providerState(u, listing.data)
   const patch = useUpstreamModelPatch()
   const [editing, setEditing] = useState(false)
   const m = listing.data?.models.find((x) => x.id === modelId)
@@ -377,7 +380,7 @@ export function ProviderDetail({ selected, onSelect }) {
 
   let body
   if (!u) body = <DetailEmpty>Select a provider to see its details.</DetailEmpty>
-  else if (sel.model) body = <ModelPanel u={u} modelId={sel.model} onSelect={onSelect} catalog={catalogQ.data} />
+  else if (sel.model) body = <ModelPanel key={`${u.name}/${sel.model}`} u={u} modelId={sel.model} onSelect={onSelect} catalog={catalogQ.data} />
   else body = <ProviderPanel key={u.name} u={u} selected={sel} onSelect={onSelect} catalog={catalogQ.data} />
   return (
     <div className="provider-detail" data-testid="provider-detail">

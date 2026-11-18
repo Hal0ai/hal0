@@ -224,7 +224,7 @@ describe('provider sections', () => {
 
   it('clicking a row selects the model, not the switch', async () => {
     const v = await expand('minimax')
-    click(q('[data-testid="prov-model-minimax-m2"]')!)
+    click(q('[data-testid="prov-model-minimax-m2"] .prov-pick')!)
     expect(v.onSelect).toHaveBeenCalledWith({ provider: 'minimax', model: 'm2' })
     v.onSelect.mockClear()
     click(q('[data-testid="prov-model-minimax-m2"] [role="switch"]')!)
@@ -242,6 +242,57 @@ describe('provider sections', () => {
     expect(q('[data-testid="prov-model-minimax-m1"]')!.textContent).toContain('gone')
     expect(q('[data-testid="prov-model-minimax-m2"]')!.textContent).toContain('recommended')
     expect(q('[data-testid="prov-model-minimax-m2"]')!.textContent).toContain('minimax/m2')
+  })
+})
+
+describe('search', () => {
+  const later = async (ms: number) => {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, ms))
+    })
+  }
+
+  it('with every section collapsed, finds a deep row in the 300-row provider after the debounce', async () => {
+    view()
+    await settle()
+    await settle()
+    expect(modelCalls()).toBe(0)
+    await type(q('input[aria-label="Search models"]'), 'm299')
+    expect(modelCalls()).toBe(0) // debounced
+    await later(300)
+    await settle()
+    expect(q('[data-testid="prov-model-openrouter-m299"]')).not.toBeNull()
+    // sections with no match show the header only, muted, and the count chip says "N match"
+    expect(q('[data-testid="prov-head-minimax"]')!.textContent).toContain('no match')
+    expect(q('[data-testid="prov-head-openrouter"]')!.textContent).toContain('1 match')
+    expect(q('[data-testid="prov-on-minimax"]')).toBeNull()
+  })
+
+  it('clearing the search returns sections to how they were', async () => {
+    view()
+    await settle()
+    await type(q('input[aria-label="Search models"]'), 'm299')
+    await later(300)
+    await settle()
+    expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('true')
+    await type(q('input[aria-label="Search models"]'), '')
+    await later(300)
+    await settle()
+    expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('false')
+    expect(q('[data-testid="prov-model-openrouter-m299"]')).toBeNull()
+  })
+
+  it('a one-character query still renders at most the paged off rows per section', async () => {
+    view()
+    await settle()
+    await type(q('input[aria-label="Search models"]'), 'm')
+    await later(300)
+    await settle()
+    const off = qa('[data-testid^="prov-model-openrouter-"]').filter((e) => e.closest('[data-testid="prov-off-openrouter"]'))
+    expect(off.length).toBe(OFF_PAGE)
+    expect(text()).toContain('273 more available')
+    click(qa('button').find((b) => b.textContent === 'Show 25 more')!)
+    expect(qa('[data-testid="prov-off-openrouter"] [data-testid^="prov-model-"]').length).toBe(OFF_PAGE * 2)
   })
 })
 
@@ -286,13 +337,41 @@ describe('switches', () => {
     expect(sw().getAttribute('aria-checked')).toBe('false')
   })
 
+  it('a transport error (no status) toasts the generic message and the switch is back', async () => {
+    vi.mocked(client.apiPatch).mockRejectedValue(new TypeError('Failed to fetch'))
+    await expand('minimax')
+    const sw = () => q('[data-testid="prov-model-minimax-m2"] [role="switch"]')!
+    click(sw())
+    await settle()
+    await settle()
+    expect(toasts).toContainEqual(['Could not change the model. Try again.', 'err'])
+    expect(sw().getAttribute('aria-checked')).toBe('false')
+  })
+
+  it('a listing the server marks protected disables the switches even for an operator-looking entry', async () => {
+    listings.minimax = listing('minimax', [row('m1', { enabled: true })], { protected: true })
+    await expand('minimax')
+    expect(q<HTMLButtonElement>('[data-testid="prov-model-minimax-m1"] [role="switch"]')!.disabled).toBe(true)
+  })
+
   it('a not-converted and a managed provider have disabled switches', async () => {
     await expand('corp')
     expect(q<HTMLButtonElement>('[data-testid="prov-model-corp-c1"] [role="switch"]')!.disabled).toBe(true)
     cleanup()
     await expand('hermes.coder')
     expect(q<HTMLButtonElement>('[data-testid="prov-model-hermes.coder-h1"] [role="switch"]')!.disabled).toBe(true)
-    expect(text()).toContain('Created and kept up to date by agent:hermes. Read-only here.')
+    expect(text()).toContain('Created and kept up to date by the Hermes agent. Read-only here.')
+    expect(text()).not.toContain('agent:hermes')
+  })
+})
+
+describe('row control', () => {
+  it('the row has a real button with a name for selecting the model; the switch is separate', async () => {
+    const v = await expand('minimax')
+    const b = q<HTMLButtonElement>('[data-testid="prov-model-minimax-m2"] button.prov-pick')!
+    expect(b.getAttribute('aria-label')).toBe('Show details of minimax/m2')
+    click(b)
+    expect(v.onSelect).toHaveBeenCalledWith({ provider: 'minimax', model: 'm2' })
   })
 })
 

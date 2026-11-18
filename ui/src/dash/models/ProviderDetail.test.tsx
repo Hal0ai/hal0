@@ -191,6 +191,18 @@ describe('provider selected', () => {
   })
 })
 
+describe('key slot', () => {
+  it('a provider with no key env name gets no editor and says so', async () => {
+    upstreams = [entry('minimax', { auth_value_env: '', auth_key_present: false })]
+    view({ provider: 'minimax', model: null })
+    await flush()
+    expect(btn('Add key')).toBeUndefined()
+    expect(btn('Replace key')).toBeUndefined()
+    expect(text()).toContain('This provider has no key slot configured.')
+    expect(btn('Save key')).toBeUndefined()
+  })
+})
+
 describe('key editor', () => {
   it('is a labelled password input that never shows the saved value and clears on success', async () => {
     vi.mocked(client.apiPost).mockResolvedValue({} as never)
@@ -208,6 +220,7 @@ describe('key editor', () => {
     expect(q('input[type="password"]')).toBeNull()
     expect(document.body.innerHTML).not.toContain(SECRET)
     expect(JSON.stringify(toasts)).not.toContain(SECRET)
+    expect(qc.getMutationCache().getAll().map((m) => m.state.variables)).not.toContainEqual(expect.objectContaining({ value: SECRET }))
     // reopening starts empty
     click(btn('Replace key')!)
     expect(q<HTMLInputElement>('input[type="password"]')!.value).toBe('')
@@ -226,15 +239,17 @@ describe('key editor', () => {
   })
 
   it('a failed save keeps the editor and says what to do, without echoing the key', async () => {
-    vi.mocked(client.apiPost).mockRejectedValue(new Error('boom ' + SECRET))
+    vi.mocked(client.apiPost).mockRejectedValue(new Error('key store is read-only'))
     view({ provider: 'minimax', model: null })
     await flush()
     click(btn('Replace key')!)
     await type(q('input[type="password"]'), SECRET)
     click(btn('Save key')!)
     await flush()
-    expect(q('[data-testid="prov-key-editor"] [role="alert"]')).not.toBeNull()
+    expect(q('[data-testid="prov-key-editor"] [role="alert"]')!.textContent).toContain('key store is read-only')
+    expect(q<HTMLInputElement>('input[type="password"]')).not.toBeNull()
     expect(document.body.textContent).not.toContain(SECRET)
+    expect(qc.getMutationCache().getAll()).toHaveLength(0)
   })
 
   it('opens when the list asked for it through the selection, and clears the request', async () => {
@@ -244,6 +259,24 @@ describe('key editor', () => {
     expect(q('input[type="password"]')).not.toBeNull()
     expect(btn('Add key')).toBeUndefined() // the editor is open; the button is hidden
     expect(v.onSelect).toHaveBeenCalledWith({ provider: 'minimax', model: null })
+  })
+})
+
+describe('model panel state', () => {
+  it('open Edit on one model, select another: no editor, Save sends nothing until Edit is opened again', async () => {
+    vi.mocked(client.apiPatch).mockResolvedValue({} as never)
+    models = [row('m1', { context: 1000 }), row('m2', { context: 2000 })]
+    const v = view({ provider: 'minimax', model: 'm1' })
+    await flush()
+    click(btn('Edit')!)
+    await type(qa('[data-testid="prov-edit"] input')[0], '999')
+    v.rerender({ provider: 'minimax', model: 'm2' })
+    await flush()
+    expect(q('[data-testid="prov-edit"]')).toBeNull()
+    expect(btn('Save')).toBeUndefined()
+    expect(client.apiPatch).not.toHaveBeenCalled()
+    click(btn('Edit')!)
+    expect((qa('[data-testid="prov-edit"] input')[0] as HTMLInputElement).value).toBe('2000')
   })
 })
 

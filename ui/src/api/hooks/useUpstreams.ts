@@ -241,15 +241,52 @@ export function useUpstreamTest() {
   })
 }
 
+/**
+ * Store a provider's key. Deliberately not a react-query mutation: a mutation keeps its
+ * variables (the key) in the mutation cache for minutes and hands them to the global
+ * reauth handler. Here the body lives only in the `save` call; the hook keeps nothing but
+ * the pending flag and the last error. Contract: `key` is the upstream's `auth_value_env`
+ * name (server-enforced), `value` the secret.
+ */
 export function useProviderCredentialSet() {
   const qc = useQueryClient()
-  return useMutation({
-    // Contract: {key: <ENV_VAR_NAME>, value: <secret>} — key must match
-    // the upstream's declared auth_value_env (server-enforced binding).
-    mutationFn: ({ name, key, value }: { name: string; key: string; value: string }) =>
-      apiPost(ENDPOINTS.providerCredentials(name), { key, value }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['upstreams'] }),
-  })
+  const [isPending, setPending] = useState(false)
+  const [error, setError] = useState<Error | null>(null)
+  const alive = useRef(true)
+  const latest = useRef(0)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+    }
+  }, [])
+
+  const save = useCallback(
+    async ({ name, key, value }: { name: string; key: string; value: string }): Promise<void> => {
+      const mine = ++latest.current
+      const current = () => alive.current && latest.current === mine
+      setPending(true)
+      setError(null)
+      try {
+        await apiPost(ENDPOINTS.providerCredentials(name), { key, value })
+        void qc.invalidateQueries({ queryKey: ['upstreams'] })
+      } catch (e) {
+        if (current()) setError(e instanceof Error ? e : new Error(String(e)))
+        throw e
+      } finally {
+        if (current()) setPending(false)
+      }
+    },
+    [qc],
+  )
+
+  const clear = useCallback(() => {
+    latest.current += 1
+    setPending(false)
+    setError(null)
+  }, [])
+
+  return { save, isPending, error, clear }
 }
 
 export function useUpstreamModels(name: string | null, opts: { enabled?: boolean } = {}) {

@@ -298,3 +298,68 @@ describe('useProviderProbe', () => {
     expect(keyAnywhere()).toBe(false)
   })
 })
+
+describe('useProviderCredentialSet', () => {
+  const keyAnywhere = () =>
+    JSON.stringify([
+      qc.getMutationCache().getAll().map((m) => m.state.variables),
+      qc.getQueryCache().getAll().map((q) => q.state.data),
+    ]).includes('sk-secret')
+
+  it('posts {key, value} once, invalidates the provider list and keeps the key nowhere', async () => {
+    vi.mocked(client.apiPost).mockResolvedValue({})
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    const h = mount(() => hooks.useProviderCredentialSet())
+    await act(async () => {
+      await h.current().save({ name: 'p', key: 'P_KEY', value: 'sk-secret' })
+    })
+    await flush()
+    expect(client.apiPost).toHaveBeenCalledWith('/api/providers/p/credentials', { key: 'P_KEY', value: 'sk-secret' })
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['upstreams'] })
+    expect(h.current().isPending).toBe(false)
+    expect(qc.getMutationCache().getAll()).toHaveLength(0)
+    expect(keyAnywhere()).toBe(false)
+    expect(JSON.stringify(h.current())).not.toContain('sk-secret')
+  })
+
+  it('rejects, exposes the error and keeps no key', async () => {
+    vi.mocked(client.apiPost).mockRejectedValue(new Error('disk full'))
+    const h = mount(() => hooks.useProviderCredentialSet())
+    await act(async () => {
+      await expect(h.current().save({ name: 'p', key: 'P_KEY', value: 'sk-secret' })).rejects.toThrow('disk full')
+    })
+    await flush()
+    expect(h.current().error?.message).toBe('disk full')
+    expect(qc.getMutationCache().getAll()).toHaveLength(0)
+    expect(keyAnywhere()).toBe(false)
+    act(() => h.current().clear())
+    expect(h.current().error).toBeNull()
+  })
+
+  it('is pending while the request runs', async () => {
+    let resolve!: (r: unknown) => void
+    vi.mocked(client.apiPost).mockReturnValue(new Promise((r) => (resolve = r)))
+    const h = mount(() => hooks.useProviderCredentialSet())
+    act(() => {
+      void h.current().save({ name: 'p', key: 'K', value: 'sk-secret' })
+    })
+    expect(h.current().isPending).toBe(true)
+    await act(async () => resolve({}))
+    await flush()
+    expect(h.current().isPending).toBe(false)
+  })
+
+  it('leaves nothing behind when the component unmounts mid-request', async () => {
+    let resolve!: (r: unknown) => void
+    vi.mocked(client.apiPost).mockReturnValue(new Promise((r) => (resolve = r)))
+    const h = mount(() => hooks.useProviderCredentialSet())
+    act(() => {
+      void h.current().save({ name: 'p', key: 'K', value: 'sk-secret' })
+    })
+    act(() => root!.unmount())
+    root = null
+    await act(async () => resolve({}))
+    expect(qc.getMutationCache().getAll()).toHaveLength(0)
+    expect(keyAnywhere()).toBe(false)
+  })
+})

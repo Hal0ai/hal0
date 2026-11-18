@@ -8,7 +8,7 @@
 //
 // A section loads its model rows only while it is expanded. Switches read the cached listing, so
 // a refused change shows the row back where it was (the patch hook rolls the cache back).
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { PillToggle } from '@/dash/primitives.jsx'
 import { CatalogToolbar } from '@/dash/models/catalog-shell.jsx'
 import {
@@ -70,6 +70,14 @@ export function providerLabel(u, catalog) {
   return (u.catalog_id && catalog?.[u.catalog_id]?.name) || u.name
 }
 
+/** Who keeps a managed provider up to date, in plain words. */
+export function ownerLabel(u) {
+  if (!u.managed_by) return 'hal0'
+  const m = /^agent:([A-Za-z0-9_-]+)$/.exec(u.managed_by)
+  if (!m) return 'an agent'
+  return `the ${m[1][0].toUpperCase()}${m[1].slice(1)} agent`
+}
+
 function hostOf(url) {
   try {
     return new URL(url).host
@@ -103,59 +111,59 @@ function ModelRow({ u, m, state, selected, onPick, onToggle }) {
     <div
       className={'prov-row' + (selected ? ' sel' : '') + (m.enabled ? '' : ' off')}
       data-testid={`prov-model-${u.name}-${m.id}`}
-      tabIndex={0}
-      aria-current={selected ? 'true' : undefined}
-      onClick={onPick}
-      onKeyDown={(e) => {
-        if (e.target !== e.currentTarget) return
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onPick()
-        }
-      }}
     >
-      <span className="prov-sw" onClick={(e) => e.stopPropagation()}>
-        <PillToggle
-          on={m.enabled}
-          disabled={state !== 'per-model'}
-          label={`${m.enabled ? 'Switch off' : 'Switch on'} ${call}`}
-          onToggle={(next) => onToggle(m, next)}
-        />
-      </span>
-      <span className="prov-mid">
-        <b>{m.id}</b>
-        {flag && <span className={'chip prov-flag ' + (flag === 'gone' ? 'err' : 'amber')}>{flag === 'gone' ? 'gone' : 'recommended'}</span>}
-        <small>{call}</small>
-      </span>
-      <span className="prov-meta">
-        <span className="chip">{m.type}</span>
-        <span className="num">{formatContext(m.context)}</span>
-        <span className="num">{formatPrice(m)}</span>
-      </span>
+      <PillToggle
+        on={m.enabled}
+        disabled={state !== 'per-model'}
+        label={`${m.enabled ? 'Switch off' : 'Switch on'} ${call}`}
+        onToggle={(next) => onToggle(m, next)}
+      />
+      <button
+        type="button"
+        className="prov-pick"
+        aria-label={`Show details of ${call}`}
+        aria-current={selected ? 'true' : undefined}
+        onClick={onPick}
+      >
+        <span className="prov-mid">
+          <b>{m.id}</b>
+          {flag && <span className={'chip prov-flag ' + (flag === 'gone' ? 'err' : 'amber')}>{flag === 'gone' ? 'gone' : 'recommended'}</span>}
+          <small>{call}</small>
+        </span>
+        <span className="prov-meta">
+          <span className="chip">{m.type}</span>
+          <span className="num">{formatContext(m.context)}</span>
+          <span className="num">{formatPrice(m)}</span>
+        </span>
+      </button>
     </div>
   )
 }
 
-function ProviderSection({ u, catalog, selected, expanded, filter, onHeader, onSelect, onToggled }) {
+function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch, filter, onHeader, onSelect }) {
   const label = providerLabel(u, catalog)
-  const state = providerState(u)
   const key = keyState(u)
   const isSel = selected.provider === u.name
   const [offShown, setOffShown] = useState(OFF_PAGE)
-  const listing = useUpstreamModels(u.name, { enabled: expanded })
+  // A search opens every section for the rows it shows, without touching the remembered state.
+  const shown = expanded || searching
+  const listing = useUpstreamModels(u.name, { enabled: expanded || loadSearch })
+  const state = providerState(u, listing.data)
   const patch = useUpstreamModelPatch()
   const refresh = useUpstreamRefresh()
 
   const rows = listing.data?.models ?? []
   const parts = sectionRows(rows, filter, offShown)
-  const owner = u.managed_by || 'hal0'
+  const owner = ownerLabel(u)
+  const matches = parts.on.length + parts.offTotal
+  const noMatch = searching && !expanded && !!listing.data && matches === 0
+  const body = shown && !noMatch
   const chip = KEY_CHIP[key]
 
   const toggle = async (m, next) => {
     try {
       await patch.mutateAsync({ name: u.name, modelId: m.id, patch: { enabled: next } })
       toast(`${u.name}/${m.id} switched ${next ? 'on' : 'off'}`, 'ok')
-      onToggled?.()
     } catch (err) {
       toast(toggleErrorMessage(err || {}), 'err')
     }
@@ -177,8 +185,8 @@ function ProviderSection({ u, catalog, selected, expanded, filter, onHeader, onS
     <section className="prov-sec" data-testid={`prov-section-${u.name}`}>
       <button
         type="button"
-        className={'prov-head' + (isSel ? ' sel' : '')}
-        aria-expanded={expanded}
+        className={'prov-head' + (isSel ? ' sel' : '') + (noMatch ? ' muted' : '')}
+        aria-expanded={shown}
         data-testid={`prov-head-${u.name}`}
         onClick={onHeader}
       >
@@ -186,12 +194,13 @@ function ProviderSection({ u, catalog, selected, expanded, filter, onHeader, onS
         <span className="prov-logo" aria-hidden="true">{initials(label)}</span>
         <span className="prov-name">{label}</span>
         <span className="prov-host">{hostOf(u.url)}</span>
+        {noMatch && <span className="prov-nomatch">no match</span>}
         <span className="prov-chips">
           <span className={'chip' + (chip.tone ? ' ' + chip.tone : '')}>{chip.label}</span>
-          <span className="chip">{countLabel(u)}</span>
+          <span className="chip">{searching && listing.data ? `${matches} match` : countLabel(u)}</span>
         </span>
       </button>
-      {expanded && (
+      {body && (
         <div className="prov-body">
           {state === 'managed' && (
             <div className="prov-banner info" data-testid={`prov-banner-managed-${u.name}`}>
@@ -273,6 +282,12 @@ export function ProvidersTab({ selected, onSelect, onAdd }) {
   const [type, setType] = useState('any')
   // Per provider, this session only. Unset means: open when it is the selected provider.
   const [open, setOpen] = useState({})
+  // What starts a listing load while searching trails the box by 250 ms; filtering is immediate.
+  const [loadQ, setLoadQ] = useState('')
+  useEffect(() => {
+    const t = setTimeout(() => setLoadQ(q), 250)
+    return () => clearTimeout(t)
+  }, [q])
 
   const providers = visibleProviders(upstreams.data)
   const filter = { q, show, type }
@@ -352,6 +367,8 @@ export function ProvidersTab({ selected, onSelect, onAdd }) {
           catalog={catalogQ.data}
           selected={sel}
           expanded={open[u.name] ?? sel.provider === u.name}
+          searching={q.trim() !== ''}
+          loadSearch={loadQ.trim() !== ''}
           filter={filter}
           onHeader={() => header(u)}
           onSelect={(next) => {

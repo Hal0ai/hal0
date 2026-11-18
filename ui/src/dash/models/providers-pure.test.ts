@@ -157,11 +157,11 @@ describe('sectionRows', () => {
     expect(s.offTotal).toBe(450)
     expect(s.offHidden).toBe(425)
   })
-  it('applies no cut when a search is set', () => {
+  it('still cuts to the page when a search is set; offHidden counts the remaining matches', () => {
     const s = sectionRows(off450, { ...ANY, q: 'model-1' }, OFF_PAGE)
-    expect(s.off).toHaveLength(100)
-    expect(s.offHidden).toBe(0)
+    expect(s.off).toHaveLength(25)
     expect(s.offTotal).toBe(100)
+    expect(s.offHidden).toBe(75)
   })
   it('shows every on row, sorted by id', () => {
     const on = [row('b', { enabled: true }), row('a', { enabled: true }), ...off450]
