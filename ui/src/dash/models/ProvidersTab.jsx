@@ -19,25 +19,26 @@ import {
   useUpstreams,
 } from '@/api/hooks/useUpstreams'
 import {
+  MODEL_TYPE_CHOICES,
   OFF_PAGE,
   countLabel,
   formatContext,
   formatPrice,
+  hostOf,
   keyState,
+  ownerLabel,
+  providerLabel,
   providerState,
   rowFlag,
   sectionRows,
   toggleErrorMessage,
+  visibleProviders,
 } from '@/dash/models/providers-pure'
 
-const TYPE_CHIPS = [
-  { id: 'chat', label: 'chat' },
-  { id: 'embed', label: 'embed' },
-  { id: 'tts', label: 'speech' },
-  { id: 'stt', label: 'transcribe' },
-  { id: 'rerank', label: 'rerank' },
-  { id: 'image', label: 'image' },
-]
+// The list's helpers live in providers-pure.ts; these names stay importable from here.
+export { ownerLabel, providerLabel, visibleProviders }
+
+const TYPE_CHIPS = MODEL_TYPE_CHOICES
 
 const SHOW_CHIPS = [
   { id: 'all', label: 'All' },
@@ -54,36 +55,6 @@ const KEY_CHIP = {
 
 export function toast(msg, kind = 'info') {
   if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind)
-}
-
-/** Providers listed here: operator remotes by name, then managed ones. Slot-backed upstreams
- * are local models, not providers, so they never appear. */
-export function visibleProviders(list) {
-  const remotes = (Array.isArray(list) ? list : []).filter((u) => u.kind !== 'slot' && !u.slot_name)
-  const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)
-  const operator = remotes.filter((u) => providerState(u) !== 'managed').sort(byName)
-  const managed = remotes.filter((u) => providerState(u) === 'managed').sort(byName)
-  return [...operator, ...managed]
-}
-
-export function providerLabel(u, catalog) {
-  return (u.catalog_id && catalog?.[u.catalog_id]?.name) || u.name
-}
-
-/** Who keeps a managed provider up to date, in plain words. */
-export function ownerLabel(u) {
-  if (!u.managed_by) return 'hal0'
-  const m = /^agent:([A-Za-z0-9_-]+)$/.exec(u.managed_by)
-  if (!m) return 'an agent'
-  return `the ${m[1][0].toUpperCase()}${m[1].slice(1)} agent`
-}
-
-function hostOf(url) {
-  try {
-    return new URL(url).host
-  } catch {
-    return url || ''
-  }
 }
 
 function initials(label) {

@@ -24,17 +24,18 @@ import {
   useUpstreamUpdate,
   useUpstreams,
 } from '@/api/hooks/useUpstreams'
-import { formatContext, formatPrice, keyState, providerState, toggleErrorMessage } from '@/dash/models/providers-pure'
-import { providerLabel, refreshModelList, toast, visibleProviders } from '@/dash/models/ProvidersTab.jsx'
-
-const TYPES = [
-  ['chat', 'chat'],
-  ['embed', 'embed'],
-  ['tts', 'speech'],
-  ['stt', 'transcribe'],
-  ['rerank', 'rerank'],
-  ['image', 'image'],
-]
+import {
+  MODEL_TYPE_CHOICES,
+  formatContext,
+  formatPrice,
+  hostOf,
+  keyState,
+  providerLabel,
+  providerState,
+  toggleErrorMessage,
+  visibleProviders,
+} from '@/dash/models/providers-pure'
+import { refreshModelList, toast } from '@/dash/models/ProvidersTab.jsx'
 
 const MANAGED_NOTE = 'Managed providers cannot be edited or removed here.'
 
@@ -231,14 +232,6 @@ function ProviderPanel({ u, selected, onSelect, catalog }) {
   )
 }
 
-function hostOf(url) {
-  try {
-    return new URL(url).host
-  } catch {
-    return url || ''
-  }
-}
-
 function PriceEditor({ m, onSave, onCancel }) {
   const str = (v) => (v === null || v === undefined ? '' : String(v))
   const [ctx, setCtx] = useState(str(m.context))
@@ -335,8 +328,8 @@ function ModelPanel({ u, modelId, onSelect, catalog }) {
             disabled={readOnly}
             onChange={(e) => send({ type: e.target.value })}
           >
-            {TYPES.map(([id, text]) => (
-              <option key={id} value={id}>{text}</option>
+            {MODEL_TYPE_CHOICES.map(({ id, label }) => (
+              <option key={id} value={id}>{label}</option>
             ))}
           </select>
         </DetailLine>

@@ -15,18 +15,20 @@ import { apiPost } from '@/api/client'
 import { ENDPOINTS } from '@/api/endpoints'
 import { useProvidersCatalog, useProviderProbe, useUpstreamCreate, useUpstreams } from '@/api/hooks/useUpstreams'
 import {
+  MODEL_TYPE_CHOICES,
   buildCreateBody,
   defaultProviderName,
   formatContext,
   formatPrice,
   initialPicks,
+  keyEnvFor,
+  keyProblem,
   probeErrorMessage,
   validateProviderName,
 } from './providers-pure'
 
 const PAGE = 100
 const SEARCH_ABOVE = 20
-const MODEL_TYPES = ['chat', 'embed', 'rerank', 'tts', 'stt', 'image']
 const URL_PATTERN = /^https?:\/\/\S+$/i
 const AUTH_CHOICES = [
   { value: 'bearer', label: 'Bearer key' },
@@ -45,54 +47,8 @@ function tileNote(p) {
   return first || p.category
 }
 
-// The variable names the credentials route refuses for a key, mirrored from src/hal0/api/_env_store.py
-// (is_process_control_env: PROCESS_CONTROL_ENV_NAMES, PROCESS_CONTROL_ENV_PREFIXES, the _PROXY suffix,
-// the HF Hub redirect names and prefixes; the TLS trust names) and the HAL0_ service namespace
-// (routes/secrets.py is_protected_secret). They are tested against the FINAL variable name.
-const RESERVED_ENV_NAMES = new Set([
-  'PATH', 'HOME', 'SHELL', 'IFS', 'ENV', 'BASH_ENV', 'NODE_OPTIONS', 'PERL5OPT', 'RUBYOPT', 'GCONV_PATH',
-  'PERL5LIB', 'NODE_PATH', 'SHELLOPTS', 'BASHOPTS', 'PS4', 'HERMES_HOME', 'SSLKEYLOGFILE',
-  'NODE_TLS_REJECT_UNAUTHORIZED',
-  'HF_ENDPOINT', 'HF_INFERENCE_ENDPOINT', 'HUGGINGFACE_CO_STAGING', 'HF_TOKEN_PATH', 'HF_ASSETS_CACHE',
-  'HUGGINGFACE_ASSETS_CACHE',
-  'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS',
-])
-const RESERVED_ENV_PREFIXES = [
-  'LD_', 'DYLD_', 'PYTHON', 'UV_', 'PIP_', 'NPM_CONFIG_', 'GIT_', 'OPENSSL_', 'XDG_',
-  'HF_HUB_', 'HUGGINGFACE_HUB_', 'HF_XET_',
-  'HAL0_',
-]
-function isReservedEnv(env) {
-  const n = env.toUpperCase()
-  return RESERVED_ENV_NAMES.has(n) || n.endsWith('_PROXY') || RESERVED_ENV_PREFIXES.some((p) => n.startsWith(p))
-}
-
-// The variable a provider's key is stored under, derived from its NAME so that two providers made
-// from one preset never share a key: `minimax` -> MINIMAX_API_KEY, `minimax-2` -> MINIMAX_2_API_KEY.
-// A reserved or digit-leading name gets a PROVIDER_ prefix; a variable another provider already
-// uses gets a numeric suffix.
-export function keyEnvFor(name, used = []) {
-  let stem = name.toUpperCase().replace(/[^A-Z0-9]/g, '_')
-  if (/^[0-9]/.test(stem) || isReservedEnv(`${stem}_API_KEY`)) stem = `PROVIDER_${stem}`
-  let env = `${stem}_API_KEY`
-  for (let n = 2; used.includes(env); n += 1) env = `${stem}_${n}_API_KEY`
-  return env
-}
-
-// Same rule as the server (upstreams/registry.py normalise_key): printable ASCII, no whitespace,
-// after one optional leading "Bearer " (exactly one space, then the token).
-const KEY_MESSAGE = 'The key must be printable ASCII without spaces.'
-function keyProblem(raw) {
-  const t = raw.trim()
-  if (!t) return null
-  if (/^bearer\s*$/i.test(t)) return KEY_MESSAGE
-  let bare = t
-  if (/^bearer\s/i.test(t)) {
-    if (t[6] !== ' ' || /^\s/.test(t.slice(7))) return KEY_MESSAGE
-    bare = t.slice(7)
-  }
-  return /^[\x21-\x7e]+$/.test(bare) ? null : KEY_MESSAGE
-}
+// The key rules and the variable naming live in providers-pure.ts; keyEnvFor stays importable from here.
+export { keyEnvFor }
 
 // A request that has not answered by then is given up on, so a hung server never traps the modal.
 const REQUEST_TIMEOUT_MS = 30000
@@ -621,7 +577,7 @@ export function AddProviderModal({ open, onClose, onAdded }) {
                           </label>
                           <select className="input addprov-type" aria-label={`Type of ${m.id}`} value={types[m.id] ?? m.type} disabled={busy}
                             onChange={(e) => setTypes((t) => ({ ...t, [m.id]: e.target.value }))}>
-                            {MODEL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                            {MODEL_TYPE_CHOICES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
                           </select>
                           <span className="addprov-num mono" title="Context">{formatContext(m.context)}</span>
                           <span className="addprov-num mono" title={priceTitle(m)}>{formatPrice(m)}</span>

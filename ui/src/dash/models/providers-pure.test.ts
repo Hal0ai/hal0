@@ -15,16 +15,24 @@ import {
   filterModels,
   formatContext,
   formatPrice,
+  hostOf,
   initialPicks,
+  keyEnvFor,
+  keyProblem,
   keyState,
   legacyModelsRedirect,
+  MODEL_TYPE_CHOICES,
   modelPath,
+  modelTypeLabel,
+  ownerLabel,
   probeErrorMessage,
+  providerLabel,
   providerState,
   rowFlag,
   sectionRows,
   toggleErrorMessage,
   validateProviderName,
+  visibleProviders,
   type ModelFilter,
 } from './providers-pure'
 
@@ -392,5 +400,69 @@ describe('legacyModelsRedirect', () => {
     expect(legacyModelsRedirect('models', 'inference', new URLSearchParams())).toBeNull()
     expect(legacyModelsRedirect('slots', 'endpoints', new URLSearchParams())).toBeNull()
     expect(legacyModelsRedirect('slots', undefined, new URLSearchParams('focus=upstream'))).toBeNull()
+  })
+})
+
+describe('keyProblem', () => {
+  it('accepts nothing typed, a bare token and one Bearer prefix', () => {
+    expect(keyProblem('')).toBeNull()
+    expect(keyProblem('   ')).toBeNull()
+    expect(keyProblem('sk-abc123')).toBeNull()
+    expect(keyProblem('Bearer sk-abc123')).toBeNull()
+  })
+  it('refuses spaces inside, a bare Bearer and non-ASCII', () => {
+    expect(keyProblem('sk abc')).not.toBeNull()
+    expect(keyProblem('Bearer')).not.toBeNull()
+    expect(keyProblem('Bearer  sk')).not.toBeNull()
+    expect(keyProblem('clé')).not.toBeNull()
+  })
+})
+
+describe('keyEnvFor', () => {
+  it('derives the variable from the provider name', () => {
+    expect(keyEnvFor('minimax')).toBe('MINIMAX_API_KEY')
+    expect(keyEnvFor('minimax-2')).toBe('MINIMAX_2_API_KEY')
+  })
+  it('prefixes a reserved or digit-leading stem and numbers a variable already in use', () => {
+    expect(keyEnvFor('hal0')).toBe('PROVIDER_HAL0_API_KEY')
+    expect(keyEnvFor('9lives')).toBe('PROVIDER_9LIVES_API_KEY')
+    expect(keyEnvFor('minimax', ['MINIMAX_API_KEY'])).toBe('MINIMAX_2_API_KEY')
+  })
+})
+
+describe('provider list helpers', () => {
+  it('visibleProviders sorts operator providers by name, managed ones last, and hides slots', () => {
+    const list = [
+      entry({ name: 'zed' }),
+      entry({ name: 'a-managed', managed_by: 'agent:hermes' }),
+      entry({ name: 'alpha' }),
+      entry({ name: 'local', slot_name: 'chat' }),
+      entry({ name: 'sl', kind: 'slot' }),
+    ]
+    expect(visibleProviders(list).map((u) => u.name)).toEqual(['alpha', 'zed', 'a-managed'])
+    expect(visibleProviders(undefined)).toEqual([])
+  })
+  it('providerLabel prefers the preset name', () => {
+    expect(providerLabel(entry({ name: 'mm' }), { minimax: { name: 'MiniMax' } as CatalogEntry })).toBe('MiniMax')
+    expect(providerLabel(entry({ name: 'mm', catalog_id: null }), {})).toBe('mm')
+  })
+  it('ownerLabel names the owner in plain words', () => {
+    expect(ownerLabel(entry())).toBe('hal0')
+    expect(ownerLabel(entry({ managed_by: 'agent:hermes' }))).toBe('the Hermes agent')
+    expect(ownerLabel(entry({ managed_by: 'something' }))).toBe('an agent')
+  })
+  it('hostOf returns the host, or the text when it is not a URL', () => {
+    expect(hostOf('https://api.x.io/v1')).toBe('api.x.io')
+    expect(hostOf('nope')).toBe('nope')
+    expect(hostOf(null)).toBe('')
+  })
+})
+
+describe('model type labels', () => {
+  it('shows speech for tts and transcribe for stt, sending the raw value', () => {
+    expect(modelTypeLabel('tts')).toBe('speech')
+    expect(modelTypeLabel('stt')).toBe('transcribe')
+    expect(modelTypeLabel('chat')).toBe('chat')
+    expect(MODEL_TYPE_CHOICES.map((c) => c.id)).toEqual(['chat', 'embed', 'tts', 'stt', 'rerank', 'image'])
   })
 })

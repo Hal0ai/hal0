@@ -185,12 +185,6 @@ export function isManagedRemote(u: UpstreamEntry): boolean {
   return u.kind === 'remote' && !u.slot_name
 }
 
-/** "managed by <owner>" for an agent-managed entry, else null. Such a row is
- * read-only here: the API refuses PATCH, DELETE and credential writes. */
-export function managedByLabel(u: UpstreamEntry): string | null {
-  return u.managed_by ? `managed by ${u.managed_by}` : null
-}
-
 export function useUpstreams() {
   return useQuery({
     queryKey: ['upstreams'],
