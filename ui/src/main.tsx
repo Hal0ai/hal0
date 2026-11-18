@@ -81,6 +81,9 @@ import './dash/model-drawer.jsx'
 // (connections-overhaul). The old standalone MCP page is removed; #mcp aliases
 // to this view.
 import './dash/connections.css'
+// Models → Providers tab: list + detail, and the Add provider modal.
+import './dash/models/providers.css'
+import './dash/models/add-provider.css'
 import './dash/connections.jsx'
 // issue #658 — Profiles: container-slot template catalog + iGPU intent labels.
 import './dash/profiles.jsx'
