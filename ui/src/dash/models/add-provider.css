@@ -57,9 +57,12 @@
   .addprov-note { flex: 0 0 auto; }
   .addprov .pf-row { grid-template-columns: 1fr; gap: 4px; }
   .addprov .pf-row-lbl { padding-top: 0; }
-  .addprov-row { grid-template-columns: auto minmax(0, 1fr) auto; }
-  .addprov-row .addprov-type { grid-column: 2; justify-self: start; width: auto; }
-  .addprov-row .addprov-num { grid-column: 2; text-align: left; }
+  /* Two lines per model: tick + id (+ recommended) on top, then type, context and price under the id. */
+  .addprov-row { grid-template-columns: auto auto auto minmax(0, 1fr); row-gap: 2px; }
+  .addprov-row .addprov-mid { grid-column: 2 / -1; }
+  .addprov-row .addprov-type { grid-column: 2; grid-row: 2; justify-self: start; width: auto; }
+  .addprov-row .addprov-type + .addprov-num { grid-column: 3; grid-row: 2; text-align: left; }
+  .addprov-row .addprov-num + .addprov-num { grid-column: 4; grid-row: 2; text-align: left; }
 }
 
 .addprov-summary { padding: 8px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-2); font-size: 12px; overflow-wrap: anywhere; }

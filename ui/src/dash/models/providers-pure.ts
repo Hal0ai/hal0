@@ -71,10 +71,39 @@ export function sectionRows(
   return { on, off, offTotal: offAll.length, offHidden: offAll.length - off.length }
 }
 
-export function rowFlag(m: UpstreamModelRow): 'gone' | 'recommended' | null {
-  if (!m.discovered) return 'gone'
+/** True when the provider answered with its model list: fetched at least once and not stale. A
+ * provider that cannot be asked (no key, down, never asked) answers `fetched_at: null` and
+ * `stale: true`, and every row then reads `discovered: false` because nothing was compared
+ * (routes/providers.py `_discovered`: no cache entry gives `([], None, True)`). */
+export function listingKnown(l: Pick<UpstreamListing, 'fetched_at' | 'stale'> | null | undefined): boolean {
+  return !!l && l.fetched_at !== null && l.fetched_at !== undefined && !l.stale
+}
+
+/** "gone" means the provider answered and no longer lists the model, so it needs a known listing. */
+export function rowFlag(m: UpstreamModelRow, known: boolean): 'gone' | 'recommended' | null {
+  if (known && !m.discovered) return 'gone'
   if (m.recommended && !m.enabled) return 'recommended'
   return null
+}
+
+/** The provider needs a key and none is stored. A partial entry without the field is not "missing". */
+export function keyMissing(u: UpstreamEntry): boolean {
+  return keyState(u) === 'missing' && u.auth_key_present === false
+}
+
+export const NO_KEY_TEST_LINE = 'No key stored for this provider. Add a key, then test again.'
+export const noKeyRefreshToast = (label: string) => `Add a key for ${label} to load its model list.`
+
+export const STALE_NOTE = 'Model list could not be refreshed; showing the last known list.'
+export const NOT_LOADED_NOTE = 'Model list not loaded yet. Refresh model list to load it.'
+
+/** The quiet line above a per-model provider's rows, or null. A provider with no key says nothing
+ * (its banner explains why), a list never fetched says it is not loaded, a list fetched once and now
+ * stale keeps the "could not be refreshed" line. */
+export function listingNote(u: UpstreamEntry, l: UpstreamListing | null | undefined): string | null {
+  if (!l || providerState(u, l) !== 'per-model' || keyMissing(u)) return null
+  if (l.fetched_at === null || l.fetched_at === undefined) return NOT_LOADED_NOTE
+  return l.stale ? STALE_NOTE : null
 }
 
 export function countLabel(u: UpstreamEntry): string {
@@ -111,6 +140,18 @@ export function visibleProviders(list: UpstreamEntry[] | null | undefined): Upst
 
 export function providerLabel(u: UpstreamEntry, catalog?: Record<string, CatalogEntry> | null): string {
   return (u.catalog_id && catalog?.[u.catalog_id]?.name) || u.name
+}
+
+/** The header words of a provider: the preset's display name, plus the provider's own name when it
+ * differs from the name a fresh add would give (`defaultProviderName(preset, [])`), so two providers
+ * made from one preset can be told apart. A provider without a known preset is shown by name alone. */
+export function providerHeading(
+  u: UpstreamEntry,
+  catalog?: Record<string, CatalogEntry> | null,
+): { label: string; name: string | null } {
+  const preset = u.catalog_id ? catalog?.[u.catalog_id] : undefined
+  if (!preset?.name) return { label: u.name, name: null }
+  return { label: preset.name, name: u.name === defaultProviderName(preset, []) ? null : u.name }
 }
 
 /** Who keeps a managed provider up to date, in plain words. */

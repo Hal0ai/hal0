@@ -33,6 +33,10 @@ import {
   refreshSummary,
   providerState,
   rowFlag,
+  listingKnown,
+  listingNote,
+  providerHeading,
+  keyMissing,
   sectionRows,
   toggleErrorMessage,
   validateProviderName,
@@ -195,17 +199,98 @@ describe('rowFlag on a stored row only', () => {
   })
 })
 
+describe('listingKnown', () => {
+  it('is true only for a fetched list that is not stale', () => {
+    expect(listingKnown({ fetched_at: 1_700_000_000, stale: false })).toBe(true)
+  })
+  it('is false for a list never fetched, a stale list and no listing at all', () => {
+    expect(listingKnown({ fetched_at: null, stale: true })).toBe(false)
+    expect(listingKnown({ fetched_at: 1_700_000_000, stale: true })).toBe(false)
+    expect(listingKnown({ fetched_at: null, stale: false })).toBe(false)
+    expect(listingKnown(undefined)).toBe(false)
+  })
+})
+
 describe('rowFlag', () => {
-  it('is gone when the provider no longer lists the model', () => {
-    expect(rowFlag(row('x', { discovered: false }))).toBe('gone')
-    expect(rowFlag(row('x', { discovered: false, enabled: true }))).toBe('gone')
+  it('is gone when the provider answered and no longer lists the model', () => {
+    expect(rowFlag(row('x', { discovered: false }), true)).toBe('gone')
+    expect(rowFlag(row('x', { discovered: false, enabled: true }), true)).toBe('gone')
+  })
+  it('is never gone while the model list is unknown', () => {
+    expect(rowFlag(row('x', { discovered: false }), false)).toBeNull()
+    expect(rowFlag(row('x', { discovered: false, enabled: true }), false)).toBeNull()
+    expect(rowFlag(row('x', { discovered: false, recommended: true }), false)).toBe('recommended')
   })
   it('is recommended only for an off row', () => {
-    expect(rowFlag(row('x', { recommended: true }))).toBe('recommended')
-    expect(rowFlag(row('x', { recommended: true, enabled: true }))).toBeNull()
+    expect(rowFlag(row('x', { recommended: true }), true)).toBe('recommended')
+    expect(rowFlag(row('x', { recommended: true, enabled: true }), true)).toBeNull()
   })
   it('is null otherwise', () => {
-    expect(rowFlag(row('x'))).toBeNull()
+    expect(rowFlag(row('x'), true)).toBeNull()
+  })
+})
+
+describe('keyMissing', () => {
+  it('is true only when the provider needs a key and none is stored', () => {
+    expect(keyMissing(entry({ auth_key_present: false }))).toBe(true)
+    expect(keyMissing(entry({ auth_key_present: true }))).toBe(false)
+    expect(keyMissing(entry({ auth_key_present: false, auth_style: 'none' }))).toBe(false)
+    expect(keyMissing(entry({ auth_key_present: false, managed_by: 'agent:hermes' }))).toBe(false)
+  })
+})
+
+describe('listingNote', () => {
+  const l = (over: Partial<UpstreamListing>): UpstreamListing => ({
+    name: 'minimax',
+    curated: true,
+    protected: false,
+    fetched_at: 1_700_000_000,
+    stale: false,
+    models: [],
+    ...over,
+  })
+  it('says nothing for a fresh list', () => {
+    expect(listingNote(entry(), l({}))).toBeNull()
+  })
+  it('keeps the old note for a previously fetched list that is now stale', () => {
+    expect(listingNote(entry(), l({ stale: true }))).toBe('Model list could not be refreshed; showing the last known list.')
+  })
+  it('says the list is not loaded yet when it was never fetched and a key is there or not needed', () => {
+    const text = 'Model list not loaded yet. Refresh model list to load it.'
+    expect(listingNote(entry(), l({ fetched_at: null, stale: true }))).toBe(text)
+    expect(listingNote(entry({ auth_style: 'none', auth_key_present: false }), l({ fetched_at: null, stale: true }))).toBe(text)
+  })
+  it('says nothing when the key is missing: the key banner already explains it', () => {
+    expect(listingNote(entry({ auth_key_present: false }), l({ fetched_at: null, stale: true }))).toBeNull()
+    expect(listingNote(entry({ auth_key_present: false }), l({ stale: true }))).toBeNull()
+  })
+  it('says nothing without a listing, or for a provider that is not per-model', () => {
+    expect(listingNote(entry(), undefined)).toBeNull()
+    expect(listingNote(entry({ curated: false }), l({ fetched_at: null, stale: true }))).toBeNull()
+    expect(listingNote(entry({ managed_by: 'agent:hermes' }), l({ fetched_at: null }))).toBeNull()
+  })
+})
+
+describe('providerHeading', () => {
+  const preset = { id: 'openrouter', name: 'OpenRouter' } as CatalogEntry
+  const catalog = { openrouter: preset }
+  it('shows only the display name when the provider carries the preset default name', () => {
+    expect(providerHeading(entry({ name: 'openrouter', catalog_id: 'openrouter' }), catalog)).toEqual({
+      label: 'OpenRouter',
+      name: null,
+    })
+  })
+  it('adds the provider name when it differs from the preset default', () => {
+    expect(providerHeading(entry({ name: 'ct150-check', catalog_id: 'openrouter' }), catalog)).toEqual({
+      label: 'OpenRouter',
+      name: 'ct150-check',
+    })
+    expect(providerHeading(entry({ name: 'openrouter-2', catalog_id: 'openrouter' }), catalog).name).toBe('openrouter-2')
+  })
+  it('shows only the name for a provider without a preset, or one the catalog does not know', () => {
+    expect(providerHeading(entry({ name: 'corp', catalog_id: null }), catalog)).toEqual({ label: 'corp', name: null })
+    expect(providerHeading(entry({ name: 'corp', catalog_id: 'gone' }), catalog)).toEqual({ label: 'corp', name: null })
+    expect(providerHeading(entry({ name: 'corp', catalog_id: 'openrouter' }), null).name).toBeNull()
   })
 })
 

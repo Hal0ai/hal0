@@ -24,7 +24,7 @@ async function open(
   page: Page,
   allow: RegExp[] = [],
   hash = '#models/providers',
-  opts: { switchedOff?: string[] } = {},
+  opts: { switchedOff?: string[]; keyless?: boolean } = {},
 ): Promise<Env> {
   const errors = watchErrors(page, allow)
   const ctl = await installProviders(page, opts)
@@ -434,6 +434,53 @@ test.describe('Keyboard', () => {
   })
 })
 
+test.describe('A provider whose model list is unknown (added without a key)', () => {
+  const keyless = (page: Page, allow: RegExp[] = []) => open(page, allow, '#models/providers', { keyless: true })
+
+  test('marks no model gone, shows no stale note, and keeps the key banner', async ({ page }) => {
+    const { errors } = await keyless(page)
+    await expand(page, 'ct150-check')
+    const sec = page.getByTestId('prov-section-ct150-check')
+    await expect(sec.locator('.prov-row')).toHaveCount(4)
+    await expect(sec.locator('.prov-flag')).toHaveCount(0)
+    await expect(sec).not.toContainText('gone')
+    await expect(sec).not.toContainText('could not be refreshed')
+    await expect(sec).not.toContainText('not loaded yet')
+    await expect(page.getByTestId('prov-banner-key-ct150-check')).toContainText('No key stored')
+    await page.getByRole('button', { name: 'Show details of ct150-check/vendor/alpha', exact: true }).click()
+    await expect(page.getByTestId('prov-detail-model')).toContainText('Offered by provider')
+    await expect(page.getByTestId('prov-detail-model')).toContainText('unknown')
+    await expect(page.getByTestId('prov-detail-model')).not.toContainText('no longer listed')
+    expect(errors.seen).toEqual([])
+  })
+
+  test('the header shows the provider name after the display name; a default-named provider shows one name', async ({ page }) => {
+    const { errors } = await keyless(page)
+    await expect(head(page, 'ct150-check').locator('.prov-name')).toHaveText('OpenRouter')
+    await expect(head(page, 'ct150-check').locator('.prov-pname')).toHaveText('ct150-check')
+    await expect(head(page, 'ct150-check')).toContainText('openrouter.ai')
+    await expect(head(page, 'openrouter').locator('.prov-name')).toHaveText('OpenRouter')
+    await expect(head(page, 'openrouter').locator('.prov-pname')).toHaveCount(0)
+    await head(page, 'ct150-check').click()
+    await expect(page.getByTestId('prov-detail-provider')).toContainText('ct150-check · openrouter.ai')
+    expect(errors.seen).toEqual([])
+  })
+
+  test('Test connection and Refresh model list ask for a key and call nothing', async ({ page }) => {
+    const { ctl, errors } = await keyless(page)
+    await head(page, 'ct150-check').click()
+    const panel = page.getByTestId('provider-detail')
+    const testBtn = panel.getByRole('button', { name: 'Test connection' })
+    await expect(testBtn).toBeEnabled()
+    await testBtn.click()
+    await expect(page.getByTestId('prov-test-line')).toHaveText('No key stored for this provider. Add a key, then test again.')
+    await panel.getByRole('button', { name: 'Refresh model list' }).click()
+    await expect(toast(page, 'Add a key for OpenRouter to load its model list.')).toBeVisible()
+    expect(ctl.callsTo('POST', /\/ct150-check\/(test|refresh)$/)).toEqual([])
+    expect(errors.seen).toEqual([])
+  })
+})
+
 test.describe('Phone width', () => {
   test.use({ viewport: { width: 400, height: 800 } })
 
@@ -467,6 +514,49 @@ test.describe('Phone width', () => {
     const box = await shell.boundingBox()
     expect(box!.x).toBeGreaterThanOrEqual(0)
     expect(box!.x + box!.width).toBeLessThanOrEqual(400.5)
+    expect(errors.seen).toEqual([])
+  })
+
+  test('a model row in the Add provider dialog is two lines: id on top, type, context and price under it', async ({ page }) => {
+    const { errors } = await open(page)
+    const modal = await addModal(page)
+    await modal.getByRole('button', { name: /^DeepSeek/ }).click()
+    await modal.getByLabel('API key').fill('sk-live-abcdef123456')
+    await modal.getByRole('button', { name: 'Check connection' }).click()
+    await expect(modal.getByTestId('addprov-result')).toContainText('Reachable')
+    const row = modal.locator('.addprov-row').first()
+    await expect(row).toBeVisible()
+    const box = async (loc: Locator) => (await loc.boundingBox())!
+    const r = await box(row)
+    const mid = await box(row.locator('.addprov-mid'))
+    const type = await box(row.locator('.addprov-type'))
+    const nums = row.locator('.addprov-num')
+    const ctx = await box(nums.nth(0))
+    const price = await box(nums.nth(1))
+    // Line 2 holds all three, on one line, left-aligned under the id.
+    expect(Math.abs(ctx.y - type.y)).toBeLessThanOrEqual(type.height)
+    expect(Math.abs(price.y - ctx.y)).toBeLessThanOrEqual(4)
+    expect(type.y).toBeGreaterThanOrEqual(mid.y + mid.height - 1)
+    expect(Math.abs(type.x - mid.x)).toBeLessThanOrEqual(2)
+    expect(ctx.x).toBeGreaterThan(type.x + type.width - 1)
+    expect(price.x).toBeGreaterThan(ctx.x)
+    // So the row is no taller than the id line plus the control line plus its padding.
+    expect(r.height).toBeLessThanOrEqual(mid.height + type.height + 20)
+    await noHorizontalScroll(page, modal)
+    expect(errors.seen).toEqual([])
+  })
+
+  test('a model row in the tab is two lines: id and flags, then type, context and price', async ({ page }) => {
+    const { errors } = await open(page)
+    await expand(page, 'minimax')
+    const row = page.getByTestId('prov-section-minimax').locator('.prov-row').first()
+    await expect(row).toBeVisible()
+    await expect(row.locator('.prov-mid small')).toBeHidden()
+    const mid = (await row.locator('.prov-mid').boundingBox())!
+    const meta = (await row.locator('.prov-meta').boundingBox())!
+    const r = (await row.boundingBox())!
+    expect(meta.y).toBeGreaterThanOrEqual(mid.y + mid.height - 1)
+    expect(r.height).toBeLessThanOrEqual(mid.height + meta.height + 24)
     expect(errors.seen).toEqual([])
   })
 })

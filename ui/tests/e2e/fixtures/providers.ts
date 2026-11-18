@@ -62,12 +62,52 @@ function ok(route: Route, body: unknown, status = 200) {
 /** Install the routes on `page` before `page.goto`. */
 export async function installProviders(
   page: Page,
-  opts: { switchedOff?: string[] } = {},
+  opts: { switchedOff?: string[]; keyless?: boolean } = {},
 ): Promise<ProvidersCtl> {
   const upstreams: Json[] = clone((MOCK_BUILDERS.upstreams as any)('/api/upstreams', []))
   for (const u of upstreams) if (opts.switchedOff?.includes(u.name)) u.enabled = false
+  // `keyless` adds "ct150-check": a per-model OpenRouter provider added without a key. The server
+  // cannot fetch its list, so it answers `stale: true`, `fetched_at: null` and every row
+  // `discovered: false` (routes/providers.py `_discovered`: no cache entry gives `([], None, True)`).
+  const keylessRows = ['vendor/alpha', 'vendor/beta', 'vendor/gamma', 'vendor/delta'].map((id, i) => ({
+    id,
+    canonical_id: `ct150-check/${id}`,
+    enabled: i < 2,
+    type: 'chat',
+    context: 128000,
+    price_in: 0.3,
+    price_out: 1.2,
+    price_unit: 'Mtok',
+    discovered: false,
+    recommended: false,
+    in_use_by: [],
+  }))
+  if (opts.keyless) {
+    const proto = clone(upstreams.find((u) => u.name === 'openrouter')!)
+    upstreams.push({
+      ...proto,
+      name: 'ct150-check',
+      catalog_id: 'openrouter',
+      auth_value_env: 'CT150_CHECK_API_KEY',
+      auth_key_present: false,
+      curated: true,
+      models: [],
+    })
+  }
   const listings = new Map<string, Json>()
+  if (opts.keyless) {
+    listings.set('ct150-check', {
+      name: 'ct150-check',
+      curated: true,
+      protected: false,
+      fetched_at: null,
+      stale: true,
+      warning: null,
+      models: keylessRows,
+    })
+  }
   for (const u of upstreams) {
+    if (listings.has(u.name)) continue
     listings.set(u.name, clone((MOCK_BUILDERS.upstreamModels as any)('', ['', u.name])))
   }
   let probeCount = 0

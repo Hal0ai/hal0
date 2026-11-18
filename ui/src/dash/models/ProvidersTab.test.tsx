@@ -243,6 +243,46 @@ describe('provider sections', () => {
     expect(text()).not.toContain('could not be refreshed')
   })
 
+  it('marks a model gone only when the provider answered without it', async () => {
+    listings.minimax = listing('minimax', [row('m1', { enabled: true, discovered: false })])
+    await expand('minimax')
+    expect(q('[data-testid="prov-model-minimax-m1"]')!.textContent).toContain('gone')
+  })
+
+  it('an unknown model list (never fetched) marks nothing gone and shows no refresh blame', async () => {
+    upstreams = [entry('minimax', { auth_key_present: false, enabled_count: 1, models_total: 2 })]
+    listings.minimax = listing('minimax', [row('m1', { enabled: true, discovered: false }), row('m2', { discovered: false })], {
+      stale: true,
+      fetched_at: null,
+    })
+    await expand('minimax')
+    expect(text()).not.toContain('gone')
+    expect(text()).not.toContain('could not be refreshed')
+    expect(text()).not.toContain('not loaded yet')
+    expect(q('[data-testid="prov-banner-key-minimax"]')).not.toBeNull()
+  })
+
+  it('a never-fetched list with a key says it is not loaded yet', async () => {
+    listings.minimax = listing('minimax', [row('m1', { enabled: true, discovered: false })], { stale: true, fetched_at: null })
+    await expand('minimax')
+    expect(text()).toContain('Model list not loaded yet. Refresh model list to load it.')
+    expect(text()).not.toContain('gone')
+  })
+
+  it('shows the provider name after the display name when it differs from the preset default', async () => {
+    upstreams = [entry('ct150-check', { catalog_id: 'minimax' }), entry('minimax', { catalog_id: 'minimax' })]
+    listings['ct150-check'] = listing('ct150-check', [row('m1')])
+    view()
+    await settle()
+    await settle()
+    const named = q('[data-testid="prov-head-ct150-check"]')!
+    expect(named.querySelector('.prov-name')!.textContent).toBe('MiniMax')
+    expect(named.querySelector('.prov-pname')!.textContent).toBe('ct150-check')
+    const plain = q('[data-testid="prov-head-minimax"]')!
+    expect(plain.querySelector('.prov-name')!.textContent).toBe('MiniMax')
+    expect(plain.querySelector('.prov-pname')).toBeNull()
+  })
+
   it('shows a flag chip and the callable name', async () => {
     listings.minimax = listing('minimax', [row('m1', { enabled: true, discovered: false }), row('m2', { recommended: true })])
     await expand('minimax')
@@ -527,6 +567,12 @@ describe('refreshModelList', () => {
   it('warns that the provider could not be reached when the answer is stale without a warning', async () => {
     await run({ curated: true, stale: true, warning: null })
     expect(toasts).toEqual([['Could not reach Corp; showing the last known list.', 'warn']])
+  })
+  it('asks for a key instead of calling the provider when none is stored', async () => {
+    const refresh = { mutateAsync: vi.fn(async () => ({})) }
+    await refreshModelList(refresh, { name: 'corp', curated: true, auth_style: 'bearer', auth_key_present: false } as UpstreamEntry, 'Corp')
+    expect(refresh.mutateAsync).not.toHaveBeenCalled()
+    expect(toasts).toEqual([['Add a key for Corp to load its model list.', 'warn']])
   })
   it('shows the warning text when there is one', async () => {
     await run({ curated: true, stale: true, warning: 'conversion failed' })

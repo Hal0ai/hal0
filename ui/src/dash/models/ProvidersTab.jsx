@@ -26,7 +26,12 @@ import {
   formatContext,
   formatPrice,
   hostOf,
+  keyMissing,
   keyState,
+  listingKnown,
+  listingNote,
+  noKeyRefreshToast,
+  providerHeading,
   ownerLabel,
   providerLabel,
   providerState,
@@ -66,6 +71,10 @@ function initials(label) {
 /** Refresh the model list. A not-converted provider becomes per-model with everything on. An answer
  * that is stale or carries a `warning` means the provider could not be reached: warn, never report success. */
 export async function refreshModelList(refresh, u, label) {
+  if (keyMissing(u)) {
+    toast(noKeyRefreshToast(label), 'warn')
+    return
+  }
   try {
     const res = await refresh.mutateAsync(u.name)
     if (refreshOutcome(res) === 'unreachable') {
@@ -87,8 +96,8 @@ export async function setProviderEnabled(update, u, next) {
   }
 }
 
-function ModelRow({ u, m, state, selected, onPick, onToggle }) {
-  const flag = rowFlag(m)
+function ModelRow({ u, m, state, known, selected, onPick, onToggle }) {
+  const flag = rowFlag(m, known)
   const call = m.canonical_id || `${u.name}/${m.id}`
   return (
     <div
@@ -124,7 +133,7 @@ function ModelRow({ u, m, state, selected, onPick, onToggle }) {
 }
 
 function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch, filter, onHeader, onSelect }) {
-  const label = providerLabel(u, catalog)
+  const { label, name: ownName } = providerHeading(u, catalog)
   const key = keyState(u)
   const isSel = selected.provider === u.name
   const [offShown, setOffShown] = useState(OFF_PAGE)
@@ -133,6 +142,8 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
   // once its listing is loaded or loading: inside the debounce nothing opens with an empty body.
   const shown = expanded || (searching && (!!listing.data || listing.isLoading))
   const state = providerState(u, listing.data)
+  const known = listingKnown(listing.data)
+  const note = listingNote(u, listing.data)
   const patch = useUpstreamModelPatch()
   const refresh = useUpstreamRefresh()
   const update = useUpstreamUpdate()
@@ -189,6 +200,7 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
       u={u}
       m={m}
       state={state}
+      known={known}
       selected={isSel && selected.model === m.id}
       onPick={() => onSelect({ provider: u.name, model: m.id })}
       onToggle={toggle}
@@ -207,6 +219,7 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
         <span className="prov-chev" aria-hidden="true">{shown ? '▾' : '▸'}</span>
         <span className="prov-logo" aria-hidden="true">{initials(label)}</span>
         <span className="prov-name">{label}</span>
+        {ownName && <span className="prov-pname">{ownName}</span>}
         <span className="prov-host">{hostOf(u.url)}</span>
         {noMatch && <span className="prov-nomatch">no match</span>}
         <span className="prov-chips">
@@ -271,9 +284,7 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
               Could not load this provider's models. Reload the list to try again.
             </div>
           )}
-          {listing.data?.stale && state === 'per-model' && (
-            <div className="prov-msg quiet">Model list could not be refreshed; showing the last known list.</div>
-          )}
+          {note && <div className="prov-msg quiet">{note}</div>}
           {listing.data && rows.length === 0 && (
             <div className="prov-msg">This provider has not listed any models yet.</div>
           )}

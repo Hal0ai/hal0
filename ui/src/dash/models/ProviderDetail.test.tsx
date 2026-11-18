@@ -70,10 +70,12 @@ let upstreams: UpstreamEntry[]
 let models: UpstreamModelRow[]
 let toasts: Array<[string, string]>
 let qc: QueryClient
+let listingOver: Record<string, unknown>
 
 beforeEach(() => {
   upstreams = [entry('alpha'), entry('minimax'), entry('zeta')]
   models = [row('m1', { enabled: true }), row('m2')]
+  listingOver = {}
   toasts = []
   copied.length = 0
   ;(window as unknown as { __hal0Toast: unknown }).__hal0Toast = (m: string, k: string) => toasts.push([m, k])
@@ -82,7 +84,7 @@ beforeEach(() => {
     if (url === '/api/upstreams') return upstreams as never
     if (url === '/api/providers/catalog') return {} as never
     if (/^\/api\/upstreams\/[^/]+\/models$/.test(url)) {
-      return { name: 'minimax', curated: true, protected: false, fetched_at: Math.floor(Date.now() / 1000) - 120, stale: false, models } as never
+      return { name: 'minimax', curated: true, protected: false, fetched_at: Math.floor(Date.now() / 1000) - 120, stale: false, models, ...listingOver } as never
     }
     throw new Error('unexpected GET ' + url)
   })
@@ -170,6 +172,42 @@ describe('provider selected', () => {
     click(btn('Test connection')!)
     await flush()
     expect(q('[data-testid="prov-test-line"]')!.textContent).toBe('HTTP 401')
+  })
+
+  it('"Test connection" on a provider with no key says so and does not call the test route', async () => {
+    upstreams = [entry('minimax', { auth_key_present: false })]
+    view({ provider: 'minimax', model: null })
+    await flush()
+    const b = btn('Test connection') as HTMLButtonElement
+    expect(b.disabled).toBe(false)
+    click(b)
+    await flush()
+    expect(client.apiPost).not.toHaveBeenCalled()
+    expect(q('[data-testid="prov-test-line"]')!.textContent).toBe('No key stored for this provider. Add a key, then test again.')
+  })
+
+  it('"Refresh model list" on a provider with no key asks for a key and does not call the server', async () => {
+    upstreams = [entry('minimax', { auth_key_present: false })]
+    view({ provider: 'minimax', model: null })
+    await flush()
+    click(btn('Refresh model list')!)
+    await flush()
+    expect(client.apiPost).not.toHaveBeenCalled()
+    expect(toasts).toEqual([['Add a key for minimax to load its model list.', 'warn']])
+  })
+
+  it('the header shows the provider name when it differs from the preset default name', async () => {
+    upstreams = [entry('ct150-check', { catalog_id: 'minimax' })]
+    vi.mocked(client.apiGet).mockImplementation(async (url: string) => {
+      if (url === '/api/upstreams') return upstreams as never
+      if (url === '/api/providers/catalog') return { minimax: { id: 'minimax', name: 'MiniMax' } } as never
+      return { name: 'ct150-check', curated: true, protected: false, fetched_at: 1, stale: false, models } as never
+    })
+    view({ provider: 'ct150-check', model: null })
+    await flush()
+    const head = q('[data-testid="prov-detail-provider"]')!.textContent!
+    expect(head).toContain('MiniMax')
+    expect(head).toContain('ct150-check · api.ct150-check.example')
   })
 
   it('a not-converted provider offers "Choose models" instead of "Refresh model list"', async () => {
@@ -326,6 +364,29 @@ describe('model selected', () => {
     view({ provider: 'minimax', model: 'm2' })
     await flush()
     expect(text()).toContain('no longer listed')
+  })
+
+  it('says "unknown" while the model list is not known', async () => {
+    models = [row('m2', { discovered: false })]
+    listingOver = { stale: true, fetched_at: null }
+    view({ provider: 'minimax', model: 'm2' })
+    await flush()
+    expect(text()).not.toContain('no longer listed')
+    expect(text()).toContain('unknown')
+  })
+
+  it('says "yes" for a model a managed or not-converted provider is serving (no fetch time, rows discovered)', async () => {
+    for (const over of [{ managed_by: 'agent:hermes' }, { curated: false }]) {
+      upstreams = [entry('minimax', over)]
+      models = [row('m2')]
+      listingOver = { stale: over.curated === false, fetched_at: null, protected: !!over.managed_by, curated: over.curated !== false }
+      const v = view({ provider: 'minimax', model: 'm2' })
+      await flush()
+      expect(q('[data-testid="prov-detail-model"]')!.textContent).toContain('yes')
+      expect(text()).not.toContain('unknown')
+      v.unmount?.()
+      cleanup()
+    }
   })
 
   it('changing the type PATCHes { type }', async () => {

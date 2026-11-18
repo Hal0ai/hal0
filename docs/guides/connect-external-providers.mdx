@@ -72,8 +72,12 @@ the closed ones, and the **Show** and **Type** filters narrow the list.
 Select a model's name to see its details on the right: the name to call it by
 (`<provider>/<model>`), its type, context size and price. **Edit** lets you
 correct the context size and the prices stored for the model.
-A **gone** tag means the provider no longer offers that model; a
-**recommended** tag marks the template's suggestion.
+A **gone** tag means the provider answered and no longer offers that model; a
+**recommended** tag marks the template's suggestion. A provider without a key
+cannot load its model list, so nothing is tagged gone there and the panel says
+the model's status is unknown. Add a key, then choose **Refresh model list**.
+When two providers come from one template, the header shows the template name
+followed by the provider's own name.
 
 Select a provider's header to act on the whole provider. Its facts and actions
 appear in the panel on the right:

@@ -30,9 +30,13 @@ import {
   formatContext,
   formatPrice,
   hostOf,
+  NO_KEY_TEST_LINE,
+  keyMissing,
   keyProblem,
   keyState,
+  listingKnown,
   priceProblem,
+  providerHeading,
   providerLabel,
   providerState,
   toggleErrorMessage,
@@ -101,7 +105,7 @@ function ProviderPanel({ u, selected, onSelect, catalog }) {
   const listing = useUpstreamModels(u.name)
   const state = providerState(u, listing.data)
   const key = keyState(u)
-  const label = providerLabel(u, catalog)
+  const { label, name: ownName } = providerHeading(u, catalog)
   const test = useUpstreamTest()
   const update = useUpstreamUpdate()
   const refresh = useUpstreamRefresh()
@@ -129,6 +133,10 @@ function ProviderPanel({ u, selected, onSelect, catalog }) {
 
   const runTest = async () => {
     setTestLine(null)
+    if (keyMissing(u)) {
+      setTestLine({ ok: false, text: NO_KEY_TEST_LINE })
+      return
+    }
     try {
       const r = await test.mutateAsync(u.name)
       setTestLine(
@@ -173,7 +181,7 @@ function ProviderPanel({ u, selected, onSelect, catalog }) {
       <DetailHeader
         state={{ installed: u.enabled !== false, inUseBy: [] }}
         name={label}
-        source={u.name === label ? hostOf(u.url) : `${u.name} · ${hostOf(u.url)}`}
+        source={ownName ? `${ownName} · ${hostOf(u.url)}` : hostOf(u.url)}
         chips={
           <>
             <span className="chip">{state === 'managed' ? 'read-only' : state === 'not-converted' ? 'routes everything' : 'per-model'}</span>
@@ -370,7 +378,9 @@ function ModelPanel({ u, modelId, onSelect, catalog }) {
             )}
           </>
         )}
-        <DetailLine k="Offered by provider">{m.discovered ? 'yes' : 'no longer listed'}</DetailLine>
+        <DetailLine k="Offered by provider">
+          {m.discovered ? 'yes' : listingKnown(listing.data) ? 'no longer listed' : 'unknown'}
+        </DetailLine>
       </DetailSection>
       <DetailActions note={readOnly ? (state === 'managed' ? MANAGED_NOTE : 'Choose models for this provider to change its models.') : null}>
         {!readOnly && (
