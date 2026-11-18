@@ -44,7 +44,8 @@ const ALIASES = {
 
 /** The glyph key for a model type, or null when the type has no glyph. */
 export function typeGlyphKey(type) {
-  return ALIASES[String(type || '').toLowerCase()] ?? null
+  const t = String(type || '').toLowerCase()
+  return Object.hasOwn(ALIASES, t) ? ALIASES[t] : null
 }
 
 export function TypeGlyph({ type }) {

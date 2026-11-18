@@ -17,8 +17,12 @@ export const LANE_CODES: Record<LaneKey, { code: string; label: string }> = {
 
 type SlotLike = { device?: string | null; binary?: string | null }
 
-/** The lane of a slot. An NPU slot is FLM unless it runs the xdna runner. */
+const isLaneKey = (k: string): k is LaneKey => Object.hasOwn(LANE_CODES, k)
+
+/** The lane of a slot. An NPU slot is FLM unless it runs the xdna runner. `devKind` has no CUDA
+ *  kind (it folds every non-Vulkan GPU device into rocm), so a CUDA device is read here first. */
 export function laneForSlot(slot: SlotLike | null | undefined): LaneKey {
+  if (String(slot?.device || '').toLowerCase().includes('cuda')) return 'cuda'
   const kind = devKind(slot?.device)
   if (kind !== 'npu') return kind
   return isXdnaSlot(slot as Parameters<typeof isXdnaSlot>[0]) ? 'npu' : 'flm'
@@ -32,5 +36,5 @@ export function laneForBackend(
 ): LaneKey | null {
   const b = String(backend || '').toLowerCase().replace(/^gpu-/, '')
   if (b === 'npu') return model && isFlmModel(model) ? 'flm' : 'npu'
-  return b in LANE_CODES ? (b as LaneKey) : null
+  return isLaneKey(b) ? b : null
 }

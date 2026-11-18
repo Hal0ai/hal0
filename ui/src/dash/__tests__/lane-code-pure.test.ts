@@ -16,6 +16,9 @@ describe('laneForSlot', () => {
     expect(laneForSlot({ device: 'cpu' })).toBe('cpu')
     expect(laneForSlot(null)).toBe('cpu')
   })
+  it('reads a CUDA device as the CUDA lane, not ROCm', () => {
+    expect(laneForSlot({ device: 'gpu-cuda' })).toBe('cuda')
+  })
   it('names an NPU slot FLM unless it runs the xdna runner', () => {
     expect(laneForSlot({ device: 'npu' })).toBe('flm')
     expect(laneForSlot({ device: 'npu', binary: 'flm' })).toBe('flm')
@@ -36,5 +39,6 @@ describe('laneForBackend', () => {
   it('returns null for a token outside the vocabulary', () => {
     expect(laneForBackend('metal')).toBeNull()
     expect(laneForBackend('')).toBeNull()
+    expect(laneForBackend('constructor')).toBeNull()
   })
 })

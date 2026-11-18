@@ -3,7 +3,7 @@
 import { LANE_CODES } from './lane-code-pure'
 
 export function LaneCode({ lane, title, testid, ...rest }) {
-  const meta = LANE_CODES[lane] ?? LANE_CODES.cpu
+  const meta = Object.hasOwn(LANE_CODES, lane) ? LANE_CODES[lane] : LANE_CODES.cpu
   const name = title || meta.label
   return (
     <span className={'lane-code lane-' + lane} role="img" aria-label={name} title={name} data-testid={testid} {...rest}>

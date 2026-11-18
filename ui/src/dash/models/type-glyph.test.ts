@@ -14,5 +14,6 @@ describe('typeGlyphKey', () => {
     expect(typeGlyphKey('video')).toBeNull()
     expect(typeGlyphKey('')).toBeNull()
     expect(typeGlyphKey(undefined)).toBeNull()
+    expect(typeGlyphKey('constructor')).toBeNull()
   })
 })
