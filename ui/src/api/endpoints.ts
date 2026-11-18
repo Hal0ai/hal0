@@ -5,7 +5,7 @@
 // authoritative when we reconcile against the backend (ADR-0004 for
 // agent surface, etc).
 
-import { modelPath } from '@/dash/models/providers-pure'
+import { modelPath } from '@/lib/providerModel'
 
 export const ENDPOINTS = {
   // ── Slots / status (hal0-api) ────────────────────────────────────

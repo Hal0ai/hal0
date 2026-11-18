@@ -146,6 +146,65 @@ describe('useUpstreamModelPatch', () => {
     expect(h.current().isError).toBe(true)
   })
 
+  it('overlapping toggles on two rows: a failure restores only its own row', async () => {
+    qc.setQueryData(['upstream-models', 'p'], LISTING)
+    // An observer on the listing makes an invalidation refetch it; count those requests.
+    vi.mocked(client.apiGet).mockReturnValue(new Promise(() => {}))
+    let rejectA!: (e: Error) => void
+    let resolveB!: (r: UpstreamModelRow) => void
+    vi.mocked(client.apiPatch).mockImplementation((path: string) =>
+      path.endsWith('/qwen/qwen3-coder')
+        ? new Promise((_, rej) => (rejectA = rej))
+        : new Promise((res) => (resolveB = res)),
+    )
+    const h = mount(() => {
+      hooks.useUpstreamModels('p')
+      return hooks.useUpstreamModelPatch()
+    })
+    await flush()
+    vi.mocked(client.apiGet).mockClear()
+    act(() => {
+      h.current().mutate({ name: 'p', modelId: 'qwen/qwen3-coder', patch: { enabled: true } })
+      h.current().mutate({ name: 'p', modelId: 'b', patch: { enabled: false } })
+    })
+    await flush()
+    const rows = () => qc.getQueryData<UpstreamListing>(['upstream-models', 'p'])!.models
+    expect(rows().map((m) => m.enabled)).toEqual([true, false])
+    await act(async () => rejectA(new Error('conflict')))
+    await flush()
+    // A is back to off; B keeps its optimistic off (it was on before).
+    expect(rows().map((m) => m.enabled)).toEqual([false, false])
+    // B is still pending: no refetch yet that could overwrite it.
+    expect(client.apiGet).not.toHaveBeenCalled()
+    await act(async () => resolveB(row('b')))
+    await flush()
+    expect(client.apiGet).toHaveBeenCalledTimes(1)
+  })
+
+  it('overlapping toggles: B failing leaves the already-confirmed A change in place', async () => {
+    qc.setQueryData(['upstream-models', 'p'], LISTING)
+    vi.mocked(client.apiGet).mockReturnValue(new Promise(() => {}))
+    let resolveA!: (r: UpstreamModelRow) => void
+    let rejectB!: (e: Error) => void
+    vi.mocked(client.apiPatch).mockImplementation((path: string) =>
+      path.endsWith('/qwen/qwen3-coder')
+        ? new Promise((res) => (resolveA = res))
+        : new Promise((_, rej) => (rejectB = rej)),
+    )
+    const h = mount(() => hooks.useUpstreamModelPatch())
+    act(() => {
+      h.current().mutate({ name: 'p', modelId: 'qwen/qwen3-coder', patch: { enabled: true } })
+      h.current().mutate({ name: 'p', modelId: 'b', patch: { enabled: false } })
+    })
+    await flush()
+    await act(async () => resolveA(row('qwen/qwen3-coder', true)))
+    await flush()
+    await act(async () => rejectB(new Error('boom')))
+    await flush()
+    const rows = qc.getQueryData<UpstreamListing>(['upstream-models', 'p'])!.models
+    expect(rows.map((m) => m.enabled)).toEqual([true, true])
+  })
+
   it('invalidates the provider list when it settles', async () => {
     qc.setQueryData(['upstreams'], [])
     qc.setQueryData(['upstream-models', 'p'], LISTING)
@@ -173,20 +232,69 @@ describe('useUpstreamRefresh', () => {
 })
 
 describe('useProviderProbe', () => {
-  it('posts the body and drops the key from mutation state on reset', async () => {
-    vi.mocked(client.apiPost).mockResolvedValue({ ok: true, status: 200, latency_ms: 1, models: [], rate_limit: {}, error: null })
+  const OK = { ok: true, status: 200, latency_ms: 1, models: [], rate_limit: {}, error: null }
+  const keyAnywhere = () =>
+    JSON.stringify([
+      qc.getMutationCache().getAll().map((m) => m.state.variables),
+      qc.getQueryCache().getAll().map((q) => q.state.data),
+    ]).includes('sk-secret')
+
+  it('posts the body, returns the answer and keeps no key in the mutation cache after it settles', async () => {
+    vi.mocked(client.apiPost).mockResolvedValue(OK)
+    const h = mount(() => hooks.useProviderProbe())
+    let out: unknown
+    await act(async () => {
+      out = await h.current().probe({ url: 'https://x/v1', key: 'sk-secret' })
+    })
+    await flush()
+    expect(client.apiPost).toHaveBeenCalledWith('/api/providers/probe', { url: 'https://x/v1', key: 'sk-secret' })
+    expect(out).toEqual(OK)
+    expect(h.current().result).toEqual(OK)
+    expect(h.current().isPending).toBe(false)
+    expect(qc.getMutationCache().getAll()).toHaveLength(0)
+    expect(keyAnywhere()).toBe(false)
+    expect(JSON.stringify(h.current())).not.toContain('sk-secret')
+  })
+
+  it('keeps no key after a rejection either, and surfaces the error', async () => {
+    vi.mocked(client.apiPost).mockRejectedValue(new Error('boom'))
     const h = mount(() => hooks.useProviderProbe())
     await act(async () => {
-      await h.current().mutateAsync({ url: 'https://x/v1', key: 'sk-secret' })
+      await expect(h.current().probe({ url: 'https://x/v1', key: 'sk-secret' })).rejects.toThrow('boom')
     })
-    expect(client.apiPost).toHaveBeenCalledWith('/api/providers/probe', { url: 'https://x/v1', key: 'sk-secret' })
     await flush()
-    expect(h.current().variables).toEqual({ url: 'https://x/v1', key: 'sk-secret' })
-    act(() => h.current().reset())
+    expect(h.current().error?.message).toBe('boom')
+    expect(h.current().result).toBeNull()
+    expect(qc.getMutationCache().getAll()).toHaveLength(0)
+    expect(keyAnywhere()).toBe(false)
+  })
+
+  it('is pending while the request runs and clear() drops the last result', async () => {
+    let resolve!: (r: unknown) => void
+    vi.mocked(client.apiPost).mockReturnValue(new Promise((r) => (resolve = r)))
+    const h = mount(() => hooks.useProviderProbe())
+    act(() => {
+      void h.current().probe({ url: 'u', key: 'sk-secret' })
+    })
+    expect(h.current().isPending).toBe(true)
+    await act(async () => resolve(OK))
     await flush()
-    expect(h.current().variables).toBeUndefined()
-    expect(h.current().data).toBeUndefined()
-    const cached = qc.getMutationCache().getAll()
-    expect(JSON.stringify(cached.map((m) => m.state.variables))).not.toContain('sk-secret')
+    expect(h.current().result).toEqual(OK)
+    act(() => h.current().clear())
+    expect(h.current().result).toBeNull()
+  })
+
+  it('leaves nothing behind when the component unmounts mid-request', async () => {
+    let resolve!: (r: unknown) => void
+    vi.mocked(client.apiPost).mockReturnValue(new Promise((r) => (resolve = r)))
+    const h = mount(() => hooks.useProviderProbe())
+    act(() => {
+      void h.current().probe({ url: 'u', key: 'sk-secret' })
+    })
+    act(() => root!.unmount())
+    root = null
+    await act(async () => resolve(OK))
+    expect(qc.getMutationCache().getAll()).toHaveLength(0)
+    expect(keyAnywhere()).toBe(false)
   })
 })

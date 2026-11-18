@@ -5,10 +5,11 @@
 // for the "Add upstream" form and the credentials write. Secrets never
 // round-trip: the API returns env-var NAMES and boolean presence only.
 
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { apiDelete, apiGet, apiPatch, apiPost } from '../client'
 import { ENDPOINTS } from '../endpoints'
-import type { ModelType } from '@/dash/models/providers-pure'
+import type { ModelType } from '@/lib/providerModel'
 
 export interface UpstreamModelFilters {
   models: string[]
@@ -148,13 +149,19 @@ export type ProbeBody = {
   key?: string
 }
 
-/** Answer of the probe. Its model rows carry the `_row` fields except `enabled`,
- * `discovered` and `in_use_by`, plus `type_source`; callers must not rely on those. */
+/** One model of a probe answer (routes/providers.py probe_provider): no `enabled`,
+ * `discovered` or `in_use_by`, since nothing is stored yet. */
+export type ProbeModelRow = Pick<
+  UpstreamModelRow,
+  'id' | 'canonical_id' | 'type' | 'context' | 'price_in' | 'price_out' | 'price_unit' | 'recommended'
+> & { type_source: string }
+
+/** Answer of the probe. */
 export interface ProbeResult {
   ok: boolean
   status: number | null
   latency_ms: number
-  models: UpstreamModelRow[]
+  models: ProbeModelRow[]
   rate_limit: Record<string, number | null>
   error: string | null
 }
@@ -253,34 +260,52 @@ export function useUpstreamModels(name: string | null, opts: { enabled?: boolean
   })
 }
 
+const MODEL_PATCH_KEY = ['upstream-model-patch']
+
 /**
- * Switch a model on or off, or correct its type, context or price. The cached
- * listing is patched at once and put back if the request fails, so a switch
- * never shows a state the server did not take.
+ * Switch a model on or off, or correct its type, context or price. The cached row is
+ * patched at once; if the request fails only that row's patched fields go back to what they
+ * were, so overlapping toggles on other rows of the same provider are left alone. The
+ * listing is refetched only when no other patch for the provider is still in flight, so a
+ * refetch never overwrites a row that is still waiting for its answer.
  */
 export function useUpstreamModelPatch() {
   const qc = useQueryClient()
   return useMutation({
+    mutationKey: MODEL_PATCH_KEY,
     mutationFn: ({ name, modelId, patch }: { name: string; modelId: string; patch: ModelPatch }) =>
       apiPatch<UpstreamModelRow>(ENDPOINTS.upstreamModel(name, modelId), patch),
     onMutate: async ({ name, modelId, patch }) => {
       const key = ['upstream-models', name]
       await qc.cancelQueries({ queryKey: key })
-      const previous = qc.getQueryData<UpstreamListing>(key)
-      if (previous) {
+      const current = qc.getQueryData<UpstreamListing>(key)
+      const row = current?.models.find((m) => m.id === modelId)
+      const before: Partial<UpstreamModelRow> = {}
+      if (row) {
+        for (const k of Object.keys(patch) as Array<keyof ModelPatch>) {
+          ;(before as Record<string, unknown>)[k] = row[k]
+        }
         qc.setQueryData<UpstreamListing>(key, {
-          ...previous,
-          models: previous.models.map((m) => (m.id === modelId ? { ...m, ...patch } : m)),
+          ...current!,
+          models: current!.models.map((m) => (m.id === modelId ? { ...m, ...patch } : m)),
         })
       }
-      return { previous }
+      return { before }
     },
-    onError: (_err, { name }, ctx) => {
-      if (ctx?.previous) qc.setQueryData(['upstream-models', name], ctx.previous)
+    onError: (_err, { name, modelId }, ctx) => {
+      if (!ctx || Object.keys(ctx.before).length === 0) return
+      qc.setQueryData<UpstreamListing>(['upstream-models', name], (cur) =>
+        cur ? { ...cur, models: cur.models.map((m) => (m.id === modelId ? { ...m, ...ctx.before } : m)) } : cur,
+      )
     },
-    onSettled: (_data, _err, { name }) => {
+    onSettled: (_data, _err, variables) => {
       qc.invalidateQueries({ queryKey: ['upstreams'] })
-      qc.invalidateQueries({ queryKey: ['upstream-models', name] })
+      const othersPending = qc.isMutating({
+        mutationKey: MODEL_PATCH_KEY,
+        predicate: (m) =>
+          m.state.variables !== variables && (m.state.variables as { name?: string } | undefined)?.name === variables.name,
+      })
+      if (!othersPending) qc.invalidateQueries({ queryKey: ['upstream-models', variables.name] })
     },
   })
 }
@@ -297,11 +322,53 @@ export function useUpstreamRefresh() {
   })
 }
 
-/** Check a url + key and list the models, saving nothing. Never cached: the key
- * is in the variables, so call `reset()` once the answer is read. */
+/**
+ * Check a url + key and list the models, saving nothing. This is deliberately not a
+ * react-query mutation: a mutation keeps its variables (the key) in the mutation cache.
+ * Here the request body lives only in the `probe` call; the hook keeps the last answer
+ * (never the body) or the last error in its own state.
+ *
+ * Returns `{ probe(body): Promise<ProbeResult>, isPending, result, error, clear() }`.
+ * `probe` rejects on a transport or HTTP failure (also stored in `error`); a provider that
+ * answered `ok: false` resolves normally with that answer.
+ */
 export function useProviderProbe() {
-  return useMutation({
-    gcTime: 0,
-    mutationFn: (body: ProbeBody) => apiPost<ProbeResult>(ENDPOINTS.providerProbe, body),
-  })
+  const [isPending, setPending] = useState(false)
+  const [result, setResult] = useState<ProbeResult | null>(null)
+  const [error, setError] = useState<Error | null>(null)
+  const alive = useRef(true)
+  const latest = useRef(0)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+    }
+  }, [])
+
+  const probe = useCallback(async (body: ProbeBody): Promise<ProbeResult> => {
+    const mine = ++latest.current
+    const current = () => alive.current && latest.current === mine
+    setPending(true)
+    setResult(null)
+    setError(null)
+    try {
+      const r = await apiPost<ProbeResult>(ENDPOINTS.providerProbe, body)
+      if (current()) setResult(r)
+      return r
+    } catch (e) {
+      if (current()) setError(e instanceof Error ? e : new Error(String(e)))
+      throw e
+    } finally {
+      if (current()) setPending(false)
+    }
+  }, [])
+
+  const clear = useCallback(() => {
+    latest.current += 1
+    setPending(false)
+    setResult(null)
+    setError(null)
+  }, [])
+
+  return { probe, isPending, result, error, clear }
 }

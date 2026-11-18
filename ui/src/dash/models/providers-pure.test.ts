@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type {
   CatalogEntry,
+  ProbeModelRow,
   ProbeResult,
   UpstreamEntry,
   UpstreamListing,
@@ -61,6 +62,19 @@ const row = (id: string, over: Partial<UpstreamModelRow> = {}): UpstreamModelRow
   ...over,
 })
 
+const probeRow = (id: string, over: Partial<ProbeModelRow> = {}): ProbeModelRow => ({
+  id,
+  canonical_id: null,
+  type: 'chat',
+  type_source: 'guess',
+  context: null,
+  price_in: null,
+  price_out: null,
+  price_unit: 'Mtok',
+  recommended: false,
+  ...over,
+})
+
 const ANY: ModelFilter = { q: '', show: 'all', type: 'any' }
 
 describe('providerState', () => {
@@ -76,6 +90,9 @@ describe('providerState', () => {
   it('is managed for a slot-kind or slot-backed entry', () => {
     expect(providerState(entry({ kind: 'slot' }))).toBe('managed')
     expect(providerState(entry({ slot_name: 'agent' }))).toBe('managed')
+  })
+  it('is managed for the reserved hal0 name', () => {
+    expect(providerState(entry({ name: 'hal0' }))).toBe('managed')
   })
   it('is managed when the listing says protected', () => {
     const listing = { protected: true } as UpstreamListing
@@ -160,6 +177,12 @@ describe('sectionRows', () => {
   })
 })
 
+describe('rowFlag on a stored row only', () => {
+  it('a probe row has no discovered flag, so it is not passed to rowFlag', () => {
+    expect('discovered' in probeRow('x')).toBe(false)
+  })
+})
+
 describe('rowFlag', () => {
   it('is gone when the provider no longer lists the model', () => {
     expect(rowFlag(row('x', { discovered: false }))).toBe('gone')
@@ -197,6 +220,14 @@ describe('formatPrice', () => {
     expect(formatPrice(row('x', { price_in: 100, price_unit: 'Mchar' }))).toBe('100 / Mchar')
     expect(formatPrice(row('x', { price_in: 0.0035, price_unit: 'img' }))).toBe('0.0035 / img')
   })
+  it('names the side when a non-token unit has only an output price', () => {
+    expect(formatPrice(row('x', { price_out: 5, price_unit: 'Mchar' }))).toBe('out 5 / Mchar')
+    expect(formatPrice(row('x', { price_in: 1, price_out: 2, price_unit: 'Mchar' }))).toBe('1 / 2 / Mchar')
+  })
+  it('formats a probe row too', () => {
+    expect(formatPrice(probeRow('x', { price_in: 0.3, price_out: 1.2 }))).toBe('0.30 / 1.20')
+    expect(formatContext(probeRow('x', { context: 204000 }).context)).toBe('204k')
+  })
   it('is a dash when both are null', () => {
     expect(formatPrice(row('x'))).toBe('—')
   })
@@ -208,6 +239,11 @@ describe('formatContext', () => {
     expect(formatContext(1000000)).toBe('1M')
     expect(formatContext(262144)).toBe('262k')
     expect(formatContext(8191)).toBe('8k')
+  })
+  it('never prints 1000k', () => {
+    expect(formatContext(999_499)).toBe('999k')
+    expect(formatContext(999_500)).toBe('1M')
+    expect(formatContext(999_999)).toBe('1M')
   })
   it('is a dash for null', () => {
     expect(formatContext(null)).toBe('—')
@@ -254,8 +290,8 @@ describe('validateProviderName', () => {
 
 describe('buildCreateBody', () => {
   const probed = [
-    row('a', { recommended: true, context: 1000, price_in: 1, price_out: 2 }),
-    row('b', { type: 'chat' }),
+    probeRow('a', { recommended: true, context: 1000, price_in: 1, price_out: 2 }),
+    probeRow('b', { type: 'chat' }),
   ]
   const base = {
     name: 'p',
@@ -289,11 +325,11 @@ describe('buildCreateBody', () => {
 
 describe('initialPicks', () => {
   it('picks the recommended ids', () => {
-    const s = initialPicks([row('a', { recommended: true }), row('b'), row('c', { recommended: true })])
+    const s = initialPicks([probeRow('a', { recommended: true }), probeRow('b'), probeRow('c', { recommended: true })])
     expect([...s].sort()).toEqual(['a', 'c'])
   })
   it('is empty when none are recommended', () => {
-    expect(initialPicks([row('a')]).size).toBe(0)
+    expect(initialPicks([probeRow('a')]).size).toBe(0)
   })
 })
 

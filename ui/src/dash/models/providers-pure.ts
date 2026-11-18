@@ -2,8 +2,10 @@
 // The list, the detail panel and the Add provider modal import from here so the
 // rules (what state a provider is in, how many off rows to draw, how a failed
 // switch reads, what the create body holds) live in one tested place.
+import { modelPath, type ModelType } from '@/lib/providerModel'
 import type {
   CatalogEntry,
+  ProbeModelRow,
   ProbeResult,
   UpstreamCreateBody,
   UpstreamEntry,
@@ -11,15 +13,16 @@ import type {
   UpstreamModelRow,
 } from '@/api/hooks/useUpstreams'
 
-export type ModelType = 'chat' | 'embed' | 'rerank' | 'tts' | 'stt' | 'image'
+export { modelPath }
+export type { ModelType }
 export type ProviderState = 'per-model' | 'not-converted' | 'managed'
 
 const RESERVED_NAME = 'hal0'
 const NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/
 
-/** Agent-managed, slot-backed or slot-kind: the API refuses writes to these. */
+/** Agent-managed, slot-backed, slot-kind or the reserved name: the API refuses writes to these. */
 function isReadOnlyEntry(u: UpstreamEntry): boolean {
-  return !!u.managed_by || !!u.slot_name || u.kind === 'slot'
+  return !!u.managed_by || !!u.slot_name || u.kind === 'slot' || u.name === RESERVED_NAME
 }
 
 export function providerState(u: UpstreamEntry, listing?: UpstreamListing): ProviderState {
@@ -31,11 +34,6 @@ export function keyState(u: UpstreamEntry): 'set' | 'missing' | 'not-needed' | '
   if (isReadOnlyEntry(u)) return 'managed'
   if (u.auth_style === 'none') return 'not-needed'
   return u.auth_key_present ? 'set' : 'missing'
-}
-
-/** Model ids contain `/`: keep it as a path separator, encode the rest. */
-export function modelPath(modelId: string): string {
-  return modelId.split('/').map(encodeURIComponent).join('/')
 }
 
 export interface ModelFilter {
@@ -95,15 +93,21 @@ function fmtMtok(v: number | null): string {
   return v > 0 && Number(s) === 0 ? String(v) : s
 }
 
-export function formatPrice(m: UpstreamModelRow): string {
+type Priced = Pick<UpstreamModelRow, 'price_in' | 'price_out' | 'price_unit'>
+
+/** Works on a stored row and on a probe row. Per Mtok: "in / out". Any other unit:
+ * "in / unit", "out N / unit" when only the output side is set, "in / out / unit" for both. */
+export function formatPrice(m: Priced): string {
   if (m.price_in === null && m.price_out === null) return DASH
   if (m.price_unit === 'Mtok') return `${fmtMtok(m.price_in)} / ${fmtMtok(m.price_out)}`
-  return `${m.price_in ?? m.price_out} / ${m.price_unit}`
+  if (m.price_in === null) return `out ${m.price_out} / ${m.price_unit}`
+  if (m.price_out === null) return `${m.price_in} / ${m.price_unit}`
+  return `${m.price_in} / ${m.price_out} / ${m.price_unit}`
 }
 
 export function formatContext(n: number | null): string {
   if (n === null) return DASH
-  if (n >= 1_000_000) return `${Math.round((n / 1_000_000) * 10) / 10}M`
+  if (n >= 999_500) return `${Math.round((n / 1_000_000) * 10) / 10}M`
   if (n >= 1000) return `${Math.round(n / 1000)}k`
   return String(n)
 }
@@ -134,7 +138,7 @@ export function buildCreateBody(args: {
   authStyle: string
   authHeader: string
   picked: Set<string>
-  probed: UpstreamModelRow[]
+  probed: ProbeModelRow[]
   types: Record<string, ModelType>
 }): UpstreamCreateBody {
   const body: UpstreamCreateBody = {
@@ -156,7 +160,7 @@ export function buildCreateBody(args: {
   return body
 }
 
-export function initialPicks(probed: UpstreamModelRow[]): Set<string> {
+export function initialPicks(probed: ProbeModelRow[]): Set<string> {
   return new Set(probed.filter((m) => m.recommended).map((m) => m.id))
 }
 

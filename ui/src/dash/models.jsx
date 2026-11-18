@@ -118,7 +118,9 @@ function ModelsView({ modelParam = null }) {
 
 
   const modelsQuery = useModels();
-  const modelList = modelsQuery.data ?? [];
+  // GET /api/models also lists what providers advertise; those live under Providers, so the
+  // catalog, its selection and its counts only ever hold local models.
+  const modelList = (modelsQuery.data ?? []).filter(m => !isUpstreamModel(m));
 
   // HF update check — the hook triggers the (server-TTL-cached) probe on
   // mount; /api/models then carries per-row `update_available` flags.
@@ -165,7 +167,7 @@ function ModelsView({ modelParam = null }) {
   const [refreshingProviders, setRefreshingProviders] = useStateM(false);
   const onRefreshProviders = async () => {
     const targets = providerList.filter(
-      u => providerState(u) === "per-model" && ["set", "not-needed"].includes(keyState(u)),
+      u => u.enabled !== false && providerState(u) === "per-model" && ["set", "not-needed"].includes(keyState(u)),
     );
     if (!targets.length) {
       toastM("No provider to refresh — add a provider and choose its models first", "info");
@@ -221,7 +223,6 @@ function ModelsView({ modelParam = null }) {
   }, [pullsList.jobs]);
   const stateOf = (m) => ({
     installed: !!m.installed,
-    remote: isUpstreamModel(m),
     inUseBy: slotsUsing(slotList, m.id),
     update: !!(m.installed && m.update_available),
     download: activePulls.get(m.id) ?? null,
@@ -244,9 +245,9 @@ function ModelsView({ modelParam = null }) {
   const used = m => slotsUsing(slotList, m.id).length > 0;
 
   // ── Tab datasets ────────────────────────────────────────────────────
-  // Inference: installed + blessed + user.* (not upstream). Installed models a
+  // Inference: installed + blessed + user.*. Installed models a
   // slot references lead the list under "In use".
-  const local = modelList.filter(m => !isUpstreamModel(m) && fil(m));
+  const local = modelList.filter(fil);
   const installed = local.filter(m => m.installed);
   const inferenceSections = [
     { key: "inuse", label: "In use", rows: bySort(installed.filter(used)) },
@@ -605,7 +606,6 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
 // models, mirroring the detail pane's Delete button gate.
 const registryState = (model) => ({
   installed: !!model.installed,
-  remote: isUpstreamModel(model),
   update: !!(model.installed && model.update_available),
 });
 function ModelRow({ model, state = registryState(model), npuFit = null, selected, onSelect, onEditModel, onDeleteModel }) {
@@ -676,11 +676,10 @@ function ModelRow({ model, state = registryState(model), npuFit = null, selected
                 onClick: () => onEditModel && onEditModel(model),
               },
               // Delete — same gate as the detail pane's Delete button: only an
-              // installed local model has bytes/registry row to remove (an
-              // upstream row is served remotely; a not-installed catalog row
-              // has nothing on disk). Routes through DeleteModelDialog, so the
+              // installed local model has bytes/registry row to remove (a
+              // not-installed catalog row has nothing on disk). Routes through DeleteModelDialog, so the
               // type-the-name confirm + refcount contract stays the boundary.
-              ...(model.installed && !isUpstreamModel(model)
+              ...(model.installed
                 ? [
                     { divider: true },
                     {
@@ -717,7 +716,6 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
     return <DetailEmpty>No model selected.</DetailEmpty>;
   }
   const rowState = state ?? registryState(model);
-  const upstream = isUpstreamModel(model);
   // ADR-0029: a model carries FILE FACTS only — chat template, jinja, whether
   // the file has MTP heads — plus its native context window (read-only, from
   // metadata). The tune (flags, context, thinking, vision, speculation) lives
@@ -777,9 +775,7 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
               <span className="chip amber" data-testid="mdl-detail-update-badge" role="status" aria-label="Update available on Hugging Face" title="A newer version of this file is available on Hugging Face">update available</span>
             )}
             {/* The update has its own badge above, so the status here says the rest. */}
-            {upstream
-              ? <span className="chip info">upstream · {model.upstream}</span>
-              : <StatusChip state={{ ...rowState, update: false }} testid="mdl-detail-status" />}
+            <StatusChip state={{ ...rowState, update: false }} testid="mdl-detail-status" />
           </>
         }
       />
@@ -793,7 +789,7 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
           { k: "runtime", v: model.runtime },
           { k: "namespace", v: model.ns },
           { k: "added", v: fmtAdded(model.created) },
-          { k: "origin", v: upstream ? `upstream · ${model.upstream}` : "local" },
+          { k: "origin", v: "local" },
         ]}
       />
       <div className="mdl-detail-labels">
@@ -891,10 +887,6 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
             <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit options</button>
             <button className="btn danger sm" onClick={onDelete}>{Icons.unload} Delete</button>
           </>
-        ) : upstream ? (
-          <div className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
-            Served remotely by the <span className="chip info">{model.upstream}</span> upstream — not stored on this host.
-          </div>
         ) : (
           <>
             <button className="btn" onClick={onPull} disabled={pull.inFlight}>
