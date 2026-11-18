@@ -1452,9 +1452,10 @@
 }
 /* Base = auto-fit (also the fallback for pre-container-query browsers);
    the ruler is a strip item spanning the full row. Container queries
-   below pin explicit column counts so the 3-column band can pull the
-   ruler UP into the blank space beside the wrapped NPU cell instead of
-   leaving a dead cell; at 4 / 2 / 1 columns it returns to full width. */
+   below pin explicit column counts: one four-cell band with the ruler
+   under it wherever four cells fit (compacted below 1283cqw), then a
+   3-column band that pulls the ruler UP beside the wrapped NPU cell
+   instead of leaving a dead cell; at 2 / 1 columns it is full width. */
 .th-strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -1462,11 +1463,28 @@
   background: var(--line-soft);
 }
 @supports (container-type: inline-size) {
-  /* ≥1283cqw: four cells one row, ruler full-width row 2 */
+  /* ≥1041cqw: four cells one row, ruler full-width row 2 */
   .th-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  /* 1041-1282cqw (a 1440px window beside the sidebar): still one band, with
+     the cell contents drawn smaller so the gauge and its digits fit a
+     ~260px cell. The ruler row below is untouched. */
+  @container (min-width: 1041px) and (max-width: 1282px) {
+    /* `.th-strip` prefix: these must outrank the base cell rules further down the file. */
+    .th-strip .th-cell { padding: 12px 14px 10px; }
+    .th-strip .th-row { gap: 12px; }
+    .th-strip .th-gauge { width: 100px; height: 58px; }
+    .th-strip .th-gauge-cap { font-size: 7.5px; letter-spacing: 0.04em; }
+    .th-strip .th-gauge svg { width: 100%; height: 100%; }
+    .th-strip .th-gauge-v { font-size: 16px; }
+    .th-strip .th-gauge-v.sm { font-size: 14px; }
+    .th-strip .th-digits { gap: 10px; }
+    .th-strip .th-digit .v { font-size: 18px; }
+    .th-strip .th-digit .cap { font-size: 8.5px; letter-spacing: 0.03em; white-space: nowrap; }
+    .th-strip .th-hero { font-size: 30px; }
+  }
   /* 3-col band: cells 1-3 on row 1, NPU wraps to row 2 col 1 — the ruler
      rises beside it (cols 2-3) so no blank cell remains */
-  @container (max-width: 1282px) {
+  @container (max-width: 1040px) {
     .th-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .th-strip .th-ruler { grid-column: 2 / -1; }
   }
