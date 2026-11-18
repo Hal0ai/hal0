@@ -40,6 +40,7 @@ from typing import Any, Literal
 import httpx
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 from hal0.cli._shared import _api_base, auth_client, auth_hint
 from hal0.normalize.thinking import apply_thinking_policy
@@ -121,10 +122,54 @@ class ChatSession:
         return thinking, visible
 
 
+def _raise_for_status(resp: httpx.Response) -> None:
+    """``raise_for_status`` that first reads a streamed error body.
+
+    A streaming response's body is not loaded when the status line arrives, so
+    without ``read()`` the hal0 error envelope would be unreachable from the
+    ``HTTPStatusError`` the caller catches.
+    """
+    if resp.is_error:
+        resp.read()
+    resp.raise_for_status()
+
+
+def _describe_http_error(
+    exc: httpx.HTTPError, url: str, *, model: str, brain: bool
+) -> tuple[str, str | None]:
+    """Render an ``httpx`` failure as ``(markup-safe text, optional hint)``.
+
+    A server answer carrying the hal0 error envelope
+    (``{"error": {"code", "message"}}``) prints its ``code`` and ``message``;
+    anything else falls back to the httpx text. Server-supplied text is
+    escaped — it is printed through Rich markup.
+    """
+    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+    suffix = auth_hint(status, url)
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            body = exc.response.json()
+        except ValueError:
+            body = None
+        error = body.get("error") if isinstance(body, dict) else None
+        if isinstance(error, dict) and error.get("message"):
+            code = error.get("code")
+            text = f"{code}: {error['message']}" if code else str(error["message"])
+            hint = None
+            if code == "dispatch.no_route" and not brain:
+                hint = (
+                    f"if '{model}' is a slot with no model, load one with "
+                    f"`hal0 slot load {model} --model <id>`, or chat with the "
+                    "steward via `hal0 chat --brain`"
+                )
+            return f"{escape(text)}{escape(suffix)}", hint
+    return f"{escape(str(exc))}{escape(suffix)}", None
+
+
 def _post_completions(client: httpx.Client, url: str, body: dict[str, Any]) -> dict[str, Any]:
     """One non-streaming ``POST /v1/chat/completions`` call → parsed JSON."""
     resp = client.post(url, json=body)
-    resp.raise_for_status()
+    _raise_for_status(resp)
     data = resp.json()
     return data if isinstance(data, dict) else {}
 
@@ -141,7 +186,7 @@ def _iter_stream_events(
     the REPL turn.
     """
     with client.stream("POST", url, json=body) as resp:
-        resp.raise_for_status()
+        _raise_for_status(resp)
         for raw in resp.iter_lines():
             if not raw or not raw.startswith("data:"):
                 continue
@@ -169,7 +214,7 @@ def _iter_brain_sse_events(
     lines are skipped, same tolerance as the ``/v1`` iterator.
     """
     with client.stream("POST", url, json=body) as resp:
-        resp.raise_for_status()
+        _raise_for_status(resp)
         for raw in resp.iter_lines():
             if not raw or not raw.startswith("data:"):
                 continue
@@ -387,10 +432,10 @@ def chat_command(
                 else:
                     _run_nonstreaming_turn(session, client, url, line)
             except httpx.HTTPError as exc:
-                status = (
-                    exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
-                )
-                console.print(f"[red]transport error:[/red] {exc}{auth_hint(status, url)}")
+                text, hint = _describe_http_error(exc, url, model=model, brain=brain)
+                console.print(f"[red]error:[/red] {text}")
+                if hint:
+                    console.print(f"[dim]hint: {escape(hint)}[/dim]")
 
 
 __all__ = ["ChatSession", "chat_command"]

@@ -271,3 +271,66 @@ def test_chat_brain_flag_posts_to_brain_route(monkeypatch: pytest.MonkeyPatch) -
     assert calls[0]["url"] == "http://example.invalid/api/brain/chat"
     assert calls[0]["body"] == {"messages": [{"role": "user", "content": "hello"}]}
     assert "brain steward" in result.output
+
+
+# ── API error envelope rendering (#3798) ─────────────────────────────────────
+
+_NO_ROUTE = {
+    "error": {
+        "code": "dispatch.no_route",
+        "message": "model 'agent' not found in registry [x]",
+    }
+}
+
+
+def _mock_auth_client(monkeypatch: pytest.MonkeyPatch, status: int, payload: Any) -> None:
+    def handler(request: Any) -> Any:
+        import httpx
+
+        return httpx.Response(status, json=payload)
+
+    def fake_auth_client(**kwargs: Any) -> Any:
+        import httpx
+
+        return httpx.Client(transport=httpx.MockTransport(handler))
+
+    monkeypatch.setattr(chat_commands, "auth_client", fake_auth_client)
+
+
+@pytest.mark.parametrize("flags", [[], ["--no-stream"]])
+def test_repl_prints_envelope_code_message_and_hint_on_no_route(
+    monkeypatch: pytest.MonkeyPatch, flags: list[str]
+) -> None:
+    _mock_auth_client(monkeypatch, 404, _NO_ROUTE)
+
+    result = runner.invoke(app, ["chat", *flags], input="hi\n/quit\n")
+
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())  # undo terminal wrapping
+    assert "dispatch.no_route: model 'agent' not found in registry [x]" in out
+    assert "hal0 slot load agent --model <id>" in out
+    assert "hal0 chat --brain" in out
+    assert "transport error" not in out
+    assert "developer.mozilla.org" not in out
+
+
+def test_repl_envelope_without_no_route_code_has_no_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_auth_client(monkeypatch, 500, {"error": {"code": "slot.boom", "message": "kaput"}})
+
+    result = runner.invoke(app, ["chat", "--no-stream"], input="hi\n/quit\n")
+
+    assert "slot.boom: kaput" in result.output
+    assert "hint:" not in result.output
+
+
+def test_repl_non_envelope_error_falls_back_to_httpx_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _mock_auth_client(monkeypatch, 502, "bad gateway")
+
+    result = runner.invoke(app, ["chat", "--no-stream"], input="hi\n/quit\n")
+
+    assert "502" in result.output
+    assert "hint:" not in result.output
