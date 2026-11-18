@@ -61,7 +61,7 @@ async def _pull(
     try:
         await run_pull(
             job,
-            hf_repo="Qwen/Qwen3-4B-Instruct-GGUF",
+            hf_repo="Qwen/Qwen3-4B-GGUF",
             hf_file=filename,
             registry=registry,
             client=client,
