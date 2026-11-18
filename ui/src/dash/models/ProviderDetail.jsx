@@ -379,7 +379,7 @@ function ModelPanel({ u, modelId, onSelect, catalog }) {
           </>
         )}
         <DetailLine k="Offered by provider">
-          {!listingKnown(listing.data) ? 'unknown' : m.discovered ? 'yes' : 'no longer listed'}
+          {m.discovered ? 'yes' : listingKnown(listing.data) ? 'no longer listed' : 'unknown'}
         </DetailLine>
       </DetailSection>
       <DetailActions note={readOnly ? (state === 'managed' ? MANAGED_NOTE : 'Choose models for this provider to change its models.') : null}>

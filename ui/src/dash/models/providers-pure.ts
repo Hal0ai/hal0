@@ -91,6 +91,9 @@ export function keyMissing(u: UpstreamEntry): boolean {
   return keyState(u) === 'missing' && u.auth_key_present === false
 }
 
+export const NO_KEY_TEST_LINE = 'No key stored for this provider. Add a key, then test again.'
+export const noKeyRefreshToast = (label: string) => `Add a key for ${label} to load its model list.`
+
 export const STALE_NOTE = 'Model list could not be refreshed; showing the last known list.'
 export const NOT_LOADED_NOTE = 'Model list not loaded yet. Refresh model list to load it.'
 
@@ -378,6 +381,3 @@ export function legacyModelsRedirect(
   if (route === 'slots' && param === 'endpoints' && query.get('focus') === 'upstream') return 'models/providers'
   return null
 }
-
-export const NO_KEY_TEST_LINE = 'No key stored for this provider. Add a key, then test again.'
-export const noKeyRefreshToast = (label: string) => `Add a key for ${label} to load its model list.`

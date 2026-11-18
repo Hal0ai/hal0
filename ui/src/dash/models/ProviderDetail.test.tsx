@@ -375,6 +375,20 @@ describe('model selected', () => {
     expect(text()).toContain('unknown')
   })
 
+  it('says "yes" for a model a managed or not-converted provider is serving (no fetch time, rows discovered)', async () => {
+    for (const over of [{ managed_by: 'agent:hermes' }, { curated: false }]) {
+      upstreams = [entry('minimax', over)]
+      models = [row('m2')]
+      listingOver = { stale: over.curated === false, fetched_at: null, protected: !!over.managed_by, curated: over.curated !== false }
+      const v = view({ provider: 'minimax', model: 'm2' })
+      await flush()
+      expect(q('[data-testid="prov-detail-model"]')!.textContent).toContain('yes')
+      expect(text()).not.toContain('unknown')
+      v.unmount?.()
+      cleanup()
+    }
+  })
+
   it('changing the type PATCHes { type }', async () => {
     vi.mocked(client.apiPatch).mockResolvedValue({} as never)
     view({ provider: 'minimax', model: 'm2' })
