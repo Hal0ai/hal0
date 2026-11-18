@@ -5,7 +5,7 @@
  *
  *  1. Accordion — parent rows with sub-links (one per page tab: Slots ▸
  *     Inference/Image Gen/Endpoints/Runner Images/Stacks, Models ▸ Inference/
- *     Image/Upstream/Profiles, Benchmarks ▸ Roster/Runs/Evals/Run Queue,
+ *     Image/Providers/Profiles, Benchmarks ▸ Roster/Runs/Evals/Run Queue,
  *     Agents ▸ Overview/Memory/MCP, Settings ▸ its sections) start COLLAPSED. The sub-links don't render until the parent is
  *     opened (via its caret), and the section you navigate into auto-expands.
  *     This is the "sub-links don't show until their parent is clicked"
@@ -101,10 +101,10 @@ test.describe('sidebar tab sub-links', () => {
   })
 
   test('Models tabs are deep-linkable from the sidebar', async ({ page }) => {
-    await page.goto('/#models/upstream')
+    await page.goto('/#models/providers')
     const sb = page.locator('.sidebar')
-    await expect(sb.locator('[data-testid="nav-models-upstream"]')).toHaveAttribute('aria-current', 'page', { timeout: FIVE_S })
-    await expect(page.getByRole('tab', { name: /Upstream Models/ })).toHaveAttribute('aria-selected', 'true')
+    await expect(sb.locator('[data-testid="nav-models-providers"]')).toHaveAttribute('aria-current', 'page', { timeout: FIVE_S })
+    await expect(page.getByRole('tab', { name: /Providers/ })).toHaveAttribute('aria-selected', 'true')
     await sb.locator('[data-testid="nav-models-image"]').click()
     await expect(page.getByRole('tab', { name: /Image \/ ComfyUI/ })).toHaveAttribute('aria-selected', 'true')
   })

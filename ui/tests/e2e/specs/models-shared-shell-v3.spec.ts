@@ -1,8 +1,8 @@
 /**
  * models-shared-shell-v3 — what the shared catalog shell (dash/models/catalog-shell.jsx)
- * adds to the Inference and Upstream tabs: the "In use" section, the State filter, one
+ * adds to the Inference tab: the "In use" section, the State filter, one
  * status chip per row, the NPU fit of a GGUF that ggml-xdna can run, and the header's
- * Check updates / Add actions on the Upstream tab.
+ * Check updates / Add actions.
  *
  * Forced-mock note: /api/models, /api/slots and /api/npu/occupancy are served by the
  * in-bundle HAL0_DATA mock layer, so rows and the slot that uses one are injected via

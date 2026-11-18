@@ -1,5 +1,5 @@
 /**
- * models-v3 — `#models` route renders the 4-tab catalog (Inference / Image / Upstream /
+ * models-v3 — `#models` route renders the 4-tab catalog (Inference / Image / Providers /
  * Profiles) with simplified OR filter chips, pagination, and download-icon
  * installed indicators. (runner-catalogue-v2 IA: the Runner Images tab moved
  * to Slots ▸ Runner Images — see runner-images-slots-v3.spec.ts — and
