@@ -916,4 +916,147 @@ describe('AddProviderModal', () => {
     expect(document.body.textContent).toContain('rejected')
     expectKeyNowhere()
   })
+
+  // ---- review round 2 -------------------------------------------------------------------
+
+  it.each([
+    ['git', 'PROVIDER_GIT_API_KEY'],
+    ['uv', 'PROVIDER_UV_API_KEY'],
+    ['pip', 'PROVIDER_PIP_API_KEY'],
+    ['ld', 'PROVIDER_LD_API_KEY'],
+    ['xdg', 'PROVIDER_XDG_API_KEY'],
+    ['openssl', 'PROVIDER_OPENSSL_API_KEY'],
+    ['npm-config', 'PROVIDER_NPM_CONFIG_API_KEY'],
+    ['hf-hub', 'PROVIDER_HF_HUB_API_KEY'],
+    ['hf-xet', 'PROVIDER_HF_XET_API_KEY'],
+    ['huggingface-hub', 'PROVIDER_HUGGINGFACE_HUB_API_KEY'],
+    ['dyld', 'PROVIDER_DYLD_API_KEY'],
+    ['hal0-x', 'PROVIDER_HAL0_X_API_KEY'],
+    ['python-tools', 'PROVIDER_PYTHON_TOOLS_API_KEY'],
+    ['9lives', 'PROVIDER_9LIVES_API_KEY'],
+    ['acme', 'ACME_API_KEY'],
+    ['hal0x', 'HAL0X_API_KEY'],
+  ])('derives the key variable for %s as %s (tested against the final name)', async (provider, env) => {
+    mount()
+    await settle()
+    click(tile('Custom'))
+    type(input('Name'), provider)
+    type(input('Base URL'), 'https://corp.example/v1')
+    type(input('API key'), KEY)
+    box.handlers[`/api/providers/${provider}/credentials`] = () => ({ ok: true })
+    click(byText('button', 'Add without checking'))
+    await settle()
+    expect(box.posts[0].body.auth_value_env).toBe(env)
+    expect(box.posts[1].body.key).toBe(env)
+  })
+
+  it('sends the name-derived variable even when no key is typed, except for auth none', async () => {
+    mount()
+    await settle()
+    click(tile('MiniMax'))
+    type(input('Name'), 'mm')
+    click(byText('button', 'Add without checking'))
+    await settle()
+    expect(box.posts).toHaveLength(1)
+    expect(box.posts[0].body.auth_value_env).toBe('MM_API_KEY')
+    mount(false)
+    mount(true)
+    await settle()
+    box.posts = []
+    click(tile('Ollama'))
+    click(byText('button', 'Add without checking'))
+    await settle()
+    expect(box.posts[0].body).not.toHaveProperty('auth_value_env')
+  })
+
+  it('shows a create 400 about the key variable as a form error, not under Name', async () => {
+    mount()
+    await settle()
+    await pickAndCheck()
+    box.handlers['/api/upstreams'] = fail("auth_value_env 'X' is reserved (process_control) and cannot name an upstream credential", 400)
+    click(submitBtn())
+    await settle()
+    expect($('[data-testid="addprov-form-error"]')?.textContent).toContain('reserved')
+    expect($('#addprov-err-name')).toBeNull()
+  })
+
+  it('stops waiting for a create after 30 s: dismissable, nothing reported, list refreshed on close', async () => {
+    box.handlers['/api/upstreams'] = () => new Promise(() => {})
+    mount()
+    await settle()
+    await pickAndCheck()
+    type(input('Name'), 'mm')
+    const spy = vi.spyOn(qc, 'invalidateQueries')
+    vi.useFakeTimers()
+    try {
+      click(submitBtn())
+      expect($('button[aria-label="Close"]')).toBeNull()
+      await act(async () => { vi.advanceTimersByTime(29_000) })
+      expect($('button[aria-label="Close"]')).toBeNull()
+      await act(async () => { vi.advanceTimersByTime(1_500) })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect($('[data-testid="addprov-form-error"]')?.textContent).toContain(
+      'hal0 did not answer. The provider may or may not have been added; close this and check the list.',
+    )
+    expect($('button[aria-label="Close"]')).not.toBeNull()
+    expect(onAdded).not.toHaveBeenCalled()
+    expectKeyNowhere()
+    esc()
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(onAdded).not.toHaveBeenCalled()
+    expect(spy).toHaveBeenCalledWith({ queryKey: ['upstreams'] })
+    expect(toast).not.toHaveBeenCalled()
+  })
+
+  it('stops waiting for the key save after 30 s: key-failed state with retry, dismissable', async () => {
+    mount()
+    await settle()
+    await pickAndCheck()
+    type(input('Name'), 'mm')
+    box.handlers['/api/providers/mm/credentials'] = () => new Promise(() => {})
+    vi.useFakeTimers()
+    try {
+      click(submitBtn())
+      await act(async () => { await Promise.resolve() })
+      await act(async () => { vi.advanceTimersByTime(30_500) })
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(document.body.textContent).toContain('Provider added, but the key was not saved.')
+    expect($('#addprov-err-key')?.textContent).toContain('hal0 did not answer while saving the key.')
+    expect((byText('button', 'Try saving the key again') as HTMLButtonElement).disabled).toBe(false)
+    expect($('button[aria-label="Close"]')).not.toBeNull()
+    expect(onAdded).not.toHaveBeenCalled()
+    expectKeyNowhere()
+  })
+
+  it('rejects a bare or oddly spaced Bearer prefix with the fixed message', async () => {
+    mount()
+    await settle()
+    click(tile('MiniMax'))
+    for (const bad of ['Bearer ', 'Bearer', 'Bearer  abc']) {
+      type(input('API key'), bad)
+      expect(document.body.textContent).toContain('The key must be printable ASCII without spaces.')
+      expect(checkBtn().disabled).toBe(true)
+    }
+    type(input('API key'), 'Bearer abc')
+    expect(document.body.textContent).not.toContain('The key must be printable ASCII without spaces.')
+  })
+
+  it('disables the model controls while the create is in flight', async () => {
+    const d = deferred<unknown>()
+    box.handlers['/api/upstreams'] = () => d.promise
+    mount()
+    await settle()
+    await pickAndCheck()
+    click(submitBtn())
+    expect(rowChecks().every((c) => c.disabled)).toBe(true)
+    expect((document.body.querySelector('select[aria-label="Type of MiniMax-M3"]') as HTMLSelectElement).disabled).toBe(true)
+    expect((byText('button', 'Recommended only') as HTMLButtonElement).disabled).toBe(true)
+    expect((($('#addprov-all')) as HTMLInputElement).disabled).toBe(true)
+    d.reject(new Hal0Error('x', { status: 500 }))
+    await settle()
+  })
 })

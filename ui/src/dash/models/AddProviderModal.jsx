@@ -45,33 +45,65 @@ function tileNote(p) {
   return first || p.category
 }
 
-// Name prefixes the credentials route refuses for a key variable (src/hal0/api/_env_store.py:
-// PROCESS_CONTROL_ENV_PREFIXES and the HF Hub redirect prefixes, plus the HAL0_ service namespace).
+// The variable names the credentials route refuses for a key, mirrored from src/hal0/api/_env_store.py
+// (is_process_control_env: PROCESS_CONTROL_ENV_NAMES, PROCESS_CONTROL_ENV_PREFIXES, the _PROXY suffix,
+// the HF Hub redirect names and prefixes; the TLS trust names) and the HAL0_ service namespace
+// (routes/secrets.py is_protected_secret). They are tested against the FINAL variable name.
+const RESERVED_ENV_NAMES = new Set([
+  'PATH', 'HOME', 'SHELL', 'IFS', 'ENV', 'BASH_ENV', 'NODE_OPTIONS', 'PERL5OPT', 'RUBYOPT', 'GCONV_PATH',
+  'PERL5LIB', 'NODE_PATH', 'SHELLOPTS', 'BASHOPTS', 'PS4', 'HERMES_HOME', 'SSLKEYLOGFILE',
+  'NODE_TLS_REJECT_UNAUTHORIZED',
+  'HF_ENDPOINT', 'HF_INFERENCE_ENDPOINT', 'HUGGINGFACE_CO_STAGING', 'HF_TOKEN_PATH', 'HF_ASSETS_CACHE',
+  'HUGGINGFACE_ASSETS_CACHE',
+  'SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS',
+])
 const RESERVED_ENV_PREFIXES = [
-  'HAL0', 'LD_', 'DYLD_', 'PYTHON', 'UV_', 'PIP_', 'NPM_CONFIG_', 'GIT_', 'OPENSSL_', 'XDG_',
+  'LD_', 'DYLD_', 'PYTHON', 'UV_', 'PIP_', 'NPM_CONFIG_', 'GIT_', 'OPENSSL_', 'XDG_',
   'HF_HUB_', 'HUGGINGFACE_HUB_', 'HF_XET_',
+  'HAL0_',
 ]
+function isReservedEnv(env) {
+  const n = env.toUpperCase()
+  return RESERVED_ENV_NAMES.has(n) || n.endsWith('_PROXY') || RESERVED_ENV_PREFIXES.some((p) => n.startsWith(p))
+}
 
 // The variable a provider's key is stored under, derived from its NAME so that two providers made
 // from one preset never share a key: `minimax` -> MINIMAX_API_KEY, `minimax-2` -> MINIMAX_2_API_KEY.
-// A reserved or digit-leading stem gets a PROVIDER_ prefix; a name another provider already uses
-// gets a numeric suffix.
+// A reserved or digit-leading name gets a PROVIDER_ prefix; a variable another provider already
+// uses gets a numeric suffix.
 export function keyEnvFor(name, used = []) {
   let stem = name.toUpperCase().replace(/[^A-Z0-9]/g, '_')
-  if (/^[0-9]/.test(stem) || RESERVED_ENV_PREFIXES.some((p) => stem.startsWith(p))) stem = `PROVIDER_${stem}`
+  if (/^[0-9]/.test(stem) || isReservedEnv(`${stem}_API_KEY`)) stem = `PROVIDER_${stem}`
   let env = `${stem}_API_KEY`
   for (let n = 2; used.includes(env); n += 1) env = `${stem}_${n}_API_KEY`
   return env
 }
 
 // Same rule as the server (upstreams/registry.py normalise_key): printable ASCII, no whitespace,
-// after one optional leading "Bearer ".
+// after one optional leading "Bearer " (exactly one space, then the token).
 const KEY_MESSAGE = 'The key must be printable ASCII without spaces.'
 function keyProblem(raw) {
   const t = raw.trim()
-  const bare = /^bearer /i.test(t) ? t.slice(7).trim() : t
-  return /^[\x21-\x7e]*$/.test(bare) ? null : KEY_MESSAGE
+  if (!t) return null
+  if (/^bearer\s*$/i.test(t)) return KEY_MESSAGE
+  let bare = t
+  if (/^bearer\s/i.test(t)) {
+    if (t[6] !== ' ' || /^\s/.test(t.slice(7))) return KEY_MESSAGE
+    bare = t.slice(7)
+  }
+  return /^[\x21-\x7e]+$/.test(bare) ? null : KEY_MESSAGE
 }
+
+// A request that has not answered by then is given up on, so a hung server never traps the modal.
+const REQUEST_TIMEOUT_MS = 30000
+const TIMED_OUT = Symbol('timed out')
+function withTimeout(promise) {
+  let timer
+  const limit = new Promise((_, reject) => { timer = setTimeout(() => reject(TIMED_OUT), REQUEST_TIMEOUT_MS) })
+  return Promise.race([promise, limit]).finally(() => clearTimeout(timer))
+}
+const CREATE_TIMEOUT_MESSAGE = 'hal0 did not answer. The provider may or may not have been added; close this and check the list.'
+const KEY_TIMEOUT_MESSAGE = 'hal0 did not answer while saving the key.'
 
 const DISCARD_COPY = 'Discard unsaved changes?'
 const UNIT_WORDS = { Mtok: 'million tokens', Mchar: 'million characters', img: 'image' }
@@ -122,6 +154,7 @@ export function AddProviderModal({ open, onClose, onAdded }) {
   const [busy, setBusy] = useState(false) // a create or credentials request is in flight
   const [created, setCreated] = useState(null) // { name, env, url, models } once the provider exists
   const [keyFailed, setKeyFailed] = useState(false)
+  const [unknownCreate, setUnknownCreate] = useState(false) // create got no answer: the provider may exist
   const [tick, setTick] = useState(0)
   const [errTick, setErrTick] = useState(0)
   const [discardOpen, setDiscardOpen] = useState(false)
@@ -154,7 +187,7 @@ export function AddProviderModal({ open, onClose, onAdded }) {
     setCatalogId(null); setName(''); setUrl(''); setApiKey(''); setAuthStyle('bearer'); setAuthHeader('')
     setCheck(null); setCheckError(null); setFieldErr({}); setFormError(null); setCredErr(null)
     setPicked(new Set()); setTypes({}); setQ(''); setShown(PAGE)
-    setBusy(false); setCreated(null); setKeyFailed(false); setDiscardOpen(false)
+    setBusy(false); setCreated(null); setKeyFailed(false); setUnknownCreate(false); setDiscardOpen(false)
   }
   // Every opening starts clean, and so does every closing: nothing typed survives a reopen.
   useEffect(() => {
@@ -197,7 +230,8 @@ export function AddProviderModal({ open, onClose, onAdded }) {
   const urlShown = fieldErr.url || (url.trim() && !urlOk ? 'Enter a base URL starting with http:// or https://.' : null)
   const headerShown = fieldErr.header || (headerMissing && isCustom ? 'Enter the header name the provider expects.' : null)
   const keyShown = credErr || fieldErr.key || keyBad
-  const ready = !!preset && !nameInvalid && urlOk && !headerMissing && !keyBad && !busy
+  const locked = busy || unknownCreate
+  const ready = !!preset && !nameInvalid && urlOk && !headerMissing && !keyBad && !locked
   const canCheck = ready && !checking
   const rows = check ? check.rows : []
   const authNone = authStyle === 'none'
@@ -279,7 +313,11 @@ export function AddProviderModal({ open, onClose, onAdded }) {
 
   async function saveKey(info, value) {
     if (!info.env) throw new Error('The provider has no key variable to store the key under.')
-    await apiPost(ENDPOINTS.providerCredentials(info.name), { key: info.env, value })
+    try {
+      await withTimeout(apiPost(ENDPOINTS.providerCredentials(info.name), { key: info.env, value }))
+    } catch (e) {
+      throw e === TIMED_OUT ? new Error(KEY_TIMEOUT_MESSAGE) : e
+    }
     qc.invalidateQueries({ queryKey: ['upstreams'] })
   }
 
@@ -319,15 +357,22 @@ export function AddProviderModal({ open, onClose, onAdded }) {
     })
     // The key is stored under a variable named after the provider, so a second provider from one
     // preset never overwrites the first one's key.
-    if (keyValue) body.auth_value_env = keyEnvFor(name, usedEnvs)
+    if (authStyle !== 'none') body.auth_value_env = keyEnvFor(name, usedEnvs)
     let made
     try {
-      made = await create.mutateAsync(body)
+      made = await withTimeout(create.mutateAsync(body))
     } catch (e) {
       if (sub.current !== token) return
       setBusy(false)
+      if (e === TIMED_OUT) {
+        sub.current += 1 // a late answer is ignored
+        setUnknownCreate(true)
+        setFormError(CREATE_TIMEOUT_MESSAGE)
+        return
+      }
       const msg = messageOf(e, 'The provider could not be added.')
-      if (e && (e.status === 409 || (e.status === 400 && /name/i.test(msg)))) setFieldErr((f) => ({ ...f, name: msg }))
+      const aboutName = /name/i.test(msg) && !/auth_value_env|reserved|\benv\b/i.test(msg)
+      if (e && (e.status === 409 || (e.status === 400 && aboutName))) setFieldErr((f) => ({ ...f, name: msg }))
       else setFormError(msg)
       return
     }
@@ -377,7 +422,12 @@ export function AddProviderModal({ open, onClose, onAdded }) {
   // Close paths: inert while a request is in flight; after the provider exists they still tell the list.
   function close() {
     if (busy) return
-    if (created) complete(created, true)
+    if (unknownCreate) {
+      // Whether the provider exists is not known: show the list as it is, never claim an add.
+      qc.invalidateQueries({ queryKey: ['upstreams'] })
+      reset()
+      onClose()
+    } else if (created) complete(created, true)
     else {
       reset()
       onClose()
@@ -386,12 +436,19 @@ export function AddProviderModal({ open, onClose, onAdded }) {
 
   if (!open) return null
 
-  const dirty = !created && !!(catalogId || name || url || apiKey)
+  const dirty = !created && !unknownCreate && !!(catalogId || name || url || apiKey)
 
   let note = 'Pick a provider to start.'
   if (preset) note = check ? `${rows.length} offered · ${picked.size} picked` : "Check the connection to see this provider's models."
 
-  const foot = created ? (
+  const foot = unknownCreate ? (
+    <>
+      <span className="addprov-note addprov-bad" role="status">No answer from hal0.</span>
+      <span className="addprov-btns">
+        <button type="button" className="btn sm" onClick={close}>Close</button>
+      </span>
+    </>
+  ) : created ? (
     <>
       <span className="addprov-note addprov-bad" role="status">
         {keyFailed ? 'Provider added, but the key was not saved.' : 'Saving the key…'}
@@ -431,7 +488,7 @@ export function AddProviderModal({ open, onClose, onAdded }) {
           placeholder={authNone ? 'Not needed for this provider' : 'Paste key'}
           aria-invalid={keyShown ? 'true' : 'false'}
           aria-describedby={keyShown ? 'addprov-err-key addprov-key-hint' : 'addprov-key-hint'}
-          disabled={busy}
+          disabled={locked}
           onChange={(e) => {
             setApiKey(e.target.value)
             setCredErr(null)
@@ -473,7 +530,7 @@ export function AddProviderModal({ open, onClose, onAdded }) {
               <div className="addprov-tiles">
                 {presets.map((p) => (
                   <button key={p.id} type="button" className={'addprov-tile' + (p.id === catalogId ? ' on' : '')}
-                    aria-pressed={p.id === catalogId} disabled={busy} onClick={() => pickTile(p)}>
+                    aria-pressed={p.id === catalogId} disabled={locked} onClick={() => pickTile(p)}>
                     <b>{p.name}</b>
                     <span>{tileNote(p)}</span>
                   </button>
@@ -487,19 +544,19 @@ export function AddProviderModal({ open, onClose, onAdded }) {
                 <Field id="addprov-name" label="Name" req error={nameShown}>
                   <input id="addprov-name" ref={nameRef} className={'input mono' + (nameShown ? ' input-err' : '')} value={name}
                     autoComplete="off" spellCheck={false} aria-invalid={nameShown ? 'true' : 'false'}
-                    aria-describedby={nameShown ? 'addprov-err-name' : undefined} disabled={busy}
+                    aria-describedby={nameShown ? 'addprov-err-name' : undefined} disabled={locked}
                     onChange={(e) => { setName(e.target.value); setFieldErr((f) => ({ ...f, name: undefined })) }} />
                 </Field>
                 <Field id="addprov-url" label="Base URL" req error={urlShown}>
                   <input id="addprov-url" className={'input mono' + (urlShown ? ' input-err' : '')} value={url} placeholder="https://…/v1"
                     autoComplete="off" spellCheck={false} aria-invalid={urlShown ? 'true' : 'false'}
-                    aria-describedby={urlShown ? 'addprov-err-url' : undefined} disabled={busy}
+                    aria-describedby={urlShown ? 'addprov-err-url' : undefined} disabled={locked}
                     onChange={(e) => { setUrl(e.target.value); invalidate() }} />
                 </Field>
                 {isCustom && (
                   <>
                     <Field id="addprov-auth" label="Auth">
-                      <select id="addprov-auth" className="input" value={authStyle} disabled={busy}
+                      <select id="addprov-auth" className="input" value={authStyle} disabled={locked}
                         onChange={(e) => { setAuthStyle(e.target.value); invalidate() }}>
                         {AUTH_CHOICES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                       </select>
@@ -507,7 +564,7 @@ export function AddProviderModal({ open, onClose, onAdded }) {
                     {authStyle === 'header' && (
                       <Field id="addprov-header" label="Header name" req error={headerShown}>
                         <input id="addprov-header" className={'input mono' + (headerShown ? ' input-err' : '')} value={authHeader}
-                          autoComplete="off" spellCheck={false} placeholder="X-Api-Key" disabled={busy}
+                          autoComplete="off" spellCheck={false} placeholder="X-Api-Key" disabled={locked}
                           aria-invalid={headerShown ? 'true' : 'false'}
                           aria-describedby={headerShown ? 'addprov-err-header' : undefined}
                           onChange={(e) => { setAuthHeader(e.target.value); invalidate() }} />
@@ -541,23 +598,23 @@ export function AddProviderModal({ open, onClose, onAdded }) {
                   <span className="addprov-lbl mono">Models to switch on</span>
                   <div className="addprov-pick">
                     <div className="addprov-pick-h">
-                      <input type="checkbox" id="addprov-all" ref={allRef} checked={allOn} onChange={toggleAll} />
+                      <input type="checkbox" id="addprov-all" ref={allRef} checked={allOn} disabled={busy} onChange={toggleAll} />
                       <label htmlFor="addprov-all" className="addprov-grow">{needle ? 'Select all shown' : 'Select all'}</label>
-                      <button type="button" className="btn ghost sm" onClick={() => setPicked(initialPicks(rows))}>Recommended only</button>
+                      <button type="button" className="btn ghost sm" disabled={busy} onClick={() => setPicked(initialPicks(rows))}>Recommended only</button>
                     </div>
                     {rows.length > SEARCH_ABOVE && (
                       <input type="search" className="input addprov-search" aria-label="Search models" placeholder="Search models"
-                        autoComplete="off" value={q} onChange={(e) => { setQ(e.target.value); setShown(PAGE) }} />
+                        autoComplete="off" value={q} disabled={busy} onChange={(e) => { setQ(e.target.value); setShown(PAGE) }} />
                     )}
                     <div className="addprov-list">
                       {visible.map((m, i) => (
                         <div className="addprov-row" key={m.id}>
-                          <input type="checkbox" id={`addprov-m-${i}`} checked={picked.has(m.id)} onChange={() => toggleRow(m.id)} />
+                          <input type="checkbox" id={`addprov-m-${i}`} checked={picked.has(m.id)} disabled={busy} onChange={() => toggleRow(m.id)} />
                           <label htmlFor={`addprov-m-${i}`} className="addprov-mid">
                             <b>{m.id}</b>
                             {m.recommended && <span className="chip amber">recommended</span>}
                           </label>
-                          <select className="input addprov-type" aria-label={`Type of ${m.id}`} value={types[m.id] ?? m.type}
+                          <select className="input addprov-type" aria-label={`Type of ${m.id}`} value={types[m.id] ?? m.type} disabled={busy}
                             onChange={(e) => setTypes((t) => ({ ...t, [m.id]: e.target.value }))}>
                             {MODEL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
                           </select>
@@ -567,7 +624,7 @@ export function AddProviderModal({ open, onClose, onAdded }) {
                       ))}
                       {filtered.length === 0 && <div className="addprov-empty mono">No model matches.</div>}
                       {filtered.length > visible.length && (
-                        <button type="button" className="btn ghost sm addprov-more" onClick={() => setShown((n) => n + PAGE)}>
+                        <button type="button" className="btn ghost sm addprov-more" disabled={busy} onClick={() => setShown((n) => n + PAGE)}>
                           Show more ({filtered.length - visible.length} left)
                         </button>
                       )}
