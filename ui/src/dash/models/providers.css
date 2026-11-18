@@ -1,1 +1,85 @@
-/* Models → Providers: the list and the detail panel (ProvidersTab.jsx, ProviderDetail.jsx). */
+/* Models → Providers: the list and the detail panel. The toolbar, list card, detail card and
+   chips come from the shared Models shell (dashboard.css `.mdl-*`); only the provider sections
+   and the model rows are styled here. Tokens come from dashboard.css `:root`. */
+
+.prov-sec { border-bottom: 1px solid var(--line); }
+.prov-sec:last-child { border-bottom: 0; }
+
+.prov-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  width: 100%; padding: 10px 14px; text-align: left;
+  background: transparent; border: 0; border-left: 2px solid transparent;
+  color: var(--fg); font: inherit; cursor: pointer;
+}
+.prov-head:hover { background: var(--bg-2); }
+.prov-head.sel { border-left-color: var(--accent); background: var(--accent-soft); }
+.prov-chev { width: 14px; flex: none; color: var(--fg-4); font-family: var(--jbm); font-size: 11px; }
+.prov-logo {
+  display: grid; place-items: center; flex: none; width: 26px; height: 26px;
+  border-radius: 6px; background: var(--bg-3); border: 1px solid var(--line-strong);
+  color: var(--fg-2); font-family: var(--jbm); font-size: 10.5px; font-weight: 600;
+}
+.prov-name { font-weight: 600; }
+.prov-host { flex: 1 1 0; min-width: 0; color: var(--fg-4); font-family: var(--jbm); font-size: 11px; overflow-wrap: anywhere; }
+.prov-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.prov-banner {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px;
+  margin: 0 14px 10px 36px; padding: 9px 12px;
+  background: var(--bg-2); border: 1px solid var(--line-strong); border-left: 3px solid var(--warn);
+  border-radius: 6px; color: var(--fg-2); font-size: 12px;
+}
+.prov-banner.info { border-left-color: var(--info); }
+.prov-banner p { flex: 1 1 240px; min-width: 0; margin: 0; }
+
+.prov-msg { padding: 8px 14px 8px 36px; color: var(--fg-3); font-family: var(--jbm); font-size: 11px; }
+.prov-msg.err { color: var(--err); }
+.prov-msg.ok { color: var(--ok); }
+.prov-msg.quiet { color: var(--fg-4); }
+
+.prov-subh {
+  padding: 6px 14px 4px 36px; background: var(--bg);
+  color: var(--fg-4); font-family: var(--jbm); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase;
+}
+
+.prov-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px;
+  padding: 7px 14px 7px 36px; border-top: 1px solid var(--line-soft); cursor: pointer;
+}
+.prov-row:hover { background: var(--bg-2); }
+.prov-row.sel { background: var(--accent-soft); }
+.prov-row.off .prov-mid, .prov-row.off .prov-meta { opacity: 0.6; }
+.prov-sw { flex: none; }
+.prov-mid { flex: 1 1 180px; min-width: 0; }
+.prov-mid b { font-family: var(--jbm); font-size: 12.5px; font-weight: 500; overflow-wrap: anywhere; }
+.prov-mid small { display: block; color: var(--fg-4); font-family: var(--jbm); font-size: 10.5px; overflow-wrap: anywhere; }
+.prov-flag { margin-left: 6px; }
+.prov-meta { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 10px; }
+.prov-meta .num { color: var(--fg-2); font-family: var(--jbm); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+.prov-more {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  padding: 8px 14px 10px 36px; border-top: 1px solid var(--line-soft); color: var(--fg-3); font-size: 12px;
+}
+
+.prov-empty { padding: 32px 20px; text-align: center; color: var(--fg-3); }
+.prov-empty-title { margin-bottom: 6px; color: var(--fg); font-size: 14px; font-weight: 600; }
+.prov-empty p { margin: 0 0 14px; font-size: 12px; }
+
+/* detail panel */
+.prov-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.prov-keyform { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+.prov-keylbl { color: var(--fg-3); font-size: 11px; }
+.prov-hint { color: var(--fg-4); font-size: 11px; }
+.prov-call { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.prov-call code { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; color: var(--fg); font-size: 12px; }
+.prov-edit { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
+.prov-field { display: flex; flex-direction: column; gap: 3px; color: var(--fg-3); font-size: 11px; }
+.provider-detail .btn.danger { color: var(--err); }
+.provider-detail .ro-row .v { min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 480px) {
+  .prov-head, .prov-row, .prov-more { padding-right: 10px; }
+  .prov-banner { margin-right: 10px; }
+  .prov-meta { justify-content: flex-start; }
+}
