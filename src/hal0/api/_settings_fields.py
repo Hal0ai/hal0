@@ -37,6 +37,7 @@ from pydantic.fields import FieldInfo
 from hal0.api._redact import is_sensitive_key, redact_config
 from hal0.api._settings_apply import REGISTRY
 from hal0.config.schema import Hal0Config
+from hal0.redaction import is_token_count_key
 
 # Segments that should render fully upper-case in a humanized label
 # (acronyms a Title Case pass would otherwise mangle to "Tts"/"Vad").
@@ -179,7 +180,10 @@ def walk_settings_schema(
                 enum=enum,
                 constraints=_constraints(field),
                 default=field.get_default(call_default_factory=True),
-                secret=is_sensitive_key(name),
+                # A numeric ``*tokens`` field is a count, shown in the clear by
+                # redact_config (#3805); the row must not claim otherwise.
+                secret=is_sensitive_key(name)
+                and not (type_ == "number" and is_token_count_key(name)),
             )
         )
     return out

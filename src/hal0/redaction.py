@@ -75,6 +75,21 @@ def is_sensitive_key(key: str) -> bool:
     return bool(SENSITIVE_KEY_RE.search(key))
 
 
+_TOKENS_PLURAL_RE: Final[re.Pattern[str]] = re.compile(r"(?i)tokens")
+
+
+def is_token_count_key(key: str) -> bool:
+    """True if ``key`` is sensitive only for the plural word ``tokens``.
+
+    ``max_request_tokens`` and ``extraction_max_tokens`` are; ``HF_TOKEN``,
+    ``api_token`` and ``max_tokens_secret`` are not. The name alone does not
+    make a value safe to show (``api_tokens`` can hold a list of credentials):
+    callers pair this with a check that the value is a number (#3805).
+    """
+    rest, found = _TOKENS_PLURAL_RE.subn("", key)
+    return found > 0 and not SENSITIVE_KEY_RE.search(rest)
+
+
 # Where a ``*_KEY=`` name may start in LOG_SECRET_RE: after anything that is no
 # part of a name run. The run is the ASCII word characters, with the four
 # non-ASCII letters that ``re.I`` folds onto them (U+0130, U+0131, U+017F and
