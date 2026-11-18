@@ -8,6 +8,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from hal0.api.routes.providers import (
+    _check_auth_value_env,
+    _reserved_env_name_reason,
+    preset_credential_env,
+)
+from hal0.upstreams.presets import load_presets
 from hal0.upstreams.registry import Upstream
 
 
@@ -343,6 +349,24 @@ def test_create_upstream_from_catalog_prefills(client: TestClient, monkeypatch: 
     assert body["auth_value_env"] == "OPENROUTER_API_KEY"
     # Key not yet written → hint chains to the credentials route.
     assert "credentials" in body.get("hint", "")
+
+
+def test_create_upstream_from_hal0_peer_preset_3801(client: TestClient) -> None:
+    _seed_upstreams(client)
+    response = client.post(
+        "/api/upstreams",
+        json={"name": "peer", "catalog_id": "hal0_peer", "url": "http://peer.example/v1"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["auth_value_env"] == "PROVIDER_HAL0_PEER_API_KEY"
+
+
+@pytest.mark.parametrize("catalog_id", sorted(load_presets()))
+def test_every_shipped_preset_derives_an_accepted_credential_name(catalog_id: str) -> None:
+    """No shipped preset may derive a name the create path itself refuses (#3801)."""
+    env = preset_credential_env(catalog_id)
+    assert _reserved_env_name_reason(env) is None, env
+    _check_auth_value_env(env, name=catalog_id)
 
 
 def test_create_upstream_explicit_fields_beat_catalog(client: TestClient) -> None:
