@@ -21,6 +21,8 @@ const { ModelsView } = (await import('../models.jsx').then(() => window)) as unk
 const { MOCK_BUILDERS } = await import('@/api/mockFixtures')
 
 const posts: string[] = []
+let upstreamOverride: unknown = null
+let refreshAnswer: (name: string) => Record<string, unknown> = (name) => ({ name, curated: true, stale: false, warning: null, models: [] })
 const toast = vi.fn()
 
 function stubFetch() {
@@ -33,8 +35,9 @@ function stubFetch() {
       if (init?.method === 'POST') {
         posts.push(url.pathname)
         const name = url.pathname.split('/')[3]
-        body = { name, curated: true, models: [] }
-      } else if (url.pathname === '/api/upstreams') body = MOCK_BUILDERS.upstreams(url.pathname, [] as unknown as RegExpMatchArray)
+        body = refreshAnswer(name)
+      } else if (url.pathname === '/api/upstreams' && upstreamOverride) body = upstreamOverride
+      else if (url.pathname === '/api/upstreams') body = MOCK_BUILDERS.upstreams(url.pathname, [] as unknown as RegExpMatchArray)
       else if (url.pathname === '/api/models') body = { models: [], count: 0 }
       else if (url.pathname === '/api/slots') body = { slots: [] }
       return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
@@ -60,6 +63,8 @@ const byTestId = (host: HTMLElement, id: string) => host.querySelector(`[data-te
 
 describe('Models → Providers wiring', () => {
   beforeEach(() => {
+    upstreamOverride = null
+    refreshAnswer = (name) => ({ name, curated: true, stale: false, warning: null, models: [] })
     stubFetch()
     ;(window as unknown as { __hal0Toast: unknown }).__hal0Toast = toast
     toast.mockClear()
@@ -108,6 +113,37 @@ describe('Models → Providers wiring', () => {
     // hermes.coder is managed.
     expect(posts).toEqual(['/api/upstreams/minimax/refresh', '/api/upstreams/openrouter/refresh'])
     expect(toast).toHaveBeenCalledWith('Refreshed 2 model lists', 'info')
+    await unmount()
+  })
+
+  it('counts only clean answers and says how many could not be reached', async () => {
+    refreshAnswer = (name) => ({ name, curated: true, stale: name === 'openrouter', warning: null, models: [] })
+    const { host, unmount } = await mount('providers')
+    await act(async () => byTestId(host, 'mdl-check-providers')!.click())
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+    expect(toast).toHaveBeenCalledWith('Refreshed 1 model list · 1 could not be reached', 'warn')
+    await unmount()
+  })
+
+  it('a warning on the answer counts as not reached too', async () => {
+    refreshAnswer = (name) => ({ name, curated: true, stale: false, warning: 'x', models: [] })
+    const { host, unmount } = await mount('providers')
+    await act(async () => byTestId(host, 'mdl-check-providers')!.click())
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+    expect(toast).toHaveBeenCalledWith('Refreshed 0 model lists · 2 could not be reached', 'warn')
+    await unmount()
+  })
+
+  it('says there is no provider to refresh when none is eligible', async () => {
+    upstreamOverride = []
+    const { host, unmount } = await mount('providers')
+    await act(async () => byTestId(host, 'mdl-check-providers')!.click())
+    expect(posts).toEqual([])
+    expect(toast).toHaveBeenCalledWith('No provider to refresh.', 'info')
     await unmount()
   })
 })

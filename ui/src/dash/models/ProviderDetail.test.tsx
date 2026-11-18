@@ -151,7 +151,7 @@ describe('provider selected', () => {
     vi.mocked(client.apiPatch).mockResolvedValue({} as never)
     view({ provider: 'minimax', model: null })
     await flush()
-    const sw = q('[role="switch"]')!
+    const sw = q('[role="switch"][aria-label="Show this provider\'s models in app model pickers"]')!
     expect(sw.getAttribute('aria-checked')).toBe('true')
     click(sw)
     await flush()
@@ -397,5 +397,49 @@ describe('nothing selected', () => {
     view({ provider: null, model: null })
     await flush()
     expect(text()).toContain('Select a provider')
+  })
+})
+
+describe('Routes requests', () => {
+  it('is a switch for an operator provider, above "Shown in app model pickers", and PATCHes enabled', async () => {
+    vi.mocked(client.apiPatch).mockResolvedValue({} as never)
+    view({ provider: 'minimax', model: null })
+    await flush()
+    const sw = q<HTMLButtonElement>('[data-testid="prov-routes-switch"] [role="switch"]')!
+    expect(sw.getAttribute('aria-checked')).toBe('true')
+    expect(text().indexOf('Routes requests')).toBeGreaterThan(-1)
+    expect(text().indexOf('Routes requests')).toBeLessThan(text().indexOf('Shown in app model pickers'))
+    click(sw)
+    await settle()
+    expect(client.apiPatch).toHaveBeenCalledWith('/api/upstreams/minimax', { enabled: false })
+  })
+
+  it('reads off for a switched-off provider and sends enabled: true', async () => {
+    upstreams = [entry('minimax', { enabled: false })]
+    vi.mocked(client.apiPatch).mockResolvedValue({} as never)
+    view({ provider: 'minimax', model: null })
+    await flush()
+    const sw = q<HTMLButtonElement>('[data-testid="prov-routes-switch"] [role="switch"]')!
+    expect(sw.getAttribute('aria-checked')).toBe('false')
+    click(sw)
+    await settle()
+    expect(client.apiPatch).toHaveBeenCalledWith('/api/upstreams/minimax', { enabled: true })
+  })
+
+  it('a refused change toasts the server message and the switch follows the cache', async () => {
+    vi.mocked(client.apiPatch).mockRejectedValue(Object.assign(new Error('could not write the config'), { status: 500 }))
+    view({ provider: 'minimax', model: null })
+    await flush()
+    click(q('[data-testid="prov-routes-switch"] [role="switch"]')!)
+    await flush()
+    expect(toasts).toContainEqual(['could not write the config', 'err'])
+    expect(q('[data-testid="prov-routes-switch"] [role="switch"]')!.getAttribute('aria-checked')).toBe('true')
+  })
+
+  it('is absent for a managed provider', async () => {
+    upstreams = [entry('hermes.coder', { managed_by: 'agent:hermes' })]
+    view({ provider: 'hermes.coder', model: null })
+    await flush()
+    expect(q('[data-testid="prov-routes-switch"]')).toBeNull()
   })
 })

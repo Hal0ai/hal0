@@ -17,7 +17,7 @@ vi.mock('@/api/client', async () => {
 })
 
 const client = await import('@/api/client')
-const { ProvidersTab } = await import('./ProvidersTab.jsx')
+const { ProvidersTab, refreshModelList } = await import('./ProvidersTab.jsx')
 
 const entry = (name: string, over: Partial<UpstreamEntry> = {}): UpstreamEntry => ({
   name,
@@ -467,5 +467,78 @@ describe('empty state', () => {
     expect(text()).toContain('No providers yet')
     click(qa('button').find((b) => b.textContent === '+ Add provider')!)
     expect(v.onAdd).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('a provider switched off from routing', () => {
+  beforeEach(() => {
+    upstreams = [entry('minimax', { enabled: false, enabled_count: 1, models_total: 2 })]
+    listings.minimax = listing('minimax', [row('m1', { enabled: true }), row('m2')])
+  })
+
+  it('shows an "off" chip and "switched off" instead of the count', async () => {
+    await expand('minimax')
+    const head = q('[data-testid="prov-head-minimax"]')!.textContent!
+    expect(head).toContain('off')
+    expect(head).toContain('switched off')
+    expect(head).not.toContain('1 of 2 on')
+    expect(q('[data-testid="prov-off-chip-minimax"]')!.className).toContain('warn')
+  })
+
+  it('says so in the body and keeps the model switches usable', async () => {
+    await expand('minimax')
+    const line = q('[data-testid="prov-switched-off-minimax"]')!
+    expect(line.textContent).toContain('This provider is switched off. Its models are not called until it is switched on.')
+    expect(q('[data-testid="prov-model-minimax-m2"] [role="switch"]')!.hasAttribute('disabled')).toBe(false)
+  })
+
+  it('"Switch on" sends { enabled: true } and surfaces the server message when it fails', async () => {
+    vi.mocked(client.apiPatch).mockRejectedValueOnce(Object.assign(new Error('disk is read-only'), { status: 500 }))
+    await expand('minimax')
+    const on = () => qa('[data-testid="prov-switched-off-minimax"] button').find((b) => b.textContent === 'Switch on')!
+    click(on())
+    await settle()
+    expect(client.apiPatch).toHaveBeenCalledWith('/api/upstreams/minimax', { enabled: true })
+    expect(toasts).toContainEqual(['disk is read-only', 'err'])
+    expect(q('[data-testid="prov-off-chip-minimax"]')).not.toBeNull()
+  })
+
+  it('shows neither chip nor line for a provider that routes, or for a managed one', async () => {
+    upstreams = [entry('minimax'), entry('hermes.coder', { managed_by: 'agent:hermes', enabled: false })]
+    listings['hermes.coder'] = listing('hermes.coder', [row('h1')], { protected: true })
+    view({ provider: 'hermes.coder', model: null })
+    await settle()
+    await settle()
+    expect(q('[data-testid="prov-off-chip-minimax"]')).toBeNull()
+    expect(q('[data-testid="prov-off-chip-hermes.coder"]')).toBeNull()
+    expect(q('[data-testid="prov-switched-off-hermes.coder"]')).toBeNull()
+  })
+})
+
+describe('refreshModelList', () => {
+  const run = async (answer: Record<string, unknown>, curated = true) => {
+    const refresh = { mutateAsync: vi.fn(async () => answer) }
+    await refreshModelList(refresh, { name: 'corp', curated } as UpstreamEntry, 'Corp')
+  }
+  beforeEach(() => {
+    toasts = []
+    ;(window as unknown as { __hal0Toast: unknown }).__hal0Toast = (m: string, k: string) => toasts.push([m, k])
+  })
+  it('warns that the provider could not be reached when the answer is stale without a warning', async () => {
+    await run({ curated: true, stale: true, warning: null })
+    expect(toasts).toEqual([['Could not reach Corp; showing the last known list.', 'warn']])
+  })
+  it('shows the warning text when there is one', async () => {
+    await run({ curated: true, stale: true, warning: 'conversion failed' })
+    expect(toasts).toEqual([['conversion failed', 'warn']])
+  })
+  it('reports success only for a clean answer', async () => {
+    await run({ curated: true, stale: false, warning: null })
+    expect(toasts).toEqual([['Corp: model list refreshed', 'ok']])
+  })
+  it('still announces a conversion', async () => {
+    await run({ curated: true, stale: false, warning: null }, false)
+    expect(toasts[0][1]).toBe('ok')
+    expect(toasts[0][0]).toContain('converted')
   })
 })

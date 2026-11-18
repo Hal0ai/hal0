@@ -27,6 +27,8 @@ import {
   ownerLabel,
   probeErrorMessage,
   providerLabel,
+  refreshOutcome,
+  refreshSummary,
   providerState,
   rowFlag,
   sectionRows,
@@ -214,6 +216,13 @@ describe('countLabel', () => {
   })
   it('says read-only for a managed provider', () => {
     expect(countLabel(entry({ managed_by: 'agent:hermes' }))).toBe('read-only')
+  })
+  it('says switched off for a provider removed from routing, converted or not', () => {
+    expect(countLabel(entry({ enabled: false }))).toBe('switched off')
+    expect(countLabel(entry({ enabled: false, curated: false }))).toBe('switched off')
+  })
+  it('still says read-only for a managed provider that is switched off', () => {
+    expect(countLabel(entry({ enabled: false, managed_by: 'agent:hermes' }))).toBe('read-only')
   })
 })
 
@@ -464,5 +473,31 @@ describe('model type labels', () => {
     expect(modelTypeLabel('stt')).toBe('transcribe')
     expect(modelTypeLabel('chat')).toBe('chat')
     expect(MODEL_TYPE_CHOICES.map((c) => c.id)).toEqual(['chat', 'embed', 'tts', 'stt', 'rerank', 'image'])
+  })
+})
+
+describe('refreshOutcome', () => {
+  const listingOf = (over: Partial<UpstreamListing>) =>
+    ({ name: 'p', curated: true, protected: false, fetched_at: 1, stale: false, models: [], ...over }) as UpstreamListing
+  it('is clean only when the answer is neither stale nor carries a warning', () => {
+    expect(refreshOutcome(listingOf({}))).toBe('clean')
+    expect(refreshOutcome(listingOf({ warning: null }))).toBe('clean')
+  })
+  it('is unreachable when the provider answered stale, with or without a warning', () => {
+    expect(refreshOutcome(listingOf({ stale: true }))).toBe('unreachable')
+    expect(refreshOutcome(listingOf({ stale: true, warning: 'x' }))).toBe('unreachable')
+    expect(refreshOutcome(listingOf({ warning: 'x' }))).toBe('unreachable')
+  })
+})
+
+describe('refreshSummary', () => {
+  it('counts clean answers only and says how many could not be reached', () => {
+    expect(refreshSummary(2, 0)).toEqual({ text: 'Refreshed 2 model lists', kind: 'info' })
+    expect(refreshSummary(1, 0)).toEqual({ text: 'Refreshed 1 model list', kind: 'info' })
+    expect(refreshSummary(1, 2)).toEqual({ text: 'Refreshed 1 model list · 2 could not be reached', kind: 'warn' })
+    expect(refreshSummary(0, 1)).toEqual({ text: 'Refreshed 0 model lists · 1 could not be reached', kind: 'warn' })
+  })
+  it('says there is nothing to refresh when no provider was eligible', () => {
+    expect(refreshSummary(0, 0)).toEqual({ text: 'No provider to refresh.', kind: 'info' })
   })
 })

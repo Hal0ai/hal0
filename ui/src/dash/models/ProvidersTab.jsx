@@ -16,6 +16,7 @@ import {
   useUpstreamModelPatch,
   useUpstreamModels,
   useUpstreamRefresh,
+  useUpstreamUpdate,
   useUpstreams,
 } from '@/api/hooks/useUpstreams'
 import {
@@ -29,6 +30,7 @@ import {
   ownerLabel,
   providerLabel,
   providerState,
+  refreshOutcome,
   rowFlag,
   sectionRows,
   toggleErrorMessage,
@@ -61,17 +63,27 @@ function initials(label) {
   return label.replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '··'
 }
 
-/** Refresh the model list. A not-converted provider becomes per-model with everything on;
- * the answer's `warning` is shown verbatim. */
+/** Refresh the model list. A not-converted provider becomes per-model with everything on. An answer
+ * that is stale or carries a `warning` means the provider could not be reached: warn, never report success. */
 export async function refreshModelList(refresh, u, label) {
   try {
     const res = await refresh.mutateAsync(u.name)
-    if (res?.warning) toast(res.warning, 'warn')
-    else if (!u.curated && res?.curated) {
+    if (refreshOutcome(res) === 'unreachable') {
+      toast(res?.warning || `Could not reach ${label}; showing the last known list.`, 'warn')
+    } else if (!u.curated && res?.curated) {
       toast(`${label} converted. Everything it offered is on; switch off what you do not use.`, 'ok')
     } else toast(`${label}: model list refreshed`, 'ok')
   } catch {
     toast(`Could not fetch the model list from ${label}. Check the key and the address, then try again.`, 'err')
+  }
+}
+
+/** Switch a provider's routing on or off (`enabled`). A failure shows the server's message. */
+export async function setProviderEnabled(update, u, next) {
+  try {
+    await update.mutateAsync({ name: u.name, patch: { enabled: next } })
+  } catch (err) {
+    toast(err?.message || 'Could not change this provider. Try again.', 'err')
   }
 }
 
@@ -122,6 +134,7 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
   const state = providerState(u, listing.data)
   const patch = useUpstreamModelPatch()
   const refresh = useUpstreamRefresh()
+  const update = useUpstreamUpdate()
 
   // A switched row moves between "On" and "Available", which remounts it and drops keyboard focus.
   // The switch that had focus gets it back, unless the user has already moved on. `refocus` holds
@@ -151,6 +164,7 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
   const noMatch = searching && !expanded && !!listing.data && matches === 0
   const body = shown && !noMatch
   const chip = KEY_CHIP[key]
+  const switchedOff = u.enabled === false && state !== 'managed'
 
   const toggle = async (m, next) => {
     if (secRef.current?.contains(document.activeElement)) refocus.current = { id: m.id, final: false }
@@ -195,12 +209,28 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
         <span className="prov-host">{hostOf(u.url)}</span>
         {noMatch && <span className="prov-nomatch">no match</span>}
         <span className="prov-chips">
+          {switchedOff && (
+            <span className="chip warn" data-testid={`prov-off-chip-${u.name}`}>off</span>
+          )}
           <span className={'chip' + (chip.tone ? ' ' + chip.tone : '')}>{chip.label}</span>
           <span className="chip">{searching && listing.data ? `${matches} match` : countLabel(u)}</span>
         </span>
       </button>
       {body && (
         <div className="prov-body">
+          {switchedOff && (
+            <div className="prov-banner" data-testid={`prov-switched-off-${u.name}`}>
+              <p>This provider is switched off. Its models are not called until it is switched on.</p>
+              <button
+                type="button"
+                className="btn sm"
+                disabled={update.isPending}
+                onClick={() => setProviderEnabled(update, u, true)}
+              >
+                Switch on
+              </button>
+            </div>
+          )}
           {state === 'managed' && (
             <div className="prov-banner info" data-testid={`prov-banner-managed-${u.name}`}>
               <p>{`Created and kept up to date by ${owner}. Read-only here.`}</p>

@@ -80,6 +80,7 @@ export function rowFlag(m: UpstreamModelRow): 'gone' | 'recommended' | null {
 export function countLabel(u: UpstreamEntry): string {
   const state = providerState(u)
   if (state === 'managed') return 'read-only'
+  if (u.enabled === false) return 'switched off'
   if (state === 'not-converted') return 'routes everything'
   return `${u.enabled_count} of ${u.models_total} on`
 }
@@ -175,6 +176,19 @@ export function keyProblem(raw: string): string | null {
     bare = t.slice(7)
   }
   return /^[\x21-\x7e]+$/.test(bare) ? null : KEY_MESSAGE
+}
+
+/** A refresh answer is clean only when the provider was reached: not stale and no warning. */
+export function refreshOutcome(res: Pick<UpstreamListing, 'stale' | 'warning'> | null | undefined): 'clean' | 'unreachable' {
+  return res?.stale || res?.warning ? 'unreachable' : 'clean'
+}
+
+/** The toast after the header "Refresh model lists" has asked every eligible provider. */
+export function refreshSummary(clean: number, unreachable: number): { text: string; kind: 'info' | 'warn' } {
+  if (clean === 0 && unreachable === 0) return { text: 'No provider to refresh.', kind: 'info' }
+  const base = `Refreshed ${clean} model list${clean === 1 ? '' : 's'}`
+  if (unreachable === 0) return { text: base, kind: 'info' }
+  return { text: `${base} · ${unreachable} could not be reached`, kind: 'warn' }
 }
 
 const DASH = '—'

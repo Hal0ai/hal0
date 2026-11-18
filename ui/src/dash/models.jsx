@@ -23,7 +23,7 @@ import { DownloadRow, DownloadsPane } from '@/dash/models/DownloadsPane.jsx'
 import { ProvidersTab } from '@/dash/models/ProvidersTab.jsx'
 import { ProviderDetail } from '@/dash/models/ProviderDetail.jsx'
 import { AddProviderModal } from '@/dash/models/AddProviderModal.jsx'
-import { keyState, providerState } from '@/dash/models/providers-pure'
+import { keyState, providerState, refreshOutcome, refreshSummary } from '@/dash/models/providers-pure'
 import { useXdnaFit } from '@/api/hooks/useXdnaFit'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { npuTabVisible } from '@/dash/npu/npu-pure'
@@ -170,26 +170,25 @@ function ModelsView({ modelParam = null }) {
       u => u.enabled !== false && providerState(u) === "per-model" && ["set", "not-needed"].includes(keyState(u)),
     );
     if (!targets.length) {
-      toastM("No provider to refresh — add a provider and choose its models first", "info");
+      const none = refreshSummary(0, 0);
+      toastM(none.text, none.kind);
       return;
     }
     setRefreshingProviders(true);
-    const failed = [];
+    let clean = 0;
+    let unreachable = 0;
     for (const u of targets) {
       try {
-        await upstreamRefresh.mutateAsync(u.name);
+        const res = await upstreamRefresh.mutateAsync(u.name);
+        if (refreshOutcome(res) === "clean") clean += 1;
+        else unreachable += 1;
       } catch {
-        failed.push(u.name);
+        unreachable += 1;
       }
     }
     setRefreshingProviders(false);
-    const ok = targets.length - failed.length;
-    toastM(
-      failed.length
-        ? `Refreshed ${ok} of ${targets.length} model lists — could not reach ${failed.join(", ")}`
-        : `Refreshed ${ok} model list${ok === 1 ? "" : "s"}`,
-      failed.length ? "err" : "info",
-    );
+    const done = refreshSummary(clean, unreachable);
+    toastM(done.text, done.kind);
   };
 
   // Auto-pick the first installed model on first render so the detail

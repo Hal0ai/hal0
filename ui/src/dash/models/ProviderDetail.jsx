@@ -35,7 +35,7 @@ import {
   toggleErrorMessage,
   visibleProviders,
 } from '@/dash/models/providers-pure'
-import { refreshModelList, toast } from '@/dash/models/ProvidersTab.jsx'
+import { refreshModelList, setProviderEnabled, toast } from '@/dash/models/ProvidersTab.jsx'
 
 const MANAGED_NOTE = 'Managed providers cannot be edited or removed here.'
 
@@ -171,7 +171,20 @@ function ProviderPanel({ u, selected, onSelect, catalog }) {
         }
       />
       <DetailFacts facts={facts} />
-      <DetailSection title="In app model pickers">
+      <DetailSection title="Routing and pickers">
+        {!managed && (
+          <DetailLine k="Routes requests">
+            <span data-testid="prov-routes-switch">
+              <PillToggle
+                on={u.enabled !== false}
+                disabled={update.isPending}
+                label="Route requests to this provider"
+                stateText={u.enabled !== false ? 'on' : 'off'}
+                onToggle={(next) => setProviderEnabled(update, u, next)}
+              />
+            </span>
+          </DetailLine>
+        )}
         <DetailLine k="Shown in app model pickers">
           <PillToggle
             on={u.advertise_models}
