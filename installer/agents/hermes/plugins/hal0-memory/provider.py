@@ -243,10 +243,27 @@ def _memory_private_config_path(hermes_home: str | None) -> str:
     return os.path.join(base, "config.yaml")
 
 
+def _load_yaml(text: str) -> Any:
+    """Parse a YAML document with whichever safe loader this interpreter has.
+
+    The plugin runs in the Hermes venv, which ships ``ruamel.yaml`` and no
+    PyYAML (#3803); hal0's own venv, where the unit tests import this module,
+    has PyYAML and no ``ruamel.yaml``. Both loaders return plain dicts and
+    lists. Raises the parser's error, or ``ImportError`` when neither exists.
+    """
+    try:
+        import yaml
+    except ImportError:
+        from ruamel.yaml import YAML
+
+        return YAML(typ="safe", pure=True).load(text)
+    return yaml.safe_load(text)
+
+
 def _yaml_error_summary(exc: Exception) -> str:
     """Name and position of a parse error, safe to log.
 
-    ``str()`` of a PyYAML error quotes the offending line, and a profile
+    ``str()`` of a YAML parse error quotes the offending line, and a profile
     config.yaml carries ``Authorization: Bearer ...`` headers. (The plugin runs
     in the Hermes venv and cannot import hal0's helper of the same name.)
     """
@@ -261,7 +278,7 @@ def _read_memory_private(path: str) -> bool:
 
     FAILS CLOSED: only a missing file, or the key absent/null/false (or one of
     the off words), means shared. A file that exists but cannot be read, a
-    parse failure, a non-mapping document or a missing ``yaml`` module mean
+    parse failure, a non-mapping document or a missing YAML parser mean
     PRIVATE, with a warning, so a broken config never quietly publishes a
     private profile's notes. Never raises.
     """
@@ -278,9 +295,7 @@ def _read_memory_private(path: str) -> bool:
         )
         return True
     try:
-        import yaml
-
-        data = yaml.safe_load(text)
+        data = _load_yaml(text)
     except Exception as exc:
         logger.warning(
             "hal0-memory: cannot parse %s (%s); treating hal0.memory_private as true",
@@ -330,9 +345,7 @@ def _read_agent_key(path: str, agent_id: str) -> str | None:
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
-        import yaml
-
-        data = yaml.safe_load(text)
+        data = _load_yaml(text)
     except Exception:
         return None
     if not isinstance(data, dict):

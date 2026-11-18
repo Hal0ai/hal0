@@ -258,6 +258,62 @@ def test_hermes_sqlite_floor_is_defined_once() -> None:
     assert hermes_doctor.SQLITE_MIN is hermes_layout.SQLITE_MIN is hp.SQLITE_MIN == (3, 51, 3)
 
 
+_PLUGINS_SRC = Path(__file__).resolve().parents[2] / "installer" / "agents" / "hermes" / "plugins"
+
+
+def _run_probe_here(argv, **kwargs):
+    """Run the probe script for real, under this interpreter instead of a Hermes venv."""
+    import sys
+
+    return subprocess.run([sys.executable, *argv[1:]], **kwargs)
+
+
+def _memory_config_row(tmp_path: Path, text: str | None) -> dict[str, str]:
+    home = tmp_path / "home"
+    home.mkdir()
+    if text is not None:
+        (home / "config.yaml").write_text(text, encoding="utf-8")
+    return dc.check_hermes_memory_config(
+        _venv_with_python(tmp_path), home, _PLUGINS_SRC, run=_run_probe_here
+    )
+
+
+def test_hermes_memory_config_row_ok_when_the_plugin_reads_its_key(tmp_path: Path) -> None:
+    key = "hal0ak_" + "s" * 43
+    row = _memory_config_row(
+        tmp_path,
+        f"memory:\n  provider: hal0-memory\nhal0:\n  agent_key: {{agent: hermes, key: {key}}}\n",
+    )
+    assert row["status"] == "ok" and key not in row["detail"]
+
+
+def test_hermes_memory_config_row_warns_when_the_provider_has_no_key(tmp_path: Path) -> None:
+    row = _memory_config_row(tmp_path, "memory:\n  provider: hal0-memory\n")
+    assert row["status"] == "warn" and "no identity key" in row["detail"]
+
+
+def test_hermes_memory_config_row_ok_when_another_provider_is_set(tmp_path: Path) -> None:
+    assert _memory_config_row(tmp_path, "memory:\n  provider: builtin\n")["status"] == "ok"
+
+
+def test_hermes_memory_config_row_warns_when_the_plugin_cannot_parse(tmp_path: Path) -> None:
+    row = _memory_config_row(tmp_path, "hal0: [1\nsecret: hunter2 }\n")
+    assert row["status"] == "warn" and "cannot parse" in row["detail"]
+    assert "hunter2" not in row["detail"]
+
+
+def test_hermes_memory_config_row_absent_without_config_or_venv(tmp_path: Path) -> None:
+    assert _memory_config_row(tmp_path, None)["status"] == "absent"
+    assert dc.check_hermes_memory_config(tmp_path / "none")["status"] == "absent"
+
+
+def test_hermes_memory_config_row_warns_when_the_probe_dies(tmp_path: Path) -> None:
+    row = dc.check_hermes_memory_config(
+        _venv_with_python(tmp_path), tmp_path, _PLUGINS_SRC, run=lambda *a, **k: _proc("", 1)
+    )
+    assert row["status"] == "warn" and "could not load" in row["detail"]
+
+
 def test_check_hermes_plugins_flags_a_stale_mirror(tmp_path: Path) -> None:
     """#2884: a mirrored plugin tree that differs from the shipped one warns."""
     src = tmp_path / "src"

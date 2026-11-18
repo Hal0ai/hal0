@@ -763,13 +763,13 @@ def test_a_config_that_is_a_directory_fails_closed(tmp_path) -> None:
     assert _retain(provider, fake) is True
 
 
-def test_a_missing_yaml_module_fails_closed(tmp_path, monkeypatch) -> None:
+def test_no_yaml_parser_at_all_fails_closed(tmp_path, monkeypatch) -> None:
     import builtins
 
     real = builtins.__import__
 
     def no_yaml(name, *a, **k):
-        if name == "yaml":
+        if name == "yaml" or name.startswith("ruamel"):
             raise ImportError("no yaml")
         return real(name, *a, **k)
 
