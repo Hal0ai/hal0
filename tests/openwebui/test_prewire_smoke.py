@@ -8,7 +8,13 @@ This test proves the v1 install bundle's *prewire* actually works:
        launch its own login screen (``WEBUI_AUTH=False``), and queries
        the hal0 API for its model catalogue.
     3. hal0 aggregates models from its configured upstreams and serves
-       them on ``/v1/models`` in the OpenAI shape.
+       them on ``/v1/models`` in the OpenAI shape.  A provider row written
+       straight into ``upstreams.toml`` is converted to stored per-model
+       rows in the background at boot, after which its models are listed
+       under the canonical id ``<provider>/<model-id>`` (a bare id still
+       routes and ``GET /v1/models/{id}`` still answers it).  The test
+       therefore waits for the converted listing and expects the canonical
+       id end to end.
 
 Why a stub upstream rather than a real one?
     A live llama-server would dominate the test budget (model download,
@@ -101,7 +107,11 @@ pytestmark = [
 
 # ── Stub upstream ────────────────────────────────────────────────────────────
 
+STUB_PROVIDER = "ci-smoke"
+# What the stub server itself serves (bare id).
 STUB_MODEL_ID = "ci-smoke-llama-0.1b"
+# What hal0 advertises once the provider row is converted: ``<provider>/<model-id>``.
+ADVERTISED_MODEL_ID = f"{STUB_PROVIDER}/{STUB_MODEL_ID}"
 
 
 def _free_port() -> int:
@@ -189,9 +199,12 @@ def hal0_api(
     ``0.0.0.0`` so the OpenWebUI container (running on the host's
     Docker bridge) can hit it via ``host.docker.internal``.
 
-    Polls ``/v1/models`` until the catalogue includes the stub model
-    id before yielding — guarantees the API is fully wired up before
-    we hand control to the OpenWebUI fixture.
+    The provider row is converted to stored per-model rows by a boot-time
+    background task once the stub answers, and ``/v1/models`` lists the
+    model under its canonical id (``ADVERTISED_MODEL_ID``) only after that.
+    Polls until the canonical id is listed — so the test never races the
+    converter between the bare and canonical listings — then checks that
+    the bare id still resolves via ``GET /v1/models/{id}`` before yielding.
 
     Yields ``(host_addr, host_port)``.  ``host_addr`` is always
     ``host.docker.internal`` (what OpenWebUI sees), ``host_port`` is
@@ -215,7 +228,7 @@ def hal0_api(
     upstreams_toml.write_text(
         # Inline TOML — no need to import tomli_w just for this.
         f"[[upstream]]\n"
-        f'name = "ci-smoke"\n'
+        f'name = "{STUB_PROVIDER}"\n'
         f'kind = "remote"\n'
         f'url = "{stub_url}"\n'
         f'auth_style = "none"\n'
@@ -248,8 +261,9 @@ def hal0_api(
     proc = subprocess.Popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT, env=env)
 
     try:
-        # Wait until /v1/models reports the stub model.  Generous
-        # timeout — fastapi imports a lot, and CI runners can be slow.
+        # Wait until /v1/models reports the canonical id, i.e. the row has
+        # been converted.  Generous timeout — fastapi imports a lot, CI
+        # runners can be slow, and conversion runs after the boot probe.
         deadline = time.monotonic() + 30.0
         last_err: str | None = None
         seen_model = False
@@ -264,7 +278,7 @@ def hal0_api(
                 resp = httpx.get(f"http://127.0.0.1:{port}/v1/models", timeout=2.0)
                 if resp.status_code == 200:
                     ids = [m.get("id") for m in resp.json().get("data", [])]
-                    if STUB_MODEL_ID in ids:
+                    if ADVERTISED_MODEL_ID in ids:
                         seen_model = True
                         break
                     last_err = f"models endpoint returned {ids!r}"
@@ -276,8 +290,15 @@ def hal0_api(
 
         if not seen_model:
             raise RuntimeError(
-                f"hal0-api did not advertise stub model within 30 s (last error: {last_err})"
+                f"hal0-api did not advertise {ADVERTISED_MODEL_ID!r} within 30 s "
+                f"(last error: {last_err})"
             )
+
+        # Product promise: a bare id keeps answering after conversion.
+        bare = httpx.get(f"http://127.0.0.1:{port}/v1/models/{STUB_MODEL_ID}", timeout=5.0)
+        assert bare.status_code == 200, (
+            f"GET /v1/models/{STUB_MODEL_ID} -> {bare.status_code}: {bare.text[:200]}"
+        )
 
         yield ("host.docker.internal", port)
     finally:
@@ -534,13 +555,13 @@ def test_openwebui_reads_prewired_env_and_lists_hal0_models(
         else:
             entries = []
         last_ids = [(e.get("id") or e.get("name") or "") for e in entries if isinstance(e, dict)]
-        if STUB_MODEL_ID in last_ids:
+        if ADVERTISED_MODEL_ID in last_ids:
             return  # 🎉 prewire works end-to-end
 
-        last_err = f"models listed: {last_ids!r} (missing {STUB_MODEL_ID!r})"
+        last_err = f"models listed: {last_ids!r} (missing {ADVERTISED_MODEL_ID!r})"
         time.sleep(2.0)
 
     pytest.fail(
-        f"OpenWebUI never advertised the hal0 model {STUB_MODEL_ID!r}. "
+        f"OpenWebUI never advertised the hal0 model {ADVERTISED_MODEL_ID!r}. "
         f"Last seen: {last_ids!r}. Last error: {last_err!r}."
     )
