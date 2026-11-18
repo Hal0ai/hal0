@@ -41,6 +41,7 @@ from hal0.redaction import (
     MASK,
     SENSITIVE_KEY_RE,
     is_sensitive_key,
+    is_token_count_key,
     redact_log_line,
     redact_text_tree,
 )
@@ -82,11 +83,24 @@ def redact_value(value: Any) -> dict[str, Any]:
 # ``redact_log_line`` from here so logs_tail and /api/logs share one
 # behaviour (api-logs-redact, surfaced by the SEC-mcp-clientid lane).
 #
+def is_token_count(key: str, value: Any) -> bool:
+    """True for a token-count setting: a ``*tokens`` key holding a number or nothing.
+
+    A count such as ``max_request_tokens = 4096`` is not a secret, and masking
+    it left the dashboard showing a blank field for a configured limit (#3805).
+    A string, list or mapping under the same name is still masked.
+    """
+    return is_token_count_key(key) and (
+        value is None or (isinstance(value, (int, float)) and not isinstance(value, bool))
+    )
+
+
 def redact_config(config: Any) -> Any:
     """Recursively scrub sensitive-keyed values from a config tree.
 
     - ``dict``: walk keys. For a sensitive key, replace its value with
-      :func:`redact_value`'s ``{value, set}`` projection. For a nested
+      :func:`redact_value`'s ``{value, set}`` projection, unless it is a
+      token count (:func:`is_token_count`). For a nested
       dict or list value, recurse. Otherwise pass through.
     - ``list``: recurse element-by-element (so a list of dicts is fully
       scrubbed). Lists of scalars pass through as-is — only keyed
@@ -99,7 +113,7 @@ def redact_config(config: Any) -> Any:
     if isinstance(config, dict):
         out: dict[str, Any] = {}
         for k, v in config.items():
-            if is_sensitive_key(k):
+            if is_sensitive_key(k) and not is_token_count(k, v):
                 out[k] = redact_value(v)
             elif isinstance(v, (dict, list)):
                 out[k] = redact_config(v)
@@ -115,6 +129,7 @@ __all__ = [
     "LOG_SECRET_RE",
     "MASK",
     "is_sensitive_key",
+    "is_token_count",
     "redact_config",
     "redact_log_line",
     "redact_text_tree",

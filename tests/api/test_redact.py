@@ -136,6 +136,30 @@ def test_redact_config_plain_key_passes_through_unmasked() -> None:
     assert out == {"ctx_size": 4096, "port": 8080}
 
 
+def test_redact_config_shows_a_numeric_token_count() -> None:
+    """A token-count limit is not a secret (#3805): the dashboard needs the number."""
+    tree = {"decision": {"max_request_tokens": 4096}, "lane": {"max_completion_tokens": None}}
+    assert redact_config(tree) == tree
+    assert redact_config({"extraction_max_tokens": 2048.0}) == {"extraction_max_tokens": 2048.0}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("api_tokens", "Zq8vR2mW9xK4tL7pQ3"),  # a string under a tokens name
+        ("api_tokens", ["a", "b"]),
+        ("max_tokens", "4096"),  # not a number
+        ("max_tokens", True),  # bool is not a count
+        ("HF_TOKEN", 12345),  # singular token: a credential name
+        ("max_tokens_secret", 5),  # another secret word in the name
+        ("tokens_key", 5),
+        ("password", 1234),
+    ],
+)
+def test_redact_config_still_masks_everything_that_is_not_a_count(key: str, value: object) -> None:
+    assert redact_config({key: value}) == {key: {"value": MASK, "set": True}}
+
+
 def test_redact_config_empty_sensitive_key_yields_set_false() -> None:
     """An empty sensitive value is masked with ``set=false`` so the UI can
     render the slot as 'not configured' without ever receiving the secret."""

@@ -2030,30 +2030,29 @@ known_issues:
     status: by-design
     adjudicated: v1.4.0-nightly.20261015155017
     summary: >-
-      GET /api/settings and /api/settings/fields echo memory.graph.extraction_max_tokens as
-      {"value":"***REDACTED***","set":true} (secret=true); is_sensitive_key is True for
-      extraction_max_tokens and max_tokens. It is the only masked leaf in /api/settings.
+      Key-name redaction over-masks any key containing TOKEN. Since #3805 a structured config
+      echo (GET /api/settings, /api/settings/fields, the settings preview diff, doctor bundles)
+      shows a numeric `*tokens` setting in the clear (memory.decision.max_request_tokens,
+      memory.graph.extraction_max_tokens, memory.lanes.*.max_completion_tokens) and reports
+      secret=false for it. Every other TOKEN-named key is still masked as
+      {"value":"***REDACTED***","set":true}, including a string, list or mapping stored under a
+      `*tokens` name.
     why: >-
-      Key-name redaction in hal0.api._redact (is_sensitive_key / redact_config) deliberately
-      over-masks any key containing TOKEN, including count keys (#553 over-redact spec in
-      _redact.py:46-51; pinned by tests/api/test_redact.py:43 and
-      tests/fixtures/redaction_shapes.json sensitive_keys, which lists max_tokens, #2520).
-      redaction.py:921-927 documents
-      the count-name exemption (#2466/#2487) as applying only to the TEXT redactors. Nothing a
-      user sees or saves is affected: the dashboard reads extraction_limits.max_tokens (4096,
-      unmasked) from GET /api/memory/graph/status, and PUT /api/settings refuses every
-      memory.graph.* key (settings.py:98-110, :173) so the masked object cannot be written back.
-      Unmasking counts is a design change to the pinned contract (enhancement), not a release
-      finding.
+      A token-count limit is not a secret, and masking it left Settings > Memory > Models
+      showing a blank "Largest request" field (#3805). The exemption is narrow on purpose
+      (hal0.api._redact.is_token_count): the key is sensitive only for the plural word
+      `tokens` AND the value is a number or unset. is_sensitive_key itself is unchanged and
+      still True for max_tokens (pinned by tests/api/test_redact.py and
+      tests/fixtures/redaction_shapes.json), so the installer mirror and the bridge
+      capability filter keep their over-redact behaviour.
     still_report_if: >-
       A dashboard page or CLI command shows ***REDACTED***, [object Object] or a blank in place
-      of a token-count setting; OR GET /api/memory/graph/status masks
-      extraction_limits.max_tokens; OR a settings write or preview path (PUT /api/settings,
-      /api/settings/preview, PUT /api/memory/graph) accepts the masked {value,set} object back
-      and persists it or reports 'no change' for a real token-count change; OR is_sensitive_key
-      stops masking a real credential key (HF_TOKEN, *_API_KEY); OR masking spreads beyond the
-      key's own value (installer report or doctor bundle masks the literal number elsewhere, the
-      #2439 class).
+      of a token-count setting; OR a string value under a `*tokens` key is echoed in the clear;
+      OR GET /api/memory/graph/status masks extraction_limits.max_tokens; OR is_sensitive_key
+      stops masking a real credential key (HF_TOKEN, *_API_KEY); OR a settings write or preview
+      path (PUT /api/settings, /api/settings/preview, PUT /api/memory/graph) accepts a masked
+      {value,set} object back and persists it; OR masking spreads beyond the key's own value
+      (installer report or doctor bundle masks the literal number elsewhere, the #2439 class).
     review_at: v1.5.0
 
   - id: batch-retain-parent-retry-is-idempotent
