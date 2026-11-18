@@ -149,8 +149,8 @@ In order, the first rule that applies wins:
 4. If nothing has routed the request and a curated provider stores the model switched off,
    or the request named `<provider>/<id>` and that provider has no enabled row for it, the
    answer is a 404 `upstream.model_not_enabled`. The message names the provider and how to
-   enable the model: `hal0 upstream enable <provider> <model>`, or the provider's model
-   list in the dashboard. A **bare** id is not refused here when the request is for
+   enable the model: `hal0 upstream enable <provider> <model>`, or under Models → Providers
+   in the dashboard. A **bare** id is not refused here when the request is for
    embeddings, rerank, speech, transcription or images, or when the id is one of hal0's
    own alias names (such as `tts-1`): those continue to step 5 and the local slot serves
    them.
@@ -185,6 +185,29 @@ refetches the provider's list and stores each model it newly offers as a switche
 (existing rows are not changed); `GET /api/upstreams/{name}/models` never writes.
 A new upstream created with no `models` is uncurated and converts the same way; one created
 with `models` (even `[]`) is curated from the start.
+
+### In the dashboard
+
+Everything above is available under **Models → Providers**: the list has a section per
+provider with a switch per model (the `enabled` field of each `[[upstream.models]]` row), the
+**Add provider** dialog creates a curated provider with the rows you ticked, and **Refresh
+model list** is the same refresh. A provider that has not been converted shows **Choose
+models**, which runs the refresh and converts it with every model it offered switched on. The
+dashboard reads and writes these routes: `GET /api/upstreams`, `GET /api/providers/catalog`,
+`POST /api/providers/probe`, `POST /api/upstreams`, `GET /api/upstreams/{name}/models`,
+`PATCH /api/upstreams/{name}/models/{model_id}`, `POST /api/upstreams/{name}/refresh`,
+`POST /api/upstreams/{name}/test`, `PATCH` and `DELETE /api/upstreams/{name}`, and
+`POST /api/providers/{name}/credentials`. The remote-provider panel that used to sit under
+**Slots → Endpoints** moved there; Slots → Endpoints keeps the local endpoints and a link, and
+the old `#models/upstream` and `#slots/endpoints?focus=upstream` addresses forward to the new
+tab.
+
+The dashboard stores a key in a variable named after the provider, `<NAME>_API_KEY` with the
+name upper-cased and anything outside letters and digits turned into `_` (`deepseek-2` becomes
+`DEEPSEEK_2_API_KEY`), so two providers made from one template keep separate keys. A name that
+starts with a digit or would collide with a reserved variable gets a `PROVIDER_` prefix, and a
+variable already used by another provider gets a number. The variable name is saved as
+`auth_value_env`; the key itself goes only to the credentials route.
 
 ### Keys
 
