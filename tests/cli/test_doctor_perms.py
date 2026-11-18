@@ -302,6 +302,29 @@ def test_hermes_memory_config_row_warns_when_the_plugin_cannot_parse(tmp_path: P
     assert "hunter2" not in row["detail"]
 
 
+def test_hermes_memory_config_row_warns_on_a_non_mapping_or_undecodable_file(
+    tmp_path: Path,
+) -> None:
+    row = _memory_config_row(tmp_path, "- hal0-memory\n")
+    assert row["status"] == "warn" and "NotAMapping" in row["detail"]
+    (tmp_path / "home" / "config.yaml").write_bytes(b"hal0: \xff\xfe\n")
+    row = dc.check_hermes_memory_config(
+        tmp_path / "venv", tmp_path / "home", _PLUGINS_SRC, run=_run_probe_here
+    )
+    assert row["status"] == "warn" and "UnicodeDecodeError" in row["detail"]
+
+
+def test_hermes_memory_config_row_is_advisory_when_a_path_cannot_be_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def denied(self: Path, *args: object, **kwargs: object) -> bool:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "is_dir", denied)
+    row = dc.check_hermes_memory_config(_venv_with_python(tmp_path), tmp_path, _PLUGINS_SRC)
+    assert row["status"] == "unreadable" and "Permission denied" in row["detail"]
+
+
 def test_hermes_memory_config_row_absent_without_config_or_venv(tmp_path: Path) -> None:
     assert _memory_config_row(tmp_path, None)["status"] == "absent"
     assert dc.check_hermes_memory_config(tmp_path / "none")["status"] == "absent"

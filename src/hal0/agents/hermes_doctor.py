@@ -142,6 +142,8 @@ except FileNotFoundError:
     print("absent"); raise SystemExit(0)
 except OSError:
     print("unreadable"); raise SystemExit(0)
+except UnicodeDecodeError:
+    print("noparse UnicodeDecodeError"); raise SystemExit(0)
 spec = importlib.util.spec_from_file_location(
     "hal0_memory_probe", plugin_dir + "/__init__.py", submodule_search_locations=[plugin_dir]
 )
@@ -153,6 +155,8 @@ try:
     data = provider._load_yaml(text)
 except Exception as exc:
     print("noparse", type(exc).__name__); raise SystemExit(0)
+if data is not None and not isinstance(data, dict):
+    print("noparse NotAMapping"); raise SystemExit(0)
 if provider._read_agent_key(config, agent):
     print("key"); raise SystemExit(0)
 memory = data.get("memory") if isinstance(data, dict) else None
@@ -189,7 +193,15 @@ def check_hermes_memory_config(
     )
     python = venv / "bin" / "python"
     plugin_dir = src / "hal0-memory"
-    if not python.exists() or not plugin_dir.is_dir():
+    try:
+        present = python.exists() and plugin_dir.is_dir()
+    except OSError as exc:
+        # Advisory only: never abort `hal0 doctor` on a path this user cannot stat.
+        return {
+            "status": "unreadable",
+            "detail": f"cannot check the Hermes venv or plugin ({exc.strerror or exc})",
+        }
+    if not present:
         return {"status": "absent", "detail": "no Hermes venv or shipped hal0-memory plugin"}
     try:
         proc = run(
