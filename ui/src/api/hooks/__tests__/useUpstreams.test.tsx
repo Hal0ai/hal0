@@ -218,6 +218,29 @@ describe('useUpstreamModelPatch', () => {
   })
 })
 
+describe('a re-added provider starts without the old listing', () => {
+  it('delete drops the removed provider\'s cached listing', async () => {
+    qc.setQueryData(['upstream-models', 'deepseek'], LISTING)
+    qc.setQueryData(['upstream-models', 'other'], LISTING)
+    vi.mocked(client.apiDelete).mockResolvedValue(null)
+    const h = mount(() => hooks.useUpstreamDelete())
+    await act(async () => {
+      await h.current().mutateAsync('deepseek')
+    })
+    expect(qc.getQueryData(['upstream-models', 'deepseek'])).toBeUndefined()
+    expect(qc.getQueryData(['upstream-models', 'other'])).toEqual(LISTING)
+  })
+  it('create drops a cached listing left under the same name', async () => {
+    qc.setQueryData(['upstream-models', 'deepseek'], LISTING)
+    vi.mocked(client.apiPost).mockResolvedValue({ name: 'deepseek' })
+    const h = mount(() => hooks.useUpstreamCreate())
+    await act(async () => {
+      await h.current().mutateAsync({ name: 'deepseek' })
+    })
+    expect(qc.getQueryData(['upstream-models', 'deepseek'])).toBeUndefined()
+  })
+})
+
 describe('useUpstreamRefresh', () => {
   it('writes the returned listing into the cache', async () => {
     const fresh = { ...LISTING, fetched_at: 2, warning: 'x' }

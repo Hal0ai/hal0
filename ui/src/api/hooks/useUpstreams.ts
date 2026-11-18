@@ -211,7 +211,11 @@ export function useUpstreamCreate() {
   return useMutation({
     mutationFn: (body: UpstreamCreateBody) =>
       apiPost<UpstreamEntry>(ENDPOINTS.upstreams, body),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['upstreams'] }),
+    // A listing cached under this name belongs to an earlier provider of the same name.
+    onSuccess: (_made, body) => {
+      qc.removeQueries({ queryKey: ['upstream-models', body.name] })
+      return qc.invalidateQueries({ queryKey: ['upstreams'] })
+    },
   })
 }
 
@@ -228,7 +232,10 @@ export function useUpstreamDelete() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (name: string) => apiDelete(ENDPOINTS.upstream(name)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['upstreams'] }),
+    onSuccess: (_done, name) => {
+      qc.removeQueries({ queryKey: ['upstream-models', name] })
+      return qc.invalidateQueries({ queryKey: ['upstreams'] })
+    },
   })
 }
 
