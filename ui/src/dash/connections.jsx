@@ -27,6 +27,8 @@ import { copyTextToClipboard } from '@/lib/clipboard'
 import { useAuthStatus } from '@/api/hooks/useAuthStatus'
 import { useSlots } from '@/api/hooks/useSlots'
 import { slotIndicatorFromPhase } from './slot-status.js'
+import { LaneCode } from './lane-code.jsx'
+import { laneForSlot } from './lane-code-pure'
 import { useMcpServers } from '@/api/hooks/useMcp'
 import { useBridgeClients } from '@/api/hooks/useBridge'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
@@ -108,12 +110,6 @@ function CIcon({ name, size = 14 }) {
 const copyText = (t) => copyTextToClipboard(t)
 function toast(msg, kind) {
   if (typeof window !== 'undefined' && window.__hal0Toast) window.__hal0Toast(msg, kind)
-}
-function devClass(d) {
-  return 'chip dev-' + (d || 'cpu').replace('gpu-', '')
-}
-function devLabel(d) {
-  return (d || 'cpu').replace('gpu-', '')
 }
 function modelId(s) {
   return s.model_id || s.model || s.name
@@ -524,7 +520,7 @@ function EndpointRow({ slot, apiBase, authRequired }) {
         </span>
         <span className="ep-model">{modelId(slot)}</span>
         <span className="ep-dev">
-          <span className={devClass(slot.device)}>{devLabel(slot.device)}</span>
+          <LaneCode lane={laneForSlot(slot)} />
         </span>
         <span className="ep-port">
           <span className="colon">:</span>

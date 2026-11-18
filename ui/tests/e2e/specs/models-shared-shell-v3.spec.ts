@@ -98,8 +98,10 @@ test.describe('Models — shared catalog shell', () => {
   test('a GGUF the NPU can run shows its ggml-xdna fit on the row and in the detail pane', async ({ page }) => {
     await page.goto('/#models')
     const used = page.locator('.mdl-row', { hasText: 'Shell Used Model' })
-    await expect(used.getByTestId('mdl-row-npu')).toHaveText('npu · per-op')
-    await expect(page.locator('.mdl-row', { hasText: 'Shell Free Model' }).getByTestId('mdl-row-npu')).toHaveText('npu · fused')
+    // The NPU lane code; the ggml-xdna path (per-op or fused) is on the element and in the tooltip.
+    await expect(used.getByTestId('mdl-row-npu')).toHaveText('NPU')
+    await expect(used.getByTestId('mdl-row-npu')).toHaveAttribute('data-xdna-path', 'per-op')
+    await expect(page.locator('.mdl-row', { hasText: 'Shell Free Model' }).getByTestId('mdl-row-npu')).toHaveAttribute('data-xdna-path', 'fused')
     await expect(page.locator('.mdl-row', { hasText: 'Shell Missing Model' }).getByTestId('mdl-row-npu')).toHaveCount(0)
 
     await used.click()

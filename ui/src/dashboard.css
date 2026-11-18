@@ -56,6 +56,8 @@
   --dev-cuda:     #8fce6f;  /* CUDA lane chip (runtime cascade) */
   --dev-npu:      #c896ff;
   --dev-img:      #3c6597;  /* ComfyUI image-gen tag (decoupled from --comfy accent) */
+  --dev-flm:      #e58fd0;  /* FastFlowLM lane code (NPU, not ggml-xdna) */
+  --dev-ext:      #4fd1c5;  /* external / upstream provider lane code */
 
   /* ComfyUI "generation engine" accent — its own blue the way the NPU stack
      owns purple. The slots-page Image-Gen pane (dash/image/*.css) draws with
@@ -1140,6 +1142,29 @@ a { color: inherit; text-decoration: none; }
 .chip.dev-npu { color: var(--dev-npu); border-color: rgba(200, 150, 255, 0.30); background: rgba(200, 150, 255, 0.08); }
 .chip.dev-img { color: var(--dev-img); border-color: rgba(60, 101, 151, 0.30); background: rgba(60, 101, 151, 0.08); }
 .chip.outlined { background: transparent; }
+
+/* Lane code: what a slot or model runs on, as a solid three-letter block (LaneCode, lane-code.jsx).
+   Square = lane, round = state (.sdot). Sized to sit on a 12.5px text line. */
+.lane-code {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: var(--rad-xs);
+  font: 700 9px/1 var(--jbm);
+  letter-spacing: 0.03em;
+  color: var(--bg);
+  background: var(--dev-cpu);
+  white-space: nowrap;
+  vertical-align: -2px;
+}
+.lane-code.lane-vulkan { background: var(--dev-vulkan); }
+.lane-code.lane-rocm { background: var(--dev-rocm); }
+.lane-code.lane-cuda { background: var(--dev-cuda); }
+.lane-code.lane-npu { background: var(--dev-npu); }
+.lane-code.lane-flm { background: var(--dev-flm); }
+.lane-code.lane-ext { background: var(--dev-ext); }
 
 .kbd {
   font-family: var(--jbm);
@@ -2397,8 +2422,13 @@ select.npu-sel {
 .mdl-row.sel { background: var(--accent-bg); }
 .mdl-row .nm { color: var(--fg); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mdl-row .nm .sub { color: var(--fg-4); font-weight: 400; font-size: 10.5px; display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
-.mdl-row-tags { display: flex; flex-wrap: nowrap; gap: 4px; justify-content: flex-end; overflow: hidden; }
+.mdl-row-tags { display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; justify-content: flex-end; overflow: hidden; }
 .mdl-row-tags .chip { text-transform: lowercase; }
+/* Type as a bare glyph (TypeGlyph); status without a chip box where the leading dot says it. */
+.mdl-row-tags .type-glyph { display: inline-flex; align-items: center; color: var(--fg-2); }
+.mdl-row .mdl-status-inuse { display: inline-flex; align-items: center; gap: 6px; font-family: var(--jbm); font-size: 10px; color: var(--fg-2); }
+.mdl-row .mdl-status-inuse svg { color: var(--ok); flex-shrink: 0; }
+.mdl-row .mdl-status-ext { display: inline-flex; align-items: center; }
 .mdl-row .sz { color: var(--fg-3); text-align: right; font-size: 11px; }
 .mdl-row .tg { color: var(--fg-3); font-size: 10.5px; text-align: right; }
 .mdl-row-icon { width: 14px; display: flex; align-items: center; justify-content: center; font-size: 12px; }

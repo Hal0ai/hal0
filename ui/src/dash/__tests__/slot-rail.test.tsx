@@ -102,6 +102,9 @@ describe('SlotRail', () => {
     expect(row('agent').classList.contains('off')).toBe(true)
     expect(row('brain').classList.contains('off')).toBe(false)
     expect(row('brain').querySelector('.st')!.textContent).toBe('42 tok/s')
+    expect(row('agent').querySelector('.st')).toBeNull()
+    expect(row('brain').querySelector('.lane-code')!.textContent).toBe('VLK')
+    expect(row('flm').querySelector('.lane-code')!.textContent).toBe('FLM')
     expect(row('brain').querySelector('.mdl')!.textContent).toBe('brain.gguf')
     expect(row('brain').querySelector('.mem')!.textContent).toBe('2.0 GB')
     expect(row('agent').querySelector('.mem')!.textContent).toBe('—')
@@ -123,7 +126,9 @@ describe('SlotRail', () => {
     // Listed, but not counted: one configured slot, none ready.
     expect(q('[data-testid="slot-rail-count"]')!.textContent).toBe('0 / 1 ready')
     expect(row('brain').querySelector('.sdot')!.classList.contains('paused')).toBe(true)
-    expect(row('brain').querySelector('.st')!.textContent).toBe('paused')
+    // The state word is the dot's accessible name; only a tok/s figure is printed.
+    expect(row('brain').querySelector('.sdot')!.getAttribute('aria-label')).toBe('paused')
+    expect(row('brain').querySelector('.st')).toBeNull()
     const foot = q('[data-testid="slot-rail-footer"]')!.textContent!
     expect(foot).toContain('1 paused for image mode')
     expect(foot).not.toContain('pool')

@@ -20,7 +20,7 @@
  * `--warn` in dashboard.css and update WARM_RGB below.
  *
  * Covered warming sites (issue AC — at least slot dot, infer epill, NPU epill):
- *   - slot dot            → `.infer-pane .sdot.warming`   (engine-panes.css)
+ *   - slot dot            → `.sdot.warming` under `.infer-pane` (overhaul.css; ring border)
  *   - connections dot     → `.ep-dot.warming`             (connections.css)
  *   - infer pane epill    → `.infer-pane .epill.starting` (engine-panes.css)
  *   - NPU pane epill      → `.npu-pane .epill.starting`   (engine-panes.css)
@@ -32,16 +32,17 @@ import { test, expect } from '../fixtures/apiMock'
 // then update this one constant. rgb() is how getComputedStyle reports it.
 const WARM_RGB = 'rgb(232, 185, 78)'
 
-type Probe = { site: string; ancestor: string; el: string; prop: 'backgroundColor' | 'color' }
+type Probe = { site: string; ancestor: string; el: string; prop: 'backgroundColor' | 'borderTopColor' | 'color' }
 
 // Each probe injects the REAL selector chain and reads the color the browser
 // resolves from the live stylesheet — proving that site is wired to --warn.
 const PROBES: Probe[] = [
-  { site: 'slot dot (infer pane)', ancestor: 'infer-pane', el: 'sdot warming', prop: 'backgroundColor' },
+  // The warming slot dot is an open ring: its colour is the border, the fill is transparent.
+  { site: 'slot dot (infer pane)', ancestor: 'infer-pane', el: 'sdot warming', prop: 'borderTopColor' },
   { site: 'connections dot', ancestor: '', el: 'ep-dot warming', prop: 'backgroundColor' },
   { site: 'infer pane epill', ancestor: 'infer-pane', el: 'epill starting', prop: 'color' },
   { site: 'NPU pane epill', ancestor: 'npu-pane', el: 'epill starting', prop: 'color' },
-  { site: 'overhaul slot dot (--warming alias)', ancestor: '', el: 'sdot warming', prop: 'backgroundColor' },
+  { site: 'overhaul slot dot (--warming alias)', ancestor: '', el: 'sdot warming', prop: 'borderTopColor' },
 ]
 
 test.describe('unified warm color', () => {
@@ -88,7 +89,7 @@ test.describe('unified warm color', () => {
         el.className = p.el
         root.appendChild(el)
         document.body.appendChild(root)
-        const value = getComputedStyle(el)[p.prop as 'backgroundColor' | 'color']
+        const value = getComputedStyle(el)[p.prop as 'backgroundColor' | 'borderTopColor' | 'color']
         root.remove()
         return value
       }, probe)
