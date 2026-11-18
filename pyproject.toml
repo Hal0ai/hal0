@@ -111,6 +111,9 @@ dev = [
   # import time. Same scope as numpy + soundfile above — toolbox-only
   # at runtime, but the test suite imports the FastAPI app.
   "python-multipart>=0.0.9",
+  # The YAML parser of the pinned Hermes venv, which has no PyYAML. The
+  # hal0-memory plugin runs there, so its tests parse with this one (#3803).
+  "ruamel.yaml>=0.18.16,<0.19",
 ]
 
 # Bench load-gen tooling (Phase 3 of the bench overhaul). Deliberately NOT in
