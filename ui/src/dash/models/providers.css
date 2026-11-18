@@ -12,15 +12,16 @@
   color: var(--fg); font: inherit; cursor: pointer;
 }
 .prov-head:hover { background: var(--bg-2); }
+.prov-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .prov-head.sel { border-left-color: var(--accent); background: var(--accent-soft); }
-.prov-chev { width: 14px; flex: none; color: var(--fg-4); font-family: var(--jbm); font-size: 11px; }
+.prov-chev { width: 14px; flex: none; color: var(--fg-3); font-family: var(--jbm); font-size: 12px; }
 .prov-logo {
   display: grid; place-items: center; flex: none; width: 26px; height: 26px;
   border-radius: 6px; background: var(--bg-3); border: 1px solid var(--line-strong);
   color: var(--fg-2); font-family: var(--jbm); font-size: 10.5px; font-weight: 600;
 }
 .prov-name { font-weight: 600; }
-.prov-host { flex: 1 1 0; min-width: 0; color: var(--fg-4); font-family: var(--jbm); font-size: 11px; overflow-wrap: anywhere; }
+.prov-host { flex: 1 1 120px; min-width: 0; color: var(--fg-4); font-family: var(--jbm); font-size: 11px; overflow-wrap: anywhere; }
 .prov-chips { display: flex; flex-wrap: wrap; gap: 5px; }
 
 .prov-banner {
@@ -53,7 +54,7 @@
   display: flex; flex: 1 1 0; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0;
   padding: 7px 0; text-align: left; background: transparent; border: 0; color: inherit; font: inherit; cursor: pointer;
 }
-.prov-pick:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.prov-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .prov-row:hover { background: var(--bg-2); }
 .prov-row.sel { background: var(--accent-soft); }
 .prov-row.off .prov-mid, .prov-row.off .prov-meta { opacity: 0.6; }
@@ -82,7 +83,6 @@
 .prov-call code { flex: 1 1 0; min-width: 0; overflow-wrap: anywhere; color: var(--fg); font-size: 12px; }
 .prov-edit { display: flex; flex-direction: column; gap: 8px; margin: 8px 0; }
 .prov-field { display: flex; flex-direction: column; gap: 3px; color: var(--fg-3); font-size: 11px; }
-.provider-detail .btn.danger { color: var(--err); }
 .provider-detail .ro-row .v { min-width: 0; overflow-wrap: anywhere; }
 
 @media (max-width: 480px) {

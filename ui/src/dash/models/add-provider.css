@@ -20,7 +20,7 @@
 .addprov-row-field .input { width: 100%; box-sizing: border-box; }
 .addprov-keyrow .input { width: auto; }
 .addprov-err { margin-top: 5px; font-size: 11px; color: var(--err); overflow-wrap: anywhere; }
-.addprov-sub, .addprov-hint { font-size: 11px; color: var(--fg-3); line-height: 1.45; overflow-wrap: anywhere; }
+.addprov-sub, .addprov-hint { font-size: 11px; color: var(--fg-3); line-height: 1.45; overflow-wrap: break-word; }
 
 .addprov-result {
   padding: 8px 11px; border: 1px solid var(--ok-line); border-radius: 8px; background: var(--ok-soft);
@@ -46,7 +46,8 @@
 .addprov-empty { padding: 12px 11px; color: var(--fg-3); font-size: 11.5px; }
 .addprov-more { margin: 8px 11px; }
 
-.addprov-note { color: var(--fg-3); }
+.addprov-sub, .addprov-hint, .addprov-hint .mono, .addprov-note { word-break: normal; } /* the shared .mono and the modal foot break every letter */
+.addprov-note { flex: 1 1 140px; min-width: 0; color: var(--fg-3); overflow-wrap: break-word; }
 .addprov-bad { color: var(--err); }
 .addprov-btns { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
@@ -54,7 +55,7 @@
   .addprov .pf-row { grid-template-columns: 1fr; gap: 4px; }
   .addprov .pf-row-lbl { padding-top: 0; }
   .addprov-row { grid-template-columns: auto minmax(0, 1fr) auto; }
-  .addprov-row .addprov-type { grid-column: 2; justify-self: start; }
+  .addprov-row .addprov-type { grid-column: 2; justify-self: start; width: auto; }
   .addprov-row .addprov-num { grid-column: 2; text-align: left; }
 }
 

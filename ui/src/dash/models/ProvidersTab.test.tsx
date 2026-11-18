@@ -231,9 +231,16 @@ describe('provider sections', () => {
     expect(v.onSelect).not.toHaveBeenCalled()
   })
 
-  it('shows the quiet line for a stale listing', async () => {
-    await expand('corp')
+  it('shows the quiet line for a stale listing of a per-model provider', async () => {
+    listings.minimax = listing('minimax', [row('m1', { enabled: true })], { stale: true })
+    await expand('minimax')
     expect(text()).toContain('Model list could not be refreshed; showing the last known list.')
+  })
+
+  it('a provider awaiting conversion is always stale on the wire, but says so only in its banner', async () => {
+    await expand('corp')
+    expect(q('[data-testid="prov-banner-convert-corp"]')).not.toBeNull()
+    expect(text()).not.toContain('could not be refreshed')
   })
 
   it('shows a flag chip and the callable name', async () => {
@@ -280,6 +287,41 @@ describe('search', () => {
     await settle()
     expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('false')
     expect(q('[data-testid="prov-model-openrouter-m299"]')).toBeNull()
+  })
+
+  it('while searching the chevron shows the open state, not the remembered one', async () => {
+    view()
+    await settle()
+    const chev = () => q('[data-testid="prov-head-openrouter"] .prov-chev')!.textContent
+    expect(chev()).toBe('▸')
+    await type(q('input[aria-label="Search models"]'), 'm299')
+    await later(300)
+    await settle()
+    expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('true')
+    expect(chev()).toBe('▾')
+    await type(q('input[aria-label="Search models"]'), '')
+    await later(300)
+    await settle()
+    expect(chev()).toBe('▸')
+  })
+
+  it('a header click while searching selects the provider and leaves the remembered state alone', async () => {
+    const { onSelect } = view({ provider: 'openrouter', model: 'm001' })
+    await settle()
+    await type(q('input[aria-label="Search models"]'), 'm299')
+    await later(300)
+    await settle()
+    click(q('[data-testid="prov-head-openrouter"]')!)
+    await settle()
+    // The provider itself is selected (its model selection is dropped); nothing is collapsed under the search.
+    expect(onSelect).toHaveBeenLastCalledWith({ provider: 'openrouter', model: null })
+    expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('true')
+    await type(q('input[aria-label="Search models"]'), '')
+    await later(300)
+    await settle()
+    // The remembered state is what it was before the click: open, because it is the selected provider.
+    expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('true')
+    expect(q('[data-testid="prov-head-minimax"]')!.getAttribute('aria-expanded')).toBe('false')
   })
 
   it('a one-character query still renders at most the paged off rows per section', async () => {

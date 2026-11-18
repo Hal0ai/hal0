@@ -187,24 +187,24 @@ function ProviderPanel({ u, selected, onSelect, catalog }) {
         <>
           <DetailSection title="Actions">
             <div className="prov-actions">
-              <button type="button" className="btn sm" disabled={test.isPending} onClick={runTest}>
+              <button type="button" className="btn ghost sm" disabled={test.isPending} onClick={runTest}>
                 {test.isPending ? 'Testing…' : 'Test connection'}
               </button>
               {state === 'not-converted' ? (
-                <button type="button" className="btn sm" disabled={refresh.isPending} onClick={() => refreshModelList(refresh, u, label)}>
+                <button type="button" className="btn ghost sm" disabled={refresh.isPending} onClick={() => refreshModelList(refresh, u, label)}>
                   Choose models
                 </button>
               ) : (
-                <button type="button" className="btn sm" disabled={refresh.isPending} onClick={() => refreshModelList(refresh, u, label)}>
+                <button type="button" className="btn ghost sm" disabled={refresh.isPending} onClick={() => refreshModelList(refresh, u, label)}>
                   Refresh model list
                 </button>
               )}
               {key !== 'not-needed' && u.auth_value_env && !editing && (
-                <button type="button" className="btn sm" onClick={() => setEditing(true)}>
+                <button type="button" className="btn ghost sm" onClick={() => setEditing(true)}>
                   {u.auth_key_present ? 'Replace key' : 'Add key'}
                 </button>
               )}
-              <button type="button" className="btn ghost sm danger" onClick={() => setConfirm(true)}>Remove</button>
+              <button type="button" className="btn danger sm" onClick={() => setConfirm(true)}>Remove</button>
             </div>
             {testLine && (
               <div className={'prov-msg' + (testLine.ok ? ' ok' : ' err')} role="status" data-testid="prov-test-line">

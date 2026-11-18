@@ -8,7 +8,7 @@
 //
 // A section loads its model rows only while it is expanded. Switches read the cached listing, so
 // a refused change shows the row back where it was (the patch hook rolls the cache back).
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { PillToggle } from '@/dash/primitives.jsx'
 import { CatalogToolbar } from '@/dash/models/catalog-shell.jsx'
 import {
@@ -152,6 +152,27 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
   const patch = useUpstreamModelPatch()
   const refresh = useUpstreamRefresh()
 
+  // A switched row moves between "On" and "Available", which remounts it and drops keyboard focus.
+  // The switch that had focus gets it back, unless the user has already moved on. `refocus` holds
+  // the model id until the request has answered (`final`), then the last render settles it.
+  const secRef = useRef(null)
+  const refocus = useRef(null)
+  const [, bump] = useState(0)
+  useEffect(() => {
+    const want = refocus.current
+    if (!want) return
+    const active = document.activeElement
+    if (active && active !== document.body) {
+      if (want.final || !secRef.current?.contains(active)) refocus.current = null
+      return
+    }
+    const rowEl = Array.from(secRef.current?.querySelectorAll('[data-testid^="prov-model-"]') ?? []).find(
+      (el) => el.getAttribute('data-testid') === `prov-model-${u.name}-${want.id}`,
+    )
+    rowEl?.querySelector('[role="switch"]')?.focus()
+    if (want.final) refocus.current = null
+  })
+
   const rows = listing.data?.models ?? []
   const parts = sectionRows(rows, filter, offShown)
   const owner = ownerLabel(u)
@@ -161,11 +182,18 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
   const chip = KEY_CHIP[key]
 
   const toggle = async (m, next) => {
+    if (secRef.current?.contains(document.activeElement)) refocus.current = { id: m.id, final: false }
     try {
       await patch.mutateAsync({ name: u.name, modelId: m.id, patch: { enabled: next } })
       toast(`${u.name}/${m.id} switched ${next ? 'on' : 'off'}`, 'ok')
     } catch (err) {
       toast(toggleErrorMessage(err || {}), 'err')
+    } finally {
+      // The answer (or the rollback) may remount the row once more.
+      if (refocus.current) {
+        refocus.current = { id: m.id, final: true }
+        bump((n) => n + 1)
+      }
     }
   }
 
@@ -182,7 +210,7 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
   )
 
   return (
-    <section className="prov-sec" data-testid={`prov-section-${u.name}`}>
+    <section className="prov-sec" data-testid={`prov-section-${u.name}`} ref={secRef}>
       <button
         type="button"
         className={'prov-head' + (isSel ? ' sel' : '') + (noMatch ? ' muted' : '')}
@@ -190,7 +218,7 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
         data-testid={`prov-head-${u.name}`}
         onClick={onHeader}
       >
-        <span className="prov-chev" aria-hidden="true">{expanded ? '▾' : '▸'}</span>
+        <span className="prov-chev" aria-hidden="true">{shown ? '▾' : '▸'}</span>
         <span className="prov-logo" aria-hidden="true">{initials(label)}</span>
         <span className="prov-name">{label}</span>
         <span className="prov-host">{hostOf(u.url)}</span>
@@ -238,7 +266,7 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
               Could not load this provider's models. Reload the list to try again.
             </div>
           )}
-          {listing.data?.stale && (
+          {listing.data?.stale && state === 'per-model' && (
             <div className="prov-msg quiet">Model list could not be refreshed; showing the last known list.</div>
           )}
           {listing.data && rows.length === 0 && (
@@ -312,6 +340,12 @@ export function ProvidersTab({ selected, onSelect, onAdd }) {
   ]
 
   const header = (u) => {
+    // Under a search every section is open for the rows it shows; a header click then only selects
+    // the provider, so what was open or shut before the search is still so after it.
+    if (q.trim() !== '') {
+      onSelect({ provider: u.name, model: null })
+      return
+    }
     const expanded = open[u.name] ?? sel.provider === u.name
     if (sel.provider === u.name) {
       setOpen((o) => ({ ...o, [u.name]: !expanded }))

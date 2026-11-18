@@ -198,7 +198,12 @@ export function AddProviderModal({ open, onClose, onAdded }) {
   useEffect(() => () => { run.current += 1; sub.current += 1 }, [])
 
   useEffect(() => { if (tick > 0) nameRef.current?.focus() }, [tick])
-  useEffect(() => { if (check || checkError) resultRef.current?.focus() }, [check, checkError])
+  // The answer is read aloud (focus) and brought on screen with the checklist that follows it.
+  useEffect(() => {
+    if (!check && !checkError) return
+    resultRef.current?.focus({ preventScroll: true })
+    resultRef.current?.scrollIntoView?.({ block: 'start' })
+  }, [check, checkError])
   useEffect(() => { if (errTick > 0) credErrRef.current?.focus() }, [errTick])
 
   // A changed address, key or auth makes an earlier answer stale: drop it and what hangs off it.
