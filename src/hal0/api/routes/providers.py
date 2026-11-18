@@ -137,6 +137,20 @@ def _reserved_env_name_reason(key: str) -> str | None:
     return None
 
 
+def preset_credential_env(catalog_id: str) -> str:
+    """The credential env name an upstream made from preset ``catalog_id`` reads.
+
+    Derived from the preset id, with the same ``PROVIDER_`` prefix the dashboard
+    uses (``keyEnvFor``) when the plain ``<ID>_API_KEY`` is a reserved name, so
+    ``hal0_peer`` gets ``PROVIDER_HAL0_PEER_API_KEY`` instead of a ``HAL0_*`` name
+    the reservation refuses (#3801).
+    """
+    stem = re.sub(r"[^A-Z0-9]", "_", catalog_id.upper())
+    if stem[:1].isdigit() or _reserved_env_name_reason(f"{stem}_API_KEY") is not None:
+        stem = f"PROVIDER_{stem}"
+    return f"{stem}_API_KEY"
+
+
 def _check_auth_value_env(value: str | None, *, name: str) -> None:
     """Refuse an upstream ``auth_value_env`` the credentials route would refuse."""
     if not value:
@@ -319,7 +333,7 @@ async def create_upstream(body: UpstreamCreateBody, request: Request) -> dict[st
             "url": preset.base_url or None,
             "auth_style": preset.auth or None,
             "auth_header": (preset.auth_header_name if preset.auth == "header" else None),
-            "auth_value_env": f"{body.catalog_id.upper()}_API_KEY",
+            "auth_value_env": preset_credential_env(body.catalog_id),
         }
 
     def pick(field: str, default: Any = None) -> Any:

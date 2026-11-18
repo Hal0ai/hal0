@@ -70,6 +70,11 @@ user config lives in `/etc/hal0/upstreams.toml`.
 "Model kinds" are the `type` values of the preset's suggested models, plus `tools` when
 the preset allows tool calls (`preset_to_api` in `hal0.upstreams.presets`).
 
+An upstream created from a preset reads its key from `<PRESET_ID>_API_KEY`
+(for example `OPENROUTER_API_KEY`). When that name is reserved, as it is for
+`hal0_peer` (the `HAL0_` prefix is hal0's own), the name gets a `PROVIDER_` prefix:
+`PROVIDER_HAL0_PEER_API_KEY`.
+
 <Aside type="note">
 The `anthropic` preset uses Anthropic's OpenAI-compatible endpoint with bearer auth, so
 it needs no proxy. Auth styles overall: `bearer, anthropic, header, none`.
