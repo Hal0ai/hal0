@@ -45,13 +45,39 @@ function tileNote(p) {
   return first || p.category
 }
 
-// A custom provider has no preset to name its key variable, so one is derived from the name.
-function customKeyEnv(name) {
-  const base = name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')
-  return /^[A-Z_]/.test(base) && !base.startsWith('HAL0') ? `${base}_API_KEY` : `PROVIDER_${base}_API_KEY`
+// Name prefixes the credentials route refuses for a key variable (src/hal0/api/_env_store.py:
+// PROCESS_CONTROL_ENV_PREFIXES and the HF Hub redirect prefixes, plus the HAL0_ service namespace).
+const RESERVED_ENV_PREFIXES = [
+  'HAL0', 'LD_', 'DYLD_', 'PYTHON', 'UV_', 'PIP_', 'NPM_CONFIG_', 'GIT_', 'OPENSSL_', 'XDG_',
+  'HF_HUB_', 'HUGGINGFACE_HUB_', 'HF_XET_',
+]
+
+// The variable a provider's key is stored under, derived from its NAME so that two providers made
+// from one preset never share a key: `minimax` -> MINIMAX_API_KEY, `minimax-2` -> MINIMAX_2_API_KEY.
+// A reserved or digit-leading stem gets a PROVIDER_ prefix; a name another provider already uses
+// gets a numeric suffix.
+export function keyEnvFor(name, used = []) {
+  let stem = name.toUpperCase().replace(/[^A-Z0-9]/g, '_')
+  if (/^[0-9]/.test(stem) || RESERVED_ENV_PREFIXES.some((p) => stem.startsWith(p))) stem = `PROVIDER_${stem}`
+  let env = `${stem}_API_KEY`
+  for (let n = 2; used.includes(env); n += 1) env = `${stem}_${n}_API_KEY`
+  return env
 }
 
-function Field({ id, label, req, error, children, hint }) {
+// Same rule as the server (upstreams/registry.py normalise_key): printable ASCII, no whitespace,
+// after one optional leading "Bearer ".
+const KEY_MESSAGE = 'The key must be printable ASCII without spaces.'
+function keyProblem(raw) {
+  const t = raw.trim()
+  const bare = /^bearer /i.test(t) ? t.slice(7).trim() : t
+  return /^[\x21-\x7e]*$/.test(bare) ? null : KEY_MESSAGE
+}
+
+const DISCARD_COPY = 'Discard unsaved changes?'
+const UNIT_WORDS = { Mtok: 'million tokens', Mchar: 'million characters', img: 'image' }
+const priceTitle = (m) => `Price, in / out, per ${UNIT_WORDS[m.price_unit] || m.price_unit}`
+
+function Field({ id, label, req, error, errRef, children }) {
   return (
     <div className={'pf-row addprov-row-field' + (error ? ' has-err' : '')}>
       <label className="pf-row-lbl" htmlFor={id}>
@@ -59,12 +85,17 @@ function Field({ id, label, req, error, children, hint }) {
       </label>
       <div className="pf-row-ctl">
         {children}
-        {error && <div id={`addprov-err-${id.replace('addprov-', '')}`} className="addprov-err mono" role="alert">{error}</div>}
-        {hint && !error && <div className="addprov-sub mono">{hint}</div>}
+        {error && (
+          <div id={`addprov-err-${id.replace('addprov-', '')}`} className="addprov-err mono" role="alert" tabIndex={-1} ref={errRef}>
+            {error}
+          </div>
+        )}
       </div>
     </div>
   )
 }
+
+const messageOf = (e, fallback) => String((e && e.message) || fallback)
 
 export function AddProviderModal({ open, onClose, onAdded }) {
   const qc = useQueryClient()
@@ -81,22 +112,27 @@ export function AddProviderModal({ open, onClose, onAdded }) {
   const [authHeader, setAuthHeader] = useState('')
   const [check, setCheck] = useState(null) // { rows, latency } after a successful check
   const [checkError, setCheckError] = useState(null)
-  const [fieldErr, setFieldErr] = useState({}) // server messages: name | url | key
+  const [fieldErr, setFieldErr] = useState({}) // server messages: name | url | key | header
   const [formError, setFormError] = useState(null)
+  const [credErr, setCredErr] = useState(null) // why the key could not be saved
   const [picked, setPicked] = useState(() => new Set())
   const [types, setTypes] = useState({})
   const [q, setQ] = useState('')
   const [shown, setShown] = useState(PAGE)
-  const [busy, setBusy] = useState(false)
-  const [created, setCreated] = useState(null) // { name, env, models } once the provider exists
+  const [busy, setBusy] = useState(false) // a create or credentials request is in flight
+  const [created, setCreated] = useState(null) // { name, env, url, models } once the provider exists
   const [keyFailed, setKeyFailed] = useState(false)
   const [tick, setTick] = useState(0)
+  const [errTick, setErrTick] = useState(0)
   const [discardOpen, setDiscardOpen] = useState(false)
 
-  const run = useRef(0) // bumped to drop an answer that is no longer wanted
+  const run = useRef(0) // probe: bumped to drop an answer that is no longer wanted
+  const sub = useRef(0) // create / key save: same idea; bumped on reset and unmount
+  const reported = useRef(false) // onAdded has been called for the current provider
   const nameRef = useRef(null)
   const resultRef = useRef(null)
   const allRef = useRef(null)
+  const credErrRef = useRef(null)
 
   const presets = useMemo(() => {
     const all = Object.values(catalogQ.data || {})
@@ -106,33 +142,38 @@ export function AddProviderModal({ open, onClose, onAdded }) {
   }, [catalogQ.data])
   const preset = presets.find((p) => p.id === catalogId) || null
   const isCustom = catalogId === 'custom'
-  const taken = useMemo(
-    () => (Array.isArray(upstreamsQ.data) ? upstreamsQ.data.map((u) => u.name) : []),
-    [upstreamsQ.data],
-  )
+  const upstreams = useMemo(() => (Array.isArray(upstreamsQ.data) ? upstreamsQ.data : []), [upstreamsQ.data])
+  const taken = useMemo(() => upstreams.map((u) => u.name), [upstreams])
+  const usedEnvs = useMemo(() => upstreams.map((u) => u.auth_value_env).filter(Boolean), [upstreams])
 
   function reset() {
     run.current += 1
+    sub.current += 1
+    reported.current = false
     clearProbe()
     setCatalogId(null); setName(''); setUrl(''); setApiKey(''); setAuthStyle('bearer'); setAuthHeader('')
-    setCheck(null); setCheckError(null); setFieldErr({}); setFormError(null)
+    setCheck(null); setCheckError(null); setFieldErr({}); setFormError(null); setCredErr(null)
     setPicked(new Set()); setTypes({}); setQ(''); setShown(PAGE)
     setBusy(false); setCreated(null); setKeyFailed(false); setDiscardOpen(false)
   }
+  // Every opening starts clean, and so does every closing: nothing typed survives a reopen.
   useEffect(() => {
-    if (!open) reset()
+    reset()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
+  // No late answer may touch state or call back once the modal is gone.
+  useEffect(() => () => { run.current += 1; sub.current += 1 }, [])
 
   useEffect(() => { if (tick > 0) nameRef.current?.focus() }, [tick])
   useEffect(() => { if (check || checkError) resultRef.current?.focus() }, [check, checkError])
+  useEffect(() => { if (errTick > 0) credErrRef.current?.focus() }, [errTick])
 
   // A changed address, key or auth makes an earlier answer stale: drop it and what hangs off it.
   function invalidate() {
     run.current += 1
     clearProbe()
     setCheck(null); setCheckError(null); setFormError(null)
-    setFieldErr((f) => ({ ...f, url: undefined, key: undefined }))
+    setFieldErr((f) => ({ ...f, url: undefined, key: undefined, header: undefined }))
     setPicked(new Set()); setTypes({}); setQ(''); setShown(PAGE)
   }
 
@@ -151,17 +192,22 @@ export function AddProviderModal({ open, onClose, onAdded }) {
   const nameInvalid = validateProviderName(name, taken)
   const urlOk = URL_PATTERN.test(url.trim())
   const headerMissing = authStyle === 'header' && !authHeader.trim()
+  const keyBad = keyProblem(apiKey)
   const nameShown = fieldErr.name || (name ? nameInvalid : null)
   const urlShown = fieldErr.url || (url.trim() && !urlOk ? 'Enter a base URL starting with http:// or https://.' : null)
-  const headerShown = headerMissing && isCustom ? 'Enter the header name the provider expects.' : null
-  const canCheck = !!preset && !nameInvalid && urlOk && !headerMissing && !checking && !busy
+  const headerShown = fieldErr.header || (headerMissing && isCustom ? 'Enter the header name the provider expects.' : null)
+  const keyShown = credErr || fieldErr.key || keyBad
+  const ready = !!preset && !nameInvalid && urlOk && !headerMissing && !keyBad && !busy
+  const canCheck = ready && !checking
   const rows = check ? check.rows : []
   const authNone = authStyle === 'none'
 
   async function runCheck() {
     if (!canCheck) return
     const mine = ++run.current
-    setCheck(null); setCheckError(null); setFieldErr((f) => ({ ...f, url: undefined, key: undefined }))
+    const hadCheck = !!check
+    setCheck(null); setCheckError(null); setFormError(null)
+    setFieldErr((f) => ({ ...f, url: undefined, key: undefined, header: undefined }))
     const body = {}
     if (!isCustom) body.catalog_id = catalogId
     if (isCustom || url.trim() !== (preset.base_url || '') || !preset.base_url) body.url = url.trim()
@@ -173,18 +219,29 @@ export function AddProviderModal({ open, onClose, onAdded }) {
       if (run.current !== mine) return
       if (r.ok) {
         setCheck({ rows: r.models, latency: r.latency_ms })
-        setPicked(initialPicks(r.models))
-        setTypes({}); setQ(''); setShown(PAGE)
+        if (hadCheck) {
+          // A repeat check with nothing edited keeps the picks and type overrides that still apply.
+          const ids = new Set(r.models.map((m) => m.id))
+          setPicked((s) => new Set([...s].filter((id) => ids.has(id))))
+          setTypes((t) => Object.fromEntries(Object.entries(t).filter(([id]) => ids.has(id))))
+        } else {
+          setPicked(initialPicks(r.models))
+          setTypes({})
+        }
+        setQ(''); setShown(PAGE)
       } else {
         setCheckError(probeErrorMessage(r))
       }
     } catch (e) {
       if (run.current !== mine) return
       if (e && e.status === 400) {
-        const msg = String(e.message || 'The provider details were not accepted.')
-        setFieldErr((f) => (/key/i.test(msg) ? { ...f, key: msg } : { ...f, url: msg }))
+        const msg = messageOf(e, 'The provider details were not accepted.')
+        if (/header/i.test(msg) && authStyle === 'header' && isCustom) setFieldErr((f) => ({ ...f, header: msg }))
+        else if (/\bkey\b/i.test(msg)) setFieldErr((f) => ({ ...f, key: msg }))
+        else if (/\burl\b/i.test(msg)) setFieldErr((f) => ({ ...f, url: msg }))
+        else setFormError(msg)
       } else {
-        setCheckError(`Could not run the check. ${e && e.message ? e.message : 'Try again.'}`)
+        setCheckError(`Could not run the check. ${messageOf(e, 'Try again.')}`)
       }
     }
   }
@@ -220,24 +277,35 @@ export function AddProviderModal({ open, onClose, onAdded }) {
     })
   }
 
-  async function saveKey(info) {
+  async function saveKey(info, value) {
     if (!info.env) throw new Error('The provider has no key variable to store the key under.')
-    await apiPost(ENDPOINTS.providerCredentials(info.name), { key: info.env, value: apiKey.trim() })
+    await apiPost(ENDPOINTS.providerCredentials(info.name), { key: info.env, value })
     qc.invalidateQueries({ queryKey: ['upstreams'] })
   }
 
-  function finish(info, noteKeyLost) {
-    const n = info.models
-    if (noteKeyLost) toast(`${info.name} added, but its key was not saved.`, 'info')
-    else if (n === null) toast(`${info.name} added. No models on yet: refresh its model list when it is reachable.`, 'info')
-    else toast(`${info.name} added · ${n} models on`, 'ok')
-    reset()
+  // The one place that reports a created provider: once, then the modal closes.
+  function complete(info, keyLost) {
+    if (reported.current) return
+    reported.current = true
+    if (keyLost) toast(`${info.name} added, but its key was not saved.`, 'info')
+    else if (info.models === null) toast(`${info.name} added. No models on yet: refresh its model list when it is reachable.`, 'info')
+    else toast(`${info.name} added · ${info.models} models on`, 'ok')
     onAdded(info.name)
+    reset()
     onClose()
   }
 
+  function keyFailure(e) {
+    setBusy(false)
+    setKeyFailed(true)
+    setCredErr(messageOf(e, 'The key could not be saved.'))
+    setErrTick((t) => t + 1)
+  }
+
   async function submit(withModels) {
-    if (busy || nameInvalid || !urlOk || headerMissing) return
+    if (!ready || created) return
+    const token = ++sub.current
+    const keyValue = apiKey.trim()
     setBusy(true); setFormError(null); setFieldErr((f) => ({ ...f, name: undefined }))
     const body = buildCreateBody({
       name,
@@ -249,70 +317,92 @@ export function AddProviderModal({ open, onClose, onAdded }) {
       probed: withModels ? rows : [],
       types,
     })
-    if (isCustom && apiKey.trim()) body.auth_value_env = customKeyEnv(name)
+    // The key is stored under a variable named after the provider, so a second provider from one
+    // preset never overwrites the first one's key.
+    if (keyValue) body.auth_value_env = keyEnvFor(name, usedEnvs)
     let made
     try {
       made = await create.mutateAsync(body)
     } catch (e) {
+      if (sub.current !== token) return
       setBusy(false)
-      const msg = String((e && e.message) || 'The provider could not be added.')
+      const msg = messageOf(e, 'The provider could not be added.')
       if (e && (e.status === 409 || (e.status === 400 && /name/i.test(msg)))) setFieldErr((f) => ({ ...f, name: msg }))
       else setFormError(msg)
       return
     }
-    const info = { name: made?.name || name, env: made?.auth_value_env || '', models: withModels ? picked.size : null }
+    if (sub.current !== token) return
+    const info = {
+      name: made?.name || name,
+      env: made?.auth_value_env || body.auth_value_env || '',
+      url: url.trim(),
+      models: withModels ? picked.size : null,
+    }
     setCreated(info)
-    if (apiKey.trim()) {
+    if (keyValue) {
       try {
-        await saveKey(info)
-      } catch {
-        setBusy(false)
-        setKeyFailed(true)
+        await saveKey(info, keyValue)
+      } catch (e) {
+        if (sub.current !== token) return
+        keyFailure(e)
         return
       }
+      if (sub.current !== token) return
     }
-    finish(info, false)
+    complete(info, false)
   }
 
   async function retryKey() {
     if (busy || !created) return
-    setBusy(true)
-    try {
-      await saveKey(created)
-    } catch {
-      setBusy(false)
+    const keyValue = apiKey.trim()
+    const problem = !keyValue ? 'Enter the key to save.' : keyProblem(keyValue)
+    if (problem) {
+      setCredErr(problem)
+      setErrTick((t) => t + 1)
       return
     }
-    finish(created, false)
+    const token = ++sub.current
+    setBusy(true); setCredErr(null)
+    try {
+      await saveKey(created, keyValue)
+    } catch (e) {
+      if (sub.current !== token) return
+      keyFailure(e)
+      return
+    }
+    if (sub.current !== token) return
+    complete(created, false)
   }
 
-  // Closing after the provider exists still tells the list about it.
+  // Close paths: inert while a request is in flight; after the provider exists they still tell the list.
   function close() {
-    if (created) {
-      const info = created
-      toast(`${info.name} added, but its key was not saved.`, 'info')
+    if (busy) return
+    if (created) complete(created, true)
+    else {
       reset()
-      onAdded(info.name)
-    } else {
-      reset()
+      onClose()
     }
-    onClose()
   }
 
   if (!open) return null
 
   const dirty = !created && !!(catalogId || name || url || apiKey)
-  const keyDescribe = [fieldErr.key ? 'addprov-err-key' : null, 'addprov-key-hint'].filter(Boolean).join(' ')
 
   let note = 'Pick a provider to start.'
   if (preset) note = check ? `${rows.length} offered · ${picked.size} picked` : "Check the connection to see this provider's models."
 
-  const foot = keyFailed ? (
+  const foot = created ? (
     <>
-      <span className="addprov-note addprov-bad" role="alert">Provider added, but the key was not saved.</span>
+      <span className="addprov-note addprov-bad" role="status">
+        {keyFailed ? 'Provider added, but the key was not saved.' : 'Saving the key…'}
+      </span>
       <span className="addprov-btns">
-        <button type="button" className="btn ghost sm" onClick={close}>Close</button>
-        <button type="button" className="btn sm" onClick={retryKey} disabled={busy}>Try saving the key again</button>
+        <button type="button" className="btn ghost sm" onClick={close} disabled={busy}>Close</button>
+        {keyFailed && (
+          <button type="button" className="btn sm" onClick={retryKey} disabled={busy}>
+            {busy ? 'Saving…' : 'Try saving the key again'}
+          </button>
+        )}
       </span>
     </>
   ) : (
@@ -320,148 +410,181 @@ export function AddProviderModal({ open, onClose, onAdded }) {
       <span className="addprov-note">{note}</span>
       <span className="addprov-btns">
         {preset && !check && (
-          <button type="button" className="btn ghost sm" onClick={() => submit(false)}
-            disabled={busy || checking || !!nameInvalid || !urlOk || headerMissing}>
+          <button type="button" className="btn ghost sm" onClick={() => submit(false)} disabled={!ready || checking}>
             Add without checking
           </button>
         )}
-        <button type="button" className="btn ghost sm" onClick={() => (dirty ? setDiscardOpen(true) : close())}>Cancel</button>
+        <button type="button" className="btn ghost sm" disabled={busy}
+          onClick={() => (dirty ? setDiscardOpen(true) : close())}>Cancel</button>
         <button type="button" className="btn sm" onClick={() => submit(true)} disabled={!check || busy}>
-          {check ? `Add provider · ${picked.size} on` : 'Add provider'}
+          {busy ? 'Adding…' : check ? `Add provider · ${picked.size} on` : 'Add provider'}
         </button>
       </span>
     </>
   )
 
+  const keyField = (
+    <Field id="addprov-key" label={authNone ? 'API key (optional)' : 'API key'} error={keyShown} errRef={credErrRef}>
+      <div className="addprov-keyrow">
+        <input id="addprov-key" type="password" autoComplete="off" spellCheck={false}
+          className={'input mono' + (keyShown ? ' input-err' : '')} value={apiKey}
+          placeholder={authNone ? 'Not needed for this provider' : 'Paste key'}
+          aria-invalid={keyShown ? 'true' : 'false'}
+          aria-describedby={keyShown ? 'addprov-err-key addprov-key-hint' : 'addprov-key-hint'}
+          disabled={busy}
+          onChange={(e) => {
+            setApiKey(e.target.value)
+            setCredErr(null)
+            if (!created) invalidate()
+          }} />
+        {!created && (
+          <button type="button" className="btn ghost" onClick={runCheck} disabled={!canCheck}>
+            {checking ? 'Checking…' : 'Check connection'}
+          </button>
+        )}
+      </div>
+    </Field>
+  )
+
   return (
-    <Modal open eyebrow="Models · add provider" title="Add provider" width={780} onClose={close} dirty={dirty} foot={foot}>
+    <Modal open eyebrow="Models · add provider" title="Add provider" width={780} onClose={close} dirty={dirty}
+      dismissable={!busy} confirmDiscard={DISCARD_COPY} foot={foot}>
       <div className="add-provider-modal addprov" data-testid="add-provider-modal">
-        <section className="addprov-sec">
-          <span className="addprov-lbl mono">Provider</span>
-          <div className="addprov-tiles">
-            {presets.map((p) => (
-              <button key={p.id} type="button" className={'addprov-tile' + (p.id === catalogId ? ' on' : '')}
-                aria-pressed={p.id === catalogId} onClick={() => pickTile(p)}>
-                <b>{p.name}</b>
-                <span>{tileNote(p)}</span>
-              </button>
-            ))}
-          </div>
-        </section>
-
-        {preset && (
-          <section className="addprov-sec">
-            <span className="addprov-lbl mono">Connection</span>
-            <Field id="addprov-name" label="Name" req error={nameShown}>
-              <input id="addprov-name" ref={nameRef} className={'input mono' + (nameShown ? ' input-err' : '')} value={name}
-                autoComplete="off" spellCheck={false} aria-invalid={nameShown ? 'true' : 'false'}
-                aria-describedby={nameShown ? 'addprov-err-name' : undefined}
-                onChange={(e) => { setName(e.target.value); setFieldErr((f) => ({ ...f, name: undefined })) }} />
-            </Field>
-            <Field id="addprov-url" label="Base URL" req error={urlShown}>
-              <input id="addprov-url" className={'input mono' + (urlShown ? ' input-err' : '')} value={url} placeholder="https://…/v1"
-                autoComplete="off" spellCheck={false} aria-invalid={urlShown ? 'true' : 'false'}
-                aria-describedby={urlShown ? 'addprov-err-url' : undefined}
-                onChange={(e) => { setUrl(e.target.value); invalidate() }} />
-            </Field>
-            {isCustom && (
-              <>
-                <Field id="addprov-auth" label="Auth">
-                  <select id="addprov-auth" className="input" value={authStyle}
-                    onChange={(e) => { setAuthStyle(e.target.value); invalidate() }}>
-                    {AUTH_CHOICES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
-                  </select>
-                </Field>
-                {authStyle === 'header' && (
-                  <Field id="addprov-header" label="Header name" req error={headerShown}>
-                    <input id="addprov-header" className={'input mono' + (headerShown ? ' input-err' : '')} value={authHeader}
-                      autoComplete="off" spellCheck={false} placeholder="X-Api-Key"
-                      aria-invalid={headerShown ? 'true' : 'false'}
-                      aria-describedby={headerShown ? 'addprov-err-header' : undefined}
-                      onChange={(e) => { setAuthHeader(e.target.value); invalidate() }} />
-                  </Field>
-                )}
-              </>
-            )}
-            <Field id="addprov-key" label={authNone ? 'API key (optional)' : 'API key'} error={fieldErr.key}>
-              <div className="addprov-keyrow">
-                <input id="addprov-key" type="password" autoComplete="off" spellCheck={false}
-                  className={'input mono' + (fieldErr.key ? ' input-err' : '')} value={apiKey}
-                  placeholder={authNone ? 'Not needed for this provider' : 'Paste key'}
-                  aria-invalid={fieldErr.key ? 'true' : 'false'} aria-describedby={keyDescribe}
-                  onChange={(e) => { setApiKey(e.target.value); invalidate() }} />
-                <button type="button" className="btn ghost" onClick={runCheck} disabled={!canCheck}>
-                  {checking ? 'Checking…' : 'Check connection'}
-                </button>
-              </div>
-            </Field>
-            <span id="addprov-key-hint" className="addprov-hint">
-              Name becomes the prefix agents use, for example <span className="mono">{name || 'name'}/model-id</span>.
-              The key is stored on this box only and never shown again.
-            </span>
-          </section>
-        )}
-
-        {preset && checkError && (
-          <div className="addprov-result err" data-testid="addprov-result" role="alert" tabIndex={-1} ref={resultRef}>
-            {checkError} Nothing was saved.
-          </div>
-        )}
-        {formError && (
-          <div className="addprov-result err" data-testid="addprov-form-error" role="alert">{formError}</div>
-        )}
-
-        {check && (
+        {created ? (
           <>
-            <div className="addprov-result" data-testid="addprov-result" role="status" tabIndex={-1} ref={resultRef}>
-              Reachable · {check.latency} ms · {rows.length} models offered
-            </div>
             <section className="addprov-sec">
-              <span className="addprov-lbl mono">Models to switch on</span>
-              <div className="addprov-pick">
-                <div className="addprov-pick-h">
-                  <input type="checkbox" id="addprov-all" ref={allRef} aria-label="Select all" checked={allOn} onChange={toggleAll} />
-                  <label htmlFor="addprov-all" className="addprov-grow">Select all{needle ? ' shown' : ''}</label>
-                  <button type="button" className="btn ghost sm" onClick={() => setPicked(initialPicks(rows))}>Recommended only</button>
-                </div>
-                {rows.length > SEARCH_ABOVE && (
-                  <input type="search" className="input addprov-search" aria-label="Search models" placeholder="Search models"
-                    autoComplete="off" value={q} onChange={(e) => { setQ(e.target.value); setShown(PAGE) }} />
-                )}
-                <div className="addprov-list">
-                  {visible.map((m, i) => (
-                    <div className="addprov-row" key={m.id}>
-                      <input type="checkbox" id={`addprov-m-${i}`} checked={picked.has(m.id)} onChange={() => toggleRow(m.id)} />
-                      <label htmlFor={`addprov-m-${i}`} className="addprov-mid">
-                        <b>{m.id}</b>
-                        {m.recommended && <span className="chip amber">recommended</span>}
-                      </label>
-                      <select className="input addprov-type" aria-label={`Type of ${m.id}`} value={types[m.id] ?? m.type}
-                        onChange={(e) => setTypes((t) => ({ ...t, [m.id]: e.target.value }))}>
-                        {MODEL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                      </select>
-                      <span className="addprov-num mono" title="Context">{formatContext(m.context)}</span>
-                      <span className="addprov-num mono" title="Price per million tokens, in / out">{formatPrice(m)}</span>
-                    </div>
-                  ))}
-                  {filtered.length === 0 && <div className="addprov-empty mono">No model matches.</div>}
-                  {filtered.length > visible.length && (
-                    <button type="button" className="btn ghost sm addprov-more" onClick={() => setShown((n) => n + PAGE)}>
-                      Show more ({filtered.length - visible.length} left)
-                    </button>
-                  )}
-                </div>
+              <span className="addprov-lbl mono">Provider</span>
+              <div className="addprov-summary" data-testid="addprov-summary">
+                <b>{created.name}</b> <span className="mono">{created.url}</span>
               </div>
-              <span className="addprov-hint">
-                Only ticked models can be called. The rest stay listed, switched off, and can be turned on later.
+            </section>
+            <section className="addprov-sec">
+              <span className="addprov-lbl mono">Key</span>
+              {keyField}
+              <span id="addprov-key-hint" className="addprov-hint">
+                The provider exists. Fix the key and save it again, or close and add it later from the provider's page.
               </span>
             </section>
           </>
+        ) : (
+          <>
+            <section className="addprov-sec">
+              <span className="addprov-lbl mono">Provider</span>
+              <div className="addprov-tiles">
+                {presets.map((p) => (
+                  <button key={p.id} type="button" className={'addprov-tile' + (p.id === catalogId ? ' on' : '')}
+                    aria-pressed={p.id === catalogId} disabled={busy} onClick={() => pickTile(p)}>
+                    <b>{p.name}</b>
+                    <span>{tileNote(p)}</span>
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            {preset && (
+              <section className="addprov-sec">
+                <span className="addprov-lbl mono">Connection</span>
+                <Field id="addprov-name" label="Name" req error={nameShown}>
+                  <input id="addprov-name" ref={nameRef} className={'input mono' + (nameShown ? ' input-err' : '')} value={name}
+                    autoComplete="off" spellCheck={false} aria-invalid={nameShown ? 'true' : 'false'}
+                    aria-describedby={nameShown ? 'addprov-err-name' : undefined} disabled={busy}
+                    onChange={(e) => { setName(e.target.value); setFieldErr((f) => ({ ...f, name: undefined })) }} />
+                </Field>
+                <Field id="addprov-url" label="Base URL" req error={urlShown}>
+                  <input id="addprov-url" className={'input mono' + (urlShown ? ' input-err' : '')} value={url} placeholder="https://…/v1"
+                    autoComplete="off" spellCheck={false} aria-invalid={urlShown ? 'true' : 'false'}
+                    aria-describedby={urlShown ? 'addprov-err-url' : undefined} disabled={busy}
+                    onChange={(e) => { setUrl(e.target.value); invalidate() }} />
+                </Field>
+                {isCustom && (
+                  <>
+                    <Field id="addprov-auth" label="Auth">
+                      <select id="addprov-auth" className="input" value={authStyle} disabled={busy}
+                        onChange={(e) => { setAuthStyle(e.target.value); invalidate() }}>
+                        {AUTH_CHOICES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
+                      </select>
+                    </Field>
+                    {authStyle === 'header' && (
+                      <Field id="addprov-header" label="Header name" req error={headerShown}>
+                        <input id="addprov-header" className={'input mono' + (headerShown ? ' input-err' : '')} value={authHeader}
+                          autoComplete="off" spellCheck={false} placeholder="X-Api-Key" disabled={busy}
+                          aria-invalid={headerShown ? 'true' : 'false'}
+                          aria-describedby={headerShown ? 'addprov-err-header' : undefined}
+                          onChange={(e) => { setAuthHeader(e.target.value); invalidate() }} />
+                      </Field>
+                    )}
+                  </>
+                )}
+                {keyField}
+                <span id="addprov-key-hint" className="addprov-hint">
+                  Name becomes the prefix agents use, for example <span className="mono">{name || 'name'}/model-id</span>.
+                  The key is stored on this box only and never shown again.
+                </span>
+              </section>
+            )}
+
+            {preset && checkError && (
+              <div className="addprov-result err" data-testid="addprov-result" role="alert" tabIndex={-1} ref={resultRef}>
+                {checkError} Nothing was saved.
+              </div>
+            )}
+            {formError && (
+              <div className="addprov-result err" data-testid="addprov-form-error" role="alert">{formError}</div>
+            )}
+
+            {check && (
+              <>
+                <div className="addprov-result" data-testid="addprov-result" role="status" tabIndex={-1} ref={resultRef}>
+                  Reachable · {check.latency} ms · {rows.length} models offered
+                </div>
+                <section className="addprov-sec">
+                  <span className="addprov-lbl mono">Models to switch on</span>
+                  <div className="addprov-pick">
+                    <div className="addprov-pick-h">
+                      <input type="checkbox" id="addprov-all" ref={allRef} checked={allOn} onChange={toggleAll} />
+                      <label htmlFor="addprov-all" className="addprov-grow">{needle ? 'Select all shown' : 'Select all'}</label>
+                      <button type="button" className="btn ghost sm" onClick={() => setPicked(initialPicks(rows))}>Recommended only</button>
+                    </div>
+                    {rows.length > SEARCH_ABOVE && (
+                      <input type="search" className="input addprov-search" aria-label="Search models" placeholder="Search models"
+                        autoComplete="off" value={q} onChange={(e) => { setQ(e.target.value); setShown(PAGE) }} />
+                    )}
+                    <div className="addprov-list">
+                      {visible.map((m, i) => (
+                        <div className="addprov-row" key={m.id}>
+                          <input type="checkbox" id={`addprov-m-${i}`} checked={picked.has(m.id)} onChange={() => toggleRow(m.id)} />
+                          <label htmlFor={`addprov-m-${i}`} className="addprov-mid">
+                            <b>{m.id}</b>
+                            {m.recommended && <span className="chip amber">recommended</span>}
+                          </label>
+                          <select className="input addprov-type" aria-label={`Type of ${m.id}`} value={types[m.id] ?? m.type}
+                            onChange={(e) => setTypes((t) => ({ ...t, [m.id]: e.target.value }))}>
+                            {MODEL_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                          </select>
+                          <span className="addprov-num mono" title="Context">{formatContext(m.context)}</span>
+                          <span className="addprov-num mono" title={priceTitle(m)}>{formatPrice(m)}</span>
+                        </div>
+                      ))}
+                      {filtered.length === 0 && <div className="addprov-empty mono">No model matches.</div>}
+                      {filtered.length > visible.length && (
+                        <button type="button" className="btn ghost sm addprov-more" onClick={() => setShown((n) => n + PAGE)}>
+                          Show more ({filtered.length - visible.length} left)
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <span className="addprov-hint">
+                    Only ticked models can be called. The rest stay listed, switched off, and can be turned on later.
+                  </span>
+                </section>
+              </>
+            )}
+          </>
         )}
       </div>
-      <ConfirmDialog open={discardOpen} title="Discard this provider?" message="What you typed will be lost."
+      <ConfirmDialog open={discardOpen} title="Discard this provider?" message={DISCARD_COPY}
         confirmLabel="Discard" cancelLabel="Keep editing" destructive
-        onCancel={() => setDiscardOpen(false)} onConfirm={close} />
+        onCancel={() => setDiscardOpen(false)} onConfirm={() => { setDiscardOpen(false); reset(); onClose() }} />
     </Modal>
   )
 }

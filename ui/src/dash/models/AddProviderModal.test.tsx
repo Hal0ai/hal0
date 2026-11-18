@@ -17,6 +17,8 @@ const { box } = vi.hoisted(() => ({
   box: {
     posts: [] as Array<{ path: string; body: Record<string, unknown> }>,
     handlers: {} as Record<string, (body: Record<string, unknown>) => unknown>,
+    upstreams: [] as Array<Record<string, unknown>>,
+    clears: 0,
   },
 }))
 
@@ -26,7 +28,7 @@ vi.mock('@/api/client', async (importOriginal) => {
     ...real,
     apiGet: async (path: string) => {
       if (path === '/api/providers/catalog') return CATALOG
-      if (path === '/api/upstreams') return [{ name: 'minimax' }]
+      if (path === '/api/upstreams') return box.upstreams
       throw new Error(`unexpected GET ${path}`)
     },
     apiPost: async (path: string, body: Record<string, unknown>) => {
@@ -34,6 +36,17 @@ vi.mock('@/api/client', async (importOriginal) => {
       const h = box.handlers[path]
       if (!h) throw new Error(`unexpected POST ${path}`)
       return h(body)
+    },
+  }
+})
+
+vi.mock('@/api/hooks/useUpstreams', async (importOriginal) => {
+  const real = await importOriginal<Record<string, (...a: unknown[]) => Record<string, unknown>>>()
+  return {
+    ...real,
+    useProviderProbe: () => {
+      const p = real.useProviderProbe() as { clear: () => void }
+      return { ...p, clear: () => { box.clears += 1; p.clear() } }
     },
   }
 })
@@ -117,6 +130,26 @@ const checkBtn = () => byText('button', 'Check') as HTMLButtonElement
 const submitBtn = () => byText('button', 'Add provider ·') as HTMLButtonElement | undefined
 const rowChecks = () => Array.from(document.body.querySelectorAll('.addprov-row input[type="checkbox"]')) as HTMLInputElement[]
 
+// The key may sit in the password input's value and in the requests; nowhere else.
+function expectKeyNowhere() {
+  const clone = document.body.cloneNode(true) as HTMLElement
+  clone.querySelectorAll('input[type="password"]').forEach((i) => i.removeAttribute('value'))
+  expect(clone.innerHTML).not.toContain(KEY)
+  expect(clone.textContent).not.toContain(KEY)
+  expect(JSON.stringify(toast.mock.calls)).not.toContain(KEY)
+  expect(JSON.stringify(qc.getMutationCache().getAll().map((m) => [m.options.mutationKey, m.state]))).not.toContain(KEY)
+  expect(JSON.stringify(qc.getQueryCache().getAll().map((q) => q.state.data))).not.toContain(KEY)
+}
+const deferred = <T,>() => {
+  let resolve!: (v: T) => void
+  let reject!: (e: unknown) => void
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
+}
+const esc = () => act(() => { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+const backdrop = () => act(() => { $('.modal-backdrop')!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })) })
+const fail = (msg: string, status = 500) => () => { throw new Hal0Error(msg, { status, code: 'system.error' }) }
+
 async function pickAndCheck(rows = ROWS) {
   box.handlers['/api/providers/probe'] = () => okProbe(rows)
   click(tile('MiniMax'))
@@ -127,9 +160,10 @@ async function pickAndCheck(rows = ROWS) {
 
 beforeEach(() => {
   box.posts = []
+  box.upstreams = [{ name: 'minimax', auth_value_env: 'MINIMAX_API_KEY' }]
+  box.clears = 0
   box.handlers = {
-    '/api/upstreams': (b) => ({ name: b.name, auth_value_env: 'MINIMAX_API_KEY' }),
-    '/api/providers/minimax/credentials': () => ({ ok: true }),
+    '/api/upstreams': (b) => ({ name: b.name, auth_value_env: b.auth_value_env }),
   }
   onClose.mockReset()
   onAdded.mockReset()
@@ -202,7 +236,7 @@ describe('AddProviderModal', () => {
     expect(document.body.textContent).toContain('rejected')
     expect(input('API key')!.value).toBe(KEY)
     expect(document.body.textContent).not.toContain(KEY)
-    expect(document.body.innerHTML.replace(/value="[^"]*"/g, '')).not.toContain(KEY)
+    expectKeyNowhere()
     expect(box.posts.map((p) => p.path)).toEqual(['/api/providers/probe'])
     expect(submitBtn()?.disabled).not.toBe(false)
   })
@@ -255,7 +289,7 @@ describe('AddProviderModal', () => {
     mount()
     await settle()
     await pickAndCheck()
-    const all = document.body.querySelector('input[aria-label="Select all"]') as HTMLInputElement
+    const all = document.body.querySelector('#addprov-all') as HTMLInputElement
     click(all)
     expect(rowChecks().map((c) => c.checked)).toEqual([true, true, true])
     click(all)
@@ -274,7 +308,7 @@ describe('AddProviderModal', () => {
     expect(rowChecks().length).toBe(200)
     type(input('Search models'), 'alpha')
     expect(rowChecks().length).toBe(10)
-    click(document.body.querySelector('input[aria-label="Select all"]'))
+    click(document.body.querySelector('#addprov-all'))
     expect(document.body.textContent).toContain('250 offered · 10 picked')
     type(input('Search models'), '')
     expect(rowChecks().filter((c) => c.checked).length).toBe(10)
@@ -291,7 +325,6 @@ describe('AddProviderModal', () => {
       set.call(sel, 'embed')
       sel.dispatchEvent(new Event('change', { bubbles: true }))
     })
-    box.handlers['/api/upstreams'] = (b) => ({ name: b.name, auth_value_env: 'MINIMAX_API_KEY' })
     box.handlers['/api/providers/mm/credentials'] = () => ({ ok: true })
     box.posts = []
     click(submitBtn())
@@ -302,6 +335,7 @@ describe('AddProviderModal', () => {
       catalog_id: 'minimax',
       url: 'https://api.minimax.io/v1',
       auth_style: 'bearer',
+      auth_value_env: 'MM_API_KEY',
       models: [
         { id: 'MiniMax-M3', enabled: true, type: 'chat', context: 204000, price_in: 0.3, price_out: 1.2, price_unit: 'Mtok' },
         { id: 'MiniMax-M2', enabled: false, type: 'embed', context: 204000, price_in: 0.3, price_out: 1.2, price_unit: 'Mtok' },
@@ -309,21 +343,19 @@ describe('AddProviderModal', () => {
       ],
     })
     expect(JSON.stringify(box.posts[0].body)).not.toContain(KEY)
-    expect(box.posts[1].body).toEqual({ key: 'MINIMAX_API_KEY', value: KEY })
+    expect(box.posts[1].body).toEqual({ key: 'MM_API_KEY', value: KEY })
     expect(onAdded).toHaveBeenCalledWith('mm')
     expect(onClose).toHaveBeenCalledTimes(1)
     expect(toast).toHaveBeenCalledWith('mm added · 1 models on', 'ok')
-    expect(JSON.stringify(toast.mock.calls)).not.toContain(KEY)
-    expect(qc.getMutationCache().getAll().some((m) => JSON.stringify(m.state.variables ?? {}).includes(KEY))).toBe(false)
-    expect(JSON.stringify(qc.getQueryCache().getAll().map((q) => q.state.data))).not.toContain(KEY)
+    expectKeyNowhere()
   })
 
   it('allows adding with zero models picked', async () => {
     mount()
     await settle()
     await pickAndCheck()
-    click(document.body.querySelector('input[aria-label="Select all"]'))
-    click(document.body.querySelector('input[aria-label="Select all"]'))
+    click(document.body.querySelector('#addprov-all'))
+    click(document.body.querySelector('#addprov-all'))
     expect(rowChecks().every((c) => !c.checked)).toBe(true)
     expect(submitBtn()!.disabled).toBe(false)
     box.handlers['/api/providers/minimax-2/credentials'] = () => ({ ok: true })
@@ -345,9 +377,9 @@ describe('AddProviderModal', () => {
     await settle()
     expect(box.posts[0]).toEqual({
       path: '/api/upstreams',
-      body: { name: 'mm', catalog_id: 'minimax', url: 'https://api.minimax.io/v1', auth_style: 'bearer', models: [] },
+      body: { name: 'mm', catalog_id: 'minimax', url: 'https://api.minimax.io/v1', auth_style: 'bearer', auth_value_env: 'MM_API_KEY', models: [] },
     })
-    expect(box.posts[1]).toEqual({ path: '/api/providers/mm/credentials', body: { key: 'MINIMAX_API_KEY', value: KEY } })
+    expect(box.posts[1]).toEqual({ path: '/api/providers/mm/credentials', body: { key: 'MM_API_KEY', value: KEY } })
     expect(toast).toHaveBeenCalledWith('mm added. No models on yet: refresh its model list when it is reachable.', 'info')
     expect(onAdded).toHaveBeenCalledWith('mm')
   })
@@ -384,7 +416,6 @@ describe('AddProviderModal', () => {
     click(checkBtn())
     await settle()
     expect(box.posts[0].body).toEqual({ url: 'https://corp.example/v1', auth_style: 'header', auth_header: 'X-Api-Key', key: KEY })
-    box.handlers['/api/upstreams'] = (b) => ({ name: b.name, auth_value_env: 'CORP_GW_API_KEY' })
     box.handlers['/api/providers/corp-gw/credentials'] = () => ({ ok: true })
     click(submitBtn())
     await settle()
@@ -408,7 +439,7 @@ describe('AddProviderModal', () => {
       throw new Hal0Error('key must be printable ASCII without whitespace', { status: 400, code: 'upstream.invalid' })
     }
     click(tile('MiniMax'))
-    type(input('API key'), 'bad key')
+    type(input('API key'), KEY)
     click(checkBtn())
     await settle()
     const err = $('#addprov-err-key')
@@ -554,5 +585,335 @@ describe('AddProviderModal', () => {
     expect(document.body.textContent).not.toContain('connection refused')
     proc.off('unhandledRejection', unhandled)
     errors.mockRestore()
+  })
+
+  // ---- review round 1 -------------------------------------------------------------------
+
+  async function toKeyFailed(message = 'failed to write api.env') {
+    mount()
+    await settle()
+    await pickAndCheck()
+    type(input('Name'), 'mm')
+    box.handlers['/api/providers/mm/credentials'] = fail(message)
+    click(submitBtn())
+    await settle()
+  }
+
+  it('cannot be closed while the create request is in flight, and reports once when it lands', async () => {
+    const d = deferred<unknown>()
+    box.handlers['/api/upstreams'] = () => d.promise
+    box.handlers['/api/providers/mm/credentials'] = () => ({ ok: true })
+    mount()
+    await settle()
+    await pickAndCheck()
+    type(input('Name'), 'mm')
+    click(submitBtn())
+    expect($('button[aria-label="Close"]')).toBeNull()
+    expect((byText('button', 'Cancel') as HTMLButtonElement).disabled).toBe(true)
+    expect(submitBtn()).toBeUndefined()
+    expect(byText('button', 'Adding…')).toBeDefined()
+    esc()
+    backdrop()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(onAdded).not.toHaveBeenCalled()
+    d.resolve({ name: 'mm', auth_value_env: 'MM_API_KEY' })
+    await settle()
+    expect(onAdded).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(toast).toHaveBeenCalledTimes(1)
+  })
+
+  it('cannot be closed while the key is being saved: success reports once', async () => {
+    const d = deferred<unknown>()
+    mount()
+    await settle()
+    await pickAndCheck()
+    type(input('Name'), 'mm')
+    box.handlers['/api/providers/mm/credentials'] = () => d.promise
+    click(submitBtn())
+    await settle()
+    esc()
+    backdrop()
+    expect($('button[aria-label="Close"]')).toBeNull()
+    expect((byText('button', 'Close') as HTMLButtonElement | undefined)?.disabled ?? true).toBe(true)
+    expect(onClose).not.toHaveBeenCalled()
+    expect(onAdded).not.toHaveBeenCalled()
+    d.resolve({ ok: true })
+    await settle()
+    expect(onAdded).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(toast).toHaveBeenCalledTimes(1)
+    expect(toast).toHaveBeenCalledWith('mm added · 1 models on', 'ok')
+  })
+
+  it('cannot be closed while the key is being saved: failure leaves the modal open, then Close reports once', async () => {
+    const d = deferred<unknown>()
+    mount()
+    await settle()
+    await pickAndCheck()
+    type(input('Name'), 'mm')
+    box.handlers['/api/providers/mm/credentials'] = () => d.promise
+    click(submitBtn())
+    await settle()
+    esc()
+    expect(onClose).not.toHaveBeenCalled()
+    d.reject(new Hal0Error('failed to write api.env', { status: 500 }))
+    await settle()
+    expect(document.body.textContent).toContain('Provider added, but the key was not saved.')
+    expect(onAdded).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+    click(byText('button', 'Close'))
+    expect(onAdded).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(toast).toHaveBeenCalledTimes(1)
+    expect(toast).toHaveBeenCalledWith('mm added, but its key was not saved.', 'info')
+  })
+
+  it.each([
+    ['create resolves', 'create', 'resolve'],
+    ['create rejects', 'create', 'reject'],
+    ['key save resolves', 'creds', 'resolve'],
+    ['key save rejects', 'creds', 'reject'],
+  ])('unmounting mid-request (%s) causes no callback, no state update and no unhandled rejection', async (_l, stage, how) => {
+    const proc = (globalThis as unknown as { process: { on: (e: string, f: () => void) => void; off: (e: string, f: () => void) => void } }).process
+    const unhandled = vi.fn()
+    proc.on('unhandledRejection', unhandled)
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const d = deferred<unknown>()
+    mount()
+    await settle()
+    await pickAndCheck()
+    type(input('Name'), 'mm')
+    if (stage === 'create') box.handlers['/api/upstreams'] = () => d.promise
+    else box.handlers['/api/providers/mm/credentials'] = () => d.promise
+    click(submitBtn())
+    await settle()
+    act(() => root.unmount())
+    root = createRoot(host)
+    if (how === 'resolve') d.resolve({ name: 'mm', auth_value_env: 'MM_API_KEY' })
+    else d.reject(new Hal0Error('boom', { status: 500 }))
+    await settle()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(onAdded).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(toast).not.toHaveBeenCalled()
+    expect(unhandled).not.toHaveBeenCalled()
+    expect(errors).not.toHaveBeenCalled()
+    proc.off('unhandledRejection', unhandled)
+    errors.mockRestore()
+  })
+
+  it('starts clean when reopened after a key-failed close', async () => {
+    await toKeyFailed()
+    click(byText('button', 'Close'))
+    mount(false)
+    mount(true)
+    await settle()
+    expect(document.body.textContent).not.toContain('Provider added, but the key was not saved.')
+    expect(document.body.querySelectorAll('button.addprov-tile').length).toBe(3)
+    expect(document.body.querySelector('input[type="password"]')).toBeNull()
+  })
+
+  it('shows the credentials error under the key, keeps the key editable, and a failed retry updates it', async () => {
+    await toKeyFailed('key must be printable ASCII without whitespace')
+    const err = () => $('#addprov-err-key')
+    expect(err()?.textContent).toContain('key must be printable ASCII without whitespace')
+    expect(input('API key')!.getAttribute('aria-describedby')).toContain('addprov-err-key')
+    expect(input('API key')!.disabled).toBe(false)
+    expect(input('API key')!.type).toBe('password')
+    expectKeyNowhere()
+    box.handlers['/api/providers/mm/credentials'] = fail('upstream "mm" is managed by agent:hermes', 409)
+    box.posts = []
+    click(byText('button', 'Try saving the key again'))
+    await settle()
+    expect(err()?.textContent).toContain('managed by agent:hermes')
+    expect(document.activeElement).toBe(err())
+    expect(onAdded).not.toHaveBeenCalled()
+    expectKeyNowhere()
+  })
+
+  it('a corrected key saved on retry succeeds; credentials only; onAdded once', async () => {
+    await toKeyFailed()
+    type(input('API key'), KEY + '-fixed')
+    box.handlers['/api/providers/mm/credentials'] = () => ({ ok: true })
+    box.posts = []
+    click(byText('button', 'Try saving the key again'))
+    await settle()
+    expect(box.posts).toEqual([{ path: '/api/providers/mm/credentials', body: { key: 'MM_API_KEY', value: KEY + '-fixed' } }])
+    expect(onAdded).toHaveBeenCalledTimes(1)
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('a retry with an invalid or empty key is refused client-side', async () => {
+    await toKeyFailed()
+    box.posts = []
+    type(input('API key'), 'two words')
+    click(byText('button', 'Try saving the key again'))
+    await settle()
+    expect($('#addprov-err-key')?.textContent).toContain('printable ASCII')
+    type(input('API key'), '')
+    click(byText('button', 'Try saving the key again'))
+    expect($('#addprov-err-key')?.textContent).toContain('Enter the key')
+    expect(box.posts).toEqual([])
+  })
+
+  it('once the provider exists, only the key and the footer buttons act', async () => {
+    await toKeyFailed()
+    expect(document.body.querySelectorAll('button.addprov-tile').length).toBe(0)
+    expect(input('Name')).toBeNull()
+    expect(input('Base URL')).toBeNull()
+    expect(byText('button', 'Check connection')).toBeUndefined()
+    expect(byText('button', 'Add without checking')).toBeUndefined()
+    expect(rowChecks().length).toBe(0)
+    expect($('[data-testid="addprov-summary"]')?.textContent).toContain('mm')
+    expect(input('API key')).not.toBeNull()
+  })
+
+  it('blocks a key that can never be saved, on Check and on Add without checking', async () => {
+    mount()
+    await settle()
+    click(tile('MiniMax'))
+    type(input('Name'), 'mm')
+    type(input('API key'), 'two words')
+    expect(document.body.textContent).toContain('The key must be printable ASCII without spaces.')
+    expect(checkBtn().disabled).toBe(true)
+    expect((byText('button', 'Add without checking') as HTMLButtonElement).disabled).toBe(true)
+    type(input('API key'), 'Bearer abc123')
+    expect((byText('button', 'Add without checking') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('stores each key under a variable named after the provider (minimax-2 never shares minimax)', async () => {
+    mount()
+    await settle()
+    await pickAndCheck()
+    box.handlers['/api/providers/minimax-2/credentials'] = () => ({ ok: true })
+    click(submitBtn())
+    await settle()
+    expect(box.posts[1].path).toBe('/api/upstreams')
+    expect(box.posts[1].body.auth_value_env).toBe('MINIMAX_2_API_KEY')
+    expect(box.posts[2]).toEqual({ path: '/api/providers/minimax-2/credentials', body: { key: 'MINIMAX_2_API_KEY', value: KEY } })
+  })
+
+  it('prefixes PROVIDER_ when the derived variable would be reserved', async () => {
+    mount()
+    await settle()
+    click(tile('Custom'))
+    type(input('Name'), 'python-tools')
+    type(input('Base URL'), 'https://corp.example/v1')
+    type(input('API key'), KEY)
+    box.handlers['/api/providers/python-tools/credentials'] = () => ({ ok: true })
+    click(byText('button', 'Add without checking'))
+    await settle()
+    expect(box.posts[0].body.auth_value_env).toBe('PROVIDER_PYTHON_TOOLS_API_KEY')
+    expect(box.posts[1].body.key).toBe('PROVIDER_PYTHON_TOOLS_API_KEY')
+  })
+
+  it('omits auth_value_env when no key is typed', async () => {
+    mount()
+    await settle()
+    click(tile('Ollama'))
+    click(byText('button', 'Add without checking'))
+    await settle()
+    expect(box.posts).toHaveLength(1)
+    expect(box.posts[0].body).not.toHaveProperty('auth_value_env')
+  })
+
+  it('adds a numeric suffix when another provider already uses the derived variable', async () => {
+    box.upstreams = [{ name: 'corp-gw', auth_value_env: 'CORP_GW_API_KEY' }]
+    mount()
+    await settle()
+    click(tile('Custom'))
+    type(input('Name'), 'corp_gw')
+    type(input('Base URL'), 'https://corp.example/v1')
+    type(input('API key'), KEY)
+    box.handlers['/api/providers/corp_gw/credentials'] = () => ({ ok: true })
+    click(byText('button', 'Add without checking'))
+    await settle()
+    expect(box.posts[0].body.auth_value_env).toBe('CORP_GW_2_API_KEY')
+  })
+
+  it('routes a header message to the header field and an unknown 400 to a form error', async () => {
+    mount()
+    await settle()
+    click(tile('Custom'))
+    type(input('Name'), 'corp')
+    type(input('Base URL'), 'https://corp.example/v1')
+    const auth = input('Auth') as unknown as HTMLSelectElement
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(auth, 'header')
+      auth.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    type(input('Header name'), 'X-Api-Key')
+    box.handlers['/api/providers/probe'] = fail("auth_style 'header' needs an auth_header name", 400)
+    click(checkBtn())
+    await settle()
+    expect($('#addprov-err-header')?.textContent).toContain("needs an auth_header name")
+    expect($('#addprov-err-url')).toBeNull()
+    box.handlers['/api/providers/probe'] = fail('unknown catalog_id', 400)
+    click(checkBtn())
+    await settle()
+    expect($('[data-testid="addprov-form-error"]')?.textContent).toContain('unknown catalog_id')
+    box.handlers['/api/providers/probe'] = fail('url must be an http:// or https:// URL with a host', 400)
+    click(checkBtn())
+    await settle()
+    expect($('#addprov-err-url')?.textContent).toContain('url must be')
+  })
+
+  it('a repeat check with nothing edited keeps the picks and type overrides that still exist', async () => {
+    mount()
+    await settle()
+    await pickAndCheck()
+    click(rowChecks()[1])
+    click(rowChecks()[0])
+    const sel = document.body.querySelector('select[aria-label="Type of speech-01"]') as HTMLSelectElement
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!.call(sel, 'stt')
+      sel.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    box.handlers['/api/providers/probe'] = () => okProbe([ROWS[0], ROWS[1], ROWS[2]])
+    click(checkBtn())
+    await settle()
+    expect(rowChecks().map((c) => c.checked)).toEqual([false, true, false])
+    expect((document.body.querySelector('select[aria-label="Type of speech-01"]') as HTMLSelectElement).value).toBe('stt')
+  })
+
+  it('titles the price by its own unit and labels select-all by what it applies to', async () => {
+    mount()
+    await settle()
+    await pickAndCheck([
+      probeRow('chat-a'),
+      probeRow('img-a', { type: 'image', price_unit: 'img', price_in: 0.04, price_out: null }),
+      probeRow('tts-a', { type: 'tts', price_unit: 'Mchar' }),
+    ])
+    const titles = Array.from(document.body.querySelectorAll('.addprov-row .addprov-num[title^="Price"]')).map((e) => e.getAttribute('title'))
+    expect(titles).toEqual([
+      'Price, in / out, per million tokens',
+      'Price, in / out, per image',
+      'Price, in / out, per million characters',
+    ])
+    const all = $('#addprov-all')!
+    expect(all.getAttribute('aria-label')).toBeNull()
+    expect(document.body.querySelector('label[for="addprov-all"]')?.textContent).toBe('Select all')
+  })
+
+  it('calls the probe hook clear() when the modal closes', async () => {
+    mount()
+    await settle()
+    await pickAndCheck()
+    const before = box.clears
+    mount(false)
+    expect(box.clears).toBeGreaterThan(before)
+  })
+
+  it('keeps the key out of every cache and out of the DOM after a rejected key', async () => {
+    mount()
+    await settle()
+    box.handlers['/api/providers/probe'] = () => ({ ok: false, status: 403, latency_ms: 50, models: [], rate_limit: {}, error: null })
+    click(tile('MiniMax'))
+    type(input('API key'), KEY)
+    click(checkBtn())
+    await settle()
+    expect(document.body.textContent).toContain('rejected')
+    expectKeyNowhere()
   })
 })
