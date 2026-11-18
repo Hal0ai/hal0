@@ -20,9 +20,14 @@ const HTTP_NOISE = [/Failed to load resource/]
 
 type Env = { ctl: ProvidersCtl; errors: ReturnType<typeof watchErrors> }
 
-async function open(page: Page, allow: RegExp[] = [], hash = '#models/providers'): Promise<Env> {
+async function open(
+  page: Page,
+  allow: RegExp[] = [],
+  hash = '#models/providers',
+  opts: { switchedOff?: string[] } = {},
+): Promise<Env> {
   const errors = watchErrors(page, allow)
-  const ctl = await installProviders(page)
+  const ctl = await installProviders(page, opts)
   await page.goto('/' + hash)
   await expect(page.getByTestId('providers-tab')).toBeVisible()
   await expect(page.getByTestId('prov-head-minimax')).toBeVisible()
@@ -118,13 +123,15 @@ test.describe('Providers tab', () => {
     expect(errors.seen).toEqual([])
   })
 
-  test('a one-letter search never draws more than 25 available rows per provider', async ({ page }) => {
+  test('a one-letter search draws exactly 25 available rows of the big provider and says how many more', async ({ page }) => {
     const { errors } = await open(page)
     await page.getByPlaceholder('Search models across providers').fill('a')
     const off = page.getByTestId('prov-off-openrouter')
     await expect(off).toBeVisible()
-    expect(await off.locator('.prov-row').count()).toBeLessThanOrEqual(25)
-    for (const n of ['minimax', 'openai', 'openrouter']) {
+    await expect(off.locator('.prov-row')).toHaveCount(25)
+    await expect(off.locator('.prov-more span')).toHaveText(/^\d+ more available$/)
+    // No provider ever draws more than one page of available rows for the query.
+    for (const n of ['minimax', 'openai']) {
       const sec = page.getByTestId(`prov-off-${n}`)
       if (await sec.count()) expect(await sec.locator('.prov-row').count()).toBeLessThanOrEqual(25)
     }
@@ -390,17 +397,20 @@ test.describe('Old addresses and the Endpoints tab', () => {
 })
 
 test.describe('Keyboard', () => {
-  test('Tab reaches the first provider, Enter expands it, Space flips a switch, Esc closes the modal', async ({ page }) => {
+  test('Tab from the search box reaches the first provider in eleven stops, Enter expands it, Space flips a switch, Esc closes the modal', async ({ page }) => {
     const { ctl, errors } = await open(page)
-    // From the toolbar search box, Tab walks the filter chips and lands on the first provider
-    // header (the first provider in the list is corp).
+    // From the toolbar search box, Tab walks the nine filter chips (Show: All, On, Available; Type:
+    // chat, embed, speech, transcribe, rerank, image) and "clear" (always present: Show always has
+    // one chip selected); the eleventh stop is the first provider header (the first one is corp).
     await page.getByPlaceholder('Search models across providers').focus()
-    let reached = false
-    for (let i = 0; i < 30 && !reached; i += 1) {
+    for (let stop = 1; stop <= 9; stop += 1) {
       await page.keyboard.press('Tab')
-      reached = await page.evaluate(() => document.activeElement?.getAttribute('data-testid') === 'prov-head-corp')
+      await expect(page.locator(':focus')).toHaveClass(/mdl-chip/)
     }
-    expect(reached, 'Tab never reached the first provider header').toBe(true)
+    await page.keyboard.press('Tab')
+    await expect(page.locator(':focus')).toHaveClass(/mdl-clear/)
+    await page.keyboard.press('Tab')
+    await expect(page.locator(':focus')).toHaveAttribute('data-testid', 'prov-head-corp')
     await page.keyboard.press('Enter')
     await expect(head(page, 'corp')).toHaveAttribute('aria-expanded', 'true')
 
@@ -457,6 +467,72 @@ test.describe('Phone width', () => {
     const box = await shell.boundingBox()
     expect(box!.x).toBeGreaterThanOrEqual(0)
     expect(box!.x + box!.width).toBeLessThanOrEqual(400.5)
+    expect(errors.seen).toEqual([])
+  })
+})
+
+test.describe('A provider switched off from routing', () => {
+  const off = (page: Page, allow: RegExp[] = []) => open(page, allow, '#models/providers', { switchedOff: ['minimax'] })
+
+  test('shows the off chip and "switched off", and Switch on sends enabled: true', async ({ page }) => {
+    const { ctl, errors } = await off(page)
+    await expect(head(page, 'minimax')).toContainText('off')
+    await expect(head(page, 'minimax')).toContainText('switched off')
+    await expect(head(page, 'minimax')).not.toContainText('of 7 on')
+    await expect(head(page, 'openrouter')).not.toContainText('switched off')
+    await expand(page, 'minimax')
+    const line = page.getByTestId('prov-switched-off-minimax')
+    await expect(line).toContainText('This provider is switched off. Its models are not called until it is switched on.')
+    // Its model switches stay usable: they are stored state.
+    await expect(sw(page, 'Switch on minimax/MiniMax-M2.5')).toBeEnabled()
+    await line.getByRole('button', { name: 'Switch on', exact: true }).click()
+    await expect.poll(() => ctl.callsTo('PATCH', /^\/api\/upstreams\/minimax$/).map((c) => c.body)).toEqual([{ enabled: true }])
+    await expect(page.getByTestId('prov-off-chip-minimax')).toHaveCount(0)
+    await expect(page.getByTestId('prov-switched-off-minimax')).toHaveCount(0)
+    await expect(head(page, 'minimax')).toContainText('of 7 on')
+    expect(errors.seen).toEqual([])
+  })
+
+  test('a refused Switch on shows the error and the chip stays', async ({ page }) => {
+    const { ctl, errors } = await off(page, HTTP_NOISE)
+    ctl.failUpstreamPatch = { status: 500, code: 'system.error', message: 'the config file could not be written' }
+    await expand(page, 'minimax')
+    await page.getByTestId('prov-switched-off-minimax').getByRole('button', { name: 'Switch on', exact: true }).click()
+    await expect(toast(page, 'the config file could not be written')).toBeVisible()
+    await expect(page.getByTestId('prov-off-chip-minimax')).toBeVisible()
+    await expect(head(page, 'minimax')).toContainText('switched off')
+    expect(errors.seen).toEqual([])
+  })
+
+  test('the detail panel shows Routes requests off and switches it on', async ({ page }) => {
+    const { ctl, errors } = await off(page)
+    await expand(page, 'minimax')
+    const routes = page.getByTestId('prov-routes-switch').getByRole('switch')
+    await expect(routes).toHaveAttribute('aria-checked', 'false')
+    await routes.click()
+    await expect.poll(() => ctl.callsTo('PATCH', /^\/api\/upstreams\/minimax$/).map((c) => c.body)).toEqual([{ enabled: true }])
+    await expect(routes).toHaveAttribute('aria-checked', 'true')
+    expect(errors.seen).toEqual([])
+  })
+})
+
+test.describe('Refresh that could not reach the provider', () => {
+  test('the per-provider refresh warns instead of reporting success', async ({ page }) => {
+    const { ctl, errors } = await open(page)
+    ctl.refreshStale = true
+    await expand(page, 'minimax')
+    await page.getByTestId('provider-detail').getByRole('button', { name: 'Refresh model list' }).click()
+    await expect(toast(page, /Could not reach .*; showing the last known list\./)).toBeVisible()
+    await expect(toast(page, 'model list refreshed')).toHaveCount(0)
+    expect(errors.seen).toEqual([])
+  })
+
+  test('the header refresh counts only clean answers and says how many could not be reached', async ({ page }) => {
+    const { ctl, errors } = await open(page)
+    ctl.refreshStale = true
+    await page.getByTestId('mdl-check-providers').click()
+    await expect(toast(page, /Refreshed 0 model lists · \d+ could not be reached/)).toBeVisible()
+    expect(ctl.callsTo('POST', /\/refresh$/).length).toBeGreaterThan(0)
     expect(errors.seen).toEqual([])
   })
 })

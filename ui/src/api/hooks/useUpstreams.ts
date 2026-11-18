@@ -226,9 +226,11 @@ export function useUpstreamDelete() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (name: string) => apiDelete(ENDPOINTS.upstream(name)),
-    onSuccess: (_done, name) => {
+    // The list refetch comes first: it unmounts the removed provider's section and panel. Dropping the
+    // listing while they are still mounted would make them fetch it again and get a 404.
+    onSuccess: async (_done, name) => {
+      await qc.invalidateQueries({ queryKey: ['upstreams'] })
       qc.removeQueries({ queryKey: ['upstream-models', name] })
-      return qc.invalidateQueries({ queryKey: ['upstreams'] })
     },
   })
 }

@@ -31,6 +31,10 @@ export type ProvidersCtl = {
   failCredentials: Failure | null
   /** Probe answers, first to last; the last repeats. Default: one success. */
   probes: Array<'ok' | 'denied'>
+  /** PATCH /api/upstreams/{name} answers this failure while set (clears after one use). */
+  failUpstreamPatch: Failure | null
+  /** A refresh answers `stale: true` with no warning (the provider could not be reached). */
+  refreshStale: boolean
   /** Hold the create (POST /api/upstreams) until `release()` is called. */
   holdCreate: boolean
   release: () => void
@@ -56,8 +60,12 @@ function ok(route: Route, body: unknown, status = 200) {
 }
 
 /** Install the routes on `page` before `page.goto`. */
-export async function installProviders(page: Page): Promise<ProvidersCtl> {
+export async function installProviders(
+  page: Page,
+  opts: { switchedOff?: string[] } = {},
+): Promise<ProvidersCtl> {
   const upstreams: Json[] = clone((MOCK_BUILDERS.upstreams as any)('/api/upstreams', []))
+  for (const u of upstreams) if (opts.switchedOff?.includes(u.name)) u.enabled = false
   const listings = new Map<string, Json>()
   for (const u of upstreams) {
     listings.set(u.name, clone((MOCK_BUILDERS.upstreamModels as any)('', ['', u.name])))
@@ -70,6 +78,8 @@ export async function installProviders(page: Page): Promise<ProvidersCtl> {
     failPatch: null,
     failDelete: null,
     failCredentials: null,
+    failUpstreamPatch: null,
+    refreshStale: false,
     probes: ['ok'],
     holdCreate: false,
     release: () => gate?.(),
@@ -192,6 +202,7 @@ export async function installProviders(page: Page): Promise<ProvidersCtl> {
         recount(name)
         return ok(route, l)
       }
+      if (ctl.refreshStale && l) return ok(route, { ...l, stale: true, warning: null })
       return ok(route, MOCK_MUTATION_FIXTURES.upstreamRefresh(name))
     }
 
@@ -209,6 +220,11 @@ export async function installProviders(page: Page): Promise<ProvidersCtl> {
         return ok(route, { ok: true })
       }
       if (method === 'PATCH') {
+        if (ctl.failUpstreamPatch) {
+          const f = ctl.failUpstreamPatch
+          ctl.failUpstreamPatch = null
+          return envelope(route, f)
+        }
         const u = upstreams.find((x) => x.name === name)
         if (u) Object.assign(u, body ?? {})
         return ok(route, u ?? {})
