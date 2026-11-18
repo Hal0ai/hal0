@@ -109,7 +109,7 @@ def _not_enabled(provider: str, model: str, *, listed: bool = True) -> ModelNotE
     state = "is not enabled" if listed else "is not enabled, or is not offered,"
     return ModelNotEnabled(
         f"model {model!r} {state} on provider {provider!r}; enable it with "
-        f"`hal0 upstream enable {provider} {model}` or on the provider's model list "
+        f"`hal0 upstream enable {provider} {model}` or under Models \u2192 Providers "
         "in the dashboard",
         details={"provider": provider, "model": model},
     )

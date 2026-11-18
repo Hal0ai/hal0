@@ -101,13 +101,12 @@ def test_unlisted_model_on_named_provider_is_pending_canonical() -> None:
     assert "hal0 upstream enable mm nope" in result.error.message
 
 
-def test_not_enabled_message_never_names_a_providers_tab() -> None:
+def test_not_enabled_message_names_the_providers_tab() -> None:
     mm = _up("mm", UpstreamModel("m", enabled=False))
     for ref in ("mm/m", "m", "mm/nope"):
         result = resolve_requested_model(ref, [mm])
         assert isinstance(result, NotEnabled)
-        assert "Providers" not in result.error.message
-        assert "dashboard" in result.error.message
+        assert result.error.message.endswith("or under Models \u2192 Providers in the dashboard")
 
 
 def test_unlisted_ref_resolves_as_a_bare_id_elsewhere() -> None:
