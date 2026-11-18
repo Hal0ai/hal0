@@ -75,18 +75,29 @@ correct the context size and the prices stored for the model.
 A **gone** tag means the provider no longer offers that model; a
 **recommended** tag marks the template's suggestion.
 
-Select a provider's header, or its name in the panel, to act on the whole
-provider:
+Select a provider's header to act on the whole provider. Its facts and actions
+appear in the panel on the right:
 
 - **Test connection** checks that the address and key still work.
 - **Refresh model list** asks the provider again. New models arrive switched
-  off, so nothing starts being routed without you. **Refresh model lists** at
-  the top of the tab does this for every provider.
+  off, so nothing starts being routed without you. If the provider cannot be
+  reached, hal0 says so and keeps showing the last known list. **Refresh model
+  lists** at the top of the tab does this for the providers that are switched
+  on, use per-model switches, and have a key stored or need none. It says how
+  many lists it refreshed and how many could not be reached; a provider that
+  is switched off, still awaiting **Choose models**, missing its key or managed
+  by an agent is skipped.
 - **Replace key** (or **Add key** when none is stored) writes a new key under
   the provider's own key slot. A banner on the provider's section offers
   **Add key** too when no key is stored.
 - **Remove** deletes the provider. Its models stop being callable; the stored
   key stays on the box.
+- **Routes requests** switches the whole provider on or off for routing (the
+  `enabled` field, the same as `hal0 upstream update` with `--enabled` and
+  `--disabled`). A provider that is switched off is not called at all, and its
+  section shows an **off** chip, "switched off" instead of the count of models
+  that are on, and a **Switch on** button. Its model switches keep their state,
+  so switching the provider back on restores what you had.
 - **Shown in app model pickers** controls whether the provider's models appear
   in the model lists inside hal0's apps.
 

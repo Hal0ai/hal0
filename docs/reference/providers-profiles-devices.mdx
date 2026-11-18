@@ -191,7 +191,12 @@ with `models` (even `[]`) is curated from the start.
 Everything above is available under **Models → Providers**: the list has a section per
 provider with a switch per model (the `enabled` field of each `[[upstream.models]]` row), the
 **Add provider** dialog creates a curated provider with the rows you ticked, and **Refresh
-model list** is the same refresh. A provider that has not been converted shows **Choose
+model list** is the same refresh; an answer marked `stale`, or carrying a `warning`, means the
+provider could not be reached and is reported as such, not as a success. The provider's
+**Routes requests** switch (and the **Switch on** button of a switched-off provider's section)
+sends `PATCH /api/upstreams/{name}` with `{"enabled": false}` or `{"enabled": true}`: the routing
+kill-switch, which removes the provider from dispatch while it is off and leaves its stored
+model rows untouched. A provider that has not been converted shows **Choose
 models**, which runs the refresh and converts it with every model it offered switched on. The
 dashboard reads and writes these routes: `GET /api/upstreams`, `GET /api/providers/catalog`,
 `POST /api/providers/probe`, `POST /api/upstreams`, `GET /api/upstreams/{name}/models`,
