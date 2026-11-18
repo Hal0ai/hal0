@@ -5009,6 +5009,7 @@ class Updater:
         # ADR-0045: a release before per-slot [tune] refuses a slot file that
         # carries the table, a profile with reasoning keys and a stack entry with
         # tune. Strip them and leave a .bak-<stamp> copy of each file touched.
+        # The same goes for the per-model provider catalog (#3800) in upstreams.toml.
         tune_backups: dict[str, _TuneBackup] = {}
         # Steps 8 + 8b via the same privileged primitive commit() uses: swap the
         # symlink back and re-pip the prior tree so the next hal0-api restart
@@ -5019,6 +5020,9 @@ class Updater:
         # is left half-done.
         try:
             tune_stripped = _strip_tune_config_for(
+                prior_path, job_id=self.job_id, backups_out=tune_backups
+            )
+            catalog_stripped = _strip_upstream_catalog_for(
                 prior_path, job_id=self.job_id, backups_out=tune_backups
             )
             activated = await seam.activate(prior_path.name)
@@ -5073,6 +5077,7 @@ class Updater:
             "previous_now": str(current_target) if current_target else None,
             "schema_warning": warning,
             "tune_stripped": tune_stripped,
+            "catalog_stripped": catalog_stripped,
         }
 
 
@@ -5200,16 +5205,35 @@ def _strip_tune_config_for(
     """
     if (prior_path / _TUNE_MARKER).is_file():
         return []
-    import tomllib
-
-    import tomli_w
-
     slots_dir = paths.slots_config_dir()
     targets: list[tuple[Path, Callable[[dict[str, Any]], bool]]] = [
         *((path, _drop_slot_file_tune) for path in sorted(slots_dir.glob("*.toml"))),
         (paths.profiles_toml(), lambda data: _drop_profile_tune_keys(data.get("profile"))),
         (paths.stacks_toml(), _drop_stack_catalog_tune),
     ]
+    return _strip_config_files(
+        targets, event="tune_stripped", job_id=job_id, backups_out=backups_out
+    )
+
+
+def _strip_config_files(
+    targets: list[tuple[Path, Callable[[dict[str, Any]], bool]]],
+    *,
+    event: str,
+    job_id: str | None,
+    backups_out: dict[str, _TuneBackup] | None,
+) -> list[str]:
+    """Run each ``drop`` over its parsed file; rewrite the files it changed.
+
+    The shared body of :func:`_strip_tune_config_for` and
+    :func:`_strip_upstream_catalog_for`: back up, rewrite atomically keeping
+    owner and mode, record in ``backups_out``, and on any failure restore what
+    this call already changed before propagating.
+    """
+    import tomllib
+
+    import tomli_w
+
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     backups: dict[str, _TuneBackup] = backups_out if backups_out is not None else {}
     changed: list[str] = []
@@ -5243,13 +5267,98 @@ def _strip_tune_config_for(
                 path, data, mode=stat.S_IMODE(st.st_mode), owner=(st.st_uid, st.st_gid)
             )
             changed.append(str(path))
-            log.info("updater.tune_stripped", job_id=job_id, path=str(path), backup=str(backup))
+            log.info(f"updater.{event}", job_id=job_id, path=str(path), backup=str(backup))
     except BaseException:
         # Nothing else touches these files inside this window, so restore without
         # the edited-since check (the file being written still holds its old content).
         _restore_tune_backups(backups, job_id=job_id, force=True)
         raise
     return changed
+
+
+# HAL0-SUNSET: v2.0.0  — rollback guard for the one-time upstream catalog conversion; delete it (the constants, three helpers and the rollback call) with upstreams/convert.py.
+#: A release tree that understands the per-model provider catalog (#3782): the
+#: module that reads ``curated`` and ``models``. v1.7.1 and earlier do not ship
+#: it; the first release that does is v1.8.0.
+_CATALOG_MARKER = Path("src/hal0/upstreams/catalog.py")
+
+#: ``[[upstream]]`` keys the catalog added. A release before it validates every
+#: row with ``extra="forbid"`` and drops the whole file on one unknown key.
+_UPSTREAM_CATALOG_KEYS = ("curated", "models", "catalog_id", "budget_monthly_usd")
+
+
+def _drop_upstream_catalog_keys(data: dict[str, Any], *, original_filters: dict[str, Any]) -> bool:
+    """Drop the catalog keys from every ``[[upstream]]`` row. True when any went.
+
+    Conversion cleared a converted row's ``model_filters``. A row that had one
+    before conversion gets it back from ``original_filters`` (name -> filters,
+    read from ``upstreams.toml.pre-convert``), so the old build advertises what
+    it advertised before the upgrade. Rows, URLs and credential references are
+    otherwise left exactly as they are.
+    """
+    rows = data.get("upstream")
+    if not isinstance(rows, list):
+        return False
+    dropped = False
+    for row in rows:
+        if not isinstance(row, dict) or not any(k in row for k in _UPSTREAM_CATALOG_KEYS):
+            continue
+        if row.get("curated") and not row.get("model_filters"):
+            filters = original_filters.get(str(row.get("name")))
+            if filters:
+                row["model_filters"] = filters
+        for key in _UPSTREAM_CATALOG_KEYS:
+            row.pop(key, None)
+        dropped = True
+    return dropped
+
+
+def _pre_convert_filters(upstreams: Path) -> dict[str, Any]:
+    """``{row name: model_filters}`` from ``<upstreams>.pre-convert``; empty if unusable."""
+    import tomllib
+
+    from hal0.upstreams.convert import BACKUP_SUFFIX
+
+    try:
+        raw = tomllib.loads(
+            upstreams.with_name(upstreams.name + BACKUP_SUFFIX).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return {}
+    rows = raw.get("upstream")
+    return {
+        r["name"]: r["model_filters"]
+        for r in (rows if isinstance(rows, list) else [])
+        if isinstance(r, dict) and r.get("model_filters") and "name" in r
+    }
+
+
+def _strip_upstream_catalog_for(
+    prior_path: Path,
+    *,
+    job_id: str | None,
+    backups_out: dict[str, _TuneBackup] | None = None,
+) -> list[str]:
+    """Before rolling back to ``prior_path``, remove the per-model catalog keys from
+    ``upstreams.toml`` when that release predates the catalog (#3800).
+
+    Same contract as :func:`_strip_tune_config_for`: a copy at
+    ``<file>.bak-<UTC stamp>``, an atomic rewrite that keeps owner and mode, an
+    entry in ``backups_out``, nothing touched when the file is absent or has no
+    catalog key. Stripping rather than restoring ``upstreams.toml.pre-convert``
+    keeps every post-conversion edit (new providers, changed URLs); the rows
+    return to uncurated, so the next upgrade converts them again.
+    """
+    if (prior_path / _CATALOG_MARKER).is_file():
+        return []
+    upstreams = paths.etc() / "upstreams.toml"
+    filters = _pre_convert_filters(upstreams)
+    return _strip_config_files(
+        [(upstreams, lambda data: _drop_upstream_catalog_keys(data, original_filters=filters))],
+        event="upstream_catalog_stripped",
+        job_id=job_id,
+        backups_out=backups_out,
+    )
 
 
 __all__ = [
