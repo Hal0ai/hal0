@@ -443,3 +443,71 @@ describe('Routes requests', () => {
     expect(q('[data-testid="prov-routes-switch"]')).toBeNull()
   })
 })
+
+describe('key editor input and rule', () => {
+  it('asks password managers to leave the key alone', async () => {
+    view({ provider: 'minimax', model: null })
+    await flush()
+    click(btn('Replace key')!)
+    const input = q<HTMLInputElement>('input[type="password"]')!
+    expect(input.getAttribute('autocomplete')).toBe('off')
+    expect(input.getAttribute('data-1p-ignore')).not.toBeNull()
+    expect(input.getAttribute('data-lpignore')).toBe('true')
+  })
+
+  it('applies the same key rule as the Add provider modal: no request for a key that can never be stored', async () => {
+    view({ provider: 'minimax', model: null })
+    await flush()
+    click(btn('Replace key')!)
+    await type(q('input[type="password"]'), 'sk with spaces')
+    expect(q('[data-testid="prov-key-editor"] [role="alert"]')!.textContent).toBe('The key must be printable ASCII without spaces.')
+    expect(btn('Save key')!.hasAttribute('disabled')).toBe(true)
+    click(btn('Save key')!)
+    await flush()
+    expect(client.apiPost).not.toHaveBeenCalled()
+    expect(document.body.textContent).not.toContain('sk with spaces')
+  })
+})
+
+describe('context and price editor rules', () => {
+  const open = async () => {
+    view({ provider: 'minimax', model: 'm2' })
+    await flush()
+    click(btn('Edit')!)
+    return qa('[data-testid="prov-edit"] input') as HTMLInputElement[]
+  }
+
+  it('refuses a context that is not a whole number above 0 with a field message', async () => {
+    const inputs = await open()
+    for (const bad of ['0', '1.5', '-3']) {
+      await type(inputs[0], bad)
+      expect(q('[data-testid="prov-edit"] [role="alert"]')!.textContent).toContain('Context')
+      expect(btn('Save')!.hasAttribute('disabled')).toBe(true)
+    }
+    await type(inputs[0], '')
+    expect(q('[data-testid="prov-edit"] [role="alert"]')).toBeNull()
+    expect(btn('Save')!.hasAttribute('disabled')).toBe(false)
+  })
+
+  it('refuses a negative or non-numeric price', async () => {
+    const inputs = await open()
+    await type(inputs[1], '-0.1')
+    expect(q('[data-testid="prov-edit"] [role="alert"]')!.textContent).toContain('Price')
+    expect(btn('Save')!.hasAttribute('disabled')).toBe(true)
+    await type(inputs[1], 'abc')
+    expect(btn('Save')!.hasAttribute('disabled')).toBe(true)
+    await type(inputs[1], '0')
+    expect(btn('Save')!.hasAttribute('disabled')).toBe(false)
+  })
+
+  it('a refusal from the server shows the server message, not the generic one', async () => {
+    vi.mocked(client.apiPatch).mockRejectedValue(
+      Object.assign(new Error('request validation failed'), { status: 422, details: { fields: [{ loc: ['body', 'context'], msg: 'Input should be greater than 0' }] } }),
+    )
+    await open()
+    click(btn('Save')!)
+    await flush()
+    expect(toasts).toContainEqual(['context: Input should be greater than 0', 'err'])
+    expect(JSON.stringify(toasts)).not.toContain('Could not change the model. Try again.')
+  })
+})

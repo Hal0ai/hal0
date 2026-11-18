@@ -128,9 +128,10 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
   const key = keyState(u)
   const isSel = selected.provider === u.name
   const [offShown, setOffShown] = useState(OFF_PAGE)
-  // A search opens every section for the rows it shows, without touching the remembered state.
-  const shown = expanded || searching
   const listing = useUpstreamModels(u.name, { enabled: expanded || loadSearch })
+  // A search opens a section for the rows it shows, without touching the remembered state, but only
+  // once its listing is loaded or loading: inside the debounce nothing opens with an empty body.
+  const shown = expanded || (searching && (!!listing.data || listing.isLoading))
   const state = providerState(u, listing.data)
   const patch = useUpstreamModelPatch()
   const refresh = useUpstreamRefresh()
@@ -161,7 +162,7 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
   const parts = sectionRows(rows, filter, offShown)
   const owner = ownerLabel(u)
   const matches = parts.on.length + parts.offTotal
-  const noMatch = searching && !expanded && !!listing.data && matches === 0
+  const noMatch = searching && !!listing.data && matches === 0
   const body = shown && !noMatch
   const chip = KEY_CHIP[key]
   const switchedOff = u.enabled === false && state !== 'managed'
@@ -249,7 +250,10 @@ function ProviderSection({ u, catalog, selected, expanded, searching, loadSearch
               </button>
             </div>
           )}
-          {key === 'missing' && (
+          {key === 'missing' && !u.auth_value_env && (
+            <div className="prov-msg" data-testid={`prov-no-key-slot-${u.name}`}>This provider has no key slot configured.</div>
+          )}
+          {key === 'missing' && u.auth_value_env && (
             <div className="prov-banner" data-testid={`prov-banner-key-${u.name}`}>
               <p>No key stored. Models that are on will fail until a key is added.</p>
               <button

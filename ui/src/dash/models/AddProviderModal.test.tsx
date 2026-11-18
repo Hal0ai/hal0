@@ -425,11 +425,13 @@ describe('AddProviderModal', () => {
     expect(box.posts[1].body).not.toHaveProperty('catalog_id')
   })
 
-  it('labels the key optional when the preset needs none', async () => {
+  it('hides the key field when the preset needs none and says so', async () => {
     mount()
     await settle()
     click(tile('Ollama'))
-    expect(document.body.textContent).toContain('API key (optional)')
+    expect(input('API key')).toBeNull()
+    expect(document.body.querySelector('input[type="password"]')).toBeNull()
+    expect(document.body.textContent).toContain('No key needed for this provider.')
   })
 
   it('shows the server message for a 400 from the probe next to the key field', async () => {
@@ -557,7 +559,7 @@ describe('AddProviderModal', () => {
     await settle()
     click(tile('MiniMax'))
     type(input('API key'), KEY)
-    click(tile('Ollama'))
+    click(tile('Custom'))
     expect(input('API key')!.value).toBe('')
   })
 
@@ -808,7 +810,7 @@ describe('AddProviderModal', () => {
     expect(box.posts[1].body.key).toBe('PROVIDER_PYTHON_TOOLS_API_KEY')
   })
 
-  it('omits auth_value_env when no key is typed', async () => {
+  it('omits auth_value_env for a provider whose auth is none', async () => {
     mount()
     await settle()
     click(tile('Ollama'))
@@ -1058,5 +1060,78 @@ describe('AddProviderModal', () => {
     expect((($('#addprov-all')) as HTMLInputElement).disabled).toBe(true)
     d.reject(new Hal0Error('x', { status: 500 }))
     await settle()
+  })
+
+  it('never calls the credentials route for an auth none preset', async () => {
+    mount()
+    await settle()
+    box.handlers['/api/providers/probe'] = () => okProbe()
+    click(tile('Ollama'))
+    click(checkBtn())
+    await settle()
+    expect(box.posts[0].body).not.toHaveProperty('key')
+    box.posts = []
+    click(submitBtn())
+    await settle()
+    expect(box.posts.map((p) => p.path)).toEqual(['/api/upstreams'])
+    expect(box.posts[0].body).not.toHaveProperty('auth_value_env')
+  })
+
+  it('a custom provider switched to auth none drops a typed key and never saves it', async () => {
+    mount()
+    await settle()
+    click(tile('Custom'))
+    type(input('Name'), 'corp')
+    type(input('Base URL'), 'https://corp.example/v1')
+    type(input('API key'), KEY)
+    const auth = $('#addprov-auth') as HTMLSelectElement
+    act(() => {
+      const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!
+      set.call(auth, 'none')
+      auth.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(input('API key')).toBeNull()
+    expect(document.body.textContent).toContain('No key needed for this provider.')
+    box.handlers['/api/providers/probe'] = () => okProbe()
+    click(checkBtn())
+    await settle()
+    expect(box.posts[0].body).not.toHaveProperty('key')
+    box.posts = []
+    click(submitBtn())
+    await settle()
+    expect(box.posts.map((p) => p.path)).toEqual(['/api/upstreams'])
+    expect(JSON.stringify(box.posts)).not.toContain(KEY)
+    expect(document.body.textContent).not.toContain('key was not saved')
+  })
+
+  it('asks password managers to leave the key alone', async () => {
+    mount()
+    await settle()
+    click(tile('MiniMax'))
+    const key = input('API key')!
+    expect(key.getAttribute('autocomplete')).toBe('off')
+    expect(key.getAttribute('data-1p-ignore')).not.toBeNull()
+    expect(key.getAttribute('data-lpignore')).toBe('true')
+  })
+
+  it('disables "Add provider" when the name has become invalid after a check, and shows why', async () => {
+    mount()
+    await settle()
+    await pickAndCheck()
+    type(input('Name'), 'Bad Name')
+    expect(submitBtn()!.disabled).toBe(true)
+    expect(document.body.textContent).toContain('Use lowercase letters')
+    type(input('Name'), 'mm')
+    expect(submitBtn()!.disabled).toBe(false)
+  })
+
+  it('the type select shows the chip labels and sends the raw value', async () => {
+    mount()
+    await settle()
+    await pickAndCheck()
+    const sel = document.body.querySelector('select[aria-label="Type of speech-01"]') as HTMLSelectElement
+    const opts = Array.from(sel.options).map((o) => [o.value, o.textContent])
+    expect(opts).toContainEqual(['tts', 'speech'])
+    expect(opts).toContainEqual(['stt', 'transcribe'])
   })
 })

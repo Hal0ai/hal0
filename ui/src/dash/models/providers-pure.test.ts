@@ -10,6 +10,7 @@ import type {
 import {
   OFF_PAGE,
   buildCreateBody,
+  contextProblem,
   countLabel,
   defaultProviderName,
   filterModels,
@@ -24,6 +25,7 @@ import {
   MODEL_TYPE_CHOICES,
   modelPath,
   modelTypeLabel,
+  priceProblem,
   ownerLabel,
   probeErrorMessage,
   providerLabel,
@@ -499,5 +501,39 @@ describe('refreshSummary', () => {
   })
   it('says there is nothing to refresh when no provider was eligible', () => {
     expect(refreshSummary(0, 0)).toEqual({ text: 'No provider to refresh.', kind: 'info' })
+  })
+})
+
+describe('toggleErrorMessage for a refused edit', () => {
+  it('shows the server line for a 400 or 422 instead of the generic text', () => {
+    expect(
+      toggleErrorMessage({ status: 400, code: 'upstream.invalid', message: 'invalid model row', details: { errors: ['context: Input should be greater than 0'] } }),
+    ).toBe('context: Input should be greater than 0')
+    expect(
+      toggleErrorMessage({ status: 422, code: 'validation.invalid', message: 'request validation failed', details: { fields: [{ loc: ['body', 'price_in'], msg: 'Input should be greater than or equal to 0', type: 'x' }] } }),
+    ).toBe('price_in: Input should be greater than or equal to 0')
+  })
+  it('falls back to the server message, then to the generic text', () => {
+    expect(toggleErrorMessage({ status: 422, message: 'request validation failed', details: {} })).toBe('request validation failed')
+    expect(toggleErrorMessage({ status: 500 })).toBe('Could not change the model. Try again.')
+  })
+})
+
+describe('model field problems', () => {
+  it('context must be a whole number above 0, or empty', () => {
+    expect(contextProblem('')).toBeNull()
+    expect(contextProblem(' 256000 ')).toBeNull()
+    expect(contextProblem('0')).not.toBeNull()
+    expect(contextProblem('-5')).not.toBeNull()
+    expect(contextProblem('1.5')).not.toBeNull()
+    expect(contextProblem('12k')).not.toBeNull()
+  })
+  it('a price must be a number of 0 or more, or empty', () => {
+    expect(priceProblem('')).toBeNull()
+    expect(priceProblem('0')).toBeNull()
+    expect(priceProblem('0.25')).toBeNull()
+    expect(priceProblem('-1')).not.toBeNull()
+    expect(priceProblem('abc')).not.toBeNull()
+    expect(priceProblem('Infinity')).not.toBeNull()
   })
 })

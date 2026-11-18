@@ -49,9 +49,12 @@
 .addprov-sub, .addprov-hint, .addprov-hint .mono, .addprov-note { word-break: normal; } /* the shared .mono and the modal foot break every letter */
 .addprov-note { flex: 1 1 140px; min-width: 0; color: var(--fg-3); overflow-wrap: break-word; }
 .addprov-bad { color: var(--err); }
+.addprov-nokey { padding: 8px 11px; border: 1px dashed var(--line); border-radius: 8px; color: var(--fg-3); font-size: 12px; }
 .addprov-btns { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
 
 @media (max-width: 520px) {
+  .modal-foot:has(.addprov-note) { flex-direction: column; align-items: stretch; gap: 8px; }
+  .addprov-note { flex: 0 0 auto; }
   .addprov .pf-row { grid-template-columns: 1fr; gap: 4px; }
   .addprov .pf-row-lbl { padding-top: 0; }
   .addprov-row { grid-template-columns: auto minmax(0, 1fr) auto; }

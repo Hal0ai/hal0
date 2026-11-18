@@ -26,10 +26,13 @@ import {
 } from '@/api/hooks/useUpstreams'
 import {
   MODEL_TYPE_CHOICES,
+  contextProblem,
   formatContext,
   formatPrice,
   hostOf,
+  keyProblem,
   keyState,
+  priceProblem,
   providerLabel,
   providerState,
   toggleErrorMessage,
@@ -44,6 +47,7 @@ function KeyEditor({ u, onDone }) {
   const [value, setValue] = useState('')
   const [err, setErr] = useState('')
   const env = u.auth_value_env
+  const problem = keyProblem(value)
   const inputId = `prov-key-${u.name}`
 
   const cancel = () => {
@@ -53,7 +57,7 @@ function KeyEditor({ u, onDone }) {
   }
   const submit = async (e) => {
     e.preventDefault()
-    if (!value) return
+    if (!value || problem) return
     setErr('')
     try {
       await save.save({ name: u.name, key: env, value })
@@ -71,15 +75,22 @@ function KeyEditor({ u, onDone }) {
         id={inputId}
         className="input mono"
         type="password"
-        autoComplete="new-password"
+        autoComplete="off"
+        data-1p-ignore
+        data-lpignore="true"
+        spellCheck={false}
+        aria-invalid={problem || err ? 'true' : 'false'}
         autoFocus
         value={value}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => {
+          setValue(e.target.value)
+          setErr('')
+        }}
       />
       <div className="prov-hint">Stored on this box only. Never shown again.</div>
-      {err && <div className="prov-msg err" role="alert">{err}</div>}
+      {(err || problem) && <div className="prov-msg err" role="alert">{err || problem}</div>}
       <div className="prov-actions">
-        <button type="submit" className="btn sm" disabled={!value || save.isPending}>Save key</button>
+        <button type="submit" className="btn sm" disabled={!value || !!problem || save.isPending}>Save key</button>
         <button type="button" className="btn ghost sm" onClick={cancel}>Cancel</button>
       </div>
     </form>
@@ -251,7 +262,7 @@ function PriceEditor({ m, onSave, onCancel }) {
   const [pin, setPin] = useState(str(m.price_in))
   const [pout, setPout] = useState(str(m.price_out))
   const num = (s) => (s.trim() === '' ? null : Number(s))
-  const bad = [ctx, pin, pout].some((s) => s.trim() !== '' && !(Number(s) >= 0))
+  const problem = contextProblem(ctx) || priceProblem(pin) || priceProblem(pout)
   return (
     <div className="prov-edit" data-testid="prov-edit">
       <label className="prov-field">
@@ -266,12 +277,12 @@ function PriceEditor({ m, onSave, onCancel }) {
         <span>{`Price out (per ${m.price_unit})`}</span>
         <input className="input mono" inputMode="decimal" value={pout} onChange={(e) => setPout(e.target.value)} />
       </label>
-      {bad && <div className="prov-msg err" role="alert">Use numbers of 0 or more, or leave a field empty.</div>}
+      {problem && <div className="prov-msg err" role="alert">{problem}</div>}
       <div className="prov-actions">
         <button
           type="button"
           className="btn sm"
-          disabled={bad}
+          disabled={!!problem}
           onClick={() => onSave({ context: num(ctx), price_in: num(pin), price_out: num(pout) })}
         >
           Save

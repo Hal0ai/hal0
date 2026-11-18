@@ -542,3 +542,64 @@ describe('refreshModelList', () => {
     expect(toasts[0][0]).toContain('converted')
   })
 })
+
+describe('search debounce and empty sections', () => {
+  const later = async (ms: number) => {
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, ms))
+    })
+  }
+
+  it('closed sections stay closed until their listing has started loading', async () => {
+    view()
+    await settle()
+    await settle()
+    await type(q('input[aria-label="Search models"]'), 'm299')
+    // Inside the 250 ms debounce nothing has started loading: no section may open with an empty body.
+    for (const n of ['openrouter', 'minimax', 'corp']) {
+      expect(q(`[data-testid="prov-head-${n}"]`)!.getAttribute('aria-expanded')).toBe('false')
+      expect(q(`[data-testid="prov-section-${n}"] .prov-body`)).toBeNull()
+    }
+    await later(300)
+    await settle()
+    expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('true')
+  })
+
+  it('shows the loading line once a search has started loading a section', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => (release = r))
+    const base = vi.mocked(client.apiGet).getMockImplementation()!
+    vi.mocked(client.apiGet).mockImplementation(async (url: string) => {
+      if (url === '/api/upstreams/minimax/models') await gate
+      return base(url)
+    })
+    view()
+    await settle()
+    await type(q('input[aria-label="Search models"]'), 'm')
+    await later(300)
+    expect(q('[data-testid="prov-section-minimax"]')!.textContent).toContain('Loading models…')
+    release()
+    await settle()
+  })
+
+  it('an open section with no match shows only the "no match" chip, not an empty-filter body', async () => {
+    await expand('minimax')
+    await type(q('input[aria-label="Search models"]'), 'zzz-nothing')
+    await later(300)
+    await settle()
+    expect(q('[data-testid="prov-head-minimax"]')!.textContent).toContain('no match')
+    expect(text()).not.toContain('No models match the filter.')
+    expect(q('[data-testid="prov-section-minimax"] .prov-body')).toBeNull()
+  })
+})
+
+describe('provider without a key slot', () => {
+  it('does not offer "Add key"; it says there is no key slot', async () => {
+    upstreams = [entry('openai', { auth_key_present: false, auth_value_env: '' })]
+    listings.openai = listing('openai', [row('gpt', { enabled: true })])
+    await expand('openai')
+    expect(q('[data-testid="prov-banner-key-openai"]')).toBeNull()
+    expect(qa('button').find((b) => b.textContent === 'Add key')).toBeUndefined()
+    expect(q('[data-testid="prov-no-key-slot-openai"]')!.textContent).toContain('This provider has no key slot configured.')
+  })
+})

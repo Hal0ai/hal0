@@ -208,7 +208,7 @@ export function AddProviderModal({ open, onClose, onAdded }) {
     if (isCustom || url.trim() !== (preset.base_url || '') || !preset.base_url) body.url = url.trim()
     if (authStyle) body.auth_style = authStyle
     if (authStyle === 'header') body.auth_header = authHeader.trim()
-    if (apiKey.trim()) body.key = apiKey.trim()
+    if (apiKey.trim() && !authNone) body.key = apiKey.trim()
     try {
       const r = await probe(body)
       if (run.current !== mine) return
@@ -304,7 +304,8 @@ export function AddProviderModal({ open, onClose, onAdded }) {
   async function submit(withModels) {
     if (!ready || created) return
     const token = ++sub.current
-    const keyValue = apiKey.trim()
+    // A provider that needs no key never gets one stored, whatever was typed before auth became none.
+    const keyValue = authNone ? '' : apiKey.trim()
     setBusy(true); setFormError(null); setFieldErr((f) => ({ ...f, name: undefined }))
     const body = buildCreateBody({
       name,
@@ -434,19 +435,21 @@ export function AddProviderModal({ open, onClose, onAdded }) {
         )}
         <button type="button" className="btn ghost sm" disabled={busy}
           onClick={() => (dirty ? setDiscardOpen(true) : close())}>Cancel</button>
-        <button type="button" className="btn sm" onClick={() => submit(true)} disabled={!check || busy}>
+        <button type="button" className="btn sm" onClick={() => submit(true)} disabled={!check || !ready || busy}>
           {busy ? 'Adding…' : check ? `Add provider · ${picked.size} on` : 'Add provider'}
         </button>
       </span>
     </>
   )
 
-  const keyField = (
-    <Field id="addprov-key" label={authNone ? 'API key (optional)' : 'API key'} error={keyShown} errRef={credErrRef}>
+  const keyField = authNone && !created ? (
+    <div className="addprov-nokey" data-testid="addprov-nokey">No key needed for this provider.</div>
+  ) : (
+    <Field id="addprov-key" label="API key" error={keyShown} errRef={credErrRef}>
       <div className="addprov-keyrow">
-        <input id="addprov-key" type="password" autoComplete="off" spellCheck={false}
+        <input id="addprov-key" type="password" autoComplete="off" data-1p-ignore data-lpignore="true" spellCheck={false}
           className={'input mono' + (keyShown ? ' input-err' : '')} value={apiKey}
-          placeholder={authNone ? 'Not needed for this provider' : 'Paste key'}
+          placeholder="Paste key"
           aria-invalid={keyShown ? 'true' : 'false'}
           aria-describedby={keyShown ? 'addprov-err-key addprov-key-hint' : 'addprov-key-hint'}
           disabled={locked}
@@ -463,6 +466,14 @@ export function AddProviderModal({ open, onClose, onAdded }) {
       </div>
     </Field>
   )
+  // With no key field the check button has nowhere to sit: it gets its own row.
+  const checkRow = authNone && !created ? (
+    <div className="addprov-keyrow">
+      <button type="button" className="btn ghost" onClick={runCheck} disabled={!canCheck}>
+        {checking ? 'Checking…' : 'Check connection'}
+      </button>
+    </div>
+  ) : null
 
   return (
     <Modal open eyebrow="Models · add provider" title="Add provider" width={780} onClose={close} dirty={dirty}
@@ -518,7 +529,11 @@ export function AddProviderModal({ open, onClose, onAdded }) {
                   <>
                     <Field id="addprov-auth" label="Auth">
                       <select id="addprov-auth" className="input" value={authStyle} disabled={locked}
-                        onChange={(e) => { setAuthStyle(e.target.value); invalidate() }}>
+                        onChange={(e) => {
+                          setAuthStyle(e.target.value)
+                          if (e.target.value === 'none') setApiKey('')
+                          invalidate()
+                        }}>
                         {AUTH_CHOICES.map((c) => <option key={c.value} value={c.value}>{c.label}</option>)}
                       </select>
                     </Field>
@@ -534,6 +549,7 @@ export function AddProviderModal({ open, onClose, onAdded }) {
                   </>
                 )}
                 {keyField}
+                {checkRow}
                 <span id="addprov-key-hint" className="addprov-hint">
                   Name becomes the prefix agents use, for example <span className="mono">{name || 'name'}/model-id</span>.
                   The key is stored on this box only and never shown again.

@@ -270,13 +270,49 @@ export function initialPicks(probed: ProbeModelRow[]): Set<string> {
   return new Set(probed.filter((m) => m.recommended).map((m) => m.id))
 }
 
-export function toggleErrorMessage(err: { status?: number; code?: string }): string {
+type ApiFailure = { status?: number; code?: string; message?: string; details?: Record<string, unknown> }
+
+/** The first field line a 400 or 422 carries: `details.errors` is a list of "field: reason" strings
+ * (routes/providers.py `_validation_summaries`), `details.fields` the request-validation list. */
+function serverDetail(details: ApiFailure['details']): string | null {
+  const errors = details?.errors
+  if (Array.isArray(errors) && typeof errors[0] === 'string') return errors[0]
+  const fields = details?.fields
+  if (Array.isArray(fields) && fields[0] && typeof fields[0] === 'object') {
+    const f = fields[0] as { loc?: unknown[]; msg?: string }
+    if (f.msg) {
+      const where = Array.isArray(f.loc) ? f.loc.filter((p) => p !== 'body').join('.') : ''
+      return where ? `${where}: ${f.msg}` : f.msg
+    }
+  }
+  return null
+}
+
+export function toggleErrorMessage(err: ApiFailure): string {
   if (err.status === 409 && err.code === 'upstream.not_curated') return 'Choose models for this provider first.'
   if (err.status === 409 && err.code === 'upstream.protected') {
     return 'This provider is managed by an agent and cannot be changed here.'
   }
   if (err.status === 404) return 'This provider no longer exists. Reload the list.'
+  if (err.status === 400 || err.status === 422) {
+    const line = serverDetail(err.details) || err.message
+    if (line) return line
+  }
   return 'Could not change the model. Try again.'
+}
+
+/** Mirrors the server (routes/providers.py `UpstreamModelPatchBody`): context an integer above 0. */
+export function contextProblem(raw: string): string | null {
+  const t = raw.trim()
+  if (t === '') return null
+  return /^\d+$/.test(t) && Number(t) > 0 ? null : 'Context must be a whole number above 0, or left empty.'
+}
+
+/** Mirrors the server: a price is a number of 0 or more. */
+export function priceProblem(raw: string): string | null {
+  const t = raw.trim()
+  if (t === '') return null
+  return /^\d+(\.\d+)?$/.test(t) ? null : 'Price must be a number of 0 or more, or left empty.'
 }
 
 export function probeErrorMessage(r: ProbeResult): string {
