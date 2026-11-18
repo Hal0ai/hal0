@@ -129,7 +129,7 @@ def _raise_for_status(resp: httpx.Response) -> None:
     without ``read()`` the hal0 error envelope would be unreachable from the
     ``HTTPStatusError`` the caller catches.
     """
-    if resp.is_error:
+    if not resp.is_success:  # raise_for_status also raises on 1xx and 3xx
         resp.read()
     resp.raise_for_status()
 
