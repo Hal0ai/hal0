@@ -45,7 +45,7 @@ def test_scan_registers_new_gguf(
     isolated_client_with_root: tuple[TestClient, Path],
 ) -> None:
     client, root = isolated_client_with_root
-    target = root / "qwen3-4b-instruct-q4_k_m.gguf"
+    target = root / "Qwen3-4B-Q4_K_M.gguf"
     target.write_bytes(b"x" * 512)
 
     r = client.post("/api/models/scan")
@@ -66,7 +66,7 @@ def test_scan_idempotent(
     isolated_client_with_root: tuple[TestClient, Path],
 ) -> None:
     client, root = isolated_client_with_root
-    (root / "qwen3-4b-instruct-q4_k_m.gguf").write_bytes(b"x" * 128)
+    (root / "Qwen3-4B-Q4_K_M.gguf").write_bytes(b"x" * 128)
 
     first = client.post("/api/models/scan").json()
     assert "qwen3-4b" in first["added"]

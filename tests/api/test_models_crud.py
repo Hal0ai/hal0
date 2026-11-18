@@ -261,7 +261,7 @@ def test_scan_legacy_empty_body_still_auto_registers(
     crud_models_root: Path,
 ) -> None:
     """Empty body falls back to the legacy auto-scan path."""
-    (crud_models_root / "qwen3-4b-instruct-q4_k_m.gguf").write_bytes(b"\x00" * 64)
+    (crud_models_root / "Qwen3-4B-Q4_K_M.gguf").write_bytes(b"\x00" * 64)
     pre = _max_event_id(crud_client)
     r = crud_client.post("/api/models/scan")
     assert r.status_code == 200, r.text
