@@ -1093,7 +1093,10 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
       {tab === "endpoints" ? (
         <div className="conn">
           {window.LocalEndpointsPanel ? <window.LocalEndpointsPanel /> : null}
-          {window.UpstreamProvidersPanel ? <window.UpstreamProvidersPanel /> : null}
+          <p className="cn-note" data-testid="endpoints-providers-note">
+            Remote providers moved to Models → Providers.{" "}
+            <a className="cn-note-link" href="#models/providers">Open Providers</a>
+          </p>
         </div>
       ) : tab === "runner-images" ? (
         <RunnerImagesView />

@@ -10,6 +10,7 @@
 
 import type { Slot } from '@/api/hooks/useSlots'
 import { isReadyCls, isSlotConfigured, slotIndicatorFromPhase } from './slot-status.js'
+import { laneForSlot, type LaneKey } from './lane-code-pure'
 
 export type RailGroup = 'vulkan' | 'rocm' | 'npu' | 'cpu'
 
@@ -36,6 +37,8 @@ export interface RailRow {
   name: string
   model: string | null
   device: string
+  /** The lane code the row shows (FLM for an NPU slot that is not on the xdna runner). */
+  lane: LaneKey
   group: RailGroup
   cls: RailCls
   label: string
@@ -74,6 +77,7 @@ export function railRows(
       name: slot.name,
       model: slot.model || null,
       device: slot.device || 'cpu',
+      lane: laneForSlot(slot),
       group: railGroup(slot.device),
       cls,
       label: paused ? 'paused' : ind.label,
@@ -124,8 +128,9 @@ export function railCounts(rows: readonly RailRow[]): {
   return { ready, total, byGroup }
 }
 
-/** The text and tone of a row's state cell: `42 tok/s` while serving with a figure, the indicator's
- *  own label otherwise. */
+/** The text and tone of a row's state: `42 tok/s` while serving with a figure, the indicator's own
+ *  label otherwise. The rail prints it only when it is a figure (`stateFigure`); the label is the
+ *  state dot's accessible name. */
 export function stateCell(row: RailRow): { text: string; tone: 'live' | 'paused' | 'warn' | 'err' | '' } {
   switch (row.cls) {
     case 'serving':
@@ -159,4 +164,9 @@ export function railFooter(
     else if (r.up && r.group !== 'cpu') mb += memMb.get(r.name) ?? 0
   }
   return { loadedGb: mb / 1024, poolFreeGb, paused }
+}
+
+/** True when the row's state cell is a measurement worth printing beside the dot. */
+export function stateFigure(row: RailRow): boolean {
+  return row.cls === 'serving' && row.toks != null && row.toks > 0
 }

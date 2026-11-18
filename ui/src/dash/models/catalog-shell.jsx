@@ -7,6 +7,7 @@
 // on. The pure parts (status, State filter, sections, paging) are catalog-pure.ts.
 import { useEffect, useRef, useState } from 'react'
 import { catalogDot, catalogStatus } from './catalog-pure'
+import { LaneCode } from '../lane-code.jsx'
 
 export const PER_PAGE_OPTS = [10, 25, 50, 'all']
 
@@ -256,9 +257,41 @@ export function CatalogList({
   )
 }
 
-/** The status chip for a row or a detail header, from the shared vocabulary. */
-export function StatusChip({ state, testid }) {
+const LINK_ICON = (
+  <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+    <path d="M6.8 9.2a2.6 2.6 0 0 0 3.7 0l2-2a2.6 2.6 0 0 0-3.7-3.7l-.7.7M9.2 6.8a2.6 2.6 0 0 0-3.7 0l-2 2a2.6 2.6 0 0 0 3.7 3.7l.7-.7" />
+  </svg>
+)
+
+/**
+ * The status chip for a row or a detail header, from the shared vocabulary.
+ * With `row`, the three everyday states are drawn without a chip box, since the row's leading dot
+ * already carries them: installed keeps only its words for a screen reader, in use becomes a link
+ * mark and the slot's name, and an upstream row shows the EXT lane code. The words stay in the DOM.
+ */
+export function StatusChip({ state, testid, row = false }) {
   const s = catalogStatus(state)
+  if (row && s.kind === 'installed') {
+    return <span className="mdl-status sr-only" data-testid={testid} data-status={s.kind}>{s.label}</span>
+  }
+  if (row && s.kind === 'inuse') {
+    const [lead, ...rest] = s.label.split(' · ')
+    return (
+      <span className="mdl-status mdl-status-inuse" data-testid={testid} data-status={s.kind} title={s.title}>
+        {LINK_ICON}
+        <span className="sr-only">{lead} · </span>
+        {rest.join(' · ')}
+      </span>
+    )
+  }
+  if (row && s.kind === 'remote') {
+    return (
+      <span className="mdl-status mdl-status-ext" data-testid={testid} data-status={s.kind} title={s.title}>
+        <LaneCode lane="ext" title={s.title} />
+        <span className="sr-only">{s.label}</span>
+      </span>
+    )
+  }
   return (
     <span
       className={'chip mdl-status' + (s.tone ? ' ' + s.tone : '')}
@@ -305,7 +338,7 @@ export function CatalogRow({ state, selected, onSelect, name, sub, badge, tags, 
       <span className="mdl-row-tags">{tags}</span>
       <span className="sz num" data-testid={sizeTestid}>{size || ''}</span>
       <span className="tg">
-        <StatusChip state={state} testid={statusTestid} />
+        <StatusChip state={state} testid={statusTestid} row />
       </span>
       <span className="mdl-row-kebab">{menu}</span>
       {state.download && <span className="mdl-row-bar" style={{ width: `${Math.max(0, Math.min(100, pct ?? 0))}%` }} />}

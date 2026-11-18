@@ -29,6 +29,7 @@ import Benchmarks from './Benchmarks'
 // The Memory area (#memory/<tab>, ADR-0058 decision 12): a real ES module, like Benchmarks.
 import { MemoryArea } from './memory-area/MemoryArea.jsx'
 import { legacyMemoryRedirect } from './memory-area/memory-route-pure'
+import { modelsRedirectForHash } from './models-redirect'
 import { Dock } from './dock/Dock.jsx'
 import { GpuStatusProvider } from './dock/GpuStatusContext.jsx'
 import { GpuGateBlockedBanner } from './dock/GpuGateBlockedBanner.jsx'
@@ -66,7 +67,11 @@ function parseRoute() {
   // deleted #memworkspace page) are rewritten in place to where they live now, so a saved link
   // lands on the right tab and Back does not return to an address that redirects again.
   // HAL0-SUNSET: v1.9.0 — remove with legacyMemoryRedirect.
-  const moved = legacyMemoryRedirect(window.location.hash || "");
+  // The Models "upstream" tab and the Slots → Endpoints upstream panel moved to Models → Providers.
+  // HAL0-SUNSET: v1.9.0 — remove with modelsRedirectForHash.
+  const moved =
+    legacyMemoryRedirect(window.location.hash || "") ||
+    modelsRedirectForHash(window.location.hash || "");
   if (moved) {
     try {
       window.history.replaceState(window.history.state, "", moved);

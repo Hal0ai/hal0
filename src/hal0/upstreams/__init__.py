@@ -8,10 +8,10 @@ Two kinds:
 UpstreamRegistry loads from /etc/hal0/upstreams.toml at startup and
 supports dynamic registration for auto-discovered slots.
 
-integrations.py holds the built-in provider catalog (_CATALOG) with
-known base URLs, auth styles, and model lists.
+presets.py loads the built-in provider presets (config/data/provider_presets.toml)
+with known base URLs, auth styles, and model lists.
 
-Port targets: haloai lib/upstreams.py (737 lines), lib/integrations.py.
+Port targets: haloai lib/upstreams.py (737 lines).
 Adds: adaptive cold-boot timeout (PLAN.md §5 Tier 1).
 See PLAN.md §3 and §5 Tier 1.
 

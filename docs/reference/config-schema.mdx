@@ -26,7 +26,6 @@ below) — see [Environment variables](/docs/reference/env-vars/) for the full l
 |---|---|---|
 | `/etc/hal0/hal0.toml` | TOML | Main config — `[meta]`, `[slots]`, `[dispatcher]`, `[telemetry]`, `[updates]`, `[models]`, `[memory]`, `[activity]`, `[brain_chat]`, `[security]`, `[network]`, `[bridge]`, `[openwebui]`, `[realtime]`, `[metrics]` (the last is read independently of the rest — see below). |
 | `/etc/hal0/slots/<name>.toml` | TOML | One file per slot. |
-| `/etc/hal0/providers.toml` | TOML | Local cloud-provider API entries (`[[provider]]`). |
 | `/etc/hal0/upstreams.toml` | TOML | Remote/cloud LLM upstream entries (`[[upstream]]`). |
 | `/etc/hal0/profiles.toml` | TOML | Named backend-tuning profiles. Optional — seeds apply if absent. |
 | `/etc/hal0/stacks.toml` | TOML | Named stack bundles (slot + profile + model sets). Optional. |
@@ -36,8 +35,7 @@ below) — see [Environment variables](/docs/reference/env-vars/) for the full l
 | `/etc/hal0/api.env`, `/etc/hal0/openwebui.env` | env-file (`KEY=value`) | systemd `EnvironmentFile=` — secrets/keys, not part of the Pydantic schema. |
 
 `hal0.toml` is documented on this page; `slots/<name>.toml` is documented in
-[Config schema: slot files](/docs/reference/config-schema-slots/). `providers.toml`,
-`upstreams.toml`, `profiles.toml`, `stacks.toml`, `agents/<name>.toml`, `hardware.json`
+[Config schema: slot files](/docs/reference/config-schema-slots/). `upstreams.toml`, `profiles.toml`, `stacks.toml`, `agents/<name>.toml`, `hardware.json`
 and `manifest.json` are documented in
 [Config schema: providers, profiles, stacks & agents](/docs/reference/config-schema-profiles/).
 

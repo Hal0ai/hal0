@@ -240,7 +240,8 @@ export function resolveMetaEnums(data?: Partial<MetaEnums> | null): MetaEnums {
   }
 }
 
-/** Chip/palette token vocabulary (drives .dev-* / .sl-dev-* / .dchip classes). */
+/** Device-kind token vocabulary (drives the .dev-* / .sl-dev-* palette classes and, through
+ *  lane-code-pure.ts, the lane codes). */
 export type DevKind = 'rocm' | 'vulkan' | 'cpu' | 'npu'
 
 /**

@@ -34,6 +34,7 @@ import {
   toggleIn,
 } from './models/catalog-shell.jsx'
 import { DownloadsPane } from './models/DownloadsPane.jsx'
+import { LaneCode } from './lane-code.jsx'
 import {
   FLM_ROLE_FILTERS,
   FLM_SORT_FIELDS,
@@ -303,7 +304,7 @@ export function FlmModelsTab({ addSeq = 0 }) {
                     audio
                   </span>
                 )}
-                <span className="chip dev-npu">npu</span>
+                <LaneCode lane="flm" />
               </>
             }
           />

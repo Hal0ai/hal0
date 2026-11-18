@@ -104,7 +104,24 @@ disambiguation.
 | `upstream update <name>` | `name` | partial update — `--url`/`--base-url`, `--auth-style` (`bearer\|anthropic\|header\|none`), `--auth-header`, `--auth-env`, `--timeout`, `--advertise-models`/`--hide-models`, `--enabled`/`--disabled`, `--model` (repeatable), `--include` (repeatable), `--exclude` (repeatable), `--clear-filters`. No `--catalog`/`--api-key` — use `upstream credentials set` to rotate the key. |
 | `upstream delete <name>` | `name` | `--force`/`-f` |
 | `upstream test <name>` | `name` | — |
+| `upstream models <name>` | `name` | `--json` |
+| `upstream enable <name> <model>` | `name`, `model` (the provider's own id, `/` and `:` allowed) | — |
+| `upstream disable <name> <model>` | `name`, `model` | — |
+| `upstream refresh <name>` | `name` | `--json` |
+| `upstream probe` | — | `--catalog-id`/`-c` or `--url`/`--base-url` (one is required), `--auth-style`, `--auth-header`, `--key-env`, `--json` |
 | `upstream credentials set <name>` | `name` | `--key` (required, prompts securely if omitted), `--env-var` |
+
+`models` prints one row per model (id, enabled, type, context, prices, whether the provider
+lists it) or the raw listing with `--json`; a `warning` from the server is printed above the
+table. `enable` and `disable` switch one row on a curated upstream; `enable` on a model that
+only discovery lists adds its row. `refresh` refetches the provider's list; on a curated
+upstream it stores each newly offered model as a switched-off row, and on an
+upstream that has no per-model rows yet it converts it (see
+[Providers, profiles & devices](/docs/reference/providers-profiles-devices/)). `probe` checks
+a base URL and key and lists the provider's models without saving anything; the key is read
+only from the environment variable named by `--key-env`, never from an argument, is never
+printed, and the command stops with an error when that variable is unset. `upstream create`
+sends no `models`, so a new upstream starts uncurated and converts on its first `refresh`.
 
 <Aside type="note">
 `google_query` is a retired `--auth-style`. The valid values are `bearer`, `anthropic`,

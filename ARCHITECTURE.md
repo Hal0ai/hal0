@@ -232,7 +232,7 @@ Three categories of state, three filesystem locations:
 | Kind      | Location              | Examples                                |
 |-----------|-----------------------|------------------------------------------|
 | Code      | `/usr/lib/hal0/current/` | Python package, UI dist, unit templates |
-| Config    | `/etc/hal0/`          | `hal0.toml`, `slots/*.toml`, `providers.toml`, `hardware.json` |
+| Config    | `/etc/hal0/`          | `hal0.toml`, `slots/*.toml`, `upstreams.toml`, `hardware.json` |
 | Runtime   | `/var/lib/hal0/`      | `models/`, `registry/`, `openwebui/`, `slots/<name>/state.json` |
 
 Code is replaceable (every update writes a new versioned dir + flips a

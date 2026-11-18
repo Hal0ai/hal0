@@ -178,7 +178,7 @@ test.describe('Local endpoints — auth-aware cURL (#1467)', () => {
     await expect(authKv).not.toContainText(/open on lan/i)
 
     // The pane foot posture readout matches (scope to the Local endpoints
-    // pane — Upstream providers renders its own .cpane-foot alongside it).
+    // pane).
     const foot = page.locator('.cpane', { hasText: 'Local endpoints' }).locator('.cpane-foot')
     await expect(foot).toContainText(/client key required/i)
     await expect(foot).not.toContainText(/open · lan/i)
@@ -204,115 +204,23 @@ test.describe('Local endpoints — auth-aware cURL (#1467)', () => {
   })
 })
 
-// ── Upstream providers — mutation error surfacing (#1467 item 5) ──
-// Enabled/advertise toggles, filter Apply/Clear, Delete, and the credential
-// write all fired their mutation with no onError — a failed PATCH just
-// snapped the checkbox back on refetch with zero feedback, and a failed
-// AddUpstreamForm credential write still closed the form (onSettled),
-// leaving a keyless upstream with no message.
-const UPSTREAM_FIXTURE = {
-  name: 'openrouter',
-  kind: 'remote',
-  url: 'https://openrouter.ai/api/v1',
-  auth_style: 'bearer',
-  auth_header: 'Authorization',
-  auth_value_env: 'OPENROUTER_API_KEY',
-  auth_configured: true,
-  auth_key_present: false,
-  timeout_seconds: 30,
-  slot_name: null,
-  warmup_strategy: 'none',
-  advertise_models: true,
-  enabled: true,
-  model_filters: { models: [], include: [], exclude: [] },
-  models: [],
-}
-
-test.describe('Upstream providers — mutation error surfacing (#1467)', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.route('**/api/upstreams', (route) => {
-      if (route.request().method() === 'GET') return json(route, [UPSTREAM_FIXTURE])
-      return json(route, {})
-    })
+// ── Remote providers moved to Models ▸ Providers ──
+test.describe('Endpoints → Providers hand-off', () => {
+  test('Endpoints keeps one line that opens Providers, and no provider list', async ({ page }) => {
     await page.goto('/#slots/endpoints', { waitUntil: 'domcontentloaded' })
-    await expect(page.locator('.cpane', { hasText: 'Upstream providers' })).toBeVisible({
-      timeout: 5_000,
-    })
+    const note = page.locator('[data-testid="endpoints-providers-note"]')
+    await expect(note).toContainText('Remote providers moved to Models → Providers.', { timeout: 5_000 })
+    await expect(page.locator('.cpane', { hasText: 'Upstream providers' })).toHaveCount(0)
+    await note.getByRole('link', { name: 'Open Providers' }).click()
+    await expect(page).toHaveURL(/#models\/providers$/)
+    await expect(page.locator('[data-testid="providers-tab"]')).toBeVisible({ timeout: 5_000 })
   })
 
-  test('a failed enabled-toggle PATCH surfaces a toast', async ({ page }) => {
-    await page.route('**/api/upstreams/openrouter', (route) => {
-      if (route.request().method() === 'PATCH')
-        return json(route, { error: { code: 'upstream.write_failed', message: 'disk full' } }, 500)
-      return json(route, UPSTREAM_FIXTURE)
-    })
-    // The panel opens the sole upstream row by default (defaultOpen =
-    // remotes.length === 1 && i === 0) — no need to click it open, and
-    // clicking .up-main here would just toggle it CLOSED.
-    const row = page.locator('.uprow').filter({ hasText: 'openrouter' })
-    await expect(row).toHaveClass(/expanded/)
-    const enabledInput = row.locator('.up-toggle', { hasText: 'enabled' }).locator('input')
-    await expect(enabledInput).toBeVisible()
-    await enabledInput.click()
-
-    await expect(page.locator('.hal0-toast')).toContainText(/failed/i)
-  })
-
-  test('a failed Delete surfaces a toast', async ({ page }) => {
-    await page.route('**/api/upstreams/openrouter', (route) => {
-      if (route.request().method() === 'DELETE')
-        return json(route, { error: { code: 'upstream.write_failed', message: 'locked' } }, 500)
-      return json(route, UPSTREAM_FIXTURE)
-    })
-    // Sole upstream row is expanded by default — see comment above.
-    const row = page.locator('.uprow').filter({ hasText: 'openrouter' })
-    await expect(row).toHaveClass(/expanded/)
-    await row.locator('button', { hasText: 'Delete' }).click()
-    await expect(row.locator('button', { hasText: 'Confirm delete' })).toBeVisible()
-    await row.locator('button', { hasText: 'Confirm delete' }).click({ force: true })
-
-    await expect(page.locator('.hal0-toast')).toContainText(/failed/i)
-  })
-
-  test('AddUpstreamForm keeps the form open and shows the error when the credential write fails', async ({
-    page,
-  }) => {
-    await page.route('**/api/providers/catalog', (route) =>
-      json(route, {
-        openrouter: {
-          id: 'openrouter',
-          name: 'OpenRouter',
-          base_url: 'https://openrouter.ai/api/v1',
-          auth: 'bearer',
-          auth_header_name: 'Authorization',
-          models_path: '/models',
-          default_models: [],
-          default_model: '',
-          capabilities: ['chat'],
-          docs_url: '',
-          category: 'cloud',
-          notes: '',
-        },
-      }),
-    )
-    await page.route('**/api/upstreams', (route) => {
-      if (route.request().method() === 'POST')
-        return json(route, { ...UPSTREAM_FIXTURE, name: 'newprov' }, 201)
-      return json(route, [UPSTREAM_FIXTURE])
-    })
-    await page.route('**/api/providers/newprov/credentials', (route) =>
-      json(route, { error: { code: 'secret.value_invalid', message: 'rejected' } }, 400),
-    )
-
-    await page.locator('button', { hasText: '+ Add upstream' }).click()
-    await page.locator('.up-add select').selectOption('openrouter')
-    await page.locator('.up-add input[placeholder="openrouter"]').fill('newprov')
-    await page.locator('.up-add input[type="password"]').fill('sk-bad-key')
-    await page.locator('.up-add button', { hasText: 'Add upstream' }).click()
-
-    // The form stays open (not silently closed) and shows the failure.
-    await expect(page.locator('.up-add')).toBeVisible()
-    await expect(page.locator('.up-add')).toContainText(/rejected|failed/i)
+  test('old upstream addresses are rewritten to Providers', async ({ page }) => {
+    await page.goto('/#slots/endpoints?focus=upstream', { waitUntil: 'domcontentloaded' })
+    await expect(page).toHaveURL(/#models\/providers$/)
+    await page.goto('/#models/upstream', { waitUntil: 'domcontentloaded' })
+    await expect(page).toHaveURL(/#models\/providers$/)
   })
 })
 
