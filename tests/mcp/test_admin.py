@@ -2237,3 +2237,10 @@ async def test_upstream_models_refuses_a_slash_in_the_upstream_name(
     )
     assert result["status"] == "error"
     assert mock_transport["calls"] == []
+
+
+def test_system_info_description_says_backends_are_catalogue_defaults() -> None:
+    """#3811: the steward must not read a runner's default lane as the live backend."""
+    desc = admin.TOOL_DESCRIPTIONS["system_info"]
+    assert "catalogue default" in desc
+    assert "backend_list" in desc

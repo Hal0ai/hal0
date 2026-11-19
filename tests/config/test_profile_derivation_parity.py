@@ -24,7 +24,7 @@ import pytest
 
 from hal0.capabilities.catalog import _profile_for_fit as catalog_profile_for_fit
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
-from hal0.capabilities.profile_fit import profile_name_for_fit
+from hal0.capabilities.profile_fit import fit_profile_name, profile_name_for_fit
 from hal0.config.schema import DEVICE_DEFAULT_PROFILES
 from hal0.install.profile_derive import derive_profile
 
@@ -144,7 +144,7 @@ def test_profile_for_fit_matches_shared_helper(
     ``profile_fit_skipped`` log; the fit path treats None as 'no match').
     """
     cat = catalog_profile_for_fit(capability, device)
-    expected = profile_name_for_fit(capability, device)
+    expected = fit_profile_name(capability, device)
     cat_name = cat.name if cat is not None else None
     # profile_name_for_fit may return a legacy name with no corresponding
     # seed (e.g. ``tts`` on npu): catalog drops those to None, so the

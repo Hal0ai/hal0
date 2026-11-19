@@ -1119,13 +1119,15 @@ def _profile_for_fit(capability: str, device: str, provider: str = "") -> Resolv
     Mirrors CapabilityOrchestrator's conservative inference so picker and
     apply use the same model/profile/slot compatibility rules until the
     selection schema carries an explicit profile. Both surfaces share the
-    single :func:`hal0.capabilities.profile_fit.profile_name_for_fit` rule.
+    single :func:`hal0.capabilities.profile_fit.fit_profile_name` rule.
     """
     # Local import: profile_fit imports tts_profile_for_device from this
     # module, so a top-level import here would be circular.
-    from hal0.capabilities.profile_fit import profile_name_for_fit
+    from hal0.capabilities.profile_fit import fit_profile_name
 
-    profile_name = profile_name_for_fit(capability, device, provider)
+    # Carries the apply path's tts runner veto (#2749, #3811): a gpu-vulkan
+    # tts row resolves the Kokoro engine that actually runs, not qwen3-tts.
+    profile_name = fit_profile_name(capability, device, provider)
     if not profile_name:
         return None
     try:
