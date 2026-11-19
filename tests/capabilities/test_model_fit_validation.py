@@ -164,3 +164,43 @@ def test_models_for_capability_filters_backends_blocked_by_model_fit(
     assert rows[0]["id"] == "reranker"
     assert [backend["id"] for backend in rows[0]["backends"]] == ["gpu-vulkan"]
     assert rows[0]["backends"][0]["fit_status"] == "allowed"
+
+
+class _RegistryOnly:
+    """Registry that knows an id the capability catalog does not list."""
+
+    def __init__(self, ids: set[str]) -> None:
+        self._ids = ids
+
+    def has(self, model_id: str) -> bool:
+        return model_id in self._ids
+
+    def get(self, model_id: str) -> Any:
+        return None
+
+
+@pytest.mark.parametrize(
+    ("slot", "child", "model_id", "device"),
+    [
+        ("embed", "embed", "bge-reranker-v2-m3-q4_k_m", "cpu"),
+        ("embed", "rerank", "bge-base-en-v1.5-q4_k_m", "cpu"),
+        ("voice", "stt", "kokoro-v1", "cpu"),
+    ],
+)
+def test_registry_fallback_blocks_wrong_model_class(
+    monkeypatch: pytest.MonkeyPatch, slot: str, child: str, model_id: str, device: str
+) -> None:
+    monkeypatch.setattr(
+        "hal0.capabilities.orchestrator.models_for_capability",
+        lambda capability, registry=None: [],
+    )
+    orch = CapabilityOrchestrator(
+        slot_manager=FakeSlotManager(),  # type: ignore[arg-type]
+        registry=_RegistryOnly({model_id}),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(BadRequest) as exc:
+        orch._validate_model_in_catalog(slot, child, model_id, device)
+
+    assert exc.value.code == "capability.illegal_model_fit"
+    assert exc.value.details["fit_reasons"][0] == "model.slot_type_mismatch"

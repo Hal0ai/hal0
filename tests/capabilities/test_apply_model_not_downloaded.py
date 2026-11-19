@@ -257,7 +257,7 @@ def test_registry_only_model_with_missing_weights_is_409(
 
     class FakeRegistry:
         def has(self, model_id: str) -> bool:
-            return model_id == "user-model"
+            return model_id == "user-bge-embed-model"
 
         def get(self, model_id: str) -> FakeEntry:
             return FakeEntry()
@@ -273,7 +273,7 @@ def test_registry_only_model_with_missing_weights_is_409(
 
     with pytest.raises(Conflict) as exc:
         orch._validate_model_in_catalog(
-            "embed", "embed", "user-model", "gpu-vulkan", require_downloaded=True
+            "embed", "embed", "user-bge-embed-model", "gpu-vulkan", require_downloaded=True
         )
     assert exc.value.code == "capability.model_not_downloaded"
     assert exc.value.details["pullable"] is True
@@ -294,7 +294,7 @@ def test_registry_only_model_with_missing_weights_is_409(
         registry=FakeRegistryPresent(),  # type: ignore[arg-type]
     )
     orch2._validate_model_in_catalog(
-        "embed", "embed", "user-model", "gpu-vulkan", require_downloaded=True
+        "embed", "embed", "user-bge-embed-model", "gpu-vulkan", require_downloaded=True
     )
 
 
