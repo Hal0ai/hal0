@@ -80,7 +80,15 @@ except ImportError:  # pragma: no cover — covered by the hal0-venv fallback pa
             default_aux_model: str = ""
 
             def get_hostname(self) -> str:
-                return self.hostname
+                # Pinned providers/base.py:182-193: an empty ``hostname``
+                # falls back to the base_url's host.
+                if self.hostname:
+                    return self.hostname
+                if self.base_url:
+                    from urllib.parse import urlparse
+
+                    return urlparse(self.base_url).hostname or ""
+                return ""
 
             def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 return messages
@@ -362,11 +370,28 @@ class Hal0ProviderProfile(ProviderProfile):  # type: ignore[misc]
             supports_vision=True,
             supports_vision_tool_messages=True,
             default_aux_model=default_aux_model,
-            hostname="127.0.0.1",
         )
         # Non-dataclass instance state (kept off the frozen field surface).
         self._http_client = http_client
         self._include_aliases = include_aliases
+
+    # ── URL classification ─────────────────────────────────────────────
+
+    def get_hostname(self) -> str:
+        """Claim no hostname, so Hermes never files a URL under ``hal0`` (#3835).
+
+        Hermes adds every profile's hostname to ``_URL_TO_PROVIDER`` and
+        matches it as a SUBSTRING of a base URL's netloc; a known provider's
+        URL then skips the live ``/models`` context lookup for custom
+        endpoints (pinned ``agent/model_metadata.py:460-480, 2288``). A
+        ``127.0.0.1`` claim therefore cost the gateway its context discovery
+        (``hal0/agent`` fell to Hermes's 256,000 fallback against a 65,536
+        window) and shadowed every other loopback server too. Hermes reaches
+        hal0 as ``provider: custom``, which needs no URL inference. The base
+        class would derive ``127.0.0.1`` from ``base_url`` when the field is
+        empty, so this override is what makes the claim go away.
+        """
+        return ""
 
     # ── discovery headers ──────────────────────────────────────────────
 
