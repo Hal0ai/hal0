@@ -74,11 +74,31 @@ _IMAGE_PATHS = ("/images/generations", "/images/edits", "/images/variations")
 # so that "qwen3.5:embed" still routes to the NPU rather than to embed.
 _EMBED_NAME_HINTS = ("embed", "rerank")
 
-# Capability slots that can never serve a chat/completions-shaped request,
-# mapped to the request-path fragments they DO serve.  Keyed by the slot role
-# name (the ``slot_name`` behind the resolved upstream — same for local
-# ``kind="slot"`` upstreams and container-backed remotes).  Used by
-# :func:`guard_capability_mismatch` at the dispatch choke point (#1894).
+# Speech-to-text path (served by ``type = "transcription"`` slots).
+_STT_PATHS = ("/audio/transcriptions",)
+
+# Capability slot TYPES (a ``hal0.model_meta.SLOT_TYPES`` member) mapped to the
+# request-path fragments they serve.  The authority for both dispatch-time
+# capability gates (#3807): a slot's declared ``type`` is what the CLI's
+# ``--type`` sets and what "determines how the dispatcher routes requests", so
+# an operator-created ``--type reranking`` slot named ``zzrr`` is gated exactly
+# like the stock ``rerank`` slot.  ``--reranking`` implies llama-server's
+# embedding mode, so a reranking slot serves ``/embeddings`` too.  ``llm`` is
+# deliberately absent: chat slots are gated by their mode flags instead
+# (:func:`guard_chat_slot_capability`).
+_CAPABILITY_ONLY_TYPE_PATHS: dict[str, tuple[str, ...]] = {
+    "embedding": _EMBED_PATHS,
+    "reranking": (*_RERANK_PATHS, *_EMBED_PATHS),
+    "tts": _TTS_PATHS,
+    "image": _IMAGE_PATHS,
+    "transcription": _STT_PATHS,
+}
+
+# Fallback for when the resolved slot's config is not available (no slot
+# manager wired, slot inventory unreadable): the stock role names, keyed by
+# the ``slot_name`` behind the resolved upstream — same for local
+# ``kind="slot"`` upstreams and container-backed remotes (#1894).  Only
+# consulted when the slot type is unknown; a known type always wins.
 _CAPABILITY_ONLY_SLOT_PATHS: dict[str, tuple[str, ...]] = {
     "embed": _EMBED_PATHS,
     "rerank": _RERANK_PATHS,
@@ -304,10 +324,18 @@ def select_slot_by_type(
     return seeded_name if seeded_name in candidates else candidates[0]
 
 
+def slot_type_of(cfg: dict[str, Any] | None) -> str:
+    """Normalised declared ``type`` of a slot config, ``""`` when unknown."""
+    if not cfg:
+        return ""
+    return str(cfg.get("type") or "").strip().lower()
+
+
 def guard_capability_mismatch(
     slot: str,
     path: str,
     *,
+    slot_type: str = "",
     model: str = "",
     resolution_path: str = "",
 ) -> None:
@@ -324,26 +352,36 @@ def guard_capability_mismatch(
     does not logits computation" 500 — would otherwise pass through verbatim
     per ``Dispatcher.forward()``'s documented contract).
 
-    Keyed on the *resolved* slot's role, not on model-name substrings: it
-    fires only when hal0 itself has already decided the request lands on a
-    capability-only slot.  When no such slot resolves at all (embed offline /
-    fresh install), resolution fails upstream of this gate and the documented
-    clean ``dispatch.no_route`` 404 is preserved untouched.
+    Keyed on the *resolved* slot, not on model-name substrings: it fires only
+    when hal0 itself has already decided the request lands on a
+    capability-only slot.  The slot's declared ``slot_type`` decides (#3807),
+    so a custom-named ``--type reranking`` slot is gated too and an ``llm``
+    slot is never gated whatever its name; the stock role-name table is only
+    the fallback when the type is unknown.  When no such slot resolves at all
+    (embed offline / fresh install), resolution fails upstream of this gate
+    and the documented clean ``dispatch.no_route`` 404 is preserved untouched.
 
     Args:
-        slot:            Effective slot role behind the resolved upstream
+        slot:            Effective slot name behind the resolved upstream
                          (``slot_name`` or container slot name; ``""`` for a
                          genuine remote — always a no-op).
         path:            Incoming request path (e.g. "/v1/chat/completions").
+        slot_type:       The slot's declared type (:func:`slot_type_of`);
+                         ``""`` when its config is unavailable.
         model:           Requested model id, for the error envelope.
         resolution_path: Dispatch resolution breadcrumb, for the envelope.
 
     Raises:
         CapabilityMismatch: 409, code ``dispatch.capability_mismatch``, when
-            ``slot`` is a capability-only role and ``path`` is
+            ``slot`` is a capability-only slot and ``path`` is
             chat/completions-shaped.
     """
-    serves = _CAPABILITY_ONLY_SLOT_PATHS.get(slot)
+    if not slot:
+        return
+    if slot_type:
+        serves = _CAPABILITY_ONLY_TYPE_PATHS.get(slot_type)
+    else:
+        serves = _CAPABILITY_ONLY_SLOT_PATHS.get(slot)
     if serves is None:
         # Not a capability-only slot (agent/coding/npu/… or a remote) —
         # chat-shaped requests are exactly what it is for.
@@ -359,6 +397,7 @@ def guard_capability_mismatch(
             "model": model,
             "path": path,
             "slot": slot,
+            "slot_type": slot_type,
             "serves": list(serves),
             "resolution_path": resolution_path,
         },
@@ -372,21 +411,29 @@ def guard_chat_slot_capability(
     model: str = "",
     resolution_path: str = "",
 ) -> None:
-    """Raise a typed 409 when an embeddings/rerank request lands on a chat slot (#2672).
+    """Raise a typed 409 when an embeddings/rerank request lands on a slot that cannot serve it.
 
-    The reverse of :func:`guard_capability_mismatch`: a chat (``type="llm"``,
-    llama-server) slot started without ``--embedding``/``--reranking`` answers
-    ``/v1/embeddings`` and ``/v1/rerank`` with a raw 501 naming a llama-server
-    flag a hal0 user cannot act on. Keyed on the slot's *mode flag* (via
-    :func:`~hal0.slots._cfg_helpers.non_chat_signal`), not its role, so a chat
-    slot whose profile carries ``--embedding`` / ``--reranking`` still passes.
-    ``--reranking`` implies llama-server's embedding mode, so a reranking slot
-    serves both paths; an ``--embedding`` slot serves only embeddings.
+    The reverse of :func:`guard_capability_mismatch`. Two shapes:
 
-    A missing config, a non-``llm`` slot or an FLM/NPU slot (recognised by
+    * A chat (``type="llm"``, llama-server) slot started without
+      ``--embedding``/``--reranking`` (#2672). Keyed on the slot's *mode flag*
+      (via :func:`~hal0.slots._cfg_helpers.non_chat_signal`), so a chat slot
+      whose profile carries ``--embedding`` / ``--reranking`` still passes.
+    * A capability slot of another type (#3807): ``/v1/rerank`` resolved to an
+      ``embedding`` slot (by passthrough on its advertised model id), or either
+      path resolved to a ``tts``/``image``/``transcription`` slot. Keyed on the
+      declared type via :data:`_CAPABILITY_ONLY_TYPE_PATHS`; an explicit
+      ``--reranking`` flag on an ``embedding``-typed slot is still honoured.
+
+    Without the gate llama-server answers with a raw 501 naming a flag a hal0
+    user cannot act on. ``--reranking`` implies llama-server's embedding mode,
+    so a reranking slot serves both paths; an embedding slot serves only
+    embeddings.
+
+    A missing config, an unknown type or an FLM/NPU slot (recognised by
     :func:`~hal0.slots.config_write.slot_is_flm`, not the ``provider`` label,
-    which shipped FLM slots leave unset) is always a no-op: only a slot we can positively identify
-    as a plain chat slot is rejected.
+    which shipped FLM slots leave unset) is always a no-op: only a slot we can
+    positively identify as unable to serve the path is rejected.
     """
     if not cfg:
         return
@@ -397,23 +444,32 @@ def guard_chat_slot_capability(
         needed, wanted = ("embedding", "reranking"), "embedding"
     else:
         return
-    if str(cfg.get("type") or "").strip().lower() != "llm":
-        return
-    if slot_is_flm(cfg):
-        # The FLM anchor serves embeddings/STT through its own [npu] modalities,
-        # not llama-server mode flags; ``provider`` is not set on shipped FLM slots.
-        return
+    slot_type = slot_type_of(cfg)
+    if slot_type == "llm":
+        if slot_is_flm(cfg):
+            # The FLM anchor serves embeddings/STT through its own [npu] modalities,
+            # not llama-server mode flags; ``provider`` is not set on shipped FLM slots.
+            return
+        kind = "chat slot"
+    else:
+        serves = _CAPABILITY_ONLY_TYPE_PATHS.get(slot_type)
+        if serves is None:
+            # Unknown / missing type: not evidence either way.
+            return
+        if any(frag in path for frag in serves):
+            return
+        kind = f"{slot_type} slot"
     if non_chat_signal(cfg) in needed:
         return
     slot = str(cfg.get("name") or "")
     raise CapabilityMismatch(
-        f"model {model!r} resolved to the chat slot {slot!r}, which is not running in "
+        f"model {model!r} resolved to the {kind} {slot!r}, which is not running in "
         f"{wanted} mode and cannot serve {path!r}; address an {wanted} slot instead",
         details={
             "model": model,
             "path": path,
             "slot": slot,
-            "slot_type": "llm",
+            "slot_type": slot_type,
             "requires": wanted,
             "resolution_path": resolution_path,
         },
@@ -426,4 +482,5 @@ __all__ = [
     "guard_chat_slot_capability",
     "resolve_by_capability",
     "select_slot_by_type",
+    "slot_type_of",
 ]
