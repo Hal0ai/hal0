@@ -3,7 +3,7 @@ export const meta = {
   description: 'Versioned release-candidate validation: preflight, lane sweep, regression probes, adversarial verification, report',
   whenToUse: 'Validating a hal0 release candidate on the test fleet. Reset and install the RC on the boxes first, then run this with {version, boxes, mode, repo}.',
   phases: [
-    { title: 'Preflight', detail: 'per-box readiness gate, writes CONTEXT.md' },
+    { title: 'Preflight', detail: 'per-box readiness gate, writes CONTEXT-<box>.md' },
     { title: 'Sweep', detail: 'read-only lanes, stateful lanes, update lanes, regression probes' },
     { title: 'Triage', detail: 'dedup, drop known issues, rank candidates', model: 'opus' },
     { title: 'Verify', detail: 'one skeptic per candidate finding', model: 'opus' },
@@ -188,7 +188,11 @@ KIT (versioned, in-repo): ${KIT}
 RUN DIRECTORY (scratch, not in the repo): ${RUN}
 
 Read these before doing anything, in this order:
-  1. ${RUN}/CONTEXT.md            — live facts for this run. Beats everything else.
+  1. ${RUN}/CONTEXT-<box id>.md   — live facts for this run, ONE FILE PER BOX (box ids:
+     ${BOX_IDS.join(', ')}). Read the file of the box you were dispatched to; an agent with
+     no single box (triage, report, filing, curation) reads all of them. Beats everything else.
+     If your box's file is missing, say so at the top of your notes and take identity from
+     ${KIT}/boxes.toml — do not stop.
   2. ${KIT}/lanes/_shared.md      — reporting rules, severity, box discipline.
   3. ${KIT}/known-issues.yaml     — do not re-report anything listed there.
 
@@ -223,7 +227,9 @@ own CONTEXT file.
 5. Note anything about the FRESH-INSTALL STATE that a user would hit — this is the highest-value
    observation window in the whole run and it closes as soon as the stateful lanes start
    mutating. Record the installer's own output/log if it is still on the box.
-6. Write ${RUN}/CONTEXT.md (create the directory). It must contain, concretely:
+6. Write ${RUN}/CONTEXT-${boxId}.md (create the directory). Write ONLY that file: another
+   preflight agent is writing its own box's file in the same directory at the same time, and a
+   shared CONTEXT.md is overwritten by whichever finishes last (#3838). It must contain, concretely:
    - version under test, box id, hostname, IP, API base URL, exact SSH invocation
    - hardware and OS, whether this box has a GPU, and the backend that applies
    - the staged test models by id, type, size, and which are known-good on this hardware
@@ -280,11 +286,11 @@ Set box="${box}" and lane="${key}".`, Object.assign({ label: `${kind}:${key}`, p
 // serialised chain: each stage is handed the previous stage's box_state_on_exit verbatim
 async function chain(kind, keys, box) {
   const out = []
-  let prev = 'as left by preflight — see CONTEXT.md'
+  let prev = `as left by preflight — see CONTEXT-${box}.md`
   for (const key of keys) {
     if (!wanted(key)) continue
     const r = await laneAgent(kind, key, box,
-      `\nBOX STATE LEFT BY THE PREVIOUS STAGE (trust this over CONTEXT.md where they differ):\n${prev}\n`,
+      `\nBOX STATE LEFT BY THE PREVIOUS STAGE (trust this over CONTEXT-${box}.md where they differ):\n${prev}\n`,
       { effort: 'high' })
     if (r) { out.push(r); prev = r.box_state_on_exit || prev }
     else log(`${kind}:${key} returned nothing — later stages inherit the last known box state`)

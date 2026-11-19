@@ -134,6 +134,20 @@ from an untyped 500 to a typed 404 since the entry was last checked; the entry's
 
 22. **Slot NAME as model, for every ready slot.** Chat-complete naming each non-brain ready slot by NAME and diff the outcome against the `/v1/models` id list: an id advertised there but 404ing on chat is the #1837 ghost-id shape for a live slot. If another actor deletes a foreign slot mid-probe, record that and do not conclude.
 
+25. **Custom-named capability slot.** Re-run the capability-mismatch checks (chat to a reranking slot, `/v1/rerank` to the embed model) against a throwaway slot with a NON-stock name: the guards key on role name (open #3807), so stock-named slots hide the leak.
+
+26. **Response `model` label.** `/v1/embeddings` naming a REGISTERED chat or tts id must not echo that id on nomic vectors (#2663, open); assert the label equals the serving slot's model.
+
+27. **agent.toml checksum.** `sha256sum /etc/hal0/slots/agent.toml` at entry; after the bind-and-restore cycle compare byte for byte.
+
+28. **Cold-start row.** Record median-of-3 cold embed and rerank latency as a fixed table row (1.8.0 ct151: embed ~3.5 s, rerank ~5.8 s with no concurrent load).
+
+29. **Bare alias twice.** Run the #2665 probe once with both sibling slots idle and once while the named slot is busy. Idle runs pass 3/3 and hide the defect; with `agent` busy, `model=agent` 3/3 went to `brain`.
+30. **502 on a bare alias.** A `502 dispatch.upstream_unavailable 'Server disconnected'` may be a foreign lane deleting a sibling slot mid-request; `hal0 slot list` before filing.
+31. **409 names the addressed slot.** In check 25 also assert `details.slot` in the 409 body names the slot you addressed (catches `rerank` naming `embed`).
+32. **Slot JSON keys.** The bound model is `.config.model.default` in `hal0 slot show --json` (or `model_default` in `GET /api/slots/<n>`), not top-level `.model`; the brief's `jq .model` returns null.
+33. **Scratch dirs.** Use `/var/tmp/routing-<pid>`; `/tmp/entry-*.txt` are overwritten by other actors.
+
 ## Leave behind
 
 Brain and embed loaded and healthy. Any model you caused to auto-load, unload again.

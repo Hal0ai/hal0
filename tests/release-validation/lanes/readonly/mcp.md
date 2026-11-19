@@ -96,6 +96,14 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
 
 24. **Connect paths.** Probe `/mcp/admin/mcp` and `/mcp/memory/mcp` directly; bare `/mcp`, `/mcp/` and `/mcp/admin` return 405 and cost time-outs when probed blindly.
 
+27. **Required-arg sweep on gated tools.** For every gated tool whose `inputSchema` `args.required` is non-empty, call it with `{"args":{}}`. Path-arg tools must return `mcp.missing_arg`; the seven body-only tools still queue (open #3806, known-issues `mcp-gated-body-required-args-queue`). Report any OTHER tool that queues, and deny every approval you create. A gated tool with an int path arg that queues is by design.
+
+28. **hal0-agents surface.** `/mcp/agents` needs a bridge key (`hal0bk_`). Either use the key from `CONTEXT.md` or record the surface as an explicit `skipped`; do not omit it silently.
+
+29. **slot_list count.** `slot_list` count is local slots + remote rows + the synthetic `hal0` row (#2697, open); compare against `kind=="local"` REST rows and record the delta instead of asserting equality.
+
+30. **Wrong CONTEXT.md.** If `CONTEXT.md` is another box's file (#3838) take identity from `boxes.toml` and run; do not stop.
+
 ## Carry-forward
 
 The MCP surface is how other agents consume hal0, so *silent* protocol wrongness here is worse

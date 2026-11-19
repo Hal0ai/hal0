@@ -160,6 +160,19 @@ the fact otherwise:
 
 23. **Registry diff across the update.** Diff `/api/models` before and after: the first update to a build with the #2739 fix adds `kokoro-v1` (`updater.kokoro_bundle_pulled`) and nothing else should appear or vanish. Compare each slot TOML `[model].default` with the API `model_id` in the BEFORE snapshot so coder/flm-style mismatches are recorded as pre-existing (`known-issues: slot-model-id-is-runtime-not-binding`).
 
+24. **Rollback banner.** After rollback the CLI banner must contain the literal `systemctl restart hal0-api` line and `/api/health` must still report the old version until that restart.
+
+25. **Outage windows.** Run a 1 s health poller across upgrade, rollback, restart and roll-forward and report each outage window separately (roll-forward was 31.4 s on 1.8.0).
+
+26. **FLM/NPU installed vs disk.** Cross-check `/api/models` `installed=true` against the real directory or file for FLM/NPU rows, not only GGUF (open #3810; `comm` recipe in regression `flm-registry-installed-ghost`).
+
+27. **Image digest parity.** For every running slot assert container image digest equals the unit's resolved `Image=` and `/api/slots/<n>` image, before and after.
+
+28. **Channel bundle URL.** The channel-URL bundle actually fetched (`nightly.json.bundle?channel=nightly`) must return 200 from releases.hal0.dev and byte-match the GitHub asset.
+
+29. **Notes baseline.** The 'Changes since vX' baseline in the update notes must match the previously installed nightly or say it is the last published tag (1.8.0 listed changes since ...144935 for a box that came from ...043319).
+30. **hal0-api restart re-wakes utility.** Restarting hal0-api re-wakes the utility slot via Hindsight within ~25 s on an upgraded box, so `podman ps` after any restart is not an upgrade side effect.
+
 ## Leave behind
 
 The box on the new version, healthy, with the "before" snapshot recorded in your report for the

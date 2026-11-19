@@ -144,6 +144,24 @@ declare `utility` off-limits — say in your report which of the two you got.
 
 25. **Write-side facts.** `POST /api/memory/add` takes `text` (`content` gives 400 `validation.invalid`). Zero-yield retains: the single-op GET must carry `nothing_learned=true` and `result_metadata` a zero-yield flag, not only `unit_ids_count=0` (#2030). Precondition for the marker retain and the grounding probe: pending <= 2 in `hal0 memory ops list`, otherwise the probe cannot finish inside the budget (the post-upgrade lane could not on a 27B anchor). Cleanup: delete your probe documents (`DELETE /api/memory/banks/shared/documents/<id>`) or world units as the owning agent; an observation id deletes 0 even as owner (#2747, filed) and an anonymous delete of a private unit returns 0 by design.
 
+26. **Quiet-box entry check.** Before the marker retain, confirm brain `requests_processing=0`, `requests_deferred=0` and no processing/pending rows in `hal0 memory ops list`; otherwise the marker's 300 s hindsight timeout starts counting while it waits in brain's queue.
+
+27. **Orphan-decode probe (settles `brain-turn-cancelled-on-client-disconnect`).** Quiesce brain, start one retain, DELETE its child op, sample brain `/slots` `n_decoded` for 60 s; pass means decoding stops within ~10 s.
+
+28. **Shipped caps.** Read RETAIN/CONSOLIDATION `MAX_COMPLETION_TOKENS` from `/proc/<hindsight pid>/environ` (1.8.0: 16384 / 8192) and assert `/slots` `params.n_predict` is not -1 during extraction; the 4096 figures in known-issues are stale.
+
+29. **Degraded replay completes.** `brain_lane.degraded_replay_armed` in the journal must be followed by a completion line (1.8.0 box had the armed line and no completion).
+
+30. **Exit state.** Put brain `requests_processing/deferred` in `box_state_on_exit` so the next stage knows whether the box is quiet.
+
+31. **Extraction speed row measures brain.** (#3837, known.) `hal0 memory status` / `hal0 memory graph check` on the stock shape (model-less memory slot falling back to brain) currently print `probe failed: ConnectError`; when #3837 is fixed they must measure brain.
+32. **Replay completion (check 29).** Assert no `brain_lane.replay_incomplete` error plus replay POSTs to hindsight `hal0:shared/memories` at the `provider_healed` second; the success path logs no completion line (src/hal0/api/__init__.py:2895-2940).
+33. **Bank names.** Banks are `hal0:shared` and `hal0:private` on 1.8.0: use them in checks 15, 16 and 25 (`/api/memory/banks/shared/...` is 404).
+34. **Queue gate before check 16.** Count active ops in `hal0 memory ops list --json` first and run check 16 first; with ~8 foreign retains on the `--parallel 1` brain the child cannot go terminal in a 12-minute lane.
+35. **Parent state on child cancel.** Record that the parent turns `cancelled` immediately (the #2699 precondition) and poll it again after the child completes once the queue is quiet.
+36. **`pkill -f` over ssh.** Inside an ssh command string it kills the remote shell; use `ps | grep [x]` then `kill <pid>`.
+37. **Zero-yield counting.** Read `facts_extracted`/`nothing_learned` from the single-op GET over natural memory-worthy text; "OK, thanks." yielding 0 is correct. REST add body key is `text`. A sync `memory_add` under heavy contention fails after 120 s with an empty `mcp.memory_failed` detail: worth its own error-honesty note.
+
 ## Leave behind
 
 Memory enabled, utility slot loaded, brain healthy. Note the marker you stored and the state of

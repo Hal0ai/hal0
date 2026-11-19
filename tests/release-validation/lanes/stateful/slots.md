@@ -195,6 +195,19 @@ a second actor that mutates slots later (one swapped `zzsl-crash` after the lane
 
 24. **Fixtures for `slot swap`.** The check needs a second small chat gguf; on a one-model box stage one (or state the accepted fixture in CONTEXT.md) rather than marking it skipped every release.
 
+25. **Foreign slots before the exit diff.** List `zz*` slots right before your exit diff; a concurrent actor created `zzrpe/zzrpr/zzimg` mid-lane on 1.8.0. Attribute before you clean or report.
+
+26. **Unload vs GET for unknown names.** For a name with no TOML (`utility`, `npu` on a fresh box) compare `POST /api/slots/<n>/unload` with `GET /api/slots/<n>`: 409 slot.pinned against 404 is open #3811 item 1; any other name must 404 on both.
+
+27. **Stage models first.** A fresh install has no embed or rerank model; pull one in preflight (rsync -L) instead of spending check 2 on it.
+
+28. **`model rm` deletes files.** `hal0 model rm` removes the registered file unless `--keep-files`; do not register shared-store paths for a test and then `rm` them.
+
+29. **Lane-unique scratch names.** Write snapshots to `/var/tmp/slots-<pid>/...`, never `/tmp/entry-*.txt`: another actor overwrote `/tmp/entry-slots.txt` mid-run and the entry/exit diff became meaningless.
+30. **Non-interactive confirm vs scope.** `hal0 slot delete` has no `--yes`; `--force` both skips the prompt and permits deleting seeded slots (known, #2740). Pipe `echo y |` for throwaways and never use `--force` on a seeded slot.
+31. **`--port` outside 8081-8099.** `hal0 slot create ... --port 8297` printed `Created slot ... on port 8084`: an explicit out-of-range port is silently replaced. Record the port the CLI reports against the one you asked for (unfiled; one-line file if it also happens via the API).
+32. **Stale-image preflight (8e) feasibility.** Before planning the stale Vulkan-lane image check, confirm a stale image exists in the podman store and a hal0-api restart is safe in this window; otherwise record it as a fixed coverage gap, do not re-derive it.
+
 ## Leave behind
 
 Brain slot loaded and healthy on the CPU-viable chat model; embed slot loaded (the memory lane

@@ -106,6 +106,17 @@ Close the browser when done.
 
 18. **Selectors and ground truth.** Nav rail rows and service links are selected by `data-testid` (`nav-*`, `svc-*`), not `id`. The dock (`[data-testid=dock]`; the chips keep their `foot-health-*` ids) has only two aggregate chips (`foot-health-runtimes`, `foot-health-services`), so "diff the chip id set" is the wrong assertion: compare the services N/M with the key count of `/api/services/health`. For the dashboard iGPU tile, read `gpu_busy_percent` from sysfs on the box as ground truth to separate #2726 (fraction rendered as percent) from foreign telemetry. Playwright 1.64 removed `page.accessibility.snapshot()`: use `ariaSnapshot()` / `innerText` / aria attributes.
 
+19. **GPU triple sample.** Sample sysfs `gpu_busy_percent` and `/api/stats/hardware` `gpu_util` in the same second, three times in a row; a single read can differ by a whole workload.
+
+20. **Dashboard vs Agents badge.** Diff each agent's Overview status word with its Agents-page card badge. A difference only when the overview has `degraded` non-empty is known (#3808); any other difference is new.
+
+21. **Dock denominators.** Record the status-dock slot denominator before and after every window where another lane loads a slot, and attribute each change to that lane before filing.
+
+22. **Models panel numbers.** Open Settings > Memory > Models > Decision model; 'Largest request' must show the saved value, not blank (open #3805).
+
+23. **Playwright without the MCP tools.** The browser MCP tools are often absent; use the docker `playwright:v1.64.1` image with an existing `node_modules` mount (see `hal0-playwright-via-docker` notes) rather than skipping the lane.
+24. **Throughput numbers agree.** Compare the Slots page THROUGHPUT tok/s hero with the Overview tok/s and the per-slot tok/s read in the same few seconds; report a disagreement beyond sampling noise.
+
 ## Carry-forward
 
 Anything found here that can be expressed against fixtures should be promoted into

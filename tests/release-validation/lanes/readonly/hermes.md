@@ -148,6 +148,14 @@ chat messages — that is the `hermes-e2e` stateful lane.
    `_config_version: 51` with `sessions.auto_prune: false` intact. The session count must match
    the pre-update baseline (item 19).
 
+26. **Bank id first.** Banks are `hal0:shared` and `hal0:private`; `banks/shared/operations` 404s. Assert the bank id from `/api/memory/banks` before reading any operations URL.
+
+27. **Smoke vs brain-ready.** Compare `provision.json` `phases.smoke_tests.at` with the brain slot's `model loaded` journal timestamp and with any in-flight consolidation (`journalctl -u hal0-slot@brain`). A chat_completions timeout while brain was loading or busy is #3809, not a new chat failure.
+
+28. **Config version.** `grep _config_version /var/lib/hal0/.hermes/config.yaml`; a fresh box has none while `/api/status` reports config_version 0 against latest 51 and `hermes_doctor` advises a migrate. Record it; file only if the advice persists after reprovision.
+
+29. **Memory plugin can read its key.** Run the hermes venv python as hal0: `import yaml` must work and the plugin's `_read_agent_key` must be non-None (open #3803). One command, 2 seconds; do it before any Hermes memory check.
+
 ## Carry-forward
 
 Hermes findings have historically been *reporting* defects rather than functional ones. Treat

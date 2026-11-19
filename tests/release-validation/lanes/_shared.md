@@ -2,10 +2,11 @@
 
 You are validating a hal0 release candidate on a real box. Read, in this order:
 
-1. `CONTEXT.md` in your run directory — the live facts for this run: version under test, box,
-   IP, API base, SSH invocation, which models are staged, current slot state, and (for stateful
-   lanes) the state the previous stage left behind. **`CONTEXT.md` beats anything written here
-   or in your brief.** If they disagree, trust `CONTEXT.md` and say so in your report.
+1. `CONTEXT-<box>.md` in your run directory, where `<box>` is the box you were dispatched to
+   (preflight writes one file per box since #3838) — the live facts for this run: version under
+   test, box, IP, API base, SSH invocation, which models are staged, current slot state, and
+   (for stateful lanes) the state the previous stage left behind. **It beats anything written
+   here or in your brief.** If they disagree, trust it and say so in your report.
 2. `known-issues.yaml` — do not re-report anything listed there. Record it as `known` and move
    on. Each by-design entry has a `still_report_if:` clause; that clause is the only thing that
    turns it back into a finding.
@@ -30,8 +31,8 @@ You are validating a hal0 release candidate on a real box. Read, in this order:
 
 ## Box identity — check before you trust anything
 
-`CONTEXT.md` describes ONE box. In v1.4.0 several ct151 lanes were handed ct150's file. Before
-your first check, assert the box id and IP in `CONTEXT.md` match the box you were dispatched to
+Each `CONTEXT-<box>.md` describes ONE box. In v1.4.0 several ct151 lanes were handed ct150's file. Before
+your first check, assert the box id and IP in your context file match the box you were dispatched to
 (`boxes.toml` has the truth); if they do not, say so at the top of your report and take identity
 from `boxes.toml` plus live probes. Likewise confirm the installed version from
 `/usr/lib/hal0/current/VERSION`, not from `hal0 --version`. Other lanes and the regression-probe
@@ -44,6 +45,8 @@ and do not file it as a defect.
   setgid parent) and shows up as drift in `hal0 doctor perms`; `chmod 2775` it or keep fixtures
   outside the store (`known-issues: doctor-perms-handmade-models-dir-2755`).
 * Every MCP approval you queue, you deny; the inbox must be empty when you exit.
+* Scratch files go under a lane-unique directory (`/var/tmp/<lane>-<pid>/`), never `/tmp/entry-*.txt`: another actor overwrote them mid-run.
+* A lane that finds the wrong box's `CONTEXT.md` still RUNS (#3838): say so at the top and use `boxes.toml`. Stopping loses the whole lane.
 * `CONTEXT.md` may be another box's file. Prefer `CONTEXT-<box>.md` in the run directory when it
   exists; otherwise take identity from `boxes.toml` as above.
 
