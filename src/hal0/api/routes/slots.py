@@ -145,8 +145,11 @@ async def remove_flm_model(tag: str, request: Request) -> dict[str, Any]:
       ``{role, slot}``;
     * 409 ``flm.pull_running`` — a pull of the tag is queued or running;
     * 409 ``model.deleting`` — another remove of the tag is running;
-    * 404 ``flm.model_not_found`` / 409 ``flm.model_not_installed`` — the
-      catalogue does not list it, or not as downloaded.
+    * 404 ``flm.model_not_found`` — the catalogue does not list it;
+    * 409 ``flm.model_not_installed`` — the catalogue lists it as not
+      downloaded and hal0 has no FLM registry row for it. With such a row
+      (files removed outside hal0) nothing is deleted: the row and its stale
+      pull job are dropped.
 
     502 ``flm.remove_failed`` when flm ran but the files are still there (flm
     1.0.12 exits 0 on a failed remove, so the directory is checked); 503

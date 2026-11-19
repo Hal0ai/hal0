@@ -682,11 +682,12 @@ function ModelRow({ model, state = registryState(model), npuFit = null, selected
                 label: "Edit model settings",
                 onClick: () => onEditModel && onEditModel(model),
               },
-              // Delete — same gate as the detail pane's Delete button: only an
-              // installed local model has bytes/registry row to remove (a
-              // not-installed catalog row has nothing on disk). Routes through DeleteModelDialog, so the
+              // Delete — same gate as the detail pane's Delete button: an
+              // installed model, or a local registry row whose files are gone
+              // (an FLM ghost row, #3810) has something to remove; a catalog
+              // row with no registry entry does not. Routes through DeleteModelDialog, so the
               // type-the-name confirm + refcount contract stays the boundary.
-              ...(model.installed
+              ...(model.installed || model.origin === "local"
                 ? [
                     { divider: true },
                     {
@@ -937,6 +938,9 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
               </button>
             )}
             <button className="btn ghost sm" onClick={() => window.open(`https://huggingface.co/${model.hf_repo || model.repo || ""}`, "_blank")}>View on HF →</button>
+            {model.origin === "local" && (
+              <button className="btn danger sm" data-testid="mdl-detail-delete-registration" onClick={onDelete}>{Icons.unload} Delete</button>
+            )}
           </>
         )}
       </DetailActions>
