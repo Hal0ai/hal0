@@ -1126,6 +1126,15 @@ def _profile_for_fit(capability: str, device: str, provider: str = "") -> Resolv
     from hal0.capabilities.profile_fit import profile_name_for_fit
 
     profile_name = profile_name_for_fit(capability, device, provider)
+    if capability == "tts":
+        # Same vetoed answer the apply path writes (#2749): the shared rule
+        # says qwen3-tts for every GPU, but the qwen3tts runner is ROCm-only,
+        # so a gpu-vulkan row runs (and applies as) the Kokoro CPU engine.
+        from hal0.slots.profile_adopt import type_implied_profile
+
+        profile_name = type_implied_profile({"type": "tts", "device": device}) or (
+            tts_profile_for_device("cpu")
+        )
     if not profile_name:
         return None
     try:

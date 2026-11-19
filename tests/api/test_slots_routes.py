@@ -3671,3 +3671,15 @@ def test_resolved_footprint_is_null_for_a_halogen_slot_with_no_model(
     assert r.status_code == 200, r.text
     assert r.json()["footprint"] is None
     assert asked == []
+
+
+@pytest.mark.parametrize("name", ["utility", "npu"])
+def test_unload_missing_default_anchor_is_404_not_pinned(
+    name: str,
+    container_stub: dict[str, Any],
+    isolated_client: TestClient,
+) -> None:
+    """#3811: a default-pinned anchor with no slot config is 404, not 409 slot.pinned."""
+    r = isolated_client.post(f"/api/slots/{name}/unload")
+    assert r.status_code == 404, r.text
+    assert r.json()["error"]["code"] == "slot.not_found"

@@ -3399,8 +3399,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "hardware_probe": "Live hardware probe — backends, memory, accelerators.",
     "system_info": (
-        "Consolidated hardware + feature flags + per-runner backend state "
-        "(installed/installable/unavailable) — one read for 'what can this box run'."
+        "Consolidated hardware + feature flags + per-runner catalogue state "
+        "(installed/installable/unavailable) — one read for 'what can this box run'. "
+        "Each `backends` row's `backend` is the runner's catalogue default lane, NOT "
+        "what is serving models now; use `backend_list` or the slot's own backend for that."
     ),
     "capability_list": (
         "Capability overlay state — backends + selections + catalogs. The unfiltered "

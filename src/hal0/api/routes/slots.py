@@ -1653,6 +1653,9 @@ async def unload_slot(name: str, request: Request, force: bool = False) -> dict[
     this guard (it already excludes pinned slots at candidate-selection).
     """
     sm = _get_slot_manager(request)
+    # 404 slot.not_found before the pin check: the default pin set applies to a
+    # name with no config, so a missing ``utility``/``npu`` would read as pinned.
+    await sm.status(name)
     if not force and await sm.is_pinned(name):
         from hal0.slots.state import SlotPinned
 
