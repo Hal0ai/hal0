@@ -309,16 +309,104 @@ def test_model_run_loads_and_waits_ready(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_model_run_unregistered_model_names_the_fix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Unregistered AND unpullable: exit 1 with the manual fixes spelled out."""
+
     def fake_get(path: str, **_kw: Any) -> Any:
         raise shared.CliApiError("404 model not found")
 
+    def fake_post(path: str, **_kw: Any) -> Any:
+        assert path == "/api/models/missing-model/pull"
+        raise shared.CliApiError("404 no curated entry")
+
     monkeypatch.setattr(model_commands, "api_get", fake_get)
+    monkeypatch.setattr(shared, "api_post", fake_post)
     result = runner.invoke(model_commands.app, ["run", "missing-model"])
     assert result.exit_code == 1
     out = result.output
     assert "hal0 model pull" in out
     assert "hal0 model add" in out
     assert "hal0 model scan" in out
+
+
+def test_model_run_pulls_an_unregistered_model_then_loads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3791: the docstring promises "pull if needed"; it used to exit instead."""
+    calls: list[str] = []
+    pulled = {"done": False}
+
+    def fake_get(path: str, **_kw: Any) -> Any:
+        calls.append(f"GET {path}")
+        if path == "/api/models/qwen3-4b":
+            if not pulled["done"]:
+                raise shared.CliApiError("404 model not found")
+            return {"id": "qwen3-4b"}
+        if path == "/api/models/qwen3-4b/pull/status":
+            pulled["done"] = True
+            return {"state": "completed", "bytes_downloaded": 10, "bytes_total": 10}
+        if path == "/api/slots":
+            return {"slots": [{"name": "agent", "type": "llm"}]}
+        if path == "/api/slots/agent":
+            return {"name": "agent", "status": "ready", "port": 8081}
+        raise AssertionError(path)
+
+    def fake_post(path: str, *, json: Any = None, **_kw: Any) -> Any:
+        calls.append(f"POST {path}")
+        if path == "/api/models/qwen3-4b/pull":
+            return {"hf_repo": "org/repo", "hf_file": "m.gguf"}
+        assert path == "/api/slots/agent/load"
+        return {"state": "loading"}
+
+    monkeypatch.setattr(model_commands, "api_get", fake_get)
+    monkeypatch.setattr(shared, "api_post", fake_post)
+    result = runner.invoke(model_commands.app, ["run", "qwen3-4b"])
+    assert result.exit_code == 0, result.output
+    assert calls.index("POST /api/models/qwen3-4b/pull") < calls.index("POST /api/slots/agent/load")
+
+
+def _slot_rows() -> list[dict[str, Any]]:
+    return [
+        {"name": "embed", "type": "embedding"},
+        {"name": "flm", "type": "llm", "model_default": "flm-tag"},
+        {"name": "tts", "type": "tts"},
+        {"name": "agent", "type": "llm", "model_default": "big"},
+        {"name": "coder", "type": "llm"},
+    ]
+
+
+def test_default_run_slot_skips_non_llm_and_prefers_unbound() -> None:
+    assert model_commands._default_run_slot(_slot_rows()) == "coder"
+
+
+def test_default_run_slot_falls_back_to_agent_when_all_bound() -> None:
+    rows = [
+        {"name": "embed", "type": "embedding"},
+        {"name": "brain", "type": "llm", "model_default": "a"},
+        {"name": "agent", "type": "llm", "model_id": "b"},
+    ]
+    assert model_commands._default_run_slot(rows) == "agent"
+
+
+def test_default_run_slot_none_without_llm_slot() -> None:
+    assert model_commands._default_run_slot([{"name": "tts", "type": "tts"}]) is None
+
+
+def test_model_run_without_slot_never_picks_a_non_llm_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get(path: str, **_kw: Any) -> Any:
+        if path == "/api/models/qwen3-4b":
+            return {"id": "qwen3-4b"}
+        if path == "/api/slots":
+            return {
+                "slots": [{"name": "embed", "type": "embedding"}, {"name": "tts", "type": "tts"}]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(model_commands, "api_get", fake_get)
+    result = runner.invoke(model_commands.app, ["run", "qwen3-4b"])
+    assert result.exit_code == 1
+    assert "no LLM slot" in result.output
 
 
 def test_model_run_explicit_timeout_caps_the_blocking_load_post(

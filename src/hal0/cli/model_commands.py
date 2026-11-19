@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json as jsonlib
 from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -652,11 +653,39 @@ def model_store(
     console.print("[dim]Running slots pick up the new mount on their next restart.[/dim]")
 
 
+def _default_run_slot(rows: list[Any]) -> str | None:
+    """Pick the slot ``model run`` loads into when ``--slot`` is not given.
+
+    Only LLM slots qualify (a slot row without a ``type`` predates the field
+    and counts as LLM; remote/synthetic rows never do). Prefer the first one
+    with no model bound, so a run does not evict a working slot; otherwise
+    ``agent``, else the first LLM slot. ``None`` when there is no LLM slot.
+    """
+    llm = [
+        r
+        for r in rows
+        if isinstance(r, dict)
+        and r.get("name")
+        and r.get("type", "llm") == "llm"
+        and r.get("kind", "local") == "local"
+    ]
+    for r in llm:
+        if not (r.get("model_default") or r.get("model_id")):
+            return str(r["name"])
+    for r in llm:
+        if r["name"] == "agent":
+            return "agent"
+    return str(llm[0]["name"]) if llm else None
+
+
 @app.command("run")
 def model_run(
     ref: str = typer.Argument(..., help="Model ref (registered id or curated alias)"),
     slot: str = typer.Option(
-        "", "--slot", "-s", help="Slot to run on (default: the first compatible slot)"
+        "",
+        "--slot",
+        "-s",
+        help="Slot to run on (default: the first LLM slot with no model bound, else agent)",
     ),
     timeout_s: int = typer.Option(
         # The default clears the server's own worst case for a load; a smaller
@@ -669,10 +698,11 @@ def model_run(
 ) -> None:
     """Get a model serving: pull if needed, assign to a slot, load, wait ready.
 
+    An unregistered ref is pulled first (curated alias or known HF coordinates).
     The one-command first-run path::
 
-        hal0 model pull qwen3-4b     # or drop a file + `hal0 model add`
-        hal0 model run  qwen3-4b
+        hal0 model run qwen3-4b      # pulls if needed, then loads
+        hal0 model add /path/to.gguf # or register a local file first
     """
     import time
 
@@ -681,16 +711,27 @@ def model_run(
         raise typer.Exit(1)
     from hal0.cli._shared import api_post
 
-    # 1. Model must exist (registered local file or an installed FLM tag).
+    # 1. Model must exist (registered local file or an installed FLM tag);
+    # when it is not registered, try to pull it (curated alias / HF-known ref).
     try:
         api_get(f"/api/models/{ref}")
     except CliApiError:
-        die(
-            f"model {ref!r} is not registered. Pull it first (hal0 model pull {ref}), "
-            f"register a local file (hal0 model add /path/to/file.gguf), or rescan "
-            f"(hal0 model scan)."
+        console.print(f"[dim]{ref!r} is not registered; pulling it first.[/dim]")
+        try:
+            start = api_post(f"/api/models/{ref}/pull")
+        except CliApiError as exc:
+            die(
+                f"model {ref!r} is not registered and could not be pulled ({exc}). "
+                f"Pull it explicitly (hal0 model pull {ref}), "
+                f"register a local file (hal0 model add /path/to/file.gguf), "
+                f"or rescan (hal0 model scan)."
+            )
+            return
+        console.print(
+            f"Starting pull for [bold]{ref}[/bold] "
+            f"({start.get('hf_repo', '?')}/{start.get('hf_file', '?')})…"
         )
-        return
+        _poll_pull_progress(ref)
 
     # 2. Resolve the target slot.
     target = slot
@@ -701,14 +742,17 @@ def model_run(
             die(str(exc))
             return
         rows = slots.get("slots", slots) if isinstance(slots, dict) else slots
-        names = [r.get("name", "") for r in rows if isinstance(r, dict)]
-        if not names:
+        if not [r for r in rows if isinstance(r, dict) and r.get("name")]:
             die(
                 "no slots configured — create one first: "
                 "hal0 slot create chat  (then re-run this command)"
             )
             return
-        target = "chat" if "chat" in names else names[0]
+        picked = _default_run_slot(rows)
+        if picked is None:
+            die("no LLM slot to run on — pass --slot <name>, or create one: hal0 slot create chat")
+            return
+        target = picked
         console.print(f"[dim]No --slot given; using slot [bold]{target}[/bold].[/dim]")
 
     # 3. Load with the model assigned.
