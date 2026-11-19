@@ -858,6 +858,18 @@ class CapabilityOrchestrator:
         match = next((row for row in rows if row["id"] == model_id), None)
         if match is None:
             if not is_image and self._registry is not None and self._registry.has(model_id):
+                # Provenance is permissive, type is not: a registry-only id
+                # still has to be the right model class for this child
+                # (#3834). The registry entry's own capabilities (e.g. "asr")
+                # classify custom-named models, as a catalog row's do. Fit
+                # runs first so a wrong-class model gets that answer rather
+                # than "pull it".
+                entry_caps: Any = None
+                try:
+                    entry_caps = getattr(self._registry.get(model_id), "capabilities", None)
+                except Exception:
+                    entry_caps = None
+                self._check_model_fit(slot, child, capability, model_id, backend_id, entry_caps)
                 if require_downloaded and backend_id != "npu":
                     self._require_registry_weights_present(slot, child, model_id, backend_id)
                 return
@@ -900,6 +912,20 @@ class CapabilityOrchestrator:
                 )
         if is_image:
             return
+        self._check_model_fit(
+            slot, child, capability, model_id, backend_id, match.get("capabilities")
+        )
+
+    def _check_model_fit(
+        self,
+        slot: str,
+        child: str,
+        capability: str,
+        model_id: str,
+        backend_id: str,
+        capabilities: Any,
+    ) -> None:
+        """Refuse a model whose class/profile cannot serve this child."""
         slot_type = _CAPABILITY_TO_SLOT_TYPE.get(capability)
         if slot_type is None:
             return
@@ -917,7 +943,7 @@ class CapabilityOrchestrator:
             device=backend_id,
             profile=profile,
             registry=registry_for_fit,
-            capabilities=match.get("capabilities"),
+            capabilities=capabilities,
         )
         if not fit.allowed:
             details: dict[str, Any] = {

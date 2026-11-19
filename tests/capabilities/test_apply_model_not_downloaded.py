@@ -254,6 +254,7 @@ def test_registry_only_model_with_missing_weights_is_409(
         path = str(tmp_path / "gone.gguf")  # never created
         hf_repo = "org/repo"
         hf_filename = "gone.gguf"
+        capabilities = ("embed",)
 
     class FakeRegistry:
         def has(self, model_id: str) -> bool:
