@@ -4174,7 +4174,7 @@ else
                 # the check reports as "could not measure".
                 info "checking the memory extraction slot's throughput…"
                 "${HAL0_BIN}" memory graph check \
-                    || warn "could not check the extraction slot's throughput; run '${HAL0_BIN} memory graph check' once a model is loaded"
+                    || warn "could not check the extraction slot's throughput; run '${HAL0_BIN} memory graph check' once the agent slot has a model loaded"
             else
                 warn "hindsight-api not healthy yet: on its first start the engine downloads its embedding and reranker models"
                 warn "  check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'; hal0-api seeds the memory banks once the engine is up"
