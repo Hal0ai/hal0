@@ -149,7 +149,7 @@ def _has_registry_row(registry: Any, tag: str) -> bool:
     Such a row is a ghost once its files are gone. A row under the same id that
     FLM does not manage (a GGUF registered as ``qwen3:0.6b``) is not ours to
     drop here, so it does not count. Rows are matched on ``id == tag`` (what
-    ``_register_flm_pulled`` writes); a legacy ``<tag>-FLM`` id is not matched.
+    ``_register_flm_pulled`` writes); an older ``<tag>-FLM`` id is not matched.
     """
     from hal0.registry.discover import is_runtime_managed
 
