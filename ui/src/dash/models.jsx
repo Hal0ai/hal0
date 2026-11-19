@@ -27,6 +27,7 @@ import { laneForBackend } from '@/dash/lane-code-pure'
 import { ProviderDetail } from '@/dash/models/ProviderDetail.jsx'
 import { AddProviderModal } from '@/dash/models/AddProviderModal.jsx'
 import { keyState, providerState, refreshOutcome, refreshSummary } from '@/dash/models/providers-pure'
+import { resolveLoadTarget } from '@/dash/models/load-target-pure'
 import { useXdnaFit } from '@/api/hooks/useXdnaFit'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { npuTabVisible } from '@/dash/npu/npu-pure'
@@ -718,9 +719,33 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
   const swap = useSlotSwap();
   const hfUpdate = useModelUpdateApply();
   const [cancelling, setCancelling] = useStateM(false);
+  // The open slot picker, tagged with the model it was opened for. ModelsView renders one
+  // ModelDetail and swaps `model` as the selection moves, so a picker opened for one model
+  // must not survive onto another (it would offer, and load into, slots chosen for the first).
+  const [pick, setPick] = useStateM(null);
+  const picker = pick && model && pick.modelId === model.id ? pick : null;
+  if (pick && !picker) setPick(null); // selection moved: forget it for good (derived-state reset)
+  const pickOptions = picker ? picker.options : null;
+  const pickName = picker ? picker.name : "";
   if (!model) {
     return <DetailEmpty>No model selected.</DetailEmpty>;
   }
+  const loadInto = async (target) => {
+    if (!target) return;
+    setPick(null);
+    try {
+      await swap.mutateAsync({ name: target.name, model_id: model.id });
+      window.__hal0Toast && window.__hal0Toast(
+        `Loading ${model.longName || model.id} → slot ${target.name}`,
+        "info",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Load failed — ${e?.message || "see logs"}`,
+        "err",
+      );
+    }
+  };
   const rowState = state ?? registryState(model);
   // ADR-0029: a model carries FILE FACTS only — chat template, jinja, whether
   // the file has MTP heads — plus its native context window (read-only, from
@@ -856,40 +881,48 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
               className="btn"
               disabled={swap.isPending}
               onClick={async () => {
-                const slots = slotsQuery.data ?? [];
-                const compatible = slots.filter(s => s.type === model.type);
-                if (compatible.length === 0) {
+                const res = resolveLoadTarget(slotsQuery.data ?? [], model);
+                if (res.kind === "none") {
                   window.__hal0Toast && window.__hal0Toast(
                     `No slot accepts type=${model.type || "?"} — create one in Slots`,
                     "err",
                   );
                   return;
                 }
-                const owning = compatible.find(
-                  s => (s.model_id || s.model?.default) === model.id,
-                );
-                if (!owning && compatible.length > 1) {
-                  window.__hal0Toast && window.__hal0Toast(
-                    `Multiple compatible slots — use the slot card swap dropdown to pick one`,
-                    "warn",
-                  );
+                if (res.kind === "choose") {
+                  setPick({
+                    modelId: model.id,
+                    options: res.options,
+                    name: res.options.find(s => !(s.model_id || s.model?.default))?.name ?? res.options[0].name,
+                  });
                   return;
                 }
-                const target = owning || compatible[0];
-                try {
-                  await swap.mutateAsync({ name: target.name, model_id: model.id });
-                  window.__hal0Toast && window.__hal0Toast(
-                    `Loading ${model.longName || model.id} → slot ${target.name}`,
-                    "info",
-                  );
-                } catch (e) {
-                  window.__hal0Toast && window.__hal0Toast(
-                    `Load failed — ${e?.message || "see logs"}`,
-                    "err",
-                  );
-                }
+                loadInto(res.slot);
               }}
             >{swap.isPending ? "Loading…" : "Load now"}</button>
+            {pickOptions && (
+              <span className="mdl-load-picker" data-testid="mdl-load-picker">
+                <select
+                  className="input sm"
+                  aria-label="Slot to load into"
+                  data-testid="mdl-load-picker-select"
+                  value={pickName}
+                  onChange={e => setPick({ ...picker, name: e.target.value })}
+                >
+                  {pickOptions.map(s => {
+                    const bound = s.model_id || s.model?.default;
+                    return <option key={s.name} value={s.name}>{s.name}{bound ? ` (${bound})` : " (empty)"}</option>;
+                  })}
+                </select>
+                <button
+                  className="btn sm"
+                  data-testid="mdl-load-picker-go"
+                  disabled={swap.isPending}
+                  onClick={() => loadInto(pickOptions.find(s => s.name === pickName))}
+                >Load</button>
+                <button className="btn ghost sm" onClick={() => setPick(null)}>Cancel</button>
+              </span>
+            )}
             <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit options</button>
             <button className="btn danger sm" onClick={onDelete}>{Icons.unload} Delete</button>
           </>
