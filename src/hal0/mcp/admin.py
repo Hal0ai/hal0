@@ -2163,8 +2163,24 @@ def _split_args(tool: str, args: dict[str, Any]) -> tuple[dict[str, str], dict[s
     return path_args, remainder
 
 
+def _require_advertised_args(tool: str, args: dict[str, Any]) -> None:
+    """Raise ``KeyError`` for the first arg the tool's advertised schema requires but ``args`` lacks.
+
+    :func:`tool_param_schema` is what ``tools/list`` advertises as
+    ``args.required``: the path args plus the body fields a
+    :data:`TOOL_PARAM_HINTS` entry marks required. :func:`_split_args` covers
+    only the path args, so without this a gated call missing a required BODY
+    field (``slot_create {}``, ``comfyui_pin {}``) was queued for an approval
+    that could only fail with a 422 (#3806). Presence only: the gate checks
+    call shape, and type and range validation stays with the REST layer.
+    """
+    for key in tool_param_schema(tool)["required"]:
+        if key not in args:
+            raise KeyError(f"tool {tool!r} requires arg {key!r}")
+
+
 def _arg_error(exc: KeyError | PathArgError) -> dict[str, Any]:
-    """The tool-error envelope for a path argument that is missing or unsendable."""
+    """The tool-error envelope for a missing argument or an unsendable path argument."""
     code = "mcp.missing_arg" if isinstance(exc, KeyError) else "mcp.invalid_arg"
     return {"status": "error", "error": {"code": code, "detail": str(exc)}}
 
@@ -2558,7 +2574,8 @@ async def dispatch(
     ``{"status": "pending_approval", "approval_id": "..."}`` for gated
     ones. A missing or unsendable path argument (``mcp.missing_arg`` /
     ``mcp.invalid_arg``) is refused up front, so a gated call with one is
-    never queued.
+    never queued; so is a gated call missing any other arg its advertised
+    schema requires (``mcp.missing_arg``).
 
     ``memory_dispatcher`` is the in-process callable the memory server
     exposes for direct invocation (avoiding the HTTP round-trip for
@@ -2602,9 +2619,13 @@ async def dispatch(
     # Refuse an unsendable path argument BEFORE a card exists or a call runs:
     # the operator approves what the card names, so a value that cannot be sent
     # faithfully must never reach the queue. ``_execute_tool`` re-checks at run
-    # time, so a queued entry is covered too.
+    # time, so a queued entry is covered too. A gated call must also carry
+    # every arg its advertised schema requires, body fields included (#3806):
+    # the operator should never be asked to approve a call that can only 422.
     try:
         _split_args(tool, args)
+        if gated:
+            _require_advertised_args(tool, args)
     except (KeyError, PathArgError) as exc:
         refusal = _arg_error(exc)
         _audit(

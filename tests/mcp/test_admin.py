@@ -1827,6 +1827,116 @@ async def test_missing_path_arg_on_a_gated_tool_is_refused_before_approval(
     assert mock_transport["calls"] == []
 
 
+# #3806: the seven gated tools whose only required args are BODY fields. The
+# advertised inputSchema marks them required, so an empty call must be refused
+# inline like a missing path arg, not queued for an approval that can only 422.
+_BODY_REQUIRED_GATED = {
+    "comfyui_pin": {"pinned": True},
+    "comfyui_switchover": {"mode": "gpu"},
+    "npu_backend_load": {"model_id": "m"},
+    "npu_backend_unload": {"slot_name": "s"},
+    "profile_create": {"name": "p"},
+    "slot_create": {"name": "s", "model": "m"},
+    "upstream_create": {"name": "u"},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", sorted(_BODY_REQUIRED_GATED))
+async def test_missing_required_body_arg_on_a_gated_tool_is_refused_before_approval(
+    tool: str, queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    required = admin.tool_param_schema(tool)["required"]
+    assert required, f"{tool} must advertise required args"
+    result = await admin.dispatch(
+        tool=tool,
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["status"] == "error"
+    assert result["error"]["code"] == "mcp.missing_arg"
+    assert repr(required[0]) in result["error"]["detail"]
+    assert queue.list_all() == []
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", sorted(_BODY_REQUIRED_GATED))
+async def test_gated_tool_with_its_required_body_args_still_queues(
+    tool: str, queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool=tool,
+        args=dict(_BODY_REQUIRED_GATED[tool]),
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["status"] == "pending_approval"
+    assert len(queue.list_all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_one_of_several_required_body_args_missing_is_refused(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool="slot_create",
+        args={"name": "s"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["error"]["code"] == "mcp.missing_arg"
+    assert "'model'" in result["error"]["detail"]
+    assert queue.list_all() == []
+
+
+@pytest.mark.asyncio
+async def test_path_arg_tool_missing_only_its_required_body_arg_is_refused(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """slot_rename has the path arg but not the body ``new_name``: same refusal."""
+    result = await admin.dispatch(
+        tool="slot_rename",
+        args={"name": "s"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["error"]["code"] == "mcp.missing_arg"
+    assert "'new_name'" in result["error"]["detail"]
+    assert queue.list_all() == []
+
+
+@pytest.mark.asyncio
+async def test_every_gated_tool_with_empty_args_queues_only_if_it_requires_nothing(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """The release kit's mechanical sweep: {} never queues a tool that advertises required args."""
+    for tool in sorted(admin.GATED_TOOLS):
+        result = await admin.dispatch(
+            tool=tool,
+            args={},
+            client_id="pi",
+            bearer="t",
+            base_url="http://t",
+            approval_queue=queue,
+        )
+        if admin.tool_param_schema(tool)["required"]:
+            assert result["status"] == "error", tool
+            assert result["error"]["code"] == "mcp.missing_arg", tool
+        else:
+            assert result["status"] == "pending_approval", tool
+    assert mock_transport["calls"] == []
+
+
 @pytest.mark.asyncio
 async def test_approved_call_reaches_the_server_with_the_literal_argument(
     queue: ApprovalQueue, mock_transport: dict[str, Any]
