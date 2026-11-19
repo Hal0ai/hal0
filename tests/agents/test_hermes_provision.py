@@ -6824,3 +6824,29 @@ def test_chat_smoke_skips_a_kept_model(tmp_path: Path) -> None:
     state = hp.BootstrapState(hermes_home=str(home))
     ok, detail = hp._smoke_chat_completions(state, None)  # type: ignore[arg-type]
     assert ok is None and "operator model kept (m)" in detail
+
+
+def test_chat_probe_outwaits_first_boot_consolidation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe's client timeout must outlast a ~125 s consolidation holding a
+    single-sequence slot (#3809); a timeout still fails, never skips."""
+    from urllib.error import URLError
+
+    assert hp._CHAT_PROBE_TIMEOUT_S >= 150.0
+    hh = tmp_path / "hh"
+    hh.mkdir()
+    (hh / "config.yaml").write_text(
+        "model:\n  default: hal0/agent\n  base_url: http://127.0.0.1:8080/v1\n"
+    )
+    seen: list[float | None] = []
+
+    def _open(req: Any, timeout: float | None = None) -> Any:
+        seen.append(timeout)
+        raise URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr("hal0.service_identity.open_url", _open)
+    state = hp.BootstrapState(hermes_home=str(hh))
+    passed, detail = hp._smoke_chat_completions(state, object())  # type: ignore[arg-type]
+    assert seen == [hp._CHAT_PROBE_TIMEOUT_S]
+    assert passed is False and "timed out" in detail

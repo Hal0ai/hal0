@@ -8490,6 +8490,13 @@ def _wrapper_bin() -> Path:
     return HERMES_CLI_INSTALL_PATH
 
 
+#: Client timeout of the chat probe's one request. A fresh install can queue
+#: the probe behind first-boot memory consolidation on a single-sequence brain
+#: (about 125 s of generation, #3809), so the wait must outlast that. A timeout
+#: stays a failure: only a reply within the budget proves the chat path works.
+_CHAT_PROBE_TIMEOUT_S = 180.0
+
+
 def _smoke_chat_completions(state: BootstrapState, _io: InstallIO) -> tuple[bool | None, str]:
     """POST against model.base_url/chat/completions; assert 'ready' in reply.
 
@@ -8544,7 +8551,7 @@ def _smoke_chat_completions(state: BootstrapState, _io: InstallIO) -> tuple[bool
     # Thinking models can spend tens of seconds on the reasoning block
     # before emitting visible content; 10s wasn't long enough.
     try:
-        with open_url(req, timeout=60.0) as resp:
+        with open_url(req, timeout=_CHAT_PROBE_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (URLError, OSError, json.JSONDecodeError, TimeoutError) as exc:
         return (False, f"chat/completions: {exc}")
