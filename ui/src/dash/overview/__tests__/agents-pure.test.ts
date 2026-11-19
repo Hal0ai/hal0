@@ -41,8 +41,36 @@ describe('hermesRow', () => {
     expect(hermesRow({ ...OV_HERMES, units: { agent: 'inactive' } } as any, null, null).state).toBe('serving')
     ;(window as any).__hal0DeriveCardModel = () => ({ phase: 'broken' })
     expect(hermesRow(OV_HERMES, null, null).state).toBe('down')
-    ;(window as any).__hal0DeriveCardModel = () => ({ phase: 'degraded' })
+    ;(window as any).__hal0DeriveCardModel = () => ({ phase: 'degraded', reasons: [{ reason: 'doctor_drift' }] })
     expect(hermesRow(OV_HERMES, null, null).state).toBe('ready')
+  })
+
+  describe('degraded card model (#3808)', () => {
+    const withReasons = (...reasons: string[]) => {
+      ;(window as any).__hal0DeriveCardModel = () => ({
+        phase: 'degraded',
+        reasons: reasons.map((reason) => ({ reason })),
+      })
+      return hermesRow(OV_HERMES, null, null).state
+    }
+
+    it.each(['gateway_down', 'api_unhealthy', 'provision_failed'])('reads down for the outage reason %s', (r) =>
+      expect(withReasons(r)).toBe('down'))
+
+    it.each(['provision_warn', 'doctor_drift', 'approvals_drift'])('keeps reading ready for the soft reason %s', (r) =>
+      expect(withReasons(r)).toBe('ready'))
+
+    it('lets an outage reason win in a mixed list', () => {
+      expect(withReasons('doctor_drift', 'api_unhealthy', 'approvals_drift')).toBe('down')
+      expect(withReasons('provision_warn', 'gateway_down')).toBe('down')
+    })
+
+    it('reads ready for an empty list, a missing list, or an unknown future reason', () => {
+      expect(withReasons()).toBe('ready')
+      ;(window as any).__hal0DeriveCardModel = () => ({ phase: 'degraded' })
+      expect(hermesRow(OV_HERMES, null, null).state).toBe('ready')
+      expect(withReasons('some_future_reason')).toBe('ready')
+    })
   })
 
   it('treats a ctx counter of 0 as absent, not 0%', () => {
