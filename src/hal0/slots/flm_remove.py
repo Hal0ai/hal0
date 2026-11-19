@@ -140,6 +140,16 @@ def _catalog_entry(tag: str) -> dict[str, Any] | None:
     return None
 
 
+def _has_registry_row(registry: Any, tag: str) -> bool:
+    """True when hal0 still records ``tag`` (a ghost row once its files are gone)."""
+    if registry is None:
+        return False
+    try:
+        return bool(registry.has(tag))
+    except Exception:
+        return False
+
+
 def _install_dir(tag: str, store: str) -> str | None:
     """The tag's directory in ``store``, read from a fresh raw ``flm list -j``."""
     from hal0.providers.flm import _probe_flm_catalog
@@ -221,13 +231,47 @@ async def check_removable(
             code="flm.model_not_found",
             details={"tag": tag},
         )
-    if not entry.get("installed"):
+    if not entry.get("installed") and not _has_registry_row(registry, tag):
         raise Conflict(
             f"{tag} is not downloaded, so there is nothing to remove.",
             code="flm.model_not_installed",
             details={"tag": tag},
         )
     return entry
+
+
+async def _drop_ghost_row(
+    tag: str, *, registry: Any, jobs: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Drop the hal0 records of an FLM tag whose files are already gone."""
+    from hal0.providers.flm import reset_flm_catalog_cache
+    from hal0.registry.pull import mark_deleted, mark_deleting, pull_job_file, unmark_deleting
+
+    mark_deleting(tag)
+    try:
+        registry_removed = False
+        if registry is not None:
+            with contextlib.suppress(Exception):
+                registry_removed = bool(await asyncio.to_thread(registry.remove, tag))
+        mark_deleted(tag)
+    finally:
+        unmark_deleting(tag)
+        reset_flm_catalog_cache()
+    if jobs is not None:
+        stale = jobs.get(tag)
+        if stale is not None and getattr(stale, "state", None) not in _ACTIVE_STATES:
+            jobs.pop(tag, None)
+    with contextlib.suppress(OSError):
+        pull_job_file(tag).unlink(missing_ok=True)
+    log.info("flm.ghost_row_removed tag=%s", tag)
+    return {
+        "tag": tag,
+        "removed": True,
+        "path": None,
+        "bytes_freed": 0,
+        "registry_removed": registry_removed,
+        "warnings": [],
+    }
 
 
 async def remove_flm_model(
@@ -261,6 +305,12 @@ async def remove_flm_model(
     # Check-and-mark with no await between, so a pull started from here on is
     # refused (``model.deleting``) and a second remove of the same tag waits its turn.
     ensure_not_deleting(tag)
+    if not entry.get("installed"):
+        # The files are already gone (removed outside hal0), but the registry
+        # row survives: ADR-0026 keeps runtime-managed rows out of prune, so
+        # this route is the only way to clear it. There is nothing for
+        # ``flm remove`` to do.
+        return await _drop_ghost_row(tag, registry=registry, jobs=jobs)
     job = (jobs or {}).get(tag)
     if job is not None and getattr(job, "state", None) in _ACTIVE_STATES:
         raise Conflict(

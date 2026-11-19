@@ -317,6 +317,18 @@ async def test_not_installed_and_unknown_tags_are_refused(env) -> None:
     assert env.calls == []
 
 
+async def test_ghost_registry_row_is_cleared_without_flm_remove(env) -> None:
+    """Files removed outside hal0 leave a row only this route can clear (#3810)."""
+    registry = _Registry({"gemma3:1b"})
+    result = await flm_remove.remove_flm_model("gemma3:1b", registry=registry, jobs=None)
+    assert env.calls == []  # nothing on disk for flm to remove
+    assert result["removed"] is True
+    assert result["registry_removed"] is True
+    assert result["bytes_freed"] == 0
+    assert registry.ids == set()
+    assert env.resets >= 1
+
+
 @pytest.mark.parametrize("tag", ["qwen3", "-rf:x", "a:b;id", ""])
 async def test_bad_tag_is_422(env, tag: str) -> None:
     with pytest.raises(UnprocessableEntity) as exc:
