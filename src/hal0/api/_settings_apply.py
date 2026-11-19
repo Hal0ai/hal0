@@ -364,7 +364,6 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.console.enabled": {"apply_class": "immediate", "services": []},
     "memory.console.port": {"apply_class": "immediate", "services": []},
     "memory.console.bind": {"apply_class": "immediate", "services": []},
-    "memory.console.url": {"apply_class": "immediate", "services": []},
     "memory.public_url": {"apply_class": "immediate", "services": []},
     # [activity] — the AuditStore is constructed once at create_app
     # (api/__init__.py); retention/max_rows/enabled land on restart.

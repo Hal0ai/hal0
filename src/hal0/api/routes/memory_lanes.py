@@ -325,16 +325,14 @@ _INSTALL_COMMAND = f"hal0 memory agents install <harness> --bridge-key-file {_KE
 def _console_url(request: Request, cfg: Any) -> str | None:
     """Hindsight Control Plane console URL from ``[memory.console]``, or None.
 
-    Returns None when the console is disabled. If ``[memory.console]`` has no
-    explicit ``url``, derive one from ``memory.public_url`` (host) plus the
-    console port; else fall back to the inbound request's hostname.
+    Returns None when the console is disabled. Otherwise derive the URL from
+    ``memory.public_url`` (host) plus the console port; with no public URL fall
+    back to the inbound request's hostname. ``[memory.console]`` has no ``url``
+    key (ADR-0058 decision 10 removes the section).
     """
     console = getattr(cfg.memory, "console", None)
     if console is None or not getattr(console, "enabled", False):
         return None
-    url = getattr(console, "url", None)
-    if url:
-        return str(url)
     port = getattr(console, "port", 9999)
     public_url = getattr(cfg.memory, "public_url", None)
     host = None
