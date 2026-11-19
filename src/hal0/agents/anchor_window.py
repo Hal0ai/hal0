@@ -50,7 +50,9 @@ window, and the target value the repair would need to write).
 
 from __future__ import annotations
 
+import os
 import subprocess  # nosec B404 — asks the Hermes venv python for its own constant
+import tempfile
 import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -100,13 +102,24 @@ def read_hermes_minimum_context(
     if not venv_python:
         return (HERMES_MINIMUM_CONTEXT_LENGTH, "fallback:no-venv")
     try:
-        proc = run(  # nosec B603 — fixed argv, no shell, hal0-owned venv path
-            [str(venv_python), "-c", _FLOOR_PROBE],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
+        # Importing Hermes bootstraps ``$HERMES_HOME`` (or ``~/.hermes``). A root
+        # ``hal0 doctor all`` would otherwise create ``/root/.hermes`` (#3836), so
+        # point both at a throwaway dir: the probe reads a constant and needs no
+        # state, and nothing lands under /root or in the managed Hermes tree.
+        with tempfile.TemporaryDirectory(prefix="hal0-floor-probe-") as scratch:
+            env = {
+                **os.environ,
+                "HOME": scratch,
+                "HERMES_HOME": str(Path(scratch) / ".hermes"),
+            }
+            proc = run(  # nosec B603 — fixed argv, no shell, hal0-owned venv path
+                [str(venv_python), "-c", _FLOOR_PROBE],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=env,
+            )
     except (OSError, subprocess.SubprocessError) as exc:
         return (HERMES_MINIMUM_CONTEXT_LENGTH, f"fallback:{type(exc).__name__}")
     if getattr(proc, "returncode", 1) != 0:
