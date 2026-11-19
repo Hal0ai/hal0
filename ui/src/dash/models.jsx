@@ -719,14 +719,20 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
   const swap = useSlotSwap();
   const hfUpdate = useModelUpdateApply();
   const [cancelling, setCancelling] = useStateM(false);
-  const [pickOptions, setPickOptions] = useStateM(null);
-  const [pickName, setPickName] = useStateM("");
+  // The open slot picker, tagged with the model it was opened for. ModelsView renders one
+  // ModelDetail and swaps `model` as the selection moves, so a picker opened for one model
+  // must not survive onto another (it would offer, and load into, slots chosen for the first).
+  const [pick, setPick] = useStateM(null);
+  const picker = pick && model && pick.modelId === model.id ? pick : null;
+  if (pick && !picker) setPick(null); // selection moved: forget it for good (derived-state reset)
+  const pickOptions = picker ? picker.options : null;
+  const pickName = picker ? picker.name : "";
   if (!model) {
     return <DetailEmpty>No model selected.</DetailEmpty>;
   }
   const loadInto = async (target) => {
     if (!target) return;
-    setPickOptions(null);
+    setPick(null);
     try {
       await swap.mutateAsync({ name: target.name, model_id: model.id });
       window.__hal0Toast && window.__hal0Toast(
@@ -884,8 +890,11 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
                   return;
                 }
                 if (res.kind === "choose") {
-                  setPickOptions(res.options);
-                  setPickName(res.options.find(s => !(s.model_id || s.model?.default))?.name ?? res.options[0].name);
+                  setPick({
+                    modelId: model.id,
+                    options: res.options,
+                    name: res.options.find(s => !(s.model_id || s.model?.default))?.name ?? res.options[0].name,
+                  });
                   return;
                 }
                 loadInto(res.slot);
@@ -898,7 +907,7 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
                   aria-label="Slot to load into"
                   data-testid="mdl-load-picker-select"
                   value={pickName}
-                  onChange={e => setPickName(e.target.value)}
+                  onChange={e => setPick({ ...picker, name: e.target.value })}
                 >
                   {pickOptions.map(s => {
                     const bound = s.model_id || s.model?.default;
@@ -911,7 +920,7 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
                   disabled={swap.isPending}
                   onClick={() => loadInto(pickOptions.find(s => s.name === pickName))}
                 >Load</button>
-                <button className="btn ghost sm" onClick={() => setPickOptions(null)}>Cancel</button>
+                <button className="btn ghost sm" onClick={() => setPick(null)}>Cancel</button>
               </span>
             )}
             <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit options</button>
