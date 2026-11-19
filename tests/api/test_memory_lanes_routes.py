@@ -372,7 +372,6 @@ def test_agents_console_url_enabled(client: TestClient, recorder: _Recorder, mon
     class _Console:
         enabled = True
         port = 9999
-        url = None
 
     class _MemCfg:
         public_url = None
@@ -388,6 +387,26 @@ def test_agents_console_url_enabled(client: TestClient, recorder: _Recorder, mon
     body = r.json()
     assert body["console_url"] is not None
     assert body["console_url"].endswith(":9999")
+
+
+def test_agents_console_url_ignores_url_key(
+    client: TestClient, recorder: _Recorder, monkeypatch
+) -> None:
+    """``[memory.console]`` has no ``url`` key: a stray one is dropped at load and
+    the console link is always derived (ADR-0058 decision 10)."""
+    from hal0.api.routes import memory_lanes as mod
+    from hal0.config.schema import Hal0Config
+
+    cfg = Hal0Config.model_validate(
+        {"memory": {"console": {"enabled": True, "url": "https://console.example"}}}
+    )
+    assert not hasattr(cfg.memory.console, "url")
+    monkeypatch.setattr(mod, "load_hal0_config", lambda: cfg)
+    recorder.respond("GET", "/v1/default/banks", 200, {"banks": []})
+    r = client.get("/api/memory/agents")
+    assert r.status_code == 200
+    assert r.json()["console_url"] != "https://console.example"
+    assert r.json()["console_url"].endswith(":9999")
 
 
 def test_models_shape(client: TestClient) -> None:
