@@ -1941,6 +1941,9 @@ class ExtractionThroughput:
     probe_timed_out: bool = False
     measured_at: float = 0.0
     detail: str = ""
+    #: The slot that really served the probe when ``slot`` has no model of its
+    #: own and resolves through the fallback chain (#3837); empty otherwise.
+    served_by: str = ""
 
     @property
     def projected_s(self) -> float | None:
@@ -1982,6 +1985,13 @@ class ExtractionThroughput:
             "<name>`) or raise [memory.graph].llm_timeout_s."
         )
 
+    @property
+    def _label(self) -> str:
+        """The slot for messages, naming the one that served it when different."""
+        if self.served_by and self.served_by != self.slot:
+            return f"{self.slot!r} (served by {self.served_by!r})"
+        return repr(self.slot)
+
     def message(self) -> str:
         """One operator-facing sentence naming the measured rates and the timeout."""
         timeout = f"[memory.graph].llm_timeout_s = {self.timeout_s} s"
@@ -1989,7 +1999,7 @@ class ExtractionThroughput:
         if projected is None:
             why = f" ({self.detail})" if self.detail else ""
             return (
-                f"could not measure extraction slot {self.slot!r}'s throughput{why}, "
+                f"could not measure extraction slot {self._label}'s throughput{why}, "
                 f"so hal0 cannot tell whether one extraction fits inside {timeout}"
             )
         consequence = (
@@ -1998,7 +2008,7 @@ class ExtractionThroughput:
         )
         if self.probe_timed_out:
             head = (
-                f"extraction slot {self.slot!r} did not finish a "
+                f"extraction slot {self._label} did not finish a "
                 f"{PROBE_PROMPT_TOKENS}-token probe inside {PROBE_TIMEOUT_S:.0f} s "
                 f"(under {self.prompt_tps:.1f} prompt tok/s), so prefilling the "
                 f"~{EXTRACTION_PROMPT_TOKENS}-token extraction prompt alone takes "
@@ -2011,7 +2021,7 @@ class ExtractionThroughput:
                 f"{timeout} (or the slot was busy during the probe). {self._remedy()}"
             )
         rates = (
-            f"extraction slot {self.slot!r} measured {self.prompt_tps:.1f} prompt tok/s "
+            f"extraction slot {self._label} measured {self.prompt_tps:.1f} prompt tok/s "
             f"and {self.decode_tps:.1f} decode tok/s (from {self.source}); one "
             f"extraction (~{EXTRACTION_PROMPT_TOKENS} prompt + "
             f"~{self._projected_completion_tokens} completion tokens) projects to ~{projected:.0f} s"
