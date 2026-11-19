@@ -105,11 +105,23 @@ def test_legacy_flm_id_maps_back_to_its_tag(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 class _Registry:
-    def __init__(self, ids: set[str]) -> None:
+    def __init__(self, ids: set[str], foreign: set[str] | None = None) -> None:
         self.ids = set(ids)
+        self.foreign = set(foreign or ())
 
     def has(self, model_id: str) -> bool:
         return model_id in self.ids
+
+    def get(self, model_id: str) -> Any:
+        if model_id not in self.ids:
+            return None
+        from hal0.registry.model import Model
+
+        if model_id in self.foreign:
+            return Model(id=model_id, path="/m/x.gguf", backends=["llamacpp"])
+        return Model(
+            id=model_id, path=f"/m/flm/{model_id}", backends=["npu"], metadata={"runtime": "flm"}
+        )
 
     def remove(self, model_id: str) -> bool:
         if model_id in self.ids:
@@ -327,6 +339,35 @@ async def test_ghost_registry_row_is_cleared_without_flm_remove(env) -> None:
     assert result["bytes_freed"] == 0
     assert registry.ids == set()
     assert env.resets >= 1
+
+
+async def test_non_flm_row_with_an_flm_id_is_not_dropped(env) -> None:
+    """A GGUF row sharing an FLM tag is not a ghost: still 409, row kept."""
+    registry = _Registry({"gemma3:1b"}, foreign={"gemma3:1b"})
+    with pytest.raises(Conflict) as exc:
+        await flm_remove.remove_flm_model("gemma3:1b", registry=registry, jobs=None)
+    assert exc.value.code == "flm.model_not_installed"
+    assert registry.ids == {"gemma3:1b"}
+
+
+async def test_ghost_row_refuses_a_pull_that_started_during_the_catalogue_lookup(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The jobs recheck runs before the ghost shortcut, so a racing pull wins."""
+    registry = _Registry({"gemma3:1b"})
+    running = types.SimpleNamespace(state="running")
+    jobs: dict[str, Any] = {}
+    real = flm_remove._catalog_entry
+
+    def _entry_then_pull(tag: str) -> Any:
+        jobs[tag] = running  # the pull lands while the catalogue is probed
+        return real(tag)
+
+    monkeypatch.setattr(flm_remove, "_catalog_entry", _entry_then_pull)
+    with pytest.raises(Conflict) as exc:
+        await flm_remove.remove_flm_model("gemma3:1b", registry=registry, jobs=jobs)
+    assert exc.value.code == "flm.pull_running"
+    assert registry.ids == {"gemma3:1b"}
 
 
 @pytest.mark.parametrize("tag", ["qwen3", "-rf:x", "a:b;id", ""])

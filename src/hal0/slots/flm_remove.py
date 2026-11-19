@@ -14,7 +14,10 @@ Refused (409) before anything runs when:
   ``whisper-v3:turbo`` while ``[npu].asr`` is on, or the ``[npu].decision`` tag;
 * a pull of the tag is queued or running (in this process, or a persisted
   snapshot whose writer is still alive);
-* the catalogue does not report the tag as installed.
+* the catalogue does not report the tag as installed and hal0 has no
+  FLM-managed registry row for it. With such a row (its files were removed
+  outside hal0) the route drops the row and the stale pull job instead,
+  without running ``flm remove``.
 
 While the remove runs the tag is marked "deleting" (ADR-0026), so a pull of it
 started meanwhile gets ``model.deleting``. FastFlowLM 1.0.12's ``remove`` exits
@@ -141,11 +144,20 @@ def _catalog_entry(tag: str) -> dict[str, Any] | None:
 
 
 def _has_registry_row(registry: Any, tag: str) -> bool:
-    """True when hal0 still records ``tag`` (a ghost row once its files are gone)."""
+    """True when hal0 still records an FLM-managed row for ``tag``.
+
+    Such a row is a ghost once its files are gone. A row under the same id that
+    FLM does not manage (a GGUF registered as ``qwen3:0.6b``) is not ours to
+    drop here, so it does not count. Rows are matched on ``id == tag`` (what
+    ``_register_flm_pulled`` writes); a legacy ``<tag>-FLM`` id is not matched.
+    """
+    from hal0.registry.discover import is_runtime_managed
+
     if registry is None:
         return False
     try:
-        return bool(registry.has(tag))
+        row = registry.get(tag)
+        return row is not None and is_runtime_managed(row)
     except Exception:
         return False
 
@@ -305,12 +317,6 @@ async def remove_flm_model(
     # Check-and-mark with no await between, so a pull started from here on is
     # refused (``model.deleting``) and a second remove of the same tag waits its turn.
     ensure_not_deleting(tag)
-    if not entry.get("installed"):
-        # The files are already gone (removed outside hal0), but the registry
-        # row survives: ADR-0026 keeps runtime-managed rows out of prune, so
-        # this route is the only way to clear it. There is nothing for
-        # ``flm remove`` to do.
-        return await _drop_ghost_row(tag, registry=registry, jobs=jobs)
     job = (jobs or {}).get(tag)
     if job is not None and getattr(job, "state", None) in _ACTIVE_STATES:
         raise Conflict(
@@ -318,6 +324,13 @@ async def remove_flm_model(
             code="flm.pull_running",
             details={"tag": tag, "pull_state": job.state},
         )
+    if not entry.get("installed"):
+        # The files are already gone (removed outside hal0), but the registry
+        # row survives: ADR-0026 keeps runtime-managed rows out of prune, so
+        # this route is the only way to clear it. There is nothing for
+        # ``flm remove`` to do. This sits below the pull recheck above so a
+        # pull that started during the catalogue lookup is still refused.
+        return await _drop_ghost_row(tag, registry=registry, jobs=jobs)
     mark_deleting(tag)
     try:
         invocation, store = await asyncio.to_thread(flm_remove_invocation, tag)
