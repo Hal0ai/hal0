@@ -3494,6 +3494,13 @@ class MemoryConsoleConfig(BaseModel):
         default="127.0.0.1",
         description="Bind address — kept loopback by default; proxy through hal0-api.",
     )
+    url: str | None = Field(
+        default=None,
+        description=(
+            "Explicit console URL for the dashboard link (reverse proxy or another host). "
+            "Unset derives it from memory.public_url plus the console port."
+        ),
+    )
 
 
 # One [memory.compat].shared_document_prefixes entry: what a document id may

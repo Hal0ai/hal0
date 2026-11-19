@@ -390,6 +390,23 @@ def test_agents_console_url_enabled(client: TestClient, recorder: _Recorder, mon
     assert body["console_url"].endswith(":9999")
 
 
+def test_agents_console_url_explicit_from_config(
+    client: TestClient, recorder: _Recorder, monkeypatch
+) -> None:
+    """A ``[memory.console].url`` set in hal0.toml survives load and is reported."""
+    from hal0.api.routes import memory_lanes as mod
+    from hal0.config.schema import Hal0Config
+
+    cfg = Hal0Config.model_validate(
+        {"memory": {"console": {"enabled": True, "url": "https://console.example"}}}
+    )
+    monkeypatch.setattr(mod, "load_hal0_config", lambda: cfg)
+    recorder.respond("GET", "/v1/default/banks", 200, {"banks": []})
+    r = client.get("/api/memory/agents")
+    assert r.status_code == 200
+    assert r.json()["console_url"] == "https://console.example"
+
+
 def test_models_shape(client: TestClient) -> None:
     r = client.get("/api/memory/models")
     assert r.status_code == 200
