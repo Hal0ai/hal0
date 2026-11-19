@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -169,14 +170,17 @@ def test_models_for_capability_filters_backends_blocked_by_model_fit(
 class _RegistryOnly:
     """Registry that knows an id the capability catalog does not list."""
 
-    def __init__(self, ids: set[str]) -> None:
+    def __init__(self, ids: set[str], capabilities: list[str] | None = None) -> None:
         self._ids = ids
+        self._capabilities = capabilities
 
     def has(self, model_id: str) -> bool:
         return model_id in self._ids
 
     def get(self, model_id: str) -> Any:
-        return None
+        if self._capabilities is None:
+            return None
+        return SimpleNamespace(capabilities=self._capabilities)
 
 
 @pytest.mark.parametrize(
@@ -204,3 +208,40 @@ def test_registry_fallback_blocks_wrong_model_class(
 
     assert exc.value.code == "capability.illegal_model_fit"
     assert exc.value.details["fit_reasons"][0] == "model.slot_type_mismatch"
+
+
+def test_registry_fallback_accepts_right_class_by_registry_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A custom-named registry ASR model is still accepted for voice/stt.
+
+    Its id carries no class hint; the registry entry's "asr" capability does.
+    """
+    monkeypatch.setattr(
+        "hal0.capabilities.orchestrator.models_for_capability",
+        lambda capability, registry=None: [],
+    )
+    orch = CapabilityOrchestrator(
+        slot_manager=FakeSlotManager(),  # type: ignore[arg-type]
+        registry=_RegistryOnly({"local-transcriber"}, ["asr"]),  # type: ignore[arg-type]
+    )
+
+    orch._validate_model_in_catalog("voice", "stt", "local-transcriber", "cpu")
+
+
+def test_registry_fallback_wrong_class_is_refused_before_weights_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "hal0.capabilities.orchestrator.models_for_capability",
+        lambda capability, registry=None: [],
+    )
+    orch = CapabilityOrchestrator(
+        slot_manager=FakeSlotManager(),  # type: ignore[arg-type]
+        registry=_RegistryOnly({"kokoro-v1"}),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(BadRequest) as exc:
+        orch._validate_model_in_catalog("voice", "stt", "kokoro-v1", "cpu", require_downloaded=True)
+
+    assert exc.value.code == "capability.illegal_model_fit"
