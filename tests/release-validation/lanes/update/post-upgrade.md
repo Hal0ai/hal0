@@ -115,6 +115,20 @@ did not ask for?**
 
 26. **Restart cost.** A hal0-api restart with the agent slot serving took ~20 s and added 2 failed memory ops per restart. Schedule restart-based checks (16, 20) last.
 
+27. **Cold agent warning.** Before any steward grounding check, assert the agent slot is loaded or accept that the steward wakes the 27B and preload-evicts utility and embed; record the `preload_evict` stop/start pair as expected, not drift.
+
+28. **Snapshot completeness gate.** Fail the upgrade stage if `before.txt` lacks `profile list --json`, bank counts, `actual_image` and TOML default vs `model_id`; check 22 was missed again on 1.8.0 and checks 1 and 9 had no real baseline.
+
+29. **Stale tree siblings.** Count `.stale-<epoch>` siblings in `/usr/lib/hal0` (18 x 16 MB on ct150) and cap or flag unbounded growth across update, rollback and roll-forward.
+
+30. **Failed-op attribution.** List failed memory ops created inside the update-stage window (8 rows from the 2b restarts on 1.8.0) so 'no new failed operations' does not blame the update.
+
+31. **OOM before/after.** Record cgroup `memory.events` `oom_kill` before and after any agent/27B wake on a RAM-limited LXC. A 137 with oom_kill+1 and the container at `memory.max` is the memcg, not slot admission (known `agent-27b-oom-is-container-memcg-not-slot-admission`).
+32. **Persistent session for SSE.** Run steward and other long SSE probes under `setsid`/a persistent session so closing the ssh channel does not cancel the turn.
+33. **Alias logged.** `dispatch.decision` logs only the resolved model; assert you can tie the requested alias (`hal0/utility`) to the resolved upstream, else note the logging gap.
+34. **Concurrent-actor sentinel.** Snapshot `/api/activity` at lane start and flag any `slot.unload` with actor `dashboard` that this lane did not issue.
+35. **Version string.** The steward's final prose should carry `version_info.version`; today `build_sha` is null and the value is the base `1.8.0` without the nightly suffix.
+
 ## Leave behind
 
 The box healthy on the new version, with its accumulated state intact — it is the input to the

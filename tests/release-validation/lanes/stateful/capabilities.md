@@ -129,6 +129,20 @@ that a later POST naming a downloaded model on it swaps/loads. Take backups firs
 
 23. **Scan collisions and tombstones.** Put two files with the same name `model.gguf` but different capabilities under `<store>/<cap>/<id>/` and run `hal0 model scan`: each must register under its directory id with the right capability (#2725), none silently skipped. Take `sha256sum /var/lib/hal0/registry/ignored-paths.json` at lane entry and exit: `rm --keep-files` and `rm` of a scratch-path model both tombstone paths that later lanes trip over. Restore from a pre-probe copy, merging any tombstone another lane wrote.
 
+24. **Catalog row vs applied slot.** After applying each advertised backend, compare `catalogs.voice.tts[].backends[].profile` and `runtime_family` with the profile and image written to `/etc/hal0/slots/tts.toml` (open #3811 item 3: kokoro gpu-vulkan row says qwen3-tts, apply writes kokoro).
+
+25. **n_predict handoff.** After any lane that restarts brain, record `n_decoded` and `n_predict` from `:8089/slots`; hand off as a finding if `n_predict` is -1 and `n_decoded` exceeds 2000 for a caller you cannot identify.
+
+26. **Scan skip reason.** After `hal0 model scan` over a pulled-layout `model.gguf`, the CLI must name the skip reason (`id_collision`), not only print '1 added, 1 skipped'.
+
+27. **Reaper vs fresh apply.** The idle reaper must not evict a capability-enabled embed/rerank slot applied less than `idle_timeout_s` ago; `capabilities list` must render enabled+offline distinctly from enabled+ready.
+
+28. **Tombstone hygiene.** `sha256sum` `ignored-paths.json` at entry and exit and check for scratch `/tmp` paths: `model rm` of a scratch-path model always tombstones it.
+
+29. **Wrong-type apply (#3834).** Apply a registered model of the WRONG type to each child (embedding gguf on embed/rerank, tts model on voice/stt, chat model on embed/embed). Assert a typed 4xx, then if any reports ready send `/v1/rerank` banana-vs-Paris to prove ranking sanity. Back up and restore `capabilities.toml` and the slot TOMLs.
+30. **Three `model add` error messages.** Run `hal0 model add` against an unreadable file, a missing file in the same dir, and a missing file in a readable dir; the three messages should differ (item 10 of #1840 still reproduces).
+31. **`model rm -f --keep-files` names `affected_slots`.** For a model bound to embed/embed the server returns 409 `model.in_use` with `force_cascade=false`; the CLI should name the affected slots.
+
 ## Leave behind
 
 Capabilities left enabled on the backend this box supports; defaults set; scratch model files
