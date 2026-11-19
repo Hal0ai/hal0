@@ -97,7 +97,18 @@ class ProviderProfile:
     model_capabilities: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def get_hostname(self) -> str:
-        return self.hostname
+        """Return the provider's base hostname for URL-based detection.
+
+        Uses self.hostname if set explicitly, otherwise derives it from base_url.
+        e.g. 'https://api.gmi-serving.com/v1' → 'api.gmi-serving.com'
+        """
+        if self.hostname:
+            return self.hostname
+        if self.base_url:
+            from urllib.parse import urlparse
+
+            return urlparse(self.base_url).hostname or ""
+        return ""
 
     def prepare_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return messages
