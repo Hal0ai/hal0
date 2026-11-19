@@ -52,6 +52,7 @@ import structlog
 from fastapi.responses import Response, StreamingResponse
 
 from hal0.dispatcher._capability_resolve import (
+    _CHAT_SHAPED_PATHS,
     _DEFAULT_MODEL,
     _EMBED_PATHS,
     _IMAGE_PATHS,
@@ -62,6 +63,7 @@ from hal0.dispatcher._capability_resolve import (
     guard_chat_slot_capability,
     resolve_by_capability,
     select_slot_by_type,
+    slot_type_of,
 )
 from hal0.dispatcher.admission import REGISTRY as _ADMISSION_REGISTRY
 from hal0.dispatcher.admission import AdmissionTimeout
@@ -685,15 +687,25 @@ class Dispatcher:
         # When nothing resolves (embed offline / fresh install), _resolve
         # already raised the documented clean dispatch.no_route 404 — the
         # gate never sees it, so that contract is preserved untouched.
+        # Both gates key on the resolved slot's declared type (#3807), so a
+        # custom-named capability slot is gated like the stock one.
+        slot_cfg = await self._resolved_slot_cfg(request.url.path, call)
         try:
             guard_capability_mismatch(
                 call.slot_name or call.container_slot_name,
                 request.url.path,
+                slot_type=slot_type_of(slot_cfg),
                 model=call.requested_model or call.resolved_model,
                 resolution_path=call.resolution_path,
             )
-            # Reverse direction (#2672): embeddings/rerank naming a chat slot.
-            await self._guard_chat_slot(request.url.path, call)
+            # Reverse direction (#2672, #3807): embeddings/rerank landing on a
+            # chat slot or on a capability slot that cannot serve them.
+            guard_chat_slot_capability(
+                slot_cfg,
+                request.url.path,
+                model=call.requested_model or call.resolved_model,
+                resolution_path=call.resolution_path,
+            )
         except Hal0Error as exc:
             log.warning(
                 "dispatch.capability_mismatch",
@@ -1998,25 +2010,28 @@ class Dispatcher:
 
     # ── internals ────────────────────────────────────────────────────────
 
-    async def _guard_chat_slot(self, path: str, call: UpstreamCall) -> None:
-        """Typed 409 when ``/embeddings`` or ``/rerank`` resolved to a plain chat slot (#2672)."""
+    async def _resolved_slot_cfg(self, path: str, call: UpstreamCall) -> dict[str, Any] | None:
+        """Config of the slot ``call`` resolved to, for the capability gates.
+
+        Read only on the paths a gate can act on (chat/completions-shaped,
+        ``/embeddings``, ``/rerank``). ``None`` for a genuine remote, without a
+        slot manager, or when the inventory read fails: the gates then fall
+        back to the stock role names (chat direction) or stand aside.
+        """
         slot = call.slot_name or call.container_slot_name
         if not slot or self._slot_manager is None:
-            return
-        if not any(frag in path for frag in (*_EMBED_PATHS, *_RERANK_PATHS)):
-            return
+            return None
+        if not any(frag in path for frag in (*_CHAT_SHAPED_PATHS, *_EMBED_PATHS, *_RERANK_PATHS)):
+            return None
         try:
             configs = await self._slot_manager.iter_configs()
+            return next(
+                (c for c in configs if isinstance(c, dict) and c.get("name") == slot),
+                None,
+            )
         except Exception:  # TIER2 — inventory is best-effort; never block a request on it
             log.warning("dispatch.chat_slot_inventory_failed", slot=slot, path=path)
-            return
-        cfg = next((c for c in configs if c.get("name") == slot), None)
-        guard_chat_slot_capability(
-            cfg,
-            path,
-            model=call.requested_model or call.resolved_model,
-            resolution_path=call.resolution_path,
-        )
+            return None
 
     async def _tts_slot_for(self, path: str, model: str) -> str | None:
         """Serving ``type = "tts"`` slot for a speech request, picked by type (#2784).
