@@ -141,7 +141,11 @@ const q = <T extends Element = HTMLElement>(sel: string) => document.querySelect
 const qa = (sel: string) => Array.from(document.querySelectorAll<HTMLElement>(sel))
 const text = () => document.body.textContent ?? ''
 
-async function type(el: HTMLElement | null, value: string) {
+// The field renders once the provider list has reached React, which under load can take more
+// than one settle(), so wait for it instead of assuming it is already there.
+async function type(sel: string, value: string) {
+  for (let i = 0; i < 50 && !q(sel); i++) await settle()
+  const el = q(sel)
   expect(el).not.toBeNull()
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
   await act(async () => {
@@ -209,7 +213,7 @@ describe('provider sections', () => {
   it('a search reveals a row beyond the page', async () => {
     await expand('openrouter')
     expect(q('[data-testid="prov-model-openrouter-m299"]')).toBeNull()
-    await type(q('input[aria-label="Search models"]'), 'm299')
+    await type('input[aria-label="Search models"]', 'm299')
     expect(q('[data-testid="prov-model-openrouter-m299"]')).not.toBeNull()
     expect(qa('[data-testid^="prov-model-openrouter-"]').length).toBe(1)
   })
@@ -304,7 +308,7 @@ describe('search', () => {
     await settle()
     await settle()
     expect(modelCalls()).toBe(0)
-    await type(q('input[aria-label="Search models"]'), 'm299')
+    await type('input[aria-label="Search models"]', 'm299')
     expect(modelCalls()).toBe(0) // debounced
     await later(300)
     await settle()
@@ -318,11 +322,11 @@ describe('search', () => {
   it('clearing the search returns sections to how they were', async () => {
     view()
     await settle()
-    await type(q('input[aria-label="Search models"]'), 'm299')
+    await type('input[aria-label="Search models"]', 'm299')
     await later(300)
     await settle()
     expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('true')
-    await type(q('input[aria-label="Search models"]'), '')
+    await type('input[aria-label="Search models"]', '')
     await later(300)
     await settle()
     expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('false')
@@ -334,12 +338,12 @@ describe('search', () => {
     await settle()
     const chev = () => q('[data-testid="prov-head-openrouter"] .prov-chev')!.textContent
     expect(chev()).toBe('▸')
-    await type(q('input[aria-label="Search models"]'), 'm299')
+    await type('input[aria-label="Search models"]', 'm299')
     await later(300)
     await settle()
     expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('true')
     expect(chev()).toBe('▾')
-    await type(q('input[aria-label="Search models"]'), '')
+    await type('input[aria-label="Search models"]', '')
     await later(300)
     await settle()
     expect(chev()).toBe('▸')
@@ -348,7 +352,7 @@ describe('search', () => {
   it('a header click while searching selects the provider and leaves the remembered state alone', async () => {
     const { onSelect } = view({ provider: 'openrouter', model: 'm001' })
     await settle()
-    await type(q('input[aria-label="Search models"]'), 'm299')
+    await type('input[aria-label="Search models"]', 'm299')
     await later(300)
     await settle()
     click(q('[data-testid="prov-head-openrouter"]')!)
@@ -356,7 +360,7 @@ describe('search', () => {
     // The provider itself is selected (its model selection is dropped); nothing is collapsed under the search.
     expect(onSelect).toHaveBeenLastCalledWith({ provider: 'openrouter', model: null })
     expect(q('[data-testid="prov-head-openrouter"]')!.getAttribute('aria-expanded')).toBe('true')
-    await type(q('input[aria-label="Search models"]'), '')
+    await type('input[aria-label="Search models"]', '')
     await later(300)
     await settle()
     // The remembered state is what it was before the click: open, because it is the selected provider.
@@ -367,7 +371,7 @@ describe('search', () => {
   it('a one-character query still renders at most the paged off rows per section', async () => {
     view()
     await settle()
-    await type(q('input[aria-label="Search models"]'), 'm')
+    await type('input[aria-label="Search models"]', 'm')
     await later(300)
     await settle()
     const off = qa('[data-testid^="prov-model-openrouter-"]').filter((e) => e.closest('[data-testid="prov-off-openrouter"]'))
@@ -600,7 +604,7 @@ describe('search debounce and empty sections', () => {
     view()
     await settle()
     await settle()
-    await type(q('input[aria-label="Search models"]'), 'm299')
+    await type('input[aria-label="Search models"]', 'm299')
     // Inside the 250 ms debounce nothing has started loading: no section may open with an empty body.
     for (const n of ['openrouter', 'minimax', 'corp']) {
       expect(q(`[data-testid="prov-head-${n}"]`)!.getAttribute('aria-expanded')).toBe('false')
@@ -621,7 +625,7 @@ describe('search debounce and empty sections', () => {
     })
     view()
     await settle()
-    await type(q('input[aria-label="Search models"]'), 'm')
+    await type('input[aria-label="Search models"]', 'm')
     await later(300)
     expect(q('[data-testid="prov-section-minimax"]')!.textContent).toContain('Loading models…')
     release()
@@ -630,7 +634,7 @@ describe('search debounce and empty sections', () => {
 
   it('an open section with no match shows only the "no match" chip, not an empty-filter body', async () => {
     await expand('minimax')
-    await type(q('input[aria-label="Search models"]'), 'zzz-nothing')
+    await type('input[aria-label="Search models"]', 'zzz-nothing')
     await later(300)
     await settle()
     expect(q('[data-testid="prov-head-minimax"]')!.textContent).toContain('no match')
