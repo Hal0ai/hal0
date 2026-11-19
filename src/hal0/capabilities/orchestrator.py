@@ -49,7 +49,7 @@ from hal0.capabilities.config import (
     load_capabilities_config,
     save_capabilities_config,
 )
-from hal0.capabilities.profile_fit import profile_name_for_fit
+from hal0.capabilities.profile_fit import fit_profile_name, profile_name_for_fit
 from hal0.comfyui.catalog import install_route
 from hal0.config import paths
 from hal0.config.loader import load_slot_config, write_toml_atomic
@@ -1030,9 +1030,10 @@ class CapabilityOrchestrator:
         existing device/capability already identifies a runtime family, and
         avoid treating generic CPU as kokoro except for TTS. The rule is
         shared with the picker via
-        :func:`hal0.capabilities.profile_fit.profile_name_for_fit`.
+        :func:`hal0.capabilities.profile_fit.fit_profile_name`, which also
+        carries the tts runner veto the slot-create path applies (#3811).
         """
-        profile_name = profile_name_for_fit(capability, device)
+        profile_name = fit_profile_name(capability, device)
         if not profile_name:
             return None
         try:
