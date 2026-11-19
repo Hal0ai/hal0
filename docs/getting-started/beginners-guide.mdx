@@ -521,8 +521,9 @@ hal0 can also send a request to a hosted service such as OpenRouter or OpenAI,
 which hal0 calls a **provider**. You choose which of the provider's models to
 allow, and apps then use them through the same address as your local models.
 
-**Dashboard.** Open **Slots**, then **Endpoints**, and add a provider there.
-The **Upstream Models** tab on the **Models** page lists the models it serves.
+**Dashboard.** Open **Models**, then the **Providers** tab, and choose
+**Add provider**. The dialog checks the connection and lets you tick the models
+to switch on; the tab then lists each provider with a switch per model.
 
 **Command line.** `hal0 upstream create openrouter --catalog openrouter
 --auth-env OPENROUTER_API_KEY --api-key <your key>` adds one. Then `hal0

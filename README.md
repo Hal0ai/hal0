@@ -322,7 +322,7 @@ walks through the same steps in plain language.
 - **A new Overview page and a Models page with one catalog shell.** The
   dashboard opens on an operator's briefing: what the box is doing, what needs
   you, who is working and how it performed (ADR-0044). Models has Inference
-  Models, Image / ComfyUI, Upstream Models, FLM and Profiles tabs.
+  Models, Image / ComfyUI, Providers, FLM and Profiles tabs.
 - Typed profile reasoning knobs, narrowable model and capability lists, and
   approval decisions that need a session or root (ADR-0048).
 
@@ -595,7 +595,7 @@ content-addressed, host-redacted archive you can attach anywhere, and
   — is on by default. The Overview page is the operator's briefing, the Slots
   page has Inference, Image Gen, NPU (when the box has one), Endpoints, Runner
   Images and Stacks tabs, and the Models page has Inference Models, Image /
-  ComfyUI, Upstream Models, FLM and Profiles tabs. The
+  ComfyUI, Providers, FLM and Profiles tabs. The
   Image-Gen tab has Generate, Models and Engine sub-tabs: it generates,
   installs image models with a fit meter for this box, shows what a render
   costs chat, and operates the ComfyUI container. The top bar's Chat | Image

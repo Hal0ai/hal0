@@ -92,11 +92,11 @@ a box that has one). A running pull shows as a progress bar on its row.
 
 The header has **Check updates** and a **+ Add model** menu. On Inference the
 menu offers Add by HF coords, Search HF, Add by path and Scan directory; on
-Image it is Install image model, on FLM Download FLM model, and on Upstream
-Add upstream, which opens Slots → Endpoints. The Upstream tab lists the models
-your external providers serve (for a provider with per-model rows, the enabled
-ones) and **Check updates** there asks the providers again which models they advertise; turning a provider's
-models on or off is `hal0 upstream enable|disable`, covered in
+Image it is Install image model, on FLM Download FLM model, and on Providers
+Add provider, which opens the Add provider dialog. The Providers tab lists each
+external provider with a switch per model, and its header button is **Refresh model lists**,
+which asks the providers again which models they offer; the switches and
+`hal0 upstream enable|disable` do the same thing, covered in
 [Connect external providers](/docs/guides/connect-external-providers). **Update all** appears beside
 Check updates when updates are waiting. A GGUF that ggml-xdna can run on the
 NPU shows `npu · fused` or `npu · per-op` on its row and an NPU fit block in
