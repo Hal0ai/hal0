@@ -653,22 +653,36 @@ def model_store(
     console.print("[dim]Running slots pick up the new mount on their next restart.[/dim]")
 
 
+def _is_general_llm_slot(row: Any) -> bool:
+    """True for a local llama-server LLM slot that is a general chat target.
+
+    Excluded even though they are ``type = "llm"``: NPU rows (the FLM slot and
+    the xdna runner, via ``declared_backend`` / an ``flm`` provider or profile),
+    which do not serve a GGUF loaded by ``model run``; and the ``memory`` role
+    slot (ADR-0053), whose bound model is Hindsight's extraction model.
+    A row without a ``type`` predates the field and counts as LLM.
+    """
+    if not (isinstance(row, dict) and row.get("name")):
+        return False
+    if row.get("type", "llm") != "llm" or row.get("kind", "local") != "local":
+        return False
+    if row.get("declared_backend") in ("flm", "npu"):
+        return False
+    for key in ("provider", "profile"):
+        kind = str(row.get(key) or "").lower()
+        if kind == "flm" or kind.startswith("flm-"):
+            return False
+    return not (row["name"] == "memory" or row.get("profile") == "memory")
+
+
 def _default_run_slot(rows: list[Any]) -> str | None:
     """Pick the slot ``model run`` loads into when ``--slot`` is not given.
 
-    Only LLM slots qualify (a slot row without a ``type`` predates the field
-    and counts as LLM; remote/synthetic rows never do). Prefer the first one
-    with no model bound, so a run does not evict a working slot; otherwise
-    ``agent``, else the first LLM slot. ``None`` when there is no LLM slot.
+    Only general LLM slots qualify (see :func:`_is_general_llm_slot`). Prefer
+    the first one with no model bound, so a run does not evict a working slot;
+    otherwise ``agent``, else the first such slot. ``None`` when there is none.
     """
-    llm = [
-        r
-        for r in rows
-        if isinstance(r, dict)
-        and r.get("name")
-        and r.get("type", "llm") == "llm"
-        and r.get("kind", "local") == "local"
-    ]
+    llm = [r for r in rows if _is_general_llm_slot(r)]
     for r in llm:
         if not (r.get("model_default") or r.get("model_id")):
             return str(r["name"])
@@ -715,7 +729,10 @@ def model_run(
     # when it is not registered, try to pull it (curated alias / HF-known ref).
     try:
         api_get(f"/api/models/{ref}")
-    except CliApiError:
+    except CliApiError as get_exc:
+        if get_exc.status != 404:
+            die(f"could not look up model {ref!r}: {get_exc}")
+            return
         console.print(f"[dim]{ref!r} is not registered; pulling it first.[/dim]")
         try:
             start = api_post(f"/api/models/{ref}/pull")
@@ -750,7 +767,9 @@ def model_run(
             return
         picked = _default_run_slot(rows)
         if picked is None:
-            die("no LLM slot to run on — pass --slot <name>, or create one: hal0 slot create chat")
+            die(
+                "no general LLM slot to run on — pass --slot <name>, or create one: hal0 slot create chat"
+            )
             return
         target = picked
         console.print(f"[dim]No --slot given; using slot [bold]{target}[/bold].[/dim]")
