@@ -317,10 +317,29 @@ async def _enabled_llm_slots(request: Request) -> list[str]:
     return sorted(alias_map.keys())
 
 
+def _extraction_served_by(slot: str | None, available: list[str]) -> str | None:
+    """The slot that serves ``hal0/<slot>``, or ``None`` when nothing does.
+
+    Mirrors ``normalize.resolver.resolve_chain``: the first chain entry with a
+    model-bound slot wins; for a canonical name with none bound (ADR-0053: the
+    installer leaves ``memory`` and ``agent`` model-less) the dispatcher's last
+    resort serves it, the first enabled model-bound llm slot. ``available`` is
+    that model-bound list. A non-canonical slot has no last resort.
+    """
+    if not slot:
+        return None
+    chain = DEFAULT_CHAINS.get(f"hal0/{slot}")
+    if chain is None:
+        return slot if slot in available else None
+    for name in chain:
+        if name in available:
+            return name
+    return available[0] if available else None
+
+
 def _extraction_slot_resolves(slot: str | None, available: list[str]) -> bool:
-    """The default memory target may share agent when its own binding is empty."""
-    chain = DEFAULT_CHAINS[MEMORY_ALIAS] if slot == "memory" else (slot,)
-    return any(name in available for name in chain)
+    """Whether the dispatcher can serve the extraction slot (last resort included)."""
+    return _extraction_served_by(slot, available) is not None
 
 
 def _extraction_mode(graph_cfg: MemoryGraphConfig, available: list[str]) -> str:
@@ -496,6 +515,7 @@ async def graph_status(request: Request) -> dict[str, Any]:
     available = await _enabled_llm_slots(request)
     status["available_slots"] = available
     status["slot_resolves"] = _extraction_slot_resolves(status.get("extraction_slot"), available)
+    status["served_by"] = _extraction_served_by(status.get("extraction_slot"), available)
     # llm_timeout_s and the extraction limits (#1834) live in hal0.toml (not
     # on the provider) — echo them so the dashboard's graph panel can edit
     # them without a second config fetch.

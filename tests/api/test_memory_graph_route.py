@@ -1183,3 +1183,28 @@ def test_mode_follows_configuration_and_binding_not_readiness(
     assert status.json()["mode"] == expected
     if slot == "memory" and not model and not bound:
         assert status.json()["slot_resolves"] is True
+
+
+def test_extraction_slot_resolves_via_dispatcher_last_resort() -> None:
+    """#3851: memory and agent model-less, brain bound -> hal0/memory is served by brain."""
+    from hal0.api.routes.memory import _extraction_served_by, _extraction_slot_resolves
+
+    assert _extraction_slot_resolves("memory", ["brain"]) is True
+    assert _extraction_served_by("memory", ["brain"]) == "brain"
+    # A bound chain entry still wins over the last resort.
+    assert _extraction_served_by("memory", ["agent", "brain"]) == "agent"
+    assert _extraction_served_by("memory", ["memory", "agent"]) == "memory"
+    # Nothing model-bound anywhere: genuinely unresolved.
+    assert _extraction_slot_resolves("memory", []) is False
+    # A model-less custom slot has no last resort (the dispatcher returns None).
+    assert _extraction_slot_resolves("custom", ["brain"]) is False
+    assert _extraction_slot_resolves("custom", ["custom"]) is True
+
+
+def test_graph_status_names_the_serving_slot(stub_wrapper: StubWrapper, hal0_home: Path) -> None:
+    stub_wrapper.extraction_slot = "memory"
+    app = _build_app(stub_wrapper, "brain")
+    with TestClient(app) as c:
+        body = c.get("/api/memory/graph/status").json()
+    assert body["slot_resolves"] is True
+    assert body["served_by"] == "brain"
