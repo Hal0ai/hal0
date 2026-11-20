@@ -65,13 +65,13 @@ def tps_from_events(events: Any, window_s: float = 5.0) -> float:
     all events age out.
 
     A single in-window event still yields a rate (smeared across the
-    window). Non-streaming completions land as ONE event carrying the
-    whole ``usage.completion_tokens`` count, so the old ``< 2 → 0.0``
-    guard meant a slot doing steady non-streaming work (graph
-    extraction, embeddings callers, curl scripts) read 0 tok/s forever
-    while /api/stats/throughput/history — which buckets the same store
-    — showed real throughput. Smearing matches the history endpoint's
-    tokens-per-bucket semantics.
+    window), so a short non-streaming completion that lands as one event
+    is not read as 0 tok/s.
+
+    Events are not guaranteed to be in timestamp order: a non-streaming
+    completion is spread back over its decode span (#3859), so its events
+    can interleave with a concurrent stream's. The span is therefore taken
+    from the min/max timestamps, not the first/last deque entries.
     """
     import time
 
@@ -84,10 +84,12 @@ def tps_from_events(events: Any, window_s: float = 5.0) -> float:
     if len(in_window) == 1:
         return in_window[0][1] / window_s
     total_tokens = sum(tok for _, tok in in_window)
-    span = in_window[-1][0] - in_window[0][0]
+    first_ts = min(ts for ts, _ in in_window)
+    last_ts = max(ts for ts, _ in in_window)
+    span = last_ts - first_ts
     # Bias slightly toward the window so a stale-but-recent burst still
     # decays instead of pegging at peak forever.
-    effective_span = max(span, (now - in_window[-1][0]))
+    effective_span = max(span, (now - last_ts))
     if effective_span <= 0:
         return 0.0
     return total_tokens / effective_span

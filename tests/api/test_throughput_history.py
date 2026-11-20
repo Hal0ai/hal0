@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterator
+from itertools import pairwise
 
 import pytest
 from fastapi import FastAPI
@@ -106,18 +107,25 @@ def test_seeded_events_produce_correct_buckets(app: FastAPI, client: TestClient)
 
     assert body["window_s"] == 100
     assert body["bucket_s"] == 5.0
-    samples = body["samples"]
+    all_samples = body["samples"]
     per_slot = body["per_slot"]
 
-    # Must have exactly 2 non-empty bins
-    assert len(samples) == 2
+    # Leading empty bins are omitted: the first sample is the oldest event's
+    # bin. From there every bin is emitted, empty ones as a measured 0 (#3859).
+    assert all_samples[0]["total_tps"] > 0
+    assert all_samples[-1]["total_tps"] == 0.0
+    assert all_samples[-1]["serving_slots"] == 0
+    nonzero = [i for i, s in enumerate(all_samples) if s["total_tps"] > 0]
+    # Exactly 2 non-empty bins
+    assert len(nonzero) == 2
+    samples = [all_samples[i] for i in nonzero]
 
     # per_slot arrays aligned to samples (same length)
-    assert len(per_slot["slotA"]) == len(samples)
-    assert len(per_slot["slotB"]) == len(samples)
+    assert len(per_slot["slotA"]) == len(all_samples)
+    assert len(per_slot["slotB"]) == len(all_samples)
 
     # Samples ordered oldest → newest
-    assert samples[0]["ts"] < samples[1]["ts"]
+    assert all(a["ts"] < b["ts"] for a, b in pairwise(all_samples))
 
     # Bin 0 (older, ~now-50s): slotA=100 + slotB=200 => total=300 tokens / 5s = 60 tps
     bucket_s = 5.0
@@ -129,10 +137,11 @@ def test_seeded_events_produce_correct_buckets(app: FastAPI, client: TestClient)
     assert samples[1]["serving_slots"] == 1
 
     # per_slot alignment
-    assert pytest.approx(per_slot["slotA"][0], abs=0.01) == 100.0 / bucket_s
-    assert pytest.approx(per_slot["slotA"][1], abs=0.01) == 50.0 / bucket_s
-    assert pytest.approx(per_slot["slotB"][0], abs=0.01) == 200.0 / bucket_s
-    assert pytest.approx(per_slot["slotB"][1], abs=0.01) == 0.0
+    i0, i1 = nonzero
+    assert pytest.approx(per_slot["slotA"][i0], abs=0.01) == 100.0 / bucket_s
+    assert pytest.approx(per_slot["slotA"][i1], abs=0.01) == 50.0 / bucket_s
+    assert pytest.approx(per_slot["slotB"][i0], abs=0.01) == 200.0 / bucket_s
+    assert pytest.approx(per_slot["slotB"][i1], abs=0.01) == 0.0
 
 
 def test_events_outside_window_excluded(app: FastAPI, client: TestClient) -> None:
@@ -322,3 +331,133 @@ async def test_v1_records_draft_timings_streaming() -> None:
         pass
     ((_, drafted, accepted),) = app_state.spec_events["primary"]
     assert (drafted, accepted) == (8, 5)
+
+
+# ── #3859: non-streaming over-read + stale hero ───────────────────────────────
+
+
+def _freeze_clock(monkeypatch: pytest.MonkeyPatch, mono: float, epoch: float) -> None:
+    """Pin the endpoint's clocks so bin edges are deterministic."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        throughput_routes, "time", SimpleNamespace(monotonic=lambda: mono, time=lambda: epoch)
+    )
+
+
+def _nonstreaming_state() -> object:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        tps_events=defaultdict(lambda: deque(maxlen=4096)),
+        spec_events=defaultdict(lambda: deque(maxlen=64)),
+    )
+
+
+def test_nonstreaming_completion_spread_over_upstream_decode_time(
+    app: FastAPI, client: TestClient
+) -> None:
+    """963 tokens decoded at 27.8 tok/s must not read 963 / 5 = 192.6 tok/s.
+
+    llama-server reports the decode duration in ``timings.predicted_ms``; the
+    recorder spreads the tokens across that span instead of dropping all of
+    them into the bin the response finished in.
+    """
+    from hal0.api.routes.v1 import _record_nonstreaming_throughput
+
+    state = _nonstreaming_state()
+    decode_ms = 963 / 27.8 * 1000
+    body = (
+        b'{"usage":{"completion_tokens":963},'
+        b'"timings":{"predicted_n":963,"predicted_ms":' + str(decode_ms).encode() + b"}}"
+    )
+    _record_nonstreaming_throughput(body, state, "primary")
+    events = list(state.tps_events["primary"])
+    assert sum(tok for _, tok in events) == 963
+    assert len(events) > 1
+    span = max(ts for ts, _ in events) - min(ts for ts, _ in events)
+    assert span == pytest.approx(decode_ms / 1000, abs=1.5)
+
+    app.state.tps_events = state.tps_events
+    samples = client.get("/api/stats/throughput/history").json()["samples"]
+    peak = max(s["total_tps"] for s in samples)
+    assert peak < 35.0, f"non-streaming completion over-read as {peak} tok/s"
+    assert peak > 20.0
+
+
+def test_nonstreaming_completion_without_timings_uses_dispatch_start() -> None:
+    """No upstream timings: spread over the wall time since dispatch."""
+    from hal0.api.routes.v1 import _record_nonstreaming_throughput
+
+    state = _nonstreaming_state()
+    started = time.monotonic() - 30.0
+    _record_nonstreaming_throughput(
+        b'{"usage":{"completion_tokens":600}}', state, "primary", dispatch_started=started
+    )
+    events = list(state.tps_events["primary"])
+    assert sum(tok for _, tok in events) == 600
+    first = min(ts for ts, _ in events)
+    assert first >= started
+    assert max(ts for ts, _ in events) - first == pytest.approx(30.0, abs=1.5)
+
+
+def test_nonstreaming_completion_uses_flm_decoding_speed() -> None:
+    """FLM reports ``usage.decoding_speed_tps``: decode span = tokens / speed."""
+    from hal0.api.routes.v1 import _record_nonstreaming_throughput
+
+    state = _nonstreaming_state()
+    _record_nonstreaming_throughput(
+        b'{"usage":{"completion_tokens":200,"decoding_speed_tps":10.0}}', state, "npu"
+    )
+    events = list(state.tps_events["npu"])
+    assert sum(tok for _, tok in events) == 200
+    span = max(ts for ts, _ in events) - min(ts for ts, _ in events)
+    assert span == pytest.approx(20.0, abs=1.5)
+
+
+def test_tps_from_events_tolerates_backdated_events() -> None:
+    """A spread non-streaming completion appends events older than a
+    concurrent stream's last one; the rate uses the true min/max span."""
+    from hal0.slots.metrics_collect import tps_from_events
+
+    now = time.monotonic()
+    # stream events at now-1 .. now, then a backdated completion's events
+    events = [(now - 1.0, 10), (now, 10), (now - 4.0, 10), (now - 3.0, 10)]
+    # 40 tokens over a 4 s span, not 40 / (now-3 - (now-1)) misordered
+    assert tps_from_events(events, window_s=5.0) == pytest.approx(10.0, rel=0.05)
+
+
+def test_stream_finished_60s_ago_reads_zero_now(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stream that ended 60 s ago must not stay on as the hero's last sample."""
+    mono_now = 10_000.0
+    _freeze_clock(monkeypatch, mono_now, 1_700_000_002.0)
+    end = mono_now - 60.0
+    duration = 963 / 27.8
+    n = 963
+    events = [(end - duration + duration * (i + 1) / n, 1) for i in range(n)]
+    _seed_store(app, {"primary": events})
+
+    samples = client.get("/api/stats/throughput/history").json()["samples"]
+    assert max(s["total_tps"] for s in samples) == pytest.approx(27.8, abs=2.0)
+    assert samples[-1]["total_tps"] == 0.0
+    assert samples[-1]["serving_slots"] == 0
+
+
+def test_bin_edges_do_not_shift_between_polls(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two polls 1.3 s apart, no new traffic: the same bins, the same values."""
+    mono_now = 10_000.0
+    epoch_now = 1_700_000_001.2
+    _seed_store(app, {"primary": [(mono_now - 32.0, 100), (mono_now - 21.0, 40)]})
+
+    _freeze_clock(monkeypatch, mono_now, epoch_now)
+    first = client.get("/api/stats/throughput/history").json()["samples"]
+    _freeze_clock(monkeypatch, mono_now + 1.3, epoch_now + 1.3)
+    second = client.get("/api/stats/throughput/history").json()["samples"]
+
+    assert first == second
+    for s in first:
+        assert s["ts"] % 5.0 == pytest.approx(0.0, abs=1e-6)

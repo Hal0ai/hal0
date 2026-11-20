@@ -14,6 +14,7 @@ path below is relative (``/stats/throughput/history``).
 
 from __future__ import annotations
 
+import math
 import time
 from collections import defaultdict
 from typing import Any
@@ -62,10 +63,17 @@ def throughput_history(
           }
         }
 
-    ``samples`` is ordered oldest → newest and contains ONLY bins that
-    had at least one event (empty leading bins are omitted; the FE pads
-    left).  ``per_slot`` arrays are aligned to ``samples`` (same length
-    and order).
+    ``samples`` is ordered oldest → newest. Empty LEADING bins (before the
+    first event in the window) are omitted and the FE pads left; every bin
+    from the first event onwards is emitted, an empty one as a measured
+    ``total_tps: 0.0`` with ``serving_slots: 0``, so the newest sample reads
+    0 as soon as nothing is generating (#3859, ADR-0044 decision 4).
+    ``per_slot`` arrays are aligned to ``samples`` (same length and order).
+
+    Bins are COMPLETED, wall-clock-anchored intervals: right edges sit on
+    multiples of ``bucket_s`` epoch seconds and the newest bin ends at the
+    last such edge, so the in-progress interval is not reported until it
+    closes. A bin's ``ts`` and value therefore do not shift between polls.
     """
     # ── param clamp ───────────────────────────────────────────────────────
     buckets = max(_BUCKETS_MIN, min(_BUCKETS_MAX, int(buckets)))
@@ -88,14 +96,13 @@ def throughput_history(
     epoch_now = time.time()
     epoch_offset = epoch_now - mono_now  # ev_epoch = ev_mono + epoch_offset
 
-    window_start_mono = mono_now - window_s
-
-    # ── bucket accumulators ───────────────────────────────────────────────
-    # bin_index 0 = oldest, bin_index (buckets-1) = newest
-    # bin right-edge mono = window_start_mono + (bin_index+1) * bucket_s
-    #
-    # For event at mono ts t: bin = int((t - window_start_mono) / bucket_s)
-    # clamped to [0, buckets-1].
+    # ── anchored bin edges ────────────────────────────────────────────────
+    # Right edge of bin idx (0 = oldest, buckets-1 = newest), in epoch
+    # seconds: (last_edge_n - (buckets - 1 - idx)) * bucket_s. Computing it
+    # from an integer edge index keeps the value bit-identical across polls.
+    last_edge_n = math.floor(epoch_now / bucket_s)
+    window_end_mono = last_edge_n * bucket_s - epoch_offset
+    window_start_mono = window_end_mono - buckets * bucket_s
 
     # total tokens per bin across all slots
     bin_tokens: list[float] = [0.0] * buckets
@@ -107,7 +114,8 @@ def throughput_history(
     for slot_name, deque in store.items():
         slot_bins: list[float] = [0.0] * buckets
         for mono_ts, tokens in deque:
-            if mono_ts < window_start_mono:
+            # The in-progress interval (>= window_end) is reported once it closes.
+            if mono_ts < window_start_mono or mono_ts >= window_end_mono:
                 continue
             raw_idx = int((mono_ts - window_start_mono) / bucket_s)
             idx = max(0, min(buckets - 1, raw_idx))
@@ -117,28 +125,20 @@ def throughput_history(
             slot_bins[idx] += tok
         per_slot_bins[slot_name] = slot_bins
 
-    # ── build output (skip empty bins; FE pads left) ──────────────────────
-    samples: list[dict[str, Any]] = []
-    emitted_indices: list[int] = []
-
-    for idx in range(buckets):
-        if not bin_slots[idx]:
-            continue  # no data in this bin — skip
-        # right edge of this bin in epoch seconds
-        right_mono = window_start_mono + (idx + 1) * bucket_s
-        ts = right_mono + epoch_offset
-        total_tps = bin_tokens[idx] / bucket_s
-        samples.append(
-            {
-                "ts": ts,
-                "total_tps": total_tps,
-                "serving_slots": len(bin_slots[idx]),
-            }
-        )
-        emitted_indices.append(idx)
-
-    if not samples:
+    # ── build output (skip leading empty bins; FE pads left) ──────────────
+    first_idx = next((i for i in range(buckets) if bin_slots[i]), None)
+    if first_idx is None:
         return empty_response
+    emitted_indices = list(range(first_idx, buckets))
+
+    samples: list[dict[str, Any]] = [
+        {
+            "ts": (last_edge_n - (buckets - 1 - idx)) * bucket_s,
+            "total_tps": bin_tokens[idx] / bucket_s,
+            "serving_slots": len(bin_slots[idx]),
+        }
+        for idx in emitted_indices
+    ]
 
     # ── per_slot aligned to emitted samples ───────────────────────────────
     per_slot: dict[str, list[float]] = {
