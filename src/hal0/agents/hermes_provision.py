@@ -3441,6 +3441,7 @@ def _merge_config_yaml_layers(
             overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
         if memory_servers:
             list_keys = _without_private_header(list_keys, memory_servers)
+        list_keys = _layer_state_hook_onto(base, list_keys)
         merged = _deep_merge(base, list_keys)
         if memory_servers:
             final = _deep_merge(merged, overlay)
@@ -3665,6 +3666,40 @@ def _retire_hal0_session_start_hook(data: dict[str, Any]) -> bool:
     if not hooks:
         del data["hooks"]
     return True
+
+
+def _layer_state_hook_onto(base: dict[str, Any], layers: dict[str, Any]) -> dict[str, Any]:
+    """Return ``layers`` with ``hooks.pre_llm_call`` made additive over ``base``.
+
+    :func:`_deep_merge` replaces a list wholesale, so layering ``[STATE_HOOK]``
+    over a ``config.yaml`` whose operator already has ``pre_llm_call`` hooks
+    would delete theirs. The result keeps every operator entry of ``base`` and
+    carries exactly one hal0 state-hook entry: any earlier hal0 entry (current
+    or retired command) is dropped from the kept list first, so a re-run does
+    not stack duplicates. ``layers`` is not mutated; it is returned as is when
+    it carries no ``pre_llm_call`` list.
+    """
+    layer_hooks = layers.get("hooks")
+    if not isinstance(layer_hooks, dict):
+        return layers
+    layer_entries = layer_hooks.get(STATE_HOOK_EVENT)
+    if not isinstance(layer_entries, list):
+        return layers
+    base_hooks = base.get("hooks")
+    existing = base_hooks.get(STATE_HOOK_EVENT) if isinstance(base_hooks, dict) else None
+    operator_entries = [
+        e
+        for e in (existing if isinstance(existing, list) else [])
+        if not (
+            isinstance(e, dict)
+            and isinstance(e.get("command"), str)
+            and e["command"].strip() in _HAL0_STATE_HOOK_COMMANDS
+        )
+    ]
+    return {
+        **layers,
+        "hooks": {**layer_hooks, STATE_HOOK_EVENT: operator_entries + list(layer_entries)},
+    }
 
 
 def _persona_prompt_layer(system_prompt: str) -> dict[str, Any]:

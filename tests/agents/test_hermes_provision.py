@@ -1728,6 +1728,48 @@ def test_release_activation_rewires_the_state_hook(tmp_path: Path) -> None:
     assert not hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml")
 
 
+def test_merge_keeps_operator_pre_llm_call_hooks(tmp_path: Path) -> None:
+    """#3868 review: ``_deep_merge`` replaces lists, so layering the state hook
+    must not delete an operator's own ``pre_llm_call`` entries, and a re-run
+    must leave exactly one hal0 entry beside them."""
+    yaml = pytest.importorskip("yaml")
+    cfg = tmp_path / "config.yaml"
+    operator_hook = {"command": "/opt/me/context.sh", "timeout": 5}
+    cfg.write_text(yaml.safe_dump({"hooks": {"pre_llm_call": [operator_hook]}}), encoding="utf-8")
+    for _ in range(2):
+        hp._merge_config_yaml_layers(
+            cfg, list_keys=hp.HAL0_CONFIG_LIST_KEYS, overrides_path=tmp_path / "absent.yaml"
+        )
+        hooks = yaml.safe_load(cfg.read_text(encoding="utf-8"))["hooks"]
+        assert hooks["pre_llm_call"] == [operator_hook, hp.STATE_HOOK]
+
+
+def test_release_activation_keeps_operator_pre_llm_call_hooks(tmp_path: Path) -> None:
+    """The ``hal0 update`` path carries the same guarantee, and a retired
+    installer-path hal0 entry under pre_llm_call is replaced, not duplicated."""
+    yaml = pytest.importorskip("yaml")
+    home = tmp_path / "hermes"
+    home.mkdir()
+    operator_hook = {"command": "/opt/me/context.sh"}
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "agent": {"system_prompt": "p"},
+                "hooks": {
+                    "pre_llm_call": [
+                        operator_hook,
+                        {"command": "/usr/lib/hal0/hermes-hooks/inject-system-state.sh"},
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml")
+    hooks = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["hooks"]
+    assert hooks == {"pre_llm_call": [operator_hook, hp.STATE_HOOK]}
+
+
 def test_state_hook_command_is_the_release_tree_script() -> None:
     """The hook runs from the release tree so ``hal0 update`` refreshes it with
     the code; the shipped script must exist at the matching repo path."""
