@@ -30,7 +30,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-## [1.8.0] — 2026-11-19
+## [1.8.0] — 2026-11-20
 
 ### Highlights
 
