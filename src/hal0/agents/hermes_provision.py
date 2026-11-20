@@ -2476,12 +2476,13 @@ def _build_config_overlay(
     Mirrors the (now-deleted) ``config.yaml.j2`` — but ONLY the scalar /
     nested-scalar keys. List-valued keys (``skills.external_dirs``,
     ``hooks.on_session_start``) are layered by :func:`_merge_config_yaml_layers`;
-    ``model.context_length`` is deliberately omitted: per-model context comes
-    from live ``/v1/models`` discovery. (Hermes 0.14 applied it to every
-    model, cloud ones included; v0.22.2 scopes it to the configured default
-    model and route, hermes agent/agent_init.py:1700-1745, but under
-    live-resolve that default is the virtual ``hal0/agent``, so a single
-    number would still be wrong for most slots.)
+    ``model.context_length`` is not in this overlay: every other model's
+    context comes from live ``/v1/models`` discovery, and the one value hal0
+    does write, for the ``hal0/agent`` default, is owned and reconciled by
+    :func:`_reconcile_model_context_length_yaml` (#3854). (Hermes 0.14 applied
+    the key to every model, cloud ones included; v0.22.2 scopes it to the
+    configured default model and route, hermes agent/agent_init.py:1700-1745,
+    so it describes ``hal0/agent`` alone.)
 
     Under live-resolve (the hal0 default) ``model.default`` is the virtual
     ``hal0/agent`` against the gateway with ``discover_models`` on, so the
@@ -2915,6 +2916,101 @@ def _prune_model_aliases_yaml(
             return removed, None
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         return [], _yaml_error_summary(exc)
+
+
+def _served_anchor_context(io: InstallIO, model_id: str, base_url: str) -> int | None:
+    """The window ``GET {base_url}/models/{model_id}`` reports, or ``None``.
+
+    The by-id route resolves the routing fallback chain exactly as chat
+    dispatch does (``api/routes/v1.py::_resolve_virtual_model_entry``), so for
+    ``hal0/agent`` on a box whose agent slot has no model it answers with the
+    window of the slot that really serves it (ADR-0023's fallback, #3854).
+    ``None`` means "cannot see": unreachable, no route, or no usable number.
+    """
+    try:
+        entry, _catalog = io.fetch_anchor_models(model_id, base_url)
+    except Exception as exc:  # the seam promises not to raise; stay non-fatal anyway
+        log.warning("hermes_provision.anchor_window_unreadable", error=str(exc))
+        return None
+    ctx = entry.get("context_length") if isinstance(entry, dict) else None
+    if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= 0:
+        return None
+    return ctx
+
+
+def _reconcile_model_context_length_yaml(
+    config_path: Path, *, managed: bool, window: int | None
+) -> tuple[int | None, str | None]:
+    """Own ``model.context_length`` for ``hal0/agent``; ``(value in file, error)``.
+
+    Hermes only learns a window from a ``/v1/models`` row it can match or from
+    a local-server probe. On a box whose ``agent`` slot has no model, neither
+    sees the ADR-0023 fallback that serves ``hal0/agent``, so Hermes fell back
+    to its 256,000-token default (#3854). Hermes scopes this key to
+    ``model.default`` (agent/agent_init.py ``_scope_context_length_to_default_runtime``),
+    so it describes ``hal0/agent`` alone and never another slot picked later.
+
+    Ownership is explicit, as for model aliases: hal0 records the value it
+    wrote in ``hal0.model_context_length``. A value that does not match the
+    record (the #3854 hand workaround, or an edit after hal0 wrote it) is the
+    operator's: left alone and the record dropped. Otherwise:
+
+    * ``managed`` with a ``window`` — write it and record it, so a reprovision
+      follows the resolver when the serving slot or its profile changes;
+    * ``managed`` without a window — "cannot see" is not "remove": keep what
+      is there;
+    * not ``managed`` (live-resolve off, or the operator picked their own
+      model) — remove hal0's own value, which would otherwise be applied to a
+      default it does not describe.
+    """
+    if not config_path.exists():
+        return None, None
+    try:
+        import yaml
+    except ImportError:
+        return None, "PyYAML unavailable"
+    try:
+        with root_config_lock(config_path.parent):
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None, "config.yaml is not a YAML mapping"
+            model = data.get("model")
+            hal0 = data.get("hal0", {})
+            if not isinstance(model, dict) or not isinstance(hal0, dict):
+                return None, "model or hal0 is not a YAML mapping"
+            current = model.get("context_length")
+            recorded = hal0.get("model_context_length")
+            ours = current is not None and recorded is not None and current == recorded
+            changed = False
+            if current is not None and not ours:
+                result = current if isinstance(current, int) else None
+                if "model_context_length" in hal0:
+                    del hal0["model_context_length"]
+                    changed = True
+            elif not managed:
+                result = None
+                if ours:
+                    del model["context_length"]
+                    changed = True
+                if "model_context_length" in hal0:
+                    del hal0["model_context_length"]
+                    changed = True
+            elif window is None:
+                result = current
+            else:
+                result = window
+                if current != window or recorded != window:
+                    model["context_length"] = window
+                    hal0["model_context_length"] = window
+                    data["hal0"] = hal0
+                    changed = True
+            if changed:
+                _atomic_write(
+                    config_path, yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+                )
+            return result, None
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return None, _yaml_error_summary(exc)
 
 
 def _prune_mcp_servers_yaml(
@@ -3785,6 +3881,25 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     removed_aliases, alias_error = _prune_model_aliases_yaml(config_path, chat_slots)
     if alias_error is not None:
         errors.append(f"prune model aliases: {alias_error}")
+    # #3854: the window of whatever really serves hal0/agent, the ADR-0023
+    # fallback included. Only hal0's own hal0/agent default gets one.
+    ctx_managed = live_resolve_enabled and kept_model is None
+    anchor_window = (
+        _served_anchor_context(
+            ctx.io,
+            _model_default_id(primary["model_id"], live_resolve_enabled),
+            _DEFAULT_PRIMARY_BACKEND_URL,
+        )
+        if ctx_managed
+        else None
+    )
+    model_context_length, ctx_error = _reconcile_model_context_length_yaml(
+        config_path, managed=ctx_managed, window=anchor_window
+    )
+    if ctx_error is not None:
+        ctx_error = f"model.context_length: {ctx_error}"
+        errors.append(ctx_error)
+    yaml_warning = alias_error or ctx_error
     # Toolsets the operator disabled by hand survive: hal0 only ever adds or
     # removes its own two terminal entries (a list value replaces on merge).
     # The read that feeds those layers and the merge that applies them are one
@@ -3864,7 +3979,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     )
     if status == PhaseStatus.OK and terminal_state_stale:
         status = PhaseStatus.WARN
-    if status == PhaseStatus.OK and alias_error is not None:
+    if status == PhaseStatus.OK and yaml_warning is not None:
         status = PhaseStatus.WARN
     return PhaseResult(
         status=status,
@@ -3872,7 +3987,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         reason=(
             "; ".join(errors[:3])
             if status == PhaseStatus.FAIL
-            else (stale_reason if terminal_state_stale else alias_error)
+            else (stale_reason if terminal_state_stale else yaml_warning)
         ),
         details={
             "config_path": str(config_path),
@@ -3886,6 +4001,9 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "operator_model_kept": kept_model,
             "chat_slot_count": len(chat_slots),
             "removed_model_aliases": removed_aliases,
+            # The model.context_length now in the file (hal0's or the
+            # operator's), None when Hermes is left to discover it (#3854).
+            "model_context_length": model_context_length,
             "persona": persona_name or None,
             "mcp_server_count": len(mcp_servers),
             "delegation_model": (delegation or {}).get("model"),
