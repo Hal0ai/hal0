@@ -98,6 +98,18 @@ def next_free_slot_port(
     )
 
 
+def reject_port_out_of_range(port: int) -> None:
+    """400 when an explicit slot port is outside the ``SlotConfig`` bounds (#3858)."""
+    from hal0.config.schema import _SLOT_PORT_MAX, _SLOT_PORT_MIN
+
+    if not _SLOT_PORT_MIN <= port <= _SLOT_PORT_MAX:
+        raise BadRequest(
+            f"port {port} is outside the allowed slot port range {_SLOT_PORT_MIN}-{_SLOT_PORT_MAX}",
+            code="slot.port_out_of_range",
+            details={"port": port, "min": _SLOT_PORT_MIN, "max": _SLOT_PORT_MAX},
+        )
+
+
 def reject_port_conflict(
     port: int, owner_slot: str, slot_snapshots: list[dict] | None = None
 ) -> None:

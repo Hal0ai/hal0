@@ -1495,6 +1495,7 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     # another slot (config or runtime) or listener already owns.
     new_port = body.get("port")
     if isinstance(new_port, int) and new_port > 0:
+        _port_alloc.reject_port_out_of_range(new_port)
         runtime_ports = [
             {
                 "name": getattr(s, "name", None),

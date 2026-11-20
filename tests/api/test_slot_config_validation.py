@@ -62,6 +62,28 @@ def test_put_config_unknown_top_level_key_400(slot_toml: Path, client: TestClien
     assert "enabeld" not in _read(slot_toml)
 
 
+@pytest.mark.parametrize("port", [8297, 8201, 8080, 65535])
+def test_put_config_out_of_range_port_400_toml_untouched(
+    slot_toml: Path, client: TestClient, port: int
+) -> None:
+    """#3858: a port outside SlotConfig's 8081-8200 is refused, TOML unchanged."""
+    before = slot_toml.read_bytes()
+    r = client.put("/api/slots/chat/config", json={"port": port})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.port_out_of_range"
+    assert err["details"]["min"] == 8081
+    assert err["details"]["max"] == 8200
+    assert slot_toml.read_bytes() == before
+
+
+def test_put_config_in_range_port_updates_toml(slot_toml: Path, client: TestClient) -> None:
+    r = client.put("/api/slots/chat/config", json={"port": 8150})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["port"] == 8150
+    assert r.json()["port"] == 8150
+
+
 def test_put_config_unknown_model_key_400_with_path(slot_toml: Path, client: TestClient) -> None:
     r = client.put("/api/slots/chat/config", json={"model": {"ctx_sizee": 8192}})
     assert r.status_code == 400, r.text
