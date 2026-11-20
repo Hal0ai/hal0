@@ -1185,26 +1185,47 @@ def test_mode_follows_configuration_and_binding_not_readiness(
         assert status.json()["slot_resolves"] is True
 
 
-def test_extraction_slot_resolves_via_dispatcher_last_resort() -> None:
-    """#3851: memory and agent model-less, brain bound -> hal0/memory is served by brain."""
-    from hal0.api.routes.memory import _extraction_served_by, _extraction_slot_resolves
-
-    assert _extraction_slot_resolves("memory", ["brain"]) is True
-    assert _extraction_served_by("memory", ["brain"]) == "brain"
-    # A bound chain entry still wins over the last resort.
-    assert _extraction_served_by("memory", ["agent", "brain"]) == "agent"
-    assert _extraction_served_by("memory", ["memory", "agent"]) == "memory"
-    # Nothing model-bound anywhere: genuinely unresolved.
-    assert _extraction_slot_resolves("memory", []) is False
-    # A model-less custom slot has no last resort (the dispatcher returns None).
-    assert _extraction_slot_resolves("custom", ["brain"]) is False
-    assert _extraction_slot_resolves("custom", ["custom"]) is True
-
-
-def test_graph_status_names_the_serving_slot(stub_wrapper: StubWrapper, hal0_home: Path) -> None:
-    stub_wrapper.extraction_slot = "memory"
-    app = _build_app(stub_wrapper, "brain")
+def _status_for(
+    stub_wrapper: StubWrapper, slots: list[tuple[str, bool]], extraction_slot: str = "memory"
+) -> dict[str, Any]:
+    """Graph status with ``slots`` as ``(name, model_bound)`` in config order."""
+    stub_wrapper.extraction_slot = extraction_slot
+    app = _build_app(stub_wrapper, "placeholder")
+    app.state.slot_manager.iter_configs.return_value = [
+        {"name": n, "type": "llm", "enabled": True, "model_id": f"model-{n}" if bound else ""}
+        for n, bound in slots
+    ]
     with TestClient(app) as c:
-        body = c.get("/api/memory/graph/status").json()
+        return c.get("/api/memory/graph/status").json()
+
+
+def test_graph_status_names_the_last_resort_slot(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """#3851: memory and agent model-less, brain bound -> brain serves hal0/memory."""
+    body = _status_for(stub_wrapper, [("memory", False), ("agent", False), ("brain", True)])
     assert body["slot_resolves"] is True
     assert body["served_by"] == "brain"
+
+
+def test_graph_status_follows_dispatcher_order_not_alphabetical(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """The last resort is the first slot in config order (resolver._configured_primary)."""
+    body = _status_for(stub_wrapper, [("utility", True), ("brain", True)])
+    assert body["served_by"] == "utility"
+
+
+def test_graph_status_bound_chain_entry_beats_last_resort(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    body = _status_for(stub_wrapper, [("brain", True), ("agent", True)])
+    assert body["served_by"] == "agent"
+
+
+def test_graph_status_unresolved_when_nothing_is_bound(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    body = _status_for(stub_wrapper, [("memory", False), ("agent", False)])
+    assert body["slot_resolves"] is False
+    assert body["served_by"] is None
