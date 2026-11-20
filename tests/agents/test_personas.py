@@ -311,3 +311,22 @@ def test_hermes_templates_do_not_claim_a_private_namespace() -> None:
         assert "namespace is yours" not in text, name
     for name in ("SOUL.md.j2", "HERMES.md.j2", "AGENTS.md.j2"):
         assert "private=true" in (root / name).read_text(encoding="utf-8"), name
+
+
+def test_soul_template_names_callable_admin_tools_and_live_state_rule() -> None:
+    """#3855: ``hal0_admin:<tool>`` is not callable under Hermes tool_search."""
+    from pathlib import Path
+
+    from hal0.agents import hermes_provision as hp
+
+    text = (Path(hp.__file__).parent / "hermes_templates" / "SOUL.md.j2").read_text(
+        encoding="utf-8"
+    )
+    for old in ("hal0_admin:slot_status", "hal0_admin:hardware_probe", "hal0_admin:capability_set"):
+        assert old not in text
+    assert "tool_search" in text
+    assert "tool_call" in text
+    assert "mcp__hal0_admin__slot_list" in text
+    assert "mcp__hal0_admin__slot_status" in text
+    assert "mcp__hal0_admin__capability_set" in text
+    assert "not from recall" in text
