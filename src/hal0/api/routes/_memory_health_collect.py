@@ -538,7 +538,7 @@ async def _read_extraction(request: Request, graph_cfg: Any, out: dict[str, Any]
     kind, _target = _ee.memory_engine_target(graph_cfg)
     slot_in_play = kind == "slot" and llm.get("overridden") is not True
     out["slot_resolves"] = (
-        _memory._extraction_slot_resolves(slot, available) if slot_in_play else None
+        await _memory._extraction_slot_resolves(request, slot) if slot_in_play else None
     )
     out["llm_reachable"] = await _llm_reachable(llm.get("base_url"))
     out["complete"] = True

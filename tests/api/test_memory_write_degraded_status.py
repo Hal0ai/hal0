@@ -35,16 +35,16 @@ from hal0.memory.hindsight_provider import HindsightProvider
 def _route_extraction_slot(monkeypatch: pytest.MonkeyPatch, *slots: str) -> None:
     """Make ``_extraction_target_resolves`` see ``slots`` as model-bound.
 
-    Patches the same ``_enabled_llm_slots`` helper the route layer calls, so
+    Patches the ``_resolved_serving_slot`` helper the route layer calls, so
     tests don't need to stand up a real SlotManager + model-bound config just
     to prove a slot resolves.
     """
     import hal0.api.routes.memory as memory_routes
 
-    async def _fake_enabled_llm_slots(_request: Any) -> list[str]:
-        return list(slots)
+    async def _fake_serving_slot(_request: Any, _slot: str) -> str | None:
+        return slots[0] if slots else None
 
-    monkeypatch.setattr(memory_routes, "_enabled_llm_slots", _fake_enabled_llm_slots)
+    monkeypatch.setattr(memory_routes, "_resolved_serving_slot", _fake_serving_slot)
 
 
 class _AcceptingClient:

@@ -49,7 +49,6 @@ from hal0.memory.namespace import (
 )
 from hal0.memory.retain_chunk_guard import ChunkAudit, audit_bank_chunks
 from hal0.memory.write_gate import require_writes_allowed
-from hal0.normalize.resolver import DEFAULT_CHAINS
 from hal0.upstreams.catalog import curated_model_ids
 
 router = APIRouter()
@@ -317,10 +316,22 @@ async def _enabled_llm_slots(request: Request) -> list[str]:
     return sorted(alias_map.keys())
 
 
-def _extraction_slot_resolves(slot: str | None, available: list[str]) -> bool:
-    """The default memory target may share agent when its own binding is empty."""
-    chain = DEFAULT_CHAINS[MEMORY_ALIAS] if slot == "memory" else (slot,)
-    return any(name in available for name in chain)
+async def _extraction_served_by(request: Request, slot: str | None) -> str | None:
+    """The slot that serves ``hal0/<slot>``, or ``None`` when nothing does.
+
+    Asks the dispatcher's own resolver (``normalize.resolver.resolve_chain``)
+    over the same ordered slot views the request path uses, so the answer holds
+    for the last-resort primary too (ADR-0053: the installer leaves ``memory``
+    and ``agent`` model-less and the first model-bound slot serves them).
+    """
+    if not slot:
+        return None
+    return await _resolved_serving_slot(request, slot)
+
+
+async def _extraction_slot_resolves(request: Request, slot: str | None) -> bool:
+    """Whether the dispatcher can serve the extraction slot (last resort included)."""
+    return await _extraction_served_by(request, slot) is not None
 
 
 def _extraction_mode(graph_cfg: MemoryGraphConfig, available: list[str]) -> str:
@@ -495,7 +506,9 @@ async def graph_status(request: Request) -> dict[str, Any]:
     status = wrapper.graph_status()
     available = await _enabled_llm_slots(request)
     status["available_slots"] = available
-    status["slot_resolves"] = _extraction_slot_resolves(status.get("extraction_slot"), available)
+    served_by = await _extraction_served_by(request, status.get("extraction_slot"))
+    status["slot_resolves"] = served_by is not None
+    status["served_by"] = served_by
     # llm_timeout_s and the extraction limits (#1834) live in hal0.toml (not
     # on the provider) — echo them so the dashboard's graph panel can edit
     # them without a second config fetch.
