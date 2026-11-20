@@ -361,8 +361,8 @@ async def test_trio_shadows_load(tmp_hal0_home: str) -> None:
     assert loaded["flm-stt"].served_by == "flm"
     assert loaded["flm-stt"].type == "transcription"
     assert loaded["flm-embed"].served_by == "flm"
-    # A drifted shadow is repaired in place and still loads.
-    await sm.update_config("flm-stt", {"port": 9999})
+    # A drifted shadow (an in-range but wrong port) is repaired in place and still loads.
+    await sm.update_config("flm-stt", {"port": 8150})
     await sm.reconcile_npu_trio_slots()
     assert _load_everything()["flm-stt"].port == 8088
 

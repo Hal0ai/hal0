@@ -39,7 +39,13 @@ from hal0.cli._shared import (
     follow_sse_logs,
     run_with_progress,
 )
-from hal0.config.schema import CTX_SIZE_MAX, CTX_SIZE_MIN, ReasoningEffort
+from hal0.config.schema import (
+    _SLOT_PORT_MAX,
+    _SLOT_PORT_MIN,
+    CTX_SIZE_MAX,
+    CTX_SIZE_MIN,
+    ReasoningEffort,
+)
 from hal0.hardware.stats import SLOT_PORT_RANGE_END, SLOT_PORT_RANGE_START
 from hal0.slot_lifecycle_budget import slot_lifecycle_timeout_s
 
@@ -630,11 +636,11 @@ def slot_create(
         "--port",
         "-p",
         help=(
-            "Slot port (default: auto-assign next free port in "
-            f"{SLOT_PORT_RANGE_START}-{SLOT_PORT_RANGE_END})."
+            f"Slot port, {_SLOT_PORT_MIN}-{_SLOT_PORT_MAX} (default: auto-assign "
+            f"next free port in {SLOT_PORT_RANGE_START}-{SLOT_PORT_RANGE_END})."
         ),
-        min=1024,
-        max=65535,
+        min=_SLOT_PORT_MIN,
+        max=_SLOT_PORT_MAX,
     ),
     profile: str | None = typer.Option(
         None,
@@ -716,7 +722,7 @@ def slot_create(
 def slot_edit(
     name: str = typer.Argument(..., help="Slot name to edit"),
     model: str | None = typer.Option(None, "--model", "-m"),
-    port: int | None = typer.Option(None, "--port", "-p", min=1024, max=65535),
+    port: int | None = typer.Option(None, "--port", "-p", min=_SLOT_PORT_MIN, max=_SLOT_PORT_MAX),
     provider: SlotProvider | None = typer.Option(
         None, "--provider", case_sensitive=False, help="Change the slot's inference provider."
     ),

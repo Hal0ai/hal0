@@ -509,6 +509,7 @@ _slot_port_range = _port_alloc.slot_port_range
 _collect_port_claims = _port_alloc.collect_port_claims
 _next_free_slot_port = _port_alloc.next_free_slot_port
 _reject_port_conflict = _port_alloc.reject_port_conflict
+_validate_explicit_slot_port = _port_alloc.validate_explicit_slot_port
 
 
 def _validation_error_details(exc: ValidationError) -> dict[str, str]:
@@ -791,6 +792,13 @@ async def create_slot(request: Request, background_tasks: BackgroundTasks) -> di
             details={"max_slots": max_slots, "existing_slots": len(existing)},
         )
 
+    # An EXPLICIT port is validated before normalisation: after it, ``port`` may
+    # be one auto-assigned from the operator's ``[slots].port_range_*`` pool,
+    # which is allowed to lie outside 8081-8200 and must not be refused.
+    # Missing / null / 0 mean "auto-assign".
+    raw_port = body.get("port")
+    if raw_port is not None and (isinstance(raw_port, bool) or raw_port != 0):
+        _validate_explicit_slot_port(raw_port)
     body = _normalize_create_body(
         body,
         port_start=(int(slots_cfg.port_range_start) if slots_cfg else None),
@@ -1493,8 +1501,10 @@ async def update_slot_config(name: str, request: Request) -> dict[str, object]:
     _validate_autoload_priority(body)
     # Port moves go through the registry so an edit can't land on a port
     # another slot (config or runtime) or listener already owns.
-    new_port = body.get("port")
-    if isinstance(new_port, int) and new_port > 0:
+    # Edit has no auto-assign: any ``port`` key must be a valid explicit port
+    # (0 / null / "8297" would be written to the TOML and fail SlotConfig).
+    if "port" in body:
+        new_port = _validate_explicit_slot_port(body["port"])
         runtime_ports = [
             {
                 "name": getattr(s, "name", None),
