@@ -70,6 +70,11 @@ from hal0.config.loader import (
 )
 from hal0.config.migrations import latest_version, run_migrations
 from hal0.errors import Hal0Error
+
+# Imported here, not lazily inside the activation step (#3874): that step runs
+# after the venv re-pip, when a first import loads the INCOMING tree's copy,
+# and on a rollback that tree may lack what this code calls.
+from hal0.install import perms
 from hal0.release.policy import ReleaseKind, ReleasePolicy, ReleaseTagError
 
 log = structlog.get_logger(__name__)
@@ -4317,26 +4322,32 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
     gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
     retired = remove_retired_artifacts(job_id=job_id)
 
-    # Heal root-created tombstone locks on existing boxes (#2698), using
-    # the same narrow ownership row as doctor perms --fix.
+    # Both repairs below use `perms` as imported at module load, i.e. from the
+    # tree running this activation, never the tree just re-pipped in: on a
+    # rollback that one may predate them (#3874). What they reach lazily from
+    # there (ownership_table's mDNS dir) still comes from the new site-packages,
+    # so each is best-effort: a failure is logged and the activation carries on.
     if os.geteuid() == 0:
+        # Heal root-created tombstone locks on existing boxes (#2698), using
+        # the same narrow ownership row as doctor perms --fix.
         try:
-            from hal0.install import perms
-
             lock_rows = [
                 row
                 for row in perms.ownership_table()
                 if row.target == paths.var_lib() / "registry" and row.glob == "*.lock"
             ]
             perms.commit(perms.plan(lock_rows))
-        except (OSError, KeyError) as exc:
+        except Exception as exc:
             log.warning("updater.registry_lock_perms_failed", job_id=job_id, error=str(exc))
         # #3852: hand a root-owned Hermes plugin tree (left by a root-run
         # install.sh) back to hal0 while root is still held, so the hal0-run
-        # post-swap mirror below can replace it.
-        from hal0.install import perms
-
-        perms.converge_hermes_plugin_trees()
+        # post-swap mirror can replace it.
+        try:
+            perms.converge_hermes_plugin_trees()
+        except Exception as exc:
+            log.warning(
+                "updater.hermes_plugin_trees_converge_failed", job_id=job_id, error=str(exc)
+            )
 
     log.info(
         "updater.activate_ok",
