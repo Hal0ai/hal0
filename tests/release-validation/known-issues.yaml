@@ -17,8 +17,10 @@
 
 schema: 1
 updated: 2026-11-20
-updated_for: v1.8.0-nightly.20261119225557
+updated_for: v1.8.0-nightly.20261120045628
 
+# NOTE (kit 19): five boxes' worth of by-design rulings added at the bottom; the Overview soft-degraded decision (#3808 option b) is now APPLIED, see dashboard-overview-agents-degraded-shown-ready.
+#
 # NOTE (kit 18): CONTEXT.md in a run can be a stale-script artifact (the run executed a pre-#3839 rc-validate snapshot); see rc-validate-stale-script-snapshot. Take identity from boxes.toml.
 #
 # NOTE (kit 17): ct151 runs may find CONTEXT.md is ct150's file (#3838). Take identity from boxes.toml and run; do not stop.
@@ -2733,19 +2735,20 @@ known_issues:
     review_at: v1.8.1
 
   - id: dashboard-overview-agents-degraded-shown-ready
-    status: open
-    issue: 3808
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    related_issue: 3808
     summary: >-
-      Overview Agents panel shows a degraded Hermes as an amber "ready" with no reason (agents-pure.ts
-      phaseToState degraded|working -> ready; no Needs-you source). Agents page names the reason.
+      Overview Agents panel shows a Hermes degraded only by SOFT reasons (provision_warn, doctor_drift, approvals_drift) as an amber
+      "ready" with no reason. Outage reasons (gateway_down, api_unhealthy, provision_failed) read red "down" since #3843.
     why: >-
-      Filed #3808 (P2, ready-for-human): test-pinned (agents-pure.test.ts:44, #3152) and partly ADR-0044
-      "summarise and link". Not reproducible on a clean box (overview degraded=[]).
+      Operator decision on #3808 (option b, 2026-11-19), implemented by #3843: only outage reasons turn the pill to down; soft reasons stay
+      "ready" in an amber (warn) pill; the reason is named on the Agents page card. Pinned by agents-pure.test.ts. ADR-0044 "summarise and link".
     still_report_if: >-
-      The Overview pill renders green/"serving" or any non-amber tone while the Agents card is degraded; OR
-      a gateway_down/api_unhealthy/provision_failed reason is shown nowhere on the dashboard; OR the two
-      surfaces disagree on anything other than degraded/working -> ready.
-    review_at: v1.8.1
+      The pill renders green/"serving" or any non-amber tone while the Agents card is degraded by soft reasons only; OR a card with
+      gateway_down/api_unhealthy/provision_failed reads anything but red "down"; OR the Agents page card does not name the soft reason; OR a new
+      outage-class reason is added to overview.py degraded_reasons without being added to OUTAGE_REASONS in agents-pure.ts.
+    review_at: v1.9.0
 
   - id: hermes-smoke-chat-probe-timeout-behind-consolidation
     status: open
@@ -3086,3 +3089,104 @@ known_issues:
     still_report_if: >-
       The sentinel is absent from a profile that should have exec disabled, or the gateway fails to start because of it.
     review_at: v1.9.0
+
+  # ── Added in kit 19 (v1.8.0-nightly.20261120045628) ─────────────────────────────────────
+
+  - id: hermes-gateway-turn-not-cancelled-on-client-disconnect
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    summary: >-
+      Killing a `hermes -z` client (SIGTERM) does not cancel the gateway turn: the in-flight LLM call completes (165 s on ct151) and active_agents stays 1.
+    why: >-
+      Upstream Hermes v0.22.4 semantics: closing the terminal only detaches a viewer ("Detached; accepted work continues at the gateway",
+      cli.md:176); /stop (session.interrupt) is the cancel path. The gateway's own HTTP request to hal0 stays open, so hal0's http.disconnect abandon path
+      (slots/abandon.py) never fires. Cost of a long call is #3804 (decode cap) and #2734 (--parallel 1 queueing). No new /v1/chat call is issued after the kill.
+    still_report_if: >-
+      Sending /stop (session.interrupt) does not bring active_agents to 0 and stop new /v1/chat calls within 30 s; OR hal0's /v1 relay keeps the llama slot
+      computing >30 s after the gateway's request to hal0 closes; OR a detached turn starts a new /v1/chat call >600 s after its client died; OR a detached
+      turn runs past ~10 min with the #3804 cap in place; OR docs/--help start promising that killing `hermes -z` cancels the turn.
+    review_at: v1.9.0
+
+  - id: agent-identity-cards-deleted-not-rewritten
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    related_issue: 2700
+    summary: >-
+      After a hal0-api restart `hal0 agent peers` says "No agent identity cards published yet" and the boot dedupe seems to delete cards without rewriting.
+    why: >-
+      Refuted as stated. The boot lane deletes prior cards then calls memory_add; that is an async Hindsight retain and the card appears once extraction
+      finishes (15 min on ct151: restarts refuse in-flight extraction, retry backoff 120 s, brain --parallel 1 shared). A slow queued write, not a missing
+      one. The real residuals are filed: #3876 (duplicates from pending retains, zero-card window) and #3877 (peers one row per fact).
+    still_report_if: >-
+      No card document exists 30 min after a restart on a drained queue with failed=0; OR the card retain is in failed state; OR a card write leaves no
+      journal line when it fails.
+    review_at: v1.9.0
+
+  - id: memory-work-starves-interactive-chat-on-fresh-install
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    related_issue: 2734
+    summary: >-
+      On a fresh install an interactive request waits 28-216 s behind Hindsight work on the shared --parallel 1 brain (a multi-round steward turn ~5 min).
+    why: >-
+      Accepted 1.8.0 consequence (ADR-0053; background_gate.py "Out of scope: preempting an in-flight llama-server call"). Hindsight runs one retain and one
+      consolidation call at a time, so two memory calls can be inside llama at once; the #3333 gate holds only NEW hal0/memory requests while a foreground
+      request is registered; quiet_gap_s scheduling is config-only until v1.9.0. No single queued request waited >300 s. Workaround: bind a model to the
+      memory slot. Measure on a box without a restart-induced retain backlog.
+    still_report_if: >-
+      A single request (one round, timed from brain launch_slot/print_timing) waits >300 s behind Hindsight work; OR waits behind more than the in-flight
+      memory call plus one already queued (check hal0.background_gate.proceeded inside the wait window); OR a queued request fails 5xx/503; OR after
+      quiet-gap scheduling ships a memory call starts within quiet_gap_s of a foreground round; OR it happens with the memory slot bound to its own model.
+    review_at: v1.9.0
+
+  - id: chat-to-rerank-name-409-names-embed-slot
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    related_issue: 1894
+    summary: >-
+      Chat to model=rerank / hal0/rerank returns 409 (or 404 with rerank ready, embed offline) naming slot=embed.
+    why: >-
+      Rule 7 (_capability_resolve.py:75,251) maps any name containing embed or rerank to the embed slot before the slot-name branch; locked by
+      tests/dispatcher/test_router.py:502-515. Always a typed refusal. The slot's own registered id (bge-reranker-...) names slot=rerank. Same ruling as
+      chat-to-embed-slot-500-passthrough; routing.md check 31 reworded in kit 19 so it no longer calls this a failure.
+    still_report_if: >-
+      The request is served or leaks a raw 5xx; OR a model id a serving rerank slot advertises (or the registry binds to rerank) yields an envelope naming
+      embed; OR a custom --type reranking slot's 409 names another slot; OR /v1/rerank with model=rerank stops landing on the rerank slot; OR rule 7's
+      rerank hint is removed and the stock name still resolves to embed.
+    review_at: v1.9.0
+
+  - id: hermes-profile-delete-leaves-stale-upstream
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    summary: >-
+      After `hermes profile delete <n> -y` the managed hermes.<n> upstream stays in /api/upstreams and /api/slots.
+    why: >-
+      ADR-0035 decision 7: the 120 s periodic reconcile (HERMES_RECONCILE_INTERVAL_S, api/__init__.py:1491) removes it with no POST; measured removal 118 s.
+      No in-process hook on Hermes's profile CLI (ADR-0035 fact 10). During the lag the gateway 404s the prefix and a pinned id fails fast with 502. Wait a full
+      interval before judging; hal0-api restarts add boot passes.
+    still_report_if: >-
+      The upstream persists >240 s with no hal0-api restart; OR a request for the deleted profile's id is answered by a local slot; OR the journal shows
+      api.hermes_upstreams.periodic_reconcile_failed; OR a deleted profile's upstream returns on a later pass.
+    review_at: v1.9.0
+
+  - id: cli-model-scan-hides-skip-reason
+    status: open
+    issue: 2725
+    summary: >-
+      `hal0 model scan` prints "N added, M skipped" and never the skipped[] path/reason (model_commands.py:449-460); the API returns them. Applies to every
+      reason (id_collision, unsupported_quant, register_failed), not only collisions. Commented on #2725 in 1.8.0.
+    why: >-
+      Open P2 #2725 ("at minimum the CLI should print the skip reason"). Duplicate, not a new finding.
+    still_report_if: >-
+      A scan skip reason is printed wrongly, or a skipped file is counted as added.
+
+  - id: tracked-open-defects-20261120045628
+    status: open
+    summary: >-
+      Filed from the v1.8.0-nightly.20261120045628 run, all open: #3874 rollback crashes in activate (P0), #3875 context_length not stamped on first provision,
+      #3876 identity-card dedupe race, #3877 agent peers per-fact rows, #3878 hindsight_recall tool result 10x budget, #3879 slot models[] stale,
+      #3880 GET /v1/models/<raw chat id> 404, #3881 stale-quarantine reaper per version, #3882 kit upgrade baseline (fixed in kit 19).
+    why: >-
+      Each has a regressions.yaml entry. Record as `known (#N)`.
+    still_report_if: >-
+      The symptom is materially wider than the issue text, or a fix lands and the repro still reproduces.

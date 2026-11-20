@@ -167,3 +167,9 @@ any gap between what hermes says about itself and what it does as `major`.
 * `hal0-terminal-off` ERROR and the 'Unknown terminal backend hal0-terminal-off' advisory are by design (known-issues hermes-hook-and-terminal-by-design).
 * Item 5 (web_dist) is stale: web_dist ships and :9119/ returns 200; check only that.
 * Run the shell-hook output through `agent.shell_hooks._parse_response` for on_session_start, or grep agent.log for 'shell hook stdout was not valid JSON' (#3853).
+
+## Added in kit 19
+
+* Check 29 wording: replace "import yaml must work" with "the plugin's `_read_agent_key` returns non-empty" (#3803 made PyYAML unnecessary).
+* Check the mode of `.hermes/config.yaml` against the key it carries.
+* On a FRESH box, before any reprovision, `config.yaml` must carry `model.context_length` and the gateway must not log `256000 tokens (default)` (#3875, known).

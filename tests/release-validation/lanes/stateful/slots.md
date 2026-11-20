@@ -220,3 +220,11 @@ uses it); rerank unloaded; every throwaway slot deleted and its unit reset. Stat
 * Fixtures for hand-registered embedding/reranking models must keep the upstream filename (bge-reranker-*, nomic-embed-*); a renamed copy registers as chat and looks like a bug.
 * Entry and exit: `/var/lib/hal0/.first_run_done` is the only root-owned file under /var/lib/hal0 (outside secrets, python, openwebui).
 * Check 8e (garbage-convict net) cannot run on a box with one Vulkan-gated runner image; mark it a coverage gap unless preflight pulls a second, older runner image.
+
+## Added in kit 19
+
+* Check-11 formula, exact on GPU-resident slots: `size_bytes/1MiB + 0.5*context_length/1000` equals the capacity Total.
+* Drift check 8d is constructible on a one-image box: `PUT /api/slots/<n>/config {"image_pin":"<cpu runner ref>"}` onto a gpu-vulkan slot. Use that as the standard recipe.
+* `/api/slots/<n>.models` must be empty whenever the TOML has no `[model].default` and the slot is offline (#3879, known); then ask the steward which slots have a model.
+* A `hal0 slot edit` on a seeded slot rewrites the TOML and drops its seed comments; diff the header and record it.
+* Check `/slots` `is_processing` on brain before the canary; if Hindsight holds it, run the canary on a fresh vulkan slot on the same image.

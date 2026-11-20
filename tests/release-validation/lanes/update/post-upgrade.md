@@ -142,3 +142,11 @@ The box healthy on the new version, with its accumulated state intact — it is 
 * A REST call with no headers while auth is off logs actor 'dashboard'; do not read that as a concurrent actor.
 * Record the ops-ahead-of-me count when submitting a retain (took ~8 min behind 10 pending).
 * A slot TOML failing SlotConfig validation shows no config_error in /api/slots; record it (known rerank-toml-load-failure-hidden).
+
+## Added in kit 19
+
+* Probe `POST /api/brain/chat` only with a real message, never an empty body (it ran a steward turn and woke the 27B).
+* Look up a memory document's retain op by `document_id`, not by counting ops: the list caps at 300 so a before/after count can stay equal and prove nothing.
+* After a steward grounding turn record agent container health (the 27B went unhealthy under a ~16k-token prefill on the 12 GB LXC).
+* Check 29 is now #3881 (known): count `.stale-*` trees and the number older than 30 days.
+* `hal0 doctor perms` should report a root-owned `model-providers/hal0` dir after the update.

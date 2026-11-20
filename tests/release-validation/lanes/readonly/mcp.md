@@ -115,3 +115,8 @@ and session handling as `major` by default.
 * Parse GATED_TOOLS from the release-tag source with `ast` and diff it against the REST tool_details `gated` flag in a script, not by hand.
 * For all three servers, the advertised connect_url from `hal0 mcp status` / `/api/mcp/servers` must answer `initialize` with 200, and serverInfo.version must equal the VERSION file.
 * #3806 looks fixed (all 39 gated tools with required args return mcp.missing_arg); keep the sweep but expect pass.
+
+## Added in kit 19
+
+* Diff `tool_details` names against `tools/list` for all three servers in one script, and diff the ast-parsed GATED_TOOLS from the release tag against the REST gated flags (61 matched on 1.8.0).
+* If CONTEXT provides a `hal0bk_` bridge key, exercise `/mcp/agents/mcp` instead of recording it skipped (without one it is 401 by design).

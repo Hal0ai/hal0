@@ -155,3 +155,11 @@ and throwaway profiles removed. Brain and utility slots healthy.
 * Diff `ls /etc/hal0/slots` before/after every non-200 capability apply; record new TOMLs. The first stt enable with an empty model creates stt.toml with provider llama-server (#3860).
 * `hal0 model add` of a kept reranker gguf re-registers it as chat (confidence medium): the documented recovery changes the type.
 * API DELETE of a bound model without force returns 200 with affected_slots, no 409 model.in_use, unlike the CLI path; brief item 31 should expect that.
+
+## Added in kit 19
+
+* After `model rm --keep-files`, run the exact `model add <kept path>` the CLI prints for a pulled-layout gguf and assert the re-registered id equals the original (it becomes `model`), then re-apply the capability selection.
+* After `hal0 profile create` plus DELETE of the throwaway, `/etc/hal0/profiles.toml` must be absent or byte-identical to the seed (a 10-byte `[profile]` was left).
+* After enabling embed/rerank/tts, note TOML provider rewrites (`provider = "llama-server"` appeared, tts lost its comment header) as intended or file.
+* Capture the `/api/capabilities` tts catalog row (backends, profile, runtime_family) BEFORE kokoro-v1 is pulled so check 13 can diff.
+* `hal0 model scan` skip reasons: compare CLI output with the API `skipped` list (#2725, known).

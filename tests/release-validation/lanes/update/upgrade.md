@@ -185,3 +185,12 @@ The box on the new version, healthy, with the "before" snapshot recorded in your
 * Capture `hal0 doctor` and `hal0 doctor perms` in the BEFORE snapshot to attribute post-update drift rows.
 * Record per-bank fact_count before / after / after 30 min to separate consolidation drift from loss.
 * Make the 3x restart-with-stream check a script (stop duration from systemd timestamps; bc is not installed).
+
+## Added in kit 19
+
+* The before snapshot ALSO includes `hal0 profile list --json`, `GET /api/slots` JSON (for `actual_image`), `GET /api/capabilities`, bank counts, `hal0 doctor` and `hal0 doctor perms`; write them to `/var/tmp/upgrade-lane/before-*` (#3882, moved here from post-upgrade checks 22/28).
+* After any rollback compare `readlink /usr/lib/hal0/current`, `/var/lib/hal0/hal0.previous` and the running hal0-api version and require consistency even when the CLI exits non-zero (half-applied rollback, #3874).
+* After every update and rollback grep the journal for `updater.privileged_crashed` and `has no attribute`: a missing symbol means new activate code is running against an older tree.
+* Run the rollback ONCE. A rollback to a pre-#3870 tree is expected to hit #3874 until fixed; record it `known`, roll forward with `hal0 update --yes`, and do not retry.
+* On a box with a root-owned Hermes plugin dir run the update twice (old to new, then roll-forward) to separate the old build's silent behaviour from the new tree's reporting; the second must list `hermes_plugin_mirror_failed` and exit 2.
+* Time `sudo hal0 agent reprovision hermes` (about 5 min on ct150, silent over ssh) and report that it prints no progress.

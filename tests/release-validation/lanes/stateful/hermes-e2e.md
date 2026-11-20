@@ -164,3 +164,10 @@ every config file you touched and its final contents in `box_state_on_exit`.
 * Both banks are hal0:shared and hal0:private; assert both queues are empty before entry and record the private pending count per turn.
 * Create a named profile (hal0-brain) in lane setup; none exists after install, so c22/c30 cannot run otherwise.
 * Check the resolver: g('hal0/agent') vs g('brain') when agent is model-less (#3854).
+
+## Added in kit 19
+
+* Kill-client check 18: kill by PID from a script file, then poll `gateway_state.json` `active_agents`. Detach is upstream by design; the pass criterion is "no NEW /v1/chat call within 30 s" and cancel is `/stop` / session.interrupt (known hermes-gateway-turn-not-cancelled-on-client-disconnect).
+* After any recall turn compare the `hindsight_recall` tool message length in state.db with its `max_tokens` and record peak `in=` (#3878, known).
+* After `hermes profile delete`, wait a full 120 s reconcile interval before asserting the `hermes.<profile>` upstream is gone (by design).
+* `GET /v1/models/<id>` must agree with chat routing for every id in `config.yaml` model_aliases (#3880 for raw chat ids, known).

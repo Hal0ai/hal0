@@ -128,3 +128,8 @@ only hold checks that genuinely require a live install.
 * Assert the Memory Health extraction_slot_unresolved copy against `llm_reachable`, `failures_6h` and a fact count that grows; a 'failing' page with growing facts is #3851.
 * Record which lane created each zz* slot before reading dock denominators.
 * Compare the Slots throughput hero with the API latest bucket immediately after a request ends (#3859).
+
+## Added in kit 19
+
+* The Overview hero GPU text must agree with the GPU tile on the same page (a hero read "gpu — · 86°C" beside a 100% tile).
+* A degraded-by-soft-reason Hermes reads amber "ready" on Overview by design (#3808 decided); do not report it.

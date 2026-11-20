@@ -173,3 +173,10 @@ every operation you created — the hermes lane will look for its own marker sep
 * `hal0 memory status` and `hal0 memory graph check` must print a busy-slot message, not ConnectError; re-run on an idle brain for a real tok/s (#3837 progress).
 * /api/memory/health extraction must be slot_resolves=true when brain serves hal0/memory (#3851).
 * Single-word recall (`query=identity`) returned 0 items while identity cards exist; compare with Hindsight directly before deciding if it is a recall defect.
+
+## Added in kit 19
+
+* A lone retain on a drained queue should land under 60 s; separately report queue depth whenever a retain exceeds 300 s so self-inflicted bursts are not read as the #2734/#2669 clauses.
+* Log any `slow llm call: scope=consolidation` with output_tokens >= 0.95 x 8192 as a truncation-risk observation.
+* Identity cards: after restarts wait for a drained queue before counting; duplicates are #3876, a missing card is only a finding after 30 min of drained queue (known agent-identity-cards-deleted-not-rewritten).
+* After a steward-driven memory_add, confirm via the documents list that the original retain document is removed after `/api/memory/delete`.
