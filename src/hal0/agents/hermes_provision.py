@@ -1779,10 +1779,28 @@ def _live_resolve_enabled() -> bool:
 # Static list-valued hal0 keys layered by :func:`_merge_config_yaml_layers`
 # (config set stringifies lists, so these can't go through the CLI).
 SKILLS_EXTERNAL_DIRS: list[str] = ["/etc/hal0/agent-skills", "/var/lib/hal0/skills"]
-SESSION_START_HOOK: dict[str, Any] = {
-    "command": "/usr/lib/hal0/hermes-hooks/inject-system-state.sh",
+#: The live-state hook (``inject-system-state.sh`` prints ``{"context": <STATE.md>}``
+#: on a session's first turn). It rides ``pre_llm_call`` because that is the one
+#: hook event whose return the pinned Hermes injects (into the user message,
+#: agent/turn_context.py ``_collect_pre_llm_call_context``). hal0 used to wire it
+#: under ``on_session_start``, an observer whose return Hermes v0.22.4 ignores
+#: (agent/conversation_loop.py), so the block never reached a session (#3853).
+#: :func:`_retire_hal0_session_start_hook` removes that old entry.
+#:
+#: The command runs the script from the active release tree (``current``), not
+#: the installer-written copy under ``/usr/lib/hal0/hermes-hooks``: ``hal0
+#: update`` never re-runs the installer and cannot write that root-owned copy,
+#: so an upgraded box would keep running whatever script it was installed with.
+#: The release tree always ships the hook that matches this wiring.
+STATE_HOOK_EVENT = "pre_llm_call"
+STATE_HOOK: dict[str, Any] = {
+    "command": "/usr/lib/hal0/current/installer/agents/hermes/hooks/inject-system-state.sh",
     "timeout": 2,
 }
+#: Commands hal0 has wired for the live-state hook, current and retired.
+_HAL0_STATE_HOOK_COMMANDS: frozenset[str] = frozenset(
+    {STATE_HOOK["command"], "/usr/lib/hal0/hermes-hooks/inject-system-state.sh"}
+)
 #: Hermes session pruning switch; hal0 writes it false (ADR-0034 decision 7).
 SESSIONS_AUTO_PRUNE_CONFIG_KEY = "sessions.auto_prune"
 
@@ -1793,7 +1811,7 @@ PERSONA_PROMPT_CONFIG_KEY = "agent.system_prompt"
 
 HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
     "skills": {"external_dirs": SKILLS_EXTERNAL_DIRS},
-    "hooks": {"on_session_start": [SESSION_START_HOOK]},
+    "hooks": {STATE_HOOK_EVENT: [STATE_HOOK]},
 }
 
 
@@ -2475,7 +2493,7 @@ def _build_config_overlay(
 
     Mirrors the (now-deleted) ``config.yaml.j2`` — but ONLY the scalar /
     nested-scalar keys. List-valued keys (``skills.external_dirs``,
-    ``hooks.on_session_start``) are layered by :func:`_merge_config_yaml_layers`;
+    ``hooks.pre_llm_call``) are layered by :func:`_merge_config_yaml_layers`;
     ``model.context_length`` is not in this overlay: every other model's
     context comes from live ``/v1/models`` discovery, and the one value hal0
     does write, for the ``hal0/agent`` default, is owned and reconciled by
@@ -2496,7 +2514,7 @@ def _build_config_overlay(
     pairs: list[tuple[str, Any]] = []
 
     # hooks_auto_accept — the provisioner is also the thing that installs
-    # ``hooks.on_session_start`` (SESSION_START_HOOK, below via
+    # ``hooks.pre_llm_call`` (STATE_HOOK, below via
     # HAL0_CONFIG_LIST_KEYS): a headless box has no TTY to answer the
     # first-run "approve this hook?" prompt, so without this the hook is
     # silently skipped every session (agent.shell_hooks: "not allowlisted")
@@ -3378,12 +3396,13 @@ def _merge_config_yaml_layers(
     """Deep-merge the irreducible list keys + operator overrides onto config.yaml.
 
     ``config set`` can't express YAML sequences (it stringifies them), so the
-    list-valued hal0 keys (``skills.external_dirs``, ``hooks.on_session_start``)
+    list-valued hal0 keys (``skills.external_dirs``, ``hooks.pre_llm_call``)
     are layered here. The operator escape hatch (``overrides.yaml``) deep-merges
     on top LAST so a hand override still wins. Every hermes-owned key is
     preserved (merge, never clobber). Keys hal0 itself used to write and no
-    longer does (:data:`RETIRED_HAL0_CONFIG_KEYS`) are removed first, so an
-    upgraded box does not keep dead config. A ``display.personality`` that
+    longer does (:data:`RETIRED_HAL0_CONFIG_KEYS`, and hal0's own entry under
+    ``hooks.on_session_start``, #3853) are removed first, so an upgraded box
+    does not keep dead config. A ``display.personality`` that
     equals one of ``persona_names`` (a hal0 persona's display name, which
     hal0 itself wrote there before #2839) is reset to ``""``: Hermes lets a
     known personality override ``agent.system_prompt``, so a custom persona
@@ -3416,6 +3435,7 @@ def _merge_config_yaml_layers(
         for dotted in RETIRED_HAL0_CONFIG_KEYS:
             _drop_dotted_key(base, dotted)
         _retire_hal0_personality(base, persona_names)
+        _retire_hal0_session_start_hook(base)
         overlay: dict[str, Any] = {}
         if overrides_path.exists():
             overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
@@ -3489,8 +3509,14 @@ def _carry_prelude_to_system_prompt(data: dict[str, Any]) -> bool:
 #: Keys every Hermes release hal0 activates must find in config.yaml before
 #: its units start (ADR-0034 decision 7: session pruning off). Written by
 #: :func:`apply_release_config_invariants` during activation as well as by
-#: the full overlay on install and reprovision.
-RELEASE_CONFIG_INVARIANTS: dict[str, Any] = {"sessions": {"auto_prune": False}}
+#: the full overlay on install and reprovision. The live-state hook is one of
+#: them (#3853): ``hal0 update`` is how most boxes pick up a release, and it
+#: never runs the overlay, so without this an upgraded box would keep the
+#: retired ``on_session_start`` wiring.
+RELEASE_CONFIG_INVARIANTS: dict[str, Any] = {
+    "sessions": {"auto_prune": False},
+    "hooks": {STATE_HOOK_EVENT: [STATE_HOOK]},
+}
 
 
 def apply_release_config_invariants(
@@ -3603,6 +3629,41 @@ def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str])
     if not isinstance(current, str) or current.strip().lower() not in names:
         return False
     display["personality"] = ""
+    return True
+
+
+def _retire_hal0_session_start_hook(data: dict[str, Any]) -> bool:
+    """Drop hal0's live-state hook from ``hooks.on_session_start`` (#3853).
+
+    hal0 wired it there before the hook moved to :data:`STATE_HOOK_EVENT`. The
+    pinned Hermes ignores ``on_session_start``'s return, so the entry only
+    produced a "not valid JSON" warning per session. An operator's own
+    ``on_session_start`` hooks stay; an emptied list, and then an emptied
+    ``hooks`` mapping, is removed. True iff an entry was dropped.
+    """
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    entries = hooks.get("on_session_start")
+    if not isinstance(entries, list):
+        return False
+    kept = [
+        e
+        for e in entries
+        if not (
+            isinstance(e, dict)
+            and isinstance(e.get("command"), str)
+            and e["command"].strip() in _HAL0_STATE_HOOK_COMMANDS
+        )
+    ]
+    if len(kept) == len(entries):
+        return False
+    if kept:
+        hooks["on_session_start"] = kept
+    else:
+        del hooks["on_session_start"]
+    if not hooks:
+        del data["hooks"]
     return True
 
 
@@ -3788,7 +3849,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
          model_aliases, delegation, mcp_servers, persona prompt, auxiliary,
          …) applied via ``hermes config set`` — idempotent, headless-safe.
       3. The two irreducible LIST keys (``skills.external_dirs``,
-         ``hooks.on_session_start``) + operator ``overrides.yaml`` deep-merged
+         ``hooks.pre_llm_call``) + operator ``overrides.yaml`` deep-merged
          in via PyYAML, preserving every hermes-owned key.
 
     Idempotent under ``--repair``: every ``config set`` re-writes the same
@@ -7438,7 +7499,7 @@ def render_live_context(
         out["state_written"] = True
     elif reachable:
         # Content unchanged, but we just confirmed it current against a
-        # reachable daemon — bump mtime so the on_session_start hook's TTL
+        # reachable daemon — bump mtime so the pre_llm_call state hook's TTL
         # staleness check settles instead of firing a background regen every
         # session forever. mtime is not content, so Hermes's injected text
         # is byte-identical and the prompt-cache prefix stays warm.

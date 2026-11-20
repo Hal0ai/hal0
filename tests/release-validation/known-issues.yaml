@@ -768,7 +768,7 @@ known_issues:
       that confirms the body still current bumps mtime via os.utime and deliberately leaves
       `_as_of` alone so the injected bytes stay prompt-cache-identical. An old `_as_of` therefore
       means "unchanged since", not "stale data". The hook is bound by hermes' own 2 s
-      on_session_start timeout, so it cannot probe synchronously — it cats a pre-rendered
+      pre_llm_call hook timeout, so it cannot probe synchronously — it cats a pre-rendered
       snapshot and kicks a detached refresh. Verified on the GPU prod box: `_as_of` 12.6 h old on
       a file verified 34 minutes earlier.
     still_report_if: >-

@@ -1330,7 +1330,7 @@ regressions:
       slot carries a model do not hit it.
     repro: |
       curl -s $API/api/slots | jq -c '.[] | select(.type=="llm") | {name, state, model_id}'
-      sudo -u hal0 /usr/lib/hal0/hermes-hooks/inject-system-state.sh | grep 'Chat model'
+      sudo -u hal0 /usr/lib/hal0/current/installer/agents/hermes/hooks/inject-system-state.sh </dev/null | grep 'Chat model'
       /usr/lib/hal0/venv/bin/python -c "from hal0.agents import hermes_provision as hp; \
         s=hp._fetch_slots(); print(hp._resolve_primary_slot(slots_fetcher=lambda: s)); \
         print([(x['name'], hp._is_ready(x)) for x in s])"
