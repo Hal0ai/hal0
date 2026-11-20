@@ -822,11 +822,12 @@ def test_create_accepts_valid_tune(tmp_hal0_home: str, client: TestClient) -> No
 def test_slot_write_guard_rejects_bad_port_for_in_process_writers() -> None:
     """stacks apply / orchestrators write through the same guard as the route."""
     from hal0.errors import BadRequest
-    from hal0.slots.config_write import guard_slot_write_payload
+    from hal0.slots.config_write import reconcile_and_guard_slot_config
 
     for bad in (8297, 0, None, "8100"):
         with pytest.raises(BadRequest) as ei:
-            guard_slot_write_payload({"port": bad})
+            reconcile_and_guard_slot_config("chat", {"name": "chat", "port": 8081}, {"port": bad})
         assert ei.value.code == "slot.port_out_of_range"
-    guard_slot_write_payload({"port": 8150})
-    guard_slot_write_payload({"device": "gpu-vulkan"})
+    base = {"name": "chat", "port": 8081, "device": "gpu-vulkan"}
+    reconcile_and_guard_slot_config("chat", base, {"port": 8150})
+    reconcile_and_guard_slot_config("chat", base, {"device": "gpu-vulkan"})
