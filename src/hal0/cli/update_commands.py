@@ -340,6 +340,15 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
         "memory lane limit adoption (a hand-made drop-in value could not be copied into "
         "hal0.toml, so the managed value now applies; the update log names the file)"
     ),
+    # #3852: these two also keep the update from counting as converged.
+    "updater.hermes_plugin_mirror_failed": (
+        "Hermes plugin refresh: the shipped plugins did not land "
+        "(run: sudo hal0 agent reprovision hermes)"
+    ),
+    "updater.hermes_plugin_mirror_pass_failed": (
+        "Hermes plugin refresh: the shipped plugins did not land "
+        "(run: sudo hal0 agent reprovision hermes)"
+    ),
     "components.hermes_gateway_regen_failed": (
         "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"
     ),

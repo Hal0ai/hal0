@@ -1802,6 +1802,49 @@ def test_commit_is_not_converged_while_a_slot_file_carries_tuning_keys(
     assert result["convergence"]["converged"] is False
 
 
+@pytest.mark.parametrize(
+    ("event", "converged"),
+    [
+        # #3852: the shipped Hermes plugins did not land, so not converged.
+        ("updater.hermes_plugin_mirror_failed", False),
+        ("updater.hermes_plugin_mirror_pass_failed", False),
+        # Any other pass warning stays a warning only.
+        ("updater.vulkan_migration_failed", True),
+    ],
+)
+def test_commit_reports_a_failed_plugin_mirror_and_is_not_converged(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    converged: bool,
+) -> None:
+    class _Completed:
+        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, *a, **k):
+        if any("run_post_activation_migrations" in part for part in list(cmd)):
+            envelope = json.dumps({updater_module._MIGRATION_RESULT_KEY: {"from": 1, "to": 1}})
+            stderr = (
+                f"2026-11-20 00:00:00 [warning  ] {event} reason='[Errno 13] Permission denied'\n"
+            )
+            return _Completed(stdout=envelope, stderr=stderr)
+        return _Completed()
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())
+
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["ok"] is True
+    assert post["pass_warnings"] == [event]
+    assert result["convergence"]["converged"] is converged
+
+
 def test_commit_carries_a_failed_model_bundle_pull_without_failing_convergence(
     synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

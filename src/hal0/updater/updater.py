@@ -1671,9 +1671,19 @@ def mirror_hermes_plugins(
     shipped ``installer/agents/hermes/plugins`` of the freshly activated tree.
 
     ``install=False`` (the boot-time safety net) does nothing. A box without a
-    hermes home is skipped. Every failure is a quiet ``False``: a plugin copy
-    that cannot land is never a reason to fail an update; ``hal0 doctor``
-    reports the drift. Returns ``True`` only when a tree was rewritten.
+    hermes home is skipped. A failure never fails the update itself, but it is
+    not quiet either (#3852): it logs ``updater.hermes_plugin_mirror_failed``,
+    which is in :data:`_UNCONVERGED_PASS_EVENTS`, so the update reports it
+    and is not recorded as converged. Returns ``True`` only when a tree was
+    rewritten.
+
+    A root caller (``install.sh``'s migration step) never copies into the
+    hal0-writable HERMES_HOME itself (#3852): it first hands any root-owned
+    plugin tree back to hal0 through the ownership table, then runs the copy
+    as hal0 (ADR-0032: Hermes trees are born ``hal0:hal0``, a root caller
+    drops to hal0). A root rmtree + copytree there followed a symlinked parent
+    the hal0 account could plant, and left the trees root-owned, which every
+    later hal0-run update then failed to replace.
     """
     if not install:
         return False
@@ -1687,13 +1697,80 @@ def mirror_hermes_plugins(
     src_root = plugin_src_root or (
         hermes.REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "plugins"
     )
-    changed, _details, failure = hermes._mirror_plugins(src_root, home)
-    if failure is not None:
-        log.warning("updater.hermes_plugin_mirror_failed", job_id=job_id, reason=failure.reason)
+    if os.geteuid() == 0 and _hal0_account_exists():
+        from hal0.install import perms
+
+        perms.converge_hermes_plugin_trees()
+        changed, reason = _mirror_hermes_plugins_as_hal0(src_root, home)
+    else:
+        changed, _details, failure = hermes._mirror_plugins(src_root, home)
+        reason = failure.reason if failure is not None else None
+    if reason is not None:
+        # The remedy rides on the line so the installer's own output, where this
+        # is the only trace of a failed mirror, names the way out too.
+        log.warning(
+            "updater.hermes_plugin_mirror_failed",
+            job_id=job_id,
+            reason=reason,
+            remedy="sudo hal0 agent reprovision hermes",
+        )
         return False
     if changed:
         log.info("updater.hermes_plugins_mirrored", job_id=job_id, hermes_home=str(home))
     return changed
+
+
+def _hal0_account_exists() -> bool:
+    import pwd
+
+    try:
+        pwd.getpwnam("hal0")
+    except KeyError:
+        return False
+    return True
+
+
+#: The child :func:`_mirror_hermes_plugins_as_hal0` runs: the provisioner's own
+#: mirror, with its verdict as the last stdout line.
+_PLUGIN_MIRROR_SCRIPT = (
+    "import json, sys\n"
+    "from pathlib import Path\n"
+    "from hal0.agents.hermes_provision import _mirror_plugins\n"
+    "src, home = sys.argv[1], sys.argv[2]\n"
+    "changed, _details, failure = _mirror_plugins(Path(src), Path(home))\n"
+    "print(json.dumps({'changed': bool(changed),"
+    " 'reason': failure.reason if failure is not None else None}))\n"
+)
+
+
+def _mirror_hermes_plugins_as_hal0(src_root: Path, home: Path) -> tuple[bool, str | None]:
+    """Run the plugin mirror as hal0 from a root process: ``(changed, failure reason)``."""
+    from hal0.system.seam import as_hal0_argv
+
+    argv = as_hal0_argv(
+        [sys.executable, "-I", "-c", _PLUGIN_MIRROR_SCRIPT, str(src_root), str(home)]
+    )
+    try:
+        proc = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd="/",
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"plugin mirror as hal0 could not run: {exc}"
+    for line in reversed((proc.stdout or "").splitlines()):
+        try:
+            verdict = json.loads(line)
+        except ValueError:
+            continue
+        if proc.returncode == 0 and isinstance(verdict, dict) and "changed" in verdict:
+            reason = verdict.get("reason")
+            return bool(verdict["changed"]), str(reason) if reason is not None else None
+    tail = (proc.stderr or "").strip().splitlines()[-1:] or [f"exit {proc.returncode}"]
+    return False, f"plugin mirror as hal0 failed: {tail[0]}"
 
 
 def repair_hermes_mcp_client(
@@ -4254,6 +4331,12 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
             perms.commit(perms.plan(lock_rows))
         except (OSError, KeyError) as exc:
             log.warning("updater.registry_lock_perms_failed", job_id=job_id, error=str(exc))
+        # #3852: hand a root-owned Hermes plugin tree (left by a root-run
+        # install.sh) back to hal0 while root is still held, so the hal0-run
+        # post-swap mirror below can replace it.
+        from hal0.install import perms
+
+        perms.converge_hermes_plugin_trees()
 
     log.info(
         "updater.activate_ok",
@@ -4420,12 +4503,23 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.extraction_dropin_reconcile_failed",
     "updater.showcase_dropin_reconcile_failed",
     "updater.embedder_record_failed",
+    "updater.hermes_plugin_mirror_failed",
+    "updater.hermes_plugin_mirror_pass_failed",
     # Not a failure: an operator-facing note that the update changed a stored
     # lane limit or adopted a hand-made drop-in value (config migration v5).
     "updater.lane_limits_converted",
     "updater.lane_limits_adopt_skipped",
     # Not a failure: config migration v6 changed [memory.decision].provider.
     "updater.memory_decision_provider_converted",
+)
+
+#: The pass warnings above that also keep an update from counting as converged
+#: (#3852): the shipped Hermes plugin trees did not land, so the box runs the
+#: new release with the old plugin code. Every other pass warning describes a
+#: best-effort cleanup whose miss leaves the box working as before.
+_UNCONVERGED_PASS_EVENTS: tuple[str, ...] = (
+    "updater.hermes_plugin_mirror_failed",
+    "updater.hermes_plugin_mirror_pass_failed",
 )
 
 
@@ -4871,14 +4965,14 @@ class Updater:
             previous=str(prior) if prior else None,
         )
 
-        # `pass_warnings` (#1960 B2) does NOT factor into `ok`/`converged`:
-        # those five passes are independently best-effort BY DESIGN (see
+        # `pass_warnings` (#1960 B2) does NOT factor into `ok`, and only the
+        # _UNCONVERGED_PASS_EVENTS among them factor into `converged`. The
+        # other passes are independently best-effort BY DESIGN (see
         # run_post_activation_migrations's own docstring — an affected slot
-        # or model just keeps its previous state until the operator acts),
-        # exactly as true before this PR as after it. What changed is only
-        # that a swallowed pass failure used to be invisible outside
-        # journalctl; it is now visible here too, without reclassifying a
-        # long-standing non-fatal outcome as a hard one.
+        # or model just keeps its previous state until the operator acts).
+        # A failed Hermes plugin mirror is different (#3852): a shipped
+        # component did not land, so the box is not the release it reports.
+        unconverged_passes = [e for e in pass_warnings if e in _UNCONVERGED_PASS_EVENTS]
         convergence = {
             "post_activation_migrations": {
                 "ok": migrations_error is None,
@@ -4897,7 +4991,7 @@ class Updater:
                 # to launch until it is fixed, so the install is not converged.
                 "conversion_blockers": blockers,
             },
-            "converged": migrations_error is None and not blockers,
+            "converged": migrations_error is None and not blockers and not unconverged_passes,
         }
         log.info(
             "updater.convergence",

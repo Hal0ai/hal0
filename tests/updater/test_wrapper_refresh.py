@@ -277,8 +277,12 @@ def test_activation_repairs_only_registry_locks(
 
     updater.activate_release(target.name)
 
-    assert len(plans) == int(root)
+    # Root also hands the Hermes plugin trees back to hal0 (#3852), nothing else.
+    assert len(plans) == 2 * int(root)
     if root:
         assert {diff.path for diff in plans[0].diffs} == {registry, lock}
         lock_diff = next(diff for diff in plans[0].diffs if diff.path == lock)
         assert (lock_diff.owner, lock_diff.group, lock_diff.mode) == ("hal0", "hal0", 0o664)
+        plugins = paths.var_lib() / ".hermes" / "plugins"
+        assert plans[1].diffs
+        assert all(d.path == plugins or plugins in d.path.parents for d in plans[1].diffs)
