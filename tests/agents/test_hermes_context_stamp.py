@@ -41,13 +41,14 @@ def _config_write(
     anchor_row: dict[str, Any] | None,
     *,
     live: bool = True,
+    catalog: list[dict[str, Any]] | None = None,
 ) -> tuple[hp.PhaseResult, dict[str, Any], list[tuple[str, str]]]:
     monkeypatch.setattr(hp, "_live_resolve_enabled", lambda: live)
     asked: list[tuple[str, str]] = []
 
     def anchor(model_id: str, base_url: str = "", gateway_url: str = ""):  # type: ignore[no-untyped-def]
         asked.append((model_id, base_url))
-        return (anchor_row, [])
+        return (anchor_row, list(catalog or []))
 
     # The ct151 shape: the agent slot has no model and only brain is bound, so
     # /v1/models carries no `agent` row for Hermes to match.
@@ -170,3 +171,117 @@ def test_drops_its_stamp_when_hal0_agent_is_not_the_default(
     assert "context_length" not in data["model"]
     assert "model_context_length" not in (data.get("hal0") or {})
     assert out.details["model_context_length"] is None
+
+
+def _write_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: dict[str, Any]
+) -> None:
+    path = tmp_path / "overrides.yaml"
+    path.write_text(yaml.safe_dump({"model": model}), encoding="utf-8")
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", path)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [{"default": "hal0/utility"}, {"default": "some/cloud", "provider": "openrouter"}],
+    ids=["hal0-utility", "foreign-provider"],
+)
+def test_overrides_model_wiring_gets_no_agent_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model: dict[str, Any]
+) -> None:
+    """overrides.yaml lands after the config-set calls: the stamp must be
+    decided on the final file, from the first provision and on every rerun."""
+    _write_overrides(tmp_path, monkeypatch, model)
+    for _ in range(3):
+        out, data, _asked = _config_write(tmp_path, monkeypatch, _FALLBACK_ROW)
+        assert data["model"]["default"] == model["default"]
+        assert "context_length" not in data["model"]
+        assert "model_context_length" not in (data.get("hal0") or {})
+        assert out.details["model_context_length"] is None
+
+
+def test_overrides_added_later_remove_an_existing_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _config_write(tmp_path, monkeypatch, _FALLBACK_ROW)
+    _write_overrides(tmp_path, monkeypatch, {"default": "hal0/utility"})
+    _out, data, _ = _config_write(tmp_path, monkeypatch, _FALLBACK_ROW)
+    assert "context_length" not in data["model"]
+    assert "model_context_length" not in (data.get("hal0") or {})
+
+
+def test_no_stamp_when_an_agent_model_is_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bound agent model has an `agent` alias row, which Hermes matches
+    (`key in model`) and reads live; a stamp would only go stale."""
+    catalog = [{"id": "agent", "owned_by": "hal0", "context_length": 131072}]
+    out, data, _ = _config_write(tmp_path, monkeypatch, _FALLBACK_ROW, catalog=catalog)
+    assert "context_length" not in data["model"]
+    assert out.details["model_context_length"] is None
+
+
+def test_binding_an_agent_model_removes_the_fallback_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _config_write(tmp_path, monkeypatch, _FALLBACK_ROW)
+    catalog = [{"id": "agent", "owned_by": "hal0", "context_length": 131072}]
+    _out, data, _ = _config_write(tmp_path, monkeypatch, _FALLBACK_ROW, catalog=catalog)
+    assert "context_length" not in data["model"]
+    assert "model_context_length" not in (data.get("hal0") or {})
+
+
+def test_slot_swap_refresh_follows_the_window_and_drops_the_stamp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """render_live_context runs after every slot swap; it re-reconciles a
+    stamp hal0 owns, so binding an agent model does not leave it stale."""
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path / "runtime")
+    _config_write(tmp_path, monkeypatch, _FALLBACK_ROW)
+    config = tmp_path / "hh" / "config.yaml"
+    slots = [{"name": "brain", "type": "llm", "state": "ready", "model": "brain-model"}]
+
+    def render(row: dict[str, Any], catalog: list[dict[str, Any]]) -> None:
+        hp.render_live_context(
+            hermes_home=tmp_path / "hh",
+            slots_fetcher=lambda: slots,
+            contexts_fetcher=lambda: {"brain": 65536},
+            health_probe=lambda *_a, **_k: 200,
+            anchor_fetcher=lambda *_a, **_k: (row, catalog),
+        )
+
+    render({**_FALLBACK_ROW, "context_length": 32768}, [])
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert data["model"]["context_length"] == 32768
+    assert data["hal0"]["model_context_length"] == 32768
+    render(_FALLBACK_ROW, [{"id": "agent", "context_length": 131072}])
+    data = yaml.safe_load(config.read_text(encoding="utf-8"))
+    assert "context_length" not in data["model"]
+    assert "model_context_length" not in (data.get("hal0") or {})
+
+
+def test_slot_swap_refresh_leaves_a_box_without_a_stamp_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(hp, "RUNTIME_SNAPSHOT_DIR", tmp_path / "runtime")
+    home = tmp_path / "hh"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"default": "hal0/agent", "context_length": 40000}}),
+        encoding="utf-8",
+    )
+    calls: list[str] = []
+
+    def anchor(*_a: Any, **_k: Any):  # type: ignore[no-untyped-def]
+        calls.append("asked")
+        return (_FALLBACK_ROW, [])
+
+    hp.render_live_context(
+        hermes_home=home,
+        slots_fetcher=lambda: [{"name": "brain", "type": "llm", "model": "m"}],
+        contexts_fetcher=lambda: {},
+        health_probe=lambda *_a, **_k: 200,
+        anchor_fetcher=anchor,
+    )
+    assert calls == []
+    assert yaml.safe_load((home / "config.yaml").read_text())["model"]["context_length"] == 40000
