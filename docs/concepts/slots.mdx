@@ -7,7 +7,7 @@ sidebar:
 # (hal0-web PageTitle override). Product metadata, so it belongs here
 # with the page it describes rather than web-side, where the mirror
 # would overwrite it.
-appliesTo: v1.0
+appliesTo: v1.8
 ---
 
 import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
@@ -107,7 +107,8 @@ hal0 slot edit scratch --profile agent-32k
 Every image hal0 ships is a `RUNNER_IMAGES` registry entry — the default
 AMD GPU runtime (`standard`, titled **Standard**, the only entry allowed both
 a ROCm and a Vulkan lane) plus the CPU, NPU, CUDA and single-purpose speech
-and image runtimes, each pinned in `manifest.json`.
+and image runtimes and the optional `halogen` and `xdna` runners, each pinned
+in `manifest.json`.
 `image_pin` is a debug-only override (a custom build, an A/B test, a
 rollback) and never appears as a pickable Runtime option. See [Capabilities
 & profiles](/docs/concepts/capabilities-and-profiles) for the full Runtime
@@ -332,9 +333,11 @@ Pinning image mode (`POST /api/comfyui/pin`, or `pin` on the switchover) holds i
 until you unpin it.
 
 <Aside type="caution">
-The single NPU LLM anchor is exclusive too, but for a different reason: the AMD
-XDNA hardware context admits exactly one NPU LLM at a time. hal0 enforces this —
-enabling a second `device=npu` chat slot is rejected.
+The single FLM NPU LLM anchor is exclusive too, but for a different reason: the
+AMD XDNA hardware context admits exactly one FLM chat model at a time. hal0
+enforces this — configuring a second model-bound FLM `device=npu` chat slot is
+rejected. See [The NPU lanes](#the-npu-lanes) for how the optional `xdna` runner
+fits beside it.
 </Aside>
 
 ## Dedicated embed and rerank lanes
@@ -390,7 +393,7 @@ device. A profile's own `--spec-draft-*` flags override the bundle's values.
 Every install starts with a set of **seeded slots** so the common capabilities
 have a home before you create anything:
 
-`flm`, `tts`, `rerank`, `utility`, `img`, `agent`, `brain`, `qwen3tts`,
+`flm`, `tts`, `rerank`, `memory`, `img`, `agent`, `brain`, `qwen3tts`,
 `coder`, and `embed`.
 
 When the NPU runtime (FastFlowLM) is present, two more shadow slots are
@@ -400,15 +403,18 @@ deleting one requires `--force` (see [Manage slots](/docs/guides/manage-slots)),
 which an install or update reconcile may later re-seed.
 
 Each seeded slot names a seed profile that carries its tune: `agent` runs
-`agent`, `utility` runs `utility`, `coder` runs `coding`, `brain` runs
+`agent`, `memory` runs `memory`, `coder` runs `coding`, `brain` runs
 `brain`, `embed` runs `embedding`, `rerank` runs `reranking`, `flm` runs
 `flm`, `tts` runs `kokoro`, `qwen3tts` runs `qwen3-tts`, and `img` runs
 `comfyui`.
 
 The two canonical LLM slots are **`agent`** (the capable default — the
-dispatch fallback anchor every routing chain ends in) and **`utility`** (the
-cheap helper, seeded on every install so tasks like memory extraction always
-have a cheap local model to target). The slot name is the routing key.
+dispatch fallback anchor every routing chain ends in) and **`memory`** (a slot
+for the memory engine's extraction work, seeded empty with no model bound).
+`hal0/memory` resolves through `(memory, agent)`, so until you bind a model to
+`memory` that work shares the `agent` slot. A box upgraded from before the
+`memory` seed keeps its own `utility` slot untouched. The slot name is the
+routing key.
 
 Each slot carries a **type** (`llm`, `embedding`, `reranking`, `transcription`,
 `tts`, or `image`) and a **device** preference (`gpu-rocm`, `gpu-vulkan`,
@@ -422,19 +428,42 @@ they're a transparent translation at dispatch time.
 Addressing a slot by its name (e.g. `model: "agent"`) is the stable way to pin
 a co-resident model: the name doesn't change when you swap the underlying
 model file. hal0 also resolves `hal0/<slot>`-style virtual model names —
-`hal0/agent`, `hal0/utility`, `hal0/npu`, and the same pattern for any
+`hal0/agent`, `hal0/memory`, `hal0/npu`, and the same pattern for any
 custom `type: llm` slot (`hal0/research`, say) — to whichever slot is
 actually loaded. As of v1.0 these canonical names are no longer advertised
 as separate entries in `/v1/models`: each enabled LLM slot's own alias
 already covers its listing, so a `hal0/<slot>` request is resolved on
 demand at dispatch time instead of being double-listed.
 
-## The NPU trio
+## The NPU lanes
 
-The AMD XDNA NPU is driven by FastFlowLM (FLM), and one detail shapes how hal0
-uses it: a **single `flm serve` process serves three modalities at once** —
-chat, speech-to-text, and embeddings. hal0 calls this the **NPU trio**. See
-[Strix Halo](/docs/concepts/strix-halo) for the hardware reason this exists.
+The AMD XDNA NPU has two lanes, both listed on the dashboard's Slots → NPU tab.
+See [Strix Halo](/docs/concepts/strix-halo) for the hardware.
+
+**FLM, the default lane.** The NPU is driven by FastFlowLM (FLM), and one detail
+shapes how hal0 uses it: a **single `flm serve` process serves three modalities
+at once** — chat, speech-to-text, and embeddings. hal0 calls this the **NPU
+trio**.
+
+**`xdna`, the optional GGML lane.** The optional `xdna` runner runs plain GGUF
+models on the same NPU through a llama.cpp fork, instead of FLM's own model
+list ([ADR-0057](/docs/adr/0057-ggml-xdna-optional-npu-runner)). `hal0 slot
+create` and `hal0 slot edit` take `--hardware npu` for one, and new `xdna`
+slots default to the seeded `xdna` profile. A model runs either fused (a single
+kernel decode path, for one architecture and quantization) or per-op, which is
+correct but slower; the slot's fit chip says which.
+
+Both lanes serve one request at a time, so a slot file's `max_inflight` caps how
+many requests hal0 admits into the slot; an FLM or `xdna` slot defaults to one
+and the rest queue in hal0 instead of inside the backend
+([ADR-0056](/docs/adr/0056-serial-backend-admission)).
+
+The NPU is one piece of silicon, so the lanes exclude each other where they
+must. A **per-op** `xdna` slot and the FLM anchor cannot both hold it: loading
+the second is refused with `409 slot.npu_conflict`, and the dashboard (or
+`--unload-npu-holder` on `hal0 slot load` and `restart`) offers to unload the
+holder first. A fused `xdna` slot time-slices the NPU beside FLM
+([ADR-0059](/docs/adr/0059-npu-perop-exclusion)).
 
 ## Stacks — declarative slot bundles
 

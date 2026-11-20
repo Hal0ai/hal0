@@ -149,7 +149,7 @@ not refused, and a tool you never listed (which the policy denies) is
 callable too. That holds even for an allow-only or empty policy.
 `hal0 mcp expose <id> --hermes` or `--brain` returns
 `409 mcp.exposure_policy_unenforced`, `hal0 mcp test <id>` says the same,
-and a server exposed before this release is removed from the agent's
+and a server exposed earlier is removed from the agent's
 config at the next hal0-api start or MCP change. Exposure comes back once
 hal0's proxy mount sits on the agent's call path (#2303). hal0's own
 bundled servers are not affected.
@@ -379,8 +379,9 @@ name is its identity. hal0's own agents (the Hermes profiles and Pi) prove
 theirs with an identity key in `X-hal0-Agent-Key`, which hal0 writes into
 their configuration ([ADR-0062](/docs/adr/0062-memory-identity-from-a-credential)).
 
-The names hal0 reserves for its own agents (`hermes`, `hermes__<profile>`,
-`pi`, any name starting `hal0`, `unknown`) are refused with
+The names hal0 reserves (`hermes`, `hermes__<profile>`, `pi`, `admin`,
+`anonymous`, `shared`, `unknown`, `unresolved` and any name starting `hal0`)
+are refused with
 `403 bridge.client_name_reserved` on `/mcp/memory` when sent without their
 identity key.
 
@@ -452,6 +453,10 @@ both mounts; a client-tier `HAL0_CLIENT_KEY` only satisfies `/mcp/memory`
 ![MCP admin tab in dashboard](/screenshots/mcp-tab.png)
 *Dashboard tab showing available MCP tools and their approval status.*
 
+`hal0-memory` registers 30 tools: search, recall, reflect, curation, mental
+models, directives, operations, documents and the knowledge base. The everyday
+ones are:
+
 | Tool            | Effect | Notes |
 |-----------------|--------|-------|
 | `memory_add`    | write  | `text` (required), `dataset`, `tags`, `metadata`, `document_id`. Reuse `document_id` to upsert one logical document. |
@@ -460,30 +465,21 @@ both mounts; a client-tier `HAL0_CLIENT_KEY` only satisfies `/mcp/memory`
 | `memory_list`   | read   | Paginate: `dataset`, `cursor`, `limit`. |
 | `memory_delete` | delete | `ids` (non-empty list), optional `dataset`. |
 
+[MCP tools: hal0-memory](/docs/reference/mcp-tools-memory) lists every tool, its
+arguments and its gating tier.
+
 ### Admin tools (`/mcp/admin`)
 
 Admin tools are classified into three tiers. Read-only and low-blast-radius
 writes run **autonomously**; destructive or wide-reaching tools are
 **gated** — they enqueue for owner approval and return
 `{"status": "pending_approval", "approval_id": "..."}` instead of
-executing.
+executing. Reads include `slot_list`, `model_list`, `hardware_probe` and
+`profile_list`; `model_pull`, `model_delete`, `slot_create`, `slot_restart`,
+`capability_set`, `config_write` and `stack_apply` are gated. The
+[MCP tools reference](/docs/reference/mcp-tools) lists every tool with its tier.
 
-**Autonomous — read:** `slot_list`, `slot_status`, `model_list`,
-`hardware_probe`, `capability_list`, `provider_list`, `version_info`,
-`stack_list`, `stack_status`, `profile_list`, `profile_status`,
-`profile_export`, `gpu_target_version`, `npu_status`, `env_report`,
-`model_store_probe`.
-
-**Autonomous — write:** `model_swap`, `memory_add`, `memory_search`,
-`memory_list`, and `memory_delete` for a single id. A bulk `memory_delete`
-routes to the gated tier at call time.
-
-**Gated — always require approval:** `model_pull`, `model_delete`,
-`slot_create`, `slot_delete`, `slot_restart`, `capability_set`,
-`config_write`, `provider_credential_write`, `stack_apply`,
-`stack_import`, `stack_delete`, `profile_create`, `profile_update`,
-`profile_import`, `profile_delete`, and
-`logs_tail`. `slot_create` and `config_write` go through the same slot-write checks as every other path: a tuning key on the slot is refused with `slot.tuning_key_denied`, and a `LLAMA_ARG_*` variable in `[server].env` with `slot.llama_env_denied`. Tunes belong on a profile; see [Edit configuration](/docs/guides/configure#launch-flags-are-screened-on-the-profile).
+`slot_create` and `config_write` go through the same slot-write checks as every other path: a tuning key on the slot is refused with `slot.tuning_key_denied`, and a `LLAMA_ARG_*` variable in `[server].env` with `slot.llama_env_denied`. Tunes belong on a profile; see [Edit configuration](/docs/guides/configure#launch-flags-are-screened-on-the-profile).
 
 ### The approval flow
 

@@ -7,13 +7,11 @@ sidebar:
 
 import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components';
 
-hal0 gives you three log/activity surfaces, each with a different
-lifetime and a different CLI verb: per-slot runtime logs, per-agent
-provisioning logs, the API's own systemd journal, and — separately from
-all of those — the durable Activity/Audit log, which you read in the
-dashboard's dock, merged with the journal. The dashboard also rolls request
-traffic up live: per-endpoint request volume with p50 / p95 latency over the
-last 60 seconds.
+hal0 has four log and activity surfaces, each with its own lifetime: per-slot
+runtime logs, per-agent provisioning logs, the API's own systemd journal, and
+the durable Activity/Audit log, which you read in the dashboard's dock, merged
+with the journal. The dashboard also rolls request traffic up live:
+per-endpoint request volume with p50 / p95 latency over the last 60 seconds.
 
 ## Slot logs
 
@@ -139,9 +137,9 @@ curl 'http://localhost:8080/api/activity/export?fmt=json' -o hal0-activity.json
 ```
 
 <Aside type="note">
-Don't confuse this with `hal0 board` — the agent task kanban (Triage →
-To-do → Scheduled → Ready). That's a work-tracking surface, not a log.
-See [Run agents](/docs/guides/run-agents).
+Don't confuse this with `hal0 board`, the operator board (the Hermes kanban:
+Triage, To-do, Scheduled, Ready and so on). That's a work-tracking surface, not
+a log. See [Operator board](/docs/guides/operator-board).
 </Aside>
 
 ## See also

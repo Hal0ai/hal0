@@ -49,7 +49,7 @@ Root model `Hal0Config`, `extra="allow"`.
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `schema_version` | int | `4` | `>= 1` |
+| `schema_version` | int | `6` | `>= 1` |
 
 ### `[slots]`
 
@@ -129,148 +129,10 @@ override: `HAL0_FLM_MODELS_DIR`.
 
 ### `[memory]`
 
-`extra="allow"`.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `enabled` | bool | `true` | — |
-| `bank` | str | `"hal0:shared"` | Hindsight bank behind the `shared` namespace (ADR-0052, ADR-0058 decision 7); letters, digits, `.`, `_`, `:`, `-`, max 128, must start alphanumeric; not `agents` or `private__*`. A store from before the two-bank layout keeps its recorded bank, and there the key names a bank only when set to something other than `hal0:shared` ([Memory banks](/docs/concepts/memory-banks)). Run `hal0 memory migrate platform` before changing it; restart hal0-api |
-| `private_bank` | str | `"hal0:private"` | Hindsight bank behind every `private:<agent>` namespace in the two-bank layout; same rules as `bank`, and must differ from it. Not used by a store still on its old layout. Restart hal0-api |
-| `engine` | str | `"hindsight"` | one of `hindsight`, `mem0`, `pgvector` — `"cognee"` is explicitly rejected (retired) |
-| `graph` | table | — | see below |
-| `priority` | table | — | see below |
-| `embedding` | table | — | see below |
-| `projects` | table | — | see below |
-| `compat` | table | — | see below |
-| `lanes` | table | — | see below |
-
-#### `[memory.graph]`
-
-`extra="ignore"`.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `enabled` | bool | `false` | informational only |
-| `extraction_slot` | str | `"memory"` | regex `^[a-z0-9][a-z0-9_-]{0,31}$`; the local slot the engine runs on while `extraction_model` is unset |
-| `extraction_model` | str \| null | `null` | an upstream model id hal0's `/v1` routes (regex `^[A-Za-z0-9][A-Za-z0-9_./:-]{0,127}$`, never `hal0/…`); set → the engine runs on it instead of `extraction_slot`, validated against the live upstream catalogs at set-time |
-| `llm_timeout_s` | int | `300` | `30-3600` |
-| `extraction_max_concurrent` | int | `1` | `1-8` |
-| `extraction_max_tokens` | int | `16384` | `3072-32768` |
-| `extraction_llm_retries` | int | `1` | `0-5` |
-| `extraction_task_retries` | int | `2` | `0-10` |
-| `extraction_retry_backoff_s` | int | `120` | `10-3600` |
-| `extraction_worker_slots` | int | `4` | `3-32` |
-| `retain_reserved_slots` | int | `1` | `0-31` |
-| `consolidation_reserved_slots` | int | `2` | `0-31` |
-| `refresh_reserved_slots` | int | `0` | `0-31` |
-
-`hindsight-api` always calls one virtual model id, `hal0/memory`, which the `extraction-model.conf` systemd drop-in sets. hal0's `/v1` resolves it on every call to `hal0/<extraction_slot>`, or to `extraction_model` when that is set. Changing `extraction_slot` or `extraction_model` therefore applies at once and does not restart the engine. hal0 clamps `extraction_max_concurrent` to the extraction slot's `--parallel`. `hal0/memory` reads use `llm_timeout_s` when it exceeds `[dispatcher].direct_read_timeout_s`. Changing `llm_timeout_s` or one of the `extraction_*` limits rewrites the drop-in and restarts hindsight-api, as does the first save after an upgrade when the drop-in is missing or stale. An `extraction_model` that no configured upstream advertises is rejected (422 `config.memory_graph_model_invalid`, listing the pickable ids) and the config is left as it was. A `HINDSIGHT_API_LLM_PROVIDER`, `HINDSIGHT_API_LLM_BASE_URL` or `HINDSIGHT_API_LLM_MODEL` line in `/etc/hal0/hindsight-llm.env` overrides both settings; see [Services](/docs/operate/services/#hindsight-apiservice).
-
-`hal0/memory` has the canonical chain `(memory, agent)`: an absent or model-less
-memory slot falls back to agent. A model-bound memory slot wins even while cold.
-Config migration v4 preserves upgrades by writing `"utility"` only when
-`[memory.graph].extraction_slot` is missing; explicit values and upstreams persist.
-
-`extraction_max_concurrent` sets both `HINDSIGHT_API_LLM_MAX_CONCURRENT` and
-`HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT` to the same rendered value. The global
-limit covers consolidation, reflect and mental-model refresh as well as retain;
-these operations share the LLM concurrency budget. A long reflect or
-consolidation can hold the default single permit and delay queued retains until
-the call finishes or reaches `llm_timeout_s`.
-
-`extraction_worker_slots` sets `HINDSIGHT_API_WORKER_MAX_SLOTS`, how many
-memory tasks the engine runs at once; Hindsight's default of 10 got an 11 GiB
-box OOM-killed, so hal0 renders 4. The `*_reserved_slots` keys reserve slots
-for one task type and must leave at least one shared; see
-[Memory graph extraction](/docs/concepts/memory-graph-extraction).
-`hal0 doctor` (row `memory_engine_env`) shows the values in force.
-
-#### `[memory.priority]`
-
-`extra="forbid"`. These keys reserve the shared-memory scheduling contract;
-admission, deferral and preemption are implemented in a later stage.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `enabled` | bool | `true` | migration v4 writes `false` on upgrades when this key is absent, even in a partially present table |
-| `quiet_gap_s` | int | `30` | non-negative; quiet time after non-memory traffic |
-| `max_defer_s` | int | `300` | non-negative; starvation admission threshold, not a completion deadline |
-
-Migration v4 preserves every explicitly stored priority value. There is no stored
-hold-budget setting: the later gate derives it from half the memory engine's
-`llm_timeout_s`. Existing retry/backoff values remain operator-owned.
-
-#### `[memory.embedding]`
-
-`extra="ignore"`.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `rerank_fallback` | bool | `true` | |
-| `rerank_gateway_url` | str | `"http://127.0.0.1:8080"` | non-empty |
-| `rerank_model` | str | `""` (the `rerank` slot's model) | |
-| `rerank_connect_timeout_s` | float | `1.0` | `0.05-10.0` |
-| `rerank_read_timeout_s` | float | `8.0` | `0.05-60.0` |
-
-#### `[memory.projects]`
-
-`extra="forbid"`. The project registry that memory writes are resolved
-against; see [Memory projects](/docs/concepts/memory-projects).
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `aliases` | table of str → str | `{}` | other spellings of a project: a write naming the left side is tagged as the right side. Applied before `deny`. An alias may not point at a denied name (or the reserved `unresolved`) or back at a name that leads to it. An entry whose two sides are the same name once normalised (`"Widgets" = "widgets"`) does nothing and is ignored |
-| `deny` | list[str] | `["tmp", "temp", "root", "home", "workdir", "scratch", "scratchpad", "unknown", "default"]` | names that are never projects; a write naming one is stored with no project. Setting the key replaces the default list |
-| `registered` | list[str] | `[]` | projects you have confirmed. Not required to write; the `memory_projects` doctor row reports names in use that are neither listed here nor aliased |
-
-Every entry is normalised at load: lower case, `a-z`, `0-9`, `.`, `_` and `-`
-kept, any other run turned into one `-`, at most 100 characters. An entry
-with nothing left after that is refused. hal0-api reads the table at start,
-so a change needs a restart; `hal0 doctor` reads the file each run.
-
-#### `[memory.compat]`
-
-`extra="forbid"`. The engine-compatible memory endpoint for coding agents,
-`/api/memory/compat`; see its [API reference](/docs/reference/api/memory-compat/).
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `shared_document_prefixes` | list[str] | `["git:", "gitlog:", "survey-baseline:"]` | at most 32 entries, each 3 to 64 characters of `a-z A-Z 0-9 . _ : -`, ending with `:` and with no `::`. A client's documents are stored in a namespace of its own; a document id that starts with one of these is stored in its project's shared namespace, which any client of that project may write. Setting the key replaces the default list; `[]` shares nothing |
-| `max_concurrent_reflects` | int | `2` | `1-64`. Reflects through the endpoint running at once, across all clients; one client always runs one at a time. Never more than one fewer than `[memory.lanes]` lets the engine run, so with the shipped lanes the effective value is `1`. Beyond the limit a request is `429` with `Retry-After` |
-| `max_concurrent_recalls` | int | `4` | `1-64`. Recalls through the endpoint running at once, across all clients; one client runs at most two. Beyond the limit a request is `429` with `Retry-After` |
-| `max_outstanding_operations` | int | `64` | `1-10000`. Asynchronous retains one client may have unfinished in the engine. Beyond it an asynchronous retain is `429` with `Retry-After` until earlier ones finish. Counted in the hal0-api process; operations from before a restart are not counted |
-| `max_outstanding_bytes` | int | `268435456` | `1048576-17179869184`. Total request-body size of one client's unfinished asynchronous retains. A single retain is accepted whatever its size while the client has none outstanding |
-| `max_item_bytes` | int | `16777216` | `1024-33554432`. The largest `content` of one retained item, in UTF-8 bytes. The request body is capped at 48 MiB whatever this is |
-| `gitlog_min_interval_s` | int | `86400` | `0-2592000`. The shortest time between two retains of one project's commit-log document (strategy `gitlog`). The plugin re-sends its last 300 commit messages whenever a session starts on a new HEAD, and the engine then extracts the whole document again. A retain sooner than this is `429 memory.compat_gitlog_held` with `Retry-After`. After a restart of hal0-api the stored document's last write in the engine counts as the last retain. `0` turns it off |
-
-The default prefixes are the document ids the Hindsight coding-agents plugin
-derives from the repository itself: one commit, the commit log and a
-codebase-survey marker. The endpoint reads the table from hal0-api's loaded
-configuration on each request: a change saved through the Settings API
-applies at once, and a hand edit of `hal0.toml` at the next restart.
-
-#### `[memory.refresh]`
-
-`extra="forbid"`. When the memory engine refreshes knowledge pages (its
-mental models) and when it consolidates ([ADR-0060](/docs/adr/0060-hal0-owns-knowledge-page-refresh-timing)).
-hal0 writes the page settings onto every page and mental model of this box's
-banks, and onto each bank's defaults, and replaces whatever a page writer
-sends for them.
-
-| Key | Type | Default | Constraints |
-|---|---|---|---|
-| `pages` | str | `"scheduled"` | `scheduled`, `after_consolidation` or `manual`. `scheduled` refreshes each page on `schedule`, and only when facts in its scope changed since its last refresh. `after_consolidation` refreshes a page after every consolidation round that touched its scope. `manual` never refreshes a page by itself. Written to every page's `trigger.refresh_after_consolidation` and `trigger.refresh_cron` |
-| `schedule` | str | `"0 3 * * *"` | A five-field cron expression in UTC (minute hour day-of-month month day-of-week): numbers, `*`, ranges `a-b`, steps `/n` and comma lists; no names or `@` shorthands. Used when `pages = "scheduled"` |
-| `min_interval_s` | int | `86400` | `0-2592000`. The shortest time between two automatic refreshes of one page; a refresh due sooner waits. Written to every page's `trigger.min_refresh_interval_seconds` and to each bank's `mental_model_min_refresh_interval_seconds`. A refresh asked for by hand is not held back. `0` turns the floor off |
-| `consolidation` | str | `"continuous"` | `continuous` or `scheduled`. `scheduled` sets `enable_auto_consolidation = false` on this box's banks and hal0-api starts one consolidation of each on `consolidation_schedule`; `continuous` clears that bank setting when hal0 set it, so the engine's own default applies. An `enable_auto_consolidation = false` hal0 did not set is left alone and reported |
-| `consolidation_schedule` | str | `"0 2 * * *"` | A five-field cron expression in UTC, as `schedule`. Used when `consolidation = "scheduled"`. A run missed while hal0-api was down runs once at its next start; a changed mode or schedule starts the clock again instead. A bank the engine does not take is retried with a backoff, at most four times per run |
-
-hal0-api applies the table at start, every six hours, and whenever one of
-these keys is saved through the Settings API; `hal0 memory refresh-policy
-apply` applies it by hand. Which slot runs a refresh is
-`[memory.lanes.mental_model_refresh].virtual_model`, not this table.
-
-`[memory.lanes]` and `[memory.lanes.<op>]` are on
+The `[memory]` table and its sub-tables (`graph`, `priority`, `embedding`, `models`,
+`console`, `projects`, `compat`, `refresh`) are on
+[Config schema: memory](/docs/reference/config-schema-memory/). `[memory.lanes]` and
+`[memory.decision]` are on
 [Config schema: memory lanes](/docs/reference/config-schema-memory-lanes/).
 
 ### `[updates]`

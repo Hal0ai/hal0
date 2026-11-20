@@ -51,8 +51,8 @@ and export stay dashboard/API-only (`/api/profiles`).
 |---|---|---|
 | `profile list` | — | `--json` |
 | `profile show <name>` | `name` | `--json` |
-| `profile create <name>` | `name` | `--from <profile>` (duplicate a seed or custom profile first), `--flags`, `--ctx-size` (128-16777216), `--thinking`/`--no-thinking`, `--vision` (`auto`\|`off`), `--speculation` (`auto`\|`off`\|`ngram`), `--runner`, `--intent`, `--json` |
-| `profile edit <name>` | `name` | `--flags`, `--ctx-size`, `--clear-ctx-size`, `--thinking`/`--no-thinking`, `--clear-thinking`, `--vision`, `--speculation`, `--runner` (`''` clears), `--intent`, `--json` |
+| `profile create <name>` | `name` | `--from <profile>` (duplicate a seed or custom profile first), `--flags`, `--ctx-size` (128-16777216), `--thinking`/`--no-thinking`, `--vision` (`auto`\|`off`), `--reasoning-effort` (`default`\|`minimal`\|`low`\|`medium`\|`high`\|`xhigh`\|`max`; `default` sends none), `--reasoning-budget` (`-1` unlimited, `0` no thinking, `N` tokens), `--speculation` (`auto`\|`off`\|`ngram`), `--runner`, `--intent`, `--json` |
+| `profile edit <name>` | `name` | `--flags`, `--ctx-size`, `--clear-ctx-size`, `--thinking`/`--no-thinking`, `--clear-thinking`, `--vision`, `--reasoning-effort`, `--reasoning-budget`, `--clear-reasoning-budget` (back to unlimited), `--speculation`, `--runner` (`''` clears), `--intent`, `--json` |
 
 Seed profiles are read-only: `profile edit` on one is refused with the duplicate-first hint (`profile create <new> --from <seed>`). Edits reach a running slot at its next restart, except `runner`: a launch resolves its image from the slot's `binary`, which is copied from the profile's `runner` only when the profile is applied to the slot (`slot edit <slot> --profile <name>`). After `profile edit --runner`, re-apply the profile to each slot that uses it. A llama-server slot with no profile runs its type's seed (`chat` for an `llm` slot), and one that names a profile that does not exist fails to launch with `slot.profile_missing`.
 

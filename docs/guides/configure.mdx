@@ -22,7 +22,7 @@ running daemon; most subcommands are simple wrappers over
 | `upstreams.toml` | External/upstream provider routing — one `[[upstream]]` block per remote or local endpoint. |
 | `profiles.toml` | Optional reusable backend/flag templates. Built-in seed profiles are always overlaid from code on load and never written back here, even if the file exists. |
 | `stacks.toml` | The stack catalogue — bundles of slot configs you can apply as one unit. Managed via the dashboard/`/api/stacks`, not `config show`/`edit`. |
-| `slots/<name>.toml` | One file per slot — port, `device` (`gpu-rocm`\|`gpu-vulkan`\|`gpu-cuda`\|`cpu`\|`npu`), the slot's hardware grid (`n_gpu_layers`, `threads`, `binary`, `image_pin`), `profile` reference, `[model]`, `[server]`, `[npu]`, and (on the `img` slot) `[image]`. |
+| `slots/<name>.toml` | One file per slot — port, `device` (`gpu-rocm`\|`gpu-vulkan`\|`gpu-cuda`\|`cpu`\|`npu`), the slot's hardware grid (`n_gpu_layers`, `threads`, `binary`, `image_pin`), `profile` reference, `[model]`, `[server]`, `[npu]`, an optional `[tune]` override table, and (on the `img` slot) `[image]`. |
 | `mcp-servers/<id>.toml` | One file per MCP server you've installed with `hal0 mcp install`. Mode `0600` — secrets live in its `env` block. |
 
 Other files the runtime drops here: `hardware.json` (cached hardware
@@ -127,11 +127,15 @@ projector, and whether the file has MTP heads. A **profile** holds every tune:
 free llama-server flags, `ctx_size`, `enable_thinking`, `vision` (`auto` or
 `off`) and `speculation` (`auto`, `off` or `ngram`). A **slot** holds placement (`device`,
 `gpu_index`, `n_gpu_layers`, `threads`, `binary`, `image_pin`) and names its
-model and its profile. See
+model and its profile. A slot may also carry a sparse `[tune]` table that
+overrides a few of the profile's tunes for that slot alone: `ctx_size`,
+`enable_thinking`, `reasoning_effort`, `reasoning_budget`, `vision` and
+`speculation`. A key left out inherits the profile
+([ADR-0045](/docs/adr/0045-slots-carry-a-sparse-tune-override-table)). See
 [Slots](/docs/concepts/slots#who-owns-what-slot-model-profile) for how the
 launch command is assembled from the three.
 
-A slot write that carries a tuning key is refused with
+A slot write that carries a tuning key outside `[tune]` is refused with
 `slot.tuning_key_denied`: `[model].context_size` / `ctx_size`, `parallel`,
 `chat_template`, `workers`, `mtp`, `speculation`, `enable_thinking`, `vision`, or
 `[server].extra_args`. Set the window and flags with `hal0 profile

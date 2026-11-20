@@ -28,7 +28,9 @@ A Strix Halo machine gives hal0 three places to run a model:
   <Card title="XDNA NPU" icon="seti:config">
     The AMD XDNA NPU is driven by FastFlowLM (FLM) on the `npu` device. hal0
     detects it via the `amdxdna` driver (the `/dev/accel` device nodes), and one
-    `flm serve` process serves the NPU trio — chat, STT, and embeddings.
+    `flm serve` process serves the NPU trio — chat, STT, and embeddings. The
+    optional `xdna` runner adds a second lane that runs plain GGUF models on
+    the same NPU.
   </Card>
   <Card title="CPU" icon="laptop">
     The Ryzen CPU is always available as the `cpu` device and is the home for
@@ -125,6 +127,26 @@ faster lane; measure yours with `hal0 bench` before you move a slot. Why you
 might not: MTP / speculative-decode profiles are tuned on the ROCm lane, so a
 slot leaning on those may do better where it is.
 
+## The NPU: two lanes, one piece of silicon
+
+The Slots page's NPU tab shows both lanes with their live activity. The
+default lane is FLM, whose closed model list covers chat, speech-to-text and
+embeddings. The optional `xdna` lane runs any GGUF the operator registers
+(see [Run GGUF models on the NPU](/docs/guides/run-xdna-npu)). Both backends
+serve one request at a time, and the NPU is shared hardware, so hal0 keeps the
+lanes from colliding:
+
+- A per-op `xdna` slot and the FLM anchor exclude each other; loading the
+  second is refused with `409 slot.npu_conflict` unless you confirm unloading
+  the holder. A fused `xdna` slot can time-slice the NPU beside FLM. See
+  [Slots](/docs/concepts/slots#the-npu-lanes).
+- Running NPU inference while a GPU slot is up can hang the box or corrupt NPU
+  results when the GPU's fabric clock changes level mid-flight. hal0 reads the
+  clock state and, by default, refuses the load that would combine the two
+  unless the clock is held; holding it has to happen on the Proxmox host, since
+  a guest cannot write the sysfs controls
+  ([ADR-0054](/docs/adr/0054-gpu-fabric-clock-guard)).
+
 ## Unified memory is the tuning target
 
 The defining feature of Strix Halo — and the reason it's such a good fit for
@@ -169,7 +191,7 @@ host reboots. See [Run Flash-Next on halogen](/docs/guides/run-flash-next-on-hal
 hal0 also never budgets a model against the *entire* unified pool: the OS,
 the container runtime, and every other slot need headroom too. When hal0
 seeds its llama.cpp slots (`agent`, `brain`, `coder`, `embed`, `rerank`,
-`utility`) onto a box, it clamps each seed's context window (the `ctx_size` of
+`memory`) onto a box, it clamps each seed's context window (the `ctx_size` of
 the profile the slot names) against a bounded **memory envelope**, not the raw
 pool, and `hal0 doctor all` checks existing slots against the same envelope
 (its `seed_context_envelope` row): on unified-memory hardware that is 55% of total RAM, floored at 2 GiB; on a

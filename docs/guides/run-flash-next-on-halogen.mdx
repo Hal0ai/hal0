@@ -119,8 +119,8 @@ When the box runs out of contiguous memory, allocations do not fail cleanly: the
 engine, or whatever asked for the memory, can stall for minutes at 100% of one
 core with no output. It looks exactly like a hang and is not a crash. hal0's
 admission refuses a load that its estimate says will not fit and evicts only idle,
-unpinned slots first. `agent`, `utility` and `npu` are pinned by default, so a
-halogen load does not take them down unless you un-pinned them.
+unpinned slots first. Slots named `agent`, `utility` or `npu` are pinned by
+default, so a halogen load does not take them down unless you unpinned them.
 
 ## Stage the weights
 
@@ -378,7 +378,7 @@ fuser -v /dev/kfd
 If the first figure is large and nothing holds `/dev/kfd`, either something outside this
 box holds the memory or it has leaked: check the other guests first. The warning can only
 fire while no other GPU slot of this box could hold the memory, so a box running a Vulkan
-slot such as `utility` (which holds GPU memory without appearing under `/dev/kfd`) never
+slot (an upgraded box's `utility` slot, say, which holds GPU memory without appearing under `/dev/kfd`) never
 trips it. The row warns and never fails.
 
 ## What hal0 does not do with it

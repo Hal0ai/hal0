@@ -186,7 +186,7 @@ Leave `kernel.keys.maxkeys` alone unless `sysctl kernel.keys.maxkeys` prints
 less than 2000; if it does, raise it to 2000. Proxmox defaults to 2000 keys
 and 20000 bytes, so setting `maxkeys` to a smaller number such as 1000 would
 cut the key-count quota. The byte quota is the one that runs out: with
-`brain`, `utility` and Open WebUI running, an unprivileged guest used about
+the slots and Open WebUI running, an unprivileged guest used about
 11% of it and never hit the error, so apply the bump if you do.
 
 ### AppArmor
@@ -234,14 +234,13 @@ done
 podman run --rm quay.io/podman/hello
 ```
 
-**The installer repairs this itself.** From the release that ships the fix
-tracked in [#3234](https://github.com/Hal0ai/hal0/issues/3234), hal0's
+**The installer repairs this itself.** Since v1.8.0
+([#3234](https://github.com/Hal0ai/hal0/issues/3234)), hal0's
 installer detects this exact failure — `podman run` failing with `: socket:
 permission denied` — but only inside a nested AppArmor policy namespace,
 which is what an unprivileged LXC is. It never acts on a bare-metal host or
 in a privileged container. It disables only those of the six profiles that
 exist and carry `flags=(unconfined)`, retries, and prints what it changed.
-Until you are on that release, the check is manual.
 
 The denial depends on the **host** kernel: it reproduced on a Proxmox VE 9.2
 host running kernel 7.0 and not on a 6.8 kernel, and Ubuntu 26.04 guests were
@@ -302,8 +301,8 @@ dashboard's unified-memory bar shows real host pressure instead of
 pretending only this container's bytes exist.
 
 Create a read-only token in the Proxmox UI (Datacenter → Permissions →
-API Tokens, with `PVEAuditor` on `/`), then configure it via the dashboard
-Settings → Proxmox card, or write `/etc/hal0/proxmox.json` directly:
+API Tokens, with `PVEAuditor` on `/`), then configure it via
+`PUT /api/settings/proxmox` (`POST /api/settings/proxmox/test` validates a candidate without saving), or write `/etc/hal0/proxmox.json` directly:
 
 ```json
 {
@@ -348,10 +347,9 @@ unprivileged CT with the GPU and NPU forwarded finished with three:
   the memory engine or read the bank layout. hal0-api seeds the same banks
   once it has the engine.
 
-`hal0 doctor all` on the same box reported 31 passes, 5 warnings and no
-failures. The five warnings were: no capability slots active, the open-on-LAN
-auth posture, the agent uid split, memory extraction speed (the `utility`
-slot has no model yet), and `Port DNAT rules` audit unavailable on netavark
+`hal0 doctor all` on the same box reported no failures. Its warnings were:
+no capability slots active, the open-on-LAN auth posture, the agent uid split,
+memory extraction speed, and `Port DNAT rules` audit unavailable on netavark
 1.4. `systemctl --failed` may also list `proxmox-regenerate-snakeoil.service`,
 a known container artefact.
 </Aside>
@@ -415,8 +413,7 @@ The API and dashboard listen on `http://<container-ip>:8080`; OpenWebUI on
 ## Proxmox VM
 
 hal0 also auto-detects and supports running inside a **Proxmox VM**
-(`proxmox-kvm`), CPU-only. iGPU passthrough to a VM is not documented for
-1.0 — use an LXC for GPU/NPU acceleration instead. The dashboard's Proxmox
+(`proxmox-kvm`), CPU-only. iGPU passthrough to a VM is not documented — use an LXC for GPU/NPU acceleration instead. The dashboard's Proxmox
 panel (host memory pressure) also stays off inside a VM, since it depends
 on the LXC-specific cgroup-vs-host memory split described above.
 

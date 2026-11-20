@@ -138,9 +138,10 @@ selecting it starts the `img` slot. A selection you made is left alone.
 
 A model is a set of weight files, each of one component type. Each type lands in
 its own folder under `<model store>/comfyui/models` (`models/` under
-`HAL0_COMFYUI_DATA_ROOT` when you set it), and **Models → Image / ComfyUI**
-groups the files on disk the same way, each marked with the catalog models that
-load it or as unmanaged.
+`HAL0_COMFYUI_DATA_ROOT` when you set it), and **Models → Image / ComfyUI →
+Files** groups the files on disk the same way, each marked with the catalog
+models that load it or as unmanaged. The same tab's **Models** view is the
+catalog: install, cancel, remove and set the default image model there.
 
 | Component | Folder | Loaded by, for example |
 |---|---|---|
@@ -158,7 +159,7 @@ their diffusion model, text encoder and VAE, so installing the second fetches
 only what is still missing. Video, image-edit and upscale models install the
 same way, but the API renders only text-to-image: those run in the ComfyUI
 editor. The files you can delete by hand are the ones no catalog model loads,
-such as a checkpoint you copied in: delete one from **Models → Image / ComfyUI**,
+such as a checkpoint you copied in: delete one from **Models → Image / ComfyUI → Files**,
 or with `DELETE /api/comfyui/files/{subdir}/{relpath}` (MCP
 `comfyui_file_delete`). The call refuses a file a catalog model loads (409
 `comfyui.file_catalog_owned`), a symlink, a hidden path part and any file that

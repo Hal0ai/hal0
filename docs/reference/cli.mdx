@@ -157,9 +157,9 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 |---|---|---|
 | `slot list` | — | `--json` |
 | `slot status <name>` | `name` | `--json` |
-| `slot load <name>` | `name` | `--model`/`-m`, `--json` |
+| `slot load <name>` | `name` | `--model`/`-m`, `--json`, `--unload-npu-holder` (unload an FLM anchor or per-op xdna slot that holds the NPU first) |
 | `slot unload <name>` | `name` | `--json` |
-| `slot restart <name>` | `name` | `--json` |
+| `slot restart <name>` | `name` | `--json`, `--unload-npu-holder` (as for `slot load`) |
 | `slot rename <name> <new_name>` | `name`, `new_name` | — |
 | `slot swap <name>` | `name` | `--model`/`-m` (required), `--no-persist`, `--json` |
 | `slot logs <name>` | `name` | `--follow`/`-f` (when hal0-api cannot read the journal it prints the reason and returns instead of waiting), `--lines`/`-n` (default 200, 1-5000) |

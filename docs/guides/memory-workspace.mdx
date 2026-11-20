@@ -11,7 +11,7 @@ Once [memory is enabled](/docs/guides/enable-memory), the sidebar has one
 **Memory** row, after **Agents**. It opens the Memory area at
 `#memory/health`. The area has five tabs: **Health**, **Facts**,
 **Knowledge**, **Operations** and **Agents**. The header carries a one-line
-summary and an **Engine settings** link to Settings → Data → Memory, where
+summary and an **Engine settings** link to Settings → Memory, where
 the engine, graph extraction and the reranker are configured.
 
 For what memory *is* (namespaces, fact types, directives, mental models),
@@ -38,6 +38,8 @@ a row of buttons while there are six banks or fewer, a dropdown past that.
 On Facts and Knowledge, an address with no bank gets the first bank written
 into it; on Facts, an address that names a bank the engine does not list says
 so instead of opening another one.
+The bar marks `hal0:shared` as shared, `hal0:private` as private, and a bank
+the store has retired as retired.
 
 When memory is off (`[memory].enabled = false`), the Memory row is not in
 the sidebar and any `#memory/…` address goes to the dashboard once the
@@ -229,7 +231,7 @@ A refresh rewrites a page from its facts. It is several calls to the memory
 model and takes minutes, and while it runs, retains and consolidation wait
 for the same model. hal0 decides when every page and mental model refreshes,
 from **Settings → Memory → Knowledge page refresh** (`[memory.refresh]` in
-`hal0.toml`, see the [configuration schema](/docs/reference/config-schema#memoryrefresh)):
+`hal0.toml`, see the [configuration schema](/docs/reference/config-schema-memory/#memoryrefresh)):
 
 - **Scheduled** (the default) refreshes each page once a day at 03:00 UTC,
   and skips a page whose facts have not changed. The schedule can be daily at
@@ -282,7 +284,9 @@ scope bar chooses **All banks** or one bank.
   them.
 - **Consolidate now** queues consolidation, the step that turns stored facts
   into observations, for the chosen bank. It appears in the list as an
-  operation.
+  operation. Consolidation works on one bank at a time, so
+  with **All banks** in scope the button is off and the tab offers **Pick a
+  bank**, which moves you to the scope bar.
 
 CLI equivalent: `hal0 memory ops list` and `hal0 memory ops retry`.
 

@@ -40,8 +40,8 @@ header, flips it back and returns focus to **tap · console**.
 
 ## The console
 
-The back of the card has four tabs, and the arrow keys move between them. It
-opens on **Controls**.
+The back of the Hermes card has five tabs, and the arrow keys move between
+them. Pi's has the first four. It opens on **Controls**.
 
 - **Status** is read-only: the agent unit and gateway state (a gateway you
   turned off is marked "disabled"), the platforms, the API server's endpoint and
@@ -61,6 +61,8 @@ opens on **Controls**.
   provider.
 - **Lifecycle** holds **Upgrade to `<pin>`** or **Repair · rebuild at the
   pin**, and **Uninstall Hermes**.
+- **Delegated** (Hermes only) lists the runs that bridge clients delegated to
+  Hermes; see [Delegate work to the Hermes agent](/docs/guides/delegate-to-agents#see-it-in-the-dashboard).
 
 ## Controls
 
@@ -74,7 +76,7 @@ opens on **Controls**.
   `Gateway restart failed: <reason>` when it fails.
 - **Unit logs** opens the Logs page on the agent's unit
   (`#logs?unit=hal0-agent@hermes.service`): a `unit` channel tails that unit's
-  journal. **Tool activity** opens the activity log on the Slots page. Neither
+  journal. **Tool activity** opens the status dock's events tab. Neither
   acts on the agent.
 - **Persona** lists the personas, with the active one marked. Picking one in
   the list changes nothing; **Activate** makes it the active persona (a toast

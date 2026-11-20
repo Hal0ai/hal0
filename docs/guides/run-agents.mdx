@@ -50,7 +50,7 @@ Pass `--switch` to uninstall the current agent before installing this one.
 
 ### Hermes version, session history and linger
 
-hal0 1.6.0 installs one reviewed Hermes release, v0.22.4 (`4d043038`). Moving from the previous pin (0.19.0) changes two things:
+hal0 installs one reviewed Hermes release, v0.22.4 (`4d043038`). It changes two things on the host:
 
 - **Session history is kept.** From 0.22, Hermes deletes sessions idle 90 days. hal0 writes `sessions.auto_prune: false`, so nothing is
   pruned. To prune, set
@@ -533,6 +533,8 @@ hal0 agent reprovision hermes --repair  # builds and activates a fresh release
 
 - [Enable memory](/docs/guides/enable-memory) — the recall store agents
   read and write.
+- [The Operator Board](/docs/guides/operator-board) — the Hermes kanban in
+  the dashboard and `hal0 board`.
 - [Connect MCP servers](/docs/guides/connect-mcp) — the admin tool tiers
   and the approvals flow.
 - [Delegate work to the Hermes agent](/docs/guides/delegate-to-agents) — let a

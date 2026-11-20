@@ -26,11 +26,13 @@ by a `hal0-slot@<name>.service` systemd unit. A single control plane,
 OpenAI-compatible `/v1/*` requests to the right slot, and serves the
 dashboard. There is no shared inference daemon to babysit.
 
-Each capability — `utility`, `embed`, `rerank`, `stt`, `tts`, `img`, `vision`,
-`agent`, and the NPU-conditional `flm-stt` / `flm-embed` slots — runs in its
-own dedicated podman container. `agent` is the capable default/fallback
-anchor and `utility` is the cheap helper used for background jobs like
-memory extraction.
+A fresh install seeds slots such as `agent`, `brain`, `memory`, `coder`,
+`embed`, `rerank`, `tts` and `img`, plus the NPU `flm` slot where the hardware
+allows; each runs in its own dedicated podman container. The slot name is the
+routing key (`hal0/<slot>`). `agent` is the capable default/fallback anchor,
+`brain` backs the dashboard's steward chat, and `memory` is the extraction
+slot for the memory engine. No chat model is chosen for you: only the small
+brain model is pulled by default.
 
 ## Hardware support
 
@@ -50,16 +52,24 @@ backend selection degrades to CPU rather than refusing to run.
   image, flags, port, and lifecycle, sharing only the GPU through an
   arbiter.
 - **Profiles** — the whole tune for a slot: llama-server flags, context
-  window, thinking default, vision and MTP (seeds include `chat`, `agent`,
-  `utility`, `coding`, `embedding` and `reranking`). A slot names a profile;
+  window, thinking default, vision, reasoning and speculation (seeds include
+  `chat`, `agent`, `memory`, `coding`, `embedding` and `reranking`). A slot
+  names a profile and can override individual keys in its own `[tune]` table;
   to run one model two ways, make two profiles.
 - **Stacks** — named, exportable bundles of slot + profile + model
   assignments (built-in `saber`, `forge`, and `pi`) that you can load,
   clone, and re-apply as a single declarative unit.
-- **Hardware-anchored install** — `install.sh` probes your hardware and
-  provisions a coherent set of slots, models, and extensions in one pass —
-  no separate setup wizard to run afterward.
-- **Prewired chat UI** — OpenWebUI on port `3001`, zero config.
+- **Component-aware install** — `install.sh` probes your hardware, seeds the
+  slots, and lets you opt out of Open WebUI, ComfyUI, the Hermes and Pi agents,
+  memory and the brain model (`--bare` installs inference only) — no separate
+  setup wizard to run afterward.
+- **Prewired chat UI** — Open WebUI on port `3001`, zero config, with hal0's
+  memory and agent-delegation tools attached.
+- **Agents and memory** — the bundled Hermes agent, an optional Pi coding
+  agent, the Hindsight memory engine, and an agent bridge that lets a remote
+  coding agent share hal0 memory under its own revocable key.
+- **NPU** — FastFlowLM chat, embedding and speech on the XDNA NPU, plus the
+  optional `xdna` runner for plain GGUF models.
 - **Signed self-update** — cosign-verified tarballs with one-flag
   rollback.
 
@@ -69,6 +79,11 @@ backend selection degrades to CPU rather than refusing to run.
 ## Start here
 
 <CardGrid>
+  <LinkCard
+    title="Beginner's guide"
+    href="/docs/getting-started/beginners-guide/"
+    description="New to this? One plain-language walkthrough from install to models, slots, profiles, agents and memory."
+  />
   <LinkCard
     title="Install hal0"
     href="/docs/getting-started/install/"

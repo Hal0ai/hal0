@@ -61,8 +61,8 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 
 The bootstrap fetches the release manifest, SHA-256- and cosign-verifies
 the tarball, then hands off to the installer, which installs podman, builds
-the venv, writes systemd units, runs a hardware-recommended first-run
-setup, and starts `hal0-api` on port `8080`. See [Install hal0](/docs/getting-started/install/)
+the venv, writes systemd units, scaffolds the capability slots from the hardware probe, pulls the small brain model, and
+starts `hal0-api` on port `8080`. See [Install hal0](/docs/getting-started/install/)
 for the full sequence and every environment variable and flag.
 
 <Aside type="tip" title="GPU device groups">
@@ -91,7 +91,8 @@ tails the control-plane log if something looks wrong. The dashboard is at
 ## 5. (Optional) Enable the NPU
 
 If the host has an AMD XDNA NPU and the `amdxdna` kernel driver is loaded
-(kernel ≥ 6.11, NPU firmware ≥ 1.1.0.0, `/dev/accel/accel0` present), the
+(the `amdxdna` driver loaded, current NPU firmware, `/dev/accel/accel0`
+present; see [GPU drivers and memory](/docs/getting-started/drivers/)), the
 installer auto-installs the **FastFlowLM (FLM)** userspace on apt hosts.
 Verify with:
 
@@ -102,7 +103,10 @@ flm validate       # → "flm validate ok — NPU runtime reachable"
 A single `flm serve` process backs the **NPU trio** — a chat model plus
 opt-in embedding and speech-to-text passengers on the seeded `flm` slot
 (port `8088`). On non-apt distros the NPU path is skipped and you install
-FastFlowLM manually; the GPU and CPU paths are unaffected.
+FastFlowLM manually; the GPU and CPU paths are unaffected. On a box with an
+NPU the dashboard adds **Slots → NPU**, which shows the FLM and GGML lanes with
+live activity. To run plain GGUF models on the NPU with the optional `xdna`
+runner, see [Run GGUF models on the NPU](/docs/guides/run-xdna-npu/).
 
 ## Next
 

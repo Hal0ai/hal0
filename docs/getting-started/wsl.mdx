@@ -8,7 +8,7 @@ sidebar:
 import { Steps, Aside, Tabs, TabItem, Code, LinkCard, CardGrid } from '@astrojs/starlight/components';
 
 <Aside type="danger" title="Experimental and unsupported">
-Windows is **out of scope for hal0 v1**. hal0 can *detect* that it is
+Windows is **out of scope for hal0**. hal0 can *detect* that it is
 running under WSL2, but nothing in the installer, pre-flight, or doctor
 accommodates or works around WSL's limitations. Expect **CPU-only**
 inference and a fair amount of manual setup. Use this path for
@@ -74,8 +74,9 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 The bootstrap and installer run exactly as on bare metal — verify the
 tarball, install podman, build the venv, write systemd units, and start
 `hal0-api` on port `8080`. Because no GPU/NPU nodes are available, the
-hardware probe falls back to CPU and the `cpu` device is seeded with the
-`cpu-chat` chat profile, so you still get a working primary chat slot.
+hardware probe falls back to CPU and slots run on the `cpu` device with the
+`cpu-chat` profile. Bind a model to a slot as in
+[Load your first model](/docs/getting-started/first-model/).
 
 <Aside type="note" title="Ports and reachability">
 `hal0-api` binds `0.0.0.0:8080` and OpenWebUI `:3001`. From Windows,

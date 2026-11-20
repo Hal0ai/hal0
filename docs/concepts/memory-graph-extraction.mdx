@@ -91,7 +91,7 @@ even on a fresh install, under `[memory.graph]`:
   at least one shared slot. A box held at 3 slots loads with no retain
   reservation unless it sets one, so it runs as before; raise the total to 4
   for the retain slot (the floor stays 3 because each slot costs engine
-  memory). Set all four under **Worker slots** on Settings → Data → Memory,
+  memory). Set all four under **Worker slots** on Settings → Memory,
   which shows the shared pool left as you type; `PUT /api/memory/graph`
   refuses reservations that leave no shared slot with 400
   `config.memory_graph_invalid`. Do not also set Hindsight's older
@@ -128,7 +128,7 @@ on any save. The write and restart go through hal0's privileged-operation seam
 rather than hal0-api (which runs unprivileged) touching `/etc/systemd`
 directly.
 
-Pick the engine model under **Engine model** on Settings → Data → Memory
+Pick the engine model under **Engine model** on Settings → Memory
 (Local slots / Upstream models), or from the CLI with
 `hal0 memory graph enable --model <id>`; `--local` returns to the local
 `extraction_slot`, and `--model` cannot be combined with `--slot` or
@@ -139,6 +139,17 @@ hindsight-api really loads, read from the running engine process. If
 applies that file after every hal0 setting, so the override wins over your
 choice until you remove it. When hal0-api can read neither the process nor
 that file, the row says it cannot verify rather than reporting no override.
+
+Beyond `[memory.graph]`, three more tables are rendered into the engine's
+`showcase-lanes.conf` drop-in beside it: `[memory.models]` (the engine's own
+embedder record, reranker and its candidate cap), `[memory.decision]` (the
+optional decision model, off by default; see [Memory](/docs/concepts/memory#the-decision-model))
+and `[memory.lanes]`, a global `llm_max_concurrent` (unset follows `extraction_max_concurrent`) plus per-operation
+tables for `retain`, `consolidation`, `reflect` and `mental_model_refresh`. hal0
+holds the lane caps to the extraction slot's `--parallel`, the same clamp as
+`extraction_max_concurrent`. A Settings save writes the drop-in and restarts
+`hindsight-api`; `hal0 update` creates or re-renders it. Every key is listed in
+[Config schema: memory lanes](/docs/reference/config-schema-memory-lanes).
 
 <Aside type="note">
 A memory write is refused (fast, with a clear error) rather than silently
