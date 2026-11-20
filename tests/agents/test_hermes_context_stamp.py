@@ -285,3 +285,49 @@ def test_slot_swap_refresh_leaves_a_box_without_a_stamp_alone(
     )
     assert calls == []
     assert yaml.safe_load((home / "config.yaml").read_text())["model"]["context_length"] == 40000
+
+
+# --- first provision: the decision must not depend on how many rows exist ----
+
+
+def _served(catalog: list[dict[str, Any]]) -> tuple[int | None, bool]:
+    def fetch(model_id: str, base_url: str = "") -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        return _FALLBACK_ROW, catalog
+
+    return hp._served_anchor_context(fetch, "hal0/agent", _GATEWAY)
+
+
+def test_one_row_catalogue_of_brain_still_stamps() -> None:
+    """At the installer's first config_write only `brain` is listed. Hermes's
+    single-key shortcut would answer for it today, but the catalogue grows
+    ~10 s later and the shortcut stops applying, so the decision must not use
+    it."""
+    assert _served([{"id": "brain", "owned_by": "hal0", "context_length": 65536}]) == (
+        65536,
+        False,
+    )
+
+
+def test_two_row_catalogue_with_hermes_agent_stamps() -> None:
+    catalog = [
+        {"id": "brain", "owned_by": "hal0", "context_length": 65536},
+        {"id": "hermes-agent", "owned_by": "hal0", "context_length": 65536},
+    ]
+    assert _served(catalog) == (65536, False)
+
+
+def test_catalogue_with_an_agent_row_is_discoverable() -> None:
+    catalog = [
+        {"id": "brain", "owned_by": "hal0", "context_length": 65536},
+        {"id": "agent", "owned_by": "hal0", "context_length": 131072},
+    ]
+    assert _served(catalog) == (None, True)
+
+
+def test_first_provision_stamps_with_only_brain_listed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = [{"id": "brain", "owned_by": "hal0", "context_length": 65536}]
+    out, data, _ = _config_write(tmp_path, monkeypatch, _FALLBACK_ROW, catalog=catalog)
+    assert data["model"]["context_length"] == 65536
+    assert out.details["model_context_length"] == 65536
