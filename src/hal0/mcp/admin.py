@@ -2683,6 +2683,76 @@ async def dispatch(
     return result
 
 
+def _serving_backends_from(backend_list: Any) -> list[dict[str, Any]] | None:
+    """Backends with at least one model loaded now, from a ``backend_list`` result.
+
+    ``None`` when the result is not a usable ``backend_list`` payload (transport
+    error envelope), so the caller can say "unknown" rather than "nothing".
+    """
+    if not isinstance(backend_list, dict) or not isinstance(backend_list.get("backends"), list):
+        return None
+    serving: list[dict[str, Any]] = []
+    for row in backend_list["backends"]:
+        if not isinstance(row, dict):
+            continue
+        loaded = row.get("loaded")
+        if not isinstance(loaded, list) or not loaded:
+            continue
+        serving.append(
+            {
+                "id": row.get("id"),
+                "label": row.get("label", row.get("id")),
+                "models": [m.get("modelId") for m in loaded if isinstance(m, dict)],
+            }
+        )
+    return serving
+
+
+async def _project_system_info(
+    payload: Any,
+    *,
+    bearer: str | None,
+    base_url: str,
+    memory_dispatcher: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None,
+) -> Any:
+    """Project ``GET /api/system-info`` for MCP callers and the steward (#3856).
+
+    The REST body is untouched. Here the runner catalogue's per-row ``backend``
+    (the runner's default lane, not what serves models) is renamed
+    ``default_lane``, and ``serving_backends`` is put first: the backends with a
+    model loaded now, read through the same ``backend_list`` tool path (so it
+    cannot be computed a second way). Empty list when nothing is serving.
+    Every MCP caller and the brain steward reach this through :func:`dispatch`.
+    """
+    if not isinstance(payload, dict) or payload.get("status") == "error":
+        return payload
+    live = await _execute_tool(
+        tool="backend_list",
+        args={},
+        bearer=bearer,
+        base_url=base_url,
+        memory_dispatcher=memory_dispatcher,
+    )
+    serving = _serving_backends_from(live)
+    projected: dict[str, Any] = {"serving_backends": serving if serving is not None else []}
+    if serving is None:
+        projected["serving_backends_error"] = (
+            "live backend status unavailable; call backend_list before naming a backend"
+        )
+    for key, value in payload.items():
+        if key == "backends" and isinstance(value, dict):
+            value = {
+                name: (
+                    {("default_lane" if k == "backend" else k): v for k, v in row.items()}
+                    if isinstance(row, dict)
+                    else row
+                )
+                for name, row in value.items()
+            }
+        projected[key] = value
+    return projected
+
+
 async def _execute_tool(
     *,
     tool: str,
@@ -2750,6 +2820,10 @@ async def _execute_tool(
     result = _wrap_list_payload(tool, result)
     if tool == "slot_list":
         result = _compact_slot_list(result)
+    if tool == "system_info":
+        result = await _project_system_info(
+            result, bearer=bearer, base_url=base_url, memory_dispatcher=memory_dispatcher
+        )
     return result
 
 
@@ -3401,8 +3475,10 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "system_info": (
         "Consolidated hardware + feature flags + per-runner catalogue state "
         "(installed/installable/unavailable) — one read for 'what can this box run'. "
-        "Each `backends` row's `backend` is the runner's catalogue default lane, NOT "
-        "what is serving models now; use `backend_list` or the slot's own backend for that."
+        "`serving_backends` (first key) lists the backends with a model loaded right now "
+        "(same source as `backend_list`); an empty list means nothing is serving. "
+        "Each `backends` row's `default_lane` is the runner's catalogue default lane, NOT "
+        "what is serving models now; never report it as the backend in use."
     ),
     "capability_list": (
         "Capability overlay state — backends + selections + catalogs. The unfiltered "

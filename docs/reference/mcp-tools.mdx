@@ -126,7 +126,7 @@ the slot's current name; an unknown id returns `404 slot.not_found`.
 | `model_inspect_draft` | `POST /api/models/inspect-draft` |
 | `model_store` | `GET /api/settings/models/store` |
 | `hardware_probe` | `GET /api/stats/hardware` |
-| `system_info` | `GET /api/system-info` |
+| `system_info` | `GET /api/system-info` — the tool result leads with `serving_backends` (backends with a model loaded now, the same source as `backend_list`; an empty list when nothing is serving) and names each runner's catalogue default lane `default_lane`, not `backend`. The REST body is unchanged |
 | `port_list` | `GET /api/ports` |
 | `capability_list` | `GET /api/capabilities` |
 | `provider_list` | `GET /api/providers` |
