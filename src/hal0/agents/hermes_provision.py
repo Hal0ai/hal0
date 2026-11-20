@@ -2476,12 +2476,13 @@ def _build_config_overlay(
     Mirrors the (now-deleted) ``config.yaml.j2`` — but ONLY the scalar /
     nested-scalar keys. List-valued keys (``skills.external_dirs``,
     ``hooks.on_session_start``) are layered by :func:`_merge_config_yaml_layers`;
-    ``model.context_length`` is deliberately omitted: per-model context comes
-    from live ``/v1/models`` discovery. (Hermes 0.14 applied it to every
-    model, cloud ones included; v0.22.2 scopes it to the configured default
-    model and route, hermes agent/agent_init.py:1700-1745, but under
-    live-resolve that default is the virtual ``hal0/agent``, so a single
-    number would still be wrong for most slots.)
+    ``model.context_length`` is not in this overlay: every other model's
+    context comes from live ``/v1/models`` discovery, and the one value hal0
+    does write, for the ``hal0/agent`` default, is owned and reconciled by
+    :func:`_reconcile_model_context_length_yaml` (#3854). (Hermes 0.14 applied
+    the key to every model, cloud ones included; v0.22.2 scopes it to the
+    configured default model and route, hermes agent/agent_init.py:1700-1745,
+    so it describes ``hal0/agent`` alone.)
 
     Under live-resolve (the hal0 default) ``model.default`` is the virtual
     ``hal0/agent`` against the gateway with ``discover_models`` on, so the
@@ -2915,6 +2916,189 @@ def _prune_model_aliases_yaml(
             return removed, None
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         return [], _yaml_error_summary(exc)
+
+
+_ANCHOR_MODEL_ID = "hal0/agent"
+
+
+def _hermes_matches_catalog_row(catalog: Iterable[Any], model_id: str) -> bool:
+    """Would Hermes' own ``/models`` discovery find a window for ``model_id``?
+
+    Mirrors the pinned v0.22.4 lookup (agent/model_metadata.py
+    ``_resolve_endpoint_context_length`` over ``_parse_models_payload``): every
+    row is keyed by its id and by the part after its first ``/``; an exact key
+    wins, a catalog with a single key answers for any model, otherwise the
+    first key that contains the model or is contained in it. The row only
+    counts when it carries an integer window.
+    """
+    keys: dict[str, Any] = {}
+    for row in catalog:
+        rid = row.get("id") if isinstance(row, dict) else None
+        if not rid:
+            continue
+        rid = str(rid)
+        keys[rid] = row
+        if "/" in rid:
+            keys.setdefault(rid.split("/", 1)[1], row)
+    matched = keys.get(model_id)
+    if not matched and len(keys) == 1:
+        matched = next(iter(keys.values()))
+    elif not matched and model_id:
+        matched = next((r for k, r in keys.items() if model_id in k or k in model_id), None)
+    ctx = matched.get("context_length") if matched else None
+    return isinstance(ctx, int) and not isinstance(ctx, bool)
+
+
+def _served_anchor_context(
+    fetch_anchor_models: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]],
+    model_id: str,
+    base_url: str,
+) -> tuple[int | None, bool]:
+    """``(window, discoverable)`` for ``model_id`` on ``base_url``.
+
+    ``window`` is what ``GET {base_url}/models/{model_id}`` reports. The by-id
+    route resolves the routing fallback chain exactly as chat dispatch does
+    (``api/routes/v1.py::_resolve_virtual_model_entry``), so for ``hal0/agent``
+    on a box whose agent slot has no model it answers with the window of the
+    slot that really serves it (ADR-0023's fallback, #3854). ``None`` means
+    "cannot see": unreachable, no route, or no usable number.
+
+    ``discoverable`` is True when the catalog already holds a row Hermes would
+    match for ``model_id`` (a bound agent model): Hermes then learns the live
+    window itself, and a stamp would only go stale.
+    """
+    try:
+        entry, catalog = fetch_anchor_models(model_id, base_url)
+    except Exception as exc:  # the seam promises not to raise; stay non-fatal anyway
+        log.warning("hermes_provision.anchor_window_unreadable", error=str(exc))
+        return None, False
+    if _hermes_matches_catalog_row(catalog or [], model_id):
+        return None, True
+    ctx = entry.get("context_length") if isinstance(entry, dict) else None
+    if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= 0:
+        return None, False
+    return ctx, False
+
+
+def _wiring_is_agent_route(data: dict[str, Any]) -> bool:
+    """Does the config's EFFECTIVE model wiring send Hermes to ``hal0/agent``?
+
+    Hermes scopes ``model.context_length`` to ``model.default`` on its route,
+    so hal0 may only own the key when the file, with ``overrides.yaml`` and any
+    operator model pick already applied, names the virtual ``hal0/agent`` on
+    the hal0 gateway.
+    """
+    model = data.get("model")
+    if not isinstance(model, dict):
+        return False
+    base = str(model.get("base_url") or "").rstrip("/")
+    return (
+        model.get("default") == _ANCHOR_MODEL_ID
+        and model.get("provider") == "custom"
+        and base == _DEFAULT_PRIMARY_BACKEND_URL.rstrip("/")
+    )
+
+
+def _sync_model_context_length(
+    config_path: Path,
+    fetch_anchor_models: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]],
+) -> tuple[int | None, str | None]:
+    """Reconcile ``model.context_length`` against the final config and the live window."""
+    if not config_path.exists():
+        return None, None
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:  # unreadable: the reconcile reports it under the lock
+        data = None
+    window, discoverable = None, False
+    if isinstance(data, dict) and _wiring_is_agent_route(data):
+        window, discoverable = _served_anchor_context(
+            fetch_anchor_models, _ANCHOR_MODEL_ID, _DEFAULT_PRIMARY_BACKEND_URL
+        )
+    return _reconcile_model_context_length_yaml(
+        config_path, window=window, discoverable=discoverable
+    )
+
+
+def _reconcile_model_context_length_yaml(
+    config_path: Path, *, window: int | None, discoverable: bool = False
+) -> tuple[int | None, str | None]:
+    """Own ``model.context_length`` for ``hal0/agent``; ``(value in file, error)``.
+
+    Hermes only learns a window from a ``/v1/models`` row it can match or from
+    a local-server probe. On a box whose ``agent`` slot has no model, neither
+    sees the ADR-0023 fallback that serves ``hal0/agent``, so Hermes fell back
+    to its 256,000-token default (#3854). Hermes scopes this key to
+    ``model.default`` (agent/agent_init.py ``_scope_context_length_to_default_runtime``),
+    so it describes ``hal0/agent`` alone and never another slot picked later.
+
+    Ownership is explicit, as for model aliases: hal0 records the value it
+    wrote in ``hal0.model_context_length``. A value that does not match the
+    record (the #3854 hand workaround, or an edit after hal0 wrote it) is the
+    operator's: left alone and the record dropped. Otherwise:
+
+    * managed with a ``window`` — write it and record it, so a refresh follows
+      the resolver when the serving slot or its profile changes;
+    * managed without a window — "cannot see" is not "remove": keep what is
+      there;
+    * not managed — remove hal0's own value, which would otherwise be applied
+      to a default it does not describe. Managed means the file's effective
+      wiring is the ``hal0/agent`` route (:func:`_wiring_is_agent_route`,
+      checked on the file as it stands, so an ``overrides.yaml`` or operator
+      model pick is honoured) and Hermes cannot already discover the window
+      (``discoverable``: an agent model is bound and the catalog has its row).
+    """
+    if not config_path.exists():
+        return None, None
+    try:
+        import yaml
+    except ImportError:
+        return None, "PyYAML unavailable"
+    try:
+        with root_config_lock(config_path.parent):
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None, "config.yaml is not a YAML mapping"
+            model = data.get("model")
+            hal0 = data.get("hal0", {})
+            if not isinstance(model, dict) or not isinstance(hal0, dict):
+                return None, "model or hal0 is not a YAML mapping"
+            managed = _wiring_is_agent_route(data) and not discoverable
+            current = model.get("context_length")
+            recorded = hal0.get("model_context_length")
+            ours = current is not None and recorded is not None and current == recorded
+            changed = False
+            if current is not None and not ours:
+                result = current if isinstance(current, int) else None
+                if "model_context_length" in hal0:
+                    del hal0["model_context_length"]
+                    changed = True
+            elif not managed:
+                result = None
+                if ours:
+                    del model["context_length"]
+                    changed = True
+                if "model_context_length" in hal0:
+                    del hal0["model_context_length"]
+                    changed = True
+            elif window is None:
+                result = current
+            else:
+                result = window
+                if current != window or recorded != window:
+                    model["context_length"] = window
+                    hal0["model_context_length"] = window
+                    data["hal0"] = hal0
+                    changed = True
+            if changed:
+                _atomic_write(
+                    config_path, yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+                )
+            return result, None
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return None, _yaml_error_summary(exc)
 
 
 def _prune_mcp_servers_yaml(
@@ -3821,6 +4005,18 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             memory_servers=_MEMORY_REACHING_SERVERS,
         )
 
+    # #3854: own model.context_length against the FINAL file, so overrides.yaml
+    # and an operator's model pick (both laid down above) decide whether the
+    # key describes hal0/agent. The window is that of whatever really serves
+    # hal0/agent, the ADR-0023 fallback included.
+    model_context_length, ctx_error = _sync_model_context_length(
+        config_path, ctx.io.fetch_anchor_models
+    )
+    if ctx_error is not None:
+        ctx_error = f"model.context_length: {ctx_error}"
+        errors.append(ctx_error)
+    yaml_warning = alias_error or ctx_error
+
     # Legacy honcho.json cleanup — see _disable_honcho_hermes_host.
     honcho_json_changed = _disable_honcho_hermes_host(hermes_home)
 
@@ -3864,7 +4060,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     )
     if status == PhaseStatus.OK and terminal_state_stale:
         status = PhaseStatus.WARN
-    if status == PhaseStatus.OK and alias_error is not None:
+    if status == PhaseStatus.OK and yaml_warning is not None:
         status = PhaseStatus.WARN
     return PhaseResult(
         status=status,
@@ -3872,7 +4068,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         reason=(
             "; ".join(errors[:3])
             if status == PhaseStatus.FAIL
-            else (stale_reason if terminal_state_stale else alias_error)
+            else (stale_reason if terminal_state_stale else yaml_warning)
         ),
         details={
             "config_path": str(config_path),
@@ -3886,6 +4082,9 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "operator_model_kept": kept_model,
             "chat_slot_count": len(chat_slots),
             "removed_model_aliases": removed_aliases,
+            # The model.context_length now in the file (hal0's or the
+            # operator's), None when Hermes is left to discover it (#3854).
+            "model_context_length": model_context_length,
             "persona": persona_name or None,
             "mcp_server_count": len(mcp_servers),
             "delegation_model": (delegation or {}).get("model"),
@@ -7069,6 +7268,25 @@ def _state_body_minus_timestamp(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not line.startswith("_as_of:"))
 
 
+def _refresh_context_stamp(
+    config_path: Path,
+    fetch_anchor_models: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]] | None,
+) -> None:
+    """Re-reconcile ``model.context_length`` iff hal0 recorded a stamp (#3854)."""
+    if not config_path.exists():
+        return
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    hal0 = data.get("hal0") if isinstance(data, dict) else None
+    if not isinstance(hal0, dict) or hal0.get("model_context_length") is None:
+        return
+    _sync_model_context_length(config_path, fetch_anchor_models or _fetch_anchor_models)
+
+
 def render_live_context(
     *,
     hermes_home: Path,
@@ -7076,6 +7294,7 @@ def render_live_context(
     contexts_fetcher: Callable[[], dict[str, int]] | None = None,
     health_probe: Callable[..., int] | None = None,
     now_iso: str | None = None,
+    anchor_fetcher: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]] | None = None,
 ) -> dict[str, Any]:
     """Re-probe live slot/capability state; (re)write HERMES.md + STATE.md.
 
@@ -7145,6 +7364,17 @@ def render_live_context(
             ),
             None,
         )
+
+    # #3854: a slot swap lands here (hermes_refresh), and a window hal0 stamped
+    # into config.yaml for hal0/agent may no longer be the one that serves it
+    # (an agent model was bound, or its profile changed). Re-reconcile it, but
+    # only where hal0 owns a stamp, so a box without one makes no extra calls.
+    # Best-effort: a read-only or unreachable config never fails the render.
+    if not degraded:
+        try:
+            _refresh_context_stamp(hermes_home / "config.yaml", anchor_fetcher)
+        except Exception as exc:
+            log.warning("hermes_provision.context_stamp_refresh_failed", error=str(exc))
 
     capabilities = _collect_capability_rollup(slots_all)
 
