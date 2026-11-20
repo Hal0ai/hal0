@@ -144,7 +144,7 @@ from an untyped 500 to a typed 404 since the entry was last checked; the entry's
 
 29. **Bare alias twice.** Run the #2665 probe once with both sibling slots idle and once while the named slot is busy. Idle runs pass 3/3 and hide the defect; with `agent` busy, `model=agent` 3/3 went to `brain`.
 30. **502 on a bare alias.** A `502 dispatch.upstream_unavailable 'Server disconnected'` may be a foreign lane deleting a sibling slot mid-request; `hal0 slot list` before filing.
-31. **409 names the addressed slot.** In check 25 also assert `details.slot` in the 409 body names the slot you addressed (catches `rerank` naming `embed`).
+31. **409 names the addressed slot.** In check 25 also assert `details.slot` in the 409 body names the slot you addressed (custom-named slots and registered or advertised ids only; stock `rerank` naming `embed` is rule 7, by design, see known-issues `chat-to-rerank-name-409-names-embed-slot`).
 32. **Slot JSON keys.** The bound model is `.config.model.default` in `hal0 slot show --json` (or `model_default` in `GET /api/slots/<n>`), not top-level `.model`; the brief's `jq .model` returns null.
 33. **Scratch dirs.** Use `/var/tmp/routing-<pid>`; `/tmp/entry-*.txt` are overwritten by other actors.
 
@@ -158,3 +158,11 @@ Brain and embed loaded and healthy. Any model you caused to auto-load, unload ag
 * With agent bound to the same model as a second ready slot, assert model=agent AND model=coder both reach the named slot, idle and busy (#2665).
 * Load qwen3.5-0.8b into coder as the workhorse when brain is held by Hindsight; it is a Qwen3-family template so check 11 (json_object) exercises the collision case.
 * Approvals inbox empty at exit: use the API route; `hal0 mcp approvals list` does not exist.
+
+## Added in kit 19
+
+* Check 31 is reworded (see its text): stock `rerank` naming `embed` is rule 7, by design. Probe `model=rerank` and `hal0/rerank` only to confirm a typed refusal, and probe a registered or advertised rerank id for `details.slot==rerank`.
+* Gate the lane on a quiet brain (`hal0 memory ops list --json` zero pending): checks 23/24 took 45-100 s per call behind Hindsight and ate the budget.
+* Probe `hermes-agent` from `/v1/models` both stream and non-stream and report them as one row.
+* Record the tts `models`/model column at entry and exit; kokoro-v1 appearing at exit with the TOML untouched is runtime display (known slot-model-id-is-runtime-not-binding).
+* #2666 symptom (omitted model, bound-but-offline agent) now wakes the agent and returns 200 on 1.8.0; re-verify and close the issue if it holds.

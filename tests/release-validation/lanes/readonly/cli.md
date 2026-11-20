@@ -123,3 +123,9 @@ baseline diff, so don't stop checking after the first comparison.
 Rollups are cheap to file and cheap to lose track of — when you find several small CLI defects,
 enumerate every one individually in your findings even if they will be filed as a single issue
 (#1796 collected fourteen in rc.4; #1840 collected thirteen in rc.5).
+
+## Added in kit 19
+
+* In one pass compare `used_by` in `/api/profiles` against `/api/profiles/<name>` for every profile.
+* `hal0 agent peers` row count must equal distinct card document ids (#3877, known); `hal0 model scan` must name each skip reason (#2725, known).
+* Assert `hal0 mcp status <server>` output is bounded (hal0-admin printed 44 KB).

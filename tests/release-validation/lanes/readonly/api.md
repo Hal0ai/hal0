@@ -148,3 +148,10 @@ cheapest place to catch a regression, so it should grow every release.
 * Update-box baseline: 0 masked leaves after #3817/#3805; fail if any appear.
 * Unknown `/api/...` path returning an empty 404 is by design; do not file it (reword any check that expects a JSON body).
 * Kit fact: qwen3.5-0.8b is NOT registered on a fresh ct151 at install; the installer pulls only the brain model and kokoro.
+
+## Added in kit 19
+
+* Re-run the `/v1/models` against models-and-slots `comm -23` check at lane end as well as at the start.
+* `GET /v1/models/<raw model id of a serving chat slot>` must return 200 like the chat POST with the same id (#3880, known).
+* `GET /api/slots?limit=abc`: assert a 4xx or a documented ignore, never a 5xx.
+* After an MCP client DELETE, scan the journal for `Error in standalone SSE writer` / ClosedResourceError.

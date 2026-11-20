@@ -157,3 +157,10 @@ values you changed.
 * Wrong-typed `messages` fast probe: cut the client at ~4 s and require an error frame or an open stream, not a 0-byte close.
 * Gate latency checks on `hal0 memory ops list` showing zero processing/pending ops.
 * Ask the steward 'Call system_info and tell me which GPU backend serves models' 3x on a no-kfd box; rocm 3/3 is #3856, a plain question must give vulkan.
+
+## Added in kit 19
+
+* Gate every latency check on `hal0 memory ops list --json` showing zero pending/processing and record when the queue went quiet (first frame went 44-112 s to 2 s once Hindsight drained).
+* Read brain streams with a client that waits to `done` with a 330 s socket timeout, run in the background; an 8 s curl yields 0 bytes on a busy brain and looks like #2737 without being it.
+* Kill background scripts by task id, never `pkill -f` a script name from the shell that launched it.
+* Ask the steward "does slot X have a model assigned?" for an unbound slot after a prior load; a wrong yes is #3879 (known).

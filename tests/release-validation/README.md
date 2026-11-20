@@ -135,6 +135,18 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **19** (2026-11-20) — Curation from the v1.8.0-nightly.20261120045628 run (16 verified findings: 9 filed
+  #3874-#3882, 1 duplicate commented on #2725, 6 refuted or by-design). `regressions.yaml`: nine new entries
+  (#3874 rollback crashes in activate after the swap, P0; #3875 context_length not stamped on first provision;
+  #3876/#3877 identity-card dedupe race and `agent peers` per-fact rows; #3878 hindsight_recall result 10x budget;
+  #3879 slot `models[]` never cleared; #3880 GET /v1/models/<raw chat id> 404; #3881 stale-quarantine reaper per
+  version; #3882 kit baseline gap), and `last_result` rescored for every non-fixed probe (fixed ones keep the
+  previous release stamp). `known-issues.yaml`: seven entries (client-disconnect detach, identity-card "never
+  rewritten", memory starving chat, chat-to-rerank 409 names embed, profile-delete upstream lag, #2725 scan reasons,
+  one tracking entry for the nine new issues); `dashboard-overview-agents-degraded-shown-ready` flipped to by-design
+  (#3808 option b applied). Lane briefs: "Added in kit 19" in all 13; routing check 31 reworded (it kept re-filing a
+  rule-7 by-design ruling); upgrade.md now owns the before-snapshot list (#3882). Lesson: a check that restates a
+  by-design ruling as a failure is re-filed every run; reword the check, not just the known-issues entry.
 * **18** (2026-11-20) — Curation from the v1.8.0-nightly.20261119225557 run (15 verified findings:
   10 filed #3851-#3860, 5 refuted, by-design or cosmetic). `regressions.yaml`: ten new entries (#3851
   Memory Health false "failing" on a model-less shared fallback; #3852 `hal0 update` cannot refresh a
