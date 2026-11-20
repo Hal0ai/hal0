@@ -545,13 +545,20 @@ def test_nested_state_json_two_levels_deep_plans_as_drift_and_heals(tmp_hal0_hom
 def test_recursive_glob_does_not_alter_non_recursive_rows(tmp_hal0_home: str) -> None:
     """Auditing the recursion feature: every OTHER glob row stays single-level.
 
-    ``recursive`` defaults False and only the slots/ + models/ rows opt in
-    (both nest per-item state one level below the glob'd dir) — this locks
-    that in so future edits don't silently widen the lock-file / .hermes /
-    secrets/agents / benchmarks glob rows to walk nested subdirectories.
+    ``recursive`` defaults False and only the slots/ + models/ rows and the
+    two shipped Hermes plugin trees (#3852, copied whole by the mirror) opt in
+    — this locks that in so future edits don't silently widen the lock-file /
+    .hermes / secrets/agents / benchmarks glob rows to walk nested
+    subdirectories.
     """
     table = perms.ownership_table(service_user="hal0")
-    _recursive_targets = {paths.var_lib() / "slots", paths.var_lib() / "models"}
+    hermes = paths.var_lib() / ".hermes"
+    _recursive_targets = {
+        paths.var_lib() / "slots",
+        paths.var_lib() / "models",
+        hermes / "plugins" / "hal0-memory",
+        hermes / "plugins" / "model-providers" / "hal0",
+    }
     non_recursive_glob_rows = [
         r for r in table if r.glob is not None and r.target not in _recursive_targets
     ]

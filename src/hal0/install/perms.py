@@ -244,6 +244,13 @@ def _flm_store_exclusion() -> tuple[Path, ...]:
         return ()
 
 
+#: HERMES_HOME-relative dirs holding the mirrored plugin trees, and the trees
+#: themselves (``hermes_provision._mirror_plugins`` targets; a test pins the two
+#: together).
+_HERMES_PLUGIN_PARENTS: tuple[str, ...] = ("plugins", "plugins/model-providers")
+_HERMES_PLUGIN_TREES: tuple[str, ...] = ("plugins/hal0-memory", "plugins/model-providers/hal0")
+
+
 @dataclass(frozen=True)
 class PermRow:
     """One path's declared ownership + mode.
@@ -558,6 +565,42 @@ def ownership_table(
             service_group,
             0o700,
             role="HERMES_HOME",
+        ),
+        # The shipped Hermes plugin trees mirrored into HERMES_HOME (#3852):
+        # ``hermes_provision._mirror_plugins`` is the writer (rmtree + copytree
+        # of each tree) and runs as hal0 everywhere except a root-run
+        # install.sh migration from before #3852, which left the trees
+        # ``root:hal0`` so every later hal0-run ``hal0 update`` failed to
+        # replace them. The HERMES_HOME row above is non-recursive, so nothing
+        # healed them. The two parents get a dir-only row (any other plugin
+        # Hermes keeps beside them is the operator's, not ours to re-mode);
+        # hal0's own two trees are recursive. The modes are the ones the
+        # mirror births them with: copytree copies the shipped tree's
+        # 0755 dirs and 0644 files. ``hermes_plugin_rows`` selects these rows
+        # for the root-held repair paths.
+        *(
+            PermRow(
+                var_lib / ".hermes" / sub,
+                state_owner,
+                service_group,
+                0o755,
+                role=f"HERMES_HOME/{sub}",
+            )
+            for sub in _HERMES_PLUGIN_PARENTS
+        ),
+        *(
+            PermRow(
+                var_lib / ".hermes" / sub,
+                state_owner,
+                service_group,
+                0o755,
+                glob="*",
+                child_mode=0o755,
+                child_file_mode=0o644,
+                recursive=True,
+                role=f"HERMES_HOME/{sub} (shipped plugin, recursive)",
+            )
+            for sub in _HERMES_PLUGIN_TREES
         ),
         # The Hermes release tree and the uv-managed interpreters inside it
         # (ADR-0032 decision 5, ADR-0034 decision 2 amendment). Builds run as
@@ -1325,6 +1368,33 @@ def commit(
     return [d.path for d in applied]
 
 
+def hermes_plugin_rows(table: Iterable[PermRow] | None = None) -> list[PermRow]:
+    """The table's rows for the mirrored Hermes plugin trees (#3852)."""
+    plugins = paths.var_lib() / ".hermes" / "plugins"
+    rows = list(table) if table is not None else ownership_table()
+    return [r for r in rows if r.target == plugins or plugins in r.target.parents]
+
+
+def converge_hermes_plugin_trees() -> list[Path]:
+    """Apply :func:`hermes_plugin_rows` as root; a no-op for anyone else (#3852).
+
+    For the root-held paths that must hand a root-owned plugin tree back to
+    the service account before a hal0-run mirror can replace it: the
+    installer's migration, ``hal0 update``'s root activation step, and the
+    root prelude of ``hal0 agent reprovision hermes``. Same plan and commit
+    as ``doctor perms --fix``, so a symlink in the tree is never followed or
+    re-owned (#1739, #2975). Never raises: a failure is logged and the caller
+    carries on, and ``hal0 doctor perms`` still reports the drift.
+    """
+    if os.geteuid() != 0:
+        return []
+    try:
+        return commit(plan(hermes_plugin_rows()))
+    except (OSError, KeyError) as exc:
+        log.warning("perms.hermes_plugin_trees_converge_failed error=%s", exc)
+        return []
+
+
 # ── audit (doctor perms) ──────────────────────────────────────────────────────
 
 
@@ -1383,7 +1453,9 @@ __all__ = [
     "PermRow",
     "audit_rows",
     "commit",
+    "converge_hermes_plugin_trees",
     "ensure_shared_dir",
+    "hermes_plugin_rows",
     "observe",
     "ownership_table",
     "plan",
