@@ -124,7 +124,7 @@ def test_capacity_endpoint_reports_slot_budget(
     assert budget == {"used_slots": 1, "max_slots": 4}
 
 
-@pytest.mark.parametrize("bad_port", [7000, 8080, 8201, 8297])
+@pytest.mark.parametrize("bad_port", [7000, 8080, 8201, 8297, "7000", 7000.0, True])
 def test_create_slot_rejects_out_of_range_explicit_port(
     tmp_hal0_home: str,
     isolated_client: TestClient,
@@ -164,3 +164,26 @@ def test_create_slot_keeps_in_range_explicit_port(
     )
     assert r.status_code == 201, r.text
     assert r.json()["port"] == 8150
+
+
+def test_create_slot_custom_pool_outside_slot_range_still_auto_assigns(
+    tmp_hal0_home: str,
+    isolated_app: FastAPI,
+    isolated_client: TestClient,
+) -> None:
+    """The range check applies to a port the caller SENT, not one auto-assigned
+    from a ``[slots].port_range_*`` pool that lies outside 8081-8200."""
+    register_model_file(isolated_client, tmp_hal0_home, "qwen3-4b-q4_k_m")
+    slots_cfg = isolated_app.state.hal0_config.slots
+    slots_cfg.port_range_start, slots_cfg.port_range_end = 9000, 9099
+    for body_extra in ({}, {"port": 0}, {"port": None}):
+        r = isolated_client.post(
+            "/api/slots",
+            json={
+                "name": f"pool{len(body_extra)}{body_extra.get('port', 'x')}",
+                "model": "qwen3-4b-q4_k_m",
+                "device": "gpu-vulkan",
+                **body_extra,
+            },
+        )
+        assert r.status_code == 201, r.text

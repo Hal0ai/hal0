@@ -722,7 +722,7 @@ def slot_create(
 def slot_edit(
     name: str = typer.Argument(..., help="Slot name to edit"),
     model: str | None = typer.Option(None, "--model", "-m"),
-    port: int | None = typer.Option(None, "--port", "-p", min=1024, max=65535),
+    port: int | None = typer.Option(None, "--port", "-p", min=_SLOT_PORT_MIN, max=_SLOT_PORT_MAX),
     provider: SlotProvider | None = typer.Option(
         None, "--provider", case_sensitive=False, help="Change the slot's inference provider."
     ),

@@ -508,3 +508,13 @@ def test_port_flag_rejects_out_of_range(captured_post: dict[str, Any], bad_port:
     )
     assert result.exit_code != 0
     assert "body" not in captured_post
+
+
+@pytest.mark.parametrize("bad_port", ["7000", "8297", "0", "65535"])
+def test_slot_edit_port_flag_rejects_out_of_range(
+    captured_post: dict[str, Any], bad_port: str
+) -> None:
+    """#3858: ``slot edit --port`` bounds match SlotConfig (8081-8200)."""
+    result = runner.invoke(slot_commands.app, ["edit", "x", "--port", bad_port])
+    assert result.exit_code == 2
+    assert "body" not in captured_post

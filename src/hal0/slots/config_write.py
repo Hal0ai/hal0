@@ -700,12 +700,20 @@ def guard_slot_write_payload(updates: dict[str, Any]) -> None:
     one-shot converter is gone), not this guard's.
 
     Raises:
-        hal0.errors.BadRequest: the payload crosses a partition.
+        hal0.errors.BadRequest: the payload crosses a partition, or carries a
+            ``port`` outside the ``SlotConfig`` range.
     """
     from hal0.slot_config import reject_slot_tuning_keys, reject_unknown_slot_keys
 
     reject_slot_tuning_keys(updates)
     reject_unknown_slot_keys(updates)
+    if "port" in updates:
+        # Same range check as the HTTP routes: stacks apply and the
+        # orchestrators write through here and must not persist a port
+        # ``SlotConfig`` rejects (#3858).
+        from hal0.slots.port_alloc import validate_explicit_slot_port
+
+        validate_explicit_slot_port(updates["port"])
 
 
 def reconcile_slot_updates(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:

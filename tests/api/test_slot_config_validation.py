@@ -62,6 +62,29 @@ def test_put_config_unknown_top_level_key_400(slot_toml: Path, client: TestClien
     assert "enabeld" not in _read(slot_toml)
 
 
+@pytest.mark.parametrize("port", [8297, 8201, 8080, 65535, 0, -5, "8297", 8297.0, None, True])
+def test_put_config_out_of_range_port_400_toml_untouched(
+    slot_toml: Path, client: TestClient, port: int
+) -> None:
+    """#3858: any ``port`` that SlotConfig would reject (out of 8081-8200, 0, null,
+    a string, a float, a bool) is refused with a typed 400, TOML unchanged."""
+    before = slot_toml.read_bytes()
+    r = client.put("/api/slots/chat/config", json={"port": port})
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.port_out_of_range"
+    assert err["details"]["min"] == 8081
+    assert err["details"]["max"] == 8200
+    assert slot_toml.read_bytes() == before
+
+
+def test_put_config_in_range_port_updates_toml(slot_toml: Path, client: TestClient) -> None:
+    r = client.put("/api/slots/chat/config", json={"port": 8150})
+    assert r.status_code == 200, r.text
+    assert _read(slot_toml)["port"] == 8150
+    assert r.json()["port"] == 8150
+
+
 def test_put_config_unknown_model_key_400_with_path(slot_toml: Path, client: TestClient) -> None:
     r = client.put("/api/slots/chat/config", json={"model": {"ctx_sizee": 8192}})
     assert r.status_code == 400, r.text
@@ -794,3 +817,16 @@ def test_create_accepts_valid_tune(tmp_hal0_home: str, client: TestClient) -> No
     assert r.status_code == 201, r.text
     got = _read(Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "good.toml")
     assert got["tune"] == {"vision": "off", "ctx_size": 4096}
+
+
+def test_slot_write_guard_rejects_bad_port_for_in_process_writers() -> None:
+    """stacks apply / orchestrators write through the same guard as the route."""
+    from hal0.errors import BadRequest
+    from hal0.slots.config_write import guard_slot_write_payload
+
+    for bad in (8297, 0, None, "8100"):
+        with pytest.raises(BadRequest) as ei:
+            guard_slot_write_payload({"port": bad})
+        assert ei.value.code == "slot.port_out_of_range"
+    guard_slot_write_payload({"port": 8150})
+    guard_slot_write_payload({"device": "gpu-vulkan"})
