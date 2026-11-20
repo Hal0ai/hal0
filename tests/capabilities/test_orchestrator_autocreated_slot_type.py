@@ -93,3 +93,109 @@ async def test_autocreated_embed_slot_keeps_its_trio_type(tmp_hal0_home: str) ->
     raw = _read(home, "embed")
     assert raw.get("type") == "embedding"
     assert raw.get("profile") == "embedding"
+
+
+@pytest.mark.parametrize(
+    ("slot_name", "device", "expected_provider"),
+    [
+        ("stt", "cpu", "moonshine"),
+        ("stt", "npu", "flm"),
+        ("tts", "cpu", "kokoro"),
+        ("img", "gpu-rocm", "comfyui"),
+        ("embed", "cpu", "llama-server"),
+        ("rerank", "cpu", "llama-server"),
+    ],
+)
+async def test_autocreated_slot_provider_is_the_engine_the_profile_runs(
+    tmp_hal0_home: str, slot_name: str, device: str, expected_provider: str
+) -> None:
+    """#3860: the provider label written beside the profile is the engine the
+    shared type-implied rule picks, never the ``llama-server`` fallback."""
+    home = Path(tmp_hal0_home)
+    orch = CapabilityOrchestrator(
+        _manager(home), config_path=home / "etc" / "hal0" / "capabilities.toml"
+    )
+
+    await orch._ensure_slot_exists(
+        slot_name, CapabilitySelection(device=device, provider="", model="", enabled=True)
+    )
+
+    assert _read(home, slot_name).get("provider") == expected_provider
+
+
+async def test_first_stt_enable_then_reseed_still_applies(tmp_hal0_home: str) -> None:
+    """A fresh stt.toml reseeds a selection the next apply accepts."""
+    home = Path(tmp_hal0_home)
+    cfg_path = home / "etc" / "hal0" / "capabilities.toml"
+    orch = CapabilityOrchestrator(_manager(home), config_path=cfg_path)
+    await orch._ensure_slot_exists(
+        "stt", CapabilitySelection(device="cpu", provider="", model="", enabled=True)
+    )
+    assert _read(home, "stt").get("profile") == "moonshine"
+
+    cfg_path.unlink(missing_ok=True)
+    reseeded = CapabilityOrchestrator(_manager(home), config_path=cfg_path)
+    await reseeded.initialize_if_missing()
+    seeded = tomllib.loads(cfg_path.read_text())
+    assert seeded["selections"]["voice"]["stt"]["provider"] == "moonshine"
+    result = await reseeded.apply("voice", "stt", {"model": "", "enabled": True})
+    assert result["provider"] == "moonshine"
+
+
+def _write_stale_stt_toml(home: Path) -> None:
+    """The file a 1.7.1 / early-1.8.0 box already has: llama-server + moonshine."""
+    path = home / "etc" / "hal0" / "slots" / "stt.toml"
+    raw = path.read_text()
+    raw = raw.replace('provider = "moonshine"', 'provider = "llama-server"')
+    assert 'provider = "llama-server"' in raw
+    path.write_text(raw)
+
+
+async def test_stale_llama_server_stt_toml_is_healed_on_reseed(tmp_hal0_home: str) -> None:
+    """Existing boxes: a ``llama-server`` stt.toml must not poison a reseed."""
+    home = Path(tmp_hal0_home)
+    cfg_path = home / "etc" / "hal0" / "capabilities.toml"
+    orch = CapabilityOrchestrator(_manager(home), config_path=cfg_path)
+    await orch._ensure_slot_exists(
+        "stt", CapabilitySelection(device="cpu", provider="", model="", enabled=True)
+    )
+    _write_stale_stt_toml(home)
+
+    cfg_path.unlink(missing_ok=True)
+    reseeded = CapabilityOrchestrator(_manager(home), config_path=cfg_path)
+    await reseeded.initialize_if_missing()
+    seeded = tomllib.loads(cfg_path.read_text())
+    assert seeded["selections"]["voice"]["stt"]["provider"] == "moonshine"
+    result = await reseeded.apply("voice", "stt", {"model": "", "enabled": True})
+    assert result["provider"] == "moonshine"
+
+
+async def test_capabilities_toml_already_seeded_with_llama_server_is_healed(
+    tmp_hal0_home: str,
+) -> None:
+    """A capabilities.toml seeded before this fix heals on the next apply, while
+    a provider the caller sends explicitly is still refused (#2691)."""
+    from hal0.errors import BadRequest
+
+    home = Path(tmp_hal0_home)
+    cfg_path = home / "etc" / "hal0" / "capabilities.toml"
+    orch = CapabilityOrchestrator(_manager(home), config_path=cfg_path)
+    await orch._ensure_slot_exists(
+        "stt", CapabilitySelection(device="cpu", provider="", model="", enabled=True)
+    )
+    cfg_path.unlink(missing_ok=True)
+    seeding = CapabilityOrchestrator(_manager(home), config_path=cfg_path)
+    await seeding.initialize_if_missing()
+    cfg_path.write_text(
+        cfg_path.read_text().replace('provider = "moonshine"', 'provider = "llama-server"')
+    )
+
+    fresh = CapabilityOrchestrator(_manager(home), config_path=cfg_path)
+    result = await fresh.apply("voice", "stt", {"model": "", "enabled": True})
+    assert result["provider"] == "moonshine"
+
+    with pytest.raises(BadRequest) as exc:
+        await fresh.apply(
+            "voice", "stt", {"model": "", "enabled": True, "provider": "llama-server"}
+        )
+    assert exc.value.code == "capability.no_engine_for_provider"

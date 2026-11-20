@@ -495,6 +495,21 @@ class TestReadHermesMinimumContext:
         floor, source = aw.read_hermes_minimum_context(shim, run=run)
         assert (floor, source) == (70000, "hermes")
 
+    def test_probe_env_never_points_at_the_callers_home(self, monkeypatch: Any) -> None:
+        """#3836: root ``doctor all`` must not bootstrap /root/.hermes."""
+        monkeypatch.setenv("HOME", "/root")
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        seen: dict[str, Any] = {}
+
+        def run(_argv: list[str], **kwargs: Any) -> Any:
+            seen.update(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout="64000\n")
+
+        assert aw.read_hermes_minimum_context("/nope/python", run=run) == (64000, "hermes")
+        assert seen["HERMES_HOME"]
+        assert seen["HOME"] != "/root"
+        assert not seen["HERMES_HOME"].startswith("/root")
+
     def test_no_venv_falls_back_to_the_pinned_constant(self) -> None:
         floor, source = aw.read_hermes_minimum_context(None)
         assert floor == aw.HERMES_MINIMUM_CONTEXT_LENGTH

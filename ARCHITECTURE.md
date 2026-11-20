@@ -125,10 +125,13 @@ also gates ADMIN-class routes for off-box callers on a LAN-bound box even
 with `require_auth` off. TLS and user directories stay with an upstream
 reverse proxy (`docs/operate/auth.mdx`).
 
-**Component updates.** `components/` catalogs the four hal0-shipped
+**Component updates.** `components/` catalogs the hal0-shipped
 components that converge alongside a `hal0 update`: OpenWebUI (the
 podman companion container), runner images (slot toolbox images),
-Hermes, and Hindsight. None of them float independently — each
+Hermes, Pi (report-only), the memory decision model, and Hindsight. The
+decision model (`memory-decision`, `hal0.memory.decision_component`) is
+opt-in: it converges when asked for by name (`hal0 memory decision
+install`) and afterwards only on a box where it is installed. None of them float independently — each
 component's pin travels *inside* the hal0 release, so converging a
 box to a release converges its components too (the final pass of
 `Updater.commit`'s post-swap migrations, `hal0.components.runner.
@@ -229,7 +232,7 @@ Three categories of state, three filesystem locations:
 | Kind      | Location              | Examples                                |
 |-----------|-----------------------|------------------------------------------|
 | Code      | `/usr/lib/hal0/current/` | Python package, UI dist, unit templates |
-| Config    | `/etc/hal0/`          | `hal0.toml`, `slots/*.toml`, `providers.toml`, `hardware.json` |
+| Config    | `/etc/hal0/`          | `hal0.toml`, `slots/*.toml`, `upstreams.toml`, `hardware.json` |
 | Runtime   | `/var/lib/hal0/`      | `models/`, `registry/`, `openwebui/`, `slots/<name>/state.json` |
 
 Code is replaceable (every update writes a new versioned dir + flips a

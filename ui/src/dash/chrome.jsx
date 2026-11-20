@@ -527,7 +527,7 @@ function useNavItems() {
       { id: "models/inference", label: "Inference Models",
         match: (route, param) => route === "models" && (!param || param === "inference") },
       { id: "models/image",     label: "Image / ComfyUI" },
-      { id: "models/upstream",  label: "Upstream Models" },
+      { id: "models/providers", label: "Providers" },
       { id: "models/flm",       label: "FLM" },
       { id: "models/profiles",  label: "Profiles" },
     ] },

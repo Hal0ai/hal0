@@ -135,6 +135,75 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **19** (2026-11-20) — Curation from the v1.8.0-nightly.20261120045628 run (16 verified findings: 9 filed
+  #3874-#3882, 1 duplicate commented on #2725, 6 refuted or by-design). `regressions.yaml`: nine new entries
+  (#3874 rollback crashes in activate after the swap, P0; #3875 context_length not stamped on first provision;
+  #3876/#3877 identity-card dedupe race and `agent peers` per-fact rows; #3878 hindsight_recall result 10x budget;
+  #3879 slot `models[]` never cleared; #3880 GET /v1/models/<raw chat id> 404; #3881 stale-quarantine reaper per
+  version; #3882 kit baseline gap), and `last_result` rescored for every non-fixed probe (fixed ones keep the
+  previous release stamp). `known-issues.yaml`: seven entries (client-disconnect detach, identity-card "never
+  rewritten", memory starving chat, chat-to-rerank 409 names embed, profile-delete upstream lag, #2725 scan reasons,
+  one tracking entry for the nine new issues); `dashboard-overview-agents-degraded-shown-ready` flipped to by-design
+  (#3808 option b applied). Lane briefs: "Added in kit 19" in all 13; routing check 31 reworded (it kept re-filing a
+  rule-7 by-design ruling); upgrade.md now owns the before-snapshot list (#3882). Lesson: a check that restates a
+  by-design ruling as a failure is re-filed every run; reword the check, not just the known-issues entry.
+* **18** (2026-11-20) — Curation from the v1.8.0-nightly.20261119225557 run (15 verified findings:
+  10 filed #3851-#3860, 5 refuted, by-design or cosmetic). `regressions.yaml`: ten new entries (#3851
+  Memory Health false "failing" on a model-less shared fallback; #3852 `hal0 update` cannot refresh a
+  root-owned Hermes plugin tree yet converges; #3853 STATE.md hook output never reaches a session;
+  #3854 256k fallback with a model-less agent anchor; #3855 Hermes answers from stale recall instead of
+  slot_list; #3856 steward names ROCm after #3811; #3857/#3858 slot create/edit out-of-range port;
+  #3859 throughput hero stale/inflated; #3860 stt.toml provider llama-server); every probed entry
+  rescored (`last_result`); the #2030 repro now reads the single-op GET; notes on #3835, #2671, #3806,
+  #3803. `known-issues.yaml`: six new entries (fresh degraded provision_warn, rerank TOML typed-load vs
+  launch split, Hermes fresh-turn latency is queue wait, zero-yield annotation probe misread,
+  rc-validate stale script snapshot, hal0-terminal-off sentinel); #3835 entry amended; `review_due`
+  added to every entry with `review_at` <= v1.8.0. Lane briefs: a "Added in kit 18" section in all 13
+  briefs. `boxes.toml`: ct151 and ct150 facts. Lesson: a run launched from a cached pre-fix workflow
+  snapshot reproduces fixed harness defects; relaunch from the repo copy.
+* **17** (2026-11-19) — Curation from the v1.8.0-nightly.20261118233655 run (10 verified findings:
+  5 filed #3834-#3838, 1 commented on existing #3456, 1 cosmetic left unfiled, 3 refuted or by-design).
+  `regressions.yaml`: five new entries (#3834 capability apply registry fallback skips the model-fit
+  type check; #3835 Hermes 256k context fallback; #3836 `hal0 doctor all` as root creates
+  /root/.hermes; #3837 extraction throughput probe hits the model-less memory slot's port; #3838
+  harness: per-box preflights share one CONTEXT.md); every probed entry re-scored (`last_result`
+  for all 135 prior entries); stale repro fixed on `flm-registry-installed-ghost` (`.models[]`) and a
+  stale `expect` on `hermes-reprovision-rotates-gateway-key` (`unreadable` is the intended outcome).
+  `known-issues.yaml`: ten new entries (five open filings, #3456 qwen3-tts unmounted path, the unfiled
+  `.deleted` tombstone skip, by-design `agent-27b-oom-is-container-memcg-not-slot-admission` and
+  `gateway-secrets-wire-unreadable-is-intended`); `brain-steward-saved-before-async-extraction`
+  tightened (count zero-yield from the single-op GET only; the refuted zero-yield candidate); every
+  entry with `review_at` <= v1.8.0 still carries `review_due`. Lane briefs: new checks in 12 briefs
+  and `_shared.md` (wrong-type capability apply, lane-unique scratch dirs, wrong-CONTEXT lanes still run,
+  root `doctor all` residue, OOM before/after, context warm line, queue-quiet gates); no check
+  deleted. `boxes.toml` (operator-local) facts refreshed for ct150 and ct151.
+
+* **16** (2026-11-18) — Curation from the v1.8.0-nightly.20261118002332 run (13 verified findings:
+  9 issues filed #3803-#3811 covering 11 findings, 1 refuted-as-by-design retain claim banked, 1
+  kit-only drift fixed here; every probed regression entry re-scored). `regressions.yaml`: nine new entries
+  (#3803 Hermes plugin imports PyYAML the pinned venv lacks, so every keyed memory call 403s; #3804
+  `model.max_tokens` not applied by Hermes; #3805 redaction masks memory token-count keys; #3806 seven
+  gated MCP tools queue with missing body args; #3807 capability guards keyed on role name; #3808
+  Overview shows degraded Hermes as ready; #3809 install-smoke chat timeout behind consolidation; #3810
+  FLM installed ghost; #3811 polish rollup), a `last_result` for every probed entry, `v1_8_0_note` on
+  the entries whose repro text went stale (Hermes is a source release not a wheel, banks are
+  hal0:shared/hal0:private, no `utility` slot, ADR-0062 keys), and `promote_ready: true` on six
+  blocked unit-test candidates plus every new mechanical entry (see `promote_to`).
+  `known-issues.yaml`: ten new entries (six open filings, plus by-design
+  `brain-steward-saved-before-async-extraction`, `system-info-backends-is-runner-catalogue`,
+  `kokoro-on-gpu-vulkan-row-runs-on-cpu`, `memory-reserved-agent-header-needs-key`);
+  `settings-redacts-token-count-keys` and `embeddings-rerank-to-wrong-slot-raw-501` reopened because their
+  `still_report_if` fired; `memory-delete-private-withheld-silently` and
+  `mcp-admin-path-args-are-stringified` corrected; 43 more entries flagged `review_due` (everything with
+  `review_at` at or before v1.8.0 now carries it, so the next release must re-adjudicate or delete them).
+  Lane briefs: new checks in all 13 briefs (generalisations that paid: sweep every gated tool by
+  required-arg kind, run capability guards against a custom-named slot, check the Hermes venv can read
+  its own plugin's imports before any Hermes memory check, sample queue quietness before timed
+  memory checks, attribute concurrent-lane residue before the exit diff); stale checks fixed (api 6c,
+  15, 18, 19; brain 20, 24; hermes-e2e 0 and 11). `boxes.toml`: ct151 and ct150 facts refreshed.
+  Mechanical checks moved out of the briefs into a promotion list in the curation report (GATED_TOOLS
+  parity, tool annotation parity, openapi GET sweep, removed-route diff) rather than added as agent work.
+
 * **15** (2026-10-16) — Curation from the v1.4.0-nightly.20261016003929 run (verified findings:
   4 filed, 1 duplicate of an open issue, 6 refuted or ruled by-design, 1 hint regression).
   `regressions.yaml` grows by five entries: #2741 (`hal0/utility` and `hal0/brain` resolve to the

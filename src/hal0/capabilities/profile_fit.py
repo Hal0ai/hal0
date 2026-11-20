@@ -88,3 +88,25 @@ def profile_name_for_fit(capability: str, device: str, provider: str = "") -> st
     if device in {"gpu-rocm", "gpu-vulkan"}:
         return DEVICE_DEFAULT_PROFILES.get(device)
     return None
+
+
+def fit_profile_name(capability: str, device: str, provider: str = "") -> str | None:
+    """The profile name the picker AND the apply-time fit check resolve.
+
+    :func:`profile_name_for_fit` plus the apply path's runner veto for TTS
+    (#2749, #3811). The shared rule answers ``qwen3-tts`` for every GPU, but
+    the qwen3tts runner is ROCm-only, so a ``gpu-vulkan`` selection actually
+    runs the profile-less Kokoro fallback. Both ``_profile_for_fit`` twins
+    (``catalog`` and ``orchestrator``) route through here so the picker row
+    and the fit check see the engine that really launches, not one the box
+    cannot start. Non-GPU TTS answers are left as the shared rule gives them.
+    """
+    profile_name = profile_name_for_fit(capability, device, provider)
+    if capability == "tts" and profile_name and device in {"gpu-rocm", "gpu-vulkan"}:
+        # Local import: profile_adopt imports this module lazily too.
+        from hal0.slots.profile_adopt import type_implied_profile
+
+        profile_name = type_implied_profile({"type": "tts", "device": device}) or (
+            tts_profile_for_device("cpu")
+        )
+    return profile_name

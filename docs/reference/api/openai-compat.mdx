@@ -80,6 +80,15 @@ behaviors:
   dispatch. A `<tag>-FLM` catalog id (e.g. `gemma4-it-e2b-FLM`) is further normalized
   to the native FLM-served tag (e.g. `gemma4-it:e2b`), since `flm serve` only
   advertises the native tag.
+- **`X-hal0-Max-Tokens: <n>` request header** — bounds the output of this request
+  at `n` tokens (hal0 extension). A body with no `max_tokens` or
+  `max_completion_tokens` gains `max_tokens: n`; a limit above `n`, or `-1`, is
+  lowered to `n`; a smaller limit is kept. A value that is not a positive
+  integer is ignored. It is for clients that can add a fixed header but have no
+  default output limit of their own: the bundled Hermes agent sends `8192`, so
+  one model call cannot decode until the slot's context window is full. hal0
+  applies it only to requests that reach this endpoint; a client pointed
+  straight at a slot's own backend port is not bounded.
 - **`hal0/*` virtual model names** are resolved against live slot state before
   dispatch, and a "lane pin" records which specific slot the caller meant when
   multiple slots share one model id.

@@ -74,7 +74,12 @@ from hal0.memory.embedder_record import (
     persist_embedder_record,
     resolve_embedder,
 )
-from hal0.system.seam import HINDSIGHT_LEGACY_CAP_DROPIN_NAME, SeamTimeout, SystemCtlSeam
+from hal0.system.seam import (
+    DECISION_UNIT_PATH,
+    HINDSIGHT_LEGACY_CAP_DROPIN_NAME,
+    SeamTimeout,
+    SystemCtlSeam,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from hal0.config.schema import (
@@ -290,14 +295,17 @@ _DROP_IN_TEMPLATE = (
 #: extraction limits and is rewritten by the `hal0 memory graph` path) so the
 #: two renderers stay independently testable and a graph-only PUT never
 #: clobbers the showcase lanes, or vice versa. systemd merges all `.conf`
-#: files in the `.d` dir, last-Environment-line-wins on duplicate keys, so the
-#: load order between the two is irrelevant: they never set the same key.
+#: files in the `.d` dir, last-Environment-line-wins on duplicate keys, and the
+#: showcase file sorts later, so for the keys both set (``HINDSIGHT_API_LLM_MAX_CONCURRENT`` and
+#: ``HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT``) it wins, which is why
+#: :func:`render_showcase_env` resolves the global cap from the graph ceiling
+#: when ``[memory.lanes].llm_max_concurrent`` is unset (#3758).
 SHOWCASE_DROP_IN_PATH = DROP_IN_DIR / "showcase-lanes.conf"
 
-#: The local decision-model unit (``installer/systemd/hal0-hs-decide.service``).
-#: The installer does not lay it down yet, so its presence is what says the
-#: ``provider = "local"`` decision lane can answer at all (#3519).
-DECISION_UNIT_PATH = Path("/etc/systemd/system/hal0-hs-decide.service")
+# DECISION_UNIT_PATH (imported from hal0.system.seam): the local decision-model
+# unit. Only the opt-in ``memory-decision`` component lays it down
+# (hal0.memory.decision_component, #3757), so its presence is what says the
+# ``provider = "local"`` decision lane can answer at all (#3519).
 
 #: Base URL of the hosted decision model (``provider = "hindsight-cloud"``).
 HINDSIGHT_CLOUD_DECISION_URL = "https://api.hindsight.ai"
@@ -373,12 +381,63 @@ LANE_OP_ENV_PREFIX = {
 }
 
 
+#: Global cap rendered when ``[memory.lanes].llm_max_concurrent`` is unset and
+#: no graph ceiling is known (the graph default, ``extraction_max_concurrent``).
+UNSET_LANES_CAP_FALLBACK = 1
+
 #: Ops whose Hindsight 1.2.0 env accepts ``*_MAX_COMPLETION_TOKENS`` (#3596).
 _COMPLETION_CAP_OPS = frozenset({"consolidation", "reflect"})
 
 #: Cap rendered when ``[memory.lanes.<op>].max_completion_tokens`` is unset.
 #: Resolved here, not in the schema, so a partial table keeps it (#3596).
 DEFAULT_OP_COMPLETION_TOKENS = 8192
+
+
+def lane_caps(lanes: MemoryLanesConfig, ceiling: int | None) -> tuple[int, dict[str, int]]:
+    """The global LLM cap and each op's cap, as the engine is given them (#3758).
+
+    The one resolver: the showcase renderer, ``GET /api/memory/lanes`` and the
+    compat reflect limit all call it, so what is reported and used is what is
+    rendered. ``ceiling`` is the extraction drop-in's effective concurrency
+    (:func:`showcase_ceiling`: ``[memory.graph]`` held to the slot's
+    ``--parallel``); ``None`` means no graph config is known.
+
+    * An explicit ``[memory.lanes].llm_max_concurrent`` is held to the ceiling,
+      and every op that sets no cap of its own inherits it unchanged.
+    * Unset follows the ceiling (:data:`UNSET_LANES_CAP_FALLBACK` with none),
+      and the consolidation lane then takes one fewer (minimum 1), so retain
+      and page refresh always have a permit.
+    * An op's own ``max_concurrent`` wins; held to the ceiling unless the op
+      routes to its own ``virtual_model``.
+    """
+
+    def held(value: int) -> int:
+        return value if ceiling is None else min(value, ceiling)
+
+    explicit = lanes.llm_max_concurrent
+    if explicit is None:
+        base = ceiling if ceiling is not None else UNSET_LANES_CAP_FALLBACK
+    else:
+        base = explicit
+    global_cap = held(base)
+    per_op: dict[str, int] = {}
+    for op in LANE_OP_ENV_PREFIX:
+        op_cfg: MemoryLaneOpConfig = getattr(lanes, op)
+        if op_cfg.max_concurrent is not None:
+            cap = op_cfg.max_concurrent
+        elif explicit is None and op == "consolidation":
+            cap = max(1, global_cap - 1)
+        else:
+            cap = global_cap if explicit is None else base
+        per_op[op] = cap if op_cfg.virtual_model is not None else held(cap)
+    return global_cap, per_op
+
+
+def resolved_lane_caps(
+    lanes: MemoryLanesConfig, graph: MemoryGraphConfig
+) -> tuple[int, dict[str, int]]:
+    """:func:`lane_caps` for a live config: the ceiling is the slot-clamped graph limit."""
+    return lane_caps(lanes, showcase_ceiling(graph))
 
 
 def render_reranker_env(models: MemoryModelsConfig) -> list[str]:
@@ -521,10 +580,7 @@ def render_showcase_env(
             "Environment=HINDSIGHT_API_DECISION_MODEL_API_KEY=hal0-local-noauth",
         ]
 
-    def _held(value: int) -> int:
-        return value if ceiling is None else min(value, ceiling)
-
-    global_cap = _held(lanes.llm_max_concurrent)
+    global_cap, op_caps = lane_caps(lanes, ceiling)
     lines += [
         f"Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT={global_cap}",
         f"Environment=HINDSIGHT_API_LLM_REASONING_EFFORT={lanes.reasoning_effort}",
@@ -534,12 +590,7 @@ def render_showcase_env(
 
     for op, prefix in LANE_OP_ENV_PREFIX.items():
         op_cfg: MemoryLaneOpConfig = getattr(lanes, op)
-        max_concurrent = (
-            op_cfg.max_concurrent if op_cfg.max_concurrent is not None else lanes.llm_max_concurrent
-        )
-        if op_cfg.virtual_model is None:
-            max_concurrent = _held(max_concurrent)
-        lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MAX_CONCURRENT={max_concurrent}")
+        lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MAX_CONCURRENT={op_caps[op]}")
         if op_cfg.virtual_model is not None:
             lines.append(f"Environment=HINDSIGHT_API_{prefix}_LLM_MODEL={op_cfg.virtual_model}")
         if op_cfg.timeout_s is not None:
@@ -565,6 +616,26 @@ def render_showcase_env(
             )
             if cap:
                 lines.append(f"Environment=HINDSIGHT_API_{prefix}_MAX_COMPLETION_TOKENS={cap}")
+
+    # #3759: always rendered, so a box never runs on the engine's 300 s reflect
+    # clock, which counts time spent queued for an LLM permit.
+    from hal0.config.schema import (
+        DEFAULT_CONSOLIDATION_BATCH_SIZE,
+        DEFAULT_REFLECT_WALL_TIMEOUT_S,
+    )
+
+    wall = lanes.reflect.wall_timeout_s
+    lines.append(
+        "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT="
+        f"{DEFAULT_REFLECT_WALL_TIMEOUT_S if wall is None else wall}"
+    )
+    # #3762: the engine batches 8 memories per consolidation call, which can
+    # overflow the 8192-token output cap rendered above.
+    batch = lanes.consolidation.batch_size
+    lines.append(
+        "Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE="
+        f"{DEFAULT_CONSOLIDATION_BATCH_SIZE if batch is None else batch}"
+    )
 
     return "\n".join(lines) + "\n"
 
@@ -1870,6 +1941,9 @@ class ExtractionThroughput:
     probe_timed_out: bool = False
     measured_at: float = 0.0
     detail: str = ""
+    #: The slot that really served the probe when ``slot`` has no model of its
+    #: own and resolves through the fallback chain (#3837); empty otherwise.
+    served_by: str = ""
 
     @property
     def projected_s(self) -> float | None:
@@ -1911,6 +1985,13 @@ class ExtractionThroughput:
             "<name>`) or raise [memory.graph].llm_timeout_s."
         )
 
+    @property
+    def _label(self) -> str:
+        """The slot for messages, naming the one that served it when different."""
+        if self.served_by and self.served_by != self.slot:
+            return f"{self.slot!r} (served by {self.served_by!r})"
+        return repr(self.slot)
+
     def message(self) -> str:
         """One operator-facing sentence naming the measured rates and the timeout."""
         timeout = f"[memory.graph].llm_timeout_s = {self.timeout_s} s"
@@ -1918,7 +1999,7 @@ class ExtractionThroughput:
         if projected is None:
             why = f" ({self.detail})" if self.detail else ""
             return (
-                f"could not measure extraction slot {self.slot!r}'s throughput{why}, "
+                f"could not measure extraction slot {self._label}'s throughput{why}, "
                 f"so hal0 cannot tell whether one extraction fits inside {timeout}"
             )
         consequence = (
@@ -1927,7 +2008,7 @@ class ExtractionThroughput:
         )
         if self.probe_timed_out:
             head = (
-                f"extraction slot {self.slot!r} did not finish a "
+                f"extraction slot {self._label} did not finish a "
                 f"{PROBE_PROMPT_TOKENS}-token probe inside {PROBE_TIMEOUT_S:.0f} s "
                 f"(under {self.prompt_tps:.1f} prompt tok/s), so prefilling the "
                 f"~{EXTRACTION_PROMPT_TOKENS}-token extraction prompt alone takes "
@@ -1940,7 +2021,7 @@ class ExtractionThroughput:
                 f"{timeout} (or the slot was busy during the probe). {self._remedy()}"
             )
         rates = (
-            f"extraction slot {self.slot!r} measured {self.prompt_tps:.1f} prompt tok/s "
+            f"extraction slot {self._label} measured {self.prompt_tps:.1f} prompt tok/s "
             f"and {self.decode_tps:.1f} decode tok/s (from {self.source}); one "
             f"extraction (~{EXTRACTION_PROMPT_TOKENS} prompt + "
             f"~{self._projected_completion_tokens} completion tokens) projects to ~{projected:.0f} s"

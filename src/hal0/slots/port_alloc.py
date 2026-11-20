@@ -98,6 +98,37 @@ def next_free_slot_port(
     )
 
 
+def validate_explicit_slot_port(port: object) -> int:
+    """Return *port* when it is a plain int inside the ``SlotConfig`` range.
+
+    The ONE range check for every path that accepts a caller-supplied slot
+    port (create, edit, and the in-process write guard). The bounds are
+    ``_SLOT_PORT_MIN``/``_SLOT_PORT_MAX`` in ``hal0.config.schema`` -- the same
+    constants ``SlotConfig.port`` validates with -- never a second copy.
+
+    Raises ``BadRequest`` (``slot.port_out_of_range``, HTTP 400) for an
+    out-of-range int, and for anything that is not a plain int (``bool``,
+    ``str``, ``float``, ``None``): those would otherwise be silently replaced
+    (create) or written to a TOML that fails ``SlotConfig`` (edit).
+    Without this, ``PortAuthority.next_free`` honours ``preferred`` only inside
+    its pool and swaps the port for the lowest free one (#3857, #3858).
+    """
+    from hal0.config.schema import _SLOT_PORT_MAX, _SLOT_PORT_MIN
+
+    if (
+        isinstance(port, bool)
+        or not isinstance(port, int)
+        or not _SLOT_PORT_MIN <= port <= _SLOT_PORT_MAX
+    ):
+        raise BadRequest(
+            f"port {port!r} is not a valid slot port: it must be an integer in "
+            f"{_SLOT_PORT_MIN}-{_SLOT_PORT_MAX}",
+            code="slot.port_out_of_range",
+            details={"port": port, "min": _SLOT_PORT_MIN, "max": _SLOT_PORT_MAX},
+        )
+    return port
+
+
 def reject_port_conflict(
     port: int, owner_slot: str, slot_snapshots: list[dict] | None = None
 ) -> None:

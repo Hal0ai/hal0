@@ -27,7 +27,6 @@ from hal0.api._redact import (
     redact_log_line,
     redact_value,
 )
-from hal0.observability.sentry import SENSITIVE_HEADERS
 from hal0.redaction import MASK, redact_secret_shapes, redact_shareable_text, secret_spans
 
 
@@ -135,6 +134,30 @@ def test_redact_config_plain_key_passes_through_unmasked() -> None:
     """A non-sensitive key (e.g. ``ctx_size``) is echoed verbatim."""
     out = redact_config({"ctx_size": 4096, "port": 8080})
     assert out == {"ctx_size": 4096, "port": 8080}
+
+
+def test_redact_config_shows_a_numeric_token_count() -> None:
+    """A token-count limit is not a secret (#3805): the dashboard needs the number."""
+    tree = {"decision": {"max_request_tokens": 4096}, "lane": {"max_completion_tokens": None}}
+    assert redact_config(tree) == tree
+    assert redact_config({"extraction_max_tokens": 2048.0}) == {"extraction_max_tokens": 2048.0}
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("api_tokens", "Zq8vR2mW9xK4tL7pQ3"),  # a string under a tokens name
+        ("api_tokens", ["a", "b"]),
+        ("max_tokens", "4096"),  # not a number
+        ("max_tokens", True),  # bool is not a count
+        ("HF_TOKEN", 12345),  # singular token: a credential name
+        ("max_tokens_secret", 5),  # another secret word in the name
+        ("tokens_key", 5),
+        ("password", 1234),
+    ],
+)
+def test_redact_config_still_masks_everything_that_is_not_a_count(key: str, value: object) -> None:
+    assert redact_config({key: value}) == {key: {"value": MASK, "set": True}}
 
 
 def test_redact_config_empty_sensitive_key_yields_set_false() -> None:
@@ -1624,14 +1647,12 @@ class TestEscapedOpeningQuote:
         assert out == rf"password=\"{MASK}\" HF_TOKEN={MASK}"
 
 
-# ── #2413: the cases shared with the dashboard's browser-side port ─────────
+# ── #2413: the shared redaction cases ───────────────────────────────────────
 
 
 class TestSharedFixture:
-    """``tests/fixtures/redaction_shapes.json`` is also read by
-    ``ui/src/sentry.test.ts``, which pins ``redactSecrets`` in
-    ``ui/src/sentry.ts``, the hand-port of :func:`redact_log_line`. A case added
-    there is checked against both implementations."""
+    """``tests/fixtures/redaction_shapes.json`` holds the redaction cases read by
+    these tests."""
 
     _CASES = json.loads(
         (Path(__file__).parents[1] / "fixtures" / "redaction_shapes.json").read_text()
@@ -1678,10 +1699,6 @@ class TestSharedFixture:
     @pytest.mark.parametrize("key", _CASES["plain_keys"])
     def test_a_plain_key_name_is_not_sensitive(self, key: str) -> None:
         assert not is_sensitive_key(key)
-
-    def test_the_sensitive_headers_are_the_backend_set(self) -> None:
-        # ui/src/sentry.ts masks the same headers whole; its test reads this list.
-        assert set(self._CASES["sensitive_headers"]) == SENSITIVE_HEADERS
 
 
 # -- secret_spans: where redact_log_line masks, read off the redactor itself ------------------

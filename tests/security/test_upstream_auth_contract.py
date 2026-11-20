@@ -35,7 +35,8 @@ from __future__ import annotations
 import pytest
 
 from hal0.config.schema import _VALID_AUTH_STYLES
-from hal0.upstreams.integrations import _CATALOG, validate_catalog
+from hal0.upstreams import presets
+from hal0.upstreams.presets import load_presets, preset_to_api
 from hal0.upstreams.registry import Upstream, UpstreamAuthUnconfigured, UpstreamRegistry
 
 
@@ -73,12 +74,12 @@ def test_every_declared_auth_style_is_actually_implemented() -> None:
 
 
 def test_no_catalog_entry_uses_an_unimplemented_style() -> None:
-    for cid, entry in _CATALOG.items():
-        assert entry["auth"] in _VALID_AUTH_STYLES, f"{cid} → {entry['auth']!r}"
+    for pid, preset in load_presets().items():
+        assert preset.auth in _VALID_AUTH_STYLES, f"{pid} → {preset.auth!r}"
 
 
 def test_catalog_still_validates() -> None:
-    assert validate_catalog() == []
+    assert load_presets()
 
 
 def test_google_query_is_no_longer_offered_as_a_choice() -> None:
@@ -95,29 +96,24 @@ def test_google_query_is_no_longer_offered_as_a_choice() -> None:
 
 def test_google_query_is_not_a_selectable_value_anywhere() -> None:
     """The three places that enumerate valid styles agree."""
-    from hal0.upstreams import integrations
-
     assert "google_query" not in _VALID_AUTH_STYLES
-    assert all(e["auth"] != "google_query" for e in integrations._CATALOG.values())
-    assert (
-        "google_query"
-        not in (integrations.__doc__ or "").split("Auth styles:")[1].split("Every style")[0]
-    )
+    assert all(p.auth != "google_query" for p in load_presets().values())
+    assert "google_query" not in (presets.__doc__ or "").split("Auth styles")[1]
 
 
 # ── 2. Google AI Studio authenticates ───────────────────────────────────────
 
 
 def test_google_ai_studio_uses_bearer() -> None:
-    entry = _CATALOG["google_ai_studio"]
-    assert entry["auth"] == "bearer"
-    assert entry["auth_header_name"] == "Authorization"
+    preset = load_presets()["google_ai_studio"]
+    assert preset.auth == "bearer"
+    assert preset_to_api(preset)["auth_header_name"] == "Authorization"
 
 
 def test_google_ai_studio_still_points_at_the_openai_compat_surface() -> None:
     """The bearer choice is only correct for `/v1beta/openai`; the native
     API is a different surface with different auth."""
-    assert _CATALOG["google_ai_studio"]["base_url"].endswith("/v1beta/openai")
+    assert load_presets()["google_ai_studio"].base_url.endswith("/v1beta/openai")
 
 
 def test_google_ai_studio_emits_a_bearer_header(
@@ -125,11 +121,11 @@ def test_google_ai_studio_emits_a_bearer_header(
 ) -> None:
     """The #1513 repro: this returned `{}` and the call went out naked."""
     monkeypatch.setenv("GEMINI_KEY", "secret-key")
-    entry = _CATALOG["google_ai_studio"]
+    preset = load_presets()["google_ai_studio"]
     u = _upstream(
         name="gemini",
-        url=entry["base_url"],
-        auth_style=entry["auth"],
+        url=preset.base_url,
+        auth_style=preset.auth,
         auth_value_env="GEMINI_KEY",
     )
     assert registry.auth_headers(u) == {"Authorization": "Bearer secret-key"}

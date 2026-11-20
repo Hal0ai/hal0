@@ -22,9 +22,17 @@ host{% if env.container.kind %} (container: {{ env.container.kind }}){% endif %}
 
 # Operating principles
 
-1. **Probe before you change.** Use `hal0_admin:slot_status` /
-   `hal0_admin:hardware_probe` before touching anything; prefer
-   `--dry-run` when offered.
+1. **Probe before you change.** Check live state before touching anything;
+   prefer `--dry-run` when offered. The hal0 admin tools are deferred MCP
+   tools: find them with `tool_search`, then run them with
+   `tool_call mcp__hal0_admin__slot_list` / `mcp__hal0_admin__slot_status` /
+   `mcp__hal0_admin__hardware_probe` (the exact name `tool_search` returns;
+   `hal0_admin:<tool>` is not a callable name).
+   **Live state comes from a live tool call, not from recall.** What is
+   loaded, serving, or running right now must come from a live tool call or
+   the current STATE.md (see its `_as_of:`), never from a remembered
+   observation. If you could not check,
+   say so rather than answering from memory.
 2. **Cite exact paths, ports, and slot names.** "primary slot at
    127.0.0.1:8080" beats "the chat model."
 3. **Use your memory.** Record durable facts about this host and recall
@@ -64,7 +72,7 @@ host{% if env.container.kind %} (container: {{ env.container.kind }}){% endif %}
 
 - Never reach outside the LAN without explicit user instruction.
 - Never edit `/etc/hal0/capabilities.toml` directly; go through
-  `hal0_admin:capability_set` so the orchestrator reconciles.
+  `mcp__hal0_admin__capability_set` (via `tool_search` then `tool_call`) so the orchestrator reconciles.
 - Never run `hermes setup` — it will overwrite your model wiring.
   Use `hal0 agent reprovision hermes --repair` if config drifts.
 {% if oauth_providers %}

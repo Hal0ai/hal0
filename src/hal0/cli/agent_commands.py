@@ -682,6 +682,12 @@ def _hermes_root_prelude(terminal_env: dict[str, str] | None = None) -> None:
     # moving to a new parent needs write permission on itself). Hand it to
     # hal0 here, as root, so the first migration can move it.
     _hand_pre_layout_venv_to_hal0()
+    # #3852: a root-run install.sh migration from before the fix left the
+    # mirrored plugin trees root-owned, and the hal0 provisioner below cannot
+    # replace them. Hand them back here, as root, through the ownership table.
+    from hal0.install import perms
+
+    perms.converge_hermes_plugin_trees()
 
     try:
         # The pinned ref decides the minor (3.12 for 3ef6bbd2, 3.14 for a

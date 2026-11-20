@@ -48,6 +48,8 @@ import { compatibleModels } from './slots/slot-shared.js'
 import { useMemoryMapModel } from './memory-map'
 import { slotIndicatorFromPhase, isSlotLive, imageStatusChip } from './slot-status.js'
 import { SlotBreakerChip } from './breaker-chip.jsx'
+import { LaneCode } from './lane-code.jsx'
+import { laneForSlot } from './lane-code-pure'
 import { ConversionBlockedChip } from './conversion-blocked-chip.jsx'
 import { SlotPausedChip, SlotPauseNote } from './image/SlotPause.jsx'
 import { slotPause } from './image/status-line-parts-pure'
@@ -269,26 +271,16 @@ function profileCardOptions({ s, profiles, backends }) {
   return opts
 }
 
-// provider tag — a joined [ device | PROFILE ] control. The device chip is
+// provider tag — the slot's lane code beside its PROFILE control. The lane code is
 // static; the profile side is a real picker over /api/profiles. Picking a row
 // WRITES NOTHING: it hands the pick up to the pane (`onPickProfile`), which
 // owns the consequence confirm. This component holds no data hooks and no
 // mutations — the card is a leaf.
 function DevCell({ s, onProfile, profiles, backends, onPickProfile }) {
-  const kind = devKind(s.device)
-  const dchip =
-    kind === 'npu' ? (
-      <span className="flm-chip">FLM · npu</span>
-    ) : (
-      <span className={'dchip ' + kind}>
-        <span className="sw" />
-        {kind}
-      </span>
-    )
   const cur = s.profile || ''
   return (
     <span className="prov">
-      {dchip}
+      <LaneCode lane={laneForSlot(s)} />
       <RichSelect
         className="profile-pill"
         value={cur}

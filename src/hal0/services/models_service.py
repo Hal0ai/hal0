@@ -40,6 +40,7 @@ from hal0.registry.detect import (
     is_halogen_companion,
 )
 from hal0.registry.model import _derive_ns
+from hal0.upstreams.catalog import curated_model_ids
 from hal0.upstreams.filters import apply_filters
 
 log = logging.getLogger(__name__)
@@ -1651,6 +1652,13 @@ async def remove_model_draft(registry: Any, model_id: str) -> dict[str, Any]:
 # ── catalog aggregation (GET /api/models) ─────────────────────────────────────
 
 
+def _is_ghost_flm_row(entry: Any, not_installed: set[str]) -> bool:
+    """True for a runtime-managed FLM registry row FLM reports as not downloaded."""
+    from hal0.registry.discover import is_runtime_managed
+
+    return is_runtime_managed(entry) and entry.id in not_installed
+
+
 async def list_all(
     *, registry: Any, upstreams: Any, cache: dict[str, Any], update_state: Any
 ) -> dict[str, Any]:
@@ -1686,9 +1694,27 @@ async def list_all(
     update_checks: dict[str, Any] = {}
     if isinstance(update_state, dict):
         update_checks = update_state.get("models") or {}
+    # FLM owns its model bytes, so a registry row for an FLM tag is only
+    # installed while FLM's own catalogue says so (a directory removed outside
+    # hal0 leaves a ghost row that prune never drops, ADR-0026). ``None`` =
+    # the probe gave no answer, so nothing is known and rows stay installed.
+    flm_not_installed: set[str] = set()
+    try:
+        from hal0.providers.flm import flm_catalog as _flm_catalog
+        from hal0.providers.flm import flm_served_models_async as _warm_flm
+
+        await _warm_flm()  # off-loop warm; the read below is then a cache hit
+        for _ce in _flm_catalog() or []:
+            _ctag = _ce.get("tag")
+            if isinstance(_ctag, str) and _ctag and not _ce.get("installed"):
+                flm_not_installed.add(_ctag)
+    except Exception:
+        pass
     for entry in registry.list():
         dumped = model_to_dict(entry)
-        dumped["installed"] = True
+        dumped["installed"] = not (
+            flm_not_installed and _is_ghost_flm_row(entry, flm_not_installed)
+        )
         chk = update_checks.get(entry.id)
         if isinstance(chk, dict) and str(chk.get("reason") or "").startswith("shard_"):
             # A later part of a split GGUF moved (#2761): the first part's sha
@@ -1751,8 +1777,11 @@ async def list_all(
         if not getattr(u, "enabled", True) or not getattr(u, "advertise_models", True):
             continue
         try:
-            ids = cache.get(u.name) or await upstreams.fetch_models(u.name)
-            cache[u.name] = ids
+            if getattr(u, "curated", False):
+                ids = curated_model_ids(u, cache)  # never the network list
+            else:
+                ids = cache.get(u.name) or await upstreams.fetch_models(u.name)
+                cache[u.name] = ids
         except Exception:
             ids = []
         # Same operator curation as /v1/models — the Models page is a

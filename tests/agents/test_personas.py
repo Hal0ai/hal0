@@ -311,3 +311,31 @@ def test_hermes_templates_do_not_claim_a_private_namespace() -> None:
         assert "namespace is yours" not in text, name
     for name in ("SOUL.md.j2", "HERMES.md.j2", "AGENTS.md.j2"):
         assert "private=true" in (root / name).read_text(encoding="utf-8"), name
+
+
+def test_hermes_templates_name_only_callable_admin_tools() -> None:
+    """#3855: ``hal0_admin:<tool>`` is not callable under Hermes tool_search.
+
+    Every ``mcp__hal0_admin__<tool>`` a shipped template names must be a real
+    tool of the admin MCP server, so a rename there fails here.
+    """
+    import re
+    from pathlib import Path
+
+    from hal0.agents import hermes_provision as hp
+    from hal0.mcp import admin
+
+    known = admin.AUTONOMOUS_READ_TOOLS | admin.AUTONOMOUS_WRITE_TOOLS | admin.GATED_TOOLS
+    root = Path(hp.__file__).parent / "hermes_templates"
+    named: set[str] = set()
+    for name in ("SOUL.md.j2", "HERMES.md.j2", "AGENTS.md.j2"):
+        text = (root / name).read_text(encoding="utf-8")
+        assert not re.search(r"hal0_admin:[a-z]", text), name
+        named |= set(re.findall(r"mcp__hal0_admin__([a-z0-9_]+)", text))
+    assert {"slot_list", "slot_status", "hardware_probe", "capability_set"} <= named
+    assert named <= known, sorted(named - known)
+
+    soul = (root / "SOUL.md.j2").read_text(encoding="utf-8")
+    assert "tool_search" in soul
+    assert "tool_call" in soul
+    assert "not from recall" in soul

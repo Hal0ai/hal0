@@ -71,6 +71,7 @@ from hal0.agents.hermes_layout import (
 )
 from hal0.agents.role_slots import candidate_from_slot_mapping, resolve_role_slots
 from hal0.install.perms import SECRETS_DIR_MODE, ensure_shared_dir, state_root_owner
+from hal0.normalize.output_cap import MAX_TOKENS_HEADER
 from hal0.security import nofollow
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
 from hal0.slots.state import SlotState, is_dispatchable_state, provider_requires_model
@@ -1778,10 +1779,28 @@ def _live_resolve_enabled() -> bool:
 # Static list-valued hal0 keys layered by :func:`_merge_config_yaml_layers`
 # (config set stringifies lists, so these can't go through the CLI).
 SKILLS_EXTERNAL_DIRS: list[str] = ["/etc/hal0/agent-skills", "/var/lib/hal0/skills"]
-SESSION_START_HOOK: dict[str, Any] = {
-    "command": "/usr/lib/hal0/hermes-hooks/inject-system-state.sh",
+#: The live-state hook (``inject-system-state.sh`` prints ``{"context": <STATE.md>}``
+#: on a session's first turn). It rides ``pre_llm_call`` because that is the one
+#: hook event whose return the pinned Hermes injects (into the user message,
+#: agent/turn_context.py ``_collect_pre_llm_call_context``). hal0 used to wire it
+#: under ``on_session_start``, an observer whose return Hermes v0.22.4 ignores
+#: (agent/conversation_loop.py), so the block never reached a session (#3853).
+#: :func:`_retire_hal0_session_start_hook` removes that old entry.
+#:
+#: The command runs the script from the active release tree (``current``), not
+#: the installer-written copy under ``/usr/lib/hal0/hermes-hooks``: ``hal0
+#: update`` never re-runs the installer and cannot write that root-owned copy,
+#: so an upgraded box would keep running whatever script it was installed with.
+#: The release tree always ships the hook that matches this wiring.
+STATE_HOOK_EVENT = "pre_llm_call"
+STATE_HOOK: dict[str, Any] = {
+    "command": "/usr/lib/hal0/current/installer/agents/hermes/hooks/inject-system-state.sh",
     "timeout": 2,
 }
+#: Commands hal0 has wired for the live-state hook, current and retired.
+_HAL0_STATE_HOOK_COMMANDS: frozenset[str] = frozenset(
+    {STATE_HOOK["command"], "/usr/lib/hal0/hermes-hooks/inject-system-state.sh"}
+)
 #: Hermes session pruning switch; hal0 writes it false (ADR-0034 decision 7).
 SESSIONS_AUTO_PRUNE_CONFIG_KEY = "sessions.auto_prune"
 
@@ -1792,7 +1811,7 @@ PERSONA_PROMPT_CONFIG_KEY = "agent.system_prompt"
 
 HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
     "skills": {"external_dirs": SKILLS_EXTERNAL_DIRS},
-    "hooks": {"on_session_start": [SESSION_START_HOOK]},
+    "hooks": {STATE_HOOK_EVENT: [STATE_HOOK]},
 }
 
 
@@ -2297,6 +2316,11 @@ def terminal_tool_enabled(
 # unreadable setting falls back to.
 HAL0_APPROVALS_MODE = "smart"
 
+#: Most tokens one Hermes model call may generate through the hal0 gateway
+#: (#3804). Sent as ``X-hal0-Max-Tokens``; an operator changes it with
+#: ``providers.custom.extra_headers.X-hal0-Max-Tokens`` in overrides.yaml.
+HERMES_MAX_OUTPUT_TOKENS = 8192
+
 
 #: hal0's own MCP servers that can write memory for the caller: hal0-memory,
 #: and hal0-admin whose catalog carries ``memory_add``. A profile's
@@ -2469,13 +2493,14 @@ def _build_config_overlay(
 
     Mirrors the (now-deleted) ``config.yaml.j2`` — but ONLY the scalar /
     nested-scalar keys. List-valued keys (``skills.external_dirs``,
-    ``hooks.on_session_start``) are layered by :func:`_merge_config_yaml_layers`;
-    ``model.context_length`` is deliberately omitted: per-model context comes
-    from live ``/v1/models`` discovery. (Hermes 0.14 applied it to every
-    model, cloud ones included; v0.22.2 scopes it to the configured default
-    model and route, hermes agent/agent_init.py:1700-1745, but under
-    live-resolve that default is the virtual ``hal0/agent``, so a single
-    number would still be wrong for most slots.)
+    ``hooks.pre_llm_call``) are layered by :func:`_merge_config_yaml_layers`;
+    ``model.context_length`` is not in this overlay: every other model's
+    context comes from live ``/v1/models`` discovery, and the one value hal0
+    does write, for the ``hal0/agent`` default, is owned and reconciled by
+    :func:`_reconcile_model_context_length_yaml` (#3854). (Hermes 0.14 applied
+    the key to every model, cloud ones included; v0.22.2 scopes it to the
+    configured default model and route, hermes agent/agent_init.py:1700-1745,
+    so it describes ``hal0/agent`` alone.)
 
     Under live-resolve (the hal0 default) ``model.default`` is the virtual
     ``hal0/agent`` against the gateway with ``discover_models`` on, so the
@@ -2489,7 +2514,7 @@ def _build_config_overlay(
     pairs: list[tuple[str, Any]] = []
 
     # hooks_auto_accept — the provisioner is also the thing that installs
-    # ``hooks.on_session_start`` (SESSION_START_HOOK, below via
+    # ``hooks.pre_llm_call`` (STATE_HOOK, below via
     # HAL0_CONFIG_LIST_KEYS): a headless box has no TTY to answer the
     # first-run "approve this hook?" prompt, so without this the hook is
     # silently skipped every session (agent.shell_hooks: "not allowlisted")
@@ -2518,15 +2543,24 @@ def _build_config_overlay(
 
     # model.* — the OpenAI-compatible-LAN wiring. ``provider: custom`` is
     # hermes's built-in bucket for Ollama/vLLM/llama.cpp endpoints; hal0 is
-    # that endpoint. max_tokens guards the thinking-model silent-TUI (#635).
+    # that endpoint.
+    #
+    # Output cap (#3804): the pinned Hermes has no reader for a
+    # ``model.max_tokens`` key, and its built-in ``custom`` profile sets no
+    # cap, so a main-loop call went out unbounded and could decode until the
+    # slot's context filled. Hermes does put a provider entry's
+    # ``extra_headers`` on every request to that entry's base_url, so the cap
+    # travels as ``X-hal0-Max-Tokens`` and the hal0 gateway applies it
+    # (hal0.normalize.output_cap). A base_url that points straight at a slot's
+    # llama-server (live-resolve off) bypasses the gateway and stays uncapped.
     # ADR-0023: the canonical default virtual is hal0/agent (was hal0/chat).
     pairs.append(("model.default", _model_default_id(primary["model_id"], live_resolve_enabled)))
     pairs += [
         ("model.provider", "custom"),
         ("model.base_url", base_url),
-        ("model.max_tokens", 8192),
         ("providers.custom.name", "hal0"),
         ("providers.custom.base_url", base_url),
+        (f"providers.custom.extra_headers.{MAX_TOKENS_HEADER}", HERMES_MAX_OUTPUT_TOKENS),
         ("providers.custom.request_timeout_seconds", 300),
         ("providers.custom.stale_timeout_seconds", 900),
     ]
@@ -2902,6 +2936,194 @@ def _prune_model_aliases_yaml(
         return [], _yaml_error_summary(exc)
 
 
+_ANCHOR_MODEL_ID = "hal0/agent"
+
+
+def _hermes_matches_catalog_row(catalog: Iterable[Any], model_id: str) -> bool:
+    """Would Hermes' own ``/models`` discovery find a window for ``model_id`` BY NAME?
+
+    Mirrors the pinned v0.22.x lookup (agent/model_metadata.py
+    ``_resolve_endpoint_context_length`` over ``_add_model_aliases``): every
+    row is keyed by its id and by the part after its first ``/``; an exact key
+    wins, otherwise the first key that contains the model or is contained in
+    it. The row only counts when it carries an integer window.
+
+    Hermes also answers "the catalogue has exactly one key, use it" for any
+    model. That shortcut is deliberately NOT mirrored: it depends on how many
+    rows ``/v1/models`` lists at one instant, and on a fresh install the count
+    changes about ten seconds after the installer's ``config_write`` (reconcile
+    adds ``hermes-agent``), after which Hermes no longer takes it (#3854
+    follow-up). Only a row that matches the name (an ``agent`` alias row from a
+    bound model) is stable, so only that makes the window "discoverable".
+    """
+    keys: dict[str, Any] = {}
+    for row in catalog:
+        rid = row.get("id") if isinstance(row, dict) else None
+        if not rid:
+            continue
+        rid = str(rid)
+        keys[rid] = row
+        if "/" in rid:
+            keys.setdefault(rid.split("/", 1)[1], row)
+    matched = keys.get(model_id)
+    if not matched and model_id:
+        matched = next((r for k, r in keys.items() if model_id in k or k in model_id), None)
+    ctx = matched.get("context_length") if matched else None
+    return isinstance(ctx, int) and not isinstance(ctx, bool)
+
+
+def _served_anchor_context(
+    fetch_anchor_models: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]],
+    model_id: str,
+    base_url: str,
+) -> tuple[int | None, bool]:
+    """``(window, discoverable)`` for ``model_id`` on ``base_url``.
+
+    ``window`` is what ``GET {base_url}/models/{model_id}`` reports. The by-id
+    route resolves the routing fallback chain exactly as chat dispatch does
+    (``api/routes/v1.py::_resolve_virtual_model_entry``), so for ``hal0/agent``
+    on a box whose agent slot has no model it answers with the window of the
+    slot that really serves it (ADR-0023's fallback, #3854). ``None`` means
+    "cannot see": unreachable, no route, or no usable number.
+
+    ``discoverable`` is True when the catalog already holds a row Hermes would
+    match for ``model_id`` (a bound agent model): Hermes then learns the live
+    window itself, and a stamp would only go stale.
+    """
+    try:
+        entry, catalog = fetch_anchor_models(model_id, base_url)
+    except Exception as exc:  # the seam promises not to raise; stay non-fatal anyway
+        log.warning("hermes_provision.anchor_window_unreadable", error=str(exc))
+        return None, False
+    if _hermes_matches_catalog_row(catalog or [], model_id):
+        return None, True
+    ctx = entry.get("context_length") if isinstance(entry, dict) else None
+    if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= 0:
+        return None, False
+    return ctx, False
+
+
+def _wiring_is_agent_route(data: dict[str, Any]) -> bool:
+    """Does the config's EFFECTIVE model wiring send Hermes to ``hal0/agent``?
+
+    Hermes scopes ``model.context_length`` to ``model.default`` on its route,
+    so hal0 may only own the key when the file, with ``overrides.yaml`` and any
+    operator model pick already applied, names the virtual ``hal0/agent`` on
+    the hal0 gateway.
+    """
+    model = data.get("model")
+    if not isinstance(model, dict):
+        return False
+    base = str(model.get("base_url") or "").rstrip("/")
+    return (
+        model.get("default") == _ANCHOR_MODEL_ID
+        and model.get("provider") == "custom"
+        and base == _DEFAULT_PRIMARY_BACKEND_URL.rstrip("/")
+    )
+
+
+def _sync_model_context_length(
+    config_path: Path,
+    fetch_anchor_models: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]],
+) -> tuple[int | None, str | None]:
+    """Reconcile ``model.context_length`` against the final config and the live window."""
+    if not config_path.exists():
+        return None, None
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:  # unreadable: the reconcile reports it under the lock
+        data = None
+    window, discoverable = None, False
+    if isinstance(data, dict) and _wiring_is_agent_route(data):
+        window, discoverable = _served_anchor_context(
+            fetch_anchor_models, _ANCHOR_MODEL_ID, _DEFAULT_PRIMARY_BACKEND_URL
+        )
+    return _reconcile_model_context_length_yaml(
+        config_path, window=window, discoverable=discoverable
+    )
+
+
+def _reconcile_model_context_length_yaml(
+    config_path: Path, *, window: int | None, discoverable: bool = False
+) -> tuple[int | None, str | None]:
+    """Own ``model.context_length`` for ``hal0/agent``; ``(value in file, error)``.
+
+    Hermes only learns a window from a ``/v1/models`` row it can match or from
+    a local-server probe. On a box whose ``agent`` slot has no model, neither
+    sees the ADR-0023 fallback that serves ``hal0/agent``, so Hermes fell back
+    to its 256,000-token default (#3854). Hermes scopes this key to
+    ``model.default`` (agent/agent_init.py ``_scope_context_length_to_default_runtime``),
+    so it describes ``hal0/agent`` alone and never another slot picked later.
+
+    Ownership is explicit, as for model aliases: hal0 records the value it
+    wrote in ``hal0.model_context_length``. A value that does not match the
+    record (the #3854 hand workaround, or an edit after hal0 wrote it) is the
+    operator's: left alone and the record dropped. Otherwise:
+
+    * managed with a ``window`` — write it and record it, so a refresh follows
+      the resolver when the serving slot or its profile changes;
+    * managed without a window — "cannot see" is not "remove": keep what is
+      there;
+    * not managed — remove hal0's own value, which would otherwise be applied
+      to a default it does not describe. Managed means the file's effective
+      wiring is the ``hal0/agent`` route (:func:`_wiring_is_agent_route`,
+      checked on the file as it stands, so an ``overrides.yaml`` or operator
+      model pick is honoured) and Hermes cannot already discover the window
+      (``discoverable``: an agent model is bound and the catalog has its row).
+    """
+    if not config_path.exists():
+        return None, None
+    try:
+        import yaml
+    except ImportError:
+        return None, "PyYAML unavailable"
+    try:
+        with root_config_lock(config_path.parent):
+            data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None, "config.yaml is not a YAML mapping"
+            model = data.get("model")
+            hal0 = data.get("hal0", {})
+            if not isinstance(model, dict) or not isinstance(hal0, dict):
+                return None, "model or hal0 is not a YAML mapping"
+            managed = _wiring_is_agent_route(data) and not discoverable
+            current = model.get("context_length")
+            recorded = hal0.get("model_context_length")
+            ours = current is not None and recorded is not None and current == recorded
+            changed = False
+            if current is not None and not ours:
+                result = current if isinstance(current, int) else None
+                if "model_context_length" in hal0:
+                    del hal0["model_context_length"]
+                    changed = True
+            elif not managed:
+                result = None
+                if ours:
+                    del model["context_length"]
+                    changed = True
+                if "model_context_length" in hal0:
+                    del hal0["model_context_length"]
+                    changed = True
+            elif window is None:
+                result = current
+            else:
+                result = window
+                if current != window or recorded != window:
+                    model["context_length"] = window
+                    hal0["model_context_length"] = window
+                    data["hal0"] = hal0
+                    changed = True
+            if changed:
+                _atomic_write(
+                    config_path, yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+                )
+            return result, None
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        return None, _yaml_error_summary(exc)
+
+
 def _prune_mcp_servers_yaml(
     config_path: Path,
     *,
@@ -3179,12 +3401,13 @@ def _merge_config_yaml_layers(
     """Deep-merge the irreducible list keys + operator overrides onto config.yaml.
 
     ``config set`` can't express YAML sequences (it stringifies them), so the
-    list-valued hal0 keys (``skills.external_dirs``, ``hooks.on_session_start``)
+    list-valued hal0 keys (``skills.external_dirs``, ``hooks.pre_llm_call``)
     are layered here. The operator escape hatch (``overrides.yaml``) deep-merges
     on top LAST so a hand override still wins. Every hermes-owned key is
     preserved (merge, never clobber). Keys hal0 itself used to write and no
-    longer does (:data:`RETIRED_HAL0_CONFIG_KEYS`) are removed first, so an
-    upgraded box does not keep dead config. A ``display.personality`` that
+    longer does (:data:`RETIRED_HAL0_CONFIG_KEYS`, and hal0's own entry under
+    ``hooks.on_session_start``, #3853) are removed first, so an upgraded box
+    does not keep dead config. A ``display.personality`` that
     equals one of ``persona_names`` (a hal0 persona's display name, which
     hal0 itself wrote there before #2839) is reset to ``""``: Hermes lets a
     known personality override ``agent.system_prompt``, so a custom persona
@@ -3217,11 +3440,13 @@ def _merge_config_yaml_layers(
         for dotted in RETIRED_HAL0_CONFIG_KEYS:
             _drop_dotted_key(base, dotted)
         _retire_hal0_personality(base, persona_names)
+        _retire_hal0_session_start_hook(base)
         overlay: dict[str, Any] = {}
         if overrides_path.exists():
             overlay = yaml.safe_load(overrides_path.read_text(encoding="utf-8")) or {}
         if memory_servers:
             list_keys = _without_private_header(list_keys, memory_servers)
+        list_keys = _layer_state_hook_onto(base, list_keys)
         merged = _deep_merge(base, list_keys)
         if memory_servers:
             final = _deep_merge(merged, overlay)
@@ -3290,8 +3515,14 @@ def _carry_prelude_to_system_prompt(data: dict[str, Any]) -> bool:
 #: Keys every Hermes release hal0 activates must find in config.yaml before
 #: its units start (ADR-0034 decision 7: session pruning off). Written by
 #: :func:`apply_release_config_invariants` during activation as well as by
-#: the full overlay on install and reprovision.
-RELEASE_CONFIG_INVARIANTS: dict[str, Any] = {"sessions": {"auto_prune": False}}
+#: the full overlay on install and reprovision. The live-state hook is one of
+#: them (#3853): ``hal0 update`` is how most boxes pick up a release, and it
+#: never runs the overlay, so without this an upgraded box would keep the
+#: retired ``on_session_start`` wiring.
+RELEASE_CONFIG_INVARIANTS: dict[str, Any] = {
+    "sessions": {"auto_prune": False},
+    "hooks": {STATE_HOOK_EVENT: [STATE_HOOK]},
+}
 
 
 def apply_release_config_invariants(
@@ -3405,6 +3636,75 @@ def _retire_hal0_personality(data: dict[str, Any], persona_names: Iterable[str])
         return False
     display["personality"] = ""
     return True
+
+
+def _retire_hal0_session_start_hook(data: dict[str, Any]) -> bool:
+    """Drop hal0's live-state hook from ``hooks.on_session_start`` (#3853).
+
+    hal0 wired it there before the hook moved to :data:`STATE_HOOK_EVENT`. The
+    pinned Hermes ignores ``on_session_start``'s return, so the entry only
+    produced a "not valid JSON" warning per session. An operator's own
+    ``on_session_start`` hooks stay; an emptied list, and then an emptied
+    ``hooks`` mapping, is removed. True iff an entry was dropped.
+    """
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    entries = hooks.get("on_session_start")
+    if not isinstance(entries, list):
+        return False
+    kept = [
+        e
+        for e in entries
+        if not (
+            isinstance(e, dict)
+            and isinstance(e.get("command"), str)
+            and e["command"].strip() in _HAL0_STATE_HOOK_COMMANDS
+        )
+    ]
+    if len(kept) == len(entries):
+        return False
+    if kept:
+        hooks["on_session_start"] = kept
+    else:
+        del hooks["on_session_start"]
+    if not hooks:
+        del data["hooks"]
+    return True
+
+
+def _layer_state_hook_onto(base: dict[str, Any], layers: dict[str, Any]) -> dict[str, Any]:
+    """Return ``layers`` with ``hooks.pre_llm_call`` made additive over ``base``.
+
+    :func:`_deep_merge` replaces a list wholesale, so layering ``[STATE_HOOK]``
+    over a ``config.yaml`` whose operator already has ``pre_llm_call`` hooks
+    would delete theirs. The result keeps every operator entry of ``base`` and
+    carries exactly one hal0 state-hook entry: any earlier hal0 entry (current
+    or retired command) is dropped from the kept list first, so a re-run does
+    not stack duplicates. ``layers`` is not mutated; it is returned as is when
+    it carries no ``pre_llm_call`` list.
+    """
+    layer_hooks = layers.get("hooks")
+    if not isinstance(layer_hooks, dict):
+        return layers
+    layer_entries = layer_hooks.get(STATE_HOOK_EVENT)
+    if not isinstance(layer_entries, list):
+        return layers
+    base_hooks = base.get("hooks")
+    existing = base_hooks.get(STATE_HOOK_EVENT) if isinstance(base_hooks, dict) else None
+    operator_entries = [
+        e
+        for e in (existing if isinstance(existing, list) else [])
+        if not (
+            isinstance(e, dict)
+            and isinstance(e.get("command"), str)
+            and e["command"].strip() in _HAL0_STATE_HOOK_COMMANDS
+        )
+    ]
+    return {
+        **layers,
+        "hooks": {**layer_hooks, STATE_HOOK_EVENT: operator_entries + list(layer_entries)},
+    }
 
 
 def _persona_prompt_layer(system_prompt: str) -> dict[str, Any]:
@@ -3589,7 +3889,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
          model_aliases, delegation, mcp_servers, persona prompt, auxiliary,
          …) applied via ``hermes config set`` — idempotent, headless-safe.
       3. The two irreducible LIST keys (``skills.external_dirs``,
-         ``hooks.on_session_start``) + operator ``overrides.yaml`` deep-merged
+         ``hooks.pre_llm_call``) + operator ``overrides.yaml`` deep-merged
          in via PyYAML, preserving every hermes-owned key.
 
     Idempotent under ``--repair``: every ``config set`` re-writes the same
@@ -3806,6 +4106,18 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             memory_servers=_MEMORY_REACHING_SERVERS,
         )
 
+    # #3854: own model.context_length against the FINAL file, so overrides.yaml
+    # and an operator's model pick (both laid down above) decide whether the
+    # key describes hal0/agent. The window is that of whatever really serves
+    # hal0/agent, the ADR-0023 fallback included.
+    model_context_length, ctx_error = _sync_model_context_length(
+        config_path, ctx.io.fetch_anchor_models
+    )
+    if ctx_error is not None:
+        ctx_error = f"model.context_length: {ctx_error}"
+        errors.append(ctx_error)
+    yaml_warning = alias_error or ctx_error
+
     # Legacy honcho.json cleanup — see _disable_honcho_hermes_host.
     honcho_json_changed = _disable_honcho_hermes_host(hermes_home)
 
@@ -3849,7 +4161,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
     )
     if status == PhaseStatus.OK and terminal_state_stale:
         status = PhaseStatus.WARN
-    if status == PhaseStatus.OK and alias_error is not None:
+    if status == PhaseStatus.OK and yaml_warning is not None:
         status = PhaseStatus.WARN
     return PhaseResult(
         status=status,
@@ -3857,7 +4169,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         reason=(
             "; ".join(errors[:3])
             if status == PhaseStatus.FAIL
-            else (stale_reason if terminal_state_stale else alias_error)
+            else (stale_reason if terminal_state_stale else yaml_warning)
         ),
         details={
             "config_path": str(config_path),
@@ -3871,6 +4183,9 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
             "operator_model_kept": kept_model,
             "chat_slot_count": len(chat_slots),
             "removed_model_aliases": removed_aliases,
+            # The model.context_length now in the file (hal0's or the
+            # operator's), None when Hermes is left to discover it (#3854).
+            "model_context_length": model_context_length,
             "persona": persona_name or None,
             "mcp_server_count": len(mcp_servers),
             "delegation_model": (delegation or {}).get("model"),
@@ -7054,6 +7369,25 @@ def _state_body_minus_timestamp(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not line.startswith("_as_of:"))
 
 
+def _refresh_context_stamp(
+    config_path: Path,
+    fetch_anchor_models: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]] | None,
+) -> None:
+    """Re-reconcile ``model.context_length`` iff hal0 recorded a stamp (#3854)."""
+    if not config_path.exists():
+        return
+    try:
+        import yaml
+
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    hal0 = data.get("hal0") if isinstance(data, dict) else None
+    if not isinstance(hal0, dict) or hal0.get("model_context_length") is None:
+        return
+    _sync_model_context_length(config_path, fetch_anchor_models or _fetch_anchor_models)
+
+
 def render_live_context(
     *,
     hermes_home: Path,
@@ -7061,6 +7395,7 @@ def render_live_context(
     contexts_fetcher: Callable[[], dict[str, int]] | None = None,
     health_probe: Callable[..., int] | None = None,
     now_iso: str | None = None,
+    anchor_fetcher: Callable[..., tuple[dict[str, Any] | None, list[dict[str, Any]]]] | None = None,
 ) -> dict[str, Any]:
     """Re-probe live slot/capability state; (re)write HERMES.md + STATE.md.
 
@@ -7131,6 +7466,17 @@ def render_live_context(
             None,
         )
 
+    # #3854: a slot swap lands here (hermes_refresh), and a window hal0 stamped
+    # into config.yaml for hal0/agent may no longer be the one that serves it
+    # (an agent model was bound, or its profile changed). Re-reconcile it, but
+    # only where hal0 owns a stamp, so a box without one makes no extra calls.
+    # Best-effort: a read-only or unreachable config never fails the render.
+    if not degraded:
+        try:
+            _refresh_context_stamp(hermes_home / "config.yaml", anchor_fetcher)
+        except Exception as exc:
+            log.warning("hermes_provision.context_stamp_refresh_failed", error=str(exc))
+
     capabilities = _collect_capability_rollup(slots_all)
 
     # NPU: present from the cached env snapshot; loaded model from any FLM
@@ -7193,7 +7539,7 @@ def render_live_context(
         out["state_written"] = True
     elif reachable:
         # Content unchanged, but we just confirmed it current against a
-        # reachable daemon — bump mtime so the on_session_start hook's TTL
+        # reachable daemon — bump mtime so the pre_llm_call state hook's TTL
         # staleness check settles instead of firing a background regen every
         # session forever. mtime is not content, so Hermes's injected text
         # is byte-identical and the prompt-cache prefix stays warm.
@@ -8475,6 +8821,13 @@ def _wrapper_bin() -> Path:
     return HERMES_CLI_INSTALL_PATH
 
 
+#: Client timeout of the chat probe's one request. A fresh install can queue
+#: the probe behind first-boot memory consolidation on a single-sequence brain
+#: (about 125 s of generation, #3809), so the wait must outlast that. A timeout
+#: stays a failure: only a reply within the budget proves the chat path works.
+_CHAT_PROBE_TIMEOUT_S = 180.0
+
+
 def _smoke_chat_completions(state: BootstrapState, _io: InstallIO) -> tuple[bool | None, str]:
     """POST against model.base_url/chat/completions; assert 'ready' in reply.
 
@@ -8529,7 +8882,7 @@ def _smoke_chat_completions(state: BootstrapState, _io: InstallIO) -> tuple[bool
     # Thinking models can spend tens of seconds on the reasoning block
     # before emitting visible content; 10s wasn't long enough.
     try:
-        with open_url(req, timeout=60.0) as resp:
+        with open_url(req, timeout=_CHAT_PROBE_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (URLError, OSError, json.JSONDecodeError, TimeoutError) as exc:
         return (False, f"chat/completions: {exc}")

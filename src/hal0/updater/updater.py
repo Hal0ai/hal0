@@ -70,6 +70,11 @@ from hal0.config.loader import (
 )
 from hal0.config.migrations import latest_version, run_migrations
 from hal0.errors import Hal0Error
+
+# Imported here, not lazily inside the activation step (#3874): that step runs
+# after the venv re-pip, when a first import loads the INCOMING tree's copy,
+# and on a rollback that tree may lack what this code calls.
+from hal0.install import perms
 from hal0.release.policy import ReleaseKind, ReleasePolicy, ReleaseTagError
 
 log = structlog.get_logger(__name__)
@@ -1671,9 +1676,19 @@ def mirror_hermes_plugins(
     shipped ``installer/agents/hermes/plugins`` of the freshly activated tree.
 
     ``install=False`` (the boot-time safety net) does nothing. A box without a
-    hermes home is skipped. Every failure is a quiet ``False``: a plugin copy
-    that cannot land is never a reason to fail an update; ``hal0 doctor``
-    reports the drift. Returns ``True`` only when a tree was rewritten.
+    hermes home is skipped. A failure never fails the update itself, but it is
+    not quiet either (#3852): it logs ``updater.hermes_plugin_mirror_failed``,
+    which is in :data:`_UNCONVERGED_PASS_EVENTS`, so the update reports it
+    and is not recorded as converged. Returns ``True`` only when a tree was
+    rewritten.
+
+    A root caller (``install.sh``'s migration step) never copies into the
+    hal0-writable HERMES_HOME itself (#3852): it first hands any root-owned
+    plugin tree back to hal0 through the ownership table, then runs the copy
+    as hal0 (ADR-0032: Hermes trees are born ``hal0:hal0``, a root caller
+    drops to hal0). A root rmtree + copytree there followed a symlinked parent
+    the hal0 account could plant, and left the trees root-owned, which every
+    later hal0-run update then failed to replace.
     """
     if not install:
         return False
@@ -1687,13 +1702,80 @@ def mirror_hermes_plugins(
     src_root = plugin_src_root or (
         hermes.REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "plugins"
     )
-    changed, _details, failure = hermes._mirror_plugins(src_root, home)
-    if failure is not None:
-        log.warning("updater.hermes_plugin_mirror_failed", job_id=job_id, reason=failure.reason)
+    if os.geteuid() == 0 and _hal0_account_exists():
+        from hal0.install import perms
+
+        perms.converge_hermes_plugin_trees()
+        changed, reason = _mirror_hermes_plugins_as_hal0(src_root, home)
+    else:
+        changed, _details, failure = hermes._mirror_plugins(src_root, home)
+        reason = failure.reason if failure is not None else None
+    if reason is not None:
+        # The remedy rides on the line so the installer's own output, where this
+        # is the only trace of a failed mirror, names the way out too.
+        log.warning(
+            "updater.hermes_plugin_mirror_failed",
+            job_id=job_id,
+            reason=reason,
+            remedy="sudo hal0 agent reprovision hermes",
+        )
         return False
     if changed:
         log.info("updater.hermes_plugins_mirrored", job_id=job_id, hermes_home=str(home))
     return changed
+
+
+def _hal0_account_exists() -> bool:
+    import pwd
+
+    try:
+        pwd.getpwnam("hal0")
+    except KeyError:
+        return False
+    return True
+
+
+#: The child :func:`_mirror_hermes_plugins_as_hal0` runs: the provisioner's own
+#: mirror, with its verdict as the last stdout line.
+_PLUGIN_MIRROR_SCRIPT = (
+    "import json, sys\n"
+    "from pathlib import Path\n"
+    "from hal0.agents.hermes_provision import _mirror_plugins\n"
+    "src, home = sys.argv[1], sys.argv[2]\n"
+    "changed, _details, failure = _mirror_plugins(Path(src), Path(home))\n"
+    "print(json.dumps({'changed': bool(changed),"
+    " 'reason': failure.reason if failure is not None else None}))\n"
+)
+
+
+def _mirror_hermes_plugins_as_hal0(src_root: Path, home: Path) -> tuple[bool, str | None]:
+    """Run the plugin mirror as hal0 from a root process: ``(changed, failure reason)``."""
+    from hal0.system.seam import as_hal0_argv
+
+    argv = as_hal0_argv(
+        [sys.executable, "-I", "-c", _PLUGIN_MIRROR_SCRIPT, str(src_root), str(home)]
+    )
+    try:
+        proc = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            cwd="/",
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"plugin mirror as hal0 could not run: {exc}"
+    for line in reversed((proc.stdout or "").splitlines()):
+        try:
+            verdict = json.loads(line)
+        except ValueError:
+            continue
+        if proc.returncode == 0 and isinstance(verdict, dict) and "changed" in verdict:
+            reason = verdict.get("reason")
+            return bool(verdict["changed"]), str(reason) if reason is not None else None
+    tail = (proc.stderr or "").strip().splitlines()[-1:] or [f"exit {proc.returncode}"]
+    return False, f"plugin mirror as hal0 failed: {tail[0]}"
 
 
 def repair_hermes_mcp_client(
@@ -4240,20 +4322,32 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
     gpu_perms_unit = refresh_gpu_perms_unit(target, job_id=job_id)
     retired = remove_retired_artifacts(job_id=job_id)
 
-    # Heal root-created tombstone locks on existing boxes (#2698), using
-    # the same narrow ownership row as doctor perms --fix.
+    # Both repairs below use `perms` as imported at module load, i.e. from the
+    # tree running this activation, never the tree just re-pipped in: on a
+    # rollback that one may predate them (#3874). What they reach lazily from
+    # there (ownership_table's mDNS dir) still comes from the new site-packages,
+    # so each is best-effort: a failure is logged and the activation carries on.
     if os.geteuid() == 0:
+        # Heal root-created tombstone locks on existing boxes (#2698), using
+        # the same narrow ownership row as doctor perms --fix.
         try:
-            from hal0.install import perms
-
             lock_rows = [
                 row
                 for row in perms.ownership_table()
                 if row.target == paths.var_lib() / "registry" and row.glob == "*.lock"
             ]
             perms.commit(perms.plan(lock_rows))
-        except (OSError, KeyError) as exc:
+        except Exception as exc:
             log.warning("updater.registry_lock_perms_failed", job_id=job_id, error=str(exc))
+        # #3852: hand a root-owned Hermes plugin tree (left by a root-run
+        # install.sh) back to hal0 while root is still held, so the hal0-run
+        # post-swap mirror can replace it.
+        try:
+            perms.converge_hermes_plugin_trees()
+        except Exception as exc:
+            log.warning(
+                "updater.hermes_plugin_trees_converge_failed", job_id=job_id, error=str(exc)
+            )
 
     log.info(
         "updater.activate_ok",
@@ -4420,6 +4514,23 @@ _NON_FATAL_MIGRATION_FAILURE_EVENTS: tuple[str, ...] = (
     "updater.extraction_dropin_reconcile_failed",
     "updater.showcase_dropin_reconcile_failed",
     "updater.embedder_record_failed",
+    "updater.hermes_plugin_mirror_failed",
+    "updater.hermes_plugin_mirror_pass_failed",
+    # Not a failure: an operator-facing note that the update changed a stored
+    # lane limit or adopted a hand-made drop-in value (config migration v5).
+    "updater.lane_limits_converted",
+    "updater.lane_limits_adopt_skipped",
+    # Not a failure: config migration v6 changed [memory.decision].provider.
+    "updater.memory_decision_provider_converted",
+)
+
+#: The pass warnings above that also keep an update from counting as converged
+#: (#3852): the shipped Hermes plugin trees did not land, so the box runs the
+#: new release with the old plugin code. Every other pass warning describes a
+#: best-effort cleanup whose miss leaves the box working as before.
+_UNCONVERGED_PASS_EVENTS: tuple[str, ...] = (
+    "updater.hermes_plugin_mirror_failed",
+    "updater.hermes_plugin_mirror_pass_failed",
 )
 
 
@@ -4865,14 +4976,14 @@ class Updater:
             previous=str(prior) if prior else None,
         )
 
-        # `pass_warnings` (#1960 B2) does NOT factor into `ok`/`converged`:
-        # those five passes are independently best-effort BY DESIGN (see
+        # `pass_warnings` (#1960 B2) does NOT factor into `ok`, and only the
+        # _UNCONVERGED_PASS_EVENTS among them factor into `converged`. The
+        # other passes are independently best-effort BY DESIGN (see
         # run_post_activation_migrations's own docstring — an affected slot
-        # or model just keeps its previous state until the operator acts),
-        # exactly as true before this PR as after it. What changed is only
-        # that a swallowed pass failure used to be invisible outside
-        # journalctl; it is now visible here too, without reclassifying a
-        # long-standing non-fatal outcome as a hard one.
+        # or model just keeps its previous state until the operator acts).
+        # A failed Hermes plugin mirror is different (#3852): a shipped
+        # component did not land, so the box is not the release it reports.
+        unconverged_passes = [e for e in pass_warnings if e in _UNCONVERGED_PASS_EVENTS]
         convergence = {
             "post_activation_migrations": {
                 "ok": migrations_error is None,
@@ -4891,7 +5002,7 @@ class Updater:
                 # to launch until it is fixed, so the install is not converged.
                 "conversion_blockers": blockers,
             },
-            "converged": migrations_error is None and not blockers,
+            "converged": migrations_error is None and not blockers and not unconverged_passes,
         }
         log.info(
             "updater.convergence",
@@ -5003,6 +5114,7 @@ class Updater:
         # ADR-0045: a release before per-slot [tune] refuses a slot file that
         # carries the table, a profile with reasoning keys and a stack entry with
         # tune. Strip them and leave a .bak-<stamp> copy of each file touched.
+        # The same goes for the per-model provider catalog (#3800) in upstreams.toml.
         tune_backups: dict[str, _TuneBackup] = {}
         # Steps 8 + 8b via the same privileged primitive commit() uses: swap the
         # symlink back and re-pip the prior tree so the next hal0-api restart
@@ -5013,6 +5125,9 @@ class Updater:
         # is left half-done.
         try:
             tune_stripped = _strip_tune_config_for(
+                prior_path, job_id=self.job_id, backups_out=tune_backups
+            )
+            catalog_stripped = _strip_upstream_catalog_for(
                 prior_path, job_id=self.job_id, backups_out=tune_backups
             )
             activated = await seam.activate(prior_path.name)
@@ -5067,6 +5182,7 @@ class Updater:
             "previous_now": str(current_target) if current_target else None,
             "schema_warning": warning,
             "tune_stripped": tune_stripped,
+            "catalog_stripped": catalog_stripped,
         }
 
 
@@ -5194,16 +5310,35 @@ def _strip_tune_config_for(
     """
     if (prior_path / _TUNE_MARKER).is_file():
         return []
-    import tomllib
-
-    import tomli_w
-
     slots_dir = paths.slots_config_dir()
     targets: list[tuple[Path, Callable[[dict[str, Any]], bool]]] = [
         *((path, _drop_slot_file_tune) for path in sorted(slots_dir.glob("*.toml"))),
         (paths.profiles_toml(), lambda data: _drop_profile_tune_keys(data.get("profile"))),
         (paths.stacks_toml(), _drop_stack_catalog_tune),
     ]
+    return _strip_config_files(
+        targets, event="tune_stripped", job_id=job_id, backups_out=backups_out
+    )
+
+
+def _strip_config_files(
+    targets: list[tuple[Path, Callable[[dict[str, Any]], bool]]],
+    *,
+    event: str,
+    job_id: str | None,
+    backups_out: dict[str, _TuneBackup] | None,
+) -> list[str]:
+    """Run each ``drop`` over its parsed file; rewrite the files it changed.
+
+    The shared body of :func:`_strip_tune_config_for` and
+    :func:`_strip_upstream_catalog_for`: back up, rewrite atomically keeping
+    owner and mode, record in ``backups_out``, and on any failure restore what
+    this call already changed before propagating.
+    """
+    import tomllib
+
+    import tomli_w
+
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     backups: dict[str, _TuneBackup] = backups_out if backups_out is not None else {}
     changed: list[str] = []
@@ -5237,13 +5372,98 @@ def _strip_tune_config_for(
                 path, data, mode=stat.S_IMODE(st.st_mode), owner=(st.st_uid, st.st_gid)
             )
             changed.append(str(path))
-            log.info("updater.tune_stripped", job_id=job_id, path=str(path), backup=str(backup))
+            log.info(f"updater.{event}", job_id=job_id, path=str(path), backup=str(backup))
     except BaseException:
         # Nothing else touches these files inside this window, so restore without
         # the edited-since check (the file being written still holds its old content).
         _restore_tune_backups(backups, job_id=job_id, force=True)
         raise
     return changed
+
+
+# HAL0-SUNSET: v2.0.0  — rollback guard for the one-time upstream catalog conversion; delete it (the constants, three helpers and the rollback call) with upstreams/convert.py.
+#: A release tree that understands the per-model provider catalog (#3782): the
+#: module that reads ``curated`` and ``models``. v1.7.1 and earlier do not ship
+#: it; the first release that does is v1.8.0.
+_CATALOG_MARKER = Path("src/hal0/upstreams/catalog.py")
+
+#: ``[[upstream]]`` keys the catalog added. A release before it validates every
+#: row with ``extra="forbid"`` and drops the whole file on one unknown key.
+_UPSTREAM_CATALOG_KEYS = ("curated", "models", "catalog_id", "budget_monthly_usd")
+
+
+def _drop_upstream_catalog_keys(data: dict[str, Any], *, original_filters: dict[str, Any]) -> bool:
+    """Drop the catalog keys from every ``[[upstream]]`` row. True when any went.
+
+    Conversion cleared a converted row's ``model_filters``. A row that had one
+    before conversion gets it back from ``original_filters`` (name -> filters,
+    read from ``upstreams.toml.pre-convert``), so the old build advertises what
+    it advertised before the upgrade. Rows, URLs and credential references are
+    otherwise left exactly as they are.
+    """
+    rows = data.get("upstream")
+    if not isinstance(rows, list):
+        return False
+    dropped = False
+    for row in rows:
+        if not isinstance(row, dict) or not any(k in row for k in _UPSTREAM_CATALOG_KEYS):
+            continue
+        if row.get("curated") and not row.get("model_filters"):
+            filters = original_filters.get(str(row.get("name")))
+            if filters:
+                row["model_filters"] = filters
+        for key in _UPSTREAM_CATALOG_KEYS:
+            row.pop(key, None)
+        dropped = True
+    return dropped
+
+
+def _pre_convert_filters(upstreams: Path) -> dict[str, Any]:
+    """``{row name: model_filters}`` from ``<upstreams>.pre-convert``; empty if unusable."""
+    import tomllib
+
+    from hal0.upstreams.convert import BACKUP_SUFFIX
+
+    try:
+        raw = tomllib.loads(
+            upstreams.with_name(upstreams.name + BACKUP_SUFFIX).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return {}
+    rows = raw.get("upstream")
+    return {
+        r["name"]: r["model_filters"]
+        for r in (rows if isinstance(rows, list) else [])
+        if isinstance(r, dict) and r.get("model_filters") and "name" in r
+    }
+
+
+def _strip_upstream_catalog_for(
+    prior_path: Path,
+    *,
+    job_id: str | None,
+    backups_out: dict[str, _TuneBackup] | None = None,
+) -> list[str]:
+    """Before rolling back to ``prior_path``, remove the per-model catalog keys from
+    ``upstreams.toml`` when that release predates the catalog (#3800).
+
+    Same contract as :func:`_strip_tune_config_for`: a copy at
+    ``<file>.bak-<UTC stamp>``, an atomic rewrite that keeps owner and mode, an
+    entry in ``backups_out``, nothing touched when the file is absent or has no
+    catalog key. Stripping rather than restoring ``upstreams.toml.pre-convert``
+    keeps every post-conversion edit (new providers, changed URLs); the rows
+    return to uncurated, so the next upgrade converts them again.
+    """
+    if (prior_path / _CATALOG_MARKER).is_file():
+        return []
+    upstreams = paths.etc() / "upstreams.toml"
+    filters = _pre_convert_filters(upstreams)
+    return _strip_config_files(
+        [(upstreams, lambda data: _drop_upstream_catalog_keys(data, original_filters=filters))],
+        event="upstream_catalog_stripped",
+        job_id=job_id,
+        backups_out=backups_out,
+    )
 
 
 __all__ = [

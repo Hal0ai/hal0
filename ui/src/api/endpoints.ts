@@ -5,6 +5,8 @@
 // authoritative when we reconcile against the backend (ADR-0004 for
 // agent surface, etc).
 
+import { modelPath } from '@/lib/providerModel'
+
 export const ENDPOINTS = {
   // ── Slots / status (hal0-api) ────────────────────────────────────
   status: '/api/status',
@@ -476,13 +478,20 @@ export const ENDPOINTS = {
 
   // ── Upstream providers (external LLM endpoints) ──────────────────
   // GET list / POST create; PATCH settings / DELETE per name; POST test
-  // probes reachability. providersCatalog feeds the "Add upstream" form;
+  // probes reachability. providersCatalog feeds the Add provider tiles;
   // providerCredentials writes ONE api-key to api.env ({key, value} —
   // the secret never transits the upstream CRUD surface).
   upstreams: '/api/upstreams',
   upstream: (name: string) => `/api/upstreams/${encodeURIComponent(name)}`,
   upstreamTest: (name: string) => `/api/upstreams/${encodeURIComponent(name)}/test`,
   providersCatalog: '/api/providers/catalog',
+  // Per-model provider routes: check a url + key without saving, the model
+  // listing, one model row (ids contain `/`, kept as path separators), refetch.
+  providerProbe: '/api/providers/probe',
+  upstreamModels: (name: string) => `/api/upstreams/${encodeURIComponent(name)}/models`,
+  upstreamModel: (name: string, modelId: string) =>
+    `/api/upstreams/${encodeURIComponent(name)}/models/${modelPath(modelId)}`,
+  upstreamRefresh: (name: string) => `/api/upstreams/${encodeURIComponent(name)}/refresh`,
   providerCredentials: (name: string) =>
     `/api/providers/${encodeURIComponent(name)}/credentials`,
 

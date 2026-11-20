@@ -393,6 +393,59 @@ class _OmniRequest:
         return self._raw
 
 
+class _CappedRequest(_OmniRequest):
+    """A chat request carrying ``X-hal0-Max-Tokens``."""
+
+    def __init__(self, raw: bytes, cap: str):
+        super().__init__(raw)
+        # Starlette's Headers match names case-insensitively; so must this.
+        from starlette.datastructures import Headers
+
+        self.headers = Headers({"X-hal0-Max-Tokens": cap})
+
+
+async def _dispatched_body(monkeypatch, request) -> dict:
+    seen: dict = {}
+
+    async def fake_dispatch(req, dispatcher, *, body=None):
+        seen["body"] = body
+        return "sentinel"
+
+    monkeypatch.setattr(v1, "_dispatch_and_forward", fake_dispatch)
+    assert await v1.chat_completions(request, dispatcher=object()) == "sentinel"
+    return seen["body"]
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_header_caps_a_request_that_sets_no_limit(monkeypatch):
+    """#3804: Hermes sends no output limit; its provisioned header bounds the call."""
+    import json
+
+    req = _CappedRequest(b'{"model": "hal0/agent", "messages": []}', "8192")
+    body = await _dispatched_body(monkeypatch, req)
+    assert body["max_tokens"] == 8192
+    # the dispatcher re-reads request.body(), so the cached body carries it too
+    assert json.loads(req._body)["max_tokens"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_max_tokens_header_keeps_a_smaller_limit(monkeypatch):
+    req = _CappedRequest(b'{"model": "hal0/agent", "messages": [], "max_tokens": 64}', "8192")
+    assert (await _dispatched_body(monkeypatch, req))["max_tokens"] == 64
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_max_tokens_header_changes_nothing(monkeypatch):
+    req = _CappedRequest(b'{"model": "hal0/agent", "messages": []}', "plenty")
+    assert "max_tokens" not in await _dispatched_body(monkeypatch, req)
+
+
+@pytest.mark.asyncio
+async def test_no_max_tokens_header_leaves_the_request_unbounded(monkeypatch):
+    req = _OmniRequest(b'{"model": "hal0/agent", "messages": []}')
+    assert "max_tokens" not in await _dispatched_body(monkeypatch, req)
+
+
 @pytest.mark.asyncio
 async def test_omni_path_receives_normalized_body(monkeypatch):
     """The omni branch returns before _dispatch_and_forward, so chat_completions

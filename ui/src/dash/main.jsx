@@ -23,16 +23,13 @@ import { AuthChallengeDrawer } from './auth/AuthChallengeDrawer.jsx'
 // index.html), so a box that's live-updated without a UI rebuild still
 // shows its true version.
 import { useUpdateState } from '@/api/hooks/useUpdates'
-// Optional error reporting (src/sentry.ts). Import is always safe: with no
-// VITE_SENTRY_DSN baked in, captureUiException is a no-op and the SDK chunk is
-// never fetched.
-import { captureUiException } from '@/sentry'
 // Benchmarks page (#benchmarks): a real ES module, imported directly rather
 // than read off a `window.BenchmarksView` global.
 import Benchmarks from './Benchmarks'
 // The Memory area (#memory/<tab>, ADR-0058 decision 12): a real ES module, like Benchmarks.
 import { MemoryArea } from './memory-area/MemoryArea.jsx'
 import { legacyMemoryRedirect } from './memory-area/memory-route-pure'
+import { modelsRedirectForHash } from './models-redirect'
 import { Dock } from './dock/Dock.jsx'
 import { GpuStatusProvider } from './dock/GpuStatusContext.jsx'
 import { GpuGateBlockedBanner } from './dock/GpuGateBlockedBanner.jsx'
@@ -70,7 +67,11 @@ function parseRoute() {
   // deleted #memworkspace page) are rewritten in place to where they live now, so a saved link
   // lands on the right tab and Back does not return to an address that redirects again.
   // HAL0-SUNSET: v1.9.0 — remove with legacyMemoryRedirect.
-  const moved = legacyMemoryRedirect(window.location.hash || "");
+  // The Models "upstream" tab and the Slots → Endpoints upstream panel moved to Models → Providers.
+  // HAL0-SUNSET: v1.9.0 — remove with modelsRedirectForHash.
+  const moved =
+    legacyMemoryRedirect(window.location.hash || "") ||
+    modelsRedirectForHash(window.location.hash || "");
   if (moved) {
     try {
       window.history.replaceState(window.history.state, "", moved);
@@ -117,11 +118,6 @@ class ViewErrorBoundary extends React.Component {
   componentDidCatch(err, info) {
     // Surface in the console for diagnosis; never re-throw.
     console.error("view crashed:", err, info && info.componentStack);
-    // This boundary swallows the throw to keep the chrome alive, so the
-    // browser's global error handler never sees it — a black-screened view
-    // would be invisible in Sentry without an explicit capture. No-op when
-    // Sentry is off (the shipped default).
-    captureUiException(err, info && info.componentStack);
   }
   render() {
     if (this.state.err) {

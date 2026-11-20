@@ -1066,6 +1066,14 @@ def reconcile_and_guard_slot_config(
         hal0.errors.BadRequest: ``updates`` carries a key the slot does not own.
     """
     guard_slot_write_payload(updates)
+    if "port" in updates:
+        # Same range check as the HTTP routes: update_config, stacks apply and
+        # the orchestrators write through here and must not persist a port
+        # ``SlotConfig`` rejects (#3858). Update-only: ``create`` takes an
+        # already-normalised config and has its own route-level check.
+        from hal0.slots.port_alloc import validate_explicit_slot_port
+
+        validate_explicit_slot_port(updates["port"])
     merged = reconcile_slot_updates(base, updates)
     check_runner_family(merged, set(updates.keys()))
     guard_and_normalize_tune(merged, _tune_updates_for_profile_switch(merged, updates))

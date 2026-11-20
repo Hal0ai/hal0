@@ -948,7 +948,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
           <div className="dash-main">
             <div className="dash-empty">
               <h2 className="mono">No slots configured</h2>
-              <p>No slot has a model loaded yet. Run <span className="mono">hal0 setup</span> in your terminal to configure a bundle, or create a slot one at a time.</p>
+              <p>No slots are set up on this box yet. Use <b>New slot</b> to create one, or run <span className="mono">hal0 slot create</span> in your terminal.</p>
               <div className="dash-empty-cta">
                 <button className="btn lg" onClick={() => setCreateOpen(true)}>{Icons.plus} New slot</button>
               </div>
@@ -1093,7 +1093,10 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
       {tab === "endpoints" ? (
         <div className="conn">
           {window.LocalEndpointsPanel ? <window.LocalEndpointsPanel /> : null}
-          {window.UpstreamProvidersPanel ? <window.UpstreamProvidersPanel /> : null}
+          <p className="cn-note" data-testid="endpoints-providers-note">
+            Remote providers moved to Models → Providers.{" "}
+            <a className="cn-note-link" href="#models/providers">Open Providers</a>
+          </p>
         </div>
       ) : tab === "runner-images" ? (
         <RunnerImagesView />

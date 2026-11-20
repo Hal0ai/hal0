@@ -161,3 +161,18 @@ def test_spec_is_a_frozen_dataclass_instance() -> None:
     assert isinstance(row, SettingsFieldSpec)
     with pytest.raises(AttributeError):
         row.path = "mutated"  # type: ignore[misc]
+
+
+def test_a_token_count_setting_is_not_a_secret_row() -> None:
+    """Settings > Memory > Models renders this number; a masked row left it blank (#3805)."""
+    from hal0.api._settings_fields import build_settings_fields
+
+    rows = {row["path"]: row for row in build_settings_fields(Hal0Config())}
+    row = rows["memory.decision.max_request_tokens"]
+    assert row["secret"] is False
+    assert row["current"] == Hal0Config().memory.decision.max_request_tokens
+    assert all(
+        isinstance(r["current"], dict) and r["current"].get("value") == "***REDACTED***"
+        for r in rows.values()
+        if r["secret"] and r["current"] is not None
+    )

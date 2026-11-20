@@ -1802,6 +1802,49 @@ def test_commit_is_not_converged_while_a_slot_file_carries_tuning_keys(
     assert result["convergence"]["converged"] is False
 
 
+@pytest.mark.parametrize(
+    ("event", "converged"),
+    [
+        # #3852: the shipped Hermes plugins did not land, so not converged.
+        ("updater.hermes_plugin_mirror_failed", False),
+        ("updater.hermes_plugin_mirror_pass_failed", False),
+        # Any other pass warning stays a warning only.
+        ("updater.vulkan_migration_failed", True),
+    ],
+)
+def test_commit_reports_a_failed_plugin_mirror_and_is_not_converged(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+    converged: bool,
+) -> None:
+    class _Completed:
+        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, *a, **k):
+        if any("run_post_activation_migrations" in part for part in list(cmd)):
+            envelope = json.dumps({updater_module._MIGRATION_RESULT_KEY: {"from": 1, "to": 1}})
+            stderr = (
+                f"2026-11-20 00:00:00 [warning  ] {event} reason='[Errno 13] Permission denied'\n"
+            )
+            return _Completed(stdout=envelope, stderr=stderr)
+        return _Completed()
+
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())
+
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["ok"] is True
+    assert post["pass_warnings"] == [event]
+    assert result["convergence"]["converged"] is converged
+
+
 def test_commit_carries_a_failed_model_bundle_pull_without_failing_convergence(
     synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2354,6 +2397,146 @@ def test_failed_backup_copy_leaves_no_partial_file(
         upd._strip_tune_config_for(older, job_id=None)
     assert tuned.read_bytes() == original
     assert [p.name for p in tuned.parent.iterdir()] == ["tuned.toml"]
+
+
+# ── rollback and the upstream catalog (#3800) ─────────────────────────────────
+
+_CONVERTED_UPSTREAMS = (
+    "# keep\n"
+    '[[upstream]]\nname = "peer"\nurl = "http://peer.example/v1"\n'
+    'auth_style = "bearer"\nauth_value_env = "PEER_KEY"\n'
+    'curated = true\ncatalog_id = "openrouter"\nbudget_monthly_usd = 5.0\n'
+    '[[upstream.models]]\nid = "a"\nenabled = true\n'
+    '[[upstream]]\nname = "later"\nurl = "http://later.example/v1"\n'
+)
+_PRE_CONVERT_UPSTREAMS = (
+    '[[upstream]]\nname = "peer"\nurl = "http://peer.example/v1"\n'
+    '[upstream.model_filters]\ninclude = ["a*"]\n'
+)
+
+
+def _upstreams_file(content: str | None, pre_convert: str | None = None) -> Path:
+    from hal0.config import paths
+
+    f = paths.etc() / "upstreams.toml"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    if content is not None:
+        f.write_text(content, encoding="utf-8")
+    if pre_convert is not None:
+        f.with_name("upstreams.toml.pre-convert").write_text(pre_convert, encoding="utf-8")
+    return f
+
+
+def _old_tree(tmp_path: Path, *, catalog: bool) -> Path:
+    tree = tmp_path / "hal0-prior"
+    tree.mkdir()
+    if catalog:
+        marker = tree / "src/hal0/upstreams/catalog.py"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("", encoding="utf-8")
+    return tree
+
+
+def test_rollback_across_catalog_boundary_leaves_a_file_the_old_schema_accepts(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_hal0_home: str,
+    tmp_path: Path,
+) -> None:
+    """Strip keeps every row and its credential reference, drops only the new keys,
+    and the result validates against the schema before the catalog (no ``curated``)."""
+    import tomllib
+
+    from hal0.config import paths
+    from hal0.config.loader import load_upstreams_config
+
+    _two_release_rollback_setup(tmp_path)
+    f = _upstreams_file(_CONVERTED_UPSTREAMS, _PRE_CONVERT_UPSTREAMS)
+    pre = f.with_name("upstreams.toml.pre-convert").read_bytes()
+
+    result = asyncio.run(Updater().rollback())
+
+    assert result["catalog_stripped"] == [str(f)]
+    rows = tomllib.loads(f.read_text())["upstream"]
+    assert [r["name"] for r in rows] == ["peer", "later"]  # post-conversion row kept
+    assert rows[0]["auth_value_env"] == "PEER_KEY"
+    assert rows[0]["model_filters"] == {"include": ["a*"]}  # pre-conversion advertising back
+    for r in rows:
+        assert not {"curated", "models", "catalog_id", "budget_monthly_usd"} & r.keys()
+    assert load_upstreams_config(f).upstream  # still loads; conversion can run again
+    assert not any(e.curated for e in load_upstreams_config(f).upstream)
+    assert f.with_name("upstreams.toml.pre-convert").read_bytes() == pre
+    assert len(list(paths.etc().glob("upstreams.toml.bak-*"))) == 1
+
+
+def test_rollback_within_catalog_aware_releases_changes_nothing(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    from hal0.updater import updater as upd
+
+    f = _upstreams_file(_CONVERTED_UPSTREAMS, _PRE_CONVERT_UPSTREAMS)
+    before = f.read_bytes()
+    assert upd._strip_upstream_catalog_for(_old_tree(tmp_path, catalog=True), job_id=None) == []
+    assert f.read_bytes() == before
+    assert not list(f.parent.glob("upstreams.toml.bak-*"))
+
+
+def test_rollback_strips_without_a_pre_convert_backup(tmp_hal0_home: str, tmp_path: Path) -> None:
+    import tomllib
+
+    from hal0.updater import updater as upd
+
+    f = _upstreams_file(_CONVERTED_UPSTREAMS)
+    assert upd._strip_upstream_catalog_for(_old_tree(tmp_path, catalog=False), job_id=None) == [
+        str(f)
+    ]
+    rows = tomllib.loads(f.read_text())["upstream"]
+    assert [r["name"] for r in rows] == ["peer", "later"]
+    assert "model_filters" not in rows[0] and "curated" not in rows[0]
+
+
+def test_rollback_with_no_upstreams_file_is_a_noop(tmp_hal0_home: str, tmp_path: Path) -> None:
+    from hal0.config import paths
+    from hal0.updater import updater as upd
+
+    assert upd._strip_upstream_catalog_for(_old_tree(tmp_path, catalog=False), job_id=None) == []
+    assert not (paths.etc() / "upstreams.toml").exists()
+
+
+def test_rollback_leaves_an_unconverted_upstreams_file_alone(
+    tmp_hal0_home: str, tmp_path: Path
+) -> None:
+    from hal0.updater import updater as upd
+
+    f = _upstreams_file(_PRE_CONVERT_UPSTREAMS)
+    before = f.read_bytes()
+    assert upd._strip_upstream_catalog_for(_old_tree(tmp_path, catalog=False), job_id=None) == []
+    assert f.read_bytes() == before
+
+
+def test_rollback_restores_upstreams_when_activate_fails(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    tmp_hal0_home: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The swap failing leaves the current (catalog-aware) release active: the
+    converted file comes back byte-identical and no backup is left."""
+    from hal0.updater.privileged import UpdateSeam
+
+    _two_release_rollback_setup(tmp_path)
+    f = _upstreams_file(_CONVERTED_UPSTREAMS, _PRE_CONVERT_UPSTREAMS)
+    before = f.read_bytes()
+
+    def _boom(self: Any, *_a: Any, **_k: Any) -> Any:
+        raise UpdateSwapError("symlink swap failed")
+
+    monkeypatch.setattr(UpdateSeam, "activate", _boom)
+    with pytest.raises(UpdateSwapError):
+        asyncio.run(Updater().rollback())
+    assert f.read_bytes() == before
+    assert not list(f.parent.glob("upstreams.toml.bak-*"))
 
 
 # ── rollback re-pip into venv (#980) ──────────────────────────────────────────

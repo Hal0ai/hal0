@@ -1,8 +1,8 @@
 /**
  * models-shared-shell-v3 — what the shared catalog shell (dash/models/catalog-shell.jsx)
- * adds to the Inference and Upstream tabs: the "In use" section, the State filter, one
+ * adds to the Inference tab: the "In use" section, the State filter, one
  * status chip per row, the NPU fit of a GGUF that ggml-xdna can run, and the header's
- * Check updates / Add actions on the Upstream tab.
+ * Check updates / Add actions.
  *
  * Forced-mock note: /api/models, /api/slots and /api/npu/occupancy are served by the
  * in-bundle HAL0_DATA mock layer, so rows and the slot that uses one are injected via
@@ -98,8 +98,10 @@ test.describe('Models — shared catalog shell', () => {
   test('a GGUF the NPU can run shows its ggml-xdna fit on the row and in the detail pane', async ({ page }) => {
     await page.goto('/#models')
     const used = page.locator('.mdl-row', { hasText: 'Shell Used Model' })
-    await expect(used.getByTestId('mdl-row-npu')).toHaveText('npu · per-op')
-    await expect(page.locator('.mdl-row', { hasText: 'Shell Free Model' }).getByTestId('mdl-row-npu')).toHaveText('npu · fused')
+    // The NPU lane code; the ggml-xdna path (per-op or fused) is on the element and in the tooltip.
+    await expect(used.getByTestId('mdl-row-npu')).toHaveText('NPU')
+    await expect(used.getByTestId('mdl-row-npu')).toHaveAttribute('data-xdna-path', 'per-op')
+    await expect(page.locator('.mdl-row', { hasText: 'Shell Free Model' }).getByTestId('mdl-row-npu')).toHaveAttribute('data-xdna-path', 'fused')
     await expect(page.locator('.mdl-row', { hasText: 'Shell Missing Model' }).getByTestId('mdl-row-npu')).toHaveCount(0)
 
     await used.click()
@@ -114,14 +116,12 @@ test.describe('Models — shared catalog shell', () => {
     await expect(page.locator('.mdl-row')).toHaveCount(2)
   })
 
-  test('the Upstream tab carries Check updates and Add upstream', async ({ page }) => {
-    await page.goto('/#models/upstream')
-    await expect(page.getByTestId('mdl-check-upstream')).toBeVisible()
-    // Upstream rows are never installed or downloadable: only "In use" is offered as a state.
-    await expect(page.getByTestId('mdl-filter-inuse')).toBeVisible()
-    await expect(page.getByTestId('mdl-filter-installed')).toHaveCount(0)
+  test('the Providers tab carries Refresh model lists and Add provider', async ({ page }) => {
+    await page.goto('/#models/providers')
+    await expect(page.getByTestId('providers-tab')).toBeVisible()
+    await expect(page.getByTestId('mdl-check-providers')).toHaveText('Refresh model lists')
     await page.getByTestId('mdl-add').click()
-    await expect(page).toHaveURL(/#slots\/endpoints/)
+    await expect(page.getByTestId('add-provider-modal')).toBeVisible()
   })
 
   test('a row is reachable and selectable from the keyboard', async ({ page }) => {

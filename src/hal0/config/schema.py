@@ -10,7 +10,6 @@ Model hierarchy:
       SlotsConfig      — [slots] global slot policy
       DispatcherConfig — [dispatcher] tunables (Tier 2 prefetch timeout)
       TelemetryConfig  — [telemetry] opt-in
-    ProvidersConfig  — providers.toml (external LLM providers)
     UpstreamsConfig  — upstreams.toml (slot + remote upstream catalog)
     SlotConfig       — slots/<name>.toml
       ModelConfig      — [model] section within a slot config
@@ -106,7 +105,7 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Schema version for migrations.  Bumped when a backwards-incompatible
 # config-shape change lands.  See PLAN.md §5 Tier 3.
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 6
 
 # Capabilities-file schema version. Independent of ``hal0.toml``'s
 # ``meta.schema_version``. v2 (since v0.2) means CapabilitySelection uses
@@ -862,52 +861,6 @@ class SlotConfig(BaseModel):
         return v
 
 
-# ── ProvidersConfig ────────────────────────────────────────────────────────────
-
-
-class ProviderEntry(BaseModel):
-    """One [[provider]] entry in providers.toml.
-
-    ``extra="forbid"`` (P3-schema Part C): typo'd provider keys should raise
-    at load time rather than silently round-trip as dead weight. The
-    containing ``ProvidersConfig`` (the ``[[provider]]`` list) stays
-    ``allow`` for forward-compat.
-    """
-
-    model_config = {"populate_by_name": True, "extra": "forbid"}
-
-    catalog_id: str = Field(
-        ...,
-        description="References an entry in upstreams.integrations._CATALOG.",
-    )
-    name: str = Field(default="", description="User-visible name override.")
-    base_url: str = Field(
-        default="",
-        description="URL override (leave empty to use catalog default).",
-    )
-    auth_value_env: str = Field(
-        default="",
-        description="Env var holding the API key.  Never stored in plain text.",
-    )
-    enabled: bool = Field(default=True)
-    models: list[str] = Field(default_factory=list, description="User-selected model ids.")
-
-    @field_validator("catalog_id")
-    @classmethod
-    def catalog_id_nonempty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("provider catalog_id must not be empty")
-        return v
-
-
-class ProvidersConfig(BaseModel):
-    """Parsed providers.toml."""
-
-    model_config = {"populate_by_name": True, "extra": "allow"}
-
-    provider: list[ProviderEntry] = Field(default_factory=list)
-
-
 # ── ProfileConfig + ProfilesConfig ────────────────────────────────────────────
 
 #: llama.cpp device name per slot backend (the slot's device). The container
@@ -1435,6 +1388,54 @@ class UpstreamModelFilters(BaseModel):
         return not (self.models or self.include or self.exclude)
 
 
+# Mirrors hal0.upstreams.catalog.MODEL_TYPES (importing it here would pull in the
+# upstreams package, which imports this module); a test keeps the two equal.
+VALID_MODEL_TYPES = frozenset({"chat", "embed", "rerank", "tts", "stt", "image"})
+_VALID_MODEL_TYPES = VALID_MODEL_TYPES
+VALID_PRICE_UNITS = frozenset({"Mtok", "Mchar", "image", "1k_search"})
+
+
+class UpstreamModelEntry(BaseModel):
+    """One [[upstream.models]] row: a model listed under a provider."""
+
+    model_config = {"extra": "forbid"}
+
+    id: str = Field(..., description="Model id as the provider names it.")
+    enabled: bool = Field(default=True)
+    type: str = Field(default="chat", description="chat | embed | rerank | tts | stt | image.")
+    context: int | None = Field(default=None, gt=0)
+    price_in: float | None = Field(default=None, ge=0)
+    price_out: float | None = Field(default=None, ge=0)
+    price_unit: str = Field(default="Mtok")
+
+    @field_validator("id")
+    @classmethod
+    def id_nonempty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("upstream model id must not be empty")
+        if v != v.strip():
+            raise ValueError("upstream model id must not start or end with whitespace")
+        return v
+
+    @field_validator("type")
+    @classmethod
+    def type_valid(cls, v: str) -> str:
+        if v not in _VALID_MODEL_TYPES:
+            raise ValueError(
+                f"model type {v!r} is not valid; choose from {sorted(_VALID_MODEL_TYPES)}"
+            )
+        return v
+
+    @field_validator("price_unit")
+    @classmethod
+    def price_unit_valid(cls, v: str) -> str:
+        if v not in VALID_PRICE_UNITS:
+            raise ValueError(
+                f"price_unit {v!r} is not valid; choose from {sorted(VALID_PRICE_UNITS)}"
+            )
+        return v
+
+
 class UpstreamEntry(BaseModel):
     """One [[upstream]] entry in upstreams.toml.
 
@@ -1459,7 +1460,21 @@ class UpstreamEntry(BaseModel):
         default=True,
         description="When false the upstream is skipped by routing and /v1/models.",
     )
-    model_filters: UpstreamModelFilters | None = Field(default=None)
+    model_filters: UpstreamModelFilters | None = Field(
+        default=None,
+        description="Advertising filters used only by uncurated rows; rejected on a curated row.",
+    )
+    catalog_id: str | None = Field(
+        default=None, description="Provider preset this row was created from, if any."
+    )
+    curated: bool = Field(
+        default=False,
+        description="When true, only the enabled rows in ``models`` are served.",
+    )
+    budget_monthly_usd: float | None = Field(default=None, ge=0)
+    models: list[UpstreamModelEntry] = Field(
+        default_factory=list, description="Per-model rows ([[upstream.models]])."
+    )
     hal0_peer: bool | None = Field(
         default=None,
         description=(
@@ -1535,6 +1550,24 @@ class UpstreamEntry(BaseModel):
         # Catch this at load rather than at dispatch time.
         if self.kind == "slot" and not (self.slot_name and self.slot_name.strip()):
             raise ValueError(f"upstream {self.name!r}: kind='slot' requires slot_name to be set")
+        return self
+
+    @model_validator(mode="after")
+    def model_ids_unique(self) -> UpstreamEntry:
+        seen: set[str] = set()
+        for m in self.models:
+            if m.id in seen:
+                raise ValueError(f"upstream {self.name!r}: duplicate model id {m.id!r}")
+            seen.add(m.id)
+        return self
+
+    @model_validator(mode="after")
+    def curated_excludes_filters(self) -> UpstreamEntry:
+        if self.curated and self.model_filters is not None and not self.model_filters.is_empty():
+            raise ValueError(
+                f"upstream {self.name!r}: curated rows list models in [[upstream.models]]; "
+                "model_filters applies only to uncurated rows and cannot be combined with curated = true"
+            )
         return self
 
     @model_validator(mode="after")
@@ -3162,16 +3195,18 @@ class MemoryDecisionConfig(BaseModel):
 
     The decision model (``hs-decide-1-flash``) replaces many of Hindsight's
     LLM calls (recall rank/prune/dedup, consolidation judgments, reflect
-    sufficiency, page delta gating) with a single cheap forward pass. hal0
-    runs it locally as the ``hal0-hs-decide`` CPU System One service
-    (packaging/hindsight-decision/hs_decide_serve.py, unit
-    installer/systemd/hal0-hs-decide.service) on ``port``. The showcase
-    drop-in points hindsight-api at it only while that unit is installed
-    (#3519, ``hal0.memory.extraction_env.decision_engine_base_url``);
-    ``provider = "hindsight"``
-    with ``base_url = http://127.0.0.1:<port>`` is the verified-working local
-    shape (hindsight-api still requires a non-empty, if placeholder, API key
-    even for a local base URL — see ``zz-showcase-1.2.conf``).
+    sufficiency, page delta gating) with a single cheap forward pass.
+
+    ``provider`` is ``"off"`` (the default), ``"local"`` or
+    ``"hindsight-cloud"``. ``"local"`` is the CPU ``hal0-hs-decide`` service on
+    ``port``, built by the opt-in ``memory-decision`` component
+    (``hal0 memory decision install``, :mod:`hal0.memory.decision_component`),
+    which also sets ``provider = "local"``. The showcase drop-in points
+    hindsight-api at it only while its unit is installed (#3519,
+    ``hal0.memory.extraction_env.decision_engine_base_url``), and renders the
+    engine-side provider value ``hindsight`` plus a fixed placeholder API key
+    (the engine wants a non-empty key even for a loopback URL). A
+    ``hal0.toml`` that says ``provider = "local"`` explicitly keeps that value.
     """
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
@@ -3181,11 +3216,11 @@ class MemoryDecisionConfig(BaseModel):
         description="Whether the decision model lane is enabled at all.",
     )
     provider: str = Field(
-        default="local",
+        default="off",
         description=(
-            "'local' (hal0-managed hal0-hs-decide service), 'hindsight-cloud' "
-            "(hosted decision model), or 'off' (engine falls back to its LLM "
-            "lane for decision-gated operations)."
+            "'off' (the default: the engine uses its LLM lane for decision-gated "
+            "operations), 'local' (the hal0-hs-decide service that `hal0 memory "
+            "decision install` builds), or 'hindsight-cloud' (hosted decision model)."
         ),
     )
     model: str = Field(
@@ -3269,7 +3304,8 @@ class MemoryLaneOpConfig(BaseModel):
         le=32,
         description=(
             "HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT. Unset falls back to "
-            "[memory.lanes].llm_max_concurrent."
+            "[memory.lanes].llm_max_concurrent (itself defaulting to "
+            "[memory.graph].extraction_max_concurrent; consolidation takes one fewer)."
         ),
     )
     virtual_model: str | None = Field(
@@ -3318,6 +3354,55 @@ class MemoryLaneOpConfig(BaseModel):
         return None if v is None else _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
 
 
+#: What an unset ``[memory.lanes.reflect].wall_timeout_s`` /
+#: ``[memory.lanes.consolidation].batch_size`` mean. Resolved at render time,
+#: not in the field default, so a settings save does not write them into
+#: hal0.toml and a later change of the default reaches existing boxes.
+DEFAULT_REFLECT_WALL_TIMEOUT_S = 1800
+DEFAULT_CONSOLIDATION_BATCH_SIZE = 4
+
+
+class MemoryReflectLaneConfig(MemoryLaneOpConfig):
+    """``[memory.lanes.reflect]``: the per-op lane plus the reflect wall clock."""
+
+    wall_timeout_s: int | None = Field(
+        default=None,
+        ge=60,
+        le=86400,
+        description=(
+            "HINDSIGHT_API_REFLECT_WALL_TIMEOUT (#3759): seconds the engine "
+            "gives one reflect, and one knowledge-page refresh (a reflect "
+            "call), from start to finish. The clock includes time spent "
+            "waiting for an LLM permit, so a refresh queued behind "
+            "consolidation and retain needs headroom; the engine's own "
+            "default is 300. Unset means hal0's default, 1800 "
+            "(DEFAULT_REFLECT_WALL_TIMEOUT_S), resolved when the drop-in is "
+            "rendered so a save never pins it. Keep it above "
+            "[memory.graph].llm_timeout_s: a wall clock shorter than one "
+            "LLM call's timeout cannot let a slow call finish."
+        ),
+    )
+
+
+class MemoryConsolidationLaneConfig(MemoryLaneOpConfig):
+    """``[memory.lanes.consolidation]``: the per-op lane plus the batch size."""
+
+    batch_size: int | None = Field(
+        default=None,
+        ge=1,
+        le=32,
+        description=(
+            "HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE (#3762): memories "
+            "consolidated per LLM call (1 = no batching). The engine's own "
+            "default is 8, which can overflow the 8192-token output cap "
+            "hal0 renders; a batch that overflows is split and retried, and "
+            "what still fails is counted as failed. Unset means hal0's "
+            "default, 4 (DEFAULT_CONSOLIDATION_BATCH_SIZE), resolved when "
+            "the drop-in is rendered so a save never pins it."
+        ),
+    )
+
+
 class MemoryLanesConfig(BaseModel):
     """[memory.lanes] section of hal0.toml — global + per-op LLM concurrency lanes.
 
@@ -3333,28 +3418,43 @@ class MemoryLanesConfig(BaseModel):
 
     model_config = {"populate_by_name": True, "extra": "ignore"}
 
-    llm_max_concurrent: int = Field(
-        default=1,
+    llm_max_concurrent: int | None = Field(
+        default=None,
         ge=1,
         le=32,
         description=(
             "HINDSIGHT_API_LLM_MAX_CONCURRENT — the GLOBAL cap across every "
             "hindsight-api LLM call (retain, consolidation, reflect, "
-            "mental-model-refresh together), independent of any per-op cap."
+            "mental-model-refresh together), independent of any per-op cap. "
+            "Unset follows [memory.graph].extraction_max_concurrent (as held to "
+            "the extraction slot's --parallel), so the one setting the dashboard "
+            "edits drives the whole engine, and the consolidation lane then "
+            "takes one fewer so retain and page refresh always have a permit. "
+            "An explicit value is still held to that same ceiling."
         ),
     )
     timeout_s: int = Field(default=600, ge=30, le=3600, description="HINDSIGHT_API_LLM_TIMEOUT.")
     reasoning_effort: str = Field(default="none", description="HINDSIGHT_API_LLM_REASONING_EFFORT.")
     strict_schema: bool = Field(default=False, description="HINDSIGHT_API_LLM_STRICT_SCHEMA.")
     retain: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
-    consolidation: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
-    reflect: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
+    consolidation: MemoryConsolidationLaneConfig = Field(
+        default_factory=MemoryConsolidationLaneConfig
+    )
+    reflect: MemoryReflectLaneConfig = Field(default_factory=MemoryReflectLaneConfig)
     mental_model_refresh: MemoryLaneOpConfig = Field(default_factory=MemoryLaneOpConfig)
 
     @field_validator("reasoning_effort")
     @classmethod
     def _effort_shape(cls, v: str) -> str:
         return _showcase_shape(v, _SHOWCASE_EFFORT_RE, "reasoning_effort")
+
+    @field_validator("reflect", "consolidation", mode="before")
+    @classmethod
+    def _plain_op_lane_to_subclass(cls, v: object) -> object:
+        # Callers that build the lane from the base per-op model keep working.
+        if type(v) is MemoryLaneOpConfig:
+            return v.model_dump(exclude_unset=True)
+        return v
 
     @model_validator(mode="after")
     def _completion_cap_only_where_engine_accepts(self) -> MemoryLanesConfig:
@@ -4926,8 +5026,6 @@ __all__ = [
     "NpuConfig",
     "ProfileConfig",
     "ProfilesConfig",
-    "ProviderEntry",
-    "ProvidersConfig",
     "SecurityConfig",
     "ServerConfig",
     "SlotConfig",

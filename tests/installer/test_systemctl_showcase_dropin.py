@@ -132,6 +132,13 @@ _HEAD = "[Service]\n"
         "Environment=HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS=0",
         "Environment=HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS=08192",
         "Environment=HINDSIGHT_API_MENTAL_MODEL_REFRESH_MAX_COMPLETION_TOKENS=8192",
+        "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT=-1",
+        "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT=30m",
+        "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT=0",
+        "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT=00",
+        "Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE=0",
+        "Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE=-4",
+        "Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE=four",
         "Environment=HINDSIGHT_API_RETAIN_LLM_MODEL=gpt-4o",
         "Environment=HINDSIGHT_API_RETAIN_LLM_MODEL=hal0/x HINDSIGHT_API_LLM_API_KEY=y",
     ],
@@ -181,3 +188,24 @@ def test_default_body_carries_the_completion_caps_and_is_accepted() -> None:
     assert "Environment=HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS=8192\n" in body
     assert "Environment=HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS=8192\n" in body
     _accepts(body)
+
+
+def test_default_body_carries_the_reflect_wall_clock_and_is_accepted() -> None:
+    """#3759: the shipped reflect wall clock passes the allow-list."""
+    body = _body()
+    assert "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT=1800\n" in body
+    _accepts(body)
+
+
+def test_default_body_carries_the_consolidation_batch_size_and_is_accepted() -> None:
+    """#3762: the shipped consolidation batch size passes the allow-list."""
+    body = _body()
+    assert "Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE=4\n" in body
+    _accepts(body)
+
+
+def test_zero_is_still_accepted_where_the_generic_integer_arm_allows_it() -> None:
+    """Rejecting 0 for the wall clock and batch size loosens and tightens nothing else."""
+    _accepts(_HEAD + "Environment=HINDSIGHT_API_REFLECT_LLM_TIMEOUT=0\n")
+    _accepts(_HEAD + "Environment=HINDSIGHT_API_REFLECT_WALL_TIMEOUT=1\n")
+    _accepts(_HEAD + "Environment=HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE=32\n")

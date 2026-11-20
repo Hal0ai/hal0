@@ -1658,6 +1658,129 @@ def test_merge_drops_config_keys_hal0_no_longer_writes(tmp_path: Path) -> None:
     assert data["model"] == {"default": "m"}
 
 
+def test_merge_moves_the_hal0_state_hook_off_on_session_start(tmp_path: Path) -> None:
+    """#3853: an upgraded box carries hal0's hook under on_session_start, whose
+    return the pinned Hermes ignores. The merge drops hal0's entry there (an
+    operator's own on_session_start hook stays) and wires pre_llm_call."""
+    yaml = pytest.importorskip("yaml")
+    cfg = tmp_path / "config.yaml"
+    operator_hook = {"command": "/opt/me/notify.sh", "timeout": 5}
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "hooks": {
+                    "on_session_start": [
+                        {"command": hp.STATE_HOOK["command"], "timeout": 2},
+                        operator_hook,
+                    ]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    hp._merge_config_yaml_layers(
+        cfg, list_keys=hp.HAL0_CONFIG_LIST_KEYS, overrides_path=tmp_path / "absent.yaml"
+    )
+    hooks = yaml.safe_load(cfg.read_text(encoding="utf-8"))["hooks"]
+    assert hooks["on_session_start"] == [operator_hook]
+    assert hooks["pre_llm_call"] == [hp.STATE_HOOK]
+
+
+def test_merge_drops_an_emptied_on_session_start(tmp_path: Path) -> None:
+    yaml = pytest.importorskip("yaml")
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        yaml.safe_dump({"hooks": {"on_session_start": [{"command": hp.STATE_HOOK["command"]}]}}),
+        encoding="utf-8",
+    )
+    # Even a caller that layers no hal0 list keys retires the dead entry.
+    hp._merge_config_yaml_layers(cfg, list_keys={}, overrides_path=tmp_path / "absent.yaml")
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert "hooks" not in data
+
+
+def test_release_activation_rewires_the_state_hook(tmp_path: Path) -> None:
+    """#3853: ``hal0 update`` never runs the overlay, so release activation is
+    what moves an upgraded box's hook from on_session_start to pre_llm_call."""
+    yaml = pytest.importorskip("yaml")
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "agent": {"system_prompt": "p"},
+                "hooks": {
+                    "on_session_start": [
+                        {
+                            "command": "/usr/lib/hal0/hermes-hooks/inject-system-state.sh",
+                            "timeout": 2,
+                        }
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml")
+    hooks = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["hooks"]
+    assert hooks == {"pre_llm_call": [hp.STATE_HOOK]}
+    # Idempotent: a second activation changes nothing.
+    assert not hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml")
+
+
+def test_merge_keeps_operator_pre_llm_call_hooks(tmp_path: Path) -> None:
+    """#3868 review: ``_deep_merge`` replaces lists, so layering the state hook
+    must not delete an operator's own ``pre_llm_call`` entries, and a re-run
+    must leave exactly one hal0 entry beside them."""
+    yaml = pytest.importorskip("yaml")
+    cfg = tmp_path / "config.yaml"
+    operator_hook = {"command": "/opt/me/context.sh", "timeout": 5}
+    cfg.write_text(yaml.safe_dump({"hooks": {"pre_llm_call": [operator_hook]}}), encoding="utf-8")
+    for _ in range(2):
+        hp._merge_config_yaml_layers(
+            cfg, list_keys=hp.HAL0_CONFIG_LIST_KEYS, overrides_path=tmp_path / "absent.yaml"
+        )
+        hooks = yaml.safe_load(cfg.read_text(encoding="utf-8"))["hooks"]
+        assert hooks["pre_llm_call"] == [operator_hook, hp.STATE_HOOK]
+
+
+def test_release_activation_keeps_operator_pre_llm_call_hooks(tmp_path: Path) -> None:
+    """The ``hal0 update`` path carries the same guarantee, and a retired
+    installer-path hal0 entry under pre_llm_call is replaced, not duplicated."""
+    yaml = pytest.importorskip("yaml")
+    home = tmp_path / "hermes"
+    home.mkdir()
+    operator_hook = {"command": "/opt/me/context.sh"}
+    (home / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "agent": {"system_prompt": "p"},
+                "hooks": {
+                    "pre_llm_call": [
+                        operator_hook,
+                        {"command": "/usr/lib/hal0/hermes-hooks/inject-system-state.sh"},
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert hp.apply_release_config_invariants(home, overrides_path=tmp_path / "none.yaml")
+    hooks = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8"))["hooks"]
+    assert hooks == {"pre_llm_call": [operator_hook, hp.STATE_HOOK]}
+
+
+def test_state_hook_command_is_the_release_tree_script() -> None:
+    """The hook runs from the release tree so ``hal0 update`` refreshes it with
+    the code; the shipped script must exist at the matching repo path."""
+    prefix = "/usr/lib/hal0/current/"
+    command = hp.STATE_HOOK["command"]
+    assert command.startswith(prefix)
+    script = Path(__file__).resolve().parents[2] / command.removeprefix(prefix)
+    assert script.is_file()
+    assert os.access(script, os.X_OK)
+
+
 @pytest.mark.parametrize(
     ("current", "reset"),
     [("Concise", True), (" hal0 brain ", True), ("pirate", False), ("", False)],
@@ -2119,7 +2242,10 @@ def test_config_write_renders_role_slots_from_live_state(
     assert "custom_providers" not in cfg
     # The two irreducible list keys land via the targeted YAML merge.
     assert cfg["skills"]["external_dirs"] == hp.SKILLS_EXTERNAL_DIRS
-    assert cfg["hooks"]["on_session_start"] == [hp.SESSION_START_HOOK]
+    # The live-state hook rides pre_llm_call, the one event whose return the
+    # pinned Hermes injects (#3853); on_session_start's return is ignored.
+    assert cfg["hooks"]["pre_llm_call"] == [hp.STATE_HOOK]
+    assert "on_session_start" not in cfg["hooks"]
 
 
 def test_config_write_renders_the_configured_delegation_slot(
@@ -2173,8 +2299,9 @@ def test_delegation_slot_survives_a_repair_seed_rewrite(
 # #635 wires the `chat` slot (Qwen3-class thinking-on model) as the top-level
 # model with reasoning visible in the TUI. Three Hermes gotchas apply:
 #   1. model.base_url MUST be set (provider:custom requires it) ← already done.
-#   2. model.max_tokens MUST be set — else Qwen3 spends the full budget on
-#      <think> and the content field comes back empty (silent TUI).
+#   2. An output cap MUST be set — else Qwen3 spends the full budget on
+#      <think> and the content field comes back empty (silent TUI). It is
+#      sent as the X-hal0-Max-Tokens gateway header (#3804).
 #   3. display.streaming AND display.show_reasoning BOTH required; without
 #      streaming the TUI hangs on the reasoning block.
 #
@@ -2199,12 +2326,17 @@ def test_overlay_has_streaming_true() -> None:
     assert keys["display.streaming"] is True
 
 
-def test_overlay_has_model_max_tokens() -> None:
-    """model.max_tokens must be a positive int — Qwen3 thinking models silently
-    drain the budget in <think> and return empty content otherwise (#635)."""
-    keys = _build_overlay_keys()
-    max_tokens = keys["model.max_tokens"]
-    assert isinstance(max_tokens, int) and max_tokens > 0
+def test_overlay_sends_the_output_cap_as_a_gateway_header() -> None:
+    """A Hermes model call must be bounded: Qwen3 thinking models drain the
+    budget in <think> otherwise (#635). The pinned Hermes reads no
+    ``model.max_tokens`` key, so the cap rides the provider entry's
+    ``extra_headers``, which Hermes sends on every request, and the hal0
+    gateway applies it (#3804)."""
+    for live_resolve in (True, False):
+        keys = _build_overlay_keys(live_resolve_enabled=live_resolve)
+        cap = keys["providers.custom.extra_headers.X-hal0-Max-Tokens"]
+        assert isinstance(cap, int) and cap > 0
+        assert "model.max_tokens" not in keys
 
 
 def test_overlay_model_base_url_set() -> None:
@@ -6818,3 +6950,29 @@ def test_chat_smoke_skips_a_kept_model(tmp_path: Path) -> None:
     state = hp.BootstrapState(hermes_home=str(home))
     ok, detail = hp._smoke_chat_completions(state, None)  # type: ignore[arg-type]
     assert ok is None and "operator model kept (m)" in detail
+
+
+def test_chat_probe_outwaits_first_boot_consolidation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe's client timeout must outlast a ~125 s consolidation holding a
+    single-sequence slot (#3809); a timeout still fails, never skips."""
+    from urllib.error import URLError
+
+    assert hp._CHAT_PROBE_TIMEOUT_S >= 150.0
+    hh = tmp_path / "hh"
+    hh.mkdir()
+    (hh / "config.yaml").write_text(
+        "model:\n  default: hal0/agent\n  base_url: http://127.0.0.1:8080/v1\n"
+    )
+    seen: list[float | None] = []
+
+    def _open(req: Any, timeout: float | None = None) -> Any:
+        seen.append(timeout)
+        raise URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr("hal0.service_identity.open_url", _open)
+    state = hp.BootstrapState(hermes_home=str(hh))
+    passed, detail = hp._smoke_chat_completions(state, object())  # type: ignore[arg-type]
+    assert seen == [hp._CHAT_PROBE_TIMEOUT_S]
+    assert passed is False and "timed out" in detail

@@ -16,8 +16,19 @@
 # Do not treat a review-due entry as automatically still valid.
 
 schema: 1
-updated: 2026-10-16
-updated_for: v1.4.0-nightly.20261016003929
+updated: 2026-11-20
+updated_for: v1.8.0-nightly.20261120045628
+
+# NOTE (kit 19): five boxes' worth of by-design rulings added at the bottom; the Overview soft-degraded decision (#3808 option b) is now APPLIED, see dashboard-overview-agents-degraded-shown-ready.
+#
+# NOTE (kit 18): CONTEXT.md in a run can be a stale-script artifact (the run executed a pre-#3839 rc-validate snapshot); see rc-validate-stale-script-snapshot. Take identity from boxes.toml.
+#
+# NOTE (kit 17): ct151 runs may find CONTEXT.md is ct150's file (#3838). Take identity from boxes.toml and run; do not stop.
+# `hal0 doctor all` as root creates /root/.hermes (#3836): attribute a split-brain row to it before reporting.
+#
+# NOTE (kit 16, v1.8.0): the shipped Hindsight caps are RETAIN_MAX_COMPLETION_TOKENS=16384 and
+# CONSOLIDATION_MAX_COMPLETION_TOKENS=8192. Entries below that quote 4096 are stale on those numbers.
+# There is no `utility` slot on a fresh 1.8.0 install (ADR-0053); extraction falls back to `brain`.
 
 known_issues:
   # ── Open defects, already tracked ───────────────────────────────────────────
@@ -761,7 +772,7 @@ known_issues:
       that confirms the body still current bumps mtime via os.utime and deliberately leaves
       `_as_of` alone so the injected bytes stay prompt-cache-identical. An old `_as_of` therefore
       means "unchanged since", not "stale data". The hook is bound by hermes' own 2 s
-      on_session_start timeout, so it cannot probe synchronously — it cats a pre-rendered
+      pre_llm_call hook timeout, so it cannot probe synchronously — it cats a pre-rendered
       snapshot and kicks a detached refresh. Verified on the GPU prod box: `_as_of` 12.6 h old on
       a file verified 34 minutes earlier.
     still_report_if: >-
@@ -1553,6 +1564,7 @@ known_issues:
       status` and it fails to show zero yield. Do NOT re-file because `memory ops list` or
       `memory status` show no yield, or a dropped sub-chunk leaves extraction_errors_count at 0.
     review_at: v1.5.0
+    review_due: true
 
   - id: brain-tool-budget-exhaustion-typed-error
     status: by-design
@@ -1577,6 +1589,7 @@ known_issues:
       dashboard thread after the budget error; OR exhaustion is reported as success (token or
       done frame with no error frame).
     review_at: v1.5.0
+    review_due: true
 
   - id: brain-tool-result-not-summarised
     status: by-design
@@ -1595,6 +1608,7 @@ known_issues:
       envelope; OR the tool_result frame itself is suppressed or not rendered in the dashboard
       drawer.
     review_at: v1.5.0
+    review_due: true
 
   - id: capability-path-pin-ignores-model
     status: by-design
@@ -1621,6 +1635,7 @@ known_issues:
       client-supplied name after #2663 ships; OR a chat-capable model is served by the
       embed/rerank slot.
     review_at: v1.5.0
+    review_due: true
     v1_4_0_nightly_20261015021622_note: >-
       A REGISTERED embedding/rerank id that no slot advertises also takes legacy_slot and gets the
       default slot vectors under the requested label. Same #2663 line, not a separate finding; its
@@ -1649,6 +1664,7 @@ known_issues:
       OR on a box whose agent slot HAS a model bound a malformed body returns 404 no_route instead
       of an upstream 4xx; OR the operator reopens #1840 items 7/8.
     review_at: v1.5.0
+    review_due: true
 
   - id: memory-add-ignores-unknown-body-keys
     status: by-design
@@ -1672,6 +1688,7 @@ known_issues:
       outside `shared` or in another agent's private scope; OR the MCP memory_add tool DECLARES a
       bank/namespace property and silently ignores it (mcp-args-additional-properties-open).
     review_at: v1.5.0
+    review_due: true
 
   - id: podman-healthcheck-transient-failed-units
     status: by-design
@@ -1695,6 +1712,7 @@ known_issues:
       hal0 surface counts it as a failure or degrades status because of it; OR the slot's own
       `hal0-slot@<name>.service` enters failed during a normal load.
     review_at: v1.5.0
+    review_due: true
 
   - id: runner-images-converged-is-catalogue-only
     status: by-design
@@ -1718,6 +1736,7 @@ known_issues:
       pre-pulls runner images. Do NOT re-report Store=missing after an update or the
       "N images | N images | converged" row.
     review_at: v1.5.0
+    review_due: true
 
   - id: ui-rail-openwebui-link-unnamed
     status: by-design      # operator wontfix; real but accepted, not a product ruling
@@ -1739,6 +1758,7 @@ known_issues:
       loses its icon, href, target=_blank or keyboard focusability; OR accessibility is declared a
       release priority.
     review_at: v1.5.0
+    review_due: true
 
   - id: brain-vulkan-garbage-fixture-unconstructable-on-fleet
     status: by-design      # coverage gap, not a product defect
@@ -1764,6 +1784,7 @@ known_issues:
       the slot lands anywhere but terminal `error` with slot.output_sanity_failed; OR the two
       test files above fail.
     review_at: v1.5.0
+    review_due: true
     v1_4_0_nightly_20261015_note: >-
       The second non-FPX gguf (ct150 utility qwen3.5-0.8b) and a kfd-visible ROCm-available lane
       (ct150) both returned Paris on 20261015021622. Only 8e (garbage-backend conviction) remains
@@ -1793,6 +1814,7 @@ known_issues:
       frame is emitted on a stream that terminated normally; OR either [dispatcher] default is 0
       on a fresh install.
     review_at: v1.5.0
+    review_due: true
     v1_4_0_nightly_20261015_note: >-
       Re-verified on 20261015021622 with an in-process Dispatcher against a TCP SSE stub (total 4
       s -> 4.07 s, idle 2 s -> 2.07 s, normal stream 0 stall frames). Do not file the live-stall
@@ -1819,6 +1841,7 @@ known_issues:
       list`'s loaded count; OR the composite reports status "serving" while none of its
       advertised models is loaded.
     review_at: v1.5.0
+    review_due: true
 
   - id: hal0-agent-alias-lands-on-utility-when-agent-offline
     status: by-design
@@ -1839,6 +1862,7 @@ known_issues:
       `hal0/agent` lands on utility; OR the dispatch.decision line for a `hal0/agent` request does
       not name the upstream that served it.
     review_at: v1.5.0
+    review_due: true
 
   - id: moonshine-weights-operator-staged
     status: by-design
@@ -1856,6 +1880,7 @@ known_issues:
       configured weights dir, or a staged non-streaming bundle at the documented path still
       fails with weights_missing.
     review_at: v1.5.0
+    review_due: true
 
   - id: brain-chat-malformed-body-is-empty-turn
     status: by-design
@@ -1880,6 +1905,7 @@ known_issues:
       shipped client is seen sending a body that hits the coercion path. A refused attempt is not
       a finding.
     review_at: v1.5.0
+    review_due: true
 
   - id: update-job-record-is-a-snapshot
     status: by-design
@@ -1901,6 +1927,7 @@ known_issues:
       own post-swap migration logged updater.post_swap_migration_failed; OR the boot retry still
       fails to convert after `doctor perms --fix` + restart.
     review_at: v1.5.0
+    review_due: true
 
   - id: memory-extraction-retry-ladder-is-bounded
     status: by-design
@@ -1926,6 +1953,7 @@ known_issues:
       shipped unit sets; OR requests_deferred stays non-zero across two 10-minute samples while
       an interactive request to the slot is starved.
     review_at: v1.5.0
+    review_due: true
 
   - id: brain-fabrication-not-reproducible-on-shipped-default
     status: by-design      # coverage gap in the regression, not a product defect
@@ -1962,6 +1990,7 @@ known_issues:
       miscount alone stays prose-vs-tool_result). VRAM/GB unit conversion errors are filed
       separately as #2728.
     review_at: v1.5.0
+    review_due: true
 
   - id: capability-apply-undownloaded-409-holds
     status: by-design
@@ -1988,6 +2017,7 @@ known_issues:
       stacks (/api/stacks active:false), collections/omni bundle manifests and source comments
       (RerankPanel.jsx:2, EmbedPanel.jsx:2) are opt-in and do NOT count.
     review_at: v1.5.0
+    review_due: true
 
   - id: footer-slots-chip-counts-configured-slots
     status: by-design
@@ -2006,6 +2036,7 @@ known_issues:
       [data-testid=foot-health-runtimes]; OR M differs from the count of non-synthetic entries
       with a model bound; OR the chip is green while N < M; OR a model-less slot is counted.
     review_at: v1.5.0
+    review_due: true
 
   - id: mcp-admin-path-args-are-stringified
     status: by-design
@@ -2023,38 +2054,46 @@ known_issues:
       A non-string path arg returns isError=false; OR the stringified value resolves a resource
       the caller did not name and a mutating tool acts on it; OR it contains URL-structural
       characters (? # % ..) and routes to a different endpoint than the tool's template; OR the
-      direct REST call with the same string returns a different status or code.
+      direct REST call with the same string returns a different status or code; OR on a GATED tool a
+      non-string, non-int path arg (null/bool/float/list/dict) or an int >= 2**53 is queued instead of
+      refused with mcp.invalid_arg; OR a queued-and-approved int path arg acts on a resource other than
+      str(value). NOT a finding: a gated tool with an int path arg (slot_logs name=123) queues, exactly
+      like a well-typed name that does not exist; #3053 accepts ints below 2**53 on purpose and the gate
+      checks call shape, not resource existence (1.8.0 skeptic).
     review_at: v1.5.0
+    review_due: true
 
   - id: settings-redacts-token-count-keys
-    status: by-design
+    status: open
+    issue: 3805
+    reopened: v1.8.0-nightly.20261118002332
     adjudicated: v1.4.0-nightly.20261015155017
     summary: >-
-      GET /api/settings and /api/settings/fields echo memory.graph.extraction_max_tokens as
-      {"value":"***REDACTED***","set":true} (secret=true); is_sensitive_key is True for
-      extraction_max_tokens and max_tokens. It is the only masked leaf in /api/settings.
+      Key-name redaction over-masks any key containing TOKEN. Since #3805 a structured config
+      echo (GET /api/settings, /api/settings/fields, the settings preview diff, doctor bundles)
+      shows a numeric `*tokens` setting in the clear (memory.decision.max_request_tokens,
+      memory.graph.extraction_max_tokens, memory.lanes.*.max_completion_tokens) and reports
+      secret=false for it. Every other TOKEN-named key is still masked as
+      {"value":"***REDACTED***","set":true}, including a string, list or mapping stored under a
+      `*tokens` name.
     why: >-
-      Key-name redaction in hal0.api._redact (is_sensitive_key / redact_config) deliberately
-      over-masks any key containing TOKEN, including count keys (#553 over-redact spec in
-      _redact.py:46-51; pinned by tests/api/test_redact.py:43 and
-      tests/fixtures/redaction_shapes.json sensitive_keys, which lists max_tokens, #2520;
-      ui/src/sentry.ts:959 "over-masks max_tokens on purpose"). redaction.py:921-927 documents
-      the count-name exemption (#2466/#2487) as applying only to the TEXT redactors. Nothing a
-      user sees or saves is affected: the dashboard reads extraction_limits.max_tokens (4096,
-      unmasked) from GET /api/memory/graph/status, and PUT /api/settings refuses every
-      memory.graph.* key (settings.py:98-110, :173) so the masked object cannot be written back.
-      Unmasking counts is a design change to the pinned contract (enhancement), not a release
-      finding.
+      A token-count limit is not a secret, and masking it left Settings > Memory > Models
+      showing a blank "Largest request" field (#3805). The exemption is narrow on purpose
+      (hal0.api._redact.is_token_count): the key is sensitive only for the plural word
+      `tokens` AND the value is a number or unset. is_sensitive_key itself is unchanged and
+      still True for max_tokens (pinned by tests/api/test_redact.py and
+      tests/fixtures/redaction_shapes.json), so the installer mirror and the bridge
+      capability filter keep their over-redact behaviour.
     still_report_if: >-
       A dashboard page or CLI command shows ***REDACTED***, [object Object] or a blank in place
-      of a token-count setting; OR GET /api/memory/graph/status masks
-      extraction_limits.max_tokens; OR a settings write or preview path (PUT /api/settings,
-      /api/settings/preview, PUT /api/memory/graph) accepts the masked {value,set} object back
-      and persists it or reports 'no change' for a real token-count change; OR is_sensitive_key
-      stops masking a real credential key (HF_TOKEN, *_API_KEY); OR masking spreads beyond the
-      key's own value (installer report or doctor bundle masks the literal number elsewhere, the
-      #2439 class).
+      of a token-count setting; OR a string value under a `*tokens` key is echoed in the clear;
+      OR GET /api/memory/graph/status masks extraction_limits.max_tokens; OR is_sensitive_key
+      stops masking a real credential key (HF_TOKEN, *_API_KEY); OR a settings write or preview
+      path (PUT /api/settings, /api/settings/preview, PUT /api/memory/graph) accepts a masked
+      {value,set} object back and persists it; OR masking spreads beyond the key's own value
+      (installer report or doctor bundle masks the literal number elsewhere, the #2439 class).
     review_at: v1.5.0
+    review_due: true
 
   - id: batch-retain-parent-retry-is-idempotent
     status: by-design
@@ -2078,6 +2117,7 @@ known_issues:
       before; OR a second worker claims the same child; OR it returns 200 for a parent whose
       children are ALL completed (that must be the 409 "no incomplete sub-batches").
     review_at: v1.5.0
+    review_due: true
 
   - id: nonchat-slot-type-llm-persisted-needs-doctor-fix
     status: by-design
@@ -2105,6 +2145,7 @@ known_issues:
       installed box, or a type-less TOML on a post-#2710 build, ends up with type = "llm" on a
       non-chat profile; OR /v1/models labels an embed/rerank slot alias as chat.
     review_at: v1.5.0
+    review_due: true
 
   - id: capability-apply-noop-repost-reports-existing-status
     status: by-design
@@ -2122,6 +2163,7 @@ known_issues:
       A re-POST that DOES change enabled, model or device and fails the lifecycle step still
       returns 2xx; OR status reads ready/ok while the slot is in error.
     review_at: v1.5.0
+    review_due: true
 
   - id: memory-reranker-code-path-fallback-only
     status: open
@@ -2144,12 +2186,16 @@ known_issues:
       rerank slot and recall still does not hit the slot; OR the seed-stack docs again claim the
       rerank row is needed for memory recall.
     review_at: v1.5.0
+    review_due: true
 
   - id: embeddings-rerank-to-wrong-slot-raw-501
     status: open
-    issue: 2672
+    issue: 3807
+    related_issue: 2672
     summary: >-
-      /v1/embeddings or /v1/rerank naming a CHAT slot or chat model id, and /v1/rerank naming
+      UPDATE 1.8.0: #2672 is CLOSED (fixed for llm slots: chat slot named on /v1/embeddings or /v1/rerank now 409s) and its
+      still_report_if fired for the remaining directions; re-filed as #3807 (embed model on /v1/rerank -> raw 501; chat to a
+      custom-named reranking slot -> raw 500). Original text follows.       /v1/embeddings or /v1/rerank naming a CHAT slot or chat model id, and /v1/rerank naming
       the EMBED model id, return llama-server's raw 501 ("Start it with `--embeddings`" /
       "`--reranking`") instead of a typed 409 dispatch.capability_mismatch.
     why: >-
@@ -2169,6 +2215,7 @@ known_issues:
       wrongness); OR the same leak appears on /v1/audio/speech or /v1/images/* naming a chat
       slot (untested; file under #2672).
     review_at: v1.5.0
+    review_due: true
 
   - id: omitted-model-404-agent-bound-offline
     status: open
@@ -2187,6 +2234,7 @@ known_issues:
       model bound; OR the omitted-model request returns 2xx from a different slot than the one
       hal0/agent would pick.
     review_at: v1.5.0
+    review_due: true
 
   - id: tracked-open-defects-20261015155017
     status: open
@@ -2218,6 +2266,7 @@ known_issues:
       observed with a materially different cause or wider scope than the issue describes
       (comment on the issue with the new evidence).
     review_at: v1.5.0
+    review_due: true
 
   # ── Adjudicated in v1.4.0-nightly.20261015200136 ───────────────────────────
 
@@ -2253,6 +2302,7 @@ known_issues:
       windows) chat still queues behind extraction or consolidation; OR the retain/consolidation
       queue fails to drain across two 10-minute samples with no new writes.
     review_at: v1.5.0
+    review_due: true
 
   - id: capability-defaults-not-staged-by-installer
     status: by-design
@@ -2279,6 +2329,7 @@ known_issues:
       state or starts a unit without the typed 409 + pull_endpoint or a tracked pull job. Catalog
       rows, inactive seed stacks, collections/omni manifests and source comments do not count.
     review_at: v1.5.0
+    review_due: true
 
   - id: doctor-perms-handmade-models-dir-2755
     status: by-design
@@ -2304,6 +2355,7 @@ known_issues:
       the drift returns after --fix. Lanes that hand-place fixtures must `chmod 2775` the dir or use
       /var/lib/hal0/scratch or /mnt/ai-models/scratch.
     review_at: v1.5.0
+    review_due: true
 
   - id: model-rm-keep-files-recovery-loses-capability
     status: by-design
@@ -2338,6 +2390,7 @@ known_issues:
       does not clear the tombstone" is met by it. Only the legacy tts/kokoro-v1/model.gguf layout
       (upgraded boxes that never re-pulled) still behaves as adjudicated here.
     review_at: v1.5.0
+    review_due: true
 
   - id: tracked-open-defects-20261015200136
     status: open
@@ -2363,6 +2416,7 @@ known_issues:
       with a materially different cause or wider scope than the issue describes (comment with the
       evidence).
     review_at: v1.5.0
+    review_due: true
 
   # ── Added by kit curation after v1.4.0-nightly.20261016003929 ───────────────
 
@@ -2385,6 +2439,7 @@ known_issues:
       evidence). #2741 specifically: also report if the substitution happens with NO log line after
       the fix (every substitution must be logged).
     review_at: v1.5.0
+    review_due: true
 
   - id: lfm25-structured-output-pays-think-tokens
     status: by-design
@@ -2422,6 +2477,7 @@ known_issues:
       thinking budget for LFM2.5 and reasoning_content still appears on structured-output requests.
       Do not re-report small-max_tokens length/empty on lfm2.5.
     review_at: v1.5.0
+    review_due: true
 
   - id: slot-model-id-is-runtime-not-binding
     status: by-design
@@ -2454,6 +2510,7 @@ known_issues:
       that is neither model_id nor model_default; OR the dashboard treats a slot as configured by
       model_id alone.
     review_at: v1.5.0
+    review_due: true
 
   - id: capability-enable-empty-model-is-staged-unset
     status: by-design
@@ -2487,6 +2544,7 @@ known_issues:
       observation, unchecked: an embed/rerank enable rewrites the shipped rerank.toml through the
       store and drops its comment header.
     review_at: v1.5.0
+    review_due: true
 
   - id: memory-delete-private-withheld-silently
     status: by-design
@@ -2495,7 +2553,10 @@ known_issues:
     summary: >-
       POST /api/memory/delete returns {deleted:0} and the unit stays when called with no
       X-hal0-Agent header, or another agent's header, on a unit tagged visibility:private + agent:<owner>
-      (e.g. the steward's memory_add output).
+      (e.g. a unit written by a profile that opted into hal0.memory_private; the steward's memory_add output is
+      SHARED by default since #3168, so an anonymous delete of it returns {deleted:1}).
+      UPDATE 1.8.0 (ADR-0062): 'owner identity' means X-hal0-Agent PLUS a valid X-hal0-Agent-Key; a reserved
+      name without the key is refused 403 bridge.client_name_reserved, see memory-reserved-agent-header-needs-key.
     why: >-
       Fail-closed ACL (routes/memory.py memory_delete docstring; hindsight_provider.py:1505-1533 and
       :1611): deletes are gated on the same predicate as reads (_is_visible_to / _is_in_scope), so no
@@ -2513,6 +2574,7 @@ known_issues:
       through /api/memory/delete without the owner header and reports success. Legacy multi-bank mode
       skips the gate.
     review_at: v1.5.0
+    review_due: true
 
   - id: doctor-runners-healthy-counts-offline
     status: by-design
@@ -2539,6 +2601,7 @@ known_issues:
       slot_manager reports slots=0. Do not re-report offline, never-loaded or model-less slots counted
       in "N/N healthy" (a copy tweak, not a defect).
     review_at: v1.5.0
+    review_due: true
 
   - id: slot-view-has-no-device-key
     status: by-design
@@ -2565,6 +2628,7 @@ known_issues:
       the slot TOML; OR the dashboard shows a device different from the TOML. Do not re-report the absence
       of a `device` key or a `device: null` produced by a jq object filter.
     review_at: v1.5.0
+    review_due: true
 
   - id: ui-agents-card-dot-css-class-tooltip
     status: by-design
@@ -2590,6 +2654,7 @@ known_issues:
       shows a CSS class name or disagrees with the dot class; OR accessibility is declared a release
       priority. Probe `.sdot`, never `.pip`, and report as known, not regressed.
     review_at: v1.5.0
+    review_due: true
 
   - id: update-installs-only-gpu-perms-unit
     status: by-design
@@ -2618,3 +2683,510 @@ known_issues:
       hal0-gpu-perms.service is left stale after `hal0 update`; OR `hal0 update` / `hal0 doctor` claims
       units are up to date while a functional hunk differs.
     review_at: v1.5.0
+    review_due: true
+
+  # ── Added by kit 16 (v1.8.0-nightly.20261118002332 curation) ────────────────────────────────
+  # Open defects filed this run (do not re-report), then adjudicated by-design / refuted candidates.
+
+  - id: hermes-memory-plugin-no-pyyaml
+    status: open
+    issue: 3803
+    summary: >-
+      Hermes memory provider plugin `import yaml` fails in the pinned Hermes venv (ruamel.yaml only), so it
+      never sends X-hal0-Agent-Key and its /api/memory/add + /recall get 403 bridge.client_name_reserved;
+      memory_private fails closed to true. MCP memory tools (key in the MCP headers) are NOT affected.
+    why: >-
+      Real P0, filed #3803. Cause is the plugin/venv mismatch, not ADR-0062 (the 403 is intended for a keyless
+      reserved name). `hal0 agent reprovision hermes --repair` cannot help: the key is already written.
+    still_report_if: >-
+      The Hermes venv imports yaml and the plugin still gets 403 bridge.client_name_reserved for hermes-origin
+      requests; OR the 403 appears with a key present in config.yaml hal0.agent_key.
+    review_at: v1.8.1
+
+  - id: hermes-max-tokens-config-not-applied
+    status: open
+    issue: 3804
+    summary: >-
+      model.max_tokens: 8192 in the Hermes config.yaml is not consumed by the pinned Hermes; main-loop
+      requests carry n_predict=-1 and can decode until the context fills (one 16577-token call held brain
+      for 7 min). Related, NOT filed separately: a 2.6B steward model looping on a failing tool (35 calls,
+      2370 s in one gateway turn; max_iterations=60 and the inactivity watchdog do not bound it).
+    why: >-
+      Real P1, filed #3804 (cap wiring only). Queueing of other callers behind a --parallel 1 brain is the
+      accepted design (#2734), not a separate defect.
+    still_report_if: >-
+      A hermes-originated stream shows params.n_predict=-1 on /slots; OR a single gateway turn runs past
+      ~10 min with the cap present; OR another caller is starved by a Hermes call on a box where the agent
+      role has its own slot.
+    review_at: v1.8.1
+
+  - id: mcp-gated-body-required-args-queue
+    status: open
+    issue: 3806
+    summary: >-
+      Seven gated admin tools with only body-required args (comfyui_pin, comfyui_switchover,
+      npu_backend_load, npu_backend_unload, profile_create, slot_create, upstream_create) queue an approval
+      for {"args":{}} instead of mcp.missing_arg. The #2722 fix covered only the 26 path-arg tools.
+    why: >-
+      Filed #3806 (P2). Unfinished part of #2722 (closed). The inbox does not fill, rows are deduped.
+    still_report_if: >-
+      Any gated tool with a non-empty inputSchema args.required other than these seven queues on {}; OR one
+      of the seven queues after #3806 is closed.
+    review_at: v1.8.1
+
+  - id: dashboard-overview-agents-degraded-shown-ready
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    related_issue: 3808
+    summary: >-
+      Overview Agents panel shows a Hermes degraded only by SOFT reasons (provision_warn, doctor_drift, approvals_drift) as an amber
+      "ready" with no reason. Outage reasons (gateway_down, api_unhealthy, provision_failed) read red "down" since #3843.
+    why: >-
+      Operator decision on #3808 (option b, 2026-11-19), implemented by #3843: only outage reasons turn the pill to down; soft reasons stay
+      "ready" in an amber (warn) pill; the reason is named on the Agents page card. Pinned by agents-pure.test.ts. ADR-0044 "summarise and link".
+    still_report_if: >-
+      The pill renders green/"serving" or any non-amber tone while the Agents card is degraded by soft reasons only; OR a card with
+      gateway_down/api_unhealthy/provision_failed reads anything but red "down"; OR the Agents page card does not name the soft reason; OR a new
+      outage-class reason is added to overview.py degraded_reasons without being added to OUTAGE_REASONS in agents-pure.ts.
+    review_at: v1.9.0
+
+  - id: hermes-smoke-chat-probe-timeout-behind-consolidation
+    status: open
+    issue: 3809
+    summary: >-
+      Install-time provision smoke_tests chat_completions times out (60 s hard-coded) behind first-boot
+      Hindsight consolidation on brain (--parallel 1, model-less utility/memory) and records warn.
+    why: >-
+      Filed #3809 (P2). hal0 did not reject the request; it waited ~106 s in brain's queue (consolidation
+      output uncapped on that path, #2669). Distinct from memory_roundtrip race #2671.
+    still_report_if: >-
+      The probe fails with a non-timeout error; OR smoke_tests warns while brain is idle and the canary passes.
+    review_at: v1.8.1
+
+  - id: flm-registry-installed-ghost
+    status: open
+    issue: 3810
+    summary: >-
+      FLM registry row whose model dir was removed outside hal0 stays installed:true in /api/models and
+      `hal0 model list` (local) while the FLM catalogue says not installed; the FLM remove route 409s.
+      ct150: qwen3:0.6b and qwen3.5:0.8b.
+    why: >-
+      Filed #3810 (P2). Trigger is an out-of-band delete (flm remove / rm); hal0's own remove route drops the
+      row. prune_missing never drops FLM rows (ADR-0026). Only `hal0 model delete <id>` clears it.
+    still_report_if: >-
+      hal0's own FLM remove/delete route leaves a row installed:true; OR load of a ghost row is accepted and
+      the slot comes up ready (not exercised).
+    review_at: v1.8.1
+
+  - id: polish-rollup-1-8-0-nightly-20261118002332-open
+    status: open
+    issue: 3811
+    summary: >-
+      Three polish items: unload of an unseeded default anchor (utility/npu) 409s slot.pinned instead of 404;
+      system_info tool description lets the steward read the runner-catalogue backend as live state;
+      Kokoro gpu-vulkan catalog row labelled qwen3-tts while apply writes kokoro.
+    why: >-
+      Filed #3811 (P2 rollup). `hal0 slot unload` has no --force: that half is #2729 item 2, not new.
+    still_report_if: >-
+      Any of the three still reproduces after #3811 closes.
+    review_at: v1.8.1
+
+  - id: brain-steward-saved-before-async-extraction
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261118002332
+    summary: >-
+      The steward calls memory_add, gets {status:ok, id, operation_id} and says "I've saved that" while the
+      retain is still queued; fact extraction runs later (126-300 s per retain on a CPU/iGPU box, queue ~31
+      deep). A zero-yield retain therefore comes after the reply.
+    why: >-
+      memory_add is fire-and-forget by contract (mcp/memory.py _memory_add: sync=false default;
+      docs/concepts/memory.mdx:60-61 "async by default"). brain/chat.py _brain_memory_args never sets sync.
+      The #2658 honesty rule only requires a memory_add result in the same turn, which holds. Zero yield is
+      reported on the single-op GET (nothing_learned:true, facts_extracted:0, notice) as in
+      memory-retain-zero-yield-visible-on-op-record-only; 2 of 15 retains zero on lfm2.5 is variance
+      (memory-extraction-quality-is-anchor-dependent). The raw document IS stored; a later 404 was a lane
+      cleanup delete, not data loss. P2 enhancement possibility: say "queued for memory".
+    still_report_if: >-
+      The steward says saved/noted/remembered with no memory_add tool_result in that turn (#2658 regressing);
+      OR the tool_result is an error/refusal/pending_approval and it still says saved; OR the single-op GET
+      lacks nothing_learned:true and the notice after a 0-unit terminal state; OR the raw document is absent
+      with no audited delete_document; OR the brain path starts passing sync=true or polling and still says
+      "saved" for a nothing_learned retain; OR >=2 of 3 natural memory-worthy retains yield 0 facts with the
+      coherence canary passing; OR a later turn claims to recall a fact memory_search did not return.
+      Do NOT re-file because "saved" precedes extraction or one retain yields 0 facts.
+      Count zero-yield ONLY from the single-op GET (facts_extracted/nothing_learned), over natural
+      memory-worthy content; acknowledgements like "OK, thanks." yielding 0 are correct, and a
+      "Cat name: X" steward retain at 0 beside >=1-fact neighbours is variance (re-adjudicated
+      v1.8.0-nightly.20261118233655, candidate zero-yield-retain-reported-saved refuted: 1 natural zero in ~8).
+      The REST add body uses `text`, not `content` (400 validation.invalid otherwise).
+    review_at: v1.9.0
+
+  - id: system-info-backends-is-runner-catalogue
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261118002332
+    summary: >-
+      /api/system-info backends.<runner>.backend reads "rocm" for the standard runner (and "cuda" for the cuda
+      runner) on a Vulkan-only AMD box with kfd_present:false.
+    why: >-
+      The map is the runner catalogue keyed by image; `backend` is Runner.backend, "The runner's default lane"
+      (src/hal0/runners/__init__.py). The same row carries supported_backends [rocm, vulkan]; the UI reads it
+      as a catalogue (hw-cascade.js, profiles.jsx). The box's real backend is /api/slots/<n>.backend,
+      /api/capabilities backends and hardware.kfd_present. The steward misreading is the real (minor) part,
+      filed in #3811 item 2 against the system_info tool description.
+    still_report_if: >-
+      backends.<runner>.backend changes with host hardware (two boxes differ for the same runner); OR a UI
+      surface renders it as "this box's GPU backend"; OR the steward, asked a plain hardware-summary or
+      which-backend question WITHOUT being told to use system_info, names ROCm as serving on a kfd_present:false
+      box in >=2 of 3 runs.
+    review_at: v1.9.0
+
+  - id: kokoro-on-gpu-vulkan-row-runs-on-cpu
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261118002332
+    summary: >-
+      catalogs.voice.tts kokoro-v1 offers a gpu-vulkan backend; applying it writes profile=kokoro,
+      n_gpu_layers=0 and runs the CPU ONNX image (hal0-runner-kokoro, Devices=[]).
+    why: >-
+      #1941: _RUNTIME_TO_HOST_BACKENDS['kokoro']=('gpu-vulkan','cpu'); providers/_gpu.py says gpu-vulkan is the
+      GPU row label, not an image claim, and Kokoro is a no-rocm CPU image ungated on gpu-vulkan. Apply writing
+      profile=kokoro is the #2749 veto working. Only the row's profile/runtime_family label (qwen3-tts) is a
+      defect (#3811 item 3). The original #2718 symptoms (503 apply_failed, slot error, qwen3-tts written)
+      no longer reproduce; the #2718 closing comment's claim that the catalog does not fan out is wrong, the
+      fix was the apply veto.
+    still_report_if: >-
+      Applying kokoro-v1 on gpu-vulkan does not reach ready or serve 200 audio; OR it writes profile qwen3-tts
+      or launches the qwen3tts image; OR the dashboard gains a TTS device picker that labels the Kokoro row
+      "GPU (Vulkan)" without saying it runs on CPU.
+    review_at: v1.9.0
+
+  - id: memory-reserved-agent-header-needs-key
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261118002332
+    related_issue: 3569
+    summary: >-
+      /api/memory/* (recall, search, delete, add) and /mcp/memory with a reserved X-hal0-Agent (hermes,
+      hermes__hal0-brain, pi, hal0*) and no X-hal0-Agent-Key return 403 bridge.client_name_reserved (not 400).
+      Anonymous callers keep shared memory read/write.
+    why: >-
+      ADR-0062 (docs/adr/0062-memory-identity-from-a-credential.md, #3736 cbac1f7f4, in nightlies from
+      v1.8.0-nightly.20261116155344): a memory identity comes from a credential, so a reserved name cannot be
+      claimed by header alone. Since #3168 the steward writes SHARED (scope:global, agent:hermes__hal0-brain)
+      unless profiles/hal0-brain/config.yaml sets hal0: {memory_private: true}. Upgraded boxes may still hold
+      pre-#3168 visibility:private facts that need the key to delete. The ADR notes a short window on upgraded
+      boxes between hal0-api start and gateway restart where the old plugin's bare header gets 403.
+    still_report_if: >-
+      A request with a reserved X-hal0-Agent AND its correct X-hal0-Agent-Key (or a bundled agent's own wired
+      config) is refused or treated as anonymous; OR an unkeyed reserved-name request reads or deletes a
+      visibility:private unit instead of getting 403; OR an anonymous/non-owner caller deletes a
+      visibility:private unit; OR the steward writes visibility:private or to a private:hermes__hal0-brain
+      bank with no memory_private opt-in; OR Hermes's plugin or Pi gets this 403 after the startup converge
+      (see hermes-memory-plugin-no-pyyaml, #3803); OR a shipped doc, CLI or MCP schema still tells callers to
+      use a bare X-hal0-Agent for private memory.
+    review_at: v1.9.0
+
+  # ── Added in kit 17 (v1.8.0-nightly.20261118233655) ─────────────────────────
+
+  - id: capability-apply-registry-fallback-skips-model-fit
+    status: open
+    issue: 3834
+    summary: >-
+      Capability apply (CLI, REST, MCP capability_set) accepts a registry model of the WRONG type for a child
+      whose catalog does not list it (embedding gguf on embed/rerank returns ready; kokoro-v1 on voice/stt
+      passes validation) because the registry fallback returns before evaluate_model_fit.
+    still_report_if: >-
+      Only a DIFFERENT shape: the wrong-type apply is refused for registry models but a catalog row of the
+      wrong class is accepted; or the refusal exists and the slot still starts. Do not re-file the registry-fallback case.
+    review_at: v1.8.1
+
+  - id: hermes-context-length-256k-fallback
+    status: open
+    issue: 3835
+    related_issue: 3854
+    v1_8_0_note: >-
+      #3835 closed by #3844 (plugin claims no hostname; Hermes now live-discovers). Residual #3854: a model-less agent slot
+      leaves no /v1/models row, so hal0/agent still resolves 256000. The old note that /v1/models not listing the virtual name
+      is not decisive is stale for a model-less agent. Stale plugin (hostname 127.0.0.1) on an upgraded box is #3852.
+    summary: >-
+      Hermes resolves hal0/agent to its 256,000 fallback (gateway.log "warmed ... 256000 (default)") against a
+      65,536 window, because the provider plugin's 127.0.0.1 hostname makes Hermes skip live /models discovery.
+      Proactive compaction never fires below the real window; reactive overflow still compacts.
+    still_report_if: >-
+      A long session demonstrably fails (not just compacts reactively) on the 64k window; OR a model.context_length
+      override in config.yaml is ignored; OR the warmed value disagrees with ctx_effective for a non-virtual id.
+    review_at: v1.8.1
+
+  - id: doctor-all-creates-root-hermes-tree
+    status: open
+    issue: 3836
+    summary: >-
+      `hal0 doctor all` as root creates /root/.hermes via the hermes_anchor_window probe; `hal0 doctor perms`
+      then shows `split-brain /root/.hermes | DRIFT` (rc 1). Not an installer or lane defect.
+    still_report_if: >-
+      /root/.hermes appears with NO root-run `hal0 doctor all` (or `agent reprovision hermes --repair` as root)
+      beforehand and the birth time predates the lane's first command; or the installer itself creates it.
+    review_at: v1.8.1
+
+  - id: memory-extraction-throughput-probes-wrong-slot
+    status: open
+    issue: 3837
+    summary: >-
+      The extraction throughput preflight (hal0 memory graph check, doctor row, installer step) probes the
+      model-less memory slot's :8091 instead of the resolver's slot (brain), so it is verdict=unknown /
+      ConnectError on every fresh install; `hal0 memory status` echoes the cached result.
+    still_report_if: >-
+      The probe targets the right slot and still returns ConnectError; OR a model-bound extraction slot that is
+      READY returns ConnectError.
+    review_at: v1.8.1
+
+  - id: rc-validate-shared-context-md
+    status: open
+    issue: 3838
+    summary: >-
+      Harness defect: per-box preflights all write ${RUN}/CONTEXT.md, so one box's lanes get another box's file or none.
+    still_report_if: >-
+      A run directory holds CONTEXT-<box>.md per box and a lane still reads the wrong box's file.
+    review_at: v1.8.1
+
+  - id: qwen3tts-seed-model-path-unmounted
+    status: open
+    issue: 3456
+    summary: >-
+      The seeded qwen3-tts profile passes --model_path /mnt/ai-models/local/qwen3-tts/... but Qwen3TTSProvider.container_spec
+      mounts only [models].store (+ /qwen3tts-cache), has no out-of-store mount and no slot.weights_missing preflight
+      (moonshine has both). On a box whose store is not /mnt/ai-models the staged weights are invisible and the
+      runner falls back to a ~4.5 GB Hugging Face download. Apply is first refused with 409 capability.model_not_downloaded,
+      so a normal user sees a loud refusal until the weights are registered.
+    why: >-
+      Flag placement in the profile is intended (ADR-0030, ADR-0029 decision 2); the unmounted target with no preflight is the
+      defect, already tracked at #3456 (P2, ready-for-human). Evidence comment added in v1.8.0-nightly.20261118233655.
+    still_report_if: >-
+      #3456 is closed and the rendered qwen3tts container_spec still passes a --model_path outside every mount or has no
+      slot.weights_missing preflight; OR apply for qwen3-tts on a ROCm-lane box stops returning 409 model_not_downloaded
+      for unregistered weights and launches the container.
+    review_at: v1.9.0
+
+  - id: hermes-deleted-profile-dir-recorded-skipped
+    status: open
+    issue: null
+    summary: >-
+      After `hermes profile delete <name>`, upstream leaves its tombstone profiles/.deleted/<name> on purpose; hal0's
+      wire_named_profiles does not skip dot-directories and records skipped {".deleted": "invalid profile name"} in
+      provision.json phases.profile_mcp_wire.details (phase stays ok). Cosmetic, deliberately NOT filed (CLAUDE.md filing
+      rule 3); XS fix at hermes_provision.py ~:6229 (skip dot-dirs).
+    why: >-
+      Nothing is wired or harmed. Do NOT delete profiles/.deleted: it is Hermes's protection against resurrecting a deleted
+      profile. Fold into the next Hermes polish rollup if one is opened.
+    still_report_if: >-
+      The phase turns warn/failed because of the .deleted entry; OR hal0 wires a config.yaml into a directory under a
+      tombstoned name (wire_named_profiles does not check named_profile_is_deleted, #95188 ghost-profile shape; unreproduced).
+    review_at: v1.9.0
+
+  - id: agent-27b-oom-is-container-memcg-not-slot-admission
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261118233655
+    summary: >-
+      On ct150 (12 GB LXC) the 17.6 GB qwen3.8-27b agent slot loaded and served, then llama-server was SIGKILLed (137)
+      during a steward request; memcg oom_kill 1; the slot reads OFFLINE "container stopped (auto-reloads on next request)"
+      and the client gets dispatch.upstream_unavailable. Candidate: "no capacity guard for a model larger than the container".
+    why: >-
+      On UMA AMD hosts GPU-lane weights live in amdgpu GTT (host RAM), not the LXC memcg; the slot unit's own peak was 1.5 GB.
+      Admission budgets free GTT (reaper.probe_host_free_mb, preload_evict; #372 deferred memory.max). The OOM was the whole
+      container at its 12000 MiB limit with swap exhausted (hindsight-api and hal0-hs-decide co-resident), llama-server chosen
+      as victim. 137 restarting under Restart=always is policy (providers/container.py:1020-1026); OFFLINE-not-ERROR after a
+      stop is deliberate (slots/watchdog.py:458-468). A guard on container RAM would refuse a load that works.
+    still_report_if: >-
+      A gpu-rocm/gpu-vulkan LLM slot's OWN unit memory peak (or cgroup memory.current) reaches the container limit, i.e. weights
+      really are charged to the memcg, with no admission warning; OR a cpu-device slot whose file+KV estimate exceeds MemAvailable
+      is admitted on a UMA box because the probe read GTT; OR free GTT is below the model size and no slot.gtt_feasibility warning
+      precedes the load; OR an OOM-killed slot keeps restarting past StartLimitBurst without reaching ERROR, or reads READY after the
+      kill; OR the same OOM recurs while the container memcg is NOT at its limit.
+    review_at: v1.9.0
+
+  - id: gateway-secrets-wire-unreadable-is-intended
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261118233655
+    related_issue: 2667
+    summary: >-
+      `hal0 agent reprovision hermes` records gateway_secrets_wire.api_server_key {outcome:"unreadable", key_len:0} inside an ok phase.
+    why: >-
+      The CLI always drops to hal0 (agent_commands.py _provision_hermes); the vault is root-only 0700/0600, so hal0 asks the
+      hal0-agentenv seam for key NAMES and keeps a set key (f42a185e7, #2910; fixes #2908). The value-level check is
+      profile_api_keys.default_key. Only an in-process root caller records "present". Regression
+      hermes-reprovision-rotates-gateway-key expect updated accordingly (kit 17).
+    still_report_if: >-
+      The vault API_SERVER_KEY tail changes across a reprovision on a box that already had one; OR outcome is "generated" with a key
+      already in the vault; OR "unreadable" with NO API_SERVER_KEY in the vault; OR a euid-0 caller records "unreadable"; OR after
+      reprovision the gateway /proc environ key or $HERMES_HOME/.env mirror differs from the vault, or :8642 rejects the vault key (401);
+      OR profile_api_keys.default_key is unreadable while this phase says ok.
+    review_at: v1.9.0
+
+  - id: fresh-hermes-degraded-provision-warn-no-fix
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    related_issue: 2671
+    summary: >-
+      Fresh install: Hermes overview reads degraded, reason provision_warn, fix none, until the next reprovision.
+    why: >-
+      provision_warn is a soft reason by contract (overview.py, #2924); the cause is the first-provision memory_roundtrip race (#2671, open). It clears on the next reprovision/Repair; the card has a generic Repair button. Precedent #2951 fixed the probe, not the contract.
+    still_report_if: >-
+      provision_warn persists after a successful reprovision whose smoke_tests is ok; OR the warn names something other than memory_roundtrip (#2671) or chat_completions timeout (#3809); OR #2671 is closed and a fresh first provision still warns; OR the card offers no Repair control; OR a smoke-only warn raises provision_failed. Otherwise comment on #2671 only.
+    review_at: v1.9.0
+
+  - id: rerank-toml-load-failure-hidden
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    related_issue: 2720
+    summary: >-
+      Slot TOML with a hand-added unknown key ([model].output_sanity) fails `hal0 config validate` ('does not load') yet the slot loads and serves; /api/slots shows offline with config_error null.
+    why: >-
+      ADR-0029 s5: the typed SlotConfig load is strict (validate, doctor, discover) and the launch path reads the TOML as a raw dict. slot load reached ready and /v1/rerank returned 200. validate and doctor print the row loudly; the only inaccuracy is the 'does not load' wording.
+    still_report_if: >-
+      A typed-load-failing slot ALSO fails `hal0 slot load`/its endpoint while /api/slots shows config_error null; OR /api/slots reports ready for a slot whose launch failed; OR `hal0 doctor profiles` skips such a slot without printing its row; OR boot auto-scan prunes a model referenced only by it (models.auto_scan_prune_skipped absent); OR a hal0 writer itself emits a key the typed loader rejects.
+    review_at: v1.9.0
+
+  - id: hermes-fresh-turn-latency-over-120s
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    summary: >-
+      A fresh Hermes turn on ct151 reads 109 s in agent.log / 48 s wall on a Vulkan brain.
+    why: >-
+      About 100 s was queue wait behind an in-flight Hindsight consolidation call (--parallel 1, capped at 8192 tokens); brain compute for the request was 9.5 s. The ADR-0053/#3333 background gate cannot preempt a call already in flight. Calls inflated by hal0-api restarts (Connection refused in agent.log) are environmental. Covered by memory-extraction-serializes-with-chat-on-fresh-install.
+    still_report_if: >-
+      Brain-side compute (llama print_timing total) for a Hermes task exceeds ~120 s on a GPU-accelerated box; OR a request queued behind ONE in-flight Hindsight call waits >300 s; OR the turn fails; OR the hal0:private queue stops draining across three samples 10 min apart with no restarts. Quote queue wait separately from compute.
+    review_at: v1.9.0
+
+  - id: zero-yield-retain-annotation-check
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    related_issue: 2030
+    summary: >-
+      A zero-yield retain shows plain `completed` in `memory ops list` / `memory status` and the #2030 regression probe scored it regressed.
+    why: >-
+      Probe misread. The annotation (facts_extracted:0, nothing_learned:true, notice) is on the single-op GET /api/memory/banks/{bank}/operations/{id} and MCP memory_operation_get only; list and status are unannotated on purpose (known memory-retain-zero-yield-visible-on-op-record-only). regressions.yaml probe 2030 now says to read the single-op GET.
+    still_report_if: >-
+      The single-op GET lacks nothing_learned:true and the notice while the document's memory_unit_count is 0. Do not re-file from a probe that read only the list or status.
+    review_at: v1.9.0
+
+  - id: rc-validate-stale-script-snapshot
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    related_issue: 3838
+    summary: >-
+      Probe/lane/triage prompts say `${RUN}/CONTEXT.md` instead of CONTEXT-<box id>.md.
+    why: >-
+      The run executed a pre-#3839 snapshot of .claude/workflows/rc-validate.js; the repo copy builds every prompt from BASE which names CONTEXT-<box id>.md. Operational, not a repo defect. Relaunch from the current repo copy. Remaining 'CONTEXT.md' wording in _shared.md/ui.md/mcp.md/kit.toml is drift only.
+    still_report_if: >-
+      The repo's rc-validate.js at the launch commit tells any agent to read the shared CONTEXT.md; OR a non-ct151 agent demonstrably acted on ct151 facts despite the per-box header.
+    review_at: v1.9.0
+
+  - id: hermes-hook-and-terminal-by-design
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    summary: >-
+      gateway journal shows `hal0-terminal-off` ERROR and hermes_doctor advisory 'Unknown terminal backend hal0-terminal-off'.
+    why: >-
+      Deliberate sentinel backend (hermes_provision.py:1843) that disables host exec for the agent.
+    still_report_if: >-
+      The sentinel is absent from a profile that should have exec disabled, or the gateway fails to start because of it.
+    review_at: v1.9.0
+
+  # ── Added in kit 19 (v1.8.0-nightly.20261120045628) ─────────────────────────────────────
+
+  - id: hermes-gateway-turn-not-cancelled-on-client-disconnect
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    summary: >-
+      Killing a `hermes -z` client (SIGTERM) does not cancel the gateway turn: the in-flight LLM call completes (165 s on ct151) and active_agents stays 1.
+    why: >-
+      Upstream Hermes v0.22.4 semantics: closing the terminal only detaches a viewer ("Detached; accepted work continues at the gateway",
+      cli.md:176); /stop (session.interrupt) is the cancel path. The gateway's own HTTP request to hal0 stays open, so hal0's http.disconnect abandon path
+      (slots/abandon.py) never fires. Cost of a long call is #3804 (decode cap) and #2734 (--parallel 1 queueing). No new /v1/chat call is issued after the kill.
+    still_report_if: >-
+      Sending /stop (session.interrupt) does not bring active_agents to 0 and stop new /v1/chat calls within 30 s; OR hal0's /v1 relay keeps the llama slot
+      computing >30 s after the gateway's request to hal0 closes; OR a detached turn starts a new /v1/chat call >600 s after its client died; OR a detached
+      turn runs past ~10 min with the #3804 cap in place; OR docs/--help start promising that killing `hermes -z` cancels the turn.
+    review_at: v1.9.0
+
+  - id: agent-identity-cards-deleted-not-rewritten
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    related_issue: 2700
+    summary: >-
+      After a hal0-api restart `hal0 agent peers` says "No agent identity cards published yet" and the boot dedupe seems to delete cards without rewriting.
+    why: >-
+      Refuted as stated. The boot lane deletes prior cards then calls memory_add; that is an async Hindsight retain and the card appears once extraction
+      finishes (15 min on ct151: restarts refuse in-flight extraction, retry backoff 120 s, brain --parallel 1 shared). A slow queued write, not a missing
+      one. The real residuals are filed: #3876 (duplicates from pending retains, zero-card window) and #3877 (peers one row per fact).
+    still_report_if: >-
+      No card document exists 30 min after a restart on a drained queue with failed=0; OR the card retain is in failed state; OR a card write leaves no
+      journal line when it fails.
+    review_at: v1.9.0
+
+  - id: memory-work-starves-interactive-chat-on-fresh-install
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    related_issue: 2734
+    summary: >-
+      On a fresh install an interactive request waits 28-216 s behind Hindsight work on the shared --parallel 1 brain (a multi-round steward turn ~5 min).
+    why: >-
+      Accepted 1.8.0 consequence (ADR-0053; background_gate.py "Out of scope: preempting an in-flight llama-server call"). Hindsight runs one retain and one
+      consolidation call at a time, so two memory calls can be inside llama at once; the #3333 gate holds only NEW hal0/memory requests while a foreground
+      request is registered; quiet_gap_s scheduling is config-only until v1.9.0. No single queued request waited >300 s. Workaround: bind a model to the
+      memory slot. Measure on a box without a restart-induced retain backlog.
+    still_report_if: >-
+      A single request (one round, timed from brain launch_slot/print_timing) waits >300 s behind Hindsight work; OR waits behind more than the in-flight
+      memory call plus one already queued (check hal0.background_gate.proceeded inside the wait window); OR a queued request fails 5xx/503; OR after
+      quiet-gap scheduling ships a memory call starts within quiet_gap_s of a foreground round; OR it happens with the memory slot bound to its own model.
+    review_at: v1.9.0
+
+  - id: chat-to-rerank-name-409-names-embed-slot
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    related_issue: 1894
+    summary: >-
+      Chat to model=rerank / hal0/rerank returns 409 (or 404 with rerank ready, embed offline) naming slot=embed.
+    why: >-
+      Rule 7 (_capability_resolve.py:75,251) maps any name containing embed or rerank to the embed slot before the slot-name branch; locked by
+      tests/dispatcher/test_router.py:502-515. Always a typed refusal. The slot's own registered id (bge-reranker-...) names slot=rerank. Same ruling as
+      chat-to-embed-slot-500-passthrough; routing.md check 31 reworded in kit 19 so it no longer calls this a failure.
+    still_report_if: >-
+      The request is served or leaks a raw 5xx; OR a model id a serving rerank slot advertises (or the registry binds to rerank) yields an envelope naming
+      embed; OR a custom --type reranking slot's 409 names another slot; OR /v1/rerank with model=rerank stops landing on the rerank slot; OR rule 7's
+      rerank hint is removed and the stock name still resolves to embed.
+    review_at: v1.9.0
+
+  - id: hermes-profile-delete-leaves-stale-upstream
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120045628
+    summary: >-
+      After `hermes profile delete <n> -y` the managed hermes.<n> upstream stays in /api/upstreams and /api/slots.
+    why: >-
+      ADR-0035 decision 7: the 120 s periodic reconcile (HERMES_RECONCILE_INTERVAL_S, api/__init__.py:1491) removes it with no POST; measured removal 118 s.
+      No in-process hook on Hermes's profile CLI (ADR-0035 fact 10). During the lag the gateway 404s the prefix and a pinned id fails fast with 502. Wait a full
+      interval before judging; hal0-api restarts add boot passes.
+    still_report_if: >-
+      The upstream persists >240 s with no hal0-api restart; OR a request for the deleted profile's id is answered by a local slot; OR the journal shows
+      api.hermes_upstreams.periodic_reconcile_failed; OR a deleted profile's upstream returns on a later pass.
+    review_at: v1.9.0
+
+  - id: cli-model-scan-hides-skip-reason
+    status: open
+    issue: 2725
+    summary: >-
+      `hal0 model scan` prints "N added, M skipped" and never the skipped[] path/reason (model_commands.py:449-460); the API returns them. Applies to every
+      reason (id_collision, unsupported_quant, register_failed), not only collisions. Commented on #2725 in 1.8.0.
+    why: >-
+      Open P2 #2725 ("at minimum the CLI should print the skip reason"). Duplicate, not a new finding.
+    still_report_if: >-
+      A scan skip reason is printed wrongly, or a skipped file is counted as added.
+
+  - id: tracked-open-defects-20261120045628
+    status: open
+    summary: >-
+      Filed from the v1.8.0-nightly.20261120045628 run, all open: #3874 rollback crashes in activate (P0), #3875 context_length not stamped on first provision,
+      #3876 identity-card dedupe race, #3877 agent peers per-fact rows, #3878 hindsight_recall tool result 10x budget, #3879 slot models[] stale,
+      #3880 GET /v1/models/<raw chat id> 404, #3881 stale-quarantine reaper per version, #3882 kit upgrade baseline (fixed in kit 19).
+    why: >-
+      Each has a regressions.yaml entry. Record as `known (#N)`.
+    still_report_if: >-
+      The symptom is materially wider than the issue text, or a fix lands and the repro still reproduces.

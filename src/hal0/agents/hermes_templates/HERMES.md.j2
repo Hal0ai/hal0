@@ -23,9 +23,10 @@
 # Live state
 
 Current loaded model, capabilities, and GPU/NPU backend are in
-`/var/lib/hal0/STATE.md` (auto-injected each session; refreshed on restart
-and on every model/slot change). Read it for the live picture rather
-than assuming — it carries an `_as_of:` timestamp.
+`/var/lib/hal0/STATE.md`. Its content is added to the first message of each
+session (the live-state block); the file is refreshed on restart
+and on every model/slot change, so later in a long session re-read the file
+for the live picture rather than assuming. It carries an `_as_of:` timestamp.
 
 # Peer agents
 {% if peer_agents %}
@@ -46,7 +47,7 @@ than assuming — it carries an `_as_of:` timestamp.
 # Conventions
 
 - The dashboard at {{ dashboard_url }} shows live slot state.
-- Never edit slot TOMLs directly — use `hal0_admin:capability_set`.
+- Never edit slot TOMLs directly — use `mcp__hal0_admin__capability_set`.
 - Never run `hermes setup` — it will overwrite your model wiring.
 - Bootstrap is `hal0 agent reprovision hermes`; `--repair` re-renders
   this file + config.yaml from current state.

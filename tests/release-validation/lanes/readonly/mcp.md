@@ -96,8 +96,27 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
 
 24. **Connect paths.** Probe `/mcp/admin/mcp` and `/mcp/memory/mcp` directly; bare `/mcp`, `/mcp/` and `/mcp/admin` return 405 and cost time-outs when probed blindly.
 
+27. **Required-arg sweep on gated tools.** For every gated tool whose `inputSchema` `args.required` is non-empty, call it with `{"args":{}}`. Path-arg tools must return `mcp.missing_arg`; the seven body-only tools still queue (open #3806, known-issues `mcp-gated-body-required-args-queue`). Report any OTHER tool that queues, and deny every approval you create. A gated tool with an int path arg that queues is by design.
+
+28. **hal0-agents surface.** `/mcp/agents` needs a bridge key (`hal0bk_`). Either use the key from `CONTEXT.md` or record the surface as an explicit `skipped`; do not omit it silently.
+
+29. **slot_list count.** `slot_list` count is local slots + remote rows + the synthetic `hal0` row (#2697, open); compare against `kind=="local"` REST rows and record the delta instead of asserting equality.
+
+30. **Wrong CONTEXT.md.** If `CONTEXT.md` is another box's file (#3838) take identity from `boxes.toml` and run; do not stop.
+
 ## Carry-forward
 
 The MCP surface is how other agents consume hal0, so *silent* protocol wrongness here is worse
 than elsewhere — a client cannot tell it is being lied to. Weight `isError`, schema validity,
 and session handling as `major` by default.
+
+## Added in kit 18
+
+* Parse GATED_TOOLS from the release-tag source with `ast` and diff it against the REST tool_details `gated` flag in a script, not by hand.
+* For all three servers, the advertised connect_url from `hal0 mcp status` / `/api/mcp/servers` must answer `initialize` with 200, and serverInfo.version must equal the VERSION file.
+* #3806 looks fixed (all 39 gated tools with required args return mcp.missing_arg); keep the sweep but expect pass.
+
+## Added in kit 19
+
+* Diff `tool_details` names against `tools/list` for all three servers in one script, and diff the ast-parsed GATED_TOOLS from the release tag against the REST gated flags (61 matched on 1.8.0).
+* If CONTEXT provides a `hal0bk_` bridge key, exercise `/mcp/agents/mcp` instead of recording it skipped (without one it is 401 by design).

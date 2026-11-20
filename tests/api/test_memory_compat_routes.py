@@ -38,7 +38,7 @@ from hal0.api.middleware import error_codes
 from hal0.api.routes import memory_compat
 from hal0.api.routes.memory_compat import _engine_operation_id
 from hal0.bridge.store import BridgeStore, BridgeStoreError
-from hal0.config.schema import MemoryCompatConfig, MemoryLanesConfig
+from hal0.config.schema import MemoryCompatConfig, MemoryGraphConfig
 from hal0.errors import Hal0Error
 from hal0.memory.hindsight_client import REFLECT_TIMEOUT_S, HindsightRestClient
 from hal0.memory.hindsight_provider import HindsightProvider
@@ -3051,7 +3051,7 @@ def test_reflects_here_always_leave_an_engine_slot_for_everyone_else(
 def test_lanes_hal0_cannot_read_are_taken_to_be_the_shipped_single_slot(
     client: TestClient, key: str, app: FastAPI
 ) -> None:
-    assert MemoryLanesConfig().llm_max_concurrent == 1
+    assert MemoryGraphConfig().extraction_max_concurrent == 1
     _configure(app, None, max_concurrent_reflects=8)
     _compat_state(app).in_flight[("reflect", "*")] = 1
     _busy(client.post(_url(URL_BANK + "/reflect"), headers=_auth(key), json={"query": "q"}), "15")
@@ -3553,3 +3553,34 @@ def test_a_failed_age_lookup_never_refuses_a_commit_log(
     engine.overrides[("GET", path)] = httpx.Response(500, json={"detail": "boom"})
     assert _gitlog(client, key).status_code == 200
     assert _engine_retains(engine) == 1
+
+
+def test_reflect_limit_uses_what_the_engine_is_given(
+    client: TestClient, key: str, app: FastAPI, monkeypatch
+) -> None:
+    """#3758: the reflect limit comes from the renderer's resolver, so graph 4 on
+    a slot with --parallel 2 leaves one of two engine slots; an explicit lanes
+    value of 6 under graph 2 is held to 2."""
+    from hal0.config.schema import MemoryConfig
+    from hal0.memory import extraction_env
+
+    def limit(memory: MemoryConfig, parallel: int | None) -> int:
+        monkeypatch.setattr(extraction_env, "extraction_slot_parallel", lambda g, **kw: parallel)
+        app.state.hal0_config = types.SimpleNamespace(memory=memory)
+        request = types.SimpleNamespace(app=app)
+        return memory_compat._reflect_limit(request)  # type: ignore[arg-type]
+
+    memory = MemoryConfig(
+        graph={"extraction_max_concurrent": 4}, compat={"max_concurrent_reflects": 8}
+    )
+    assert limit(memory, 2) == 1
+    memory = MemoryConfig(
+        graph={"extraction_max_concurrent": 2},
+        lanes={"llm_max_concurrent": 6},
+        compat={"max_concurrent_reflects": 8},
+    )
+    assert limit(memory, None) == 1
+    memory = MemoryConfig(
+        graph={"extraction_max_concurrent": 4}, compat={"max_concurrent_reflects": 8}
+    )
+    assert limit(memory, None) == 3

@@ -1,6 +1,6 @@
 ---
 title: Connect external providers
-description: Wire up OpenAI, Anthropic, OpenRouter, Ollama, or any OpenAI-compatible provider with the hal0 upstream CLI — credentials, testing, and reachability.
+description: Wire up OpenAI, Anthropic, OpenRouter, Ollama, or any OpenAI-compatible provider from the dashboard or the hal0 upstream CLI — credentials, testing, choosing which models are on, and reachability.
 sidebar:
   order: 40
 ---
@@ -10,8 +10,124 @@ import { Steps, Aside, Tabs, TabItem, Code } from '@astrojs/starlight/components
 hal0 can route requests to **external upstreams** — third-party
 OpenAI-compatible APIs like OpenAI, Anthropic, OpenRouter, Google AI
 Studio, DeepSeek, MiniMax, Ollama, or any custom endpoint. Manage them
-with `hal0 upstream`, a thin client over `/api/upstreams` /
-`/api/providers` backed by a built-in catalogue of provider templates.
+in the dashboard under **Models → Providers**, or with `hal0 upstream`, a
+thin client over `/api/upstreams` / `/api/providers` backed by a built-in
+catalogue of provider templates. Both manage the same providers; the dashboard
+sections come first, the CLI follows.
+
+## Add a provider in the dashboard
+
+Open **Models → Providers** and choose **Add provider**. One dialog does the
+whole job:
+
+<Steps>
+
+1. **Pick a provider.** Each tile is a template with the base URL and sign-in
+   style filled in. Choose **Custom OpenAI-compatible** for anything that is
+   not listed, and enter its address yourself.
+
+2. **Check the name, the address and the key.** The name becomes the prefix
+   you and your agents use, for example `deepseek/model-id`. Paste the key
+   into the key box. It is stored on the hal0 box only and is never shown
+   again.
+
+3. **Choose Check connection.** hal0 asks the provider for its model list
+   without saving anything. A rejected key, a wrong address or an unreachable
+   provider is reported in the dialog, and nothing is saved. A good answer
+   shows how many models the provider offers.
+
+4. **Tick the models to switch on.** The ones the template recommends are
+   ticked for you. Use **Select all**, **Recommended only**, or the search box
+   (shown when the list is long) to change the picks. You can also correct a
+   model's type, such as chat or embedding, before adding it. Only ticked
+   models can be called; the rest stay in the list, switched off.
+
+5. **Choose Add provider.** hal0 creates the provider, then stores the key,
+   and selects the new provider in the list.
+
+</Steps>
+
+Each provider gets its own key slot, named after the provider: a provider
+called `deepseek` keeps its key as `DEEPSEEK_API_KEY`, and a second one called
+`deepseek-2` keeps its own as `DEEPSEEK_2_API_KEY`. Two providers made from the
+same template never share or overwrite a key. If the name would clash with a
+reserved variable, or the variable is already in use, hal0 adds a prefix or a
+number.
+
+If the key cannot be saved, the dialog stays open and says that the provider
+was added but the key was not. Fix the key and choose **Try saving the key
+again**, or close the dialog and add the key later from the provider's page.
+**Add without checking** adds the provider with no models on, for a provider
+that is not reachable yet; refresh its model list once it is.
+
+## Switch models on and off
+
+Each provider is a section of the list. Select its header to open it. Models
+that are on come first, then the ones that are available. Every row has a
+switch: flipping it takes effect at once, and a model that is off cannot be
+called. A long list shows 25 available models at a time; choose **Show 25
+more** for the next page. The search box looks through every provider, even
+the closed ones, and the **Show** and **Type** filters narrow the list.
+
+Select a model's name to see its details on the right: the name to call it by
+(`<provider>/<model>`), its type, context size and price. **Edit** lets you
+correct the context size and the prices stored for the model.
+A **gone** tag means the provider answered and no longer offers that model; a
+**recommended** tag marks the template's suggestion. A provider without a key
+cannot load its model list, so nothing is tagged gone there and the panel says
+the model's status is unknown. Add a key, then choose **Refresh model list**.
+When two providers come from one template, the header shows the template name
+followed by the provider's own name.
+
+Select a provider's header to act on the whole provider. Its facts and actions
+appear in the panel on the right:
+
+- **Test connection** checks that the address and key still work.
+- **Refresh model list** asks the provider again. New models arrive switched
+  off, so nothing starts being routed without you. If the provider cannot be
+  reached, hal0 says so and keeps showing the last known list. **Refresh model
+  lists** at the top of the tab does this for the providers that are switched
+  on, use per-model switches, and have a key stored or need none. It says how
+  many lists it refreshed and how many could not be reached; a provider that
+  is switched off, still awaiting **Choose models**, missing its key or managed
+  by an agent is skipped.
+- **Replace key** (or **Add key** when none is stored) writes a new key under
+  the provider's own key slot. A banner on the provider's section offers
+  **Add key** too when no key is stored.
+- **Remove** deletes the provider. Its models stop being callable; the stored
+  key stays on the box.
+- **Routes requests** switches the whole provider on or off for routing (the
+  `enabled` field, the same as `hal0 upstream update` with `--enabled` and
+  `--disabled`). A provider that is switched off is not called at all, and its
+  section shows an **off** chip, "switched off" instead of the count of models
+  that are on, and a **Switch on** button. Its model switches keep their state,
+  so switching the provider back on restores what you had.
+- **Shown in app model pickers** controls whether the provider's models appear
+  in the model lists inside hal0's apps.
+
+### A provider added before per-model switches
+
+Providers created by an older hal0 route every model the provider lists. Their
+section says so, with a **Choose models** button, and their switches are
+locked. **Choose models** asks the provider for its list and converts it: every
+model it offered is switched on, except any that your old filters hid, and you
+switch off the ones you do not use. If the
+provider cannot be reached or lists nothing, hal0 leaves the provider as it was
+and tells you why; fix the address or key and try again.
+
+### Providers managed by an agent
+
+Providers that an agent creates, such as the Hermes profiles, are listed at the
+end of the tab as read-only. Change them from the agent.
+
+### Where the Endpoints panel went
+
+**Slots → Endpoints** now shows only your local endpoints, with a link to
+**Models → Providers**. The panel that added and edited remote providers moved
+into the Providers tab, and the old address (`#models/upstream`) forwards
+there. The pinned-id, include and exclude filter editor is gone from the
+dashboard: switch models on and off instead. The CLI filters below still work
+for a provider that has not been converted.
 
 ## See what's available
 
@@ -25,7 +141,7 @@ The catalogue is a static reference of known provider templates —
 `minimax`, `ollama` (local), and a generic `custom` OpenAI-compatible
 entry — each carrying its default base URL, auth style, and models path.
 
-## Create an upstream
+## Create an upstream from the CLI
 
 ```sh
 hal0 upstream create openrouter \
@@ -90,7 +206,48 @@ reachability report: `{ok, status, latency_ms, models_count, error?}`. If
 the declared env var is empty, the probe fails fast without making an
 HTTP call.
 
-hal0 also registers upstreams for you. When Hermes is installed, each Hermes profile with an API key appears on the Providers page and in `GET /api/upstreams` as `hermes` or `hermes.<profile>`, with `managed_by` set to `agent:hermes`. These entries are pinned and read-only: an update or delete request is refused with `400 upstream.protected`. Change them on the Hermes side; see [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
+hal0 also registers upstreams for you. When Hermes is installed, each Hermes profile with an API key appears in **Models → Providers** and in `GET /api/upstreams` as `hermes` or `hermes.<profile>`, with `managed_by` set to `agent:hermes`. These entries are pinned and read-only: an update or delete request is refused with `400 upstream.protected`. Change them on the Hermes side; see [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
+
+## Choose which models are routed
+
+Once an upstream has per-model rows (it is *curated*), only the rows that are enabled
+route; everything else the provider lists is reachable only after you enable it.
+
+```sh
+hal0 upstream models openrouter                       # table: id, enabled, type, context, prices
+hal0 upstream enable openrouter qwen/qwen3-coder      # route a model
+hal0 upstream disable openrouter qwen/qwen3-coder     # stop routing it
+hal0 upstream refresh openrouter                      # refetch the list; store new models (off)
+export OPENROUTER_API_KEY=...                         # a probe reads its key from the environment
+hal0 upstream probe --catalog-id openrouter --key-env OPENROUTER_API_KEY
+```
+
+An upstream created without `models` is uncurated: it routes whatever the provider lists,
+as before. `refresh` converts it once the provider answers, writing one row per model. If
+the provider cannot be reached or lists nothing, the row is left as it is and the `warning`
+in the response (printed by the CLI) says why; fix the URL or key and refresh again. Over
+the API, `POST /api/upstreams` with a `models` array (even `[]`) creates a curated upstream
+directly. On a curated upstream, `refresh` stores each model the provider newly offers as a
+switched-off row, so it shows in `hal0 upstream models` ready to enable; hal0 does the same
+once at every start.
+
+Request a model by its canonical id, `<provider>/<id>`, which splits on the first `/`
+(`openrouter/qwen/qwen3-coder` is provider `openrouter`, model `qwen/qwen3-coder`). A bare id
+works when exactly one enabled model has it. When `<provider>/<id>` has no enabled row on that
+provider, the whole string is tried as a bare id first, so `openai/gpt-5` still reaches an
+OpenRouter that lists it. A slot or an upstream that has not been converted keeps serving the
+ids it advertises. Routing reads only the stored rows, never the provider's live list. The
+full order is in
+[How a model id is routed](/docs/reference/providers-profiles-devices/#how-a-model-id-is-routed).
+
+| Response | Code | What to do |
+|---|---|---|
+| 404 | `upstream.model_not_enabled` | Nothing else serves the request, and either you named `<provider>/<id>` and that provider has no enabled row for it, or a bare id is stored switched off on a curated provider. Enable it under **Models → Providers** or with `hal0 upstream enable <name> <model>`. A bare id on embeddings, rerank, speech, transcription or images, or a hal0 alias such as `tts-1`, is not refused this way: a local slot serves it. |
+| 400 | `upstream.model_ambiguous` | A bare id is enabled on several providers: the message lists the canonical ids; send one of them. |
+
+A key you type may start with `Bearer `: hal0 strips it only for `bearer` auth on the
+`Authorization` header, where it adds the prefix itself. For a custom header (`--auth-style
+header`) the key is sent exactly as typed.
 
 ## Curate which models are advertised
 

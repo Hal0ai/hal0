@@ -126,11 +126,15 @@ function ThCellThroughput({ slots }) {
   const latest = samples.length > 0 ? samples[samples.length - 1] : null
   const hasLive = latest != null && typeof latest.total_tps === 'number'
   // Empty-but-alive window → measured 0.0 (paired with the serving count
-  // below, per the #221 invariant).
+  // below, per the #221 invariant). The endpoint emits idle bins after the
+  // last burst as a measured 0 (#3859), so the newest sample is current; a
+  // 0 bin counts no generating slots, so the count falls back to the slots'
+  // lifecycle state exactly as an empty window does.
   const heroTps = hasLive ? latest.total_tps : sourcePending ? null : 0
-  const serving = hasLive
-    ? (latest.serving_slots ?? 0)
-    : (slots || []).filter((s) => s.state === 'serving').length
+  const serving =
+    hasLive && latest.total_tps > 0
+      ? (latest.serving_slots ?? 0)
+      : (slots || []).filter((s) => s.state === 'serving').length
 
   const bars = sourcePending ? [] : mergeTpsCache(samples)
   const maxTps = bars.length > 0 ? Math.max(...bars.map((s) => s.total_tps), 1) : 1

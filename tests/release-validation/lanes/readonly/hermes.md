@@ -75,7 +75,7 @@ chat messages — that is the `hermes-e2e` stateful lane.
    configured or enabled on a fresh install. Anything enabled by default is a finding.
 9. **Wiring.** Session hooks installed by the installer should be allowlisted and actually fire;
    plugin kinds should resolve rather than silently downgrade (both were rc.4 #1795 items).
-   Run the `on_session_start` hook by hand as the hermes user and check its payload is fresh
+   Run the `pre_llm_call` state hook by hand as the hermes user (stdin `</dev/null`; it prints `{"context": ...}`) and check its payload is fresh
    *enough*: an `_as_of` older than the hook's own TTL is expected and adjudicated
    (`known-issues.yaml: hermes-state-md-as-of-is-change-marker`) — what is reportable is the
    injected BODY disagreeing with `hal0 slot list` at the moment of injection. Do the diff in
@@ -95,7 +95,7 @@ chat messages — that is the `hermes-e2e` stateful lane.
 
 14. **Smoke `memory_roundtrip` warn is timing or extraction?** Compare the completion time of the smoke marker's retain op (`hal0 memory ops list`) with the smoke run's search time in `provision.json`; completion later than the search means the warn is the #2671 race, not extraction failure.
 
-15. **Run the `on_session_start` hook twice back-to-back.** The first run can lag a slot another lane just loaded; the second must match `/api/slots`. A disagreement that persists on the second run is a finding.
+15. **Run the `pre_llm_call` state hook twice back-to-back.** The first run can lag a slot another lane just loaded; the second must match `/api/slots`. A disagreement that persists on the second run is a finding.
 
 16. **Skip synthetic rows.** `/api/slots` carries a synthetic `hal0` composite entry (`_synthetic=true`, no `state`/`type`); scripts that iterate slots must skip it.
 
@@ -148,7 +148,28 @@ chat messages — that is the `hermes-e2e` stateful lane.
    `_config_version: 51` with `sessions.auto_prune: false` intact. The session count must match
    the pre-update baseline (item 19).
 
+26. **Bank id first.** Banks are `hal0:shared` and `hal0:private`; `banks/shared/operations` 404s. Assert the bank id from `/api/memory/banks` before reading any operations URL.
+
+27. **Smoke vs brain-ready.** Compare `provision.json` `phases.smoke_tests.at` with the brain slot's `model loaded` journal timestamp and with any in-flight consolidation (`journalctl -u hal0-slot@brain`). A chat_completions timeout while brain was loading or busy is #3809, not a new chat failure.
+
+28. **Config version.** `grep _config_version /var/lib/hal0/.hermes/config.yaml`; a fresh box has none while `/api/status` reports config_version 0 against latest 51 and `hermes_doctor` advises a migrate. Record it; file only if the advice persists after reprovision.
+
+29. **Memory plugin can read its key.** Run the hermes venv python as hal0: `import yaml` must work and the plugin's `_read_agent_key` must be non-None (open #3803). One command, 2 seconds; do it before any Hermes memory check.
+
 ## Carry-forward
 
 Hermes findings have historically been *reporting* defects rather than functional ones. Treat
 any gap between what hermes says about itself and what it does as `major`.
+
+## Added in kit 18
+
+* Item 22 wording: mcp_wire proof is `details.servers.<name>.client.status == ok` with a tool_count; `details.mcp_client` may record stage `import` with tools [] when no probe URL is given. Do not fail on that.
+* `hal0-terminal-off` ERROR and the 'Unknown terminal backend hal0-terminal-off' advisory are by design (known-issues hermes-hook-and-terminal-by-design).
+* Item 5 (web_dist) is stale: web_dist ships and :9119/ returns 200; check only that.
+* Run the shell-hook output through `agent.shell_hooks._parse_response` for on_session_start, or grep agent.log for 'shell hook stdout was not valid JSON' (#3853).
+
+## Added in kit 19
+
+* Check 29 wording: replace "import yaml must work" with "the plugin's `_read_agent_key` returns non-empty" (#3803 made PyYAML unnecessary).
+* Check the mode of `.hermes/config.yaml` against the key it carries.
+* On a FRESH box, before any reprovision, `config.yaml` must carry `model.context_length` and the gateway must not log `256000 tokens (default)` (#3875, known).

@@ -180,12 +180,19 @@ from mcp.types import CallToolResult, TextContent
 
 from hal0.api._redact import redact_log_line as _redact_log_line
 from hal0.config.schema import REASONING_BUDGET_MAX
+from hal0.config.schema import VALID_PRICE_UNITS as _VALID_PRICE_UNITS
 from hal0.mcp.approval_queue import ApprovalQueue
 from hal0.mcp.memory import _ANNOTATIONS as _MEMORY_TOOL_ANNOTATIONS
 from hal0.mcp.probes import PROBE_TOOLS, dispatch_probe
 from hal0.memory.namespace import is_known_namespace
 from hal0.redaction import redact_audit_args as _redact_audit_args_shared
 from hal0.slot_lifecycle_budget import STACK_APPLY_SLOT_ALLOWANCE, slot_lifecycle_timeout_s
+from hal0.upstreams.catalog import MODEL_TYPES as _UPSTREAM_MODEL_TYPES
+from hal0.upstreams.presets import load_presets
+
+#: Preset ids for the upstream tool descriptions, generated so they cannot drift
+#: from the presets file.
+_PRESET_IDS = "|".join(sorted(load_presets()))
 
 # ── logs_tail secret redactor (security review MED-1) ────────────────────────
 #
@@ -440,6 +447,9 @@ AUTONOMOUS_READ_TOOLS: frozenset[str] = frozenset(
         # reads above); test probes the provider but changes no state.
         "upstream_get",
         "upstream_test",
+        # Per-model rows: the listing is a pure read. upstream_refresh is gated
+        # (below): it can rewrite upstreams.toml and change routing.
+        "upstream_models",
         # Memory reads — moved out of AUTONOMOUS_WRITE_TOOLS (§4.3): their
         # ToolAnnotations have always said readOnlyHint=True, the
         # classification bucket just hadn't caught up. memory_recall is
@@ -664,6 +674,14 @@ GATED_TOOLS: frozenset[str] = frozenset(
         "upstream_create",
         "upstream_update",
         "upstream_delete",
+        # Turning one provider model on or off changes what /v1/* routes.
+        "upstream_model_update",
+        # On an unconverted row refresh converts it: rewrites upstreams.toml (with
+        # a backup) and changes what routes.
+        "upstream_refresh",
+        # Sends a request to a caller-chosen URL, so it is gated like the other
+        # outbound-reaching tools. It takes no key (see TOOL_PARAM_HINTS).
+        "provider_probe",
         # memory_delete with len(ids) > 1, or a list/foreign-namespace
         # dataset even for a single id, routes here at call time (#8).
         # Memory — mental-model/directive deletion is destructive, same
@@ -842,6 +860,10 @@ TOOL_NAME_ALIASES: dict[str, tuple[str, ...]] = {
     "PATCH:/api/upstreams/{name}": ("upstream_update",),
     "DELETE:/api/upstreams/{name}": ("upstream_delete",),
     "POST:/api/upstreams/{name}/test": ("upstream_test",),
+    "GET:/api/upstreams/{name}/models": ("upstream_models",),
+    "POST:/api/upstreams/{name}/refresh": ("upstream_refresh",),
+    "PATCH:/api/upstreams/{name}/models/{model_id}": ("upstream_model_update",),
+    "POST:/api/providers/probe": ("provider_probe",),
     # ── Services (platform-management expansion) ───────────────────────────
     "GET:/api/services": ("service_list",),
     "GET:/api/services/health": ("service_health",),
@@ -1589,10 +1611,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             },
             "catalog_id": {
                 "type": "string",
-                "description": (
-                    "Optional provider template: openai|anthropic|openrouter|"
-                    "google_ai_studio|ollama — prefills url/auth"
-                ),
+                "description": (f"Optional provider template ({_PRESET_IDS}) — prefills url/auth"),
             },
             "url": {
                 "type": "string",
@@ -1602,8 +1621,60 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
                 "type": "string",
                 "description": "Env-var NAME for the API key (never the key itself)",
             },
+            "models": {
+                "type": "array",
+                "items": {"type": "object"},
+                "description": (
+                    "Optional model rows [{id, enabled, type, context, price_in, price_out, "
+                    "price_unit}]. Present (even []) = curated: only enabled rows route. "
+                    "Omitted = uncurated: routes what the provider lists."
+                ),
+            },
         },
         "required": ["name"],
+    },
+    "upstream_model_update": {
+        "properties": {
+            "name": {"type": "string", "description": "Upstream name"},
+            "model_id": {
+                "type": "string",
+                "description": "Model id as the provider spells it (may contain '/' and ':')",
+            },
+            "enabled": {"type": "boolean", "description": "Route this model (true) or not"},
+            "type": {
+                "type": "string",
+                "description": "Model type: " + "|".join(sorted(_UPSTREAM_MODEL_TYPES)),
+            },
+            "context": {"type": ["integer", "null"], "description": "Context window; null clears"},
+            "price_in": {"type": ["number", "null"], "description": "Input price; null clears"},
+            "price_out": {"type": ["number", "null"], "description": "Output price; null clears"},
+            "price_unit": {
+                "type": "string",
+                "description": "Price unit: "
+                + "|".join(sorted(_VALID_PRICE_UNITS))
+                + " (default Mtok)",
+            },
+        },
+    },
+    "provider_probe": {
+        "properties": {
+            "catalog_id": {
+                "type": "string",
+                "description": f"Provider preset to probe ({_PRESET_IDS})",
+            },
+            "url": {
+                "type": "string",
+                "description": "Base URL (required without catalog_id)",
+            },
+            "auth_style": {
+                "type": "string",
+                "description": "bearer|anthropic|header|none (defaults from the preset)",
+            },
+            "auth_header": {
+                "type": "string",
+                "description": "Header NAME when auth_style is header",
+            },
+        },
     },
     "upstream_update": {
         "properties": {
@@ -2000,9 +2071,9 @@ def _path_arg_refusal(tool: str, key: str, value: Any) -> str | None:
     - text that is not encodable as UTF-8 (a lone surrogate).
 
     The one exception to the ``/`` rule is an argument whose route declares it
-    ``{name:path}`` (:func:`_slash_path_args`; today only ``comfyui_file_delete``'s
-    ``relpath``). It is a relative path, so it may hold ``/`` BETWEEN segments, and every
-    segment must pass the rules above on its own: no empty segment (a leading, trailing or
+    ``{name:path}`` (:func:`_slash_path_args`; today ``comfyui_file_delete``'s ``relpath``
+    and ``upstream_model_update``'s ``model_id``). It is a multi-segment value, so it may
+    hold ``/`` BETWEEN segments, and every segment must pass the rules above on its own: no empty segment (a leading, trailing or
     doubled ``/``), no ``.`` or ``..``, no control or invisible character.
 
     Everything else is percent-encoded by :func:`_format_url`, a ``:path`` argument one
@@ -2092,8 +2163,24 @@ def _split_args(tool: str, args: dict[str, Any]) -> tuple[dict[str, str], dict[s
     return path_args, remainder
 
 
+def _require_advertised_args(tool: str, args: dict[str, Any]) -> None:
+    """Raise ``KeyError`` for the first arg the tool's advertised schema requires but ``args`` lacks.
+
+    :func:`tool_param_schema` is what ``tools/list`` advertises as
+    ``args.required``: the path args plus the body fields a
+    :data:`TOOL_PARAM_HINTS` entry marks required. :func:`_split_args` covers
+    only the path args, so without this a gated call missing a required BODY
+    field (``slot_create {}``, ``comfyui_pin {}``) was queued for an approval
+    that could only fail with a 422 (#3806). Presence only: the gate checks
+    call shape, and type and range validation stays with the REST layer.
+    """
+    for key in tool_param_schema(tool)["required"]:
+        if key not in args:
+            raise KeyError(f"tool {tool!r} requires arg {key!r}")
+
+
 def _arg_error(exc: KeyError | PathArgError) -> dict[str, Any]:
-    """The tool-error envelope for a path argument that is missing or unsendable."""
+    """The tool-error envelope for a missing argument or an unsendable path argument."""
     code = "mcp.missing_arg" if isinstance(exc, KeyError) else "mcp.invalid_arg"
     return {"status": "error", "error": {"code": code, "detail": str(exc)}}
 
@@ -2487,7 +2574,8 @@ async def dispatch(
     ``{"status": "pending_approval", "approval_id": "..."}`` for gated
     ones. A missing or unsendable path argument (``mcp.missing_arg`` /
     ``mcp.invalid_arg``) is refused up front, so a gated call with one is
-    never queued.
+    never queued; so is a gated call missing any other arg its advertised
+    schema requires (``mcp.missing_arg``).
 
     ``memory_dispatcher`` is the in-process callable the memory server
     exposes for direct invocation (avoiding the HTTP round-trip for
@@ -2531,9 +2619,13 @@ async def dispatch(
     # Refuse an unsendable path argument BEFORE a card exists or a call runs:
     # the operator approves what the card names, so a value that cannot be sent
     # faithfully must never reach the queue. ``_execute_tool`` re-checks at run
-    # time, so a queued entry is covered too.
+    # time, so a queued entry is covered too. A gated call must also carry
+    # every arg its advertised schema requires, body fields included (#3806):
+    # the operator should never be asked to approve a call that can only 422.
     try:
         _split_args(tool, args)
+        if gated:
+            _require_advertised_args(tool, args)
     except (KeyError, PathArgError) as exc:
         refusal = _arg_error(exc)
         _audit(
@@ -2589,6 +2681,76 @@ async def dispatch(
     outcome = result.get("status", "ok") if isinstance(result, dict) else "ok"
     _audit(client_id=client_id, tool=tool, args=args, gated=False, outcome=outcome)
     return result
+
+
+def _serving_backends_from(backend_list: Any) -> list[dict[str, Any]] | None:
+    """Backends with at least one model loaded now, from a ``backend_list`` result.
+
+    ``None`` when the result is not a usable ``backend_list`` payload (transport
+    error envelope), so the caller can say "unknown" rather than "nothing".
+    """
+    if not isinstance(backend_list, dict) or not isinstance(backend_list.get("backends"), list):
+        return None
+    serving: list[dict[str, Any]] = []
+    for row in backend_list["backends"]:
+        if not isinstance(row, dict):
+            continue
+        loaded = row.get("loaded")
+        if not isinstance(loaded, list) or not loaded:
+            continue
+        serving.append(
+            {
+                "id": row.get("id"),
+                "label": row.get("label", row.get("id")),
+                "models": [m.get("modelId") for m in loaded if isinstance(m, dict)],
+            }
+        )
+    return serving
+
+
+async def _project_system_info(
+    payload: Any,
+    *,
+    bearer: str | None,
+    base_url: str,
+    memory_dispatcher: Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]] | None,
+) -> Any:
+    """Project ``GET /api/system-info`` for MCP callers and the steward (#3856).
+
+    The REST body is untouched. Here the runner catalogue's per-row ``backend``
+    (the runner's default lane, not what serves models) is renamed
+    ``default_lane``, and ``serving_backends`` is put first: the backends with a
+    model loaded now, read through the same ``backend_list`` tool path (so it
+    cannot be computed a second way). Empty list when nothing is serving.
+    Every MCP caller and the brain steward reach this through :func:`dispatch`.
+    """
+    if not isinstance(payload, dict) or payload.get("status") == "error":
+        return payload
+    live = await _execute_tool(
+        tool="backend_list",
+        args={},
+        bearer=bearer,
+        base_url=base_url,
+        memory_dispatcher=memory_dispatcher,
+    )
+    serving = _serving_backends_from(live)
+    projected: dict[str, Any] = {"serving_backends": serving if serving is not None else []}
+    if serving is None:
+        projected["serving_backends_error"] = (
+            "live backend status unavailable; call backend_list before naming a backend"
+        )
+    for key, value in payload.items():
+        if key == "backends" and isinstance(value, dict):
+            value = {
+                name: (
+                    {("default_lane" if k == "backend" else k): v for k, v in row.items()}
+                    if isinstance(row, dict)
+                    else row
+                )
+                for name, row in value.items()
+            }
+        projected[key] = value
+    return projected
 
 
 async def _execute_tool(
@@ -2658,6 +2820,10 @@ async def _execute_tool(
     result = _wrap_list_payload(tool, result)
     if tool == "slot_list":
         result = _compact_slot_list(result)
+    if tool == "system_info":
+        result = await _project_system_info(
+            result, bearer=bearer, base_url=base_url, memory_dispatcher=memory_dispatcher
+        )
     return result
 
 
@@ -2901,6 +3067,19 @@ _ANNOTATIONS: dict[str, ToolAnnotations] = {
     ),
     "upstream_test": ToolAnnotations(
         readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_models": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_refresh": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    "upstream_model_update": ToolAnnotations(
+        readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+    ),
+    # Requests a caller-chosen URL: the one upstream tool that is open-world.
+    "provider_probe": ToolAnnotations(
+        readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
     ),
     "upstream_create": ToolAnnotations(
         readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
@@ -3294,8 +3473,12 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     ),
     "hardware_probe": "Live hardware probe — backends, memory, accelerators.",
     "system_info": (
-        "Consolidated hardware + feature flags + per-runner backend state "
-        "(installed/installable/unavailable) — one read for 'what can this box run'."
+        "Consolidated hardware + feature flags + per-runner catalogue state "
+        "(installed/installable/unavailable) — one read for 'what can this box run'. "
+        "`serving_backends` (first key) lists the backends with a model loaded right now "
+        "(same source as `backend_list`); an empty list means nothing is serving. "
+        "Each `backends` row's `default_lane` is the runner's catalogue default lane, NOT "
+        "what is serving models now; never report it as the backend in use."
     ),
     "capability_list": (
         "Capability overlay state — backends + selections + catalogs. The unfiltered "
@@ -3307,11 +3490,35 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     "upstream_list": "List all configured upstream LLM providers.",
     "upstream_get": "Get one upstream provider's full detail.",
     "upstream_test": "Probe an upstream's reachability and auth status.",
-    "upstream_create": "Register a new remote upstream LLM provider (gated).",
+    "upstream_create": (
+        "Register a new remote upstream LLM provider (gated). `catalog_id` prefills "
+        f"url/auth from a preset ({_PRESET_IDS}). Omit `models` to route everything the "
+        "provider lists (converted on a later upstream_refresh); pass `models` (even "
+        "an empty list) to create it curated, routing only the enabled rows."
+    ),
     "upstream_update": (
         "Update an upstream provider's settings (url/auth/visibility/filters/enabled) (gated)."
     ),
     "upstream_delete": "Remove an upstream provider; its api.env credential is kept (gated).",
+    "upstream_models": (
+        "List an upstream's model rows (enabled, type, context, prices) merged with what "
+        "the provider lists. Never fails because the provider is down: `stale` says so."
+    ),
+    "upstream_refresh": (
+        "Refetch an upstream's model list (gated). On a curated row, stores each model "
+        "the provider newly offers as a switched-off row. Converts a not-yet-converted "
+        "row to per-model rows when the provider answers. Either rewrites upstreams.toml; "
+        "`warning` says why a row was left alone."
+    ),
+    "upstream_model_update": (
+        "Turn one model on or off on a curated upstream and set its type, context or "
+        "prices (gated). `model_id` is the provider's own id and may contain '/'."
+    ),
+    "provider_probe": (
+        "Check a base URL and list the provider's models without saving anything (gated). "
+        "Takes no API key, so it can reach keyless providers or confirm a URL; use the "
+        "`hal0 upstream probe --key-env` CLI to probe with a key."
+    ),
     "stack_list": "List every stack, with the active stack + drift status.",
     "stack_status": "Get one stack's detail, active flag, and drift status.",
     "profile_list": "List every profile in the catalog (seed + custom).",

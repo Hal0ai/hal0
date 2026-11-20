@@ -286,7 +286,8 @@ def test_open_world_tools_are_the_documented_set() -> None:
     runner_image_sync (GHCR discovery probe), mcp_server_install
     (may fetch a manifest from an arbitrary URL), and profile_generate
     (reaches HuggingFace when given hf_repo, like model_inspect). model_inspect_draft
-    reads GGUF headers from the Hub by range (ADR-0031 §2).
+    reads GGUF headers from the Hub by range (ADR-0031 §2). provider_probe
+    requests a caller-chosen base URL.
     Component-updates spec (2026-08-30 §1b) adds update_check — same
     GET /api/updates/check route as updater_check, so the same release-
     manifest fetch applies.
@@ -305,6 +306,7 @@ def test_open_world_tools_are_the_documented_set() -> None:
         "runner_image_sync",
         "mcp_server_install",
         "profile_generate",
+        "provider_probe",
     }
 
 
@@ -1227,9 +1229,11 @@ async def test_system_info_is_autonomous_read(
         base_url="http://t",
         approval_queue=queue,
     )
-    assert result == {"ok": "get"}
-    method, url, _, _ = mock_transport["calls"][-1]
-    assert (method, url) == ("GET", "http://t/api/system-info")
+    # Projected (#3856): live serving backends first, the REST body otherwise intact.
+    assert next(iter(result)) == "serving_backends"
+    assert result["ok"] == "get"
+    calls = [(m, u) for m, u, _, _ in mock_transport["calls"]]
+    assert calls == [("GET", "http://t/api/system-info"), ("GET", "http://t/api/backends")]
 
 
 @pytest.mark.asyncio
@@ -1825,6 +1829,116 @@ async def test_missing_path_arg_on_a_gated_tool_is_refused_before_approval(
     assert mock_transport["calls"] == []
 
 
+# #3806: the seven gated tools whose only required args are BODY fields. The
+# advertised inputSchema marks them required, so an empty call must be refused
+# inline like a missing path arg, not queued for an approval that can only 422.
+_BODY_REQUIRED_GATED = {
+    "comfyui_pin": {"pinned": True},
+    "comfyui_switchover": {"mode": "gpu"},
+    "npu_backend_load": {"model_id": "m"},
+    "npu_backend_unload": {"slot_name": "s"},
+    "profile_create": {"name": "p"},
+    "slot_create": {"name": "s", "model": "m"},
+    "upstream_create": {"name": "u"},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", sorted(_BODY_REQUIRED_GATED))
+async def test_missing_required_body_arg_on_a_gated_tool_is_refused_before_approval(
+    tool: str, queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    required = admin.tool_param_schema(tool)["required"]
+    assert required, f"{tool} must advertise required args"
+    result = await admin.dispatch(
+        tool=tool,
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["status"] == "error"
+    assert result["error"]["code"] == "mcp.missing_arg"
+    assert repr(required[0]) in result["error"]["detail"]
+    assert queue.list_all() == []
+    assert mock_transport["calls"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", sorted(_BODY_REQUIRED_GATED))
+async def test_gated_tool_with_its_required_body_args_still_queues(
+    tool: str, queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool=tool,
+        args=dict(_BODY_REQUIRED_GATED[tool]),
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["status"] == "pending_approval"
+    assert len(queue.list_all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_one_of_several_required_body_args_missing_is_refused(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    result = await admin.dispatch(
+        tool="slot_create",
+        args={"name": "s"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["error"]["code"] == "mcp.missing_arg"
+    assert "'model'" in result["error"]["detail"]
+    assert queue.list_all() == []
+
+
+@pytest.mark.asyncio
+async def test_path_arg_tool_missing_only_its_required_body_arg_is_refused(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """slot_rename has the path arg but not the body ``new_name``: same refusal."""
+    result = await admin.dispatch(
+        tool="slot_rename",
+        args={"name": "s"},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["error"]["code"] == "mcp.missing_arg"
+    assert "'new_name'" in result["error"]["detail"]
+    assert queue.list_all() == []
+
+
+@pytest.mark.asyncio
+async def test_every_gated_tool_with_empty_args_queues_only_if_it_requires_nothing(
+    queue: ApprovalQueue, mock_transport: dict[str, Any]
+) -> None:
+    """The release kit's mechanical sweep: {} never queues a tool that advertises required args."""
+    for tool in sorted(admin.GATED_TOOLS):
+        result = await admin.dispatch(
+            tool=tool,
+            args={},
+            client_id="pi",
+            bearer="t",
+            base_url="http://t",
+            approval_queue=queue,
+        )
+        if admin.tool_param_schema(tool)["required"]:
+            assert result["status"] == "error", tool
+            assert result["error"]["code"] == "mcp.missing_arg", tool
+        else:
+            assert result["status"] == "pending_approval", tool
+    assert mock_transport["calls"] == []
+
+
 @pytest.mark.asyncio
 async def test_approved_call_reaches_the_server_with_the_literal_argument(
     queue: ApprovalQueue, mock_transport: dict[str, Any]
@@ -2031,3 +2145,198 @@ def test_slot_load_and_restart_document_unload_npu_holder() -> None:
         assert prop["type"] == "boolean"
         assert "NPU" in prop["description"]
     assert "unload_npu_holder" in admin.TOOL_DESCRIPTIONS["slot_load"]
+
+
+# ── per-model upstream tools ──────────────────────────────────────────────────
+
+_MODEL_TOOLS = ("upstream_models", "upstream_refresh", "upstream_model_update", "provider_probe")
+
+
+@pytest.mark.asyncio
+async def test_model_tools_are_registered(queue: ApprovalQueue) -> None:
+    server = admin.build_server(approval_queue=queue, base_url="http://t")
+    registered = {t.name for t in await server.list_tools()}
+    assert set(_MODEL_TOOLS) <= registered
+
+
+def test_model_tool_classification() -> None:
+    # refresh rewrites upstreams.toml on an unconverted row, so it is gated.
+    assert {"upstream_model_update", "provider_probe", "upstream_refresh"} <= admin.GATED_TOOLS
+    assert "upstream_models" in admin.AUTONOMOUS_READ_TOOLS
+    assert "upstream_refresh" not in admin.AUTONOMOUS_READ_TOOLS
+    for tool in _MODEL_TOOLS:
+        assert tool not in admin.AUTONOMOUS_WRITE_TOOLS
+
+
+def test_model_tools_route_to_the_real_routes() -> None:
+    assert admin._REST_MAP["upstream_models"] == ("GET", "/api/upstreams/{name}/models")
+    assert admin._REST_MAP["upstream_refresh"] == ("POST", "/api/upstreams/{name}/refresh")
+    assert admin._REST_MAP["upstream_model_update"][0] == "PATCH"
+    assert admin._REST_MAP["provider_probe"] == ("POST", "/api/providers/probe")
+
+
+def test_provider_probe_schema_takes_no_key() -> None:
+    props = admin.tool_param_schema("provider_probe")["properties"]
+    assert {"catalog_id", "url", "auth_style", "auth_header"} <= set(props)
+    assert not {p for p in props if "key" in p.lower() or "secret" in p.lower()}
+
+
+def test_upstream_create_lists_every_preset_and_takes_models() -> None:
+    from hal0.upstreams.presets import load_presets
+
+    ids = set(load_presets())
+    assert len(ids) >= 11
+    description = admin.TOOL_DESCRIPTIONS["upstream_create"]
+    catalog_hint = admin.TOOL_PARAM_HINTS["upstream_create"]["properties"]["catalog_id"]
+    for preset_id in ids:
+        assert preset_id in description
+        assert preset_id in catalog_hint["description"]
+    assert admin.TOOL_PARAM_HINTS["upstream_create"]["properties"]["models"]["type"] == "array"
+
+
+def test_upstream_model_update_schema_requires_its_path_args_and_lists_values() -> None:
+    schema = admin.tool_param_schema("upstream_model_update")
+    assert schema["required"] == ["name", "model_id"]
+    props = schema["properties"]
+    from hal0.config.schema import VALID_PRICE_UNITS
+    from hal0.upstreams.catalog import MODEL_TYPES
+
+    for t in MODEL_TYPES:
+        assert t in props["type"]["description"]
+    for unit in VALID_PRICE_UNITS:
+        assert unit in props["price_unit"]["description"]
+
+
+@pytest.mark.asyncio
+async def test_upstream_model_update_forwards_a_slashed_model_id(
+    mock_transport: dict[str, Any],
+) -> None:
+    result = await admin._execute_tool(
+        tool="upstream_model_update",
+        args={"name": "openrouter", "model_id": "qwen/qwen3-coder:free", "enabled": True},
+        bearer="t",
+        base_url="http://t",
+        memory_dispatcher=None,
+    )
+    assert result == {"ok": "patch"}
+    method, url, body, _headers = mock_transport["calls"][-1]
+    assert method == "PATCH"
+    assert unquote(url) == "http://t/api/upstreams/openrouter/models/qwen/qwen3-coder:free"
+    assert url.count("/models/") == 1
+    assert body == {"enabled": True}
+
+
+@pytest.mark.asyncio
+async def test_upstream_models_refuses_a_slash_in_the_upstream_name(
+    mock_transport: dict[str, Any],
+) -> None:
+    result = await admin._execute_tool(
+        tool="upstream_models",
+        args={"name": "a/b"},
+        bearer="t",
+        base_url="http://t",
+        memory_dispatcher=None,
+    )
+    assert result["status"] == "error"
+    assert mock_transport["calls"] == []
+
+
+def test_system_info_description_says_backends_are_catalogue_defaults() -> None:
+    """#3811: the steward must not read a runner's default lane as the live backend."""
+    desc = admin.TOOL_DESCRIPTIONS["system_info"]
+    assert "catalogue default" in desc
+    assert "backend_list" in desc
+    assert "serving_backends" in desc
+    assert "default_lane" in desc
+
+
+_REST_SYSTEM_INFO = {
+    "hardware": {"kfd_present": False},
+    "features": {},
+    "backends": {
+        "standard": {
+            "state": "installed",
+            "backend": "rocm",
+            "supported_backends": ["rocm", "vulkan"],
+        },
+        "cpu": {"state": "installable", "backend": "cpu"},
+    },
+    "podman_context": "rootful",
+}
+
+
+def _fake_rest(monkeypatch: pytest.MonkeyPatch, backend_rows: Any) -> None:
+    import copy
+
+    async def fake(*, url: str, **_: Any) -> Any:
+        if url.endswith("/api/system-info"):
+            return copy.deepcopy(_REST_SYSTEM_INFO)
+        assert url.endswith("/api/backends")
+        return backend_rows
+
+    monkeypatch.setattr(admin, "_call_rest", fake)
+
+
+@pytest.mark.asyncio
+async def test_system_info_projection_renames_lane_and_adds_serving(
+    queue: ApprovalQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3856: no `backend` on catalogue rows; live serving backends come first."""
+    _fake_rest(
+        monkeypatch,
+        [
+            {"id": "vulkan", "label": "Vulkan", "loaded": [{"modelId": "qwen3-4b"}]},
+            {"id": "rocm", "label": "ROCm", "loaded": []},
+        ],
+    )
+    result = await admin.dispatch(
+        tool="system_info",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert next(iter(result)) == "serving_backends"
+    assert result["serving_backends"] == [
+        {"id": "vulkan", "label": "Vulkan", "models": ["qwen3-4b"]}
+    ]
+    for row in result["backends"].values():
+        assert "backend" not in row
+    assert result["backends"]["standard"]["default_lane"] == "rocm"
+    assert result["backends"]["standard"]["supported_backends"] == ["rocm", "vulkan"]
+    assert result["hardware"] == {"kfd_present": False}
+
+
+@pytest.mark.asyncio
+async def test_system_info_projection_empty_list_when_nothing_serving(
+    queue: ApprovalQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_rest(monkeypatch, [{"id": "vulkan", "loaded": []}])
+    result = await admin.dispatch(
+        tool="system_info",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["serving_backends"] == []
+    assert "serving_backends_error" not in result
+
+
+@pytest.mark.asyncio
+async def test_system_info_projection_flags_unavailable_live_status(
+    queue: ApprovalQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_rest(monkeypatch, {"status": "error", "error": {"code": "x"}})
+    result = await admin.dispatch(
+        tool="system_info",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["serving_backends"] == []
+    assert "backend_list" in result["serving_backends_error"]

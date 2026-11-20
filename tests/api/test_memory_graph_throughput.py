@@ -286,3 +286,39 @@ def test_timeout_without_metrics_is_cached_as_unknown(
     reprojected = client.put("/api/memory/graph", json={"llm_timeout_s": 30}).json()
     assert reprojected["throughput"]["verdict"] == "unknown"
     assert len(fake.probe_bodies) == 1
+
+
+def test_modelless_memory_slot_probes_the_resolved_anchor(
+    stub: StubWrapper, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3837: a model-less ``memory`` slot is measured where ``hal0/memory`` lands."""
+    from hal0.normalize.resolver import SlotView
+
+    stub.extraction_slot = "memory"
+    mgr = client.app.state.slot_manager  # type: ignore[attr-defined]
+    mgr.iter_configs = AsyncMock(
+        return_value=[
+            {"name": "memory", "type": "llm", "enabled": True, "model": {}, "port": 8091},
+            {
+                "name": "agent",
+                "type": "llm",
+                "enabled": True,
+                "model": {"default": "m-a"},
+                "port": 8081,
+            },
+        ]
+    )
+
+    async def _views(_request: Any) -> list[SlotView]:
+        return [SlotView("agent", "cpu", "m-a", 4096)]
+
+    monkeypatch.setattr("hal0.api.routes.v1._normalize_slot_views", _views)
+    probed = _fake_slots(monkeypatch, p8081=FAST, p8082=FAST)
+
+    body = client.post("/api/memory/graph/throughput").json()["throughput"]
+
+    assert probed == [8081]
+    assert body["slot"] == "memory"
+    assert body["served_by"] == "agent"
+    assert body["verdict"] == "ok"
+    assert "served by 'agent'" in body["message"]

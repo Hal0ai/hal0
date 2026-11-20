@@ -24,12 +24,10 @@ from hal0.config.loader import (
     list_slots,
     load_hal0_config,
     load_hardware_info,
-    load_providers_config,
     load_slot_config,
     load_upstreams_config,
     save_hal0_config,
     save_hardware_info,
-    save_providers_config,
     save_slot_config,
     save_upstreams_config,
     write_toml_atomic,
@@ -47,8 +45,6 @@ from hal0.config.schema import (
     HardwareInfo,
     MetaConfig,
     NPUInfo,
-    ProviderEntry,
-    ProvidersConfig,
     SlotConfig,
     UpstreamEntry,
     UpstreamsConfig,
@@ -385,23 +381,6 @@ class TestSlotConfigRoundTrip:
         assert data["server"]["env"]["HSA_OVERRIDE_GFX_VERSION"] == "11.0.0"
 
 
-# ── providers.toml round-trip ────────────────────────────────────────────────
-
-
-class TestProvidersRoundTrip:
-    def test_load_default_when_missing(self, tmp_hal0_home: str) -> None:
-        cfg = load_providers_config()
-        assert isinstance(cfg, ProvidersConfig)
-        assert cfg.provider == []
-
-    def test_save_then_load(self, tmp_hal0_home: str) -> None:
-        cfg = ProvidersConfig(provider=[ProviderEntry(catalog_id="openrouter", name="OpenRouter")])
-        save_providers_config(cfg)
-        loaded = load_providers_config()
-        assert len(loaded.provider) == 1
-        assert loaded.provider[0].catalog_id == "openrouter"
-
-
 # ── upstreams.toml round-trip ────────────────────────────────────────────────
 
 
@@ -569,7 +548,6 @@ class TestHAL0HomeIsolation:
         """All loaders write under HAL0_HOME when set."""
         save_hal0_config(Hal0Config())
         save_slot_config(SlotConfig(name="primary", port=8081))
-        save_providers_config(ProvidersConfig())
         save_upstreams_config(UpstreamsConfig())
         save_hardware_info(HardwareInfo())
 
@@ -577,7 +555,6 @@ class TestHAL0HomeIsolation:
         assert str(home) in str(paths.hal0_toml())
         assert paths.hal0_toml().exists()
         assert (paths.slots_config_dir() / "primary.toml").exists()
-        assert (paths.etc() / "providers.toml").exists()
         assert (paths.etc() / "upstreams.toml").exists()
         assert paths.hardware_json().exists()
 

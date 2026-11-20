@@ -101,6 +101,10 @@ def test_registry_declares_three_apply_classes() -> None:
         ("memory.graph.extraction_slot", "immediate", []),
         ("memory.graph.extraction_model", "immediate", []),
         ("memory.graph.llm_timeout_s", "immediate", []),
+        # [memory.lanes] — rendered into the engine drop-in on apply (#3758, #3759).
+        ("memory.lanes.llm_max_concurrent", "immediate", []),
+        ("memory.lanes.reflect.wall_timeout_s", "immediate", []),
+        ("memory.lanes.consolidation.batch_size", "immediate", []),
         # [updates] — read once by the post-start image-drift pass (#2096).
         ("updates.auto_restart_image_drift", "service-restart", [SERVICE_HAL0_API]),
         # [activity] — AuditStore is constructed once at create_app.

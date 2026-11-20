@@ -9,7 +9,8 @@ import { useArbiter } from '@/api/hooks/useComfyui'
 import { useMemoryBudget } from '@/api/hooks/useStatsHardware'
 import { slotMemLabel } from './slots/slot-shared.js'
 import { isXdnaSlot } from '@/lib/slotModelFit'
-import { RAIL_GROUPS, railCounts, railFooter, railRows, stateCell } from './slot-rail-pure'
+import { RAIL_GROUPS, railCounts, railFooter, railRows, stateCell, stateFigure } from './slot-rail-pure'
+import { LaneCode } from './lane-code.jsx'
 
 const { useEffect, useMemo, useRef } = React
 
@@ -134,7 +135,6 @@ export function SlotRail({ onNew }) {
               </div>
               {groupRows.map((r) => {
                 const cell = stateCell(r)
-                const chip = (r.device || 'cpu').replace('gpu-', '')
                 return (
                   <div
                     key={r.name}
@@ -152,12 +152,12 @@ export function SlotRail({ onNew }) {
                       }
                     }}
                   >
-                    <span className={'sdot ' + r.cls + (r.group === 'npu' ? ' npu' : '')} />
+                    <span className={'sdot ' + r.cls + (r.group === 'npu' ? ' npu' : '')} role="img" aria-label={r.label} />
                     <span className="nm">
                       <span className="name mono">{r.name}</span>
-                      <span className={'chip mono dev-' + chip}>{r.device}</span>
+                      <LaneCode lane={r.lane} />
                     </span>
-                    <span className={'st mono' + (cell.tone ? ' ' + cell.tone : '')}>{cell.text}</span>
+                    {stateFigure(r) && <span className={'st mono' + (cell.tone ? ' ' + cell.tone : '')}>{cell.text}</span>}
                     <span className="mdl mono">{r.model || 'no model configured'}</span>
                     <span className="mem mono">{r.mem}</span>
                   </div>

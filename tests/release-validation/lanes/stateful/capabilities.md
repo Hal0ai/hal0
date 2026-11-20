@@ -129,7 +129,37 @@ that a later POST naming a downloaded model on it swaps/loads. Take backups firs
 
 23. **Scan collisions and tombstones.** Put two files with the same name `model.gguf` but different capabilities under `<store>/<cap>/<id>/` and run `hal0 model scan`: each must register under its directory id with the right capability (#2725), none silently skipped. Take `sha256sum /var/lib/hal0/registry/ignored-paths.json` at lane entry and exit: `rm --keep-files` and `rm` of a scratch-path model both tombstone paths that later lanes trip over. Restore from a pre-probe copy, merging any tombstone another lane wrote.
 
+24. **Catalog row vs applied slot.** After applying each advertised backend, compare `catalogs.voice.tts[].backends[].profile` and `runtime_family` with the profile and image written to `/etc/hal0/slots/tts.toml` (open #3811 item 3: kokoro gpu-vulkan row says qwen3-tts, apply writes kokoro).
+
+25. **n_predict handoff.** After any lane that restarts brain, record `n_decoded` and `n_predict` from `:8089/slots`; hand off as a finding if `n_predict` is -1 and `n_decoded` exceeds 2000 for a caller you cannot identify.
+
+26. **Scan skip reason.** After `hal0 model scan` over a pulled-layout `model.gguf`, the CLI must name the skip reason (`id_collision`), not only print '1 added, 1 skipped'.
+
+27. **Reaper vs fresh apply.** The idle reaper must not evict a capability-enabled embed/rerank slot applied less than `idle_timeout_s` ago; `capabilities list` must render enabled+offline distinctly from enabled+ready.
+
+28. **Tombstone hygiene.** `sha256sum` `ignored-paths.json` at entry and exit and check for scratch `/tmp` paths: `model rm` of a scratch-path model always tombstones it.
+
+29. **Wrong-type apply (#3834).** Apply a registered model of the WRONG type to each child (embedding gguf on embed/rerank, tts model on voice/stt, chat model on embed/embed). Assert a typed 4xx, then if any reports ready send `/v1/rerank` banana-vs-Paris to prove ranking sanity. Back up and restore `capabilities.toml` and the slot TOMLs.
+30. **Three `model add` error messages.** Run `hal0 model add` against an unreadable file, a missing file in the same dir, and a missing file in a readable dir; the three messages should differ (item 10 of #1840 still reproduces).
+31. **`model rm -f --keep-files` names `affected_slots`.** For a model bound to embed/embed the server returns 409 `model.in_use` with `force_cascade=false`; the CLI should name the affected slots.
+
 ## Leave behind
 
 Capabilities left enabled on the backend this box supports; defaults set; scratch model files
 and throwaway profiles removed. Brain and utility slots healthy.
+
+## Added in kit 18
+
+* After any `hal0 model rm --keep-files` or DELETE of a row bound to a capability, assert the slot still serves or the call was refused (the embed slot went offline silently in #2724).
+* Fresh-box entry: `ls /var/lib/hal0/models/*/` and `hal0 model list` against CONTEXT before judging check 2b.
+* Diff `ls /etc/hal0/slots` before/after every non-200 capability apply; record new TOMLs. The first stt enable with an empty model creates stt.toml with provider llama-server (#3860).
+* `hal0 model add` of a kept reranker gguf re-registers it as chat (confidence medium): the documented recovery changes the type.
+* API DELETE of a bound model without force returns 200 with affected_slots, no 409 model.in_use, unlike the CLI path; brief item 31 should expect that.
+
+## Added in kit 19
+
+* After `model rm --keep-files`, run the exact `model add <kept path>` the CLI prints for a pulled-layout gguf and assert the re-registered id equals the original (it becomes `model`), then re-apply the capability selection.
+* After `hal0 profile create` plus DELETE of the throwaway, `/etc/hal0/profiles.toml` must be absent or byte-identical to the seed (a 10-byte `[profile]` was left).
+* After enabling embed/rerank/tts, note TOML provider rewrites (`provider = "llama-server"` appeared, tts lost its comment header) as intended or file.
+* Capture the `/api/capabilities` tts catalog row (backends, profile, runtime_family) BEFORE kokoro-v1 is pulled so check 13 can diff.
+* `hal0 model scan` skip reasons: compare CLI output with the API `skipped` list (#2725, known).

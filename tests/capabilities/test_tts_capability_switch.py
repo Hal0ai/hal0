@@ -292,3 +292,15 @@ def test_apply_non_tts_child_does_not_write_profile(tmp_hal0_home: str) -> None:
     with open(slots_dir / "embed.toml", "rb") as f:
         on_disk = tomllib.load(f)
     assert "profile" not in on_disk, f"embed slot must not gain a profile: {on_disk!r}"
+
+
+def test_catalog_profile_for_fit_tts_vulkan_is_vetoed_to_kokoro(tmp_hal0_home: str) -> None:
+    """#3811: the picker resolves the same vetoed profile the apply path writes.
+
+    The shared rule says qwen3-tts for every GPU, but the qwen3tts runner is
+    ROCm-only, so a gpu-vulkan row must carry the Kokoro profile.
+    """
+    profile = catalog_mod._profile_for_fit("tts", "gpu-vulkan")
+    assert profile is not None
+    assert profile.name == "kokoro"
+    assert profile.runtime_family == "kokoro"

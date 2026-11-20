@@ -435,7 +435,6 @@ _PLANTED_SECRETS = {
     "HAL0_ADMIN_KEY": "admin-planted",
     "HAL0_CLIENT_KEY": "client-planted",
     "HAL0_HERMES_API_KEY__CODER": "hermes-planted",
-    "HAL0_SENTRY_DSN": "https://planted@sentry.invalid/1",
     "HAL0_HERMES_TERMINAL": "local",
     "HERMES_HOME": "/somewhere/else",
     "SSL_CERT_FILE": "/etc/planted.pem",

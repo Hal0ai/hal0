@@ -399,8 +399,10 @@ def test_apply_status_eventually_failed_on_invalid_manifest(
     r = isolated_client.post("/api/updates/apply", json={})
     job_id = r.json()["id"]
 
-    # Poll up to a couple of seconds for the background task to land.
-    deadline = time.monotonic() + 3.0
+    # Wait for the background task to land. The deadline is only an upper bound for a
+    # stuck job: the loop leaves as soon as the state is final, so a generous value costs
+    # nothing on a passing run. Three seconds was too tight on a loaded CI runner.
+    deadline = time.monotonic() + 30.0
     final: dict = {}
     while time.monotonic() < deadline:
         s = isolated_client.get(f"/api/updates/status/{job_id}")
@@ -1379,6 +1381,7 @@ def test_components_returns_catalog_rows(isolated_client: TestClient) -> None:
         "runner-images",
         "hermes",
         "pi",
+        "memory-decision",
         "hindsight",
     }
     assert isinstance(body["pending"], int)
@@ -1453,6 +1456,26 @@ def test_hermes_converge_rejects_an_unvetted_target_400(
     resp = isolated_client.post("/api/updates/components/hermes/converge", json={"target": bad})
     assert resp.status_code == 400
     assert "VETTED_HERMES_REFS" in resp.text
+
+
+def test_memory_decision_converge_by_name_is_the_install(isolated_client: TestClient) -> None:
+    # #3757: opt-in — asking for the component by name installs it; the catalog
+    # pass (runner._arm_kwargs) keeps install=False.
+    (kw,) = _converge_kwargs(isolated_client, "memory-decision", {})
+    assert kw["install"] is True and kw["apply"] is True
+    assert "action" not in kw
+
+
+def test_memory_decision_converge_remove_action(isolated_client: TestClient) -> None:
+    (kw,) = _converge_kwargs(
+        isolated_client, "memory-decision", {"action": "remove", "purge_model": True}
+    )
+    assert kw["action"] == "remove" and kw["purge_model"] is True
+
+
+def test_memory_decision_converge_rejects_an_unknown_action(isolated_client: TestClient) -> None:
+    (kw,) = _converge_kwargs(isolated_client, "memory-decision", {"action": "nuke"})
+    assert kw == {"status_code": 400}
 
 
 def test_component_converge_busy_409(isolated_client: TestClient) -> None:

@@ -10,7 +10,7 @@ Before planning anything else, run the context-window gate:
 
 ```sh
 grep -rn 'MINIMUM_CONTEXT_LENGTH' \
-  /var/lib/hal0/venvs/hermes/lib/python3*/site-packages/agent/model_metadata.py
+  /var/lib/hal0/hermes/current/src/agent/model_metadata.py
 curl -s $API/v1/models | jq '.data[] | {id, context_length}'
 grep -n 'model:' -A3 /var/lib/hal0/.hermes/config.yaml
 ```
@@ -97,7 +97,7 @@ live chat: it is install-time ground truth, and it distinguishes "broken out of 
    the bare model id, read `dispatch.decision` upstream= and assert it matches `GET
    /v1/models/<id>` name (`dispatch-slot-alias-ignores-lane-pin`,
    `virtual-model-entry-first-row-not-matched-slot`). Memory recall checks must send `X-hal0-Agent:
-   hermes` and `X-hal0-Private: 1`; anonymous calls cannot see private facts. Record whether
+   hermes` AND `X-hal0-Agent-Key` (from the profile `config.yaml` `hal0-memory` header or `hal0.agent_key`); a bare reserved name gets 403 `bridge.client_name_reserved` (ADR-0062, known `memory-reserved-agent-header-needs-key`). Anonymous calls see shared memory only. Record whether
    prefetch recall fires on every turn and per-turn retain latency (Hindsight op created_at to
    completed_at, p50 and max) against the 'working GPU acceleration' clause of
    `hindsight-extraction-shares-utility-slot`. `hermes-smoke-memory-roundtrip-race`: a smoke_tests
@@ -136,7 +136,38 @@ Run order inside this lane: the reprovision checks (10) restart the gateway unde
    Cleanup: `sudo systemctl enable --now hermes-gateway`, confirm the readonly lane's item 24 is
    green again, and delete the two test sessions.
 
+23. **Preflight: the plugin can read its key.** As hal0, `/var/lib/hal0/hermes/current/venv/bin/python -I -c 'import yaml'` must work and the plugin's `_read_agent_key` must return non-None (open #3803, P0 on 1.8.0). Run it before any Hermes memory check; a failure explains every 403 below.
+
+24. **403 count after every turn.** After any Hermes turn, hal0-api journal `POST /api/memory/add` and `/recall` for hermes-origin requests must be 200; zero `bridge.client_name_reserved` is the pass condition.
+
+25. **Gateway turn cannot hold brain.** Before and after the lane sample llama `/slots` `is_processing` and `n_predict`; flag any hermes-originated `n_predict=-1` stream longer than 5 minutes and count iterations per turn in `agent.log` (open #3804).
+
+26. **Unreadable-cwd probe as non-root.** Run it as `sudo -u hal0` or a normal user; as root EACCES never fires.
+
+27. **Context warm line.** After every gateway restart compare `gateway.log` `Model context warmed: <model> -> N tokens` with the slot's `ctx_effective`; a `(default)` suffix or 256000 means Hermes could not resolve the model (#3835, known).
+28. **Per-call tool names.** For the tool-use check read `agent.log` tool names per API call, not just the final answer: `hindsight_recall` x4 instead of `slot_list` is a wrong-tool loop, distinguishable from pure queueing.
+29. **Empty Hindsight queue first.** Assert the ops queue is empty before timing checks; every Hermes turn adds retain+consolidation on the shared `--parallel 1` brain (117, 230, 396 s retain series). Take a no-memory baseline with `memory.provider` disabled or after drain for a clean multiplier.
+30. **Profile delete leaves a tombstone.** After `hermes profile delete`, `profiles/.deleted/` holds a marker; `profile_mcp_wire.skipped` shows `.deleted` (cosmetic, known `hermes-deleted-profile-dir-recorded-skipped`). Do NOT delete the tombstone.
+31. **Gateway key outcome.** `gateway_secrets_wire.api_server_key.outcome` is `unreadable` after a CLI reprovision by design (known `gateway-secrets-wire-unreadable-is-intended`); fail only on the entry's `still_report_if`.
+
 ## Leave behind
 
 Hermes running with its SHIPPED config restored. Brain, utility, and embed slots healthy. State
 every config file you touched and its final contents in `box_state_on_exit`.
+
+## Added in kit 18
+
+* Per-call tool audit from state.db messages.tool_calls (not agent.log): a slot-state ask must reach mcp__hal0_admin__slot_list within 3 calls (#3855).
+* grep agent.log for 'shell hook stdout was not valid JSON' every release (#3853).
+* Replace the `import yaml` plugin check with a direct call to hal0-memory provider._read_agent_key(config.yaml,'hermes') and assert zero bridge.client_name_reserved (#3803 is fixed).
+* Kill-the-client: terminate `hermes -z` mid-turn; the gateway must stop issuing /v1/chat calls within 30 s.
+* Both banks are hal0:shared and hal0:private; assert both queues are empty before entry and record the private pending count per turn.
+* Create a named profile (hal0-brain) in lane setup; none exists after install, so c22/c30 cannot run otherwise.
+* Check the resolver: g('hal0/agent') vs g('brain') when agent is model-less (#3854).
+
+## Added in kit 19
+
+* Kill-client check 18: kill by PID from a script file, then poll `gateway_state.json` `active_agents`. Detach is upstream by design; the pass criterion is "no NEW /v1/chat call within 30 s" and cancel is `/stop` / session.interrupt (known hermes-gateway-turn-not-cancelled-on-client-disconnect).
+* After any recall turn compare the `hindsight_recall` tool message length in state.db with its `max_tokens` and record peak `in=` (#3878, known).
+* After `hermes profile delete`, wait a full 120 s reconcile interval before asserting the `hermes.<profile>` upstream is gone (by design).
+* `GET /v1/models/<id>` must agree with chat routing for every id in `config.yaml` model_aliases (#3880 for raw chat ids, known).

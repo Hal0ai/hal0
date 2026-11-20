@@ -52,14 +52,18 @@ import structlog
 from fastapi.responses import Response, StreamingResponse
 
 from hal0.dispatcher._capability_resolve import (
+    _CHAT_SHAPED_PATHS,
     _DEFAULT_MODEL,
     _EMBED_PATHS,
+    _IMAGE_PATHS,
     _RERANK_PATHS,
+    _TTS_PATHS,
     LegacyResolutionFailed,
     guard_capability_mismatch,
     guard_chat_slot_capability,
     resolve_by_capability,
     select_slot_by_type,
+    slot_type_of,
 )
 from hal0.dispatcher.admission import REGISTRY as _ADMISSION_REGISTRY
 from hal0.dispatcher.admission import AdmissionTimeout
@@ -73,7 +77,9 @@ from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
 from hal0.forwarded_headers import forwardable_request_headers
 from hal0.http_client import async_client
+from hal0.services.models_service import is_alias
 from hal0.slots.state import SlotCrashLooping, SlotNpuConflict, SlotState
+from hal0.upstreams.catalog import NotEnabled, Resolved, participates, resolve_requested_model
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
 if TYPE_CHECKING:
@@ -681,15 +687,25 @@ class Dispatcher:
         # When nothing resolves (embed offline / fresh install), _resolve
         # already raised the documented clean dispatch.no_route 404 — the
         # gate never sees it, so that contract is preserved untouched.
+        # Both gates key on the resolved slot's declared type (#3807), so a
+        # custom-named capability slot is gated like the stock one.
+        slot_cfg = await self._resolved_slot_cfg(request.url.path, call)
         try:
             guard_capability_mismatch(
                 call.slot_name or call.container_slot_name,
                 request.url.path,
+                slot_type=slot_type_of(slot_cfg),
                 model=call.requested_model or call.resolved_model,
                 resolution_path=call.resolution_path,
             )
-            # Reverse direction (#2672): embeddings/rerank naming a chat slot.
-            await self._guard_chat_slot(request.url.path, call)
+            # Reverse direction (#2672, #3807): embeddings/rerank landing on a
+            # chat slot or on a capability slot that cannot serve them.
+            guard_chat_slot_capability(
+                slot_cfg,
+                request.url.path,
+                model=call.requested_model or call.resolved_model,
+                resolution_path=call.resolution_path,
+            )
         except Hal0Error as exc:
             log.warning(
                 "dispatch.capability_mismatch",
@@ -934,11 +950,48 @@ class Dispatcher:
                     model=model_id,
                 )
 
+        # ── Step 1b: curated-upstream catalog ────────────────────────────
+        # A curated upstream serves only the models its operator enabled, read
+        # from stored rows (never the network). An enabled row routes here,
+        # after container preemption, pinned ownership and registry binding (a
+        # local model wins). ModelAmbiguous propagates at once. A "not enabled"
+        # answer is held back as ``not_enabled`` and raised only if the steps
+        # below route nothing (see the check before Step 4). An upstream outside
+        # the catalog (slot, uncurated remote, agent-managed) whose warm cache
+        # holds the exact string skips this step, so an existing row keeps
+        # routing as before.
+        not_enabled: NotEnabled | None = None
+        if not self._held_by_a_non_catalog_upstream(model_id, lane_slot):
+            resolved = resolve_requested_model(
+                model_id, self._upstreams_in_priority_order(lane_slot)
+            )
+            if isinstance(resolved, NotEnabled):
+                not_enabled = resolved
+            elif isinstance(resolved, Resolved):
+                upstream = resolved.upstream
+                call = UpstreamCall(
+                    upstream_name=upstream.name,
+                    target_url=_resolve_target_url(upstream, path),
+                    headers=self._build_headers(request, upstream),
+                    body=_remap_model(body, resolved.model_id),
+                    streaming=streaming,
+                    method=method,
+                    resolved_model=resolved.model_id,
+                    requested_model=original_model,
+                    resolution_path=f"catalog:{upstream.name}",
+                    slot_name=_slot_name_of(upstream),
+                    container_slot_name=_container_slot_name_of(upstream),
+                )
+                self._log_decision(call, t0, cache_state="catalog")
+                return call
+
         # ── Step 2: passthrough on warm caches ───────────────────────────
         # Backend-aware loading for slot-backed models is handled at the
         # route layer before dispatch (#430), independent of which upstream
         # wins here.
         for upstream in self._upstreams_in_priority_order(lane_slot):
+            if participates(upstream):
+                continue  # curated: the catalog step above is its only way in
             if model_id in self._cached_models(upstream.name):
                 call = UpstreamCall(
                     upstream_name=upstream.name,
@@ -960,11 +1013,13 @@ class Dispatcher:
         cold_remotes = [
             u
             for u in self._upstreams_in_priority_order(lane_slot)
-            if u.kind == "remote" and not self._cached_models(u.name)
+            if u.kind == "remote" and not participates(u) and not self._cached_models(u.name)
         ]
         if cold_remotes:
             await self._cold_prefetch(cold_remotes)  # TIER2 + TIER3
             for upstream in self._upstreams_in_priority_order(lane_slot):
+                if participates(upstream):
+                    continue
                 if model_id in self._cached_models(upstream.name):
                     call = UpstreamCall(
                         upstream_name=upstream.name,
@@ -995,6 +1050,17 @@ class Dispatcher:
                 "configured upstream advertises it right now",
                 details={"model": model_id, "upstream_only": True},
             )
+
+        # ── Step 1b, deferred: a curated "not enabled" ───────────────────
+        # Nothing above routed the request. A ``provider/model`` the caller
+        # named is a 404 now. A bare id is too, unless the local heuristics
+        # below route by path (embeddings, rerank, speech, transcription,
+        # images) or the id is a hal0 alias such as ``tts-1``: those reach
+        # the local slot as they would with no curated provider at all.
+        if not_enabled is not None and (
+            not_enabled.canonical or not _local_heuristics_own(path, model_id)
+        ):
+            raise not_enabled.error
 
         # ── Step 4: capability/path routing ──────────────────────────────
         try:  # TIER1 — narrow exception handling; log + re-raise typed errors
@@ -1944,25 +2010,28 @@ class Dispatcher:
 
     # ── internals ────────────────────────────────────────────────────────
 
-    async def _guard_chat_slot(self, path: str, call: UpstreamCall) -> None:
-        """Typed 409 when ``/embeddings`` or ``/rerank`` resolved to a plain chat slot (#2672)."""
+    async def _resolved_slot_cfg(self, path: str, call: UpstreamCall) -> dict[str, Any] | None:
+        """Config of the slot ``call`` resolved to, for the capability gates.
+
+        Read only on the paths a gate can act on (chat/completions-shaped,
+        ``/embeddings``, ``/rerank``). ``None`` for a genuine remote, without a
+        slot manager, or when the inventory read fails: the gates then fall
+        back to the stock role names (chat direction) or stand aside.
+        """
         slot = call.slot_name or call.container_slot_name
         if not slot or self._slot_manager is None:
-            return
-        if not any(frag in path for frag in (*_EMBED_PATHS, *_RERANK_PATHS)):
-            return
+            return None
+        if not any(frag in path for frag in (*_CHAT_SHAPED_PATHS, *_EMBED_PATHS, *_RERANK_PATHS)):
+            return None
         try:
             configs = await self._slot_manager.iter_configs()
+            return next(
+                (c for c in configs if isinstance(c, dict) and c.get("name") == slot),
+                None,
+            )
         except Exception:  # TIER2 — inventory is best-effort; never block a request on it
             log.warning("dispatch.chat_slot_inventory_failed", slot=slot, path=path)
-            return
-        cfg = next((c for c in configs if c.get("name") == slot), None)
-        guard_chat_slot_capability(
-            cfg,
-            path,
-            model=call.requested_model or call.resolved_model,
-            resolution_path=call.resolution_path,
-        )
+            return None
 
     async def _tts_slot_for(self, path: str, model: str) -> str | None:
         """Serving ``type = "tts"`` slot for a speech request, picked by type (#2784).
@@ -2072,6 +2141,13 @@ class Dispatcher:
             if rank_slot_name(self._slot_manager, slot_name, lane_slot=lane_slot) < bound_key:
                 return True
         return False
+
+    def _held_by_a_non_catalog_upstream(self, model_id: str, lane_slot: str = "") -> bool:
+        """Does an upstream outside the catalog advertise ``model_id`` (warm cache)?"""
+        return any(
+            not participates(u) and model_id in self._cached_models(u.name)
+            for u in self._upstreams_in_priority_order(lane_slot)
+        )
 
     def _upstreams_in_priority_order(self, lane_slot: str = "") -> list[Upstream]:
         """Routable upstreams, most-preferred first.
@@ -2192,6 +2268,27 @@ class Dispatcher:
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
+
+
+# Paths whose local slot the Step 4 heuristics pick by path, not by model name.
+# Transcription is routed by the multipart route layer and lands here with the
+# form's model field; its slot, too, is chosen by capability, not by that id.
+_PATH_ROUTED_CAPABILITY_PATHS = (
+    *_EMBED_PATHS,
+    *_RERANK_PATHS,
+    *_TTS_PATHS,
+    *_IMAGE_PATHS,
+    "/audio/transcriptions",
+)
+
+
+def _local_heuristics_own(path: str, model_id: str) -> bool:
+    """Should a bare id a curated provider has not enabled still reach Step 4?
+
+    True for a path-routed capability request and for a hal0 alias name: the
+    local slot serves those whatever id a provider happens to store.
+    """
+    return is_alias(model_id) or any(frag in path for frag in _PATH_ROUTED_CAPABILITY_PATHS)
 
 
 def _remap_model(body: dict[str, Any], new_model: str) -> bytes:

@@ -49,7 +49,7 @@ from hal0.memory.namespace import (
 )
 from hal0.memory.retain_chunk_guard import ChunkAudit, audit_bank_chunks
 from hal0.memory.write_gate import require_writes_allowed
-from hal0.normalize.resolver import DEFAULT_CHAINS
+from hal0.upstreams.catalog import curated_model_ids
 
 router = APIRouter()
 
@@ -316,10 +316,22 @@ async def _enabled_llm_slots(request: Request) -> list[str]:
     return sorted(alias_map.keys())
 
 
-def _extraction_slot_resolves(slot: str | None, available: list[str]) -> bool:
-    """The default memory target may share agent when its own binding is empty."""
-    chain = DEFAULT_CHAINS[MEMORY_ALIAS] if slot == "memory" else (slot,)
-    return any(name in available for name in chain)
+async def _extraction_served_by(request: Request, slot: str | None) -> str | None:
+    """The slot that serves ``hal0/<slot>``, or ``None`` when nothing does.
+
+    Asks the dispatcher's own resolver (``normalize.resolver.resolve_chain``)
+    over the same ordered slot views the request path uses, so the answer holds
+    for the last-resort primary too (ADR-0053: the installer leaves ``memory``
+    and ``agent`` model-less and the first model-bound slot serves them).
+    """
+    if not slot:
+        return None
+    return await _resolved_serving_slot(request, slot)
+
+
+async def _extraction_slot_resolves(request: Request, slot: str | None) -> bool:
+    """Whether the dispatcher can serve the extraction slot (last resort included)."""
+    return await _extraction_served_by(request, slot) is not None
 
 
 def _extraction_mode(graph_cfg: MemoryGraphConfig, available: list[str]) -> str:
@@ -370,7 +382,9 @@ async def _warm_cold_catalogs(
 
     async def _one(u: Any) -> None:
         try:
-            if fetch is not None:
+            if getattr(u, "curated", False):
+                curated_model_ids(u, cache)  # the enabled list, never the network
+            elif fetch is not None:
                 await fetch(u)
             elif registry is not None and hasattr(registry, "fetch_models"):
                 models = await registry.fetch_models(u.name)
@@ -492,7 +506,9 @@ async def graph_status(request: Request) -> dict[str, Any]:
     status = wrapper.graph_status()
     available = await _enabled_llm_slots(request)
     status["available_slots"] = available
-    status["slot_resolves"] = _extraction_slot_resolves(status.get("extraction_slot"), available)
+    served_by = await _extraction_served_by(request, status.get("extraction_slot"))
+    status["slot_resolves"] = served_by is not None
+    status["served_by"] = served_by
     # llm_timeout_s and the extraction limits (#1834) live in hal0.toml (not
     # on the provider) — echo them so the dashboard's graph panel can edit
     # them without a second config fetch.
@@ -540,26 +556,76 @@ async def graph_status(request: Request) -> dict[str, Any]:
 # ── extraction throughput preflight (#2353) ────────────────────────────────
 
 
-async def _extraction_slot_target(request: Request, slot: str) -> tuple[int, str | None]:
-    """Port and model of ``slot`` (or its alias target), unknown as ``(0, None)``."""
+async def _resolved_serving_slot(request: Request, slot: str) -> str | None:
+    """Name of the slot the dispatcher routes ``hal0/<slot>`` to, or ``None``.
+
+    Same chain as the request path (ADR-0053: ``memory`` falls back to the
+    ``agent`` anchor while it has no model bound), so a model-less target is
+    measured where its extraction calls actually land (#3837).
+    """
+    from hal0.api.routes.v1 import _normalize_slot_views
+    from hal0.normalize.resolver import _configured_primary, resolve_chain
+
+    try:
+        views = await _normalize_slot_views(request)
+        res = resolve_chain(f"hal0/{slot}", views, set())
+    except Exception:
+        return None
+    if res is None or not res.model_id:
+        return None
+    if res.matched_name:
+        for view in views:
+            if view.model_id == res.model_id and view.name.lower() == res.matched_name.lower():
+                return view.name
+        return res.matched_name
+    primary = _configured_primary(views)
+    return primary.name if primary is not None else None
+
+
+async def _extraction_slot_target(
+    request: Request, slot: str
+) -> tuple[int, str | None, str | None]:
+    """Port, model and serving slot of ``slot``, unknown as ``(0, None, None)``.
+
+    ``slot`` may be an alias. A target with no model bound is not what serves
+    extraction: it resolves through the dispatcher's fallback chain, and the
+    serving slot's port and model are returned (#3837). The third item is the
+    serving slot's name when it differs from ``slot``, else ``None``.
+    """
     slot_manager = getattr(request.app.state, "slot_manager", None)
     if slot_manager is None:
-        return 0, None
+        return 0, None, None
     from hal0.slots._cfg_helpers import _cfg_port, _model_default
     from hal0.slots.manager import SLOT_ALIASES
 
     try:
         cfgs = await slot_manager.iter_configs()
     except Exception:
-        return 0, None
-    for name in (slot, SLOT_ALIASES.get(slot)):
+        return 0, None, None
+
+    def _lookup(name: str | None) -> tuple[int, str | None] | None:
         for cfg in cfgs:
             if name and cfg.get("name") == name:
                 try:
                     return _cfg_port(cfg), _model_default(cfg) or None
                 except (TypeError, ValueError):
                     return 0, None
-    return 0, None
+        return None
+
+    found: tuple[int, str | None] | None = None
+    for name in (slot, SLOT_ALIASES.get(slot)):
+        found = _lookup(name)
+        if found is not None:
+            break
+    if found is None:
+        return 0, None, None
+    if found[1]:
+        return found[0], found[1], None
+    served = await _resolved_serving_slot(request, slot)
+    resolved = _lookup(served)
+    if served is None or resolved is None:
+        return found[0], found[1], None
+    return resolved[0], resolved[1], (served if served != slot else None)
 
 
 async def _measure_throughput(request: Request, slot: str, graph_cfg: MemoryGraphConfig) -> Any:
@@ -569,9 +635,11 @@ async def _measure_throughput(request: Request, slot: str, graph_cfg: MemoryGrap
     for the slot it measured; :func:`_cached_throughput` reports it only while
     that slot is still the extraction slot.
     """
+    from dataclasses import replace
+
     from hal0.memory import extraction_env
 
-    port, model = await _extraction_slot_target(request, slot)
+    port, model, served_by = await _extraction_slot_target(request, slot)
     estimate = await extraction_env.measure_extraction_throughput(
         slot,
         port,
@@ -579,6 +647,8 @@ async def _measure_throughput(request: Request, slot: str, graph_cfg: MemoryGrap
         timeout_s=graph_cfg.llm_timeout_s,
         max_tokens=graph_cfg.extraction_max_tokens,
     )
+    if served_by:
+        estimate = replace(estimate, served_by=served_by)
     request.app.state.extraction_throughput = estimate
     if estimate.verdict == "too_slow":
         log.warning("memory.extraction_slot_too_slow %s", estimate.message())

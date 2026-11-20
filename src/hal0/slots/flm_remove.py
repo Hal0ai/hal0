@@ -14,7 +14,10 @@ Refused (409) before anything runs when:
   ``whisper-v3:turbo`` while ``[npu].asr`` is on, or the ``[npu].decision`` tag;
 * a pull of the tag is queued or running (in this process, or a persisted
   snapshot whose writer is still alive);
-* the catalogue does not report the tag as installed.
+* the catalogue does not report the tag as installed and hal0 has no
+  FLM-managed registry row for it. With such a row (its files were removed
+  outside hal0) the route drops the row and the stale pull job instead,
+  without running ``flm remove``.
 
 While the remove runs the tag is marked "deleting" (ADR-0026), so a pull of it
 started meanwhile gets ``model.deleting``. FastFlowLM 1.0.12's ``remove`` exits
@@ -140,6 +143,25 @@ def _catalog_entry(tag: str) -> dict[str, Any] | None:
     return None
 
 
+def _has_registry_row(registry: Any, tag: str) -> bool:
+    """True when hal0 still records an FLM-managed row for ``tag``.
+
+    Such a row is a ghost once its files are gone. A row under the same id that
+    FLM does not manage (a GGUF registered as ``qwen3:0.6b``) is not ours to
+    drop here, so it does not count. Rows are matched on ``id == tag`` (what
+    ``_register_flm_pulled`` writes); an older ``<tag>-FLM`` id is not matched.
+    """
+    from hal0.registry.discover import is_runtime_managed
+
+    if registry is None:
+        return False
+    try:
+        row = registry.get(tag)
+        return row is not None and is_runtime_managed(row)
+    except Exception:
+        return False
+
+
 def _install_dir(tag: str, store: str) -> str | None:
     """The tag's directory in ``store``, read from a fresh raw ``flm list -j``."""
     from hal0.providers.flm import _probe_flm_catalog
@@ -221,13 +243,47 @@ async def check_removable(
             code="flm.model_not_found",
             details={"tag": tag},
         )
-    if not entry.get("installed"):
+    if not entry.get("installed") and not _has_registry_row(registry, tag):
         raise Conflict(
             f"{tag} is not downloaded, so there is nothing to remove.",
             code="flm.model_not_installed",
             details={"tag": tag},
         )
     return entry
+
+
+async def _drop_ghost_row(
+    tag: str, *, registry: Any, jobs: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Drop the hal0 records of an FLM tag whose files are already gone."""
+    from hal0.providers.flm import reset_flm_catalog_cache
+    from hal0.registry.pull import mark_deleted, mark_deleting, pull_job_file, unmark_deleting
+
+    mark_deleting(tag)
+    try:
+        registry_removed = False
+        if registry is not None:
+            with contextlib.suppress(Exception):
+                registry_removed = bool(await asyncio.to_thread(registry.remove, tag))
+        mark_deleted(tag)
+    finally:
+        unmark_deleting(tag)
+        reset_flm_catalog_cache()
+    if jobs is not None:
+        stale = jobs.get(tag)
+        if stale is not None and getattr(stale, "state", None) not in _ACTIVE_STATES:
+            jobs.pop(tag, None)
+    with contextlib.suppress(OSError):
+        pull_job_file(tag).unlink(missing_ok=True)
+    log.info("flm.ghost_row_removed tag=%s", tag)
+    return {
+        "tag": tag,
+        "removed": True,
+        "path": None,
+        "bytes_freed": 0,
+        "registry_removed": registry_removed,
+        "warnings": [],
+    }
 
 
 async def remove_flm_model(
@@ -268,6 +324,13 @@ async def remove_flm_model(
             code="flm.pull_running",
             details={"tag": tag, "pull_state": job.state},
         )
+    if not entry.get("installed"):
+        # The files are already gone (removed outside hal0), but the registry
+        # row survives: ADR-0026 keeps runtime-managed rows out of prune, so
+        # this route is the only way to clear it. There is nothing for
+        # ``flm remove`` to do. This sits below the pull recheck above so a
+        # pull that started during the catalogue lookup is still refused.
+        return await _drop_ghost_row(tag, registry=registry, jobs=jobs)
     mark_deleting(tag)
     try:
         invocation, store = await asyncio.to_thread(flm_remove_invocation, tag)

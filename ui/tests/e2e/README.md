@@ -30,7 +30,7 @@ image:
 ```bash
 docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp \
   -v "$PWD":/work -w /work \
-  mcr.microsoft.com/playwright:v1.64.1-noble \
+  mcr.microsoft.com/playwright:v1.65.1-noble \
   npx playwright test --reporter=line
 ```
 

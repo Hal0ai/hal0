@@ -1,6 +1,6 @@
 ---
 title: "Config schema: memory lanes"
-description: "The [memory.lanes] tables in hal0.toml: the global LLM concurrency caps and the per-operation overrides and output caps, verified against src/hal0/config/schema.py."
+description: "The [memory.lanes] and [memory.decision] tables in hal0.toml: the global LLM concurrency caps, the per-operation overrides and output caps, and the opt-in decision model, verified against src/hal0/config/schema.py."
 sidebar:
   order: 23
 ---
@@ -18,7 +18,7 @@ under `[memory.lanes.<op>]`. The engine reads these as its own
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `llm_max_concurrent` | int | `1` | `1-32`. `HINDSIGHT_API_LLM_MAX_CONCURRENT` global cap; rendered as min(this, effective `[memory.graph].extraction_max_concurrent`). |
+| `llm_max_concurrent` | int | unset | `1-32`. `HINDSIGHT_API_LLM_MAX_CONCURRENT` global cap. Unset follows the effective `[memory.graph].extraction_max_concurrent`, and the consolidation lane then takes one fewer (minimum 1) so retain and page refresh always have a permit. An explicit value is rendered as min(this, effective `[memory.graph].extraction_max_concurrent`) and every lane inherits it unchanged: an explicit global cap gets no automatic "consolidation minus one", so set `[memory.lanes.consolidation].max_concurrent` yourself if you want it. "Effective" means held to the extraction slot's `--parallel`; `GET /api/memory/lanes` reports the same values the drop-in carries. |
 | `timeout_s` | int | `600` | `30-3600`. Not rendered. Engine-wide timeout: `[memory.graph].llm_timeout_s` (`HINDSIGHT_API_LLM_TIMEOUT`); see [#3631](https://github.com/Hal0ai/hal0/issues/3631). |
 | `reasoning_effort` | str | `"none"` | `HINDSIGHT_API_LLM_REASONING_EFFORT`. |
 | `strict_schema` | bool | `false` | `HINDSIGHT_API_LLM_STRICT_SCHEMA`. |
@@ -38,3 +38,95 @@ The per-operation tables `retain`, `consolidation`, `reflect` and
 | `reasoning_effort` | str | unset | Per-op `HINDSIGHT_API_{OP}_LLM_REASONING_EFFORT` override; unset falls back to `[memory.lanes].reasoning_effort`. |
 | `strict_schema` | bool | unset | Per-op `HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA` override; unset falls back to `[memory.lanes].strict_schema`. |
 | `max_completion_tokens` | int | unset; `consolidation` and `reflect` then render `8192` | `0-131072`; `0` leaves the engine uncapped. Rendered as `HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS` or `HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS`. Mental-model refresh runs through reflect, so the reflect cap bounds it; a mental model whose `max_tokens` is near the cap leaves no headroom, because the engine fails the call on `finish_reason=length` instead of truncating, and on a thinking model reasoning tokens count inside the cap. Setting it on `retain` (use `[memory.graph].extraction_max_tokens`) or on `mental_model_refresh` is refused |
+
+## `[memory.lanes.reflect]` and `[memory.lanes.consolidation]` extra keys
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `[memory.lanes.reflect].wall_timeout_s` | int | unset (renders `1800`) | `60-86400`. Rendered as `HINDSIGHT_API_REFLECT_WALL_TIMEOUT`: the seconds the engine gives one reflect, and one knowledge-page refresh (which runs as a reflect), from start to finish. The clock includes time spent waiting for a language-model permit, so a refresh queued behind consolidation and retain needs headroom. The engine's own default is 300. Keep it above `[memory.graph].llm_timeout_s`: a wall clock shorter than one language-model call's timeout cannot let a slow call finish, so the call is cut off however long it was allowed. hal0 does not enforce this, because the two keys live in different tables and a box may rely on either. Unset follows hal0's default, and a settings save does not write the default into `hal0.toml`. |
+| `[memory.lanes.consolidation].batch_size` | int | unset (renders `4`) | `1-32`. Rendered as `HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE`: memories consolidated per language-model call (`1` means no batching). The engine's own default is 8, which can overflow the 8192-token output cap; a batch that overflows is split and retried, and what still fails is counted as failed. Unset follows hal0's default, and a settings save does not write it into `hal0.toml`. |
+
+### Upgrading an existing box
+
+Config migration v5 runs once on the first update that carries it; `meta.schema_version` in `hal0.toml` is the record that it ran, so it never runs again.
+
+- A stored `[memory.lanes].llm_max_concurrent = 1` is removed. The old default was 1 and a settings save wrote it, so a stored 1 is almost never a choice, and left in place it would keep clamping the engine to one call. Any other stored value stays and behaves exactly as before. A 1 you set after the update is respected.
+- A hand-made drop-in in the engine's `hindsight-api.service.d/` directory that sets `HINDSIGHT_API_REFLECT_WALL_TIMEOUT` or `HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE` would be silently overridden by the managed `showcase-lanes.conf`. When `hal0.toml` has no value for the matching key, the drop-in's value (inside the bounds above) is copied into `hal0.toml` first, so the box keeps its setting. hal0 never deletes your file: the update says it is now redundant and you can remove it. A value outside the bounds is reported and not copied.
+- The update summary lists both outcomes. A fresh install has neither stored value and follows the defaults.
+- After rolling back to an older release, a settings save there writes `llm_max_concurrent = 1` back, and the conversion does not run again on the way forward; delete the line by hand if you did not choose it.
+
+## `[memory.decision]` decision model
+
+The decision model (`hs-decide-1-flash`) answers the questions Hindsight
+would otherwise put to an LLM: recall ranking and dedup, consolidation
+triage, reflect sufficiency and knowledge-page delta gating. Each answer is
+one forward pass, with no generated text. With the lane off, the engine sends
+those calls to its LLM lane instead, which works but costs an LLM call each.
+
+| Key | Type | Default | Constraints |
+|---|---|---|---|
+| `enabled` | bool | `true` | `false` turns the lane off whatever `provider` says. |
+| `provider` | str | `"off"` | `off`, `local` or `hindsight-cloud`. `local` is the `hal0-hs-decide` server on this box; `hal0 memory decision install` and `enable` set it. A `hal0.toml` that already says `local` keeps it. |
+| `model` | str | `"hs-decide-1-flash"` | `HINDSIGHT_API_DECISION_MODEL_MODEL`. |
+| `threads` | int | `8` | `1-64`. CPU threads of the local server. |
+| `max_concurrent` | int | `4` | `1-64`. `HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT`. |
+| `max_request_tokens` | int | `4096` | `256-32768`. The engine's request cap and the local server's `--max-tokens`. |
+| `timeout_s` | int | `60` | `5-600`. HTTP timeout of a decision call. |
+| `port` | int | `9178` | Loopback port of the local server. |
+| `base_url` | str | unset | Somewhere else to send decision calls; the engine accepts only `http://127.0.0.1:<port>` or the hosted API. |
+
+The local server is the opt-in `memory-decision` component. Nothing installs
+it by default. `hal0 memory decision install` builds a venv under
+`/var/lib/hal0/memory/hindsight-decision` with exact versions (torch 2.15.0
+from the PyTorch CPU index only; transformers 5.23.0, fastapi 0.163.1,
+uvicorn 0.54.0, accelerate 1.16.0 and huggingface-hub 2.4.0 from PyPI), pulls
+the model at one full commit sha into the memory engine's Hugging Face cache,
+installs `hal0-hs-decide.service` (runs as `hal0`, listens on `127.0.0.1`
+only, no network at run time), waits for its `/health`, sets `provider =
+"local"` and points the engine at it. `hal0 update` keeps an installed one on
+the release's pins and never installs one.
+
+The build installs the model repository's own `serving/` package into the
+venv. That is code from the Hugging Face repository, and it runs as the `hal0`
+user; the full-sha revision pin is what fixes which code it is.
+
+A failed install leaves no unit and the lane off. A failed update puts the
+previous venv, server script and unit back, restarts the previous server and
+checks it. A server installed by hand (a unit with no hal0 build stamp) is
+reported as `unmanaged`: it keeps working, `enable` and `disable` act on it,
+`hal0 update` leaves it alone, and `install` adopts it.
+
+**Upgrading to this release.** The default of `provider` changed from
+`"local"` to `"off"`, and most `hal0.toml` files carry the old default
+written out. Config migration v6 converts it once (`meta.schema_version` is
+the record that it ran):
+
+- `enabled = false` is never changed, whatever else is set.
+- `provider = "local"`, written or left to the old default, with no
+  `hal0-hs-decide` unit: becomes `off` (an absent value already reads as
+  `off` and stays absent).
+- The same with the unit installed: written as `local`, so a working lane
+  stays on. `enabled` is not touched.
+- `hindsight-cloud`, `off`, or an explicit `base_url`: left alone.
+
+The update summary lists the conversion.
+
+Measured on one box: a 640 MB venv and a 1.5 GB model, a few minutes to
+build, 2.7 GB of RAM at peak, and about 5 s per request of 3,000 to 5,000
+input tokens on 8 threads (16 threads were no faster, 4 were 1.7 times
+slower).
+
+The unit takes `threads`, `port` and `max_request_tokens` from this table
+when it is written. After changing one of them, run `hal0 memory decision
+install` again to rewrite the unit.
+
+### The commands
+
+| Command | Flags |
+|---|---|
+| `memory decision install` | `--yes` |
+| `memory decision status` | `--json` |
+| `memory decision enable` / `disable` | — |
+| `memory decision remove` | `--purge-model`, `--yes` |
+
+`install` runs `hal0 update component memory-decision`, which also sets `provider = "local"`; run as root, it builds in-process. One converge runs at a time. `enable` needs a server installed (managed or by hand); `disable` sets `off` and leaves the server up; `remove` sets `off`, deletes the unit and venv, and keeps the model unless `--purge-model`.

@@ -1183,3 +1183,49 @@ def test_mode_follows_configuration_and_binding_not_readiness(
     assert status.json()["mode"] == expected
     if slot == "memory" and not model and not bound:
         assert status.json()["slot_resolves"] is True
+
+
+def _status_for(
+    stub_wrapper: StubWrapper, slots: list[tuple[str, bool]], extraction_slot: str = "memory"
+) -> dict[str, Any]:
+    """Graph status with ``slots`` as ``(name, model_bound)`` in config order."""
+    stub_wrapper.extraction_slot = extraction_slot
+    app = _build_app(stub_wrapper, "placeholder")
+    app.state.slot_manager.iter_configs.return_value = [
+        {"name": n, "type": "llm", "enabled": True, "model_id": f"model-{n}" if bound else ""}
+        for n, bound in slots
+    ]
+    with TestClient(app) as c:
+        return c.get("/api/memory/graph/status").json()
+
+
+def test_graph_status_names_the_last_resort_slot(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """#3851: memory and agent model-less, brain bound -> brain serves hal0/memory."""
+    body = _status_for(stub_wrapper, [("memory", False), ("agent", False), ("brain", True)])
+    assert body["slot_resolves"] is True
+    assert body["served_by"] == "brain"
+
+
+def test_graph_status_follows_dispatcher_order_not_alphabetical(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    """The last resort is the first slot in config order (resolver._configured_primary)."""
+    body = _status_for(stub_wrapper, [("utility", True), ("brain", True)])
+    assert body["served_by"] == "utility"
+
+
+def test_graph_status_bound_chain_entry_beats_last_resort(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    body = _status_for(stub_wrapper, [("brain", True), ("agent", True)])
+    assert body["served_by"] == "agent"
+
+
+def test_graph_status_unresolved_when_nothing_is_bound(
+    stub_wrapper: StubWrapper, hal0_home: Path
+) -> None:
+    body = _status_for(stub_wrapper, [("memory", False), ("agent", False)])
+    assert body["slot_resolves"] is False
+    assert body["served_by"] is None

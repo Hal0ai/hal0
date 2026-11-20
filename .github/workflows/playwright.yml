@@ -75,7 +75,7 @@ jobs:
     # ui/package-lock.json and must be bumped with it — the check below
     # fails the shard if the two ever drift apart.
     container:
-      image: mcr.microsoft.com/playwright:v1.64.1-noble
+      image: mcr.microsoft.com/playwright:v1.65.1-noble
       # Chromium needs the host IPC namespace or it can run out of shared
       # memory and crash (Playwright's own Docker guidance).
       options: --ipc=host

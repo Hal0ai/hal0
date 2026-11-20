@@ -64,9 +64,7 @@ class CuratedModel(BaseModel):
     )
     license: str = Field(..., description="SPDX-ish license short name, e.g. 'Apache-2.0'.")
     license_url: str = Field(..., description="HTTPS URL to the canonical license text.")
-    hf_repo: str = Field(
-        ..., description="HuggingFace repo id, e.g. 'Qwen/Qwen3-4B-Instruct-GGUF'."
-    )
+    hf_repo: str = Field(..., description="HuggingFace repo id, e.g. 'Qwen/Qwen3-4B-GGUF'.")
     hf_file: str = Field(..., description="Filename within the repo (GGUF, safetensors, etc.).")
     mmproj_file: str = Field(
         default="",
@@ -388,16 +386,16 @@ CURATED_MODELS: list[CuratedModel] = [
     # list, just lower in render order.
     CuratedModel(
         id="qwen3-4b",
-        display_name="Qwen3 4B Instruct",
+        display_name="Qwen3 4B",
         description="Multilingual, fast all-rounder. Great default for a 4-8 GB VRAM budget.",
         family="qwen",
         size_gb=2.5,
         vram_gb_min=4.0,
         license="Apache-2.0",
         license_url="https://www.apache.org/licenses/LICENSE-2.0",
-        hf_repo="Qwen/Qwen3-4B-Instruct-GGUF",
-        hf_file="qwen3-4b-instruct-q4_k_m.gguf",
-        context_length=32768,
+        hf_repo="Qwen/Qwen3-4B-GGUF",
+        hf_file="Qwen3-4B-Q4_K_M.gguf",
+        context_length=40960,
         recommended_slot="chat",
         tags=["chat", "multilingual", "balanced"],
         notes="Q4_K_M quant for the size/quality sweet spot.",

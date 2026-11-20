@@ -160,7 +160,37 @@ the fact otherwise:
 
 23. **Registry diff across the update.** Diff `/api/models` before and after: the first update to a build with the #2739 fix adds `kokoro-v1` (`updater.kokoro_bundle_pulled`) and nothing else should appear or vanish. Compare each slot TOML `[model].default` with the API `model_id` in the BEFORE snapshot so coder/flm-style mismatches are recorded as pre-existing (`known-issues: slot-model-id-is-runtime-not-binding`).
 
+24. **Rollback banner.** After rollback the CLI banner must contain the literal `systemctl restart hal0-api` line and `/api/health` must still report the old version until that restart.
+
+25. **Outage windows.** Run a 1 s health poller across upgrade, rollback, restart and roll-forward and report each outage window separately (roll-forward was 31.4 s on 1.8.0).
+
+26. **FLM/NPU installed vs disk.** Cross-check `/api/models` `installed=true` against the real directory or file for FLM/NPU rows, not only GGUF (open #3810; `comm` recipe in regression `flm-registry-installed-ghost`).
+
+27. **Image digest parity.** For every running slot assert container image digest equals the unit's resolved `Image=` and `/api/slots/<n>` image, before and after.
+
+28. **Channel bundle URL.** The channel-URL bundle actually fetched (`nightly.json.bundle?channel=nightly`) must return 200 from releases.hal0.dev and byte-match the GitHub asset.
+
+29. **Notes baseline.** The 'Changes since vX' baseline in the update notes must match the previously installed nightly or say it is the last published tag (1.8.0 listed changes since ...144935 for a box that came from ...043319).
+30. **hal0-api restart re-wakes utility.** Restarting hal0-api re-wakes the utility slot via Hindsight within ~25 s on an upgraded box, so `podman ps` after any restart is not an upgrade side effect.
+
 ## Leave behind
 
 The box on the new version, healthy, with the "before" snapshot recorded in your report for the
 `post-upgrade` stage to diff against.
+
+## Added in kit 18
+
+* After every update grep the journal for updater.*_failed / *_skipped and require the CLI output to mention each (hermes_plugin_mirror_failed was silent, #3852).
+* Diff /var/lib/hal0/.hermes/plugins/model-providers/hal0 against installer/agents/hermes/plugins/hal0-provider and assert identical and hal0-owned.
+* Capture `hal0 doctor` and `hal0 doctor perms` in the BEFORE snapshot to attribute post-update drift rows.
+* Record per-bank fact_count before / after / after 30 min to separate consolidation drift from loss.
+* Make the 3x restart-with-stream check a script (stop duration from systemd timestamps; bc is not installed).
+
+## Added in kit 19
+
+* The before snapshot ALSO includes `hal0 profile list --json`, `GET /api/slots` JSON (for `actual_image`), `GET /api/capabilities`, bank counts, `hal0 doctor` and `hal0 doctor perms`; write them to `/var/tmp/upgrade-lane/before-*` (#3882, moved here from post-upgrade checks 22/28).
+* After any rollback compare `readlink /usr/lib/hal0/current`, `/var/lib/hal0/hal0.previous` and the running hal0-api version and require consistency even when the CLI exits non-zero (half-applied rollback, #3874).
+* After every update and rollback grep the journal for `updater.privileged_crashed` and `has no attribute`: a missing symbol means new activate code is running against an older tree.
+* Run the rollback ONCE. A rollback to a pre-#3870 tree is expected to hit #3874 until fixed; record it `known`, roll forward with `hal0 update --yes`, and do not retry.
+* On a box with a root-owned Hermes plugin dir run the update twice (old to new, then roll-forward) to separate the old build's silent behaviour from the new tree's reporting; the second must list `hermes_plugin_mirror_failed` and exit 2.
+* Time `sudo hal0 agent reprovision hermes` (about 5 min on ct150, silent over ssh) and report that it prints no progress.

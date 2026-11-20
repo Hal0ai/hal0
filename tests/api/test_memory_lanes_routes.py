@@ -372,7 +372,6 @@ def test_agents_console_url_enabled(client: TestClient, recorder: _Recorder, mon
     class _Console:
         enabled = True
         port = 9999
-        url = None
 
     class _MemCfg:
         public_url = None
@@ -390,6 +389,26 @@ def test_agents_console_url_enabled(client: TestClient, recorder: _Recorder, mon
     assert body["console_url"].endswith(":9999")
 
 
+def test_agents_console_url_ignores_url_key(
+    client: TestClient, recorder: _Recorder, monkeypatch
+) -> None:
+    """``[memory.console]`` has no ``url`` key: a stray one is dropped at load and
+    the console link is always derived (ADR-0058 decision 10)."""
+    from hal0.api.routes import memory_lanes as mod
+    from hal0.config.schema import Hal0Config
+
+    cfg = Hal0Config.model_validate(
+        {"memory": {"console": {"enabled": True, "url": "https://console.example"}}}
+    )
+    assert not hasattr(cfg.memory.console, "url")
+    monkeypatch.setattr(mod, "load_hal0_config", lambda: cfg)
+    recorder.respond("GET", "/v1/default/banks", 200, {"banks": []})
+    r = client.get("/api/memory/agents")
+    assert r.status_code == 200
+    assert r.json()["console_url"] != "https://console.example"
+    assert r.json()["console_url"].endswith(":9999")
+
+
 def test_models_shape(client: TestClient) -> None:
     r = client.get("/api/memory/models")
     assert r.status_code == 200
@@ -397,6 +416,23 @@ def test_models_shape(client: TestClient) -> None:
     assert body["embeddings"]["provider"] == "local"
     assert body["decision"]["model"] == "hs-decide-1-flash"
     assert body["decision"]["reachable"] is False
+    assert body["decision"]["installed"] is False
+
+
+@pytest.mark.parametrize(("installed", "active"), [(True, True), (True, False), (False, None)])
+def test_models_decision_says_installed_and_unit_active(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, installed: bool, active: bool | None
+) -> None:
+    """#3757: the dashboard reads these to say "install it" vs "it is down"."""
+    from hal0.memory import decision_component
+
+    state = "managed" if installed else "not-installed"
+    monkeypatch.setattr(decision_component, "install_state", lambda: (state, None))
+    monkeypatch.setattr(decision_component, "unit_active", lambda: active)
+    body = client.get("/api/memory/models").json()["decision"]
+    assert body["installed"] is installed and body["unit_active"] is active
+    assert body["install_state"] == state
+    assert {"enabled", "provider", "model", "reachable"} <= set(body)
 
 
 # ── /api/memory/models: recorded against configured embedder (#3518) ─────────
@@ -568,3 +604,31 @@ def test_models_reports_the_reranker_caps_and_remote_endpoint(
     assert rr["timeout_s"] is None
     assert rr["local_max_concurrent"] is None
     assert rr["max_candidates_low"] is None
+
+
+def test_lanes_report_what_the_engine_is_given(
+    client: TestClient, recorder: _Recorder, monkeypatch
+) -> None:
+    """#3758: graph 4 on a slot with --parallel 2 is 2 (consolidation 1); an
+    explicit lanes value of 6 under graph 2 is held to 2 for every op."""
+    from hal0.api.routes import memory_lanes as mod
+    from hal0.config.schema import Hal0Config
+    from hal0.memory import extraction_env
+
+    monkeypatch.setattr(extraction_env, "extraction_slot_parallel", lambda graph, **kw: 2)
+
+    cfg = Hal0Config(memory={"graph": {"extraction_max_concurrent": 4}})
+    monkeypatch.setattr(mod, "load_hal0_config", lambda: cfg)
+    llm = client.get("/api/memory/lanes").json()["llm"]
+    assert llm["max_concurrent"] == 2
+    assert llm["per_op"]["reflect"]["max_concurrent"] == 2
+    assert llm["per_op"]["consolidation"]["max_concurrent"] == 1
+
+    cfg = Hal0Config(
+        memory={"graph": {"extraction_max_concurrent": 2}, "lanes": {"llm_max_concurrent": 6}}
+    )
+    monkeypatch.setattr(mod, "load_hal0_config", lambda: cfg)
+    monkeypatch.setattr(extraction_env, "extraction_slot_parallel", lambda graph, **kw: None)
+    llm = client.get("/api/memory/lanes").json()["llm"]
+    assert llm["max_concurrent"] == 2
+    assert {op["max_concurrent"] for op in llm["per_op"].values()} == {2}

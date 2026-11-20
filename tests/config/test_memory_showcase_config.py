@@ -23,11 +23,12 @@ def test_memory_config_defaults_include_showcase_sections() -> None:
     assert cfg.models.reranker_bucket_batching is True
 
     assert cfg.decision.enabled is True
-    assert cfg.decision.provider == "local"
+    # #3757: off until the opt-in memory-decision component is installed.
+    assert cfg.decision.provider == "off"
     assert cfg.decision.model == "hs-decide-1-flash"
     assert cfg.decision.port == 9178
 
-    assert cfg.lanes.llm_max_concurrent == 1
+    assert cfg.lanes.llm_max_concurrent is None  # follows [memory.graph] (#3758)
     for op in ("retain", "consolidation", "reflect", "mental_model_refresh"):
         lane = getattr(cfg.lanes, op)
         assert lane.max_concurrent is None  # falls back to the global cap
@@ -59,3 +60,24 @@ def test_memory_config_round_trips_through_model_dump() -> None:
     dumped = cfg.model_dump(mode="json")
     restored = MemoryConfig(**dumped)
     assert restored == cfg
+
+
+def test_reflect_wall_timeout_default_and_bounds() -> None:
+    assert MemoryConfig().lanes.reflect.wall_timeout_s is None  # resolves to 1800 at render
+    assert (
+        MemoryConfig(lanes={"reflect": {"wall_timeout_s": 7200}}).lanes.reflect.wall_timeout_s
+        == 7200
+    )
+    for bad in (0, 59, 86401):
+        with pytest.raises(ValidationError):
+            MemoryConfig(lanes={"reflect": {"wall_timeout_s": bad}})
+
+
+def test_consolidation_batch_size_default_and_bounds() -> None:
+    assert MemoryConfig().lanes.consolidation.batch_size is None  # resolves to 4 at render
+    assert (
+        MemoryConfig(lanes={"consolidation": {"batch_size": 8}}).lanes.consolidation.batch_size == 8
+    )
+    for bad in (0, 33):
+        with pytest.raises(ValidationError):
+            MemoryConfig(lanes={"consolidation": {"batch_size": bad}})

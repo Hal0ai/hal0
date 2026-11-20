@@ -121,7 +121,7 @@ read the tool_result payload and confirm it actually answers what was asked.
 
 19. **Brain concurrency.** Assert the brain slot's own `/props` `total_slots` is 1 or that per-sequence context is >= 16k (#2714); the existing #2692 check covers only the utility profile. Announce first if you drive 4 concurrent 16k prompts: it kills other lanes' brain requests.
 
-20. **Memory path keys.** The steward's `memory_add` fact lives in bank `shared` with tags `visibility:private` and `agent:hermes__hal0-brain` (no bank `private:hermes__hal0-brain`); assert it is findable by `memory_search` under that scheme. Plain `/api/memory/search` does not return it.
+20. **Memory path keys.** Since #3168 the steward's `memory_add` fact is SHARED: bank `hal0:shared`, tags `agent:hermes__hal0-brain` and `scope:global`, no `visibility:private` unless `profiles/hal0-brain/config.yaml` sets `hal0: {memory_private: true}`. Assert it is findable by `memory_search` and that `hal0:private` gained nothing.
 
 21. **Reads must not write.** After any recall turn ('what is my X'), diff the memory bank fact/doc count before and after; a write on a read intent is a finding.
 
@@ -129,9 +129,38 @@ read the tool_result payload and confirm it actually answers what was asked.
 
 23. **Queue depth at entry, and first-frame latency under consolidation.** Snapshot `hal0 memory ops list` pending/processing at lane entry (backlog from earlier stages made 3 of the first 4 turns take 94-283 s in 20261016003929; run this lane before anything wakes hermes or Hindsight where you can). Record first-frame latency while a consolidation runs: it must stay below `completion_timeout_s` (300 s) and the turn must end in `done` (188 s first frames were seen).
 
-24. **Clean up what the steward stored.** Delete the facts `memory_add` created through the shipped API, as the owner: `POST /api/memory/delete` with `X-hal0-Agent: hermes__hal0-brain` and the WORLD unit id (anonymous delete returns `{deleted:0}` by design, `memory-delete-private-withheld-silently`; an observation id returns 0 even as owner, #2747 filed). Otherwise the memory lane inherits the rows.
+24. **Clean up what the steward stored.** Delete the facts `memory_add` created through the shipped API, as the owner: `POST /api/memory/delete` with body `{ids:[...]}` (a plain `id` field is rejected) and the WORLD unit id. Steward facts are shared, so an anonymous delete returns `{deleted:1}`; only legacy `visibility:private` facts need the owner identity, which is `X-hal0-Agent` PLUS `X-hal0-Agent-Key`. A bare `X-hal0-Agent: hermes__hal0-brain` gets 403 `bridge.client_name_reserved` (`memory-reserved-agent-header-needs-key`). An observation id returns 0 even as owner (#2747, fixed on 1.8.0 probes). Otherwise the memory lane inherits the rows.
+
+25. **Turn latency probe.** Record first-frame and total time for one trivial slot question and one tool-heavy one on an iGPU box; on 1.8.0 the first turn took 83 s to first frame, later ones 7 to 25 s. A cold or first-turn penalty above that, with a quiet queue, is a finding.
+
+26. **Wrong-typed messages, read to the end.** Send `messages` as 123, 1.5, true, "x", {}, null and [123]; read the WHOLE stream, so an empty-turn coercion (runs a full live turn) is told apart from the old #2737 0-byte close; grep `dispatch.decision` per request.
+
+27. **Running and offline in one reply.** The steward must not call the same slot both 'running' and 'offline' (embed: 'running on port 8083' beside 'Status: offline'); 2 of 3 contradicting replies is a finding.
+
+28. **Backend claims.** Compare any ROCm/Vulkan claim in a steward reply with `/api/slots/<n>.backend` of the serving slot; a `system_info`-sourced 'ROCm serves models' on a kfd-less box is #3811 item 2, known (`system-info-backends-is-runner-catalogue`).
+
+29. **Searchable-yet poll.** Check 9's recall must assert two things separately: an honest not-found while the retain is queued, and found once `memory_operation_get` is terminal. On 1.8.0 the retain sat pending ~14 min behind a hal0:private consolidation.
+30. **Wrong-tool pick.** The steward must not pass a memory document id to the board `get_task` tool (seen once after an honest 'no relevant facts': board 404, not shown to the user as fact). Minor; note only.
+31. **Quiet-queue gate for latency.** Record `hal0 memory ops list --json` active counts at entry and run the latency checks only when quiet; a consolidation inflated first-frame to 127 s and total to 264 s against `completion_timeout_s`.
+32. **Concurrent actors.** Record up front that a memory-lane `POST /api/memory/add` and a regression-probe `DELETE /api/slots/zzrg*?force=true` can hit the same box, so bank-count and slot-list before/after checks cannot be clean.
 
 ## Leave behind
 
 Brain healthy. Note any slot you loaded for the tool-model test, and restore `brain_chat` config
 values you changed.
+
+## Added in kit 18
+
+* Verify each claimed slot TOML [model] against the file, not against /api/slots model_id (a handoff string said tts showed kokoro-v1 and was wrong).
+* list_slots / slot_by_name return a stale `models` array (last-loaded) for model-less slots while model_id is null; the steward then says 'has a model assigned'. Assert `models` is empty when [model].default is empty.
+* Cancelling a pending steward memory_add needs DELETE /api/memory/banks/{bank}/operations/{id} on both the batch_retain parent and the retain child; POST .../delete is 405 and the CLI has no cancel.
+* Wrong-typed `messages` fast probe: cut the client at ~4 s and require an error frame or an open stream, not a 0-byte close.
+* Gate latency checks on `hal0 memory ops list` showing zero processing/pending ops.
+* Ask the steward 'Call system_info and tell me which GPU backend serves models' 3x on a no-kfd box; rocm 3/3 is #3856, a plain question must give vulkan.
+
+## Added in kit 19
+
+* Gate every latency check on `hal0 memory ops list --json` showing zero pending/processing and record when the queue went quiet (first frame went 44-112 s to 2 s once Hindsight drained).
+* Read brain streams with a client that waits to `done` with a 330 s socket timeout, run in the background; an 8 s curl yields 0 bytes on a busy brain and looks like #2737 without being it.
+* Kill background scripts by task id, never `pkill -f` a script name from the shell that launched it.
+* Ask the steward "does slot X have a model assigned?" for an unbound slot after a prior load; a wrong yes is #3879 (known).

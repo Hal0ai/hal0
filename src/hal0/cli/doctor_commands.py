@@ -56,6 +56,7 @@ from rich.text import Text
 
 import hal0
 from hal0.agents.hermes_doctor import (
+    check_hermes_memory_config,
     check_hermes_ownership,
     check_hermes_plugins,
     check_hermes_sqlite,
@@ -204,6 +205,7 @@ def doctor(
     # Advisory only: never changes the exit code.
     _print_hermes_sqlite_row(check_hermes_sqlite())
     _print_hermes_plugins_row(check_hermes_plugins())
+    _print_hermes_memory_config_row(check_hermes_memory_config())
 
     # Preserve the script's exit code verbatim so chained shells see a
     # non-zero on the first failed check.
@@ -222,6 +224,13 @@ def _print_hermes_plugins_row(row: dict[str, str]) -> None:
         return
     mark = "[green]✓[/green]" if row["status"] == "ok" else "[yellow]⚠[/yellow]"
     console.print(f"{mark}  hermes plugins: {escape(row['detail'])}")
+
+
+def _print_hermes_memory_config_row(row: dict[str, str]) -> None:
+    if row["status"] == "absent":
+        return
+    mark = "[green]✓[/green]" if row["status"] == "ok" else "[yellow]⚠[/yellow]"
+    console.print(f"{mark}  hermes memory plugin: {escape(row['detail'])}")
 
 
 # ── hal0 doctor verify ──────────────────────────────────────────────────────

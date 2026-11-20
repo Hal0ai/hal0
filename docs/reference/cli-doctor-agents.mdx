@@ -64,7 +64,7 @@ Linger`) and warns when that does not match whether the Hermes gateway is instal
 
 `hal0 memory embedder switch <model>` re-embeds the store on another model; the warnings for a mismatch and for a mixed store name the exact line (a dry run until `--apply` is added). Setting `[memory.models]` to the recorded embedder also clears a mismatch, without re-embedding anything. See [Change the embedding model](/docs/guides/enable-memory#change-the-embedding-model).
 
-`memory_decision_lane` ("Memory decision lane") is advisory. With `[memory.decision]` enabled it passes when the decision server answers `/health`, and warns when it does not, or when `provider = "local"` but the `hal0-hs-decide` unit is not installed. The installer does not lay that unit down yet, so on most boxes the memory engine runs without a decision model and sends decision-gated calls to its LLM lane; hal0 leaves the decision settings out of the engine's environment until the unit exists. Set `[memory.decision].provider = "off"` to silence the row. The hosted `hindsight-cloud` provider is not probed.
+`memory_decision_lane` ("Memory decision lane") is advisory and reads one of four states: the lane is off (pass; `provider = "off"` is the default); on and answering `/health` (pass); `provider = "local"` but the opt-in `memory-decision` component is not installed (warn, naming `hal0 memory decision install`, or `hal0 memory decision disable` to turn the lane off); installed but not answering (warn, naming `systemctl status hal0-hs-decide`). hal0 leaves the decision settings out of the engine's environment until the unit exists, so a missing server costs LLM calls, not errors. The hosted `hindsight-cloud` provider is not probed.
 
 `memory_layout` ("Memory layout") reads `/var/lib/hal0/state/memory-layout.json`, the record of which banks the memory store is laid out in ([Memory banks](/docs/concepts/memory-banks)), and writes nothing. It passes with the layout and, for an old layout, its platform bank; it passes with a note when there is no record yet (the next update or hal0-api start writes it). It warns, with hal0-api's reason, when there is no record and hal0-api reports the layout undecided (`layout_undecided` in `GET /api/memory/engine`): memory writes are refused until the cause is fixed. It fails when the file exists and cannot be read: hal0-api then serves no memory bank, and the detail names the file and the remedy (restore it, or remove it to have the layout decided again, then restart hal0-api).
 
@@ -104,7 +104,24 @@ disambiguation.
 | `upstream update <name>` | `name` | partial update — `--url`/`--base-url`, `--auth-style` (`bearer\|anthropic\|header\|none`), `--auth-header`, `--auth-env`, `--timeout`, `--advertise-models`/`--hide-models`, `--enabled`/`--disabled`, `--model` (repeatable), `--include` (repeatable), `--exclude` (repeatable), `--clear-filters`. No `--catalog`/`--api-key` — use `upstream credentials set` to rotate the key. |
 | `upstream delete <name>` | `name` | `--force`/`-f` |
 | `upstream test <name>` | `name` | — |
+| `upstream models <name>` | `name` | `--json` |
+| `upstream enable <name> <model>` | `name`, `model` (the provider's own id, `/` and `:` allowed) | — |
+| `upstream disable <name> <model>` | `name`, `model` | — |
+| `upstream refresh <name>` | `name` | `--json` |
+| `upstream probe` | — | `--catalog-id`/`-c` or `--url`/`--base-url` (one is required), `--auth-style`, `--auth-header`, `--key-env`, `--json` |
 | `upstream credentials set <name>` | `name` | `--key` (required, prompts securely if omitted), `--env-var` |
+
+`models` prints one row per model (id, enabled, type, context, prices, whether the provider
+lists it) or the raw listing with `--json`; a `warning` from the server is printed above the
+table. `enable` and `disable` switch one row on a curated upstream; `enable` on a model that
+only discovery lists adds its row. `refresh` refetches the provider's list; on a curated
+upstream it stores each newly offered model as a switched-off row, and on an
+upstream that has no per-model rows yet it converts it (see
+[Providers, profiles & devices](/docs/reference/providers-profiles-devices/)). `probe` checks
+a base URL and key and lists the provider's models without saving anything; the key is read
+only from the environment variable named by `--key-env`, never from an argument, is never
+printed, and the command stops with an error when that variable is unset. `upstream create`
+sends no `models`, so a new upstream starts uncurated and converts on its first `refresh`.
 
 <Aside type="note">
 `google_query` is a retired `--auth-style`. The valid values are `bearer`, `anthropic`,

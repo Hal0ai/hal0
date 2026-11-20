@@ -1,5 +1,5 @@
 /**
- * models-v3 — `#models` route renders the 4-tab catalog (Inference / Image / Upstream /
+ * models-v3 — `#models` route renders the 4-tab catalog (Inference / Image / Providers /
  * Profiles) with simplified OR filter chips, pagination, and download-icon
  * installed indicators. (runner-catalogue-v2 IA: the Runner Images tab moved
  * to Slots ▸ Runner Images — see runner-images-slots-v3.spec.ts — and
@@ -23,12 +23,12 @@ test.describe('Models v3 (/models)', () => {
     await expect(page.locator('.mdl-list')).toBeVisible()
   })
 
-  test('five tabs: Inference, Image/ComfyUI, Upstream, FLM, Profiles', async ({ page }) => {
+  test('five tabs: Inference, Image/ComfyUI, Providers, FLM, Profiles', async ({ page }) => {
     await page.goto('/#models')
     await expect(page.locator('.slot-tab[role="tab"]')).toHaveCount(5)
     await expect(page.locator('.slot-tab:has-text("Inference Models")')).toBeVisible()
     await expect(page.locator('.slot-tab:has-text("Image / ComfyUI")')).toBeVisible()
-    await expect(page.locator('.slot-tab:has-text("Upstream Models")')).toBeVisible()
+    await expect(page.locator('.slot-tab:has-text("Providers")')).toBeVisible()
     await expect(page.locator('[data-testid="models-tab-flm"]')).toBeVisible()
     // Profiles (runner-catalogue-v2 IA) — moved here from Slots; Runner
     // Images left for Slots ▸ Runner Images.

@@ -49,7 +49,7 @@ from hal0.capabilities.config import (
     load_capabilities_config,
     save_capabilities_config,
 )
-from hal0.capabilities.profile_fit import profile_name_for_fit
+from hal0.capabilities.profile_fit import fit_profile_name, profile_name_for_fit
 from hal0.comfyui.catalog import install_route
 from hal0.config import paths
 from hal0.config.loader import load_slot_config, write_toml_atomic
@@ -81,23 +81,43 @@ _CHILD_TO_SLOT: dict[tuple[str, str], str] = {
 }
 
 
-def _engine_provider_for_tts(device: str, provider: str) -> str:
-    """Provider label for a voice.tts selection (#2749).
+def _engine_provider_for(slot_type: str, device: str, provider: str) -> str:
+    """Provider label of the engine a capability slot really runs (#2749, #3860).
 
-    A tts selection's provider is never an input: ``profile_name_for_fit``
-    resolves the engine from the device alone (cpu -> kokoro, gpu-rocm ->
-    qwen3tts) and the container dispatch ignores the stored value. So the
-    label is always re-derived from the device; keeping a stored value would
-    leave the previous engine's name behind after a device switch. Falls back
-    to ``provider`` only when no engine resolves.
+    The label is never an input: the shared type-implied profile rule
+    (:func:`hal0.slots.profile_adopt.type_implied_profile`, which routes
+    through ``profile_name_for_fit``) resolves the engine from the device
+    alone (tts cpu -> kokoro, gpu-rocm -> qwen3tts; stt cpu -> moonshine,
+    npu -> flm), and the container dispatch ignores the stored value. So
+    the label is re-derived from the device; keeping a stored value would
+    leave a stale engine's name behind (a device switch, a ``llama-server``
+    fallback). Falls back to ``provider`` only when no engine resolves.
     """
     from hal0.slots.config_write import _cfg_effective_provider
 
-    cfg: dict[str, Any] = {"type": "tts", "device": device}
+    cfg: dict[str, Any] = {"type": slot_type, "device": device}
     profile = type_implied_profile(cfg)
     if profile:
         cfg["profile"] = profile
     return _cfg_effective_provider(cfg) or provider
+
+
+def _engine_provider_for_tts(device: str, provider: str) -> str:
+    """Provider label for a voice.tts selection (#2749)."""
+    return _engine_provider_for("tts", device, provider)
+
+
+def _engine_provider_for_stt(device: str, provider: str) -> str:
+    """Provider label for a voice.stt selection (#3860).
+
+    Unlike tts there is no profile-less fallback engine: when the shared rule
+    resolves nothing for ``device`` (unset device, or a GPU, where hal0 ships
+    no STT engine) the stored ``provider`` is kept untouched, so the apply
+    path's GPU rejection and the #2691 guard still see what the caller chose.
+    """
+    if type_implied_profile({"type": "transcription", "device": device}) is None:
+        return provider
+    return _engine_provider_for("transcription", device, provider)
 
 
 # Inverse for status surfacing ("which child is this slot serving").
@@ -318,6 +338,12 @@ class CapabilityOrchestrator:
                     selection.provider = _engine_provider_for_tts(
                         selection.device, selection.provider
                     )
+                elif child == "stt":
+                    # Heals a ``llama-server`` label an earlier release wrote
+                    # into stt.toml (#3860) instead of seeding it forward.
+                    selection.provider = _engine_provider_for_stt(
+                        selection.device, selection.provider
+                    )
                 selection.model = slot_cfg.model.default or ""
                 selection.enabled = bool(selection.model)
                 cfg.selections[slot][child] = selection
@@ -342,6 +368,11 @@ class CapabilityOrchestrator:
             # The tts provider is derived from the device, never stored as a
             # pick; this also heals pre-#2749 ``llama-server`` seeds.
             selection.provider = _engine_provider_for_tts(selection.device, selection.provider)
+        elif child == "stt":
+            # Same for stt (#3860): heals a capabilities.toml already seeded
+            # with ``llama-server``. A provider the CALLER sends is merged in
+            # after this read, so the #2691 guard still rejects it.
+            selection.provider = _engine_provider_for_stt(selection.device, selection.provider)
         return selection
 
     # ── public reads ─────────────────────────────────────────────────────────
@@ -858,6 +889,18 @@ class CapabilityOrchestrator:
         match = next((row for row in rows if row["id"] == model_id), None)
         if match is None:
             if not is_image and self._registry is not None and self._registry.has(model_id):
+                # Provenance is permissive, type is not: a registry-only id
+                # still has to be the right model class for this child
+                # (#3834). The registry entry's own capabilities (e.g. "asr")
+                # classify custom-named models, as a catalog row's do. Fit
+                # runs first so a wrong-class model gets that answer rather
+                # than "pull it".
+                entry_caps: Any = None
+                try:
+                    entry_caps = getattr(self._registry.get(model_id), "capabilities", None)
+                except Exception:
+                    entry_caps = None
+                self._check_model_fit(slot, child, capability, model_id, backend_id, entry_caps)
                 if require_downloaded and backend_id != "npu":
                     self._require_registry_weights_present(slot, child, model_id, backend_id)
                 return
@@ -900,6 +943,20 @@ class CapabilityOrchestrator:
                 )
         if is_image:
             return
+        self._check_model_fit(
+            slot, child, capability, model_id, backend_id, match.get("capabilities")
+        )
+
+    def _check_model_fit(
+        self,
+        slot: str,
+        child: str,
+        capability: str,
+        model_id: str,
+        backend_id: str,
+        capabilities: Any,
+    ) -> None:
+        """Refuse a model whose class/profile cannot serve this child."""
         slot_type = _CAPABILITY_TO_SLOT_TYPE.get(capability)
         if slot_type is None:
             return
@@ -917,7 +974,7 @@ class CapabilityOrchestrator:
             device=backend_id,
             profile=profile,
             registry=registry_for_fit,
-            capabilities=match.get("capabilities"),
+            capabilities=capabilities,
         )
         if not fit.allowed:
             details: dict[str, Any] = {
@@ -1030,9 +1087,10 @@ class CapabilityOrchestrator:
         existing device/capability already identifies a runtime family, and
         avoid treating generic CPU as kokoro except for TTS. The rule is
         shared with the picker via
-        :func:`hal0.capabilities.profile_fit.profile_name_for_fit`.
+        :func:`hal0.capabilities.profile_fit.fit_profile_name`, which also
+        carries the tts runner veto the slot-create path applies (#3811).
         """
-        profile_name = profile_name_for_fit(capability, device)
+        profile_name = fit_profile_name(capability, device)
         if not profile_name:
             return None
         try:
@@ -1115,6 +1173,20 @@ class CapabilityOrchestrator:
             engine_profile = type_implied_profile(cfg_dict)
             if engine_profile is not None:
                 cfg_dict["profile"] = engine_profile
+            # The provider label is the engine the device picked (cpu stt ->
+            # moonshine), never the ``llama-server`` fallback (#3860): a slot
+            # TOML carrying ``llama-server`` beside ``profile = "moonshine"``
+            # poisons a later capabilities.toml reseed, after which every stt
+            # apply 400s ``capability.no_engine_for_provider``.
+            if child == "stt":
+                cfg_dict["provider"] = _engine_provider_for_stt(slot_device, provider)
+        # Same rule for the other single-engine children: an empty selection
+        # provider must not stamp ``llama-server`` beside a kokoro / comfyui
+        # profile. embed/rerank really are llama-server, so they keep the label.
+        if child in ("tts", "img"):
+            cfg_dict["provider"] = _engine_provider_for(
+                str(cfg_dict.get("type") or ""), str(cfg_dict["device"]), provider
+            )
         try:
             await self._slot_manager.create(slot_name, cfg_dict)
         except Exception as exc:

@@ -8,6 +8,12 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from hal0.api.routes.providers import (
+    _check_auth_value_env,
+    _reserved_env_name_reason,
+    preset_credential_env,
+)
+from hal0.upstreams.presets import load_presets
 from hal0.upstreams.registry import Upstream
 
 
@@ -343,6 +349,24 @@ def test_create_upstream_from_catalog_prefills(client: TestClient, monkeypatch: 
     assert body["auth_value_env"] == "OPENROUTER_API_KEY"
     # Key not yet written → hint chains to the credentials route.
     assert "credentials" in body.get("hint", "")
+
+
+def test_create_upstream_from_hal0_peer_preset_3801(client: TestClient) -> None:
+    _seed_upstreams(client)
+    response = client.post(
+        "/api/upstreams",
+        json={"name": "peer", "catalog_id": "hal0_peer", "url": "http://peer.example/v1"},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["auth_value_env"] == "PROVIDER_HAL0_PEER_API_KEY"
+
+
+@pytest.mark.parametrize("catalog_id", sorted(load_presets()))
+def test_every_shipped_preset_derives_an_accepted_credential_name(catalog_id: str) -> None:
+    """No shipped preset may derive a name the create path itself refuses (#3801)."""
+    env = preset_credential_env(catalog_id)
+    assert _reserved_env_name_reason(env) is None, env
+    _check_auth_value_env(env, name=catalog_id)
 
 
 def test_create_upstream_explicit_fields_beat_catalog(client: TestClient) -> None:
@@ -718,3 +742,32 @@ def test_patch_upstream_refuses_a_reserved_auth_value_env(client: TestClient) ->
     assert response.status_code == 400, response.text
     assert response.json()["error"]["code"] == "upstream.invalid"
     assert client.app.state.upstreams.get("custom").auth_value_env == "CUSTOM_KEY"
+
+
+def test_patch_keeps_the_discovery_entry_unless_the_endpoint_changes(client: TestClient) -> None:
+    from hal0.upstreams.discovery import DiscoveredModel
+
+    _seed_upstreams(client)
+    _seed_openrouter_in_toml(client)
+    discovery = client.app.state.upstream_discovery
+    listing = [DiscoveredModel(id="m", type="chat", type_source="guess")]
+
+    discovery.put("openrouter", listing)
+    for body in ({"advertise_models": False}, {"timeout_seconds": 30.0}, {"enabled": True}):
+        assert client.patch("/api/upstreams/openrouter", json=body).status_code == 200
+        assert discovery.get("openrouter") is not None, body
+
+    # Re-sending the current url is not a change.
+    url = client.app.state.upstreams.get("openrouter").url
+    assert client.patch("/api/upstreams/openrouter", json={"url": url}).status_code == 200
+    assert discovery.get("openrouter") is not None
+
+    for body in (
+        {"url": "https://other.example.invalid/v1"},
+        {"auth_value_env": "OTHER_EXAMPLE_KEY"},
+        {"auth_style": "header", "auth_header": "x-api-key"},
+    ):
+        discovery.put("openrouter", listing)
+        resp = client.patch("/api/upstreams/openrouter", json=body)
+        assert resp.status_code == 200, resp.text
+        assert discovery.get("openrouter") is None, body

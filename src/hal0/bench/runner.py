@@ -311,8 +311,10 @@ _SLOTS_BUSY_STATES = {"serving", "warming", "running", "loaded", "active"}
 def _traffic_in_flight(api: str, quiet_min: int = 10) -> bool:
     """True if any tokens moved in the last ``quiet_min`` minutes — i.e. a request
     is (or just was) in flight. Reads the REAL throughput route
-    ``/api/stats/throughput/history?window_s=`` (samples are emitted only for
-    non-empty bins; idle ⇔ no samples / all total_tps==0). A failure to read is
+    ``/api/stats/throughput/history?window_s=`` (samples cover completed bins
+    only, idle bins read ``total_tps`` 0; the still-open interval is reported
+    as ``pending_tokens``, so idle ⇔ all total_tps==0 and no pending tokens).
+    A failure to read is
     treated as "in flight" (fail-safe: never measure over live traffic)."""
     data = _get_json(api, f"/api/stats/throughput/history?window_s={quiet_min * 60}")
     if data is None:
@@ -327,6 +329,8 @@ def _traffic_in_flight(api: str, quiet_min: int = 10) -> bool:
         )
         return True
     samples = data.get("samples") or []
+    if float(data.get("pending_tokens") or 0) > 0:
+        return True
     return any(float(s.get("total_tps") or 0) > 0 for s in samples)
 
 

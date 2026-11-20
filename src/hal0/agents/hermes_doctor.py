@@ -129,6 +129,128 @@ def check_hermes_plugins(
     return {"status": "ok", "detail": "plugin trees match the shipped source"}
 
 
+#: Runs inside the Hermes interpreter: load the shipped hal0-memory plugin and
+#: have it read the default profile's config.yaml the way it does at runtime.
+#: Prints one word and never the key.
+_MEMORY_CONFIG_PROBE = """
+import importlib.util, sys
+plugin_dir, config, agent = sys.argv[1:4]
+try:
+    with open(config, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    print("absent"); raise SystemExit(0)
+except OSError:
+    print("unreadable"); raise SystemExit(0)
+except UnicodeDecodeError:
+    print("noparse UnicodeDecodeError"); raise SystemExit(0)
+spec = importlib.util.spec_from_file_location(
+    "hal0_memory_probe", plugin_dir + "/__init__.py", submodule_search_locations=[plugin_dir]
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules["hal0_memory_probe"] = module
+spec.loader.exec_module(module)
+from hal0_memory_probe import provider
+try:
+    data = provider._load_yaml(text)
+except Exception as exc:
+    print("noparse", type(exc).__name__); raise SystemExit(0)
+if data is not None and not isinstance(data, dict):
+    print("noparse NotAMapping"); raise SystemExit(0)
+if provider._read_agent_key(config, agent):
+    print("key"); raise SystemExit(0)
+memory = data.get("memory") if isinstance(data, dict) else None
+uses = isinstance(memory, dict) and memory.get("provider") == "hal0-memory"
+print("nokey" if uses else "unused")
+"""
+
+
+def check_hermes_memory_config(
+    venv: Path | None = None,
+    hermes_home: Path | None = None,
+    src_root: Path | None = None,
+    *,
+    run: Callable[..., Any] = subprocess.run,
+) -> dict[str, str]:
+    """Whether the hal0-memory plugin can read its identity key inside the Hermes venv (#3803).
+
+    The plugin's readers swallow every failure, so a parser the Hermes venv
+    lacks leaves memory dead with no other sign. This runs the shipped plugin's
+    own readers under the live Hermes interpreter against the default profile's
+    ``config.yaml``. ``status`` is ``ok``, ``warn`` (the plugin cannot parse the
+    file, or the profile uses the plugin and no key is recorded, or the probe
+    failed), ``unreadable`` (this user cannot read HERMES_HOME) or ``absent``
+    (no Hermes venv, shipped plugin or config.yaml).
+    """
+    from hal0.agents.hermes_provision import DEFAULT_PROFILE_AGENT_ID, REPO_ROOT_FOR_INSTALLER
+
+    venv = venv if venv is not None else HERMES_VENV_PATH
+    home = hermes_home if hermes_home is not None else _HERMES_HOME
+    src = (
+        src_root
+        if src_root is not None
+        else REPO_ROOT_FOR_INSTALLER / "installer" / "agents" / "hermes" / "plugins"
+    )
+    python = venv / "bin" / "python"
+    plugin_dir = src / "hal0-memory"
+    try:
+        present = python.exists() and plugin_dir.is_dir()
+    except OSError as exc:
+        # Advisory only: never abort `hal0 doctor` on a path this user cannot stat.
+        return {
+            "status": "unreadable",
+            "detail": f"cannot check the Hermes venv or plugin ({exc.strerror or exc})",
+        }
+    if not present:
+        return {"status": "absent", "detail": "no Hermes venv or shipped hal0-memory plugin"}
+    try:
+        proc = run(
+            [
+                str(python),
+                "-I",
+                "-c",
+                _MEMORY_CONFIG_PROBE,
+                str(plugin_dir),
+                str(home / "config.yaml"),
+                DEFAULT_PROFILE_AGENT_ID,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"status": "warn", "detail": f"could not run {python}: {exc}"}
+    words = (getattr(proc, "stdout", "") or "").split()
+    verdict = words[0] if getattr(proc, "returncode", 1) == 0 and words else ""
+    if verdict == "absent":
+        return {"status": "absent", "detail": "no Hermes config.yaml"}
+    if verdict == "unreadable":
+        return {"status": "unreadable", "detail": "cannot read Hermes config.yaml; run with sudo"}
+    if verdict == "key":
+        return {"status": "ok", "detail": "the memory plugin reads its identity key"}
+    if verdict == "unused":
+        return {"status": "ok", "detail": "the memory plugin parses config.yaml (not the provider)"}
+    if verdict == "nokey":
+        return {
+            "status": "warn",
+            "detail": (
+                "config.yaml has no identity key for the memory plugin, so hal0 refuses its "
+                "requests. Run `sudo hal0 agent reprovision hermes --repair`."
+            ),
+        }
+    if verdict == "noparse":
+        cause = words[1] if len(words) > 1 else "unknown error"
+        return {
+            "status": "warn",
+            "detail": (
+                f"the memory plugin cannot parse config.yaml in the Hermes venv ({cause}), "
+                "so it sends no identity key and treats every profile as private"
+            ),
+        }
+    return {"status": "warn", "detail": f"could not load the memory plugin with {python}"}
+
+
 # ── hal0 doctor perms — Hermes ownership drift (#843) ─────────────────────────
 #
 # Read-only audit for the root-clobber regression: when root runs Hermes it

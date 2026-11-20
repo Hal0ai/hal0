@@ -322,6 +322,7 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
         "services": [],
     },
     "memory.lanes.consolidation.strict_schema": {"apply_class": "immediate", "services": []},
+    "memory.lanes.consolidation.batch_size": {"apply_class": "immediate", "services": []},
     "memory.lanes.consolidation.max_completion_tokens": {
         "apply_class": "immediate",
         "services": [],
@@ -332,6 +333,7 @@ _HAL0_REGISTRY: dict[str, ApplyPlanEntry] = {
     "memory.lanes.reflect.reasoning_effort": {"apply_class": "immediate", "services": []},
     "memory.lanes.reflect.strict_schema": {"apply_class": "immediate", "services": []},
     "memory.lanes.reflect.max_completion_tokens": {"apply_class": "immediate", "services": []},
+    "memory.lanes.reflect.wall_timeout_s": {"apply_class": "immediate", "services": []},
     "memory.lanes.mental_model_refresh.max_concurrent": {
         "apply_class": "manual-restart",
         "services": [],

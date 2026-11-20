@@ -66,7 +66,7 @@ key (use `declared_backend`; `known-issues: slot-view-has-no-device-key`), and t
    * **6c. Vulkan capabilities fan-out, restored (#1948, landed as #1973).** On an AMD box
      (ct151, ct150), `GET /api/capabilities` must offer `gpu-vulkan` again as a valid device for
      LLM/llama runtimes, not just the non-llama runtimes it was never removed for — cross-check
-     against `/api/hardware`'s `vulkan_capable` flag for the same box. This is confirmed
+     against `/api/hardware` `.gpus[].vulkan_capable` (per GPU, not top level) for the same box. This is confirmed
      offer-not-promise, by source (`capabilities/catalog.py`'s llama.cpp fan-out): the picker
      offers `gpu-vulkan` whenever the host advertises that backend at all (a usable render node
      exists), with NO dependency on which runner image is installed. So a box whose Standard
@@ -120,14 +120,14 @@ key (use `declared_backend`; `known-issues: slot-view-has-no-device-key`), and t
 15. **Catalog rows vs advertised backends, mechanically** — regression
    `capabilities-npu-apply-accepted-dead` (#2659). `jq` every catalog row's `backends` against
    `/api/capabilities .backends` and report the count of rows naming a backend the box does not
-   advertise (35 npu-only rows on ct151/ct150). Read-only: do not apply anything here, the
+   advertise (baseline on 1.8.0: 0 such rows on ct151, the 35 npu-only rows are gone; assert 0). Read-only: do not apply anything here, the
    capabilities lane does.
 
 16. **Security headers baseline.** Record which of `Content-Security-Policy`, `X-Frame-Options`, `X-Content-Type-Options` come back on `/` and `/api/status` (none on 1.4.0 nightlies). Observation, not a finding; report only a change against the previous report.
 17. **Empty-body 404 sweep.** List every GET under `/api` that answers 404 with `content-length: 0`, not only unknown paths. Use `curl -m 4` per request and skip SSE/stream routes: the 113-route sweep took ~4 minutes without a per-request cap.
-18. **Brief routes against the spec.** Assert every route this brief names is in `openapi.json`; a stale name is a kit defect, report it under kit feedback, not as a product finding. On a box with auth enabled (ct150 after the update, prod) an anonymous GET gets 401 `auth.required` before any body parse: use the key from `CONTEXT.md` or record `skipped`.
+18. **Brief routes against the spec.** Assert every route this brief names is in `openapi.json` (`/health` is not in the spec, name `/api/health`); a stale name is a kit defect, report it under kit feedback, not as a product finding. On a box with auth enabled (ct150 after the update, prod) an anonymous GET gets 401 `auth.required` before any body parse: use the key from `CONTEXT.md` or record `skipped`.
 
-19. **Redaction of count keys.** `jq '[paths(type=="object" and .value=="***REDACTED***")|join(".")]'` over `/api/settings`; the only masked leaf expected is `memory.graph.extraction_max_tokens` (known-issues `settings-redacts-token-count-keys`). A new masked leaf, or a masked number on any other surface, is a finding.
+19. **Redaction of count keys.** `jq '[paths(type=="object" and .value=="***REDACTED***")|join(".")]'` over `/api/settings`; six leaves are masked on 1.8.0 (`memory.graph.extraction_max_tokens`, `memory.decision.max_request_tokens`, `memory.lanes.{retain,consolidation,reflect,mental_model_refresh}.max_completion_tokens`); that is open #3805 (known-issues `settings-redacts-token-count-keys`). A seventh masked leaf, or the Models panel rendering a blank number, is new.
 
 20. **Missing field, not just invalid JSON.** POSTs are out of scope here; the memory lane's check 17 owns `{bad` and `{"q":"x"}` against `/api/memory/{add,search,recall,delete}` (#2701).
 
@@ -135,7 +135,23 @@ key (use `declared_backend`; `known-issues: slot-view-has-no-device-key`), and t
 
 22. **Concurrent-actor drift.** Diff `GET /api/models` ids at lane start and end and name the drift (it grew from 1 to 4 models in one run) so it is not mistaken for a defect.
 
+23. **Removed-route diff.** Diff `openapi.json` paths against the previous release's saved path list (`<run>/…-openapi-paths.txt`) and list every removed path; the 1.4.0 to 1.8.0 removals are the baseline. A removed path that a brief or doc still names is a finding.
+
 ## Carry-forward
 
 Add a check here whenever an API defect is found by another lane or by a user. This lane is the
 cheapest place to catch a regression, so it should grow every release.
+
+## Added in kit 18
+
+* Compare the Slots/Overview THROUGHPUT hero with the latest bucket of `/api/stats/throughput/history` and the dock serving count immediately after a request ends (#3859); the hero must not outlive traffic by more than one bin.
+* Update-box baseline: 0 masked leaves after #3817/#3805; fail if any appear.
+* Unknown `/api/...` path returning an empty 404 is by design; do not file it (reword any check that expects a JSON body).
+* Kit fact: qwen3.5-0.8b is NOT registered on a fresh ct151 at install; the installer pulls only the brain model and kokoro.
+
+## Added in kit 19
+
+* Re-run the `/v1/models` against models-and-slots `comm -23` check at lane end as well as at the start.
+* `GET /v1/models/<raw model id of a serving chat slot>` must return 200 like the chat POST with the same id (#3880, known).
+* `GET /api/slots?limit=abc`: assert a 4xx or a documented ignore, never a 5xx.
+* After an MCP client DELETE, scan the journal for `Error in standalone SSE writer` / ClosedResourceError.

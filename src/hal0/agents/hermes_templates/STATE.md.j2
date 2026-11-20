@@ -1,5 +1,6 @@
 {# Volatile live-state snapshot — re-rendered on restart + on model/slot
-   change, injected into every Hermes session by the on_session_start hook.
+   change, injected into the first user message of every Hermes session by
+   the pre_llm_call hook (inject-system-state.sh, #3853).
    Keep it LEAN: this is fed to the model every session. Stable identity
    lives in SOUL.md; structural map lives in HERMES.md.
    Params: primary (dict|None), unwired_llm_slot (str|None), capabilities

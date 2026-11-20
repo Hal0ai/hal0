@@ -9,6 +9,7 @@
 
 import { useModels, usePullsList, usePullJob, useHfSearch, useModelUpdatesCheck, useModelUpdatesForceCheck, useModelUpdateApply, useModelUpdateAll, fmtBytes } from '@/api/hooks/useModels'
 import { useSlots, useSlotSwap } from '@/api/hooks/useSlots'
+import { isManagedRemote, useUpstreamRefresh, useUpstreams } from '@/api/hooks/useUpstreams'
 import { useMetaEnums } from '@/api/hooks/useMeta'
 import { isUpstreamModel } from '@/lib/normalizeApiModel'
 import { useComfyuiModels } from '@/api/hooks/useComfyui'
@@ -19,6 +20,14 @@ import { flmCatalogRows } from '@/dash/npu/npu-models-pure'
 import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
 import { DownloadRow, DownloadsPane } from '@/dash/models/DownloadsPane.jsx'
+import { ProvidersTab } from '@/dash/models/ProvidersTab.jsx'
+import { TypeGlyph } from '@/dash/models/type-glyph.jsx'
+import { LaneCode } from '@/dash/lane-code.jsx'
+import { laneForBackend } from '@/dash/lane-code-pure'
+import { ProviderDetail } from '@/dash/models/ProviderDetail.jsx'
+import { AddProviderModal } from '@/dash/models/AddProviderModal.jsx'
+import { keyState, providerState, refreshOutcome, refreshSummary } from '@/dash/models/providers-pure'
+import { resolveLoadTarget } from '@/dash/models/load-target-pure'
 import { useXdnaFit } from '@/api/hooks/useXdnaFit'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { npuTabVisible } from '@/dash/npu/npu-pure'
@@ -70,7 +79,7 @@ function usePageReset(deps) {
 }
 
 // ── ModelsView ─────────────────────────────────────────────────────────
-const MODEL_TABS = ["inference", "image", "upstream", "flm", "profiles"];
+const MODEL_TABS = ["inference", "image", "providers", "flm", "profiles"];
 const toastM = (msg, kind) => window.__hal0Toast && window.__hal0Toast(msg, kind);
 // `modelParam` mirrors SlotsView's slotParam: #models/profiles deep-links
 // the Profiles tab (runner-catalogue-v2 — Profiles moved here from Slots).
@@ -84,10 +93,11 @@ function ModelsView({ modelParam = null }) {
   const [sortField, setSortField] = useStateM("name");
   const [sortDir, setSortDir] = useStateM("asc");
   const [q, setQ] = useStateM("");
-  // Tabs: "inference" (default), "image", "upstream", "flm", "profiles". Each is
+  // Tabs: "inference" (default), "image", "providers", "flm", "profiles". Each is
   // hash-routed (#models/<tab>) so the sidebar sub-links track it; bare
   // #models or an unknown param shows Inference (same idiom as SlotsView).
-  const tabFromParam = (p) => (MODEL_TABS.includes(p) ? p : "inference");
+  // The old `upstream` address forwards to Providers (the history redirect lives in main.jsx).
+  const tabFromParam = (p) => (p === "upstream" ? "providers" : MODEL_TABS.includes(p) ? p : "inference");
   const [tab, setTab] = useStateM(tabFromParam(modelParam));
   useEffectM(() => { setTab(tabFromParam(modelParam)); }, [modelParam]);
   // Pagination
@@ -112,7 +122,9 @@ function ModelsView({ modelParam = null }) {
 
 
   const modelsQuery = useModels();
-  const modelList = modelsQuery.data ?? [];
+  // GET /api/models also lists what providers advertise; those live under Providers, so the
+  // catalog, its selection and its counts only ever hold local models.
+  const modelList = (modelsQuery.data ?? []).filter(m => !isUpstreamModel(m));
 
   // HF update check — the hook triggers the (server-TTL-cached) probe on
   // mount; /api/models then carries per-row `update_available` flags.
@@ -147,21 +159,40 @@ function ModelsView({ modelParam = null }) {
       toastM(`Update all failed — ${e?.message || "see logs"}`, "err");
     }
   };
-  // Upstream rows have no file to compare: checking them is asking the upstreams
-  // again which models they advertise.
-  const [recheckingUpstream, setRecheckingUpstream] = useStateM(false);
-  const onRecheckUpstream = async () => {
-    setRecheckingUpstream(true);
-    try {
-      const res = await modelsQuery.refetch();
-      if (res.isError) throw res.error;
-      const n = (res.data ?? []).filter(isUpstreamModel).length;
-      toastM(`${n} upstream model${n === 1 ? "" : "s"} advertised`, "info");
-    } catch (e) {
-      toastM(`Could not re-read the upstream models — ${e?.message || "see logs"}`, "err");
-    } finally {
-      setRecheckingUpstream(false);
+  // Providers: the header "Refresh model lists" asks every provider that is switched per model
+  // and can authenticate (a key is set, or none is needed) what it offers now, one after another.
+  const upstreamsQuery = useUpstreams();
+  // Only a count rides on this query here, so a body that is not a list reads as no providers.
+  const providerList = (Array.isArray(upstreamsQuery.data) ? upstreamsQuery.data : []).filter(isManagedRemote);
+  const providersTotal = providerList.length;
+  const upstreamRefresh = useUpstreamRefresh();
+  const [provSel, setProvSel] = useStateM({ provider: null, model: null });
+  const [addProviderOpen, setAddProviderOpen] = useStateM(false);
+  const [refreshingProviders, setRefreshingProviders] = useStateM(false);
+  const onRefreshProviders = async () => {
+    const targets = providerList.filter(
+      u => u.enabled !== false && providerState(u) === "per-model" && ["set", "not-needed"].includes(keyState(u)),
+    );
+    if (!targets.length) {
+      const none = refreshSummary(0, 0);
+      toastM(none.text, none.kind);
+      return;
     }
+    setRefreshingProviders(true);
+    let clean = 0;
+    let unreachable = 0;
+    for (const u of targets) {
+      try {
+        const res = await upstreamRefresh.mutateAsync(u.name);
+        if (refreshOutcome(res) === "clean") clean += 1;
+        else unreachable += 1;
+      } catch {
+        unreachable += 1;
+      }
+    }
+    setRefreshingProviders(false);
+    const done = refreshSummary(clean, unreachable);
+    toastM(done.text, done.kind);
   };
 
   // Auto-pick the first installed model on first render so the detail
@@ -195,7 +226,6 @@ function ModelsView({ modelParam = null }) {
   }, [pullsList.jobs]);
   const stateOf = (m) => ({
     installed: !!m.installed,
-    remote: isUpstreamModel(m),
     inUseBy: slotsUsing(slotList, m.id),
     update: !!(m.installed && m.update_available),
     download: activePulls.get(m.id) ?? null,
@@ -218,9 +248,9 @@ function ModelsView({ modelParam = null }) {
   const used = m => slotsUsing(slotList, m.id).length > 0;
 
   // ── Tab datasets ────────────────────────────────────────────────────
-  // Inference: installed + blessed + user.* (not upstream). Installed models a
+  // Inference: installed + blessed + user.*. Installed models a
   // slot references lead the list under "In use".
-  const local = modelList.filter(m => !isUpstreamModel(m) && fil(m));
+  const local = modelList.filter(fil);
   const installed = local.filter(m => m.installed);
   const inferenceSections = [
     { key: "inuse", label: "In use", rows: bySort(installed.filter(used)) },
@@ -229,14 +259,6 @@ function ModelsView({ modelParam = null }) {
     { key: "userns", label: "user.*", rows: bySort(local.filter(m => !m.installed && m.ns === "pulled")) },
   ];
   const inferenceCount = inferenceSections.reduce((n, s) => n + s.rows.length, 0);
-
-  // Upstream: only isUpstreamModel
-  const upstreamAll = modelList.filter(m => isUpstreamModel(m) && fil(m));
-  const upstreamSections = [
-    { key: "inuse", label: "In use", rows: bySort(upstreamAll.filter(used)) },
-    { key: "advertised", label: "Advertised", rows: bySort(upstreamAll.filter(m => !used(m))) },
-  ];
-  const upstreamTotal = modelList.filter(m => isUpstreamModel(m)).length;
 
   // Image: ComfyUI models are not registry rows — the tab is the image catalog
   // (ImageModelsTab), with the weight files behind its Files switch. react-query
@@ -250,20 +272,16 @@ function ModelsView({ modelParam = null }) {
   // ── Pagination logic ────────────────────────────────────────────────
   const pageReset = usePageReset([tab, q, sortField, sortDir, filterSel, stateSel, runsSel]);
   useEffectM(() => { if (pageReset) setPage(1); }, [pageReset]);
-  const paged = pageSections(tab === "upstream" ? upstreamSections : inferenceSections, page, perPage);
+  const paged = pageSections(inferenceSections, page, perPage);
 
   // FLM: the catalogue is not registry rows; react-query serves the tab's own query from cache.
   const flmCatalog = useFlmCatalog();
   const flmTotal = useMemoM(() => flmCatalogRows(flmCatalog.data?.models).length, [flmCatalog.data]);
 
   // ── Render ──────────────────────────────────────────────────────────
-  const tabLabel = tab === "inference" ? `Inference Models${inferenceCount ? ` · ${inferenceCount}` : ""}`
-    : `Upstream Models${upstreamTotal ? ` · ${upstreamTotal}` : ""}`;
-
-  // Upstream rows are neither installed nor downloadable, and have no file to update.
-  const stateChips = tab === "upstream" ? STATE_FILTERS.filter(c => c.id === "inuse") : STATE_FILTERS;
+  const tabLabel = `Inference Models${inferenceCount ? ` · ${inferenceCount}` : ""}`;
   const toolbarGroups = [
-    { id: "state", label: "state", chips: stateChips, selected: stateSel, onToggle: id => setStateSel(s => toggleIn(s, id)) },
+    { id: "state", label: "state", chips: STATE_FILTERS, selected: stateSel, onToggle: id => setStateSel(s => toggleIn(s, id)) },
     { id: "filter", label: "filter", chips: FILTER_CHIPS, selected: filterSel, onToggle: id => setFilterSel(s => toggleIn(s, id)) },
     ...(tab === "inference"
       ? [{
@@ -326,12 +344,13 @@ function ModelsView({ modelParam = null }) {
         pending: recheckingFlm,
         onClick: onRecheckFlm,
       }
-    : tab === "upstream"
+    : tab === "providers"
     ? {
-        testid: "mdl-check-upstream",
-        title: "Ask the upstreams again which models they advertise",
-        pending: recheckingUpstream,
-        onClick: onRecheckUpstream,
+        testid: "mdl-check-providers",
+        label: "Refresh model lists",
+        title: "Ask each provider which models it offers now. New models arrive switched off.",
+        pending: refreshingProviders,
+        onClick: onRefreshProviders,
       }
     : {
         title: "Compare every installed model against its HuggingFace repo now",
@@ -342,8 +361,8 @@ function ModelsView({ modelParam = null }) {
     ? [{ label: "Install image model", hint: "Show the catalog models that are not installed yet", onClick: () => setImageAddSeq(n => n + 1) }]
     : tab === "flm"
     ? [{ label: "Download FLM model", hint: "Show the catalogue models that are not installed yet", onClick: () => setFlmAddSeq(n => n + 1) }]
-    : tab === "upstream"
-    ? [{ label: "Add upstream", hint: "Add a provider under Slots → Endpoints; its models appear here", onClick: () => { window.location.hash = "#slots/endpoints"; } }]
+    : tab === "providers"
+    ? [{ label: "Add provider", hint: "Connect a provider and choose which of its models to switch on", testid: "mdl-add-provider", onClick: () => setAddProviderOpen(true) }]
     : [
         { label: "Add by HF coords", hint: "a repo and a file, pulled into the model store", testid: "mdl-add-hf", onClick: () => setAddOpen(true) },
         { label: "Search HF", hint: "find a repo on Hugging Face, then add it", testid: "mdl-add-search", onClick: () => setSearchOpen(true) },
@@ -400,12 +419,13 @@ function ModelsView({ modelParam = null }) {
         </button>
         <button
           role="tab"
-          aria-selected={tab === "upstream"}
-          className={"slot-tab" + (tab === "upstream" ? " on" : "")}
-          onClick={() => { window.location.hash = "#models/upstream"; }}
+          aria-selected={tab === "providers"}
+          className={"slot-tab" + (tab === "providers" ? " on" : "")}
+          data-testid="models-tab-providers"
+          onClick={() => { window.location.hash = "#models/providers"; }}
         >
-          <span>Upstream Models</span>
-          <span className="slot-tab-ct num">{upstreamTotal}</span>
+          <span>Providers</span>
+          <span className="slot-tab-ct num">{providersTotal}</span>
         </button>
         <button
           role="tab"
@@ -433,6 +453,13 @@ function ModelsView({ modelParam = null }) {
         <ImageModelsTab addSeq={imageAddSeq} />
       ) : tab === "flm" ? (
         <FlmModelsTab addSeq={flmAddSeq} />
+      ) : tab === "providers" ? (
+      <div className="models-layout" style={{marginTop: 18}}>
+        <ProvidersTab selected={provSel} onSelect={setProvSel} onAdd={() => setAddProviderOpen(true)} />
+        <div className="models-sidebar">
+          <ProviderDetail selected={provSel} onSelect={setProvSel} />
+        </div>
+      </div>
       ) : (
       <div className="models-layout" style={{marginTop: 18}}>
         {/* ── List (toolbar + rows) ── */}
@@ -453,13 +480,13 @@ function ModelsView({ modelParam = null }) {
             />
           }
           title={tabLabel}
-          right={`${modelList.length} total · ${modelList.filter(m => m.installed).length} on disk · ${upstreamTotal} upstream`}
+          right={`${modelList.length} total · ${modelList.filter(m => m.installed).length} on disk`}
           paged={paged}
           loading={modelsQuery.isPending ? "Loading models…" : null}
           error={modelsQuery.isError ? (modelsQuery.error?.message || "Failed to load models") : null}
           empty={filtered
             ? "No models match — adjust the search or filters."
-            : tab === "upstream" ? "No upstream models advertised." : "the catalog is empty."}
+            : "the catalog is empty."}
           pager={{ perPage, onPage: setPage, onPerPage: (opt) => { setPerPage(opt); setPage(1); } }}
           renderRow={m => (
             <ModelRow
@@ -489,6 +516,11 @@ function ModelsView({ modelParam = null }) {
       </div>
       )}
 
+      <AddProviderModal
+        open={addProviderOpen}
+        onClose={() => setAddProviderOpen(false)}
+        onAdded={(name) => { setProvSel({ provider: name, model: null }); setAddProviderOpen(false); }}
+      />
       <AddByHfModal open={addOpen} onClose={() => setAddOpen(false)} initialRepo={searchPick} />
       <AddByPathModal open={addByPathOpen} onClose={() => setAddByPathOpen(false)} />
       <ScanDirectoryModal open={scanOpen} onClose={() => setScanOpen(false)} />
@@ -577,7 +609,6 @@ function HfSearchPanel({ q, onQ, onPick, onClose }) {
 // models, mirroring the detail pane's Delete button gate.
 const registryState = (model) => ({
   installed: !!model.installed,
-  remote: isUpstreamModel(model),
   update: !!(model.installed && model.update_available),
 });
 function ModelRow({ model, state = registryState(model), npuFit = null, selected, onSelect, onEditModel, onDeleteModel }) {
@@ -605,7 +636,7 @@ function ModelRow({ model, state = registryState(model), npuFit = null, selected
               ✓ default
             </span>
           )}
-          {model.type && <span className="chip">{model.type}</span>}
+          {model.type && <TypeGlyph type={model.type} />}
           {model.quant && <span className="chip quant" data-testid="mdl-row-quant">{model.quant}</span>}
           {isDrafterModel(model) && (
             <span className="chip info" data-testid="mdl-row-drafter" title={`Paired drafter · ${draftVariantLabel(model.draftVariant)}`}>
@@ -613,13 +644,17 @@ function ModelRow({ model, state = registryState(model), npuFit = null, selected
             </span>
           )}
           {npuFit && (
-            <span className="chip dev-npu" data-testid="mdl-row-npu" title={`Runs on the NPU through ggml-xdna. ${npuFit.reason}`}>
-              npu · {npuFit.xdna_path}
-            </span>
+            <LaneCode
+              lane="npu"
+              testid="mdl-row-npu"
+              data-xdna-path={npuFit.xdna_path}
+              title={`Runs on the NPU through ggml-xdna (${npuFit.xdna_path}). ${npuFit.reason}`}
+            />
           )}
-          {backends.map(b => (
-            <span key={b} className={"chip dev-" + b}>{b}</span>
-          ))}
+          {backends.map(b => {
+            const lane = laneForBackend(b, model);
+            return lane ? <LaneCode key={b} lane={lane} /> : <span key={b} className="chip">{b}</span>;
+          })}
         </>
       }
       menu={
@@ -647,12 +682,12 @@ function ModelRow({ model, state = registryState(model), npuFit = null, selected
                 label: "Edit model settings",
                 onClick: () => onEditModel && onEditModel(model),
               },
-              // Delete — same gate as the detail pane's Delete button: only an
-              // installed local model has bytes/registry row to remove (an
-              // upstream row is served remotely; a not-installed catalog row
-              // has nothing on disk). Routes through DeleteModelDialog, so the
+              // Delete — same gate as the detail pane's Delete button: an
+              // installed model, or a local registry row whose files are gone
+              // (an FLM ghost row, #3810) has something to remove; a catalog
+              // row with no registry entry does not. Routes through DeleteModelDialog, so the
               // type-the-name confirm + refcount contract stays the boundary.
-              ...(model.installed && !isUpstreamModel(model)
+              ...(model.installed || model.origin === "local"
                 ? [
                     { divider: true },
                     {
@@ -685,11 +720,34 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
   const swap = useSlotSwap();
   const hfUpdate = useModelUpdateApply();
   const [cancelling, setCancelling] = useStateM(false);
+  // The open slot picker, tagged with the model it was opened for. ModelsView renders one
+  // ModelDetail and swaps `model` as the selection moves, so a picker opened for one model
+  // must not survive onto another (it would offer, and load into, slots chosen for the first).
+  const [pick, setPick] = useStateM(null);
+  const picker = pick && model && pick.modelId === model.id ? pick : null;
+  if (pick && !picker) setPick(null); // selection moved: forget it for good (derived-state reset)
+  const pickOptions = picker ? picker.options : null;
+  const pickName = picker ? picker.name : "";
   if (!model) {
     return <DetailEmpty>No model selected.</DetailEmpty>;
   }
+  const loadInto = async (target) => {
+    if (!target) return;
+    setPick(null);
+    try {
+      await swap.mutateAsync({ name: target.name, model_id: model.id });
+      window.__hal0Toast && window.__hal0Toast(
+        `Loading ${model.longName || model.id} → slot ${target.name}`,
+        "info",
+      );
+    } catch (e) {
+      window.__hal0Toast && window.__hal0Toast(
+        `Load failed — ${e?.message || "see logs"}`,
+        "err",
+      );
+    }
+  };
   const rowState = state ?? registryState(model);
-  const upstream = isUpstreamModel(model);
   // ADR-0029: a model carries FILE FACTS only — chat template, jinja, whether
   // the file has MTP heads — plus its native context window (read-only, from
   // metadata). The tune (flags, context, thinking, vision, speculation) lives
@@ -749,9 +807,7 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
               <span className="chip amber" data-testid="mdl-detail-update-badge" role="status" aria-label="Update available on Hugging Face" title="A newer version of this file is available on Hugging Face">update available</span>
             )}
             {/* The update has its own badge above, so the status here says the rest. */}
-            {upstream
-              ? <span className="chip info">upstream · {model.upstream}</span>
-              : <StatusChip state={{ ...rowState, update: false }} testid="mdl-detail-status" />}
+            <StatusChip state={{ ...rowState, update: false }} testid="mdl-detail-status" />
           </>
         }
       />
@@ -765,7 +821,7 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
           { k: "runtime", v: model.runtime },
           { k: "namespace", v: model.ns },
           { k: "added", v: fmtAdded(model.created) },
-          { k: "origin", v: upstream ? `upstream · ${model.upstream}` : "local" },
+          { k: "origin", v: "local" },
         ]}
       />
       <div className="mdl-detail-labels">
@@ -826,47 +882,51 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
               className="btn"
               disabled={swap.isPending}
               onClick={async () => {
-                const slots = slotsQuery.data ?? [];
-                const compatible = slots.filter(s => s.type === model.type);
-                if (compatible.length === 0) {
+                const res = resolveLoadTarget(slotsQuery.data ?? [], model);
+                if (res.kind === "none") {
                   window.__hal0Toast && window.__hal0Toast(
                     `No slot accepts type=${model.type || "?"} — create one in Slots`,
                     "err",
                   );
                   return;
                 }
-                const owning = compatible.find(
-                  s => (s.model_id || s.model?.default) === model.id,
-                );
-                if (!owning && compatible.length > 1) {
-                  window.__hal0Toast && window.__hal0Toast(
-                    `Multiple compatible slots — use the slot card swap dropdown to pick one`,
-                    "warn",
-                  );
+                if (res.kind === "choose") {
+                  setPick({
+                    modelId: model.id,
+                    options: res.options,
+                    name: res.options.find(s => !(s.model_id || s.model?.default))?.name ?? res.options[0].name,
+                  });
                   return;
                 }
-                const target = owning || compatible[0];
-                try {
-                  await swap.mutateAsync({ name: target.name, model_id: model.id });
-                  window.__hal0Toast && window.__hal0Toast(
-                    `Loading ${model.longName || model.id} → slot ${target.name}`,
-                    "info",
-                  );
-                } catch (e) {
-                  window.__hal0Toast && window.__hal0Toast(
-                    `Load failed — ${e?.message || "see logs"}`,
-                    "err",
-                  );
-                }
+                loadInto(res.slot);
               }}
             >{swap.isPending ? "Loading…" : "Load now"}</button>
+            {pickOptions && (
+              <span className="mdl-load-picker" data-testid="mdl-load-picker">
+                <select
+                  className="input sm"
+                  aria-label="Slot to load into"
+                  data-testid="mdl-load-picker-select"
+                  value={pickName}
+                  onChange={e => setPick({ ...picker, name: e.target.value })}
+                >
+                  {pickOptions.map(s => {
+                    const bound = s.model_id || s.model?.default;
+                    return <option key={s.name} value={s.name}>{s.name}{bound ? ` (${bound})` : " (empty)"}</option>;
+                  })}
+                </select>
+                <button
+                  className="btn sm"
+                  data-testid="mdl-load-picker-go"
+                  disabled={swap.isPending}
+                  onClick={() => loadInto(pickOptions.find(s => s.name === pickName))}
+                >Load</button>
+                <button className="btn ghost sm" onClick={() => setPick(null)}>Cancel</button>
+              </span>
+            )}
             <button className="btn ghost sm" onClick={onEdit}>{Icons.edit} Edit options</button>
             <button className="btn danger sm" onClick={onDelete}>{Icons.unload} Delete</button>
           </>
-        ) : upstream ? (
-          <div className="mono" style={{fontSize: 11, color: "var(--fg-4)"}}>
-            Served remotely by the <span className="chip info">{model.upstream}</span> upstream — not stored on this host.
-          </div>
         ) : (
           <>
             <button className="btn" onClick={onPull} disabled={pull.inFlight}>
@@ -878,6 +938,9 @@ function ModelDetail({ model, state, npuFit = null, onDelete, onEdit, onPullStar
               </button>
             )}
             <button className="btn ghost sm" onClick={() => window.open(`https://huggingface.co/${model.hf_repo || model.repo || ""}`, "_blank")}>View on HF →</button>
+            {model.origin === "local" && (
+              <button className="btn danger sm" data-testid="mdl-detail-delete-registration" onClick={onDelete}>{Icons.unload} Delete</button>
+            )}
           </>
         )}
       </DetailActions>

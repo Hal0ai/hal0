@@ -26,6 +26,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import math
 import re
 import time
 from collections.abc import Mapping
@@ -52,8 +53,16 @@ from hal0.dispatcher.lane_pin import (
 )
 from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_chunk
 from hal0.memory.extraction_env import MEMORY_ALIAS
+from hal0.normalize.output_cap import MAX_TOKENS_HEADER, apply_output_cap, parse_output_cap
 from hal0.slots.abandon import ClientGoneProbe, abandon_probe
 from hal0.slots.state import SlotNpuConflict
+from hal0.upstreams.catalog import (
+    ModelAmbiguous,
+    Resolved,
+    canonical_id,
+    enabled_ids,
+    resolve_requested_model,
+)
 from hal0.upstreams.filters import apply_filters
 
 if TYPE_CHECKING:
@@ -210,11 +219,92 @@ def _instrument_streaming_throughput(
     return response
 
 
+#: Spacing of the synthetic per-token-batch events a non-streaming completion
+#: is spread into, and the cap on how many one completion may append (the
+#: per-slot deque holds 4096). A finer step keeps a 5 s history bin from
+#: catching one extra lump and reading ~20% high.
+_NONSTREAM_SPREAD_STEP_S = 0.25
+_NONSTREAM_SPREAD_MAX_EVENTS = 200
+
+
+def _positive_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
+def _nonstreaming_decode_span(
+    data: Mapping[str, Any],
+    usage: Mapping[str, Any],
+    completion: int,
+    now: float,
+    dispatch_started: float | None,
+) -> float:
+    """Seconds the upstream spent producing a non-streaming completion.
+
+    Preference order: llama-server ``timings.predicted_ms`` (pure decode
+    time), FLM ``usage.decoding_speed_tps`` (tokens / speed), then the wall
+    time since dispatch (includes prefill, so it slightly under-reads, never
+    over-reads). Never longer than the request has actually been running.
+    """
+    span: float | None = None
+    timings = data.get("timings")
+    if isinstance(timings, Mapping):
+        predicted_ms = _positive_number(timings.get("predicted_ms"))
+        if predicted_ms is not None:
+            span = predicted_ms / 1000.0
+    if span is None:
+        flm_tps = _positive_number(usage.get("decoding_speed_tps"))
+        if flm_tps is not None:
+            span = completion / flm_tps
+    wall = max(0.0, now - dispatch_started) if dispatch_started is not None else None
+    if span is None:
+        span = wall or 0.0
+    elif wall is not None:
+        span = min(span, wall)
+    return span
+
+
+def _append_spread_events(events: Any, completion: int, span: float, now: float) -> None:
+    """Append ``completion`` tokens to ``events`` spread evenly over the
+    ``span`` seconds that ended at ``now``.
+
+    The per-slot deque's contract is "``tokens`` were produced at ``ts``";
+    one lump stamped at completion time breaks it, and every consumer that
+    divides by a window (the 5 s history bins, ``tps_from_events``) then
+    reads the whole completion as if it was produced inside that window
+    (#3859: 963 tokens at 27.8 tok/s read as 192.6 tok/s).
+    """
+    n = max(1, math.ceil(span / _NONSTREAM_SPREAD_STEP_S))
+    n = min(n, _NONSTREAM_SPREAD_MAX_EVENTS, completion)
+    if n <= 1 or span <= 0:
+        events.append((now, completion))
+        return
+    # Event i sits at start + span*i/(n-1): the first at ``start`` and the last
+    # at ``now``, so the min-to-max span ``tps_from_events`` divides by is the
+    # whole decode span and the live rate reads completion/span exactly.
+    # Tokens use cumulative rounding so the remainder is spread across the
+    # span rather than front-loaded, and the batches sum to ``completion``.
+    start = now - span
+    prev = 0
+    for i in range(n):
+        cum = completion * (i + 1) // n
+        events.append((start + span * i / (n - 1), cum - prev))
+        prev = cum
+
+
 def _record_nonstreaming_throughput(
-    body_bytes: bytes, app_state: Any, slot_name: str | None
+    body_bytes: bytes,
+    app_state: Any,
+    slot_name: str | None,
+    dispatch_started: float | None = None,
 ) -> None:
-    """Pull ``usage.completion_tokens`` + a recent timestamp out of a JSON
-    response body so non-streaming chats also move the per-slot tile."""
+    """Pull ``usage.completion_tokens`` out of a JSON response body so
+    non-streaming chats also move the per-slot tile and throughput history.
+
+    The tokens are spread over the completion's decode span (see
+    :func:`_nonstreaming_decode_span`) rather than stamped as one lump at
+    completion time (#3859)."""
     events = _slot_events(app_state, slot_name)
     if events is None or not body_bytes:
         return
@@ -243,10 +333,12 @@ def _record_nonstreaming_throughput(
     completion = usage.get("completion_tokens") or 0
     if not isinstance(completion, (int, float)) or completion <= 0:
         return
-    # Without a real start time, attribute the whole completion to "now"
-    # — the rolling window will smear it across the lookback. Better
-    # alternatives need start-time tracking through forward().
-    events.append((time.monotonic(), int(completion)))
+    completion = int(completion)
+    if completion <= 0:
+        return
+    now = time.monotonic()
+    span = _nonstreaming_decode_span(data, usage, completion, now, dispatch_started)
+    _append_spread_events(events, completion, span, now)
 
     # FLM (NPU) metrics: extract decoding speed + KV column occupancy from
     # the ``usage`` block so the dashboard can show NPU tok/s and column
@@ -1179,7 +1271,12 @@ async def _dispatch_and_forward_probed(
             response.body_iterator = strip_usage_only_chunk(response.body_iterator)
         return response
     if isinstance(response, Response) and getattr(response, "body", None):
-        _record_nonstreaming_throughput(response.body, request.app.state, call.upstream_name)
+        _record_nonstreaming_throughput(
+            response.body,
+            request.app.state,
+            call.upstream_name,
+            dispatch_started=dispatch_started,
+        )
         if seam is not None:
             seam.record_nonstreaming(
                 response.body,
@@ -1387,14 +1484,23 @@ async def _aggregate_models(request: Request, *, show_all: bool) -> list[dict[st
             continue
         if not getattr(u, "advertise_models", True):
             continue
-        try:
-            advertised = await upstreams.fetch_models(u.name)
-        except Exception:
-            advertised = []
-        # Per-upstream curation of the discovery catalog only — the dispatch
-        # cache keeps the full list, so filtered-out ids stay addressable.
-        advertised = apply_filters(advertised, getattr(u, "model_filters", None))
-        for mid in advertised:
+        if u.curated:
+            # Listed from config, no network: the enabled rows under their
+            # canonical ids. ``model_filters`` curate a fetched catalog and do
+            # not apply to an operator-chosen list.
+            listed = [canonical_id(u.name, mid) for mid in enabled_ids(u)]
+        else:
+            # Uncurated upstreams are read live on every call: a slot swaps
+            # models, a profile renames aliases, and an unconverted remote
+            # advertises exactly what it serves right now.
+            try:
+                advertised = await upstreams.fetch_models(u.name)
+            except Exception:
+                advertised = []
+            # Per-upstream curation of the discovery catalog only — the dispatch
+            # cache keeps the full list, so filtered-out ids stay addressable.
+            listed = apply_filters(advertised, getattr(u, "model_filters", None))
+        for mid in listed:
             if mid in seen:
                 continue
             # A chat slot's raw model id is already covered by its alias
@@ -1457,6 +1563,10 @@ async def get_model(
         if isinstance(entry, dict) and entry.get("id") == model_id:
             return entry
 
+    catalog_entry = _catalog_entry_for(request, model_id, data)
+    if catalog_entry is not None:
+        return {**catalog_entry, "id": model_id}
+
     virtual_entry = await _resolve_virtual_model_entry(request, model_id, data)
     if virtual_entry is not None:
         return virtual_entry
@@ -1467,6 +1577,37 @@ async def get_model(
         f"model {model_id!r} is not advertised by any configured upstream",
         details={"model": model_id},
     )
+
+
+def _catalog_entry_for(
+    request: Request, model_id: str, data: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """The listed row of the curated provider that ``model_id`` routes to.
+
+    ``/v1/models`` lists a curated provider's models as ``provider/id``, but a
+    bare id still routes. This resolves ``model_id`` against stored rows the
+    way the dispatcher's catalog step does and returns that provider's row, so
+    a lookup by a saved bare id keeps answering. ``None`` when the id does not
+    resolve to exactly one enabled row (an ambiguous id has no single row).
+    """
+    upstreams = getattr(request.app.state, "upstreams", None)
+    if upstreams is None:
+        return None
+    try:
+        resolved = resolve_requested_model(model_id, upstreams.list())
+    except ModelAmbiguous:
+        return None
+    if not isinstance(resolved, Resolved):
+        return None
+    wanted = canonical_id(resolved.upstream.name, resolved.model_id)
+    for entry in data:
+        if (
+            isinstance(entry, dict)
+            and entry.get("id") == wanted
+            and entry.get("owned_by") == resolved.upstream.name
+        ):
+            return entry
+    return None
 
 
 async def _resolve_virtual_model_entry(
@@ -1500,7 +1641,9 @@ async def _resolve_virtual_model_entry(
             for entry in data:
                 if isinstance(entry, dict) and entry.get("id") == target:
                     return {**entry, "id": requested}
-            return None
+            # A bare id saved before its provider was curated still resolves.
+            catalog_entry = _catalog_entry_for(request, target, data)
+            return {**catalog_entry, "id": requested} if catalog_entry is not None else None
         model_id = target
     from hal0.normalize.resolver import LiveSlotResolver
 
@@ -1569,6 +1712,7 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
     # unconditional request._body=json(body) rewrite would corrupt the
     # multipart upload / inject a meaningless enable_thinking.
     body = await _normalize_chat_body(request, body)
+    body = _apply_output_cap_header(request, body)
     # #3333: on a single-parallel slot, a BACKGROUND (hal0/memory) request
     # yields the slot to any FOREGROUND (user) request already waiting on or
     # running on it, so Hindsight extraction/reflect/consolidation can never
@@ -1590,6 +1734,22 @@ async def chat_completions(request: Request, dispatcher: DispatcherDep) -> Respo
             with contextlib.suppress(Exception):
                 request._body = json.dumps(body).encode("utf-8")  # type: ignore[attr-defined]
         return await _dispatch_and_forward(request, dispatcher, body=body)
+
+
+def _apply_output_cap_header(request: Request, body: dict[str, Any]) -> dict[str, Any]:
+    """Bound the body's output limit at ``X-hal0-Max-Tokens`` when the caller sent one (#3804).
+
+    See :mod:`hal0.normalize.output_cap`. ``request._body`` is rewritten too, for
+    the same reason ``_normalize_chat_body`` rewrites it.
+    """
+    cap = parse_output_cap(request.headers.get(MAX_TOKENS_HEADER))
+    if cap is None:
+        return body
+    capped = apply_output_cap(body, cap)
+    if capped is not body:
+        with contextlib.suppress(Exception):
+            request._body = json.dumps(capped).encode("utf-8")  # type: ignore[attr-defined]
+    return capped
 
 
 def _gate_slot_key(request: Request, body: dict[str, Any]) -> str:

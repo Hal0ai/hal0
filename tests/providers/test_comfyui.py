@@ -1483,7 +1483,7 @@ async def test_a_lone_surrogate_in_the_gates_reason_is_replaced(
     provider: ComfyUIProvider, field: str
 ) -> None:
     """The 503 body comes from inside the container. ``"\\ud800"`` is valid JSON and not
-    valid UTF-8; kept, it breaks every later envelope, log line and Sentry event."""
+    valid UTF-8; kept, it breaks every later envelope and log line."""
     from hal0.providers.comfyui import ImageGateRefused
 
     body = _refused_prompt("x")

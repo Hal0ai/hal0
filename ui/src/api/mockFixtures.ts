@@ -2193,6 +2193,764 @@ function buildRunnerImagesPulls() {
   return []
 }
 
+// ─── Upstream provider catalog + per-model routes (upstream catalog lane 1) ──
+// Shapes mirror src/hal0/api/routes/providers.py field for field:
+//   GET  /api/providers/catalog                       preset_to_api() per preset
+//   GET  /api/upstreams/{name}/models                 _listing()
+//   PATCH /api/upstreams/{name}/models/{model_id}     one _row()
+//   POST /api/upstreams/{name}/refresh                _listing(), plus a warning
+//   POST /api/providers/probe                         probe_provider()
+// Only the two GET routes are in MOCK_ALLOWLIST: `mockFetch` substitutes GETs
+// and never a mutation (see ./mock.ts). The mutation responses are exported
+// through MOCK_MUTATION_FIXTURES so a spec can fulfil them with `page.route`,
+// or a unit test can use them directly.
+
+const PROVIDER_CATALOG = {
+  minimax: {
+    id: 'minimax',
+    name: 'MiniMax',
+    category: 'cloud',
+    base_url: 'https://api.minimax.io/v1',
+    auth: 'bearer',
+    auth_header_name: 'Authorization',
+    models_path: '/models',
+    default_models: ['MiniMax-M3', 'MiniMax-M3.1-Flash'],
+    default_model: 'MiniMax-M3',
+    capabilities: ['chat', 'tools'],
+    docs_url: 'https://platform.minimax.io/docs/api-reference/text-openai-api',
+    notes: 'MiniMax OpenAI-compatible API (international endpoint).',
+    tools: true,
+    quirks: ['no_nullable_union_tool_schema', 'strip_llama_samplers'],
+    rate_limit_headers: {},
+    models: [
+      {
+        id: 'MiniMax-M3',
+        type: 'chat',
+        context: 1000000,
+        price_in: 0.3,
+        price_out: 1.2,
+        price_unit: 'Mtok',
+        recommended: true,
+      },
+      {
+        id: 'MiniMax-M3.1-Flash',
+        type: 'chat',
+        context: 1000000,
+        price_in: 0.15,
+        price_out: 0.6,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+    ],
+  },
+  openai: {
+    id: 'openai',
+    name: 'OpenAI',
+    category: 'cloud',
+    base_url: 'https://api.openai.com/v1',
+    auth: 'bearer',
+    auth_header_name: 'Authorization',
+    models_path: '/models',
+    default_models: ['gpt-5', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o-mini'],
+    default_model: 'gpt-5-mini',
+    capabilities: ['chat', 'embed', 'tools'],
+    docs_url: 'https://platform.openai.com/api-keys',
+    notes: 'Official OpenAI API.',
+    tools: true,
+    quirks: [],
+    rate_limit_headers: {},
+    models: [
+      {
+        id: 'gpt-5',
+        type: 'chat',
+        context: null,
+        price_in: 1.25,
+        price_out: 10.0,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'gpt-5-mini',
+        type: 'chat',
+        context: null,
+        price_in: 0.25,
+        price_out: 2.0,
+        price_unit: 'Mtok',
+        recommended: true,
+      },
+      {
+        id: 'gpt-4.1',
+        type: 'chat',
+        context: null,
+        price_in: 2.0,
+        price_out: 8.0,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'gpt-4o-mini',
+        type: 'chat',
+        context: null,
+        price_in: 0.15,
+        price_out: 0.6,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'text-embedding-3-small',
+        type: 'embed',
+        context: null,
+        price_in: 0.02,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'text-embedding-3-large',
+        type: 'embed',
+        context: null,
+        price_in: 0.13,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+    ],
+  },
+  anthropic: {
+    id: 'anthropic',
+    name: 'Anthropic',
+    category: 'cloud',
+    base_url: 'https://api.anthropic.com/v1',
+    auth: 'bearer',
+    auth_header_name: 'Authorization',
+    models_path: '/models',
+    default_models: ['claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-2', 'claude-haiku-5-5'],
+    default_model: 'claude-sonnet-5-5',
+    capabilities: ['chat', 'tools'],
+    docs_url: 'https://platform.claude.com/docs/en/cli-sdks-libraries/libraries/openai-sdk',
+    notes: 'Claude via Anthropic\'s OpenAI-compatible layer. Intended for testing and comparison; thinking output and prompt caching are not available here.',
+    tools: true,
+    quirks: [],
+    rate_limit_headers: {
+      remaining_requests: 'x-ratelimit-remaining-requests',
+      remaining_tokens: 'x-ratelimit-remaining-tokens',
+      retry_after: 'retry-after',
+    },
+    models: [
+      {
+        id: 'claude-sonnet-5-5',
+        type: 'chat',
+        context: 1000000,
+        price_in: 2.0,
+        price_out: 10.0,
+        price_unit: 'Mtok',
+        recommended: true,
+      },
+      {
+        id: 'claude-opus-5-5',
+        type: 'chat',
+        context: 1000000,
+        price_in: 4.0,
+        price_out: 20.0,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'claude-fable-5-2',
+        type: 'chat',
+        context: 1000000,
+        price_in: 8.0,
+        price_out: 40.0,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'claude-haiku-5-5',
+        type: 'chat',
+        context: 1000000,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+    ],
+  },
+  openrouter: {
+    id: 'openrouter',
+    name: 'OpenRouter',
+    category: 'cloud',
+    base_url: 'https://openrouter.ai/api/v1',
+    auth: 'bearer',
+    auth_header_name: 'Authorization',
+    models_path: '/models',
+    default_models: [],
+    default_model: '',
+    capabilities: ['chat', 'tools'],
+    docs_url: 'https://openrouter.ai/keys',
+    notes: 'OpenRouter aggregates many models behind one OpenAI-compatible endpoint. Model ids are discovered from GET /models.',
+    tools: true,
+    quirks: [],
+    rate_limit_headers: {},
+    models: [],
+  },
+  google_ai_studio: {
+    id: 'google_ai_studio',
+    name: 'Google AI Studio',
+    category: 'cloud',
+    base_url: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    auth: 'bearer',
+    auth_header_name: 'Authorization',
+    models_path: '/models',
+    default_models: ['gemini-3.8-flash'],
+    default_model: 'gemini-3.8-flash',
+    capabilities: ['chat', 'embed', 'tools'],
+    docs_url: 'https://aistudio.google.com/docs/openai',
+    notes: 'Google Gemini via the OpenAI-compatible REST layer (documented as beta).',
+    tools: true,
+    quirks: [],
+    rate_limit_headers: {},
+    models: [
+      {
+        id: 'gemini-3.8-flash',
+        type: 'chat',
+        context: null,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: true,
+      },
+      {
+        id: 'gemini-embedding-001',
+        type: 'embed',
+        context: null,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+    ],
+  },
+  deepseek: {
+    id: 'deepseek',
+    name: 'DeepSeek',
+    category: 'cloud',
+    base_url: 'https://api.deepseek.com',
+    auth: 'bearer',
+    auth_header_name: 'Authorization',
+    models_path: '/models',
+    default_models: ['deepseek-flash', 'deepseek-v4-pro'],
+    default_model: 'deepseek-flash',
+    capabilities: ['chat', 'tools'],
+    docs_url: 'https://api-docs.deepseek.com/quick_start/pricing',
+    notes: 'DeepSeek\'s OpenAI-compatible API. Listed prices are the peak-hour rates; off-peak is cheaper.',
+    tools: true,
+    quirks: [],
+    rate_limit_headers: {},
+    models: [
+      {
+        id: 'deepseek-flash',
+        type: 'chat',
+        context: 1000000,
+        price_in: 0.3,
+        price_out: 1.2,
+        price_unit: 'Mtok',
+        recommended: true,
+      },
+      {
+        id: 'deepseek-v4-pro',
+        type: 'chat',
+        context: 1000000,
+        price_in: 1.32,
+        price_out: 3.96,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+    ],
+  },
+  groq: {
+    id: 'groq',
+    name: 'Groq',
+    category: 'cloud',
+    base_url: 'https://api.groq.com/openai/v1',
+    auth: 'bearer',
+    auth_header_name: 'Authorization',
+    models_path: '/models',
+    default_models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b'],
+    default_model: 'llama-3.3-70b-versatile',
+    capabilities: ['chat', 'stt', 'tools'],
+    docs_url: 'https://console.groq.com/docs/openai',
+    notes: 'Groq\'s OpenAI-compatible API.',
+    tools: true,
+    quirks: [],
+    rate_limit_headers: {},
+    models: [
+      {
+        id: 'llama-3.3-70b-versatile',
+        type: 'chat',
+        context: 131072,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: true,
+      },
+      {
+        id: 'llama-3.1-8b-instant',
+        type: 'chat',
+        context: 131072,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'openai/gpt-oss-120b',
+        type: 'chat',
+        context: 131072,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'openai/gpt-oss-20b',
+        type: 'chat',
+        context: 131072,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'whisper-large-v3-turbo',
+        type: 'stt',
+        context: null,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'whisper-large-v3',
+        type: 'stt',
+        context: null,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+    ],
+  },
+  mistral: {
+    id: 'mistral',
+    name: 'Mistral',
+    category: 'cloud',
+    base_url: 'https://api.mistral.ai/v1',
+    auth: 'bearer',
+    auth_header_name: 'Authorization',
+    models_path: '/models',
+    default_models: ['mistral-large-latest', 'mistral-small-latest'],
+    default_model: 'mistral-large-latest',
+    capabilities: ['chat', 'tools'],
+    docs_url: 'https://docs.mistral.ai/api/',
+    notes: 'Mistral La Plateforme, OpenAI-compatible chat completions.',
+    tools: true,
+    quirks: [],
+    rate_limit_headers: {},
+    models: [
+      {
+        id: 'mistral-large-latest',
+        type: 'chat',
+        context: null,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: true,
+      },
+      {
+        id: 'mistral-small-latest',
+        type: 'chat',
+        context: null,
+        price_in: null,
+        price_out: null,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+    ],
+  },
+  ollama: {
+    id: 'ollama',
+    name: 'Ollama',
+    category: 'local',
+    base_url: 'http://localhost:11434/v1',
+    auth: 'none',
+    auth_header_name: '',
+    models_path: '/models',
+    default_models: [],
+    default_model: '',
+    capabilities: ['chat', 'tools'],
+    docs_url: 'https://docs.ollama.com/api/openai-compatibility',
+    notes: 'Local Ollama server. The OpenAI-compatible surface ignores the API key.',
+    tools: true,
+    quirks: [],
+    rate_limit_headers: {},
+    models: [],
+  },
+  hal0_peer: {
+    id: 'hal0_peer',
+    name: 'hal0 peer',
+    category: 'peer',
+    base_url: '',
+    auth: 'bearer',
+    auth_header_name: 'Authorization',
+    models_path: '/models',
+    default_models: [],
+    default_model: '',
+    capabilities: ['chat', 'tools'],
+    docs_url: '',
+    notes: 'Another hal0 instance on your network. Enter its URL and a key from that instance.',
+    tools: true,
+    quirks: [],
+    rate_limit_headers: {},
+    models: [],
+  },
+  custom: {
+    id: 'custom',
+    name: 'Custom OpenAI-compatible',
+    category: 'custom',
+    base_url: '',
+    auth: 'bearer',
+    auth_header_name: 'Authorization',
+    models_path: '/models',
+    default_models: [],
+    default_model: '',
+    capabilities: ['chat', 'tools'],
+    docs_url: '',
+    notes: 'Any OpenAI-compatible endpoint.',
+    tools: true,
+    quirks: [],
+    rate_limit_headers: {},
+    models: [],
+  },
+}
+
+function buildProvidersCatalog() {
+  return PROVIDER_CATALOG
+}
+
+type UpstreamModelRow = {
+  id: string
+  canonical_id: string
+  enabled: boolean
+  type: 'chat' | 'embed' | 'rerank' | 'tts' | 'stt' | 'image'
+  context: number | null
+  price_in: number | null
+  price_out: number | null
+  price_unit: string
+  discovered: boolean
+  recommended: boolean
+  in_use_by: string[]
+}
+
+function upstreamModelRow(
+  upstream: string,
+  id: string,
+  over: Partial<UpstreamModelRow> = {},
+): UpstreamModelRow {
+  return {
+    id,
+    canonical_id: `${upstream}/${id}`,
+    enabled: false,
+    type: 'chat',
+    context: null,
+    price_in: null,
+    price_out: null,
+    price_unit: 'Mtok',
+    discovered: true,
+    recommended: false,
+    in_use_by: [],
+    ...over,
+  }
+}
+
+type UpstreamListing = {
+  name: string
+  curated: boolean
+  protected: boolean
+  fetched_at: number | null
+  stale: boolean
+  warning: string | null
+  models: UpstreamModelRow[]
+}
+
+// The mock provider set (names the Providers tab shows):
+//   minimax     per-model, a few rows, key set
+//   openrouter  per-model, 450 rows (generated), key set
+//   openai      per-model, key missing
+//   corp        awaiting conversion (`curated: false`, `stale: true`, rows are the ids it serves today)
+//   hermes.coder agent-managed (`protected: true`, read-only live rows)
+// Any other name 404s, like the real route's unknown-upstream answer.
+
+const MOCK_FETCHED_AT = 1763337600
+
+const PROVIDER_VENDORS = ['qwen', 'meta-llama', 'mistralai', 'google', 'deepseek', 'anthropic', 'cohere', 'nvidia']
+const PROVIDER_CONTEXTS = [8192, 32768, 65536, 131072, 204800, 262144, 1000000]
+
+/**
+ * `count` deterministic model rows for a large provider: no randomness and no clock, so a
+ * snapshot or an e2e run sees the same list every time. Every 17th row is an embedding model,
+ * every 41st is no longer offered (`discovered: false`), every 53rd is recommended, and the
+ * first few are on.
+ */
+function generatedUpstreamModels(upstream: string, count: number, firstIndex = 0): UpstreamModelRow[] {
+  const rows: UpstreamModelRow[] = []
+  for (let n = 0; n < count; n += 1) {
+    const i = firstIndex + n
+    const vendor = PROVIDER_VENDORS[i % PROVIDER_VENDORS.length]
+    const embed = i % 17 === 0
+    const priced = i % 5 !== 0
+    rows.push(
+      upstreamModelRow(upstream, `${vendor}/model-${String(i).padStart(3, '0')}${i % 7 === 0 ? ':free' : ''}`, {
+        enabled: i < firstIndex + 4 && !embed,
+        type: embed ? 'embed' : 'chat',
+        context: PROVIDER_CONTEXTS[i % PROVIDER_CONTEXTS.length],
+        price_in: priced ? Math.round(((i % 40) + 1) * 0.05 * 100) / 100 : null,
+        price_out: priced && !embed ? Math.round(((i % 40) + 1) * 0.2 * 100) / 100 : null,
+        discovered: i % 41 !== 40,
+        recommended: i % 53 === 0,
+      }),
+    )
+  }
+  return rows
+}
+
+function curatedListing(name: string, models: UpstreamModelRow[], over: Partial<UpstreamListing> = {}): UpstreamListing {
+  return { name, curated: true, protected: false, fetched_at: MOCK_FETCHED_AT, stale: false, warning: null, models, ...over }
+}
+
+function upstreamListing(name: string): UpstreamListing | null {
+  if (name === 'minimax') {
+    return curatedListing(name, [
+      upstreamModelRow(name, 'MiniMax-M3', { enabled: true, context: 512000, price_in: 0.4, price_out: 1.6, recommended: true }),
+      upstreamModelRow(name, 'MiniMax-M3.1-Flash', { enabled: true, context: 256000, price_in: 0.1, price_out: 0.4, recommended: true }),
+      upstreamModelRow(name, 'MiniMax-M2.5', { context: 204000, price_in: 0.3, price_out: 1.2 }),
+      upstreamModelRow(name, 'speech-2.8-hd', { type: 'tts', price_in: 100, price_unit: 'Mchar', recommended: true }),
+      upstreamModelRow(name, 'speech-2.8-turbo', { type: 'tts', price_in: 60, price_unit: 'Mchar' }),
+      upstreamModelRow(name, 'embo-01', { type: 'embed', context: 4096, price_in: 0.07 }),
+      upstreamModelRow(name, 'image-01', { type: 'image', price_in: 0.0035, price_unit: 'img' }),
+    ])
+  }
+  if (name === 'openrouter') {
+    return curatedListing(name, [
+      upstreamModelRow(name, 'qwen/qwen3-coder', { enabled: true, context: 262144, price_in: 0.22, price_out: 0.95 }),
+      upstreamModelRow(name, 'meta-llama/llama-3.3-70b-instruct:free', { context: 131072, price_in: 0, price_out: 0 }),
+      upstreamModelRow(name, 'openai/text-embedding-3-small', { type: 'embed', context: 8191, price_in: 0.02, price_out: 0 }),
+      ...generatedUpstreamModels(name, 447),
+    ])
+  }
+  if (name === 'openai') {
+    return curatedListing(name, [
+      upstreamModelRow(name, 'gpt-5', { enabled: true, price_in: 1.25, price_out: 10, recommended: true }),
+      upstreamModelRow(name, 'gpt-5-mini', { enabled: true, price_in: 0.25, price_out: 2, recommended: true }),
+      upstreamModelRow(name, 'text-embedding-3-small', { type: 'embed', context: 8191, price_in: 0.02 }),
+      upstreamModelRow(name, 'whisper-1', { type: 'stt' }),
+      upstreamModelRow(name, 'tts-1', { type: 'tts', price_in: 15, price_unit: 'Mchar' }),
+    ])
+  }
+  if (name === 'corp') {
+    return {
+      name,
+      curated: false,
+      protected: false,
+      fetched_at: null,
+      stale: true,
+      warning: null,
+      models: [
+        upstreamModelRow(name, 'corp-chat-large', { enabled: true }),
+        upstreamModelRow(name, 'corp-embed', { enabled: true, type: 'embed' }),
+      ],
+    }
+  }
+  if (name === 'hermes.coder') {
+    return {
+      name,
+      curated: false,
+      protected: true,
+      fetched_at: null,
+      stale: false,
+      warning: null,
+      models: [upstreamModelRow(name, 'hermes-agent', { enabled: true })],
+    }
+  }
+  return null
+}
+
+/** One `GET /api/upstreams` row (`_serialize_upstream`); the key is never present, only env-var names. */
+function upstreamEntry(name: string, over: Record<string, unknown> = {}) {
+  const listing = upstreamListing(name)!
+  const total = listing.curated ? listing.models.length : 0
+  return {
+    name,
+    kind: 'remote',
+    url: `https://${name}.example.com/v1`,
+    auth_style: 'bearer',
+    auth_header: '',
+    auth_value_env: `${name.replace(/[^a-z0-9]/gi, '_').toUpperCase()}_API_KEY`,
+    auth_configured: true,
+    auth_key_present: true,
+    timeout_seconds: 60,
+    slot_name: null,
+    warmup_strategy: 'none',
+    advertise_models: true,
+    enabled: true,
+    model_filters: null,
+    models: listing.models.filter((m) => m.enabled).map((m) => m.id),
+    managed_by: null,
+    pinned: false,
+    owned_models: [] as string[],
+    catalog_id: null as string | null,
+    curated: listing.curated,
+    budget_monthly_usd: null,
+    enabled_count: listing.curated ? listing.models.filter((m) => m.enabled).length : 0,
+    models_total: total,
+    ...over,
+  }
+}
+
+function buildUpstreams() {
+  return [
+    upstreamEntry('minimax', { url: 'https://api.minimax.io/v1', catalog_id: 'minimax' }),
+    upstreamEntry('openrouter', { url: 'https://openrouter.ai/api/v1', catalog_id: 'openrouter' }),
+    upstreamEntry('openai', { url: 'https://api.openai.com/v1', catalog_id: 'openai', auth_key_present: false }),
+    upstreamEntry('corp', { url: 'https://llm.corp.example.com/v1', auth_style: 'none', auth_value_env: '', auth_configured: false, auth_key_present: false }),
+    upstreamEntry('hermes.coder', {
+      url: 'http://127.0.0.1:8642/v1',
+      auth_style: 'none',
+      auth_value_env: '',
+      auth_configured: false,
+      auth_key_present: false,
+      managed_by: 'agent:hermes',
+    }),
+  ]
+}
+
+function buildUpstreamModels(_url: string, match: RegExpMatchArray) {
+  return upstreamListing(decodeURIComponent(match[1]))
+}
+
+/** HTTP status plus the JSON body a route answers with. */
+type MockHttpAnswer<T> = { status: number; body: T }
+
+/**
+ * PATCH /api/upstreams/{name}/models/{model_id}: 200 with the changed row, or, for an
+ * upstream that is not converted yet, the 409 `upstream.not_curated` error envelope.
+ */
+function upstreamModelPatchResponse(
+  name: string,
+  modelId: string,
+  body: Partial<Pick<UpstreamModelRow, 'enabled' | 'type' | 'context' | 'price_in' | 'price_out' | 'price_unit'>> = {},
+): MockHttpAnswer<UpstreamModelRow | { error: { code: string; message: string; details: { name: string } } }> {
+  const listing = upstreamListing(name)
+  if (listing?.protected) {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'upstream.protected',
+          message: `upstream '${name}' is managed by an agent and cannot be changed here`,
+          details: { name },
+        },
+      },
+    }
+  }
+  if (listing && !listing.curated) {
+    return {
+      status: 409,
+      body: {
+        error: {
+          code: 'upstream.not_curated',
+          message: `upstream '${name}' is not converted yet; refresh when the provider is reachable`,
+          details: { name },
+        },
+      },
+    }
+  }
+  const stored = listing?.models.find((m) => m.id === modelId)
+  return { status: 200, body: { ...(stored ?? upstreamModelRow(name, modelId)), ...body } }
+}
+
+/** POST /api/upstreams/{name}/refresh: a curated row only refetches discovery. */
+function upstreamRefreshResponse(name: string): UpstreamListing | null {
+  const listing = upstreamListing(name)
+  if (!listing) return null
+  if (listing.curated) return { ...listing, fetched_at: 1763341200 }
+  // An unconverted row whose provider answered no models: left as is, with a reason.
+  return {
+    ...listing,
+    warning: 'the provider returned no models; check the url and key, then refresh again',
+  }
+}
+
+/** POST /api/providers/probe: the key is never echoed; `canonical_id` is always null. */
+function providerProbeResponse(ok = true) {
+  if (!ok) {
+    return {
+      ok: false,
+      status: 401,
+      latency_ms: 38.4,
+      models: [],
+      rate_limit: {
+        limit_requests: null,
+        remaining_requests: null,
+        limit_tokens: null,
+        remaining_tokens: null,
+      },
+      error: 'the provider rejected the key (HTTP 401)',
+    }
+  }
+  return {
+    ok: true,
+    status: 200,
+    latency_ms: 112.7,
+    models: [
+      {
+        id: 'qwen/qwen3-coder',
+        canonical_id: null,
+        type: 'chat',
+        type_source: 'provider',
+        context: 262144,
+        price_in: 0.22,
+        price_out: 0.95,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+      {
+        id: 'openai/text-embedding-3-small',
+        canonical_id: null,
+        type: 'embed',
+        type_source: 'guess',
+        context: 8191,
+        price_in: 0.02,
+        price_out: 0,
+        price_unit: 'Mtok',
+        recommended: false,
+      },
+    ],
+    rate_limit: {
+      limit_requests: 1000,
+      remaining_requests: 998,
+      limit_tokens: null,
+      remaining_tokens: null,
+    },
+    error: null,
+  }
+}
+
+export const MOCK_MUTATION_FIXTURES = {
+  providerProbe: providerProbeResponse,
+  upstreamModelPatch: upstreamModelPatchResponse,
+  upstreamRefresh: upstreamRefreshResponse,
+}
+
 // ─── Builder lookup — keyed by the AllowRow.key in `./mock.ts`'s
 // `MOCK_ALLOWLIST`. The route table there only carries `{re, key,
 // networkFirst}` (no function refs), so it stays cheap to construct eagerly;
@@ -2220,6 +2978,9 @@ export const MOCK_BUILDERS: Record<string, Builder> = {
   runnerImages: buildRunnerImages,
   runnerImagesDownloaded: buildRunnerImagesDownloaded,
   runnerImagesPulls: buildRunnerImagesPulls,
+  providersCatalog: buildProvidersCatalog,
+  upstreams: buildUpstreams,
+  upstreamModels: buildUpstreamModels,
   memoryEngine: buildMemoryEngine,
   memoryHealth: buildMemoryHealth,
   memoryBanks: buildMemoryBanks,

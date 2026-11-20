@@ -1,6 +1,9 @@
 // hal0 Overview v2 — pure model for the Agents panel: the Hermes row, the Pi row, delegated runs
 // and the board's in-progress count. No React; the one window read is the card model the Agents
-// page publishes, so the panel's state word is the card's state word.
+// page publishes. The panel keeps its own four words (serving / ready / down / unknown), so the
+// card's phase is mapped, not copied: `serving`, `ready`, `working` and `broken` map straight
+// across, and a `degraded` card reads `down` when any of its reasons is an outage (see
+// OUTAGE_REASONS) and `ready` otherwise (#3808, ADR-0044).
 
 import type { AgentOverview, AgentRecord } from '@/api/hooks/useAgents'
 import type { BridgeRun } from '@/api/hooks/useBridge'
@@ -78,7 +81,10 @@ function shortRef(ref: unknown): string | null {
 }
 
 type CardPhase = string
-type Derive = (input: Record<string, unknown>) => { phase?: CardPhase }
+type Derive = (input: Record<string, unknown>) => {
+  phase?: CardPhase
+  reasons?: { reason?: string }[]
+}
 
 function publishedDerive(): Derive | null {
   if (typeof window === 'undefined') return null
@@ -86,12 +92,19 @@ function publishedDerive(): Derive | null {
   return typeof fn === 'function' ? fn : null
 }
 
-function phaseToState(phase: CardPhase | undefined): HermesState {
+/** Degraded reasons (src/hal0/agents/overview.py `degraded_reasons`) that mean the agent is not
+ *  serving: the gateway or API server is unreachable, or provisioning failed. The rest
+ *  (`provision_warn`, `doctor_drift`, `approvals_drift`) are soft, and so is any reason added
+ *  later: an unknown reason reads `ready` rather than a false `down`. */
+const OUTAGE_REASONS: ReadonlySet<string> = new Set(['gateway_down', 'api_unhealthy', 'provision_failed'])
+
+function phaseToState(phase: CardPhase | undefined, reasons?: { reason?: string }[]): HermesState {
   switch (phase) {
     case 'serving':
       return 'serving'
-    case 'ready':
     case 'degraded':
+      return (reasons ?? []).some((r) => OUTAGE_REASONS.has(r?.reason ?? '')) ? 'down' : 'ready'
+    case 'ready':
     case 'working':
       return 'ready'
     case 'down':
@@ -114,7 +127,7 @@ function stateOf(
   const derive = publishedDerive()
   if (derive) {
     const model = derive({ agent: 'hermes', record, overview: ov, slot, job: null, caps: null, urls: null })
-    return phaseToState(model?.phase)
+    return phaseToState(model?.phase, model?.reasons)
   }
   const unit = ov?.units?.agent
   const active = unit != null ? unit === 'active' : record ? record.unit_active === true : null

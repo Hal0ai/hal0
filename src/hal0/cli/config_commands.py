@@ -29,13 +29,6 @@ from hal0.config.schema import CURRENT_SCHEMA_VERSION
 #: the literal too); this comment is the cross-reference.
 HAL0_TOML_SEED_MODE = 0o600
 
-#: Canonical mode for a freshly-seeded providers.toml. save_providers_config's
-#: atomic rewrite passes no explicit mode to write_toml_atomic, so
-#: tempfile.mkstemp's own default (0600) is what "canonical" already means
-#: for this file — matched here so the seed doesn't drift from the first
-#: real write.
-PROVIDERS_TOML_SEED_MODE = 0o600
-
 #: Service account a freshly-seeded config file should end up owned by, so
 #: hal0-api.service (``User=hal0``/``Group=hal0``) can actually read it.
 #: Mirrors ``hal0.install.perms.ownership_table()``'s ``service_user`` /
@@ -52,21 +45,19 @@ console = Console()
 class ConfigFile(StrEnum):
     """Which on-disk config file a `config show`/`config edit` targets.
 
-    Mirrors the three files ``hal0 config validate`` already checks
-    (hal0.toml, upstreams.toml, providers.toml) — before this, ``show``/
-    ``edit`` were hardcoded to hal0.toml only, so a validate failure in
-    upstreams.toml or providers.toml had no matching ``edit`` target.
+    Mirrors the files ``hal0 config validate`` checks (hal0.toml,
+    upstreams.toml) — before this, ``show``/``edit`` were hardcoded to
+    hal0.toml only, so a validate failure in upstreams.toml had no matching
+    ``edit`` target.
     """
 
     hal0 = "hal0"
     upstreams = "upstreams"
-    providers = "providers"
 
 
 _CONFIG_FILENAMES: dict[ConfigFile, str] = {
     ConfigFile.hal0: "hal0.toml",
     ConfigFile.upstreams: "upstreams.toml",
-    ConfigFile.providers: "providers.toml",
 }
 
 
@@ -206,7 +197,7 @@ def _seed_config_file(path: Path, content: str, mode: int) -> None:
 def config_show(
     which: ConfigFile = typer.Argument(
         ConfigFile.hal0,
-        help="Which config file to show: hal0 | upstreams | providers.",
+        help="Which config file to show: hal0 | upstreams.",
         case_sensitive=False,
     ),
 ) -> None:
@@ -263,7 +254,7 @@ def config_show(
 def config_edit(
     which: ConfigFile = typer.Argument(
         ConfigFile.hal0,
-        help="Which config file to edit: hal0 | upstreams | providers.",
+        help="Which config file to edit: hal0 | upstreams.",
         case_sensitive=False,
     ),
 ) -> None:
@@ -279,12 +270,9 @@ def config_edit(
                 "[slots]\nport_range_start = 8081\nport_range_end = 8099\n"
             )
             seed_mode = HAL0_TOML_SEED_MODE
-        elif which == ConfigFile.upstreams:
-            seed_content = f"# hal0 {which.value} configuration — created by `hal0 config edit`.\n"
-            seed_mode = UPSTREAMS_TOML_MODE
         else:
             seed_content = f"# hal0 {which.value} configuration — created by `hal0 config edit`.\n"
-            seed_mode = PROVIDERS_TOML_SEED_MODE
+            seed_mode = UPSTREAMS_TOML_MODE
         try:
             _seed_config_file(path, seed_content, seed_mode)
         except ConfigSeedOwnershipError as exc:
@@ -383,7 +371,7 @@ def _run_config_migration(path, target, run_migrations, MigrationError) -> None:
 
 @app.command("validate")
 def config_validate() -> None:
-    """Validate hal0.toml, upstreams.toml, providers.toml and every slot file.
+    """Validate hal0.toml, upstreams.toml and every slot file.
 
     Each slot file goes through the typed ``SlotConfig`` load the daemon and
     ``hal0 doctor profiles`` use, so a slot the daemon refuses at boot fails
@@ -392,7 +380,6 @@ def config_validate() -> None:
     from hal0.config.loader import (
         list_slots,
         load_hal0_config,
-        load_providers_config,
         load_slot_config,
         load_upstreams_config,
     )
@@ -406,10 +393,6 @@ def config_validate() -> None:
         load_upstreams_config()
     except Exception as exc:
         problems.append(f"upstreams.toml: {exc}")
-    try:
-        load_providers_config()
-    except Exception as exc:
-        problems.append(f"providers.toml: {exc}")
     try:
         slot_stems = list_slots()
     except Exception as exc:

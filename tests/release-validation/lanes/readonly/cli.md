@@ -111,8 +111,21 @@ baseline diff, so don't stop checking after the first comparison.
 
 20. **Doctor on a release tree.** `HAL0_PLAIN=1 hal0 doctor </dev/null` ends `passed with N warning(s)` on a healthy box. Count the distinct warnings yourself; node-missing and own-port warnings on a signed release tree (no `ui/package.json`) are #2740 items 1-3, not new findings. Also `hal0 doctor profiles; echo rc=$?` with a non-loading slot TOML present: rc 0 is item 5.
 
+22. **Install-time tracebacks.** `journalctl -u hal0-api --no-pager | grep -c Traceback` right after install (MCP SSE writer tracebacks were seen on 1.8.0); record the count as a warn candidate, not a finding, unless one names a user-visible failure.
+
+23. **Slot backend vs capabilities.** `hal0 slot list` backend per row against `/api/capabilities .backends`. On a kfd-less box `img` and `qwen3tts` show `rocm` while capabilities advertise vulkan/cpu only; record, attribute to the non-LLM seeded slots, file only if a slot a user can load shows a backend the box cannot run.
+
+24. **Root `doctor all` creates `/root/.hermes`.** (#3836, known.) Check `ls -d /root/.hermes` before and after your first `hal0 doctor all`; if it appears, a later `doctor perms` DRIFT row is that, not the installer. Remove it only if you created it.
+25. **Wrong CONTEXT.md.** If `CONTEXT.md` line 1 names another box (#3838), say so, take identity from `boxes.toml`, and run the lane anyway. In 1.8.0-nightly.20261118233655 four ct151 lanes stopped on this and produced nothing.
+
 ## Carry-forward
 
 Rollups are cheap to file and cheap to lose track of — when you find several small CLI defects,
 enumerate every one individually in your findings even if they will be filed as a single issue
 (#1796 collected fourteen in rc.4; #1840 collected thirteen in rc.5).
+
+## Added in kit 19
+
+* In one pass compare `used_by` in `/api/profiles` against `/api/profiles/<name>` for every profile.
+* `hal0 agent peers` row count must equal distinct card document ids (#3877, known); `hal0 model scan` must name each skip reason (#2725, known).
+* Assert `hal0 mcp status <server>` output is bounded (hal0-admin printed 44 KB).

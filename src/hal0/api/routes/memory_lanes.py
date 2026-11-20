@@ -187,11 +187,8 @@ async def _decision_health(decision_cfg: Any) -> dict[str, Any]:
     return out
 
 
-def _lane_op(op_cfg: Any, lanes_cfg: Any) -> dict[str, Any]:
-    return {
-        "max_concurrent": op_cfg.max_concurrent or lanes_cfg.llm_max_concurrent,
-        "model": op_cfg.virtual_model or "hal0/memory",
-    }
+def _lane_op(op_cfg: Any, cap: int) -> dict[str, Any]:
+    return {"max_concurrent": cap, "model": op_cfg.virtual_model or "hal0/memory"}
 
 
 def _engine_env_report(memory_cfg: Any) -> dict[str, Any]:
@@ -243,16 +240,15 @@ async def get_lanes(request: Request) -> dict[str, Any]:
     # hindsight-api unit really carries — a later-sorting drop-in can override
     # hal0's — and ``drift`` lists every managed key where the two disagree.
     # ``effective`` is ``None`` when the unit env cannot be read.
+    # What the engine is given: the renderer's own resolver (#3758).
+    from hal0.memory.extraction_env import resolved_lane_caps
+
+    global_cap, op_caps = await asyncio.to_thread(resolved_lane_caps, lanes_cfg, cfg.memory.graph)
     llm: dict[str, Any] = {
         "model": "hal0/memory",
-        "max_concurrent": lanes_cfg.llm_max_concurrent,
+        "max_concurrent": global_cap,
         "timeout": lanes_cfg.timeout_s,
-        "per_op": {
-            "retain": _lane_op(lanes_cfg.retain, lanes_cfg),
-            "consolidation": _lane_op(lanes_cfg.consolidation, lanes_cfg),
-            "reflect": _lane_op(lanes_cfg.reflect, lanes_cfg),
-            "mental_model_refresh": _lane_op(lanes_cfg.mental_model_refresh, lanes_cfg),
-        },
+        "per_op": {op: _lane_op(getattr(lanes_cfg, op), cap) for op, cap in op_caps.items()},
         "effective": None,
         "drift": [],
         "legacy_drop_in": None,
@@ -329,16 +325,14 @@ _INSTALL_COMMAND = f"hal0 memory agents install <harness> --bridge-key-file {_KE
 def _console_url(request: Request, cfg: Any) -> str | None:
     """Hindsight Control Plane console URL from ``[memory.console]``, or None.
 
-    Returns None when the console is disabled. If ``[memory.console]`` has no
-    explicit ``url``, derive one from ``memory.public_url`` (host) plus the
-    console port; else fall back to the inbound request's hostname.
+    Returns None when the console is disabled. Otherwise derive the URL from
+    ``memory.public_url`` (host) plus the console port; with no public URL fall
+    back to the inbound request's hostname. ``[memory.console]`` has no ``url``
+    key (ADR-0058 decision 10 removes the section).
     """
     console = getattr(cfg.memory, "console", None)
     if console is None or not getattr(console, "enabled", False):
         return None
-    url = getattr(console, "url", None)
-    if url:
-        return str(url)
     port = getattr(console, "port", 9999)
     public_url = getattr(cfg.memory, "public_url", None)
     host = None
@@ -408,6 +402,7 @@ async def get_models(request: Request) -> dict[str, Any]:
     # on disk. ``effective`` is what the engine runs (or would start on), and
     # ``conflict`` lists where that disagrees with the record.
     embedder = await asyncio.to_thread(_embedder_status, models_cfg)
+    install_state, unit_active = await asyncio.to_thread(_decision_component_state)
 
     return {
         "embeddings": {
@@ -437,5 +432,23 @@ async def get_models(request: Request) -> dict[str, Any]:
             "provider": decision_cfg.provider,
             "model": decision_cfg.model,
             "reachable": decision_health.get("reachable", False),
+            # #3757: whether the opt-in memory-decision component is installed,
+            # and whether its unit runs (null when systemd cannot be asked), so
+            # the dashboard can say "install it" vs "it is down".
+            "installed": install_state != "not-installed",
+            # not-installed | unmanaged (a hand install) | managed
+            "install_state": install_state,
+            "unit_active": unit_active,
         },
     }
+
+
+def _decision_component_state() -> tuple[str, bool | None]:
+    """``(install_state, unit_active)`` of the ``memory-decision`` component; never raises."""
+    try:
+        from hal0.memory.decision_component import install_state, unit_active
+
+        return install_state()[0], unit_active()
+    except Exception as exc:
+        log.warning("memory.decision_component_probe_failed: %s", exc)
+        return "not-installed", None

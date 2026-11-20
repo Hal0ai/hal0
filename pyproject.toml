@@ -39,7 +39,7 @@ dependencies = [
   # entire MCP surface with the API still reporting healthy. Raise this
   # deliberately, after running tests/mcp/test_admin_route_map_nested.py against
   # the new version.
-  "fastapi>=0.115,<0.163",
+  "fastapi>=0.115,<0.164",
   "uvicorn[standard]>=0.32",
   "httpx>=0.28",
   # hal0.providers.comfyui follows a render's step progress on ComfyUI's
@@ -86,7 +86,7 @@ dependencies = [
   # compromised emSign root from uv's bundled CA store (GHSA-hq85-5cpj-mr62),
   # the case a quarantine cannot help with. The floor moves to it too, so no
   # install keeps the vulnerable store.
-  "uv>=0.13.4,<0.13.8",
+  "uv>=0.13.4,<0.13.9",
 ]
 
 [project.optional-dependencies]
@@ -111,15 +111,9 @@ dev = [
   # import time. Same scope as numpy + soundfile above — toolbox-only
   # at runtime, but the test suite imports the FastAPI app.
   "python-multipart>=0.0.9",
-]
-
-# Optional error reporting. Deliberately NOT in `dependencies`: hal0 is a
-# self-hosted appliance that phones home to nobody by default, and the
-# absence of the package is a second, physical guarantee of that on top of
-# the "no DSN ⇒ no-op" logic in hal0.observability.sentry. Install with
-# `pip install 'hal0ai[sentry]'` only on boxes you want reporting from.
-sentry = [
-  "sentry-sdk>=2.20",
+  # The YAML parser of the pinned Hermes venv, which has no PyYAML. The
+  # hal0-memory plugin runs there, so its tests parse with this one (#3803).
+  "ruamel.yaml>=0.18.16,<0.19",
 ]
 
 # Bench load-gen tooling (Phase 3 of the bench overhaul). Deliberately NOT in

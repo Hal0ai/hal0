@@ -127,3 +127,36 @@ def test_curated_chat_entries_keep_chat_capability() -> None:
     assert chat_picks, "no curated entry recommends the chat slot"
     for m in chat_picks:
         assert m.capability == "chat", m.id
+
+
+def test_qwen3_4b_points_at_the_resolving_official_repo() -> None:
+    """#3790: the documented first pull must not target a repo that 401s."""
+    from hal0.registry.curated import get_curated
+
+    entry = get_curated("qwen3-4b")
+    assert entry is not None
+    assert entry.hf_repo == "Qwen/Qwen3-4B-GGUF"
+    assert entry.hf_file == "Qwen3-4B-Q4_K_M.gguf"
+
+
+@pytest.mark.network
+def test_every_curated_gguf_file_resolves_on_huggingface() -> None:
+    """Every curated (repo, file) pair exists on the public Hugging Face tree."""
+    import httpx
+
+    from hal0.registry.curated import CURATED_MODELS
+
+    missing: list[str] = []
+    for m in CURATED_MODELS:
+        if not m.hf_repo or not m.hf_file:
+            continue
+        r = httpx.get(
+            f"https://huggingface.co/api/models/{m.hf_repo}/tree/main",
+            params={"recursive": "1"},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            missing.append(f"{m.id}: {m.hf_repo} -> HTTP {r.status_code}")
+        elif m.hf_file not in {f.get("path") for f in r.json()}:
+            missing.append(f"{m.id}: {m.hf_file} not in {m.hf_repo}")
+    assert not missing, missing
