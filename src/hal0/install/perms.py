@@ -278,6 +278,11 @@ class PermRow:
     # single-level behavior byte-for-byte.
     optional: bool = True  # skip silently when the path is absent
     role: str = ""  # human label for the audit table
+    dirs_only: bool = False  # re-own and re-mode real DIRECTORIES only, never a file (#3852):
+    # for a tree the service account can write, where a regular file may be a hard link to a
+    # file outside it. A glob skips every non-directory match, a target that is not a directory
+    # is left alone, and commit() applies through an O_DIRECTORY descriptor, so a file swapped
+    # in after plan() is refused rather than re-owned.
     exclude: tuple[Path, ...] = ()  # glob rows skip these paths and everything under
     # them (the row itself too, when its target is one): another owner declares
     # them (the FLM store under or at ``models/``, #2446)
@@ -572,18 +577,35 @@ def ownership_table(
         # install.sh migration from before #3852, which left the trees
         # ``root:hal0`` so every later hal0-run ``hal0 update`` failed to
         # replace them. The HERMES_HOME row above is non-recursive, so nothing
-        # healed them. The two parents get a dir-only row (any other plugin
-        # Hermes keeps beside them is the operator's, not ours to re-mode);
-        # hal0's own two trees are recursive. The modes are the ones the
-        # mirror births them with: copytree copies the shipped tree's
-        # 0755 dirs and 0644 files. ``hermes_plugin_rows`` selects these rows
-        # for the root-held repair paths.
+        # healed them. ``hermes_plugin_rows`` selects these rows for the
+        # root-held repair paths.
+        #
+        # DIRECTORIES ONLY (``dirs_only``): the trees are hal0-writable, so a
+        # regular file in them may be a hard link hal0 planted to a file
+        # anywhere on the same filesystem, and re-owning it as root would hand
+        # that inode to hal0. Directories cannot be hard-linked, and they are
+        # all the hal0 mirror needs: unlinking a root-owned file needs write on
+        # its directory, not on the file, so once every directory is hal0's the
+        # mirror deletes and re-copies root-owned files without root ever
+        # touching them. Files are therefore neither audited nor fixed here;
+        # the mirror replaces them (and ``hal0 doctor``'s hermes plugins row
+        # reports a tree that differs from the shipped copy).
+        #
+        # Modes are what a healthy box has. The parents are plain ``mkdir``s
+        # (``hermes_provision._phase_home_init``, or copytree's makedirs) under
+        # the setgid HERMES_HOME skeleton, so they are born 2755, like the
+        # state/agents/hermes row above (#3545). Each tree's directories get
+        # their mode from copytree's copystat of the shipped 0755 dirs (which
+        # drops the inherited setgid bit), and the ``__pycache__`` dirs Hermes
+        # writes into them at runtime are a ``mkdir`` under a non-setgid 0755
+        # dir with the units' default umask 0022, so 0755 throughout.
         *(
             PermRow(
                 var_lib / ".hermes" / sub,
                 state_owner,
                 service_group,
-                0o755,
+                0o2755,
+                dirs_only=True,
                 role=f"HERMES_HOME/{sub}",
             )
             for sub in _HERMES_PLUGIN_PARENTS
@@ -596,9 +618,9 @@ def ownership_table(
                 0o755,
                 glob="*",
                 child_mode=0o755,
-                child_file_mode=0o644,
                 recursive=True,
-                role=f"HERMES_HOME/{sub} (shipped plugin, recursive)",
+                dirs_only=True,
+                role=f"HERMES_HOME/{sub} (shipped plugin dirs, recursive)",
             )
             for sub in _HERMES_PLUGIN_TREES
         ),
@@ -1147,6 +1169,7 @@ class PermDiff:
     group: str
     mode: int
     role: str
+    dirs_only: bool = False
 
     @property
     def changed(self) -> bool:
@@ -1220,6 +1243,14 @@ def _is_or_is_under_symlink(child: Path, base: Path) -> bool:
     return False
 
 
+def _is_non_directory(path: Path) -> bool:
+    """True when ``path`` exists (``lstat``) and is not a directory."""
+    try:
+        return not stat_mod.S_ISDIR(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
 def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
     """Expand a glob row to one (path, row) per match; identity for plain rows.
 
@@ -1229,6 +1260,8 @@ def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
     on ``slots/`` heals the per-slot ``slots/<id>/`` dirs but never reaches
     ``slots/<id>/state.json`` one level deeper).
     """
+    if row.dirs_only and _is_non_directory(row.target):
+        return []  # a file (maybe a planted hard link) where a directory belongs (#3852)
     if row.glob is None:
         return [(row.target, row)]
     # #1739-class guard (the PR #1743 fix missed this exact spot): ``Path.is_dir()``
@@ -1257,6 +1290,8 @@ def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
             continue
         if any(child == ex or ex in child.parents for ex in row.exclude):
             continue
+        if row.dirs_only and not child.is_dir():
+            continue  # never a file: it may be a hard link to one outside the tree (#3852)
         out.append(
             (
                 child,
@@ -1298,6 +1333,7 @@ def plan(
                     group=eff.group,
                     mode=eff.mode,
                     role=eff.label,
+                    dirs_only=eff.dirs_only,
                 )
             )
     return OwnershipPlan(diffs=tuple(diffs))
@@ -1332,11 +1368,29 @@ def _apply_one(
     chmod(str(path), mode)
 
 
+def _apply_dir(path: Path, owner: str, group: str, mode: int) -> None:
+    """Re-own and re-mode directory ``path`` through its own descriptor (#3852).
+
+    :func:`hal0.security.nofollow.open_dir` walks from ``/`` without following
+    a link below an untrusted directory and opens the leaf ``O_DIRECTORY``, so
+    a file (or a link) swapped in for the directory is refused, never touched.
+    """
+    uid = pwd.getpwnam(owner).pw_uid
+    gid = grp.getgrnam(group).gr_gid
+    fd = nofollow.open_dir(path)
+    try:
+        os.fchown(fd, uid, gid)
+        os.fchmod(fd, mode)
+    finally:
+        os.close(fd)
+
+
 def commit(
     plan_: OwnershipPlan,
     *,
     chown: Callable[[str, int, int], None] = nofollow.chown,
     chmod: Callable[[str, int], None] = nofollow.chmod,
+    apply_dir: Callable[[Path, str, str, int], None] = _apply_dir,
 ) -> list[Path]:
     """Apply every drifted diff, rolling back on failure. Returns paths changed.
 
@@ -1354,15 +1408,22 @@ def commit(
     otherwise (the ``doctor perms --fix`` caller is root-gated, as today).
     """
     applied: list[PermDiff] = []
+
+    def _apply(d: PermDiff, owner: str, group: str, mode: int) -> None:
+        if d.dirs_only:
+            apply_dir(d.path, owner, group, mode)
+        else:
+            _apply_one(d.path, owner, group, mode, chown=chown, chmod=chmod)
+
     for d in plan_.drifted:
         try:
-            _apply_one(d.path, d.owner, d.group, d.mode, chown=chown, chmod=chmod)
+            _apply(d, d.owner, d.group, d.mode)
         except BaseException:
             for prior in reversed(applied):
                 b = prior.before
                 if b.exists and b.owner and b.group and b.mode is not None:
                     with contextlib.suppress(OSError, KeyError):
-                        _apply_one(b.path, b.owner, b.group, b.mode, chown=chown, chmod=chmod)
+                        _apply(prior, b.owner, b.group, b.mode)
             raise
         applied.append(d)
     return [d.path for d in applied]
@@ -1383,7 +1444,8 @@ def converge_hermes_plugin_trees() -> list[Path]:
     installer's migration, ``hal0 update``'s root activation step, and the
     root prelude of ``hal0 agent reprovision hermes``. Same plan and commit
     as ``doctor perms --fix``, so a symlink in the tree is never followed or
-    re-owned (#1739, #2975). Never raises: a failure is logged and the caller
+    re-owned (#1739, #2975), and the rows are ``dirs_only``: no file in the
+    hal0-writable trees (possibly a planted hard link) is ever re-owned. Never raises: a failure is logged and the caller
     carries on, and ``hal0 doctor perms`` still reports the drift.
     """
     if os.geteuid() != 0:

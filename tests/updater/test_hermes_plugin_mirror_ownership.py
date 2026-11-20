@@ -194,21 +194,92 @@ def test_the_table_covers_exactly_the_trees_the_mirror_writes(tmp_path: Path) ->
     assert {p for w in written for p in w.parents if p != Path(".")} == parents
 
 
-def test_doctor_perms_reports_a_root_owned_plugin_tree(tmp_path: Path) -> None:
+def test_doctor_perms_reports_a_root_owned_plugin_dir_and_never_a_file(tmp_path: Path) -> None:
     home = _hermes_home()
     from hal0.agents.hermes_provision import _mirror_plugins
 
     _mirror_plugins(_plugin_src(tmp_path), home)
-    # Declared for the real service account; on this box the files are the
-    # test user's, so every row is drift — exactly what a root-owned tree shows.
+    # Declared for the real service account; on this box the dirs are the
+    # test user's, so each is drift, which is what a root-owned tree shows.
     rows = perms.audit_rows(perms.plan(perms.hermes_plugin_rows()))
-    profile = home / "plugins" / "model-providers" / "hal0" / "profile.py"
+    tree = home / "plugins" / "model-providers" / "hal0"
     by_path = {r["path"]: r for r in rows}
-    assert str(profile) in by_path
-    me = pwd.getpwuid(os.getuid()).pw_name
-    if me != "hal0":
-        assert by_path[str(profile)]["status"] == "drift"
-        assert "want hal0:hal0 0644" in by_path[str(profile)]["detail"]
+    assert str(tree / "profile.py") not in by_path  # files are the mirror's (#3852)
+    if pwd.getpwuid(os.getuid()).pw_name != "hal0":
+        assert by_path[str(tree)]["status"] == "drift"
+        assert "want hal0:hal0 0755" in by_path[str(tree)]["detail"]
+
+
+def _me() -> tuple[str, str]:
+    return pwd.getpwuid(os.getuid()).pw_name, grp.getgrgid(os.getgid()).gr_name
+
+
+def _my_rows() -> list[perms.PermRow]:
+    """The plugin rows declared for the test user, so a real commit can run."""
+    me, group = _me()
+    return perms.hermes_plugin_rows(perms.ownership_table(service_user=me, service_group=group))
+
+
+def test_a_healthy_tree_shows_no_drift(tmp_path: Path) -> None:
+    """Build the tree the way a box does (#3852 review): the setgid 2775 state
+    root, HERMES_HOME and its standard dirs from ``_phase_home_init``, the
+    mirror's copytree, then the ``__pycache__`` Hermes writes on import, all
+    under the units' default umask 0022."""
+    from types import SimpleNamespace
+
+    from hal0.agents.hermes_provision import _mirror_plugins, _phase_home_init
+
+    old = os.umask(0o022)
+    try:
+        var_lib = paths.var_lib()
+        var_lib.mkdir(parents=True)
+        var_lib.chmod(0o2775)
+        home = var_lib / ".hermes"
+        _phase_home_init(SimpleNamespace(state=SimpleNamespace(hermes_home=str(home))))
+        assert (home / "plugins").stat().st_mode & 0o7777 == 0o2755
+        _mirror_plugins(_plugin_src(tmp_path), home)
+        import importlib.util
+        import py_compile
+
+        for source in home.glob("plugins/**/*.py"):
+            py_compile.compile(str(source), cfile=importlib.util.cache_from_source(str(source)))
+    finally:
+        os.umask(old)
+    plan = perms.plan(_my_rows())
+    assert (home / "plugins" / "model-providers" / "hal0" / "__pycache__") in {
+        d.path for d in plan.diffs
+    }
+    assert plan.drifted == ()
+
+
+def test_the_mirror_needs_write_on_the_dirs_only(tmp_path: Path) -> None:
+    """Why handing back the directories is enough (#3852 review): unlinking a
+    file needs write on its directory, not on the file, so files the mirror
+    cannot write (root's, here read-only) are still replaced. A non-empty
+    directory it cannot write is not, which is why the dirs are handed back
+    recursively."""
+    from hal0.agents.hermes_provision import _mirror_plugins
+
+    home = _hermes_home()
+    src = _plugin_src(tmp_path)
+    (src / "hal0-provider" / "sub").mkdir()
+    (src / "hal0-provider" / "sub" / "x.py").write_text("X = 1\n")
+    _mirror_plugins(src, home)
+    tree = home / "plugins" / "model-providers" / "hal0"
+    for f in tree.rglob("*.py"):
+        f.chmod(0o444)
+    (src / "hal0-provider" / "profile.py").write_text("NEWER = True\n")
+    _changed, _d, failure = _mirror_plugins(src, home)
+    assert failure is None
+    assert (tree / "profile.py").read_text() == "NEWER = True\n"
+
+    (tree / "sub").chmod(0o555)
+    (src / "hal0-provider" / "profile.py").write_text("NEWEST = True\n")
+    try:
+        _changed, _d, failure = _mirror_plugins(src, home)
+        assert failure is not None
+    finally:
+        (tree / "sub").chmod(0o755)
 
 
 def test_converge_is_a_no_op_without_root(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -326,12 +397,9 @@ def test_a_symlink_planted_in_the_plugin_tree_is_never_followed(tmp_path: Path) 
 
     shutil.rmtree(memory)
     memory.symlink_to(outside_dir, target_is_directory=True)
-    (tree / "profile.py").chmod(0o600)  # real drift inside the tree
+    tree.chmod(0o700)  # real drift inside the tree
 
-    me = pwd.getpwuid(os.getuid()).pw_name
-    group = grp.getgrgid(os.getgid()).gr_name
-    rows = perms.hermes_plugin_rows(perms.ownership_table(service_user=me, service_group=group))
-    plan = perms.plan(rows)
+    plan = perms.plan(_my_rows())
     planned = {d.path for d in plan.diffs}
     assert tree / "evil" not in planned
     assert tree / "evil-dir" not in planned
@@ -340,9 +408,102 @@ def test_a_symlink_planted_in_the_plugin_tree_is_never_followed(tmp_path: Path) 
 
     perms.commit(plan)
 
-    assert (tree / "profile.py").stat().st_mode & 0o7777 == 0o644  # drift inside fixed
+    assert tree.stat().st_mode & 0o7777 == 0o755  # drift inside fixed
     assert outside_file.stat().st_mode & 0o7777 == 0o600
     assert outside_dir.stat().st_mode & 0o7777 == 0o700
     assert (outside_dir / "inner").stat().st_mode & 0o7777 == 0o600
     assert (tree / "evil").is_symlink()
     assert memory.is_symlink()
+
+
+def test_a_hardlink_planted_in_the_plugin_tree_keeps_its_owner_and_mode(tmp_path: Path) -> None:
+    """#3852 review: hal0 can hard-link any file on the filesystem into the
+    tree. Re-owning it as root would hand that inode over, so files are never
+    planned, including one standing where a directory belongs."""
+    home = _hermes_home()
+    from hal0.agents.hermes_provision import _mirror_plugins
+
+    _mirror_plugins(_plugin_src(tmp_path), home)
+    tree = home / "plugins" / "model-providers" / "hal0"
+    outside = tmp_path / "outside-secret"
+    outside.write_text("secret")
+    outside.chmod(0o600)
+    os.link(outside, tree / "planted")
+    # A whole tree replaced by a hard link, too.
+    memory = home / "plugins" / "hal0-memory"
+    import shutil
+
+    shutil.rmtree(memory)
+    os.link(outside, memory)
+    before = outside.stat()
+
+    plan = perms.plan(_my_rows())
+    assert tree / "planted" not in {d.path for d in plan.diffs}
+    assert memory not in {d.path for d in plan.diffs}
+    perms.commit(plan)
+
+    after = outside.stat()
+    assert after.st_nlink == 3
+    assert (after.st_uid, after.st_gid, after.st_mode) == (
+        before.st_uid,
+        before.st_gid,
+        before.st_mode,
+    )
+
+
+def test_a_file_swapped_in_for_a_dir_after_the_plan_is_refused(tmp_path: Path) -> None:
+    """The dirs-only apply opens the directory ``O_DIRECTORY``: a hard-linked
+    file put in its place between plan and commit is refused, not re-owned."""
+    home = _hermes_home()
+    from hal0.agents.hermes_provision import _mirror_plugins
+
+    _mirror_plugins(_plugin_src(tmp_path), home)
+    tree = home / "plugins" / "model-providers" / "hal0"
+    tree.chmod(0o700)
+    outside = tmp_path / "outside-secret"
+    outside.write_text("secret")
+    outside.chmod(0o600)
+    plan = perms.plan(_my_rows())
+    import shutil
+
+    shutil.rmtree(tree)
+    os.link(outside, tree)
+    with pytest.raises(OSError):
+        perms.commit(plan)
+    assert outside.stat().st_mode & 0o7777 == 0o600
+
+
+def test_a_parent_swapped_for_a_symlink_after_the_plan_is_refused_and_rolled_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3852 review: with only root trusted (as on a real box, not the suite's
+    default of trusting the test user too), a parent directory swapped for a
+    link between plan and commit is refused, the dirs already changed are put
+    back, and nothing behind the link is touched."""
+    from hal0.agents.hermes_provision import _mirror_plugins
+    from hal0.security import nofollow
+
+    home = _hermes_home()
+    _mirror_plugins(_plugin_src(tmp_path), home)
+    plugins = home / "plugins"
+    parent = plugins / "model-providers"
+    plugins.chmod(0o700)  # drift, applied first
+    parent.chmod(0o700)
+    (parent / "hal0").chmod(0o700)
+    outside = tmp_path / "outside" / "model-providers"
+    (outside / "hal0").mkdir(parents=True)
+    (outside / "hal0").chmod(0o700)
+    outside.chmod(0o700)
+
+    plan = perms.plan(_my_rows())
+    assert plan.drifted[0].path == plugins
+    parent.rename(home / "moved")
+    parent.symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(nofollow, "_trusted_uids", lambda: frozenset({0}))
+
+    with pytest.raises(nofollow.UnsafePathError):
+        perms.commit(plan)
+
+    assert plugins.stat().st_mode & 0o7777 == 0o700  # rolled back
+    assert outside.stat().st_mode & 0o7777 == 0o700
+    assert (outside / "hal0").stat().st_mode & 0o7777 == 0o700

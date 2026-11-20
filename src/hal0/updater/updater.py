@@ -1706,7 +1706,14 @@ def mirror_hermes_plugins(
         changed, _details, failure = hermes._mirror_plugins(src_root, home)
         reason = failure.reason if failure is not None else None
     if reason is not None:
-        log.warning("updater.hermes_plugin_mirror_failed", job_id=job_id, reason=reason)
+        # The remedy rides on the line so the installer's own output, where this
+        # is the only trace of a failed mirror, names the way out too.
+        log.warning(
+            "updater.hermes_plugin_mirror_failed",
+            job_id=job_id,
+            reason=reason,
+            remedy="sudo hal0 agent reprovision hermes",
+        )
         return False
     if changed:
         log.info("updater.hermes_plugins_mirrored", job_id=job_id, hermes_home=str(home))
