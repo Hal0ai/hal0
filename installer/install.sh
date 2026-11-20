@@ -2122,22 +2122,20 @@ if [[ -f "${AGENT_UNIT_SRC}" ]]; then
         esac
     fi
 
-    # Session-start hook: inject-system-state.sh cats /var/lib/hal0/STATE.md into
-    # every new Hermes session (referenced by config.yaml.j2's
-    # hooks.on_session_start). MUST land at the absolute /usr/lib/hal0 path
-    # the config hardcodes (dev mode shadows it under PREFIX).
+    # Session-start hook: inject-system-state.sh is no longer copied here. The
+    # Hermes config runs it from the release tree
+    # (current/installer/agents/hermes/hooks, hermes_provision.STATE_HOOK) under
+    # hooks.pre_llm_call, so `hal0 update` refreshes it with the code (#3853).
+    # Remove the copy older installs wrote to hermes-hooks/.
     if [[ "${DEV_MODE}" -eq 1 ]]; then
         LIB_DIR="${PREFIX}/usr/lib/hal0"
     else
         LIB_DIR="/usr/lib/hal0"
     fi
-    HOOK_SRC="${REPO_ROOT}/installer/agents/hermes/hooks/inject-system-state.sh"
-    if [[ -f "${HOOK_SRC}" ]]; then
-        install -d "${LIB_DIR}/hermes-hooks"
-        install -m 0755 "${HOOK_SRC}" "${LIB_DIR}/hermes-hooks/inject-system-state.sh"
-        info "wrote ${LIB_DIR}/hermes-hooks/inject-system-state.sh"
-    else
-        warn "${HOOK_SRC} not found — Hermes session-state hook not installed"
+    if [[ -f "${LIB_DIR}/hermes-hooks/inject-system-state.sh" ]]; then
+        rm -f "${LIB_DIR}/hermes-hooks/inject-system-state.sh"
+        rmdir "${LIB_DIR}/hermes-hooks" 2>/dev/null || true
+        info "removed legacy ${LIB_DIR}/hermes-hooks/inject-system-state.sh"
     fi
 
     # run-as-hal0 guard: the hermes wrapper sources this at the absolute path

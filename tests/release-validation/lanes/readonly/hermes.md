@@ -75,7 +75,7 @@ chat messages — that is the `hermes-e2e` stateful lane.
    configured or enabled on a fresh install. Anything enabled by default is a finding.
 9. **Wiring.** Session hooks installed by the installer should be allowlisted and actually fire;
    plugin kinds should resolve rather than silently downgrade (both were rc.4 #1795 items).
-   Run the `on_session_start` hook by hand as the hermes user and check its payload is fresh
+   Run the `pre_llm_call` state hook by hand as the hermes user (stdin `</dev/null`; it prints `{"context": ...}`) and check its payload is fresh
    *enough*: an `_as_of` older than the hook's own TTL is expected and adjudicated
    (`known-issues.yaml: hermes-state-md-as-of-is-change-marker`) — what is reportable is the
    injected BODY disagreeing with `hal0 slot list` at the moment of injection. Do the diff in
@@ -95,7 +95,7 @@ chat messages — that is the `hermes-e2e` stateful lane.
 
 14. **Smoke `memory_roundtrip` warn is timing or extraction?** Compare the completion time of the smoke marker's retain op (`hal0 memory ops list`) with the smoke run's search time in `provision.json`; completion later than the search means the warn is the #2671 race, not extraction failure.
 
-15. **Run the `on_session_start` hook twice back-to-back.** The first run can lag a slot another lane just loaded; the second must match `/api/slots`. A disagreement that persists on the second run is a finding.
+15. **Run the `pre_llm_call` state hook twice back-to-back.** The first run can lag a slot another lane just loaded; the second must match `/api/slots`. A disagreement that persists on the second run is a finding.
 
 16. **Skip synthetic rows.** `/api/slots` carries a synthetic `hal0` composite entry (`_synthetic=true`, no `state`/`type`); scripts that iterate slots must skip it.
 
