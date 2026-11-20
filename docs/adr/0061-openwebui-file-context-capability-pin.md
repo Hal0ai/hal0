@@ -5,6 +5,12 @@
 **ACCEPTED (2026-11-10).** Amends the file/RAG path assumption of ADR-0049
 decision 4. Ships with the Open WebUI v0.13.3 image pin.
 
+**Amended (2026-11-20): the pin moves to v0.13.4; the decision does not
+change.** `is_file_context_enabled` in `backend/open_webui/utils/tools.py` is
+byte-identical between v0.13.3 and v0.13.4, and v0.13.4 adds no database
+migration, so the decision below stands as written. Only the version this
+record cites moves.
+
 ## Context
 
 Open WebUI 0.13 changed what a chat turn does with its files, and 0.13.1
@@ -137,10 +143,11 @@ applies.
 
 - `src/hal0/openwebui/env_writer.py` (`_DEFAULT_OPENWEBUI_ENV`),
   `tests/openwebui/test_env_file_context.py`.
-- Open WebUI v0.13.3 `backend/open_webui/utils/tools.py`
-  (`is_file_context_enabled`), `utils/middleware.py`
-  (`process_chat_payload`), `utils/models.py` (`get_all_models`),
-  `config.py` (`DEFAULT_MODEL_METADATA`), `models/config.py` (`Config`).
+- Open WebUI v0.13.4 `backend/open_webui/utils/tools.py`
+  (`is_file_context_enabled`, byte-identical to v0.13.3),
+  `utils/middleware.py` (`process_chat_payload`), `utils/models.py`
+  (`get_all_models`), `config.py` (`DEFAULT_MODEL_METADATA`),
+  `models/config.py` (`Config`).
 - Open WebUI v0.12.5 `backend/open_webui/utils/middleware.py:2963` (the
   unconditional handler).
 - `docs/guides/open-webui.mdx`.
