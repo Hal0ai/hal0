@@ -23,6 +23,7 @@ export interface ThroughputHistory {
   bucket_s: number
   samples: ThroughputSample[]
   per_slot?: Record<string, number[]>  // optional; same length as samples
+  pending_tokens?: number  // tokens in the still-open interval (not yet in samples)
 }
 
 const POLL_MS = 5_000

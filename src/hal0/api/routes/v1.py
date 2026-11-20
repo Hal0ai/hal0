@@ -26,6 +26,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import math
 import re
 import time
 from collections.abc import Mapping
@@ -218,11 +219,92 @@ def _instrument_streaming_throughput(
     return response
 
 
+#: Spacing of the synthetic per-token-batch events a non-streaming completion
+#: is spread into, and the cap on how many one completion may append (the
+#: per-slot deque holds 4096). A finer step keeps a 5 s history bin from
+#: catching one extra lump and reading ~20% high.
+_NONSTREAM_SPREAD_STEP_S = 0.25
+_NONSTREAM_SPREAD_MAX_EVENTS = 200
+
+
+def _positive_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        return None
+    return float(value)
+
+
+def _nonstreaming_decode_span(
+    data: Mapping[str, Any],
+    usage: Mapping[str, Any],
+    completion: int,
+    now: float,
+    dispatch_started: float | None,
+) -> float:
+    """Seconds the upstream spent producing a non-streaming completion.
+
+    Preference order: llama-server ``timings.predicted_ms`` (pure decode
+    time), FLM ``usage.decoding_speed_tps`` (tokens / speed), then the wall
+    time since dispatch (includes prefill, so it slightly under-reads, never
+    over-reads). Never longer than the request has actually been running.
+    """
+    span: float | None = None
+    timings = data.get("timings")
+    if isinstance(timings, Mapping):
+        predicted_ms = _positive_number(timings.get("predicted_ms"))
+        if predicted_ms is not None:
+            span = predicted_ms / 1000.0
+    if span is None:
+        flm_tps = _positive_number(usage.get("decoding_speed_tps"))
+        if flm_tps is not None:
+            span = completion / flm_tps
+    wall = max(0.0, now - dispatch_started) if dispatch_started is not None else None
+    if span is None:
+        span = wall or 0.0
+    elif wall is not None:
+        span = min(span, wall)
+    return span
+
+
+def _append_spread_events(events: Any, completion: int, span: float, now: float) -> None:
+    """Append ``completion`` tokens to ``events`` spread evenly over the
+    ``span`` seconds that ended at ``now``.
+
+    The per-slot deque's contract is "``tokens`` were produced at ``ts``";
+    one lump stamped at completion time breaks it, and every consumer that
+    divides by a window (the 5 s history bins, ``tps_from_events``) then
+    reads the whole completion as if it was produced inside that window
+    (#3859: 963 tokens at 27.8 tok/s read as 192.6 tok/s).
+    """
+    n = max(1, math.ceil(span / _NONSTREAM_SPREAD_STEP_S))
+    n = min(n, _NONSTREAM_SPREAD_MAX_EVENTS, completion)
+    if n <= 1 or span <= 0:
+        events.append((now, completion))
+        return
+    # Event i sits at start + span*i/(n-1): the first at ``start`` and the last
+    # at ``now``, so the min-to-max span ``tps_from_events`` divides by is the
+    # whole decode span and the live rate reads completion/span exactly.
+    # Tokens use cumulative rounding so the remainder is spread across the
+    # span rather than front-loaded, and the batches sum to ``completion``.
+    start = now - span
+    prev = 0
+    for i in range(n):
+        cum = completion * (i + 1) // n
+        events.append((start + span * i / (n - 1), cum - prev))
+        prev = cum
+
+
 def _record_nonstreaming_throughput(
-    body_bytes: bytes, app_state: Any, slot_name: str | None
+    body_bytes: bytes,
+    app_state: Any,
+    slot_name: str | None,
+    dispatch_started: float | None = None,
 ) -> None:
-    """Pull ``usage.completion_tokens`` + a recent timestamp out of a JSON
-    response body so non-streaming chats also move the per-slot tile."""
+    """Pull ``usage.completion_tokens`` out of a JSON response body so
+    non-streaming chats also move the per-slot tile and throughput history.
+
+    The tokens are spread over the completion's decode span (see
+    :func:`_nonstreaming_decode_span`) rather than stamped as one lump at
+    completion time (#3859)."""
     events = _slot_events(app_state, slot_name)
     if events is None or not body_bytes:
         return
@@ -251,10 +333,12 @@ def _record_nonstreaming_throughput(
     completion = usage.get("completion_tokens") or 0
     if not isinstance(completion, (int, float)) or completion <= 0:
         return
-    # Without a real start time, attribute the whole completion to "now"
-    # — the rolling window will smear it across the lookback. Better
-    # alternatives need start-time tracking through forward().
-    events.append((time.monotonic(), int(completion)))
+    completion = int(completion)
+    if completion <= 0:
+        return
+    now = time.monotonic()
+    span = _nonstreaming_decode_span(data, usage, completion, now, dispatch_started)
+    _append_spread_events(events, completion, span, now)
 
     # FLM (NPU) metrics: extract decoding speed + KV column occupancy from
     # the ``usage`` block so the dashboard can show NPU tok/s and column
@@ -1187,7 +1271,12 @@ async def _dispatch_and_forward_probed(
             response.body_iterator = strip_usage_only_chunk(response.body_iterator)
         return response
     if isinstance(response, Response) and getattr(response, "body", None):
-        _record_nonstreaming_throughput(response.body, request.app.state, call.upstream_name)
+        _record_nonstreaming_throughput(
+            response.body,
+            request.app.state,
+            call.upstream_name,
+            dispatch_started=dispatch_started,
+        )
         if seam is not None:
             seam.record_nonstreaming(
                 response.body,
