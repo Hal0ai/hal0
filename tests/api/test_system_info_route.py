@@ -46,6 +46,10 @@ def test_system_info_route_folds_hardware_features_backends(
         # (tier is the one source) and the arch veto list.
         assert "is_default" not in entry
         assert "unsupported_archs" not in entry
+        # #3856: the REST row keeps `backend`; only the MCP/steward projection renames it.
+        assert entry["backend"] == RUNNER_IMAGES[key].backend
+        assert "default_lane" not in entry
+    assert "serving_backends" not in body
 
 
 def test_system_info_backends_expose_runner_supports_metadata(

@@ -1229,9 +1229,11 @@ async def test_system_info_is_autonomous_read(
         base_url="http://t",
         approval_queue=queue,
     )
-    assert result == {"ok": "get"}
-    method, url, _, _ = mock_transport["calls"][-1]
-    assert (method, url) == ("GET", "http://t/api/system-info")
+    # Projected (#3856): live serving backends first, the REST body otherwise intact.
+    assert next(iter(result)) == "serving_backends"
+    assert result["ok"] == "get"
+    calls = [(m, u) for m, u, _, _ in mock_transport["calls"]]
+    assert calls == [("GET", "http://t/api/system-info"), ("GET", "http://t/api/backends")]
 
 
 @pytest.mark.asyncio
@@ -2244,3 +2246,97 @@ def test_system_info_description_says_backends_are_catalogue_defaults() -> None:
     desc = admin.TOOL_DESCRIPTIONS["system_info"]
     assert "catalogue default" in desc
     assert "backend_list" in desc
+    assert "serving_backends" in desc
+    assert "default_lane" in desc
+
+
+_REST_SYSTEM_INFO = {
+    "hardware": {"kfd_present": False},
+    "features": {},
+    "backends": {
+        "standard": {
+            "state": "installed",
+            "backend": "rocm",
+            "supported_backends": ["rocm", "vulkan"],
+        },
+        "cpu": {"state": "installable", "backend": "cpu"},
+    },
+    "podman_context": "rootful",
+}
+
+
+def _fake_rest(monkeypatch: pytest.MonkeyPatch, backend_rows: Any) -> None:
+    import copy
+
+    async def fake(*, url: str, **_: Any) -> Any:
+        if url.endswith("/api/system-info"):
+            return copy.deepcopy(_REST_SYSTEM_INFO)
+        assert url.endswith("/api/backends")
+        return backend_rows
+
+    monkeypatch.setattr(admin, "_call_rest", fake)
+
+
+@pytest.mark.asyncio
+async def test_system_info_projection_renames_lane_and_adds_serving(
+    queue: ApprovalQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3856: no `backend` on catalogue rows; live serving backends come first."""
+    _fake_rest(
+        monkeypatch,
+        [
+            {"id": "vulkan", "label": "Vulkan", "loaded": [{"modelId": "qwen3-4b"}]},
+            {"id": "rocm", "label": "ROCm", "loaded": []},
+        ],
+    )
+    result = await admin.dispatch(
+        tool="system_info",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert next(iter(result)) == "serving_backends"
+    assert result["serving_backends"] == [
+        {"id": "vulkan", "label": "Vulkan", "models": ["qwen3-4b"]}
+    ]
+    for row in result["backends"].values():
+        assert "backend" not in row
+    assert result["backends"]["standard"]["default_lane"] == "rocm"
+    assert result["backends"]["standard"]["supported_backends"] == ["rocm", "vulkan"]
+    assert result["hardware"] == {"kfd_present": False}
+
+
+@pytest.mark.asyncio
+async def test_system_info_projection_empty_list_when_nothing_serving(
+    queue: ApprovalQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_rest(monkeypatch, [{"id": "vulkan", "loaded": []}])
+    result = await admin.dispatch(
+        tool="system_info",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["serving_backends"] == []
+    assert "serving_backends_error" not in result
+
+
+@pytest.mark.asyncio
+async def test_system_info_projection_flags_unavailable_live_status(
+    queue: ApprovalQueue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_rest(monkeypatch, {"status": "error", "error": {"code": "x"}})
+    result = await admin.dispatch(
+        tool="system_info",
+        args={},
+        client_id="pi",
+        bearer="t",
+        base_url="http://t",
+        approval_queue=queue,
+    )
+    assert result["serving_backends"] == []
+    assert "backend_list" in result["serving_backends_error"]
