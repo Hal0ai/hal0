@@ -122,3 +122,9 @@ Close the browser when done.
 Anything found here that can be expressed against fixtures should be promoted into
 `ui/tests/e2e/` as a spec in the fix PR, and then removed from this brief. This lane should
 only hold checks that genuinely require a live install.
+
+## Added in kit 18
+
+* Assert the Memory Health extraction_slot_unresolved copy against `llm_reachable`, `failures_6h` and a fact count that grows; a 'failing' page with growing facts is #3851.
+* Record which lane created each zz* slot before reading dock denominators.
+* Compare the Slots throughput hero with the API latest bucket immediately after a request ends (#3859).

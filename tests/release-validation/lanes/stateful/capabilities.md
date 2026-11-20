@@ -147,3 +147,11 @@ that a later POST naming a downloaded model on it swaps/loads. Take backups firs
 
 Capabilities left enabled on the backend this box supports; defaults set; scratch model files
 and throwaway profiles removed. Brain and utility slots healthy.
+
+## Added in kit 18
+
+* After any `hal0 model rm --keep-files` or DELETE of a row bound to a capability, assert the slot still serves or the call was refused (the embed slot went offline silently in #2724).
+* Fresh-box entry: `ls /var/lib/hal0/models/*/` and `hal0 model list` against CONTEXT before judging check 2b.
+* Diff `ls /etc/hal0/slots` before/after every non-200 capability apply; record new TOMLs. The first stt enable with an empty model creates stt.toml with provider llama-server (#3860).
+* `hal0 model add` of a kept reranker gguf re-registers it as chat (confidence medium): the documented recovery changes the type.
+* API DELETE of a bound model without force returns 200 with affected_slots, no 409 model.in_use, unlike the CLI path; brief item 31 should expect that.

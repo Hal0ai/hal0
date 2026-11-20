@@ -213,3 +213,10 @@ a second actor that mutates slots later (one swapped `zzsl-crash` after the lane
 Brain slot loaded and healthy on the CPU-viable chat model; embed slot loaded (the memory lane
 uses it); rerank unloaded; every throwaway slot deleted and its unit reset. State all of this in
 `box_state_on_exit`, including anything you could not clean up.
+
+## Added in kit 18
+
+* Slot create/edit with an out-of-range --port (e.g. 8297, 7000): the create must refuse or say it replaced the port (#3857); `slot edit --port 8297` must not write an invalid TOML (#3858).
+* Fixtures for hand-registered embedding/reranking models must keep the upstream filename (bge-reranker-*, nomic-embed-*); a renamed copy registers as chat and looks like a bug.
+* Entry and exit: `/var/lib/hal0/.first_run_done` is the only root-owned file under /var/lib/hal0 (outside secrets, python, openwebui).
+* Check 8e (garbage-convict net) cannot run on a box with one Vulkan-gated runner image; mark it a coverage gap unless preflight pulls a second, older runner image.

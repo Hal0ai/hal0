@@ -135,6 +135,20 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **18** (2026-11-20) — Curation from the v1.8.0-nightly.20261119225557 run (15 verified findings:
+  10 filed #3851-#3860, 5 refuted, by-design or cosmetic). `regressions.yaml`: ten new entries (#3851
+  Memory Health false "failing" on a model-less shared fallback; #3852 `hal0 update` cannot refresh a
+  root-owned Hermes plugin tree yet converges; #3853 STATE.md hook output never reaches a session;
+  #3854 256k fallback with a model-less agent anchor; #3855 Hermes answers from stale recall instead of
+  slot_list; #3856 steward names ROCm after #3811; #3857/#3858 slot create/edit out-of-range port;
+  #3859 throughput hero stale/inflated; #3860 stt.toml provider llama-server); every probed entry
+  rescored (`last_result`); the #2030 repro now reads the single-op GET; notes on #3835, #2671, #3806,
+  #3803. `known-issues.yaml`: six new entries (fresh degraded provision_warn, rerank TOML typed-load vs
+  launch split, Hermes fresh-turn latency is queue wait, zero-yield annotation probe misread,
+  rc-validate stale script snapshot, hal0-terminal-off sentinel); #3835 entry amended; `review_due`
+  added to every entry with `review_at` <= v1.8.0. Lane briefs: a "Added in kit 18" section in all 13
+  briefs. `boxes.toml`: ct151 and ct150 facts. Lesson: a run launched from a cached pre-fix workflow
+  snapshot reproduces fixed harness defects; relaunch from the repo copy.
 * **17** (2026-11-19) — Curation from the v1.8.0-nightly.20261118233655 run (10 verified findings:
   5 filed #3834-#3838, 1 commented on existing #3456, 1 cosmetic left unfiled, 3 refuted or by-design).
   `regressions.yaml`: five new entries (#3834 capability apply registry fallback skips the model-fit

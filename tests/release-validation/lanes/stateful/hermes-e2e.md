@@ -154,3 +154,13 @@ Run order inside this lane: the reprovision checks (10) restart the gateway unde
 
 Hermes running with its SHIPPED config restored. Brain, utility, and embed slots healthy. State
 every config file you touched and its final contents in `box_state_on_exit`.
+
+## Added in kit 18
+
+* Per-call tool audit from state.db messages.tool_calls (not agent.log): a slot-state ask must reach mcp__hal0_admin__slot_list within 3 calls (#3855).
+* grep agent.log for 'shell hook stdout was not valid JSON' every release (#3853).
+* Replace the `import yaml` plugin check with a direct call to hal0-memory provider._read_agent_key(config.yaml,'hermes') and assert zero bridge.client_name_reserved (#3803 is fixed).
+* Kill-the-client: terminate `hermes -z` mid-turn; the gateway must stop issuing /v1/chat calls within 30 s.
+* Both banks are hal0:shared and hal0:private; assert both queues are empty before entry and record the private pending count per turn.
+* Create a named profile (hal0-brain) in lane setup; none exists after install, so c22/c30 cannot run otherwise.
+* Check the resolver: g('hal0/agent') vs g('brain') when agent is model-less (#3854).

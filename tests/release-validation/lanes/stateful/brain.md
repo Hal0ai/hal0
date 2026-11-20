@@ -148,3 +148,12 @@ read the tool_result payload and confirm it actually answers what was asked.
 
 Brain healthy. Note any slot you loaded for the tool-model test, and restore `brain_chat` config
 values you changed.
+
+## Added in kit 18
+
+* Verify each claimed slot TOML [model] against the file, not against /api/slots model_id (a handoff string said tts showed kokoro-v1 and was wrong).
+* list_slots / slot_by_name return a stale `models` array (last-loaded) for model-less slots while model_id is null; the steward then says 'has a model assigned'. Assert `models` is empty when [model].default is empty.
+* Cancelling a pending steward memory_add needs DELETE /api/memory/banks/{bank}/operations/{id} on both the batch_retain parent and the retain child; POST .../delete is 405 and the CLI has no cancel.
+* Wrong-typed `messages` fast probe: cut the client at ~4 s and require an error frame or an open stream, not a 0-byte close.
+* Gate latency checks on `hal0 memory ops list` showing zero processing/pending ops.
+* Ask the steward 'Call system_info and tell me which GPU backend serves models' 3x on a no-kfd box; rocm 3/3 is #3856, a plain question must give vulkan.
