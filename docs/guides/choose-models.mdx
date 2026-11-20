@@ -65,11 +65,42 @@ a file from ComfyUI's models folder with `hal0 model add`. Image models span
 the licensing spectrum on purpose (research-only through fully permissive) —
 read the license before using output commercially.
 
-The Models view's **Image / ComfyUI** tab lists the weight files in that
-folder, grouped by what each one is (checkpoints, diffusion models, text
-encoders, VAE and so on). A file no catalog model loads, and that is not a
-symlink, has a Delete button there; to delete a catalog model's files, remove
-the model with `hal0 comfyui models remove <id>`.
+The Models view's **Image / ComfyUI** tab has a **Models | Files** switch.
+**Models** (the default) lists the image catalog in the same list and detail
+layout as the other tabs: an **In use** section for the default image model,
+then **Installed** and **Not installed**, with filters for state, task and
+fit, and the server's verdict on whether each model fits this box. The detail
+card carries Install (or Retry install), Cancel, Remove, **Set as default** and
+a link to Image Gen. Remove asks first and names what it deletes and what it
+keeps. **Files** lists the weight files in the models folder, grouped by what
+each one is (checkpoints, diffusion models, text encoders, VAE and so on),
+with a search box, an owner filter (used by a model, unmanaged) and a sort. A
+file no catalog model loads, and that is not a symlink, has a Delete button
+there; to delete a catalog model's files, remove the model.
+
+## The Models page layout
+
+The Inference, Upstream, FLM and Image tabs share one layout: a toolbar with a
+search box and filter chips, a list in sections, and a detail pane beside it.
+Inference and Upstream lead with an **In use** section (models a slot
+references), followed by Installed and the models you can pull. Each row
+carries one status chip: `downloading`, `update ↑`, `in use · <slot>`,
+`installed`, `not installed`, `won't fit` or `upstream`. Besides the filter
+chips below, a **State** filter (Installed, In use, Not installed, Update)
+narrows the list, and Inference adds a **Runs on** filter (GPU, CPU, and NPU on
+a box that has one). A running pull shows as a progress bar on its row.
+
+The header has **Check updates** and a **+ Add model** menu. On Inference the
+menu offers Add by HF coords, Search HF, Add by path and Scan directory; on
+Image it is Install image model, on FLM Download FLM model, and on Providers
+Add provider, which opens the Add provider dialog. The Providers tab lists each
+external provider with a switch per model, and its header button is **Refresh model lists**,
+which asks the providers again which models they offer; the switches and
+`hal0 upstream enable|disable` do the same thing, covered in
+[Connect external providers](/docs/guides/connect-external-providers). **Update all** appears beside
+Check updates when updates are waiting. A GGUF that ggml-xdna can run on the
+NPU shows `npu · fused` or `npu · per-op` on its row and an NPU fit block in
+the detail pane; see [Run GGUF models on the NPU with ggml-xdna](/docs/guides/run-xdna-npu).
 
 ## Filter and sort the catalog
 
@@ -81,6 +112,7 @@ direction). The filter chips are:
 | Chip | Matches |
 |---|---|
 | MTP | the model's MTP-heads fact is explicitly on, or the model carries the legacy `mtp` tag — a plain OR, so the tag still matches even when the fact is explicitly off (see "Vision and MTP" below) |
+| Drafter | the model has a paired drafter (see [Pull and register models](/docs/guides/pull-and-register-models)) |
 | MOE | a mixture-of-experts architecture (`qwen3next`, `mixtral`, `deepseek-moe`), or — since no registry row persists `architecture` yet — the `moe`/`a3b`/`mtp` tag or an `a3b` token in the id |
 | DENSE | neither MTP nor MOE |
 | Embed | `type === "embedding"` |

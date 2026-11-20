@@ -296,14 +296,43 @@ hal0 slot edit rerank --profile reranking
 ```
 
 Pass any subset of `--model`, `--port`, `--provider`, `--hardware`,
-`--profile`. At least one is required. Changes the container baked in (port,
-hardware grid, profile) take effect on the next `restart`. A slot has no
-flags or context size of its own to edit; to change them, edit the profile it
-runs (`hal0 profile edit <name> --ctx-size N`) or point the slot at another
-one. Editing a profile affects every slot that runs it, and each picks up
-changed flags, context window, vision or speculation at its next restart. A changed
+`--profile`, `--autoload/--no-autoload` and the tune overrides below. At least
+one is required. Changes the container baked in (port, hardware grid, profile)
+take effect on the next `restart`. A slot has no free launch flags of its own:
+to change those, edit the profile it runs (`hal0 profile edit <name>
+--ctx-size N`) or point the slot at another one. Editing a profile affects every
+slot that runs it, and each picks up changed flags, context window, vision or
+speculation at its next restart. A changed
 profile `runner` does not reach a slot that way: re-apply the profile to each
 slot with `hal0 slot edit <slot> --profile <name>`, then restart it.
+
+### Override the profile's tune for one slot
+
+When one slot needs an exception to its profile (the same model in a fast slot
+and a full-context slot, say), give it a sparse `[tune]` table instead of
+cloning the profile. The table takes `ctx_size`, `enable_thinking`,
+`reasoning_effort`, `reasoning_budget`, `vision` and `speculation`; a key left
+out follows the profile.
+
+```sh
+hal0 slot edit agent --ctx 32768
+hal0 slot edit agent --no-thinking --reasoning-effort low
+hal0 slot edit agent --reasoning-budget 2048 --speculation ngram
+hal0 slot edit agent --tune-reset          # follow the profile again
+```
+
+`--reasoning-effort` takes `default`, `minimal`, `low`, `medium`, `high`,
+`xhigh` or `max`; `--reasoning-budget` takes `-1` (unlimited), `0` (no
+thinking) or a token count; `--vision` takes `auto` or `off`; `--speculation`
+takes `auto`, `off` or `ngram`. Only the keys you pass change, and
+`--tune-reset` cannot be combined with the others. A thinking-only change
+applies to new requests; the rest apply at the next load. Only LLM slots accept
+overrides, and not the FLM lane's NPU slots. An `xdna` slot takes them but, like a
+halogen slot, refuses `speculation = "ngram"`. `hal0 slot show` prints the effective values and
+which of the slot or the profile each came from. A `--reasoning on|off` in the
+profile's flags pins thinking, so an `enable_thinking` override cannot beat it.
+The dashboard's [Tune panel](/docs/guides/manage-slots-dashboard/#tune-one-slot)
+does the same.
 
 ## Switching a slot to the Vulkan lane
 

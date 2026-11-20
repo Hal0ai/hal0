@@ -129,6 +129,16 @@ there. The pinned-id, include and exclude filter editor is gone from the
 dashboard: switch models on and off instead. The CLI filters below still work
 for a provider that has not been converted.
 
+## The CLI in short
+
+Create the upstream, store its key, check it, then enable the models you want
+routed.
+
+1. `hal0 upstream create openrouter --catalog openrouter --auth-env OPENROUTER_API_KEY --api-key ...`
+2. `hal0 upstream test openrouter`
+3. `hal0 upstream refresh openrouter` — fetch the provider's model list and store one row per model.
+4. `hal0 upstream enable openrouter <model>` — route a model; `hal0 upstream models openrouter` shows the rows.
+
 ## See what's available
 
 ```sh
@@ -138,8 +148,11 @@ curl http://localhost:8080/api/providers/catalog
 
 The catalogue is a static reference of known provider templates —
 `openai`, `anthropic`, `openrouter`, `google_ai_studio`, `deepseek`,
-`minimax`, `ollama` (local), and a generic `custom` OpenAI-compatible
-entry — each carrying its default base URL, auth style, and models path.
+`minimax`, `groq`, `mistral`, `ollama` (local), `hal0_peer` (another hal0
+box; you enter its URL) and a generic `custom` OpenAI-compatible
+entry — each carrying its default base URL and auth style, plus suggested
+models. The full table is in
+[Providers, profiles & devices](/docs/reference/providers-profiles-devices/#b-remotecloud-upstream-provider-catalog).
 
 ## Create an upstream from the CLI
 
@@ -185,11 +198,37 @@ hal0 upstream create openrouter \
 
 </Steps>
 
-<Aside type="caution">
-For Anthropic specifically: its native API speaks `/v1/messages`, not
-OpenAI's `/v1/chat/completions` — route through a compatible proxy rather
-than pointing an upstream straight at `api.anthropic.com`.
+<Aside type="note">
+The `anthropic` preset points at Anthropic's OpenAI-compatible endpoint
+(`https://api.anthropic.com/v1`, bearer auth), so it needs no proxy. That
+layer is meant for testing and comparison: thinking output and prompt caching
+are not available through it.
 </Aside>
+
+A new upstream registers live, with no restart. Without a `models` list it is
+*uncurated* and keeps routing whatever the provider advertises until you run
+`hal0 upstream refresh` (see [Choose which models are routed](#choose-which-models-are-routed)).
+In the dashboard, **Add provider** on Models → Providers does the same create
+and lets you choose the models in the same dialog (see
+[Add a provider in the dashboard](#add-a-provider-in-the-dashboard)).
+
+## Check a provider before saving it
+
+`hal0 upstream probe` tests a base URL and key and lists what the provider
+offers, without writing anything:
+
+```sh
+export OPENROUTER_API_KEY=...
+hal0 upstream probe --catalog-id openrouter --key-env OPENROUTER_API_KEY
+hal0 upstream probe --url http://localhost:11434/v1 --auth-style none
+```
+
+It prints whether the provider answered (HTTP status and latency), any
+rate-limit headers the preset knows about, and a table of models. Pass
+`--catalog-id` or `--url`; the key is read only from the environment variable
+named by `--key-env`, never from an argument, and is not stored or printed.
+The command exits `1` when the provider does not answer. Over the API this is
+`POST /api/providers/probe`, which accepts JSON only.
 
 ## Update, test, and remove
 
@@ -250,6 +289,12 @@ A key you type may start with `Bearer `: hal0 strips it only for `bearer` auth o
 header`) the key is sent exactly as typed.
 
 ## Curate which models are advertised
+
+<Aside type="note">
+Filters apply only to an uncurated upstream. A curated upstream lists exactly
+its enabled models, and a filter on it is refused; use
+`hal0 upstream disable` instead.
+</Aside>
 
 `[upstream.model_filters]` narrows which of an upstream's models show up
 in the aggregated `/v1/models` catalog, without touching dispatch — a
@@ -312,10 +357,21 @@ surface requires the admin key once it is on — and reverse-proxy the host
 if it needs to be exposed beyond the LAN.
 </Aside>
 
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `refresh` prints a `warning` and the row stays uncurated | The provider returned no models. Check the URL and key (`hal0 upstream test <name>`), then refresh again. |
+| `404 upstream.model_not_enabled` | The model's row is off, or no row exists. `hal0 upstream models <name>` shows the rows; `hal0 upstream enable <name> <model>` routes it. |
+| `400 upstream.model_ambiguous` | A bare id is enabled on several providers. Send `<provider>/<id>`. |
+| A new model the provider released is missing | Run `hal0 upstream refresh <name>`; it appears as a switched-off row. |
+| `probe` says the environment variable is not set | Export the variable in the same shell that runs the command. |
+| `409 upstream.protected` on a model or refresh call | The upstream is managed by an agent, backed by a slot, or reserved. Change it at its source. |
+
 ## Picking up changes
 
 Credential writes, and every `hal0 upstream create` / `update` / `delete`
-/ `advertise` call, apply to the running `hal0-api` process immediately —
+/ `advertise` / `enable` / `disable` / `refresh` call, apply to the running `hal0-api` process immediately —
 no restart needed. Creating an upstream registers it live; patching one
 (visibility flags, auth, URL, timeout, model filters) applies live too. A
 patch that flips `advertise_models` or `enabled` punches only that

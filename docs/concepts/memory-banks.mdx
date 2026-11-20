@@ -20,7 +20,9 @@ was created (ADR-0058, decision 7).
 | old, unified | the bank it always used, `shared` unless `[memory] bank` was set | the same bank, tagged `visibility:private` and `agent:<id>` | a store from before, with `unified_bank = true` (the old default) |
 | old, split | the same as unified | `private__<agent>`, a bank per agent | a store from before, with `unified_bank = false` |
 
-The `agents` namespace keeps its own bank in every layout.
+The `agents` namespace is retired, so no layout has a bank for it. A leftover
+`agents` bank on an old store is folded into the platform bank by `hal0 memory
+migrate platform`.
 
 In `hal0:private` every write is stamped `agent:<id>` and
 `visibility:private`, and a read of that bank is held to the caller's own

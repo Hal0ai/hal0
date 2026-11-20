@@ -7,19 +7,21 @@ sidebar:
 
 import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-The installer seeds slots and starts services — there is no setup wizard in
-v1.0. Models in hal0 live in a local registry, the single source of truth for
+The installer seeds slots and starts services, and pulls only the small brain
+model (skip it with `--no-brain-model`); it does not pick a chat model for you.
+Models in hal0 live in a local registry, the single source of truth for
 Hugging Face coordinates, SHA-256 digests, and curated filenames. Populate it
 from the dashboard or directly from the CLI.
 
 ## Via the dashboard
 
-Open the dashboard at `http://<host>:8080` and use the **Models** view to
-pull a curated pick and assign it to a slot — the largest-that-fits-your-RAM
-picks are ranked first, with one starred as recommended, filtered to hal0's
-curated model catalogue so anything you pick already validates against the
-registry. Slot assignment happens from the same view: pick a slot, pick a
-model, apply.
+Open the dashboard at `http://<host>:8080` and go to **Models → Inference
+Models**. Use **+ Add model** → **Search HF** to find a model on Hugging
+Face, pick a quantization, and pull it; progress shows in the Downloads
+panel. Then open **Slots**, choose the model in the slot card's model
+picker, and start the slot. The fit chip beside each model says whether it
+fits this box's memory. Image models live under
+**Models → Image / ComfyUI**, and NPU models under **Models → FLM**.
 
 ## Via the CLI
 
@@ -39,7 +41,9 @@ flow is **list → pull → assign**.
    hal0 model list
    ```
 
-   Add `--json` to emit the raw `/api/models` payload for scripting.
+   Add `--json` to emit the raw `/api/models` payload for scripting. To use a
+   hosted model such as OpenRouter's instead of pulling one, see
+   [Connect external providers](/docs/guides/connect-external-providers).
 
 2. **Pull a model** from Hugging Face. The argument is either a curated
    alias (e.g. `qwen3-4b`) or a registered model id:
@@ -63,9 +67,9 @@ flow is **list → pull → assign**.
    ```
 
    This writes `model.default` into the slot's configuration. `agent` is the
-   always-seeded default/anchor slot (see [Slots](/docs/concepts/slots)); swap
-   in `utility` or any other slot name you've created instead. Start the
-   slot afterward (see [Manage slots](/docs/guides/manage-slots/)).
+   seeded default/anchor slot (see [Slots](/docs/concepts/slots)); use any
+   other slot name you've created instead. Start the slot afterward (see
+   [Manage slots](/docs/guides/manage-slots/)).
 
 4. **Verify the slot is up**:
 
@@ -78,8 +82,13 @@ flow is **list → pull → assign**.
 
 </Steps>
 
-Other `hal0 model` commands: `add` (record an on-disk file in the
-registry), `show` (inspect metadata), and `rm` (remove a registry row).
+`hal0 model run <ref>` does the pull, assignment, load and wait in one
+command; pass `--slot <name>` to pick the slot (the default is the first
+compatible one). Other `hal0 model` commands: `add` (record an on-disk file
+in the registry), `show` (inspect metadata), `default` (promote a model as its
+type's default), `update` (check for or apply Hugging Face updates), `scan`,
+`set`, `store` (show or change the model store), and `rm` (remove a model and,
+unless `--keep-files` is given, its files).
 
 <Aside type="tip" title="Gated or large models">
 Pulls that need a Hugging Face token read `HF_TOKEN` from the API

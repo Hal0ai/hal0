@@ -207,18 +207,36 @@ the owner of `private:<agent>` notes, needs a credential
   configuration and derives from a secret in `/var/lib/hal0/agents/identity.bin`.
 
 A name hal0 reserves for its own agents (`hermes`, `hermes__<profile>`, `pi`,
-any `hal0…`) claimed without its key is refused with
+`admin`, `anonymous`, `shared`, `unknown`, `unresolved`, any `hal0…`) claimed without its key is refused with
 `403 bridge.client_name_reserved` on `/mcp/memory` and `/api/memory/*`. The
 same identity resolves the same memory namespace whether it arrives over REST
 or MCP. Privileged or destructive agent actions are **gated**:
 rather than executing immediately, they enqueue an approval that a human
-clears from the dashboard, the CLI, or via the approval API. See
+decides. Deciding takes a dashboard session, or root on the box through
+`sudo hal0 agent approvals approve|deny <id>`; an API key of any tier is refused
+([ADR-0048](/docs/adr/0048-approval-decisions-need-a-session-or-root)). See
 [Agents](/docs/concepts/agents) for how personas, tool gating, and the
 approval queue fit together.
 
 Login attempts are also rate-limited (a login-throttle mechanism in
 `hal0.security.ratelimit`) so a brute-force key guess against an enabled auth
 layer doesn't get unlimited attempts.
+
+## Where hal0 runs: wrappers protect the host
+
+A bare-metal install is the default. Two wrappers put hal0 off the host's own
+accounts: an unprivileged LXC system container, through `pct` on Proxmox or
+`incus` on plain Linux ([ADR-0050](/docs/adr/0050-no-oci-appliance-unprivileged-lxc-is-the-wrapper)),
+and the opt-in rootless podman box, `install.sh --box`, which runs the whole
+install inside one container under a dedicated `hal0box` host user
+([ADR-0051](/docs/adr/0051-rootless-podman-box-install)). See
+[Install in a rootless podman box](/docs/getting-started/box),
+[Proxmox](/docs/getting-started/proxmox) and [Incus](/docs/getting-started/incus).
+
+A wrapper protects the host from hal0, not the credentials inside the wrapper.
+Inside it, the bundled agent still runs as the same `hal0` user as hal0-api, so
+the approval gate above is not a hard boundary while that holds, and the agent
+user split is tracked separately.
 
 ## Practical checklist
 

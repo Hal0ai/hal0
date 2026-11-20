@@ -88,7 +88,7 @@ Pi (`kind: "cli"`):
 | `version` | `installed` and `pin` as `{pi, adapter}` versions, and `update_available` (`true` when either is behind the installer's pin). |
 | `profile` | The marker's `home` and `profiled_at`, `home_readable`, and `checks`: `{id, ok, detail}` rows where `ok` is `null` when the daemon cannot read the profiled home. |
 | `memory` | `mcp_entry` and `hindsight_config` (from `profile.checks`), and `hindsight_api_reachable`. |
-| `commands` | `install`, `upgrade` and `uninstall` commands to run as root. |
+| `commands` | `install`, `upgrade` (`sudo hal0 update component pi`) and `uninstall` commands to run as root. |
 | `phase` | `installed` or `broken`. |
 | `generated_at`, `partial` | As for Hermes. |
 

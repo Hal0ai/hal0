@@ -52,7 +52,8 @@ hal0 resolves the caller's tier in this order:
 
 </Steps>
 
-A `bridge` caller reaches `/mcp/agents`, `GET /api/bridge/me` and the MCP
+A `bridge` caller reaches `/mcp/agents`, `GET /api/bridge/me`,
+`/api/memory/compat` (which needs the `memory` scope) and the MCP
 mounts its scopes name, and gets 403 on every other non-OPEN route, with
 enforcement on or off; see
 [Connect an external MCP client](/docs/guides/connect-mcp#connect-an-external-mcp-client).
@@ -428,13 +429,14 @@ under `hal0.auth.origin_rejected`.
 
 Every route falls into one of five classes — **open** (no auth), **bootstrap**
 (open until an admin key exists, then treated as admin), **client**,
-**bridge** (`/mcp/agents` and `GET /api/bridge/me`, enforced even with auth
-off), or **admin**. An unclassified path defaults to **admin** —
+**bridge** (`/mcp/agents`, `GET /api/bridge/me` and `/api/memory/compat`,
+enforced even with auth off), or **admin**. An unclassified path defaults to **admin** —
 deny-by-default, not allow-by-default. The full live table is served at `GET /api/auth/exposure`
 (admin-gated) and backs the dashboard's Settings → Security page.
 
 The open allowlist is intentionally small — model listing, health, metrics,
-and the login/logout/status routes themselves:
+the static Open WebUI Filter source (its importer cannot send a key) and the
+login/logout/status routes themselves:
 
 ```
 GET  /v1/models
@@ -443,12 +445,14 @@ GET  /api/health
 GET  /api/health/system
 GET  /api/metrics/prometheus
 GET  /api/config/urls
+GET  /api/memory/openwebui-function/hal0_hindsight_rag.py
 POST /api/auth/login
 GET  /api/auth/status
 POST /api/auth/logout
 ```
 
-Inference (`/v1/*`) and read-only status/list routes are **client**-tier.
+Inference (`/v1/*`), read-only status/list routes, `POST /api/memory/context`
+and the `/mcp/memory` mount are **client**-tier.
 Anything that mutates config, secrets, memory, or services is **admin**-tier.
 A hardened subset of memory-delete routes is pinned to admin regardless of
 how the generic `/api/memory` rule is ever widened, following an earlier

@@ -152,6 +152,12 @@ that page lasts only until Open WebUI restarts, because hal0 turns off Open
 WebUI's persistent config. Open WebUI no longer connects to ComfyUI; ComfyUI's
 editor stays on the dashboard's Image Gen tab.
 
+On Open WebUI 0.13.4 and newer that page is a list of **image connections**
+rather than the old engine settings. hal0 still drives the image path from
+the environment it renders — the engine, the base URL, the key, the model and
+the empty size — so nothing moves to hal0's side of the wire, and a change
+made in Open WebUI is lost on the next restart exactly as before.
+
 Each image render from Open WebUI puts the GPU in image mode for as long as
 the image takes. A chat request for a GPU slot that arrives during the render
 waits for the render to finish and for hal0 to reload the chat models (up to
@@ -413,7 +419,7 @@ one is never started by this, and reads the new file at its next start)
 whenever:
 
 - You apply a capability change to `embed` or `img`
-  (`hal0 capabilities set …` or the dashboard's Capabilities page).
+  (`hal0 capabilities set …` or Settings → AI Capabilities in the dashboard).
 - You create or delete the `embed` or `img` slot directly.
 - You rotate, re-scope or revoke the `openwebui` bridge client, or hal0-api
   starts and has to create it.

@@ -138,7 +138,7 @@ The box healthy on the new version, with its accumulated state intact — it is 
 
 * Compare /api/models installed flags before and after against the on-disk dirs (FLM ghost clearing, #3829).
 * Diff /api/capabilities row by row before and after (the kokoro profile relabel is intended).
-* Assert plugin tree hashes equal the shipped tree and files are hal0-owned (#3852).
+* Assert plugin tree hashes equal the shipped tree and the plugin DIRECTORIES are hal0-owned (#3852; files are re-owned only when a mirror rewrites them).
 * A REST call with no headers while auth is off logs actor 'dashboard'; do not read that as a concurrent actor.
 * Record the ops-ahead-of-me count when submitting a retain (took ~8 min behind 10 pending).
 * A slot TOML failing SlotConfig validation shows no config_error in /api/slots; record it (known rerank-toml-load-failure-hidden).
@@ -150,3 +150,11 @@ The box healthy on the new version, with its accumulated state intact — it is 
 * After a steward grounding turn record agent container health (the 27B went unhealthy under a ~16k-token prefill on the 12 GB LXC).
 * Check 29 is now #3881 (known): count `.stale-*` trees and the number older than 30 days.
 * `hal0 doctor perms` should report a root-owned `model-providers/hal0` dir after the update.
+
+## Added in kit 20
+
+* Resolve every hal0/<slot> alias through resolve_chain with loaded=set() and again with the agent loaded, then tie it to the logged dispatch.decision resolution_path (proves #2741 without waking the 27B).
+* Attribute failed memory ops (APIConnectionError) by created_at against the lane's own restart timestamps (update, api.env restore, 3x restart) instead of counting ops.
+* After idle-reap, POST /v1/embeddings with hal0/embed: require HTTP 200 and slot state offline (not error) for every reaped slot.
+* Before the retain grounding probe, record whether a foreign Hindsight writer is feeding the platform bank (pending ops rising) and hard-cap the probe's poll.
+* `hal0 doctor perms` on an upgraded box legitimately shows state/agents/hermes 0755 DRIFT (#3888, known) and the split-brain /root/.hermes row; do not re-report.

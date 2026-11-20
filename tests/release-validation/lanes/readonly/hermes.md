@@ -173,3 +173,8 @@ any gap between what hermes says about itself and what it does as `major`.
 * Check 29 wording: replace "import yaml must work" with "the plugin's `_read_agent_key` returns non-empty" (#3803 made PyYAML unnecessary).
 * Check the mode of `.hermes/config.yaml` against the key it carries.
 * On a FRESH box, before any reprovision, `config.yaml` must carry `model.context_length` and the gateway must not log `256000 tokens (default)` (#3875, known).
+
+## Added in kit 20
+
+* Assert the mode of every config file that carries X-hal0-Agent-Key (config.yaml is 0644 on 094401; record, do not file unless world-writable).
+* Brief item 12's `gateway_platforms {}` on :9119 is stale: it is populated in 1.8.0. Record the value, do not expect empty.

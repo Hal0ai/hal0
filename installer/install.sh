@@ -2028,7 +2028,7 @@ OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
 # per-arch sub-manifest — a sub-manifest digest pins one architecture on every
 # host (the prior arm64 pin died on amd64 with "exec ... Exec format error").
 # Verify with: podman manifest inspect <ref> (mediaType ...manifest.list...).
-OPENWEBUI_IMAGE="ghcr.io/open-webui/open-webui@sha256:46b59158e6558eeb980bc828e0f1b30238ad24d82ed84d5e5eda1dab2a082f14"
+OPENWEBUI_IMAGE="ghcr.io/open-webui/open-webui@sha256:d5168bfbc28609eff5bea1b438dd864cf64d185cf6582c02244865e18385b901"
 if [[ -f "${OPENWEBUI_UNIT_SRC}" ]]; then
     cp "${OPENWEBUI_UNIT_SRC}" "${OPENWEBUI_UNIT_DST}"
     info "wrote ${OPENWEBUI_UNIT_DST}"

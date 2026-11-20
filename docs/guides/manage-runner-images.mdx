@@ -8,8 +8,8 @@ sidebar:
 import { Steps, Aside } from '@astrojs/starlight/components';
 
 A **runner image** is the container image a slot actually launches: the
-`podman` image that bundles `llama-server` (or FLM, Kokoro, Qwen3-TTS,
-Moonshine, ComfyUI, halogen) plus the GPU/CPU backend it was built against. hal0
+`podman` image that bundles `llama-server` (or FLM, ggml-xdna, Kokoro,
+Qwen3-TTS, Moonshine, ComfyUI, halogen) plus the GPU/CPU backend it was built against. hal0
 ships a fixed set of **runners**, pins one image per runner in
 `manifest.json`, and tracks them in a catalogue. The dashboard's **Runner
 Images** page — a sub-page of **Slots** (`#slots/runner-images`) — is where
@@ -38,8 +38,13 @@ description the dashboard shows, and a **tier**:
 | `moonshine` | Moonshine transcription | default | moonshine (STT) | cpu | cpu |
 | `comfyui` | ComfyUI | default | comfyui (image gen) | img | rocm |
 | `qwen3tts` | Qwen3 TTS | optional | qwen3tts (TTS) | gpu | rocm |
+| `xdna` | NPU (ggml-xdna) | optional | llama-server (ggml-xdna fork) | npu | npu |
 | `cuda` | NVIDIA CUDA | optional | llama-server | gpu | cuda |
 | `halogen` | halogen (Flash-Next) | optional | halogen (Qwen3.8-Flash-Next) | gpu | rocm |
+
+`xdna` runs plain GGUF models on the AMD XDNA2 NPU through Tether's ggml-xdna
+fork of llama.cpp, and time-slices the NPU with `flm`. See
+[Run GGUF models on the NPU with ggml-xdna](/docs/guides/run-xdna-npu).
 
 `halogen` is Peonist's closed-source engine for one model, Qwen3.8-Flash-Next, on
 Strix Halo (gfx1151) only. Its pin names the vendor's image by tag `0.18.22` and
@@ -60,7 +65,7 @@ image serves both lanes, HIP for `gpu-rocm` and RADV for `gpu-vulkan`. It runs
 plain GGUF models. Fork-only quantizations (ROCmFPX, ROCmFP4, IU4, ActiveFPX)
 need a llama.cpp fork hal0 no longer ships, so no runner loads them; see
 [Pull and register models](/docs/guides/pull-and-register-models/) for where
-they are refused. Every other GPU runner (`qwen3tts`, `cuda`, `halogen`)
+they are refused. Every other runner (`qwen3tts`, `xdna`, `cuda`, `halogen`)
 declares exactly one backend (ADR-0006).
 
 A slot with no `binary` set derives one from its `device`

@@ -47,6 +47,7 @@ EnvironmentFile=-${HF_SECRETS_ENV}
 ExecStart=${HAL0_BIN} serve --port ${HAL0_PORT}
 Restart=on-failure
 RestartSec=3
+TimeoutStopSec=30
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=hal0-api
@@ -62,9 +63,14 @@ WantedBy=multi-user.target
   `hal0-agent@` units do not start with it. Under ADR-0002 the agent shares
   the `hal0` uid and can influence `hal0-api`, so this is a scoping measure,
   not an isolation boundary. The installer omits the line on a host that has
-  no `systemd-journal` group. `hal0 update` does not rewrite this unit:
-  re-run the installer once after updating to 1.4.0. `hal0 doctor all` warns
-  (`API journal read`) until it has been. Until then the Logs page's slot
+  no `systemd-journal` group. An update re-renders this unit from the
+  release's `installer/systemd/hal0-api.service.in` on its privileged side,
+  keeping the per-box values (binary, working directory, env files) and any
+  drop-in, and never restarts `hal0-api` itself; the new unit applies at the
+  restart the update already performs. `hal0 doctor all` warns on the
+  `api-unit` row (`API unit current`) while the installed unit differs from
+  that template, and on the `api-journal` row (`API journal read`) until the
+  daemon has the group; re-run the installer to fix either. Until then the Logs page's slot
   channel and the slot log drawer show a notice naming the cause and the fix (a
   `degraded` frame, held open with keepalives) instead of reconnecting in a
   loop, the one-shot slot log tail carries the same hint, and
@@ -148,10 +154,20 @@ Environment=HF_HOME=/var/lib/hal0/memory/hindsight/hf-cache
 
 Environment=HINDSIGHT_API_LLM_PROVIDER=openai
 Environment=HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1
-Environment=HINDSIGHT_API_LLM_MODEL=hal0/utility
+Environment=HINDSIGHT_API_LLM_MODEL=hal0/memory
 Environment=HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth
 EnvironmentFile=-/etc/hal0/hindsight-llm.env
 Environment=HINDSIGHT_API_LLM_TIMEOUT=300
+Environment=HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT=1
+Environment=HINDSIGHT_API_LLM_MAX_CONCURRENT=1
+Environment=HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS=16384
+Environment=HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES=1
+Environment=HINDSIGHT_API_WORKER_MAX_RETRIES=2
+Environment=HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS=120
+Environment=HINDSIGHT_API_WORKER_MAX_SLOTS=4
+Environment=HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS=1
+Environment=HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS=2
+Environment=HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_RESERVED_SLOTS=0
 Environment=HINDSIGHT_API_SKIP_LLM_VERIFICATION=true
 
 Environment=HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU=true
@@ -176,7 +192,7 @@ WantedBy=multi-user.target
   OpenAI-compatible endpoint (`HINDSIGHT_API_LLM_BASE_URL=http://127.0.0.1:8080/v1`).
   hindsight-api is a consumer of hal0-api, not the reverse.
 - **No TOML config** — every setting is an inline `Environment=` line in the
-  unit itself, with one exception: `EnvironmentFile=-/etc/hal0/hindsight-llm.env`
+  unit itself (the model line and the limits above are the shipped defaults; the drop-in below overrides them), with one exception: `EnvironmentFile=-/etc/hal0/hindsight-llm.env`
   (the leading `-` means "ignore if absent") overrides the inline
   `HINDSIGHT_API_LLM_API_KEY=hal0-local-noauth` placeholder with the real
   client key. `installer/install.sh` writes that file at install time from
@@ -187,7 +203,7 @@ WantedBy=multi-user.target
   the virtual id hal0's `/v1` resolves on every call to the local
   `[memory.graph].extraction_slot` or to the upstream model in
   `extraction_model`. Choosing a slot or an upstream model (**Engine model** on
-  Settings → Data → Memory, or `hal0 memory graph enable --slot|--model|--local`)
+  Settings → Memory, or `hal0 memory graph enable --slot|--model|--local`)
   is therefore a config write that applies at once and never restarts the
   engine. The drop-in also carries `HINDSIGHT_API_LLM_TIMEOUT` and the extraction
   limits (`HINDSIGHT_API_LLM_MAX_CONCURRENT`, `HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT`,
@@ -222,7 +238,7 @@ WantedBy=multi-user.target
   `HINDSIGHT_API_LLM_MODEL` line in `/etc/hal0/hindsight-llm.env` therefore beats
   `hal0/memory` and whatever you picked under **Engine model**: hal0 reports the
   slot or model you chose while the engine runs the override. The **Engine
-  running** row on Settings → Data → Memory (highlighted when an override applies),
+  running** row on Settings → Memory (highlighted when an override applies),
   `hal0 memory graph status` and `engine_llm` in `GET /api/memory/graph/status`
   name the provider and model hindsight-api actually loads, read from the
   running engine process; when hal0-api can read neither the process nor the
@@ -313,6 +329,18 @@ WantedBy=multi-user.target
   `/var/lib/hal0/state/memory-embedder.json` and
   `hindsight-api.service.d/showcase-lanes.conf`, set
   `[memory.models].embeddings_model`, and re-run the installer.
+
+### hal0-hs-decide.service (optional decision model)
+
+`hal0-hs-decide.service` is the opt-in local server for the memory engine's
+decision model (`hs-decide-1-flash`, CPU). Nothing installs it by default;
+`hal0 memory decision install` (or `hal0 update component memory-decision`)
+builds it. hal0 writes the unit, which runs as `hal0`, orders itself `Before=hindsight-api.service`,
+listens on `127.0.0.1` only (port `[memory.decision].port`, default `9178`) and runs with
+`HF_HUB_OFFLINE=1`, `NoNewPrivileges=yes`, `PrivateTmp=yes` and `ProtectSystem=full`. The venv and server
+script live in `/var/lib/hal0/memory/hindsight-decision/`. The install, the
+pins and the `memory_decision_lane` doctor row are described under
+[`[memory.decision]`](/docs/reference/config-schema-memory-lanes/#memorydecision-decision-model).
 
 ### Config files it reads
 

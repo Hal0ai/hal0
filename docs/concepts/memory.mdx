@@ -327,9 +327,37 @@ This fallback client is the **Fallback reranker** panel in Settings → Memory. 
 engine's own reranker (`[memory.models]` `reranker_*`), the decision model
 (`[memory.decision]`) and a read-only embedder with its switch command are in
 the **Models** panel above it; saving a reranker or decision change restarts
-the memory engine.
+the memory engine. The engine's reranker scores at most
+`[memory.models].reranker_max_candidates` recall candidates (default 60); on
+the CPU cross-encoder the engine's own default of 300 costs 30-40 seconds per
+recall.
 
-The dashboard's Settings → Data → Memory page has a picker for `rerank_model`: the
+## The embedder belongs to the store
+
+The bundled engine is Hindsight 1.2.0. A stored vector carries no note of the
+model that made it, and the engine's two local embedders have the same
+dimension, so starting the engine on a different one raises nothing: new vectors
+land in a different space from the stored ones and recall over older memories
+quietly degrades. hal0 therefore treats the embedder as a property of the
+store. It records the one that built the store in
+`/var/lib/hal0/state/memory-embedder.json` and renders the engine from that
+record, so saving `[memory.models].embeddings_provider` or `embeddings_model`
+changes nothing on its own. The one way to change it is `hal0 memory embedder
+switch <model>`, which re-embeds the store; it is a dry run until you pass
+`--apply`. See [ADR-0058](/docs/adr/0058-memory-v3-one-surface-guarded-embedder).
+
+## The decision model
+
+Hindsight 1.2 can answer several of its LLM-gated calls (recall pruning,
+consolidation triage, reflect sufficiency, page delta gating) with one cheap
+forward pass of a small decision model instead of the extraction LLM.
+`[memory.decision].provider` is `off` by default. The local decision model
+server is an opt-in component: `hal0 memory decision install` builds and starts
+`hal0-hs-decide` (CPU, loopback only) and sets `provider = "local"`, and `hal0
+memory decision enable`, `disable`, `status` and `remove` manage it afterwards.
+The engine is pointed at it only while its unit is installed.
+
+The dashboard's Settings → Memory page has a picker for `rerank_model`: the
 schema default is offered as "the rerank slot's model", plus every model in the
 capabilities catalog tagged for reranking (labelled with its serving
 backend), plus whatever is currently saved if it's outside both lists. Free
@@ -372,10 +400,13 @@ When enabled, memory becomes the shared brain that ties the platform together:
   <Card title="Hermes's durable memory, by default" icon="comment">
     Provisioning a fresh bundled agent wires it straight to this subsystem
     with no manual config, backed by Hindsight via the hal0-api REST front
-    door. Hermes' private writes and session captures land in
-    `hal0:private` tagged `agent:hermes`, and its recall reads `hal0:shared`
-    plus its own private memory. Recalled context is injected automatically
-    every turn, and the agent can also call the MCP tools directly.
+    door. Raw conversation capture lands in `hal0:private` tagged
+    `agent:hermes`, while extracted durable facts and explicit "remember this"
+    writes go to `hal0:shared` by default; `hal0: {memory_private: true}` in a
+    profile's `config.yaml` makes that profile's durable writes private too.
+    Recall reads `hal0:shared` plus the profile's own private memory. Recalled
+    context is injected automatically every turn, and the agent can also call
+    the MCP tools directly.
   </Card>
   <Card title="Operator memory" icon="document">
     The dashboard's Memory area and the `/api/memory/*` routes let you add,

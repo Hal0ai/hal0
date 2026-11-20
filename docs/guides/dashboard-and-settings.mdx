@@ -26,14 +26,15 @@ the nav drawer.
 Typing filters a grouped list:
 
 - **Routes** — jump to Dashboard, Slots, Runner Images, Models, Profiles,
-  Operator Board, Benchmarks, Hardware, Logs, Agent, or Settings.
+  Operator Board, Benchmarks, Hardware, Logs, Agent, Memory (while memory is
+  enabled), or Settings.
 - **Slots** — every configured slot, live; selecting one opens its edit
   drawer.
 - **Models** — every catalogue and installed model; selecting one opens
   the Models page.
 - **Settings** — a deep link straight into most Settings pages (see
   below) — the palette has an entry for every page except **Model
-  Defaults**, which has no deep link.
+  Defaults** and **Realtime**, which have no deep link.
 - **Actions** — global actions that are always live: Create slot, Add
   model from HF, Open Chat Pro UI (when OpenWebUI is reachable), and Open
   docs. A Cancel download action appears only while a model pull is
@@ -76,18 +77,23 @@ is and how it's configured, see [Brain](/docs/concepts/brain).
 
 The book icon next to Agent Chat opens the hosted docs in a new tab. The
 sidebar below it lists the primary destinations — Overview, Slots (with
-Endpoints, Runner Images, and Stacks as sub-pages), Models (with
-Profiles), Benchmarks, Agents (with Memory, when the memory subsystem is
-enabled, and MCP), Services, Logs, and Settings — plus a **Services**
+Inference, Image Gen, NPU on a box that has an NPU, Endpoints, Runner Images
+and Stacks as sub-pages), Models (Inference Models, Image / ComfyUI, Providers,
+FLM and Profiles; Providers is where you add external providers and switch
+their models on and off), Benchmarks, Agents (Overview and MCP), Memory (its
+own row, shown while the memory subsystem is enabled), Services, Logs, and
+Settings — plus a **Services**
 zone pinned to the bottom of the sidebar with quick external launchers:
-**Kanban** (the in-app Operator Board, the Hermes kanban proxied through hal0-api; also reachable with ⌘B),
+**Kanban** (the in-app Operator Board, the Hermes kanban proxied through hal0-api; also reachable with ⌘B; see [The Operator Board](/docs/guides/operator-board)),
 **OpenWebUI**, and **Hermes Dash** — the latter two only appear when the
 backend reports them reachable.
 
 ### Slots: the Image Gen tab
 
-The Slots page splits into **Inference** and **Image Gen** tabs, beside
-Endpoints, Runner Images and Stacks. Image Gen is the ComfyUI engine's pane,
+The Slots page splits into **Inference** and **Image Gen** tabs, beside **NPU**
+(only on a box with an NPU; see
+[Run GGUF models on the NPU with ggml-xdna](/docs/guides/run-xdna-npu)), Endpoints, Runner Images and
+Stacks. Image Gen is the ComfyUI engine's pane,
 three sub-tabs directly under the tabs, **Generate**, **Models** and **Engine**,
 at `#slots/image/generate`, `#slots/image/models` and `#slots/image/engine`. The
 pane draws no memory gauges of its own: a model's fit meter reads the same
@@ -133,13 +139,13 @@ services exist. Each card shows:
 A service the backend has no real probe for (nothing in the current
 catalog, but a future extension-provided service could arrive this way)
 reports honestly as unmonitored rather than a fabricated "up" — the same
-rule the Overview card's services pip group and the dock's ready count
-follow.
+rule the Overview's Services card and the dock's services pip group follow.
 
 The **Discovery (mDNS)** card at the top shows whether `avahi-daemon` is
 active, the dashboard's own `<hostname>.local` announcement, and lets you
-advertise or withdraw the addon services (OpenWebUI; ComfyUI listens on
-loopback and is not announced) as their own `<name>.local` entries. The
+advertise or withdraw the addon services (OpenWebUI, and ComfyUI while it
+listens on the LAN, the default; under `[network].comfyui_listen = "loopback"`
+it is not announced) as their own `<name>.local` entries. The
 installer writes the base `hal0.service` avahi file itself when avahi is
 present, alongside the same permission fix-up that lets the daemon (running as the unprivileged `hal0` user) write the
 addon files — so both announcements come up out of the box, not just the
@@ -194,10 +200,26 @@ GB loaded and the pool's free GB. A row flashes when an event for that slot
 lands in the dock's feed; click a row to jump to its card. The Image Gen tab
 has no side column, so its pane takes the full width.
 
+## The Overview page
+
+`#dashboard` is the operator's briefing, not a customisable layout. It answers
+four questions from top to bottom:
+
+- **What the box is doing now.** The **Now** band shows the mode, key facts,
+  contextual actions and the unified memory bar.
+- **What needs you.** **Needs you** is one inbox: notifications, doctor
+  diagnoses with a next step, failing health checks and slot drift, or a single
+  all-clear line when nothing is waiting.
+- **Who is working.** **Serving now** charts each slot's token rate with GPU and
+  NPU duty, and **Agents** lists the Hermes profiles and their delegated runs.
+- **How it performed.** **Usage** reads the `GET /api/stats` windows; below it
+  are **Hardware**, **Recent**, **Image engine**, **Services**, **Memory** and a
+  version strip.
+
 ## Memory figures
 
-The Slots page opens with a telemetry bar, the Overview page carries a health
-strip and a **Unified memory** card, and **Settings ▸ Overview** has a live
+The Slots page opens with a telemetry bar, the Overview page's Now band carries
+the unified memory bar and its Hardware card a RAM row, and **Settings ▸ Overview** has a live
 hardware panel. They all take their pool, RAM and per-owner figures from one
 place, the `memory` block of `GET /api/stats/hardware`, so two screens cannot
 show two answers. The block holds two budgets that are never added together,
@@ -212,8 +234,8 @@ because they are different resources:
   no pool figure: the ruler is titled "memory · RAM" and measures this box's RAM
   instead.
 - **RAM (this box)** is the memory this machine may use. The "CPU · RAM" cell
-  shows RAM in use over this box's RAM limit, and the Overview health strip's
-  "RAM" cell and the "RAM" row in Settings ▸ Overview show the same figure.
+  shows RAM in use over this box's RAM limit, and the Overview Hardware card's
+  RAM row and the "RAM" row in Settings ▸ Overview show the same figure.
   When hal0 runs in a container or under a cgroup limit, the cell reads
   "/ N GB limit" and the other two say "container limit"; on a plain machine it
   reads "/ N GB", the machine's total. hal0 reads the limit on every refresh,
@@ -234,7 +256,7 @@ estimate, because ComfyUI's reading covers the whole card. The tooltip says
 "estimated" whenever it is the estimate. **other guests** is the striped block for whatever the pool holds that
 nothing on this box accounts for, such as a second guest on the same GPU, and it
 appears only when that is more than zero. On a box with no GPU pool, the
-**Unified memory** card shows "system" in that place instead: RAM in use beyond
+Overview's unified memory bar shows "system" in that place instead: RAM in use beyond
 what loaded models hold. Estimates can add up to more than the counter. The
 total always comes from the counter, so the ruler scales its segments to fit
 the bar, the API reports the difference as `attribution_excess_gb`, and a real
@@ -322,6 +344,8 @@ one line and a link here rather than a repeat.
   restart) so a gated or large pull can authenticate right away. See
   [REST API: secrets and Proxmox credentials](/docs/reference/api/rest-api-credentials#secrets-apisecrets)
   for the write path.
+- **Connected Accounts** — OAuth sign-in for Hermes skills; see
+  [Connect accounts for OAuth skills](/docs/guides/agent-oauth-skills).
 - **Agent Chat** — the `[brain_chat]` policy surface: kill switch,
   read-only guardrail, chat model override, tool-routing model, and loop
   knobs. `tool_model` (where a tool-calling round reroutes when the chat

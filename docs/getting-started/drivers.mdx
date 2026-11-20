@@ -49,7 +49,7 @@ exposes the accelerators as device nodes:
 |---|---|
 | `/dev/dri/renderD*` | Render node — Vulkan / ROCm render access |
 | `/dev/kfd` | ROCm compute queues |
-| `/dev/accel/accel0` | XDNA NPU (FastFlowLM) |
+| `/dev/accel/accel0` | XDNA NPU (FastFlowLM and the optional `xdna` runner) |
 
 hal0's hardware probe reads these directly; if a node is missing, the
 corresponding capability drops out of the probe rather than failing the
