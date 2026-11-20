@@ -160,3 +160,10 @@ chat messages — that is the `hermes-e2e` stateful lane.
 
 Hermes findings have historically been *reporting* defects rather than functional ones. Treat
 any gap between what hermes says about itself and what it does as `major`.
+
+## Added in kit 18
+
+* Item 22 wording: mcp_wire proof is `details.servers.<name>.client.status == ok` with a tool_count; `details.mcp_client` may record stage `import` with tools [] when no probe URL is given. Do not fail on that.
+* `hal0-terminal-off` ERROR and the 'Unknown terminal backend hal0-terminal-off' advisory are by design (known-issues hermes-hook-and-terminal-by-design).
+* Item 5 (web_dist) is stale: web_dist ships and :9119/ returns 200; check only that.
+* Run the shell-hook output through `agent.shell_hooks._parse_response` for on_session_start, or grep agent.log for 'shell hook stdout was not valid JSON' (#3853).

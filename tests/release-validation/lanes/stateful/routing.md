@@ -151,3 +151,10 @@ from an untyped 500 to a typed 404 since the entry was last checked; the entry's
 ## Leave behind
 
 Brain and embed loaded and healthy. Any model you caused to auto-load, unload again.
+
+## Added in kit 18
+
+* For each slot NAME (brain, coder, embed, rerank, hal0/<name>) sent as a chat model, assert error.details.slot equals the addressed slot; also assert details.slot on the embeddings-to-chat and rerank-to-embed 409s.
+* With agent bound to the same model as a second ready slot, assert model=agent AND model=coder both reach the named slot, idle and busy (#2665).
+* Load qwen3.5-0.8b into coder as the workhorse when brain is held by Hindsight; it is a Qwen3-family template so check 11 (json_object) exercises the collision case.
+* Approvals inbox empty at exit: use the API route; `hal0 mcp approvals list` does not exist.

@@ -133,3 +133,12 @@ did not ask for?**
 
 The box healthy on the new version, with its accumulated state intact — it is the input to the
 *next* release's upgrade lane, so do not reset it.
+
+## Added in kit 18
+
+* Compare /api/models installed flags before and after against the on-disk dirs (FLM ghost clearing, #3829).
+* Diff /api/capabilities row by row before and after (the kokoro profile relabel is intended).
+* Assert plugin tree hashes equal the shipped tree and files are hal0-owned (#3852).
+* A REST call with no headers while auth is off logs actor 'dashboard'; do not read that as a concurrent actor.
+* Record the ops-ahead-of-me count when submitting a retain (took ~8 min behind 10 pending).
+* A slot TOML failing SlotConfig validation shows no config_error in /api/slots; record it (known rerank-toml-load-failure-hidden).

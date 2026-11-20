@@ -141,3 +141,10 @@ key (use `declared_backend`; `known-issues: slot-view-has-no-device-key`), and t
 
 Add a check here whenever an API defect is found by another lane or by a user. This lane is the
 cheapest place to catch a regression, so it should grow every release.
+
+## Added in kit 18
+
+* Compare the Slots/Overview THROUGHPUT hero with the latest bucket of `/api/stats/throughput/history` and the dock serving count immediately after a request ends (#3859); the hero must not outlive traffic by more than one bin.
+* Update-box baseline: 0 masked leaves after #3817/#3805; fail if any appear.
+* Unknown `/api/...` path returning an empty 404 is by design; do not file it (reword any check that expects a JSON body).
+* Kit fact: qwen3.5-0.8b is NOT registered on a fresh ct151 at install; the installer pulls only the brain model and kokoro.

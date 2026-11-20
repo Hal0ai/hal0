@@ -166,3 +166,10 @@ declare `utility` off-limits — say in your report which of the two you got.
 
 Memory enabled, utility slot loaded, brain healthy. Note the marker you stored and the state of
 every operation you created — the hermes lane will look for its own marker separately.
+
+## Added in kit 18
+
+* `HINDSIGHT_API_LLM_MODEL` on the 1.8.0 stock shape is `hal0/memory`, not `hal0/utility`: read checks 1, 3, 7, 22, 23 as memory.
+* `hal0 memory status` and `hal0 memory graph check` must print a busy-slot message, not ConnectError; re-run on an idle brain for a real tok/s (#3837 progress).
+* /api/memory/health extraction must be slot_resolves=true when brain serves hal0/memory (#3851).
+* Single-word recall (`query=identity`) returned 0 items while identity cards exist; compare with Hindsight directly before deciding if it is a recall defect.

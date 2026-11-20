@@ -109,3 +109,9 @@ Speak MCP streamable-HTTP JSON-RPC with curl from the box (`127.0.0.1`), not fro
 The MCP surface is how other agents consume hal0, so *silent* protocol wrongness here is worse
 than elsewhere — a client cannot tell it is being lied to. Weight `isError`, schema validity,
 and session handling as `major` by default.
+
+## Added in kit 18
+
+* Parse GATED_TOOLS from the release-tag source with `ast` and diff it against the REST tool_details `gated` flag in a script, not by hand.
+* For all three servers, the advertised connect_url from `hal0 mcp status` / `/api/mcp/servers` must answer `initialize` with 200, and serverInfo.version must equal the VERSION file.
+* #3806 looks fixed (all 39 gated tools with required args return mcp.missing_arg); keep the sweep but expect pass.

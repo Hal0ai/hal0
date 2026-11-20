@@ -177,3 +177,11 @@ the fact otherwise:
 
 The box on the new version, healthy, with the "before" snapshot recorded in your report for the
 `post-upgrade` stage to diff against.
+
+## Added in kit 18
+
+* After every update grep the journal for updater.*_failed / *_skipped and require the CLI output to mention each (hermes_plugin_mirror_failed was silent, #3852).
+* Diff /var/lib/hal0/.hermes/plugins/model-providers/hal0 against installer/agents/hermes/plugins/hal0-provider and assert identical and hal0-owned.
+* Capture `hal0 doctor` and `hal0 doctor perms` in the BEFORE snapshot to attribute post-update drift rows.
+* Record per-bank fact_count before / after / after 30 min to separate consolidation drift from loss.
+* Make the 3x restart-with-stream check a script (stop duration from systemd timestamps; bc is not installed).

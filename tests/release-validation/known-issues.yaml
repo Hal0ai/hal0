@@ -16,9 +16,11 @@
 # Do not treat a review-due entry as automatically still valid.
 
 schema: 1
-updated: 2026-11-19
-updated_for: v1.8.0-nightly.20261118233655
+updated: 2026-11-20
+updated_for: v1.8.0-nightly.20261119225557
 
+# NOTE (kit 18): CONTEXT.md in a run can be a stale-script artifact (the run executed a pre-#3839 rc-validate snapshot); see rc-validate-stale-script-snapshot. Take identity from boxes.toml.
+#
 # NOTE (kit 17): ct151 runs may find CONTEXT.md is ct150's file (#3838). Take identity from boxes.toml and run; do not stop.
 # `hal0 doctor all` as root creates /root/.hermes (#3836): attribute a split-brain row to it before reporting.
 #
@@ -2896,6 +2898,11 @@ known_issues:
   - id: hermes-context-length-256k-fallback
     status: open
     issue: 3835
+    related_issue: 3854
+    v1_8_0_note: >-
+      #3835 closed by #3844 (plugin claims no hostname; Hermes now live-discovers). Residual #3854: a model-less agent slot
+      leaves no /v1/models row, so hal0/agent still resolves 256000. The old note that /v1/models not listing the virtual name
+      is not decisive is stale for a model-less agent. Stale plugin (hostname 127.0.0.1) on an upgraded box is #3852.
     summary: >-
       Hermes resolves hal0/agent to its 256,000 fallback (gateway.log "warmed ... 256000 (default)") against a
       65,536 window, because the provider plugin's 127.0.0.1 hostname makes Hermes skip live /models discovery.
@@ -3008,4 +3015,74 @@ known_issues:
       already in the vault; OR "unreadable" with NO API_SERVER_KEY in the vault; OR a euid-0 caller records "unreadable"; OR after
       reprovision the gateway /proc environ key or $HERMES_HOME/.env mirror differs from the vault, or :8642 rejects the vault key (401);
       OR profile_api_keys.default_key is unreadable while this phase says ok.
+    review_at: v1.9.0
+
+  - id: fresh-hermes-degraded-provision-warn-no-fix
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    related_issue: 2671
+    summary: >-
+      Fresh install: Hermes overview reads degraded, reason provision_warn, fix none, until the next reprovision.
+    why: >-
+      provision_warn is a soft reason by contract (overview.py, #2924); the cause is the first-provision memory_roundtrip race (#2671, open). It clears on the next reprovision/Repair; the card has a generic Repair button. Precedent #2951 fixed the probe, not the contract.
+    still_report_if: >-
+      provision_warn persists after a successful reprovision whose smoke_tests is ok; OR the warn names something other than memory_roundtrip (#2671) or chat_completions timeout (#3809); OR #2671 is closed and a fresh first provision still warns; OR the card offers no Repair control; OR a smoke-only warn raises provision_failed. Otherwise comment on #2671 only.
+    review_at: v1.9.0
+
+  - id: rerank-toml-load-failure-hidden
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    related_issue: 2720
+    summary: >-
+      Slot TOML with a hand-added unknown key ([model].output_sanity) fails `hal0 config validate` ('does not load') yet the slot loads and serves; /api/slots shows offline with config_error null.
+    why: >-
+      ADR-0029 s5: the typed SlotConfig load is strict (validate, doctor, discover) and the launch path reads the TOML as a raw dict. slot load reached ready and /v1/rerank returned 200. validate and doctor print the row loudly; the only inaccuracy is the 'does not load' wording.
+    still_report_if: >-
+      A typed-load-failing slot ALSO fails `hal0 slot load`/its endpoint while /api/slots shows config_error null; OR /api/slots reports ready for a slot whose launch failed; OR `hal0 doctor profiles` skips such a slot without printing its row; OR boot auto-scan prunes a model referenced only by it (models.auto_scan_prune_skipped absent); OR a hal0 writer itself emits a key the typed loader rejects.
+    review_at: v1.9.0
+
+  - id: hermes-fresh-turn-latency-over-120s
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    summary: >-
+      A fresh Hermes turn on ct151 reads 109 s in agent.log / 48 s wall on a Vulkan brain.
+    why: >-
+      About 100 s was queue wait behind an in-flight Hindsight consolidation call (--parallel 1, capped at 8192 tokens); brain compute for the request was 9.5 s. The ADR-0053/#3333 background gate cannot preempt a call already in flight. Calls inflated by hal0-api restarts (Connection refused in agent.log) are environmental. Covered by memory-extraction-serializes-with-chat-on-fresh-install.
+    still_report_if: >-
+      Brain-side compute (llama print_timing total) for a Hermes task exceeds ~120 s on a GPU-accelerated box; OR a request queued behind ONE in-flight Hindsight call waits >300 s; OR the turn fails; OR the hal0:private queue stops draining across three samples 10 min apart with no restarts. Quote queue wait separately from compute.
+    review_at: v1.9.0
+
+  - id: zero-yield-retain-annotation-check
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    related_issue: 2030
+    summary: >-
+      A zero-yield retain shows plain `completed` in `memory ops list` / `memory status` and the #2030 regression probe scored it regressed.
+    why: >-
+      Probe misread. The annotation (facts_extracted:0, nothing_learned:true, notice) is on the single-op GET /api/memory/banks/{bank}/operations/{id} and MCP memory_operation_get only; list and status are unannotated on purpose (known memory-retain-zero-yield-visible-on-op-record-only). regressions.yaml probe 2030 now says to read the single-op GET.
+    still_report_if: >-
+      The single-op GET lacks nothing_learned:true and the notice while the document's memory_unit_count is 0. Do not re-file from a probe that read only the list or status.
+    review_at: v1.9.0
+
+  - id: rc-validate-stale-script-snapshot
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    related_issue: 3838
+    summary: >-
+      Probe/lane/triage prompts say `${RUN}/CONTEXT.md` instead of CONTEXT-<box id>.md.
+    why: >-
+      The run executed a pre-#3839 snapshot of .claude/workflows/rc-validate.js; the repo copy builds every prompt from BASE which names CONTEXT-<box id>.md. Operational, not a repo defect. Relaunch from the current repo copy. Remaining 'CONTEXT.md' wording in _shared.md/ui.md/mcp.md/kit.toml is drift only.
+    still_report_if: >-
+      The repo's rc-validate.js at the launch commit tells any agent to read the shared CONTEXT.md; OR a non-ct151 agent demonstrably acted on ct151 facts despite the per-box header.
+    review_at: v1.9.0
+
+  - id: hermes-hook-and-terminal-by-design
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261119225557
+    summary: >-
+      gateway journal shows `hal0-terminal-off` ERROR and hermes_doctor advisory 'Unknown terminal backend hal0-terminal-off'.
+    why: >-
+      Deliberate sentinel backend (hermes_provision.py:1843) that disables host exec for the agent.
+    still_report_if: >-
+      The sentinel is absent from a profile that should have exec disabled, or the gateway fails to start because of it.
     review_at: v1.9.0
