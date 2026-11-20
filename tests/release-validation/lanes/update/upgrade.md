@@ -181,7 +181,7 @@ The box on the new version, healthy, with the "before" snapshot recorded in your
 ## Added in kit 18
 
 * After every update grep the journal for updater.*_failed / *_skipped and require the CLI output to mention each (hermes_plugin_mirror_failed was silent, #3852).
-* Diff /var/lib/hal0/.hermes/plugins/model-providers/hal0 against installer/agents/hermes/plugins/hal0-provider and assert identical and hal0-owned.
+* Diff /var/lib/hal0/.hermes/plugins/model-providers/hal0 against installer/agents/hermes/plugins/hal0-provider and assert identical; assert the DIRECTORY is hal0-owned (files stay root-owned by design when byte-identical, known-issues hermes-plugin-identical-root-owned-files-kept).
 * Capture `hal0 doctor` and `hal0 doctor perms` in the BEFORE snapshot to attribute post-update drift rows.
 * Record per-bank fact_count before / after / after 30 min to separate consolidation drift from loss.
 * Make the 3x restart-with-stream check a script (stop duration from systemd timestamps; bc is not installed).
@@ -194,3 +194,13 @@ The box on the new version, healthy, with the "before" snapshot recorded in your
 * Run the rollback ONCE. A rollback to a pre-#3870 tree is expected to hit #3874 until fixed; record it `known`, roll forward with `hal0 update --yes`, and do not retry.
 * On a box with a root-owned Hermes plugin dir run the update twice (old to new, then roll-forward) to separate the old build's silent behaviour from the new tree's reporting; the second must list `hermes_plugin_mirror_failed` and exit 2.
 * Time `sudo hal0 agent reprovision hermes` (about 5 min on ct150, silent over ssh) and report that it prints no progress.
+
+## Added in kit 20
+
+* Gate A scores directory ownership only (see Gate A in boxes.toml); never FAIL on root-owned files that are byte-identical to the shipped copy.
+* Prove the directory repair ran: compare the ctime of the plugin DIRECTORY against the update's start/end timestamps.
+* Before the 3x hal0-api restart check, poll the stream output until bytes > 0 so a stream is confirmed in flight (5 s was not enough on a cold slot); take 5+ samples.
+* After a rollback plus roll-forward, check the "Changes since" baseline names the installed version, not the last published nightly.
+* Record Hal0::Platform fact_count at 0/10/30 min and attribute drops against Hindsight consolidation logs (277 -> 266 in ~9 min on 094401).
+* `before-api-slots.json` has no `actual_image` on an all-offline box (#3882 is unsatisfiable there): accept image, image_pin, image_status, or warm one slot first.
+* Clock on ct150 is EST (UTC-5), not UTC-4; use journal local stamps as such.
