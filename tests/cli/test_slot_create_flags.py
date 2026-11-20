@@ -486,3 +486,25 @@ def test_slot_edit_with_no_fields_does_not_mention_ctx_size(
 
     assert result.exit_code == 2
     assert "--ctx-size" not in result.output
+
+
+@pytest.mark.parametrize("bad_port", ["7000", "8297"])
+def test_port_flag_rejects_out_of_range(captured_post: dict[str, Any], bad_port: str) -> None:
+    """#3857: --port bounds match SlotConfig (8081-8200)."""
+    result = runner.invoke(
+        slot_commands.app,
+        [
+            "create",
+            "x",
+            "--type",
+            "llm",
+            "--hardware",
+            "vulkan",
+            "--model",
+            "m",
+            "--port",
+            bad_port,
+        ],
+    )
+    assert result.exit_code != 0
+    assert "body" not in captured_post

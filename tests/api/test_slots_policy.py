@@ -122,3 +122,45 @@ def test_capacity_endpoint_reports_slot_budget(
     assert r.status_code == 200, r.text
     budget = r.json()["slot_budget"]
     assert budget == {"used_slots": 1, "max_slots": 4}
+
+
+@pytest.mark.parametrize("bad_port", [7000, 8080, 8201, 8297])
+def test_create_slot_rejects_out_of_range_explicit_port(
+    tmp_hal0_home: str,
+    isolated_client: TestClient,
+    bad_port: int,
+) -> None:
+    """#3857: an explicit port outside 8081-8200 is refused, not swapped."""
+    register_model_file(isolated_client, tmp_hal0_home, "qwen3-4b-q4_k_m")
+    r = isolated_client.post(
+        "/api/slots",
+        json={
+            "name": "oor",
+            "model": "qwen3-4b-q4_k_m",
+            "device": "gpu-vulkan",
+            "port": bad_port,
+        },
+    )
+    assert r.status_code == 400, r.text
+    err = r.json()["error"]
+    assert err["code"] == "slot.port_out_of_range"
+    assert "8081-8200" in err["message"]
+    assert not (Path(tmp_hal0_home) / "etc" / "hal0" / "slots" / "oor.toml").exists()
+
+
+def test_create_slot_keeps_in_range_explicit_port(
+    tmp_hal0_home: str,
+    isolated_client: TestClient,
+) -> None:
+    register_model_file(isolated_client, tmp_hal0_home, "qwen3-4b-q4_k_m")
+    r = isolated_client.post(
+        "/api/slots",
+        json={
+            "name": "inrange",
+            "model": "qwen3-4b-q4_k_m",
+            "device": "gpu-vulkan",
+            "port": 8150,
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["port"] == 8150

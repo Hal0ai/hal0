@@ -509,6 +509,7 @@ _slot_port_range = _port_alloc.slot_port_range
 _collect_port_claims = _port_alloc.collect_port_claims
 _next_free_slot_port = _port_alloc.next_free_slot_port
 _reject_port_conflict = _port_alloc.reject_port_conflict
+_reject_port_out_of_range = _port_alloc.reject_port_out_of_range
 
 
 def _validation_error_details(exc: ValidationError) -> dict[str, str]:
@@ -802,6 +803,7 @@ async def create_slot(request: Request, background_tasks: BackgroundTasks) -> di
     # key + bound model → true) only ever applies to pre-field TOMLs.
     body.setdefault("autoload", False)
     if isinstance(body.get("port"), int):
+        _reject_port_out_of_range(int(body["port"]))
         _reject_port_conflict(int(body["port"]), name, runtime_ports)
     _reject_slot_tuning_keys(body)
     _reject_unknown_config_keys(body)
