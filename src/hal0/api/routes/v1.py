@@ -280,10 +280,17 @@ def _append_spread_events(events: Any, completion: int, span: float, now: float)
     if n <= 1 or span <= 0:
         events.append((now, completion))
         return
-    base, rem = divmod(completion, n)
+    # Event i sits at start + span*i/(n-1): the first at ``start`` and the last
+    # at ``now``, so the min-to-max span ``tps_from_events`` divides by is the
+    # whole decode span and the live rate reads completion/span exactly.
+    # Tokens use cumulative rounding so the remainder is spread across the
+    # span rather than front-loaded, and the batches sum to ``completion``.
     start = now - span
+    prev = 0
     for i in range(n):
-        events.append((start + span * (i + 1) / n, base + (1 if i < rem else 0)))
+        cum = completion * (i + 1) // n
+        events.append((start + span * i / (n - 1), cum - prev))
+        prev = cum
 
 
 def _record_nonstreaming_throughput(

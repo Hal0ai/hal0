@@ -461,3 +461,113 @@ def test_bin_edges_do_not_shift_between_polls(
     assert first == second
     for s in first:
         assert s["ts"] % 5.0 == pytest.approx(0.0, abs=1e-6)
+
+
+# ── #3869 review: remainder distribution, short-completion rate, conservation ─
+
+
+def test_spread_remainder_is_not_front_loaded() -> None:
+    """300 tokens over 50 s: both halves read 6.0 tok/s, not 8.0 then 4.0."""
+    from hal0.api.routes.v1 import _append_spread_events
+
+    events: deque = deque(maxlen=4096)
+    _append_spread_events(events, 300, 50.0, 1000.0)
+    assert sum(tok for _, tok in events) == 300
+    mid = 1000.0 - 25.0
+    first_half = sum(tok for ts, tok in events if ts < mid)
+    second_half = sum(tok for ts, tok in events if ts >= mid)
+    assert abs(first_half - second_half) <= 1
+    assert first_half / 25.0 == pytest.approx(6.0, rel=0.05)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "span"),
+    [(100, 0.5), (30, 0.6), (963, 34.64), (7, 3.0), (1, 5.0), (5, 0.0), (5, -2.0)],
+)
+def test_spread_conserves_tokens_and_stays_in_span(tokens: int, span: float) -> None:
+    from hal0.api.routes.v1 import _append_spread_events
+
+    events: deque = deque(maxlen=4096)
+    _append_spread_events(events, tokens, span, 500.0)
+    assert sum(tok for _, tok in events) == tokens
+    assert all(tok >= 1 for _, tok in events)
+    assert all(500.0 - max(span, 0.0) - 1e-9 <= ts <= 500.0 + 1e-9 for ts, _ in events)
+
+
+@pytest.mark.parametrize(("tokens", "span", "expected"), [(100, 0.5, 200.0), (30, 0.6, 50.0)])
+def test_tps_from_events_short_completion_reads_true_rate(
+    monkeypatch: pytest.MonkeyPatch, tokens: int, span: float, expected: float
+) -> None:
+    """A short spread completion must read completion/span, not n/(n-1) times it."""
+    from hal0.api.routes.v1 import _append_spread_events
+    from hal0.slots.metrics_collect import tps_from_events
+
+    monkeypatch.setattr(time, "monotonic", lambda: 1000.0)
+    events: deque = deque(maxlen=4096)
+    _append_spread_events(events, tokens, span, 1000.0)
+    assert tps_from_events(events, window_s=5.0) == pytest.approx(expected, rel=0.01)
+
+
+def test_history_bins_sum_to_completion_tokens(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spreading conserves tokens: sum over bins * bucket_s == completion_tokens."""
+    from hal0.api.routes.v1 import _record_nonstreaming_throughput
+
+    mono, epoch = 10_000.0, 1_700_000_003.0
+    monkeypatch.setattr(time, "monotonic", lambda: mono)
+    state = _nonstreaming_state()
+    decode_ms = 963 / 27.8 * 1000
+    body = (
+        b'{"usage":{"completion_tokens":963},"timings":{"predicted_ms":'
+        + str(decode_ms).encode()
+        + b"}}"
+    )
+    _record_nonstreaming_throughput(body, state, "primary", dispatch_started=mono - 60.0)
+    # Finish the completion before the last closed bin edge so it is reported.
+    _freeze_clock(monkeypatch, mono + 10.0, epoch + 10.0)
+    app.state.tps_events = state.tps_events
+    body_json = client.get("/api/stats/throughput/history").json()
+    total = sum(s["total_tps"] for s in body_json["samples"]) * body_json["bucket_s"]
+    assert total == pytest.approx(963.0, abs=1e-6)
+    assert sum(body_json["per_slot"]["primary"]) * body_json["bucket_s"] == pytest.approx(963.0)
+
+
+def test_nonstreaming_span_never_zero_or_negative_division() -> None:
+    """No timings and a dispatch start in the future: span 0, one event, no error."""
+    from hal0.api.routes.v1 import _record_nonstreaming_throughput
+
+    state = _nonstreaming_state()
+    _record_nonstreaming_throughput(
+        b'{"usage":{"completion_tokens":40}}',
+        state,
+        "primary",
+        dispatch_started=time.monotonic() + 100.0,
+    )
+    assert [tok for _, tok in state.tps_events["primary"]] == [40]
+    _record_nonstreaming_throughput(b'{"usage":{"completion_tokens":40}}', state, "primary")
+    assert sum(tok for _, tok in state.tps_events["primary"]) == 80
+
+
+def test_pending_tokens_reports_the_open_interval(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tokens in the not-yet-closed bin are not in ``samples`` but are exposed
+    as the additive ``pending_tokens`` (the bench GPU gate reads it)."""
+    mono, epoch = 10_000.0, 1_700_000_003.0  # last closed edge is 3 s ago
+    _freeze_clock(monkeypatch, mono, epoch)
+    _seed_store(app, {"primary": [(mono - 1.0, 25)]})
+    body = client.get("/api/stats/throughput/history").json()
+    assert body["samples"] == []
+    assert body["pending_tokens"] == 25
+
+
+def test_bench_gate_sees_pending_traffic(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hal0.bench import runner
+
+    payload = {"samples": [{"ts": 1.0, "total_tps": 0.0, "serving_slots": 0}], "pending_tokens": 40}
+    monkeypatch.setattr(runner, "_get_json", lambda *a, **k: payload)
+    assert runner._traffic_in_flight("http://x") is True
+    payload = {**payload, "pending_tokens": 0}
+    monkeypatch.setattr(runner, "_get_json", lambda *a, **k: payload)
+    assert runner._traffic_in_flight("http://x") is False

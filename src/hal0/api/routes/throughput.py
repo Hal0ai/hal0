@@ -69,11 +69,15 @@ def throughput_history(
     ``total_tps: 0.0`` with ``serving_slots: 0``, so the newest sample reads
     0 as soon as nothing is generating (#3859, ADR-0044 decision 4).
     ``per_slot`` arrays are aligned to ``samples`` (same length and order).
+    ``pending_tokens`` (additive, integer) is the token total of the
+    still-open interval, which ``samples`` leaves out until it closes.
 
     Bins are COMPLETED, wall-clock-anchored intervals: right edges sit on
     multiples of ``bucket_s`` epoch seconds and the newest bin ends at the
     last such edge, so the in-progress interval is not reported until it
-    closes. A bin's ``ts`` and value therefore do not shift between polls.
+    closes. A bin's ``ts`` does not shift between polls and its value is
+    stable unless a non-streaming completion finishes: its backdated events
+    can land in bins already reported (as 0 while it was decoding).
     """
     # ── param clamp ───────────────────────────────────────────────────────
     buckets = max(_BUCKETS_MIN, min(_BUCKETS_MAX, int(buckets)))
@@ -87,6 +91,7 @@ def throughput_history(
         "bucket_s": bucket_s,
         "samples": [],
         "per_slot": {},
+        "pending_tokens": 0,
     }
     if not store:
         return empty_response
@@ -111,11 +116,18 @@ def throughput_history(
     # per-slot tokens per bin
     per_slot_bins: dict[str, list[float]] = {}
 
+    pending_tokens = 0
     for slot_name, deque in store.items():
         slot_bins: list[float] = [0.0] * buckets
         for mono_ts, tokens in deque:
-            # The in-progress interval (>= window_end) is reported once it closes.
-            if mono_ts < window_start_mono or mono_ts >= window_end_mono:
+            # The in-progress interval (>= window_end) is reported once it
+            # closes; its token total is exposed as ``pending_tokens`` so a
+            # reader asking "did anything move recently?" (the bench GPU gate)
+            # does not miss traffic from the last, still-open interval.
+            if mono_ts >= window_end_mono:
+                pending_tokens += int(tokens)
+                continue
+            if mono_ts < window_start_mono:
                 continue
             raw_idx = int((mono_ts - window_start_mono) / bucket_s)
             idx = max(0, min(buckets - 1, raw_idx))
@@ -128,7 +140,7 @@ def throughput_history(
     # ── build output (skip leading empty bins; FE pads left) ──────────────
     first_idx = next((i for i in range(buckets) if bin_slots[i]), None)
     if first_idx is None:
-        return empty_response
+        return {**empty_response, "pending_tokens": pending_tokens}
     emitted_indices = list(range(first_idx, buckets))
 
     samples: list[dict[str, Any]] = [
@@ -151,4 +163,5 @@ def throughput_history(
         "bucket_s": bucket_s,
         "samples": samples,
         "per_slot": per_slot,
+        "pending_tokens": pending_tokens,
     }
