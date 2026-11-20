@@ -2940,14 +2940,21 @@ _ANCHOR_MODEL_ID = "hal0/agent"
 
 
 def _hermes_matches_catalog_row(catalog: Iterable[Any], model_id: str) -> bool:
-    """Would Hermes' own ``/models`` discovery find a window for ``model_id``?
+    """Would Hermes' own ``/models`` discovery find a window for ``model_id`` BY NAME?
 
-    Mirrors the pinned v0.22.4 lookup (agent/model_metadata.py
-    ``_resolve_endpoint_context_length`` over ``_parse_models_payload``): every
+    Mirrors the pinned v0.22.x lookup (agent/model_metadata.py
+    ``_resolve_endpoint_context_length`` over ``_add_model_aliases``): every
     row is keyed by its id and by the part after its first ``/``; an exact key
-    wins, a catalog with a single key answers for any model, otherwise the
-    first key that contains the model or is contained in it. The row only
-    counts when it carries an integer window.
+    wins, otherwise the first key that contains the model or is contained in
+    it. The row only counts when it carries an integer window.
+
+    Hermes also answers "the catalogue has exactly one key, use it" for any
+    model. That shortcut is deliberately NOT mirrored: it depends on how many
+    rows ``/v1/models`` lists at one instant, and on a fresh install the count
+    changes about ten seconds after the installer's ``config_write`` (reconcile
+    adds ``hermes-agent``), after which Hermes no longer takes it (#3854
+    follow-up). Only a row that matches the name (an ``agent`` alias row from a
+    bound model) is stable, so only that makes the window "discoverable".
     """
     keys: dict[str, Any] = {}
     for row in catalog:
@@ -2959,9 +2966,7 @@ def _hermes_matches_catalog_row(catalog: Iterable[Any], model_id: str) -> bool:
         if "/" in rid:
             keys.setdefault(rid.split("/", 1)[1], row)
     matched = keys.get(model_id)
-    if not matched and len(keys) == 1:
-        matched = next(iter(keys.values()))
-    elif not matched and model_id:
+    if not matched and model_id:
         matched = next((r for k, r in keys.items() if model_id in k or k in model_id), None)
     ctx = matched.get("context_length") if matched else None
     return isinstance(ctx, int) and not isinstance(ctx, bool)
