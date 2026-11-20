@@ -100,6 +100,22 @@ def _engine_provider_for_tts(device: str, provider: str) -> str:
     return _cfg_effective_provider(cfg) or provider
 
 
+def _engine_provider_for_stt(device: str, provider: str) -> str:
+    """Provider label for a freshly created voice.stt slot (#3860).
+
+    Derived from the engine the device selects (cpu -> moonshine) through the
+    same type-implied profile rule as tts. Falls back to ``provider`` only
+    when no engine resolves.
+    """
+    from hal0.slots.config_write import _cfg_effective_provider
+
+    cfg: dict[str, Any] = {"type": "transcription", "device": device}
+    profile = type_implied_profile(cfg)
+    if profile:
+        cfg["profile"] = profile
+    return _cfg_effective_provider(cfg) or provider
+
+
 # Inverse for status surfacing ("which child is this slot serving").
 _SLOT_TO_CHILD: dict[str, tuple[str, str]] = {
     slot_name: key for key, slot_name in _CHILD_TO_SLOT.items()
@@ -1142,6 +1158,13 @@ class CapabilityOrchestrator:
             engine_profile = type_implied_profile(cfg_dict)
             if engine_profile is not None:
                 cfg_dict["profile"] = engine_profile
+            # The provider label is the engine the device picked (cpu stt ->
+            # moonshine), never the ``llama-server`` fallback (#3860): a slot
+            # TOML carrying ``llama-server`` beside ``profile = "moonshine"``
+            # poisons a later capabilities.toml reseed, after which every stt
+            # apply 400s ``capability.no_engine_for_provider``.
+            if child == "stt":
+                cfg_dict["provider"] = _engine_provider_for_stt(slot_device, provider)
         try:
             await self._slot_manager.create(slot_name, cfg_dict)
         except Exception as exc:

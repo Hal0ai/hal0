@@ -93,3 +93,30 @@ async def test_autocreated_embed_slot_keeps_its_trio_type(tmp_hal0_home: str) ->
     raw = _read(home, "embed")
     assert raw.get("type") == "embedding"
     assert raw.get("profile") == "embedding"
+
+
+async def test_autocreated_stt_slot_carries_engine_provider_and_reseeds(
+    tmp_hal0_home: str,
+) -> None:
+    """#3860: a first cpu stt enable writes ``provider = "moonshine"``, not the
+    ``llama-server`` fallback, so a reseed from the TOML still applies."""
+    home = Path(tmp_hal0_home)
+    cfg_path = home / "etc" / "hal0" / "capabilities.toml"
+    orch = CapabilityOrchestrator(_manager(home), config_path=cfg_path)
+
+    await orch._ensure_slot_exists(
+        "stt", CapabilitySelection(device="cpu", provider="", model="", enabled=True)
+    )
+
+    raw = _read(home, "stt")
+    assert raw.get("provider") == "moonshine"
+    assert raw.get("profile") == "moonshine"
+    assert raw.get("type") == "transcription"
+
+    # Reseed capabilities.toml from the slot TOMLs and re-apply stt.
+    cfg_path.unlink(missing_ok=True)
+    reseeded = CapabilityOrchestrator(_manager(home), config_path=cfg_path)
+    await reseeded.initialize_if_missing()
+    with open(cfg_path, "rb") as f:
+        seeded = tomllib.load(f)
+    assert seeded["selections"]["voice"]["stt"]["provider"] == "moonshine"
