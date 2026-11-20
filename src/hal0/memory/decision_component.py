@@ -683,12 +683,36 @@ def _poll_health(
     return False
 
 
+#: How far the server's window sits above the engine's request budget, in
+#: eighths (10/8 = 1.25). The engine packs a decision request up to
+#: ``max_request_tokens`` by its own estimate; the server counts with the
+#: model's tokenizer and answers 400 ``max_tokens_exceeded`` to anything over
+#: its window. With the two equal, requests the engine sized at the budget
+#: arrived up to 11% over it (4558 counted against 4096) and were refused. A
+#: refused prune makes reflect keep every piece of evidence it retrieved, which
+#: turned one mental-model refresh into dozens of full-context model calls
+#: (#3849).
+_WINDOW_HEADROOM_EIGHTHS = 10
+
+#: The seam's upper bound for ``--max-tokens`` (``_check_decision_unit_params``).
+_WINDOW_MAX = 32768
+
+
+def server_window(max_request_tokens: int) -> int:
+    """The ``--max-tokens`` window for an engine budget of ``max_request_tokens``.
+
+    A quarter above the budget, held to the seam's bound. At the very top of
+    the setting's range the bound leaves less headroom than that.
+    """
+    return min(_WINDOW_MAX, -(-int(max_request_tokens) * _WINDOW_HEADROOM_EIGHTHS // 8))
+
+
 def _unit_params(decision: Any) -> dict[str, Any]:
     return {
         "revision": MODEL_REVISION,
         "threads": int(decision.threads),
         "port": int(decision.port),
-        "max_tokens": int(decision.max_request_tokens),
+        "max_tokens": server_window(decision.max_request_tokens),
     }
 
 

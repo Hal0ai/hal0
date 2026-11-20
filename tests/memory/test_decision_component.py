@@ -267,7 +267,7 @@ def test_fresh_install_builds_pulls_renders_starts_and_turns_the_lane_on(
     assert dc.server_script_path().read_bytes() == dc.packaged_server_script().read_bytes()
 
     unit = box["unit"].read_text()
-    assert f"snapshots/{REV} " in unit and "--port 9178 --threads 8 --max-tokens 4096" in unit
+    assert f"snapshots/{REV} " in unit and "--port 9178 --threads 8 --max-tokens 5120" in unit
     assert ("enable", "hal0-hs-decide.service") in seam.calls
     # The converge turns the lane on itself, then re-points the engine.
     assert box["providers"] == ["local"]
@@ -719,3 +719,19 @@ def test_a_broken_hal0_toml_is_left_alone_and_said_so(
     assert toml.read_bytes() == broken
     assert ("stop", "hal0-hs-decide.service") in seam.calls
     assert not box["unit"].exists()
+
+
+@pytest.mark.parametrize(
+    ("budget", "window"),
+    [(4096, 5120), (256, 320), (4097, 5122), (26214, 32768), (32768, 32768)],
+)
+def test_server_window_sits_above_the_engine_budget(budget: int, window: int) -> None:
+    """#3849: the engine sizes a request by estimate and the server counts real
+    tokens. With equal limits, requests arrived up to 11% over (4558 against
+    4096) and the server refused them, so the window carries a quarter of
+    headroom, held to the seam's 32768 bound."""
+    assert dc.server_window(budget) == window
+
+
+def test_server_window_clears_the_worst_overshoot_seen() -> None:
+    assert dc.server_window(4096) > 4558
