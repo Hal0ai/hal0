@@ -17,7 +17,7 @@
 
 schema: 1
 updated: 2026-11-20
-updated_for: v1.8.0-nightly.20261120045628
+updated_for: v1.8.0-nightly.20261120094401
 
 # NOTE (kit 19): five boxes' worth of by-design rulings added at the bottom; the Overview soft-degraded decision (#3808 option b) is now APPLIED, see dashboard-overview-agents-degraded-shown-ready.
 #
@@ -3190,3 +3190,45 @@ known_issues:
       Each has a regressions.yaml entry. Record as `known (#N)`.
     still_report_if: >-
       The symptom is materially wider than the issue text, or a fix lands and the repro still reproduces.
+
+  - id: steward-system-info-blurb-echo
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120094401
+    summary: >-
+      On a kfd-less Vulkan box the 2.6B steward, asked to call system_info, names gpu-vulkan as serving but adds side remarks
+      copied from the runner blurb or default_lane ("ROCm-based", "ROCm/Vulkan path", "Default lane: rocm").
+    why: >-
+      Refuted over 5 of 5 runs after #3871 (admin.py _serving_backends_from / _project_system_info): tool_result leads with
+      serving_backends=[gpu-vulkan] and the catalogue field is renamed default_lane. Remaining wording is small-model prose-vs-tool_result variance.
+    still_report_if: >-
+      On a kfd_present:false box with the canary passing, the steward names rocm, or any backend absent from serving_backends, as serving in >=2 of 3 runs;
+      OR system_info serving_backends is empty, missing, or lists a backend with no loaded model while /api/backends shows one loaded;
+      OR backends.<runner> carries `backend` instead of `default_lane` in the MCP/steward projection.
+    review_at: v1.9.0
+
+  - id: hermes-plugin-identical-root-owned-files-kept
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261120094401
+    summary: >-
+      After Gate A (chown -R root:hal0) and update/rollback/update, the hal0 provider plugin files (__init__.py, plugin.yaml, profile.py)
+      stay root:hal0 644 while the directories are hal0:hal0.
+    why: >-
+      perms.py converge_hermes_plugin_trees re-owns directories only (dirs_only) to avoid re-owning a planted hard link (#1739, #2975, #3852, ADR-0032).
+      _copy_plugin_tree skips a byte-identical tree; a differing tree is replaced by rmtree+copytree with hal0-owned inodes (verifier appended a byte and ran
+      mirror_hermes_plugins: tree replaced, probe line gone).
+    still_report_if: >-
+      A plugin tree whose content differs from the shipped copy is NOT replaced by `hal0 update` or `hal0 agent reprovision hermes` (or hermes_plugin_mirror_failed
+      appears); OR a plugin DIRECTORY is still root-owned after update; OR a root-owned plugin file is not readable by hal0; OR a root process writes or re-owns a FILE
+      inside the hal0-writable plugin trees.
+    review_at: v1.9.0
+
+  - id: doctor-perms-state-agents-hermes-0755-open
+    status: open
+    issue: 3888
+    summary: >-
+      `hal0 doctor perms` DRIFT on state/agents/hermes (+ provision.json, + venv.pin) 0755 vs 2755 on upgraded boxes (ct150, long-lived installs).
+    why: >-
+      Filed #3888 (P2, v1.8.1), XS fix: keep_setgid=True on both rows. One `doctor perms --fix` clears it per box.
+    still_report_if: >-
+      Any other perms row drifts, or the dir misbehaves, or a fresh install shows it.
+    review_at: v1.8.1

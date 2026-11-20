@@ -23,7 +23,7 @@
 
 schema: 1
 updated: 2026-11-20
-updated_for: v1.8.0-nightly.20261120045628
+updated_for: v1.8.0-nightly.20261120094401
 
 # NOTE on the v1.0.0-rc.6 entries: that run executed in mode=report, so nothing was filed.
 # Entries carry `issue: null` until the operator files them; replace null with the issue number
@@ -5151,6 +5151,11 @@ regressions:
       The steward says vulkan (or says the catalogue lane is not what is serving), not rocm, in at least 2 of 3 runs.
     note: >-
       Plain-question escalation clause of system-info-backends-is-runner-catalogue is NOT met (0 of 3 wrong).
+      094401 verification: 5 of 5 name gpu-vulkan (fix #3871 installed). Blurb echoes like "ROCm-based" next to a correct
+      answer are not findings (known-issues steward-system-info-blurb-echo). Promote ready: unit-test _project_system_info.
+    promote_ready: true
+    promote_to: >-
+      pytest tests/mcp/test_admin_system_info.py: serving_backends from backend_list wins, catalogue field renamed default_lane.
 
   - id: slot-create-port-silently-replaced
     issue: 3857
@@ -5420,3 +5425,23 @@ regressions:
     expect: >-
       Before artifacts contain all three; the post-upgrade diff needs no "no baseline" caveat.
     promote_ready: false
+
+  - id: state-agents-hermes-setgid-drift-upgraded-box
+    issue: 3888
+    last_result: { release: v1.8.0-nightly.20261120094401, result: regressed }
+    from: v1.8.0-nightly.20261120094401
+    severity: minor
+    tier: mechanical
+    lane: upgrade
+    summary: >-
+      On an upgraded box where /var/lib/hal0/state/agents/hermes is 0755, `hal0 doctor perms` exits 1 with two DRIFT rows
+      (state/agents/hermes + provision.json, + venv.pin) "is hal0:hal0 0755, want hal0:hal0 2755". perms.py declares both rows
+      0o2755 without keep_setgid=True; `hal0 update` does not repair them. Fresh installs pass.
+    repro: |
+      stat -c '%U:%G %a' /var/lib/hal0/state/agents/hermes   # 755 on an upgraded box, 2755 on a fresh one
+      hal0 doctor perms; echo rc=$?
+    expect: >-
+      Directory accepted at 0755 or 2755 (keep_setgid), doctor perms rc=0 apart from the known split-brain /root/.hermes row.
+    promote_ready: true
+    promote_to: >-
+      pytest tests/install/test_perms.py: both state/agents/hermes rows set keep_setgid and _declared_mode accepts 0755 and 2755.

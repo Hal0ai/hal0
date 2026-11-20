@@ -135,6 +135,13 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **20** (2026-11-20) — Curation from the v1.8.0-nightly.20261120094401 run (3 verified findings: 1 filed #3888,
+  2 refuted as by-design). `regressions.yaml`: new #3888 entry (state/agents/hermes setgid drift), #3856 rescored with
+  promote_ready. `known-issues.yaml`: steward-system-info-blurb-echo, hermes-plugin-identical-root-owned-files-kept
+  (Gate A scored files, design is directories only), #3888 tracking. `boxes.toml` Gate A and upgrade/post-upgrade briefs
+  reworded to directory ownership; "Added in kit 20" in upgrade, post-upgrade, hermes briefs. Lesson: a gate that
+  contradicts a documented design (dirs_only) fails every run; read the source ruling before writing the expectation.
+
 * **19** (2026-11-20) — Curation from the v1.8.0-nightly.20261120045628 run (16 verified findings: 9 filed
   #3874-#3882, 1 duplicate commented on #2725, 6 refuted or by-design). `regressions.yaml`: nine new entries
   (#3874 rollback crashes in activate after the swap, P0; #3875 context_length not stamped on first provision;
