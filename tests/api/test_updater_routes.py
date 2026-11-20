@@ -399,8 +399,10 @@ def test_apply_status_eventually_failed_on_invalid_manifest(
     r = isolated_client.post("/api/updates/apply", json={})
     job_id = r.json()["id"]
 
-    # Poll up to a couple of seconds for the background task to land.
-    deadline = time.monotonic() + 3.0
+    # Wait for the background task to land. The deadline is only an upper bound for a
+    # stuck job: the loop leaves as soon as the state is final, so a generous value costs
+    # nothing on a passing run. Three seconds was too tight on a loaded CI runner.
+    deadline = time.monotonic() + 30.0
     final: dict = {}
     while time.monotonic() < deadline:
         s = isolated_client.get(f"/api/updates/status/{job_id}")
