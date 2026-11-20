@@ -278,6 +278,9 @@ class PermRow:
     # single-level behavior byte-for-byte.
     optional: bool = True  # skip silently when the path is absent
     role: str = ""  # human label for the audit table
+    keep_setgid: bool = False  # the setgid bit is neither drift nor fixed: the declared mode's
+    # other bits are enforced and the bit stays as found (#3852: a dir that is 2755 on a box whose
+    # HERMES_HOME was born under the setgid state root and 0755 on an older one, both healthy).
     dirs_only: bool = False  # re-own and re-mode real DIRECTORIES only, never a file (#3852):
     # for a tree the service account can write, where a regular file may be a hard link to a
     # file outside it. A glob skips every non-directory match, a target that is not a directory
@@ -593,8 +596,10 @@ def ownership_table(
         #
         # Modes are what a healthy box has. The parents are plain ``mkdir``s
         # (``hermes_provision._phase_home_init``, or copytree's makedirs) under
-        # the setgid HERMES_HOME skeleton, so they are born 2755, like the
-        # state/agents/hermes row above (#3545). Each tree's directories get
+        # HERMES_HOME: 2755 where HERMES_HOME was born under the setgid state
+        # root (a fresh 1.8.0 install), 0755 on boxes whose home an older
+        # release made. Both are healthy and the bit means nothing here, so
+        # ``keep_setgid`` enforces 0755 and leaves the bit as found. Each tree's directories get
         # their mode from copytree's copystat of the shipped 0755 dirs (which
         # drops the inherited setgid bit), and the ``__pycache__`` dirs Hermes
         # writes into them at runtime are a ``mkdir`` under a non-setgid 0755
@@ -604,7 +609,8 @@ def ownership_table(
                 var_lib / ".hermes" / sub,
                 state_owner,
                 service_group,
-                0o2755,
+                0o755,
+                keep_setgid=True,
                 dirs_only=True,
                 role=f"HERMES_HOME/{sub}",
             )
@@ -1310,6 +1316,17 @@ def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
     return out
 
 
+def _declared_mode(row: PermRow, before: PermObservation) -> int:
+    """The mode ``row`` wants for a path observed as ``before``.
+
+    A ``keep_setgid`` row takes the setgid bit from what is on disk, so the bit
+    is never drift and commit() writes it back as found.
+    """
+    if not row.keep_setgid or before.mode is None:
+        return row.mode
+    return (row.mode & ~stat_mod.S_ISGID) | (before.mode & stat_mod.S_ISGID)
+
+
 def plan(
     table: Iterable[PermRow] | None = None,
     *,
@@ -1331,7 +1348,7 @@ def plan(
                     before=before,
                     owner=eff.owner,
                     group=eff.group,
-                    mode=eff.mode,
+                    mode=_declared_mode(eff, before),
                     role=eff.label,
                     dirs_only=eff.dirs_only,
                 )

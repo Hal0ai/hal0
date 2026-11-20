@@ -252,6 +252,71 @@ def test_a_healthy_tree_shows_no_drift(tmp_path: Path) -> None:
     assert plan.drifted == ()
 
 
+@pytest.mark.parametrize("found", [0o755, 0o2755])
+def test_the_plugin_parents_keep_whichever_setgid_bit_they_have(tmp_path: Path, found: int) -> None:
+    """Real boxes have both (#3852): 2755 on a fresh 1.8.0 install, 0755 on a
+    box whose HERMES_HOME an older release made. Neither is drift, and a fix
+    of other drift leaves the bit as it found it."""
+    from hal0.agents.hermes_provision import _mirror_plugins
+
+    home = _hermes_home()
+    _mirror_plugins(_plugin_src(tmp_path), home)
+    parents = (home / "plugins", home / "plugins" / "model-providers")
+    for d in parents:
+        d.chmod(found)
+    plan = perms.plan(_my_rows())
+    assert not [d for d in plan.drifted if d.path in parents]
+
+    for d in parents:
+        d.chmod(found & ~0o022 | 0o070)  # group-writable: real drift, setgid as found
+    plan = perms.plan(_my_rows())
+    assert {d.path for d in plan.drifted} >= set(parents)
+    perms.commit(plan)
+    for d in parents:
+        assert d.stat().st_mode & 0o7777 == found
+
+
+def test_a_root_owned_tree_beside_a_hal0_sibling_is_repaired_then_mirrored(
+    tmp_path: Path,
+) -> None:
+    """The affected box's state (#3852): ``model-providers/hal0`` is a
+    root-owned dir of root-owned 0644 files, ``hal0-memory`` is hal0's. Stand-in
+    without root: a dir the mirror cannot write (0555) of files it cannot write
+    (0444). The mirror fails; the dirs-only converge fixes the dir and leaves
+    the files alone; the mirror then replaces those files itself."""
+    from hal0.agents.hermes_provision import _mirror_plugins
+
+    home = _hermes_home()
+    src = _plugin_src(tmp_path)
+    (src / "hal0-provider" / "__init__.py").write_text("")  # the shipped tree's three files
+    _mirror_plugins(src, home)
+    tree = home / "plugins" / "model-providers" / "hal0"
+    sibling = home / "plugins" / "hal0-memory"
+    files = sorted(tree.iterdir())
+    assert len(files) == 3
+    for f in files:
+        f.chmod(0o444)
+    tree.chmod(0o555)
+    (src / "hal0-provider" / "profile.py").write_text("SHIPPED_FIX = True\n")
+    try:
+        _changed, _d, failure = _mirror_plugins(src, home)
+        assert failure is not None  # EACCES, as on the box
+
+        plan = perms.plan(_my_rows())
+        assert {d.path for d in plan.drifted} == {tree}  # not the sibling, not a file
+        perms.commit(plan)
+        assert tree.stat().st_mode & 0o7777 == 0o755
+        assert all(f.stat().st_mode & 0o7777 == 0o444 for f in files)  # never touched
+
+        _changed, _d, failure = _mirror_plugins(src, home)
+        assert failure is None
+        assert (tree / "profile.py").read_text() == "SHIPPED_FIX = True\n"
+        assert (sibling / "plugin.yaml").is_file()
+    finally:
+        if tree.exists():
+            tree.chmod(0o755)
+
+
 def test_the_mirror_needs_write_on_the_dirs_only(tmp_path: Path) -> None:
     """Why handing back the directories is enough (#3852 review): unlinking a
     file needs write on its directory, not on the file, so files the mirror
