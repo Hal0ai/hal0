@@ -86,7 +86,7 @@ dependencies = [
   # compromised emSign root from uv's bundled CA store (GHSA-hq85-5cpj-mr62),
   # the case a quarantine cannot help with. The floor moves to it too, so no
   # install keeps the vulnerable store.
-  "uv>=0.13.4,<0.13.9",
+  "uv>=0.13.4,<0.13.10",
 ]
 
 [project.optional-dependencies]
@@ -113,7 +113,7 @@ dev = [
   "python-multipart>=0.0.9",
   # The YAML parser of the pinned Hermes venv, which has no PyYAML. The
   # hal0-memory plugin runs there, so its tests parse with this one (#3803).
-  "ruamel.yaml>=0.18.16,<0.19",
+  "ruamel.yaml>=0.18.16,<0.20",
 ]
 
 # Bench load-gen tooling (Phase 3 of the bench overhaul). Deliberately NOT in
