@@ -33,6 +33,11 @@ Bare `hal0 doctor` (no subcommand) runs `installer/lib/preflight.sh`:
 | `doctor all` | `--json` |
 | `doctor bundle` | `--out`, `--no-rocm-smi`, `--include-logs` (default `auto`; `auto\|yes\|no`) |
 
+`doctor perms` accepts both `0755` (older installs) and `2755` (fresh installs)
+for `/var/lib/hal0/state/agents/hermes`. `--fix` preserves that directory's
+existing setgid bit; ownership, the other permission bits and the `0644`
+`provision.json` / `venv.pin` files are still checked and repaired.
+
 `doctor all` rolls up every check into one report. All are read-only except
 `memory_extraction_throughput`, which sends one bounded probe to the extraction slot (at most 512
 prompt and 32 decode tokens, capped at 30 s) when the slot's metrics carry no reading. Each row has a stable id
