@@ -157,14 +157,29 @@ Run order inside this lane: the reprovision checks (10) restart the gateway unde
     plugin tabs still load (`GET /api/dashboard/plugins` through hal0-api answers 200).
 33. **Run controls on v0.23.3.** Through the bridge (`agent_run`, `agent_run_status`,
     `agent_run_events`, `agent_run_steer`, `agent_run_stop`) start one run, read its events,
-    steer it and stop it; each must answer as on v0.22.4. Then start eleven runs at once: the
-    eleventh must be refused with 429 (`gateway.api_server.max_concurrent_runs`, default 10,
-    unchanged from v0.22.4) and the bridge must return that refusal to its caller.
+    steer it and stop it; each must answer as on v0.22.4. Then hold ten runs open (a prompt that
+    waits on an approval keeps a run active), confirm all ten report as running, and start an
+    eleventh: it must be refused with 429 (`gateway.api_server.max_concurrent_runs`, default 10,
+    unchanged from v0.22.4) and the bridge must return that refusal to its caller. Stop the ten
+    runs and confirm none is left active before the next item.
 34. **A cloned profile after the bump.** `sudo -u hal0 hermes profile create probe --clone`,
     wait for hal0-api's sweep, then check the clone has its own `API_SERVER_KEY`, the
     `hal0-admin` and `hal0-memory` MCP servers, `memory.provider: hal0-memory`, the
     `hal0-terminal-off` backend on a terminal-off box, and that one chat turn through
     `/p/probe/v1/chat/completions` answers. Delete the profile afterwards.
+35. **The previous release reads the upgraded store (the flip-back path).** On the UPGRADE box,
+    after v0.23.3 has run at least one chat turn, take a copy of the session database only (no
+    `.env`, no keys) into a private scratch home:
+    `sudo install -d -m 700 -o hal0 -g hal0 /var/tmp/hermes-flipback` then
+    `sudo -u hal0 sqlite3 /var/lib/hal0/.hermes/state.db ".backup /var/tmp/hermes-flipback/state.db"`.
+    Run the previous release against the copy, never against the live home:
+    `sudo -u hal0 env HERMES_HOME=/var/tmp/hermes-flipback /var/lib/hal0/hermes/previous/venv/bin/hermes sessions list`.
+    It must list the sessions, including the one v0.23.3 wrote, with no schema or migration
+    error, and `sqlite3 /var/tmp/hermes-flipback/state.db 'select version from schema_version'`
+    must still say `33`. This is the read path only (the command opens the store read-only and
+    starts no gateway); a real flip-back also writes, which only a throwaway box can show. An
+    error here means the automatic flip-back from v0.23.3 would leave a box with a Hermes that
+    cannot open its store: a `critical` finding. Remove the scratch home.
 
 ## Leave behind
 

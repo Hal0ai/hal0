@@ -563,9 +563,13 @@ under "Left for a live box" and is a release-lane item.
   never ran v0.23.3, and once v0.23.3 is the live release
   `hal0 update component hermes --target 4d043038…` is refused
   (`hermes_release.refuse_downgrade`). The flip-back after a failed activation
-  restores `config.yaml` from its snapshot and runs v0.22.4 over a `state.db`
-  stamped 33; the additive shape reads as compatible, and v0.22.4 never
-  lowers a stamp, but that path has not been run.
+  restores `config.yaml` from its snapshot and does not touch `state.db`, so
+  v0.22.4 then runs over a store stamped 33. The source says it can: v0.22.4
+  only checks that a store is not behind its own shape and only ever adds
+  columns (`hermes_state_schema.py:169-183`, `:772-790` at `4d043038`), it
+  never lowers a stamp, and the search-index layout is the same at both refs
+  (`FTS_STORAGE_VERSION = 3`). Subagent records v0.23.3 wrote to its new
+  table are not visible to v0.22.4. That path has not been run.
 - **A rollback of hal0 itself is not covered by the refusal.** hal0 1.8.0 does
   not know `caafe538`, and `refuse_downgrade` passes a live ref it cannot
   order. A box rolled back from 1.8.1 to 1.8.0 would rebuild v0.22.4 at its
@@ -585,7 +589,7 @@ its own terminal policy from its own config (`gateway/run.py:1782-1795`,
 plugins loading; a chat turn, a tool turn and a bridge run; the Operator
 Board's live events; the tool roster of a terminal-off box; the flip-back.
 `tests/release-validation/lanes/readonly/hermes.md` items 18, 25 and 30 to 34
-and `stateful/hermes-e2e.md` items 32 to 34 are the checks.
+and `stateful/hermes-e2e.md` items 32 to 35 are the checks.
 
 ## Consequences
 
