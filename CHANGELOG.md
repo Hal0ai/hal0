@@ -30,16 +30,22 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-### Breaking
-
-- **Hermes cannot be moved back to v0.22.4 once v0.23.3 is live.** v0.23.3 moves Hermes's session database (`state.db`, schema 32 to 33) and `config.yaml` (`_config_version` 51 to 54) to versions that are never lowered, so `hal0 update component hermes --target 4d04303818b61bf3aa09278af48356315515965b` is refused as a downgrade. v0.22.4 and v0.22.2 stay vetted for the automatic flip-back after a failed activation and for a box that has not updated yet. A flip-back puts `config.yaml` back and leaves `state.db` at schema 33, which v0.22.4 reads: the step from 32 only adds to the database. hal0 1.8.0 does not know the v0.23.3 commit, so a box rolled back to hal0 1.8.0 would rebuild v0.22.4 over the newer files at its next update; that path is not supported (#2805). (#3924)
-- **Hermes's built-in browser tools are replaced, and browser automation now needs the terminal opt-in.** Hermes v0.23.0 removed the ten `browser_*` tools; `browser_exec` is the one browser tool. It runs code on the host, so Hermes offers it only to a session that has the terminal tool. A box with the terminal off (the default) has no browser automation in Hermes. A prompt, skill or toolset list of your own that names the old tools needs `browser_exec` instead. (#3924)
 ## [1.8.1] — 2026-11-22
 
 ### Highlights
 
-- **A fix release on 1.8.0.** Mental-model refreshes no longer stall for hours when the decision model refuses a prune request, a busy slot is no longer marked ERROR for a late health answer, and `hal0 update` offers the stable release to a box on a nightly of the same version.
+- **A fix release on 1.8.0 that also moves three pinned components.** Mental-model refreshes no longer stall for hours when the decision model refuses a prune request, a busy slot is no longer marked ERROR for a late health answer, and `hal0 update` offers the stable release to a box on a nightly of the same version. Hermes moves to v0.23.3, the memory engine to Hindsight 1.2.3, and the ComfyUI runner to 0.30.0, which carries the fix for CVE-2026-92816.
+- **Read the Breaking and Migrations sections before updating a box that runs Hermes.** Hermes v0.23.3 cannot be moved back to v0.22.4, and its browser tools now need the terminal opt-in.
 - **One step on a box that runs the local decision model:** run `hal0 memory decision install` after updating so the decision server gets its larger window. `hal0 update` does not rewrite that unit.
+
+### Breaking
+
+- **Hermes cannot be moved back to v0.22.4 once v0.23.3 is live.** v0.23.3 moves Hermes's session database (`state.db`, schema 32 to 33) and `config.yaml` (`_config_version` 51 to 54) to versions that are never lowered, so `hal0 update component hermes --target 4d04303818b61bf3aa09278af48356315515965b` is refused as a downgrade. v0.22.4 and v0.22.2 stay vetted for the automatic flip-back after a failed activation and for a box that has not updated yet. A flip-back puts `config.yaml` back and leaves `state.db` at schema 33, which v0.22.4 reads: the step from 32 only adds to the database. hal0 1.8.0 does not know the v0.23.3 commit, so a box rolled back to hal0 1.8.0 would rebuild v0.22.4 over the newer files at its next update; that path is not supported (#2805). (#3924)
+- **Hermes's built-in browser tools are replaced, and browser automation now needs the terminal opt-in.** Hermes v0.23.0 removed the ten `browser_*` tools; `browser_exec` is the one browser tool. It runs code on the host, so Hermes offers it only to a session that has the terminal tool. A box with the terminal off (the default) has no browser automation in Hermes. A prompt, skill or toolset list of your own that names the old tools needs `browser_exec` instead. (#3924)
+
+### Security
+
+- **The ComfyUI runner image is built from ComfyUI 0.30.0, which fixes CVE-2026-92816.** The pinned image was built from 0.28.0, which allowed a path traversal through the dataset save nodes when a user loaded a crafted workflow. The pin is now `0.30.0-rf37ebf1`; it passed the hardware gate on the rocm lane with an SDXL render. An installed box pulls the new image at its next `hal0 update`. (#3742, #3925)
 
 ### Fixed
 
@@ -49,6 +55,7 @@ applying. Add those subsections to a version's section to surface them; see
 - **`hal0 update` says when the activation step could not repair the Hermes plugin directories.** When the root activation step failed to hand a root-owned Hermes plugin tree back to the `hal0` account, the failure went only to the journal, and a later plugin refresh could fail without explanation. `hal0 update` and `hal0 update --rollback` now print `Hermes plugin directory ownership repair (run: sudo hal0 agent reprovision hermes) logged a warning`, and the update report lists its warnings even when the post-update migrations failed (it used to list them only on success). The warning alone does not mark the update as failed. (#3886)
 - **`hal0 update` marks release notes it had to shorten.** Release notes over 64 KiB (the 1.8.0 notes are about 103 KB) were cut mid-line with no sign that anything was missing. They are now cut at the end of a line and end with a note pointing at the full CHANGELOG at https://github.com/hal0ai/hal0/blob/main/CHANGELOG.md. (#3751)
 - **A box on a nightly is offered the stable release of the same version.** A box on `1.8.0-nightly.<stamp>` that switched to the stable channel was told it was up to date when 1.8.0 shipped, and stayed on its last nightly unless the operator passed `--target`. `hal0 update` now offers the selected channel's build when it and the installed build share a version and one of them is a nightly; a stable box that selects the nightly channel is still offered the nightlies. (#3893)
+- **`hal0 model scan` no longer registers a halogen draft head as a model.** Files named `*-drafter-r2.hgn` and `*-drafter-r2-ht4.hgn`, which newer halogen releases place beside a checkpoint, were registered as checkpoints of their own and accepted by `hal0 model add`. They are now treated as companions of the checkpoint. (#3920)
 
 ### Changed
 
@@ -59,6 +66,14 @@ applying. Add those subsections to a version's section to surface them; see
 - **hal0 no longer writes `auxiliary.skills_hub` into Hermes's config, and removes it from an existing one.** Hermes v0.23.3 has no such auxiliary task and ignores the block. (#3924)
 - **A Hermes feature an operator configured may fetch a plugin after the update.** Camofox, the Singularity terminal backend, GitHub Copilot, Yuanbao and `hermes import-agent` are catalog plugins from v0.23.0, as Home Assistant, Spotify, Langfuse and the memory providers Hermes used to bundle already were. Hermes downloads the plugin at its first start for a profile that uses one. hal0's own configuration uses none of them (`memory.provider` is `hal0-memory`). `hermes mcp serve` is now `hermes mcp-serve`, from a plugin. (#3924)
 - **The accepted gap in #2878 is still present at v0.23.3.** Hermes's preview-restart side agent still ignores `agent.disabled_toolsets`; the `hal0-terminal-off` backend still keeps the terminal tools out of every agent on a terminal-off box. (#3924)
+- **The memory engine is pinned to Hindsight 1.2.3** (was 1.2.0). `hal0 update` upgrades the engine in place and rolls it back by itself if the upgrade fails. hal0 no longer installs `dateparser<1.5` beside the engine: 1.2.3 handles dateparser 1.5 itself and requires it. A knowledge-page refresh no longer counts the time it waits for a model-call permit against its wall clock, so a refresh queued behind consolidation and retain is not cancelled for the queue. The engine cannot be installed on Python 3.14.1, which one of its dependencies excludes; set `HAL0_HINDSIGHT_PYTHON` to another Python 3.11 to 3.14 on such a box (#3923). (#3922)
+- **Slot flag screening follows llama.cpp b12633.** The tables hal0 uses to check a slot's extra llama-server flags were regenerated from b12633, so the flags that release added are recognised, and the ones that loosen its network and file-read defaults are reserved for hal0. The pinned llama.cpp runner is unchanged. (#3921)
+
+### Migrations
+
+- **The memory engine applies six schema migrations at its first start on 1.2.3.** They run automatically and add to the database; none changes the tables that hold memories, documents, mental models or operations. `hal0 update --rollback` to 1.8.0 leaves the engine on 1.2.3. Returning the engine to 1.2.0 means restoring the pre-upgrade database copy by hand and loses memory written since.
+- **Hermes is rebuilt once and its state moves forward.** The first `hal0 update` builds Hermes v0.23.3, which needs network access to fetch its build tools, and moves `state.db` to schema 33 and `config.yaml` to `_config_version` 54. If the build fails the box stays on v0.22.4.
+- **On a box that runs the local decision model, run `hal0 memory decision install` after updating.** `hal0 update` does not rewrite that unit.
 
 ## [1.8.0] — 2026-11-20
 
