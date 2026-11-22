@@ -1,7 +1,7 @@
 {
   "pins": [
     "ghcr.io/ggml-org/llama.cpp:server-cuda-b11804@sha256:490d8cd8000203a3ab8fdfce14ef931e2aa85affd4dd4447bcc75f299f00fd9a",
-    "ghcr.io/hal0ai/hal0-runner-comfyui:0.28.0-r6996d85@sha256:8c1dd5d7586893a8e27ec2f9fd11623a750b6a4c2ab098e62f9dcd32ec49cfa2",
+    "ghcr.io/hal0ai/hal0-runner-comfyui:0.30.0-rf37ebf1@sha256:77a6a4e8f1c6be12157d89d8ce4ea71a91db9fddf3fc7ad4bdfc534c1868fca9",
     "ghcr.io/hal0ai/hal0-runner-cpu:b11840-rba99f5d@sha256:c74a4fa963e2499b688d118467355f76ca462dd2ef5c4f2ff4e3850c1e3ac52a",
     "ghcr.io/hal0ai/hal0-runner-flm:1.0.12-r257ff92@sha256:f58cbf778ede916b8805b25461da487490f427c773dd5ad024ef306f59c601af",
     "ghcr.io/hal0ai/hal0-runner-kokoro:0.4.9-re14329d@sha256:0df4b132be5a5be04f4481940db36365bb95b50aaa0940af0b6f1f5792428325",
