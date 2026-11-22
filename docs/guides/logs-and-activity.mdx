@@ -33,12 +33,16 @@ If `hal0-api` cannot read the journal, the log views say so instead of showing n
 ## Agent provisioning logs
 
 ```sh
-hal0 agent log hermes
-hal0 agent log hermes --phase provision
+hal0 agent status hermes               # per-phase result, read from provision.json
+hal0 agent log hermes --phase job-<id> # transcript of one API-started repair
 ```
 
-These are per-phase flat files under the agent's state directory, not a
-systemd journal — a different surface from the agent's own *runtime*
+The provisioner writes no per-phase log file; `hal0 agent status` shows
+each phase's result from `provision.json`. The log files are the
+transcripts of repairs started through the API
+(`provision-logs/job-<id>.log`, the path is in the repair response), which
+the default `hal0 agent log` listing skips. They are flat files under the
+agent's state directory, not a systemd journal — a different surface from the agent's own *runtime*
 output, which lives in `hal0-agent@hermes`'s journal via `systemctl` the
 same as any other unit.
 

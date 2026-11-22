@@ -275,11 +275,16 @@ memory API reachable).
 <TabItem label="Logs">
 
 ```sh
-hal0 agent log hermes
-hal0 agent log hermes --phase provision
+hal0 agent status hermes               # per-phase result, read from provision.json
+hal0 agent log hermes --phase job-<id> # transcript of one API-started repair
 ```
 
-Per-phase provisioning logs — these are flat files under the agent's
+The per-phase picture of a provisioning run is `hal0 agent status`, which
+reads `provision.json`; the provisioner itself writes no log file. The only
+logs under the agent's `provision-logs/` directory are the transcripts of
+repairs started through the API, named `job-<id>.log`; the repair response
+gives the path. `hal0 agent log` leaves those out of its default listing,
+so name one with `--phase job-<id>`. These are flat files under the agent's
 state directory, not a systemd journal. See
 [Logs and activity](/docs/guides/logs-and-activity) for how this differs
 from a slot's runtime logs.

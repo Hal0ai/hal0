@@ -2265,9 +2265,15 @@ def _print_terminal_posture(config_write_entry: dict[str, Any]) -> None:
 @app.command("log")
 def agent_log(
     name: str = typer.Argument("hermes", help="Bundled agent name."),
-    phase: str | None = typer.Option(None, "--phase", help="Dump the named phase's log only."),
+    phase: str | None = typer.Option(
+        None, "--phase", help="Dump only this log, by name without .log (e.g. job-<id>)."
+    ),
 ) -> None:
-    """Show per-phase logs from /var/lib/hal0/state/agents/<name>/provision-logs/."""
+    """Show logs from /var/lib/hal0/state/agents/<name>/provision-logs/.
+
+    Those are the repair transcripts (job-<id>.log); for the per-phase result of
+    a provisioning run use ``hal0 agent status``.
+    """
     from pathlib import Path
 
     log_dir = Path(f"/var/lib/hal0/state/agents/{name}/provision-logs")
@@ -2280,7 +2286,7 @@ def agent_log(
 
 
 def _provision_log_files(log_dir: Path, phase: str | None) -> list[Path]:
-    """The logs ``hal0 agent log`` prints: ``<phase>.log``, or every bootstrap log.
+    """The logs ``hal0 agent log`` prints: ``<phase>.log``, or every non-repair log.
 
     The default listing leaves out ``job-<id>.log``: the transcripts of API-started
     repairs (``POST /api/agents/hermes/repair``) are never pruned, so printing them
