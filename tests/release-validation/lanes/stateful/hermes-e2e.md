@@ -149,6 +149,22 @@ Run order inside this lane: the reprovision checks (10) restart the gateway unde
 29. **Empty Hindsight queue first.** Assert the ops queue is empty before timing checks; every Hermes turn adds retain+consolidation on the shared `--parallel 1` brain (117, 230, 396 s retain series). Take a no-memory baseline with `memory.provider` disabled or after drain for a clean multiplier.
 30. **Profile delete leaves a tombstone.** After `hermes profile delete`, `profiles/.deleted/` holds a marker; `profile_mcp_wire.skipped` shows `.deleted` (cosmetic, known `hermes-deleted-profile-dir-recorded-skipped`). Do NOT delete the tombstone.
 31. **Gateway key outcome.** `gateway_secrets_wire.api_server_key.outcome` is `unreadable` after a CLI reprovision by design (known `gateway-secrets-wire-unreadable-is-intended`); fail only on the entry's `still_report_if`.
+32. **Board and plugin tabs on v0.23.3.** Open the Operator Board, create a card and watch it
+    appear without a reload: the kanban events socket now also checks Host and Origin, and
+    hal0-api connects to it on loopback with neither a browser Origin nor a foreign Host. A
+    board that lists cards but never updates live, or `board.events_upstream_failed` in the
+    hal0-api journal, is a `major` finding. Open the Agents console and confirm the Hermes
+    plugin tabs still load (`GET /api/dashboard/plugins` through hal0-api answers 200).
+33. **Run controls on v0.23.3.** Through the bridge (`agent_run`, `agent_run_status`,
+    `agent_run_events`, `agent_run_steer`, `agent_run_stop`) start one run, read its events,
+    steer it and stop it; each must answer as on v0.22.4. Then start eleven runs at once: the
+    eleventh must be refused with 429 (`gateway.api_server.max_concurrent_runs`, default 10,
+    unchanged from v0.22.4) and the bridge must return that refusal to its caller.
+34. **A cloned profile after the bump.** `sudo -u hal0 hermes profile create probe --clone`,
+    wait for hal0-api's sweep, then check the clone has its own `API_SERVER_KEY`, the
+    `hal0-admin` and `hal0-memory` MCP servers, `memory.provider: hal0-memory`, the
+    `hal0-terminal-off` backend on a terminal-off box, and that one chat turn through
+    `/p/probe/v1/chat/completions` answers. Delete the profile afterwards.
 
 ## Leave behind
 

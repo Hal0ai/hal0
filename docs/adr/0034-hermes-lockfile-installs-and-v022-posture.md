@@ -11,6 +11,9 @@ work is tracked on #2615 and ships in v1.6.0.
 Amended for v1.6.1 (#2874): decision 8's pin moves to v0.22.4. See
 "Amendment: the pin moves to v0.22.4" below.
 
+Amended for v1.8.1 (#3924): decision 8's pin moves to v0.23.3. See
+"Amendment: the pin moves to v0.23.3" below.
+
 ## Context
 
 ADR-0032 was written against hermes-agent v0.21.7 (`71d34bad`). This record
@@ -437,6 +440,153 @@ Everything else in this record stands.
   price of a gate upstream gives no switch for, and the name says who set it.
   `approvals.mode` still gates dangerous commands on a terminal-on box.
 
+### Amendment (2026-11, #3924): the pin moves to v0.23.3
+
+Decision 8's pin moves to v0.23.3,
+`caafe5389ae585ef77387a962aee05b1bcf17029`, for hal0 1.8.1. It is the commit
+upstream's v0.23.3 release names; `git describe` on it answers `v0.23.3`.
+The step from v0.22.4 is large (about 17,500 commits across v0.22.5 to
+v0.22.7 and v0.23.0 to v0.23.3), so this amendment records what was read
+again and what changed. Line numbers are in the `caafe538` tree. The review
+read the source at both refs and compared them; it did not build or run
+v0.23.3, so every statement below that depends on runtime behaviour is listed
+under "Left for a live box" and is a release-lane item.
+
+**What stands.**
+
+- Decisions 1 and 2: `requires-python` is still `>=3.11,<3.15`
+  (`pyproject.toml:15`) and the lock still serves Python 3.14 only. hal0's own
+  uv exports the v0.23.3 lock with `--frozen --extra web --extra mcp --extra
+  acp` (89 hashed packages); the platform extras and `anthropic` export too.
+  The lazy-install path is the one ADR-0034 already describes: a provider SDK
+  Hermes installs at first use lands in a pm generation under
+  `HERMES_HOME/installs/<key>/`, and the next rebuild carries it.
+- Decision 4: `hermes_cli.main._build_web_ui` still builds the dashboard
+  (`hermes_cli/main_web_build.py:177`). Underneath, the build now fetches its
+  Node packages with pnpm instead of npm, through upstream's own package
+  manager as before (`hermes_cli/source_build.py:123-175`), with the pnpm
+  store under `HERMES_HOME/cache/pnpm` (`pm/packages.py:690-704`).
+- Decisions 5 and 6: the gateway unit upstream generates is the same text for
+  a hal0 release. `generate_systemd_unit` (`hermes_cli/gateway.py:3096`) and
+  every helper it calls are unchanged; the one addition is `Environment=`
+  lines for `HERMES_BUNDLED_*`, which a source checkout never has
+  (`hermes_cli/gateway_bundled_env.py`). The template in
+  `hermes_gateway_regen.py` does not change.
+- Decision 7: `sessions.auto_prune` still defaults to false and hal0 still
+  writes false (`hermes_cli/config_defaults.py:2226`).
+- The v0.22.4 amendment's precondition. The dashboard's default Chat tab still
+  runs in the dashboard process (`hermes_cli/web_server_chat.py:575-579`); a
+  profile-scoped chat and `hermes chat` are gateway clients; an installed
+  unit that is stopped, masked or failed still blocks an unmanaged
+  `gateway run --idle-exit` (`hermes_cli/gateway_runtime_service.py:108-170`,
+  `hermes_cli/gateway_runtime_start.py:71-125`). The `Hermes gateway unit`
+  doctor row is unchanged.
+- ADR-0033: `window.__HERMES_SESSION_TOKEN__="…"` is still written into the
+  dashboard's HTML on a loopback bind (`hermes_cli/web_server_dashboard.py:221`;
+  the new per-surface table withholds it only on the gateway's Webapp
+  listener, `hermes_cli/web_server_surface.py:60-77`), and
+  `HERMES_DASHBOARD_SESSION_TOKEN` still fixes the token
+  (`hermes_cli/web_server_session_token.py:16-38`).
+- The contracts hal0's plugins use. `ProviderProfile`, `register_provider`,
+  the `MemoryProvider` abstract methods and the `PluginContext` seams keep
+  every signature hal0 uses; upstream only added optional fields and hooks
+  with defaults. `tests/fixtures/hermes/contracts/` records each addition.
+- The run, session and jobs routes hal0 calls, `X-Hermes-Session-Id`,
+  `X-Hermes-Session-Key`, the `/p/<profile>/` prefix and the API key rules
+  (`gateway/platforms/api_server.py:1565-1607`, `:1405-1414`, `:3874-3903`).
+- Command approvals: `approvals.mode` still accepts `manual`, `smart` and
+  `off` and still defaults to `smart` (`hermes_cli/approval_mode.py:16`,
+  `hermes_cli/config_defaults.py:1623`).
+- ADR-0046: the kanban schema is the same seven tables
+  (`hermes_cli/kanban_db.py:776-983`) and the dashboard plugin serves the same
+  48 routes (`plugins/kanban/dashboard/plugin_api.py`). Its events socket now
+  also checks Host and Origin; hal0-api connects on loopback and sends
+  neither a browser Origin nor a foreign Host.
+
+**What changed, and what hal0 does about it.**
+
+- **`hermes config set` moves a provider key into `.env`.** From v0.23.0 a
+  value set at `providers.<name>.api_key` (and `model.api_key`,
+  `delegation.api_key`, `auxiliary.<task>.api_key`) is saved to
+  `HERMES_HOME/.env` under a derived name and `config.yaml` gets a `${...}`
+  reference (`hermes_cli/config_secret_refs.py:295-330`). hal0 set exactly one
+  such key, the `hal0-local` placeholder under `providers.custom` that makes
+  Hermes's model picker run discovery. It now reaches `config.yaml` through
+  the YAML merge that already carries the list keys and the persona prompt
+  (`hermes_provision._discovery_key_layer`), so the value stays a literal,
+  nothing is added to `.env`, and a flip-back to v0.22.4 reads the same file.
+- **The `skills_hub` auxiliary task is gone.** Nothing at v0.23.3 reads
+  `auxiliary.skills_hub` (`hermes_cli/config_defaults.py:747`). hal0 stops
+  writing the block and removes it from existing configs, as it did for
+  `web_extract` and `session_search`.
+- **The built-in browser tools are replaced.** v0.23.0 removed the ten
+  `browser_*` tools; `browser_exec`, which runs host Python against a
+  browser, is the only browser tool, and Hermes offers it only to a session
+  that has the `terminal` tool (`model_tools.py:395-399`). A terminal-off box
+  therefore has no browser automation, and a terminal-on box has it under the
+  same opt-in. The API server lost its four browser-control and artifact
+  routes with them and gained one room-member route; hal0 called none of
+  them.
+- **More features left core.** v0.22.4 had already moved Home Assistant,
+  Spotify, Langfuse and the bundled memory providers (`hindsight`, `honcho`,
+  `mem0` and others) into catalog plugins. v0.23.3 adds Camofox, the
+  Singularity terminal backend, the agent importers, GitHub Copilot, Yuanbao
+  and `hermes mcp serve` (now `hermes mcp-serve`)
+  (`hermes_cli/left_core_migration.py:569-647`). Hermes installs such a
+  plugin, from the network, at agent or gateway start, for a home whose
+  config uses the feature. hal0's own configuration uses none of them:
+  `memory.provider` is `hal0-memory`, which was never bundled, and hal0 never
+  ran `hermes mcp serve`. A box whose operator configured one of the newly
+  moved features fetches its plugin once after the update.
+- **Provider plugins load from a copy.** Hermes imports a `HERMES_HOME`
+  provider plugin from a per-process copy under
+  `HERMES_HOME/runtime/provider-plugins/` (`providers/plugin_reload.py`). The
+  directory is new on disk and owned by `hal0`.
+- **The Webapp.** The gateway can serve the Desktop workspace to a browser
+  (`webapp.enabled`, off by default, port 9120). hal0 does not turn it on. It
+  grants host files and a shell to whoever signs in, so turning it on is an
+  operator decision outside this record.
+
+**One-way changes and rollback.**
+
+- `state.db` moves from schema 32 to 33
+  (`persistence/sqlite/_schema_ddl.py:74`) and `config.yaml` from
+  `_config_version` 51 to 54 (`hermes_cli/config_defaults.py:2666`). Neither
+  stamp is ever lowered. Schema 33 is a data-only step (it re-tags subagent
+  rows); the declared shape gains one nullable column and one table. Config
+  steps 52 to 54 drop two retired browser keys, lower a stale
+  `agent.clarify_timeout` default from 3600 to 90 seconds, and drop a seeded
+  `prompt_caching.cache_ttl: 5m` so the new `auto` default applies
+  (`hermes_cli/config_migrations.py:980-990`).
+- So the v0.22.4 amendment's rule carries over one step: v0.22.4 and v0.22.2
+  stay in `VETTED_HERMES_REFS` for the automatic flip-back and for a box that
+  never ran v0.23.3, and once v0.23.3 is the live release
+  `hal0 update component hermes --target 4d043038…` is refused
+  (`hermes_release.refuse_downgrade`). The flip-back after a failed activation
+  restores `config.yaml` from its snapshot and runs v0.22.4 over a `state.db`
+  stamped 33; the additive shape reads as compatible, and v0.22.4 never
+  lowers a stamp, but that path has not been run.
+- **A rollback of hal0 itself is not covered by the refusal.** hal0 1.8.0 does
+  not know `caafe538`, and `refuse_downgrade` passes a live ref it cannot
+  order. A box rolled back from 1.8.1 to 1.8.0 would rebuild v0.22.4 at its
+  next Hermes converge, over the newer `state.db` and `config.yaml`. The
+  manual rollback path stays with #2805.
+
+**#2878 is still open upstream.** The preview-restart side agent is still
+built with `enabled_toolsets=['terminal', 'file'], disabled_toolsets=None`
+(`gateway/session_tui_side.py:292-293`). The mitigation in the v0.22.4
+amendment still holds: an unknown `terminal.backend` still fails the terminal
+tool's `check_fn` for every agent in the process
+(`tools/terminal_tool_backends.py:413-422`), and a served profile still gets
+its own terminal policy from its own config (`gateway/run.py:1782-1795`,
+`tools/terminal_scope.py:169`). The acceptance recorded on #2878 is unchanged.
+
+**Left for a live box.** A fresh build and an upgrade from v0.22.4; both hal0
+plugins loading; a chat turn, a tool turn and a bridge run; the Operator
+Board's live events; the tool roster of a terminal-off box; the flip-back.
+`tests/release-validation/lanes/readonly/hermes.md` items 18, 25 and 30 to 34
+and `stateful/hermes-e2e.md` items 32 to 34 are the checks.
+
 ## Consequences
 
 - Each Hermes release installs exactly what upstream locked, with hashes,
@@ -459,6 +609,16 @@ Everything else in this record stands.
 
 - ADR-0032 (amended here), ADR-0033 (unchanged), ADR-0004.
 - #2615 (implementation), #2805 (deferred manual rollback).
+- NousResearch/hermes-agent `caafe538` (v0.23.3, amendment): `pyproject.toml`,
+  `uv.lock`, `hermes_cli/gateway.py`, `hermes_cli/gateway_bundled_env.py`,
+  `hermes_cli/_launchers.py`, `hermes_cli/config_secret_refs.py`,
+  `hermes_cli/config_defaults.py`, `hermes_cli/config_migrations.py`,
+  `hermes_cli/left_core_migration.py`, `hermes_cli/web_server_dashboard.py`,
+  `hermes_cli/web_server_surface.py`, `hermes_cli/plugins_context.py`,
+  `providers/base.py`, `providers/plugin_reload.py`, `agent/memory_provider.py`,
+  `gateway/platforms/api_server.py`, `gateway/session_tui_side.py`,
+  `model_tools.py`, `tools/terminal_tool_backends.py`,
+  `persistence/sqlite/_schema_ddl.py`.
 - NousResearch/hermes-agent `4d043038` (v0.22.4, amendment):
   `hermes_cli/gateway_runtime.py`, `hermes_cli/gateway_runtime_start.py`,
   `hermes_cli/gateway_runtime_service.py`, `hermes_cli/web_server_chat.py`,

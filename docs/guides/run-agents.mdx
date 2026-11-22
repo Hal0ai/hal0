@@ -50,7 +50,7 @@ Pass `--switch` to uninstall the current agent before installing this one.
 
 ### Hermes version, session history and linger
 
-hal0 installs one reviewed Hermes release, v0.22.4 (`4d043038`). It changes two things on the host:
+hal0 installs one reviewed Hermes release, v0.23.3 (`caafe538`). It changes two things on the host:
 
 - **Session history is kept.** From 0.22, Hermes deletes sessions idle 90 days. hal0 writes `sessions.auto_prune: false`, so nothing is
   pruned. To prune, set
@@ -320,7 +320,7 @@ refused. The override persists across `hal0 update` until you run
 `hal0 update component hermes --clear-override`, and `hal0 update status` shows
 the row as overridden while it is set. If a later hal0 release no longer lists
 that commit as vetted, `hal0 update` refuses to keep or rebuild it and names
-`--clear-override`. The command also refuses a vetted commit older than the live release: once v0.22.4 is live, `--target d923a5eb487a17c0a68801bba9ef0f56c81040a8` (v0.22.2) fails as a downgrade, because v0.22.3 and later write gateway runtime state into Hermes's `state.db` that v0.22.2 cannot run over. The automatic flip-back after a failed activation is not affected.
+`--clear-override`. The command also refuses a vetted commit older than the live release: once v0.23.3 is live, `--target 4d04303818b61bf3aa09278af48356315515965b` (v0.22.4) fails as a downgrade, because v0.23.3 moves Hermes's `state.db` and `config.yaml` to versions that are never lowered. The automatic flip-back after a failed activation is not affected.
 
 To watch each phase as it runs, or to re-run provisioning without the
 network, use the flags below. With `--offline` it never
