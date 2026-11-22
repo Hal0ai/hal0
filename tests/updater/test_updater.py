@@ -1845,6 +1845,49 @@ def test_commit_reports_a_failed_plugin_mirror_and_is_not_converged(
     assert result["convergence"]["converged"] is converged
 
 
+@pytest.mark.parametrize("migrations_fail", [False, True])
+def test_commit_reports_a_failed_plugin_tree_repair_from_activation(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    monkeypatch: pytest.MonkeyPatch,
+    migrations_fail: bool,
+) -> None:
+    """#3886: the root activation step's plugin-tree repair failure reaches
+    ``pass_warnings``. It is a warning, not a convergence failure on its own:
+    the mirror that follows reports whether the shipped plugins landed."""
+    from hal0.updater import privileged
+
+    class _Completed:
+        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, *a, **k):
+        if any("run_post_activation_migrations" in part for part in list(cmd)):
+            if migrations_fail:
+                return _Completed(returncode=1, stderr="boom\n")
+            envelope = json.dumps({updater_module._MIGRATION_RESULT_KEY: {"from": 1, "to": 1}})
+            return _Completed(stdout=envelope)
+        return _Completed()
+
+    real_activate = privileged.activate_release
+
+    def _activate(name: str, *, job_id: str | None = None) -> dict[str, Any]:
+        result = real_activate(name, job_id=job_id)
+        return {**result, "hermes_plugin_trees_error": "chown denied"}
+
+    monkeypatch.setattr(privileged, "activate_release", _activate)
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())
+
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["pass_warnings"] == ["updater.hermes_plugin_trees_converge_failed"]
+    assert result["convergence"]["converged"] is not migrations_fail
+
+
 def test_commit_carries_a_failed_model_bundle_pull_without_failing_convergence(
     synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:

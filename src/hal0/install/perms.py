@@ -1455,7 +1455,7 @@ def hermes_plugin_rows(table: Iterable[PermRow] | None = None) -> list[PermRow]:
     return [r for r in rows if r.target == plugins or plugins in r.target.parents]
 
 
-def converge_hermes_plugin_trees() -> list[Path]:
+def converge_hermes_plugin_trees(*, strict: bool = False) -> list[Path]:
     """Apply :func:`hermes_plugin_rows` as root; a no-op for anyone else (#3852).
 
     For the root-held paths that must hand a root-owned plugin tree back to
@@ -1464,14 +1464,21 @@ def converge_hermes_plugin_trees() -> list[Path]:
     root prelude of ``hal0 agent reprovision hermes``. Same plan and commit
     as ``doctor perms --fix``, so a symlink in the tree is never followed or
     re-owned (#1739, #2975), and the rows are ``dirs_only``: no file in the
-    hal0-writable trees (possibly a planted hard link) is ever re-owned. Never raises: a failure is logged and the caller
-    carries on, and ``hal0 doctor perms`` still reports the drift.
+    hal0-writable trees (possibly a planted hard link) is ever re-owned.
+
+    By default it never raises: a failure is logged and the caller carries on,
+    and ``hal0 doctor perms`` still reports the drift. ``strict=True`` raises
+    the failure instead, for a caller that reports it itself: ``hal0 update``'s
+    root activation step returns it in the activation result (#3886), because a
+    line on the privileged child's stderr never reaches the operator.
     """
     if os.geteuid() != 0:
         return []
     try:
         return commit(plan(hermes_plugin_rows()))
     except (OSError, KeyError) as exc:
+        if strict:
+            raise
         log.warning("perms.hermes_plugin_trees_converge_failed error=%s", exc)
         return []
 

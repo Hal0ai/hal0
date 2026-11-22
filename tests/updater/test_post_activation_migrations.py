@@ -348,10 +348,18 @@ def test_registry_toml_retirement_failure_never_blocks(
 
 def test_registry_toml_retire_event_is_a_reported_pass_warning() -> None:
     from hal0.cli.update_commands import _MIGRATION_PASS_LABELS
-    from hal0.updater.updater import _NON_FATAL_MIGRATION_FAILURE_EVENTS
+    from hal0.updater.updater import (
+        _NON_FATAL_MIGRATION_FAILURE_EVENTS,
+        _PLUGIN_TREES_CONVERGE_FAILED_EVENT,
+    )
 
     assert "updater.registry_toml_retire_failed" in _NON_FATAL_MIGRATION_FAILURE_EVENTS
-    assert set(_MIGRATION_PASS_LABELS) == set(_NON_FATAL_MIGRATION_FAILURE_EVENTS)
+    # Every pass warning has a label: the migrations child's scanned events,
+    # plus the one the activation result carries (#3886).
+    assert set(_MIGRATION_PASS_LABELS) == {
+        *_NON_FATAL_MIGRATION_FAILURE_EVENTS,
+        _PLUGIN_TREES_CONVERGE_FAILED_EVENT,
+    }
 
 
 def test_update_path_repairs_a_drifted_hermes_venv(

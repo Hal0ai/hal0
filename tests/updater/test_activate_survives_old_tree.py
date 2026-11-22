@@ -102,7 +102,7 @@ def test_activation_survives_an_older_perms_without_the_converge(
     repipped = _root_activation(
         monkeypatch,
         old_perms=_old_tree_perms(),
-        converge=lambda: events.append("converge") or [],
+        converge=lambda **_k: events.append("converge") or [],
     )
 
     result = updater_module.activate_release(OLD)
@@ -123,7 +123,7 @@ def test_activation_survives_a_converge_that_raises(
     old, new = _release_trees()
     os.symlink(new, updater_module._current_symlink())
 
-    def _boom() -> list[Path]:
+    def _boom(**_k: Any) -> list[Path]:
         raise RuntimeError("converge exploded")
 
     _root_activation(monkeypatch, old_perms=_old_tree_perms(), converge=_boom)
@@ -156,7 +156,7 @@ def test_activation_survives_a_registry_lock_repair_that_raises(
     _root_activation(
         monkeypatch,
         old_perms=_old_tree_perms(ownership_table=_old_table),
-        converge=lambda: [],
+        converge=lambda **_k: [],
     )
 
     result = updater_module.activate_release(OLD)
@@ -181,7 +181,7 @@ def test_rollback_to_a_tree_without_the_converge_completes(
     record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text(str(old), encoding="utf-8")
 
-    def _converge() -> list[Path]:
+    def _converge(**_k: Any) -> list[Path]:
         if converge_raises:
             raise RuntimeError("converge exploded")
         return []
@@ -209,3 +209,153 @@ def test_rollback_to_a_tree_without_the_converge_completes(
     out = capsys.readouterr().out
     assert "updater.activate_ok" in out
     assert "updater.rollback_ok" in out
+
+
+# ── #3886: a failed plugin-tree repair reaches the operator ────────────────────
+
+_CONVERGE_FAILED = "updater.hermes_plugin_trees_converge_failed"
+
+#: The activating tree's real repair, captured before any test swaps it out.
+_REAL_CONVERGE = perms.converge_hermes_plugin_trees
+
+
+def test_activation_result_carries_a_failed_plugin_tree_repair(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The repair's failure rides on the activation result, not only on stderr.
+
+    The privileged child's stderr is relayed as log lines and never scanned, so
+    the result envelope is the one channel back to commit() and rollback().
+    """
+    _old, new = _release_trees()
+    os.symlink(new, updater_module._current_symlink())
+
+    def _boom(**_k: Any) -> list[Path]:
+        raise RuntimeError("converge exploded")
+
+    _root_activation(monkeypatch, old_perms=_old_tree_perms(), converge=_boom)
+
+    result = updater_module.activate_release(OLD)
+
+    assert result["hermes_plugin_trees_error"] == "converge exploded"
+
+
+def test_activation_sees_the_failure_the_repair_would_swallow(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real repair swallows OSError into a stderr line by default (#3886).
+
+    Called from activation it must hand that failure back instead, or the
+    result reports a clean repair over a tree that stayed root-owned.
+    """
+    _old, new = _release_trees()
+    os.symlink(new, updater_module._current_symlink())
+    _root_activation(monkeypatch, old_perms=_old_tree_perms(), converge=_REAL_CONVERGE)
+    monkeypatch.setattr(perms.os, "geteuid", lambda: 0)
+
+    def _commit_fails(*_a: Any, **_k: Any) -> list[Path]:
+        raise PermissionError("chown denied")
+
+    # The registry-lock repair goes through the same commit; it is logged too.
+    monkeypatch.setattr(perms, "commit", _commit_fails)
+
+    result = updater_module.activate_release(OLD)
+
+    assert result["hermes_plugin_trees_error"] == "chown denied"
+
+
+def test_activation_result_reports_a_clean_plugin_tree_repair(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _old, new = _release_trees()
+    os.symlink(new, updater_module._current_symlink())
+    _root_activation(monkeypatch, old_perms=_old_tree_perms(), converge=lambda **_k: [])
+
+    result = updater_module.activate_release(OLD)
+
+    assert "hermes_plugin_trees_error" in result
+    assert result["hermes_plugin_trees_error"] is None
+
+
+@pytest.mark.parametrize("converge_raises", [False, True])
+def test_rollback_reports_a_failed_plugin_tree_repair(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, converge_raises: bool
+) -> None:
+    """A rollback has no convergence block, so its result names the warning."""
+    old, new = _release_trees()
+    os.symlink(new, updater_module._current_symlink())
+    record = updater_module._previous_record()
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(str(old), encoding="utf-8")
+
+    def _converge(**_k: Any) -> list[Path]:
+        if converge_raises:
+            raise PermissionError("chown denied")
+        return []
+
+    _root_activation(monkeypatch, old_perms=_old_tree_perms(), converge=_converge)
+
+    async def _noop(job_id: str | None) -> None:
+        return None
+
+    monkeypatch.setattr(updater_module, "_rerender_units_after_swap", _noop)
+    monkeypatch.setattr(updater_module, "_refresh_api_unit_after_swap", _noop)
+
+    result = asyncio.run(updater_module.Updater().rollback())
+
+    assert result["pass_warnings"] == ([_CONVERGE_FAILED] if converge_raises else [])
+
+
+@pytest.mark.parametrize(
+    ("activated", "expected"),
+    [
+        ({"hermes_plugin_trees_error": "chown denied"}, [_CONVERGE_FAILED]),
+        ({"hermes_plugin_trees_error": None}, []),
+        # An older privileged process does not send the key: nothing to report.
+        ({}, []),
+    ],
+)
+def test_activation_pass_warnings(activated: dict[str, Any], expected: list[str]) -> None:
+    assert updater_module._activation_pass_warnings(activated) == expected
+
+
+def test_the_cli_labels_the_plugin_tree_repair_warning() -> None:
+    from hal0.cli.update_commands import _MIGRATION_PASS_LABELS
+
+    assert "reprovision hermes" in _MIGRATION_PASS_LABELS[_CONVERGE_FAILED]
+
+
+def test_the_rollback_banner_names_the_plugin_tree_repair_warning(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0.cli import update_commands
+
+    monkeypatch.setattr(update_commands, "_running_api_version", lambda: None)
+    update_commands._render_rollback_result(
+        {"rolled_back_to": "/usr/lib/hal0/hal0-1.7.1", "pass_warnings": [_CONVERGE_FAILED]}
+    )
+
+    out = capsys.readouterr().out
+    assert "Hermes plugin" in out
+    assert "reprovision hermes" in out
+
+
+def test_the_update_report_names_the_repair_warning_when_migrations_failed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The activation warning does not depend on the migrations applying."""
+    from hal0.cli import update_commands
+
+    converged = update_commands._print_convergence(
+        {
+            "post_activation_migrations": {
+                "ok": False,
+                "error": "boom",
+                "pass_warnings": [_CONVERGE_FAILED],
+            },
+            "converged": False,
+        }
+    )
+
+    assert converged is False
+    assert "Hermes plugin directory ownership repair" in capsys.readouterr().out
