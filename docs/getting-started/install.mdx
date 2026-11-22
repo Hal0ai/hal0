@@ -27,7 +27,7 @@ By default the bootstrap fetches the latest `stable` release manifest.
 Pick a different channel with `HAL0_CHANNEL`:
 
 ```sh
-HAL0_CHANNEL=preview curl -fsSL https://hal0.dev/install.sh | sudo bash
+curl -fsSL https://hal0.dev/install.sh | sudo HAL0_CHANNEL=preview bash
 ```
 
 Accepted values: `stable` (default), `preview`, `nightly`.
