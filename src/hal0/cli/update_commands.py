@@ -349,6 +349,11 @@ _MIGRATION_PASS_LABELS: dict[str, str] = {
         "Hermes plugin refresh: the shipped plugins did not land "
         "(run: sudo hal0 agent reprovision hermes)"
     ),
+    # #3886: the root activation step could not hand a root-owned plugin tree
+    # back to hal0, so the next plugin refresh may fail to land.
+    "updater.hermes_plugin_trees_converge_failed": (
+        "Hermes plugin directory ownership repair (run: sudo hal0 agent reprovision hermes)"
+    ),
     "components.hermes_gateway_regen_failed": (
         "hermes gateway unit regeneration (run: sudo hal0 agent install hermes)"
     ),
@@ -392,15 +397,6 @@ def _print_convergence(convergence: dict | None) -> bool:
         src, dst = post_migrations.get("from"), post_migrations.get("to")
         if src is not None and dst is not None and src != dst:
             console.print(f"[green]✓[/green] on-disk schema migrated v{src} → v{dst}")
-        # A pass that swallowed its own exception into a warning is still
-        # non-fatal by design (see run_post_activation_migrations) — this
-        # does not flip `ok`/`converged` — but it must not be invisible
-        # outside journalctl either (#1960 B2).
-        for event in post_migrations.get("pass_warnings") or []:
-            label = _MIGRATION_PASS_LABELS.get(event, event)
-            console.print(
-                f"[yellow]![/yellow] {label} logged a warning — see journalctl for hal0-api"
-            )
     elif post_migrations:
         error = str(post_migrations.get("error") or "unknown error")
         retry = (
@@ -428,6 +424,16 @@ def _print_convergence(convergence: dict | None) -> bool:
                 border_style="red",
             )
         )
+
+    # A pass that swallowed its own exception into a warning is still
+    # non-fatal by design (see run_post_activation_migrations) — this
+    # does not flip `ok`/`converged` — but it must not be invisible
+    # outside journalctl either (#1960 B2). Printed whether or not the
+    # migrations applied: the activation step's own warning (#3886) is
+    # listed here too, and it does not depend on them.
+    for event in post_migrations.get("pass_warnings") or []:
+        label = _MIGRATION_PASS_LABELS.get(event, event)
+        console.print(f"[yellow]![/yellow] {label} logged a warning — see journalctl for hal0-api")
 
     # ADR-0029: a slot file still carrying tuning keys refuses to launch until an
     # operator moves them onto a profile. ``reason`` carries the fix.
@@ -777,6 +783,15 @@ def _render_rollback_result(body: dict) -> None:
                 title="Schema warning",
                 border_style="yellow",
             )
+        )
+
+    # #3886: what the activation step could not repair. Older daemons do not
+    # send the field.
+    for event in body.get("pass_warnings") or []:
+        label = _MIGRATION_PASS_LABELS.get(event, event)
+        console.print(
+            f"[yellow]![/yellow] {label} logged a warning — see journalctl for hal0-api",
+            soft_wrap=True,
         )
 
     # The daemon that answered the rollback POST is by definition the

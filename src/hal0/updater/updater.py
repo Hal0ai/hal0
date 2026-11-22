@@ -4269,7 +4269,9 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
     (:func:`hal0.updater.privileged.main`) additionally asserts the named tree
     is root-owned before calling this — see :func:`assert_trusted_release_dir`.
 
-    Returns ``{"previous": <prior target or None>, "target": <activated path>}``.
+    Returns ``{"previous": <prior target or None>, "target": <activated path>}``
+    plus the post-swap refresh outcomes, including ``hermes_plugin_trees_error``
+    (#3886).
     """
     try:
         name = assert_release_dir_name(dir_name)
@@ -4327,6 +4329,11 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
     # rollback that one may predate them (#3874). What they reach lazily from
     # there (ownership_table's mDNS dir) still comes from the new site-packages,
     # so each is best-effort: a failure is logged and the activation carries on.
+    # The plugin-tree repair's failure is also returned (#3886): this may be the
+    # privileged child, whose stderr is relayed as log lines and never scanned,
+    # so the result is the only way it reaches commit()'s and rollback()'s
+    # pass_warnings (see _activation_pass_warnings).
+    plugin_trees_error: str | None = None
     if os.geteuid() == 0:
         # Heal root-created tombstone locks on existing boxes (#2698), using
         # the same narrow ownership row as doctor perms --fix.
@@ -4343,10 +4350,11 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
         # install.sh) back to hal0 while root is still held, so the hal0-run
         # post-swap mirror can replace it.
         try:
-            perms.converge_hermes_plugin_trees()
+            perms.converge_hermes_plugin_trees(strict=True)
         except Exception as exc:
+            plugin_trees_error = str(exc) or type(exc).__name__
             log.warning(
-                "updater.hermes_plugin_trees_converge_failed", job_id=job_id, error=str(exc)
+                _PLUGIN_TREES_CONVERGE_FAILED_EVENT, job_id=job_id, error=plugin_trees_error
             )
 
     log.info(
@@ -4362,7 +4370,25 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
         "path_links_refreshed": path_links,
         "gpu_perms_unit": gpu_perms_unit,
         "retired_artifacts_removed": retired,
+        # None when the repair succeeded or did not run (not root).
+        "hermes_plugin_trees_error": plugin_trees_error,
     }
+
+
+#: Logged, and folded into the update's ``pass_warnings``, when the root
+#: activation step could not hand the Hermes plugin trees back to hal0 (#3886).
+_PLUGIN_TREES_CONVERGE_FAILED_EVENT = "updater.hermes_plugin_trees_converge_failed"
+
+
+def _activation_pass_warnings(activated: dict[str, Any]) -> list[str]:
+    """The pass warnings an activation result carries (#3886).
+
+    A result without ``hermes_plugin_trees_error`` came from an older
+    privileged process that did not report the repair: nothing to fold in.
+    """
+    if activated.get("hermes_plugin_trees_error"):
+        return [_PLUGIN_TREES_CONVERGE_FAILED_EVENT]
+    return []
 
 
 def discard_release(dir_name: str, *, job_id: str | None = None) -> None:
@@ -4961,6 +4987,11 @@ class Updater:
                 error=migrations_error,
             )
 
+        # #3886: what the root activation step itself could not repair. It ran
+        # before the migrations, so it is listed first, and it counts even when
+        # the migrations subprocess failed outright.
+        pass_warnings = _activation_pass_warnings(activated) + pass_warnings
+
         # Step 8c: re-render existing slot units through the NEW code. Must
         # run AFTER the 8b venv reinstall (see _rerender_units_after_swap).
         if not _is_editable_install():
@@ -5176,13 +5207,24 @@ class Updater:
         except Hal0Error:
             warning = None
 
-        log.info("updater.rollback_ok", job_id=self.job_id, restored=str(prior_path))
+        # #3886: a rollback has no convergence block, so the activation step's
+        # own warnings ride on the result directly, under the same name and
+        # with the same event names as commit()'s.
+        pass_warnings = _activation_pass_warnings(activated)
+
+        log.info(
+            "updater.rollback_ok",
+            job_id=self.job_id,
+            restored=str(prior_path),
+            pass_warnings=pass_warnings,
+        )
         return {
             "rolled_back_to": str(prior_path),
             "previous_now": str(current_target) if current_target else None,
             "schema_warning": warning,
             "tune_stripped": tune_stripped,
             "catalog_stripped": catalog_stripped,
+            "pass_warnings": pass_warnings,
         }
 
 
