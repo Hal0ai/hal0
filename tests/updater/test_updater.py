@@ -2978,10 +2978,31 @@ def test_installed_version_falls_back_to_wheel_metadata(
 def test_nightly_box_on_latest_nightly_sees_no_update() -> None:
     # The loop itself: same nightly on both sides must not read as newer.
     assert _is_newer("1.1.0-nightly.20260901025155", "1.1.0-nightly.20260901025155") is False
-    # And the pre-fix comparison that caused the loop stays true (the manifest
-    # IS newer than the bare wheel base) — proving the fix must come from the
-    # installed side, not from _is_newer.
-    assert _is_newer("1.1.0-nightly.20260901025155", "1.1.0") is True
+
+
+def test_same_base_nightly_and_stable_are_offered_across_channels() -> None:
+    # #3893: a box on 1.8.0-nightly.<stamp> that selects stable is offered 1.8.0.
+    assert _is_newer("1.8.0", "1.8.0-nightly.20261120171000") is True
+    # A stable 1.8.0 box that selects nightly is offered the nightlies cut after
+    # 1.8.0 shipped, which still carry the 1.8.0 base until the next release commit.
+    assert _is_newer("1.8.0-nightly.20261121135446", "1.8.0") is True
+    # Same kind on both sides: nothing to offer, and nightlies order by stamp.
+    assert _is_newer("1.8.0", "1.8.0") is False
+    assert _is_newer("1.8.0-nightly.20261121000000", "1.8.0-nightly.20261120171000") is True
+    assert _is_newer("1.8.0-nightly.20261120171000", "1.8.0-nightly.20261121000000") is False
+
+
+def test_is_newer_tolerates_a_missing_version() -> None:
+    assert _is_newer(None, "1.8.0") is False  # type: ignore[arg-type]
+    assert _is_newer("1.8.0", None) is True  # type: ignore[arg-type]
+    assert _is_newer("", "1.8.0") is False
+
+
+def test_nightly_against_a_different_base_orders_by_base() -> None:
+    assert _is_newer("1.8.1", "1.8.0-nightly.20261120171000") is True
+    assert _is_newer("1.8.1-nightly.20261122000000", "1.8.0") is True
+    assert _is_newer("1.8.0", "1.8.1-nightly.20261122000000") is False
+    assert _is_newer("1.7.1-nightly.20261102071057", "1.8.0") is False
 
 
 # ── release-tree lock (#3711) ──────────────────────────────────────────────────
