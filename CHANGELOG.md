@@ -30,6 +30,11 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Breaking
+
+- **Hermes cannot be moved back to v0.22.4 once v0.23.3 is live.** v0.23.3 moves Hermes's session database (`state.db`, schema 32 to 33) and `config.yaml` (`_config_version` 51 to 54) to versions that are never lowered, so `hal0 update component hermes --target 4d04303818b61bf3aa09278af48356315515965b` is refused as a downgrade. v0.22.4 and v0.22.2 stay vetted for the automatic flip-back after a failed activation and for a box that has not updated yet. A flip-back puts `config.yaml` back and leaves `state.db` at schema 33, which v0.22.4 reads: the step from 32 only adds to the database. hal0 1.8.0 does not know the v0.23.3 commit, so a box rolled back to hal0 1.8.0 would rebuild v0.22.4 over the newer files at its next update; that path is not supported (#2805). (#3924)
+- **Hermes's built-in browser tools are replaced, and browser automation now needs the terminal opt-in.** Hermes v0.23.0 removed the ten `browser_*` tools; `browser_exec` is the one browser tool. It runs code on the host, so Hermes offers it only to a session that has the terminal tool. A box with the terminal off (the default) has no browser automation in Hermes. A prompt, skill or toolset list of your own that names the old tools needs `browser_exec` instead. (#3924)
+
 ### Fixed
 
 - **Mental-model refreshes no longer stall for hours when the decision model refuses a prune request.** hal0 started the decision model server with a window equal to the engine's request budget (4096 tokens), and requests the engine counted as fitting arrived a few hundred tokens over and were refused. Reflect then kept all its evidence, split the synthesis into dozens of large model calls, and other refreshes waited until they were cancelled with `Task exceeded the 7200s wall-clock limit for 'refresh_mental_model'`. The server window is now a quarter above `[memory.decision].max_request_tokens` (5120 for the default), capped at 32768. Apply it on an existing box with `hal0 memory decision install`, then retry failed refreshes with `hal0 memory ops retry`. (#3897)
@@ -43,6 +48,11 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **The bundled Open WebUI image is pinned to v0.13.4** (was v0.13.3). (#3887)
 - **The bundled Pi agent is pinned to `@earendil-works/pi-coding-agent` 1.6.0** (was 1.5.2); `pi-mcp-adapter` stays at 7.0.1. (#3891)
+- **Hermes is pinned to v0.23.3 (`caafe538`) instead of v0.22.4 (`4d043038`).** The step covers upstream's v0.22.5 to v0.22.7 and v0.23.0 to v0.23.3, about 17,500 commits. The first `hal0 update` rebuilds Hermes once, with a short outage while the agent and gateway restart. The install model is unchanged: an editable checkout on a uv-managed Python 3.14, dependencies from upstream's hash-locked `uv.lock`, the same `web`, `mcp` and `acp` extras, and the same gateway unit. The contracts hal0's memory and provider plugins use, the run and session routes, the dashboard session token and the kanban routes behind the Operator Board were read again at v0.23.3 and hold; the review compared the two source trees and did not build v0.23.3, so the release lane checks a fresh install, an upgrade and the flip-back. ADR-0034 has the full record. (#3924)
+- **The model picker's placeholder key is written into Hermes's `config.yaml` directly.** From v0.23.0 `hermes config set` moves a value set at `providers.<name>.api_key` into Hermes's `.env` and leaves a `${...}` reference in `config.yaml`. hal0 set one such value, the `hal0-local` placeholder that lets Hermes list hal0's models; it now goes through hal0's own YAML merge, so it stays a literal and nothing is added to `.env`. (#3924)
+- **hal0 no longer writes `auxiliary.skills_hub` into Hermes's config, and removes it from an existing one.** Hermes v0.23.3 has no such auxiliary task and ignores the block. (#3924)
+- **A Hermes feature an operator configured may fetch a plugin after the update.** Camofox, the Singularity terminal backend, GitHub Copilot, Yuanbao and `hermes import-agent` are catalog plugins from v0.23.0, as Home Assistant, Spotify, Langfuse and the memory providers Hermes used to bundle already were. Hermes downloads the plugin at its first start for a profile that uses one. hal0's own configuration uses none of them (`memory.provider` is `hal0-memory`). `hermes mcp serve` is now `hermes mcp-serve`, from a plugin. (#3924)
+- **The accepted gap in #2878 is still present at v0.23.3.** Hermes's preview-restart side agent still ignores `agent.disabled_toolsets`; the `hal0-terminal-off` backend still keeps the terminal tools out of every agent on a terminal-off box. (#3924)
 
 ## [1.8.0] — 2026-11-20
 

@@ -5,8 +5,8 @@
 Adapter lane: **hal0-memory** (the one active external memory provider).
 
 Signatures are copied verbatim from the reviewed official pin
-``4d04303818b61bf3aa09278af48356315515965b`` (``agent/memory_provider.py``,
-Hermes v0.22.4). A Hermes bump that reshapes any of these lifecycle seams must
+``caafe5389ae585ef77387a962aee05b1bcf17029`` (``agent/memory_provider.py``,
+Hermes v0.23.3). A Hermes bump that reshapes any of these lifecycle seams must
 re-vendor this file and update the frozen signatures in
 ``tests/agents/hermes/test_contract_compatibility.py`` — that diff is the
 tripwire the ``hermes-sdk-diff`` drift-watch and the compat-pin exist to force.
@@ -28,8 +28,18 @@ a multiplexing contract (#140058, ``agent/memory_provider.py:85-103``): every
 load gets a new instance, bound from ``initialize()``'s ``hermes_home``, with no
 profile state at module or class level. The memory manager enforces the binding
 and refuses an instance another profile already claimed
-(``agent/memory_manager.py:921-927``). hal0-memory serves one profile and is
-constructed per load, so it already meets it.
+(``claim_instance``, ``agent/memory_manager.py:951-961``). hal0-memory serves
+one profile and is constructed per load, so it already meets it.
+
+What changed since v0.22.4 (``4d043038``): no existing signature, and the four
+abstract methods are the same. Four optional methods are new, all with
+defaults: ``on_profile_created`` and ``on_profile_renamed`` (no-ops,
+``agent/memory_provider.py:245-252``), and ``read_config_fields`` /
+``write_config_fields`` (``:256-267``), which Hermes calls only for a provider
+whose ``config_schema.py`` declares ``storage=STORAGE_PROVIDER``; hal0-memory
+ships no such file. ``initialize()`` may now also receive ``resumed`` and
+``message_count``, and ``on_turn_start`` ``previous_message``; all arrive as
+keywords a provider reads with ``kwargs.get``.
 """
 
 # Preserve the reviewed upstream ABC and typing spellings verbatim.
@@ -156,3 +166,17 @@ class MemoryProvider(ABC):
 
     def backup_paths(self) -> list[str]:
         return []
+
+    # -- Profile lifecycle and the dashboard config panel (new at v0.23.3) ---
+
+    def on_profile_created(self, profile_name: str, hermes_home: str) -> None:
+        pass
+
+    def on_profile_renamed(self, old_name: str, new_name: str, hermes_home: str) -> None:
+        pass
+
+    def read_config_fields(self, hermes_home: str) -> dict[str, Any]:
+        return {"values": {}, "placeholders": {}}
+
+    def write_config_fields(self, values: dict[str, Any], hermes_home: str) -> None:
+        raise NotImplementedError

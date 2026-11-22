@@ -2,7 +2,7 @@
 # hal0 Hermes pre_llm_call hook — inject live system state (#3853).
 #
 # Wired by hermes_provision.STATE_HOOK under hooks.pre_llm_call. The pinned
-# Hermes (v0.22.4) contract:
+# Hermes (v0.23.3, same as v0.22.4) contract:
 #   * stdin is a JSON payload; pre_llm_call carries extra.is_first_turn.
 #   * stdout must be a JSON object; {"context": "<text>"} is appended to the
 #     turn's user message. Raw text is logged as "not valid JSON" and dropped

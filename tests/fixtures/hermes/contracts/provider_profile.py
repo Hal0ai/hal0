@@ -6,10 +6,18 @@ Adapter lane: **hal0-provider** (dynamic model-provider plugin, chat_completions
 
 Fields and the ``fetch_models`` / ``register_provider`` / ``get_provider_profile``
 signatures are copied verbatim from the reviewed official pin
-``4d04303818b61bf3aa09278af48356315515965b`` (``providers/base.py:41-160`` and
-``providers/__init__.py:122, :192``, Hermes v0.22.4; ``providers/base.py`` is
-unchanged since v0.22.2, and v0.22.3 only taught ``get_provider_profile`` /
-``list_providers`` to return nothing inside a safe-mode worker). The hooks hal0-provider
+``caafe5389ae585ef77387a962aee05b1bcf17029`` (``providers/base.py:141-767`` and
+``providers/__init__.py:146, :224``, Hermes v0.23.3). Every field and method
+frozen here is unchanged from v0.22.4. v0.23.x added about forty fields and
+twenty hooks, all with defaults that leave a hal0 profile's behaviour as it
+was (streaming, prompt-cache and Responses-API switches, device-login and
+account hooks, picker/catalog placement); most of the new fields are
+keyword-only (``providers/base.py:277``), and hal0-provider passes every field
+by keyword. They are not copied here because hal0-provider reads none of them.
+A ``$HERMES_HOME`` provider plugin is now imported from a frozen copy under
+``<hermes root>/runtime/provider-plugins/`` (``providers/plugin_reload.py``),
+with relative imports intact, and is skipped only when ``plugins.disabled``
+names it (``providers/__init__.py:616-630``). The hooks hal0-provider
 overrides (``get_hostname``, ``prepare_messages``, ``build_extra_body``,
 ``build_api_kwargs_extras``, ``default_vision_model``, ``get_max_tokens``,
 ``fetch_models``) keep their 0.19.0 signatures. 0.22 added fields with

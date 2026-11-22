@@ -11,8 +11,9 @@ import pytest
 
 from hal0.agents import hermes_provision as hp
 
-PIN = "4d04303818b61bf3aa09278af48356315515965b"  # the shipped pin, v0.22.4
-PREV_PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # v0.22.2, still vetted
+PIN = "caafe5389ae585ef77387a962aee05b1bcf17029"  # the shipped pin, v0.23.3
+PREV_PIN = "4d04303818b61bf3aa09278af48356315515965b"  # v0.22.4, still vetted
+OLDER_PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # v0.22.2, still vetted
 
 
 def test_refuse_downgrade_orders_vetted_refs_by_version() -> None:
@@ -25,6 +26,14 @@ def test_refuse_downgrade_orders_vetted_refs_by_version() -> None:
     hr.refuse_downgrade(PIN, live=PIN)
     hr.refuse_downgrade(PREV_PIN, live=None)
     hr.refuse_downgrade(PREV_PIN, live="f" * 40)  # an unvetted live ref cannot be ordered
+    # Every older vetted ref is a downgrade from every newer one.
+    assert hp.VETTED_HERMES_VERSIONS[PIN] == (0, 23, 3)
+    with pytest.raises(hr.ReleaseError, match="downgrade"):
+        hr.refuse_downgrade(OLDER_PIN, live=PIN)
+    with pytest.raises(hr.ReleaseError, match="downgrade"):
+        hr.refuse_downgrade(OLDER_PIN, live=PREV_PIN)
+    hr.refuse_downgrade(PREV_PIN, live=OLDER_PIN)
+    hr.refuse_downgrade(PIN, live=OLDER_PIN)
 
 
 def test_upgrade_runtime_and_floor_are_gone() -> None:

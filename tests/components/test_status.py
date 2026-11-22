@@ -138,8 +138,8 @@ def test_busy_counts_as_pending_in_the_update_cli() -> None:
 
 # ── Hermes --target override (#2865) ────────────────────────────────────────
 
-_HPIN = "4d04303818b61bf3aa09278af48356315515965b"
-_HPREV = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+_HPIN = "caafe5389ae585ef77387a962aee05b1bcf17029"
+_HPREV = "4d04303818b61bf3aa09278af48356315515965b"
 
 
 def _hermes_row(*, installed: str | None, override: str | None, needs_build: bool = False):

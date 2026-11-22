@@ -20,10 +20,10 @@ Each profile reports only what its own ``config.yaml`` sets: the default
 profile's file is ``<home>/config.yaml``, a named profile's is
 ``<home>/profiles/<profile>/config.yaml``. A field the file does not set is
 ``None``, meaning "Hermes's built-in default". Nothing is borrowed from the
-default profile: at the pinned Hermes (v0.22.4, ``4d043038``) a profile's
+default profile: at the pinned Hermes (v0.23.3, ``caafe538``) a profile's
 config is its own ``HERMES_HOME/config.yaml`` (``get_config_path``,
-``hermes_cli/config.py:431-433``) merged over Hermes's built-in
-``DEFAULT_CONFIG`` (``load_config``, ``:2088-2089``), never over another
+``hermes_cli/config.py:435-437``) merged over Hermes's built-in
+``DEFAULT_CONFIG`` (``load_config``, ``:1874-1878``), never over another
 profile's file. That is why hal0 writes settings such as the terminal gate
 into every profile's file.
 

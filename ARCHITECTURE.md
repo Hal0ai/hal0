@@ -448,7 +448,7 @@ These decisions are settled. Some are recorded as ADRs in `docs/adr/`
   does not build its own runtime.
 * **MCP allow-list** — the MCP client is default-deny on two axes
   (server-axis + tool-axis); a persona's `tools_allowed` opens the gate.
-* **Upstream pin** — the bundled Hermes runtime is pinned to NousResearch/hermes-agent v0.22.4 (commit `4d043038`) with periodic
+* **Upstream pin** — the bundled Hermes runtime is pinned to NousResearch/hermes-agent v0.23.3 (commit `caafe538`) with periodic
   drift detection rather than tracking upstream `main` (ADR-0034). It installs from upstream's lockfile into a release on a uv-managed Python 3.14 (ADR-0032).
 * **LLM roles** — the canonical chat roles are `agent` (default anchor)
   and `utility`; the older `chat` / `primary` roles are retired.
@@ -461,7 +461,7 @@ These decisions are settled. Some are recorded as ADRs in `docs/adr/`
 
 ### Upstream pin
 
-The Hermes-Agent upstream commit hal0 builds and tests against (v0.22.4, `4d043038`) is recorded in `pyproject.toml [tool.hal0.upstream-hermes]`. The
+The Hermes-Agent upstream commit hal0 builds and tests against (v0.23.3, `caafe538`) is recorded in `pyproject.toml [tool.hal0.upstream-hermes]`. The
 weekly `hermes-sdk-diff` GitHub Action opens a drift issue when one of
 the tracked files changes between the pin and upstream HEAD. Bump
 process: review issue, edit shim adapters if needed, run

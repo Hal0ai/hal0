@@ -686,7 +686,7 @@ to `off`, `none` or `disabled` to route tool turns nowhere.
 
 Hermes is the service-shape agent: it runs as `hal0-agent@hermes.service`
 under the unprivileged `hal0` user, pinned to one reviewed upstream commit
-(v0.22.4, `4d043038`), and talks to `hal0-api` for
+(v0.23.3, `caafe538`), and talks to `hal0-api` for
 inference, tools and memory. `hal0 agent install hermes` installs it.
 
 - **Immutable releases.** Each build (install, `reprovision --repair`,

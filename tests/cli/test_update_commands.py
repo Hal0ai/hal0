@@ -1211,8 +1211,8 @@ def test_update_component_unknown_id_dies(monkeypatch: pytest.MonkeyPatch) -> No
 
 # ── `hal0 update component hermes --target / --clear-override` (#2865) ──────────
 
-_HERMES_PIN = "4d04303818b61bf3aa09278af48356315515965b"
-_HERMES_PREV = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+_HERMES_PIN = "caafe5389ae585ef77387a962aee05b1bcf17029"
+_HERMES_PREV = "4d04303818b61bf3aa09278af48356315515965b"
 
 
 def _wire_component_cli(monkeypatch: pytest.MonkeyPatch, rows: list[dict]) -> dict[str, object]:

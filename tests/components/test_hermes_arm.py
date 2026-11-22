@@ -34,8 +34,9 @@ def test_unprovisioned_skips(tmp_path) -> None:
     assert res["status"] == "skipped"
 
 
-PIN = "4d04303818b61bf3aa09278af48356315515965b"  # the shipped pin, v0.22.4
-PREV_PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # v0.22.2, the previous pin
+PIN = "caafe5389ae585ef77387a962aee05b1bcf17029"  # the shipped pin, v0.23.3
+PREV_PIN = "4d04303818b61bf3aa09278af48356315515965b"  # v0.22.4, the previous pin
+OLDER_PIN = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"  # v0.22.2, still vetted
 OLD_PIN = "3ef6bbd201263d354fd83ec55b3c306ded2eb72a"  # 0.19.0, before #2615 PR 4
 
 
@@ -98,15 +99,16 @@ def test_a_0_19_0_release_on_312_is_stale_after_the_pin_bump(tmp_path) -> None:
     venv = _live_release(ref=OLD_PIN, minor="3.12")
     res = hermes_arm.converge_hermes(venv=venv, apply=False)
     assert res["status"] == "stale"
-    assert "differs from target 4d04303818b6" in res["trigger"]
+    assert f"differs from target {PIN[:12]}" in res["trigger"]
 
 
-def test_a_v0_22_2_release_is_stale_after_the_v0_22_4_bump(tmp_path) -> None:
-    """A box on the v0.22.2 release rebuilds on its next `hal0 update`, same minor."""
-    venv = _live_release(ref=PREV_PIN, minor="3.14")
+@pytest.mark.parametrize("ref", [PREV_PIN, OLDER_PIN])
+def test_an_earlier_v0_22_release_is_stale_after_the_v0_23_3_bump(tmp_path, ref) -> None:
+    """A box on the v0.22.4 (or v0.22.2) release rebuilds on its next `hal0 update`, same minor."""
+    venv = _live_release(ref=ref, minor="3.14")
     res = hermes_arm.converge_hermes(venv=venv, apply=False)
     assert res["status"] == "stale"
-    assert "differs from target 4d04303818b6" in res["trigger"]
+    assert f"differs from target {PIN[:12]}" in res["trigger"]
     assert "interpreter" not in res["trigger"]
 
 
@@ -679,7 +681,7 @@ def test_target_older_than_the_live_release_is_a_refused_downgrade(tmp_path) -> 
 
 
 def test_live_release_matching_the_override_is_converged_not_drift(tmp_path) -> None:
-    """Pin is v0.22.4, the box runs the overridden v0.22.2: no rebuild, status override."""
+    """Pin is v0.23.3, the box runs the overridden v0.22.4: no rebuild, status override."""
     venv = _live_release(ref=PREV_PIN)
     _write_override(PREV_PIN)
     with patch("hal0.agents.hermes_release.ensure_release") as ensure:
