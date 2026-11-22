@@ -2992,6 +2992,12 @@ def test_same_base_nightly_and_stable_are_offered_across_channels() -> None:
     assert _is_newer("1.8.0-nightly.20261120171000", "1.8.0-nightly.20261121000000") is False
 
 
+def test_is_newer_tolerates_a_missing_version() -> None:
+    assert _is_newer(None, "1.8.0") is False  # type: ignore[arg-type]
+    assert _is_newer("1.8.0", None) is True  # type: ignore[arg-type]
+    assert _is_newer("", "1.8.0") is False
+
+
 def test_nightly_against_a_different_base_orders_by_base() -> None:
     assert _is_newer("1.8.1", "1.8.0-nightly.20261120171000") is True
     assert _is_newer("1.8.1-nightly.20261122000000", "1.8.0") is True

@@ -670,7 +670,8 @@ def _is_newer(candidate: str, current: str) -> bool:
     # cut before or after stable ``X.Y.Z`` shipped: the nightly base comes from
     # pyproject.toml, which keeps ``X.Y.Z`` until the next release commit, so
     # both happen every cycle. Every caller compares the latest build of the
-    # box's selected channel against what is installed, so when the two share a
+    # box's release source (its selected channel, or a HAL0_RELEASES_URL
+    # override) against what is installed, so when the two share a
     # base and exactly one is a nightly, the box is crossing channels and the
     # channel's build is the one to offer. That covers a nightly box moving to
     # stable ``X.Y.Z`` (#3893) and a stable box opting into the nightlies cut
@@ -684,8 +685,8 @@ def _is_newer(candidate: str, current: str) -> bool:
             return True
     # Two nightlies order by stamp, and a nightly against a different base
     # orders by that base (``X.Y.Z.dev<stamp>`` is PEP 440; the raw form is not).
-    candidate = floor_comparable_version(candidate)
-    current = floor_comparable_version(current)
+    candidate = floor_comparable_version(candidate or "")
+    current = floor_comparable_version(current or "")
     try:
         return Version(candidate) > Version(current)
     except InvalidVersion:
@@ -700,8 +701,9 @@ _NIGHTLY_INSTALLED_VERSION_RE = re.compile(
 def floor_comparable_version(installed: str) -> str:
     """Map a nightly ``X.Y.Z-nightly.<stamp>`` onto PEP 440 ``X.Y.Z.dev<stamp>``.
 
-    A nightly is cut from main before its base version ships, so it orders
-    below ``X.Y.Z``. Every other string is returned unchanged. installer/install.sh
+    For the upgrade floor a nightly counts as below its base ``X.Y.Z``: it may
+    have been cut before that version shipped, so it cannot be assumed to carry
+    everything the release does. Every other string is returned unchanged. installer/install.sh
     applies the same mapping in its own floor check.
     """
     m = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch(installed.strip())
