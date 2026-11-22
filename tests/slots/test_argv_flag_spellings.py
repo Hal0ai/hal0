@@ -1,7 +1,7 @@
 """The profile-layer screen catches every llama.cpp spelling of a flag.
 
 llama-server accepts short and alternative spellings for most flags
-(``common/arg.cpp`` at the runner pin, b11574: ``-m``/``--model``,
+(``common/arg.cpp`` at tag b12633: ``-m``/``--model``,
 ``-hf``/``-hfr``/``--hf-repo``, ``-md``/``--model-draft``/``--spec-draft-model``
 …) and rewrites ``_`` to ``-`` in a ``--long`` flag before matching. A screen
 keyed on one spelling let ``-m /etc/shadow`` redirect the model (llama-server
@@ -26,7 +26,7 @@ from hal0.slots.argv import (
     resolve_argv,
 )
 
-#: canonical flag → every spelling llama.cpp b11574 accepts for it
+#: canonical flag → every spelling llama.cpp b12633 accepts for it
 #: (``common/arg.cpp``), for the flags hal0 manages or screens.
 SPELLINGS: dict[str, tuple[str, ...]] = {
     # managed (base layer)
@@ -80,6 +80,15 @@ SPELLINGS: dict[str, tuple[str, ...]] = {
     # the shortcut for ``--tools all`` plus the MCP proxy
     "--agent": ("-ag", "--agent"),
     "--webui-mcp-proxy": ("--ui-mcp-proxy", "--webui-mcp-proxy"),
+    # the guards b12633 added around tools, the MCP proxy and media fetches
+    "--allow-unauthenticated-tools": ("--allow-unauthenticated-tools",),
+    "--ui-mcp-proxy-allow-private-urls": ("--ui-mcp-proxy-allow-private-urls",),
+    "--media-allow-private-urls": ("--media-allow-private-urls",),
+    "--connect": ("--connect",),
+    "--connect-code": ("--connect-code",),
+    "--models-memory-margin": ("--models-memory-margin",),
+    # extra GGUF shards, read from any host path
+    "--shard": ("--ple", "--shard"),
 }
 
 _EXPECTED_CODE = {
@@ -198,7 +207,7 @@ def test_a_joined_flag_followed_by_a_flag_is_fine() -> None:
     ]
 
 
-#: The preset switches arg.cpp b11574 declares in its "presets" group (each
+#: The preset switches arg.cpp b12633 declares in its "presets" group (each
 #: sets a model and a port; most download weights). Pinned here so a new
 #: preset in a runner bump is a deliberate addition.
 PRESETS = [
@@ -247,7 +256,7 @@ def test_each_preset_switch_is_refused(preset: str) -> None:
     ],
 )
 def test_a_token_after_a_valueless_switch_is_positional(tokens: list[str]) -> None:
-    """llama.cpp declares these switches with no value (arg.cpp b11574), so the
+    """llama.cpp declares these switches with no value (arg.cpp b12633), so the
     next token is a separate argument — a bare one the screen refuses."""
     with pytest.raises(BadRequest) as exc:
         screen_profile_flags(" ".join(tokens))
@@ -259,14 +268,60 @@ def test_a_token_after_a_valueless_switch_is_positional(tokens: list[str]) -> No
 
 
 def test_valueless_switches_from_the_runner_table() -> None:
-    """Spot-check the arity table against arg.cpp b11574: switches are
+    """Spot-check the arity table against arg.cpp b12633: switches are
     valueless, flags with a value hint are not."""
     from hal0.slots.argv import VALUELESS_FLAGS
 
-    for switch in ("--metrics", "--jinja", "--no-jinja", "-kvu", "--embedding", "--mtp", "-ag"):
+    for switch in (
+        "--metrics",
+        "--jinja",
+        "--no-jinja",
+        "-kvu",
+        "--embedding",
+        "--mtp",
+        "-ag",
+        # switches b12633 added: no value, so the next token is a positional
+        "--allow-unauthenticated-tools",
+        "--media-allow-private-urls",
+        "--ui-mcp-proxy-allow-private-urls",
+        "--connect",
+    ):
         assert switch in VALUELESS_FLAGS, switch
-    for valued in ("-fa", "--reasoning", "--cache-reuse", "--temp", "-b", "--spec-type", "-ngld"):
+    for valued in (
+        "-fa",
+        "--reasoning",
+        "--cache-reuse",
+        "--temp",
+        "-b",
+        "--spec-type",
+        "-ngld",
+        "--shard",
+        "--ple",
+        "--connect-code",
+        "--models-memory-margin",
+        "--moe-cache-cpu-share",
+        "--tts-voice",
+        "--tts-speaker-text",
+    ):
         assert valued not in VALUELESS_FLAGS, valued
+
+
+def test_b12633_tuning_flags_are_allowed_in_a_profile() -> None:
+    """The flags b12633 added that only tune a launch pass the screen."""
+    screen_profile_flags(
+        "--moe-cache-cpu-share 0.5 --tts-voice af_heart --tts-speaker-text hello"
+        " --spec-draft-n-ubatch 512"
+    )
+
+
+def test_the_removed_defrag_flag_is_no_longer_special() -> None:
+    """``--defrag-thold`` / ``-dt`` left arg.cpp between b11840 and b12633; hal0
+    keeps no table entry for it (llama-server rejects it at parse time)."""
+    from hal0.slots.argv import VALUELESS_FLAGS
+
+    for gone in ("--defrag-thold", "-dt"):
+        assert gone not in VALUELESS_FLAGS
+        assert gone not in FLAG_ALIASES
 
 
 def test_an_unknown_flag_keeps_the_value_heuristic() -> None:
