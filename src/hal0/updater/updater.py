@@ -666,6 +666,12 @@ def _is_newer(candidate: str, current: str) -> bool:
     (see its docstring for why that fallback needs its own prerelease handling,
     not just a raw tuple compare).
     """
+    # A nightly ``X.Y.Z-nightly.<stamp>`` is cut before ``X.Y.Z`` ships, so it
+    # must order below stable ``X.Y.Z`` (as ``X.Y.Z.dev<stamp>``). Without this
+    # mapping it is not PEP 440, drops to the naive tuple key, and ties with
+    # (or beats) the same-base stable, so a nightly box is told it is up to date.
+    candidate = floor_comparable_version(candidate)
+    current = floor_comparable_version(current)
     try:
         return Version(candidate) > Version(current)
     except InvalidVersion:

@@ -2978,10 +2978,16 @@ def test_installed_version_falls_back_to_wheel_metadata(
 def test_nightly_box_on_latest_nightly_sees_no_update() -> None:
     # The loop itself: same nightly on both sides must not read as newer.
     assert _is_newer("1.1.0-nightly.20260901025155", "1.1.0-nightly.20260901025155") is False
-    # And the pre-fix comparison that caused the loop stays true (the manifest
-    # IS newer than the bare wheel base) — proving the fix must come from the
-    # installed side, not from _is_newer.
-    assert _is_newer("1.1.0-nightly.20260901025155", "1.1.0") is True
+
+
+def test_stable_release_is_newer_than_nightly_of_same_base() -> None:
+    # #3893: a box on 1.8.0-nightly.<stamp> must be offered stable 1.8.0.
+    assert _is_newer("1.8.0", "1.8.0-nightly.20261120171000") is True
+    # A nightly of X is older than stable X, never newer.
+    assert _is_newer("1.8.0-nightly.20261120171000", "1.8.0") is False
+    # Later nightly still beats an earlier one; next-base stable beats a nightly.
+    assert _is_newer("1.8.0-nightly.20261121000000", "1.8.0-nightly.20261120171000") is True
+    assert _is_newer("1.8.1", "1.8.0-nightly.20261120171000") is True
 
 
 # ── release-tree lock (#3711) ──────────────────────────────────────────────────
