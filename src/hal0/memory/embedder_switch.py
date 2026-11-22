@@ -116,14 +116,15 @@ documents. Agents and the Hindsight coding-agents plugin hold page ids
 retain), and the dashboard links to a page by its id, so a switch that
 changed them would break all of those without a word (#3597).
 
-hindsight-api 1.2.0 keeps them only on a restore into the bank's own id
-once that bank is gone (``engine/transfer/importer.py``): knowledge-node ids
-are unique across the whole schema, so ``_restore_knowledge_pages`` gives a
+hindsight-api keeps them only on a restore into the bank's own id once that
+bank is gone (``engine/transfer/importer.py``, read at 1.2.0 and again at
+1.2.3): knowledge-node ids are unique across the whole schema, so
+``_restore_pages`` (``_restore_knowledge_pages`` before 1.2.1) gives a
 node a fresh UUID when its id is still held by another bank, and
 ``_restore_bank`` drops every directive id (``_drop_ids``) when the target
 id is not the archive's own. Neither id can be set on create through the
-HTTP API (``create_knowledge_page`` and ``create_directive`` mint their
-own). The restore into ``<bank>.switch-<run>`` is therefore the check, made
+HTTP API (``create_page``, once ``create_knowledge_page``, and
+``create_directive`` mint their own). The restore into ``<bank>.switch-<run>`` is therefore the check, made
 before any original is touched, and the bank that stays is a second restore
 of the same archive into the bank's own id, made after the original is
 deleted and compared with the original as it was exported: its counts,

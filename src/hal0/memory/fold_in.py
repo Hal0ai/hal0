@@ -38,7 +38,8 @@ What hindsight-api 1.2.0 gives it (read in its source, not assumed):
   without a word. So every model from a per-repository bank is given a new id
   (:func:`model_id_for`), and the counts are checked after.
 * A knowledge-page id held by another bank gets a fresh id on import
-  (``_restore_knowledge_pages``). The source bank keeps its pages, so a
+  (``_restore_pages``; ``_restore_knowledge_pages`` before 1.2.1, the same
+  body at 1.2.3). The source bank keeps its pages, so a
   folded page keeps its id only when the archive gives it one no bank holds.
   A node's ``parent_id`` is kept only when the parent is in the same archive
   (else it lands at the root), and a page's name is unique in its folder
@@ -4779,7 +4780,7 @@ class FoldIn(em.EngineMaintenance):
         """The mental-model ids behind the knowledge pages ``bank`` holds.
 
         A page imported into a bank whose id another bank holds gets a fresh
-        id (``_restore_knowledge_pages``), so a carried page is found by the
+        id (``_restore_pages``), so a carried page is found by the
         model behind it, which keeps its id.
         """
         if bank not in await self._bank_ids():

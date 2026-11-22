@@ -507,16 +507,56 @@ def _pips(runner) -> list[list[str]]:
     return [c for c in runner.calls if "pip" in Path(c[0]).name]
 
 
-def test_constraint_is_rendered_and_is_a_real_specifier():
+#: The ceiling hindsight-api 1.2.0 needed (#3533). 1.2.3 needs none, so the
+#: shipped tuple is empty; the mechanism stays for the next dependency that
+#: needs one, and the tests below run it against this one.
+_CEILING = ("dateparser<1.5",)
+
+
+@pytest.fixture()
+def dateparser_ceiling(monkeypatch):
+    monkeypatch.setattr("hal0.memory.engine_upgrade.ENGINE_DEP_CONSTRAINTS", _CEILING)
+
+
+def test_shipped_constraints_are_real_specifiers():
     from packaging.requirements import Requirement
 
     from hal0.memory.engine_upgrade import ENGINE_DEP_CONSTRAINTS
 
-    assert ENGINE_DEP_CONSTRAINTS == ("dateparser<1.5",)
-    spec = Requirement(ENGINE_DEP_CONSTRAINTS[0]).specifier
-    assert spec.contains("1.4.3") and not spec.contains("1.5.0")
+    for spec in ENGINE_DEP_CONSTRAINTS:
+        assert Requirement(spec).specifier, spec
 
 
+def test_shipped_constraints_leave_the_pinned_engine_installable():
+    """hindsight-api 1.2.3 requires ``dateparser>=1.5.0``: no ceiling may exclude it."""
+    from packaging.requirements import Requirement
+
+    from hal0.memory.engine_upgrade import ENGINE_DEP_CONSTRAINTS
+
+    for spec in ENGINE_DEP_CONSTRAINTS:
+        req = Requirement(spec)
+        if req.name == "dateparser":
+            assert req.specifier.contains("1.5.0"), spec
+
+
+def test_rebuild_without_constraints_installs_only_the_pin(hs):
+    runner = FakeRunner()
+    upgrade_memory_engine(seam=FakeSeam(), runner=runner, http_get=_healthy, hs_dir=hs)
+    installs = [c for c in runner.calls if "pip" in Path(c[0]).name and "wheel" not in c]
+    assert installs
+    assert installs[0][2:] == [f"hindsight-api=={HINDSIGHT_API_PIN}", "-q"]
+
+
+def test_at_pin_engine_without_constraints_is_never_repaired(hs):
+    """The 1.2.3 engine brings dateparser 1.5; an update must not pull it back."""
+    runner, seam = _dateparser_runner({"dp": "1.5.1"}), FakeSeam()
+    result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
+    assert result == {"status": "converged", "version": HINDSIGHT_API_PIN}
+    assert seam.calls == []
+    assert not _pips(runner)
+
+
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_rebuild_installs_constraints_with_the_pin(hs):
     runner = FakeRunner()
     upgrade_memory_engine(seam=FakeSeam(), runner=runner, http_get=_healthy, hs_dir=hs)
@@ -525,6 +565,7 @@ def test_rebuild_installs_constraints_with_the_pin(hs):
     assert installs[0][2:4] == [f"hindsight-api=={HINDSIGHT_API_PIN}", "dateparser<1.5"]
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_at_pin_engine_with_bad_dateparser_is_repaired_and_try_restarted(hs):
     order: list[str] = []
     runner = _dateparser_runner({"dp": "1.5.0"}, order=order)
@@ -546,6 +587,7 @@ def test_at_pin_engine_with_bad_dateparser_is_repaired_and_try_restarted(hs):
     assert order.index("pip") < order.index("try-restart")
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_stopped_unit_is_repaired_but_never_started(hs):
     runner, seam = _dateparser_runner({"dp": "1.5.0"}), FakeSeam(active=False)
     result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
@@ -554,6 +596,7 @@ def test_stopped_unit_is_repaired_but_never_started(hs):
     assert seam.verbs == ["is-active"]
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_second_run_after_repair_is_idempotent(hs):
     state: dict[str, str | None] = {"dp": "1.5.0"}
     runner, seam = _dateparser_runner(state), FakeSeam()
@@ -566,6 +609,7 @@ def test_second_run_after_repair_is_idempotent(hs):
     assert len(_pips(runner)) == before
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_at_pin_engine_with_good_dateparser_is_untouched(hs):
     runner, seam = _dateparser_runner({"dp": "1.4.3"}), FakeSeam()
     result = upgrade_memory_engine(seam=seam, runner=runner, hs_dir=hs)
@@ -574,6 +618,7 @@ def test_at_pin_engine_with_good_dateparser_is_untouched(hs):
     assert not _pips(runner)
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_failed_pip_never_restarts_the_engine(hs):
     runner, seam = _dateparser_runner({"dp": "1.5.0"}, pip_rc=1), FakeSeam()
     result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
@@ -582,6 +627,7 @@ def test_failed_pip_never_restarts_the_engine(hs):
     assert seam.calls == []
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_pip_ok_but_still_violating_is_a_failure(hs):
     runner, seam = _dateparser_runner({"dp": "1.5.0"}, after="1.5.0"), FakeSeam()
     result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
@@ -590,6 +636,7 @@ def test_pip_ok_but_still_violating_is_a_failure(hs):
     assert seam.calls == []
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_dateparser_missing_after_repair_is_a_failure(hs):
     runner, seam = _dateparser_runner({"dp": "1.5.0"}, after=None), FakeSeam()
     result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
@@ -598,6 +645,7 @@ def test_dateparser_missing_after_repair_is_a_failure(hs):
     assert seam.calls == []
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_engine_not_importable_after_repair_is_a_failure(hs):
     runner, seam = _dateparser_runner({"dp": "1.5.0"}, import_rc=1), FakeSeam()
     result = upgrade_memory_engine(seam=seam, runner=runner, http_get=_healthy, hs_dir=hs)
@@ -606,6 +654,7 @@ def test_engine_not_importable_after_repair_is_a_failure(hs):
     assert seam.calls == []
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_restart_raising_is_its_own_status_with_the_manual_remedy(hs):
     runner = _dateparser_runner({"dp": "1.5.0"})
     seam = FakeSeam(fail_verbs={"try-restart"})
@@ -616,6 +665,7 @@ def test_restart_raising_is_its_own_status_with_the_manual_remedy(hs):
     assert result["remedy"] == "systemctl restart hindsight-api"
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_restart_unhealthy_is_restart_failed(hs, monkeypatch):
     monkeypatch.setattr("hal0.memory.engine_upgrade._HEALTH_POLL_TOTAL_S", 0)
     runner, seam = _dateparser_runner({"dp": "1.5.0"}), FakeSeam()
@@ -624,6 +674,7 @@ def test_restart_unhealthy_is_restart_failed(hs, monkeypatch):
     assert "/health" in result["restart_error"]
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_root_repair_chowns_the_venv(hs, monkeypatch):
     monkeypatch.setattr(os, "geteuid", lambda: 0)
     chowned: list[Path] = []
@@ -633,6 +684,7 @@ def test_root_repair_chowns_the_venv(hs, monkeypatch):
     assert hs / ".venv" in chowned and hs / ".venv" / "bin" / "python" in chowned
 
 
+@pytest.mark.usefixtures("dateparser_ceiling")
 def test_boot_mode_only_reports_bad_dateparser(hs):
     runner, seam = _dateparser_runner({"dp": "1.5.0"}), FakeSeam()
     result = upgrade_memory_engine(upgrade=False, seam=seam, runner=runner, hs_dir=hs)

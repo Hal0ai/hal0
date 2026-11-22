@@ -1780,10 +1780,17 @@ class EngineMaintenance:
     def _own_parked(self, bank: str, parked: list[tuple[dict[str, Any], datetime]]) -> bool:
         """Whether every one of ``parked`` was queued during this run; each is then noted.
 
-        hindsight-api 1.2.0 parks only an automatic mental-model refresh
-        (``memory_engine.py`` ``_handle_refresh_mental_model``), and queues one
-        by itself at every engine start (``engine/maintenance.py``, the
-        scheduled refresh) and after it consolidates (``consolidator.py``).
+        hindsight-api parks an automatic mental-model refresh that comes due
+        inside the model's minimum refresh interval (``memory_engine.py``
+        ``_handle_refresh_mental_model``), and queues one by itself at every
+        engine start (``engine/maintenance.py``, the scheduled refresh) and
+        after it consolidates (``consolidator.py``). Read again at 1.2.3,
+        which defers in three more places (``_dispatch_task``): a task held
+        until a provider's quota resets, as 1.2.0 did; a retain held 60 s at
+        a time while the embeddings backend is down (new in 1.2.1; a retain
+        is a client's operation, not one of :data:`ENGINE_OPERATION_TYPES`);
+        and a 60 s hold that only an in-place ``hindsight-admin reembed`` sets
+        off, which hal0 does not run.
         A run that restarts the engine and imports into a bank sets both off,
         and a bank with a minimum refresh interval then has one parked for
         hours (#3722). Once :attr:`_parked_from` is set, a parked operation

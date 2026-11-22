@@ -4000,11 +4000,13 @@ else
     # tests/installer/test_hindsight_pin_lockstep.py enforces it. Kept as a
     # shell literal (not read from the venv) so the fresh-install branch works
     # even when the python side is broken.
-    HINDSIGHT_PIN="1.2.0"
+    HINDSIGHT_PIN="1.2.3"
     # Space-separated pip requirements installed beside the pin; must match
-    # hal0.memory.engine_upgrade.ENGINE_DEP_CONSTRAINTS (#3533: dateparser 1.5.0
-    # breaks the engine's temporal query analysis).
-    HINDSIGHT_DEP_CONSTRAINTS="dateparser<1.5"
+    # hal0.memory.engine_upgrade.ENGINE_DEP_CONSTRAINTS. Empty at 1.2.3: the
+    # engine handles dateparser 1.5 itself and requires it, so the
+    # "dateparser<1.5" that 1.2.0 needed (#3533) would make the install
+    # unsatisfiable.
+    HINDSIGHT_DEP_CONSTRAINTS=""
     HS_DIR="${VAR_DIR}/memory/hindsight"
     HINDSIGHT_UNIT_SRC="${REPO_ROOT}/installer/systemd/hindsight-api.service"
     if [[ "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 && -f "${HINDSIGHT_UNIT_SRC}" ]]; then

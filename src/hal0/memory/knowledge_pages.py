@@ -213,10 +213,10 @@ def folded_node_id(bank: str, old_id: str, kind: str) -> str:
 
     Shaped like the engine's own (``kp-`` or ``kf-`` and 32 hex digits) and
     derived from the old bank and the old id, so every run and every resend
-    sends the same node under the same id. hindsight-api 1.2.0 keeps an
-    archive node's id unless another bank holds it
-    (``_restore_knowledge_pages`` in ``engine/transfer/importer.py``), and no
-    bank holds this one, so it lands as sent.
+    sends the same node under the same id. hindsight-api (1.2.0, and 1.2.3)
+    keeps an archive node's id unless another bank holds it (``_restore_pages``
+    in ``engine/transfer/importer.py``, ``_restore_knowledge_pages`` before
+    1.2.1), and no bank holds this one, so it lands as sent.
     """
     prefix = "kp" if kind == "page" else "kf"
     digest = hashlib.sha256(f"hal0-fold-in\0{bank}\0{old_id}".encode()).hexdigest()[:32]

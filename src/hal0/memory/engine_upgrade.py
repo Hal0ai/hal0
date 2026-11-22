@@ -85,17 +85,20 @@ log = structlog.get_logger(__name__)
 #: The engine version every box converges on. Single source of truth —
 #: install.sh's ``HINDSIGHT_PIN`` shell variable must match
 #: (tests/installer/test_hindsight_pin_lockstep.py enforces it).
-HINDSIGHT_API_PIN = "1.2.0"
+HINDSIGHT_API_PIN = "1.2.3"
 
-#: Extra pip requirements installed alongside the engine pin. hindsight-api
-#: 1.2.0 unpacks each dateparser ``search_dates`` hit as ``(text, date)``;
-#: dateparser 1.5.0 returns three-tuples for absolute-date text, so temporal
-#: query analysis raises ``ValueError`` and date-bounded recall silently stops
-#: filtering (#3533). 1.2.2 through 1.4.x were verified clean. Single source of
-#: truth — install.sh's ``HINDSIGHT_DEP_CONSTRAINTS`` shell variable must match
+#: Extra pip requirements installed alongside the engine pin, each one a
+#: ceiling the pinned engine needs on a dependency it does not cap itself.
+#: Empty at 1.2.3. hindsight-api 1.2.0 needed ``dateparser<1.5`` here (#3533:
+#: it unpacked each dateparser hit as ``(text, date)`` and dateparser 1.5.0
+#: returns three-tuples, so date-bounded recall silently stopped filtering).
+#: 1.2.3 narrows the hits itself (``engine/query_analyzer.py`` ``_find_dates``)
+#: and requires ``dateparser>=1.5.0``, so the old ceiling would make the
+#: install unsatisfiable. Single source of truth: install.sh's
+#: ``HINDSIGHT_DEP_CONSTRAINTS`` shell variable must match
 #: (tests/installer/test_hindsight_pin_lockstep.py enforces it). Drop an entry
 #: once the pinned engine handles the newer release.
-ENGINE_DEP_CONSTRAINTS: tuple[str, ...] = ("dateparser<1.5",)
+ENGINE_DEP_CONSTRAINTS: tuple[str, ...] = ()
 
 #: Full unit name — must key into ``COMPANION_SERVICE_UNITS`` so the seam
 #: routes to the wrapper's ``svc-stop/svc-start hindsight`` arms (a bare
