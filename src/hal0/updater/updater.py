@@ -2688,6 +2688,25 @@ def _load_cached_manifest(version: str) -> dict[str, Any]:
 #: record or the CLI render. Notes are informational, not a transport.
 _MAX_NOTES_BYTES = 64 * 1024
 
+#: Appended when the notes were cut, so the operator knows the text continues.
+_NOTES_TRUNCATED_MARKER = (
+    "_Release notes truncated; the full text is in the CHANGELOG: "
+    "https://github.com/hal0ai/hal0/blob/main/CHANGELOG.md_"
+)
+
+
+def _cap_release_notes(markdown: str) -> str:
+    """Cap ``markdown`` at ``_MAX_NOTES_BYTES`` on a line boundary, with a marker."""
+    raw = markdown.encode("utf-8")
+    if len(raw) <= _MAX_NOTES_BYTES:
+        return markdown
+    head = raw[:_MAX_NOTES_BYTES].decode("utf-8", errors="ignore")
+    # Drop the trailing partial line unless that would empty the notes.
+    cut = head.rfind("\n")
+    if cut > 0:
+        head = head[:cut]
+    return head.rstrip("\n") + "\n\n" + _NOTES_TRUNCATED_MARKER + "\n"
+
 
 def _read_release_notes(install_dir: Path) -> dict[str, Any]:
     """Read release notes shipped INSIDE the (cosign-verified) release tree.
@@ -2703,7 +2722,7 @@ def _read_release_notes(install_dir: Path) -> dict[str, Any]:
     md_path = install_dir / "RELEASE_NOTES.md"
     if md_path.is_file():
         with contextlib.suppress(OSError):
-            markdown = md_path.read_text(encoding="utf-8", errors="replace")[:_MAX_NOTES_BYTES]
+            markdown = _cap_release_notes(md_path.read_text(encoding="utf-8", errors="replace"))
 
     highlights: list[str] = []
     breaking: list[str] = []

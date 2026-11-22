@@ -2083,6 +2083,25 @@ def test_read_release_notes_missing_is_empty(tmp_path: Path) -> None:
     assert notes["migrations"] == []
 
 
+def test_read_release_notes_truncates_on_line_boundary_with_marker(tmp_path: Path) -> None:
+    """Oversized notes are cut at a line boundary and end with a continuation marker."""
+    from hal0.updater.updater import _MAX_NOTES_BYTES
+
+    line = "- a fixed thing with some words in it\n"
+    (tmp_path / "RELEASE_NOTES.md").write_text(line * (_MAX_NOTES_BYTES // len(line) * 2))
+    md = _read_release_notes(tmp_path)["markdown"]
+    assert "truncated" in md.splitlines()[-1]
+    assert "CHANGELOG" in md.splitlines()[-1]
+    body = md.rsplit("\n\n", 1)[0]
+    assert all(ln == line.strip() for ln in body.splitlines())
+    assert len(md.encode()) <= _MAX_NOTES_BYTES + 300
+
+
+def test_read_release_notes_small_notes_untouched(tmp_path: Path) -> None:
+    (tmp_path / "RELEASE_NOTES.md").write_text("# hi\n- x\n")
+    assert _read_release_notes(tmp_path)["markdown"] == "# hi\n- x\n"
+
+
 # ── apply error paths ──────────────────────────────────────────────────────────
 
 
