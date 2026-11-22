@@ -310,6 +310,24 @@ async def test_health_transport_failure_surfaces_typed_status(
 
 
 @pytest.mark.asyncio
+async def test_health_read_timeout_is_a_stall(provider: FLMProvider) -> None:
+    """#3752: FLM serialises the single NPU context, so /v1/models can answer late
+    while it serves. A read timeout is ``stalled`` (still not ``ok``), which the
+    fail-watcher judges on the stall ceiling instead of striking the slot."""
+
+    async def _fake_get(url: str) -> httpx.Response:
+        raise httpx.ReadTimeout("busy")
+
+    with patch("hal0.providers.flm.httpx.AsyncClient") as MockClient:
+        client = MockClient.return_value.__aenter__.return_value
+        client.get = _fake_get
+        result = await provider.health(8086)
+
+    assert result["ok"] is False
+    assert result["status"] == "stalled"
+
+
+@pytest.mark.asyncio
 async def test_verify_inference_requires_round_trip(provider: FLMProvider) -> None:
     """The one-shot gate MUST exercise /v1/chat/completions with max_tokens=1.
 

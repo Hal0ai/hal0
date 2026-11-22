@@ -12,10 +12,14 @@ real ``_fail_watch_loop`` and ``_update_fail_watcher`` codepaths.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
+from unittest.mock import patch
 
+import httpx
 import pytest
 
+from hal0.providers.container import ContainerProvider
 from hal0.slots import watchdog as wd_mod
 from hal0.slots.manager import SlotManager
 from hal0.slots.state import SlotState
@@ -178,3 +182,107 @@ async def test_fail_watcher_keeps_ready_while_health_ok(
     # Let several poll intervals elapse with the unit active + healthy.
     await asyncio.sleep(0.8)  # > 3 * _FAIL_WATCH_INTERVAL_S (0.2)
     assert sm._states[sm._key("chat")].state == SlotState.READY
+
+
+# --- #3752: a busy llama-server's /health read timeout is a stall, not a death
+
+
+class _RealLlamaHealth(FakeContainerProvider):
+    """A fake unit with the real ``ContainerProvider.health`` dispatch."""
+
+    async def health(self, port: int, slot_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await ContainerProvider().health(port, slot_cfg)
+
+
+@pytest.fixture
+def llama_health(slot_root: Any, monkeypatch: pytest.MonkeyPatch) -> _RealLlamaHealth:
+    fake = _RealLlamaHealth()
+    fake.active.add("chat")
+    monkeypatch.setattr("hal0.providers.container.container_provider", lambda: fake)
+    monkeypatch.setattr(wd_mod, "_FAIL_WATCH_INTERVAL_S", 0.02)
+    return fake
+
+
+def _llama_http(handler: Callable[[httpx.Request], httpx.Response]) -> Any:
+    transport = httpx.MockTransport(handler)
+    return patch(
+        "hal0.providers.container.async_client",
+        lambda **kw: httpx.AsyncClient(transport=transport),
+    )
+
+
+async def _llama_ready(sm: SlotManager) -> None:
+    await sm._transition("chat", SlotState.READY, model_id="m", port=8081, force=True)
+
+
+async def _probes_reach(calls: dict[str, int], n: int, *, timeout_s: float = 10.0) -> None:
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    while calls["n"] < n and asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.01)
+    assert calls["n"] >= n, f"the watcher stopped probing after {calls['n']} probes"
+
+
+async def test_a_busy_slot_whose_health_times_out_is_not_stamped_error(
+    llama_health: _RealLlamaHealth,
+) -> None:
+    """#3752: a slot serving real traffic answers /health late; the read timeout
+    must not count as a strike. Before the fix two timeouts plus the recheck under
+    the lock stamped ``model server failed /health probe`` on a live slot."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ReadTimeout("busy")
+
+    sm = SlotManager()
+    sm._serving_count[sm._key("chat")] = 1
+    with _llama_http(handler):
+        await _llama_ready(sm)
+        # Well past two strikes + the recheck (3 probes used to stamp ERROR).
+        await _probes_reach(calls, 8)
+        assert sm.state("chat") is SlotState.READY
+        sm._serving_count.pop(sm._key("chat"))
+        await sm._transition("chat", SlotState.OFFLINE, force=True)
+
+
+async def test_an_idle_slot_whose_health_times_out_waits_for_the_stall_ceiling(
+    llama_health: _RealLlamaHealth, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The timeout is judged by the stall ceiling (#3282), not two strikes: a
+    front end that never answers still ends in ERROR, just not on a slow beat."""
+    monkeypatch.setattr(wd_mod, "_STALL_CEILING_STRIKES", 6)
+    monkeypatch.setattr(wd_mod, "_STALL_CEILING_S", 0.0)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ReadTimeout("no answer")
+
+    sm = SlotManager()
+    with _llama_http(handler):
+        await _llama_ready(sm)
+        assert await _wait_for_state(sm, "chat", SlotState.ERROR) is SlotState.ERROR
+    assert calls["n"] >= 6
+    assert sm._states[sm._key("chat")].extra.get("stall_ceiling") is True
+
+
+async def test_a_refused_health_still_stamps_error_after_two_strikes(
+    llama_health: _RealLlamaHealth,
+) -> None:
+    """Guard: only an accepted-then-silent probe is a stall; a dead server is not,
+    even while a request is in flight."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectError("connection refused")
+
+    sm = SlotManager()
+    sm._serving_count[sm._key("chat")] = 1
+    with _llama_http(handler):
+        await _llama_ready(sm)
+        assert await _wait_for_state(sm, "chat", SlotState.ERROR) is SlotState.ERROR
+    assert calls["n"] == 3
+    rec = sm._states[sm._key("chat")]
+    assert rec.message == "model server failed /health probe"
+    assert rec.extra.get("health_ok") is False
