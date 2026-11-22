@@ -233,6 +233,7 @@ export const FLAG_ALIASES = {
   "-a": "--alias",
   "--gpu-layers": "--n-gpu-layers",
   "-mm": "--mmproj",
+  "--ple": "--shard",
   "-devd": "--spec-draft-device",
   "--device-draft": "--spec-draft-device",
   "-mmdev": "--mmproj-device",
@@ -311,10 +312,13 @@ function findByCanon(text, set) {
 // strict JSON so that parse holds).
 export const HOST_OWNED_FLAGS = [
   "--agent",
+  "--allow-unauthenticated-tools",
   "--api-key",
   "--api-key-file",
   "--api-prefix",
   "--binary-file",
+  "--connect",
+  "--connect-code",
   "--context-file",
   "--control-vector",
   "--control-vector-scaled",
@@ -349,12 +353,14 @@ export const HOST_OWNED_FLAGS = [
   "--lora-scaled",
   "--mcp-servers-config",
   "--mcp-servers-json",
+  "--media-allow-private-urls",
   "--media-path",
   "--mmproj-url",
   "--model-url",
   "--models-autoload",
   "--models-dir",
   "--models-max",
+  "--models-memory-margin",
   "--models-preset",
   "--negative-file",
   "--output-file",
@@ -365,6 +371,7 @@ export const HOST_OWNED_FLAGS = [
   "--rpc",
   "--save-all-logits",
   "--server-base",
+  "--shard",
   "--slot-save-path",
   "--spec-default",
   "--spec-draft-hf",
@@ -375,6 +382,7 @@ export const HOST_OWNED_FLAGS = [
   "--tools",
   "--tools-runtime",
   "--tts-speaker-file",
+  "--ui-mcp-proxy-allow-private-urls",
   "--video-ffmpeg-dir",
   "--vision-gemma-12b-default",
   "--vision-gemma-4b-default",
@@ -388,12 +396,13 @@ export function findHostOwnedFlags(text) {
   return findByCanon(text, HOST_OWNED_SET);
 }
 
-// Every flag spelling llama.cpp (b11574) declares with no value argument: the
+// Every flag spelling llama.cpp (b12633) declares with no value argument: the
 // token after one of these is the next argument, never its value. Mirrors
 // hal0.slots.argv.VALUELESS_FLAGS verbatim (kept in sync by
 // tests/ui_contracts/test_flag_aliases_mirror.py; strict JSON).
 export const VALUELESS_FLAGS = [
   "--agent",
+  "--allow-unauthenticated-tools",
   "--backend-sampling",
   "--cache-idle-slots",
   "--cache-list",
@@ -401,6 +410,7 @@ export const VALUELESS_FLAGS = [
   "--check",
   "--check-tensors",
   "--completion-bash",
+  "--connect",
   "--cont-batching",
   "--context-shift",
   "--conversation",
@@ -441,6 +451,7 @@ export const VALUELESS_FLAGS = [
   "--log-timestamps",
   "--log-verbose",
   "--lora-init-without-apply",
+  "--media-allow-private-urls",
   "--metrics",
   "--mmproj-auto",
   "--mmproj-offload",
@@ -518,6 +529,7 @@ export const VALUELESS_FLAGS = [
   "--swa-full",
   "--ui",
   "--ui-mcp-proxy",
+  "--ui-mcp-proxy-allow-private-urls",
   "--usage",
   "--verbose",
   "--verbose-prompt",
