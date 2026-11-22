@@ -8,8 +8,9 @@
 # a full sha in VETTED_HERMES_REFS. `hal0 update component hermes --target <sha>`
 # builds another vetted commit and keeps it until `--clear-override`.
 #
-# Compatibility posture: pin the reviewed official v0.22.4 release commit
-# (4d043038; v0.22.2 d923a5eb before it, ADR-0034 decision 8) so provider, memory, and voice plugin
+# Compatibility posture: pin the reviewed official v0.23.3 release commit
+# (caafe538; v0.22.4 4d043038 and v0.22.2 d923a5eb before it, ADR-0034
+# decision 8) so provider, memory, and voice plugin
 # contracts cannot drift underneath the bundled hal0 adapters. Lift this pin
 # only through the compatibility review: re-vendor
 # tests/fixtures/hermes/contracts/ and move VETTED_HERMES_REFS and
@@ -39,4 +40,4 @@
 # Protocol fails at launch (#3344). Releases are immutable, so it has to be in
 # the pin; `hermes pm install --extra acp` into the live venv does not survive
 # the next rebuild.
-hermes-agent[web,mcp,acp] @ git+https://github.com/NousResearch/hermes-agent.git@4d04303818b61bf3aa09278af48356315515965b
+hermes-agent[web,mcp,acp] @ git+https://github.com/NousResearch/hermes-agent.git@caafe5389ae585ef77387a962aee05b1bcf17029

@@ -2,8 +2,9 @@
 
 Every assertion here freezes one Hermes SDK / plugin / HTTP / config touchpoint
 that a planned hal0 adapter lane consumes, copied verbatim from the reviewed
-official pin ``4d043038`` (NousResearch/hermes-agent v0.22.4; v0.22.2
-``d923a5eb`` before it, ADR-0034 decision 8). The frozen fixtures live under ``tests/fixtures/hermes/contracts/``
+official pin ``caafe538`` (NousResearch/hermes-agent v0.23.3; v0.22.4
+``4d043038`` and v0.22.2 ``d923a5eb`` before it, ADR-0034 decision 8). The
+frozen fixtures live under ``tests/fixtures/hermes/contracts/``
 and each is labelled with its consuming adapter lane. ADR-0032 decision 15
 re-vendors them at every pin bump.
 
@@ -37,7 +38,7 @@ from tests.fixtures.hermes.contracts.provider_profile import (
     register_provider,
 )
 
-HERMES_COMMIT = "4d04303818b61bf3aa09278af48356315515965b"
+HERMES_COMMIT = "caafe5389ae585ef77387a962aee05b1bcf17029"
 HERMES_REPO = "https://github.com/NousResearch/hermes-agent"
 _REPO_ROOT = Path(__file__).parents[3]
 
@@ -95,6 +96,11 @@ def test_provider_registration_name_override() -> None:
 # Frozen roster: every public MemoryProvider member at the pin.
 _MEMORY_ROSTER = frozenset(
     {
+        # New at v0.23.3; all four have defaults.
+        "on_profile_created",
+        "on_profile_renamed",
+        "read_config_fields",
+        "write_config_fields",
         "name",
         "is_available",
         "initialize",
@@ -147,6 +153,31 @@ def test_memory_provider_optional_hooks_added_since_0_19_have_safe_defaults() ->
         "(self, new_session_id: 'str', *, parent_session_id: 'str' = '', "
         "reset: 'bool' = False, rewound: 'bool' = False, **kwargs) -> 'None'"
     )
+
+
+def test_memory_provider_hooks_added_at_0_23_3_have_defaults() -> None:
+    # agent/memory_provider.py:245-267 at caafe538. hal0-memory overrides none
+    # of them: profile creation and rename are no-ops, and the config-panel
+    # pair is only called for a provider that ships a config_schema.py with
+    # storage=provider, which hal0-memory does not.
+    assert str(signature(MemoryProvider.on_profile_created)) == (
+        "(self, profile_name: 'str', hermes_home: 'str') -> 'None'"
+    )
+    assert str(signature(MemoryProvider.on_profile_renamed)) == (
+        "(self, old_name: 'str', new_name: 'str', hermes_home: 'str') -> 'None'"
+    )
+    assert str(signature(MemoryProvider.read_config_fields)) == (
+        "(self, hermes_home: 'str') -> 'dict[str, Any]'"
+    )
+    assert str(signature(MemoryProvider.write_config_fields)) == (
+        "(self, values: 'dict[str, Any]', hermes_home: 'str') -> 'None'"
+    )
+    new = {"on_profile_created", "on_profile_renamed", "read_config_fields", "write_config_fields"}
+    assert not new & MemoryProvider.__abstractmethods__
+
+    from hal0.agents.hermes.plugins.memory_hindsight.provider import Hal0MemoryProvider
+
+    assert not new & set(vars(Hal0MemoryProvider))
 
 
 def test_memory_provider_preserves_turn_lifecycle_signatures() -> None:
@@ -242,7 +273,7 @@ def _overlay(**over: object) -> dict:
 
 def test_persona_prompt_goes_to_the_key_hermes_reads() -> None:
     # Hermes resolves the session's ephemeral system prompt from
-    # agent.system_prompt (personality.py:118-123). hal0 used to write
+    # agent.system_prompt (personality.py:118-124). hal0 used to write
     # agent.system_prompt_prelude, which no Hermes version reads; this keeps
     # the persona key pinned to the reader so it cannot go dead again.
     from hal0.agents import hermes_provision as hp
@@ -276,8 +307,9 @@ def test_retired_persona_key_is_dropped_from_existing_configs() -> None:
 def test_hal0_turns_session_pruning_off() -> None:
     # v0.22.2 pruned ended sessions after 90 idle days unless this was false;
     # v0.22.3 made it opt-in again, but asks once on low disk while the key is
-    # absent (config_defaults.py:2279-2288). ADR-0034 decision 7: hal0 writes
-    # false either way, so a box that flips back to v0.22.2 keeps its history.
+    # absent (config_defaults.py:2218-2228 at v0.23.3). ADR-0034 decision 7:
+    # hal0 writes false either way, so a box that flips back to v0.22.2 keeps
+    # its history.
     from hal0.agents.hermes_provision import SESSIONS_AUTO_PRUNE_CONFIG_KEY
 
     assert config_defaults.SESSIONS_AUTO_PRUNE_DEFAULT is False
@@ -287,8 +319,8 @@ def test_hal0_turns_session_pruning_off() -> None:
 
 
 def test_hal0_writes_no_retired_auxiliary_task() -> None:
-    # web_extract and session_search lost their aux LLM in v0.22
-    # (config_defaults.py:775, :792); a leftover block is ignored.
+    # web_extract and session_search lost their aux LLM in v0.22 and skills_hub
+    # in v0.23.3 (config_defaults.py:747); a leftover block is ignored.
     from hal0.agents import hermes_provision as hp
 
     written = set(hp._MAIN_AUX_TASKS) | set(hp._UTILITY_AUX_TASKS)
@@ -301,12 +333,10 @@ def test_hal0_writes_no_retired_auxiliary_task() -> None:
 
 
 def test_voice_registration_callables_match_plugin_context() -> None:
-    assert str(signature(PluginContext.register_tts_provider)) == (
-        "(self, provider) -> 'Optional[PluginRegistration]'"
-    )
-    assert str(signature(PluginContext.register_transcription_provider)) == (
-        "(self, provider) -> 'Optional[PluginRegistration]'"
-    )
+    # v0.23.3 spells the two registrars out on the class and no longer
+    # annotates the handle they return (plugins_context.py:877-883).
+    assert str(signature(PluginContext.register_tts_provider)) == "(self, provider)"
+    assert str(signature(PluginContext.register_transcription_provider)) == "(self, provider)"
 
 
 def test_voice_command_provider_config_keys() -> None:
@@ -321,8 +351,11 @@ def test_plugin_context_registration_signatures() -> None:
     assert str(signature(PluginContext.register_context_engine)) == (
         "(self, engine) -> 'Optional[PluginRegistration]'"
     )
+    # hold_stream is new at v0.23.3 and keyword-only with a default
+    # (plugins_context.py:753), so a two-argument registration is unchanged.
     assert str(signature(PluginContext.register_hook)) == (
-        "(self, hook_name: 'str', callback: 'Callable') -> 'PluginRegistration'"
+        "(self, hook_name: 'str', callback: 'Callable', *, hold_stream: 'bool' = False) "
+        "-> 'PluginRegistration'"
     )
     assert str(signature(PluginContext.dispatch_tool)) == (
         "(self, tool_name: 'str', args: 'dict', **kwargs) -> 'str'"
@@ -354,7 +387,7 @@ def test_plugin_context_registration_signatures() -> None:
 
 
 def test_executor_run_routes_are_frozen() -> None:
-    # Since 0.22 these come from gateway/platforms/api_server_runs.py:241-249;
+    # Since 0.22 these come from gateway/platforms/api_server_runs.py:285-293;
     # /steer is new since 0.19.0, /clarify and /resolve-unknown since 0.22.2.
     assert api_surface.RUN_ROUTES == (
         ("post", "/v1/runs"),
@@ -370,8 +403,8 @@ def test_executor_run_routes_are_frozen() -> None:
 
 def test_api_server_route_table_is_complete() -> None:
     # The fixture tables together are the whole _http_route_table() at the pin
-    # (48 rows); the 11 rows new since 0.19.0 and the 2 new since 0.22.2 are all
-    # accounted for, and no row was removed.
+    # (45 rows). v0.23.3 removed four of v0.22.4's 48 (browser control and
+    # artifact transfer, none of them called by hal0) and added one.
     tables = (
         api_surface.RUN_ROUTES,
         api_surface.SESSION_ROUTES,
@@ -381,11 +414,19 @@ def test_api_server_route_table_is_complete() -> None:
         api_surface.OTHER_ROUTES,
     )
     rows = [row for table in tables for row in table]
-    assert len(rows) == len(set(rows)) == 48
+    assert len(rows) == len(set(rows)) == 45
     assert len(api_surface.ADDED_SINCE_0_19_0) == 11
-    assert set(rows) >= api_surface.ADDED_SINCE_0_19_0
+    assert len(api_surface.REMOVED_SINCE_0_22_4) == 4
+    assert api_surface.REMOVED_SINCE_0_22_4 <= api_surface.ADDED_SINCE_0_19_0
+    assert not set(rows) & api_surface.REMOVED_SINCE_0_22_4
+    assert set(rows) >= api_surface.ADDED_SINCE_0_19_0 - api_surface.REMOVED_SINCE_0_22_4
     assert len(api_surface.ADDED_SINCE_0_22_2) == 2
     assert set(rows) >= api_surface.ADDED_SINCE_0_22_2
+    assert len(api_surface.ADDED_SINCE_0_22_4) == 1
+    assert set(rows) >= api_surface.ADDED_SINCE_0_22_4
+    # The one registration outside the table: a served profile's inbound-port
+    # platform, behind that platform's own verifier (api_server.py:3946).
+    assert api_surface.PROFILE_INGRESS_ROUTE == ("*", "/p/{profile}/{tail:.*}")
 
 
 def test_executor_session_routes_present() -> None:
@@ -439,8 +480,8 @@ def test_kanban_db_table_roster_is_frozen() -> None:
 def test_hal0_never_sets_the_dashboard_public_url() -> None:
     # From 0.22.2 a non-loopback dashboard.public_url (or its env override
     # HERMES_DASHBOARD_PUBLIC_URL) turns the dashboard auth gate on even for a
-    # loopback bind (web_server.py:369-379 at v0.22.4;
-    # dashboard_auth/prefix.py:119-125). The gated SPA drops
+    # loopback bind (should_require_dashboard_auth, web_server.py:370 at
+    # v0.23.3; dashboard_auth/prefix.py:117-130). The gated SPA drops
     # __HERMES_SESSION_TOKEN__, so the board's token harvest would fail. hal0
     # must set neither: not in the config overlay, and nowhere in the code or
     # the installer that writes Hermes's config, env files or units.
@@ -520,10 +561,10 @@ def test_api_server_refuses_placeholder_or_weak_key() -> None:
         "execution) whenever the terminal tool is enabled, which the lxc105 "
         "checklist flags as an unsandboxed-by-default local terminal. The pin "
         "is NOT what forces this: the pinned ref also ships sandboxed backends "
-        "(built-in names local, docker, singularity, modal, daytona, "
-        "vercel_sandbox, ssh at hermes_cli/plugins.py:1035-1042 at v0.22.4, and "
-        "tools/environments/{docker,singularity,modal,daytona,ssh}.py exist at "
-        "d923a5eb and 4d043038), so no pin bump is needed to change it. None is viable here: a containerised shell cannot "
+        "(built-in names local, docker, modal, daytona, vercel_sandbox, ssh at "
+        "tools/terminal_tool_backends.py:276-278 at v0.23.3; singularity is a "
+        "catalog plugin from v0.23.0), so no pin bump is needed to change it. "
+        "None is viable here: a containerised shell cannot "
         "reach the host filesystem or 127.0.0.1:8080, which would break the "
         "bundled host-management skills (hal0-service-management, hal0-bench, "
         "hal0-tune). The 'by default' half is now answered "
@@ -618,6 +659,15 @@ def test_sdk_diff_tracks_full_adapter_contract_surface() -> None:
         "agent/model_metadata.py",
         "setup.py",
         "pyproject.toml",
+        # Added at the v0.23.3 bump.
+        "hermes_cli/plugins_context.py",
+        "gateway/platforms/api_server_room_grants.py",
+        "hermes_cli/config_secret_refs.py",
+        "hermes_cli/web_server_surface.py",
+        "hermes_cli/web_server_session_token.py",
+        "persistence/sqlite/_schema_ddl.py",
+        "gateway/session_tui_side.py",
+        "tools/terminal_tool_backends.py",
     }
     missing = required - tracked
     assert not missing, f"drift-watch missing contract surfaces: {sorted(missing)}"

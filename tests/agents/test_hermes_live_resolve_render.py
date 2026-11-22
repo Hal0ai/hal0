@@ -5,7 +5,7 @@ returns the ``(dotted_key, value)`` pairs applied via ``hermes config set``.
 These assert the same live-resolve contract the old Jinja render guaranteed.
 """
 
-from hal0.agents.hermes_provision import _build_config_overlay
+from hal0.agents.hermes_provision import _build_config_overlay, _discovery_key_layer
 
 
 def _overlay(*, live_resolve_enabled, **over):
@@ -45,7 +45,16 @@ def test_live_resolve_enables_live_model_discovery():
     Hermes's picker runs live /v1/models discovery against the gateway."""
     keys = _overlay(live_resolve_enabled=True)
     assert keys["providers.custom.discover_models"] is True
-    assert keys["providers.custom.api_key"] == "hal0-local"
+    assert _discovery_key_layer(True) == {"providers": {"custom": {"api_key": "hal0-local"}}}
+
+
+def test_discovery_key_never_goes_through_config_set():
+    """From Hermes v0.23.0 ``config set providers.<name>.api_key`` moves the value
+    into ``$HERMES_HOME/.env`` and leaves a ``${...}`` reference in config.yaml
+    (config_secret_refs.py:295-330 at caafe538). The placeholder is layered by
+    the YAML merge instead, so it is never a ``config set`` pair."""
+    assert "providers.custom.api_key" not in _overlay(live_resolve_enabled=True)
+    assert not any(key.endswith(".api_key") for key in _overlay(live_resolve_enabled=True))
 
 
 def test_live_resolve_tags_discovery_with_owned_by_filter():
@@ -61,7 +70,7 @@ def test_disabled_omits_live_model_discovery():
     live discovery is intentionally not enabled."""
     keys = _overlay(live_resolve_enabled=False)
     assert "providers.custom.discover_models" not in keys
-    assert "providers.custom.api_key" not in keys
+    assert _discovery_key_layer(False) == {}
     assert "providers.custom.extra_headers.X-hal0-Model-Filter" not in keys
 
 

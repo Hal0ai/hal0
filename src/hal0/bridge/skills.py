@@ -22,8 +22,8 @@ through :mod:`hal0.security.nofollow` or descriptors opened relative to the
 parent, and a symlinked skill is skipped when listing and refused when written.
 
 Hermes walks the drop-in root with ``os.walk(followlinks=True)`` and prunes only
-a fixed set of names (``EXCLUDED_SKILL_DIRS``, Hermes 4d043038
-``agent/skill_utils.py:24``; ``iter_skill_index_files``, ``:859``). A staging
+a fixed set of names (``EXCLUDED_SKILL_DIRS``, Hermes caafe538
+``agent/skill_utils.py:28``; ``iter_skill_index_files``, ``:878``). A staging
 directory beside the skills would therefore be read as a second, ambiguous copy
 of the skill. A write is staged, and the previous copy parked, under
 ``<dropin>/.archive/.bridge/`` (``stage-<name>-<uuid>``, ``old-<name>-<uuid>``):

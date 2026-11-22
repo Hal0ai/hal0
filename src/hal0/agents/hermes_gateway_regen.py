@@ -27,7 +27,14 @@ once :mod:`hal0.agents.hermes_gateway_unit` has normalised it to
 ``current/``. The test fixture ``tests/fixtures/hermes/gateway-unit-v0.22.2.service``
 is that output. v0.22.4 (``4d043038``, ``gateway.py:3196``) generates the same
 unit byte for byte: the generator and every helper it calls are unchanged, and
-both refs render an identical unit from the same inputs. Where upstream reads the target user's Hermes config, the
+both refs render an identical unit from the same inputs. v0.23.3 (``caafe538``,
+``gateway.py:3096``) adds one thing: ``Environment=`` lines for the
+``HERMES_BUNDLED_*`` pointers a packaged install's wrapper exports
+(``hermes_cli/gateway_bundled_env.py``), placed before ``Restart=``. They are
+empty for a source checkout with no such variable set, which is every hal0
+release, so the template is still the unit upstream would write; the helpers
+and the launcher lines (``hermes_cli/_launchers.py:39-73``) are unchanged.
+Where upstream reads the target user's Hermes config, the
 template uses upstream's defaults instead, because root must not read
 ``hal0``'s config:
 
@@ -44,8 +51,9 @@ template uses upstream's defaults instead, because root must not read
   (``_build_service_path_dirs``), every built release does, and it is a fixed
   path under ``current/``. A missing ``PATH`` directory is harmless.
 
-Nothing in hal0 runs upstream's generator any more (#2943). Under the
-v0.22.4 pin, ``hermes gateway install --system`` run as root resolves its
+Nothing in hal0 runs upstream's generator any more (#2943). From v0.22.4
+(the naming rule, ``_profile_suffix``, is the same at v0.23.3,
+``hermes_cli/gateway.py:2179``), ``hermes gateway install --system`` run as root resolves its
 default home from root's ACCOUNT home (``/root/.hermes``), so with
 ``HERMES_HOME=/var/lib/hal0/.hermes`` it names the unit
 ``hermes-gateway-<hash>.service`` and bakes the release path it ran from;
@@ -92,7 +100,7 @@ SERVICE_PATH = (
 #: once it passes, so it must outlast the gateway's own drain or agent turns in
 #: flight are cut off mid-drain. Upstream sizes it per box from the Hermes
 #: config (``gateway/restart.py:342`` ``resolve_systemd_timeout_stop_sec`` at
-#: ``d923a5eb`` and ``4d043038``)::
+#: ``d923a5eb``, ``4d043038`` and ``caafe538``)::
 #:
 #:     max(60, max(restart_drain_timeout, cron_drain_timeout + 10) + 30)
 #:

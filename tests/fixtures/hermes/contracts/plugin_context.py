@@ -8,21 +8,29 @@ Adapter lanes: **hal0-voice** (register_tts_provider / register_transcription_pr
 dispatch_tool, inject_message), and the optional future **hal0-context**
 (register_context_engine).
 
-Signatures copied verbatim from the reviewed official pin
-``4d04303818b61bf3aa09278af48356315515965b`` (``hermes_cli/plugins.py``,
-Hermes v0.22.4; read with ``inspect.signature`` in a v0.22.4 venv, identical
-to v0.22.2 for every seam frozen here).
+Signatures copied from the reviewed official pin
+``caafe5389ae585ef77387a962aee05b1bcf17029`` (Hermes v0.23.3). ``PluginContext``
+moved out of ``hermes_cli/plugins.py`` into ``hermes_cli/plugins_context.py:38``
+(``plugins.py`` still re-exports it). Read from the source at that ref, not
+from a built venv; every seam frozen here was compared with the v0.22.4 source
+(``4d043038``) definition by definition.
 ``register(ctx)`` is called once at startup; a registration crash disables
 only that plugin (per the design's "every adapter degrades independently"
 requirement).
 
 What changed since 0.19.0: most ``register_*`` methods now return a
-``PluginRegistration`` handle (``hermes_cli/plugins_ledger.py:29``) so a forced
+``PluginRegistration`` handle (``hermes_cli/plugins_ledger.py:28``) so a forced
 reload can unwind them; ``inject_message`` gained keyword-only ``session_key``
-and ``origin``; ``register_auxiliary_task`` gained ``inherit_from``; the voice
-registrars are generated from ``_SCOPED_PROVIDER_REGISTRARS``
-(``plugins.py:1050-1060``); and the general context gained an inert
-``register_memory_provider`` (see ``memory_loader.py``).
+and ``origin``; ``register_auxiliary_task`` gained ``inherit_from``; and the
+general context gained an inert ``register_memory_provider`` (see
+``memory_loader.py``).
+
+What changed at v0.23.3: ``register_hook`` gained keyword-only ``hold_stream``
+(``plugins_context.py:753``, default ``False``, so a two-argument call is
+unchanged). The voice registrars are spelled out on the class
+(``plugins_context.py:877-883``) instead of being generated from
+``_SCOPED_PROVIDER_REGISTRARS``; they still return the registration handle but
+no longer annotate it. Everything else frozen here is unchanged.
 """
 
 # ruff: noqa: UP035, UP045
@@ -36,7 +44,7 @@ from typing import Any, Callable, Optional
 
 @dataclass
 class PluginRegistration:
-    """One host-owned registration plus its inverse (plugins_ledger.py:29-36)."""
+    """One host-owned registration plus its inverse (plugins_ledger.py:28-36)."""
 
     kind: str
     key: str
@@ -81,10 +89,10 @@ class PluginContext:
     def register_memory_provider(self, provider) -> None:
         pass
 
-    def register_tts_provider(self, provider) -> Optional[PluginRegistration]:
+    def register_tts_provider(self, provider):
         return None
 
-    def register_transcription_provider(self, provider) -> Optional[PluginRegistration]:
+    def register_transcription_provider(self, provider):
         return None
 
     def register_platform(
@@ -111,5 +119,7 @@ class PluginContext:
     ) -> PluginRegistration:
         raise NotImplementedError
 
-    def register_hook(self, hook_name: str, callback: Callable) -> PluginRegistration:
+    def register_hook(
+        self, hook_name: str, callback: Callable, *, hold_stream: bool = False
+    ) -> PluginRegistration:
         raise NotImplementedError

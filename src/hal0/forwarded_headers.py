@@ -31,10 +31,10 @@ What is on the list, and why:
 ``x-hermes-session-id``, ``x-hermes-session-key``
     Hermes protocol selectors, named in its capabilities table as
     ``session_continuity_header`` and ``session_key_header`` (Hermes
-    ``gateway/platforms/api_server.py:75-76`` at ``4d043038``).
+    ``gateway/platforms/api_server.py:56-57`` at ``caafe538``).
     ``X-Hermes-Session-Id`` on ``POST /v1/chat/completions`` continues an
     existing session, reading its history from ``state.db`` rather than the
-    body (``api_server_openai_routes.py:842-853``). ``X-Hermes-Session-Key``
+    body (``api_server_openai_routes.py:895-905``). ``X-Hermes-Session-Key``
     scopes long-term memory per channel, independent of the session id (same
     lines). Hermes validates the key's shape and accepts it only when API-key
     auth is configured (``api_server.py:1756-1767``). Neither is a credential:

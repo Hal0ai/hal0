@@ -921,11 +921,13 @@ HERMES_REQUIREMENTS = (
 # adding it here AND refreshing the contract fixtures under
 # ``tests/fixtures/hermes/contracts/`` +
 # ``tests/agents/hermes/test_contract_compatibility.py``.
-# v0.22.4 (``4d043038``) is the pin; v0.22.2 (``d923a5eb``, ADR-0034 decision 8)
-# stays vetted so a flip-back to the previous release and a box still on it keep
-# building. A pre-release tag (``rc.*`` / ``+canary.*``) is never vetted.
+# v0.23.3 (``caafe538``) is the pin; v0.22.4 (``4d043038``) and v0.22.2
+# (``d923a5eb``, ADR-0034 decision 8) stay vetted so a flip-back to the previous
+# release and a box still on one of them keep building. A pre-release tag
+# (``rc.*`` / ``+canary.*``) is never vetted.
 VETTED_HERMES_REFS: frozenset[str] = frozenset(
     {
+        "caafe5389ae585ef77387a962aee05b1bcf17029",
         "4d04303818b61bf3aa09278af48356315515965b",
         "d923a5eb487a17c0a68801bba9ef0f56c81040a8",
     }
@@ -937,9 +939,13 @@ VETTED_HERMES_REFS: frozenset[str] = frozenset(
 #: downgrade, and hal0's release switch snapshots only ``config.yaml``, so the
 #: persisted gateway runtime state (session guards, policy receipts) would run
 #: under a release that predates it (upstream #140060; manual rollback is
-#: deferred to #2805). The automatic flip-back after a failed activation is
+#: deferred to #2805). v0.23.3 moves ``state.db`` to schema 33 and
+#: ``config.yaml`` to ``_config_version`` 54, and neither stamp ever goes back
+#: (``persistence/sqlite/_schema_ddl.py:74``, ``hermes_cli/config_defaults.py:2666``
+#: at ``caafe538``). The automatic flip-back after a failed activation is
 #: not a build and is unaffected.
 VETTED_HERMES_VERSIONS: dict[str, tuple[int, int, int]] = {
+    "caafe5389ae585ef77387a962aee05b1bcf17029": (0, 23, 3),
     "4d04303818b61bf3aa09278af48356315515965b": (0, 22, 4),
     "d923a5eb487a17c0a68801bba9ef0f56c81040a8": (0, 22, 2),
 }
@@ -949,6 +955,8 @@ VETTED_HERMES_VERSIONS: dict[str, tuple[int, int, int]] = {
 #: exists (the build trigger, the root prelude). The build re-reads it from
 #: the checkout and fails on a mismatch.
 VETTED_HERMES_REQUIRES_PYTHON: dict[str, str] = {
+    # NousResearch/hermes-agent caafe538 (v0.23.3), pyproject.toml:15.
+    "caafe5389ae585ef77387a962aee05b1bcf17029": ">=3.11,<3.15",
     # NousResearch/hermes-agent 4d043038 (v0.22.4), pyproject.toml:15.
     "4d04303818b61bf3aa09278af48356315515965b": ">=3.11,<3.15",
     # NousResearch/hermes-agent d923a5eb (v0.22.2), pyproject.toml:15.
@@ -1412,10 +1420,10 @@ def _phase_home_init(ctx: _StepCtx) -> PhaseResult:
 
 KANBAN_DB_NAME = "kanban.db"
 
-# The table set hermes's own SCHEMA_SQL creates (hermes_cli/kanban_db.py:776-982
-# at the pinned ref 4d043038 / v0.22.4; the same seven tables since 0.18.2).
-# ``init_db`` itself moved to hermes_cli/kanban_db_connect.py:804 and is
-# re-exported from hermes_cli.kanban_db (kanban_db.py:4218-4222), so the import
+# The table set hermes's own SCHEMA_SQL creates (hermes_cli/kanban_db.py:776-983
+# at the pinned ref caafe538 / v0.23.3; the same seven tables since 0.18.2).
+# ``init_db`` itself lives in hermes_cli/kanban_db_connect.py:803 and is
+# re-exported from hermes_cli.kanban_db (kanban_db.py:4208-4212), so the import
 # below is unchanged.
 # Used ONLY as a cheap existence probe for the convergent skip — never as a
 # CREATE statement source, so a future upstream migration can add columns or
@@ -1826,37 +1834,43 @@ HAL0_CONFIG_LIST_KEYS: dict[str, Any] = {
 # explicit opt-in now (default OFF).
 #
 # There is no sandboxed middle ground on this appliance: the pinned Hermes'
-# other backends are `docker | singularity | modal | daytona | ssh` — the box
-# ships podman (no docker) and no singularity, modal/daytona are paid cloud
-# services, and a containerised shell could not reach the host or
+# other backends are `docker | modal | daytona | vercel_sandbox | ssh`
+# (tools/terminal_tool_backends.py:276-278; singularity is a catalog plugin
+# from v0.23.0) — the box ships podman (no docker), the hosted ones are paid
+# cloud services, and a containerised shell could not reach the host or
 # 127.0.0.1:8080, which is precisely what the bundled host-management skills
 # need. So the choice is on/off, not local/sandboxed.
 #
-# HOW "off" IS EXPRESSED (re-verified against the pinned v0.22.4, 4d043038):
+# HOW "off" IS EXPRESSED (re-verified against the pinned v0.23.3, caafe538):
 # dropping ``terminal.backend`` does NOT disable anything — DEFAULT_CONFIG
-# still carries ``terminal.backend: local`` (hermes_cli/config_defaults.py:298)
+# still carries ``terminal.backend: local`` (hermes_cli/config_defaults.py:286)
 # and ``config set`` bridges terminal keys to TERMINAL_ENV. What removes the
 # tool from the model-facing schema is ``agent.disabled_toolsets``:
 # model_tools._select_tool_names subtracts it LAST, after toolset resolution
-# (model_tools.py:332-337), so a composite bundle (``toolsets: [hermes-cli]``,
+# (model_tools.py:333-355), so a composite bundle (``toolsets: [hermes-cli]``,
 # the default hal0 runs with) cannot re-add a disabled toolset's tools, and
 # the API server's per-platform toolsets apply it as a global suppression
-# list too (hermes_cli/tools_config.py:643-649). ``terminal`` resolves to
-# ``terminal`` + ``process_manage`` (toolsets.py:102); ``code_execution``
-# resolves to ``execute_code`` (toolsets.py:155), which runs arbitrary Python
+# list too (hermes_cli/tools_config.py:640-646). ``terminal`` resolves to
+# ``terminal`` + ``process_manage`` (toolsets.py:98); ``code_execution``
+# resolves to ``execute_code`` (toolsets.py:151), which runs arbitrary Python
 # as the same user — disabling one without the other would leave the shell
-# reachable by another name.
+# reachable by another name. From v0.23.0 the ten ``browser_*`` tools are gone
+# and ``browser_exec`` (host Python over CDP) is the one browser tool; Hermes
+# offers it only to a session that has the ``terminal`` tool
+# (model_tools.py:395-399), so it follows the same posture.
 #
-# WHY THE SUBTRACTION IS NOT ENOUGH (#2878, v0.22.3+): the gateway-owned
-# preview-restart side agent is built with ``enabled_toolsets=['terminal',
-# 'file'], disabled_toolsets=None`` (gateway/session_tui_side.py:282-283 at
-# 4d043038), so ``agent.disabled_toolsets`` never reaches it. What every agent
+# WHY THE SUBTRACTION IS NOT ENOUGH (#2878, v0.22.3+, still so at v0.23.3): the
+# gateway-owned preview-restart side agent is built with
+# ``enabled_toolsets=['terminal', 'file'], disabled_toolsets=None``
+# (gateway/session_tui_side.py:292-293 at caafe538), so
+# ``agent.disabled_toolsets`` never reaches it. What every agent
 # in the process shares is the terminal tool's ``check_fn``
-# (``check_terminal_requirements``, tools/terminal_tool.py:1553): an unknown
-# ``terminal.backend`` fails it (tools/terminal_tool_backends.py:385-393) and
+# (``check_terminal_requirements``, tools/terminal_tool.py:1707): an unknown
+# ``terminal.backend`` fails it (tools/terminal_tool_backends.py:413-422) and
 # ``terminal`` + ``process_manage`` are dropped from every model-facing schema,
 # side agents included. A served profile gets its own ``terminal:`` section
-# through ``install_and_reset_profile_terminal_scope`` (gateway/run.py:1829), so
+# through the profile's terminal scope (``_profile_runtime_scope``,
+# gateway/run.py:1782-1795; ``tools/terminal_scope.py:169``), so
 # the sentinel lands in every profile hal0 writes. Hermes logs the rejection at
 # ERROR ("Unknown TERMINAL_ENV 'hal0-terminal-off' …", TTL-cached 30 s), which
 # is the price of a gate upstream gives no switch for; the name says who set it.
@@ -2566,7 +2580,8 @@ def _build_config_overlay(
     ]
     if live_resolve_enabled:
         # hermes's picker only runs /v1/models discovery when an api_key is
-        # present; the gateway ignores the value (it's unauthenticated).
+        # present; the gateway ignores the value (it's unauthenticated). The
+        # key itself is layered by :func:`_discovery_key_layer`, not set here.
         #
         # extra_headers is forwarded by hermes onto the discovery GET, so we
         # tag it with X-hal0-Model-Filter: hal0 (#1148) — the gateway then
@@ -2576,7 +2591,6 @@ def _build_config_overlay(
         # explicit remote id is unaffected. Same nested-scalar `config set`
         # mechanism as mcp_servers.<name>.headers.X-hal0-Agent below.
         pairs += [
-            ("providers.custom.api_key", "hal0-local"),
             ("providers.custom.discover_models", True),
             ("providers.custom.extra_headers.X-hal0-Model-Filter", "hal0"),
         ]
@@ -3487,6 +3501,7 @@ RETIRED_HAL0_CONFIG_KEYS: tuple[str, ...] = (
     "agent.system_prompt_prelude",
     "auxiliary.web_extract",
     "auxiliary.session_search",
+    "auxiliary.skills_hub",
 )
 
 
@@ -3707,18 +3722,44 @@ def _layer_state_hook_onto(base: dict[str, Any], layers: dict[str, Any]) -> dict
     }
 
 
+#: ``providers.custom.api_key`` under live-resolve. Not a credential: the hal0
+#: gateway is unauthenticated on loopback, and Hermes's picker only runs
+#: ``/v1/models`` discovery when the entry has some key.
+DISCOVERY_API_KEY = "hal0-local"
+
+
+def _discovery_key_layer(live_resolve_enabled: bool) -> dict[str, Any]:
+    """``providers.custom.api_key`` as a YAML layer for :func:`_merge_config_yaml_layers`.
+
+    It goes through the YAML merge, not ``hermes config set``: from v0.23.0
+    ``config set`` treats ``providers.<name>.api_key`` as a credential, saves
+    the value to ``$HERMES_HOME/.env`` as ``HERMES_PROVIDER_<NAME>_<HASH>_API_KEY``
+    and writes a ``${...}`` reference into ``config.yaml``
+    (``hermes_cli/config_secret_refs.py:295-330`` at ``caafe538``). The value is
+    a placeholder, and the only thing hal0 writes into that ``.env`` is the
+    mirrored ``API_SERVER_KEY`` (:func:`hal0.agents.hermes_api.ensure_default_key`),
+    so the literal stays in ``config.yaml``, where every Hermes release hal0
+    has pinned reads it and a flip-back needs nothing from ``.env``. ``{}``
+    with live-resolve off, as before.
+    """
+    if not live_resolve_enabled:
+        return {}
+    return {"providers": {"custom": {"api_key": DISCOVERY_API_KEY}}}
+
+
 def _persona_prompt_layer(system_prompt: str) -> dict[str, Any]:
     """The active persona's prompt as a YAML layer for :func:`_merge_config_yaml_layers` (#2839).
 
     ``agent.system_prompt`` is the overlay Hermes resolves into each
-    session's ephemeral system prompt (hermes_cli/personality.py:118-123 at
-    the pinned 4d043038, unchanged since d923a5eb), read by the CLI, the TUI
+    session's ephemeral system prompt (hermes_cli/personality.py:118-124 at
+    the pinned caafe538, unchanged since d923a5eb), read by the CLI, the TUI
     gateway behind the dashboard chat, and the messaging gateway. ``display.personality`` is
     left to the operator: a known personality named there overlays this
     prompt, which is Hermes's own ``/personality`` behaviour.
 
     It goes through the YAML merge, not ``hermes config set``: from v0.22.2
-    (still at v0.22.4) ``config set`` refuses a value that "looks like a list/mapping", and the
+    (still at v0.23.3, ``hermes_cli/config.py:2974``) ``config set`` refuses a
+    value that "looks like a list/mapping", and the
     persona addendum's ``- hal0-admin: …`` lines do, so the write failed
     (non-fatally) and the prompt never landed. ``{}`` when there is no
     prompt, so an existing value is left alone.
@@ -4094,7 +4135,10 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
                     ),
                 ),
                 _deep_merge(
-                    _persona_prompt_layer(system_prompt),
+                    _deep_merge(
+                        _persona_prompt_layer(system_prompt),
+                        _discovery_key_layer(live_resolve_enabled),
+                    ),
                     # The identity key (#3569), layered here and never through
                     # ``hermes config set`` argv. Computed from the file as it is
                     # now, after the config-set calls named the agent.
@@ -7670,6 +7714,9 @@ def _collect_chat_slots(
 # leftover ``auxiliary.<task>`` block for them
 # (hermes_cli/config_defaults.py:760, :776 at d923a5eb), so hal0 no longer
 # writes either; :data:`RETIRED_HAL0_CONFIG_KEYS` removes the old blocks.
+# v0.23.3 did the same to skills_hub (config_defaults.py:747 at caafe538;
+# nothing in that tree reads the task), so it left this list too. A box that
+# flips back to v0.22.4 runs that task on its default route, the main model.
 
 # The hal0-routed side-tasks (everything that should run on the cheap
 # `utility` slot). vision is intentionally excluded — it keeps an empty
@@ -7678,7 +7725,6 @@ def _collect_chat_slots(
 _UTILITY_AUX_TASKS: tuple[str, ...] = (
     "compression",
     "title_generation",
-    "skills_hub",
     "mcp",
 )
 
@@ -7822,7 +7868,6 @@ def _resolve_auxiliary_tasks(
         "vision": "vision",
         "compression": "compression",
         "title_generation": "compression",
-        "skills_hub": "skills_hub",
         "mcp": "mcp",
     }
     tasks: dict[str, dict[str, Any]] = {}
@@ -9137,8 +9182,8 @@ _HERMES_DOCTOR_ISSUE_RE = re.compile(r"^\s*\d+\.\s+(?P<issue>\S.*?)\s*$")
 def _hermes_doctor_issues(stdout: str) -> list[str] | None:
     """The issues `hermes doctor` listed in its summary, or None when it printed none.
 
-    At the v0.22.4 pin `hermes doctor` exits 1 exactly when that list is
-    non-empty (doctor.py `run_doctor`). None means the summary is missing,
+    At the v0.23.3 pin `hermes doctor` exits 1 exactly when that list is
+    non-empty (doctor.py `run_doctor`, :176-200). None means the summary is missing,
     unrecognised, or holds a different number of entries than its own count,
     which the caller treats as a failure.
     """
@@ -9164,9 +9209,9 @@ def _smoke_hermes_doctor(_state: BootstrapState, io: InstallIO) -> tuple[bool, s
     venv_hermes = _venv_python(Path(_state.venv)).parent / "hermes"
     if not venv_hermes.exists():
         return (False, f"hermes binary missing at {venv_hermes}")
-    # Never cold-loads a slot: at the v0.22.4 pin plain `hermes doctor` only GETs
+    # Never cold-loads a slot: at the v0.23.3 pin plain `hermes doctor` only GETs
     # .../models; real model calls need `--live` (hermes_cli/doctor_live.py
-    # maybe_run_live_checks, doctor.py ~:189-192), which this never passes.
+    # maybe_run_live_checks, doctor.py :196-198), which this never passes.
     try:
         result = io.run(  # nosec B603 — known-safe argv
             [str(venv_hermes), "doctor"],

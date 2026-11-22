@@ -951,12 +951,14 @@ def test_the_resolver_targets_the_minor_it_is_given(tmp_path: Path) -> None:
 
 
 def test_the_pinned_ref_targets_314() -> None:
-    """v0.22.4 (4d043038) declares requires-python ">=3.11,<3.15" (its
-    pyproject.toml:15), as v0.22.2 (d923a5eb) did, so the shipped pin keeps
-    hosts on 3.14 and the v0.22.2 flip-back target builds on the same minor."""
+    """v0.23.3 (caafe538) declares requires-python ">=3.11,<3.15" (its
+    pyproject.toml:15), as v0.22.4 (4d043038) and v0.22.2 (d923a5eb) did, so
+    the shipped pin keeps hosts on 3.14 and both flip-back targets build on the
+    same minor."""
     assert hp.pinned_target_minor() == "3.14"
     assert set(hp.VETTED_HERMES_REQUIRES_PYTHON) == set(hp.VETTED_HERMES_REFS)
     for ref in (
+        "caafe5389ae585ef77387a962aee05b1bcf17029",
         "4d04303818b61bf3aa09278af48356315515965b",
         "d923a5eb487a17c0a68801bba9ef0f56c81040a8",
     ):
@@ -1384,10 +1386,15 @@ def test_shipped_requirement_is_the_vetted_commit_pin() -> None:
         # Vetted commit pin — the production posture.
         (
             "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
+            "caafe5389ae585ef77387a962aee05b1bcf17029",
+            True,
+        ),
+        # The previous pins stay vetted (flip-back, boxes not yet updated).
+        (
+            "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
             "4d04303818b61bf3aa09278af48356315515965b",
             True,
         ),
-        # The previous pin stays vetted (flip-back, boxes not yet updated).
         (
             "hermes-agent[web] @ git+https://github.com/NousResearch/hermes-agent.git@"
             "d923a5eb487a17c0a68801bba9ef0f56c81040a8",
@@ -1436,9 +1443,9 @@ def test_version_pin_reports_commit_ref_without_crashing(monkeypatch, tmp_path) 
         monkeypatch,
         tmp_path,
         "# comment\nhermes-agent[web] @ git+https://github.com/NousResearch/"
-        "hermes-agent.git@4d04303818b61bf3aa09278af48356315515965b\n",
+        "hermes-agent.git@caafe5389ae585ef77387a962aee05b1bcf17029\n",
     )
-    assert pin == "4d04303818b6"
+    assert pin == "caafe5389ae5"
 
 
 def test_version_pin_reports_exact_floored_and_unknown_forms(monkeypatch, tmp_path) -> None:
@@ -2051,7 +2058,7 @@ def test_read_delegation_slot(tmp_path) -> None:
 def test_resolve_auxiliary_tasks_routes_utility_group_to_utility_slot() -> None:
     aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
     # Utility group → custom provider on the utility slot's model.
-    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+    for task in ("compression", "title_generation", "mcp"):
         assert aux[task] == {
             "provider": "custom",
             "model": "qwen3-zero-coder-v2-0.8b-f16",
@@ -2086,7 +2093,7 @@ def test_resolve_auxiliary_tasks_shared_mode_uses_main_even_with_npu() -> None:
         },
     ]
     aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="agent")
-    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+    for task in ("compression", "title_generation", "mcp"):
         assert aux[task] == {
             "provider": "custom",
             "model": "",
@@ -2106,7 +2113,7 @@ def test_resolve_auxiliary_tasks_uses_bound_memory_when_cold() -> None:
     ]
     dedicated = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="memory")
     shared = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="agent")
-    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+    for task in ("compression", "title_generation", "mcp"):
         assert dedicated[task]["model"] == "hal0/memory"
         assert shared[task]["model"] == ""
 
@@ -2129,7 +2136,7 @@ def test_resolve_auxiliary_tasks_memory_lane_uses_the_slot_name() -> None:
     ]
     aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="memory")
 
-    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+    for task in ("compression", "title_generation", "mcp"):
         assert aux[task]["model"] == "hal0/memory"
 
 
@@ -2159,7 +2166,7 @@ def test_resolve_auxiliary_tasks_keeps_the_npu_lane_when_memory_is_unbound() -> 
     ]
     aux = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="memory")
 
-    for task in ("compression", "title_generation", "skills_hub", "mcp"):
+    for task in ("compression", "title_generation", "mcp"):
         assert aux[task]["model"] == "hal0/npu"
 
 
@@ -2415,6 +2422,41 @@ def test_config_write_phase_writes_yaml_idempotently(
     assert out2.status == hp.PhaseStatus.OK
     assert out2.details["list_merge_changed"] is False
     assert out2.hash == first_hash
+
+
+@pytest.mark.parametrize("live_resolve", [True, False])
+def test_config_write_layers_the_discovery_key_in_yaml(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, live_resolve: bool
+) -> None:
+    """The picker's placeholder key is written by the YAML merge, never by
+    ``hermes config set``: Hermes v0.23.3 would move it into ``.env`` and leave
+    a ``${...}`` reference (config_secret_refs.py:295-330 at caafe538)."""
+    import yaml
+
+    state = hp.BootstrapState(hermes_home=str(tmp_path / "hh"))
+    monkeypatch.setattr(
+        hp,
+        "_resolve_primary_slot",
+        lambda **_kwargs: {"model": "p", "base_url": "u", "context_length": 8000},
+    )
+    monkeypatch.setattr(hp, "OVERRIDES_PATH", tmp_path / "no-such-overrides.yaml")
+    monkeypatch.setattr(hp, "_live_resolve_enabled", lambda: live_resolve)
+    from hal0.agents import personas as _personas
+
+    monkeypatch.setattr(_personas, "PERSONAS_ROOT", tmp_path / "personas-empty")
+    calls: list[list[str]] = []
+    io = hp.InstallIO(
+        fetch_slots=lambda: [], fetch_model_contexts=lambda: {}, run=fake_hermes_run(calls)
+    )
+    out = hp._phase_config_write(hp._StepCtx(state=state, io=io))
+    assert out.status == hp.PhaseStatus.OK
+    custom = yaml.safe_load(Path(out.details["config_path"]).read_text(encoding="utf-8"))[
+        "providers"
+    ]["custom"]
+    assert custom.get("api_key") == ("hal0-local" if live_resolve else None)
+    set_keys = [argv[3] for argv in calls if argv[1:3] == ["config", "set"]]
+    assert set_keys, "the phase applied no config-set pairs"
+    assert not [key for key in set_keys if key.endswith("api_key")]
 
 
 @pytest.mark.parametrize("remaining_name", [None, "renamed"])
@@ -6749,7 +6791,7 @@ def test_install_phase_rebuilds_the_update_target_override_not_the_pin(
     monkeypatch.setattr(
         hp, "HERMES_CLI_INSTALL_PATH", tmp_path / "usr" / "local" / "bin" / "hermes"
     )
-    prev = "d923a5eb487a17c0a68801bba9ef0f56c81040a8"
+    prev = "4d04303818b61bf3aa09278af48356315515965b"
     hermes_arm.override_path().parent.mkdir(parents=True, exist_ok=True)
     hermes_arm.override_path().write_text(prev + "\n", encoding="utf-8")
     state = hp.BootstrapState(venv=str(tmp_path / "venv"), hermes_home=str(tmp_path / "h"))
@@ -6761,7 +6803,7 @@ def test_install_phase_rebuilds_the_update_target_override_not_the_pin(
     # An override this release no longer vets fails the step instead of building the pin.
     calls.clear()
     monkeypatch.setattr(
-        hp, "VETTED_HERMES_REFS", frozenset({"4d04303818b61bf3aa09278af48356315515965b"})
+        hp, "VETTED_HERMES_REFS", frozenset({"caafe5389ae585ef77387a962aee05b1bcf17029"})
     )
     out = hp._phase_install(
         hp._StepCtx(state=state, io=hp.InstallIO(ensure_release=fake_ensure_release(calls)))

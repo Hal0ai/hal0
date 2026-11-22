@@ -5,8 +5,9 @@
 Adapter lane: **hal0-voice** (routes Hermes STT/TTS through active hal0 slots).
 
 Two seams from the reviewed official pin
-``4d04303818b61bf3aa09278af48356315515965b`` (Hermes v0.22.4; the voice
-registries and ``hermes_cli/voice.py`` are unchanged since v0.22.2):
+``caafe5389ae585ef77387a962aee05b1bcf17029`` (Hermes v0.23.3; the two voice
+registries still export ``register_provider`` from the shared
+``agent.provider_registry.ProviderRegistry``, ``provider_registry.py:172``):
 
 1. The **command-provider** config path (initial hal0-voice implementation):
    generated ``tts`` / ``stt`` config selecting stable hal0 wrapper commands.
