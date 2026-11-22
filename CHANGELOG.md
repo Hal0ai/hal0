@@ -30,6 +30,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **`hal0 doctor perms` accepts both upgraded and fresh Hermes state directories.** The `state/agents/hermes` audit accepts `0755` and `2755`; `--fix` preserves the directory's existing setgid bit while still repairing ownership, ordinary permission bits and the `0644` report/stamp files. (#3888)
+
 ## [1.8.0] — 2026-11-20
 
 ### Highlights
