@@ -458,9 +458,11 @@ under "Left for a live box" and is a release-lane item.
   (`pyproject.toml:15`) and the lock still serves Python 3.14 only. hal0's own
   uv exports the v0.23.3 lock with `--frozen --extra web --extra mcp --extra
   acp` (89 hashed packages); the platform extras and `anthropic` export too.
-  The lazy-install path is the one ADR-0034 already describes: a provider SDK
-  Hermes installs at first use lands in a pm generation under
-  `HERMES_HOME/installs/<key>/`, and the next rebuild carries it.
+  The lazy-install record hal0 reads is unchanged: a provider SDK Hermes
+  installs at first use lands in a pm generation under
+  `HERMES_HOME/installs/<key>/`, recorded in that directory's `facts.json`
+  (`pm/environments.py:20-22`, `:308-324`, `pm/lock.py:299-301`), and the
+  next rebuild carries its extras.
 - Decision 4: `hermes_cli.main._build_web_ui` still builds the dashboard
   (`hermes_cli/main_web_build.py:177`). Underneath, the build now fetches its
   Node packages with pnpm instead of npm, through upstream's own package
@@ -585,8 +587,8 @@ tool's `check_fn` for every agent in the process
 its own terminal policy from its own config (`gateway/run.py:1782-1795`,
 `tools/terminal_scope.py:169`). The acceptance recorded on #2878 is unchanged.
 
-**Left for a live box.** A fresh build and an upgrade from v0.22.4; both hal0
-plugins loading; a chat turn, a tool turn and a bridge run; the Operator
+**Left for a live box.** A fresh build (the dashboard build with pnpm
+included) and an upgrade from v0.22.4; both hal0 plugins loading; a chat turn, a tool turn and a bridge run; the Operator
 Board's live events; the tool roster of a terminal-off box; the flip-back.
 `tests/release-validation/lanes/readonly/hermes.md` items 18, 25 and 30 to 34
 and `stateful/hermes-e2e.md` items 32 to 35 are the checks.
