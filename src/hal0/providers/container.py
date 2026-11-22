@@ -2218,7 +2218,10 @@ class ContainerProvider(Provider):
         FLM containers have no /health endpoint — they return 404 there.
         When /health returns a non-connection error (e.g. 404), fall back to
         GET /v1/models; 200 there means the server is up and healthy.
-        Connection-refused / timeout are always unhealthy (no fallback).
+        Connection-refused / timeout are always unhealthy (no fallback). A read
+        timeout (accepted, then no answer) is reported as ``"stalled"``, still
+        not ``ok``: a busy server answers late, a dead one does not accept
+        (#3752). The fail-watcher judges a stall on its ceiling, not on strikes.
 
         Halogen delegation: its own :meth:`~hal0.providers.halogen.HalogenProvider.liveness`,
         where a read timeout is a stall and not a death, so a silent engine is
@@ -2268,6 +2271,15 @@ class ContainerProvider(Provider):
                     "ok": ok,
                     "status": "healthy" if ok else f"http_{models_resp.status_code}",
                 }
+        except httpx.ReadTimeout as exc:
+            # #3752: accepted, then no answer inside the budget. That is what a
+            # llama-server busy with real traffic does (its HTTP workers are all
+            # held by in-flight requests), not what a dead one does: a dead
+            # server refuses or drops the connection. Report it as the stall the
+            # fail-watcher already judges on its ceiling (#3282), with ``ok``
+            # still False so every caller that reads only ``ok`` (wait_ready,
+            # the readiness gate) keeps waiting for a real answer.
+            return {"ok": False, "status": "stalled", "detail": str(exc) or "ReadTimeout"}
         except httpx.TransportError as exc:
             # TransportError is the base class for ConnectError,
             # TimeoutException, ReadError, WriteError, etc. — every failure

@@ -971,7 +971,9 @@ class FLMProvider(Provider):
         Distinguishes "up but still loading" (``ok=False``,
         ``models_endpoint_empty``) from "up and serving a model"
         (``ok=True``). Transport errors surface as ``ok=False`` /
-        ``http_error`` so the manager's strike-based fail-watcher can act.
+        ``http_error`` so the manager's strike-based fail-watcher can act; a
+        read timeout is ``ok=False`` / ``stalled`` (#3752), which it judges on
+        the stall ceiling instead.
 
         Returns {"ok": bool, "status": str, "model": str|None, ...}.
         """
@@ -990,6 +992,12 @@ class FLMProvider(Provider):
                     }
                 model_id = models[0].get("id")
             return {"ok": True, "status": "ready", "model": model_id}
+        except httpx.ReadTimeout as exc:
+            # #3752: accepted, then no answer. FLM serialises the single NPU
+            # context, so a busy container answers late; a dead one refuses.
+            # ``stalled`` is judged on the fail-watcher's stall ceiling; ``ok``
+            # stays False for the callers that only read it (the ASR gate).
+            return {"ok": False, "status": "stalled", "detail": str(exc) or "ReadTimeout"}
         except httpx.HTTPError as exc:
             return {"ok": False, "status": "http_error", "detail": str(exc)}
         except Exception as exc:
