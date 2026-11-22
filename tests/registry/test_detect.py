@@ -28,6 +28,8 @@ HALOGEN_COMPANION_NAMES = (
     "qwen38-flash-next-vision.hgn",
     "qwen38-flash-next-mtp.hgn",
     "qwen38-flash-next-ht43.overlay.hgn",
+    "qwen38-flash-next-drafter-r2.hgn",
+    "qwen38-flash-next-drafter-r2-ht4.hgn",
 )
 
 
@@ -492,6 +494,8 @@ class TestHalogenHgn:
             "-vision.hgn",
             "-mtp.hgn",
             ".overlay.hgn",
+            "-drafter-r2.hgn",
+            "-drafter-r2-ht4.hgn",
         )
 
     def test_hgn_suffix_without_magic_is_low_confidence_halogen(self, tmp_path: Path) -> None:

@@ -53,7 +53,7 @@ Detection strategy, cheapest first:
    degrades to a low-confidence ``halogen`` guess, unless the file holds a GGUF
    header, which makes it a GGUF. The
    files the engine finds beside a checkpoint by name (the ngram lookup
-   table, vision sidecar, mtp draft head and ``*.overlay.hgn``) are
+   table, vision sidecar, mtp and drafter draft heads and ``*.overlay.hgn``) are
    companions, never models: they detect as ``unknown`` with
    ``raw_hints["halogen_companion"]``.
 """
@@ -82,13 +82,17 @@ _GGUF_BACKENDS: list[str] = ["vulkan", "rocm", "cuda", "cpu"]
 HGN_MAGIC = b"HGN1"
 
 #: Name suffixes of the files the halogen engine finds beside a checkpoint by
-#: name: the ngram lookup table, the vision sidecar, the mtp draft head and
-#: ``*.overlay.hgn``. They carry the ``HGN1`` magic too but are never models.
+#: name: the ngram lookup table, the vision sidecar, the mtp draft head,
+#: ``*.overlay.hgn`` and the ``-drafter-r2`` draft heads (0.20.6's and 0.20.7's
+#: ``-ht4`` file, the exact names upstream ships). They carry the ``HGN1`` magic
+#: too but are never models.
 HALOGEN_COMPANION_SUFFIXES: tuple[str, ...] = (
     "-ngram.hgn",
     "-vision.hgn",
     "-mtp.hgn",
     ".overlay.hgn",
+    "-drafter-r2.hgn",
+    "-drafter-r2-ht4.hgn",
 )
 
 #: The vision sidecar by its exact file name: the one the engine's entrypoint
