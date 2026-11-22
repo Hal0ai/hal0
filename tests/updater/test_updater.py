@@ -2980,14 +2980,23 @@ def test_nightly_box_on_latest_nightly_sees_no_update() -> None:
     assert _is_newer("1.1.0-nightly.20260901025155", "1.1.0-nightly.20260901025155") is False
 
 
-def test_stable_release_is_newer_than_nightly_of_same_base() -> None:
-    # #3893: a box on 1.8.0-nightly.<stamp> must be offered stable 1.8.0.
+def test_same_base_nightly_and_stable_are_offered_across_channels() -> None:
+    # #3893: a box on 1.8.0-nightly.<stamp> that selects stable is offered 1.8.0.
     assert _is_newer("1.8.0", "1.8.0-nightly.20261120171000") is True
-    # A nightly of X is older than stable X, never newer.
-    assert _is_newer("1.8.0-nightly.20261120171000", "1.8.0") is False
-    # Later nightly still beats an earlier one; next-base stable beats a nightly.
+    # A stable 1.8.0 box that selects nightly is offered the nightlies cut after
+    # 1.8.0 shipped, which still carry the 1.8.0 base until the next release commit.
+    assert _is_newer("1.8.0-nightly.20261121135446", "1.8.0") is True
+    # Same kind on both sides: nothing to offer, and nightlies order by stamp.
+    assert _is_newer("1.8.0", "1.8.0") is False
     assert _is_newer("1.8.0-nightly.20261121000000", "1.8.0-nightly.20261120171000") is True
+    assert _is_newer("1.8.0-nightly.20261120171000", "1.8.0-nightly.20261121000000") is False
+
+
+def test_nightly_against_a_different_base_orders_by_base() -> None:
     assert _is_newer("1.8.1", "1.8.0-nightly.20261120171000") is True
+    assert _is_newer("1.8.1-nightly.20261122000000", "1.8.0") is True
+    assert _is_newer("1.8.0", "1.8.1-nightly.20261122000000") is False
+    assert _is_newer("1.7.1-nightly.20261102071057", "1.8.0") is False
 
 
 # ── release-tree lock (#3711) ──────────────────────────────────────────────────

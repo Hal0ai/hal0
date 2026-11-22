@@ -666,10 +666,24 @@ def _is_newer(candidate: str, current: str) -> bool:
     (see its docstring for why that fallback needs its own prerelease handling,
     not just a raw tuple compare).
     """
-    # A nightly ``X.Y.Z-nightly.<stamp>`` is cut before ``X.Y.Z`` ships, so it
-    # must order below stable ``X.Y.Z`` (as ``X.Y.Z.dev<stamp>``). Without this
-    # mapping it is not PEP 440, drops to the naive tuple key, and ties with
-    # (or beats) the same-base stable, so a nightly box is told it is up to date.
+    # The string ``X.Y.Z-nightly.<stamp>`` does not say whether the nightly was
+    # cut before or after stable ``X.Y.Z`` shipped: the nightly base comes from
+    # pyproject.toml, which keeps ``X.Y.Z`` until the next release commit, so
+    # both happen every cycle. Every caller compares the latest build of the
+    # box's selected channel against what is installed, so when the two share a
+    # base and exactly one is a nightly, the box is crossing channels and the
+    # channel's build is the one to offer. That covers a nightly box moving to
+    # stable ``X.Y.Z`` (#3893) and a stable box opting into the nightlies cut
+    # after ``X.Y.Z``; a box already on its channel's build is not offered
+    # anything, because both sides are then the same kind.
+    cand_nightly = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch((candidate or "").strip())
+    cur_nightly = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch((current or "").strip())
+    if bool(cand_nightly) != bool(cur_nightly):
+        nightly, other = (cand_nightly, current) if cand_nightly else (cur_nightly, candidate)
+        if nightly.group("base") == (other or "").strip().removeprefix("v"):
+            return True
+    # Two nightlies order by stamp, and a nightly against a different base
+    # orders by that base (``X.Y.Z.dev<stamp>`` is PEP 440; the raw form is not).
     candidate = floor_comparable_version(candidate)
     current = floor_comparable_version(current)
     try:
