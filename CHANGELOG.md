@@ -56,6 +56,7 @@ applying. Add those subsections to a version's section to surface them; see
 - **`hal0 update` marks release notes it had to shorten.** Release notes over 64 KiB (the 1.8.0 notes are about 103 KB) were cut mid-line with no sign that anything was missing. They are now cut at the end of a line and end with a note pointing at the full CHANGELOG at https://github.com/hal0ai/hal0/blob/main/CHANGELOG.md. (#3751)
 - **A box on a nightly is offered the stable release of the same version.** A box on `1.8.0-nightly.<stamp>` that switched to the stable channel was told it was up to date when 1.8.0 shipped, and stayed on its last nightly unless the operator passed `--target`. `hal0 update` now offers the selected channel's build when it and the installed build share a version and one of them is a nightly; a stable box that selects the nightly channel is still offered the nightlies. (#3893)
 - **`hal0 model scan` no longer registers a halogen draft head as a model.** Files named `*-drafter-r2.hgn` and `*-drafter-r2-ht4.hgn`, which newer halogen releases place beside a checkpoint, were registered as checkpoints of their own and accepted by `hal0 model add`. They are now treated as companions of the checkpoint. (#3920)
+- **`hal0 agent peers` lists each agent once.** The command printed one row per fact the memory search returned, so a single identity card could appear twice and be followed by blank rows. It now prints one row per card (#3877, #3930).
 
 ### Changed
 
