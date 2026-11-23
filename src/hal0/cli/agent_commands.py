@@ -2047,7 +2047,15 @@ def agent_peers() -> None:
         console.print("[dim]No agent identity cards published yet.[/dim]")
         return
 
-    table = Table(title=f"Agent peers ({len(items)})")
+    # A card is one memory document; search returns one hit per extracted fact.
+    cards: dict[Any, list[Any]] = {}
+    for index, item in enumerate(items):
+        key = None
+        if isinstance(item, dict):
+            key = item.get("document_id") or item.get("id")
+        cards.setdefault(key if key is not None else ("unkeyed", index), []).append(item)
+
+    table = Table(title=f"Agent peers ({len(cards)})")
     table.add_column("Agent ID", style="bold")
     table.add_column("Display name")
     table.add_column("Roles")
@@ -2093,8 +2101,19 @@ def agent_peers() -> None:
             return [parsed]
         return []
 
-    for item in items:
-        md = _as_dict(item.get("metadata")) if isinstance(item, dict) else {}
+    for hits in cards.values():
+        md: dict[str, Any] = {}
+        for item in hits:
+            if not isinstance(item, dict):
+                continue
+            # Only some facts of a card carry the card metadata; take each
+            # field from the first hit that has a value for it. Decode before
+            # that test: an encoded empty (`"[]"`, `"{}"`) is truthy as a
+            # string and would block a later populated value.
+            for field, value in _as_dict(item.get("metadata")).items():
+                value = _unflatten(value)
+                if not md.get(field):
+                    md[field] = value
         endpoint = _as_dict(md.get("endpoint"))
         hal0_state = _as_dict(md.get("hal0_state"))
         roles = _as_list(md.get("roles"))
