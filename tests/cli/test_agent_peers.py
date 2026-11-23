@@ -173,3 +173,102 @@ def test_peers_renders_normal_dict_shaped_cards(fake_urlopen) -> None:
     assert result.exit_code == 0, result.output
     assert "hermes-ct105" in result.output
     assert "2026-08-01" in result.output
+
+
+def _fact(document_id: str, fact_id: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    """One ``/api/memory/search`` hit: a fact inside an identity-card document."""
+    return {
+        "id": document_id,
+        "document_id": document_id,
+        "fact_id": fact_id,
+        "metadata": metadata or {},
+    }
+
+
+def test_peers_renders_one_row_per_card_not_per_fact(fake_urlopen) -> None:
+    """#3877: search returns one hit per extracted fact, and only some hits
+    carry the card metadata. A card must render once, fully populated — not
+    as a duplicated row plus rows of ``—``."""
+    card = {
+        "agent_id": "hermes",
+        "display_name": "Hermes",
+        "roles": ["chat"],
+        "endpoint": {"url": "http://192.0.2.151:9000"},
+        "hal0_state": {"registered_at": "2026-11-20T07:43:23Z"},
+    }
+    fake_urlopen(
+        {
+            "items": [
+                _fact("f964e0c2", "f1", card),
+                _fact("f964e0c2", "f2"),
+                _fact("f964e0c2", "f3"),
+                _fact("f964e0c2", "f4", {"agent_id": "hermes"}),
+                _fact("f964e0c2", "f5"),
+            ]
+        }
+    )
+
+    result = runner.invoke(agent_commands.app, ["peers"])
+
+    assert result.exit_code == 0, result.output
+    assert "Agent peers (1)" in result.output
+    assert result.output.count("hermes") == 1
+    assert "—" not in result.output
+
+
+def test_peers_takes_card_metadata_from_whichever_hit_carries_it(
+    fake_urlopen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The card fields are spread across different facts of the document; the
+    row must merge them instead of taking only the first hit's metadata."""
+    from rich.console import Console
+
+    monkeypatch.setattr(agent_commands, "console", Console(width=200))
+    fake_urlopen(
+        {
+            "items": [
+                _fact("card-a", "f1", {"agent_id": "badger", "display_name": "Badger"}),
+                _fact("card-a", "f2", {"endpoint": {"url": "http://192.0.2.7:9000"}}),
+                _fact(
+                    "card-a",
+                    "f3",
+                    {
+                        "roles": ["chat", "voice"],
+                        "hal0_state": {"registered_at": "2026-11-01T00:00:00Z"},
+                    },
+                ),
+            ]
+        }
+    )
+
+    result = runner.invoke(agent_commands.app, ["peers"])
+
+    assert result.exit_code == 0, result.output
+    assert "Agent peers (1)" in result.output
+    assert "http://192.0.2.7:9000" in result.output
+    assert "2026-11-01" in result.output
+    assert "chat, voice" in result.output
+
+
+def test_peers_header_counts_cards_not_facts(fake_urlopen) -> None:
+    """Three card documents — even with six facts between them — are three peers."""
+    fake_urlopen(
+        {
+            "items": [
+                _fact("doc-a", "a1", {"agent_id": "alpha"}),
+                _fact("doc-a", "a2"),
+                _fact("doc-b", "b1", {"agent_id": "beta"}),
+                _fact("doc-b", "b2"),
+                _fact("doc-b", "b3"),
+                _fact("doc-c", "c1", {"agent_id": "gamma"}),
+            ]
+        }
+    )
+
+    result = runner.invoke(agent_commands.app, ["peers"])
+
+    assert result.exit_code == 0, result.output
+    assert "Agent peers (3)" in result.output
+    assert result.output.count("alpha") == 1
+    assert result.output.count("beta") == 1
+    assert result.output.count("gamma") == 1
