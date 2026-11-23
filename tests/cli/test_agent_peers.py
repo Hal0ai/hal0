@@ -250,6 +250,51 @@ def test_peers_takes_card_metadata_from_whichever_hit_carries_it(
     assert "chat, voice" in result.output
 
 
+def test_peers_decodes_fields_before_taking_the_first_value(
+    fake_urlopen, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hit whose ``roles``/``endpoint`` are encoded empties (``"[]"``,
+    ``"{}"``) is truthy as a raw string; the later populated value must still
+    win, or the Roles and Endpoint cells degrade to ``—``."""
+    from rich.console import Console
+
+    monkeypatch.setattr(agent_commands, "console", Console(width=200))
+    fake_urlopen(
+        {
+            "items": [
+                _fact(
+                    "card-b",
+                    "f1",
+                    {
+                        "agent_id": "badger",
+                        "display_name": "Badger",
+                        "roles": json.dumps([]),
+                        "endpoint": json.dumps({}),
+                    },
+                ),
+                _fact(
+                    "card-b",
+                    "f2",
+                    {
+                        "roles": json.dumps(["chat", "voice"]),
+                        "endpoint": json.dumps({"url": "http://192.0.2.9:9000"}),
+                        "hal0_state": json.dumps({"registered_at": "2026-11-02T00:00:00Z"}),
+                    },
+                ),
+            ]
+        }
+    )
+
+    result = runner.invoke(agent_commands.app, ["peers"])
+
+    assert result.exit_code == 0, result.output
+    assert "Agent peers (1)" in result.output
+    assert "chat, voice" in result.output
+    assert "http://192.0.2.9:9000" in result.output
+    assert "2026-11-02" in result.output
+    assert "—" not in result.output
+
+
 def test_peers_header_counts_cards_not_facts(fake_urlopen) -> None:
     """Three card documents — even with six facts between them — are three peers."""
     fake_urlopen(

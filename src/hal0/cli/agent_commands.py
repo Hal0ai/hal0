@@ -2107,8 +2107,11 @@ def agent_peers() -> None:
             if not isinstance(item, dict):
                 continue
             # Only some facts of a card carry the card metadata; take each
-            # field from the first hit that has a value for it.
+            # field from the first hit that has a value for it. Decode before
+            # that test: an encoded empty (`"[]"`, `"{}"`) is truthy as a
+            # string and would block a later populated value.
             for field, value in _as_dict(item.get("metadata")).items():
+                value = _unflatten(value)
                 if not md.get(field):
                     md[field] = value
         endpoint = _as_dict(md.get("endpoint"))
