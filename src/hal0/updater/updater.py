@@ -1151,43 +1151,49 @@ def _reap_stale_quarantines(
     max_age_s: int = _QUARANTINE_MAX_AGE_S,
     job_id: str | None = None,
 ) -> None:
-    """Delete old ``<install_dir>.stale-<unix-ts>`` quarantine trees.
+    """Delete old ``hal0-<version>.stale-<unix-ts>`` quarantine trees.
 
     Quarantining is a self-heal (see :func:`_extract_tarball`) but nothing
     ever removed the result, so a box that retried a failed apply a few times
-    accumulated whole install trees under ``/usr/lib/hal0`` indefinitely. The
-    newest ``keep`` are retained — recovery material for the failure that just
-    happened — and everything else, plus anything older than ``max_age_s``, is
-    removed. Best-effort and logged: failing to tidy is never a reason to
+    accumulated whole install trees under ``/usr/lib/hal0`` indefinitely.
+
+    Every version's quarantines are considered, not just ``install_dir``'s:
+    a quarantine is only created while its version is being extracted, so
+    once a box moved past a version its trees were never revisited and could
+    exceed ``max_age_s`` forever (#3881). Within each version, the newest
+    ``keep`` are retained — recovery material for the failure that just
+    happened — and everything else, plus anything older than ``max_age_s``,
+    is removed. Best-effort and logged: failing to tidy is never a reason to
     fail an update.
     """
-    prefix = f"{install_dir.name}.stale-"
-    candidates: list[tuple[int, Path]] = []
+    by_version: dict[str, list[tuple[int, Path]]] = {}
     for entry in _iterdir_safe(install_dir.parent):
-        if not entry.name.startswith(prefix) or not entry.is_dir():
+        if not entry.name.startswith("hal0-") or not entry.is_dir():
             continue
-        suffix = entry.name[len(prefix) :]
-        if not suffix.isdigit():
+        base, sep, suffix = entry.name.rpartition(".stale-")
+        if not sep or not suffix.isdigit():
             continue
-        candidates.append((int(suffix), entry))
-    if not candidates:
-        return
-    candidates.sort(key=lambda item: item[0], reverse=True)
+        by_version.setdefault(base, []).append((int(suffix), entry))
     cutoff = int(time.time()) - max_age_s
-    for index, (stamp, entry) in enumerate(candidates):
-        # Two independent bounds, because either alone leaks: an age-only
-        # rule keeps every quarantine from a same-day retry storm, and a
-        # count-only rule keeps three full install trees forever.
-        if index < keep and stamp > cutoff:
-            continue
-        try:
-            shutil.rmtree(entry)
-        except OSError as exc:
-            log.warning(
-                "updater.quarantine_reap_failed", job_id=job_id, path=str(entry), error=str(exc)
-            )
-            continue
-        log.info("updater.quarantine_reaped", job_id=job_id, path=str(entry), stamp=stamp)
+    for candidates in by_version.values():
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for index, (stamp, entry) in enumerate(candidates):
+            # Two independent bounds, because either alone leaks: an age-only
+            # rule keeps every quarantine from a same-day retry storm, and a
+            # count-only rule keeps three full install trees forever.
+            if index < keep and stamp > cutoff:
+                continue
+            try:
+                shutil.rmtree(entry)
+            except OSError as exc:
+                log.warning(
+                    "updater.quarantine_reap_failed",
+                    job_id=job_id,
+                    path=str(entry),
+                    error=str(exc),
+                )
+                continue
+            log.info("updater.quarantine_reaped", job_id=job_id, path=str(entry), stamp=stamp)
 
 
 def _reap_stale_staging_dirs(
