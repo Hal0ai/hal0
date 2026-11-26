@@ -127,7 +127,9 @@ systemctl enable --now hal0-fabric-clock.service
 ```
 
 This holds the clock at boot and after every suspend/hibernate/hybrid-sleep
-(a resume can hand it back to the driver). Check it any time with
+(a resume can hand it back to the driver). At boot the unit waits up to two
+minutes for the GPU driver to expose its clock controls (`hold --wait 120`),
+since it can start before amdgpu has finished probing. Check it any time with
 `hal0-fabric-clock status`, or hold it for one session without installing the
 unit with `hal0-fabric-clock hold`. Cost: about 1 W of idle power while held.
 Inside the guest, `hal0 doctor all`'s `fabric_clock` row reads the same sysfs

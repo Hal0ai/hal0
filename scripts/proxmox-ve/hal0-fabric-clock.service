@@ -17,13 +17,18 @@
 # The unit runs once at boot and once after each resume (suspend/hibernate can
 # hand the clock back to the driver); it holds nothing open in between, so it
 # shows `inactive (dead)` between runs — that is expected, not a failure.
+#
+# `--wait 120`: at boot this unit can start before amdgpu has created its
+# sysfs clock controls (nothing orders it after the GPU driver's probe). Without
+# the wait it failed once with "no amdgpu device" and left the clock unheld
+# until the next boot. The wait returns as soon as the controls exist.
 [Unit]
 Description=hal0: hold the AMD GPU fabric clock at its top level (NPU + GPU together)
 After=systemd-modules-load.service suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/hal0-fabric-clock hold
+ExecStart=/usr/local/sbin/hal0-fabric-clock hold --wait 120
 
 [Install]
 WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
