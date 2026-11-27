@@ -451,6 +451,7 @@ def check_npu_liveness(
 
     from hal0.hardware.npu_host import STALE_NODE_REASON, accel_device_backed
     from hal0.slots.fabric_clock_guard import slot_uses_npu
+    from hal0.slots.state import is_dispatchable_state
 
     key, label = "npu", "NPU liveness"
     node = Path(dev_root) / "accel" / "accel0"
@@ -463,7 +464,7 @@ def check_npu_liveness(
         isinstance(s, dict)
         and not s.get("_synthetic")
         and slot_uses_npu(s)
-        and str(s.get("state") or "").lower() in {"ready", "serving", "idle"}
+        and is_dispatchable_state(s.get("state") or "")
         for s in slots
     ):
         return Check(key, label, _PASS, f"{node} present (AMD XDNA); an NPU slot is serving")
