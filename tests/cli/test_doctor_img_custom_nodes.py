@@ -151,3 +151,70 @@ def test_config_permission_error_is_local(slots: Path, monkeypatch: pytest.Monke
     row = da.check_img_custom_nodes()
     assert row.status == "warn"
     assert "sudo hal0 doctor all" in row.detail
+
+
+NEITHER = (
+    "[ERROR] [ComfyUI-Manager] Neither `python -m pip` nor `uv` are available. Cannot proceed.\n"
+)
+
+
+def _journal(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            argv, 0, "a" * 32 if argv[0] == "systemctl" else text, ""
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+def _manager_config(root: Path, body: str | None) -> None:
+    if body is not None:
+        config = root / "user" / "__manager" / "config.ini"
+        config.parent.mkdir(parents=True)
+        config.write_text(body)
+
+
+@pytest.mark.parametrize("value", ["True", "true", "1", "yes"])
+def test_use_uv_cause_is_named_with_the_fix(
+    slots: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """#3321: the `Neither ... are available` line is a use_uv setting, not a missing pip."""
+    root = tmp_path / "comfyui"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(root))
+    _manager_config(root, f"[default]\nuse_uv = {value}\n")
+    (slots / "img.toml").write_text('[slot]\nname = "img"\n')
+    _journal(monkeypatch, NEITHER + CLEAN)
+    row = da.check_img_custom_nodes()
+    assert row.status == "warn"
+    config = root / "user" / "__manager" / "config.ini"
+    assert f"ComfyUI-Manager has use_uv = True in {config}" in row.detail
+    assert "set use_uv = False" in row.detail
+    assert "hal0 slot restart img" in row.detail
+
+
+@pytest.mark.parametrize(
+    "body", [None, "", "[default]\n", "[default]\nuse_uv = False\n", "garbage ["]
+)
+def test_neither_line_without_use_uv_keeps_the_generic_row(
+    slots: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str | None
+) -> None:
+    root = tmp_path / "comfyui"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(root))
+    _manager_config(root, body)
+    (slots / "img.toml").write_text('[slot]\nname = "img"\n')
+    _journal(monkeypatch, NEITHER + "   0.3 seconds (PRESTARTUP FAILED): /x/ComfyUI-Manager\n")
+    row = da.check_img_custom_nodes()
+    assert row.status == "warn"
+    assert "use_uv" not in row.detail
+    assert "custom nodes failed in the current img start: ComfyUI-Manager" in row.detail
+
+
+def test_use_uv_true_without_the_neither_line_is_not_reported(
+    slots: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "comfyui"
+    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(root))
+    _manager_config(root, "[default]\nuse_uv = True\n")
+    (slots / "img.toml").write_text('[slot]\nname = "img"\n')
+    _journal(monkeypatch, CLEAN)
+    assert da.check_img_custom_nodes().status == "pass"
