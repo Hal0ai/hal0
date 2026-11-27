@@ -95,9 +95,9 @@ needs a model first (see
 model id directly works too.
 </Aside>
 
-No `Authorization` header is required — hal0 ships with no built-in auth
-and treats the local network as trusted (front it with a reverse proxy if
-it is exposed). You can point any OpenAI SDK at the same base URL:
+No `Authorization` header is required — hal0's key auth is off until you
+turn it on, and it treats the local network as trusted (front it with a
+reverse proxy if it is exposed). You can point any OpenAI SDK at the same base URL:
 
 ```python
 from openai import OpenAI
