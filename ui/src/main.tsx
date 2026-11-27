@@ -134,6 +134,7 @@ import './dash/agents/agent-view.jsx'
 //   3. leaf components (kcard/lane/drawers/overlays) register their window globals.
 //   4. board-view last — its render reads the leaf globals + the bridged hooks.
 import './dash/board/board.css'
+import './dash/mobile/table-cards.css'
 import './dash/board/board-hook-bridge'
 import './dash/board/kcard.jsx'
 import './dash/board/lane.jsx'

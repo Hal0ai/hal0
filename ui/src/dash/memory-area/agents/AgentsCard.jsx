@@ -255,33 +255,33 @@ export function AgentsCard({
   } else {
     body = (
       <div className="ma-table-region" role="region" aria-label="Agents table" tabIndex={0}>
-        <table className="ma-table ma-agents-table" data-testid="ma-agents-table">
-          <thead>
-            <tr>
-              <th scope="col">Agent</th>
-              <th scope="col">Reads</th>
-              <th scope="col">Writes</th>
-              <th scope="col">Where its facts are</th>
-              <th scope="col">Status</th>
+        <table className="ma-table ma-agents-table tc-table tc-agents" role="table" data-testid="ma-agents-table">
+          <thead role="rowgroup">
+            <tr role="row">
+              <th scope="col" role="columnheader">Agent</th>
+              <th scope="col" role="columnheader">Reads</th>
+              <th scope="col" role="columnheader">Writes</th>
+              <th scope="col" role="columnheader">Where its facts are</th>
+              <th scope="col" role="columnheader">Status</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {rows.map((row) => (
-              <tr key={row.id} data-testid={`ma-agents-row-${row.id}`} data-status={row.status}>
-                <th scope="row">
+              <tr key={row.id} role="row" data-testid={`ma-agents-row-${row.id}`} data-status={row.status}>
+                <th scope="row" role="rowheader">
                   {row.name}
                   {row.idNote && <span className="ma-agents-id ma-mono">{row.idNote}</span>}
                 </th>
-                <td>
+                <td role="cell" data-label="Reads">
                   <Lines lines={readsOf(row)} />
                 </td>
-                <td>
+                <td role="cell" data-label="Writes">
                   <Lines lines={writesOf(row)} />
                 </td>
-                <td>
+                <td role="cell" data-label="Where its facts are">
                   <Where row={row} />
                 </td>
-                <td>
+                <td role="cell" data-label="Status" className="tc-lead tc-quiet">
                   <Status row={row} />
                 </td>
               </tr>

@@ -57,47 +57,48 @@ export function NpuActivity({ rows, chartLanes, hues }) {
 
       {lanes.length ? (
         <div className="act-tablewrap">
-          <table className="act-table" data-testid="npu-lanes-table">
-            <thead>
-              <tr>
-                <th scope="col">Lane</th>
-                <th scope="col">Role · model</th>
-                <th scope="col">Cols</th>
-                <th scope="col" className="num">tok/s</th>
-                <th scope="col" className="num">Peak</th>
-                <th scope="col" className="num">Req</th>
-                <th scope="col" className="num">TTFT p50</th>
-                <th scope="col" className="num">Last used</th>
+          <table className="act-table tc-table tc-act" role="table" data-testid="npu-lanes-table">
+            <thead role="rowgroup">
+              <tr role="row">
+                <th scope="col" role="columnheader">Lane</th>
+                <th scope="col" role="columnheader">Role · model</th>
+                <th scope="col" role="columnheader">Cols</th>
+                <th scope="col" role="columnheader" className="num">tok/s</th>
+                <th scope="col" role="columnheader" className="num">Peak</th>
+                <th scope="col" role="columnheader" className="num">Req</th>
+                <th scope="col" role="columnheader" className="num">TTFT p50</th>
+                <th scope="col" role="columnheader" className="num">Last used</th>
               </tr>
             </thead>
-            <tbody>
+            <tbody role="rowgroup">
               {lanes.map((l) => (
                 <tr
                   key={l.name}
+                  role="row"
                   data-testid={`npu-lane-row-${l.name}`}
                   className={focus === l.name ? 'on' : undefined}
                   onMouseEnter={() => setFocus(l.name)}
                   onMouseLeave={() => setFocus(null)}
                 >
-                  <td>
+                  <td role="cell" className="tc-name">
                     <span className="sw" style={{ background: hueOf[l.name] }} />
                     {l.name}
                     <small>{ENGINE_LABEL[l.engine]}</small>
                   </td>
-                  <td className="dim">
+                  <td role="cell" className="dim tc-wide" data-label="Role · model">
                     <span className="role">{l.role}</span> · {l.model ?? '—'}
                   </td>
-                  <td className="dim">{l.cols}</td>
-                  <td className="num" style={l.nowToks ? { color: hueOf[l.name] } : undefined}>
+                  <td role="cell" className="dim tc-num" data-label="Cols">{l.cols}</td>
+                  <td role="cell" className="num tc-lead" data-label="tok/s" style={l.nowToks ? { color: hueOf[l.name] } : undefined}>
                     {fmtRate(l.nowToks)}
                   </td>
-                  <td className="num">{l.activity ? fmtRate(l.activity.peak_tps) : '—'}</td>
-                  <td className="num">
+                  <td role="cell" className="num tc-num" data-label="Peak">{l.activity ? fmtRate(l.activity.peak_tps) : '—'}</td>
+                  <td role="cell" className="num tc-num" data-label="Req">
                     {l.activity ? l.activity.requests : '—'}
                     {l.activity?.errors ? <span className="err"> · {l.activity.errors} err</span> : null}
                   </td>
-                  <td className="num">{fmtMs(l.activity?.ttft_p50_ms)}</td>
-                  <td className="num">{ageLabel(l.lastUsedAge)}</td>
+                  <td role="cell" className="num tc-num" data-label="TTFT p50">{fmtMs(l.activity?.ttft_p50_ms)}</td>
+                  <td role="cell" className="num tc-wide" data-label="Last used">{ageLabel(l.lastUsedAge)}</td>
                 </tr>
               ))}
             </tbody>

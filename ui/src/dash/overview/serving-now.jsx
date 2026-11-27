@@ -25,39 +25,40 @@ function SlotRow({ tile, hue, activity, focused, onFocus, onGo, onUnload, onLogs
   const stop = (e) => e.stopPropagation()
   return (
     <tr
+      role="row"
       className={'ov-srow ' + tile.cls + (focused ? ' on' : '')}
       data-testid={`ov-slot-row-${tile.name}`}
       onClick={open}
       onMouseEnter={() => onFocus(tile.name)}
       onMouseLeave={() => onFocus(null)}
     >
-      <td>
+      <td role="cell" className="tc-name">
         <span className="sw" style={{ background: hue }} />
         <button type="button" className="ov-nm" onClick={(e) => (stop(e), open())}>
           {tile.name}
         </button>
         {tile.isDefault && <span className="ov-chip amber">default</span>}
       </td>
-      <td className="ov-mdl" title={tile.model ? tile.model + (tile.port != null ? ` · :${tile.port}` : '') : undefined}>
+      <td role="cell" className="ov-mdl tc-wide" data-label="Model" title={tile.model ? tile.model + (tile.port != null ? ` · :${tile.port}` : '') : undefined}>
         {tile.model || '—'}
       </td>
-      <td className="ov-st">
+      <td role="cell" className="ov-st tc-lead tc-quiet" data-label="State">
         <span className={'ov-dot ' + DOT[tile.cls]} />
         {tile.stateLabel}
         {tile.inflight ? <span className="ov-infl"> · {tile.inflight} in flight</span> : null}
       </td>
       {/* Live rate only while serving: the backend keeps a slot's last sample after it goes idle,
           so a ready slot would otherwise show its old speed as current. */}
-      <td className="num" style={tile.cls === 'serving' && tile.toks ? { color: hue } : undefined}>
+      <td role="cell" className="num tc-num" data-label="tok/s" style={tile.cls === 'serving' && tile.toks ? { color: hue } : undefined}>
         {tile.cls === 'serving' ? fmtRate(tile.toks) : '—'}
       </td>
-      <td className="num">{activity ? fmtRate(activity.peak_tps) : '—'}</td>
-      <td className="num">
+      <td role="cell" className="num tc-num" data-label="Peak">{activity ? fmtRate(activity.peak_tps) : '—'}</td>
+      <td role="cell" className="num tc-num" data-label="Req">
         {activity ? activity.requests : '—'}
         {activity?.errors ? <span className="err"> · {activity.errors} err</span> : null}
       </td>
-      <td className="num">{fmtMs(activity?.ttft_p50_ms)}</td>
-      <td className="ov-ctxc">
+      <td role="cell" className="num tc-num" data-label="TTFT p50">{fmtMs(activity?.ttft_p50_ms)}</td>
+      <td role="cell" className="ov-ctxc tc-wide" data-label="Ctx">
         {tile.ctx ? (
           <span className="ov-ctx" title={`${tile.ctx.used} / ${tile.ctx.max} tokens`}>
             <span className="ov-track">
@@ -154,23 +155,23 @@ export function OvServingNow({ onGo }) {
             />
           </div>
           <div className="act-tablewrap">
-            <table className="act-table ov-stable">
-              <thead>
-                <tr>
-                  <th scope="col">Slot</th>
-                  <th scope="col">Model</th>
-                  <th scope="col">State</th>
-                  <th scope="col" className="num">tok/s</th>
-                  <th scope="col" className="num">Peak</th>
-                  <th scope="col" className="num">Req</th>
-                  <th scope="col" className="num">TTFT p50</th>
-                  <th scope="col">Ctx</th>
+            <table className="act-table ov-stable tc-table tc-act" role="table">
+              <thead role="rowgroup">
+                <tr role="row">
+                  <th scope="col" role="columnheader">Slot</th>
+                  <th scope="col" role="columnheader">Model</th>
+                  <th scope="col" role="columnheader">State</th>
+                  <th scope="col" role="columnheader" className="num">tok/s</th>
+                  <th scope="col" role="columnheader" className="num">Peak</th>
+                  <th scope="col" role="columnheader" className="num">Req</th>
+                  <th scope="col" role="columnheader" className="num">TTFT p50</th>
+                  <th scope="col" role="columnheader">Ctx</th>
                 </tr>
               </thead>
               {lanes.map((l) => (
-                <tbody className="ov-lane" key={l.key} data-testid={`ov-lane-${l.key}`}>
-                  <tr className="ov-lane-h">
-                    <th scope="rowgroup" colSpan={COLS}>
+                <tbody className="ov-lane" role="rowgroup" key={l.key} data-testid={`ov-lane-${l.key}`}>
+                  <tr className="ov-lane-h" role="row">
+                    <th scope="rowgroup" role="rowheader" colSpan={COLS}>
                       <span className="ov-d" style={{ background: 'var(--dev-' + l.key + ')' }} />
                       {l.label}
                       <span className="ov-cnt">
@@ -192,8 +193,8 @@ export function OvServingNow({ onGo }) {
                     />
                   ))}
                   {l.stopped.length > 0 && (
-                    <tr className="ov-stopped-row">
-                      <td colSpan={COLS}>
+                    <tr className="ov-stopped-row" role="row">
+                      <td role="cell" colSpan={COLS}>
                         <div className="ov-stopped">
                           <span>stopped</span>
                           {l.stopped.map((s) => (
