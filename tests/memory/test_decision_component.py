@@ -58,7 +58,14 @@ class FakeRunner:
     ``python -m hal0.memory.decision_fs`` children are executed for real.
     """
 
-    def __init__(self, fail: str | None = None, *, torch_out: str = "2.15.0+cpu\n") -> None:
+    def __init__(
+        self,
+        fail: str | None = None,
+        *,
+        torch_out: str = "2.15.0+cpu\n",
+        python_out: str = "3.12\n",
+    ) -> None:
+        self.python_out = python_out
         self.calls: list[list[str]] = []
         self.envs: list[dict[str, str] | None] = []
         self.fail = fail
@@ -87,7 +94,9 @@ class FakeRunner:
             return subprocess.CompletedProcess(argv, rc, stdout=b"", stderr=b"")
         joined = " ".join(argv)
         step = (
-            "venv"
+            "python-version"
+            if "sys.version_info" in joined
+            else "venv"
             if "-m" in argv and "venv" in argv
             else "torch-version"
             if "m.version('torch')" in joined
@@ -111,6 +120,8 @@ class FakeRunner:
             out = str(dc.snapshot_dir())
         if step == "torch-version":
             out = self.torch_out
+        if step == "python-version":
+            out = self.python_out
         if step in self.plant:
             self.plant[step]()
         return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
@@ -156,6 +167,11 @@ def _converge(box: dict[str, Any], **kw: Any) -> dict[str, Any]:
 
 def _install(box: dict[str, Any]) -> None:
     assert _converge(box, install=True)["status"] == "installed"
+
+
+def _only_python_probes(runner: FakeRunner) -> bool:
+    """True when the runner was asked nothing but the venv's Python version."""
+    return all(c[1:] == ["-c", dc._PYTHON_VERSION_PROBE] for c in runner.calls)
 
 
 def _hand_install(box: dict[str, Any], *, port: int = 9178) -> str:
@@ -228,7 +244,7 @@ def test_diagnose_reports_without_touching_anything(box: dict[str, Any]) -> None
     _install(box)
     runner, seam = FakeRunner(), FakeSeam()
     assert _converge(box, apply=False, runner=runner, seam=seam)["status"] == "converged"
-    assert runner.calls == [] and seam.calls == []
+    assert _only_python_probes(runner) and seam.calls == []
 
 
 # ── install ──────────────────────────────────────────────────────────────────
@@ -287,7 +303,7 @@ def test_reconverge_with_nothing_changed_only_starts(box: dict[str, Any]) -> Non
     _install(box)
     runner, seam = FakeRunner(), FakeSeam()
     assert _converge(box, runner=runner, seam=seam)["status"] == "converged"
-    assert runner.calls == []
+    assert _only_python_probes(runner)
     assert ("start", "hal0-hs-decide.service") in seam.calls
     assert not any(c[0] in ("restart", "write-unit") for c in seam.calls)
 
@@ -298,6 +314,81 @@ def test_a_pin_change_rebuilds(box: dict[str, Any], monkeypatch: pytest.MonkeyPa
     result = _converge(box)
     assert result["status"] == "upgraded"
     assert dc.install_state(unit_path=box["unit"]) == (dc.MANAGED, dc.pinned_label())
+
+
+# ── the venv's interpreter (#3960) ───────────────────────────────────────────
+
+
+def _old_format_stamp(python: str) -> None:
+    """Rewrite the stamp the way a hal0 before #3960 wrote it; pyvenv.cfg says ``python``."""
+    import json
+
+    venv = dc.venv_dir()
+    stamp = dc._read_build_stamp(venv)
+    assert stamp is not None and stamp.pop("python") == "3.12"
+    dc._build_stamp_path(venv).write_text(json.dumps(stamp))
+    (venv / "pyvenv.cfg").write_text(
+        f"home = /usr/bin\ninclude-system-site-packages = false\nversion = {python}.3\n"
+    )
+
+
+def test_the_build_stamp_records_the_interpreter(box: dict[str, Any]) -> None:
+    _install(box)
+    assert dc._read_build_stamp(dc.venv_dir())["python"] == "3.12"
+
+
+def test_same_pins_and_a_different_interpreter_rebuilds(box: dict[str, Any]) -> None:
+    _install(box)
+    runner, seam = FakeRunner(python_out="3.14\n"), FakeSeam()
+    assert _converge(box, apply=False, runner=FakeRunner(python_out="3.14\n")) == {
+        "status": "stale",
+        "reason": "it was built with Python 3.12 and its interpreter is now Python 3.14",
+    }
+    result = _converge(box, runner=runner, seam=seam)
+    assert result["status"] == "upgraded" and "from" not in result
+    assert "built with Python 3.12" in result["rebuilt_because"]
+    assert any("venv" in c and "-m" in c for c in runner.calls)
+    assert ("restart", "hal0-hs-decide.service") in seam.calls
+    assert dc._read_build_stamp(dc.venv_dir())["python"] == "3.14"
+    assert not dc.venv_dir().with_name(".venv.prev").exists()
+    # The rebuilt venv is current on the new interpreter.
+    again = FakeRunner(python_out="3.14\n")
+    assert _converge(box, runner=again)["status"] == "converged" and _only_python_probes(again)
+
+
+def test_a_venv_whose_interpreter_does_not_run_rebuilds(box: dict[str, Any]) -> None:
+    _install(box)
+
+    class Dead(FakeRunner):
+        def __call__(self, argv: list[str], **kw: Any) -> subprocess.CompletedProcess:
+            if argv[0] == str(dc.venv_dir() / "bin" / "python"):
+                self.calls.append(list(argv))
+                raise FileNotFoundError(argv[0])
+            return super().__call__(argv, **kw)
+
+    result = _converge(box, runner=Dead())
+    assert result["status"] == "upgraded"
+    assert result["rebuilt_because"] == "its Python interpreter does not run"
+
+
+@pytest.mark.parametrize(("now", "status"), [("3.12", "converged"), ("3.14", "upgraded")])
+def test_an_old_format_stamp_is_judged_by_pyvenv_cfg(
+    box: dict[str, Any], now: str, status: str
+) -> None:
+    """A stamp without ``python`` rebuilds only when the interpreter really moved."""
+    _install(box)
+    _old_format_stamp("3.12")
+    runner = FakeRunner(python_out=f"{now}\n")
+    assert _converge(box, runner=runner)["status"] == status
+    assert _only_python_probes(runner) is (status == "converged")
+
+
+def test_an_old_format_stamp_with_no_pyvenv_cfg_rebuilds(box: dict[str, Any]) -> None:
+    _install(box)
+    _old_format_stamp("3.12")
+    (dc.venv_dir() / "pyvenv.cfg").unlink()
+    result = _converge(box)
+    assert result["status"] == "upgraded" and "not recorded" in result["rebuilt_because"]
 
 
 def test_install_adopts_a_hand_install(box: dict[str, Any]) -> None:
@@ -478,6 +569,39 @@ def test_a_rollback_that_does_not_come_back_is_reported_as_a_failure(
     result = _converge(box, http_get=lambda _u: None)
     assert result["status"] == "build_failed" and result["restored"] is False
     assert "does not answer" in result["error"]
+
+
+def test_a_rollback_never_restores_a_venv_built_for_another_interpreter(
+    box: dict[str, Any],
+) -> None:
+    """#3960: the old venv is dead, so a failed rebuild keeps the new one and does not wait."""
+    _install(box)
+    polls: list[str] = []
+
+    def http(url: str) -> dict[str, Any] | None:
+        polls.append(url)
+        return None
+
+    seam = FakeSeam()
+    result = _converge(box, runner=FakeRunner(python_out="3.14\n"), seam=seam, http_get=http)
+    assert result["status"] == "build_failed" and result["restored"] is False
+    assert "previous venv was not restored" in result["error"]
+    assert "built with Python 3.12" in result["error"]
+    assert dc._read_build_stamp(dc.venv_dir())["python"] == "3.14"
+    assert not dc.venv_dir().with_name(".venv.prev").exists()
+    # One health wait (the new server's), one restart: nothing was restarted to roll back.
+    assert len(polls) == 81
+    assert [c[0] for c in seam.calls].count("restart") == 1
+
+
+def test_a_failed_rebuild_for_a_new_interpreter_leaves_the_old_venv_in_place(
+    box: dict[str, Any],
+) -> None:
+    _install(box)
+    seam = FakeSeam()
+    result = _converge(box, runner=FakeRunner(fail="pip", python_out="3.14\n"), seam=seam)
+    assert result["status"] == "build_failed" and result["lane"] == "unchanged"
+    assert dc._read_build_stamp(dc.venv_dir())["python"] == "3.12" and seam.calls == []
 
 
 def test_a_failed_adoption_puts_the_hand_unit_back(box: dict[str, Any]) -> None:

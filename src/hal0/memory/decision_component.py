@@ -144,6 +144,10 @@ _ENV_ALLOW = (
 #: Modules the built venv must import before it is swapped in.
 _IMPORT_CHECK = "import torch, transformers, fastapi, uvicorn, accelerate, hindsight_decision"
 
+#: Prints the running interpreter's ``major.minor``.
+_PYTHON_VERSION_PROBE = "import sys; print('%d.%d' % sys.version_info[:2])"
+_PYTHON_VERSION_RE = re.compile(r"^[0-9]{1,2}\.[0-9]{1,3}$")
+
 #: What a torch version probe may print: digits and dots, an optional local tag.
 _TORCH_VERSION_RE = re.compile(r"^[0-9]+(\.[0-9]+){1,3}(\+[a-z0-9]{1,16})?$")
 
@@ -286,6 +290,54 @@ def _read_build_stamp(venv: Path) -> dict[str, Any] | None:
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _python_version(runner: Runner, py: str) -> str | None:
+    """``major.minor`` of the interpreter at ``py``, or ``None`` when it does not run."""
+    try:
+        proc = _run(runner, [py, "-c", _PYTHON_VERSION_PROBE], timeout=_clip(_PROBE_TIMEOUT_S))
+    except (OSError, subprocess.SubprocessError):
+        return None
+    out = proc.stdout.decode("utf-8", "replace") if isinstance(proc.stdout, bytes) else proc.stdout
+    got = (out or "").strip()
+    # The probe ran in a venv hal0's account owns: its output is checked.
+    return got if proc.returncode == 0 and _PYTHON_VERSION_RE.match(got) else None
+
+
+def _pyvenv_cfg_version(venv: Path) -> str | None:
+    """``major.minor`` from the ``version`` line ``python -m venv`` wrote, if any."""
+    try:
+        text = decision_fs.read_bytes(venv / "pyvenv.cfg").decode("utf-8", "replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "version":
+            got = ".".join(value.strip().split(".")[:2])
+            return got if _PYTHON_VERSION_RE.match(got) else None
+    return None
+
+
+def _venv_python_problem(runner: Runner, venv: Path, stamp: dict[str, Any] | None) -> str | None:
+    """Why a managed venv cannot run on the interpreter it now resolves to, or ``None``.
+
+    A venv is tied to the ``major.minor`` it was built with: its packages sit
+    under ``lib/pythonX.Y``. When the system Python moves (a distribution
+    release upgrade), ``bin/python`` follows it and every import fails (#3960).
+    The build stamp records the version; a stamp from before it did has no
+    ``python`` key, and ``pyvenv.cfg`` answers for it, so an existing install
+    is rebuilt only when its interpreter really changed.
+    """
+    recorded = (stamp or {}).get("python")
+    built = recorded if isinstance(recorded, str) and recorded else _pyvenv_cfg_version(venv)
+    now = _python_version(runner, str(venv / "bin" / "python"))
+    if now is None:
+        return "its Python interpreter does not run"
+    if built is None:
+        return "the Python version it was built with is not recorded"
+    if built != now:
+        return f"it was built with Python {built} and its interpreter is now Python {now}"
+    return None
 
 
 def install_state(
@@ -574,6 +626,9 @@ def _build_venv(runner: Runner, new: Path, final: Path, deadline: _Deadline) -> 
         return proc
 
     step([_interpreter(), "-m", "venv", str(new)], "python3 -m venv", _VENV_TIMEOUT_S)
+    python = _python_version(runner, py)
+    if python is None:
+        raise _Abort("the new venv's Python interpreter does not run")
     step(
         # --no-deps: the CPU index does not carry the pinned versions of torch's
         # dependencies (filelock, sympy, ...); the PyPI step below installs them.
@@ -612,6 +667,7 @@ def _build_venv(runner: Runner, new: Path, final: Path, deadline: _Deadline) -> 
         "model_revision": MODEL_REVISION,
         "torch": TORCH_VERSION,
         "packages": list(PACKAGES),
+        "python": python,
         "built_at": time.time(),
     }
     _fs(runner, "write", str(_build_stamp_path(new)), body=json.dumps(stamp).encode("utf-8"))
@@ -850,6 +906,9 @@ class _Txn:
         self.prev_unit = prev_unit
         self.prev_params = parse_unit_params(prev_unit) if prev_unit else None
         self.venv_swapped = False
+        #: Why the venv this converge started with cannot run, when it cannot
+        #: (:func:`_venv_python_problem`); a rollback never restores that one.
+        self.prev_venv_problem: str | None = None
         self.script_changed = False
         self.script_had_prev = False
         self.unit_changed = False
@@ -877,7 +936,8 @@ def converge_memory_decision(
     * ``apply=False`` — diagnose only.
     * not installed and not ``install`` — ``skipped``: opt-in, so a plain
       ``hal0 update`` never installs it; an ``unmanaged`` server is left alone.
-    * otherwise build the venv if its pins changed, sync the server script,
+    * otherwise build the venv if its pins changed or its Python interpreter
+      is no longer the one it was built with, sync the server script,
       render the unit from ``[memory.decision]``, enable and (re)start it,
       wait for ``/health``; then, when asked by name (``install``), set
       ``provider = "local"``; then re-render the engine drop-in.
@@ -897,7 +957,11 @@ def converge_memory_decision(
         if state == UNMANAGED:
             return {"status": UNMANAGED, "note": UNMANAGED_NOTE}
         if not apply:
-            return {"status": "converged" if label == pinned else "stale"}
+            if label != pinned:
+                return {"status": "stale"}
+            venv = venv_dir()
+            problem = _venv_python_problem(runner, venv, _read_build_stamp(venv))
+            return {"status": "stale", "reason": problem} if problem else {"status": "converged"}
     elif not apply:
         return {"status": "skipped", "reason": "diagnose only"}
 
@@ -964,7 +1028,9 @@ def _converge(
     prev = venv.with_name(".venv.prev")
     script = server_script_path()
     script_prev = script.with_name(script.name + ".prev")
-    needs_build = state != MANAGED or label != pinned
+    if state == MANAGED:
+        txn.prev_venv_problem = _venv_python_problem(runner, venv, _read_build_stamp(venv))
+    needs_build = state != MANAGED or label != pinned or txn.prev_venv_problem is not None
     if state == UNMANAGED:
         stamp = _read_build_stamp(venv)
         needs_build = not stamp or stamp.get("label") != pinned
@@ -983,7 +1049,12 @@ def _converge(
                 f"{_MIN_FREE_BYTES // 1024**3} GiB",
                 "free disk space, then retry",
             )
-        log.info("memory.decision_build_start", job_id=job_id, pinned=pinned)
+        log.info(
+            "memory.decision_build_start",
+            job_id=job_id,
+            pinned=pinned,
+            reason=txn.prev_venv_problem,
+        )
         try:
             _build_venv(runner, new, venv, deadline)
         except (_Abort, OSError) as exc:
@@ -1049,6 +1120,8 @@ def _converge(
     }
     if state == MANAGED and label != pinned:
         result["from"] = label
+    if txn.prev_venv_problem:
+        result["rebuilt_because"] = txn.prev_venv_problem
     if state == UNMANAGED:
         result["adopted"] = True
         if hand_copy is not None:
@@ -1098,6 +1171,22 @@ def _roll_back(
         engine = _reconcile_engine(seam, txn.last_good)
         return _failed(error, remedy, lane="off", restore_problems=problems or None, engine=engine)
 
+    dead = txn.prev_venv_problem
+    if dead and txn.venv_swapped:
+        # The venv this converge replaced cannot run (#3960): putting it back
+        # and waiting on /health again would restore a server that is known
+        # dead. The new build passed its import check and stays, with the
+        # script and unit written for it.
+        with contextlib.suppress(OSError):
+            _fs(runner, "rmtree", str(prev))
+            _fs(runner, "rmtree", str(script_prev))
+        return _failed(
+            f"{error}; rollback: the previous venv was not restored ({dead}); "
+            "the new build stays in place",
+            remedy,
+            restored=False,
+        )
+
     try:
         if txn.venv_swapped and prev.exists():
             _fs(runner, "rmtree", str(venv))
@@ -1122,14 +1211,19 @@ def _roll_back(
                 )
             except _SEAM_ERRORS as exc:
                 problems.append(f"restoring the previous unit failed: {_seam_error(exc)}")
-    try:
-        _svc(seam, "restart")
-    except _SEAM_ERRORS as exc:
-        problems.append(f"restarting the previous server failed: {_seam_error(exc)}")
-    port = int((txn.prev_params or {}).get("port") or 0)
-    healthy = bool(port) and _poll_health(http_get, port, _HEALTH_POLL_TOTAL_S, sleep)
-    if not healthy:
-        problems.append("the restored server does not answer /health")
+    if dead:
+        # The swap never happened, so the venv in place is the one that cannot
+        # run: there is no server to restart or wait for.
+        problems.append(f"the venv in place cannot run ({dead})")
+    else:
+        try:
+            _svc(seam, "restart")
+        except _SEAM_ERRORS as exc:
+            problems.append(f"restarting the previous server failed: {_seam_error(exc)}")
+        port = int((txn.prev_params or {}).get("port") or 0)
+        healthy = bool(port) and _poll_health(http_get, port, _HEALTH_POLL_TOTAL_S, sleep)
+        if not healthy:
+            problems.append("the restored server does not answer /health")
     if problems:
         return _failed(f"{error}; rollback: {'; '.join(problems)}", remedy, restored=False)
     return {"status": "rolled_back", "error": error, "remedy": remedy, "restored": True}
