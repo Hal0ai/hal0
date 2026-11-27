@@ -2134,3 +2134,69 @@ def test_update_exits_0_on_a_pi_advisory_row(monkeypatch: pytest.MonkeyPatch, st
     assert result.exit_code == 0, result.output
     assert f"pi note {status}" in result.output
     assert "update applied." in result.output
+
+
+# #3970: --channel always saves, including with --check. The message must say
+# what changed and that it was saved, so the pair is not read as a dry run.
+
+
+def _channel_run(
+    monkeypatch: pytest.MonkeyPatch, saved: str | None, args: list[str]
+) -> tuple[str, list[object]]:
+    puts: list[object] = []
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_put", lambda path, **k: puts.append(k.get("json")) or {})
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/channel":
+            if saved is None:
+                raise uc.CliApiError("older daemon")
+            return {"channel": saved}
+        return {
+            "current": "1.8.1",
+            "latest": "1.8.1",
+            "channel": args[args.index("--channel") + 1],
+            "update_available": False,
+            "manifest": {},
+        }
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    result = runner.invoke(app, ["update", *args])
+    assert result.exit_code == 0, result.output
+    return " ".join(result.output.split()), puts
+
+
+def test_channel_with_check_saves_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, puts = _channel_run(monkeypatch, "stable", ["--channel", "nightly", "--check"])
+    assert puts == [{"channel": "nightly"}]
+    assert "update channel changed from stable to nightly" in out
+    assert "saved" in out
+    assert "--check only stops the update from being applied" in out
+
+
+def test_channel_without_check_names_old_and_new(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, puts = _channel_run(monkeypatch, "nightly", ["--channel", "stable"])
+    assert puts == [{"channel": "stable"}]
+    assert "update channel changed from nightly to stable" in out
+    assert "--check only stops" not in out
+
+
+def test_channel_unchanged_says_already(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, _ = _channel_run(monkeypatch, "stable", ["--channel", "stable", "--check"])
+    assert "update channel is already stable" in out
+    assert "nothing to save" in out
+
+
+def test_channel_message_survives_an_unreadable_saved_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, puts = _channel_run(monkeypatch, None, ["--channel", "nightly", "--check"])
+    assert puts == [{"channel": "nightly"}]
+    assert "update channel set to nightly" in out
+
+
+def test_help_does_not_read_as_a_dry_run() -> None:
+    out = " ".join(runner.invoke(app, ["update", "--help"]).output.split())
+    assert "saved even with --check" in out
+    assert "Does not undo --channel" in out

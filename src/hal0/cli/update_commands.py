@@ -729,6 +729,25 @@ def _restart_drifted_slots() -> None:
             console.print(f"[yellow]could not restart {f.get('slot')}:[/yellow] {f.get('error')}")
 
 
+def _channel_saved_message(previous: str | None, new: str, *, check: bool) -> str:
+    """What ``--channel`` did, in words that cannot be read as a dry run (#3970).
+
+    ``--channel`` always saves, including alongside ``--check``, which is the
+    one way to switch channel without applying an update. The message names
+    the old and the new channel and says it was saved, so nobody mistakes the
+    pair for a preview.
+    """
+    if previous is None:
+        change = f"update channel set to [bold]{new}[/bold]"
+    elif previous == new:
+        change = f"update channel is already [bold]{new}[/bold]"
+    else:
+        change = f"update channel changed from [bold]{previous}[/bold] to [bold]{new}[/bold]"
+    saved = "nothing to save" if previous == new else "saved; this box now follows it"
+    tail = " --check only stops the update from being applied." if check and previous != new else ""
+    return f"[green]{change}[/green] ({saved}).{tail}"
+
+
 def _running_api_version() -> str | None:
     """Version the live hal0-api process reports on ``/api/health``, or None.
 
@@ -836,12 +855,18 @@ def update(
     channel: UpdateChannel | None = typer.Option(
         None,
         "--channel",
-        help="Persist the update channel (stable, preview, or nightly), then check.",
+        help=(
+            "Switch this box to an update channel (stable, preview, or nightly) and "
+            "save it, then check that channel. The switch is saved even with --check."
+        ),
     ),
     check: bool = typer.Option(
         False,
         "--check",
-        help="Only check for updates; do not apply.",
+        help=(
+            "Check for updates and stop before applying. Does not undo --channel: "
+            "the two together switch the channel without updating."
+        ),
     ),
     rollback: bool = typer.Option(
         False,
@@ -893,12 +918,21 @@ def update(
         raise typer.Exit(1)
 
     if channel is not None:
+        # Read the saved channel first so the message can say what changed.
+        # Fail-soft: an older daemon or a failed read just loses the "from".
+        previous: str | None = None
+        try:
+            current = api_get("/api/updates/channel")
+            if isinstance(current, dict) and current.get("channel"):
+                previous = str(current["channel"])
+        except CliApiError:
+            previous = None
         try:
             api_put("/api/updates/channel", json={"channel": channel.value})
         except CliApiError as exc:
             die(str(exc))
             return
-        console.print(f"[green]channel set to {channel.value}[/green]")
+        console.print(_channel_saved_message(previous, channel.value, check=check), soft_wrap=True)
 
     # Standalone action: bounce drifted slots on demand, then stop. Kept
     # separate from the check/apply flow so an operator can clear post-update
