@@ -44,7 +44,9 @@ def test_linger_block_precedes_every_service_start() -> None:
     assert TEXT.count("loginctl enable-linger root >/dev/null 2>&1") == 1
 
 
-def _run(tmp_path: Path, *, linger_file: bool, mount_after: int) -> tuple[str, list[str]]:
+def _run(
+    tmp_path: Path, *, linger_file: bool, mount_after: int, running: str = ""
+) -> tuple[str, list[str]]:
     bindir = tmp_path / "bin"
     bindir.mkdir()
     calls = tmp_path / "calls"
@@ -57,6 +59,7 @@ def _run(tmp_path: Path, *, linger_file: bool, mount_after: int) -> tuple[str, l
         f'n=$(( $(cat {counter}) + 1 )); echo "$n" > {counter}\n'
         f"[[ $n -gt {mount_after} ]]\n"
     )
+    (bindir / "podman").write_text(f"#!/bin/bash\nprintf {running!r}\n")
     for f in bindir.iterdir():
         f.chmod(0o755)
     linger_path = tmp_path / "linger-root"
@@ -64,7 +67,7 @@ def _run(tmp_path: Path, *, linger_file: bool, mount_after: int) -> tuple[str, l
         linger_path.touch()
     block = _block().replace("/var/lib/systemd/linger/root", str(linger_path))
     script = (
-        "set -euo pipefail\n"
+        "set -euo pipefail\nHAL0_BIN=hal0\n"
         'info() { echo "INFO $*"; }\nwarn() { echo "WARN $*"; }\n'
         "if true; then\n" + block + "fi\n"
     )
@@ -96,3 +99,10 @@ def test_already_lingering_root_is_left_alone(tmp_path: Path) -> None:
     out, calls = _run(tmp_path, linger_file=True, mount_after=0)
     assert calls == []
     assert "INFO root linger already enabled" in out
+
+
+def test_names_containers_that_predate_linger(tmp_path: Path) -> None:
+    out, _ = _run(
+        tmp_path, linger_file=False, mount_after=0, running="hal0-slot-brain\nhal0-openwebui\n"
+    )
+    assert "must be restarted once: hal0-slot-brain hal0-openwebui" in out

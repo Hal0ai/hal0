@@ -3996,6 +3996,14 @@ else
             else
                 warn "root linger enabled, but /run/user/0 is not mounted yet; if 'hal0 doctor all' reports a stranded netns, restart that container"
             fi
+            # A re-run on a box whose linger was off: containers already up
+            # were started on the directory the mount just covered, and nothing
+            # here can move their netns. Name them so the operator restarts them.
+            _pre_linger="$(podman ps --format '{{.Names}}' 2>/dev/null | tr '\n' ' ' || true)"
+            if [[ -n "${_pre_linger// /}" ]]; then
+                warn "these containers were running before root linger was enabled and must be restarted once: ${_pre_linger}"
+                warn "  until then their next stop leaks a port rule; check with '${HAL0_BIN} doctor all' (Container netns)"
+            fi
         else
             warn "could not enable root linger; container netns may be destroyed on root logout"
             warn "  run: loginctl enable-linger root   (see 'hal0 doctor ports')"
