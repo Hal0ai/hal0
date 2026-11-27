@@ -143,6 +143,8 @@ test.describe('Voice section — Kokoro label', () => {
     await page.setViewportSize({ width: 375, height: 700 })
     await page.goto('/#settings')
     // Voice was absorbed into the unified AI Capabilities page (TTS panel).
+    // At this width the page list is folded behind its toggle (SettingsNav).
+    await page.getByTestId('settings-nav-toggle').click()
     await page.locator('.nav-item', { hasText: 'AI Capabilities' }).click()
     const defaultVoiceRow = page.locator('.settings-content .s-row').filter({
       has: page.locator('.k > span', { hasText: /^Default voice$/ }),

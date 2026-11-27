@@ -104,8 +104,12 @@ export function CatalogHeaderActions({ check, addItems = [], children }) {
  */
 export function CatalogToolbar({ q, onQ, placeholder = 'search name, repo, id…', groups = [], sort, onClear }) {
   const filtered = !!q.trim() || groups.some((g) => g.selected.length > 0)
+  // Phone width only (dashboard.css, ≤720px): the chip groups fold behind this toggle, so the rows
+  // start on the first screen. The count keeps a folded filter from being forgotten.
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const activeCount = groups.reduce((n, g) => n + g.selected.length, 0)
   return (
-    <div className="mdl-toolbar">
+    <div className={'mdl-toolbar' + (filtersOpen ? ' filters-open' : '')}>
       <input
         className="input mono mdl-search"
         placeholder={placeholder}
@@ -113,6 +117,17 @@ export function CatalogToolbar({ q, onQ, placeholder = 'search name, repo, id…
         value={q}
         onChange={(e) => onQ(e.target.value)}
       />
+      {groups.length > 0 && (
+        <button
+          type="button"
+          className={'mdl-chip mdl-filters-toggle' + (activeCount > 0 ? ' on' : '')}
+          data-testid="mdl-filters-toggle"
+          aria-expanded={filtersOpen}
+          onClick={() => setFiltersOpen((v) => !v)}
+        >
+          {activeCount > 0 ? `Filters · ${activeCount}` : 'Filters'} {filtersOpen ? '▴' : '▾'}
+        </button>
+      )}
       {groups.map((g) => (
         <div key={g.id} className="mdl-toolbar-grp" role="group" aria-label={g.label}>
           <span className="lbl">{g.label}</span>

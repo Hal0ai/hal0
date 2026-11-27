@@ -5,6 +5,8 @@
 //   - Hardware & Runtimes merges Backend & GPU + Runtimes (both evidence UIs)
 //   - Updates absorbs About
 //   - Hardware Tuning (blocked stub, spec D4) removed until its lane lands
+import { useState } from 'react'
+
 export const NAV_GROUPS = [
   {
     title: "GENERAL",
@@ -48,9 +50,27 @@ export const NAV_GROUPS = [
 // so the shell's VALID_IDS check and the nav's render loop can't drift.
 export const VALID_IDS = NAV_GROUPS.flatMap(g => g.items.map(i => i.id));
 
+const LABEL_BY_ID = Object.fromEntries(NAV_GROUPS.flatMap(g => g.items.map(i => [i.id, i.label])));
+
+// At phone width the sixteen links would fill the first screen of every Settings page, so the
+// nav folds behind one toggle that names the current page (dashboard.css shows the toggle and
+// hides the closed groups at ≤720px only). Picking a page closes it again. Wider screens never
+// see the toggle and always show the groups, whatever `open` holds.
 export function SettingsNav({ section, onSelect }) {
+  const [open, setOpen] = useState(false);
   return (
-    <div className="settings-nav">
+    <div className={"settings-nav" + (open ? " open" : "")}>
+      <button
+        type="button"
+        className="settings-nav-toggle"
+        data-testid="settings-nav-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen(o => !o)}
+      >
+        <span className="lbl">{LABEL_BY_ID[section] || "Settings"}</span>
+        <span className="hint">{open ? "close" : "all settings"}</span>
+        <span className="car" aria-hidden="true">{open ? "▴" : "▾"}</span>
+      </button>
       {NAV_GROUPS.map(group => (
         <div key={group.title} className="settings-nav-group">
           <div
@@ -60,13 +80,15 @@ export function SettingsNav({ section, onSelect }) {
             {group.title}
           </div>
           {group.items.map(item => (
-            <div
+            <button
+              type="button"
               key={item.id}
               className={"nav-item" + (section === item.id ? " active" : "")}
-              onClick={() => onSelect(item.id)}
+              aria-current={section === item.id ? "page" : undefined}
+              onClick={() => { setOpen(false); onSelect(item.id); }}
             >
               {item.label}
-            </div>
+            </button>
           ))}
         </div>
       ))}

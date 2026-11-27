@@ -510,8 +510,21 @@ export function TelemetryHeader({ slots: slotsProp }) {
   // already holds the slot list can pass it to skip the extra subscription.
   const slotsQuery = useSlots()
   const slots = slotsProp || slotsQuery.data || []
+  // Phone width only (overhaul.css, ≤720px): the GPU, CPU, NPU and memory cells fold away behind
+  // this toggle and the throughput cell stays, so the slot cards start on the first screen
+  // instead of the third. Wider screens never see the toggle and always show every cell.
+  const [hwOpen, setHwOpen] = useStateT(false)
   return (
-    <div className="th-card" data-testid="telemetry-header">
+    <div className={'th-card' + (hwOpen ? ' th-open' : '')} data-testid="telemetry-header">
+      <button
+        type="button"
+        className="th-fold"
+        data-testid="telemetry-fold"
+        aria-expanded={hwOpen}
+        onClick={() => setHwOpen((o) => !o)}
+      >
+        {hwOpen ? 'Hide hardware ▴' : 'GPU · CPU · NPU · memory ▾'}
+      </button>
       <div className="th-strip">
         <ThCellThroughput slots={slots} />
         <ThCellGpu />

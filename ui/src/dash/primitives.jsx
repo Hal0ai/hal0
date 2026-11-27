@@ -307,9 +307,14 @@ export function ConfirmDialog({ open, onCancel, onConfirm, title, message, confi
 // ─── Banner ───────────────────────────────────────────────────────────────
 // Reusable shell: icon + heading + body + actions + dismiss × · amber/red tones.
 // `compact` lays the heading, body and actions out on one line (wrapping when it must).
+// At phone width (dashboard.css, ≤720px) the body of a warn/info banner is clamped to one line
+// behind a "more" toggle, so a banner shown on every page does not take a quarter of the screen.
+// An error banner is never clamped.
 export function Banner({ kind = "warn", heading, body, actions, onDismiss, eyebrow, compact = false }) {
+  const [more, setMore] = useStateP(false);
+  const foldable = !!body && kind !== "err" && !compact;
   return (
-    <div className={"banner banner-" + kind + (compact ? " banner-compact" : "")} role={kind === "err" ? "alert" : "status"}>
+    <div className={"banner banner-" + kind + (compact ? " banner-compact" : "") + (foldable ? " banner-foldable" : "") + (more ? " banner-more" : "")} role={kind === "err" ? "alert" : "status"}>
       <div className="banner-ic">
         {kind === "err" ? Icons.warn : kind === "info" ? Icons.bell : Icons.warn}
       </div>
@@ -317,6 +322,11 @@ export function Banner({ kind = "warn", heading, body, actions, onDismiss, eyebr
         {eyebrow && <div className="banner-eye mono">{eyebrow}</div>}
         {heading && <div className="banner-heading mono">{heading}</div>}
         {body && <div className="banner-body">{body}</div>}
+        {foldable && (
+          <button type="button" className="banner-fold" aria-expanded={more} onClick={() => setMore(m => !m)}>
+            {more ? "less ▴" : "more ▾"}
+          </button>
+        )}
         {actions && <div className="banner-actions">{actions}</div>}
       </div>
       {onDismiss && (

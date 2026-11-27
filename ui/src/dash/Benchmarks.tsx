@@ -654,6 +654,7 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
   return (
     <>
     <BucketLegend />
+    <div className="bench-scroll">
     <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 12 }}>
       <colgroup>
         <col />
@@ -703,6 +704,7 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
         ))}
       </tbody>
     </table>
+    </div>
     </>
   );
 }
@@ -1364,6 +1366,7 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
           ))}
         </div>
       </div>
+      <div className="bench-scroll">
       <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 12 }}>
         <thead>
           <tr>
@@ -1416,6 +1419,7 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
           ))}
         </tbody>
       </table>
+      </div>
       {!shown.length && <div style={{ color: 'var(--fg-4)', fontStyle: 'italic', padding: '1rem 0' }}>no runs recorded yet.</div>}
     </div>
   );
@@ -1614,6 +1618,7 @@ function RunDetail({ rec, regressions }: { rec: any; regressions?: RegressionFla
         <div>
           <h4 style={h4Style}>repetitions — {reps.length}</h4>
           {reps.length ? (
+            <div className="bench-scroll">
             <table style={{ borderCollapse: 'collapse', fontFamily: mono, fontSize: 11, width: '100%' }}>
               <thead>
                 <tr>
@@ -1635,6 +1640,7 @@ function RunDetail({ rec, regressions }: { rec: any; regressions?: RegressionFla
                 ))}
               </tbody>
             </table>
+            </div>
           ) : <span style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>no per-rep samples.</span>}
 
           {Array.isArray(rec.artifacts_files) && rec.artifacts_files.length > 0 && (

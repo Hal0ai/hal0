@@ -6,10 +6,45 @@
 // ─── OvCard ──────────────────────────────────────────────────────────────────
 // section.ov-card > header.ov-card-h(.ov-card-t, .ov-card-n, .sp, right)
 //                 + div.ov-card-b[.flush] + footer.ov-card-f
+// At phone width (overview.css, ≤760px) a titled card folds to its header: the toggle is shown
+// there only, and `collapsed` hides the body and footer there only, so a choice made on a phone
+// never hides a card on a wider screen. The choice is kept per card title in localStorage.
+const OV_FOLD_KEY = 'hal0.overview.folded'
+function readFolded() {
+  try {
+    const v = JSON.parse(window.localStorage.getItem(OV_FOLD_KEY) || '[]')
+    return Array.isArray(v) ? v : []
+  } catch {
+    return []
+  }
+}
 function OvCard({ title, note, right, foot, flush, className, children }) {
+  const foldable = typeof title === 'string' && title.length > 0
+  const [folded, setFolded] = React.useState(() => foldable && readFolded().includes(title))
+  const toggle = () => {
+    const next = !folded
+    setFolded(next)
+    try {
+      const rest = readFolded().filter((t) => t !== title)
+      window.localStorage.setItem(OV_FOLD_KEY, JSON.stringify(next ? [...rest, title] : rest))
+    } catch {
+      /* storage unavailable: the fold still works for this visit */
+    }
+  }
   return (
-    <section className={'ov-card' + (className ? ' ' + className : '')}>
+    <section className={'ov-card' + (className ? ' ' + className : '') + (folded ? ' collapsed' : '')}>
       <header className="ov-card-h">
+        {foldable && (
+          <button
+            type="button"
+            className="ov-card-tog"
+            aria-expanded={!folded}
+            aria-label={(folded ? 'Expand ' : 'Collapse ') + title}
+            onClick={toggle}
+          >
+            {folded ? '▸' : '▾'}
+          </button>
+        )}
         <span className="ov-card-t">{title}</span>
         {note && <span className="ov-card-n">{note}</span>}
         <span className="sp" />

@@ -17,7 +17,6 @@ import { PROXY_NEEDS_PUBLIC_URL, publicUrlHint } from '@/api/publicUrlHint'
 import { useNotifications, hal0Notify, dismissNotifMessage, NOTIF_KIND_HUE } from './notifications.jsx'
 import { SessionChip } from './auth/SessionChip.jsx'
 import { GpuModeToggle } from './dock/GpuModeToggle.jsx'
-import { NAV_GROUPS as SETTINGS_NAV_GROUPS, VALID_IDS as SETTINGS_IDS } from './settings/SettingsNav.jsx'
 import { useNpuOccupancy } from '@/api/hooks/useNpuOccupancy'
 import { npuTabVisible } from './npu/npu-pure'
 import { SLOTS_RESERVED_TABS, slotEditHash, slotsTab } from './slots-route'
@@ -557,16 +556,10 @@ function useNavItems() {
     // stays as the quick external-launch shortcuts; this is the manager.
     { id: "services", label: "Services", icon: Icons.services },
     { id: "logs", label: "Logs", icon: Icons.logs },
-    // Settings sections mirror the in-page SettingsNav (one list, imported),
-    // so the two can never drift. Overview also owns bare #settings.
-    { id: "settings", label: "Settings", icon: Icons.settings, children:
-      SETTINGS_NAV_GROUPS.flatMap(g => g.items).map(item => ({
-        id: "settings/" + item.id,
-        label: item.label,
-        ...(item.id === "overview"
-          ? { match: (route, param) => route === "settings" && (!param || !SETTINGS_IDS.includes(param) || param === "overview") }
-          : {}),
-      })) },
+    // Settings (#settings/<section>): no sub-links. Its sixteen pages are listed, grouped, by the
+    // in-page SettingsNav; a second flat copy here pushed the page content two lists to the right
+    // and, in the phone drawer, buried every other destination. Same rule as Memory above.
+    { id: "settings", label: "Settings", icon: Icons.settings },
   ];
 }
 
