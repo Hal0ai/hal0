@@ -2044,3 +2044,47 @@ def test_update_exits_0_on_a_pi_advisory_row(monkeypatch: pytest.MonkeyPatch, st
     assert result.exit_code == 0, result.output
     assert f"pi note {status}" in result.output
     assert "update applied." in result.output
+
+
+def _check_body(channel: str) -> dict:
+    return {
+        "current": "1.8.1",
+        "latest": "1.8.1",
+        "channel": channel,
+        "configured_channel": "stable",
+        "update_available": False,
+        "manifest": {},
+    }
+
+
+def test_check_with_channel_does_not_persist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#3970: --check --channel previews; it never calls the channel PUT."""
+    puts: list[str] = []
+    gets: list[tuple[str, object]] = []
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "api_put", lambda path, **k: puts.append(path) or {})
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        gets.append((path, kwargs.get("params")))
+        return _check_body("nightly")
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    result = runner.invoke(app, ["update", "--check", "--channel", "nightly"])
+    assert result.exit_code == 0, result.output
+    assert puts == []
+    assert gets == [("/api/updates/check", {"channel": "nightly"})]
+    assert "channel set to" not in result.output
+    assert "stays on stable" in result.output
+    assert "hal0 update --channel nightly" in result.output
+
+
+def test_channel_without_check_still_persists(monkeypatch: pytest.MonkeyPatch) -> None:
+    puts: list[tuple[str, object]] = []
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_put", lambda path, **k: puts.append((path, k.get("json"))) or {})
+    monkeypatch.setattr(uc, "api_get", lambda path, **k: _check_body("nightly"))
+    result = runner.invoke(app, ["update", "--channel", "nightly"])
+    assert result.exit_code == 0, result.output
+    assert puts == [("/api/updates/channel", {"channel": "nightly"})]
+    assert "channel set to nightly" in result.output

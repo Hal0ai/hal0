@@ -829,7 +829,10 @@ def update(
     channel: UpdateChannel | None = typer.Option(
         None,
         "--channel",
-        help="Persist the update channel (stable, preview, or nightly), then check.",
+        help=(
+            "Switch the update channel (stable, preview, or nightly), then check it. "
+            "With --check, only look at that channel: the box stays on its own."
+        ),
     ),
     check: bool = typer.Option(
         False,
@@ -885,7 +888,11 @@ def update(
     if _api_unreachable(url):
         raise typer.Exit(1)
 
-    if channel is not None:
+    # --check reads; it must not change the box. With --channel it previews
+    # that channel through the check route and leaves the saved one alone
+    # (#3970). Without --check, --channel switches the box as before.
+    preview_channel = channel.value if (channel is not None and check) else None
+    if channel is not None and not check:
         try:
             api_put("/api/updates/channel", json={"channel": channel.value})
         except CliApiError as exc:
@@ -946,13 +953,24 @@ def update(
         return
 
     try:
-        body = api_get("/api/updates/check")
+        if preview_channel is not None:
+            body = api_get("/api/updates/check", params={"channel": preview_channel})
+        else:
+            body = api_get("/api/updates/check")
     except CliApiError as exc:
         die(str(exc))
         return
     _print_check(body)
 
     if check:
+        if preview_channel is not None:
+            configured = body.get("configured_channel") if isinstance(body, dict) else None
+            staying = f" This box stays on {configured}." if configured else ""
+            console.print(
+                f"[dim]Checked the {preview_channel} channel only.{staying} "
+                f"To switch, run `hal0 update --channel {preview_channel}`.[/dim]",
+                soft_wrap=True,
+            )
         return
 
     target_version = (target or "").lstrip("v") or None

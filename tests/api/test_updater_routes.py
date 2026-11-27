@@ -85,6 +85,24 @@ def test_check_returns_well_formed_envelope_with_update_available(
     assert isinstance(body["manifest"], dict)
 
 
+def test_check_with_channel_previews_without_persisting(
+    isolated_client: TestClient, tmp_hal0_home: str
+) -> None:
+    """#3970: ?channel= checks that channel and leaves the saved one alone."""
+    r = isolated_client.get("/api/updates/check", params={"channel": "nightly"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["channel"] == "nightly"
+    assert body["configured_channel"] == "stable"
+    assert isolated_client.get("/api/updates/channel").json() == {"channel": "stable"}
+    assert isolated_client.get("/api/updates/check").json()["channel"] == "stable"
+
+
+def test_check_rejects_an_unknown_channel(isolated_client: TestClient) -> None:
+    r = isolated_client.get("/api/updates/check", params={"channel": "weekly"})
+    assert r.status_code == 400, r.text
+
+
 def test_check_reports_releases_url_override(isolated_client: TestClient) -> None:
     """#2128: with HAL0_RELEASES_URL active, /check names the override URL so
     every consumer can see the configured channel was bypassed."""

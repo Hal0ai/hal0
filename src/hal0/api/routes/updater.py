@@ -703,8 +703,20 @@ async def check_updates(request: Request) -> dict[str, Any]:
     Transport failures and bad JSON surface as typed envelopes
     (system.update_error) — the dashboard renders these as "couldn't
     check for updates" without crashing.
+
+    ``?channel=<name>`` checks that channel instead of the configured one and
+    changes nothing: it is how a caller previews another channel (#3970). The
+    response's ``channel`` is the one checked, and ``configured_channel`` is
+    the one the box is on.
     """
-    channel = _current_channel(request)
+    configured = _current_channel(request)
+    requested = request.query_params.get("channel")
+    if requested is not None and requested not in _VALID_CHANNELS:
+        raise BadRequest(
+            f"channel must be one of {sorted(_VALID_CHANNELS)}",
+            details={"got": requested, "allowed": sorted(_VALID_CHANNELS)},
+        )
+    channel = requested or configured
     # #2629: current/VERSION, not the wheel base version (no nightly stamp).
     installed = installed_version()
     url = releases_url(channel)
@@ -746,6 +758,7 @@ async def check_updates(request: Request) -> dict[str, Any]:
         "current": installed,
         "latest": latest or None,
         "channel": channel,
+        "configured_channel": configured,
         "update_available": update_available,
         # #3917: additive — true when the offer is a nightly <-> stable move at
         # one base version, which may be older code than what is installed.
