@@ -41,7 +41,7 @@ from hal0.errors import BadRequest
 # Short/alternative → primary long canonicalisation. Used to compute the dedup
 # key and to match the deny sets; the emitted token keeps its original
 # spelling. The spellings come from llama.cpp's own option table
-# (``common/arg.cpp`` at tag b12633): every alternative spelling of a flag
+# (``common/arg.cpp`` at tag b12816): every alternative spelling of a flag
 # hal0 manages or screens must be here, or the screen misses it (``-m
 # /etc/shadow`` once redirected the model past a ``--model`` check).
 # Unknown flags fall through unaliased and dedup against their own spelling.
@@ -164,7 +164,7 @@ SLOT_HARDWARE_FLAGS: frozenset[str] = frozenset(
 )
 
 #: llama.cpp's built-in preset switches (the "presets" group at the end of
-#: ``common/arg.cpp`` at tag b12633). Each one sets a model, a
+#: ``common/arg.cpp`` at tag b12816). Each one sets a model, a
 #: port and a sampler at once, and most download the weights from Hugging
 #: Face (``--embd-gemma-default`` …), so none may come from a profile.
 LLAMA_PRESET_FLAGS: frozenset[str] = frozenset(
@@ -184,7 +184,7 @@ LLAMA_PRESET_FLAGS: frozenset[str] = frozenset(
     }
 )
 
-#: Every flag spelling llama.cpp b12633 declares with no value argument — a
+#: Every flag spelling llama.cpp b12816 declares with no value argument — a
 #: plain switch or a ``bool`` switch with a ``--no-`` form (``common/arg.cpp``:
 #: options whose handler takes no value). The token after one of these is the
 #: next argument, never its value, so ``--metrics /etc/shadow`` is a switch
@@ -319,6 +319,7 @@ VALUELESS_FLAGS: frozenset[str] = frozenset(
         "--stdin",
         "--swa-full",
         "--ui",
+        "--ui-agent",
         "--ui-mcp-proxy",
         "--ui-mcp-proxy-allow-private-urls",
         "--usage",
@@ -366,7 +367,7 @@ VALUELESS_FLAGS: frozenset[str] = frozenset(
 # shaping a listener, or setting auth/TLS. hal0 manages all of these (the
 # model file, the loopback listener, the API gateway's auth), so a profile —
 # or a blocked slot's recorded tune — may never set them. Canonical (long)
-# spellings from llama.cpp's ``common/arg.cpp`` at tag b12633;
+# spellings from llama.cpp's ``common/arg.cpp`` at tag b12816;
 # :data:`FLAG_ALIASES` maps every short/alternative spelling onto them.
 HOST_OWNED_FLAGS: frozenset[str] = (
     frozenset(
@@ -488,7 +489,7 @@ DERIVED_PLACEMENT_FLAGS: frozenset[str] = frozenset({"--spec-draft-device", "--m
 #
 # llama.cpp reads every option from an environment variable as well as from
 # argv (``common_arg::set_env`` in ``common/arg.cpp`` at tag
-# b12633): 160 ``LLAMA_ARG_*`` names (plus their ``LLAMA_ARG_NO_*`` negations)
+# b12816): 161 ``LLAMA_ARG_*`` names (plus their ``LLAMA_ARG_NO_*`` negations)
 # and three without the prefix — ``LLAMA_API_KEY`` (``--api-key``),
 # ``HF_TOKEN`` (``--hf-token``) and ``MTMD_BACKEND_DEVICE`` (``--mmproj-device``).
 # A slot's ``[server].env`` reaches the llama-server container, so through it a
