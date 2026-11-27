@@ -79,8 +79,8 @@ the node itself. A privileged container's root is effectively host root.
 ## NPU and memlock
 
 The engine forwards GPU nodes only. For the AMD XDNA NPU (FastFlowLM and the
-ggml-xdna runner), and for the raised memlock limit both the NPU and ROCm
-need, run this on the Proxmox host after the container exists:
+ggml-xdna runner), and for the raised memlock limit it needs, run this on the
+Proxmox host after the container exists:
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0-npu-passthrough

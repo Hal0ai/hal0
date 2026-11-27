@@ -50,12 +50,12 @@ Three things worth knowing before you run it:
 
 - **Unprivileged.** The container's root is an ordinary unprivileged user on
   the host, which is the wrapper [ADR-0050](https://github.com/Hal0ai/hal0/blob/main/docs/adr/0050-no-oci-appliance-unprivileged-lxc-is-the-wrapper.md)
-  names. An unprivileged Ubuntu 26.04 container with this device layout was
-  validated on Strix Halo with hal0 1.8.1: ROCm and Vulkan slots load and
-  serve through the idmap-mapped `/dev/kfd` and `/dev/dri/renderD128` (about
-  60 and 72 tok/s on a 2.6B model, on a GPU shared with another workload),
-  `flm validate` passes on the mapped NPU node, and slot networking works on
-  the default bridge. The cost: hal0 cannot repair a device node whose group
+  names. A container built by this script was validated on Strix Halo with
+  hal0 1.8.1: ROCm and Vulkan slots load and serve through the idmap-mapped
+  `/dev/kfd` and `/dev/dri/renderD128` (about 44 and 45 tok/s on a 2.6B
+  model, on a GPU shared with other workloads), `flm validate` passes on the
+  NPU node after the second step below, slot networking works on the default
+  bridge, and `hal0 doctor all` has no failing row. The cost: hal0 cannot repair a device node whose group
   is wrong from inside the guest, because device ownership is host-mapped,
   so that repair happens in the host's `devN:` entry (§3). Pass
   `var_unprivileged=0` for a privileged container, where hal0 repairs it
@@ -64,8 +64,8 @@ Three things worth knowing before you run it:
   it builds a CPU-only container; set `var_gpu=no` to skip passthrough
   deliberately.
 - **The NPU is a second step.** The engine forwards GPU nodes only. For the
-  XDNA NPU, and for the raised memlock limit the NPU and ROCm both need,
-  run `hal0-npu-passthrough <CTID>` on the host afterwards:
+  XDNA NPU, and for the raised memlock limit the NPU needs, run
+  `hal0-npu-passthrough <CTID>` on the host afterwards:
 
   ```sh
   curl -fsSLO https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0-npu-passthrough

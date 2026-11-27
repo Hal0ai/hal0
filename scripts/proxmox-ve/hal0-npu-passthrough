@@ -17,8 +17,7 @@
 #     render group (Proxmox grants the device access for a devN entry itself).
 #   * lxc.prlimit.memlock: unlimited — an unprivileged container cannot raise
 #     its own memlock limit. Below 64 MiB xrt-smi cannot map the NPU, so
-#     `flm validate` fails and `hal0 doctor` skips its NPU liveness check, and
-#     ROCm's pinned buffers hit the same limit.
+#     `flm validate` fails and `hal0 doctor` skips its NPU liveness check.
 #
 # Idempotent: a device or line that is already present is left alone, and the
 # container is restarted only when something changed.
