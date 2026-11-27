@@ -338,3 +338,26 @@ def test_a_hung_host_probe_is_killed(monkeypatch):
     monkeypatch.setattr(npu_columns, "_HOST_TIMEOUT_S", 0.05)
     assert asyncio.run(npu_columns._real_read_host_aie_columns()) is None
     assert procs and procs[0].killed
+
+
+# ── host_npu_responds: the doctor's active liveness query (#3935) ────────────
+
+
+def test_host_npu_responds_true_when_the_query_succeeds(monkeypatch):
+    _patch_host(monkeypatch, payload=_XRT_JSON_FULL)
+    assert asyncio.run(npu_columns.host_npu_responds()) is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"payload": None, "returncode": 1}, {"payload": None, "hang": True}],
+)
+def test_host_npu_responds_false_on_failure_or_timeout(monkeypatch, kwargs):
+    _patch_host(monkeypatch, **kwargs)
+    monkeypatch.setattr(npu_columns, "_HOST_TIMEOUT_S", 0.05)
+    assert asyncio.run(npu_columns.host_npu_responds()) is False
+
+
+def test_host_npu_responds_none_when_xrt_smi_is_not_installed(monkeypatch):
+    _patch_host(monkeypatch, payload=_XRT_JSON_FULL, binary=None)
+    assert asyncio.run(npu_columns.host_npu_responds()) is None

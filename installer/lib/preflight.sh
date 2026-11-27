@@ -1251,13 +1251,24 @@ preflight_gpu() {
     local have_render="" have_kfd="" have_accel=""
     compgen -G "${dri_glob}" >/dev/null 2>&1 && have_render=1
     [[ -e "${kfd_path}" ]] && have_kfd=1
-    [[ -e /dev/accel/accel0 ]] && have_accel=1
+    local accel_node="${HAL0_NPU_ACCEL_NODE:-/dev/accel/accel0}"
+    local accel_sys="${HAL0_NPU_SYS_ACCEL:-/sys/class/accel/accel0}"
+    [[ -e "${accel_node}" ]] && have_accel=1
 
     if [[ -n "${have_render}" ]]; then
         info "gpu: $(compgen -G "${dri_glob}" 2>/dev/null | tr '\n' ' ')present"
     fi
     [[ -n "${have_kfd}"   ]] && info "gpu: ${kfd_path} present (ROCm compute)"
-    [[ -n "${have_accel}" ]] && info "npu: /dev/accel/accel0 present (AMD XDNA)"
+    if [[ -n "${have_accel}" ]]; then
+        # The node alone is not proof (#3935): a device that left the PCI bus keeps
+        # a stale node in the guest, but /sys mirrors the host and loses its entry.
+        # Passive on purpose: no driver call, which would wake a suspended NPU.
+        if [[ -d "${accel_sys}/device" ]]; then
+            info "npu: ${accel_node} present (AMD XDNA)"
+        else
+            warn "npu: ${accel_node} present but the device node is stale: the NPU is no longer on the bus; the host needs a reboot"
+        fi
+    fi
 
     if [[ -z "${have_render}" ]]; then
         if [[ "${in_container}" == "lxc" ]]; then

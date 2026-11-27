@@ -827,3 +827,38 @@ class TestKfdGroupGate:
             }
         )
         assert rc == RC_OK
+
+
+# ── NPU row: the node alone is not proof (#3935) ─────────────────────────────
+
+
+def _npu_env(tmp_path: Path, *, node: bool, backed: bool) -> dict[str, str]:
+    env = {
+        "HAL0_GPU_DRI_GLOB": str(tmp_path / "NONE*"),
+        "HAL0_GPU_CONTAINER_OVERRIDE": "",
+        "HAL0_NPU_ACCEL_NODE": str(tmp_path / "accel0"),
+        "HAL0_NPU_SYS_ACCEL": str(tmp_path / "sys-accel0"),
+    }
+    if node:
+        (tmp_path / "accel0").touch()
+    if backed:
+        (tmp_path / "sys-accel0" / "device").mkdir(parents=True)
+    return env
+
+
+def test_npu_row_ok_when_node_and_sysfs_device_exist(tmp_path: Path) -> None:
+    out = _run_gpu_gate_full(_npu_env(tmp_path, node=True, backed=True))
+    assert "present (AMD XDNA)" in out.stdout
+    assert "stale" not in out.stderr
+
+
+def test_npu_row_warns_when_the_node_is_stale(tmp_path: Path) -> None:
+    out = _run_gpu_gate_full(_npu_env(tmp_path, node=True, backed=False))
+    assert "present (AMD XDNA)" not in out.stdout
+    assert "stale" in out.stderr and "needs a reboot" in out.stderr
+    assert out.returncode == RC_OK
+
+
+def test_npu_row_silent_without_a_node(tmp_path: Path) -> None:
+    out = _run_gpu_gate_full(_npu_env(tmp_path, node=False, backed=False))
+    assert "npu:" not in out.stdout and "npu:" not in out.stderr

@@ -131,3 +131,79 @@ def test_host_readiness_old_firmware_and_unheld_clock(tmp_path: Path) -> None:
 
 def test_memlock_comes_from_the_launch_constant() -> None:
     assert "memlock=-1" in XDNA_ULIMITS
+
+
+# ── device backing (#3935) ───────────────────────────────────────────────────
+
+
+def _backed_sys(root: Path, *, backed: bool) -> Path:
+    sys_root = root / "sys"
+    (sys_root / "class" / "accel").mkdir(parents=True)
+    if backed:
+        pci = sys_root / "devices" / "pci0000:00" / "0000:c0:00.1"
+        pci.mkdir(parents=True)
+        accel = sys_root / "class" / "accel" / "accel0"
+        accel.mkdir()
+        (accel / "device").symlink_to(pci)
+    return sys_root
+
+
+def _dev_with_node(root: Path) -> Path:
+    dev = root / "dev"
+    (dev / "accel").mkdir(parents=True)
+    (dev / "accel" / "accel0").write_text("")
+    return dev
+
+
+def test_accel_device_backed_true_false_none(tmp_path: Path) -> None:
+    backed = _backed_sys(tmp_path / "a", backed=True)
+    assert nh.accel_device_backed(backed / "class" / "accel" / "accel0") is True
+    gone = _backed_sys(tmp_path / "b", backed=False)
+    assert nh.accel_device_backed(gone / "class" / "accel" / "accel0") is False
+    assert nh.accel_device_backed(tmp_path / "nosys" / "class" / "accel" / "accel0") is None
+
+
+def test_accel_device_backed_dangling_link_is_not_backed(tmp_path: Path) -> None:
+    sys_root = _backed_sys(tmp_path, backed=False)
+    accel = sys_root / "class" / "accel" / "accel0"
+    accel.mkdir()
+    (accel / "device").symlink_to(tmp_path / "removed")
+    assert nh.accel_device_backed(accel) is False
+
+
+def test_host_readiness_node_and_sysfs_is_backed(tmp_path: Path) -> None:
+    got = nh.host_readiness(
+        sys_root=_backed_sys(tmp_path, backed=True),
+        proc_root=tmp_path / "p",
+        lib_dirs=[],
+        dev_root=_dev_with_node(tmp_path),
+    )
+    assert got["device_backed"] is True
+    assert got["device_note"] is None
+
+
+def test_host_readiness_stale_node_is_flagged(tmp_path: Path) -> None:
+    got = nh.host_readiness(
+        sys_root=_backed_sys(tmp_path, backed=False),
+        proc_root=tmp_path / "p",
+        lib_dirs=[],
+        dev_root=_dev_with_node(tmp_path),
+    )
+    assert got["device_backed"] is False
+    assert "stale" in got["device_note"] and "reboot" in got["device_note"]
+
+
+def test_host_readiness_no_node_leaves_backing_unknown(tmp_path: Path) -> None:
+    got = nh.host_readiness(
+        sys_root=_backed_sys(tmp_path, backed=False),
+        proc_root=tmp_path / "p",
+        lib_dirs=[],
+        dev_root=tmp_path / "nodev",
+    )
+    assert got["device_backed"] is None
+    assert got["device_note"] is None
+
+
+def test_readiness_none_carries_the_new_keys() -> None:
+    assert nh.NPU_READINESS_NONE["device_backed"] is None
+    assert nh.NPU_READINESS_NONE["device_note"] is None
