@@ -21,6 +21,7 @@ import { draftVariantLabel, isDrafterModel } from '@/dash/spec-state.js'
 import { MODEL_SORT_FIELDS, sortModels, fmtAdded, isMtpModel, isMoeModel } from '@/dash/model-sort.js'
 import { DownloadRow, DownloadsPane } from '@/dash/models/DownloadsPane.jsx'
 import { ProvidersTab } from '@/dash/models/ProvidersTab.jsx'
+import { revealActiveTab } from '@/dash/mobile/revealActiveTab.js'
 import { TypeGlyph } from '@/dash/models/type-glyph.jsx'
 import { LaneCode } from '@/dash/lane-code.jsx'
 import { laneForBackend } from '@/dash/lane-code-pure'
@@ -398,7 +399,7 @@ function ModelsView({ modelParam = null }) {
       </div>
 
       {/* ── Tab bar (matches slot-tabs pattern) ── */}
-      <div className="slot-tabs" role="tablist" style={{marginBottom: 0}}>
+      <div className="slot-tabs" role="tablist" style={{marginBottom: 0}} ref={revealActiveTab}>
         <button
           role="tab"
           aria-selected={tab === "inference"}

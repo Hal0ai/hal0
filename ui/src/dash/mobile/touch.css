@@ -1,0 +1,153 @@
+/* ════════════════════════════════════════════════════════════════════
+   Touch and scrolling-strip polish (v1.8.2). Imported last, so it wins over the page CSS.
+
+   1. Scroll-edge fade on the sideways-scrolling tab strips.
+   2. Touch targets: on a coarse pointer every control has a hit area of at least 40px.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. Tab strips fade at the edge that has more to scroll ─────────────────────────────────
+   `.slot-tabs` (Slots, Models, Benchmarks) and `.ma-tabs` (Memory) scroll sideways when their
+   labels do not fit, with the scrollbar hidden, so the last label looked cut off by accident.
+
+   The fade is a mask driven by the strip's own scroll position (scroll-driven animations), so it
+   needs no scroll listener: no fade at the start of the left side, none at the end of the right
+   side, both in the middle, none at all when the strip fits (the scroll timeline is inactive and
+   both widths keep their 0 initial value). A mask does not intercept taps. The bottom 3px stay
+   opaque so the strip's rule and the open tab's 2px underline never fade.
+
+   Where scroll-driven animations or `mask-composite` are missing (Firefox today, Safari before
+   26) nothing here applies: the strips scroll as before, without a fade. The Memory strip keeps
+   its own scripted edge overlay in that case (memory-area.css). */
+@property --tab-fade-l { syntax: "<length>"; inherits: false; initial-value: 0px; }
+@property --tab-fade-r { syntax: "<length>"; inherits: false; initial-value: 0px; }
+
+@supports (animation-timeline: scroll()) and (mask-composite: add) {
+  @keyframes tab-fade-l { from { --tab-fade-l: 0px; } to { --tab-fade-l: 28px; } }
+  @keyframes tab-fade-r { from { --tab-fade-r: 28px; } to { --tab-fade-r: 0px; } }
+
+  .slot-tabs,
+  .ma-tabs {
+    animation-name: tab-fade-l, tab-fade-r;
+    animation-duration: 1ms, 1ms;
+    animation-timing-function: linear, linear;
+    animation-fill-mode: both, both;
+    animation-timeline: scroll(self inline), scroll(self inline);
+    animation-range: 0 28px, calc(100% - 28px) 100%;
+    mask-image:
+      linear-gradient(to right, transparent 0, #000 var(--tab-fade-l), #000 calc(100% - var(--tab-fade-r)), transparent 100%),
+      linear-gradient(#000, #000);
+    mask-size: 100% 100%, 100% 3px;
+    mask-position: 0 0, 0 100%;
+    mask-repeat: no-repeat;
+    mask-composite: add;
+  }
+  /* The mask replaces the Memory strip's scripted overlay, which would double the fade. */
+  .ma-tabs-wrap::before,
+  .ma-tabs-wrap::after { display: none; }
+}
+
+/* ── 2. Touch targets ───────────────────────────────────────────────────────────────────────
+   A touch screen (not a narrow window: this is a pointer query) gets a 40px hit area on every
+   control. Where growing the visible box would break a dense row, the box keeps its size and an
+   invisible `::after` centred on it supplies the rest of the hit area:
+     height: max(100%, 40px)   at least 40px tall, the box's own height when that is more
+     width: var(--hit-w, 100%) the box's width, or 40px for the icon-only controls
+   Hit areas only grow where there is room: wrapped groups below get a 14px row gap so two rows
+   of chips never share a pixel. */
+@media (pointer: coarse) {
+  /* Controls whose box is the right size to grow outright. */
+  .modal-close,
+  .banner-dismiss,
+  .banner-fold,
+  .tb-bell,
+  .tb-docs,
+  .tb-menu,
+  .ov-card-tog { min-width: 40px; min-height: 40px; }
+  .slot-tab,
+  .ma-tab,
+  .ma-tabs-aside,
+  .igt-tab,
+  .npt-tab,
+  .fcb-tab { min-height: 44px; }
+
+  /* Controls that keep their visible size and grow their hit area. */
+  .btn,
+  .ov-btn,
+  .ov-lnk,
+  .ov-nm,
+  .mdl-chip,
+  .mdl-seg button,
+  .ov-tabs button,
+  .tune-seg,
+  .ma-seg-btn,
+  .mv-tf,
+  .mv-btn,
+  .field-info-btn,
+  .foot-toggle,
+  .copybtn,
+  .stk-icon-btn,
+  .sctrl,
+  .cbtn,
+  .ladd { position: relative; }
+
+  .btn::after,
+  .ov-btn::after,
+  .ov-lnk::after,
+  .ov-nm::after,
+  .mdl-chip::after,
+  .mdl-seg button::after,
+  .ov-tabs button::after,
+  .tune-seg::after,
+  .ma-seg-btn::after,
+  .mv-tf::after,
+  .mv-btn::after,
+  .field-info-btn::after,
+  .foot-toggle::after,
+  .copybtn::after,
+  .stk-icon-btn::after,
+  .sctrl::after,
+  .cbtn::after,
+  .ladd::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: var(--hit-w, 100%);
+    height: max(100%, 40px);
+    transform: translate(-50%, -50%);
+  }
+  /* Icon-only controls are narrower than a finger as well. */
+  .field-info-btn,
+  .stk-icon-btn,
+  .copybtn,
+  .sctrl { --hit-w: max(100%, 40px); }
+
+  /* The segmented controls clip their children to the rounded border; the hit area must not be
+     clipped, so the corners are drawn by the end buttons instead. */
+  .mdl-seg,
+  .ov-tabs { overflow: visible; }
+  .mdl-seg button:first-child,
+  .ov-tabs button:first-child { border-radius: calc(var(--rad-sm, var(--rad)) - 1px) 0 0 calc(var(--rad-sm, var(--rad)) - 1px); }
+  .mdl-seg button:last-child,
+  .ov-tabs button:last-child { border-radius: 0 calc(var(--rad-sm, var(--rad)) - 1px) calc(var(--rad-sm, var(--rad)) - 1px) 0; }
+
+  /* Wrapped groups of small controls: room for two 40px hit areas to stack. */
+  .mdl-toolbar,
+  .mdl-toolbar-grp,
+  .mdl-pager-size,
+  .tune-segs,
+  .fline,
+  .mv-docrow { row-gap: 14px; }
+
+  /* Icon-only controls side by side: the gap is what keeps two 40px hit areas from overlapping
+     (22-26px boxes, so the pitch must reach 40px). */
+  :is(.infer-pane, .npu-pane, .npu-card) .slot-ctrls { gap: 18px; }
+  .stk-lib-f { gap: 14px; }
+  /* The catalog row's menu button is a lone control in a two-line row: grow it outright. */
+  .mdl-row-kebab .btn { height: 40px; min-width: 40px; }
+
+  /* Form fields. Checkboxes, radios and range sliders are drawn by the browser and keep their
+     size; the controls around them are what the hit area belongs to. */
+  input:not([type="checkbox"], [type="radio"], [type="range"], [type="hidden"], [type="file"], [type="color"]),
+  select { min-height: 40px; }
+}

@@ -136,6 +136,8 @@ import './dash/agents/agent-view.jsx'
 //   4. board-view last — its render reads the leaf globals + the bridged hooks.
 import './dash/board/board.css'
 import './dash/mobile/table-cards.css'
+// Touch targets and scroll-edge fades: last, so it wins over the page CSS above.
+import './dash/mobile/touch.css'
 import './dash/board/board-hook-bridge'
 import './dash/board/kcard.jsx'
 import './dash/board/lane.jsx'
