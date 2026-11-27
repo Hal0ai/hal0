@@ -41,6 +41,30 @@ _XRT_LIB_DIRS: tuple[str, ...] = (
 )
 
 
+#: What an operator is told when the accel node outlives the device behind it.
+STALE_NODE_REASON = "device node is stale: the NPU is no longer on the bus; the host needs a reboot"
+
+
+def accel_device_backed(accel_dir: str | Path) -> bool | None:
+    """Is the accel device at ``accel_dir`` (``/sys/class/accel/accel0``) really there?
+
+    Passive: sysfs existence checks only, nothing that reaches the driver (on
+    this hardware any driver call wakes the NPU from runtime suspend, and a
+    failed wake-up is what kills it). In a guest ``/sys`` mirrors the host, so a
+    device that dropped off the PCI bus leaves a stale ``/dev/accel/accel0`` but
+    no sysfs entry. ``True`` when the entry exists and its ``device`` link
+    resolves to a directory; ``False`` when the entry is missing or dangling;
+    ``None`` when ``/sys/class`` itself is not readable, so nothing is known.
+    """
+    base = Path(accel_dir)
+    try:
+        if not base.parent.parent.is_dir():
+            return None
+        return (base / "device").resolve().is_dir()
+    except OSError:
+        return None
+
+
 def _read(path: Path) -> str | None:
     try:
         return path.read_text(encoding="utf-8", errors="replace").strip()
@@ -137,12 +161,17 @@ def host_readiness(
     sys_root: str | Path = "/sys",
     proc_root: str | Path = "/proc",
     lib_dirs: Iterable[str | Path] = _XRT_LIB_DIRS,
+    dev_root: str | Path = "/dev",
 ) -> dict[str, Any]:
     """Every readable ADR-0057 host fact, ``None`` for each one that is not.
 
     ``memlock`` reports what hal0 itself configures for xdna slot containers
     (``--ulimit memlock=-1``, read off the launch constant), not the limit of
     this process.
+
+    ``device_backed`` is only reported when the ``/dev/accel/accel0`` node exists
+    (see :func:`accel_device_backed`); without a node there is nothing stale to
+    report and it stays ``None``.
     """
     from hal0.slots.fabric_clock_guard import read_fabric_clock
 
@@ -152,6 +181,11 @@ def host_readiness(
         fw = read_firmware_version(sys_root)
         out["firmware_version"] = fw
         out["firmware_ok"] = version_at_least(fw, FIRMWARE_MIN) if fw else None
+    with contextlib.suppress(Exception):
+        if (Path(dev_root) / "accel" / "accel0").exists():
+            backed = accel_device_backed(Path(sys_root) / "class" / "accel" / "accel0")
+            out["device_backed"] = backed
+            out["device_note"] = STALE_NODE_REASON if backed is False else None
     with contextlib.suppress(Exception):
         out["cmdline_missing"] = read_missing_cmdline_tokens(proc_root)
     with contextlib.suppress(Exception):
@@ -182,4 +216,6 @@ NPU_READINESS_NONE: dict[str, Any] = {
     "memlock": None,
     "fclk_held": None,
     "fclk_perf_level": None,
+    "device_backed": None,
+    "device_note": None,
 }

@@ -80,11 +80,17 @@ def test_npu_status_strix_halo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
 
     def _path(p: Any) -> Path:
         s = str(p)
-        if s.startswith("/dev/accel") or s.startswith("/sys/bus/pci"):
+        if s.startswith(("/dev/accel", "/sys/bus/pci", "/sys/class/accel")):
             return real_path(str(tmp_path) + s)
         return real_path(p)
 
     monkeypatch.setattr(probes, "Path", _path)
+    # The accel node is backed by a PCI device in sysfs (a stale node is not).
+    pci = tmp_path / "sys" / "bus" / "pci" / "devices" / "0000:c0:00.1"
+    pci.mkdir(parents=True)
+    accel = tmp_path / "sys" / "class" / "accel" / "accel0"
+    accel.mkdir(parents=True)
+    (accel / "device").symlink_to(pci)
 
     def _fake_run(argv: list[str], *, timeout: float = 5.0) -> tuple[int, str, str]:
         if argv == ["lsmod"]:
@@ -96,9 +102,28 @@ def test_npu_status_strix_halo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     out = probes.npu_status()
     assert out["present"] is True
     assert out["device_node"] == "/dev/accel/accel0"
+    assert out["device_backed"] is True
+    assert out["device_note"] is None
     assert out["driver_loaded"] is True
     assert out["pci_id"] == "1022:17F0"
     assert out["xdna_gen"] == 2
+
+
+def test_npu_status_stale_node_is_not_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The node outlived the device: /dev/accel/accel0 exists, /sys/class/accel/accel0 does not.
+    (tmp_path / "dev" / "accel").mkdir(parents=True)
+    (tmp_path / "dev" / "accel" / "accel0").write_text("")
+    (tmp_path / "sys" / "class" / "accel").mkdir(parents=True)
+    real_path = probes.Path
+    monkeypatch.setattr(probes, "Path", lambda p: real_path(str(tmp_path) + str(p)))
+    monkeypatch.setattr(probes, "_run", lambda *a, **kw: (0, "amdxdna 159744 3\n", ""))
+    out = probes.npu_status()
+    assert out["present"] is False
+    assert out["device_node"] is None
+    assert out["device_backed"] is False
+    assert "stale" in out["device_note"] and "reboot" in out["device_note"]
 
 
 def test_npu_status_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -108,6 +133,7 @@ def test_npu_status_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     monkeypatch.setattr(probes, "_run", lambda *a, **kw: (0, "ext4 100\n", ""))
     out = probes.npu_status()
     assert out["present"] is False
+    assert out["device_backed"] is None
     assert out["driver_loaded"] is False
     assert out["pci_id"] is None
     assert out["xdna_gen"] is None
