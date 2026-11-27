@@ -1,0 +1,104 @@
+/* hal0 dashboard — phone bottom tab bar and the compact dock above it.
+
+   Everything here is ≤720px only, except the base rule that hides the bar. History: the first
+   bottom-tab bar (replaced in #583) never showed because its base `display: none` came AFTER the
+   media query's `display: grid` at equal specificity. So the hidden base rule is first in this
+   file and the reveal sits after it, in the media block. Do not reorder.
+
+   Stack, bottom up: tab bar (fixed, z 80), dock (in flow, directly above it), page. Drawers (90+),
+   the nav drawer (100), the command palette (150) and toasts (200) all sit above the bar. */
+.tabbar { display: none; }
+
+@media (max-width: 720px) {
+  :root { --tabbar-h: 56px; --dock-compact-h: 40px; }
+
+  /* The one way to open the drawer is More; the top-bar hamburger would be a second. The
+     selector matches dashboard.css's `.topbar .tb-menu { display: flex }` and comes after it. */
+  .topbar .tb-menu { display: none; }
+
+  /* The bar is fixed, so the shell leaves room for it: the grid (page, dock) ends above the bar
+     and no page element can be covered by it. */
+  .app { padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px)); }
+
+  .tabbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 80;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    height: calc(var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+    background: var(--bg);
+    border-top: 1px solid var(--line);
+  }
+  .tabbar-tab {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    min-height: 48px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    color: var(--fg-3);
+    font: inherit;
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    text-decoration: none;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .tabbar-ico { display: inline-flex; }
+  .tabbar-ico svg { width: 22px; height: 22px; }
+  .tabbar-lbl { line-height: 1.1; }
+  .tabbar-tab:hover { color: var(--fg); }
+  .tabbar-tab.active { color: var(--accent); }
+  .tabbar-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+
+  /* Toasts clear the bar and the collapsed dock (the base rule clears a 90px footer only). */
+  .hal0-toast-stack {
+    right: 12px;
+    bottom: calc(var(--tabbar-h) + var(--dock-compact-h) + 12px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* ─── Compact dock (the chips row, collapsed or expanded) ───
+     One line of --dock-compact-h: the GPU headline, the slots and services pips with their
+     ready counts, and the dock toggle as an icon with the unseen badge. Dropped while collapsed:
+     the GPU detail line, mini progress bar and inline buttons, the update chip and the two-row
+     event ticker. All of them are in the expanded dock, which the toggle (and the GPU headline)
+     still open. */
+  .app .footer .dock-ticker { display: none; }
+  .app .footer .foot-chips.dock-row {
+    flex-wrap: nowrap;
+    height: var(--dock-compact-h);
+    padding: 0 0 0 8px;
+    border-bottom: 0;
+  }
+  .app .footer .foot-chips.dock-row > .foot-health { min-height: 0; padding: 0 8px; gap: 6px; }
+  .app .footer .foot-health + .foot-health::before { top: 8px; bottom: 8px; }
+  .app .footer .foot-health .pips { flex-wrap: nowrap; overflow: hidden; min-width: 0; gap: 2px; }
+  .app .footer .foot-health .pip { flex: none; width: 6px; height: 6px; }
+  .app .footer .foot-health .lbl { flex: none; }
+  .app .footer .gpu-seg {
+    flex: 0 1 auto;
+    min-height: 0;
+    max-width: 34%;
+    padding: 0 8px 0 0;
+  }
+  .app .footer .gpu-seg .rule { margin: 6px 0; }
+  .app .footer .gpu-seg :is(.det, .mini, .acts) { display: none; }
+  .app .footer .foot-update { display: none; }
+  /* The toggle keeps a 44px target: its label goes, the chevron and the badge stay. */
+  .app .footer .foot-toggle {
+    flex: none;
+    height: var(--dock-compact-h);
+    min-width: 44px;
+    justify-content: center;
+    padding: 0 10px;
+  }
+  .app .footer .foot-toggle > span:nth-of-type(2) { display: none; }
+}
