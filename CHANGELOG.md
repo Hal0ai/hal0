@@ -30,7 +30,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-## [1.8.1] — 2026-11-23
+## [1.8.1] — 2026-11-27
 
 ### Highlights
 
@@ -57,6 +57,12 @@ applying. Add those subsections to a version's section to surface them; see
 - **A box on a nightly is offered the stable release of the same version.** A box on `1.8.0-nightly.<stamp>` that switched to the stable channel was told it was up to date when 1.8.0 shipped, and stayed on its last nightly unless the operator passed `--target`. `hal0 update` now offers the selected channel's build when it and the installed build share a version and one of them is a nightly; a stable box that selects the nightly channel is still offered the nightlies. (#3893)
 - **`hal0 model scan` no longer registers a halogen draft head as a model.** Files named `*-drafter-r2.hgn` and `*-drafter-r2-ht4.hgn`, which newer halogen releases place beside a checkpoint, were registered as checkpoints of their own and accepted by `hal0 model add`. They are now treated as companions of the checkpoint. (#3920)
 - **`hal0 agent peers` lists each agent once.** The command printed one row per fact the memory search returned, so a single identity card could appear twice and be followed by blank rows. It now prints one row per card (#3877, #3930).
+- **A slot whose server dies as it starts no longer turns the load into a server error.** When a slot's process exited while hal0's health check was still connecting to it, the check raised an internal error instead of reading "not healthy", and `POST /api/slots/<name>/load` answered `500` with a traceback in the API log. The check now treats that as a failed probe, so the load ends with the usual typed error. (#3937, #3940)
+- **A slot that is backing off after failed starts now says why.** The `slot.crash_looping` answer carries `details.last_error`, the last error line the slot logged before it exited, so the caller no longer has to open the slot's journal to learn the cause. (#3937, #3940)
+- **A slot that fails on every start now stops retrying.** Slot units allowed 10 starts per 30 minutes, but once the restart delay reached its 5 minute ceiling only six starts fit in that window, so a slot that got past its first 25 minutes restarted for good: one FLM slot with a failed NPU restarted 427 times in a row. The window is now 2 hours. A slot that fails at once still gives up after about 25 minutes; one whose failing runs each take minutes now gives up within 2 hours. A unit picks the new value up the next time its slot is loaded. (#3936, #3942)
+- **hal0 no longer reports an NPU as healthy when it is gone or not answering.** A device that had dropped off the bus left its `/dev/accel/accel0` node behind in the container, and `hal0 doctor`, the NPU tab's host facts and the `npu_status` tool all read that node as a working NPU. They now also require the device behind the node and say "device node is stale" when it is missing (`npu_host.device_backed` and `device_note` in `/api/npu/occupancy`). `hal0 doctor all` gains an `npu` row that asks the NPU a question through the host's `xrt-smi`, when it is installed and no NPU slot is already serving, and warns when it does not answer. (#3935, #3941)
+- **On a Proxmox host, the fabric-clock hold no longer fails at boot.** `hal0-fabric-clock.service` could start before the GPU driver had created its clock controls, fail once, and leave the clock unheld until someone ran it by hand, which makes hal0 refuse NPU slots beside GPU slots. The unit now waits up to two minutes for the GPU (`hal0-fabric-clock hold --wait 120`). This is a host-side file: copy `scripts/proxmox-ve/hal0-fabric-clock` and its unit to the host again to get the fix; `hal0 update` does not touch the host. (#3938, #3939)
+- **Old update leftovers are cleaned up for every version, not only the current one.** Each update can leave a `.stale-<timestamp>` copy of a release directory behind; the cleanup only ever looked at copies of the version being installed, so copies of older versions stayed forever (255 MB across 15 versions on one box). Every version's copies now follow the same rule: the newest three are kept while they are under 30 days old. (#3881, #3931)
 
 ### Changed
 
