@@ -176,7 +176,8 @@ and restart `img`: the environment is rebuilt empty and nodes install again.
 ComfyUI-Manager needs one setting. With `use_uv = True` in
 `<data root>/user/__manager/config.ini` it logs `Neither python -m pip nor uv are
 available`, because it skips pip and the image has no `uv`. Set `use_uv = False`
-and restart `img`.
+and restart `img`. When the start log has that line and the file sets `use_uv` true,
+the `img-custom-nodes` row in `hal0 doctor all` names this cause and the file to edit.
 
 To avoid installing at startup, ship the node's dependencies in a **derived
 ComfyUI runner image**, installed at image build time. Select that image with

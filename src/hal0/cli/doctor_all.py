@@ -1132,6 +1132,29 @@ def check_migration_015(
     )
 
 
+def _manager_use_uv() -> Path | None:
+    """The ComfyUI-Manager config path when it sets ``use_uv`` true, else ``None`` (#3321).
+
+    Tolerant by design: a missing or unreadable file, a missing section or a
+    malformed ini all answer ``None``. Manager keeps the key in ``[default]``;
+    any section is accepted.
+    """
+    import configparser
+
+    from hal0.comfyui import paths as comfyui_paths
+
+    try:
+        config = comfyui_paths.user_dir() / "__manager" / "config.ini"
+        parser = configparser.ConfigParser(strict=False, interpolation=None)
+        parser.read_string(config.read_text())
+        for section in parser.sections():
+            if parser.getboolean(section, "use_uv", fallback=False):
+                return config
+    except (OSError, ValueError, configparser.Error):
+        return None
+    return None
+
+
 @_report_unreadable("img-custom-nodes", "Image custom nodes")
 def check_img_custom_nodes() -> Check:
     """Report ComfyUI startup failures from this unit invocation only (#3132)."""
@@ -1187,7 +1210,10 @@ def check_img_custom_nodes() -> Check:
         return skipped("current-start journal unavailable or empty; try `sudo hal0 doctor all`")
     failures: set[str] = set()
     env_failure = ""
+    no_installer = False
     for line in Text.from_ansi(journal.stdout).plain.splitlines():
+        if re.search(r"Neither `?python -m pip`? nor `?uv`? are available", line):
+            no_installer = True
         # hal0_python_env.py's one line: nodes are then back on the read-only image.
         if "comfyui.python_env_failed" in line:
             env_failure = line.partition("comfyui.python_env_failed")[2].strip()
@@ -1204,6 +1230,13 @@ def check_img_custom_nodes() -> Check:
         problems.append(
             f"the writable Python environment could not be prepared ({env_failure}), "
             "so nodes cannot install packages"
+        )
+    uv_config = _manager_use_uv() if no_installer else None
+    if uv_config is not None:
+        problems.append(
+            f"ComfyUI-Manager has use_uv = True in {uv_config}, but the image has no uv and "
+            "Manager then skips pip, so it cannot install anything; set use_uv = False in that "
+            "file, then run `hal0 slot restart img`"
         )
     if failures:
         problems.append(
