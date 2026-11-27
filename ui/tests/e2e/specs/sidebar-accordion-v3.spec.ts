@@ -119,17 +119,16 @@ test.describe('sidebar tab sub-links', () => {
     await expect(sb.locator('[data-testid="nav-benchmarks-queue"]')).toHaveAttribute('aria-current', 'page')
   })
 
-  test('Agents has an Overview sub-link and Settings lists its sections', async ({ page }) => {
+  test('Agents has an Overview sub-link; Settings has none (its pages are listed in the page)', async ({ page }) => {
     await page.goto('/#agent')
     const sb = page.locator('.sidebar')
     await expect(sb.locator('[data-testid="nav-agent-overview"]')).toHaveAttribute('aria-current', 'page', { timeout: FIVE_S })
     await expect(sb.locator('[data-testid="nav-mcp"]')).toBeVisible()
 
-    await page.goto('/#settings')
-    await expect(sb.locator('[data-testid="nav-settings-overview"]')).toHaveAttribute('aria-current', 'page')
-    await sb.locator('[data-testid="nav-settings-updates"]').click()
-    await expect(page).toHaveURL(/#settings\/updates$/)
-    await expect(sb.locator('[data-testid="nav-settings-updates"]')).toHaveAttribute('aria-current', 'page')
+    await page.goto('/#settings/updates')
+    await expect(page.locator('.settings-nav .nav-item.active')).toHaveText('Updates')
+    await expect(sb.locator('[data-testid="nav-settings"]')).toHaveAttribute('aria-current', 'page')
+    await expect(sb.locator('[data-testid^="nav-settings-"]')).toHaveCount(0)
   })
 })
 
