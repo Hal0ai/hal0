@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+#
+# hal0-npu-passthrough — forward the host's NPU into an existing hal0 LXC and
+# lift the container's memlock limit.
+#
+# Run on the Proxmox VE host as root:
+#
+#   hal0-npu-passthrough <CTID>            apply, then restart the container
+#   hal0-npu-passthrough --dry-run <CTID>  print what would change, change nothing
+#
+# Why this is its own tool: ct/hal0.sh builds the container with the
+# community-scripts engine, which forwards GPU nodes (/dev/dri, /dev/kfd) and
+# nothing else. Two things hal0 needs are outside it:
+#
+#   * /dev/accel/accel* — the AMD XDNA NPU that FastFlowLM and the ggml-xdna
+#     runner use. Each node becomes a devN entry owned by the container's
+#     render group (Proxmox grants the device access for a devN entry itself).
+#   * lxc.prlimit.memlock: unlimited — an unprivileged container cannot raise
+#     its own memlock limit. Below 64 MiB xrt-smi cannot map the NPU, so
+#     `flm validate` fails and `hal0 doctor` skips its NPU liveness check, and
+#     ROCm's pinned buffers hit the same limit.
+#
+# Idempotent: a device or line that is already present is left alone, and the
+# container is restarted only when something changed.
+
+set -euo pipefail
+
+DRY_RUN=0
+CTID=""
+for arg in "$@"; do
+    case "${arg}" in
+        --dry-run) DRY_RUN=1 ;;
+        --help | -h)
+            sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        -*) echo "unknown option: ${arg} (try --help)" >&2; exit 2 ;;
+        *) CTID="${arg}" ;;
+    esac
+done
+
+die() { echo "error: $*" >&2; exit 1; }
+say() { echo "$*"; }
+
+[[ -n "${CTID}" ]] || die "usage: hal0-npu-passthrough [--dry-run] <CTID>"
+[[ "${CTID}" =~ ^[0-9]+$ ]] || die "CTID must be a number (got '${CTID}')"
+[[ ${EUID} -eq 0 ]] || die "must run as root on the Proxmox VE host"
+command -v pct >/dev/null 2>&1 || die "pct not found: run this on the Proxmox VE host, not inside the container"
+
+CONF="/etc/pve/lxc/${CTID}.conf"
+[[ -f "${CONF}" ]] || die "no container ${CTID} (${CONF} does not exist)"
+
+# The part of the config before the first snapshot section is the live one.
+live_config() { sed '/^\[/,$d' "${CONF}"; }
+
+changed=0
+
+# ── memlock ───────────────────────────────────────────────────────────────
+MEMLOCK_LINE="lxc.prlimit.memlock: unlimited"
+if live_config | grep -qxF "${MEMLOCK_LINE}"; then
+    say "memlock: already unlimited"
+elif live_config | grep -q '^lxc\.prlimit\.memlock:'; then
+    die "${CONF} already sets lxc.prlimit.memlock to another value; edit it by hand"
+else
+    say "memlock: adding '${MEMLOCK_LINE}'"
+    changed=1
+    if [[ ${DRY_RUN} -eq 0 ]]; then
+        # Raw lxc.* keys must sit in the live section, above any snapshot.
+        tmp="$(mktemp)"
+        awk -v line="${MEMLOCK_LINE}" '
+            !done && /^\[/ { print line; print ""; done = 1 }
+            { print }
+            END { if (!done) print line }
+        ' "${CONF}" >"${tmp}"
+        cat "${tmp}" >"${CONF}"
+        rm -f "${tmp}"
+    fi
+fi
+
+# ── NPU nodes ─────────────────────────────────────────────────────────────
+npu_nodes=()
+for node in /dev/accel/accel*; do
+    [[ -c "${node}" && ! -L "${node}" ]] && npu_nodes+=("${node}")
+done
+
+if [[ ${#npu_nodes[@]} -eq 0 ]]; then
+    say "npu: this host has no /dev/accel node (is the amdxdna driver loaded?), nothing to forward"
+else
+    # The owning group must be the CONTAINER's render group: hal0 refuses a
+    # passthrough whose gid it cannot use, and the host's number is only right
+    # by coincidence.
+    gid=""
+    if [[ "$(pct status "${CTID}" 2>/dev/null)" == "status: running" ]]; then
+        gid="$(pct exec "${CTID}" -- getent group render 2>/dev/null | cut -d: -f3 || true)"
+    fi
+    if [[ -z "${gid}" ]]; then
+        # Stopped, or no render group yet: reuse the gid an existing GPU
+        # entry was already aligned to.
+        gid="$(live_config | sed -n 's|^dev[0-9]*: /dev/dri/renderD[0-9]*,gid=\([0-9]*\).*|\1|p' | head -n1)"
+    fi
+    [[ -n "${gid}" ]] || die "cannot tell the container's render gid: start container ${CTID} and run this again"
+
+    for node in "${npu_nodes[@]}"; do
+        if live_config | grep -qE "^dev[0-9]+: ${node}(,|$)"; then
+            say "npu: ${node} already forwarded"
+            continue
+        fi
+        idx=0
+        while live_config | grep -q "^dev${idx}:"; do idx=$((idx + 1)); done
+        say "npu: forwarding ${node} as dev${idx} with gid ${gid}"
+        changed=1
+        if [[ ${DRY_RUN} -eq 0 ]]; then
+            pct set "${CTID}" "--dev${idx}" "${node},gid=${gid}" >/dev/null \
+                || die "pct set --dev${idx} failed"
+        fi
+    done
+fi
+
+# ── restart ───────────────────────────────────────────────────────────────
+if [[ ${changed} -eq 0 ]]; then
+    say "nothing to change"
+    exit 0
+fi
+if [[ ${DRY_RUN} -eq 1 ]]; then
+    say "dry run: nothing was changed"
+    exit 0
+fi
+if [[ "$(pct status "${CTID}" 2>/dev/null)" == "status: running" ]]; then
+    say "restarting container ${CTID} to apply"
+    pct reboot "${CTID}" >/dev/null || die "pct reboot failed; restart the container by hand"
+fi
+say "done. Check inside the container with: flm validate && hal0 doctor all"

@@ -1,0 +1,84 @@
+{
+  "name": "hal0",
+  "slug": "hal0",
+  "categories": [
+    20
+  ],
+  "date_created": "2026-11-27",
+  "type": "ct",
+  "platforms": ["pve"],
+  "updateable": true,
+  "privileged": false,
+  "architectures": ["amd64"],
+  "interface_port": 8080,
+  "documentation": "https://github.com/Hal0ai/hal0/tree/main/docs",
+  "website": "https://hal0.dev/",
+  "repository": "https://github.com/Hal0ai/hal0",
+  "logo": "https://raw.githubusercontent.com/Hal0ai/hal0/main/ui/public/favicon.svg",
+  "description": "hal0 is a self-hosted AI inference server for the home. It runs language, speech, embedding and image models on AMD GPUs and NPUs or on the CPU, serves them through one OpenAI-compatible API, and manages models and slots from a web dashboard. It bundles Open WebUI for chat, an agent, and a long-term memory engine.",
+  "install_methods": [
+    {
+      "type": "default",
+      "script": "ct/hal0.sh",
+      "config_path": "/etc/hal0/hal0.toml",
+      "resources": {
+        "cpu": 4,
+        "ram": 8192,
+        "hdd": 40,
+        "os": "Ubuntu",
+        "version": "26.04"
+      }
+    }
+  ],
+  "default_credentials": {
+    "username": null,
+    "password": null
+  },
+  "notes": [
+    {
+      "text": "The dashboard on port 8080 and the chat on port 3001 have no login by default. Keep the container on a trusted LAN, or run `hal0 auth reset-key` and `hal0 auth require on` inside it.",
+      "type": "warning"
+    },
+    {
+      "text": "GPU passthrough needs the amdgpu driver loaded on the Proxmox host. The NPU and a raised memlock limit are not set up by this script: run hal0-npu-passthrough from the hal0 repository on the host afterwards.",
+      "type": "info"
+    },
+    {
+      "text": "Models are large. The 40 GB disk holds the install and a small starter model; grow the disk or bind-mount a model store before pulling bigger ones.",
+      "type": "info"
+    }
+  ],
+  "app_vars": [
+    {
+      "name": "var_hal0_channel",
+      "label": "Release Channel",
+      "type": "select",
+      "options": ["stable", "preview", "nightly"],
+      "default": "stable"
+    },
+    {
+      "name": "var_hal0_memory",
+      "label": "Install the Memory Engine",
+      "type": "boolean",
+      "default": "yes"
+    },
+    {
+      "name": "var_hal0_openwebui",
+      "label": "Install Open WebUI",
+      "type": "boolean",
+      "default": "yes"
+    },
+    {
+      "name": "var_hal0_agents",
+      "label": "Install the Agents",
+      "type": "boolean",
+      "default": "yes"
+    },
+    {
+      "name": "var_hal0_image_models",
+      "label": "Download Starter Image Models",
+      "type": "boolean",
+      "default": "yes"
+    }
+  ]
+}

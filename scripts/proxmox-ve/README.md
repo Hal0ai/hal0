@@ -1,111 +1,107 @@
 # hal0 on Proxmox VE
 
-One-line helper that creates a privileged Ubuntu 26.04 LXC, forwards
-whatever GPU/NPU device nodes the host has, and runs the standard hal0
-bootstrap inside it. This is the production hal0 container shape — see the
-[Proxmox guide](../../docs/getting-started/proxmox.mdx) for the manual
-recipe it automates and for the host-side driver/GTT prerequisites.
+A helper script that creates an unprivileged Ubuntu 26.04 LXC, forwards the
+host's GPU into it, and runs the hal0 installer inside. It is written in the
+[community-scripts](https://community-scripts.org) form and built on their
+engine, so its menus, defaults files and `var_*` settings work the way they
+do for every script on that site. See the
+[Proxmox guide](../../docs/getting-started/proxmox.mdx) for the manual recipe
+and the host-side driver prerequisites.
 
 ## Quick start
 
 On a Proxmox VE host as `root`:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/ct/hal0.sh)"
 ```
 
-That will:
+The script asks for Default or Advanced install, creates the container,
+forwards the GPU nodes it finds (`/dev/dri/renderD*`, `/dev/dri/card*`,
+`/dev/kfd`) with the container's own `render` and `video` group ids, asks
+you to confirm running hal0's installer, and prints the dashboard address
+(`http://<container-ip>:8080`) when it finishes.
 
-1. Probe the host for `/dev/dri/renderD*`, `/dev/dri/amdgpu`, `/dev/kfd` and
-   `/dev/accel/accel*`
-2. Pick the next free CTID and download the Ubuntu 26.04 LXC template if missing
-3. Print the resolved plan (CTID, hostname, cores, RAM, disk, network, devices)
-4. Wait 5s so you can ctrl-C if anything looks wrong
-5. Create the LXC privileged, with `nesting/keyctl/fuse/mknod`, every probed
-   device as `devN`, the matching `lxc.cgroup2.devices.allow` rules,
-   `lxc.prlimit.memlock: unlimited`, and `lxc.apparmor.profile: unconfined`
-6. Start it, read the guest's `render` gid, re-point every `devN` entry at it
-   and restart if it differed (the host's gid is only correct by coincidence,
-   and a privileged container has no idmap to shift it), then wait for network
-   and verify each forwarded device is visible **and carries the expected gid**
-   before installing anything
-7. Install `curl` if the template lacks it (the one package that cannot be
-   fetched by the thing it fetches), then pipe `https://hal0.dev/install.sh`
-   into `bash`. Everything else the guest installs itself — bootstrap pulls
-   tar/jq/python3 and a pinned `cosign`, the installer adds podman and the
-   Python venv stdlib
-8. Print the dashboard URL (`http://<lxc-ip>:8080`)
+To update hal0 later, run `update` inside the container, or `hal0 update`.
 
-## Interactive prompts
+## The files
 
-Pass `--advanced` to open whiptail dialogs for every parameter:
+| File | Runs | What it does |
+| --- | --- | --- |
+| `ct/hal0.sh` | on the Proxmox host | Declares the container (4 cores, 8 GB RAM, 40 GB disk, unprivileged, nesting, keyctl, fuse, mknod, GPU) and the update command |
+| `install/hal0-install.sh` | inside the container | Confirms, then runs hal0's signed installer from `https://hal0.dev/install.sh` |
+| `json/hal0.json` | nowhere | Metadata for the community-scripts website |
+| `hal0-npu-passthrough` | on the Proxmox host | Forwards the NPU and lifts the memlock limit (below) |
+| `hal0-fabric-clock`, `hal0-fabric-clock.service` | on the Proxmox host | GPU fabric-clock guard (below) |
+
+## Settings
+
+Container settings are the engine's standard `var_*` variables. Set them in
+the environment, pick them in the Advanced install, or save them as defaults:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)" -- --advanced
+var_ctid=210 var_hostname=hal0 var_ram=16384 var_disk=100 \
+var_container_storage=local-zfs var_net=192.0.2.50/24 var_gateway=192.0.2.1 \
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/ct/hal0.sh)"
 ```
 
-## Env-var overrides
+hal0's own settings:
 
-Every parameter has an env-var override. Useful when running headless
-or templating multiple hosts.
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `var_hal0_channel` | `stable` | Release channel: `stable`, `preview` or `nightly` |
+| `var_hal0_memory` | `yes` | Install the memory engine (Hindsight) |
+| `var_hal0_openwebui` | `yes` | Install Open WebUI, the chat on port 3001 |
+| `var_hal0_agents` | `yes` | Install the bundled agents |
+| `var_hal0_image_models` | `yes` | Download the starter image models |
+| `var_gpu` | `yes` | Forward the host's GPU. `no` builds a CPU-only container |
+| `var_unprivileged` | `1` | `0` builds a privileged container (see below) |
+| `var_external_installer` | *(ask)* | `yes` skips the confirmation before hal0's installer runs |
 
-| Variable                  | Default                                  | Notes |
-| ------------------------- | ---------------------------------------- | ----- |
-| `CTID`                    | `pvesh get /cluster/nextid`              | LXC ID |
-| `HOSTNAME`                | `hal0`                                   | |
-| `CORES`                   | `4`                                      | |
-| `RAM_MB`                  | `8192`                                   | |
-| `SWAP_MB`                 | `1024`                                   | |
-| `DISK_GB`                 | `20`                                     | |
-| `STORAGE`                 | `local-lvm` if present, else first rootdir pool | |
-| `BRIDGE`                  | first `vmbr*` in `/etc/network/interfaces` | |
-| `NET_CONFIG`              | `name=eth0,bridge=$BRIDGE,ip=dhcp`       | full `--net0` arg if you need static IP / VLAN |
-| `IP_CIDR` / `GATEWAY`     | *(empty → DHCP)*                         | static IPv4, e.g. `192.0.2.90/24` + `192.0.2.1` |
-| `NAMESERVER`              | *(pve default)*                          | space-separated resolvers |
-| `SEARCHDOMAIN`            | *(pve default)*                          | |
-| `TIMEZONE`                | *(pve default)*                          | |
-| `TAGS`                    | `hal0`                                   | semicolon-separated pve tags |
-| `ONBOOT`                  | `1`                                      | start with the host |
-| `STARTUP`                 | *(empty)*                                | pve startup order, e.g. `order=3` |
-| `MOUNTS`                  | *(empty)*                                | `;`-separated `--mpN` values, e.g. `/mnt/ai-models,mp=/mnt/ai-models,backup=0` |
-| `OS_TYPE` / `OS_VERSION`  | `ubuntu` / `26.04`                       | |
-| `TEMPLATE_STORAGE`        | `local`                                  | where to keep the template |
-| `UNPRIVILEGED`            | `0`                                      | `1` for the narrower unprivileged container |
-| `FEATURES`                | `nesting=1,keyctl=1,fuse=1,mknod=1`      | podman-in-LXC needs these |
-| `GPU_PASSTHROUGH`         | `auto`                                   | `1` = require a device, `0` = CPU-only container |
-| `PASSWORD`                | *(empty)*                                | blank = no root password; use `pct enter` |
-| `SSH_AUTHORIZED_KEYS`     | *(empty)*                                | path to a public-key file on the pve host |
-| `HAL0_CHANNEL`            | `stable`                                 | passes through to the hal0 bootstrap |
-| `RUN_BOOTSTRAP`           | `1`                                      | `0` creates the container and stops there |
+A fully unattended run sets `mode=default var_external_installer=yes`.
 
-Example — pinned CTID, static IP, model store bind-mounted:
+## Unprivileged by default
+
+The container is unprivileged: its root is an ordinary unprivileged user on
+the host. This is the shape [ADR-0050](../../docs/adr/0050-no-oci-appliance-unprivileged-lxc-is-the-wrapper.md)
+names as hal0's one wrapper.
+
+One thing an unprivileged container cannot do is repair a device node whose
+group is wrong, because the node's ownership comes from the host. If
+`hal0 doctor all` reports a GPU node with the wrong group, fix the `devN:`
+entry in `/etc/pve/lxc/<CTID>.conf` on the host (`gid=` must be the
+container's `render` group id, from `getent group render` inside it) and
+restart the container.
+
+`var_unprivileged=0` builds a privileged container, where hal0 can repair
+the node itself. A privileged container's root is effectively host root.
+
+## NPU and memlock
+
+The engine forwards GPU nodes only. For the AMD XDNA NPU (FastFlowLM and the
+ggml-xdna runner), and for the raised memlock limit both the NPU and ROCm
+need, run this on the Proxmox host after the container exists:
 
 ```bash
-CTID=210 \
-HOSTNAME=hal0-test \
-IP_CIDR=192.0.2.50/24 GATEWAY=192.0.2.1 \
-MOUNTS='/mnt/ai-models,mp=/mnt/ai-models,backup=0' \
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"
+curl -fsSLO https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0-npu-passthrough
+bash hal0-npu-passthrough --dry-run <CTID>   # shows what it would change
+bash hal0-npu-passthrough <CTID>
 ```
 
-Example — the old vanilla shape (unprivileged, no passthrough):
+It adds a `devN` entry for each `/dev/accel/accel*` node, owned by the
+container's `render` group, adds `lxc.prlimit.memlock: unlimited`, and
+restarts the container. Running it again changes nothing. Then check inside
+the container with `flm validate` and `hal0 doctor all`.
 
-```bash
-UNPRIVILEGED=1 GPU_PASSTHROUGH=0 OS_TYPE=debian OS_VERSION=13 \
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"
-```
+## What the script does not do
 
-## What the script does NOT do
-
-- **No host-side driver or GTT setup.** `amdgpu`/`amdxdna` and the GTT
+- **No host-side driver or GTT setup.** `amdgpu`, `amdxdna` and the GTT
   window are the host kernel's business; see the drivers guide. The script
-  forwards the nodes that already exist and fails loudly when they don't
-  appear inside the container.
-- **No reverse proxy / TLS.** The dashboard listens on `0.0.0.0:8080`
-  with no auth (per ADR-0012). Treat the LXC as LAN-only.
-- **No backup / migration.** Standard `pct` / Proxmox tooling applies.
-- **No GPU fabric-clock hold.** See below — that is a separate, opt-in
-  install, and only needed when a box runs NPU and GPU slots together.
+  forwards the nodes that already exist.
+- **No reverse proxy or TLS.** The dashboard listens on `0.0.0.0:8080` with
+  no login by default. Keep the container on a trusted LAN.
+- **No model store.** Models land on the container's disk. Bind-mount a
+  host directory with `pct set <CTID> -mp0 ...` to keep them elsewhere.
 
 ## GPU fabric-clock guard (NPU + GPU together on Strix Halo)
 
@@ -140,17 +136,28 @@ GPU slot are both configured and the clock is not held; `[slots].fabric_clock_gu
 Undo: `systemctl disable --now hal0-fabric-clock.service`, then
 `hal0-fabric-clock release` (or just reboot the host).
 
+
+## Submitting to community-scripts
+
+The three files are kept in the form their repository takes. Before a pull
+request to `community-scripts/DevScripts`:
+
+- change `_CS_DEFAULT_URL` in `ct/hal0.sh` to their repository, and the
+  header comment of both scripts to their copyright and MIT licence lines;
+- their project asks for 1,000 GitHub stars and a project at least six
+  months old, so check the current count first;
+- their rules allow a script that hands off to an upstream installer only
+  behind `confirm_external_installer`, which this one uses.
+
 ## Test plan
 
-Manual; needs a Proxmox VE host since `pct` only works there:
+Manual; needs a Proxmox VE host.
 
-1. On a fresh pve, `bash -c "$(curl … hal0.sh)"` — should land at a hal0 dashboard.
-2. On a GPU host, `pct config <CTID>` should show `dev0…devN` plus the
-   cgroup/memlock/apparmor lines, and `hal0 doctor` inside the CT should see
-   the GPU (and the NPU where present).
-3. On a GPU-less host, the run should warn once and finish CPU-only.
-4. `--advanced` — should open whiptail prompts and honour them.
-5. `CTID=… STORAGE=… bash hal0.sh` non-interactive — should silently respect overrides.
-6. Re-running `apply_raw_config` against an existing CTID must not duplicate
-   any `lxc.*` line.
-7. `pct destroy <CTID>` — clean teardown leaves no leaked storage.
+1. Default install on a GPU host: lands at the dashboard, `pct config <CTID>`
+   shows `unprivileged: 1` and the `devN` entries, `hal0 doctor all` inside
+   has no FAIL row, and a slot serves on ROCm and on Vulkan.
+2. `hal0-npu-passthrough <CTID>`, then `flm validate` passes inside.
+3. `var_gpu=no`: finishes as a CPU-only container.
+4. `update` inside the container runs `hal0 update` and exits 0, twice.
+5. `mode=default var_external_installer=yes` with `var_ctid` set: no prompt.
+6. `pct destroy <CTID>` leaves no leaked storage.
