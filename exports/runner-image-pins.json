@@ -4,7 +4,7 @@
     "ghcr.io/hal0ai/hal0-runner-comfyui:0.30.0-rf37ebf1@sha256:77a6a4e8f1c6be12157d89d8ce4ea71a91db9fddf3fc7ad4bdfc534c1868fca9",
     "ghcr.io/hal0ai/hal0-runner-cpu:b12633-r4f071ba@sha256:9e69f1a64810b5c1213a5350832a9b6bc68f7f63032ae9f101f58cd104d3e1e1",
     "ghcr.io/hal0ai/hal0-runner-flm:1.0.12-r257ff92@sha256:f58cbf778ede916b8805b25461da487490f427c773dd5ad024ef306f59c601af",
-    "ghcr.io/hal0ai/hal0-runner-kokoro:0.4.9-re14329d@sha256:0df4b132be5a5be04f4481940db36365bb95b50aaa0940af0b6f1f5792428325",
+    "ghcr.io/hal0ai/hal0-runner-kokoro:0.6.1-r3a96239@sha256:11e52b004294e80ea2018788744081245fd15eff6593960a18166322d12a9e5c",
     "ghcr.io/hal0ai/hal0-runner-moonshine:20251121-re14329d@sha256:341b64a5c60496c57407a75077a746ff40bbc2eedbc8ddba1e661094d6818766",
     "ghcr.io/hal0ai/hal0-runner-qwen3tts:0.1.1-re14329d@sha256:81a914c9622fe35d11d8c0d2f81eee5a882faaad1556ac42a8db6856ad225698",
     "ghcr.io/hal0ai/hal0-runner-standard:b12633-r4f071ba@sha256:8dba30e46c4c461ac2e37c288047662af6a3210b474a1aba56f8421f1d12972e",

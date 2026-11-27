@@ -26,8 +26,8 @@
     },
     "kokoro": {
       "image": "ghcr.io/hal0ai/hal0-runner-kokoro",
-      "tag": "0.4.9-re14329d",
-      "digest": "sha256:0df4b132be5a5be04f4481940db36365bb95b50aaa0940af0b6f1f5792428325",
+      "tag": "0.6.1-r3a96239",
+      "digest": "sha256:11e52b004294e80ea2018788744081245fd15eff6593960a18166322d12a9e5c",
       "lanes_gated": ["cpu"]
     },
     "moonshine": {
