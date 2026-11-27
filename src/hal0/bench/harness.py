@@ -594,7 +594,7 @@ class ExclusiveSlots:
     The session runner holds ONE window across a whole run of consecutive
     Tier-A sweeps (``runner._ExclusiveWindow``), not one per sweep (#2770).
     Every slot unit carries ``StartLimitBurst=10`` per
-    ``StartLimitIntervalSec=1800`` (``providers/container.py``), so the shell
+    ``StartLimitIntervalSec=7200`` (``providers/container.py``), so the shell
     harness's per-sweep ``--exclusive`` tripped the start limit from a
     session's eleventh sweep and left pinned slots ``failed`` until an
     operator ran ``reset-failed``.
