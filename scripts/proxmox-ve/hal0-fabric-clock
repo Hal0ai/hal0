@@ -8,7 +8,10 @@
 # inside the LXC. See docs/adr for the hazard and scripts/proxmox-ve/README.md
 # for install instructions.
 #
-# Usage: hal0-fabric-clock hold | release | status
+# Usage: hal0-fabric-clock hold [--wait SECONDS] | release | status
+#   --wait SECONDS  poll up to SECONDS for the GPU's clock controls to appear
+#                   before holding. The boot unit uses it: at early boot the
+#                   unit can run before amdgpu has created its sysfs files.
 # Exit codes: 0 held (hold/status) or released (release); 1 not held / failed;
 #             2 the clock controls could not be read at all.
 #
@@ -104,6 +107,20 @@ hold_dev() {
   return 1
 }
 
+# Poll (1 s steps, up to $1 seconds) until an amdgpu device exposes its clock
+# controls. Returns at once when one is already there; never fails by itself,
+# do_hold reports the missing device.
+WAITED=""
+wait_for_gpu() {
+  n=0
+  while [ -z "$(devices)" ] && [ "$n" -lt "$1" ]; do
+    sleep 1
+    n=$((n + 1))
+  done
+  [ "$n" -gt 0 ] && WAITED=" (waited ${n}s)"
+  return 0
+}
+
 do_hold() {
   soc=$(soc_gpu)
   if [ -n "$soc" ]; then
@@ -114,7 +131,7 @@ do_hold() {
     return
   fi
   [ -n "$(devices)" ] || {
-    echo "hal0-fabric-clock: no amdgpu device with pp_dpm_fclk under $SYS/class/drm" >&2
+    echo "hal0-fabric-clock: no amdgpu device with pp_dpm_fclk under $SYS/class/drm$WAITED" >&2
     return 1
   }
   echo "hal0-fabric-clock: no SoC GPU found in KFD topology; holding every readable amdgpu device"
@@ -198,12 +215,26 @@ do_status() {
   return "$rc"
 }
 
+usage() {
+  echo "usage: hal0-fabric-clock hold [--wait SECONDS] | release | status" >&2
+  exit 2
+}
+
 case "${1:-status}" in
-  hold) do_hold; exit ;;
+  hold)
+    case "$#" in
+      1) ;;
+      3)
+        [ "$2" = --wait ] || usage
+        case "$3" in '' | *[!0-9]*) usage ;; esac
+        wait_for_gpu "$3"
+        ;;
+      *) usage ;;
+    esac
+    do_hold
+    exit
+    ;;
   release) do_release; exit ;;
   status) do_status; exit ;;
-  *)
-    echo "usage: hal0-fabric-clock hold | release | status" >&2
-    exit 2
-    ;;
+  *) usage ;;
 esac

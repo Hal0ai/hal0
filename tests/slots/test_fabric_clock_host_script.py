@@ -45,3 +45,45 @@ def test_status_reports_not_held_on_auto(tmp_path: Path) -> None:
     res = _run(tmp_path, "status")
     assert res.returncode != 0
     assert "NOT held" in res.stdout + res.stderr
+
+
+def test_hold_wait_picks_up_a_gpu_that_appears_late(tmp_path: Path) -> None:
+    # Boot race seen on a Proxmox host: the unit ran before amdgpu had created
+    # its sysfs controls, failed once and left the clock unheld until the next
+    # boot. `--wait` must poll for the device instead of failing on first look.
+    import threading
+
+    timer = threading.Timer(1.0, _tree, args=(tmp_path, "0: 400Mhz \n7: 2000Mhz \n"))
+    timer.start()
+    try:
+        res = _run(tmp_path, "hold", "--wait", "10")
+    finally:
+        timer.join()
+    assert res.returncode == 0, res.stderr
+    dev = tmp_path / "class" / "drm" / "card1" / "device"
+    assert (dev / "power_dpm_force_performance_level").read_text().strip() == "high"
+
+
+def test_hold_wait_gives_up_when_no_gpu_ever_appears(tmp_path: Path) -> None:
+    res = _run(tmp_path, "hold", "--wait", "1")
+    assert res.returncode == 1
+    assert "no amdgpu device" in res.stderr
+    assert "waited 1s" in res.stderr
+
+
+def test_hold_without_wait_still_fails_at_once(tmp_path: Path) -> None:
+    res = _run(tmp_path, "hold")
+    assert res.returncode == 1
+    assert "waited" not in res.stderr
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "-3"])
+def test_hold_wait_rejects_a_non_numeric_value(tmp_path: Path, bad: str) -> None:
+    res = _run(tmp_path, "hold", "--wait", bad)
+    assert res.returncode == 2
+    assert "usage" in res.stderr
+
+
+def test_unit_waits_for_the_gpu_at_boot() -> None:
+    unit = (SCRIPT.parent / "hal0-fabric-clock.service").read_text()
+    assert "ExecStart=/usr/local/sbin/hal0-fabric-clock hold --wait " in unit
