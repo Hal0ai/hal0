@@ -2580,7 +2580,12 @@ select.npu-sel {
   flex-direction: column;
   gap: 2px;
 }
+/* A <button>: this list is the only way to reach a Settings page, so it takes the keyboard. */
 .settings-nav .nav-item {
+  background: none;
+  border: 0;
+  width: 100%;
+  text-align: left;
   padding: 7px 12px;
   font-family: var(--jbm);
   font-size: 12px;
@@ -4225,6 +4230,10 @@ button.pf-state:disabled { cursor: default; opacity: 0.65; }
   .mdl-toolbar:not(.filters-open) .mdl-toolbar-grp:not(.mdl-sort-grp) { display: none; }
   .mdl-toolbar .mdl-search { flex-basis: 100%; }
   .mdl-list-h { flex-wrap: wrap; gap: 4px 12px; padding: 10px 14px; }
+  /* Benchmarks roster, runs and repetition tables scroll sideways inside their own box. Phone
+     width only: the box becomes the scroll container, which stops the sticky header following
+     the page and clips the roster's queue menu, and neither is worth it where the table fits. */
+  .bench-scroll { overflow-x: auto; }
   .mdl-seg { flex-shrink: 0; }
   .mdl-seg button { white-space: nowrap; }
 

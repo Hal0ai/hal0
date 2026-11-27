@@ -654,7 +654,7 @@ function RosterTab({ roster, loading, error, onQueue, regressions }: {
   return (
     <>
     <BucketLegend />
-    <div style={{ overflowX: 'auto' }}>
+    <div className="bench-scroll">
     <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 12 }}>
       <colgroup>
         <col />
@@ -1366,7 +1366,7 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
           ))}
         </div>
       </div>
-      <div style={{ overflowX: 'auto' }}>
+      <div className="bench-scroll">
       <table style={{ borderCollapse: 'separate', borderSpacing: 0, width: '100%', fontFamily: mono, fontSize: 12 }}>
         <thead>
           <tr>
@@ -1618,7 +1618,7 @@ function RunDetail({ rec, regressions }: { rec: any; regressions?: RegressionFla
         <div>
           <h4 style={h4Style}>repetitions — {reps.length}</h4>
           {reps.length ? (
-            <div style={{ overflowX: 'auto' }}>
+            <div className="bench-scroll">
             <table style={{ borderCollapse: 'collapse', fontFamily: mono, fontSize: 11, width: '100%' }}>
               <thead>
                 <tr>

@@ -80,13 +80,15 @@ export function SettingsNav({ section, onSelect }) {
             {group.title}
           </div>
           {group.items.map(item => (
-            <div
+            <button
+              type="button"
               key={item.id}
               className={"nav-item" + (section === item.id ? " active" : "")}
+              aria-current={section === item.id ? "page" : undefined}
               onClick={() => { setOpen(false); onSelect(item.id); }}
             >
               {item.label}
-            </div>
+            </button>
           ))}
         </div>
       ))}
