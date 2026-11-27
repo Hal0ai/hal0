@@ -20,6 +20,7 @@ import { copyTextToClipboard } from '@/lib/clipboard';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../api/client';
 import { useUpdateState } from '../api/hooks/useUpdates';
+import { revealActiveTab } from './mobile/revealActiveTab.js';
 
 /* ── types ── */
 
@@ -527,7 +528,7 @@ const Benchmarks: React.FC<{ param?: string | null }> = ({ param = null }) => {
       </div>
 
       {/* ── Tab bar (matches slot-tabs pattern) ── */}
-      <div className="slot-tabs" role="tablist" style={{ marginBottom: 0 }}>
+      <div className="slot-tabs" role="tablist" style={{ marginBottom: 0 }} ref={revealActiveTab}>
         {([
           ['roster', 'Roster', `${measured}/${roster.length}`],
           ['runs', 'Runs', null],

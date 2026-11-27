@@ -1365,6 +1365,11 @@ a { color: inherit; text-decoration: none; }
   color: var(--fg-4);
   letter-spacing: 0.04em;
 }
+/* The eyebrow and the title share a text baseline (the title is 22px, the eyebrow 11px, so
+   centring their boxes left the eyebrow floating above the title's baseline). Buttons and the
+   rest of the row stay centred. */
+.vh > h1,
+.vh > .vh-eye { align-self: baseline; }
 .vh .vh-spacer { flex: 1; }
 .vh .hint { font-family: var(--jbm); font-size: 11px; color: var(--fg-4); }
 .vh .hint kbd {

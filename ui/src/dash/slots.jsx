@@ -40,6 +40,7 @@ import { slotModelRow } from './slots/slot-shared.js'
 import { SlotSpecBolt, ModalityTag } from './fit-chip.jsx'
 import { eyeState, overrideCount, thinkingMark } from './tune-state.js'
 import { SlotRail } from './slot-rail.jsx';
+import { revealActiveTab } from './mobile/revealActiveTab.js';
 
 const { useState: useStateS, useRef, useEffect } = React;
 
@@ -1034,7 +1035,7 @@ function SlotsView({ slotVariant, slotParam, slotSub, onGo }) {
       {/* Inference ⇄ Image Gen tabs. Tab 1 holds every non-image slot; tab 2 is
           the ComfyUI generation engine pane (one container, not per-model
           slots), which replaces the old Image-group SlotCard. */}
-      <div className="slot-tabs" role="tablist">
+      <div className="slot-tabs" role="tablist" ref={revealActiveTab}>
         <button
           role="tab"
           aria-selected={tab === "inference"}
