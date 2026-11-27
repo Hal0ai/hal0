@@ -169,11 +169,12 @@ shows:
 - a **services** group — one pip per backing service and a ready count
   (a single warn-toned "services unknown" pip appears if the health
   check itself hasn't answered, rather than falsely reporting all-green),
-- an update chip when a new hal0 release is available,
+- an update chip when a new hal0 release is available (not on a phone; see below),
 - the **dock** toggle, with a `+N` badge for the events that arrived while it
   was closed.
 
-Under the row, a two-row ticker shows the newest events, newest at the bottom.
+Under the row, a two-row ticker shows the newest events, newest at the bottom
+(not on a phone).
 The toggle expands the dock into three tabs:
 
 - **events** — journal lines (tagged `J`) merged with activity actions (tagged
@@ -189,6 +190,28 @@ The toggle expands the dock into three tabs:
   slots, and the last image made in this browser.
 - **downloads** — active, queued, completed and failed model pulls with
   cancel, retry and clear controls.
+
+### On a phone or tablet
+
+At 720 px wide and under, the dashboard changes shape:
+
+- A **tab bar** along the bottom holds Overview, Slots, Models and Agents, and
+  **More**, which opens the navigation drawer with every other page (Memory,
+  Services, Logs, Settings and the rest). The top bar's menu button is hidden,
+  so More is the one way into the drawer.
+- The **dock** collapses to one line above the tab bar: the GPU headline, the
+  slot and service pips with their ready counts, and the dock toggle. The GPU
+  detail line and buttons, the update chip and the event ticker are left out
+  of that line; open the dock to see them.
+- **Wide tables** (Overview's Serving now, the Slots NPU lanes, Memory Agents
+  and the Operations queue) show each row as a stacked card instead of
+  scrolling sideways.
+
+At any width, the Slots, Models, Benchmarks and Memory tab strips scroll the
+open tab into view when the page loads and the strip is wider than the screen.
+In browsers with scroll-driven animations (Chrome and Edge today) they also
+fade at the edge that has more tabs. On a touch screen every control gets a
+hit area of at least 40 px.
 
 ### Slot rail
 
