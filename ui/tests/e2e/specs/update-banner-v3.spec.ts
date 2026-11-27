@@ -63,6 +63,35 @@ test.describe('UpdateBanner (#322 phase 2)', () => {
     await expect(banner).toContainText('stable')
   })
 
+  test('says so when the offer is a channel switch (#3917)', async ({ page }) => {
+    await withUpdateState(page, {
+      hal0: {
+        current: '1.8.0-nightly.20261125000000',
+        available: '1.8.0',
+        channel: 'stable',
+        channel_switch: true,
+      },
+      flm: { current: 'v0.9.42', source: 'manual-deb' },
+      autoCheck: true,
+    })
+    await page.goto('/#dashboard')
+    const banner = page.locator('.view-banners .banner-info').first()
+    await expect(banner).toContainText('hal0 1.8.0 available')
+    await expect(banner).toContainText('may be older than what is installed')
+  })
+
+  test('an ordinary update carries no channel-switch sentence', async ({ page }) => {
+    await withUpdateState(page, {
+      hal0: { current: '0.3.0-alpha.1', available: '0.3.0', channel: 'stable', channel_switch: false },
+      flm: { current: 'v0.9.42', source: 'manual-deb' },
+      autoCheck: true,
+    })
+    await page.goto('/#dashboard')
+    const banner = page.locator('.view-banners .banner-info').first()
+    await expect(banner).toContainText('New release on the')
+    await expect(banner).not.toContainText('may be older')
+  })
+
   test('dismiss × hides the banner', async ({ page }) => {
     await withUpdateState(page, {
       hal0: { current: '0.3.0-alpha.1', available: '0.3.0', channel: 'stable' },

@@ -486,6 +486,10 @@ class ReleaseInfo:
     #: overridden, else ``None``. When set, ``channel`` was NOT consulted to
     #: build ``manifest_url`` — reporting surfaces must disclose that (#2128).
     releases_url_override: str | None = None
+    #: True when the offered build and the installed build share a base version
+    #: but differ in kind (nightly vs stable). The offer is then a move to another
+    #: channel and may be older code than what is installed (#3917).
+    channel_switch: bool = False
 
 
 # ── URL helpers + raw fetch ────────────────────────────────────────────────────
@@ -654,6 +658,23 @@ def _naive_version_key(v: str) -> tuple[Any, int, int]:
     return (_version_tuple(v), 99, 0)
 
 
+def is_channel_switch(candidate: str, current: str) -> bool:
+    """Return True when ``candidate`` and ``current`` share a base version but differ in kind.
+
+    One side is a ``X.Y.Z-nightly.<stamp>`` build and the other is the plain
+    ``X.Y.Z`` release (#3917). Version strings alone cannot say which of the two
+    is newer code: the nightly may have been cut before or after ``X.Y.Z``
+    shipped. Surfaces use this to say the offer is a move to another channel,
+    not an ordinary upgrade. :func:`_is_newer` treats it as an offer (#3893).
+    """
+    cand_nightly = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch((candidate or "").strip())
+    cur_nightly = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch((current or "").strip())
+    if bool(cand_nightly) == bool(cur_nightly):
+        return False
+    nightly, other = (cand_nightly, current) if cand_nightly else (cur_nightly, candidate)
+    return nightly.group("base") == (other or "").strip().removeprefix("v")
+
+
 def _is_newer(candidate: str, current: str) -> bool:
     """Return True if PEP 440 version ``candidate`` is strictly newer than ``current``.
 
@@ -677,12 +698,8 @@ def _is_newer(candidate: str, current: str) -> bool:
     # stable ``X.Y.Z`` (#3893) and a stable box opting into the nightlies cut
     # after ``X.Y.Z``; a box already on its channel's build is not offered
     # anything, because both sides are then the same kind.
-    cand_nightly = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch((candidate or "").strip())
-    cur_nightly = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch((current or "").strip())
-    if bool(cand_nightly) != bool(cur_nightly):
-        nightly, other = (cand_nightly, current) if cand_nightly else (cur_nightly, candidate)
-        if nightly.group("base") == (other or "").strip().removeprefix("v"):
-            return True
+    if is_channel_switch(candidate, current):
+        return True
     # Two nightlies order by stamp, and a nightly against a different base
     # orders by that base (``X.Y.Z.dev<stamp>`` is PEP 440; the raw form is not).
     candidate = floor_comparable_version(candidate or "")
@@ -4857,6 +4874,7 @@ class Updater:
             revoked_reason=revoked_reason,
             raw_manifest=raw,
             releases_url_override=releases_url_override(),
+            channel_switch=update_available and is_channel_switch(latest, current_version),
         )
 
     # ── apply ──────────────────────────────────────────────────────────────────

@@ -153,6 +153,15 @@ export function UpdatesPage() {
             <a className="btn ghost sm" href="https://hal0.dev/changelog" target="_blank" rel="noreferrer">Changelog →</a>
           </>}
         />
+        {u.hal0?.available && u.hal0?.channel_switch && (
+          <SRow
+            k="Channel switch"
+            sub="Same version, different channel"
+            v={<span data-testid="updates-channel-switch" style={{color: "var(--warn)"}}>
+              {u.hal0.available} is the {u.hal0.channel || "selected"} channel's build of the version you run, so this moves you to another channel and may be older than what is installed.
+            </span>}
+          />
+        )}
         {u.hal0?.revoked && (
           <SRow
             k="Release notice"

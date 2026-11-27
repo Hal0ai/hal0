@@ -946,6 +946,40 @@ def test_print_check_discloses_releases_url_override(capsys: pytest.CaptureFixtu
     assert "pinned" in out
 
 
+def test_print_check_says_a_channel_switch_may_be_older(capsys: pytest.CaptureFixture) -> None:
+    """#3917: a nightly <-> stable move at one base version is called out."""
+    uc._print_check(
+        {
+            "current": "1.8.0-nightly.20261125000000",
+            "latest": "1.8.0",
+            "channel": "stable",
+            "update_available": True,
+            "channel_switch": True,
+            "manifest": {"digest_sha256": "a" * 64, "released_at": "2026-11-20"},
+        }
+    )
+    out = " ".join(capsys.readouterr().out.split())
+    assert "update available" in out
+    assert "another channel" in out
+    assert "may be older" in out
+
+
+def test_print_check_ordinary_update_has_no_channel_switch_note(
+    capsys: pytest.CaptureFixture,
+) -> None:
+    uc._print_check(
+        {
+            "current": "1.7.0",
+            "latest": "1.8.0",
+            "channel": "stable",
+            "update_available": True,
+            "channel_switch": False,
+            "manifest": {"digest_sha256": "a" * 64, "released_at": "2026-11-20"},
+        }
+    )
+    assert "another channel" not in capsys.readouterr().out
+
+
 def test_print_check_override_with_update_available_still_disclosed(
     capsys: pytest.CaptureFixture,
 ) -> None:

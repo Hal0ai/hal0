@@ -51,6 +51,7 @@ from hal0.updater.updater import (
     _read_release_notes,
     _version_tuple,
     _versioned_install_dir,
+    is_channel_switch,
 )
 
 # ── helpers ────────────────────────────────────────────────────────────────────
@@ -2990,6 +2991,26 @@ def test_same_base_nightly_and_stable_are_offered_across_channels() -> None:
     assert _is_newer("1.8.0", "1.8.0") is False
     assert _is_newer("1.8.0-nightly.20261121000000", "1.8.0-nightly.20261120171000") is True
     assert _is_newer("1.8.0-nightly.20261120171000", "1.8.0-nightly.20261121000000") is False
+
+
+def test_is_channel_switch_flags_same_base_nightly_and_stable() -> None:
+    # #3917: nightly <-> stable at one base is a channel move that may be older code.
+    assert is_channel_switch("1.8.0", "1.8.0-nightly.20261120171000") is True
+    assert is_channel_switch("1.8.0-nightly.20261121135446", "1.8.0") is True
+    assert is_channel_switch("v1.8.0", "1.8.0-nightly.20261120171000") is True
+
+
+def test_is_channel_switch_ignores_ordinary_and_same_kind_updates() -> None:
+    # A newer version, or two builds of the same kind, is not a channel switch.
+    assert is_channel_switch("1.8.1", "1.8.0-nightly.20261120171000") is False
+    assert is_channel_switch("1.8.1-nightly.20261122000000", "1.8.0") is False
+    assert is_channel_switch("1.8.1", "1.8.0") is False
+    assert is_channel_switch("1.8.0", "1.8.0") is False
+    assert (
+        is_channel_switch("1.8.0-nightly.20261121000000", "1.8.0-nightly.20261120171000") is False
+    )
+    assert is_channel_switch(None, "1.8.0") is False  # type: ignore[arg-type]
+    assert is_channel_switch("", "") is False
 
 
 def test_is_newer_tolerates_a_missing_version() -> None:
