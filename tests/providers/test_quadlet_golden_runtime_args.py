@@ -46,7 +46,7 @@ _COMFYUI_GOLDEN = """\
 
 [Unit]
 Description=hal0 container inference slot (img)
-StartLimitIntervalSec=1800
+StartLimitIntervalSec=7200
 StartLimitBurst=10
 
 [Container]
@@ -101,7 +101,7 @@ _FLM_GOLDEN = """\
 
 [Unit]
 Description=hal0 container inference slot (npu)
-StartLimitIntervalSec=1800
+StartLimitIntervalSec=7200
 StartLimitBurst=10
 
 [Container]

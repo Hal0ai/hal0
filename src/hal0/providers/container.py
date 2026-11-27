@@ -866,7 +866,17 @@ def _render_quadlet_from_plan(
         # up. The old 300s/5 pairing burned all 5 attempts in ~16s and
         # LATCHED the unit in ``failed`` (#1424): slot 15 stayed down for
         # hours after the actual contention had passed.
-        "StartLimitIntervalSec=1800",
+        #
+        # The window must also hold more than the burst at the CAPPED delay
+        # (#3936). At 1800 s only six 300 s restarts fit, so the limit was
+        # reachable during the first ramp alone, and there by a 300 s margin
+        # (the 11th start lands at ~1500 s; measured on systemd 255). A slot
+        # that missed it, a few slow failures are enough, then restarted
+        # forever: 427 consecutive restarts on one box, one container launch
+        # every five minutes for days. 7200 s keeps the fast-failure case
+        # where it was (gives up after ~25 minutes) and still trips, within
+        # two hours, for a slot whose every failing run lasts minutes.
+        "StartLimitIntervalSec=7200",
         "StartLimitBurst=10",
         "",
         "[Container]",
