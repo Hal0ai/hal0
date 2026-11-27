@@ -74,7 +74,7 @@ from hal0.config.schema import (
     resolve_chat_template,
 )
 from hal0.errors import Hal0Error, UnprocessableEntity
-from hal0.http_client import async_client
+from hal0.http_client import async_client, probe_get
 from hal0.profiles import ProfileCatalog
 from hal0.providers import podman_introspect
 from hal0.providers._gpu import (
@@ -2251,7 +2251,7 @@ class ContainerProvider(Provider):
         models_url = f"http://127.0.0.1:{port}/v1/models"
         try:
             async with async_client(timeout=_HEALTH_REQUEST_TIMEOUT_S) as client:
-                resp = await client.get(health_url)
+                resp = await probe_get(client, health_url)
                 if resp.status_code == 200:
                     try:
                         body = resp.json()
@@ -2265,7 +2265,7 @@ class ContainerProvider(Provider):
                         }
                     return {"ok": True, "status": "healthy"}
                 # Non-200 (e.g. 404 from FLM) → try /v1/models fallback.
-                models_resp = await client.get(models_url)
+                models_resp = await probe_get(client, models_url)
                 ok = models_resp.status_code == 200
                 return {
                     "ok": ok,

@@ -46,7 +46,7 @@ from typing import Any
 
 import httpx
 
-__all__ = ["async_client", "loopback_client_kwargs", "shared_ssl_context"]
+__all__ = ["async_client", "loopback_client_kwargs", "probe_get", "shared_ssl_context"]
 
 
 @cache
@@ -143,3 +143,20 @@ def loopback_client_kwargs(url: str) -> dict[str, Any]:
     if not is_loopback_url(url):
         return {}
     return {"trust_env": False, "verify": shared_ssl_context(trust_env=True)}
+
+
+async def probe_get(client: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+    """``client.get`` for a liveness probe: a connection-level failure is always an ``httpx.TransportError``.
+
+    A server that dies while its connection is being set up can fail below
+    httpx's own error mapping: httpcore reads the socket's peer address after it
+    was closed, and the ``AttributeError: 'NoneType' object has no attribute
+    'getpeername'`` escapes the client (traceback in #3937). Probe callers catch
+    ``httpx.TransportError`` to say "not healthy"; the raw error skipped that and
+    aborted the whole slot load as an untyped 500. Only these two exception types
+    raised by the GET itself are converted, so response handling stays strict.
+    """
+    try:
+        return await client.get(url, **kwargs)
+    except (AttributeError, OSError) as exc:
+        raise httpx.ConnectError(f"{type(exc).__name__}: {exc}") from exc
