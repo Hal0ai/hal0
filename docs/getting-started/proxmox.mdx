@@ -1,6 +1,6 @@
 ---
 title: Install on Proxmox
-description: Run hal0 on Proxmox VE — the one-liner that creates a privileged Ubuntu LXC with GPU/NPU passthrough already wired, and the manual recipe behind it.
+description: Run hal0 on Proxmox VE — the one-liner that creates an unprivileged Ubuntu LXC with GPU passthrough already wired, the NPU step, and the manual recipe behind it.
 sidebar:
   order: 13
 ---
@@ -25,58 +25,67 @@ the GRUB parameters that raise the amdgpu GTT window — both are set on the
 **Proxmox host**, not inside the container.
 
 If you only want a CPU-only trial, skip straight to the quick path below
-and pass `GPU_PASSTHROUGH=0`; GTT sizing and driver checks only matter once
+and pass `var_gpu=no`; GTT sizing and driver checks only matter once
 you attach a GPU.
 
 ## 2. Quick path: one command
 
-The fastest way to get hal0 running on Proxmox is the bundled installer
-script, run **on the Proxmox host**:
+The fastest way to get hal0 running on Proxmox is the helper script, run
+**on the Proxmox host**:
 
 ```sh
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/ct/hal0.sh)"
 ```
 
-It creates a **privileged Ubuntu 26.04** LXC (default CTID from
-`pvesh get /cluster/nextid`, 4 cores, 8 GB RAM, 20 GB disk — all
-overridable via env vars), forwards every GPU/NPU device node the host
-actually has, writes the matching cgroup2 device rules, `memlock` limit and
-AppArmor profile, and then runs the standard hal0 bootstrap inside it. The
-guest installs its own prerequisites (curl, jq, Python + venv, podman,
-cosign) — there is nothing to pre-stage by hand.
+The script is written in the [community-scripts](https://community-scripts.org)
+form and runs on their engine, so it offers the same Default and Advanced
+install menus as every script on that site. It creates an **unprivileged
+Ubuntu 26.04** LXC (next free CTID, 4 cores, 8 GB RAM, 40 GB disk), forwards
+the host's GPU device nodes with the container's own group ids, asks you to
+confirm, and then runs the standard hal0 bootstrap inside it. The guest
+installs its own prerequisites (jq, Python + venv, podman, cosign) — there
+is nothing to pre-stage by hand.
 
-Two defaults worth knowing before you run it:
+Three things worth knowing before you run it:
 
-- **Privileged.** hal0's slots are rootful podman containers that open the
-  GPU compute node directly, and a privileged CT can repair a mis-mapped
-  `/dev/kfd` from inside (see §3). The trade is real: a privileged
-  container's root is effectively host root. Pass `UNPRIVILEGED=1` for the
-  narrower container. That quick path is validated on Strix Halo (hal0
-  1.7.1, Ubuntu 24.04 template via `OS_VERSION=24.04`, default unprivileged
-  idmap; the script wrote the devices, cgroup rules, memlock limit and gid
-  alignment, then the stable bootstrap ran inside): ROCm and Vulkan slots
-  load and serve through the idmap-mapped `/dev/kfd` and `/dev/dri/renderD128`
-  (about 57 and 73 tok/s on a 0.8B model, on a GPU shared with another
-  workload), `flm validate` passes on the mapped NPU node, and slot
-  networking works on the default bridge. Prefer it unless you need to
-  repair `/dev/kfd`'s gid from inside the guest: device ownership is
-  host-mapped, so repairs must happen on the host. See the unprivileged
-  notes in §3.
-- **GPU passthrough on by default** (`GPU_PASSTHROUGH=auto`). On a host with
-  no accelerator nodes it warns and builds a CPU-only container; set
-  `GPU_PASSTHROUGH=0` to skip passthrough deliberately.
+- **Unprivileged.** The container's root is an ordinary unprivileged user on
+  the host, which is the wrapper [ADR-0050](https://github.com/Hal0ai/hal0/blob/main/docs/adr/0050-no-oci-appliance-unprivileged-lxc-is-the-wrapper.md)
+  names. An unprivileged Ubuntu 26.04 container with this device layout was
+  validated on Strix Halo with hal0 1.8.1: ROCm and Vulkan slots load and
+  serve through the idmap-mapped `/dev/kfd` and `/dev/dri/renderD128` (about
+  60 and 72 tok/s on a 2.6B model, on a GPU shared with another workload),
+  `flm validate` passes on the mapped NPU node, and slot networking works on
+  the default bridge. The cost: hal0 cannot repair a device node whose group
+  is wrong from inside the guest, because device ownership is host-mapped,
+  so that repair happens in the host's `devN:` entry (§3). Pass
+  `var_unprivileged=0` for a privileged container, where hal0 repairs it
+  itself — and where the container's root is effectively host root.
+- **GPU passthrough on by default** (`var_gpu=yes`). On a host with no GPU
+  it builds a CPU-only container; set `var_gpu=no` to skip passthrough
+  deliberately.
+- **The NPU is a second step.** The engine forwards GPU nodes only. For the
+  XDNA NPU, and for the raised memlock limit the NPU and ROCm both need,
+  run `hal0-npu-passthrough <CTID>` on the host afterwards:
+
+  ```sh
+  curl -fsSLO https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0-npu-passthrough
+  bash hal0-npu-passthrough --dry-run <CTID>
+  bash hal0-npu-passthrough <CTID>
+  ```
 
 <Aside type="tip">
-Pass `--advanced` to open `whiptail` prompts for CTID, hostname, cores,
-RAM, disk, storage, bridge, static IP, privilege and passthrough instead of
-accepting the defaults. Everything is also settable per-run as an env var —
-see the [script's README](https://github.com/Hal0ai/hal0/blob/main/scripts/proxmox-ve/README.md).
+Container settings (`var_ctid`, `var_hostname`, `var_ram`, `var_disk`,
+`var_container_storage`, `var_net`, …) and hal0's own (`var_hal0_channel`,
+`var_hal0_memory`, `var_hal0_openwebui`, `var_hal0_agents`,
+`var_hal0_image_models`) can be set per run as environment variables — see
+the [script's README](https://github.com/Hal0ai/hal0/blob/main/scripts/proxmox-ve/README.md).
+To update later, run `update` inside the container, or `hal0 update`.
 </Aside>
 
 ## 3. Manual GPU/NPU passthrough
 
-The script in §2 does all of this for you; this section is what it
-automates, for anyone building the container by hand or retrofitting an
+The script in §2 and `hal0-npu-passthrough` do all of this for you; this
+section is what they automate, for anyone building the container by hand or retrofitting an
 existing one. To get the iGPU and XDNA NPU into a container, create the LXC
 and forward the accelerator device nodes from the host (PVE 8.2+ `devN`
 syntax). A minimal starting point:
