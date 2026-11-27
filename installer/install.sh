@@ -3164,27 +3164,27 @@ fi
 ui_step "NPU prerequisites (FastFlowLM)" "~10-60s (apt hosts only)"
 
 # Pinned FLM .deb — bump in lockstep with ADR-0009 and the flm runner
-# image tag in manifest.json (both 1.0.12). NOTE (since 0.9.43):
+# image tag in manifest.json (both 1.0.14). NOTE (since 0.9.43):
 # FLM rejects a CLI flag passed twice, so FLMProvider.container_spec must
 # never repeat a mode flag (--asr/--embed) the model already implies.
-FLM_DEB_VERSION="1.0.12"
+FLM_DEB_VERSION="1.0.14"
 # Upstream ships a SEPARATE .deb per distro, each built against that release's
 # boost/libedit ABI: ubuntu24.04 (boost1.83), ubuntu25.10 + ubuntu26.04
 # (boost1.90), and debian13. Pick the artefact matching THIS host so
 # `apt-get install ./deb` resolves the .deb's boost/libedit/libxrt deps from the
 # host's own repos — no hardcoded SONAME list, and newer Ubuntu is first-class.
-# Since 1.0 FLM no longer links ffmpeg or fftw, and the 1.0.12 .deb needs
-# libxrt2 >= 2.25.0 (the lemonade-team PPA below ships it).
+# Since 1.0 FLM no longer links ffmpeg or fftw, and the 1.0.14 .deb needs
+# libxrt2 >= 2.25.0 on ubuntu24.04/debian13 (the lemonade-team PPA below ships it).
 # (Older installers pinned ONLY the ubuntu24.04 build and then had to SKIP host
 # FastFlowLM on every ffmpeg>=7 distro — even though the matching build existed.)
-# SHA-256 pinned per artefact, verified on download 2026-11-05; if upstream
+# SHA-256 pinned per artefact, verified on download 2026-11-27; if upstream
 # rebuilds under the same tag these drift — bump in lockstep with FLM_DEB_VERSION.
 _flm_sha_for_suffix() {
     case "$1" in
-        ubuntu24.04) echo "5e74d047ee09d0c58d532bc2b70b0cbb508a18a36b33efb0ea615867d4506815" ;;
-        ubuntu25.10) echo "7f19326ab21f51d6992b041a98d47bbf0c6a763fa0a62b6b92c8bd80c33610ae" ;;
-        ubuntu26.04) echo "a0170f98c1ad338b1dbe01396248ebb6622affe256857f9b7b514043634f7e9e" ;;
-        debian13)    echo "52243ededf50366a537e7a7e1b156c130420c0d5840658a81696aef8f3c8423a" ;;
+        ubuntu24.04) echo "74762659f67ab622279512a8be7deb320325f03a389dec0b84aff787493f6592" ;;
+        ubuntu25.10) echo "12990ea4a34e49cc85119ad3377d88a29a0ad2f6d126495b3e65b6e112639345" ;;
+        ubuntu26.04) echo "169c249adb43cda0a520f9231eb55f79ca85cc130fb07c0816436d279a3a0624" ;;
+        debian13)    echo "4dacc5edf41dcca18bdec0b73b8b8f4788cece20b4b49a9b7f49a6f4073eb951" ;;
     esac
 }
 # Resolve host distro -> .deb suffix. For Ubuntu, pick the HIGHEST shipped build
