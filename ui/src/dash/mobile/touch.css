@@ -138,6 +138,9 @@
   .tune-segs,
   .fline,
   .mv-docrow { row-gap: 14px; }
+  /* A banner's actions wrap to two lines when they do not fit one (a narrow phone, a wider
+     font): 26px buttons 6px apart had hit areas that ran into each other. */
+  .banner-actions { row-gap: 14px; }
 
   /* Icon-only controls side by side: the gap is what keeps two 40px hit areas from overlapping
      (22-26px boxes, so the pitch must reach 40px). */

@@ -77,6 +77,17 @@ test.describe('touch targets on a touch screen (390px)', () => {
       const h = await hitHeight(page, sel)
       expect(h.up && h.down, sel).toBe(true)
     }
+    // The banner's two actions stacked on two lines (a 340px phone): each keeps its own hit area.
+    await page.setViewportSize({ width: 340, height: 844 })
+    const acts = page.locator('.banner-actions .btn')
+    await expect(acts).toHaveCount(2)
+    const [first, second] = [(await acts.nth(0).boundingBox())!, (await acts.nth(1).boundingBox())!]
+    expect(second.y, 'the actions wrap at this width').toBeGreaterThan(first.y + first.height)
+    for (const nth of [0, 1]) {
+      const h = await hitHeight(page, '.banner-actions .btn', nth)
+      expect(h.up && h.down, `banner action ${nth}`).toBe(true)
+    }
+    await page.setViewportSize(PHONE)
     await page.goto('/#slots')
     expect((await page.locator('.slot-tab').first().boundingBox())!.height).toBeGreaterThanOrEqual(MIN)
     await page.goto('/#models')
