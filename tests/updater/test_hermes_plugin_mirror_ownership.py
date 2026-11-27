@@ -396,7 +396,9 @@ def test_update_activation_hands_the_plugin_trees_back_as_root(
         monkeypatch.setattr(updater_module, name, lambda *_a, **_k: {"refreshed": []})
     monkeypatch.setattr(perms, "commit", lambda *_a, **_k: [])
     events: list[str] = []
-    monkeypatch.setattr(perms, "converge_hermes_plugin_trees", lambda: events.append("converge"))
+    monkeypatch.setattr(
+        perms, "converge_hermes_plugin_trees", lambda **_k: events.append("converge")
+    )
 
     updater_module.activate_release("hal0-1.0.0")
 

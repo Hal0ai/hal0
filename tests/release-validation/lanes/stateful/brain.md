@@ -164,3 +164,10 @@ values you changed.
 * Read brain streams with a client that waits to `done` with a 330 s socket timeout, run in the background; an 8 s curl yields 0 bytes on a busy brain and looks like #2737 without being it.
 * Kill background scripts by task id, never `pkill -f` a script name from the shell that launched it.
 * Ask the steward "does slot X have a model assigned?" for an unbound slot after a prior load; a wrong yes is #3879 (known).
+
+## Added in kit 21
+
+* At lane entry record which other lanes are live (ps for `hermes -z`, `sudo -u hal0 hermes`) and gate latency checks on it, not only on `hal0 memory ops list`.
+* Fabrication pair on a count: 'how many models do I have registered' vs the 'check' phrasing, against /api/models length; list_models returned the right answer both ways.
+* memory_add retain from the steward can be cancelled via DELETE .../operations/{id}; a child cancel makes the parent `cancelled` (#2699, known).
+* VRAM question: score every derived figure within 1% of the tool_result; 3 of 6 wrong on 20261127 (#2728, known).

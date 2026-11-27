@@ -300,7 +300,7 @@ def hal0_api(
 # pin per release (#79) — sha256 digest is deterministic; bump on each
 # hal0 release. Keep in sync with install.sh OPENWEBUI_IMAGE and the
 # systemd unit's ExecStartPre/ExecStart.
-OPENWEBUI_IMAGE = "ghcr.io/open-webui/open-webui@sha256:46b59158e6558eeb980bc828e0f1b30238ad24d82ed84d5e5eda1dab2a082f14"
+OPENWEBUI_IMAGE = "ghcr.io/open-webui/open-webui@sha256:d5168bfbc28609eff5bea1b438dd864cf64d185cf6582c02244865e18385b901"
 
 
 def _docker_pull(image: str) -> None:

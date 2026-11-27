@@ -14,7 +14,7 @@
 - **Status dots derive from real activity state** (the core fix). See §3.
 - Frontend reaches the API via the existing Vite proxy (`/api`, `/v1` → :8080). Use the
   typed-hook + React Query pattern already in `ui/src/api/hooks/*.ts`. No new fetch stack.
-- All new FE state for the grid persists through the backend layout store (§4), not localStorage.
+- The Overview page is not customisable and keeps no layout state (ADR-0044); the former backend layout store and its endpoint are removed.
 
 ---
 
@@ -47,7 +47,7 @@ model assignment whose provider requires an explicit model, not only for
 **Existing FE primitives to REUSE (do not rebuild):** `slot-status.js → slotIndicatorFromPhase()`,
 `memory-map.jsx → MemoryMap/useMemoryMapModel`, `inference-pane.jsx`,
 `command-palette.jsx`, `primitives.jsx` (Modal/Drawer/ConfirmDialog/Banner/Menu/PillToggle).
-**Build NEW:** `DCard` shell primitive; the masonry grid + edit mode.
+**Build NEW:** `DCard` shell primitive.
 
 ---
 
@@ -73,13 +73,13 @@ GET /api/stats/throughput/history?buckets=20&window_s=100
 - FE renders: iGPU row = `gpu_util` %; CPU row = `cpu_util` %; NPU row = active/idle pill + "% pending driver"
   (becomes a % bar automatically if `npu_util` appears).
 
-### 2c. Dashboard layout persistence (feeds the whole grid)
-```
-GET  /api/user/dashboard-layout            → 200 DashLayout (see §4)  | 200 {} if none saved
-PUT  /api/user/dashboard-layout  <DashLayout> → 204
-```
-- File-backed JSON in hal0's state dir (single-operator LAN box; no auth). Validate against the §4 schema;
-  reject unknown card ids. Server runs the same `reconcile()` invariant (§4) defensively.
+### 2c. (removed) Dashboard layout persistence
+
+`GET`/`PUT /api/user/dashboard-layout` and their store were removed in 1.8.0 when the Overview page
+replaced the customisable grid; the endpoint no longer exists. See
+[ADR-0044](../docs/adr/0044-the-overview-is-the-operators-briefing.md).
+
+---
 
 ### 2d. Service health (feeds default "Services" card) — pending §5 spike
 ```
@@ -110,67 +110,11 @@ Backend `slot.state` enum → dot class/visual (FE maps via the EXISTING `slotIn
 
 ---
 
-## 4. DashLayout schema — v3, fixed bands (FE owns shape; BE validates + persists)
+## 4. (removed) DashLayout schema
 
-The free-form 12-column grid (v2: `order`/`enabled`/`spans`/`pinned`, drag-reorder, resize, card
-library) was replaced by a FIXED-BAND layout in #1061. Rows and cell widths are defined by the
-system. The operator can only (a) swap which widget occupies a swappable cell, from that cell's
-curated whitelist, and (b) toggle the quick-actions strip.
-
-```ts
-type CellId = string;                 // a fixed cell in the band layout
-type WidgetId = string;               // an entry in WIDGET_DEFS
-interface DashLayout {
-  v: 3;                               // schema version
-  cells: Record<CellId, WidgetId>;    // which widget occupies each cell
-  quickActions: boolean;              // quick-actions strip on/off
-}
-```
-
-- Transport: `GET`/`PUT /api/user/dashboard-layout`. GET returns `{}` when nothing is saved.
-- `reconcile(layout)` runs on load AND on write, **both ends**, with the same rules: every cell in
-  the registry is present; a cell keeps its assignment only when the widget is on that cell's own
-  `accepts` list *and* is actually built; anything else falls back to the cell's `defaultWidget`.
-  `quickActions` is true unless explicitly `false`. FE: `ui/src/api/hooks/useDashLayout.ts`.
-  BE: `src/hal0/dashboard/layout_v3.py`. Adding a widget or a cell means editing **both**.
-- Read path is fail-soft: a 404, `{}`, a v2 payload, or any error resolves to `DEFAULT_LAYOUT`.
-  Write path is fail-soft **only on 404** — every other rejection is toasted and the cache
-  re-read, so a save that didn't persist can't look like it did (#1460).
-- v2 is TOLERATED, not emitted: `PUT` still accepts a v2 body (a stale cached bundle must not
-  start 422-ing) and a pre-#1061 file on disk still round-trips under the v2 pin/span reconcile.
-  No shipped UI writes v2.
-
-### Cell registry (CellId → accepts / default)
-| cell | accepts (swap whitelist) | default | locked |
-|---|---|---|---|
-| `memory` | memorybar · memtreemap · memring | `memorybar` | |
-| `a1` | throughput · slottrack · power | `throughput` | |
-| `a2` | utilization · power · gauges | `utilization` | |
-| `a3` | requests · clients | `requests` | |
-| `slots` | slots | `slots` | ✅ |
-| `c1` | activity · heatmap | `activity` | |
-| `c2` | services · quickchat | `services` | |
-| `c3` | attention | `attention` | ✅ |
-
-### Widget registry (`built` gates the swap picker)
-| widget | built | source |
-|---|---|---|
-| `memorybar` | ✅ | /api/stats/hardware |
-| `memtreemap` | ⬜ | — same-family memory visualization, not yet built |
-| `memring` | ⬜ | — same-family memory visualization, not yet built |
-| `throughput` | ✅ | /api/stats/throughput/history |
-| `slottrack` | ✅ | throughput/history per_slot |
-| `power` | ✅ | /api/stats/power |
-| `utilization` | ✅ | /api/stats/hardware (gpu+cpu) |
-| `gauges` | ⬜ | — not yet built |
-| `requests` | ✅ | derived request rollup |
-| `clients` | ⬜ | — not yet built |
-| `slots` | ✅ | /api/slots |
-| `activity` | ✅ | /api/activity |
-| `heatmap` | ⬜ | — not yet built |
-| `services` | ✅ | /api/services/health + comfyui/status |
-| `quickchat` | ✅ | /v1/chat/completions |
-| `attention` | ✅ | derived (error/warming slots + approvals + updates) |
+The layout schema, its cell and widget registries, and the `reconcile()` rules were removed in 1.8.0
+along with the endpoint (§2c). The Overview page owns its own fixed composition
+([ADR-0044](../docs/adr/0044-the-overview-is-the-operators-briefing.md)); nothing about it is persisted.
 
 ---
 
@@ -189,7 +133,7 @@ Each spike: confirm a REAL source exists, propose the exact endpoint + effort, r
 ## 6. Build order (handoff §"Suggested build order", contract-aligned)
 1. `DCard` + status-dot (verify §3 green pulse on a real serving slot).
 2. `SlotList` anchor wired to `/api/slots` (real serving state).
-3. Masonry grid + layout state + edit mode (drag/resize/library/pin) + persistence (§2c, §4).
+3. (superseded) The masonry grid, edit mode and layout persistence were removed with the Overview page (ADR-0044).
 4. Memory map, Throughput (§2a), Utilization (§2b).
 5. Quick chat (real stream), Services (§2d + ComfyUI live queue).
 6. Opt-in cards — only those whose §5 spike landed a real source.
@@ -197,7 +141,6 @@ Each spike: confirm a REAL source exists, propose the exact endpoint + effort, r
 ## 7. Acceptance gates (orchestrator review)
 - A real serving slot shows a **green pulsing** dot end-to-end.
 - Zero fabricated numbers (grep for mock/placeholder in new code; mock layer only for tests).
-- Layout survives reload AND a different browser (backend store).
 - `<1200px` collapses to single column; `prefers-reduced-motion` kills loops.
 - `npm run typecheck` + Playwright E2E green; new specs for the grid/edit-mode/dot-state.
 

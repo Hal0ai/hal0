@@ -1748,6 +1748,29 @@ def test_auto_scan_registers_a_halogen_checkpoint_and_no_companion(
     assert scanned["metadata"]["detection_confidence"] == "high"
 
 
+def test_auto_scan_skips_the_drafter_draft_heads_beside_a_halogen_checkpoint(
+    crud_client: TestClient,
+    crud_models_root: Path,
+) -> None:
+    """0.20.6/0.20.7 draft heads sit beside the checkpoint; they are not models."""
+    d = _write_halogen_dir(crud_models_root)
+    for name in ("qwen38-flash-next-drafter-r2.hgn", "qwen38-flash-next-drafter-r2-ht4.hgn"):
+        (d / name).write_bytes(b"HGN1" + b"d" * 20)
+
+    r = crud_client.post("/api/models/scan", json={})
+
+    assert r.status_code == 200, r.text
+    assert r.json()["added"] == ["qwen38-flash-next-ht43"]
+    r = crud_client.post(
+        "/api/models/add-from-path",
+        json={"path": str(d / "qwen38-flash-next-drafter-r2-ht4.hgn")},
+    )
+    assert r.status_code == 409, r.text
+    error = r.json()["error"]
+    assert error["code"] == "models.halogen_companion"
+    assert error["details"]["checkpoints"] == [_HALOGEN_CKPT]
+
+
 def test_add_from_path_refuses_a_halogen_companion_and_names_its_checkpoint(
     crud_client: TestClient,
     crud_models_root: Path,

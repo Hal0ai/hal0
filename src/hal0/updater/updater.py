@@ -666,6 +666,27 @@ def _is_newer(candidate: str, current: str) -> bool:
     (see its docstring for why that fallback needs its own prerelease handling,
     not just a raw tuple compare).
     """
+    # The string ``X.Y.Z-nightly.<stamp>`` does not say whether the nightly was
+    # cut before or after stable ``X.Y.Z`` shipped: the nightly base comes from
+    # pyproject.toml, which keeps ``X.Y.Z`` until the next release commit, so
+    # both happen every cycle. Every caller compares the latest build of the
+    # box's release source (its selected channel, or a HAL0_RELEASES_URL
+    # override) against what is installed, so when the two share a
+    # base and exactly one is a nightly, the box is crossing channels and the
+    # channel's build is the one to offer. That covers a nightly box moving to
+    # stable ``X.Y.Z`` (#3893) and a stable box opting into the nightlies cut
+    # after ``X.Y.Z``; a box already on its channel's build is not offered
+    # anything, because both sides are then the same kind.
+    cand_nightly = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch((candidate or "").strip())
+    cur_nightly = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch((current or "").strip())
+    if bool(cand_nightly) != bool(cur_nightly):
+        nightly, other = (cand_nightly, current) if cand_nightly else (cur_nightly, candidate)
+        if nightly.group("base") == (other or "").strip().removeprefix("v"):
+            return True
+    # Two nightlies order by stamp, and a nightly against a different base
+    # orders by that base (``X.Y.Z.dev<stamp>`` is PEP 440; the raw form is not).
+    candidate = floor_comparable_version(candidate or "")
+    current = floor_comparable_version(current or "")
     try:
         return Version(candidate) > Version(current)
     except InvalidVersion:
@@ -680,8 +701,9 @@ _NIGHTLY_INSTALLED_VERSION_RE = re.compile(
 def floor_comparable_version(installed: str) -> str:
     """Map a nightly ``X.Y.Z-nightly.<stamp>`` onto PEP 440 ``X.Y.Z.dev<stamp>``.
 
-    A nightly is cut from main before its base version ships, so it orders
-    below ``X.Y.Z``. Every other string is returned unchanged. installer/install.sh
+    For the upgrade floor a nightly counts as below its base ``X.Y.Z``: it may
+    have been cut before that version shipped, so it cannot be assumed to carry
+    everything the release does. Every other string is returned unchanged. installer/install.sh
     applies the same mapping in its own floor check.
     """
     m = _NIGHTLY_INSTALLED_VERSION_RE.fullmatch(installed.strip())
@@ -1129,43 +1151,49 @@ def _reap_stale_quarantines(
     max_age_s: int = _QUARANTINE_MAX_AGE_S,
     job_id: str | None = None,
 ) -> None:
-    """Delete old ``<install_dir>.stale-<unix-ts>`` quarantine trees.
+    """Delete old ``hal0-<version>.stale-<unix-ts>`` quarantine trees.
 
     Quarantining is a self-heal (see :func:`_extract_tarball`) but nothing
     ever removed the result, so a box that retried a failed apply a few times
-    accumulated whole install trees under ``/usr/lib/hal0`` indefinitely. The
-    newest ``keep`` are retained — recovery material for the failure that just
-    happened — and everything else, plus anything older than ``max_age_s``, is
-    removed. Best-effort and logged: failing to tidy is never a reason to
+    accumulated whole install trees under ``/usr/lib/hal0`` indefinitely.
+
+    Every version's quarantines are considered, not just ``install_dir``'s:
+    a quarantine is only created while its version is being extracted, so
+    once a box moved past a version its trees were never revisited and could
+    exceed ``max_age_s`` forever (#3881). Within each version, the newest
+    ``keep`` are retained — recovery material for the failure that just
+    happened — and everything else, plus anything older than ``max_age_s``,
+    is removed. Best-effort and logged: failing to tidy is never a reason to
     fail an update.
     """
-    prefix = f"{install_dir.name}.stale-"
-    candidates: list[tuple[int, Path]] = []
+    by_version: dict[str, list[tuple[int, Path]]] = {}
     for entry in _iterdir_safe(install_dir.parent):
-        if not entry.name.startswith(prefix) or not entry.is_dir():
+        if not entry.name.startswith("hal0-") or not entry.is_dir():
             continue
-        suffix = entry.name[len(prefix) :]
-        if not suffix.isdigit():
+        base, sep, suffix = entry.name.rpartition(".stale-")
+        if not sep or not suffix.isdigit():
             continue
-        candidates.append((int(suffix), entry))
-    if not candidates:
-        return
-    candidates.sort(key=lambda item: item[0], reverse=True)
+        by_version.setdefault(base, []).append((int(suffix), entry))
     cutoff = int(time.time()) - max_age_s
-    for index, (stamp, entry) in enumerate(candidates):
-        # Two independent bounds, because either alone leaks: an age-only
-        # rule keeps every quarantine from a same-day retry storm, and a
-        # count-only rule keeps three full install trees forever.
-        if index < keep and stamp > cutoff:
-            continue
-        try:
-            shutil.rmtree(entry)
-        except OSError as exc:
-            log.warning(
-                "updater.quarantine_reap_failed", job_id=job_id, path=str(entry), error=str(exc)
-            )
-            continue
-        log.info("updater.quarantine_reaped", job_id=job_id, path=str(entry), stamp=stamp)
+    for candidates in by_version.values():
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for index, (stamp, entry) in enumerate(candidates):
+            # Two independent bounds, because either alone leaks: an age-only
+            # rule keeps every quarantine from a same-day retry storm, and a
+            # count-only rule keeps three full install trees forever.
+            if index < keep and stamp > cutoff:
+                continue
+            try:
+                shutil.rmtree(entry)
+            except OSError as exc:
+                log.warning(
+                    "updater.quarantine_reap_failed",
+                    job_id=job_id,
+                    path=str(entry),
+                    error=str(exc),
+                )
+                continue
+            log.info("updater.quarantine_reaped", job_id=job_id, path=str(entry), stamp=stamp)
 
 
 def _reap_stale_staging_dirs(
@@ -2688,6 +2716,25 @@ def _load_cached_manifest(version: str) -> dict[str, Any]:
 #: record or the CLI render. Notes are informational, not a transport.
 _MAX_NOTES_BYTES = 64 * 1024
 
+#: Appended when the notes were cut, so the operator knows the text continues.
+_NOTES_TRUNCATED_MARKER = (
+    "_Release notes truncated; the full text is in the CHANGELOG: "
+    "https://github.com/hal0ai/hal0/blob/main/CHANGELOG.md_"
+)
+
+
+def _cap_release_notes(markdown: str) -> str:
+    """Cap ``markdown`` at ``_MAX_NOTES_BYTES`` on a line boundary, with a marker."""
+    raw = markdown.encode("utf-8")
+    if len(raw) <= _MAX_NOTES_BYTES:
+        return markdown
+    head = raw[:_MAX_NOTES_BYTES].decode("utf-8", errors="ignore")
+    # Drop the trailing partial line unless that would empty the notes.
+    cut = head.rfind("\n")
+    if cut > 0:
+        head = head[:cut]
+    return head.rstrip("\n") + "\n\n" + _NOTES_TRUNCATED_MARKER + "\n"
+
 
 def _read_release_notes(install_dir: Path) -> dict[str, Any]:
     """Read release notes shipped INSIDE the (cosign-verified) release tree.
@@ -2703,7 +2750,7 @@ def _read_release_notes(install_dir: Path) -> dict[str, Any]:
     md_path = install_dir / "RELEASE_NOTES.md"
     if md_path.is_file():
         with contextlib.suppress(OSError):
-            markdown = md_path.read_text(encoding="utf-8", errors="replace")[:_MAX_NOTES_BYTES]
+            markdown = _cap_release_notes(md_path.read_text(encoding="utf-8", errors="replace"))
 
     highlights: list[str] = []
     breaking: list[str] = []
@@ -4269,7 +4316,9 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
     (:func:`hal0.updater.privileged.main`) additionally asserts the named tree
     is root-owned before calling this — see :func:`assert_trusted_release_dir`.
 
-    Returns ``{"previous": <prior target or None>, "target": <activated path>}``.
+    Returns ``{"previous": <prior target or None>, "target": <activated path>}``
+    plus the post-swap refresh outcomes, including ``hermes_plugin_trees_error``
+    (#3886).
     """
     try:
         name = assert_release_dir_name(dir_name)
@@ -4327,6 +4376,11 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
     # rollback that one may predate them (#3874). What they reach lazily from
     # there (ownership_table's mDNS dir) still comes from the new site-packages,
     # so each is best-effort: a failure is logged and the activation carries on.
+    # The plugin-tree repair's failure is also returned (#3886): this may be the
+    # privileged child, whose stderr is relayed as log lines and never scanned,
+    # so the result is the only way it reaches commit()'s and rollback()'s
+    # pass_warnings (see _activation_pass_warnings).
+    plugin_trees_error: str | None = None
     if os.geteuid() == 0:
         # Heal root-created tombstone locks on existing boxes (#2698), using
         # the same narrow ownership row as doctor perms --fix.
@@ -4343,10 +4397,11 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
         # install.sh) back to hal0 while root is still held, so the hal0-run
         # post-swap mirror can replace it.
         try:
-            perms.converge_hermes_plugin_trees()
+            perms.converge_hermes_plugin_trees(strict=True)
         except Exception as exc:
+            plugin_trees_error = str(exc) or type(exc).__name__
             log.warning(
-                "updater.hermes_plugin_trees_converge_failed", job_id=job_id, error=str(exc)
+                _PLUGIN_TREES_CONVERGE_FAILED_EVENT, job_id=job_id, error=plugin_trees_error
             )
 
     log.info(
@@ -4362,7 +4417,25 @@ def _activate_release_unlocked(dir_name: str, *, job_id: str | None = None) -> d
         "path_links_refreshed": path_links,
         "gpu_perms_unit": gpu_perms_unit,
         "retired_artifacts_removed": retired,
+        # None when the repair succeeded or did not run (not root).
+        "hermes_plugin_trees_error": plugin_trees_error,
     }
+
+
+#: Logged, and folded into the update's ``pass_warnings``, when the root
+#: activation step could not hand the Hermes plugin trees back to hal0 (#3886).
+_PLUGIN_TREES_CONVERGE_FAILED_EVENT = "updater.hermes_plugin_trees_converge_failed"
+
+
+def _activation_pass_warnings(activated: dict[str, Any]) -> list[str]:
+    """The pass warnings an activation result carries (#3886).
+
+    A result without ``hermes_plugin_trees_error`` came from an older
+    privileged process that did not report the repair: nothing to fold in.
+    """
+    if activated.get("hermes_plugin_trees_error"):
+        return [_PLUGIN_TREES_CONVERGE_FAILED_EVENT]
+    return []
 
 
 def discard_release(dir_name: str, *, job_id: str | None = None) -> None:
@@ -4961,6 +5034,11 @@ class Updater:
                 error=migrations_error,
             )
 
+        # #3886: what the root activation step itself could not repair. It ran
+        # before the migrations, so it is listed first, and it counts even when
+        # the migrations subprocess failed outright.
+        pass_warnings = _activation_pass_warnings(activated) + pass_warnings
+
         # Step 8c: re-render existing slot units through the NEW code. Must
         # run AFTER the 8b venv reinstall (see _rerender_units_after_swap).
         if not _is_editable_install():
@@ -5176,13 +5254,24 @@ class Updater:
         except Hal0Error:
             warning = None
 
-        log.info("updater.rollback_ok", job_id=self.job_id, restored=str(prior_path))
+        # #3886: a rollback has no convergence block, so the activation step's
+        # own warnings ride on the result directly, under the same name and
+        # with the same event names as commit()'s.
+        pass_warnings = _activation_pass_warnings(activated)
+
+        log.info(
+            "updater.rollback_ok",
+            job_id=self.job_id,
+            restored=str(prior_path),
+            pass_warnings=pass_warnings,
+        )
         return {
             "rolled_back_to": str(prior_path),
             "previous_now": str(current_target) if current_target else None,
             "schema_warning": warning,
             "tune_stripped": tune_stripped,
             "catalog_stripped": catalog_stripped,
+            "pass_warnings": pass_warnings,
         }
 
 

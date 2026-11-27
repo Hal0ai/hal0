@@ -228,3 +228,10 @@ uses it); rerank unloaded; every throwaway slot deleted and its unit reset. Stat
 * `/api/slots/<n>.models` must be empty whenever the TOML has no `[model].default` and the slot is offline (#3879, known); then ask the steward which slots have a model.
 * A `hal0 slot edit` on a seeded slot rewrites the TOML and drops its seed comments; diff the header and record it.
 * Check `/slots` `is_processing` on brain before the canary; if Hindsight holds it, run the canary on a fresh vulkan slot on the same image.
+
+## Added in kit 21
+
+* After every stateful step that stages models, diff `hal0 doctor perms` against entry: only added rows, all ok.
+* Record the CLI progress banner budget ('up to N s': load 2139, restart 3243, unload 1104 on 20261127) against the documented 180 s server budget; note it, do not file until the budget source is verified.
+* Hand-registered fixtures keep their upstream filenames; confirm registered capabilities (embed/rerank, not chat) after `model add`.
+* A slot deleted then recreated under the same name inherits a stale models[] (#3879); use fresh slot names.

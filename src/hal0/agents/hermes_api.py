@@ -2,33 +2,32 @@
 
 Pure read-side helpers (plus one idempotent key writer) over Hermes's own
 truth: its ``/p/<profile>/health`` probes, ``config.yaml`` and ``.env`` files.
-Verified against Hermes 0.22.4 (commit ``4d043038``; first written at 0.22.2,
-``d923a5eb``, and every cited construct re-read at 0.22.4):
+Verified against Hermes 0.23.3 (commit ``caafe538``; first written at 0.22.2,
+``d923a5eb``, and every cited construct re-read at 0.23.3):
 
 * The API server binds ``127.0.0.1:8642`` by default; host/port resolve from
   config ``gateway.platforms.api_server.{host,port}``, then env
   ``API_SERVER_HOST`` / ``API_SERVER_PORT``, then the defaults
-  (``gateway/platforms/api_server.py:219-233``, ``:1124``). "Env" is the
-  gateway's, which ``hermes_cli/env_loader.py:516`` fills from
+  (``listen_address``, ``gateway/platforms/api_server.py:170-185``). "Env" is
+  the gateway's, which ``hermes_cli/env_loader.py:735`` fills from
   ``$HERMES_HOME/.env`` with ``override=True``; hal0 reads that file, never
   hal0-api's own process environment.
 * The gateway serves one ``/p/<profile>/`` prefix per profile returned by
-  ``profiles_to_serve`` (``hermes_cli/profiles.py:1136``). Under it the
+  ``profiles_to_serve`` (``hermes_cli/profiles.py:1091``). Under it the
   advertised model id is the profile name; the default profile advertises
-  ``hermes-agent`` (``_resolve_model_name``, ``api_server.py:1386-1396``,
-  ``:2417-2422``).
+  ``hermes-agent`` (``_resolve_model_name``, ``api_server.py:1328-1338``).
 * Named profiles fail closed: each needs its own ``API_SERVER_KEY`` in
   ``profiles/<p>/.env``; placeholder or <16-char keys count as unusable
-  (``_expected_api_key``, ``api_server.py:1463-1477``;
-  ``hermes_cli/auth.py:307-314``).
+  (``_expected_api_key``, ``api_server.py:1405-1414``;
+  ``hermes_cli/auth.py:305-312``).
 * ``_load_profile_secret_scope`` re-reads ``.env`` for every request
-  (``gateway/run.py:1787-1797``), so a key written here needs no gateway
+  (``gateway/run.py:1766-1778``), so a key written here needs no gateway
   restart.
 * The default profile's key is process environment, loaded once at gateway
   start: config ``api_server.key``, else ``$HERMES_HOME/.env`` (which
-  ``hermes_cli/env_loader.py:516`` loads with ``override=True``), else the
+  ``hermes_cli/env_loader.py:735`` loads with ``override=True``), else the
   environment the unit inherits from hal0's root-only vault.
-* Dotenv semantics mirror ``agent/secret_scope.py:271-304``.
+* Dotenv semantics mirror ``agent/secret_scope.py:321-391``.
 """
 
 from __future__ import annotations

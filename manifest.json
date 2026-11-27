@@ -1,21 +1,21 @@
 {
   "_schema": "hal0.manifest.v2",
   "_comment": "Release manifest. `runners` is the ONE table of runner-image pins: key = hal0 runner key (src/hal0/runners/__init__.py RUNNER_IMAGES), `image` = registry repo, `tag` = immutable tag, `digest` = sha256 content digest, `lanes_gated` = backends that passed the hardware gate for this digest. Every other runner-image fact in hal0 (Runner.image, the Vulkan-capable set, exports/runner-image-pins.json, the bench harness, `hal0 doctor toolbox-pull`, installer/lib/preflight.sh) is derived from this table. `tag: null` marks an image that is not published yet; `digest: null` pulls by tag. scripts/release-check.sh refuses a release while any default-tier runner has a null tag or digest (hal0.runners.pins.release_gate_problems). Bump pins by editing this table only.",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "channel": "stable",
   "_upgrade_from_notes": "PEP 440 specifier for the versions this release upgrades from. release.yml copies it into every channel manifest, where the updater enforces it (updater._enforce_upgrade_floor); installer/install.sh enforces it on a re-run over an existing install. A box below it must step through a release inside the window or reinstall.",
   "upgrade_from": ">=1.5.0",
   "runners": {
     "standard": {
       "image": "ghcr.io/hal0ai/hal0-runner-standard",
-      "tag": "b11840-rba99f5d",
-      "digest": "sha256:d1f7216c2c62d3c19990f488a4df838a555f6fa6c4dac556cf7a166ea855efcd",
+      "tag": "b12633-r4f071ba",
+      "digest": "sha256:8dba30e46c4c461ac2e37c288047662af6a3210b474a1aba56f8421f1d12972e",
       "lanes_gated": ["rocm", "vulkan"]
     },
     "cpu": {
       "image": "ghcr.io/hal0ai/hal0-runner-cpu",
-      "tag": "b11840-rba99f5d",
-      "digest": "sha256:c74a4fa963e2499b688d118467355f76ca462dd2ef5c4f2ff4e3850c1e3ac52a",
+      "tag": "b12633-r4f071ba",
+      "digest": "sha256:9e69f1a64810b5c1213a5350832a9b6bc68f7f63032ae9f101f58cd104d3e1e1",
       "lanes_gated": ["cpu"]
     },
     "flm": {
@@ -38,8 +38,8 @@
     },
     "comfyui": {
       "image": "ghcr.io/hal0ai/hal0-runner-comfyui",
-      "tag": "0.28.0-r6996d85",
-      "digest": "sha256:8c1dd5d7586893a8e27ec2f9fd11623a750b6a4c2ab098e62f9dcd32ec49cfa2",
+      "tag": "0.30.0-rf37ebf1",
+      "digest": "sha256:77a6a4e8f1c6be12157d89d8ce4ea71a91db9fddf3fc7ad4bdfc534c1868fca9",
       "lanes_gated": ["rocm"]
     },
     "qwen3tts": {
@@ -50,8 +50,8 @@
     },
     "cuda": {
       "image": "ghcr.io/ggml-org/llama.cpp",
-      "tag": "server-cuda-b11804",
-      "digest": "sha256:490d8cd8000203a3ab8fdfce14ef931e2aa85affd4dd4447bcc75f299f00fd9a",
+      "tag": "server-cuda-b12627",
+      "digest": "sha256:f46a7938f84a62f7c2eba2dfc985d921cb54fb3ec7b4e729cec2cee2cbace609",
       "lanes_gated": []
     },
     "halogen": {

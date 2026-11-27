@@ -52,7 +52,7 @@ import httpx
 from hal0.config import store as model_store_module
 from hal0.config.paths import _covers, model_store_root
 from hal0.errors import Hal0Error, UnprocessableEntity
-from hal0.http_client import async_client
+from hal0.http_client import async_client, probe_get
 from hal0.install.perms import ensure_shared_dir
 from hal0.providers._gpu import resolve_gpu_device_paths, resolve_gpu_group_ids
 from hal0.providers.base import HealthCheck, Mount, Provider, RuntimeLaunchPlan
@@ -653,7 +653,7 @@ class HalogenProvider(Provider):
         timeout = httpx.Timeout(connect=5.0, read=self.LIVENESS_READ_TIMEOUT_S, write=5.0, pool=5.0)
         try:
             async with async_client(timeout=timeout) as client:
-                resp = await client.get(url)
+                resp = await probe_get(client, url)
         except httpx.ReadTimeout:
             return {"ok": True, "status": "stalled"}
         except (httpx.HTTPError, OSError) as exc:

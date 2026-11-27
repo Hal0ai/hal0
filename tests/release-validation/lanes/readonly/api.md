@@ -155,3 +155,8 @@ cheapest place to catch a regression, so it should grow every release.
 * `GET /v1/models/<raw model id of a serving chat slot>` must return 200 like the chat POST with the same id (#3880, known).
 * `GET /api/slots?limit=abc`: assert a 4xx or a documented ignore, never a 5xx.
 * After an MCP client DELETE, scan the journal for `Error in standalone SSE writer` / ClosedResourceError.
+
+## Added in kit 21
+
+* Count `grep -c 'Traceback (most recent'` in the hal0-api journal at lane entry and exit and attribute each new one to a lane before reporting (the MCP SSE one is #3654, known).
+* Anonymous GET on /api/memory/compat/* and /api/bridge/me returns 401 auth.required on an auth-off box: by-design baseline, record it.

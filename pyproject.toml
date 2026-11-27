@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 # that resolves this project by distribution name must use "hal0ai".
 [project]
 name = "hal0ai"
-version = "1.8.0"
+version = "1.8.1"
 description = "Open-source home AI inference platform"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -86,7 +86,7 @@ dependencies = [
   # compromised emSign root from uv's bundled CA store (GHSA-hq85-5cpj-mr62),
   # the case a quarantine cannot help with. The floor moves to it too, so no
   # install keeps the vulnerable store.
-  "uv>=0.13.4,<0.13.9",
+  "uv>=0.13.4,<0.13.10",
 ]
 
 [project.optional-dependencies]
@@ -113,7 +113,7 @@ dev = [
   "python-multipart>=0.0.9",
   # The YAML parser of the pinned Hermes venv, which has no PyYAML. The
   # hal0-memory plugin runs there, so its tests parse with this one (#3803).
-  "ruamel.yaml>=0.18.16,<0.19",
+  "ruamel.yaml>=0.18.16,<0.20",
 ]
 
 # Bench load-gen tooling (Phase 3 of the bench overhaul). Deliberately NOT in
@@ -213,24 +213,25 @@ warn_unused_configs = true
 # `scripts/hermes-sdk-diff.sh --bump <sha>`, δ-harness + γ-suite, open
 # `chore(hermes): bump upstream pin to <short-sha>` PR).
 [tool.hal0.upstream-hermes]
-# Aligned to the reviewed official release NousResearch/hermes-agent v0.22.4
-# (4d043038), the same immutable commit the installer requirements.txt, the
+# Aligned to the reviewed official release NousResearch/hermes-agent v0.23.3
+# (caafe538), the same immutable commit the installer requirements.txt, the
 # VETTED_HERMES_REFS allowlist, and the frozen contract fixtures
 # (tests/fixtures/hermes/contracts/) pin (ADR-0034 decision 8). The drift-watch, the
 # compat pin, and the fixtures MUST stay in lockstep —
 # tests/agents/hermes/test_contract_compatibility.py enforces it. `date` is the
 # upstream commit date of `commit`, not the bump date.
 #
-# v0.22.4 installs through the ADR-0032 / ADR-0034 model: an editable source
+# v0.23.3 installs through the ADR-0032 / ADR-0034 model: an editable source
 # checkout in a uv-managed Python 3.14 venv, dependencies from upstream's uv.lock.
 #
-# History: d923a5eb (v0.22.2, 2026-10-15) before this, then 3ef6bbd2
+# History: 4d043038 (v0.22.4, 2026-10-21) before this, then d923a5eb
+# (v0.22.2, 2026-10-15), then 3ef6bbd2
 # (v2026.7.20 / 0.19.0, 2026-07-20), then
 # 9de9c25f (v2026.7.7.2 / 0.18.2, 2026-07-07); the original
 # earendil-works@0554ef1 (2026-05-28) is historical provenance in git history only.
 repo   = "https://github.com/NousResearch/hermes-agent"
-commit = "4d04303818b61bf3aa09278af48356315515965b"
-date   = "2026-10-21"
+commit = "caafe5389ae585ef77387a962aee05b1bcf17029"
+date   = "2026-11-19"
 
 # Surfaces hal0 vendors, shims, or proxies. The diff job only opens an
 # issue when one of these paths changes between the pinned commit and
@@ -289,4 +290,15 @@ tracked_files = [
                                       # approvals.mode, dashboard.public_url, auxiliary.*)
     "hermes_cli/personality.py",     # agent.system_prompt / display.personality (persona, #2839)
     "hermes_cli/kanban_db_connect.py",  # init_db (re-exported by kanban_db.py) kanban_db_init calls
+    # Added at the v0.23.3 bump. PluginContext moved, `config set` gained
+    # credential routing, and the session store's schema moved behind a
+    # persistence package; the rest are surfaces that review found hal0 reading.
+    "hermes_cli/plugins_context.py",  # PluginContext (moved out of plugins.py)
+    "gateway/platforms/api_server_room_grants.py",  # /v1/room-members/* routes
+    "hermes_cli/config_secret_refs.py",  # `config set *.api_key` -> .env + ${VAR} reference
+    "hermes_cli/web_server_surface.py",  # which surface may put the session token in HTML
+    "hermes_cli/web_server_session_token.py",  # HERMES_DASHBOARD_SESSION_TOKEN resolution
+    "persistence/sqlite/_schema_ddl.py",  # state.db SCHEMA_VERSION (downgrade refusal)
+    "gateway/session_tui_side.py",   # preview-restart side agent toolsets (#2878)
+    "tools/terminal_tool_backends.py",  # unknown terminal.backend rejection (terminal-off gate)
 ]

@@ -24,7 +24,7 @@ Design notes:
 
 Subclasses the upstream ``ProviderProfile`` dataclass (``providers.base``),
 which resolves inside the Hermes venv at runtime. A vendored copy of the frozen
-pin (``4d043038``) keeps the module importable in hal0's own venv for unit
+pin (``caafe538``) keeps the module importable in hal0's own venv for unit
 tests. All discovery paths are best-effort: a transport failure falls back to
 ``fallback_models`` (or ``None``) so a missing hal0-api can't wedge Hermes.
 """
@@ -38,7 +38,7 @@ from typing import Any
 
 # ── Vendored-ABC + import-fallback ─────────────────────────────────────────
 # The real ``ProviderProfile`` dataclass lives in the Hermes venv. The pinned
-# surface (NousResearch/hermes-agent ``4d043038``, ``providers/base.py``) is
+# surface (NousResearch/hermes-agent ``caafe538``, ``providers/base.py``) is
 # vendored below (the fields hal0 sets; the rest default) so this module stays
 # importable in hal0's own venv.
 try:  # pragma: no cover — the real import only resolves inside the Hermes venv
@@ -381,9 +381,9 @@ class Hal0ProviderProfile(ProviderProfile):  # type: ignore[misc]
         """Claim no hostname, so Hermes never files a URL under ``hal0`` (#3835).
 
         Hermes adds every profile's hostname to ``_URL_TO_PROVIDER`` and
-        matches it as a SUBSTRING of a base URL's netloc; a known provider's
+        matches it against a base URL's host; a known provider's
         URL then skips the live ``/models`` context lookup for custom
-        endpoints (pinned ``agent/model_metadata.py:460-480, 2288``). A
+        endpoints (pinned ``agent/model_metadata.py:466-486, 2286``). A
         ``127.0.0.1`` claim therefore cost the gateway its context discovery
         (``hal0/agent`` fell to Hermes's 256,000 fallback against a 65,536
         window) and shadowed every other loopback server too. Hermes reaches

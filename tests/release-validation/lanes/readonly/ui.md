@@ -133,3 +133,10 @@ only hold checks that genuinely require a live install.
 
 * The Overview hero GPU text must agree with the GPU tile on the same page (a hero read "gpu — · 86°C" beside a 100% tile).
 * A degraded-by-soft-reason Hermes reads amber "ready" on Overview by design (#3808 decided); do not report it.
+
+## Added in kit 21
+
+* On every page that draws an NPU tile, compare npu_util with the holder list AND the host autosuspend (cat /sys/class/accel/accel0/device/power/autosuspend_delay_ms, runtime_status): util is runtime-PM residency of a device shared by ct105/ct150/ct151, so >0 with zero local holders is by-design while another guest is active (known npu-util-is-runtime-pm-residency-shared-device).
+* Compare the Slots hero main number with its own 'gpu N' breakdown in the same render (different sources).
+* If MCP browser tools are absent, run the lane with local playwright-core and cached chromium (ui/node_modules + ~/.cache/ms-playwright); headless works on the devops box, no Docker.
+* Footer 'N / N ready' with a grey comfyui pip is by-design when comfyui is stopped; the Overview widget '3 / 4 up' differs from the dock on the same screen for the same reason.

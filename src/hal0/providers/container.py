@@ -74,7 +74,7 @@ from hal0.config.schema import (
     resolve_chat_template,
 )
 from hal0.errors import Hal0Error, UnprocessableEntity
-from hal0.http_client import async_client
+from hal0.http_client import async_client, probe_get
 from hal0.profiles import ProfileCatalog
 from hal0.providers import podman_introspect
 from hal0.providers._gpu import (
@@ -866,7 +866,17 @@ def _render_quadlet_from_plan(
         # up. The old 300s/5 pairing burned all 5 attempts in ~16s and
         # LATCHED the unit in ``failed`` (#1424): slot 15 stayed down for
         # hours after the actual contention had passed.
-        "StartLimitIntervalSec=1800",
+        #
+        # The window must also hold more than the burst at the CAPPED delay
+        # (#3936). At 1800 s only six 300 s restarts fit, so the limit was
+        # reachable during the first ramp alone, and there by a 300 s margin
+        # (the 11th start lands at ~1500 s; measured on systemd 255). A slot
+        # that missed it, a few slow failures are enough, then restarted
+        # forever: 427 consecutive restarts on one box, one container launch
+        # every five minutes for days. 7200 s keeps the fast-failure case
+        # where it was (gives up after ~25 minutes) and still trips, within
+        # two hours, for a slot whose every failing run lasts minutes.
+        "StartLimitIntervalSec=7200",
         "StartLimitBurst=10",
         "",
         "[Container]",
@@ -2218,7 +2228,10 @@ class ContainerProvider(Provider):
         FLM containers have no /health endpoint — they return 404 there.
         When /health returns a non-connection error (e.g. 404), fall back to
         GET /v1/models; 200 there means the server is up and healthy.
-        Connection-refused / timeout are always unhealthy (no fallback).
+        Connection-refused / timeout are always unhealthy (no fallback). A read
+        timeout (accepted, then no answer) is reported as ``"stalled"``, still
+        not ``ok``: a busy server answers late, a dead one does not accept
+        (#3752). The fail-watcher judges a stall on its ceiling, not on strikes.
 
         Halogen delegation: its own :meth:`~hal0.providers.halogen.HalogenProvider.liveness`,
         where a read timeout is a stall and not a death, so a silent engine is
@@ -2248,7 +2261,7 @@ class ContainerProvider(Provider):
         models_url = f"http://127.0.0.1:{port}/v1/models"
         try:
             async with async_client(timeout=_HEALTH_REQUEST_TIMEOUT_S) as client:
-                resp = await client.get(health_url)
+                resp = await probe_get(client, health_url)
                 if resp.status_code == 200:
                     try:
                         body = resp.json()
@@ -2262,12 +2275,21 @@ class ContainerProvider(Provider):
                         }
                     return {"ok": True, "status": "healthy"}
                 # Non-200 (e.g. 404 from FLM) → try /v1/models fallback.
-                models_resp = await client.get(models_url)
+                models_resp = await probe_get(client, models_url)
                 ok = models_resp.status_code == 200
                 return {
                     "ok": ok,
                     "status": "healthy" if ok else f"http_{models_resp.status_code}",
                 }
+        except httpx.ReadTimeout as exc:
+            # #3752: accepted, then no answer inside the budget. That is what a
+            # llama-server busy with real traffic does (its HTTP workers are all
+            # held by in-flight requests), not what a dead one does: a dead
+            # server refuses or drops the connection. Report it as the stall the
+            # fail-watcher already judges on its ceiling (#3282), with ``ok``
+            # still False so every caller that reads only ``ok`` (wait_ready,
+            # the readiness gate) keeps waiting for a real answer.
+            return {"ok": False, "status": "stalled", "detail": str(exc) or "ReadTimeout"}
         except httpx.TransportError as exc:
             # TransportError is the base class for ConnectError,
             # TimeoutException, ReadError, WriteError, etc. — every failure

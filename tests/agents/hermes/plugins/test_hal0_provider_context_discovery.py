@@ -3,22 +3,26 @@
 Hermes resolves a model's context window in ``agent.model_metadata.
 get_model_context_length``. For a custom endpoint, the step that reads the
 live ``/models`` metadata is gated on the base URL *not* belonging to a known
-provider (pinned ``4d043038``, ``agent/model_metadata.py:2288``)::
+provider (pinned ``caafe538``, ``agent/model_metadata.py:2286``)::
 
     if _is_custom_endpoint(base_url) and not _is_known_provider_base_url(base_url) ...
 
-"Known" is decided by ``_infer_provider_from_url``, a SUBSTRING match of the
-URL's netloc against ``_URL_TO_PROVIDER``. At import time that table is
+"Known" is decided by ``_infer_provider_from_url``, which matches the URL's
+host against ``_URL_TO_PROVIDER`` (the host or a subdomain of it at v0.23.3; a
+substring of the netloc before, which the model below keeps because it claims
+strictly more). At import time that table is
 auto-extended with every registered provider profile's ``get_hostname()``
-(``model_metadata.py:460-466``), and the pinned ``ProviderProfile.get_hostname``
+(``model_metadata.py:466-471``), and the pinned ``ProviderProfile.get_hostname``
 derives a hostname from ``base_url`` when the ``hostname`` field is empty
-(``providers/base.py:182-193``).
+(``providers/base.py:331-342``). v0.23.3 also asks ``providers.profile_for_host``
+first (``model_metadata.py:481-483``), which matches a profile's declared
+``hostnames`` / ``metadata_hostnames``; the hal0 profile declares none.
 
 The hal0 profile used to declare ``hostname="127.0.0.1"``. That claimed every
 loopback URL as the provider ``hal0``: the hal0 gateway itself, but also an
 Ollama or llama.cpp server on another loopback port. With provider ``custom``
 (how hal0 provisions Hermes), the profile's own hooks are never consulted
-(``get_provider_profile(provider)`` at ``model_metadata.py:2259-2262`` looks up
+(``get_provider_profile(provider)`` at ``model_metadata.py:2258`` looks up
 ``custom``), so nothing recovered the window and ``hal0/agent`` fell to the
 256,000 fallback against a 65,536 serving window.
 
@@ -44,12 +48,12 @@ from tests.fixtures.hermes.contracts.provider_profile import (
     ProviderProfile as FrozenProviderProfile,
 )
 
-# Pinned ``agent/model_metadata.py:256`` DEFAULT_FALLBACK_CONTEXT (CONTEXT_PROBE_TIERS[0]).
+# Pinned ``agent/model_metadata.py:265`` DEFAULT_FALLBACK_CONTEXT (CONTEXT_PROBE_TIERS[0]).
 _FALLBACK_CONTEXT = 256_000
 
 
 def _url_to_provider(profiles: list[Any]) -> dict[str, str]:
-    """Pinned ``model_metadata.py:460-466`` auto-extension (static rows omitted:
+    """Pinned ``model_metadata.py:466-471`` auto-extension (static rows omitted:
     none of them is a loopback host)."""
     table: dict[str, str] = {}
     for pp in profiles:
@@ -60,7 +64,7 @@ def _url_to_provider(profiles: list[Any]) -> dict[str, str]:
 
 
 def _infer_provider_from_url(base_url: str, table: dict[str, str]) -> str | None:
-    """Pinned ``model_metadata.py:471-480``: substring match on the netloc."""
+    """``model_metadata.py:476-486``, modelled as the substring match v0.22.4 used."""
     parsed = urlparse(base_url)
     host = parsed.netloc.lower() or parsed.path.lower()
     for url_part, provider in table.items():

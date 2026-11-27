@@ -1,6 +1,6 @@
 ---
 title: "Update and roll back: upgrade notes by release"
-description: "Per-release upgrade notes for hal0 — what changes and what to check when upgrading to 1.3.0, 1.6.0, 1.7.0, 1.7.1 and 1.8.0, and from an older release."
+description: "Per-release upgrade notes for hal0 — what changes and what to check when upgrading to 1.3.0, 1.6.0, 1.7.0, 1.7.1, 1.8.0 and 1.8.1, and from an older release."
 sidebar:
   order: 111
 ---
@@ -74,6 +74,47 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
 - **Open WebUI gets the default Hermes profile after one repair.** If the default profile is missing from the picker on a box that had Hermes installed before 1.6.0, run `sudo hal0 agent reprovision hermes --repair` once; `hal0 doctor` flags this on the `hermes-api` row. See [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
 - **The agent chat proxy is removed.** `/api/agents/{id}/events`, `/submit` and `/session/*` return 404.
 - **Key rotation now ends open sockets and streams** (WebSocket close code `4401`, SSE `event: revoked`).
+
+## Upgrading to 1.8.1
+
+- **The memory engine moves from Hindsight 1.2.0 to 1.2.3.** `hal0 update`
+  builds the new engine beside the running one, then stops the old engine and
+  copies `.pg0` to `.pg0.pre-1.2.0`, which needs 1.5 times its size free; it
+  restores both if 1.2.3 does not come up. The build downloads more than
+  1.2.0 did, because the engine now also installs torchvision and PyAV. A
+  build that fails leaves 1.2.0 running.
+- **Engine 1.2.3 changes its database at the first start, one way.** Six
+  schema migrations run by themselves. They add a `kind` column to the banks,
+  a `claimed_at` column to the graph maintenance queue, one stored function,
+  and five empty `kb_*` tables for knowledge banks, an engine feature that is
+  off. Nothing stored is rewritten. hal0 never reverses them.
+- **Rolling hal0 back to 1.8.0 leaves the engine on 1.2.3.** `hal0 update
+  --rollback` switches the hal0 tree only. hal0 1.8.0 then runs against
+  engine 1.2.3, which keeps every route 1.2.0 had; its update pass reports the
+  engine as ahead of its pin and leaves it alone, and `hal0 doctor` warns that
+  the engine reports 1.2.3 while the release pins 1.2.0. To put the engine
+  back on 1.2.0 as well, stop `hindsight-api` and restore `.pg0.pre-1.2.0`
+  together with `.venv.old-1.2.0` by hand. Memory written since the upgrade
+  is lost with it.
+- **Python 3.14.1 cannot install engine 1.2.3.** torchvision excludes that
+  one Python release. On a box whose engine venv was built with 3.14.1 the
+  update reports the engine build as failed and the engine stays on 1.2.0; a
+  new install on 3.14.1 leaves memory unavailable. Point
+  `HAL0_HINDSIGHT_PYTHON` at another Python 3.11 to 3.14 and run it again.
+- **A knowledge-page refresh is no longer cancelled for time it spent
+  queued.** `[memory.lanes.reflect].wall_timeout_s` still limits a reflect
+  from start to finish, but a refresh's clock now stops while one of its
+  calls waits for a language-model permit.
+- **A failed operation that came across a bank restore cannot be retried.**
+  After `hal0 memory embedder switch` or a bank import, the engine keeps the
+  restored bank's old operations as history only. Retrying one is refused
+  (`409`), and hal0's retry of failed operations counts it as skipped. Send
+  the memory again instead.
+- **Hermes moves from v0.22.4 to v0.23.3 (`caafe538`).** The first `hal0 update` builds the new release next to the live one, checks it, then switches, with a short outage while the agent and gateway restart. The build needs the network; an offline host refuses it and stays on v0.22.4.
+- **Hermes cannot be moved back to v0.22.4 once v0.23.3 is live.** The new release moves Hermes's session database (`state.db`) and `config.yaml` to versions that are never lowered, so `hal0 update component hermes --target 4d04303818b61bf3aa09278af48356315515965b` is refused as a downgrade. v0.22.4 stays in hal0's vetted refs for the automatic flip-back after a failed activation; a flip-back puts `config.yaml` back and leaves `state.db` at the new version, which v0.22.4 reads because the step only adds to the database. hal0 1.8.0 does not know the new commit, so a box rolled back to hal0 1.8.0 would rebuild v0.22.4 over the newer files at its next update; that path is not supported.
+- **Hermes's built-in browser tools are replaced.** The ten `browser_*` tools are gone and `browser_exec` is the one browser tool. It runs code on the host, so Hermes offers it only when the terminal tool is on. A box with the terminal off (the default) has no browser automation in Hermes.
+- **A Hermes feature you configured yourself may fetch a plugin.** Camofox, the Singularity terminal backend, GitHub Copilot and Yuanbao left Hermes's core in this step. On the first start after the update, Hermes downloads the plugin for any of them a profile uses. hal0's own setup uses none of them.
+- **`hermes mcp serve` is now `hermes mcp-serve`.** An MCP client you set up yourself to launch Hermes as a server needs the new name and the `mcp-serve` plugin.
 
 ## Upgrading to 1.8.0
 

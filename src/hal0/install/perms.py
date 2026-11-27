@@ -526,10 +526,9 @@ def ownership_table(
             role="state/ (+ memory-layout.json)",
         ),
         # Hermes last-run report and venv stamp, same class (#3260). The dir
-        # is declared at 2755 (#3545): install-time mkdir under the setgid 2775
-        # state skeleton births it setgid, umask 022 drops group write, so the
-        # row never widens it and the hal0 group on its files is inherited as
-        # the skeleton intends. Declaring 0755 failed every fresh install.
+        # may be 2755 on a fresh install (#3545), or 0755 on an older one
+        # (#3888). Keep the setgid bit as found; enforce the same owner, group
+        # and ordinary permission bits on both layouts.
         PermRow(
             var_lib / "state" / "agents" / "hermes",
             state_owner,
@@ -538,6 +537,7 @@ def ownership_table(
             glob="provision.json",
             child_mode=0o644,
             role="state/agents/hermes (+ provision.json)",
+            keep_setgid=True,
         ),
         PermRow(
             var_lib / "state" / "agents" / "hermes",
@@ -547,6 +547,7 @@ def ownership_table(
             glob="venv.pin",
             child_mode=0o644,
             role="state/agents/hermes (+ venv.pin)",
+            keep_setgid=True,
         ),
         # *.lock siblings under the state root — same root-run-install hazard
         # as the /etc/hal0 lock row above. `.first-run.lock` needs its own row:
@@ -1305,6 +1306,7 @@ def _expand_row(row: PermRow) -> list[tuple[Path, PermRow]]:
                     row,
                     target=child,
                     mode=_child_mode_for(row, child),
+                    keep_setgid=row.keep_setgid and child.is_dir(),
                     glob=None,
                     child_mode=None,
                     child_file_mode=None,
@@ -1453,7 +1455,7 @@ def hermes_plugin_rows(table: Iterable[PermRow] | None = None) -> list[PermRow]:
     return [r for r in rows if r.target == plugins or plugins in r.target.parents]
 
 
-def converge_hermes_plugin_trees() -> list[Path]:
+def converge_hermes_plugin_trees(*, strict: bool = False) -> list[Path]:
     """Apply :func:`hermes_plugin_rows` as root; a no-op for anyone else (#3852).
 
     For the root-held paths that must hand a root-owned plugin tree back to
@@ -1462,14 +1464,21 @@ def converge_hermes_plugin_trees() -> list[Path]:
     root prelude of ``hal0 agent reprovision hermes``. Same plan and commit
     as ``doctor perms --fix``, so a symlink in the tree is never followed or
     re-owned (#1739, #2975), and the rows are ``dirs_only``: no file in the
-    hal0-writable trees (possibly a planted hard link) is ever re-owned. Never raises: a failure is logged and the caller
-    carries on, and ``hal0 doctor perms`` still reports the drift.
+    hal0-writable trees (possibly a planted hard link) is ever re-owned.
+
+    By default it never raises: a failure is logged and the caller carries on,
+    and ``hal0 doctor perms`` still reports the drift. ``strict=True`` raises
+    the failure instead, for a caller that reports it itself: ``hal0 update``'s
+    root activation step returns it in the activation result (#3886), because a
+    line on the privileged child's stderr never reaches the operator.
     """
     if os.geteuid() != 0:
         return []
     try:
         return commit(plan(hermes_plugin_rows()))
     except (OSError, KeyError) as exc:
+        if strict:
+            raise
         log.warning("perms.hermes_plugin_trees_converge_failed error=%s", exc)
         return []
 

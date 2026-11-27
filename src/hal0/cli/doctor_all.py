@@ -416,6 +416,103 @@ def check_fabric_clock(slots: Any = None, *, sys_root: str = "/sys") -> Check:
     return Check(name, title, _WARN, message)
 
 
+#: What ``xrt-smi`` needs to lock for its device query (one 64 MiB mapping).
+_XRT_SMI_MEMLOCK_BYTES = 64 * 1024 * 1024
+
+
+def _memlock_limit_bytes() -> int | None:
+    """This process's soft ``RLIMIT_MEMLOCK`` in bytes; ``None`` when unlimited."""
+    import resource
+
+    soft, _hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    return None if soft == resource.RLIM_INFINITY else int(soft)
+
+
+def _npu_responds_now() -> bool | None:
+    """The active query: ``True``/``False`` for a host ``xrt-smi`` answer, ``None`` if no tool."""
+    import asyncio
+
+    from hal0.providers.npu_columns import host_npu_responds
+
+    return asyncio.run(host_npu_responds())
+
+
+def check_npu_liveness(
+    slots: Any = None,
+    *,
+    sys_root: str = "/sys",
+    dev_root: str = "/dev",
+    responds: Callable[[], bool | None] | None = None,
+    memlock: Callable[[], int | None] | None = None,
+) -> Check:
+    """The NPU is on the bus and, when it can be asked, answers (#3935).
+
+    The device node alone proves nothing: a device that left the bus keeps a
+    stale ``/dev/accel/accel0`` in the guest, and one that cannot power up keeps
+    its node and sysfs entry while every slot start fails. Two steps:
+
+    1. Passive: the node needs its backing sysfs device. Node without one is a
+       stale node.
+    2. Active, here only because ``hal0 doctor`` is operator-invoked: the host
+       ``xrt-smi`` query the AIE-column probe uses. It reaches the driver, so it
+       is skipped while an NPU slot is serving (evidently alive) and a missing
+       ``xrt-smi`` is not a failure. Nothing polled may call it.
+
+    ``warn`` (advisory), never ``fail``: a box with no NPU slot is unaffected.
+    """
+    from pathlib import Path
+
+    from hal0.hardware.npu_host import STALE_NODE_REASON, accel_device_backed
+    from hal0.slots.fabric_clock_guard import slot_uses_npu
+    from hal0.slots.state import is_dispatchable_state
+
+    key, label = "npu", "NPU liveness"
+    node = Path(dev_root) / "accel" / "accel0"
+    if not node.exists():
+        return Check(key, label, _PASS, "no NPU device node, nothing to check")
+    backed = accel_device_backed(Path(sys_root) / "class" / "accel" / "accel0")
+    if backed is False:
+        return Check(key, label, _WARN, f"{node} present but {STALE_NODE_REASON}")
+    if isinstance(slots, list) and any(
+        isinstance(s, dict)
+        and not s.get("_synthetic")
+        and slot_uses_npu(s)
+        and is_dispatchable_state(s.get("state") or "")
+        for s in slots
+    ):
+        return Check(key, label, _PASS, f"{node} present (AMD XDNA); an NPU slot is serving")
+    # xrt-smi maps a 64 MiB locked buffer. Under a lower memlock limit (an
+    # unprivileged container's default is 8 MiB) the query fails although the
+    # NPU is fine, so a failure there says nothing about the device: do not ask.
+    try:
+        limit = (memlock or _memlock_limit_bytes)()
+    except Exception:
+        limit = None
+    if limit is not None and limit < _XRT_SMI_MEMLOCK_BYTES:
+        return Check(
+            key,
+            label,
+            _PASS,
+            f"{node} present (AMD XDNA); not asked: this process's memlock limit "
+            f"({limit // (1024 * 1024)} MiB) is too low for xrt-smi",
+        )
+    try:
+        answered = (responds or _npu_responds_now)()
+    except Exception:
+        answered = None
+    if answered is False:
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"{node} present but the NPU is not responding to xrt-smi; no NPU slot can start "
+            "until the host is fixed (driver reload or reboot)",
+        )
+    if answered is None:
+        return Check(key, label, _PASS, f"{node} present (AMD XDNA); xrt-smi not available to ask")
+    return Check(key, label, _PASS, f"{node} present (AMD XDNA) and answering xrt-smi")
+
+
 def check_seed_context_envelope(*, slots_dir: Path | None = None) -> Check:
     """A slot profile's ``ctx_size`` must fit this box's memory envelope (#1868).
 
@@ -4525,6 +4622,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_hardware_freshness(),
         check_gtt_leak(slots_payload),
         check_fabric_clock(slots_payload),
+        check_npu_liveness(slots_payload),
         check_seed_context_envelope(),
         check_agent_uid_isolation(),
         check_api_journal_access(),

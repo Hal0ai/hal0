@@ -101,9 +101,10 @@ chat messages — that is the `hermes-e2e` stateful lane.
 
 17. **A warn names its probe.** `provision.json` `smoke_tests` with `status: warn` must carry a `failures[]` list whose names match the false entries in `details.results`; a warn with no named probe is a finding (20261016003929: 2 failures, both named). Also confirm `/var/lib/hal0/.hermes/.env` absence is expected: `/api/status` advertises an `env_path` there that does not exist on a fresh install (treated as upstream behaviour, unverified).
 
-18. **Pin.** Hermes is v0.22.4, commit `4d043038`, on fresh and upgraded boxes alike (v0.22.2,
-   `d923a5eb`, is the upgrade baseline: the pin before this bump, still vetted as the flip-back
-   target). Read the commit from the install, not from `hermes --version` (that makes a network
+18. **Pin.** Hermes is v0.23.3, commit `caafe538`, on fresh and upgraded boxes alike (v0.22.4,
+   `4d043038`, is the upgrade baseline: the pin before this bump, still vetted as the flip-back
+   target, as is v0.22.2 `d923a5eb`). The live `release.json` must say `describe: v0.23.3`,
+   `install: lock` and list `web`, `mcp` and `acp` in `extras`. Read the commit from the install, not from `hermes --version` (that makes a network
    update check and needs tags): the live release's recorded sha, or `git rev-parse HEAD` in its
    checkout. A box on any other sha is a finding.
 19. **Session history is kept.** `/var/lib/hal0/.hermes/config.yaml` must carry
@@ -123,7 +124,7 @@ chat messages — that is the `hermes-e2e` stateful lane.
    0.19.0-shape unit and a `warn` row naming that command; after it, `pass`. A kanban card that
    stays queued while the gateway journal logs `spawn of <task> deferred, host cannot place
    the worker` is this case.
-22. **MCP client on mcp 2.x.** The v0.22.4 venv carries mcp 2.3 (v0.22.2 had 2.0), which dropped
+22. **MCP client on mcp 2.x.** The v0.23.3 venv carries mcp 2.3, as v0.22.4 did (v0.22.2 had 2.0), which dropped
    `streamablehttp_client`. `provision.json` `mcp_wire` must be `ok` with stage `connected` for
    both servers (not an `ImportError` at stage `import`), and check 2b still applies.
 23. **Board token file.** `sudo test -s /var/lib/hal0/state/agents/hermes/dashboard-session-token && echo present`
@@ -142,19 +143,51 @@ chat messages — that is the `hermes-e2e` stateful lane.
    `hermes-gateway.service`, never a `--idle-exit` one. Any unmanaged gateway is a `major`
    finding, because it runs cron and the kanban dispatcher where the operator turned the gateway
    off. The chat that would provoke one is `hermes-e2e` item 22, in the stateful lane.
-25. **Upgrade from v0.22.2.** On the UPGRADE box, the first `hal0 update` must rebuild
-   (`release.json` `ref` = `4d043038…`, `previous` = the v0.22.2 release), restart
+25. **Upgrade from v0.22.4.** On the UPGRADE box, the first `hal0 update` must rebuild
+   (`release.json` `ref` = `caafe538…`, `previous` = the v0.22.4 release), restart
    `hermes-gateway.service` onto the new release, and leave `config.yaml` at
-   `_config_version: 51` with `sessions.auto_prune: false` intact. The session count must match
-   the pre-update baseline (item 19).
+   `_config_version: 54` with `sessions.auto_prune: false` intact. The session count must match
+   the pre-update baseline (item 19). `sqlite3 state.db 'select version from schema_version'`
+   must say `33`. Then `sudo hal0 update component hermes --target
+   4d04303818b61bf3aa09278af48356315515965b` must be refused with a `downgrade` error and
+   build nothing.
 
 26. **Bank id first.** Banks are `hal0:shared` and `hal0:private`; `banks/shared/operations` 404s. Assert the bank id from `/api/memory/banks` before reading any operations URL.
 
 27. **Smoke vs brain-ready.** Compare `provision.json` `phases.smoke_tests.at` with the brain slot's `model loaded` journal timestamp and with any in-flight consolidation (`journalctl -u hal0-slot@brain`). A chat_completions timeout while brain was loading or busy is #3809, not a new chat failure.
 
-28. **Config version.** `grep _config_version /var/lib/hal0/.hermes/config.yaml`; a fresh box has none while `/api/status` reports config_version 0 against latest 51 and `hermes_doctor` advises a migrate. Record it; file only if the advice persists after reprovision.
+28. **Config version.** `grep _config_version /var/lib/hal0/.hermes/config.yaml`; a fresh box has none while `/api/status` reports config_version 0 against latest 54 (51 before v0.23.3) and `hermes_doctor` advises a migrate. Record it; file only if the advice persists after reprovision.
 
 29. **Memory plugin can read its key.** Run the hermes venv python as hal0: `import yaml` must work and the plugin's `_read_agent_key` must be non-None (open #3803). One command, 2 seconds; do it before any Hermes memory check.
+
+30. **The discovery key stays a literal (v0.23.3).** `config.yaml` must carry
+   `providers.custom.api_key: hal0-local`, not a `${HERMES_PROVIDER_...}` reference, and
+   `/var/lib/hal0/.hermes/.env` must hold no `HERMES_PROVIDER_` line (on a fresh box the file is
+   still absent, item 17). From v0.23.0 `hermes config set <...>.api_key` moves the value into
+   `.env`; hal0 writes this one through its YAML merge instead. A reference there is a finding.
+31. **Both hal0 plugins load on v0.23.3.** `sudo -u hal0 hermes plugins list` (or the gateway
+   log at start) must show `hal0-memory` as the active memory provider and no
+   `Failed to load user provider plugin hal0` line; `curl -s -H "Authorization: Bearer <key>"
+   127.0.0.1:8642/v1/models` must answer. Upstream now imports a `$HERMES_HOME` provider plugin
+   from a copy under `/var/lib/hal0/.hermes/runtime/provider-plugins/owned-*/`: the directory
+   must exist while the gateway runs, be owned by `hal0`, and hold one `owned-*` entry per
+   running Hermes process, not a growing pile.
+32. **Terminal-off tool roster (v0.23.3).** On a box with the terminal off, `GET
+   /v1/toolsets` (default profile and one named profile) and one turn's `agent.log` tool list
+   must show none of `terminal`, `process_manage`, `execute_code`, `delegate_task` or
+   `browser_exec`. `browser_exec` is the only browser tool from v0.23.0 and runs host Python;
+   upstream offers it only to a session that has `terminal`. Its presence with the terminal
+   off is a `critical` finding. The ten `browser_*` tools of v0.22.4 are gone on every box.
+33. **Nothing fetched for a feature that left core.** The gateway and agent journals from the
+   first start on v0.23.3 must show no `left-core` plugin install attempt and
+   `/var/lib/hal0/.hermes/cache/left-core-*.failed` must not exist, unless the operator
+   configured Camofox, Singularity, GitHub Copilot or Yuanbao in Hermes (new at v0.23.3; Home
+   Assistant, Spotify and Langfuse behaved this way at v0.22.4 too). Record any attempt with
+   the feature name.
+34. **No idle keep-alives.** With no chat open for 15 minutes, the hal0-api journal must show
+   no Hermes-origin `/v1/chat/completions` (v0.23.3 adds a prompt-cache warmer; it should not
+   arm for an endpoint with no cache pricing, which is every hal0 slot). One request is a
+   finding with its `aux_task` if logged.
 
 ## Carry-forward
 
@@ -178,3 +211,9 @@ any gap between what hermes says about itself and what it does as `major`.
 
 * Assert the mode of every config file that carries X-hal0-Agent-Key (config.yaml is 0644 on 094401; record, do not file unless world-writable).
 * Brief item 12's `gateway_platforms {}` on :9119 is stale: it is populated in 1.8.0. Record the value, do not expect empty.
+
+## Added in kit 21
+
+* Compare /v1/toolsets browser toolset against the model_tools._rewrite_browser_exec gate and record the live per-turn tool roster.
+* `hal0 doctor` agent-uid warn on a fresh install is #3134 (open); record it.
+* get_model_context_length without config_context_length returning 256000 is by-design since #3867; judge gateway.log 'Model context warmed' and config.yaml model.context_length instead.

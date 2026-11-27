@@ -43,7 +43,7 @@ The per-operation tables `retain`, `consolidation`, `reflect` and
 
 | Key | Type | Default | Constraints |
 |---|---|---|---|
-| `[memory.lanes.reflect].wall_timeout_s` | int | unset (renders `1800`) | `60-86400`. Rendered as `HINDSIGHT_API_REFLECT_WALL_TIMEOUT`: the seconds the engine gives one reflect, and one knowledge-page refresh (which runs as a reflect), from start to finish. The clock includes time spent waiting for a language-model permit, so a refresh queued behind consolidation and retain needs headroom. The engine's own default is 300. Keep it above `[memory.graph].llm_timeout_s`: a wall clock shorter than one language-model call's timeout cannot let a slow call finish, so the call is cut off however long it was allowed. hal0 does not enforce this, because the two keys live in different tables and a box may rely on either. Unset follows hal0's default, and a settings save does not write the default into `hal0.toml`. |
+| `[memory.lanes.reflect].wall_timeout_s` | int | unset (renders `1800`) | `60-86400`. Rendered as `HINDSIGHT_API_REFLECT_WALL_TIMEOUT`: the seconds the engine gives one reflect, and one knowledge-page refresh (which runs as a reflect), from start to finish. For a reflect the clock includes time spent waiting for a language-model permit. For a knowledge-page refresh it stops while a call waits for one (one wait can add at most this many seconds), so a refresh queued behind consolidation and retain is not cancelled for the queue. The engine's own default is 300. Keep it above `[memory.graph].llm_timeout_s`: a wall clock shorter than one language-model call's timeout cannot let a slow call finish, so the call is cut off however long it was allowed. hal0 does not enforce this, because the two keys live in different tables and a box may rely on either. Unset follows hal0's default, and a settings save does not write the default into `hal0.toml`. |
 | `[memory.lanes.consolidation].batch_size` | int | unset (renders `4`) | `1-32`. Rendered as `HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE`: memories consolidated per language-model call (`1` means no batching). The engine's own default is 8, which can overflow the 8192-token output cap; a batch that overflows is split and retried, and what still fails is counted as failed. Unset follows hal0's default, and a settings save does not write it into `hal0.toml`. |
 
 ### Upgrading an existing box
@@ -70,7 +70,7 @@ those calls to its LLM lane instead, which works but costs an LLM call each.
 | `model` | str | `"hs-decide-1-flash"` | `HINDSIGHT_API_DECISION_MODEL_MODEL`. |
 | `threads` | int | `8` | `1-64`. CPU threads of the local server. |
 | `max_concurrent` | int | `4` | `1-64`. `HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT`. |
-| `max_request_tokens` | int | `4096` | `256-32768`. The engine's request cap and the local server's `--max-tokens`. |
+| `max_request_tokens` | int | `4096` | `256-32768`. The engine's request cap. The local server's `--max-tokens` window is written a quarter above it (`5120` for the default, at most `32768`), because the engine sizes a request by estimate and the server counts real tokens. |
 | `timeout_s` | int | `60` | `5-600`. HTTP timeout of a decision call. |
 | `port` | int | `9178` | Loopback port of the local server. |
 | `base_url` | str | unset | Somewhere else to send decision calls; the engine accepts only `http://127.0.0.1:<port>` or the hosted API. |

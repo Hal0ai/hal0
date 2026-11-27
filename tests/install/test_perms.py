@@ -1175,26 +1175,70 @@ def test_pin_override_and_hermes_state_rows_declare_service_owner(tmp_hal0_home:
     assert by_glob[(hermes, "venv.pin")].mode == 0o2755
 
 
-def test_hermes_state_dir_born_setgid_is_not_drift(tmp_path: Path) -> None:
-    """#3545: a setgid 2755 dir (what mkdir under the 2775 skeleton births) audits clean,
-    and a bare 0755 one is repaired to 2755."""
-    import grp
-    import pwd
+@pytest.mark.parametrize("filename", ["provision.json", "venv.pin"])
+@pytest.mark.parametrize("mode", [0o755, 0o2755])
+def test_hermes_state_dir_keeps_existing_setgid(
+    tmp_hal0_home: str, filename: str, mode: int
+) -> None:
+    """#3888: upgraded and fresh directories audit clean; file repairs keep their mode."""
+    directory = paths.var_lib() / "state" / "agents" / "hermes"
+    directory.mkdir(parents=True)
+    child = directory / filename
+    child.write_text("x")
+    directory.chmod(mode)
+    child.chmod(0o644)
+    owner, group = _me()
+    row = next(r for r in perms.ownership_table() if r.target == directory and r.glob == filename)
+    row = replace(row, owner=owner, group=group)
 
-    d = tmp_path / "hermes"
-    d.mkdir()
-    (d / "venv.pin").write_text("x")
-    owner = pwd.getpwuid(os.getuid()).pw_name
-    group = grp.getgrgid(os.getgid()).gr_name
-    row = perms.PermRow(
-        d, owner, group, 0o2755, glob="venv.pin", child_mode=0o644, role="state/agents/hermes"
-    )
-    os.chmod(d, 0o2755)
-    os.chmod(d / "venv.pin", 0o644)
-    assert not perms.plan([row]).drifted
-    os.chmod(d, 0o755)
     pl = perms.plan([row])
-    assert [x.path for x in pl.drifted] == [d]
-    perms.commit(pl)
-    assert (d.stat().st_mode & 0o7777) == 0o2755
-    assert not perms.plan([row]).drifted
+    assert not pl.changed
+    assert all(r["status"] == "ok" for r in perms.audit_rows(pl))
+    assert perms.commit(pl) == []
+    assert directory.stat().st_mode & 0o7777 == mode
+
+    # Only the directory's setgid bit is optional. Files still require 0644,
+    # including removal of a setgid bit on the report or stamp itself.
+    for child_mode in (0o600, 0o2644):
+        child.chmod(child_mode)
+        pl = perms.plan([row])
+        assert [diff.path for diff in pl.drifted] == [child]
+        assert perms.commit(pl) == [child]
+        assert child.stat().st_mode & 0o7777 == 0o644
+        assert directory.stat().st_mode & 0o7777 == mode
+        assert not perms.plan([row]).changed
+
+
+@pytest.mark.parametrize("filename", ["provision.json", "venv.pin"])
+@pytest.mark.parametrize("mode, expected", [(0o700, 0o755), (0o2700, 0o2755)])
+def test_hermes_state_dir_repairs_other_mode_bits(
+    tmp_hal0_home: str, filename: str, mode: int, expected: int
+) -> None:
+    directory = paths.var_lib() / "state" / "agents" / "hermes"
+    directory.mkdir(parents=True)
+    directory.chmod(mode)
+    owner, group = _me()
+    row = next(r for r in perms.ownership_table() if r.target == directory and r.glob == filename)
+    row = replace(row, owner=owner, group=group)
+    pl = perms.plan([row])
+    assert [diff.path for diff in pl.drifted] == [directory]
+    assert perms.audit_rows(pl)[0]["status"] == "drift"
+    assert perms.commit(pl) == [directory]
+    assert directory.stat().st_mode & 0o7777 == expected
+    assert not perms.plan([row]).changed
+
+
+@pytest.mark.parametrize("filename", ["provision.json", "venv.pin"])
+@pytest.mark.parametrize("mode", [0o755, 0o2755])
+@pytest.mark.parametrize("axis", ["owner", "group"])
+def test_hermes_state_dir_still_detects_ownership_drift(
+    tmp_hal0_home: str, filename: str, mode: int, axis: str
+) -> None:
+    directory = paths.var_lib() / "state" / "agents" / "hermes"
+    row = next(r for r in perms.ownership_table() if r.target == directory and r.glob == filename)
+    owner = "other-owner" if axis == "owner" else row.owner
+    group = "other-group" if axis == "group" else row.group
+    pl = perms.plan([row], observe_fn=lambda path: _obs(path, owner, group, mode))
+    assert [diff.path for diff in pl.drifted] == [directory]
+    assert pl.diffs[0].mode == mode
+    assert perms.audit_rows(pl)[0]["status"] == "drift"

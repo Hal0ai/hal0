@@ -2028,7 +2028,7 @@ OPENWEBUI_UNIT_DST="${UNIT_DIR}/hal0-openwebui.service"
 # per-arch sub-manifest — a sub-manifest digest pins one architecture on every
 # host (the prior arm64 pin died on amd64 with "exec ... Exec format error").
 # Verify with: podman manifest inspect <ref> (mediaType ...manifest.list...).
-OPENWEBUI_IMAGE="ghcr.io/open-webui/open-webui@sha256:46b59158e6558eeb980bc828e0f1b30238ad24d82ed84d5e5eda1dab2a082f14"
+OPENWEBUI_IMAGE="ghcr.io/open-webui/open-webui@sha256:d5168bfbc28609eff5bea1b438dd864cf64d185cf6582c02244865e18385b901"
 if [[ -f "${OPENWEBUI_UNIT_SRC}" ]]; then
     cp "${OPENWEBUI_UNIT_SRC}" "${OPENWEBUI_UNIT_DST}"
     info "wrote ${OPENWEBUI_UNIT_DST}"
@@ -4000,11 +4000,13 @@ else
     # tests/installer/test_hindsight_pin_lockstep.py enforces it. Kept as a
     # shell literal (not read from the venv) so the fresh-install branch works
     # even when the python side is broken.
-    HINDSIGHT_PIN="1.2.0"
+    HINDSIGHT_PIN="1.2.3"
     # Space-separated pip requirements installed beside the pin; must match
-    # hal0.memory.engine_upgrade.ENGINE_DEP_CONSTRAINTS (#3533: dateparser 1.5.0
-    # breaks the engine's temporal query analysis).
-    HINDSIGHT_DEP_CONSTRAINTS="dateparser<1.5"
+    # hal0.memory.engine_upgrade.ENGINE_DEP_CONSTRAINTS. Empty at 1.2.3: the
+    # engine handles dateparser 1.5 itself and requires it, so the
+    # "dateparser<1.5" that 1.2.0 needed (#3533) would make the install
+    # unsatisfiable.
+    HINDSIGHT_DEP_CONSTRAINTS=""
     HS_DIR="${VAR_DIR}/memory/hindsight"
     HINDSIGHT_UNIT_SRC="${REPO_ROOT}/installer/systemd/hindsight-api.service"
     if [[ "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 && -f "${HINDSIGHT_UNIT_SRC}" ]]; then
@@ -4026,6 +4028,10 @@ else
             # half-built venv so the next run retries cleanly, and let the
             # `-x hindsight-api` guard below skip the unit/health steps.
             hs_pyver="$("${HS_DIR}/.venv/bin/python" -I -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo '?')"
+            # HINDSIGHT_DEP_CONSTRAINTS is empty or a space-separated list of
+            # extra requirement specifiers, so it must split into words; quoted,
+            # an empty value would reach pip as one empty argument.
+            # shellcheck disable=SC2086
             if ! "${hs_pip}" install "hindsight-api==${HINDSIGHT_PIN}" ${HINDSIGHT_DEP_CONSTRAINTS} -q; then
                 warn "hindsight-api==${HINDSIGHT_PIN} failed to install on Python ${hs_pyver} — memory engine will be unavailable"
                 warn "  set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.11-3.14) and re-run, or set HAL0_SKIP_HINDSIGHT=1"

@@ -58,6 +58,7 @@ class _FakeClient:
         #: Called before each ``type``-filtered list is answered, so a test can
         #: land new rows between two requests.
         self.before_list: Any = None
+        self.list_limits: list[int] = []
         self.typed_calls: list[dict[str, Any]] = []
         #: bank -> the engine's ``GET /banks/{bank}/stats`` payload (#2404).
         self.stats: dict[str, dict[str, Any]] = {}
@@ -82,6 +83,12 @@ class _FakeClient:
         if self.request_error is not None:
             raise self.request_error
         params = params or {}
+        if method == "GET" and path.endswith("/operations") and "limit" in params:
+            # The engine's own rule (``limit`` is ``le=100``): a larger page is
+            # a 422, not a truncated answer (#3944).
+            self.list_limits.append(int(params["limit"]))
+            if int(params["limit"]) > 100:
+                raise RuntimeError("422 Unprocessable Entity: limit must be <= 100")
         if method == "GET" and path.endswith("/operations") and "type" in params:
             return self._list_typed(path, params)
         if method == "GET" and path.endswith("/operations") and params.get("limit") != 1:
@@ -617,6 +624,25 @@ async def test_auto_retry_noop_when_nothing_failed() -> None:
 
     assert await p.maybe_auto_retry_dead_letters() is None
     assert client.retried == []
+
+
+@pytest.mark.asyncio
+async def test_auto_retry_lists_within_the_engines_page_limit() -> None:
+    """#3944: the engine rejects ``limit`` above 100 with a 422.
+
+    The sweep asked for 200, the 422 was swallowed at debug level, and no
+    failed write was ever requeued. The fake client enforces the engine's rule
+    on every list request, so the request shape cannot drift past it again.
+    """
+    client = _FakeClient()
+    p = _provider(client)
+    client.failed_ids["shared"] = ["op-1", "op-2"]
+    client.operations["shared"] = {"failed": 2, "pending": 0, "processing": 0}
+    result = await p.maybe_auto_retry_dead_letters()
+
+    assert result is not None and result["queued"] == 2
+    assert sorted(client.retried) == ["op-1", "op-2"]
+    assert client.list_limits and max(client.list_limits) <= 100
 
 
 @pytest.mark.asyncio

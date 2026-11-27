@@ -275,14 +275,15 @@ async def _cached_host_columns() -> dict[str, Any] | None:
     return value
 
 
-async def read_host_aie_columns() -> dict[str, Any] | None:
-    """Probe the AIE partition table with the host's ``xrt-smi``.
+async def _host_xrt_smi_examine() -> tuple[str, str]:
+    """Run the host ``xrt-smi`` AIE-partition query once.
 
-    Same report and parser as :func:`read_aie_columns`, run on the host. The
-    JSON goes to a file in a private temporary directory, because ``xrt-smi``
-    will not write JSON to stdout (see :data:`_XRT_SMI_SH`). Returns the parsed
-    partitions with ``"source": "host"``, or ``None`` when ``xrt-smi`` is not
-    installed or the probe fails in any way. Uncached.
+    Returns ``(state, payload)``: ``("missing", "")`` when ``xrt-smi`` is not
+    installed, ``("failed", "")`` on a spawn error, non-zero exit, timeout or an
+    unreadable result, ``("ok", <json text>)`` otherwise. The JSON goes to a file
+    in a private temporary directory, because ``xrt-smi`` will not write JSON to
+    stdout (see :data:`_XRT_SMI_SH`). Uncached. This query reaches the driver, so
+    it must only run on operator demand or for a slot that is loading anyway.
     """
     import shutil
     import tempfile
@@ -290,7 +291,7 @@ async def read_host_aie_columns() -> dict[str, Any] | None:
 
     binary = shutil.which("xrt-smi")
     if binary is None:
-        return None
+        return "missing", ""
     with tempfile.TemporaryDirectory(prefix="hal0-aie-") as tmp:
         out_path = Path(tmp) / "aie.json"
         try:
@@ -308,21 +309,47 @@ async def read_host_aie_columns() -> dict[str, Any] | None:
                 stderr=asyncio.subprocess.DEVNULL,
             )
         except (FileNotFoundError, OSError):
-            return None
+            return "failed", ""
         try:
             await asyncio.wait_for(proc.wait(), timeout=_HOST_TIMEOUT_S)
         except TimeoutError:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
-            return None
+            return "failed", ""
         if proc.returncode != 0:
-            return None
+            return "failed", ""
         try:
-            payload = out_path.read_text(encoding="utf-8", errors="replace")
+            return "ok", out_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return None
+            return "failed", ""
+
+
+async def read_host_aie_columns() -> dict[str, Any] | None:
+    """Probe the AIE partition table with the host's ``xrt-smi``.
+
+    Same report and parser as :func:`read_aie_columns`, run on the host. Returns
+    the parsed partitions with ``"source": "host"``, or ``None`` when ``xrt-smi``
+    is not installed or the probe fails in any way. Uncached.
+    """
+    state, payload = await _host_xrt_smi_examine()
+    if state != "ok":
+        return None
     parsed = _parse_aie_partitions(payload)
     return {**parsed, "source": "host"} if parsed is not None else None
+
+
+async def host_npu_responds() -> bool | None:
+    """Does the NPU answer a host ``xrt-smi`` query? (doctor's active check.)
+
+    ``True`` when the query succeeds, ``False`` when it fails or times out,
+    ``None`` when ``xrt-smi`` is not installed (absence of the tool says nothing
+    about the device). Uncached and driver-touching: call it on operator demand
+    only, never from a poll.
+    """
+    state, _payload = await _host_xrt_smi_examine()
+    if state == "missing":
+        return None
+    return state == "ok"
 
 
 def invalidate_columns_cache(container_name: str | None = None) -> None:
@@ -341,6 +368,7 @@ def invalidate_columns_cache(container_name: str | None = None) -> None:
 __all__ = [
     "aie_total_columns",
     "cached_aie_columns",
+    "host_npu_responds",
     "invalidate_columns_cache",
     "read_aie_columns",
     "read_host_aie_columns",

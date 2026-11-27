@@ -3,7 +3,7 @@
 # Asserts the spec-D2 minimal profile, pins, and both memory wires.
 set -u
 
-PI_PIN="1.5.2"
+PI_PIN="1.6.0"
 ADAPTER_PIN="7.0.1"
 HINDSIGHT_PIN="0.8.4"
 FAIL=0

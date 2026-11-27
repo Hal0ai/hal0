@@ -406,8 +406,9 @@ def check_hermes_gateway_unit(
     CLI are gateway clients. With NO gateway unit file installed they start
     their own ``gateway run --idle-exit`` inside the caller's cgroup, and that
     gateway runs cron and the kanban dispatcher (upstream
-    ``hermes_cli/gateway_runtime_service.py:92-108`` and
-    ``hermes_cli/gateway_runtime_start.py:35-81`` at ``4d043038``). A unit
+    ``hermes_cli/gateway_runtime_service.py:108-170`` and
+    ``hermes_cli/gateway_runtime_start.py:71-125`` at ``caafe538``; the same
+    rule as at ``4d043038``). A unit
     that is installed but disabled, stopped, masked or failed blocks that
     start. hal0 only ever ``systemctl disable --now``s the unit and never
     removes the file, so this row guards the one state that would let a client

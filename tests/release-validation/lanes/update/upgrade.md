@@ -204,3 +204,12 @@ The box on the new version, healthy, with the "before" snapshot recorded in your
 * Record Hal0::Platform fact_count at 0/10/30 min and attribute drops against Hindsight consolidation logs (277 -> 266 in ~9 min on 094401).
 * `before-api-slots.json` has no `actual_image` on an all-offline box (#3882 is unsatisfiable there): accept image, image_pin, image_status, or warm one slot first.
 * Clock on ct150 is EST (UTC-5), not UTC-4; use journal local stamps as such.
+
+## Added in kit 21
+
+* Poll /api/health every second with `curl -m 2` and count non-200 AND timeouts/refused connections to window the outage.
+* Print which baseline 'Changes since vX' uses (installed or last published nightly).
+* Abort and retry a 3x-restart iteration when stream bytes are not confirmed > 0, so 5+ valid samples exist.
+* For PUT /api/updates/channel check the verified-fetch journal line carries a request_id and cosign_verify_ok (job_id=None expected).
+* Use the `doctor perms` output size (1 MB on ct150) before/after as a coarse drift check instead of a full diff.
+* An all-offline box has no actual_image in the baseline by design; accept image/image_pin/image_status (known).

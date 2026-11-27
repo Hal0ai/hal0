@@ -129,3 +129,9 @@ enumerate every one individually in your findings even if they will be filed as 
 * In one pass compare `used_by` in `/api/profiles` against `/api/profiles/<name>` for every profile.
 * `hal0 agent peers` row count must equal distinct card document ids (#3877, known); `hal0 model scan` must name each skip reason (#2725, known).
 * Assert `hal0 mcp status <server>` output is bounded (hal0-admin printed 44 KB).
+
+## Added in kit 21
+
+* Repeat an unknown-name CLI call 10x while slot loads run: the error must never say 'API not running' while GET /api/health is 200.
+* Compare `hal0 status` and `hal0 slot list` state columns for every slot in the same second (ready vs serving vs offline); record disagreements.
+* `hal0 agent status|log nosuch` exit 0 is known #2706 item 1; record, do not file.

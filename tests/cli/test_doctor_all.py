@@ -11,6 +11,7 @@ import io
 import json as jsonlib
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 import typer
@@ -1632,6 +1633,12 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(
         da,
+        "check_npu_liveness",
+        lambda slots=None, **_kw: Check("npu", "NPU liveness", "pass", "stubbed"),
+    )
+
+    monkeypatch.setattr(
+        da,
         "check_img_custom_nodes",
         lambda: Check("img-custom-nodes", "Image custom nodes", "pass", "stubbed"),
     )
@@ -1702,7 +1709,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     assert set(projects_kwargs) == {"memory", "base"}
     assert set(owners_kwargs) == {"memory", "base"}
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-54:] == [
+    assert keys[-55:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1718,6 +1725,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "hardware_freshness",
         "gtt_leak",
         "fabric_clock",
+        "npu",
         "seed_context_envelope",
         "agent-uid",
         "api-journal",
@@ -4016,6 +4024,113 @@ def test_box_default_providers_read_real_config(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("HAL0_PORT", "9001")
     c = da.check_box_boundary(in_box=lambda: True, publish_hosts=lambda: {})
     assert c.status == "warn" and "9001" in c.detail
+
+
+# ── check_npu_liveness (#3935) ───────────────────────────────────────────────
+
+
+def _npu_tree(tmp_path: Path, *, node: bool, backed: bool) -> tuple[str, str]:
+    dev, sys_ = tmp_path / "dev", tmp_path / "sys"
+    (sys_ / "class" / "accel").mkdir(parents=True)
+    if node:
+        (dev / "accel").mkdir(parents=True)
+        (dev / "accel" / "accel0").write_text("")
+    if backed:
+        pci = sys_ / "devices" / "pci0000:00" / "0000:c0:00.1"
+        pci.mkdir(parents=True)
+        accel = sys_ / "class" / "accel" / "accel0"
+        accel.mkdir()
+        (accel / "device").symlink_to(pci)
+    return str(sys_), str(dev)
+
+
+def _never(*_a: Any) -> bool | None:
+    raise AssertionError("the active query must not run here")
+
+
+def _unlimited() -> int | None:
+    return None
+
+
+def test_npu_liveness_low_memlock_skips_the_query(tmp_path: Path) -> None:
+    # An unprivileged container with the default 8 MiB memlock limit: xrt-smi
+    # cannot map its 64 MiB buffer and fails although the NPU is fine. Seen on
+    # a fresh install, where the row wrongly said the host needed a reboot.
+    sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=_never, memlock=lambda: 8 * 1024 * 1024
+    )
+    assert c.status == "pass"
+    assert "memlock" in c.detail and "8 MiB" in c.detail
+    assert "not responding" not in c.detail
+
+
+def test_npu_liveness_enough_memlock_still_asks(tmp_path: Path) -> None:
+    sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=lambda: False, memlock=lambda: 64 * 1024 * 1024
+    )
+    assert c.status == "warn" and "not responding" in c.detail
+
+
+def test_npu_liveness_no_node_passes_without_asking(tmp_path: Path) -> None:
+    sys_, dev = _npu_tree(tmp_path, node=False, backed=False)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=_never, memlock=_unlimited
+    )
+    assert c.status == "pass"
+
+
+def test_npu_liveness_stale_node_warns_without_asking(tmp_path: Path) -> None:
+    sys_, dev = _npu_tree(tmp_path, node=True, backed=False)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=_never, memlock=_unlimited
+    )
+    assert c.status == "warn"
+    assert "stale" in c.detail and "reboot" in c.detail
+
+
+def test_npu_liveness_not_responding_warns(tmp_path: Path) -> None:
+    sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=lambda: False, memlock=_unlimited
+    )
+    assert c.status == "warn"
+    assert "not responding" in c.detail and "no NPU slot can start" in c.detail
+
+
+def test_npu_liveness_answering_passes(tmp_path: Path) -> None:
+    sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=lambda: True, memlock=_unlimited
+    )
+    assert c.status == "pass" and "answering" in c.detail
+
+
+def test_npu_liveness_missing_tool_is_not_a_failure(tmp_path: Path) -> None:
+    sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=lambda: None, memlock=_unlimited
+    )
+    assert c.status == "pass" and "AMD XDNA" in c.detail
+
+
+def test_npu_liveness_serving_npu_slot_skips_the_query(tmp_path: Path) -> None:
+    sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
+    slots = [{"name": "npu-fast", "state": "serving", "backend": "flm"}]
+    c = da.check_npu_liveness(
+        slots, sys_root=sys_, dev_root=dev, responds=_never, memlock=_unlimited
+    )
+    assert c.status == "pass" and "serving" in c.detail
+
+
+def test_npu_liveness_failed_npu_slot_does_not_skip_the_query(tmp_path: Path) -> None:
+    sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
+    slots = [{"name": "npu-fast", "state": "error", "backend": "flm"}]
+    c = da.check_npu_liveness(
+        slots, sys_root=sys_, dev_root=dev, responds=lambda: False, memlock=_unlimited
+    )
+    assert c.status == "warn"
 
 
 # ── check_fabric_clock ───────────────────────────────────────────────────────

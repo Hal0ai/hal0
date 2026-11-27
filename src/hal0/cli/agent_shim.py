@@ -313,24 +313,24 @@ def _build_hermes_argv(cfg: AgentConfig) -> list[str]:
     """Build the argv that boots Hermes with ``/api/events`` + ``/api/pty``.
 
     The chosen invocation is ``hermes --tui dashboard``. Re-verified against
-    the pinned Hermes v0.22.4 (``4d043038``):
+    the pinned Hermes v0.23.3 (``caafe538``):
 
-    * ``cmd_dashboard`` (``hermes_cli/main.py:2660``) is the subcommand that
-      starts ``hermes_cli.web_server.start_server`` (``web_server.py:1361``),
+    * ``cmd_dashboard`` (``hermes_cli/main.py:2437``) is the subcommand that
+      starts ``hermes_cli.web_server.start_server`` (``web_server.py:1420``),
       which serves the ``/api/pty``, ``/api/ws`` and ``/api/events``
-      WebSockets (``hermes_cli/web_routers/chat_ws.py:538``, ``:702``,
-      ``:767``).
+      WebSockets (``hermes_cli/web_routers/chat_ws.py:475``, ``:650``,
+      ``:740``).
     * The embedded chat (``/chat``, ``/api/pty``, ``/api/ws``) is always on:
-      ``_DASHBOARD_EMBEDDED_CHAT_ENABLED = True`` (``web_server.py:297``;
+      ``_DASHBOARD_EMBEDDED_CHAT_ENABLED = True`` (``web_server.py:285``;
       also true at 3ef6bbd2 and d923a5eb). The Ink TUI that ``/api/pty``
       runs attaches to this process's own ``/api/ws`` and runs its turns
-      here (``web_server_chat.py:431-435``). A profile-scoped chat
+      here (``web_server_chat.py:575-579``). A profile-scoped chat
       (``?profile=``) skips that and becomes a client of the gateway daemon
       from v0.22.3. ``--tui`` is a top-level chat flag ("launch the
-      modern TUI", ``hermes_cli/_parser.py:208``) that the ``dashboard``
+      modern TUI", ``hermes_cli/_parser.py:214``) that the ``dashboard``
       subcommand does not read; it is kept only so the argv stays the one
       the unit has always run. Nothing reads a ``HERMES_DASHBOARD_TUI``
-      env var at either pin, so hal0 no longer sets one.
+      env var at any of these refs, so hal0 no longer sets one.
     * ``--skip-build`` keeps the unit start fast and works without npm
       on the production box — the wheel ships ``hermes_cli/web_dist/``
       pre-built. Added ONLY when a built dist is actually found (see
@@ -427,8 +427,10 @@ def _dashboard_session_token(
 
     Hermes resolves its dashboard ``_SESSION_TOKEN`` as
     ``os.environ.get("HERMES_DASHBOARD_SESSION_TOKEN") or secrets.token_urlsafe(32)``
-    (``hermes_cli/web_server.py``, v0.22.2), i.e. fresh at every start unless
-    the shell that spawns it sets the variable. In loopback mode ``/api/ws``
+    (``resolve_session_token``, ``hermes_cli/web_server_session_token.py:16-38``
+    at v0.23.3, which also reads a ``file:<path>`` value as a token file; a
+    token hal0 mints is URL-safe base64 and can never start that way), i.e.
+    fresh at every start unless the shell that spawns it sets the variable. In loopback mode ``/api/ws``
     accepts only ``?token=<that value>``, so a Hermes Desktop remote pairing
     (token mode) that stored the token died at the next restart or
     ``hal0 update`` with a misleading "proxy or firewall" message and nothing

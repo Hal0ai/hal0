@@ -619,10 +619,32 @@ class TestRenderUnit:
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         unit_section, _, remainder = unit.partition("[Container]")
         service_section = remainder.partition("[Service]")[2].partition("[Install]")[0]
-        assert "StartLimitIntervalSec=1800" in unit_section
+        assert "StartLimitIntervalSec=7200" in unit_section
         assert "StartLimitBurst=10" in unit_section
         assert "StartLimitIntervalSec" not in service_section
         assert "StartLimitBurst" not in service_section
+
+    def test_start_limit_is_reachable_at_the_capped_restart_delay(self) -> None:
+        """#3936: the limit must still trip once the restart delay has ramped.
+
+        With a 1800 s window and the delay capped at 300 s only six starts fit
+        in any window, so a burst of 10 was reachable during the first ramp
+        only. A slot that missed it there (a few slow failures are enough)
+        restarted forever: 427 consecutive restarts on one box. Derive the
+        steady-state starts per window from the rendered values, with a
+        failing run allowed to last a few minutes, and require more of them
+        than the burst.
+        """
+        unit = _render_llama(
+            "test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", _moe_profile().flags
+        )
+        values = dict(line.split("=", 1) for line in unit.splitlines() if "=" in line)
+        window = int(values["StartLimitIntervalSec"])
+        burst = int(values["StartLimitBurst"])
+        max_delay = int(values["RestartMaxDelaySec"])
+        slow_failing_run_s = 300
+        starts_per_window = window // (max_delay + slow_failing_run_s)
+        assert starts_per_window > burst
 
     def test_restart_prevent_exit_status_lands_in_service_section(self) -> None:
         """#2037: the runner entrypoint translates died-during-load into exit

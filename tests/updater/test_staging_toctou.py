@@ -36,6 +36,7 @@ from hal0.config.paths import var_lib
 from hal0.updater import UpdateExtractError, Updater, UpdateVerifyError
 from hal0.updater.updater import (
     _looks_like_hal0_install,
+    _reap_stale_quarantines,
     _usr_lib_root,
     _versioned_install_dir,
 )
@@ -216,6 +217,34 @@ def test_old_quarantine_dirs_are_reaped(
     assert not ancient.exists(), "an ancient quarantine dir was not reaped"
     assert not old.exists(), "an old quarantine dir was not reaped"
     assert recent.is_dir(), "a recent quarantine dir must be kept for recovery"
+
+
+def test_quarantines_of_other_versions_are_reaped(tmp_path: Path) -> None:
+    """Age reaping covers every version's quarantines, not just this dest (#3881).
+
+    A quarantine is only created while its own version is being extracted, so
+    a version the box has moved past is never extracted again — and its
+    ``.stale-*`` trees used to survive the 30-day limit forever. Reaping after
+    an extraction of a different version must age them out while sparing both
+    that version's and the extracted version's fresh recovery material.
+    """
+    root = tmp_path / "usr-lib" / "hal0"
+    root.mkdir(parents=True)
+    install = root / "hal0-0.0.1"
+
+    now = int(time.time())
+    other_ancient = root / f"hal0-0.9.0.stale-{now - 90 * 86400}"
+    other_recent = root / f"hal0-0.9.0.stale-{now - 60}"
+    current_recent = root / f"{install.name}.stale-{now - 60}"
+    for d in (other_ancient, other_recent, current_recent):
+        d.mkdir()
+        (d / "VERSION").write_text("0.9.0\n", encoding="utf-8")
+
+    _reap_stale_quarantines(install)
+
+    assert not other_ancient.exists(), "a quarantine of another version was never reaped"
+    assert other_recent.is_dir(), "a recent quarantine of another version must be kept"
+    assert current_recent.is_dir(), "the extracted version's fresh quarantine must be kept"
 
 
 def test_orphaned_staging_dirs_are_reaped(

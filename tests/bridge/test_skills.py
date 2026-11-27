@@ -58,7 +58,8 @@ def visible(lib: SkillLibrary) -> list[str]:
 
 
 #: Directory names Hermes prunes while walking a skills root: ``EXCLUDED_SKILL_DIRS``
-#: at NousResearch/hermes-agent 4d043038 (v0.22.4, our pin), ``agent/skill_utils.py:24``.
+#: at NousResearch/hermes-agent caafe538 (v0.23.3, our pin), ``agent/skill_utils.py:28``.
+#: ``.hermes-dist`` (``DIST_SWAP_DIR``, ``:26``) is new at that ref.
 HERMES_PRUNED = frozenset(
     (
         ".git",
@@ -67,6 +68,7 @@ HERMES_PRUNED = frozenset(
         ".archive",
         ".curator_backups",
         ".locks",
+        ".hermes-dist",
         ".venv",
         "venv",
         "node_modules",
@@ -84,7 +86,7 @@ HERMES_PRUNED = frozenset(
 def hermes_sees(root: Path) -> list[str]:
     """Every ``SKILL.md`` Hermes's ``iter_skill_index_files`` finds under ``root``.
 
-    Same walk as ``agent/skill_utils.py:859`` at 4d043038: ``os.walk`` with
+    Same walk as ``agent/skill_utils.py:878`` at caafe538: ``os.walk`` with
     ``followlinks=True``, pruning :data:`HERMES_PRUNED` (and the support
     directories of a skill, which no test here creates).
     """

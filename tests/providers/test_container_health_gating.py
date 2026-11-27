@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from hal0.providers.container import ContainerProvider
@@ -123,3 +124,35 @@ async def test_health_404_v1_models_fallback_unchanged() -> None:
 
     assert result["ok"] is True
     assert result["status"] == "healthy"
+
+
+@pytest.mark.anyio
+async def test_health_read_timeout_is_a_stall_not_ok() -> None:
+    """#3752: a busy llama-server accepts /health and answers late. A read timeout
+    is reported as ``stalled`` (still not ``ok``, so every ok-only caller keeps
+    waiting) and the fail-watcher judges it on the stall ceiling, not two strikes."""
+    provider = ContainerProvider()
+
+    async def fake_get(url: str, **kwargs: Any) -> MagicMock:
+        raise httpx.ReadTimeout("busy")
+
+    with patch("hal0.providers.container.httpx.AsyncClient", return_value=_mock_client(fake_get)):
+        result = await provider.health(8081)
+
+    assert result["ok"] is False
+    assert result["status"] == "stalled"
+
+
+@pytest.mark.anyio
+async def test_health_connect_failure_is_not_a_stall() -> None:
+    """A connection that never opens is a dead server, never a stall."""
+    provider = ContainerProvider()
+
+    async def fake_get(url: str, **kwargs: Any) -> MagicMock:
+        raise httpx.ConnectTimeout("no listener")
+
+    with patch("hal0.providers.container.httpx.AsyncClient", return_value=_mock_client(fake_get)):
+        result = await provider.health(8081)
+
+    assert result["ok"] is False
+    assert result["status"] != "stalled"

@@ -1845,6 +1845,49 @@ def test_commit_reports_a_failed_plugin_mirror_and_is_not_converged(
     assert result["convergence"]["converged"] is converged
 
 
+@pytest.mark.parametrize("migrations_fail", [False, True])
+def test_commit_reports_a_failed_plugin_tree_repair_from_activation(
+    synthetic_release: dict[str, Any],
+    cosign_skip: None,
+    monkeypatch: pytest.MonkeyPatch,
+    migrations_fail: bool,
+) -> None:
+    """#3886: the root activation step's plugin-tree repair failure reaches
+    ``pass_warnings``. It is a warning, not a convergence failure on its own:
+    the mirror that follows reports whether the shipped plugins landed."""
+    from hal0.updater import privileged
+
+    class _Completed:
+        def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _fake_run(cmd, *a, **k):
+        if any("run_post_activation_migrations" in part for part in list(cmd)):
+            if migrations_fail:
+                return _Completed(returncode=1, stderr="boom\n")
+            envelope = json.dumps({updater_module._MIGRATION_RESULT_KEY: {"from": 1, "to": 1}})
+            return _Completed(stdout=envelope)
+        return _Completed()
+
+    real_activate = privileged.activate_release
+
+    def _activate(name: str, *, job_id: str | None = None) -> dict[str, Any]:
+        result = real_activate(name, job_id=job_id)
+        return {**result, "hermes_plugin_trees_error": "chown denied"}
+
+    monkeypatch.setattr(privileged, "activate_release", _activate)
+    monkeypatch.setattr(updater_module, "_is_editable_install", lambda: False)
+    monkeypatch.setattr("hal0.updater.updater.subprocess.run", _fake_run)
+
+    result = asyncio.run(Updater().apply())
+
+    post = result["convergence"]["post_activation_migrations"]
+    assert post["pass_warnings"] == ["updater.hermes_plugin_trees_converge_failed"]
+    assert result["convergence"]["converged"] is not migrations_fail
+
+
 def test_commit_carries_a_failed_model_bundle_pull_without_failing_convergence(
     synthetic_release: dict[str, Any], cosign_skip: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2038,6 +2081,25 @@ def test_read_release_notes_missing_is_empty(tmp_path: Path) -> None:
     assert notes["highlights"] == []
     assert notes["breaking"] == []
     assert notes["migrations"] == []
+
+
+def test_read_release_notes_truncates_on_line_boundary_with_marker(tmp_path: Path) -> None:
+    """Oversized notes are cut at a line boundary and end with a continuation marker."""
+    from hal0.updater.updater import _MAX_NOTES_BYTES
+
+    line = "- a fixed thing with some words in it\n"
+    (tmp_path / "RELEASE_NOTES.md").write_text(line * (_MAX_NOTES_BYTES // len(line) * 2))
+    md = _read_release_notes(tmp_path)["markdown"]
+    assert "truncated" in md.splitlines()[-1]
+    assert "CHANGELOG" in md.splitlines()[-1]
+    body = md.rsplit("\n\n", 1)[0]
+    assert all(ln == line.strip() for ln in body.splitlines())
+    assert len(md.encode()) <= _MAX_NOTES_BYTES + 300
+
+
+def test_read_release_notes_small_notes_untouched(tmp_path: Path) -> None:
+    (tmp_path / "RELEASE_NOTES.md").write_text("# hi\n- x\n")
+    assert _read_release_notes(tmp_path)["markdown"] == "# hi\n- x\n"
 
 
 # ── apply error paths ──────────────────────────────────────────────────────────
@@ -2916,10 +2978,31 @@ def test_installed_version_falls_back_to_wheel_metadata(
 def test_nightly_box_on_latest_nightly_sees_no_update() -> None:
     # The loop itself: same nightly on both sides must not read as newer.
     assert _is_newer("1.1.0-nightly.20260901025155", "1.1.0-nightly.20260901025155") is False
-    # And the pre-fix comparison that caused the loop stays true (the manifest
-    # IS newer than the bare wheel base) — proving the fix must come from the
-    # installed side, not from _is_newer.
-    assert _is_newer("1.1.0-nightly.20260901025155", "1.1.0") is True
+
+
+def test_same_base_nightly_and_stable_are_offered_across_channels() -> None:
+    # #3893: a box on 1.8.0-nightly.<stamp> that selects stable is offered 1.8.0.
+    assert _is_newer("1.8.0", "1.8.0-nightly.20261120171000") is True
+    # A stable 1.8.0 box that selects nightly is offered the nightlies cut after
+    # 1.8.0 shipped, which still carry the 1.8.0 base until the next release commit.
+    assert _is_newer("1.8.0-nightly.20261121135446", "1.8.0") is True
+    # Same kind on both sides: nothing to offer, and nightlies order by stamp.
+    assert _is_newer("1.8.0", "1.8.0") is False
+    assert _is_newer("1.8.0-nightly.20261121000000", "1.8.0-nightly.20261120171000") is True
+    assert _is_newer("1.8.0-nightly.20261120171000", "1.8.0-nightly.20261121000000") is False
+
+
+def test_is_newer_tolerates_a_missing_version() -> None:
+    assert _is_newer(None, "1.8.0") is False  # type: ignore[arg-type]
+    assert _is_newer("1.8.0", None) is True  # type: ignore[arg-type]
+    assert _is_newer("", "1.8.0") is False
+
+
+def test_nightly_against_a_different_base_orders_by_base() -> None:
+    assert _is_newer("1.8.1", "1.8.0-nightly.20261120171000") is True
+    assert _is_newer("1.8.1-nightly.20261122000000", "1.8.0") is True
+    assert _is_newer("1.8.0", "1.8.1-nightly.20261122000000") is False
+    assert _is_newer("1.7.1-nightly.20261102071057", "1.8.0") is False
 
 
 # ── release-tree lock (#3711) ──────────────────────────────────────────────────

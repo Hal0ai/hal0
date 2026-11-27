@@ -32,8 +32,8 @@ dir, and a watchdog. Crucially, the agent's secret files stay root-owned and
 unreadable to the `hal0` user, so the agent can't read its own credential
 store even though it can write to hal0's data paths.
 
-hal0 pins Hermes to one reviewed upstream release, v0.22.4 (commit
-`4d043038`), the pin since hal0 1.6.0. Every build (install, repair, upgrade, and the
+hal0 pins Hermes to one reviewed upstream release, v0.23.3 (commit
+`caafe538`), the pin since hal0 1.8.1 (v0.22.4 from 1.6.0 to 1.8.0). Every build (install, repair, upgrade, and the
 converge pass of `hal0 update`) produces an immutable release under
 `/var/lib/hal0/hermes/releases/<id>/` on a uv-managed Python 3.14, installed
 from upstream's hash-locked `uv.lock` and checked (imports, `hermes --help`, an
@@ -55,8 +55,8 @@ A release also carries the SDKs for the messaging platforms the box configures
 The pin only moves forward. `hal0 update component hermes --target` takes only a
 vetted commit and refuses to build an older vetted release over a newer one's
 `state.db`, because the gateway's persisted runtime state would then run under
-a release that predates it. Once v0.22.4 is live, a request for the older
-vetted v0.22.2 build is refused as a downgrade. That older commit stays
+a release that predates it. Once v0.23.3 is live, a request for the older
+vetted v0.22.4 or v0.22.2 build is refused as a downgrade. Those older commits stay
 vetted so the automatic flip-back to the previous release when a new one fails
 its start check, and a box still on it, keep working.
 

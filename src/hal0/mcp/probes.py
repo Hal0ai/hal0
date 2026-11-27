@@ -145,11 +145,22 @@ def npu_status() -> dict[str, Any]:
     ``/lib/firmware/amdnpu/`` (firmware loaded on the host before LXC
     boot — absence inside the container is expected).
 
+    The node alone is not proof: a device that left the bus keeps a stale node in
+    the guest. ``present`` therefore also needs the backing sysfs device
+    (``device_backed``); a node without one reports ``present: False`` plus a
+    ``device_note``. Nothing here talks to the device.
+
     PCI ID is the canonical signal: ``1022:17F0`` = XDNA2 (Strix Halo),
     ``1022:1502`` = XDNA1 (Phoenix).
     """
+    from hal0.hardware.npu_host import STALE_NODE_REASON, accel_device_backed
+
     device_node = "/dev/accel/accel0"
-    present = Path(device_node).exists()
+    node_exists = Path(device_node).exists()
+    # Passive only: sysfs, never a driver call (a query wakes the NPU from
+    # runtime suspend, and a failed wake-up is what kills it; this probe is polled).
+    device_backed = accel_device_backed(Path("/sys/class/accel/accel0")) if node_exists else None
+    present = node_exists and device_backed is not False
 
     lsmod_rc, lsmod_out, _ = _run(["lsmod"])
     driver_loaded = lsmod_rc == 0 and any(
@@ -177,6 +188,8 @@ def npu_status() -> dict[str, Any]:
     return {
         "present": present,
         "device_node": device_node if present else None,
+        "device_backed": device_backed,
+        "device_note": STALE_NODE_REASON if node_exists and device_backed is False else None,
         "driver_loaded": driver_loaded,
         "pci_id": pci_id,
         "xdna_gen": xdna_gen,
