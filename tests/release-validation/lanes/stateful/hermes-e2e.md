@@ -202,3 +202,10 @@ every config file you touched and its final contents in `box_state_on_exit`.
 * After any recall turn compare the `hindsight_recall` tool message length in state.db with its `max_tokens` and record peak `in=` (#3878, known).
 * After `hermes profile delete`, wait a full 120 s reconcile interval before asserting the `hermes.<profile>` upstream is gone (by design).
 * `GET /v1/models/<id>` must agree with chat routing for every id in `config.yaml` model_aliases (#3880 for raw chat ids, known).
+
+## Added in kit 21
+
+* Gate on an idle brain (ops queue empty, llama /slots is_processing false) before the first turn; with consolidation looping every turn took 83-156 s and the no-memory baseline was impossible.
+* slot_list count must equal real slots only, and REST state must agree with MCP slot_list; REST has virtual rows state=null while MCP shows status=serving (#2697, known).
+* Record /var/lib/hal0/.hermes/config.yaml owner and mode at lane entry and exit (640 vs 600 seen, unattributed).
+* Install-time smoke memory_roundtrip warn is #2671 (race), later reprovisions pass on stale markers; a chat_completions timeout in smoke is a #3809 recurrence candidate only if brain was idle.

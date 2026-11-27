@@ -158,3 +158,11 @@ The box healthy on the new version, with its accumulated state intact — it is 
 * After idle-reap, POST /v1/embeddings with hal0/embed: require HTTP 200 and slot state offline (not error) for every reaped slot.
 * Before the retain grounding probe, record whether a foreign Hindsight writer is feeding the platform bank (pending ops rising) and hard-cap the probe's poll.
 * `hal0 doctor perms` on an upgraded box legitimately shows state/agents/hermes 0755 DRIFT (#3888, known) and the split-brain /root/.hermes row; do not re-report.
+
+## Added in kit 21
+
+* Prove a reaper fix by running the NEW tree's _reap_stale_quarantines against a scratch dir of fake .stale-* trees; the update itself runs the OLD tree's reaper, so judge #3881 only on a hop whose from-version has #3931.
+* Use /api/memory/banks/<bank>/stats operations_by_status plus a unique document_id lookup to prove a rejected retain created zero ops (the ops list caps at 300).
+* Compare `systemctl show hindsight-api -p Environment` with the shipped unit's Environment= lines; drop-ins can hide unit drift a file diff misses.
+* After `hal0 update --restart-slots` assert the container's io.hal0.unit-sha label equals the rendered quadlet label (podman inspect) as well as slot-drift count 0.
+* A retain behind a foreign Hindsight writer took 5 min (4 ops ahead, 22 s extraction): cap that poll at 8 min.

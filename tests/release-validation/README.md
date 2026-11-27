@@ -135,6 +135,16 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **21** (2026-11-27) — Curation from the v1.8.0-nightly.20261127015252 run (about 37 verified findings: 3 filed #3944-#3946,
+  1 duplicate commented on #3654, ~12 known-open re-confirmations commented, the rest refuted or by-design). `regressions.yaml`: four new entries
+  (#3944 #1792 auto-retry never runs, list limit 200 vs engine cap 100; #3945 memory status shared-bank only; #3946 agent peers untagged
+  observations; #3654 MCP SSE ClosedResourceError), notes on #3881 (score only on a hop whose from-version has #3931), #3854 (by-design),
+  #3882 (all-offline baseline), #2716 (needs idle brain), #2700 (bank URL is hal0%3Ashared). `known-issues.yaml`: eleven rulings (npu_util
+  runtime-PM residency on a shared NPU, FPX load guard unreachable on fresh boxes, stopped ComfyUI excluded from footer count, and others),
+  hermes-context-length-256k-fallback updated for #3867. Lane briefs: "Added in kit 21" in 13 briefs. `boxes.toml`: shared-NPU and
+  autosuspend facts. Lesson: a verifier-refuted candidate costs a whole skeptic pass; adjudicate shared-hardware readings (NPU counters)
+  against the host before filing.
+
 * **20** (2026-11-20) — Curation from the v1.8.0-nightly.20261120094401 run (3 verified findings: 1 filed #3888,
   2 refuted as by-design). `regressions.yaml`: new #3888 entry (state/agents/hermes setgid drift), #3856 rescored with
   promote_ready. `known-issues.yaml`: steward-system-info-blurb-echo, hermes-plugin-identical-root-owned-files-kept

@@ -22,8 +22,8 @@
 # delete the entry. Moving work out of this kit and into CI is the goal, not a loss.
 
 schema: 1
-updated: 2026-11-20
-updated_for: v1.8.0-nightly.20261120094401
+updated: 2026-11-27
+updated_for: v1.8.0-nightly.20261127015252
 
 # NOTE on the v1.0.0-rc.6 entries: that run executed in mode=report, so nothing was filed.
 # Entries carry `issue: null` until the operator files them; replace null with the issue number
@@ -3445,7 +3445,7 @@ regressions:
 
   - id: identity-cards-duplicated-each-boot
     last_result: { release: v1.8.0-nightly.20261120045628, result: partial }
-    v1_8_0_note: "Stale bank id: use hal0:shared, not shared. Needs a box where identity cards are actually written (memory extraction bound)."
+    v1_8_0_note: "Stale bank id: use hal0%3Ashared in URLs (/api/memory/banks/hal0%3Ashared/...), NOT /banks/shared/, which 404s and makes a jq length read as 0 cards. Judge only after the queue has drained (waiting=0, failed=0); pending retains are #3876, not this entry."
     v1_4_0_nightly_20261016003929_note: >-
       Blocked again: the decisive step is a hal0-api restart, which is box-wide. Flagged
       serialize: true so it runs in the serialized pass. Baseline on 003929: 2 agent-
@@ -3751,6 +3751,8 @@ regressions:
       (passthrough:brain, never utility). Known memory-extraction-serializes-with-chat-on-
       fresh-install.
     from: v1.4.0-nightly.20261015155017
+    v1_8_0_nightly_20261127015252_note: >-
+      On a stock fresh install there is no utility slot; hal0/agent and hal0/brain both resolve passthrough:brain (--parallel 1), so the 3x timing check is meaningless unless brain requests_processing=0, the memory queue is empty and no hal0.background_gate.proceeded falls in the window. A client timeout is not a gateway error: [dispatcher] direct_read_timeout_s is 300 on the fleet.
     severity: minor
     tier: judgment
     lane: hermes-e2e
@@ -5099,6 +5101,8 @@ regressions:
     issue: 3854
     last_result: { release: v1.8.0-nightly.20261120045628, result: regressed }
     from: v1.8.0-nightly.20261119225557
+    v1_8_0_nightly_20261127015252_note: >-
+      Adjudicated by-design on 20261127: the bare resolver (no config pin) returning 256000 is Hermes upstream's last-resort; #3867 stamps model.context_length and every runtime path passes it (gateway warm-up, hygiene, /compress, context refs). Judge on gateway.log 'Model context warmed: hal0/agent -> 65536 (config)' and config.yaml model.context_length, NOT on calling get_model_context_length without config_context_length. On an upgraded box (ct150) also check that config.yaml carries the stamp.
     severity: major
     tier: judgment
     lane: hermes-e2e
@@ -5395,6 +5399,8 @@ regressions:
     issue: 3881
     last_result: { release: v1.8.0-nightly.20261120045628, result: regressed }
     from: v1.8.0-nightly.20261120045628
+    v1_8_0_nightly_20261127015252_note: >-
+      Score this ONLY on a hop whose FROM-version already contains #3931 (602bc6d7a; its installed updater.py matches '3881'). The update extracts with the from-version's reaper (the sudo seam runs `stage` from the root venv, which only `activate` re-pips), so on the hop that delivers the fix the old trees remain: record `known`, not regressed. Dry-run proof on the delivering hop: call the installed _reap_stale_quarantines against a scratch dir of fake .stale-* trees, or with shutil.rmtree stubbed on the real dir (20261127 selected exactly the 15 over-age trees).
     severity: minor
     tier: mechanical
     lane: upgrade
@@ -5414,6 +5420,8 @@ regressions:
     issue: 3882
     last_result: { release: v1.8.0-nightly.20261120045628, result: regressed }
     from: v1.8.0-nightly.20261120045628
+    v1_8_0_nightly_20261127015252_note: >-
+      On an all-offline box GET /api/slots omits actual_image by design (slot_view only inspects running/starting containers, #1507), so the baseline cannot contain it; accept image/image_pin/image_status (upgrade.md kit-20 text). before-profiles.json is written ~1 s after before-api-slots.json: check sizes only after the snapshot step ends (a 0 B read is a write race).
     severity: cosmetic
     tier: judgment
     lane: upgrade
@@ -5423,7 +5431,7 @@ regressions:
     repro: |
       ls /var/tmp/upgrade-lane/before-*; # must include profiles, slots json with actual_image, and capabilities
     expect: >-
-      Before artifacts contain all three; the post-upgrade diff needs no "no baseline" caveat.
+      Before artifacts contain profiles, slots json (image/image_pin/image_status; actual_image only if a slot is warm) and capabilities; the post-upgrade diff needs no "no baseline" caveat.
     promote_ready: false
 
   - id: state-agents-hermes-setgid-drift-upgraded-box
@@ -5445,3 +5453,88 @@ regressions:
     promote_ready: true
     promote_to: >-
       pytest tests/install/test_perms.py: both state/agents/hermes rows set keep_setgid and _declared_mode accepts 0755 and 2755.
+
+  - id: memory-auto-retry-dead-letters-list-limit-422
+    issue: 3944
+    last_result: { release: v1.8.0-nightly.20261127015252, result: regressed }
+    from: v1.8.0-nightly.20261127015252
+    severity: major
+    tier: mechanical
+    lane: memory
+    summary: >-
+      HindsightProvider.maybe_auto_retry_dead_letters (the #1792 recovery) lists failed ops with limit=200 (_AUTO_RETRY_MAX_OPS); hindsight-api 1.2.3 caps limit at 100 and
+      answers 422. The provider logs it at debug (hal0.memory.auto_retry_list_failed) and returns None, so the sweep never requeues anything and failed retains stay failed
+      until `hal0 memory ops retry --all-failed` is run by hand. P0 on the issue; verifier rated major.
+    repro: |
+      B='Hal0::Platform'   # or hal0:shared / hal0:private; any bank with status=failed ops
+      curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:9177/v1/default/banks/$B/operations?status=failed&limit=100"   # 200
+      curl -s -w '\n%{http_code}\n' "http://127.0.0.1:9177/v1/default/banks/$B/operations?status=failed&limit=200"             # 422 less_than_equal
+      journalctl -u hal0-api --since -2h -o cat | grep -c auto_retry                       # 0 even with failed ops and /api/status polls
+    expect: >-
+      The engine accepts the limit the provider sends (<=100 or paged); failed retains are requeued by the sweep with no manual retry; list failures log at warning.
+    promote_ready: true
+    promote_to: >-
+      pytest tests/memory/test_memory_write_degraded.py: drive the provider against a fake client that raises 422 for limit>100 and assert the sweep still requeues; assert _AUTO_RETRY_MAX_OPS <= 100.
+
+  - id: memory-status-ops-shared-bank-only
+    issue: 3945
+    last_result: { release: v1.8.0-nightly.20261127015252, result: regressed }
+    from: v1.8.0-nightly.20261127015252
+    severity: minor
+    tier: mechanical
+    lane: memory
+    summary: >-
+      On the two-bank layout (ADR-0058) `hal0 memory status` and /api/status memory_write_health count operations and judge Writes from hal0:shared only
+      (hindsight_provider.py ~1310 _bank_of(_write_namespace(_SHARED,None))); hal0:private, where Hermes captures land, is invisible and unlabelled.
+      A private stall reading green is source-derived, not reproduced.
+    repro: |
+      hal0 memory status                                   # Operations failed/pending/processing
+      hal0 memory ops list --json | jq -r '.[]|[.bank_id,.status]|@tsv' | sort | uniq -c
+      curl -s $API/api/status | jq .memory_write_health.bank
+    expect: >-
+      Operations equal the sum across both banks (or the row names the bank), and a stalled private bank turns Writes amber/red.
+    promote_ready: true
+    promote_to: >-
+      pytest tests/cli/test_memory_commands.py + tests/memory/test_memory_write_degraded.py: two-bank fixture with pending ops on private only; status counts them.
+
+  - id: agent-peers-untagged-observation-rows
+    issue: 3946
+    last_result: { release: v1.8.0-nightly.20261127015252, result: regressed }
+    from: v1.8.0-nightly.20261127015252
+    severity: minor
+    tier: mechanical
+    lane: cli
+    summary: >-
+      After consolidation `hal0 agent peers` shows blank all-'—' rows and an inflated 'Agent peers (N)': /api/memory/search does not forward tags_match, Hindsight's default
+      'any' admits untagged observation units (document_id null, tags []), and #3930 gives every id-less hit its own row. Not a #3877 regression (card grouping works).
+    repro: |
+      hal0 agent peers
+      curl -s -X POST $API/api/memory/search -H 'content-type: application/json' -d '{"query":"agent identity","tags":["agent-identity"],"dataset":"shared","limit":50}' \
+        | jq '[.items[]|{type,document_id,tags}]|group_by(.type)|map({t:.[0].type,n:length})'
+      curl -s -X POST $API/api/memory/recall -H 'content-type: application/json' -d '{"query":"agent identity","tags":["agent-identity"],"tags_match":"any_strict"}' | jq '.items|length'
+    expect: >-
+      No observation rows; the row count equals the number of distinct card document ids.
+    promote_ready: true
+    promote_to: >-
+      pytest tests/cli/test_agent_commands.py: peers with a mix of card world facts and untagged observations renders only the cards; tests/api for /search forwarding tags_match.
+
+  - id: mcp-sse-standalone-writer-closedresource-traceback
+    issue: 3654
+    last_result: { release: v1.8.0-nightly.20261127015252, result: regressed }
+    from: v1.8.0-nightly.20261127015252
+    severity: minor
+    tier: mechanical
+    lane: mcp
+    summary: >-
+      A client that DELETEs its MCP session while its standalone GET SSE stream is still open makes hal0-api log ERROR 'Error in standalone SSE writer' plus a ~40-line
+      ClosedResourceError traceback (mcp 1.30.0 terminate() closes the stream the writer iterates). Needs the GET stream open: no GET gives 0 of 3, GET closed first gives 0.
+    repro: |
+      # loopback only (LAN gets 421). initialize -> SID, notifications/initialized, then:
+      curl -N -H 'Accept: text/event-stream' -H "mcp-session-id: $SID" http://127.0.0.1:8080/mcp/admin/mcp &   # keep the stream open
+      curl -s -X DELETE -H "mcp-session-id: $SID" http://127.0.0.1:8080/mcp/admin/mcp
+      journalctl -u hal0-api --since -1min -o cat | grep -c 'Error in standalone SSE'    # 1 per teardown
+    expect: >-
+      Zero ERROR/traceback lines for a normal client teardown (filter the logger or bump mcp).
+    promote_ready: true
+    promote_to: >-
+      pytest tests/mcp: open a session + GET stream in-process, DELETE, assert no ERROR record on mcp.server.streamable_http.

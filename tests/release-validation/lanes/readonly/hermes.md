@@ -211,3 +211,9 @@ any gap between what hermes says about itself and what it does as `major`.
 
 * Assert the mode of every config file that carries X-hal0-Agent-Key (config.yaml is 0644 on 094401; record, do not file unless world-writable).
 * Brief item 12's `gateway_platforms {}` on :9119 is stale: it is populated in 1.8.0. Record the value, do not expect empty.
+
+## Added in kit 21
+
+* Compare /v1/toolsets browser toolset against the model_tools._rewrite_browser_exec gate and record the live per-turn tool roster.
+* `hal0 doctor` agent-uid warn on a fresh install is #3134 (open); record it.
+* get_model_context_length without config_context_length returning 256000 is by-design since #3867; judge gateway.log 'Model context warmed' and config.yaml model.context_length instead.

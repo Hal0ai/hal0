@@ -166,3 +166,11 @@ Brain and embed loaded and healthy. Any model you caused to auto-load, unload ag
 * Probe `hermes-agent` from `/v1/models` both stream and non-stream and report them as one row.
 * Record the tts `models`/model column at entry and exit; kokoro-v1 appearing at exit with the TOML untouched is runtime display (known slot-model-id-is-runtime-not-binding).
 * #2666 symptom (omitted model, bound-but-offline agent) now wakes the agent and returns 200 on 1.8.0; re-verify and close the issue if it holds.
+
+## Added in kit 21
+
+* Gate checks 9 and 11 on an idle brain: poll /slots or the queue and abort if a plain gateway chat takes > 10 s (five calls took 38-62 s on ct151 brain, --parallel 1).
+* Record the slot list before checks 12c/17: a foreign slot sharing the model changes which slot a 409 names, so 'details.slot equals the addressed slot' is unverifiable (bare-alias landing is non-deterministic, #2665).
+* Use the qwen3.5-0.8b staged by slots as the fast workhorse and for json_object; load it on coder in the first minute.
+* In check 2 print `tail -c 300` of the SSE body so the [DONE] terminator is asserted, not the head.
+* embeddings/rerank echoing the client's `model` string (legacy_slot path) is known #2663.
