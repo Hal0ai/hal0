@@ -2197,6 +2197,8 @@ def test_channel_message_survives_an_unreadable_saved_channel(
 
 
 def test_help_does_not_read_as_a_dry_run() -> None:
-    out = " ".join(runner.invoke(app, ["update", "--help"]).output.split())
-    assert "saved even with --check" in out
-    assert "Does not undo --channel" in out
+    # Read the option definitions, not the rendered help: the rendering wraps
+    # and colours the text differently from one terminal to the next.
+    params = inspect.signature(uc.update).parameters
+    assert "saved even with --check" in params["channel"].default.help
+    assert "Does not undo --channel" in params["check"].default.help
