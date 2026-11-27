@@ -322,7 +322,7 @@ def test_embed_request_matches_trio_by_slot_name(
 def test_embed_npu_sends_slot_tag_upstream_for_every_accepted_spelling(
     trio_client: tuple[TestClient, dict[str, Any]], spelling: str
 ) -> None:
-    """FLM >= 1.0.13 validates ``model``: slot name / legacy alias are rewritten
+    """FLM >= 1.0.13 validates ``model``: slot name / pre-canon alias are rewritten
     to the slot's ``[model].default``; other fields pass through unchanged."""
     import json as _json
 

@@ -1900,7 +1900,7 @@ def _match_npu_trio_cfg(
     """Return the ``device=npu`` slot config ``requested`` addresses, or ``None``.
 
     ``requested`` may be the slot's ``[model].default``, the slot name, or the
-    legacy capability alias (``embed-npu`` / ``stt-npu``).
+    pre-canon capability alias (``embed-npu`` / ``stt-npu``).
     """
     for cfg in configs:
         if cfg.get("type") != slot_type:
@@ -1928,7 +1928,7 @@ async def _npu_embed_tag(request: Request, body: dict[str, Any]) -> str:
     """FLM tag the matched NPU embed slot serves (its ``[model].default``).
 
     FastFlowLM >= 1.0.13 validates the ``model`` field of ``/v1/embeddings``,
-    so the slot name / legacy alias hal0 accepts must be rewritten to the tag.
+    so the slot name / pre-canon alias hal0 accepts must be rewritten to the tag.
     Falls back to :data:`FLM_EMBED_TAG` when the slot config has no default.
     """
     from hal0.providers.flm import FLM_EMBED_TAG
