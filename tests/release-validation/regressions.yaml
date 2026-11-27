@@ -283,7 +283,7 @@ regressions:
       Delete the throwaway slot and confirm `systemctl --failed` gained no new entry.
     expect: >-
       `container_status` reads `crashed` the moment `systemctl is-active hal0-slot@<n>` prints
-      exactly `failed` — NOT within a fixed ~240 s window (StartLimitIntervalSec=1800 /
+      exactly `failed` — NOT within a fixed ~240 s window (StartLimitIntervalSec=7200 since #3936 /
       StartLimitBurst=10 / RestartSteps=6 means natural failure can take ~20 min; `stopped`
       during that `activating (auto-restart)` ramp is correct-by-policy, see known-issues
       `crash-loop-warming-180s-window`). Once `error`, `metadata.message` is non-empty; swap
