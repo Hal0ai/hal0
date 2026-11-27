@@ -30,6 +30,28 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-11-27
+
+### Highlights
+
+- **The dashboard fits a phone and a tablet.** Every page was checked at 390, 820 and 1024 px wide. Nothing scrolls the page sideways or is cut off by its panel any more, the Models list shows model names at phone width, and the slot editor's fields stay on screen.
+- **Phone-width pages start with their content.** The Settings page list, the Models filters, the Slots hardware gauges and each Overview card fold behind a toggle at phone width. Wider screens are unchanged.
+
+### Fixed
+
+- **The Overview Services card keeps its "wired to" chips inside the card.** On a phone or tablet a service wired to several targets pushed the chips past the card's edge and made the whole page scroll sideways. The chips now sit on their own line under the service at every width, and the "Set `HAL0_…_PUBLIC_URL`" note wraps instead of ending in an ellipsis. (#3956)
+- **Models and Runner Images rows show the name at phone width.** At 390 px the six desktop columns left no room for the name, so a row showed a size and a status and nothing else. A row is now two lines there: state, name and menu, then tags, size and status. (#3956)
+- **Settings rows are no longer cut off by their panel.** At phone width the Hardware & Runtimes runner table, the Updates actions and the Security rows ran past the panel edge, which hid them; the memory reranker Provider select did the same up to tablet width. Rows now stack, and the runner table shows one runner per block. (#3956)
+- **The slot editor fits a phone.** Its Tune controls ran off the right edge and its state chips were drawn over the slot name. Labels now sit above their controls and the chips under the title. (#3956)
+- **The notifications list stays on screen at phone width.** It was aligned to the bell and ran off the left edge. (#3956)
+- **The dock is not hidden behind a phone browser's address bar.** The page was sized to the screen height with the bar hidden; it now uses the visible height where the browser supports it. (#3956)
+- **The Benchmarks tables and the Image models view switch no longer overflow at phone width.** The tables scroll sideways inside their own box there. (#3956)
+
+### Changed
+
+- **Settings is one row in the sidebar.** The sidebar no longer repeats the sixteen Settings pages under it; the grouped list on the Settings page is the one list, and its entries now take the keyboard. `#settings/<page>` addresses are unchanged. (#3956)
+- **At phone width, parts of four pages fold behind a toggle.** Settings shows the current page's name and opens the page list on tap; Models folds its filter chips behind "Filters", which shows how many are active; Slots shows throughput and folds the GPU, CPU, NPU and memory gauges; each Overview card folds to its header and remembers it in the browser. A warning or information banner shows one line of its text until "more"; an error banner always shows all of it. (#3956)
+
 ## [1.8.1] — 2026-11-27
 
 ### Highlights
