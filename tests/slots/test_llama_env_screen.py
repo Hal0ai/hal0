@@ -2,7 +2,7 @@
 
 llama.cpp reads every option from an environment variable as well as from
 argv (``common_arg::set_env`` in ``common/arg.cpp`` at tag
-b12633): ``LLAMA_ARG_*`` (and ``LLAMA_ARG_NO_*``) plus ``LLAMA_API_KEY``,
+b12816): ``LLAMA_ARG_*`` (and ``LLAMA_ARG_NO_*``) plus ``LLAMA_API_KEY``,
 ``HF_TOKEN`` and ``MTMD_BACKEND_DEVICE``. The slot env reaches the
 llama-server container, so it could otherwise set what the profile screen
 refuses — ``LLAMA_ARG_MODEL`` redirects the model, ``LLAMA_ARG_AGENT`` turns
@@ -19,7 +19,7 @@ import pytest
 from hal0.errors import BadRequest
 from hal0.slots.argv import LLAMA_ENV_NAMES, deny_llama_env, llama_env_offenders
 
-#: A sample of the names arg.cpp b12633 declares, across every kind of flag
+#: A sample of the names arg.cpp b12816 declares, across every kind of flag
 #: the profile screen refuses, plus an ordinary tuning one and a negation.
 DENIED = [
     "LLAMA_ARG_MODEL",
@@ -34,6 +34,7 @@ DENIED = [
     "LLAMA_ARG_API_KEY_FILE",
     "LLAMA_ARG_AGENT",
     "LLAMA_ARG_TOOLS",
+    "LLAMA_ARG_UI_AGENT",
     "LLAMA_ARG_UI_MCP_PROXY",
     "LLAMA_ARG_ALLOW_UNAUTHENTICATED_TOOLS",
     "LLAMA_ARG_UI_MCP_PROXY_ALLOW_PRIVATE_URLS",

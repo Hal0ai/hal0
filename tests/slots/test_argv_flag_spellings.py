@@ -1,7 +1,7 @@
 """The profile-layer screen catches every llama.cpp spelling of a flag.
 
 llama-server accepts short and alternative spellings for most flags
-(``common/arg.cpp`` at tag b12633: ``-m``/``--model``,
+(``common/arg.cpp`` at tag b12816: ``-m``/``--model``,
 ``-hf``/``-hfr``/``--hf-repo``, ``-md``/``--model-draft``/``--spec-draft-model``
 …) and rewrites ``_`` to ``-`` in a ``--long`` flag before matching. A screen
 keyed on one spelling let ``-m /etc/shadow`` redirect the model (llama-server
@@ -26,7 +26,7 @@ from hal0.slots.argv import (
     resolve_argv,
 )
 
-#: canonical flag → every spelling llama.cpp b12633 accepts for it
+#: canonical flag → every spelling llama.cpp b12816 accepts for it
 #: (``common/arg.cpp``), for the flags hal0 manages or screens.
 SPELLINGS: dict[str, tuple[str, ...]] = {
     # managed (base layer)
@@ -207,7 +207,7 @@ def test_a_joined_flag_followed_by_a_flag_is_fine() -> None:
     ]
 
 
-#: The preset switches arg.cpp b12633 declares in its "presets" group (each
+#: The preset switches arg.cpp b12816 declares in its "presets" group (each
 #: sets a model and a port; most download weights). Pinned here so a new
 #: preset in a runner bump is a deliberate addition.
 PRESETS = [
@@ -256,7 +256,7 @@ def test_each_preset_switch_is_refused(preset: str) -> None:
     ],
 )
 def test_a_token_after_a_valueless_switch_is_positional(tokens: list[str]) -> None:
-    """llama.cpp declares these switches with no value (arg.cpp b12633), so the
+    """llama.cpp declares these switches with no value (arg.cpp b12816), so the
     next token is a separate argument — a bare one the screen refuses."""
     with pytest.raises(BadRequest) as exc:
         screen_profile_flags(" ".join(tokens))
@@ -268,7 +268,7 @@ def test_a_token_after_a_valueless_switch_is_positional(tokens: list[str]) -> No
 
 
 def test_valueless_switches_from_the_runner_table() -> None:
-    """Spot-check the arity table against arg.cpp b12633: switches are
+    """Spot-check the arity table against arg.cpp b12816: switches are
     valueless, flags with a value hint are not."""
     from hal0.slots.argv import VALUELESS_FLAGS
 
@@ -285,6 +285,8 @@ def test_valueless_switches_from_the_runner_table() -> None:
         "--media-allow-private-urls",
         "--ui-mcp-proxy-allow-private-urls",
         "--connect",
+        # switch b12816 added
+        "--ui-agent",
     ):
         assert switch in VALUELESS_FLAGS, switch
     for valued in (
@@ -312,6 +314,17 @@ def test_b12633_tuning_flags_are_allowed_in_a_profile() -> None:
         "--moe-cache-cpu-share 0.5 --tts-voice af_heart --tts-speaker-text hello"
         " --spec-draft-n-ubatch 512"
     )
+
+
+def test_b12816_ui_agent_is_allowed_and_takes_no_value() -> None:
+    """``--ui-agent`` only sets the ``ui_agent`` flag the bundled web UI reads
+    from ``/props`` (arg.cpp b12816; server-context.cpp): no server tool, no MCP
+    proxy, so a profile may set it. It is a switch, so a token after it is a
+    positional the screen refuses."""
+    screen_profile_flags("--ui-agent -fa auto")
+    with pytest.raises(BadRequest) as exc:
+        screen_profile_flags("--ui-agent /etc/shadow")
+    assert exc.value.code == "slot.positional_arg_denied"
 
 
 def test_the_removed_defrag_flag_is_no_longer_special() -> None:

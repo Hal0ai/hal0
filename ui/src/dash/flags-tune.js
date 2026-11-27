@@ -396,7 +396,7 @@ export function findHostOwnedFlags(text) {
   return findByCanon(text, HOST_OWNED_SET);
 }
 
-// Every flag spelling llama.cpp (b12633) declares with no value argument: the
+// Every flag spelling llama.cpp (b12816) declares with no value argument: the
 // token after one of these is the next argument, never its value. Mirrors
 // hal0.slots.argv.VALUELESS_FLAGS verbatim (kept in sync by
 // tests/ui_contracts/test_flag_aliases_mirror.py; strict JSON).
@@ -528,6 +528,7 @@ export const VALUELESS_FLAGS = [
   "--stdin",
   "--swa-full",
   "--ui",
+  "--ui-agent",
   "--ui-mcp-proxy",
   "--ui-mcp-proxy-allow-private-urls",
   "--usage",
