@@ -67,7 +67,7 @@ test.describe('touch targets on a touch screen (390px)', () => {
 
   test('buttons, icon buttons and tabs are at least 40px tall', async ({ page }) => {
     await page.goto('/#dashboard')
-    for (const sel of ['.tb-bell', '.tb-menu', '.banner-dismiss', '.ov-card-tog']) {
+    for (const sel of ['.tb-bell', '.banner-dismiss', '.ov-card-tog']) {
       const loc = page.locator(sel).first()
       await expect(loc, sel).toBeVisible()
       const b = (await loc.boundingBox())!

@@ -98,7 +98,12 @@ test.describe('Phone tab bar (≤720px)', () => {
     await page.locator('.main').evaluate((el) => { el.scrollTop = el.scrollHeight })
     const barTop = (await page.getByTestId('tabbar').boundingBox())!.y
     const last = await page.locator('.main .view').evaluate((view) => {
-      const kids = Array.from(view.querySelectorAll('*')).filter((e) => e.getBoundingClientRect().height > 0)
+      // Not inside a table header: at this width the card tables (mobile/table-cards.css) keep
+      // their header row in the DOM clipped from sight, and its cells report boxes that are
+      // never painted.
+      const kids = Array.from(view.querySelectorAll('*')).filter(
+        (e) => e.getBoundingClientRect().height > 0 && !e.closest('thead'),
+      )
       return Math.max(...kids.map((e) => e.getBoundingClientRect().bottom))
     })
     expect(last).toBeLessThanOrEqual(barTop)
