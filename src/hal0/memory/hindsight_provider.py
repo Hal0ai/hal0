@@ -623,8 +623,12 @@ _AUTO_RETRY_COOLDOWN_S = 60.0
 #: FAILING again after this budget instead of retrying forever.
 _AUTO_RETRY_MAX_SWEEPS = 5
 
-#: Cap on ops requeued per sweep — a backstop against a runaway ledger.
-_AUTO_RETRY_MAX_OPS = 200
+#: Cap on ops requeued per sweep — a backstop against a runaway ledger. It is
+#: also the page size of the list request, so it must stay within the engine's
+#: ``limit`` ceiling of 100 (``le=100`` on ``GET …/operations``): at 200 the
+#: engine answered 422 and no failed write was ever requeued (#3944). A requeued
+#: op leaves the failed list, so a larger backlog drains over the next sweeps.
+_AUTO_RETRY_MAX_OPS = 100
 
 
 # ── private visibility on the bank-wide read tools (#3573) ──────────────────
@@ -1410,7 +1414,9 @@ class HindsightProvider(MemoryProvider):
                 params={"status": "failed", "limit": _AUTO_RETRY_MAX_OPS},
             )
         except Exception as exc:
-            log.debug("hal0.memory.auto_retry_list_failed", bank=bank, error=str(exc))
+            # Warning, not debug: this failing means no failed write is retried,
+            # and at debug level that went unseen for a whole release (#3944).
+            log.warning("hal0.memory.auto_retry_list_failed", bank=bank, error=str(exc))
             return None
         ops_list = resp.get("operations") if isinstance(resp, dict) else None
         op_ids = [
