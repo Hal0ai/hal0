@@ -1,6 +1,6 @@
 ---
 title: "Update and roll back: upgrade notes by release"
-description: "Per-release upgrade notes for hal0 — what changes and what to check when upgrading to 1.3.0, 1.6.0, 1.7.0, 1.7.1, 1.8.0 and 1.8.1, and from an older release."
+description: "Per-release upgrade notes for hal0 — what changes and what to check when upgrading to 1.3.0, 1.6.0, 1.7.0, 1.7.1, 1.8.0, 1.8.1 and 1.8.2, and from an older release."
 sidebar:
   order: 111
 ---
@@ -74,6 +74,27 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
 - **Open WebUI gets the default Hermes profile after one repair.** If the default profile is missing from the picker on a box that had Hermes installed before 1.6.0, run `sudo hal0 agent reprovision hermes --repair` once; `hal0 doctor` flags this on the `hermes-api` row. See [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
 - **The agent chat proxy is removed.** `/api/agents/{id}/events`, `/submit` and `/session/*` return 404.
 - **Key rotation now ends open sockets and streams** (WebSocket close code `4401`, SSE `event: revoked`).
+
+## Upgrading to 1.8.2
+
+- **Back up Open WebUI's data before a box with chats takes the new image.**
+  1.8.2 pins Open WebUI v0.13.5, which stores each chat message in a row of
+  its own. The container converts the existing chat history the first time
+  it starts on v0.13.5, and the old and new formats are incompatible, so a
+  box cannot go back to v0.13.4 with the converted database. hal0 does not
+  copy the data for you. Before the update, stop the container with
+  `sudo systemctl stop hal0-openwebui`, copy `/var/lib/hal0/openwebui` to a
+  place outside that directory, and check that the copy holds a `webui.db`
+  of the same size. The conversion runs in batches and resumes if it is
+  interrupted. A box with no chats needs nothing.
+- **A phone shows a different dashboard layout.** At phone width there is a
+  bottom tab bar (Overview, Slots, Models, Agents, More), the status dock is
+  one line, and long sections fold behind a toggle. Nothing changes on a
+  wider screen with a mouse, and no setting is involved.
+- **Settings is one row in the sidebar.** Its pages are listed on the
+  Settings page itself. Bookmarks to `#settings/<page>` still work.
+- **Nothing else needs a manual step.** The config schema version is
+  unchanged and there are no Breaking entries.
 
 ## Upgrading to 1.8.1
 
