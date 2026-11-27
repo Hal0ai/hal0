@@ -177,7 +177,7 @@ load work.
 ### α — unit (`make test`)
 
 ```sh
-make test            # runs `pytest tests/ -v`
+make test            # runs `pytest tests/ -n auto -q`
 ```
 
 Pytest with mocked systemd/HTTP/runtime clients; nearly every test
