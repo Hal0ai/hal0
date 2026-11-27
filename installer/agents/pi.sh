@@ -28,7 +28,7 @@
 
 set -eu
 
-PI_PKG="@earendil-works/pi-coding-agent@1.6.0"
+PI_PKG="@earendil-works/pi-coding-agent@1.6.1"
 ADAPTER_PKG="pi-mcp-adapter@7.0.1"
 
 info()  { printf '[pi] %s\n' "$*"; }
