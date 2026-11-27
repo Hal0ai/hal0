@@ -46,6 +46,7 @@ import './dash/activity-chart.css'
 // styles for the fact workspace the Memory area's Facts tab mounts.
 import './dash/memory-v2.css'
 import './dash/dock/dock.css'
+import './dash/mobile/tabbar.css'
 import './dash/overhaul.css'
 import './dash/slot-rail.css'
 

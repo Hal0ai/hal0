@@ -31,6 +31,7 @@ import { MemoryArea } from './memory-area/MemoryArea.jsx'
 import { legacyMemoryRedirect } from './memory-area/memory-route-pure'
 import { modelsRedirectForHash } from './models-redirect'
 import { Dock } from './dock/Dock.jsx'
+import { TabBar } from './mobile/TabBar.jsx'
 import { GpuStatusProvider } from './dock/GpuStatusContext.jsx'
 import { GpuGateBlockedBanner } from './dock/GpuGateBlockedBanner.jsx'
 import { slotsSub } from './slots-route'
@@ -388,6 +389,9 @@ function App() {
           onToggle={() => setFooterOpen(o => !o)}
         />
       </div>
+
+      {/* Phone only (tabbar.css): four destinations and More, which opens the drawer below. */}
+      <TabBar route={route} param={param} onMore={() => setNavOpen(true)} moreOpen={navOpen} />
 
       <NavDrawer
         open={navOpen}

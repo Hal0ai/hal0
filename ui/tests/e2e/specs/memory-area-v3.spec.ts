@@ -270,7 +270,7 @@ test.describe('narrow screen', () => {
 
   test('the drawer has exactly one row named "Memory", top-level', async ({ page }) => {
     await page.goto('/#dashboard')
-    await page.locator('.tb-menu').click()
+    await page.getByTestId('tabbar-more').click()
     const drawer = page.locator('.nav-drawer')
     await expect(drawer).toHaveClass(/\bopen\b/)
     await expect(drawer.locator('.sb-row .lbl').filter({ hasText: /^Memory$/ })).toHaveCount(1)

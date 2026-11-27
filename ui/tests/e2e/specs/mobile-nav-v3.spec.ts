@@ -1,6 +1,6 @@
 /**
  * mobile-nav-v3 — at ≤720px the desktop sidebar is hidden and navigation
- * moves into a top-right hamburger (.tb-menu) that opens a slide-in
+ * moves into the bottom tab bar's More button (.tabbar-more), which opens a slide-in
  * NavDrawer: quick-actions launcher (folded in from the topbar) and the full
  * nav (useNavItems — incl. Logs + MCP the old bottom-tabs never reached).
  * Replaces the never-shown bottom-tab bar.
@@ -12,14 +12,15 @@ const MOBILE = { width: 375, height: 812 }
 test.describe('Mobile nav drawer (≤720px)', () => {
   test.use({ viewport: MOBILE })
 
-  test('hamburger replaces the sidebar and opens a full-nav drawer', async ({ page }) => {
+  test('More replaces the sidebar and opens a full-nav drawer', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.topbar')).toBeVisible()
     // the desktop sidebar collapses out at mobile width
     await expect(page.locator('.sidebar')).toBeHidden()
 
-    // hamburger present, drawer starts closed (off-canvas → no .open class)
-    const burger = page.locator('.tb-menu')
+    // More present (the top-bar hamburger is gone: one way in), drawer starts closed (off-canvas → no .open class)
+    const burger = page.getByTestId('tabbar-more')
+    await expect(page.locator('.tb-menu')).toBeHidden()
     await expect(burger).toBeVisible()
     await expect(burger).toHaveAttribute('aria-expanded', 'false')
     const drawer = page.locator('.nav-drawer')
@@ -69,7 +70,7 @@ test.describe('Mobile nav drawer (≤720px)', () => {
 
   test('selecting a destination navigates and closes the drawer', async ({ page }) => {
     await page.goto('/')
-    await page.locator('.tb-menu').click()
+    await page.getByTestId('tabbar-more').click()
     const drawer = page.locator('.nav-drawer')
     await expect(drawer).toHaveClass(/\bopen\b/)
 
@@ -80,7 +81,7 @@ test.describe('Mobile nav drawer (≤720px)', () => {
 
   test('backdrop click closes the drawer', async ({ page }) => {
     await page.goto('/')
-    await page.locator('.tb-menu').click()
+    await page.getByTestId('tabbar-more').click()
     const drawer = page.locator('.nav-drawer')
     await expect(drawer).toHaveClass(/\bopen\b/)
 
@@ -91,7 +92,7 @@ test.describe('Mobile nav drawer (≤720px)', () => {
 
   test('Escape closes the drawer', async ({ page }) => {
     await page.goto('/')
-    await page.locator('.tb-menu').click()
+    await page.getByTestId('tabbar-more').click()
     const drawer = page.locator('.nav-drawer')
     await expect(drawer).toHaveClass(/\bopen\b/)
 
@@ -101,10 +102,11 @@ test.describe('Mobile nav drawer (≤720px)', () => {
 })
 
 test.describe('Desktop nav (>720px)', () => {
-  test('hamburger is hidden and the sidebar is the nav', async ({ page }) => {
+  test('tab bar and hamburger are hidden and the sidebar is the nav', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.goto('/')
     await expect(page.locator('.sidebar')).toBeVisible()
     await expect(page.locator('.tb-menu')).toBeHidden()
+    await expect(page.locator('.tabbar')).toBeHidden()
   })
 })

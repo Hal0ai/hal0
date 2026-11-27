@@ -489,7 +489,7 @@ function TopBar({ route, onCmdK, onBoard, onAgentChat, onMenu, menuOpen = false 
 // Canonical list of primary destinations with live counts and the 0.4
 // memory gate applied. Shared by the desktop Sidebar and the mobile
 // NavDrawer so the two navs can never drift apart.
-function useNavItems() {
+export function useNavItems() {
   const slotsQuery  = useSlots();
   const modelsQuery = useModels();
   const slotCount   = slotsQuery.data?.length  ?? 0;
@@ -568,7 +568,7 @@ function useNavItems() {
 // highlights across its whole section; a child row highlights for its exact
 // sub-path. The Agent parent groups the agent and mcp routes; Memory is its
 // own row, active on every #memory/<tab>.
-function _navActive(route, param, id, match) {
+export function _navActive(route, param, id, match) {
   if (match) return match(route, param);
   // A Slots param is `<tab>[/<sub>]`; the sub-tab never changes which sidebar row is active.
   const tab = route === "slots" ? slotsTab(param) : param;

@@ -79,9 +79,9 @@ test.describe('Top bar: GPU toggle and launchers', () => {
       expect(overflow.bar).toBeLessThanOrEqual(0)
 
       const toggle = (await page.getByTestId('tb-gpu-toggle').boundingBox())!
-      const burger = (await page.locator('.tb-menu').boundingBox())!
-      expect(toggle.x + toggle.width).toBeLessThanOrEqual(burger.x)
-      expect(burger.x + burger.width).toBeLessThanOrEqual(375)
+      // The menu button moved to the bottom tab bar (More), so the toggle is the last control here.
+      await expect(page.locator('.tb-menu')).toBeHidden()
+      expect(toggle.x + toggle.width).toBeLessThanOrEqual(375)
 
       // The question opens within the viewport.
       await page.getByTestId('tb-gpu-image').click()
