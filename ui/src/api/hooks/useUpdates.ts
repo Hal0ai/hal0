@@ -13,6 +13,9 @@ import { useToastStore } from '@/stores/useToastStore'
 export interface UpdateChannel {
   current: string
   available?: string | null
+  // #3917: the offer is a nightly <-> stable build of the same version, so it
+  // is a move to another channel and may be older than what is installed.
+  channel_switch?: boolean
   channel?: string
   // #2128: set when HAL0_RELEASES_URL overrides the manifest source — the
   // `channel` field is reported but NOT consulted while this is present.

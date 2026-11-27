@@ -142,6 +142,11 @@ def _print_check(body: dict) -> None:
         )
     )
     _print_override_note(override, channel)
+    if available and body.get("channel_switch"):
+        console.print(
+            f"[yellow]This moves {current} to another channel's build of the same "
+            f"version ({latest}), which may be older than what is installed.[/yellow]"
+        )
     if manifest:
         table = Table(show_header=False, box=None, padding=(0, 2))
         for key in ("released_at", "notes_url", "digest_sha256", "signer_identity"):

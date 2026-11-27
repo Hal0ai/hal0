@@ -57,7 +57,7 @@ from hal0.updater import (
     releases_url_override,
     validate_release_version,
 )
-from hal0.updater.updater import _is_newer, installed_version
+from hal0.updater.updater import _is_newer, installed_version, is_channel_switch
 
 log = structlog.get_logger(__name__)
 
@@ -629,6 +629,7 @@ async def update_state(request: Request) -> dict[str, Any]:
     # a manifest fetch failure (dashboard shouldn't go blank just
     # because GitHub is rate-limiting).
     hal0_available: str | None = None
+    hal0_channel_switch = False
     hal0_revoked = False
     hal0_revoked_reason = ""
     hal0_revoked_version: str | None = None
@@ -644,6 +645,7 @@ async def update_state(request: Request) -> dict[str, Any]:
             # A revoked latest is not offered (but its reason is surfaced).
             if latest and not hal0_revoked and _is_newer(latest, installed):
                 hal0_available = latest
+                hal0_channel_switch = is_channel_switch(latest, installed)
     except (OSError, ValueError):
         pass
 
@@ -656,6 +658,9 @@ async def update_state(request: Request) -> dict[str, Any]:
         "hal0": {
             "current": installed,
             "available": hal0_available,
+            # #3917: the offer is a nightly <-> stable move at one base version
+            # and may be older code than what is installed.
+            "channel_switch": hal0_channel_switch,
             "channel": channel,
             # #2128: non-None when HAL0_RELEASES_URL bypasses channel
             # resolution — the dashboard discloses it next to the channel.
@@ -742,6 +747,9 @@ async def check_updates(request: Request) -> dict[str, Any]:
         "latest": latest or None,
         "channel": channel,
         "update_available": update_available,
+        # #3917: additive — true when the offer is a nightly <-> stable move at
+        # one base version, which may be older code than what is installed.
+        "channel_switch": update_available and is_channel_switch(latest, installed),
         "revoked": revoked,
         "revoked_reason": revoked_reason,
         "manifest_url": url,

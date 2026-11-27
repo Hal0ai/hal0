@@ -26,6 +26,17 @@ update is available, and (when present) the release date, notes URL,
 digest, and signer identity. A revoked (yanked) release is never reported
 as available even if it's newer.
 
+A nightly and the stable release of the same version number (for example
+`1.8.0-nightly.<stamp>` and `1.8.0`) cannot be ordered by version alone: the
+nightly may have been cut before or after the stable shipped. When your
+channel's build and the installed build are that pair, the check offers the
+channel's build and says so: `hal0 update --check` prints that this moves you
+to another channel and may be older than what is installed, the dashboard
+shows the same sentence, and `GET /api/updates/check` and
+`GET /api/updates/state` carry `channel_switch: true`. A headless
+`hal0 update` still applies it without a prompt, as it does for any update;
+read the `--check` output first if the box is on a nightly.
+
 ## Apply an update
 
 ```sh

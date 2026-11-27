@@ -194,6 +194,37 @@ def test_state_survives_manifest_fetch_failure(
     assert body["hal0"]["current"]  # still reports our version
 
 
+def _offer_stable_to_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, installed: str
+) -> None:
+    manifest = _write_manifest(tmp_path / "cross.json", {"version": "1.8.0"})
+    monkeypatch.setenv("HAL0_RELEASES_URL", str(manifest))
+    monkeypatch.setattr("hal0.api.routes.updater.installed_version", lambda: installed)
+
+
+def test_check_and_state_flag_a_channel_switch(
+    isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3917: stable 1.8.0 offered to a 1.8.0 nightly is flagged on both payloads."""
+    _offer_stable_to_installed(tmp_path, monkeypatch, installed="1.8.0-nightly.20261125000000")
+    body = isolated_client.get("/api/updates/check").json()
+    assert body["update_available"] is True
+    assert body["channel_switch"] is True
+    hal0 = isolated_client.get("/api/updates/state").json()["hal0"]
+    assert hal0["available"] == "1.8.0"
+    assert hal0["channel_switch"] is True
+
+
+def test_check_and_state_do_not_flag_an_ordinary_update(
+    isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _offer_stable_to_installed(tmp_path, monkeypatch, installed="1.7.0")
+    body = isolated_client.get("/api/updates/check").json()
+    assert body["update_available"] is True
+    assert body["channel_switch"] is False
+    assert isolated_client.get("/api/updates/state").json()["hal0"]["channel_switch"] is False
+
+
 def test_check_no_update_when_versions_match(
     isolated_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

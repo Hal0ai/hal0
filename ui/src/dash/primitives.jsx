@@ -600,7 +600,9 @@ function UpdateBanner() {
       heading={`hal0 ${available} available`}
       body={
         <span>
-          New release on the <span className="mono">{channel}</span> channel.
+          {hal0.channel_switch
+            ? <>This moves you to the <span className="mono">{channel}</span> channel's build of the same version, which may be older than what is installed. </>
+            : <>New release on the <span className="mono">{channel}</span> channel. </>}
           Update expects a brief outage during the hal0-api restart.
         </span>
       }
