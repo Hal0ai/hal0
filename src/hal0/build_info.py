@@ -1,4 +1,4 @@
-"""Git identity of the source tree this process is running from (#1550/H7).
+"""Identity of the source tree and release this process is running from (#1550/H7).
 
 Single owner for "what commit is actually serving right now" — the fact
 `/api/status` exposes and `scripts/deploy.sh` polls after a restart to prove
@@ -48,4 +48,24 @@ def build_sha() -> str | None:
     return None
 
 
-__all__ = ["build_sha"]
+@lru_cache(maxsize=1)
+def serving_release() -> str:
+    """The release this process started from, nightly suffix included.
+
+    ``hal0.__version__`` cannot tell a nightly from the stable release of the
+    same number: package metadata holds only the base version, so
+    ``1.8.1-nightly.<stamp>`` and ``1.8.1`` both report ``1.8.1``. The release
+    tree's ``VERSION`` file carries the full string
+    (:func:`hal0.updater.updater.installed_version`).
+
+    Cached for the life of the process, like :func:`build_sha`: an update or a
+    rollback moves ``current`` to another tree while this process keeps
+    running the old one, and the point is to say what is still serving. Call
+    it once at start-up so the cache is filled before any swap can happen.
+    """
+    from hal0.updater.updater import installed_version
+
+    return installed_version()
+
+
+__all__ = ["build_sha", "serving_release"]

@@ -745,7 +745,9 @@ def _running_api_version() -> str | None:
     except Exception:
         return None
     if isinstance(body, dict):
-        version = body.get("version")
+        # ``release`` carries the nightly suffix; ``version`` alone cannot tell
+        # a nightly from the stable release of the same number (#3969).
+        version = body.get("release") or body.get("version")
         if version:
             return str(version)
     return None

@@ -3001,7 +3001,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     (``app.state.boot_report``); the report only observes — a phase that must
     fail the boot still raises.
     """
-    log.info("hal0.api.startup", version=__version__)
+    # Read the release this process starts from now, before any update or
+    # rollback can move ``current`` to another tree: the answer is cached and
+    # is what the restart contract compares against (#3969).
+    from hal0.build_info import serving_release
+
+    log.info("hal0.api.startup", version=__version__, release=serving_release())
 
     ctx = BootState()
     report = ctx.boot_report

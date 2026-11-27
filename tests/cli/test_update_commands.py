@@ -547,6 +547,70 @@ def test_rollback_falls_back_to_health_for_running_version(
     assert "systemctl restart hal0-api" in result.output
 
 
+def test_rollback_between_nightly_and_same_numbered_stable_says_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3969: the daemon still serves the nightly; the reverted tree is the
+    stable release of the same number. The banner must not say "already
+    serving"."""
+    body = dict(
+        _ROLLBACK_BODY,
+        rolled_back_to="/usr/lib/hal0/hal0-1.8.1",
+        previous_now="/usr/lib/hal0/hal0-1.8.1-nightly.20261127155122",
+        running_version="1.8.1-nightly.20261127155122",
+        restart_required=True,
+    )
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: body)
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    assert "already serving" not in result.output
+    assert "restart required" in result.output
+    assert "1.8.1-nightly.20261127155122" in result.output
+
+
+def test_rollback_health_fallback_prefers_the_full_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon that sends no running_version but reports ``release`` on
+    /api/health is compared by release, not by the bare package version."""
+    body = {
+        "rolled_back": True,
+        "channel": "stable",
+        "rolled_back_to": "/usr/lib/hal0/hal0-1.8.1",
+        "previous_now": "/usr/lib/hal0/hal0-1.8.1-nightly.20261127155122",
+        "schema_warning": None,
+    }
+    health = {"version": "1.8.1", "release": "1.8.1-nightly.20261127155122"}
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: body)
+    monkeypatch.setattr(uc, "api_get", lambda path, **k: health)
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    assert "restart required" in result.output
+
+
+def test_version_flag_appends_the_installed_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The line still starts ``hal0 <package version>``; a nightly adds its release."""
+    import hal0
+
+    nightly = f"{hal0.__version__}-nightly.20261127155122"
+    monkeypatch.setattr("hal0.updater.updater.installed_version", lambda: nightly)
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == f"hal0 {hal0.__version__} (release {nightly})"
+
+
+def test_version_flag_is_unchanged_on_a_stable_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hal0
+
+    monkeypatch.setattr("hal0.updater.updater.installed_version", lambda: hal0.__version__)
+    result = runner.invoke(app, ["--version"])
+    assert result.output.strip() == f"hal0 {hal0.__version__}"
+
+
 def test_rollback_restart_notice_suppressed_when_api_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
