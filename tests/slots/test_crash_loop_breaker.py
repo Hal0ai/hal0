@@ -386,3 +386,51 @@ async def test_gate_defers_to_a_load_still_in_progress(
 
     async with sm._lock("chat"):
         sm.check_crash_loop_gate("chat")
+
+
+# ── #3937: the envelope says why the slot failed ────────────────────────────
+
+
+async def test_gate_envelope_carries_the_last_crash_line(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    sm = SlotManager()
+    await _fail_load_once(sm, container_stub)
+    sm._states[sm._key("chat")].extra["last_crash_line"] = "[ERROR] Failed to load ASR model"
+
+    with pytest.raises(SlotCrashLooping) as exc_info:
+        await sm.load("chat")
+
+    assert exc_info.value.details["last_error"] == "[ERROR] Failed to load ASR model"
+    # The message other surfaces match on is untouched.
+    assert "backing off" in str(exc_info.value)
+
+
+async def test_gate_envelope_truncates_a_long_crash_line(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    sm = SlotManager()
+    await _fail_load_once(sm, container_stub)
+    sm._states[sm._key("chat")].extra["last_crash_line"] = "x" * 5000
+
+    with pytest.raises(SlotCrashLooping) as exc_info:
+        await sm.load("chat")
+
+    assert len(exc_info.value.details["last_error"]) <= 300
+
+
+async def test_gate_envelope_omits_last_error_without_a_crash_line(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+) -> None:
+    sm = SlotManager()
+    await _fail_load_once(sm, container_stub)
+    sm._states[sm._key("chat")].extra.pop("last_crash_line", None)
+
+    with pytest.raises(SlotCrashLooping) as exc_info:
+        await sm.load("chat")
+
+    assert "last_error" not in exc_info.value.details
+    assert exc_info.value.status == 503

@@ -425,6 +425,10 @@ class _ReadmitWithdrawn(Exception):
     """
 
 
+_LAST_ERROR_MAX_CHARS = 300
+"""Cap on the crash line carried in a ``slot.crash_looping`` envelope."""
+
+
 class SlotManager:
     """Manages the lifecycle of all hal0 inference slots.
 
@@ -1984,6 +1988,7 @@ class SlotManager:
         if failures <= 0:
             return
         remaining = _crash_loop_remaining_s(failures, last_failure)
+        last_error = self._last_error_detail(slot_name)
         if remaining <= 0:
             # Half-open: the cool-down has elapsed, so this ONE attempt is
             # permitted through the normal path (which clears systemd's
@@ -2004,6 +2009,7 @@ class SlotManager:
                     "failures": failures,
                     "parked": True,
                     "retry_after_s": max(1, int(remaining) + 1),
+                    **last_error,
                 },
             )
         raise SlotCrashLooping(
@@ -2013,8 +2019,29 @@ class SlotManager:
                 "slot": slot_name,
                 "failures": failures,
                 "retry_after_s": max(1, int(remaining) + 1),
+                **last_error,
             },
         )
+
+    def _last_error_detail(self, slot_name: str) -> dict[str, str]:
+        """``{"last_error": <line>}`` from the crash line the failed load stamped.
+
+        Reads the in-memory state record only (the journal was already tailed,
+        bounded and redacted when the load failed, see
+        :meth:`_read_last_crash_line`), so it cannot block or raise on the
+        request path. Empty when no line was captured.
+        """
+        try:
+            rec = self._states.get(self._key(slot_name))
+            line = rec.extra.get("last_crash_line") if rec is not None else None
+        except Exception:
+            return {}
+        if not isinstance(line, str) or not line.strip():
+            return {}
+        line = line.strip()
+        if len(line) > _LAST_ERROR_MAX_CHARS:
+            line = line[: _LAST_ERROR_MAX_CHARS - 1] + "…"
+        return {"last_error": line}
 
     def check_crash_loop_gate(self, slot_name: str) -> None:
         """Raise :class:`SlotCrashLooping` when :meth:`load` would refuse *slot_name* now.
