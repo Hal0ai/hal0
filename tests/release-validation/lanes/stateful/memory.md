@@ -180,3 +180,10 @@ every operation you created — the hermes lane will look for its own marker sep
 * Log any `slow llm call: scope=consolidation` with output_tokens >= 0.95 x 8192 as a truncation-risk observation.
 * Identity cards: after restarts wait for a drained queue before counting; duplicates are #3876, a missing card is only a finding after 30 min of drained queue (known agent-identity-cards-deleted-not-rewritten).
 * After a steward-driven memory_add, confirm via the documents list that the original retain document is removed after `/api/memory/delete`.
+
+## Added in kit 21
+
+* `hal0 memory status` Operations cover hal0:shared only (#3945): compare with `ops list --json` grouped by bank_id and record both.
+* Entry gate for the marker timing check: require brain requests_processing=0 and no foreign hal0:private ops (the hermes lane's private burst makes 'lone retain under 60 s' unmeasurable).
+* Run check 16 (cancel child, retry child) FIRST, before other retains, so the child does not wait behind marker traffic; poll the parent only while the child can still go terminal.
+* Failed retains: curl the engine list with limit=100 and limit=200 (#3944, 422 on 200) before trusting any 'auto-retry recovered it' reading.

@@ -120,3 +120,10 @@ and session handling as `major` by default.
 
 * Diff `tool_details` names against `tools/list` for all three servers in one script, and diff the ast-parsed GATED_TOOLS from the release tag against the REST gated flags (61 matched on 1.8.0).
 * If CONTEXT provides a `hal0bk_` bridge key, exercise `/mcp/agents/mcp` instead of recording it skipped (without one it is 401 by design).
+
+## Added in kit 21
+
+* Diff the memory server's gated flags (2 on 1.8.0) against ast-parsed GATED_TOOLS in mcp/memory.py, not only admin.
+* Run the docs-vs-served name diff against the docs under /usr/lib/hal0/current/docs on the box (the release-tag copy), not only the worktree.
+* `slot_by_id` takes arg `slot_id`, not `id`; a call with `id` is a false missing_arg.
+* Session teardown with the GET SSE stream open logs a ClosedResourceError traceback: known #3654, record only.

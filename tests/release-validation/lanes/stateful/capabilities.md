@@ -163,3 +163,9 @@ and throwaway profiles removed. Brain and utility slots healthy.
 * After enabling embed/rerank/tts, note TOML provider rewrites (`provider = "llama-server"` appeared, tts lost its comment header) as intended or file.
 * Capture the `/api/capabilities` tts catalog row (backends, profile, runtime_family) BEFORE kokoro-v1 is pulled so check 13 can diff.
 * `hal0 model scan` skip reasons: compare CLI output with the API `skipped` list (#2725, known).
+
+## Added in kit 21
+
+* Compare registry model.backends (vulkan,rocm,cuda,cpu for every local gguf) with the picker catalog row for the same model after `model add`.
+* At entry list models and capability TOMLs already staged by earlier lanes and diff against CONTEXT; embed, rerank and qwen3.5-0.8b were pre-staged, so check 2b and the 13 pull diff are un-runnable as written.
+* After any `model rm` cascade of a capability slot assert `systemctl --failed` stays empty (a podman healthcheck transient was left failed); the dangling capability itself is #2724, known.

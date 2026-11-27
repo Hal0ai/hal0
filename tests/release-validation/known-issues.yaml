@@ -16,9 +16,11 @@
 # Do not treat a review-due entry as automatically still valid.
 
 schema: 1
-updated: 2026-11-20
-updated_for: v1.8.0-nightly.20261120094401
+updated: 2026-11-27
+updated_for: v1.8.0-nightly.20261127015252
 
+# NOTE (kit 21): 20261127015252 adjudications appended at the bottom (npu_util residency, FPX load guard, footer stopped pip, quarantine reaper delivery order, others). hermes-context-length-256k-fallback updated for #3867.
+#
 # NOTE (kit 19): five boxes' worth of by-design rulings added at the bottom; the Overview soft-degraded decision (#3808 option b) is now APPLIED, see dashboard-overview-agents-degraded-shown-ready.
 #
 # NOTE (kit 18): CONTEXT.md in a run can be a stale-script artifact (the run executed a pre-#3839 rc-validate snapshot); see rc-validate-stale-script-snapshot. Take identity from boxes.toml.
@@ -2632,6 +2634,9 @@ known_issues:
 
   - id: ui-agents-card-dot-css-class-tooltip
     status: by-design
+    v1_8_0_nightly_20261127015252_note: >-
+      Dot classes now: Hermes DEGRADED reads 'stale' (3 dots), Pi NOT INSTALLED reads 'offline' (3 dots; was 'soon' when Pi was roadmap; agent-phase.ts:163 maps not_installed to offline). Same defect, not new.
+      Extra still_report_if: a dot's class disagrees with the agent-phase.ts STATUS map for the phase shown in .fc-st (DEGRADED with a 'serving' dot, NOT INSTALLED with 'stale').
     adjudicated: v1.4.0-nightly.20261016003929
     related_issue: 1841
     summary: >-
@@ -2906,6 +2911,12 @@ known_issues:
       #3835 closed by #3844 (plugin claims no hostname; Hermes now live-discovers). Residual #3854: a model-less agent slot
       leaves no /v1/models row, so hal0/agent still resolves 256000. The old note that /v1/models not listing the virtual name
       is not decisive is stale for a model-less agent. Stale plugin (hostname 127.0.0.1) on an upgraded box is #3852.
+    v1_8_0_nightly_20261127015252_note: >-
+      #3854 CLOSED by #3867 (operator decision): hal0 stamps model.context_length from GET /v1/models/hal0/agent and records hal0.model_context_length as the ownership marker. The note above that
+      'hal0/agent still resolves 256000' is out of date for the runtime. Calling agent.model_metadata.get_model_context_length WITHOUT config_context_length, and the Hermes dashboard auto_context_length field,
+      still print 256000 by upstream design (effective_context_length is 65536): do not report them. Report if gateway.log 'Model context warmed: hal0/agent' shows a value other than ctx_effective or '(default)';
+      OR config.yaml lacks model.context_length while model.default is hal0/agent after install/update/reprovision (check ct150); OR the stamp is not refreshed after the agent ctx changes and a reprovision runs;
+      OR a runtime path (hygiene, /compress, /status, context refs) uses 256000 while the stamp is present; OR an operator-set model.context_length is overwritten.
     summary: >-
       Hermes resolves hal0/agent to its 256,000 fallback (gateway.log "warmed ... 256000 (default)") against a
       65,536 window, because the provider plugin's 127.0.0.1 hostname makes Hermes skip live /models discovery.
@@ -3232,3 +3243,169 @@ known_issues:
     still_report_if: >-
       Any other perms row drifts, or the dir misbehaves, or a fresh install shows it.
     review_at: v1.8.1
+
+  # ── Kit 21 additions (v1.8.0-nightly.20261127015252) ──────────────────────────────────────────
+
+  - id: npu-util-is-runtime-pm-residency-shared-device
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    summary: >-
+      /api/stats/hardware npu_util reads 1.0 on a box (ct151) with no NPU slot and no process holding /dev/accel; the Slots header gauge captions it "util".
+    why: >-
+      npu_util is runtime-PM residency (npu_residency.py: delta active / (active + suspended) from the kernel's passive counters). The amdxdna driver has no busy counter and any query wakes the NPU,
+      and a failed wake wedges it (#3935/#3941), so nothing polled may touch the driver. The counters belong to the ONE physical device passed into ct105, ct150 and ct151, so every guest sees the host's awake time;
+      CT105's flm (holding /dev/accel0, gemma4 + whisper loaded) keeps it active. The 30-minute autosuspend_delay_ms is the operator's host-local udev rule /etc/udev/rules.d/90-hal0-npu-autosuspend.rules
+      (2026-11-26, amdxdna resume-allocation workaround), not a hal0 default (driver default 5000 ms). NPU pane strip is correctly titled "runtime-PM residency"; only telemetry-header.jsx:312 says "util" (wording; file only if fixed in the same session).
+    still_report_if: >-
+      npu_util stays >= 0.5 across two reads 60 s apart where (1) autosuspend_delay_ms is <= 5000, (2) no process in ANY guest or the host has /dev/accel/accel0 open, (3) no NPU slot served a request in 60 s;
+      OR runtime_suspended_time advances between reads while npu_util still reads 1.0 (meter math); OR runtime_active_time keeps advancing with hal0-api or a poller the only opener (hal0 keeping the NPU awake, breaking the #3941 no-touch rule).
+    review_at: v1.9.0
+
+  - id: fpx-quant-guard-load-half-unreachable-on-fresh-box
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    related_issue: 1890
+    summary: >-
+      The end-to-end load-time 422 for an FPX-quant model cannot be run on a fresh box; the expected code `slot.unsupported_quant_for_runner` never appears.
+    why: >-
+      ADR-0028 point 5 refuses fork-only quants (ROCmFPX, IU4, ActiveFPX) at model add, pull, scan and launch with models.unsupported_quant / slot.unsupported_quant. `unsupported_quant_for_runner` is retired. No FPX row can be
+      registered, so none can be bound; the launch guard (container.py _guard_unsupported_quant) is a backstop for rows from before the refusal (upgraded boxes only) and reads filenames, hf_filename and GGUF tensor types, not the stored quant.
+      Verified in-process on 20261127: by-quant, filename, hf_filename and a synthetic ggml type 103 GGUF all raise slot.unsupported_quant 422. Unit-covered by tests/slots/test_resolve_model_info_quant_guard.py + tests/registry/test_unsupported_quant.py.
+    still_report_if: >-
+      `hal0 model add`, pull or `model scan` registers a row for an FPX/IU4/ActiveFPX file instead of 422 models.unsupported_quant (or scan skip unsupported_quant:*); OR on an upgraded box a slot bound to a pre-existing FPX row reaches a container launch;
+      OR in-process _guard_unsupported_quant with null quant and a type-103 GGUF does not raise; OR either test file above fails. Do not file "no FPX fixture on ct151".
+    review_at: v1.9.0
+
+  - id: footer-services-stopped-comfyui-excluded-from-count
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    related_issue: 1899
+    summary: >-
+      Footer reads "4 / 4 ready" with five pips because comfyui (stopped, on demand) is a grey "off" pip left out of the denominator.
+    why: >-
+      Dock.jsx:192-195 filters tone !== 'off' for the fraction; status-copy.ts maps state 'stopped' to 'off'; services_health.py _down_state maps unit `inactive` to stopped and `failed` to down ('err', stays in the denominator, trips .warn).
+      Locked by tests/api/test_services_health.py and ui/tests/e2e/specs/footer-services-omits-comfyui-v3.spec.ts. The genuinely-down case is not buildable on ct151 (no ComfyUI install, no kfd); it stays an untested-on-hardware partial under regression ui-footer-services-omits-comfyui.
+      The Overview Services widget '3 / 4 up' vs dock '4 / 4 ready' on one screen is the same classification split (widget counts stopped as not up).
+    still_report_if: >-
+      With hal0-slot@img.service `failed` (or active but /system_stats unreachable) /api/services/health comfyui state is not 'down'; OR footer shows N / N without .warn while comfyui is down; OR a stopped service is counted in the denominator or rendered red;
+      OR a service in /api/services/health has no footer pip.
+    review_at: v1.9.0
+
+  - id: seed-profiles-mnt-ai-models-residue-pointer
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    related_issue: 3456
+    summary: >-
+      seed_profiles.toml:115 (moonshine) and :119 (qwen3-tts) still pass --model_path /mnt/ai-models/local/..., a path absent on ct151.
+    why: >-
+      Pointer only. Moonshine = moonshine-weights-operator-staged (ADR-0001: operator-staged default path, loud slot.weights_missing preflight). Qwen3-tts = qwen3tts-seed-model-path-unmounted, OPEN #3456. Kokoro was fixed by #2739 (no --model_path).
+    still_report_if: >-
+      seed_profiles.toml gains any other /mnt/ai-models/local path (kokoro back, a new engine); OR #3456 is closed while line ~119 still points outside every container mount; OR the moonshine preflight stops returning slot.weights_missing.
+    review_at: v1.9.0
+
+  - id: steward-names-rocm-unprompted-single-occurrence
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    related_issue: 3856
+    summary: >-
+      One unprompted steward turn called brain "(GPU/ROCm)" on a kfd-less box.
+    why: >-
+      0 of 9 fresh turns (3 phrasings x 3) named ROCm; all said gpu-vulkan. #3811 item 2 fix (180273312) is installed: system_info leads with serving_backends and renames the catalogue field default_lane. The only 'rocm' strings the steward can see are
+      the catalogue default_lane and the declared backend of offline img/qwen3tts seeds. A single mislabel from the 2.6B model is small-model prose-vs-tool_result variance (same class as brain-steward-fabricates-live-platform-state, threshold >= 2 of 3).
+    still_report_if: >-
+      On a kfd_present:false box with the canary passing, the steward labels a SERVING slot as ROCm, or names rocm a serving backend, in >= 2 of 3 fresh runs; OR /api/slots reports a serving slot's backend rocm on a kfd-less box; OR system_info serving_backends lists rocm there.
+      ROCm mentioned only for offline rocm-declared seeds or as default_lane does not count.
+    review_at: v1.9.0
+
+  - id: hermes-turn-latency-compare-needs-idle-brain
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    related_issue: 2716
+    summary: >-
+      hal0/agent vs hal0/brain 8-token chats differ 3x or more (68 s vs a 120 s client timeout) on a fresh box.
+    why: >-
+      Fresh install: agent and memory slots are model-less, hal0/agent and hal0/memory resolve passthrough:brain (ADR-0023 fallback, ADR-0053); brain is --parallel 1 and background_gate cannot preempt an in-flight memory call, so whichever alias lands behind
+      a Hindsight call waits (observed 2-93 s, either alias slower in different pairs). The 120 s was the lane's client timeout; the fleet [dispatcher] direct_read_timeout_s is 300 and no dispatch.upstream_timeout was logged. Extends memory-work-starves-interactive-chat-on-fresh-install.
+    still_report_if: >-
+      hal0/agent resolves to anything but passthrough:brain (or its own bound slot) on a stock fresh install; OR with brain idle (requests_processing=0, memory queue empty, no background_gate.proceeded within 5 s) an 8-token hal0/agent chat takes > 3x a back-to-back hal0/brain chat;
+      OR the gateway returns dispatch.upstream_timeout or 5xx for a queued chat within direct_read_timeout_s.
+    review_at: v1.9.0
+
+  - id: nonchat-type-llm-residue-doctor-rc-via-pipe
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    related_issue: 2710
+    summary: >-
+      After update, embed/rerank/tts.toml on ct150 still say type = "llm"; `hal0 doctor profiles | tail; echo $?` printed 0.
+    why: >-
+      Extends nonchat-slot-type-llm-persisted-needs-doctor-fix: update never rewrites slot TOMLs, `hal0 doctor profiles --fix` is the repair. `hal0 doctor profiles` exits 1 on drift; rc 0 came from the pipe (tail's status). Measure rc without a pipe.
+      Rerank is not flagged because a hand-added [model].output_sanity = false fails the typed load (rerank-toml-load-failure-hidden, #2720). Embed and rerank load and serve 200. The DRIFT text 'load fails the chat output-sanity probe' is stale (#2729).
+    still_report_if: >-
+      `hal0 doctor profiles` (no pipe) exits 0 while printing a DRIFT row or 'N slot(s) have the wrong type'; OR a non-chat slot with type = "llm" fails to load or serve after update.
+    review_at: v1.9.0
+
+  - id: identity-cards-reland-slowly-after-restart-burst
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    related_issue: 3876
+    summary: >-
+      After eight back-to-back hal0-api restarts no card re-lands within ~13 min, retains sit pending, then likely duplicate when they drain.
+    why: >-
+      Known #3876: boot dedupe only sees completed documents; every restart refuses the in-flight extraction (APIConnectionError) and Hindsight waits WORKER_TASK_RETRY_BACKOFF_SECONDS=120 before retry on a --parallel 1 brain shared by every lane.
+      The card did land (hermes doc 97c46d0e, 71 s after the last boot). Do not judge duplicates until waiting=0 and failed=0.
+    still_report_if: >-
+      Once the queue has drained (waiting=0, failed=0) more than one agent-identity document exists per agent (comment on #3876 with the count); OR no card exists for an agent 30 min after the last restart on a drained queue; OR an agent-identity retain ends failed and
+      no card is written until the next boot; OR a single restart on an idle queue produces two cards for one agent.
+    review_at: v1.9.0
+
+  - id: updater-quarantine-reaper-fix-lands-next-hop
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    related_issue: 3881
+    summary: >-
+      After the 20261122210809 -> 20261127015252 update (with rollback + roll-forward) ct150 still has 23 .stale-* trees, 15 older than 30 days, and no updater.quarantine_reaped event.
+    why: >-
+      The sudo seam runs `stage` (extract + reap) from the root venv, re-pipped only by `activate`, so the extract always runs the FROM-version's code. Both extracts here ran 20261122210809 (no #3931). The installed reaper selects exactly those 15 trees in a dry run.
+      Fix takes effect on the next hop. Cleanup runs only at extract time.
+    still_report_if: >-
+      On a hop whose FROM-version already contains #3931 (installed updater.py matches '3881'), over-age (-mtime +30) .stale-* trees remain after the extract, or a version keeps more than 3 quarantines, or the extract logs no updater.quarantine_reaped although over-age trees existed;
+      OR the reaper deletes current, hal0.previous or a non-.stale- tree.
+    review_at: v1.9.0
+
+  - id: kit-upgrade-baseline-actual-image-absent-when-all-offline
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    related_issue: 3882
+    summary: >-
+      before-api-slots.json has no actual_image key on ct150.
+    why: >-
+      slot_view/__init__.py:881-898 sets actual_image only for running/starting containers (#1507). With every slot offline the baseline carries image, image_pin (null) and image_status only; upgrade.md kit-20 already accepts that. before-profiles.json 0 B was a write race.
+    still_report_if: >-
+      A running/starting slot lacks actual_image in GET /api/slots; OR a before-* artifact is still 0 B after the snapshot step finished; OR image/image_status are missing for an offline configured slot.
+    review_at: v1.9.0
+
+  - id: model-add-causal-conflict-renamed-reranker
+    status: by-design
+    adjudicated: v1.8.0-nightly.20261127015252
+    related_issue: 1838
+    summary: >-
+      A renamed bge-reranker GGUF (no rerank/embed token in the name, header attention.causal=False, no pooling_type) registers as chat at detection_confidence medium.
+    why: >-
+      Extends model-add-detection-surfacing: detect.py's causal_conflict path defaults to chat at lowered (medium) confidence when the header rules out chat but gives no rerank/embed signal; the CLI prints 'confidence: medium'. Under the upstream name it classifies rerank.
+      metadata.gguf_header_read is a raw_hints flag set only on a failed read, never a metadata key. A urandom file prints the no-header warning and metadata low (they agree).
+    still_report_if: >-
+      A causal=False header with no signal registers with detection_confidence high or without the CLI confidence line; OR CLI confidence/warning disagrees with metadata.detection_confidence/detection_warning; OR the upstream filename stops classifying rerank (#1796).
+    review_at: v1.9.0
+
+  - id: tracked-open-defects-20261127015252
+    status: open
+    summary: >-
+      Open issues re-confirmed unchanged on 20261127015252; record `known`, do not file. #2724 model rm dangling capability (embed path now reproduced), #2663 embed/rerank echo client model, #2665 bare slot alias lands on sibling slot (non-deterministic),
+      #2666 omitted-model 404 on offline bound agent, #2697 MCP slot_list count = real + 2, #2699 cancelled batch parent, #2702 qwen3-4b-npu dead row, #2703 duplicate model-add rows (rm --keep-files tombstones the shared path; stray tombstone also comes from concurrent keep-files deletes), #2706 item 1 agent status unknown exit 0,
+      #2725 auto-scan ignores GGUF header, #2728 steward VRAM arithmetic (3 of 6), #2729 items 1-2, #2740 items 1/3/6, #2671 smoke memory roundtrip race (install-time only; #3809 is closed), #3654 MCP SSE ClosedResourceError (needs GET stream open at DELETE),
+      #3878 recall over budget, #3879 stale models[] (also inherited by a same-name recreated slot), #3880 GET /v1/models/<raw chat id> 404, #1840 residue (items 2,3,7,8,10,11 via cli-api-polish-rollup-1840-still-open).
+    why: >-
+      Filed 20261127015252: #3944 (auto-retry list limit 422), #3945 (memory status shared-bank only), #3946 (agent peers untagged observations); these are NOT known, they are tracked regressions.
+    still_report_if: >-
+      Any issue above is closed as fixed and still reproduces, or the symptom is materially wider than its issue text.
+    review_at: v1.9.0
