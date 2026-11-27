@@ -34,11 +34,20 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Highlights
 
+- **A cross-site request check now protects boxes that run without key enforcement, which is the default.** Update to 1.8.2. Read the Security entry if you open the dashboard through a reverse proxy or a DNS name hal0 was not told about.
 - **The dashboard fits a phone and a tablet.** Every page was checked at 390, 820 and 1024 px wide. Nothing scrolls the page sideways or is cut off by its panel any more, the Models list shows model names at phone width, and the slot editor's fields stay on screen.
 - **Phones get a bottom tab bar, card tables and larger touch targets.** Overview, Slots, Models and Agents are one tap away, wide tables show each row as a card, and long page sections fold behind a toggle. Wider screens with a mouse are unchanged.
 - **Open WebUI moves to v0.13.5, which converts the chat history on its first start.** Back up `/var/lib/hal0/openwebui` before you update a box that has chats; see Migrations.
 - **Every runner moves.** llama.cpp goes to b12816, ComfyUI to 0.46.0, kokoro to 0.6.1 and the NPU runner to FastFlowLM 1.0.14. No llama-server flag was removed. Two FLM models need pulling again, one FLM tag was renamed upstream, and your own ComfyUI custom nodes are worth a check after the update; see Migrations.
 - **Two updater fixes.** A refused Hermes downgrade no longer leaves Hermes marked `build_failed`, and an update that is really a move to the other channel's build of the same version now says so.
+
+### Breaking
+
+- **A dashboard opened through a name hal0 does not know stops working until you add the name.** This is the visible side of the Security entry below. Through a reverse-proxy or tailnet name with no `public_url` set, or a router DNS suffix such as `box.lan`, the dashboard's buttons answer `403 auth.origin_forbidden` after the update, on a box with key enforcement off. Run `hal0 network public-url set <url>` or `hal0 network origins add <origin>` once. A dashboard opened by IP address, by `<hostname>.local`, or by the host name the installer recorded keeps working, and so do curl, SDKs and server-side clients. (#3991)
+
+### Security
+
+- **The cross-site request check now applies whether or not key enforcement is on.** hal0 checks the `Origin` header of every state-changing request and every WebSocket upgrade, and refuses a web origin it does not recognise with `403 auth.origin_forbidden`. Until now that check ran only when key enforcement was on, or for admin routes on a box with an admin key. It now runs in every configuration, so a page on another site that is open in the same browser can no longer send requests to the box. Requests with no `Origin` header (curl, SDKs, and server-side clients such as Open WebUI) are unaffected, and so are browser extensions and desktop apps that send their own scheme. If you open the dashboard through a name hal0 does not know, such as a reverse-proxy or tailnet name with no `public_url` set, or a router DNS suffix such as `box.lan`, its buttons return that error until you run `hal0 network public-url set <url>` or `hal0 network origins add <origin>`. A dashboard opened by IP address, by `<hostname>.local`, or by the host name the installer recorded keeps working. Every earlier version is affected when key enforcement is off, which is the default; update to 1.8.2. (#3991)
 
 ### Fixed
 

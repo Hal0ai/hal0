@@ -93,8 +93,30 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   wider screen with a mouse, and no setting is involved.
 - **Settings is one row in the sidebar.** Its pages are listed on the
   Settings page itself. Bookmarks to `#settings/<page>` still work.
-- **Nothing else needs a manual step.** The config schema version is
-  unchanged and there are no Breaking entries.
+- **A dashboard opened through a name hal0 does not know stops working
+  until you add the name.** 1.8.2 refuses state-changing requests from a web
+  origin it does not recognise in every configuration, not only when key
+  enforcement is on. A dashboard opened by IP address, by `<hostname>.local`
+  or by the host name the installer recorded keeps working. Through a
+  reverse-proxy or tailnet name with no `public_url` set, or a router DNS
+  suffix such as `box.lan`, its buttons answer `403 auth.origin_forbidden`
+  until you run `hal0 network public-url set <url>` or
+  `hal0 network origins add <origin>`. curl, SDKs and server-side clients
+  send no `Origin` header and are unaffected.
+- **Every runner image moves.** llama.cpp goes to b12816, ComfyUI to 0.46.0,
+  kokoro to 0.6.1 and the NPU runner to FastFlowLM 1.0.14. No llama-server
+  flag was removed, so slots and profiles keep working. `hal0 update` pulls
+  the new images.
+- **Check your own ComfyUI custom nodes after the update.** ComfyUI 0.46.0
+  was not run with operator-installed nodes, and a node may need its
+  requirements installed again. Read the `img-custom-nodes` row of
+  `hal0 doctor all`.
+- **Two FLM models need pulling again, and one tag was renamed.** Pull
+  `minicpm-v-4.7:1b` and `hy-mt2-flash:1.8b` again from Models ▸ FLM before
+  using them, and re-point a slot bound to `qwen3.5-flash:2b` to
+  `qwen3.5:2b`.
+- **The config schema version is unchanged.** The one Breaking entry is the
+  dashboard-by-unknown-name change above.
 
 ## Upgrading to 1.8.1
 
