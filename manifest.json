@@ -38,8 +38,8 @@
     },
     "comfyui": {
       "image": "ghcr.io/hal0ai/hal0-runner-comfyui",
-      "tag": "0.30.0-rf37ebf1",
-      "digest": "sha256:77a6a4e8f1c6be12157d89d8ce4ea71a91db9fddf3fc7ad4bdfc534c1868fca9",
+      "tag": "0.46.0-r43c220d",
+      "digest": "sha256:463628cb064851341274b411279e7be2510b6433e2e8b39eed7ca38b18353cea",
       "lanes_gated": ["rocm"]
     },
     "qwen3tts": {
