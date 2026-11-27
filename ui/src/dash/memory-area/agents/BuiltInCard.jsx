@@ -68,25 +68,25 @@ export function BuiltInCard({ state, brain = [], openwebui = [], hasUnknown = fa
         <span className="ma-card-meta">3 parts of hal0</span>
       </div>
       <div className="ma-table-region" role="region" aria-label="Built into hal0 table" tabIndex={0}>
-        <table className="ma-table ma-agents-table ma-agents-builtin-table">
-          <thead>
-            <tr>
-              <th scope="col">Part</th>
-              <th scope="col">Reads</th>
-              <th scope="col">Writes</th>
-              <th scope="col">Facts carrying its tag</th>
+        <table className="ma-table ma-agents-table ma-agents-builtin-table tc-table tc-agents" role="table">
+          <thead role="rowgroup">
+            <tr role="row">
+              <th scope="col" role="columnheader">Part</th>
+              <th scope="col" role="columnheader">Reads</th>
+              <th scope="col" role="columnheader">Writes</th>
+              <th scope="col" role="columnheader">Facts carrying its tag</th>
             </tr>
           </thead>
-          <tbody>
-            <tr data-testid="ma-agents-builtin-dashboard">
-              <th scope="row">
+          <tbody role="rowgroup">
+            <tr role="row" data-testid="ma-agents-builtin-dashboard">
+              <th scope="row" role="rowheader">
                 Dashboard
                 <span className="ma-agents-id">you, on the Facts tab</span>
               </th>
-              <td>
+              <td role="cell" data-label="Reads">
                 <span className="ma-agents-line">Every bank, to show its facts.</span>
               </td>
-              <td>
+              <td role="cell" data-label="Writes">
                 <span className="ma-agents-line">
                   Facts you add by hand, and the changes you make when you curate one.
                 </span>
@@ -94,7 +94,7 @@ export function BuiltInCard({ state, brain = [], openwebui = [], hasUnknown = fa
                   It sends no agent name, so a fact added here is tagged <Mono>{UNKNOWN_TAG}</Mono>.
                 </span>
               </td>
-              <td>
+              <td role="cell" data-label="Facts carrying its tag">
                 <span className="ma-agents-line">
                   {hasUnknown ? (
                     <>
@@ -106,17 +106,17 @@ export function BuiltInCard({ state, brain = [], openwebui = [], hasUnknown = fa
                 </span>
               </td>
             </tr>
-            <tr data-testid="ma-agents-builtin-brain">
-              <th scope="row">
+            <tr role="row" data-testid="ma-agents-builtin-brain">
+              <th scope="row" role="rowheader">
                 Brain chat
                 <span className="ma-agents-id">the assistant in the chat drawer</span>
               </th>
-              <td>
+              <td role="cell" data-label="Reads">
                 <span className="ma-agents-line">
                   Searches and lists saved facts when it chooses to, with its memory tools.
                 </span>
               </td>
-              <td>
+              <td role="cell" data-label="Writes">
                 <span className="ma-agents-line">
                   One fact each time it uses its save tool, and nothing otherwise. It does not keep its
                   conversations.
@@ -130,16 +130,16 @@ export function BuiltInCard({ state, brain = [], openwebui = [], hasUnknown = fa
                   count.
                 </span>
               </td>
-              <td data-testid="ma-agents-builtin-brain-count">
+              <td role="cell" data-label="Facts carrying its tag" data-testid="ma-agents-builtin-brain-count">
                 <Tagged id={BRAIN_ID} sightings={brain} state={state} />
               </td>
             </tr>
-            <tr data-testid="ma-agents-builtin-openwebui">
-              <th scope="row">
+            <tr role="row" data-testid="ma-agents-builtin-openwebui">
+              <th scope="row" role="rowheader">
                 Open WebUI
                 <span className="ma-agents-id">the chat companion</span>
               </th>
-              <td>
+              <td role="cell" data-label="Reads">
                 <span className="ma-agents-line">
                   Shared memory only, as a context source before a chat turn with a model that runs on this
                   box, once hal0&apos;s filter is installed in Open WebUI.
@@ -148,14 +148,14 @@ export function BuiltInCard({ state, brain = [], openwebui = [], hasUnknown = fa
                   A model there can also search memory with hal0&apos;s memory tools when it chooses to.
                 </span>
               </td>
-              <td>
+              <td role="cell" data-label="Writes">
                 <span className="ma-agents-line">The context source does not write.</span>
                 <span className="ma-agents-line">
                   A model in Open WebUI can save a fact with hal0&apos;s memory tools; hal0 tags it{' '}
                   <Mono>agent:{OPENWEBUI_ID}</Mono>.
                 </span>
               </td>
-              <td data-testid="ma-agents-builtin-openwebui-count">
+              <td role="cell" data-label="Facts carrying its tag" data-testid="ma-agents-builtin-openwebui-count">
                 <Tagged id={OPENWEBUI_ID} sightings={openwebui} state={state} />
               </td>
             </tr>

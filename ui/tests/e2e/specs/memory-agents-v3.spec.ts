@@ -299,7 +299,7 @@ test.describe('Memory ▸ Agents', () => {
     await noBoundary(page)
   })
 
-  test('fits a 390 px screen: the tables scroll inside their cards, the page does not', async ({ page }) => {
+  test('fits a 390 px screen: each row is a card, nothing scrolls sideways', async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 })
     await routeEvidence(page)
     await open(page)
@@ -307,7 +307,7 @@ test.describe('Memory ▸ Agents', () => {
     expect(await noPageOverflow(page)).toBe(true)
     for (const name of ['Agents table', 'Built into hal0 table']) {
       const region = page.getByRole('region', { name })
-      expect(await region.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true)
+      expect(await region.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
     }
     // The command wraps inside its box.
     const box = page.getByTestId('ma-agents-command')

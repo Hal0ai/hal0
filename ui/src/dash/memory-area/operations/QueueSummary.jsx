@@ -257,36 +257,36 @@ export function BreakdownCard({ queue }) {
         <span className="ma-card-meta">a bank opens its operations</span>
       </div>
       <div className="ma-table-region" role="region" aria-label="Queue by bank table" tabIndex={0}>
-        <table className="ma-table ma-ops-banks-table">
-          <thead>
-            <tr>
-              <th scope="col">Bank</th>
-              <th scope="col" className="ma-num">
+        <table className="ma-table ma-ops-banks-table tc-table tc-bank" role="table">
+          <thead role="rowgroup">
+            <tr role="row">
+              <th scope="col" role="columnheader">Bank</th>
+              <th scope="col" role="columnheader" className="ma-num">
                 Waiting
               </th>
-              <th scope="col" className="ma-num">
+              <th scope="col" role="columnheader" className="ma-num">
                 Failed
               </th>
-              <th scope="col" className="ma-num">
+              <th scope="col" role="columnheader" className="ma-num">
                 Oldest waiting
               </th>
             </tr>
           </thead>
-          <tbody>
+          <tbody role="rowgroup">
             {rows.map((row) => (
-              <tr key={row.bank_id} data-bank={row.bank_id}>
-                <th scope="row">
+              <tr key={row.bank_id} role="row" data-bank={row.bank_id}>
+                <th scope="row" role="rowheader">
                   <a className="ma-link" href={serializeMemoryRoute({ tab: 'operations', bank: row.bank_id })}>
                     {row.bank_id}
                   </a>
                 </th>
-                <td className="ma-num" data-col="waiting">
+                <td className="ma-num" role="cell" data-label="Waiting" data-col="waiting">
                   <Figure value={row.waiting} />
                 </td>
-                <td className="ma-num" data-col="failed">
+                <td className="ma-num" role="cell" data-label="Failed" data-col="failed">
                   <Figure value={row.failed} />
                 </td>
-                <td className="ma-num" data-col="oldest">
+                <td className="ma-num" role="cell" data-label="Oldest waiting" data-col="oldest">
                   {row.waiting === 0 ? (
                     <span className="sr-only">nothing waiting</span>
                   ) : (

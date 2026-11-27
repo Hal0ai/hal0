@@ -1,0 +1,132 @@
+/* Phone-width card rows for the tables that otherwise scroll sideways inside their card.
+
+   Applies to a `<table class="tc-table tc-…">` at 720px and under; above that the table is
+   untouched. The markup stays one table: each row becomes a card, the identifying cell and the
+   row's headline value share the first line, and every other cell is a labelled value under it
+   (the label is the cell's `data-label`, drawn by `::before`). The header row stays in the
+   markup for screen readers and is only clipped from sight; the tables carry explicit ARIA table
+   roles so that `display: block` does not strip the table semantics.
+
+   Cell classes:  tc-name   the identifying cell (first line, left)
+                  tc-lead   the headline value, or the status (first line, right)
+                  tc-wide   a value that gets a full line
+                  tc-num    a short figure; four of them share one line (tc-act, tc-bank: three)
+                  tc-quiet  its label is read by screen readers but not drawn
+   Table classes: tc-agents (name | status, then full-width values), tc-bank (name, then three
+                  figures), tc-act (name | headline, then model, then four figures, then the rest).
+
+   Selectors carry `table.tc-table.tc-table` to outrank the tables' own rules (`.act-table td`,
+   `.ov-stable td:first-child`, `.ma-table tbody td`, …) whatever order the sheets load in. */
+@media (max-width: 720px) {
+  table.tc-table.tc-table,
+  table.tc-table.tc-table > tbody {
+    display: block;
+    width: 100%;
+    min-width: 0;
+  }
+  table.tc-table.tc-table > thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  /* The clipped header's own row must not be wider than the clip, or it counts as overflow. */
+  table.tc-table.tc-table > thead > tr {
+    display: block;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+  table.tc-table.tc-table > thead > tr > th { display: block; }
+
+  /* One card per row. */
+  table.tc-table.tc-table > tbody > tr {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px 12px;
+    align-items: start;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  table.tc-table.tc-table > tbody > tr:last-child { border-bottom: 0; }
+  table.tc-table.tc-table > tbody > tr > :is(th, td) {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    grid-column: 1 / -1;
+  }
+
+  /* A value's label. */
+  table.tc-table.tc-table > tbody > tr > td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    margin-bottom: 2px;
+    color: var(--fg-3);
+    font-family: var(--jbm);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  /* Read by screen readers, not drawn. */
+  table.tc-table.tc-table > tbody > tr > td.tc-quiet::before {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+
+  /* The cell roles. */
+  table.tc-table.tc-table > tbody > tr > .tc-name { grid-column: 1 / 3; grid-row: 1; }
+  table.tc-table.tc-table > tbody > tr > .tc-lead {
+    grid-column: 3 / -1;
+    grid-row: 1;
+    justify-self: end;
+    text-align: right;
+  }
+  table.tc-table.tc-table > tbody > tr > .tc-num { grid-column: auto; }
+
+  /* Agents (and the built-in parts): name on the left, status on the right, the rest full width. */
+  table.tc-agents.tc-agents > tbody > tr { grid-template-columns: minmax(0, 1fr) auto; }
+  table.tc-agents.tc-agents > tbody > tr > th { grid-column: 1; grid-row: 1; min-width: 0; }
+  table.tc-agents.tc-agents > tbody > tr > .tc-lead { grid-column: 2; max-width: 11rem; }
+  table.tc-agents.tc-agents > tbody > tr > .tc-lead .ma-agents-status { align-items: flex-end; }
+
+  /* Queue by bank: the bank, then Waiting / Failed / Oldest waiting side by side. */
+  table.tc-bank.tc-bank > tbody > tr { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  table.tc-bank.tc-bank > tbody > tr > th { grid-column: 1 / -1; }
+  table.tc-bank.tc-bank > tbody > tr > td.ma-num { grid-column: auto; text-align: left; }
+
+  /* Activity tables (Overview ▸ Serving now, Slots ▸ NPU). */
+  table.tc-act.tc-act > tbody > tr > td.num { text-align: left; }
+  table.tc-act.tc-act > tbody > tr > td.tc-lead { text-align: right; }
+  table.tc-act.tc-act > tbody > tr > td.ov-mdl {
+    max-width: none;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  /* A lane's heading and its stopped chips are single full-width lines, not cards. */
+  table.tc-act.tc-act > tbody > tr.ov-lane-h { display: block; padding: 12px 14px 0; border-bottom: 0; }
+  table.tc-act.tc-act > tbody > tr.ov-lane-h > th { padding: 0; }
+  table.tc-act.tc-act > tbody > tr.ov-stopped-row { display: block; padding: 0 14px 10px; border-bottom: 0; }
+  /* The row's logs / unload buttons show on hover on a desktop; a phone has no hover, so they
+     sit under the row's context figure. */
+  table.tc-act.tc-act > tbody > tr > td .ov-acts {
+    position: static;
+    transform: none;
+    margin-top: 6px;
+    padding-left: 0;
+    background: transparent;
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
