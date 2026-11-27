@@ -463,7 +463,7 @@ function FamilyStrip({ families }) {
       </div>
       {rows.map(f => (
         <div key={f.family} data-testid={`ri-family-${f.family}`} style={{padding: "3px 0"}}>
-          <div style={{display: "flex", alignItems: "center", gap: 8, fontSize: 12}}>
+          <div style={{display: "flex", flexWrap: "wrap", alignItems: "center", gap: "4px 8px", fontSize: 12}}>
             <span style={{color: "var(--fg-2)", minWidth: 140}}>{f.title || f.family}</span>
             {familySourceChip(f.source)}
             <StoreStateChip image={{ store_state: f.store_state, downloaded: f.store_state === "present" }} />

@@ -1931,3 +1931,16 @@
     animation: none !important;
   }
 }
+
+/* Telemetry header, phone width: every cell but throughput folds behind .th-fold
+   (TelemetryHeader in telemetry-header.jsx). The toggle does not exist above 720px. */
+.th-fold { display: none; }
+@media (max-width: 720px) {
+  .th-card { display: flex; flex-direction: column; }
+  .th-fold {
+    order: 2; display: flex; align-items: center; justify-content: center; width: 100%; min-height: 40px;
+    background: var(--bg); border: 0; border-top: 1px solid var(--line-soft);
+    font-family: var(--jbm); font-size: 11px; color: var(--fg-3); cursor: pointer;
+  }
+  .th-card:not(.th-open) .th-strip > :not(.th-cell-tps) { display: none; }
+}

@@ -133,9 +133,8 @@ function RuntimeRow({ r }) {
   const slots = r.slots.length
   return (
     <div
-      className="s-row"
+      className="s-row rt-row"
       data-testid={`runtime-row-${r.key}`}
-      style={{ display: 'grid', gridTemplateColumns: '150px 1fr 150px 150px', gap: 14, alignItems: 'center' }}
     >
       {/* runner */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -162,7 +161,7 @@ function RuntimeRow({ r }) {
         )}
       </div>
       {/* status */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+      <div className="rt-status">
         <span data-testid={`runtime-status-${r.key}`}><StatusChip state={r.state} /></span>
       </div>
     </div>
@@ -190,11 +189,11 @@ function RunnerImagesPanel() {
         <div className="s-row" style={{ paddingBottom: 4, borderBottom: '1px solid var(--line)' }}>
           <div className="k"><span>Runner images</span><FieldInfoIcon description="container image per runner · /api/system-info · reconciled by hal0 update" /></div>
         </div>
-        <div className="s-row" style={{ borderBottom: '1px solid var(--line)', display: 'grid', gridTemplateColumns: '150px 1fr 150px 150px', gap: 14 }}>
+        <div className="s-row rt-row rt-head" style={{ borderBottom: '1px solid var(--line)' }}>
           <span className="mono" style={{ fontSize: 9.5, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--fg-4)' }}>runner</span>
           <span className="mono" style={{ fontSize: 9.5, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--fg-4)' }}>image · digest</span>
           <span className="mono" style={{ fontSize: 9.5, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--fg-4)' }}>resolves to</span>
-          <span className="mono" style={{ fontSize: 9.5, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--fg-4)', textAlign: 'right' }}>status</span>
+          <span className="mono" style={{ fontSize: 9.5, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--fg-4)' }}>status</span>
         </div>
 
         {rt.isLoading && (

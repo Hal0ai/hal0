@@ -180,6 +180,9 @@ a { color: inherit; text-decoration: none; }
     "sidebar main"
     "footer footer";
   height: 100vh;
+  /* dvh where supported: on a phone 100vh is the height with the browser's address bar hidden,
+     so the dock at the bottom of the grid sat under the bar until the page was scrolled. */
+  height: 100dvh;
   width: 100vw;
 }
 .app.firstrun {
@@ -2566,7 +2569,7 @@ select.npu-sel {
    ════════════════════════════════════════════════════════════════════ */
 .settings-layout {
   display: grid;
-  grid-template-columns: 200px 1fr;
+  grid-template-columns: 200px minmax(0, 1fr);
   gap: 28px;
   align-items: start;
 }
@@ -2605,7 +2608,9 @@ select.npu-sel {
 .s-panel { background: var(--bg-1); border: 1px solid var(--line); border-radius: var(--rad-lg); overflow: hidden; }
 .s-row {
   display: grid;
-  grid-template-columns: 240px 1fr auto;
+  /* minmax(0, 1fr): a select sized by its longest option (the memory reranker provider) would
+     otherwise widen the value track past the panel, which clips it. */
+  grid-template-columns: 240px minmax(0, 1fr) auto;
   gap: 18px;
   align-items: center;
   padding: 14px 18px;
@@ -2621,7 +2626,11 @@ select.npu-sel {
 .s-row .v { font-family: var(--jbm); font-size: 12.5px; color: var(--fg-2); }
 .s-row .v.mono { font-family: var(--jbm); }
 .s-row .ac { display: flex; gap: 6px; }
-.s-row input.input { max-width: 100%; }
+.s-row input.input, .s-row select { max-width: 100%; }
+/* Hardware & Runtimes: the runner table (runner, image · digest, resolves to, status). */
+.s-row.rt-row { grid-template-columns: 150px minmax(0, 1fr) 150px 150px; gap: 14px; }
+.s-row.rt-row .rt-status { display: flex; justify-content: flex-end; }
+.s-row.rt-head > span:last-child { text-align: right; }
 
 /* responsive ───────────────────────────────────────────────────── */
 @media (max-width: 1280px) {
@@ -2648,7 +2657,7 @@ select.npu-sel {
   .tb-eyebrow .sep:nth-child(2), .tb-eyebrow .now { display: none; }
   .tiers { grid-template-columns: repeat(2, 1fr); }
   .slots-grid.quarter { grid-template-columns: repeat(2, 1fr); }
-  .settings-layout { grid-template-columns: 1fr; }
+  .settings-layout { grid-template-columns: minmax(0, 1fr); }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; }
   .models-layout { grid-template-columns: 1fr; }
   .models-sidebar { position: static; max-height: none; overflow-y: visible; }
@@ -2693,14 +2702,20 @@ select.npu-sel {
   .snap-row .model, .snap-row .badge { display: none; }
   .fr-confirm-row { grid-template-columns: 80px 1fr 80px; }
   .fr-confirm-row .tag { display: none; }
-  .s-row { grid-template-columns: 1fr; }
+  .s-row { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 12px 14px; }
+  .s-row .ac { flex-wrap: wrap; }
+  .s-row .v { min-width: 0; overflow-wrap: anywhere; }
+  /* the runner table stacks: one runner per block, no column header */
+  .s-row.rt-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .s-row.rt-head { display: none; }
+  .s-row.rt-row .rt-status { justify-content: flex-start; }
   .npu-trio { flex-direction: column; }
   .dash { grid-template-columns: 1fr; }
   .dash-side { position: static; display: flex; flex-direction: column; gap: 12px; }
   .dash-5050 { grid-template-columns: 1fr; }
   .models-layout { grid-template-columns: 1fr; }
   .models-sidebar { position: static; max-height: none; overflow-y: visible; }
-  .settings-layout { grid-template-columns: 1fr; }
+  .settings-layout { grid-template-columns: minmax(0, 1fr); }
   .settings-nav { position: static; flex-direction: row; flex-wrap: wrap; overflow-x: auto; }
   .topbar { padding: 0 12px; gap: 10px; }
   /* minmax(0, 1fr), not 1fr: a plain 1fr track has min-width: auto, so the dock footer's nowrap GPU
@@ -4163,3 +4178,90 @@ button.pf-state:disabled { cursor: default; opacity: 0.65; }
 .eng-help { grid-column: 1 / -1; font-size: 10.5px; color: var(--fg-4); line-height: 1.45; }
 .eng-err { display: block; margin-top: 2px; }
 .pf-switch:disabled, .eng-num:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ════════════════════════════════════════════════════════════════════
+   Phone layout (≤720px) — second pass
+   Rules that only make sense once the sidebar is gone and a page is one
+   column. Kept at the end of the file so they win over the base rules above.
+   ════════════════════════════════════════════════════════════════════ */
+/* Controls that only exist at phone width. */
+.settings-nav-toggle, .mdl-filters-toggle, .banner-fold { display: none; }
+
+@media (max-width: 720px) {
+  /* View header: the eyebrow goes above the title instead of beside it, and a keyboard hint
+     ("Press N to create") has no keyboard to refer to. */
+  .vh { gap: 8px 10px; margin-bottom: 14px; }
+  .vh .vh-eye { flex: 0 0 100%; margin-bottom: -6px; }
+  .vh .hint { display: none; }
+
+  /* Banners: tighter, and a foldable body is one line until "more". */
+  .banner { grid-template-columns: 1fr auto; gap: 10px; padding: 10px 12px; }
+  .banner-ic { display: none; }
+  .banner-foldable:not(.banner-more) .banner-body {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; line-clamp: 1; overflow: hidden;
+  }
+  .banner-fold {
+    display: inline-flex; align-self: flex-start; background: none; border: 0; padding: 4px 0;
+    font-family: var(--jbm); font-size: 11px; color: var(--fg-3); cursor: pointer;
+  }
+
+  /* Settings: the page list folds behind a toggle naming the current page (SettingsNav.jsx). */
+  .settings-layout { gap: 16px; }
+  .settings-nav { flex-direction: column; flex-wrap: nowrap; overflow-x: visible; gap: 0; border: 1px solid var(--line); border-radius: var(--rad); background: var(--bg-1); }
+  .settings-nav-toggle {
+    display: flex; align-items: center; gap: 10px; width: 100%; min-height: 44px; padding: 0 14px;
+    background: none; border: 0; color: var(--fg); font-family: var(--jbm); font-size: 13px; cursor: pointer; text-align: left;
+  }
+  .settings-nav-toggle .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent); }
+  .settings-nav-toggle .hint { font-size: 10.5px; color: var(--fg-4); }
+  .settings-nav-toggle .car { color: var(--fg-3); }
+  .settings-nav:not(.open) .settings-nav-group { display: none; }
+  .settings-nav.open .settings-nav-toggle { border-bottom: 1px solid var(--line-soft); }
+  .settings-nav .settings-nav-group { padding: 0 6px 6px; }
+  .settings-nav .nav-item { min-height: 40px; }
+
+  /* Models: the chip groups fold behind "Filters" (CatalogToolbar); search and sort stay. */
+  .mdl-filters-toggle { display: inline-flex; }
+  .mdl-toolbar:not(.filters-open) .mdl-toolbar-grp:not(.mdl-sort-grp) { display: none; }
+  .mdl-toolbar .mdl-search { flex-basis: 100%; }
+  .mdl-list-h { flex-wrap: wrap; gap: 4px 12px; padding: 10px 14px; }
+  .mdl-seg { flex-shrink: 0; }
+  .mdl-seg button { white-space: nowrap; }
+
+  /* Catalog rows: two lines. The six desktop columns left the name column 0 px wide at 390 px,
+     so a row showed a size and a status and no name. Line 1: state, name, menu. Line 2: tags,
+     size, status. */
+  .mdl-row {
+    grid-template-columns: 14px minmax(0, 1fr) auto auto;
+    gap: 6px 10px;
+    padding: 10px 14px;
+  }
+  .mdl-row > .mdl-row-icon { grid-column: 1; grid-row: 1; }
+  .mdl-row > .nm { grid-column: 2 / 4; grid-row: 1; }
+  .mdl-row:not(:has(> .mdl-row-kebab)) > .nm { grid-column: 2 / -1; }
+  .mdl-row > .mdl-row-kebab { grid-column: 4; grid-row: 1; justify-self: end; }
+  .mdl-row > .mdl-row-tags { grid-column: 2; grid-row: 2; justify-content: flex-start; flex-wrap: wrap; }
+  .mdl-row > .sz { grid-column: 3; grid-row: 2; }
+  .mdl-row > .tg { grid-column: 4; grid-row: 2; }
+
+  /* Notifications: anchored to the screen, not to the bell. The bell sits left of the menu
+     button, so a popover right-aligned to it ran off the left edge. */
+  .notif-pop { position: fixed; top: calc(var(--topbar-h) + 6px); left: 12px; right: 12px; width: auto; }
+
+  /* Drawers are the full screen wide here: label above control, and the header's right-hand
+     controls (state chips, pin toggle) on their own line under the title instead of over it. */
+  .drawer-h { padding: 14px 16px 12px; }
+  .drawer-h-right { position: static; flex-wrap: wrap; gap: 8px 14px; margin-top: 10px; }
+  .drawer-h:has(.drawer-h-right) h2,
+  .drawer-h:has(.drawer-h-right) .modal-h-eye { margin-right: 44px; }
+  .drawer-body { padding: 14px 16px; }
+  .drawer-foot { padding-left: 16px; padding-right: 16px; flex-wrap: wrap; }
+  .form-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .form-row .form-ctl { min-width: 0; }
+  .tune-block .tune-row { grid-template-columns: 84px minmax(0, 1fr); }
+}
+
+/* A touch screen has no hover and no keyboard hint to follow. */
+@media (pointer: coarse) {
+  .vh .hint { display: none; }
+}
