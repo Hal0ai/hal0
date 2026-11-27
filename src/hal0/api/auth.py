@@ -1036,8 +1036,10 @@ class AuthEnforcementMiddleware:
 
     Dev-open bypass: when :func:`require_auth_enabled` is false (the
     default on loopback with no keys configured), every request passes
-    through untouched -- this is what keeps the pre-existing TestClient
-    suite green without modification. The one exception is the
+    tier auth untouched -- this is what keeps the pre-existing TestClient
+    suite green without modification. The Origin check still applies: it
+    is not a credential check, and it runs before the bypass. The one
+    tier-auth exception is the
     posture-coupled ADMIN gate (:func:`_lan_admin_gate`, #1822): an
     ADMIN-classified request from a non-loopback peer against a
     non-loopback bind with an admin key already configured is enforced
@@ -1063,15 +1065,14 @@ class AuthEnforcementMiddleware:
         method = scope.get("method", "GET") if scope_type == "http" else "GET"
         auth_class = classify(method, path)
 
-        principal = _enforced_principal(auth_class, scope)
-        if principal is None:
-            await self.app(scope, receive, send)
-            return
-
         # Origin defence-in-depth: reject browser cross-site WebSocket
-        # upgrades and state-changing requests BEFORE tier auth. Requests
-        # with no Origin (SDKs/curl/same-origin) pass through untouched --
-        # see _origin_allowed for the full policy.
+        # upgrades and state-changing requests BEFORE tier auth, at every
+        # posture. It runs ahead of the dev-open bypass below on purpose: a
+        # box with enforcement off has no credential for a browser to be
+        # missing, so the Origin header is the only thing that tells the
+        # operator's own dashboard from another site open in the same
+        # browser. Requests with no Origin (SDKs/curl/same-origin) pass
+        # through untouched -- see _origin_allowed for the full policy.
         origin_gated = scope_type == "websocket" or method in _STATE_CHANGING_METHODS
         if origin_gated and not _origin_allowed(scope):
             log.info(
@@ -1098,6 +1099,11 @@ class AuthEnforcementMiddleware:
                 }
             )
             await send({"type": "http.response.body", "body": payload})
+            return
+
+        principal = _enforced_principal(auth_class, scope)
+        if principal is None:
+            await self.app(scope, receive, send)
             return
 
         allowed, status, code = _verdict(auth_class, principal, path)

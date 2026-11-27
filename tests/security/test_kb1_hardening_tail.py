@@ -313,30 +313,6 @@ def test_middleware_allows_ip_literal_and_allowlisted_origin(
     assert resp.status_code not in (401, 403), resp.text
 
 
-def test_dev_open_posture_skips_origin_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The Origin gate only runs when auth is enforced; dev-open is untouched.
-    from hal0.api import create_app
-
-    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
-    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
-    os.makedirs(tmp_path / "home" / "etc" / "hal0", exist_ok=True)
-    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "0")
-    monkeypatch.delenv("HAL0_ADMIN_KEY", raising=False)
-    monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "http://hal0.local")
-    with TestClient(create_app()) as c:
-        resp = c.post(
-            "/api/settings",
-            headers={
-                "Host": "rebound.attacker.example:8080",
-                "Origin": "http://rebound.attacker.example:8080",
-            },
-            json={},
-        )
-    assert resp.status_code != 403, resp.text
-
-
 def test_middleware_named_proxy_origin_needs_network_allowlist(
     hardened_app: TestClient, tmp_path: Path
 ) -> None:
