@@ -19,7 +19,7 @@ owning unit, its probe strategy, and which lifecycle verbs it permits:
 | OpenWebUI | Chat UI companion (podman container, LAN `:3001`; behind a reverse proxy, set [`HAL0_OPENWEBUI_PUBLIC_URL`](/docs/reference/env-vars/) — Open WebUI emits root-absolute asset URLs, so it needs its own (sub)domain, not a path prefix) | `hal0-openwebui.service` | start, stop, restart, enable, disable |
 | ComfyUI | Image generation engine (runs as the seeded `img` slot container, LAN `:8188` by default; `[network].comfyui_listen = "loopback"` fences it to the box) | `hal0-slot@img.service` | start, restart (no stop) |
 | Hermes | Bundled agent + its own dashboard (loopback `:9119`) | `hal0-agent@hermes.service` | start, stop, restart, enable, disable |
-| Hindsight | Memory engine — this is the same unit documented above | `hindsight-api.service` | start, stop, restart, enable, disable |
+| Hindsight | Memory engine — the same unit documented on [Services](/docs/operate/services) | `hindsight-api.service` | start, stop, restart, enable, disable |
 
 The Open WebUI card also shows an Agents chip with the Hermes profiles wired into the picker, taken from `openwebui_wiring_status`.
 
@@ -57,7 +57,7 @@ From Hermes v0.22.3 the gateway daemon owns chat turns and the session store. Th
 
 Hindsight's entry here isn't a second thing to learn: the Services page's
 buttons for it run through the identical `unit_action` → `hal0-systemctl`
-path already described in hindsight-api.service above.
+path that [Services](/docs/operate/services) describes for `hindsight-api.service`.
 
 ### Start, Stop, Restart
 
@@ -66,8 +66,8 @@ The Services page renders one button per allowed action
 when the unit isn't currently active, Stop only while it is. Clicking one
 calls `POST /api/services/{id}/action` with `{"action": "start"|"stop"|"restart"}`,
 which `hal0.services.systemd.unit_action()` runs against the unit — the
-same verb allow-list and `hal0-systemctl` wrapper described above for
-hal0-api and hindsight-api.
+same verb allow-list and `hal0-systemctl` wrapper that [Services](/docs/operate/services)
+describes for `hal0-api.service` and `hindsight-api.service`.
 
 Stop carries a browser confirmation — "Stop `<name>`? Clients using it will
 lose access until it is started again." — because stopping OpenWebUI,
@@ -95,7 +95,7 @@ list` and `hal0 agent list`/`hal0 agent status` show a service's systemd
 enabled/active state, but neither `hal0 app` nor `hal0 agent` has a
 start/stop/restart subcommand — for those two services, the dashboard
 buttons, or a direct `systemctl {start|stop|restart} <unit>` as root (same
-mechanism as the platform units above), are the only ways to drive these
+mechanism as the platform units on [Services](/docs/operate/services)), are the only ways to drive these
 verbs today. ComfyUI is the exception: its unit is `hal0-slot@img.service`,
 the same seeded `img` slot the Slots page manages, so `hal0 slot restart
 img`, `hal0 slot load img`, and `hal0 slot unload img` reach it from the
