@@ -432,7 +432,10 @@ def converge_hermes(
         else:
             target = pin_ref
     except rel.ReleaseError as exc:
-        return {**result, "status": "build_failed", "error": str(exc)}
+        # A refused downgrade rejects the request; nothing was built, so it must
+        # not be recorded as a build outcome on the component row (#3927).
+        status = "rejected" if exc.step == "downgrade" else "build_failed"
+        return {**result, "status": status, "error": str(exc)}
     if overridden:
         result["override"] = target
     settled = "override" if overridden else "converged"

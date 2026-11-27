@@ -1154,6 +1154,7 @@ async def _run_component_job(
             "snapshot_failed",
             "rolled_back",
             "activation_failed",
+            "rejected",
         )
         job["state"] = "failed" if failed else "applied"
         if failed:

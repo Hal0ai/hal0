@@ -32,6 +32,10 @@ _FAILURE_STATUSES = ("build_failed", "snapshot_failed", "rolled_back", "activati
 #: is treated like a diagnose-only pass when a failure is on record.
 _DID_NOT_RUN_STATUSES = ("busy",)
 
+#: The request itself was refused before any work started (#3927). Returned to
+#: the caller, never written to the ledger.
+_REJECTED_STATUSES = ("rejected",)
+
 
 def _resolve_converge(comp: ComponentDef) -> Callable[..., dict[str, Any]]:
     """Re-resolve the arm callable by name in its defining module at call
@@ -98,6 +102,12 @@ def converge_component(
     except Exception as exc:  # genuine bug in an arm — isolate it
         log.warning("components.converge_arm_crashed", component=comp.id, error=str(exc))
         result = {"status": "build_failed", "error": str(exc)}
+
+    # A rejected request (a refused Hermes downgrade, #3927) built nothing: it
+    # is returned to the caller but is not an outcome for the component row.
+    if result.get("status") in _REJECTED_STATUSES:
+        log.info("components.request_rejected", component=comp.id, error=result.get("error"))
+        return result
 
     # Boot-time diagnose (apply=False) runs on every daemon restart. If the
     # last recorded result for this component was a real failure

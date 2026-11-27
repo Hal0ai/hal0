@@ -674,10 +674,45 @@ def test_target_older_than_the_live_release_is_a_refused_downgrade(tmp_path) -> 
     venv = _live_release(ref=PIN)
     with patch("hal0.agents.hermes_release.ensure_release") as ensure:
         res = hermes_arm.converge_hermes(venv=venv, target_ref=PREV_PIN)
-    assert res["status"] == "build_failed"
+    assert res["status"] == "rejected"
     assert "downgrade" in res["error"]
     ensure.assert_not_called()
     assert hermes_arm.read_pin_override() is None
+
+
+def test_refused_downgrade_leaves_the_ledger_row_alone(tmp_path) -> None:
+    """#3927: a refused request is not a build outcome, so components.json keeps its row."""
+    from hal0.components import state
+    from hal0.components.registry import component_by_id
+    from hal0.components.runner import converge_component
+
+    venv = _live_release(ref=PIN)
+    state.record_component_result("hermes", {"status": "converged"})
+    with patch("hal0.agents.hermes_release.ensure_release") as ensure:
+        res = converge_component(component_by_id("hermes"), venv=venv, target_ref=PREV_PIN)
+    ensure.assert_not_called()
+    assert state.load_component_state()["hermes"]["status"] == "converged"
+    assert res["status"] == "rejected"
+    assert "downgrade" in res["error"]
+
+
+def test_genuine_build_failure_is_still_recorded(tmp_path) -> None:
+    from hal0.components import state
+    from hal0.components.registry import component_by_id
+    from hal0.components.runner import converge_component
+
+    venv = _venv(tmp_path)
+    with patch(
+        "hal0.agents.hermes_release.ensure_release",
+        return_value=_outcome(status="build_failed", error="boom"),
+    ):
+        converge_component(
+            component_by_id("hermes"),
+            venv=venv,
+            is_hal0_user=lambda: False,
+            target_ref=PREV_PIN,
+        )
+    assert state.load_component_state()["hermes"]["status"] == "build_failed"
 
 
 def test_live_release_matching_the_override_is_converged_not_drift(tmp_path) -> None:
@@ -766,7 +801,7 @@ def test_clear_override_is_refused_up_front_when_the_pin_is_older_than_live(tmp_
     ):
         res = hermes_arm.converge_hermes(venv=venv, clear_override=True)
     ensure.assert_not_called()
-    assert res["status"] == "build_failed"
+    assert res["status"] == "rejected"
     assert "override is kept" in res["error"]
     assert hermes_arm.read_pin_override() == PIN
 
