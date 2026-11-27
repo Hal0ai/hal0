@@ -3727,6 +3727,25 @@ applying. Add those subsections to a version's section to surface them; see
   to end, including a new `hal0 runner-images` CLI (#2134, #2135, #2137).
 - **CPU-only installs actually work** — the `cpu` runner now launches a real
   CPU-only llama.cpp build instead of crash-looping the GPU one (#2126).
+- **Two spellings are gone (see Breaking).** `hal0 update owui --tag` and the
+  `vulkanfpx` runner key are removed, with the documented replacements named
+  beside each one.
+
+### Breaking
+
+- **`hal0 update owui --tag` is removed: the OpenWebUI component is pinned by
+  digest, not by a floating upstream tag.** The component moved from a floating
+  upstream `:main` to a release-carried digest pin, so there is no upstream tag
+  left to float to. `hal0 update component openwebui --target <digest>` pins
+  an explicit digest and `--clear-override` drops the pin and converges back to
+  the release's own; a script that passed `--tag` must stop. (#2150)
+- **The `vulkanfpx` runner key is removed.** There was never a vulkanFPX
+  binary; the runner is ROCmFPX and its image serves both GPU backends.
+  `rocmfpx` is the single key (`supported_backends: rocm, vulkan`; the
+  slot's `device` picks the lane). Persisted `binary = "vulkanfpx"`,
+  `[slots].default_images` keys, and `HAL0_TOOLBOX_IMAGE_VULKANFPX` are
+  honored forever via a permanent alias (warned at load; TOML is never
+  rewritten in place).
 
 ### Fixed
 
@@ -3895,8 +3914,8 @@ applying. Add those subsections to a version's section to surface them; see
   dashboard services page, and `component_status`/`component_converge` on
   the admin MCP (converge owner-approval gated; self-update deliberately
   not exposed). OpenWebUI moves from floating upstream `:main` to a
-  release-carried digest pin — `hal0 update owui --tag` is removed,
-  `--target`/`--clear-override` added.
+  release-carried digest pin — `--target`/`--clear-override` replace the old
+  `--tag` float (see Breaking).
 - **The bundled Hindsight memory engine converges to 0.9.2 on every upgrade
   path** (#2146). The engine venv was pinned 0.8.4 and upgrade-blind —
   install.sh only built a *missing* venv and `hal0 update` never touched
@@ -3966,13 +3985,6 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Changed
 
-- **Removed** the `vulkanfpx` runner key — there was never a vulkanFPX
-  binary; the runner is ROCmFPX and its image serves both GPU backends.
-  `rocmfpx` is the single key (`supported_backends: rocm, vulkan`; the
-  slot's `device` picks the lane). Persisted `binary = "vulkanfpx"`,
-  `[slots].default_images` keys, and `HAL0_TOOLBOX_IMAGE_VULKANFPX` are
-  honored forever via a permanent alias (warned at load; TOML is never
-  rewritten in place).
 - **The memory-namespace grammar shrinks to `shared` | `private:<client_id>`**
   (ADR-0004, #2161). The `agents` and `project:<id>` namespaces are
   retired: `shared` is the default for every write, `private:<agent>`
