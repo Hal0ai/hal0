@@ -416,6 +416,18 @@ def check_fabric_clock(slots: Any = None, *, sys_root: str = "/sys") -> Check:
     return Check(name, title, _WARN, message)
 
 
+#: What ``xrt-smi`` needs to lock for its device query (one 64 MiB mapping).
+_XRT_SMI_MEMLOCK_BYTES = 64 * 1024 * 1024
+
+
+def _memlock_limit_bytes() -> int | None:
+    """This process's soft ``RLIMIT_MEMLOCK`` in bytes; ``None`` when unlimited."""
+    import resource
+
+    soft, _hard = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+    return None if soft == resource.RLIM_INFINITY else int(soft)
+
+
 def _npu_responds_now() -> bool | None:
     """The active query: ``True``/``False`` for a host ``xrt-smi`` answer, ``None`` if no tool."""
     import asyncio
@@ -431,6 +443,7 @@ def check_npu_liveness(
     sys_root: str = "/sys",
     dev_root: str = "/dev",
     responds: Callable[[], bool | None] | None = None,
+    memlock: Callable[[], int | None] | None = None,
 ) -> Check:
     """The NPU is on the bus and, when it can be asked, answers (#3935).
 
@@ -468,6 +481,21 @@ def check_npu_liveness(
         for s in slots
     ):
         return Check(key, label, _PASS, f"{node} present (AMD XDNA); an NPU slot is serving")
+    # xrt-smi maps a 64 MiB locked buffer. Under a lower memlock limit (an
+    # unprivileged container's default is 8 MiB) the query fails although the
+    # NPU is fine, so a failure there says nothing about the device: do not ask.
+    try:
+        limit = (memlock or _memlock_limit_bytes)()
+    except Exception:
+        limit = None
+    if limit is not None and limit < _XRT_SMI_MEMLOCK_BYTES:
+        return Check(
+            key,
+            label,
+            _PASS,
+            f"{node} present (AMD XDNA); not asked: this process's memlock limit "
+            f"({limit // (1024 * 1024)} MiB) is too low for xrt-smi",
+        )
     try:
         answered = (responds or _npu_responds_now)()
     except Exception:

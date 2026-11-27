@@ -4048,49 +4048,88 @@ def _never(*_a: Any) -> bool | None:
     raise AssertionError("the active query must not run here")
 
 
+def _unlimited() -> int | None:
+    return None
+
+
+def test_npu_liveness_low_memlock_skips_the_query(tmp_path: Path) -> None:
+    # An unprivileged container with the default 8 MiB memlock limit: xrt-smi
+    # cannot map its 64 MiB buffer and fails although the NPU is fine. Seen on
+    # a fresh install, where the row wrongly said the host needed a reboot.
+    sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=_never, memlock=lambda: 8 * 1024 * 1024
+    )
+    assert c.status == "pass"
+    assert "memlock" in c.detail and "8 MiB" in c.detail
+    assert "not responding" not in c.detail
+
+
+def test_npu_liveness_enough_memlock_still_asks(tmp_path: Path) -> None:
+    sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=lambda: False, memlock=lambda: 64 * 1024 * 1024
+    )
+    assert c.status == "warn" and "not responding" in c.detail
+
+
 def test_npu_liveness_no_node_passes_without_asking(tmp_path: Path) -> None:
     sys_, dev = _npu_tree(tmp_path, node=False, backed=False)
-    c = da.check_npu_liveness(None, sys_root=sys_, dev_root=dev, responds=_never)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=_never, memlock=_unlimited
+    )
     assert c.status == "pass"
 
 
 def test_npu_liveness_stale_node_warns_without_asking(tmp_path: Path) -> None:
     sys_, dev = _npu_tree(tmp_path, node=True, backed=False)
-    c = da.check_npu_liveness(None, sys_root=sys_, dev_root=dev, responds=_never)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=_never, memlock=_unlimited
+    )
     assert c.status == "warn"
     assert "stale" in c.detail and "reboot" in c.detail
 
 
 def test_npu_liveness_not_responding_warns(tmp_path: Path) -> None:
     sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
-    c = da.check_npu_liveness(None, sys_root=sys_, dev_root=dev, responds=lambda: False)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=lambda: False, memlock=_unlimited
+    )
     assert c.status == "warn"
     assert "not responding" in c.detail and "no NPU slot can start" in c.detail
 
 
 def test_npu_liveness_answering_passes(tmp_path: Path) -> None:
     sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
-    c = da.check_npu_liveness(None, sys_root=sys_, dev_root=dev, responds=lambda: True)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=lambda: True, memlock=_unlimited
+    )
     assert c.status == "pass" and "answering" in c.detail
 
 
 def test_npu_liveness_missing_tool_is_not_a_failure(tmp_path: Path) -> None:
     sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
-    c = da.check_npu_liveness(None, sys_root=sys_, dev_root=dev, responds=lambda: None)
+    c = da.check_npu_liveness(
+        None, sys_root=sys_, dev_root=dev, responds=lambda: None, memlock=_unlimited
+    )
     assert c.status == "pass" and "AMD XDNA" in c.detail
 
 
 def test_npu_liveness_serving_npu_slot_skips_the_query(tmp_path: Path) -> None:
     sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
     slots = [{"name": "npu-fast", "state": "serving", "backend": "flm"}]
-    c = da.check_npu_liveness(slots, sys_root=sys_, dev_root=dev, responds=_never)
+    c = da.check_npu_liveness(
+        slots, sys_root=sys_, dev_root=dev, responds=_never, memlock=_unlimited
+    )
     assert c.status == "pass" and "serving" in c.detail
 
 
 def test_npu_liveness_failed_npu_slot_does_not_skip_the_query(tmp_path: Path) -> None:
     sys_, dev = _npu_tree(tmp_path, node=True, backed=True)
     slots = [{"name": "npu-fast", "state": "error", "backend": "flm"}]
-    c = da.check_npu_liveness(slots, sys_root=sys_, dev_root=dev, responds=lambda: False)
+    c = da.check_npu_liveness(
+        slots, sys_root=sys_, dev_root=dev, responds=lambda: False, memlock=_unlimited
+    )
     assert c.status == "warn"
 
 
