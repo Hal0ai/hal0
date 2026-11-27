@@ -118,6 +118,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import threading
 import time
 from collections.abc import Mapping
@@ -630,7 +631,16 @@ def _origin_allowed(scope: dict[str, Any]) -> bool:
       the box and send a matching ``Origin``/``Host`` pair (#2327). Named
       origins (``hal0.local``, the box hostname, a reverse proxy's
       ``public_url``) reach the box through the allowlist instead.
-    * otherwise -> deny.
+    * ``Origin`` with an application or extension scheme
+      (``chrome-extension://…``, ``app://…``, ``tauri://…``) -> allow. A web
+      page cannot present one: the browser sets ``Origin`` from the page's
+      own URL, so a page reaches hal0 as ``http``/``https``, or as the
+      literal ``null`` when it has no origin of its own (a sandboxed frame,
+      a local file, a ``data:`` document). Desktop apps and browser
+      extensions that send their own scheme are programmatic clients like
+      curl, and still need a key wherever one is required. See
+      :func:`_is_app_origin`.
+    * otherwise (an unlisted web origin, ``null``, a malformed value) -> deny.
     """
     headers = _headers_from_scope(scope)
     origin = headers.get("origin", "")
@@ -642,7 +652,30 @@ def _origin_allowed(scope: dict[str, Any]) -> bool:
     if origin in allowed_origins():
         return True
 
+    if _is_app_origin(origin):
+        return True
+
     return _is_same_origin(origin, headers.get("host", ""), scope.get("scheme", "http"))
+
+
+_ORIGIN_SCHEME_RE = re.compile(r"[a-z][a-z0-9+.-]*")
+
+# Schemes a browser can load a document from. ``http``/``https`` are web
+# origins and take the allowlist rules. The rest serialise their Origin as
+# ``null`` in current browsers; they are listed so that a browser which sent
+# the scheme instead would still be refused.
+_DOCUMENT_SCHEMES: frozenset[str] = frozenset(
+    {"http", "https", "file", "data", "blob", "about", "javascript", "filesystem"}
+)
+
+
+def _is_app_origin(origin: str) -> bool:
+    """True for an ``Origin`` no web page can present: ``scheme://rest`` with an app scheme."""
+    scheme, sep, rest = origin.partition("://")
+    scheme = scheme.lower()
+    if not sep or not rest or not _ORIGIN_SCHEME_RE.fullmatch(scheme):
+        return False
+    return scheme not in _DOCUMENT_SCHEMES
 
 
 # ---------------------------------------------------------------------------

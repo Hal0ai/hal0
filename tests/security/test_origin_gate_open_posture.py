@@ -105,3 +105,75 @@ def test_foreign_origin_safe_method_passes(open_app: TestClient) -> None:
     """GET carries no side effect; the gate covers state changes and upgrades only."""
     resp = open_app.get("/api/health", headers={"Origin": FOREIGN})
     assert resp.status_code == 200
+
+
+# Clients that are not web pages but send an Origin: browser extensions and
+# desktop apps present their own scheme, which no web page can.
+APP_ORIGINS = ["chrome-extension://abcdefghijklmnop", "moz-extension://1b2c", "app://obsidian.md"]
+NOT_APP_ORIGINS = [
+    "null",
+    "file://",
+    "file:///home/u/page.html",
+    "data:text/html,x",
+    "garbage",
+    "://x",
+]
+
+
+@pytest.fixture
+def keyed_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
+    """A fresh app with enforcement ON and an admin key."""
+    from hal0.api import create_app
+
+    monkeypatch.setenv("HAL0_AGENT_SECRET_PATH", str(tmp_path / "secret.bin"))
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    os.makedirs(tmp_path / "home" / "etc" / "hal0", exist_ok=True)
+    monkeypatch.setenv("HAL0_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("HAL0_ADMIN_KEY", "admin-xyz")
+    monkeypatch.setenv("HAL0_ALLOWED_ORIGINS", "http://hal0.local")
+    with TestClient(create_app()) as c:
+        yield c
+
+
+@pytest.mark.parametrize("origin", APP_ORIGINS)
+def test_app_scheme_origin_passes_when_open(open_app: TestClient, origin: str) -> None:
+    resp = open_app.post("/v1/chat/completions", headers={"Origin": origin}, json={})
+    assert not _forbidden(resp), resp.text
+
+
+@pytest.mark.parametrize("origin", APP_ORIGINS)
+def test_app_scheme_origin_passes_with_a_key_when_enforced(
+    keyed_app: TestClient, origin: str
+) -> None:
+    resp = keyed_app.post(
+        "/api/settings", headers={"Origin": origin, "Authorization": "Bearer admin-xyz"}, json={}
+    )
+    assert resp.status_code not in (401, 403), resp.text
+
+
+def test_app_scheme_origin_still_needs_a_key_when_enforced(keyed_app: TestClient) -> None:
+    resp = keyed_app.post("/api/settings", headers={"Origin": APP_ORIGINS[0]}, json={})
+    assert resp.status_code == 401, resp.text
+
+
+@pytest.mark.parametrize("origin", NOT_APP_ORIGINS)
+def test_null_and_malformed_origins_are_refused_when_open(
+    open_app: TestClient, origin: str
+) -> None:
+    resp = open_app.post("/api/settings", headers={"Origin": origin}, json={})
+    assert _forbidden(resp), resp.text
+
+
+@pytest.mark.parametrize("origin", NOT_APP_ORIGINS)
+def test_null_and_malformed_origins_are_refused_when_enforced(
+    keyed_app: TestClient, origin: str
+) -> None:
+    resp = keyed_app.post(
+        "/api/settings", headers={"Origin": origin, "Authorization": "Bearer admin-xyz"}, json={}
+    )
+    assert _forbidden(resp), resp.text
+
+
+def test_app_scheme_websocket_passes_when_open(open_app: TestClient) -> None:
+    with open_app.websocket_connect("/api/board/events", headers={"origin": APP_ORIGINS[0]}):
+        pass
