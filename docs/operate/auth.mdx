@@ -412,6 +412,14 @@ origin equals the request's own origin **and** the `Host` is an IP address
 (v4 or v6) → allowed, otherwise `403 auth.origin_forbidden` (or WS close code
 `4403`).
 
+The check is about web pages, so it judges web origins (`http` and `https`)
+and the literal `null` that a browser sends for a page with no origin of its
+own (a sandboxed frame, a local file). A browser extension or desktop app that
+sends its own scheme, such as `chrome-extension://…` or `app://…`, is not a
+web origin and passes: no web page can present one, and such a client still
+needs a key wherever a key is required. `null` is always refused. The check
+runs whether or not key enforcement is on.
+
 A named `Host` (a DNS name, `hal0.local`, the box hostname) only passes
 through the allowlist. A matching `Origin`/`Host` pair on a DNS name proves
 nothing: a page on an attacker's domain can rebind that name to the box's IP

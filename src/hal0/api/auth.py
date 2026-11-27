@@ -118,6 +118,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import threading
 import time
 from collections.abc import Mapping
@@ -630,7 +631,16 @@ def _origin_allowed(scope: dict[str, Any]) -> bool:
       the box and send a matching ``Origin``/``Host`` pair (#2327). Named
       origins (``hal0.local``, the box hostname, a reverse proxy's
       ``public_url``) reach the box through the allowlist instead.
-    * otherwise -> deny.
+    * ``Origin`` with an application or extension scheme
+      (``chrome-extension://…``, ``app://…``, ``tauri://…``) -> allow. A web
+      page cannot present one: the browser sets ``Origin`` from the page's
+      own URL, so a page reaches hal0 as ``http``/``https``, or as the
+      literal ``null`` when it has no origin of its own (a sandboxed frame,
+      a local file, a ``data:`` document). Desktop apps and browser
+      extensions that send their own scheme are programmatic clients like
+      curl, and still need a key wherever one is required. See
+      :func:`_is_app_origin`.
+    * otherwise (an unlisted web origin, ``null``, a malformed value) -> deny.
     """
     headers = _headers_from_scope(scope)
     origin = headers.get("origin", "")
@@ -642,7 +652,30 @@ def _origin_allowed(scope: dict[str, Any]) -> bool:
     if origin in allowed_origins():
         return True
 
+    if _is_app_origin(origin):
+        return True
+
     return _is_same_origin(origin, headers.get("host", ""), scope.get("scheme", "http"))
+
+
+_ORIGIN_SCHEME_RE = re.compile(r"[a-z][a-z0-9+.-]*")
+
+# Schemes a browser can load a document from. ``http``/``https`` are web
+# origins and take the allowlist rules. The rest serialise their Origin as
+# ``null`` in current browsers; they are listed so that a browser which sent
+# the scheme instead would still be refused.
+_DOCUMENT_SCHEMES: frozenset[str] = frozenset(
+    {"http", "https", "file", "data", "blob", "about", "javascript", "filesystem"}
+)
+
+
+def _is_app_origin(origin: str) -> bool:
+    """True for an ``Origin`` no web page can present: ``scheme://rest`` with an app scheme."""
+    scheme, sep, rest = origin.partition("://")
+    scheme = scheme.lower()
+    if not sep or not rest or not _ORIGIN_SCHEME_RE.fullmatch(scheme):
+        return False
+    return scheme not in _DOCUMENT_SCHEMES
 
 
 # ---------------------------------------------------------------------------
@@ -1036,8 +1069,10 @@ class AuthEnforcementMiddleware:
 
     Dev-open bypass: when :func:`require_auth_enabled` is false (the
     default on loopback with no keys configured), every request passes
-    through untouched -- this is what keeps the pre-existing TestClient
-    suite green without modification. The one exception is the
+    tier auth untouched -- this is what keeps the pre-existing TestClient
+    suite green without modification. The Origin check still applies: it
+    is not a credential check, and it runs before the bypass. The one
+    tier-auth exception is the
     posture-coupled ADMIN gate (:func:`_lan_admin_gate`, #1822): an
     ADMIN-classified request from a non-loopback peer against a
     non-loopback bind with an admin key already configured is enforced
@@ -1063,15 +1098,14 @@ class AuthEnforcementMiddleware:
         method = scope.get("method", "GET") if scope_type == "http" else "GET"
         auth_class = classify(method, path)
 
-        principal = _enforced_principal(auth_class, scope)
-        if principal is None:
-            await self.app(scope, receive, send)
-            return
-
         # Origin defence-in-depth: reject browser cross-site WebSocket
-        # upgrades and state-changing requests BEFORE tier auth. Requests
-        # with no Origin (SDKs/curl/same-origin) pass through untouched --
-        # see _origin_allowed for the full policy.
+        # upgrades and state-changing requests BEFORE tier auth, at every
+        # posture. It runs ahead of the dev-open bypass below on purpose: a
+        # box with enforcement off has no credential for a browser to be
+        # missing, so the Origin header is the only thing that tells the
+        # operator's own dashboard from another site open in the same
+        # browser. Requests with no Origin (SDKs/curl/same-origin) pass
+        # through untouched -- see _origin_allowed for the full policy.
         origin_gated = scope_type == "websocket" or method in _STATE_CHANGING_METHODS
         if origin_gated and not _origin_allowed(scope):
             log.info(
@@ -1098,6 +1132,11 @@ class AuthEnforcementMiddleware:
                 }
             )
             await send({"type": "http.response.body", "body": payload})
+            return
+
+        principal = _enforced_principal(auth_class, scope)
+        if principal is None:
+            await self.app(scope, receive, send)
             return
 
         allowed, status, code = _verdict(auth_class, principal, path)

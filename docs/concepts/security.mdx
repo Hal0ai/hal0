@@ -174,12 +174,14 @@ with the auth tiers, not instead of them.
 
 ## Browser sessions: origin allowlist + session cookie
 
-When the key gate is enforced, every WebSocket upgrade and every
-state-changing request that carries an `Origin` header is checked against an
+Every WebSocket upgrade and every state-changing request that carries an
+`Origin` header is checked, whether or not the key gate is enforced, against an
 **origin allowlist** (`HAL0_ALLOWED_ORIGINS`, comma-separated; the default
 covers `http://hal0.local`, `http://localhost:5173`, `http://localhost:8080`,
 and `http://127.0.0.1:8080`; the installer replaces it with a host-derived
-list). A dashboard sign-in (`POST /api/auth/login`) mints an **HMAC-SHA256
+list). Only web origins (`http`, `https`) and the browser's `null` are judged;
+an extension or desktop-app scheme is not a web origin and is let through to
+the key check. A dashboard sign-in (`POST /api/auth/login`) mints an **HMAC-SHA256
 session cookie** (`hal0_session`, `HttpOnly`, `SameSite=Lax`) that the
 middleware treats as the `admin` tier: one signing secret
 (`/var/lib/hal0/agents/secret.bin`, mode `0600`), one cookie, one place it's
