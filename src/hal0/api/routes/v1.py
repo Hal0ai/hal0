@@ -1891,6 +1891,17 @@ async def _is_npu_trio_request(
 
     if not npu_modality_active(configs, slot_type):
         return False
+    return _match_npu_trio_cfg(configs, slot_type, requested) is not None
+
+
+def _match_npu_trio_cfg(
+    configs: list[dict[str, Any]], slot_type: str, requested: str
+) -> dict[str, Any] | None:
+    """Return the ``device=npu`` slot config ``requested`` addresses, or ``None``.
+
+    ``requested`` may be the slot's ``[model].default``, the slot name, or the
+    legacy capability alias (``embed-npu`` / ``stt-npu``).
+    """
     for cfg in configs:
         if cfg.get("type") != slot_type:
             continue
@@ -1909,8 +1920,31 @@ async def _is_npu_trio_request(
         # capability alias ("embed-npu"/"stt-npu") for backward compatibility.
         alias = _NPU_TRIO_LEGACY_ALIAS.get(slot_type, "")
         if requested in (default, slot_name, alias) and (default or slot_name):
-            return True
-    return False
+            return cfg
+    return None
+
+
+async def _npu_embed_tag(request: Request, body: dict[str, Any]) -> str:
+    """FLM tag the matched NPU embed slot serves (its ``[model].default``).
+
+    FastFlowLM >= 1.0.13 validates the ``model`` field of ``/v1/embeddings``,
+    so the slot name / legacy alias hal0 accepts must be rewritten to the tag.
+    Falls back to :data:`FLM_EMBED_TAG` when the slot config has no default.
+    """
+    from hal0.providers.flm import FLM_EMBED_TAG
+
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    raw_model = body.get("model")
+    if slot_manager is None or not isinstance(raw_model, str):
+        return FLM_EMBED_TAG
+    try:
+        configs = await slot_manager.iter_configs()
+    except Exception:
+        return FLM_EMBED_TAG
+    cfg = _match_npu_trio_cfg(configs, "embedding", raw_model.strip())
+    model_section = (cfg or {}).get("model") or {}
+    default = model_section.get("default", "") if isinstance(model_section, dict) else ""
+    return default.strip() if isinstance(default, str) and default.strip() else FLM_EMBED_TAG
 
 
 async def _dispatch_via_npu_trio(
@@ -1939,6 +1973,8 @@ async def _dispatch_via_npu_trio(
     # Stamp at dispatch start too, so the capability reads as active while
     # the request is still in flight (the counter increments on completion).
     _stamp_slot_last_used(request.app.state, "flm-embed")
+    # Copy: the caller's dict is not ours to mutate.
+    body = {**body, "model": await _npu_embed_tag(request, body)}
     upstream_resp = await router_obj.dispatch_embed_npu(body=body)
     _touch_npu_shadow_count(request, "flm-embed")
     return _wrap_npu_trio_response(upstream_resp)

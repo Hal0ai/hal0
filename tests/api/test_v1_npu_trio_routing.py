@@ -318,6 +318,44 @@ def test_embed_request_matches_trio_by_slot_name(
     assert len(embed_calls) == 1
 
 
+@pytest.mark.parametrize("spelling", ["embed-gemma", "flm-embed", "embed-npu"])
+def test_embed_npu_sends_slot_tag_upstream_for_every_accepted_spelling(
+    trio_client: tuple[TestClient, dict[str, Any]], spelling: str
+) -> None:
+    """FLM >= 1.0.13 validates ``model``: slot name / legacy alias are rewritten
+    to the slot's ``[model].default``; other fields pass through unchanged."""
+    import json as _json
+
+    client, captures = trio_client
+    body = {
+        "model": spelling,
+        "input": ["a", "b"],
+        "encoding_format": "float",
+        "dimensions": 768,
+    }
+    r = client.post("/v1/embeddings", json=body)
+    assert r.status_code == 200, r.text
+    embed_calls = [c for c in captures["calls"] if c["path"] == "/v1/embeddings"]
+    assert len(embed_calls) == 1
+    sent = _json.loads(embed_calls[0]["body"])
+    assert sent == {**body, "model": "embed-gemma"}
+
+
+def test_dispatch_via_npu_trio_does_not_mutate_callers_body(
+    trio_client: tuple[TestClient, dict[str, Any]],
+) -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from hal0.api.routes.v1 import _dispatch_via_npu_trio
+
+    client, _captures = trio_client
+    body = {"model": "flm-embed", "input": "x"}
+    request = SimpleNamespace(app=client.app)
+    asyncio.run(_dispatch_via_npu_trio(request, body=body, kind="embed"))  # type: ignore[arg-type]
+    assert body == {"model": "flm-embed", "input": "x"}
+
+
 # ── /v1/audio/transcriptions: trio-routed ────────────────────────────────
 
 
