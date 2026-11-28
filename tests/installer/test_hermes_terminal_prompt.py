@@ -124,11 +124,32 @@ def test_an_environment_answer_is_taken_and_re_exported(
 ) -> None:
     # HAL0_HERMES_TERMINAL is the answer. It must survive the block unchanged
     # and be exported, so `hal0 agent install hermes` and the privilege-dropped
-    # provisioning under it see the same value.
-    proc = _run_block(tmp_path, gating_block, {"HAL0_HERMES_TERMINAL": answer})
+    # provisioning under it see the same value. The value arrives here as a
+    # plain shell variable (not exported), so only the block's own `export`
+    # can make a child process see it.
+    script = tmp_path / "block.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        + _STUBS
+        + "DEV_MODE=0\nNO_START=0\n"
+        + f"HAL0_HERMES_TERMINAL={answer}\n"
+        + gating_block
+        + "\nprintf 'TERMINAL=%s\\n' \"${HAL0_HERMES_TERMINAL-<unset>}\"\n"
+        + "printf 'CHILD=%s\\n' \"$(bash -c 'printf %s \"${HAL0_HERMES_TERMINAL-<unset>}\"')\"\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        ["/usr/bin/env", "bash", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
 
     assert proc.returncode == 0, proc.stderr
     assert f"TERMINAL={answer}" in proc.stdout, proc.stdout
+    assert f"CHILD={answer}" in proc.stdout, proc.stdout
     assert "taken from the environment" in proc.stdout
 
 

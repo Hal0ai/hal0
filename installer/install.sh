@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # installer/install.sh
 #
-# Purpose: hal0's single user-facing install entry point — idempotent,
-#          non-interactive by default. Provisions the system user,
+# Purpose: hal0's single user-facing install entry point — idempotent;
+#          the setup screens ask every question up front, and the rest of
+#          the script asks none. Provisions the system user,
 #          filesystem layout, Python venv, dashboard UI, config, systemd
 #          units, container slot seeds, hardware probe, curated models,
 #          and starts the service.
@@ -198,9 +199,14 @@ gateway_install_note() {
 
 DEV_MODE=0
 NO_START=0
-# The release tree this script runs from (set before the flag loop: whether the
-# setup screens are part of it decides how an unknown flag is treated).
+# The release tree this script runs from. The setup screens are part of it: a
+# tree without them is a broken download, and the installer stops here, before
+# it reads a flag or changes anything.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if ! hal0_wizard_present 2>/dev/null; then
+    err "this release tree is incomplete: the setup screens are missing (src/hal0/install/wizard/__main__.py, installer/manifests/setup-catalog.json)"
+    exit 1
+fi
 
 # ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
 # binary wired into the retired daemon runtime) is gone. FP4/MTP now
@@ -232,32 +238,26 @@ MODELS_DIR_FROM_DOC=0
 # Empty means "don't write one" (the default).
 SUMMARY_JSON_PATH=""
 # Component flags (--bare, --no-*) only export the env knobs the gates further
-# down already honour. COMPONENT_FLAG_GIVEN=1 records that a component was
-# chosen on the command line (no code reads it now; a test pins it).
-COMPONENT_FLAG_GIVEN=0
+# down already honour.
 # The installer's own arguments, kept as given: the setup screens
 # (hal0_run_wizard) get the flags they know after their `--`.
 _HAL0_INSTALL_ARGS=("$@")
 # --reconfigure: ask the setup questions again on an upgrade. Set by the flag
 # only, never from the environment.
 _HAL0_RECONFIGURE=0
-# When this release tree has the setup screens, a flag the installer does not
-# know stops the run before anything else happens: a mistyped flag must not
-# silently mean the defaults. A tree without them keeps the old warn-and-ignore.
-if hal0_wizard_present 2>/dev/null; then
-    for arg in "$@"; do
-        case "$arg" in
-            --dev | --no-start | --models-dir=* | --summary-json=* | --answers=* | --no-owui \
-                | --no-comfyui | --no-hermes | --no-pi | --no-agents | --no-memory \
-                | --no-brain-model | --bare | --bare-inference | --help | -h | --reconfigure) ;;
-            *)
-                err "unknown flag: ${arg//[^[:print:]]/?} (run with --help for the list)"
-                exit 1
-                ;;
-        esac
-    done
-fi
-# shellcheck disable=SC2034  # COMPONENT_FLAG_GIVEN: recorded, no longer read
+# A flag the installer does not know stops the run before anything else
+# happens: a mistyped flag must not silently mean the defaults.
+for arg in "$@"; do
+    case "$arg" in
+        --dev | --no-start | --models-dir=* | --summary-json=* | --answers=* | --no-owui \
+            | --no-comfyui | --no-hermes | --no-pi | --no-agents | --no-memory \
+            | --no-brain-model | --bare | --bare-inference | --help | -h | --reconfigure) ;;
+        *)
+            err "unknown flag: ${arg//[^[:print:]]/?} (run with --help for the list)"
+            exit 1
+            ;;
+    esac
+done
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
@@ -266,20 +266,16 @@ for arg in "$@"; do
         --models-dir=*) MODELS_DIR="${arg#--models-dir=}"; MODELS_DIR_FLAG_GIVEN=1 ;;
         --summary-json=*) SUMMARY_JSON_PATH="${arg#--summary-json=}" ;;
         --answers=*) HAL0_ANSWERS_FILE="${arg#--answers=}" ;;
-        --no-owui) export HAL0_SKIP_OPENWEBUI=1; COMPONENT_FLAG_GIVEN=1 ;;
-        --no-comfyui) export HAL0_IMAGE_MODELS=none; COMPONENT_FLAG_GIVEN=1 ;;
-        --no-hermes) export HAL0_SKIP_HERMES=1; COMPONENT_FLAG_GIVEN=1 ;;
-        --no-pi) export HAL0_SKIP_PI=1; COMPONENT_FLAG_GIVEN=1 ;;
-        --no-agents)
-            export HAL0_SKIP_HERMES=1 HAL0_SKIP_PI=1
-            COMPONENT_FLAG_GIVEN=1
-            ;;
-        --no-memory) export HAL0_SKIP_HINDSIGHT=1; COMPONENT_FLAG_GIVEN=1 ;;
-        --no-brain-model) export HAL0_SKIP_BRAIN_MODEL=1; COMPONENT_FLAG_GIVEN=1 ;;
+        --no-owui) export HAL0_SKIP_OPENWEBUI=1 ;;
+        --no-comfyui) export HAL0_IMAGE_MODELS=none ;;
+        --no-hermes) export HAL0_SKIP_HERMES=1 ;;
+        --no-pi) export HAL0_SKIP_PI=1 ;;
+        --no-agents) export HAL0_SKIP_HERMES=1 HAL0_SKIP_PI=1 ;;
+        --no-memory) export HAL0_SKIP_HINDSIGHT=1 ;;
+        --no-brain-model) export HAL0_SKIP_BRAIN_MODEL=1 ;;
         --bare|--bare-inference)
             export HAL0_SKIP_OPENWEBUI=1 HAL0_IMAGE_MODELS=none HAL0_SKIP_HERMES=1 \
                 HAL0_SKIP_PI=1 HAL0_SKIP_HINDSIGHT=1 HAL0_SKIP_BRAIN_MODEL=1
-            COMPONENT_FLAG_GIVEN=1
             ;;
         --help|-h)
             cat <<EOF
@@ -334,7 +330,6 @@ set in the environment, which is the explicit opt-in.
 EOF
             exit 0
             ;;
-        *) warn "unknown flag: ${arg} (ignored)" ;;
     esac
 done
 
@@ -1144,53 +1139,6 @@ HAL0_CONTAINER_REQUIRED=1 preflight_container_runtime \
 # The CPU-only image gate (_cpu_only_image_gate) and the honest CPU-only
 # remedy text (_cpu_only_remedy_lines) both live in lib/preflight.sh next to
 # the runner-image mirror they consult — sourced at the top of this file.
-
-# ── Interactive-input gate (v1.0) ───────────────────────────────────────────
-# The setup screens ask every question; the helpers below stay for the steps
-# that still read a terminal themselves.
-#
-# `_interactive` is the ONE predicate that decides whether anything is asked.
-# It tests **stdin**, not /dev/tty, and that distinction is load-bearing:
-#
-#   sudo bash install.sh            stdin = the terminal      → interactive
-#   curl -fsSL … | sudo bash        stdin = the script pipe   → NON-interactive
-#   ssh host 'sudo bash install.sh' stdin = no tty at all     → NON-interactive
-#
-# bootstrap.sh documents that same contract (it forwards stdin so a downloaded
-# `sudo bash install.sh` can prompt, while `curl | bash` "falls back to
-# defaults"), and scripts/fresh-test-ct.sh drives the install over a
-# tty-less ssh. Both therefore stay fully unattended, which is the
-# requirement: an install that blocks on a prompt in CI is a broken install.
-# HAL0_NONINTERACTIVE=1 forces the headless path even on a terminal.
-#
-# The GPU gate above no longer asks anything: CPU-only is a consent that
-# arrives as HAL0_ALLOW_CPU_ONLY=1, and nothing else lets the install continue.
-_interactive() {
-    [[ "${HAL0_NONINTERACTIVE:-0}" != "1" ]] && [[ -t 0 ]] && [[ -r /dev/tty ]]
-}
-
-# Read one line from the controlling terminal, echoing `prompt` first and
-# falling back to `default` on an empty answer or any read failure. Result
-# lands in the caller-named variable (nameref) so the value never travels
-# through a subshell — `$(...)` would swallow the prompt written to /dev/tty
-# on some terminals and cannot be used with `read -s`.
-#   _tty_read <outvar> <prompt> [default] [silent]
-_tty_read() {
-    local -n _out="$1"
-    local prompt="$2" default="${3:-}" silent="${4:-0}" reply=""
-    if [[ -n "${default}" && "${silent}" != "1" ]]; then
-        printf '%s [%s]: ' "${prompt}" "${default}" >/dev/tty 2>/dev/null || { _out="${default}"; return 0; }
-    else
-        printf '%s: ' "${prompt}" >/dev/tty 2>/dev/null || { _out="${default}"; return 0; }
-    fi
-    if [[ "${silent}" == "1" ]]; then
-        IFS= read -rs reply </dev/tty 2>/dev/null || reply=""
-        printf '\n' >/dev/tty 2>/dev/null || true
-    else
-        IFS= read -r reply </dev/tty 2>/dev/null || reply=""
-    fi
-    _out="${reply:-${default}}"
-}
 
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     # gpu_rc was captured by the detection half of this step, before the answers
@@ -3516,8 +3464,9 @@ fi
 # answer is validated by `--resolve`: bash never hardcodes a figure or parses
 # the grammar itself.
 #
-# HAL0_IMAGE_MODELS opts in: `recommended`, or catalog ids / menu numbers
-# separated by commas or spaces. `none` or `0` forces the skip. --no-start
+# HAL0_IMAGE_MODELS opts in: `recommended`, or catalog ids (`--resolve` also
+# takes their 1-based positions in the offered list) separated by commas or
+# spaces. `none` or `0` forces the skip. --no-start
 # skips the step: it starts the img slot. The first model that lands becomes the
 # image-generation model, and
 # Open WebUI's environment is re-rendered for it (a running Open WebUI restarts;

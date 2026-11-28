@@ -34,7 +34,7 @@ def _step() -> str:
     return TEXT[head : TEXT.index("# ── starter image models", head)]
 
 
-def _run(tmp_path: Path, env: dict[str, str], *, interactive: bool = False) -> tuple[str, str, str]:
+def _run(tmp_path: Path, env: dict[str, str]) -> tuple[str, str, str]:
     """Run the step; return (stdout, stderr, what the stand-in Python was asked to download)."""
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True, exist_ok=True)
@@ -49,8 +49,6 @@ VENV_DIR="{venv}"
 HF_TOKEN_VAL=""
 info() {{ printf 'INFO: %s\\n' "$*"; }}
 warn() {{ printf 'WARN: %s\\n' "$*" >&2; }}
-_interactive() {{ {"return 0" if interactive else "return 1"}; }}
-_tty_read() {{ printf -v "$1" '%s' "n"; }}
 {_step()}
 """
     with subprocess.Popen(

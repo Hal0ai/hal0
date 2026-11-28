@@ -166,25 +166,17 @@ def test_agent_and_brain_seeds_carry_their_curated_profiles() -> None:
 # ── 3. headless installs stay unattended ────────────────────────────────────
 
 
-def test_operator_prompts_are_gated_on_an_interactive_stdin(install_sh_text: str) -> None:
-    """``curl | bash`` and tty-less ssh must never block on a prompt.
+def test_no_prompt_helper_is_left_in_install_sh(install_sh_text: str) -> None:
+    """The setup screens ask every question; install.sh holds no prompt helper.
 
-    The gate has to test **stdin**, not ``/dev/tty``: under ``curl … | sudo
-    bash`` from a real terminal ``/dev/tty`` IS readable, so a ``-r /dev/tty``
-    gate alone would prompt — exactly the regression this guards. ``[[ -t 0 ]]``
-    is false for the piped script and for ``ssh host 'cmd'``.
+    ``curl | bash`` and tty-less ssh must never block on a prompt, so nothing
+    between the operator-input comment and the next step banner may read a
+    terminal, and the helpers that did are gone.
     """
-    m = re.search(r"_interactive\(\)\s*\{(.*?)\n\}", install_sh_text, flags=re.DOTALL)
-    assert m, "the _interactive() gate is gone"
-    body = m.group(1)
-    assert "-t 0" in body, "_interactive() must test stdin (`[[ -t 0 ]]`), not just /dev/tty"
-    assert "HAL0_NONINTERACTIVE" in body, "no env kill-switch for the prompts"
-
-    # The pre-flight prompts are gone: the setup screens ask. Nothing between
-    # the operator-input comment and the next step banner may read a terminal.
+    assert "_interactive" not in install_sh_text
+    assert "_tty_read" not in install_sh_text
     block = install_sh_text[install_sh_text.index("Operator input: model store") :]
     block = block[: block.index("ui_step")]
-    assert "_tty_read" not in block
     assert "/dev/tty" not in block
 
 

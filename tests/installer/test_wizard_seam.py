@@ -615,13 +615,6 @@ def test_every_accepted_flag_passes_when_wizard_present(
         assert proc.returncode == 0 and "--reconfigure" in proc.stdout
 
 
-def test_unknown_flag_only_warns_when_wizard_absent(tmp_path: Path, root: Path) -> None:
-    proc = _flag_loop(tmp_path, ["--no-tls", "--no-owui"], _absent(tmp_path), root=root)
-    assert proc.returncode == 0, proc.stderr
-    assert "WARN: unknown flag: --no-tls (ignored)" in proc.stderr
-    assert "LOOP DONE reconfigure=0 args=2" in proc.stdout
-
-
 def test_reconfigure_is_documented_in_the_usage_text() -> None:
     usage = _slice("--help|-h)", "exit 0")
     assert "[--reconfigure]" in usage and "  --reconfigure " in usage

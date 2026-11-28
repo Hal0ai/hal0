@@ -148,7 +148,6 @@ VENV_DIR="$FAKE_DIR"
 HF_TOKEN_VAL="hf_secret"
 info() { printf 'INFO %s\\n' "$*"; }
 warn() { printf 'WARN %s\\n' "$*"; }
-# No _interactive and no _tty_read here on purpose: a call to either fails the run.
 DEV_MODE="${DEV_MODE:-0}"
 NO_START="${NO_START:-0}"
 """
