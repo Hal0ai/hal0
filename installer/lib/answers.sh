@@ -302,25 +302,10 @@ hal0_collect_answers() {
     else
         unset HAL0_SAVED_ANSWERS_FILE
     fi
-    # The setup screens, when this release tree has them. They return 0 with
-    # nothing applied when it does not, and today's path below runs unchanged.
+    # The setup screens ask, merge the flags, the variables, the saved answers
+    # and a given document (HAL0_ANSWERS_FILE) into one document, and apply it;
+    # nothing else applies one. hal0_run_wizard returns 0 only after it has.
     hal0_run_wizard || return $?
-    [[ "${HAL0_WIZARD_RAN:-0}" == "1" ]] && return 0
-    local path="${HAL0_ANSWERS_FILE:-}"
-    [[ -n "${path}" ]] || return 0
-    # The same interrupt rule as hal0_run_wizard: a child that dies of the
-    # signal before bash has seen it is still an interrupt, never a refusal.
-    local apply_rc=0
-    _HAL0_WIZARD_INT=0
-    trap '_HAL0_WIZARD_INT=1' INT
-    hal0_apply_answers "${path}" file || apply_rc=$?
-    trap - INT
-    if [[ "${_HAL0_WIZARD_INT}" == "1" ]]; then apply_rc=130; fi
-    [[ "${apply_rc}" -eq 0 ]] || return "${apply_rc}"
-    # shellcheck disable=SC2034 # read by install.sh, which sources this file
-    HAL0_ANSWERS_APPLIED=1
-    # shellcheck disable=SC2034 # read by install.sh and the tests
-    HAL0_ANSWERS_ORIGIN="file"
     return 0
 }
 
@@ -685,10 +670,11 @@ _hal0_wizard_take_token() {
     return 0
 }
 
-# hal0_run_wizard: run the setup screens when this release tree has them, then
-# apply the document they wrote. Returns 0 with nothing done when the tree has
-# no wizard. Otherwise returns 0 with the document applied (HAL0_WIZARD_RAN=1,
-# HAL0_ANSWERS_APPLIED=1), or the installer's exit code for the wizard's:
+# hal0_run_wizard: run the setup screens, then apply the document they wrote.
+# install.sh has already stopped on a tree without them (hal0_wizard_present),
+# so this is only called on a complete one. Returns 0 with the document applied
+# (HAL0_WIZARD_RAN=1, HAL0_ANSWERS_APPLIED=1), or the installer's exit code for
+# the wizard's:
 #   2 bad input or usage, 11 no GPU and no consent, 70 internal error -> 1
 #   10 the person quit, nothing changed -> 10
 #   130 interrupted -> 130
@@ -700,7 +686,9 @@ hal0_run_wizard() {
     unset _HAL0_WIZARD_HF_TOKEN _HAL0_WIZARD_CHOSEN_STORE _HAL0_SAVED_STORE
     HAL0_WIZARD_RAN=0
     _HAL0_WIZARD_CALLED=0
-    hal0_wizard_present || return 0
+    # Where the entry point and the catalog are (hal0_wizard_present does the
+    # same, ahead of everything, in install.sh).
+    _hal0_wizard_paths
     _HAL0_WIZARD_CALLED=1
     local dir="" rc=0
     # An interrupt of the installer itself (Ctrl-C reaches the whole process
@@ -905,6 +893,7 @@ _hal0_wizard_call() {
             _HAL0_WIZARD_CHOSEN_STORE="${chosen}"
         fi
     done
+    # shellcheck disable=SC2034 # read by install.sh and the tests
     HAL0_WIZARD_RAN=1
     # shellcheck disable=SC2034 # read by install.sh and the tests
     HAL0_ANSWERS_ORIGIN="${origin}"

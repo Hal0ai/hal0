@@ -167,7 +167,6 @@ def _collect(
     args: tuple[str, ...] = (),
     reconfigure: bool = False,
     after: str = "",
-    root: Path = ROOT,
     timeout: float = 60,
 ) -> subprocess.CompletedProcess[str]:
     """Run hal0_collect_answers with the helpers of install.sh; print the state after it."""
@@ -175,7 +174,7 @@ def _collect(
 set -euo pipefail
 IFS=$'\\n\\t'
 PY="{sys.executable}"
-REPO_ROOT="{root}"
+REPO_ROOT="{ROOT}"
 DEV_MODE=1
 PREFIX="{tmp_path}/prefix"
 VAR_DIR="{tmp_path}/var"
@@ -229,76 +228,6 @@ def _state(proc: subprocess.CompletedProcess[str]) -> dict[str, str]:
 
 
 DOC = json.dumps({"version": 1, "install": {"type": "recommended"}})
-
-
-# ── wizard absent: nothing changes ──────────────────────────────────────────
-
-
-def _absent(tmp_path: Path) -> dict[str, str]:
-    """Make the wizard absent whatever the tree holds: both seams name nothing."""
-    nowhere = tmp_path / "no-wizard"
-    return {
-        "HAL0_WIZARD_ENTRY": str(nowhere / "__main__.py"),
-        "HAL0_WIZARD_CATALOG": str(nowhere / "setup-catalog.json"),
-    }
-
-
-def _tree_with_wizard(tmp_path: Path) -> Path:
-    """A release tree that holds the wizard, as the real one does once it is merged."""
-    tree = tmp_path / "tree"
-    entry = tree / "src" / "hal0" / "install" / "wizard" / "__main__.py"
-    entry.parent.mkdir(parents=True)
-    entry.write_text(STUB, encoding="utf-8")
-    catalog = tree / "installer" / "manifests" / "setup-catalog.json"
-    catalog.parent.mkdir(parents=True)
-    catalog.write_text("{}", encoding="utf-8")
-    return tree
-
-
-@pytest.fixture(params=["real-tree", "tree-with-wizard"])
-def root(request: pytest.FixtureRequest, tmp_path: Path) -> Path:
-    """What the installer code sees as its release tree.
-
-    Every test that means "the wizard is absent" runs against both: the real
-    repository (whatever it holds today) and a tree that holds the wizard's two
-    files. Such a test passes on both only if it makes the wizard absent itself,
-    through the seams (`_absent`), and not through the tree's contents.
-    """
-    return ROOT if request.param == "real-tree" else _tree_with_wizard(tmp_path)
-
-
-def test_the_tree_with_the_wizard_is_found_without_the_seams(tmp_path: Path) -> None:
-    # control for the `root` fixture: without `_absent` the second tree IS the wizard
-    tree = _tree_with_wizard(tmp_path)
-    proc = _collect(tmp_path, {"STUB_LOG": str(tmp_path / "stub.log")}, root=tree)
-    assert len(_records(tmp_path)) == 1, proc.stdout + proc.stderr
-    proc = _flag_loop(tmp_path, ["--no-tls"], {}, root=tree)
-    assert proc.returncode == 1, proc.stderr
-    assert "ERR: unknown flag: --no-tls" in proc.stderr
-
-
-def test_not_run_when_wizard_absent(tmp_path: Path, stub: dict[str, str], root: Path) -> None:
-    env = {"STUB_LOG": stub["STUB_LOG"], **_absent(tmp_path)}
-    proc = _collect(tmp_path, env, root=root)
-    assert proc.returncode == 0, proc.stderr
-    assert _state(proc)["RC"] == "0" and _state(proc)["APPLIED"] == "0"
-    assert _records(tmp_path) == []
-    # a given document takes today's path: origin file, no wizard
-    doc = tmp_path / "given.json"
-    doc.write_text(json.dumps({"version": 1, "memory": {"enabled": False}}), encoding="utf-8")
-    proc = _collect(tmp_path, {**env, "HAL0_ANSWERS_FILE": str(doc)}, root=root)
-    state = _state(proc)
-    assert state["RC"] == "0" and state["APPLIED"] == "1" and state["RAN"] == "0"
-    assert "HAL0_SKIP_HINDSIGHT" in proc.stdout
-    assert _records(tmp_path) == []
-
-
-def test_only_one_of_the_two_files_is_not_the_wizard(tmp_path: Path, stub: dict[str, str]) -> None:
-    for missing in ("HAL0_WIZARD_ENTRY", "HAL0_WIZARD_CATALOG"):
-        env = {**stub, missing: str(tmp_path / "nowhere"), "STUB_DOC": DOC}
-        proc = _collect(tmp_path, env)
-        assert _state(proc)["APPLIED"] == "0", proc.stdout + proc.stderr
-    assert _records(tmp_path) == []
 
 
 def test_the_test_seams_are_not_honoured_as_root() -> None:
@@ -544,13 +473,11 @@ def test_a_good_saved_copy_is_handed_over_as_a_copy(tmp_path: Path, stub: dict[s
 # ── unknown flags ───────────────────────────────────────────────────────────
 
 
-def _flag_loop(
-    tmp_path: Path, args: list[str], env: dict[str, str], root: Path = ROOT
-) -> subprocess.CompletedProcess:
+def _flag_loop(tmp_path: Path, args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
     block = _slice('SUMMARY_JSON_PATH=""', "# Banner first")
     script = f"""
 set -euo pipefail
-REPO_ROOT="{root}"
+REPO_ROOT="{ROOT}"
 source "{ANSWERS_SH}"
 info() {{ printf 'INFO: %s\\n' "$*"; }}
 warn() {{ printf 'WARN: %s\\n' "$*" >&2; }}
@@ -844,11 +771,9 @@ def test_a_document_the_reader_refuses_stops(tmp_path: Path, stub: dict[str, str
 # ── exit codes, through the seam in install.sh ──────────────────────────────
 
 
-def _seam_run(
-    tmp_path: Path, env: dict[str, str], root: Path = ROOT
-) -> subprocess.CompletedProcess[str]:
+def _seam_run(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return _run_group(
-        ["bash", "-c", _seam_script(tmp_path, root=root)],
+        ["bash", "-c", _seam_script(tmp_path)],
         timeout=60,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -858,13 +783,13 @@ def _seam_run(
     )
 
 
-def _seam_script(tmp_path: Path, pre: str = "", root: Path = ROOT) -> str:
+def _seam_script(tmp_path: Path, pre: str = "") -> str:
     seam = _slice("# answers-seam: begin", "# answers-seam: end")
     return f"""
 set -euo pipefail
 IFS=$'\\n\\t'
 PY="{sys.executable}"
-REPO_ROOT="{root}"
+REPO_ROOT="{ROOT}"
 DEV_MODE=1
 PREFIX="{tmp_path}/prefix"
 VAR_DIR="{tmp_path}/var"
@@ -1008,27 +933,18 @@ esac
 exec "$STUB_REAL_PY" "$@"
 """
 
-# name -> (reader call that dies, python step that dies, shell hook, wizard present,
+# name -> (reader call that dies, python step that dies, shell hook,
 #          given document, saved answers present, wizard starts before the interrupt)
 INTERRUPT_POINTS = {
-    "reader-first-check": (1, "", "", True, True, False, False),
-    "copy-step": (0, "copy", "", True, True, False, False),
-    "reader-second-check": (2, "", "", True, True, False, False),
-    "apply-after-wizard": (3, "", "", True, True, False, True),
-    "apply-without-wizard": (1, "", "", False, True, False, False),
-    "work-directory": (
-        0,
-        "",
-        "_hal0_wizard_lstat() { kill -INT $BASHPID; }",
-        True,
-        False,
-        False,
-        False,
-    ),
-    "saved-copy": (0, "savedcopy", "", True, False, True, False),
-    "saved-store": (1, "", "", True, False, True, False),
-    "python-lookup": (0, "pylookup", "", False, True, False, False),
-    "python-version-check": (0, "pyversion", "", True, False, False, False),
+    "reader-first-check": (1, "", "", True, False, False),
+    "copy-step": (0, "copy", "", True, False, False),
+    "reader-second-check": (2, "", "", True, False, False),
+    "apply-after-wizard": (3, "", "", True, False, True),
+    "work-directory": (0, "", "_hal0_wizard_lstat() { kill -INT $BASHPID; }", False, False, False),
+    "saved-copy": (0, "savedcopy", "", False, True, False),
+    "saved-store": (1, "", "", False, True, False),
+    "python-lookup": (0, "pylookup", "", False, False, True),
+    "python-version-check": (0, "pyversion", "", False, False, False),
 }
 
 
@@ -1036,7 +952,7 @@ INTERRUPT_POINTS = {
 def test_a_child_that_dies_of_the_interrupt_before_bash_sees_it_is_a_quiet_130(
     tmp_path: Path, stub: dict[str, str], point: str
 ) -> None:
-    die_call, die_py, hook, wizard, given_doc, saved, wizard_starts = INTERRUPT_POINTS[point]
+    die_call, die_py, hook, given_doc, saved, wizard_starts = INTERRUPT_POINTS[point]
     reader = tmp_path / "counting_reader.py"
     reader.write_text(COUNTING_READER, encoding="utf-8")
     wrapper = tmp_path / "py-wrapper.sh"
@@ -1046,7 +962,6 @@ def test_a_child_that_dies_of_the_interrupt_before_bash_sees_it_is_a_quiet_130(
         "PATH": os.environ["PATH"],
         "HAL0_PLAIN": "1",
         **stub,
-        **({} if wizard else _absent(tmp_path)),
         "STUB_DOC": DOC,
         "STUB_COUNTER": str(tmp_path / "reader-calls"),
         "STUB_DIE_CALL": str(die_call),
@@ -1176,16 +1091,6 @@ def test_the_installer_sets_no_interrupt_trap_of_its_own() -> None:
     for line in TEXT.splitlines():
         stripped = line.strip()
         assert not (stripped.startswith("trap ") and stripped.endswith(" INT")), line
-
-
-def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(
-    tmp_path: Path, root: Path
-) -> None:
-    bad = tmp_path / "bad.json"
-    bad.write_text('{"version": 7}', encoding="utf-8")
-    proc = _seam_run(tmp_path, {**_absent(tmp_path), "HAL0_ANSWERS_FILE": str(bad)}, root=root)
-    assert proc.returncode == 1
-    assert "ERR TRAP" in (tmp_path / "report.log").read_text()
 
 
 # ── the secret file ─────────────────────────────────────────────────────────
@@ -1383,7 +1288,7 @@ def test_chosen_folder_ignored_when_headless_or_absent(
 
 
 def test_the_two_reasons_are_never_taken_from_the_environment(
-    tmp_path: Path, stub: dict[str, str], root: Path
+    tmp_path: Path, stub: dict[str, str]
 ) -> None:
     env = {
         **stub,
@@ -1391,22 +1296,9 @@ def test_the_two_reasons_are_never_taken_from_the_environment(
         "_HAL0_WIZARD_CHOSEN_STORE": "/home/alice/models",
         "_HAL0_SAVED_STORE": "/home/alice/models",
     }
-    proc = _collect(tmp_path, env, after=CHECK, root=root)
+    proc = _collect(tmp_path, env, after=CHECK)
     state = _state(proc)
     assert state["RC"] == "0" and state["OWN"] == "no", proc.stdout + proc.stderr
-    # nor when the wizard is absent
-    env = {
-        **_absent(tmp_path),
-        "_HAL0_WIZARD_CHOSEN_STORE": "/x/y",
-        "_HAL0_SAVED_STORE": "/x/y",
-    }
-    proc = _collect(
-        tmp_path,
-        env,
-        after="hal0_store_is_operator_choice /x/y && echo OWN=yes || echo OWN=no",
-        root=root,
-    )
-    assert _state(proc)["OWN"] == "no"
 
 
 def test_existing_store_from_saved_answers_is_exempt(tmp_path: Path, stub: dict[str, str]) -> None:
