@@ -21,6 +21,9 @@
 #   7. Warning only: an open epic with no sub-issues.
 #
 # Exit status: 0 when no check fails, 1 otherwise. Warnings do not fail.
+# A failed or cut-off read of the tracker also exits non-zero: every `gh`
+# call is a checked assignment, so a failed request stops the script
+# instead of looking like an empty, passing result.
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -49,9 +52,11 @@ warn() { echo "WARN   $*"; warnings=$((warnings + 1)); }
 
 STATUS_RE='^(needs-triage|needs-info|ready-for-agent|ready-for-human|wontfix)$'
 PRIORITY_RE='^P[0-2]$'
+ISSUE_LIMIT=2000
+PR_LIMIT=1000
 
 # --- 1. milestones -----------------------------------------------------------
-milestones="$(gh api "repos/$REPO/milestones?state=open&per_page=100")"
+milestones="$(gh api --paginate "repos/$REPO/milestones?state=open&per_page=100" | jq -s 'add // []')"
 while IFS=$'\t' read -r title due desc; do
     [[ "$title" == "Backlog" ]] && continue
     if [[ "$due" == "null" && "$desc" != *"Date:"* ]]; then
@@ -64,7 +69,10 @@ while IFS=$'\t' read -r title due desc; do
 done < <(jq -r '.[] | [.title, (.due_on // "null"), ((.description // "") | gsub("\\s+"; " "))] | @tsv' <<<"$milestones")
 
 # --- 2 and 4. open issues ----------------------------------------------------
-issues="$(gh issue list --repo "$REPO" --state open --limit 1000 --json number,labels,milestone)"
+issues="$(gh issue list --repo "$REPO" --state open --limit "$ISSUE_LIMIT" --json number,labels,milestone)"
+if [[ "$(jq length <<<"$issues")" -ge "$ISSUE_LIMIT" ]]; then
+    fail "the open issue list reached $ISSUE_LIMIT entries and may be cut off; raise ISSUE_LIMIT"
+fi
 while IFS=$'\t' read -r number milestone status_count priority_count triage; do
     if [[ "$milestone" == "null" && "$triage" == "false" ]]; then
         fail "#$number is open with no milestone"
@@ -82,30 +90,40 @@ done < <(jq -r --arg s "$STATUS_RE" --arg p "$PRIORITY_RE" '.[] | [
     ] | @tsv' <<<"$issues")
 
 # --- 3. open pull requests ---------------------------------------------------
-while IFS=$'\t' read -r number; do
+prs="$(gh pr list --repo "$REPO" --state open --limit "$PR_LIMIT" --json number,milestone,author)"
+if [[ "$(jq length <<<"$prs")" -ge "$PR_LIMIT" ]]; then
+    fail "the open pull request list reached $PR_LIMIT entries and may be cut off; raise PR_LIMIT"
+fi
+while read -r number; do
+    [[ -n "$number" ]] || continue
     fail "pull request #$number is open with no milestone"
-done < <(gh pr list --repo "$REPO" --state open --limit 500 --json number,milestone,author \
-    --jq '.[] | select(.milestone == null and (.author.is_bot | not)) | [.number] | @tsv')
+done < <(jq -r '.[] | select(.milestone == null and (.author.is_bot | not)) | .number' <<<"$prs")
 
 # --- 5. closed issues shipped where their milestone says ---------------------
 # shellcheck disable=SC2016  # GraphQL variables, not shell
-shipped_query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){
-  milestone(number:$number){issues(states:CLOSED,first:100){nodes{number
-    closedByPullRequestsReferences(first:5){nodes{number merged milestone{title}}}}}}}}'
+shipped_query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){
+  milestone(number:$number){issues(states:CLOSED,first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{number
+    closedByPullRequestsReferences(first:10){nodes{number merged milestone{title}}}}}}}}'
+# shellcheck disable=SC2016  # jq variables, not shell
+shipped_filter='.data.repository.milestone.issues.nodes[] | .number as $n
+    | .closedByPullRequestsReferences.nodes[] | select(.merged)
+    | [$n, .number, (.milestone.title // "no milestone")] | @tsv'
 while IFS=$'\t' read -r ms_number ms_title; do
     [[ "$ms_title" == "Backlog" ]] && continue
+    shipped="$(gh api graphql --paginate -f query="$shipped_query" -F owner="$OWNER" -F name="$NAME" \
+        -F number="$ms_number" --jq "$shipped_filter")"
     while IFS=$'\t' read -r number pr pr_ms; do
+        [[ -n "$number" ]] || continue
+        [[ "$pr_ms" == "$ms_title" ]] && continue
         fail "#$number is closed on $ms_title, but pull request #$pr that closed it is on $pr_ms"
-    done < <(gh api graphql -f query="$shipped_query" -F owner="$OWNER" -F name="$NAME" -F number="$ms_number" \
-        --jq ".data.repository.milestone.issues.nodes[] | .number as \$n
-              | .closedByPullRequestsReferences.nodes[]
-              | select(.merged and (.milestone.title // \"none\") != \"$ms_title\")
-              | [\$n, .number, (.milestone.title // \"no milestone\")] | @tsv")
+    done <<<"$shipped"
 done < <(jq -r '.[] | [.number, .title] | @tsv' <<<"$milestones")
 
 # --- 6. sunset markers --------------------------------------------------------
 while IFS=$'\t' read -r file version; do
-    bodies="$(gh issue list --repo "$REPO" --state open --milestone "$version" --limit 300 --json body \
+    # A milestone that does not exist makes this call fail; that is reported
+    # below as "no open issue mentions it", not as a broken run.
+    bodies="$(gh issue list --repo "$REPO" --state open --milestone "$version" --limit 1000 --json body \
         --jq '.[].body' 2>/dev/null || true)"
     if ! grep -qF -- "$file" <<<"$bodies"; then
         fail "$file carries HAL0-SUNSET: $version, and no open issue on $version mentions it"
@@ -115,12 +133,15 @@ done < <(cd "$ROOT" && grep -rnoE 'HAL0-SUNSET: v[0-9]+\.[0-9]+(\.[0-9]+)?' src 
 
 # --- 7. epics without sub-issues ----------------------------------------------
 # shellcheck disable=SC2016  # GraphQL variables, not shell
-epic_query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){
-  issues(states:OPEN,labels:["epic"],first:100){nodes{number subIssuesSummary{total}}}}}'
-while IFS=$'\t' read -r number; do
+epic_query='query($owner:String!,$name:String!,$endCursor:String){repository(owner:$owner,name:$name){
+  issues(states:OPEN,labels:["epic"],first:100,after:$endCursor){pageInfo{hasNextPage endCursor}
+    nodes{number subIssuesSummary{total}}}}}'
+epics="$(gh api graphql --paginate -f query="$epic_query" -F owner="$OWNER" -F name="$NAME" \
+    --jq '.data.repository.issues.nodes[] | select(.subIssuesSummary.total == 0) | .number')"
+while read -r number; do
+    [[ -n "$number" ]] || continue
     warn "epic #$number has no sub-issues yet"
-done < <(gh api graphql -f query="$epic_query" -F owner="$OWNER" -F name="$NAME" \
-    --jq '.data.repository.issues.nodes[] | select(.subIssuesSummary.total == 0) | [.number] | @tsv')
+done <<<"$epics"
 
 echo "plan-lint: $errors failing, $warnings warning(s) on $REPO"
 [[ "$errors" -eq 0 ]]

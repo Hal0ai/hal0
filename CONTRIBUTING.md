@@ -171,8 +171,10 @@ that will contain it, docs and CI changes included. When a fix ships in a
 different release than its issue was planned for, move the issue: a closed
 issue's milestone records where it shipped.
 
-**Each release has one tracking issue**, titled `Release vX.Y.Z: tracking`
-and named in the milestone description. It holds:
+**Each release has one tracking issue**, titled `Release vX.Y.Z: tracking`.
+The milestone description names it on a line of its own, written
+`Tracking issue: #N`, which is the form `scripts/plan-lint.sh` looks for. It
+holds:
 
 - the scope, split into must and stretch when there is a stretch set;
 - the scope log;
