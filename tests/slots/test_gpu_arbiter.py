@@ -2234,6 +2234,12 @@ async def test_the_gate_asks_again_when_a_restore_beats_its_prompt(
     fake_mgr.ready.add("img")
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     prompt = _EditorPrompt(arb, comfyui_http)
+    # The gate has one deadline for the whole prompt, counted from its start,
+    # and this test parks the gate's polls behind the restore below. On a loaded
+    # runner the restore can take longer than the helper's 2 s deadline, and the
+    # gate then closes on its first poll after the hold. The hold is the test's
+    # own, so give the deadline room for it; the waits below still bound the test.
+    prompt.gate._SWITCH_TIMEOUT_S = 30.0
     # Hold the gate's polls once it has asked for the switch, so the restore
     # lands before the gate can see image mode. Unheld, a loaded runner lets the
     # gate poll first and queue its prompt, and the chat then waits out the
