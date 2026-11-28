@@ -15,10 +15,13 @@ exit codes and the three side files.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -122,6 +125,28 @@ def _saved(tmp_path: Path, doc: dict, *, mode: int = 0o600, dir_mode: int = 0o70
     return path
 
 
+def _run_group(
+    argv: list[str], *, timeout: float, **kwargs: object
+) -> subprocess.CompletedProcess[str]:
+    """subprocess.run in its own session; on timeout kill the whole process group.
+
+    subprocess.run kills only the direct child on timeout. A grandchild (the stub
+    wizard under bash) that is blocked would survive as an orphan, so the group
+    is killed before the timeout is raised again.
+    """
+    with subprocess.Popen(argv, start_new_session=True, **kwargs) as proc:  # type: ignore[call-overload]
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except BaseException:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            # a pipe holder outside the group must not be waited on forever
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.communicate(timeout=5)
+            raise
+        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def _collect(
     tmp_path: Path,
     env: dict[str, str] | None = None,
@@ -130,6 +155,7 @@ def _collect(
     reconfigure: bool = False,
     after: str = "",
     root: Path = ROOT,
+    timeout: float = 60,
 ) -> subprocess.CompletedProcess[str]:
     """Run hal0_collect_answers with the helpers of install.sh; print the state after it."""
     script = f"""
@@ -161,13 +187,13 @@ if bash -c 'env' | grep -v '^STUB_' | grep -q hf_StubToken; then echo "TOKEN_IN_
 echo "LEFT=$(ls -A "{tmp_path}/prefix/run/hal0-install" 2>/dev/null | tr '\\n' ' ')"
 {after}
 """
-    return subprocess.run(
+    return _run_group(
         ["bash", "-c", script],
-        capture_output=True,
+        timeout=timeout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=60,
         env={"PATH": os.environ["PATH"], "HOME": str(tmp_path), **(env or {})},
-        check=False,
         cwd=tmp_path,
     )
 
@@ -642,13 +668,13 @@ def test_a_document_the_reader_refuses_stops(tmp_path: Path, stub: dict[str, str
 def _seam_run(
     tmp_path: Path, env: dict[str, str], root: Path = ROOT
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return _run_group(
         ["bash", "-c", _seam_script(tmp_path, root=root)],
-        capture_output=True,
-        text=True,
         timeout=60,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
         env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1", **env},
-        check=False,
         cwd=tmp_path,
     )
 
@@ -728,9 +754,6 @@ def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
     # Ctrl-C reaches the whole process group. The stub has no handler of its
     # own yet, so it dies of the signal, as the real wizard would before its
     # handler is installed; so does the reader checking a given file.
-    import signal
-    import time
-
     marker = tmp_path / "sleeping"
     env = {
         "PATH": os.environ["PATH"],
@@ -773,6 +796,43 @@ def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
     assert list((tmp_path / "prefix" / "run" / "hal0-install").iterdir()) == []
     if stage == "reader":
         assert _records(tmp_path) == [], "the wizard must not start after an interrupt"
+
+
+BLOCKED_ON_FIFO = """
+import os, sys
+with open(sys.argv[2], "w") as fh:
+    fh.write(str(os.getpid()))
+open(sys.argv[1]).read()  # blocks on opening: nothing ever writes to the FIFO
+"""
+
+
+def test_a_timed_out_run_leaves_no_process_behind(tmp_path: Path) -> None:
+    fifo = tmp_path / "blocker.fifo"
+    os.mkfifo(fifo)
+    pidfile = tmp_path / "blocker.pid"
+    child = tmp_path / "blocked_on_fifo.py"
+    child.write_text(BLOCKED_ON_FIFO, encoding="utf-8")
+    # not the last command, so bash forks it instead of exec-ing it: a grandchild
+    after = f'"{sys.executable}" "{child}" "{fifo}" "{pidfile}"; true'
+    pid = 0
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            _collect(tmp_path, args=(), after=after, timeout=3)
+        pid = int(pidfile.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 5
+        gone = False
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                gone = True
+                break
+            time.sleep(0.1)
+        assert gone, f"process {pid} survived the timed-out run"
+    finally:
+        if pid:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
 
 
 def test_the_installer_sets_no_interrupt_trap_of_its_own() -> None:
