@@ -30,6 +30,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **The installer's closing memory-engine check no longer says "ok" when the memory engine was never installed.** With `--no-memory` it now says the check was skipped because memory was not installed, by choice. When memory was wanted but its install did not complete, it warns that the memory engine is not installed, names the fix, and lists the check in the "Verify FAILED" part of the closing summary; the installer's exit status is unchanged. (#4007)
+
 ## [1.8.3] — 2026-11-28
 
 ### Highlights
