@@ -8,6 +8,7 @@ file and is empty when that file is absent.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -87,7 +88,24 @@ def _read_object(path: Path) -> dict[str, Any]:
         raise CatalogError(
             f"{path}: unsupported version {data.get('version')}, expected {CATALOG_VERSION}"
         )
+    where = _not_finite(data)
+    if where is not None:
+        raise CatalogError(f"{path}: {where} must be a finite number")
     return data
+
+
+def _not_finite(data: object) -> str | None:
+    """The key of the first NaN or infinity in a loaded file, or None."""
+    stack: list[tuple[str, object]] = [("", data)]
+    while stack:
+        where, value = stack.pop()
+        if isinstance(value, float) and not math.isfinite(value):
+            return where
+        if isinstance(value, dict):
+            stack.extend((f"{where}.{k}" if where else str(k), v) for k, v in value.items())
+        elif isinstance(value, list):
+            stack.extend((f"{where}[{i}]", v) for i, v in enumerate(value))
+    return None
 
 
 def _field(path: Path, where: str, item: object, key: str, kind: type) -> Any:

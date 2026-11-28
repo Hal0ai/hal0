@@ -184,3 +184,40 @@ def test_the_generated_models_file_shape_loads(catalog_path: Path, tmp_path: Pat
         assert row.lane == ""
         assert row.needs_account is False
     assert any(r.role == "brain" for r in catalog.model_ladder)
+
+
+def _models_with(tmp_path: Path, text: str) -> Path:
+    models = tmp_path / "m.json"
+    models.write_text(text)
+    return models
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "1e999"])
+def test_a_model_row_number_that_is_not_finite_is_refused(
+    catalog_path: Path, tmp_path: Path, bad: str
+) -> None:
+    row = '{"role": "starter", "model": "x", "label": "X", "min_ram_gb": ' + bad + "}"
+    models = _models_with(tmp_path, '{"version": 1, "model_ladder": [' + row + "]}")
+    with pytest.raises(CatalogError, match="min_ram_gb") as err:
+        load_catalog(catalog_path, models)
+    assert str(models) in str(err.value)
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "1e999"])
+def test_a_catalog_number_that_is_not_finite_is_refused(
+    catalog_path: Path, tmp_path: Path, bad: str
+) -> None:
+    text = catalog_path.read_text().replace('"download_gb": null', f'"download_gb": {bad}', 1)
+    p = tmp_path / "c.json"
+    p.write_text(text)
+    with pytest.raises(CatalogError, match="download_gb"):
+        load_catalog(p)
+
+
+def test_a_preset_value_that_is_not_finite_is_refused(catalog_path: Path, tmp_path: Path) -> None:
+    data = json.loads(catalog_path.read_text())
+    data["presets"]["minimal"]["network.port"] = float("nan")
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps(data))
+    with pytest.raises(CatalogError, match=r"network\.port"):
+        load_catalog(p)

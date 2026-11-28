@@ -7,7 +7,7 @@ import pytest
 
 from hal0.install.wizard.catalog import Catalog
 from hal0.install.wizard.document import Override, effective
-from hal0.install.wizard.facts import Facts, load_facts
+from hal0.install.wizard.facts import Disk, Facts, load_facts
 from hal0.install.wizard.flow import (
     Outcome,
     Row,
@@ -541,3 +541,36 @@ def test_a_copy_path_may_contain_a_percent_sign(
 ) -> None:
     copy = str(tmp_path / "50%.json")
     assert chosen(_save(catalog, usable_facts, copy))["_save_copy_to"] == copy
+
+
+def test_the_folder_screen_shows_at_most_four_other_disks_largest_free_first(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    others = tuple(Disk(f"/d{n}", 10.0 * n, 2000.0) for n in range(1, 7))
+    facts = replace(usable_facts, disks=(Disk("/", 100.0, 500.0), *others))
+    rows = view(run(start(catalog, facts), "ENTER")).rows
+    assert [r.value for r in rows] == [
+        "/var/lib/hal0/models",
+        "/d6/hal0/models",
+        "/d5/hal0/models",
+        "/d4/hal0/models",
+        "/d3/hal0/models",
+        None,
+    ]
+    assert rows[-1].id == "other"
+
+
+def test_the_other_folder_row_has_no_detail(catalog: Catalog, two_disk_facts: Facts) -> None:
+    other = view(run(start(catalog, two_disk_facts), "ENTER")).rows[-1]
+    assert (other.id, other.label, other.detail) == ("other", "Type another folder...", "")
+
+
+@pytest.mark.parametrize(
+    ("vendor", "shown"),
+    [("amd", "AMD"), ("intel", "Intel"), ("nvidia", "NVIDIA"), ("acme", "acme")],
+)
+def test_the_graphics_card_line_spells_the_vendor(
+    catalog: Catalog, usable_facts: Facts, vendor: str, shown: str
+) -> None:
+    facts = replace(usable_facts, gpu_vendor=vendor, gpu_pool_gb=96.0)
+    assert f"  Graphics card: {shown}, 96 GB memory" in view(start(catalog, facts)).intro

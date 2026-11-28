@@ -207,3 +207,132 @@ def test_podman_facts_and_the_podman_need(
 def test_podman_present_must_be_a_flag(tmp_path: Path) -> None:
     with pytest.raises(FactsError, match=r"podman\.present"):
         load_facts(write(tmp_path, {"podman": {"present": "yes"}}), disks=[], ram_gb=None)
+
+
+def _stat(total: int, free: int, fsid: int = 0) -> os.statvfs_result:
+    return SimpleNamespace(  # type: ignore[return-value]
+        f_frsize=1, f_blocks=total, f_bavail=free, f_fsid=fsid
+    )
+
+
+def _probe(table: dict[str, os.statvfs_result]):  # type: ignore[no-untyped-def]
+    """A statvfs that knows only the mounts in the table and fails the test on any other."""
+
+    def statvfs(mount: str) -> os.statvfs_result:
+        assert mount in table, f"statvfs was called on {mount}"
+        return table[mount]
+
+    return statvfs
+
+
+_POOL = (812 * 2**30, 700 * 2**30)
+
+
+def test_a_container_host_lists_only_the_root_and_one_row_for_the_pool() -> None:
+    pool_mounts = [f"/pool/share{n}" for n in range(6)] + ["/pool"]
+    mounts = "".join(
+        [
+            "rpool/root / zfs rw,relatime 0 0\n",
+            "lxcfs /proc/stat fuse.lxcfs rw,nosuid 0 0\n",
+            "hugetlbfs /dev/hugepages hugetlbfs rw,relatime 0 0\n",
+            "sunrpc /run/rpc_pipefs rpc_pipefs rw,relatime 0 0\n",
+            "nas:/export /mnt/nas nfs4 rw,relatime,vers=4.2 0 0\n",
+            *(f"tank/d{n} {m} zfs rw,xattr 0 0\n" for n, m in enumerate(pool_mounts)),
+            "/dev/sdc1 /mnt/readonly ext4 ro,relatime 0 0\n",
+            "/dev/sdd1 /mnt/tiny ext4 rw,relatime 0 0\n",
+        ]
+    )
+    table = {
+        "/": _stat(100 * 2**30, 40 * 2**30),
+        **{m: _stat(*_POOL) for m in pool_mounts},
+        "/mnt/tiny": _stat(500 * 2**20, 400 * 2**20),
+    }
+    disks = local_disks(mounts, _probe(table))
+    assert [d.mount for d in disks] == ["/pool", "/"]
+    assert disks[0].free_gb == 700.0
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "x /data/fuse fuse rw 0 0",
+        "x /data/sshfs fuse.sshfs rw 0 0",
+        "x /data/huge hugetlbfs rw 0 0",
+        "x /data/ns nsfs rw 0 0",
+        "x /data/misc binfmt_misc rw 0 0",
+        "x /data/efi efivarfs rw 0 0",
+        "x /data/se selinuxfs rw 0 0",
+        "x /data/nfsd nfsd rw 0 0",
+        "x /data/rpc sunrpc rw 0 0",
+        "x /data/pipes rpc_pipefs rw 0 0",
+        *(
+            f"srv:/x /data/{kind} {kind} rw 0 0"
+            for kind in (
+                "nfs",
+                "nfs4",
+                "cifs",
+                "smb3",
+                "smbfs",
+                "ceph",
+                "glusterfs",
+                "9p",
+                "afs",
+                "lustre",
+                "davfs",
+                "ncpfs",
+                "ocfs2",
+                "gfs2",
+            )
+        ),
+        *(
+            f"/dev/sdb1 {where} ext4 rw 0 0"
+            for where in ("/proc", "/sys/x", "/dev/y", "/run/z", "/boot", "/boot/efi", "/snap/a")
+        ),
+        "/dev/sdb1 /data/ro ext4 ro 0 0",
+        "/dev/sdb1 /data/noopts ext4",
+    ],
+)
+def test_a_mount_that_is_not_a_local_writable_disk_is_never_probed(line: str) -> None:
+    assert local_disks(line + "\n", _probe({})) == ()
+
+
+def test_the_root_is_kept_whatever_its_type() -> None:
+    disks = local_disks("overlay / overlay ro 0 0\n", _probe({"/": _stat(2**20, 2**19)}))
+    assert [d.mount for d in disks] == ["/"]
+
+
+def test_a_mount_under_a_system_folder_name_prefix_is_still_a_disk() -> None:
+    table = {"/running": _stat(*_POOL), "/bootstrap": _stat(2 * 2**30, 2**30)}
+    mounts = "/dev/sdb1 /running ext4 rw 0 0\n/dev/sdc1 /bootstrap ext4 rw 0 0\n"
+    assert [d.mount for d in local_disks(mounts, _probe(table))] == ["/running", "/bootstrap"]
+
+
+def test_two_mounts_of_one_filesystem_id_are_one_row_under_the_shortest_mount() -> None:
+    table = {
+        "/data/deep": _stat(10 * 2**30, 5 * 2**30, fsid=7),
+        "/data": _stat(10 * 2**30, 6 * 2**30, fsid=7),
+        "/other": _stat(10 * 2**30, 4 * 2**30, fsid=8),
+    }
+    mounts = "a /data/deep ext4 rw 0 0\nb /data ext4 rw 0 0\nc /other ext4 rw 0 0\n"
+    assert [d.mount for d in local_disks(mounts, _probe(table))] == ["/data", "/other"]
+
+
+def test_a_filesystem_under_one_gib_is_left_out() -> None:
+    table = {"/small": _stat(2**30 - 1, 2**29), "/big": _stat(2**30, 2**29)}
+    mounts = "a /small ext4 rw 0 0\nb /big ext4 rw 0 0\n"
+    assert [d.mount for d in local_disks(mounts, _probe(table))] == ["/big"]
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_a_number_that_is_not_finite_is_refused(tmp_path: Path, bad: float) -> None:
+    path = tmp_path / "facts.json"
+    path.write_text(json.dumps({"version": 1, "gpu": {"pool_gb": bad}}))
+    with pytest.raises(FactsError, match=r"gpu\.pool_gb"):
+        load_facts(path, disks=[], ram_gb=None)
+
+
+def test_a_huge_number_that_reads_as_infinity_is_refused(tmp_path: Path) -> None:
+    path = tmp_path / "facts.json"
+    path.write_text('{"version": 1, "gpu": {"pool_gb": 1e999}}')
+    with pytest.raises(FactsError, match=r"gpu\.pool_gb"):
+        load_facts(path, disks=[], ram_gb=None)

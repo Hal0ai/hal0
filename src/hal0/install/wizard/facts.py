@@ -7,6 +7,7 @@ Anything the file does not say is unknown (``None``), never guessed.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -38,8 +39,37 @@ PSEUDO_FILESYSTEMS = frozenset(
         "fusectl",
         "configfs",
         "ramfs",
+        "hugetlbfs",
+        "rpc_pipefs",
+        "nsfs",
+        "binfmt_misc",
+        "efivarfs",
+        "selinuxfs",
+        "nfsd",
+        "sunrpc",
+        "fuse",
     }
 )
+# Never probed: a dead server can block statvfs for good.
+NETWORK_FILESYSTEMS = frozenset(
+    {
+        "nfs",
+        "nfs4",
+        "cifs",
+        "smb3",
+        "smbfs",
+        "ceph",
+        "glusterfs",
+        "9p",
+        "afs",
+        "lustre",
+        "davfs",
+        "ncpfs",
+        "ocfs2",
+        "gfs2",
+    }
+)
+_SYSTEM_MOUNTS = ("/proc", "/sys", "/dev", "/run", "/boot", "/snap")
 _GIB = 2**30
 
 
@@ -97,6 +127,8 @@ def _number(section: Mapping[str, Any], name: str, key: str) -> float | None:
         return None
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise FactsError(f"facts: {name} has the wrong type")
+    if not math.isfinite(value):
+        raise FactsError(f"facts: {name} must be a finite number")
     return float(value)
 
 
@@ -131,26 +163,57 @@ def _decode_mount_field(field: str) -> str:
     return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), field)
 
 
+def _worth_probing(fstype: str, mount: str, options: str) -> bool:
+    """Whether a mount may be a local, writable disk; decided without touching it."""
+    if fstype in PSEUDO_FILESYSTEMS or fstype.startswith("fuse."):
+        return False
+    if fstype in NETWORK_FILESYSTEMS:
+        return False
+    if any(mount == top or mount.startswith(top + "/") for top in _SYSTEM_MOUNTS):
+        return False
+    return "rw" in options.split(",")
+
+
+def _same_filesystem(a: os.statvfs_result, b: os.statvfs_result) -> bool:
+    fsid_a, fsid_b = getattr(a, "f_fsid", 0), getattr(b, "f_fsid", 0)
+    if fsid_a and fsid_b and fsid_a == fsid_b:
+        return True
+    return (a.f_blocks * a.f_frsize, a.f_bavail * a.f_frsize) == (
+        b.f_blocks * b.f_frsize,
+        b.f_bavail * b.f_frsize,
+    )
+
+
 def local_disks(mounts_text: str, statvfs: Callable[[str], os.statvfs_result]) -> tuple[Disk, ...]:
-    """Real filesystems, one per device (its shortest mount), most free first."""
-    chosen: dict[str, str] = {}
+    """Local writable filesystems, one row each (its shortest mount), most free first.
+
+    The root is always kept. Pseudo, network and system mounts and read-only
+    ones are skipped without calling ``statvfs``; a filesystem under 1 GiB is left out.
+    """
+    mounts: list[str] = []
     for line in mounts_text.splitlines():
         parts = line.split()
-        if len(parts) < 3 or parts[2] in PSEUDO_FILESYSTEMS:
+        if len(parts) < 3:
             continue
-        device, mount = parts[0], _decode_mount_field(parts[1])
-        known = chosen.get(device)
-        if known is None or len(mount) < len(known):
-            chosen[device] = mount
-    disks: list[Disk] = []
-    for mount in chosen.values():
+        mount = _decode_mount_field(parts[1])
+        options = parts[3] if len(parts) > 3 else ""
+        if mount == "/" or _worth_probing(parts[2], mount, options):
+            mounts.append(mount)
+    kept: list[tuple[str, os.statvfs_result]] = []
+    for mount in sorted(set(mounts), key=lambda m: (len(m), m)):
         try:
             st = statvfs(mount)
         except OSError:
             continue
-        disks.append(
-            Disk(mount, st.f_bavail * st.f_frsize / _GIB, st.f_blocks * st.f_frsize / _GIB)
-        )
+        if mount != "/" and st.f_blocks * st.f_frsize < _GIB:
+            continue
+        if any(_same_filesystem(st, other) for _, other in kept):
+            continue
+        kept.append((mount, st))
+    disks = [
+        Disk(mount, st.f_bavail * st.f_frsize / _GIB, st.f_blocks * st.f_frsize / _GIB)
+        for mount, st in kept
+    ]
     return tuple(sorted(disks, key=lambda d: d.free_gb, reverse=True))
 
 

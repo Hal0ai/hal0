@@ -51,6 +51,8 @@ _GPU_REASONS = {
     "broken_group": "A graphics card was found, but this user is not allowed to use it.",
 }
 GPU_REASON_OTHER = "The graphics card on this box cannot be used."
+_VENDORS = {"amd": "AMD", "intel": "Intel", "nvidia": "NVIDIA"}
+_OTHER_DISKS = 4  # rows for other disks on the folder screen, most free first
 
 
 # ------------------------------------------------------------ GPU screen
@@ -116,7 +118,7 @@ def facts_lines(f: Facts) -> tuple[str, ...]:
     card = [
         x
         for x in (
-            f.gpu_vendor,
+            None if f.gpu_vendor is None else _VENDORS.get(f.gpu_vendor, f.gpu_vendor),
             None if f.gpu_pool_gb is None else f"{fmt_gb(f.gpu_pool_gb)} GB memory",
         )
         if x
@@ -197,9 +199,9 @@ def folder_rows(s: State) -> tuple[Row, ...]:
     others = sorted(
         (d for d in s.facts.disks if d not in shown), key=lambda d: d.free_gb, reverse=True
     )
-    for d in others:
+    for d in others[:_OTHER_DISKS]:
         rows.append(_disk_row(d.mount, posixpath.join(d.mount, "hal0/models"), d, total, None))
-    rows.append(make_row("other", "Type another folder...", path, "text", None))
+    rows.append(make_row("other", "Type another folder...", "", "text", None))
     return tuple(rows)
 
 
