@@ -229,7 +229,7 @@ layer doesn't get unlimited attempts.
 A bare-metal install is the default. Two wrappers put hal0 off the host's own
 accounts: an unprivileged LXC system container, through `pct` on Proxmox or
 `incus` on plain Linux ([ADR-0050](/docs/adr/0050-no-oci-appliance-unprivileged-lxc-is-the-wrapper)),
-and the opt-in rootless podman box, `install.sh --box`, which runs the whole
+and the opt-in rootless podman box, the one-line install with `--box`, which runs the whole
 install inside one container under a dedicated `hal0box` host user
 ([ADR-0051](/docs/adr/0051-rootless-podman-box-install)). See
 [Install in a rootless podman box](/docs/getting-started/box),

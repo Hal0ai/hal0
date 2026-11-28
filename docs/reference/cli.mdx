@@ -51,13 +51,20 @@ global flag is controlled per-command via environment variables instead — see
 | `hal0 chat` | Interactive chat REPL. | `--model` (default `"agent"`), `--base-url` (default `http://127.0.0.1:8080/v1`, env `HAL0_CHAT_BASE_URL`), `--no-stream`, `--brain` (talk to the hal0-brain steward instead) |
 | `hal0 system-info` | Host system info. | `--json` |
 | `hal0 ports` | Port allocation view. | `--json` |
-| `hal0 setup` | First-run provisioning (internal fallback in v1.0 — see caution above). | see below |
+| `hal0 setup` | First-run provisioning (internal; run by hand with none of its action flags it asks nothing — see below). | see below |
 | `hal0 update ...` | Check/apply/roll back an update. | see below |
 
 `hal0 chat` in-REPL slash commands: `/think on|off|default`, `/clear`, `/quit` / `/exit`
 (Ctrl-D also exits).
 
 ### `hal0 setup`
+
+Every install question is asked up front by the installer's setup screens, so
+`hal0 setup` asks nothing itself. Run by hand with none of `--auto`, `--answers`,
+`--emit-answers` or `--plan`, it prints one line and stops, before it probes
+hardware or touches a file: to change what was chosen at install, run the
+installer again with `--reconfigure` (see [Install](/docs/getting-started/install/)).
+The flags below keep their unattended behavior.
 
 ```sh
 hal0 setup [--auto] [--storage-dir DIR] [--no-pull] [--no-extensions] [--no-slots]
@@ -69,9 +76,9 @@ hal0 setup [--auto] [--storage-dir DIR] [--no-pull] [--no-extensions] [--no-slot
 | `--auto` | `False` | Non-interactive, applies recommended defaults. |
 | `--storage-dir` | `/var/lib/hal0/models` | Model storage root. |
 | `--no-pull` | `False` | Skip pulling a starter model. |
-| `--no-extensions` | `False` | Skip optional-extension prompts. |
+| `--no-extensions` | `False` | Skip extension install/wiring in `--auto` mode. |
 | `--no-slots` | `False` | Skip seeding starter slots. |
-| `--answers` | unset | Path to a `hal0-setup.yaml` answers file. |
+| `--answers` | unset | Path to a `hal0-setup.yaml` answers file. Not the installer's `--answers=FILE` JSON document. |
 | `--emit-answers` | unset | Write resolved answers to a file and exit, without applying. |
 | `--plan` (alias `--dry-run`) | `False` | Resolve and print the plan; write nothing. |
 

@@ -179,7 +179,7 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   `hal0 config validate`. Nothing rewrites the file for you, and
   `hal0 profile migrate` is removed.
 - **An existing install stays as it is.** The rootless podman box is an opt-in
-  for a fresh install (`install.sh --box`). `hal0 update` never moves a
+  for a fresh install (the one-line install with `--box`). `hal0 update` never moves a
   bare-metal or LXC install into a box, and `--box` refuses to run over an
   existing install. There is no converter yet; see
   [Install in a rootless podman box](/docs/getting-started/box/).

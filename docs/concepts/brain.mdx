@@ -63,6 +63,9 @@ plain GGUF with no custom tensor types, so it loads on every llama.cpp
 runner hal0 ships. `install.sh --no-brain-model` (or `--bare`, which turns every
 optional component off) skips the pull and leaves the `brain` slot without a
 model; pull one later with `hal0 model pull <id>` or from the dashboard.
+The installer's setup screens have no brain-model question: the flag and
+`HAL0_BRAIN_MODEL` below are how you change it, and the Minimal setup skips the
+pull.
 
 <Steps>
 1. **At install time**: set `HAL0_BRAIN_MODEL` before running `install.sh` to

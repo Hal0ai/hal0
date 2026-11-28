@@ -121,10 +121,14 @@ sudo hal0 agent install hermes --terminal-tool     # opt in
 sudo hal0 agent install hermes --no-terminal-tool  # opt back out
 ```
 
-The installer also asks once, on an interactive install. A piped
-(`curl … | bash`), headless, or `HAL0_NONINTERACTIVE=1` install is never
-asked and always leaves it off; set `HAL0_HERMES_TERMINAL=1` to opt in
-unattended.
+The installer's setup screens carry it as one row, "Let the assistant run
+commands on this machine?", on the "Assistant and memory" screen that
+Customize adds. It is off unless you tick it. The Recommended and Minimal setups
+leave it off. An install that shows no screens (`HAL0_NONINTERACTIVE=1`, or an
+answers file given with `--answers=FILE`) leaves it off too; set
+`HAL0_HERMES_TERMINAL=1` to opt in unattended. An answers file, and the answers
+saved by an earlier install, never turn it on: a later run starts with it off
+again until you tick the row.
 
 Your answer is recorded at `/etc/hal0/agents/hermes-terminal-tool`, so
 re-provisioning, `--repair` and updates all keep it. That file is root-owned on

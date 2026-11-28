@@ -48,12 +48,14 @@ aggregate self-check), so a failure tells you roughly where to look.
    A good answer is an OpenAI-shaped completion with real text in
    `choices[0].message.content`, back within a few seconds on a warm slot
    (longer on the first request, while the container image pulls and the
-   model loads). `hal0/brain` is a virtual model name for the brain slot —
-   the one slot a default install gives a model — not a raw model id; hal0
+   model loads). `hal0/brain` is a virtual model name for the brain slot,
+   not a raw model id; hal0
    rewrites the alias before dispatching. The `agent` slot (`hal0/agent`)
-   stays model-less unless you accepted the installer's optional agent-model
-   offer (`HAL0_PULL_AGENT_MODEL=1` opts in unattended), so use that name only
-   once you've assigned it a model. See
+   stays model-less unless the chat model was downloaded: the Recommended setup
+   picks one when one fits this box, while Minimal, or "No chat model for now" on the
+   Customize models screen, leaves it empty (`HAL0_PULL_AGENT_MODEL=1` or
+   `HAL0_AGENT_MODEL=<id>` settles it unattended). Use that name only once the
+   slot has a model. See
    [Send your first chat](/docs/getting-started/first-chat/) for the
    streaming variant and OpenWebUI equivalent.
 

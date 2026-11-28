@@ -16,10 +16,12 @@ Older tagged releases are not back-patched.
 
 hal0 ships a bundled agent (Hermes). Its terminal tool — the one that executes
 arbitrary shell commands on the host — is **off by default** as of v1.0 and is
-an explicit opt-in (`sudo hal0 agent install hermes --terminal-tool`, or
-`HAL0_HERMES_TERMINAL=1` for an unattended install). A piped, headless or
-non-interactive install never enables it. `hal0 agent status hermes` prints the
-current posture.
+an explicit opt-in: a row on the installer's Customize screens that you tick
+yourself, `sudo hal0 agent install hermes --terminal-tool`, or
+`HAL0_HERMES_TERMINAL=1` for an unattended install. An answers file or the
+answers saved by an earlier install never turn it on, and an install that shows
+no screens leaves it off unless that variable is set. `hal0 agent status
+hermes` prints the current posture.
 
 Turning it on makes the agent root-equivalent, and the rest of this section
 describes that state. Even with the terminal tool off, the agent runs under
@@ -113,7 +115,7 @@ full list.
 
 ### The opt-in podman box does not change this
 
-`install.sh --box` (v1.8.0, ADR-0051) runs hal0 inside one rootless podman
+The one-line install with `--box` (v1.8.0, ADR-0051) runs hal0 inside one rootless podman
 container. That protects the host from root inside the box in the same way an
 unprivileged LXC does, and it does not protect against kernel bugs reachable
 from a user namespace. Inside the box the `hal0` account and the credential

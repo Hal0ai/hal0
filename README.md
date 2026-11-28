@@ -302,7 +302,7 @@ walks through the same steps in plain language.
 - **An installer component checklist.** `--no-owui`, `--no-comfyui`,
   `--no-hermes`, `--no-pi`, `--no-memory`, `--no-brain-model`, `--no-agents`
   and `--bare`; an interactive fresh install shows a six-row checklist.
-- **An opt-in rootless podman box.** `install.sh --box` builds a systemd box
+- **An opt-in rootless podman box.** The one-line install with `--box` builds a systemd box
   under a dedicated `hal0box` user and runs the unchanged installer in it;
   `sudo hal0 box status|start|stop|logs|exec|rebuild` and `sudo hal0
   uninstall` manage it. Bare metal stays the default. ADR-0051. The Proxmox
@@ -1157,7 +1157,7 @@ later. Before you take it:
   and name it with `profile = "<name>"`; `hal0 config validate` confirms the
   file loads. `hal0 profile migrate` is removed.
 - **An existing install stays as it is.** The rootless podman box is an
-  opt-in for a fresh install (`install.sh --box`); `hal0 update` never moves
+  opt-in for a fresh install (the one-line install with `--box`); `hal0 update` never moves
   an install into a box, and there is no converter yet.
 - **Approvals need a session or root.** Script decisions with a signed-in
   session (`POST /api/auth/login`) or `sudo hal0 agent approvals approve|deny
