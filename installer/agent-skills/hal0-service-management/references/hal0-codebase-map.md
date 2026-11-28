@@ -7,7 +7,8 @@ lives under `/usr/lib/hal0/current/src/hal0/`; in a dev checkout it is
 hal0 is a Python/FastAPI control plane. There is **no Go gateway**, **no
 Lemonade / lemond daemon**, and **no `:13305` upstream** — those were retired.
 Every local model runs as a **podman container, one per slot**. `hal0-api`
-runs **as root** (the hardened/non-root mode was removed, ADR-0023).
+runs as the unprivileged `hal0` user (`User=hal0` in `installer/systemd/hal0-api.service.in`)
+and reaches root-only actions through sudo wrappers such as `hal0-systemctl` and `hal0-agentenv`.
 
 ## Top-level subpackages (`src/hal0/`)
 
@@ -64,7 +65,7 @@ There is **no** `api/routes/lemonade_proxy.py`.
 
 ## Providers (`providers/`)
 
-- `providers/container.py` — `ContainerProvider`, the **sole** slot-lifecycle backend. Each slot → systemd template unit `hal0-slot@<name>.service` running `podman run … <image> --model <path> --port <n> <flags>`. Port is loopback-published; dispatcher reaches it via a `kind="remote"` upstream entry. Mounts `/mnt/ai-models` at the identical path (registry GGUFs are symlinks to absolute `/mnt/ai-models/...` targets).
+- `providers/container.py` — `ContainerProvider`, the **sole** slot-lifecycle backend. Each slot → systemd template unit `hal0-slot@<name>.service` running `podman run … <image> --model <path> --port <n> <flags>`. Port is loopback-published; dispatcher reaches it via a `kind="remote"` upstream entry. Mounts the model store read-only at the identical path (the default store is `/mnt/ai-models`, `DEFAULT_MODEL_STORE` in `config/paths.py`; the `model_store` admin tool prints the configured one).
 - `providers/base.py` — `Provider` ABC (stateless) + `RuntimeLaunchPlan` (frozen).
 - `providers/llama_server.py` — llama.cpp argv/env derivation (Vulkan default, ROCm opt-in) consumed by container profiles.
 - `providers/flm.py` — AMD NPU via host FLM (Strix Halo only).
@@ -108,11 +109,12 @@ There is **no** `api/routes/lemonade_proxy.py`.
 | `/var/lib/hal0/registry/` | Atomic TOML model catalog. |
 | `/var/lib/hal0/state/agents/hermes/provision.json` | Hermes provisioning checkpoints. |
 | `/var/log/hal0/` | Optional file logs (journald is primary). |
-| `/mnt/ai-models/` | GGUF model store, mounted read-only into every slot container at the identical path. |
+| `/mnt/ai-models/` | Default GGUF model store (`[models].store` can point elsewhere), mounted read-only into every slot container at the identical path. |
 
 ## Services / systemd units
 
-- `hal0-api.service` — the FastAPI control plane on `:8080` (runs as **root**).
+- `hal0-api.service` — the FastAPI control plane on `:8080` (runs as `hal0`).
+- `hal0-agent@hermes.service` and `hermes-gateway.service` — the bundled Hermes agent and its gateway (system units, both as `hal0`; see `../SKILL.md`).
 - `hal0-slot@<name>.service` — one podman container per slot (`ExecStart = podman run …`, `ExecStop = podman stop`).
 - MCP servers (`hal0-admin`, `hal0-memory`) are mounted under the API, not separate daemons.
 

@@ -1,68 +1,34 @@
-# Dashboard permission mismatch (root vs hal0)
+# Dashboard permission errors (files owned by the wrong user)
 
 ## Problem
 
-The Hermes dashboard (`hermes dashboard --host 127.0.0.1 --port 9119`) runs as user `hal0`, but the gateway systemd unit runs as `root`. The gateway creates runtime files (`gateway.lock`, `gateway.pid`, `gateway_state.json`, `config.yaml`, `channel_directory.json`, session files, etc.) owned by `root`. When the dashboard's `/api/status` endpoint tries to open these files, it crashes with a 500 and `PermissionError`.
+The Hermes dashboard runs inside `hal0-agent@hermes.service`, and the gateway is
+`hermes-gateway.service`; both run as the `hal0` user and share the Hermes home,
+`/var/lib/hal0/.hermes`. If a file in that home belongs to `root` (for example because someone ran
+`hermes` as root against it, or a box was provisioned by an old root-run installer), the dashboard
+cannot open it and an endpoint such as `/api/status` fails with a 500 and a `PermissionError`.
 
 ## Diagnostic signal
 
-`curl http://127.0.0.1:9119/api/status` returns 500. Enabling debug mode (`log_level='debug'` in uvicorn, or `app.debug = True`) reveals the traceback. Hermes is an editable install from a source checkout, so its files live under the live release's checkout, `/var/lib/hal0/hermes/current/src/` (a host not yet migrated to the release layout has them under `/var/lib/hal0/venvs/hermes/lib/python3.X/site-packages/` instead):
-
-```
-PermissionError: [Errno 13] Permission denied: '/var/lib/hal0/agents/hermes/gateway.lock'
-  File "/var/lib/hal0/hermes/current/src/gateway/status.py", line 466, in is_gateway_runtime_lock_active
-    handle = open(resolved_lock_path, "a+", encoding="utf-8")
-
-  File "/var/lib/hal0/hermes/current/src/hermes_cli/web_server.py", line 545, in get_status
-    gateway_pid = get_running_pid()
+```bash
+journalctl -u hal0-agent@hermes -n 100 --no-pager | grep -i PermissionError
+hal0 doctor perms                      # reports Hermes ownership drift
 ```
 
-Full traceback from a live session (2026-06-02):
+`hal0 doctor perms` audits hal0's ownership table, which includes `HERMES_HOME` and the per-agent
+sub-homes, and reports drift; `--fix` applies it. The dashboard listens on loopback only
+(`127.0.0.1`, default port 9119, set per agent type in `src/hal0/cli/agent_shim.py`).
 
-```
-File "gateway/status.py", line 937, in get_running_pid
-    lock_active = is_gateway_runtime_lock_active(resolved_lock_path)
-File "gateway/status.py", line 466, in is_gateway_runtime_lock_active
-    handle = open(resolved_lock_path, "a+", encoding="utf-8")
-PermissionError: [Errno 13] Permission denied: '/var/lib/hal0/agents/hermes/gateway.lock'
-```
-
-## Root-owned files found (12 total, live example)
-
-```
-/var/lib/hal0/agents/hermes/gateway.lock          — gateway runtime lock
-/var/lib/hal0/agents/hermes/gateway.pid           — gateway PID file
-/var/lib/hal0/agents/hermes/gateway_state.json    — gateway state
-/var/lib/hal0/agents/hermes/config.yaml           — main config (also blocks config save)
-/var/lib/hal0/agents/hermes/channel_directory.json — platform channel map
-/var/lib/hal0/agents/hermes/processes.json        — background process state
-/var/lib/hal0/agents/hermes/.skills_prompt_snapshot.json — agent runtime state
-/var/lib/hal0/agents/hermes/sessions/session_*.json — 4 session files
-```
-
-## Fix
-
-Batch chown everything to the hal0 user:
+## Fix (the person, as root)
 
 ```bash
-find /var/lib/hal0/agents/hermes -user root -exec chown hal0:hal0 {} \;
+sudo hal0 agent reprovision hermes --repair
 ```
 
-Then restart the dashboard:
+`--repair`, run as root, reconciles ownership of `HERMES_HOME`, the per-agent sub-homes and the
+venv to `hal0:hal0` (`reconcile_ownership_on_repair` in `src/hal0/agents/hermes_provision.py`; it
+is skipped when not run as root). Do not `chown` by hand with a `find` over the Hermes home, and
+do not start `hermes dashboard` yourself: `hal0-agent@hermes` owns it.
 
-```bash
-sudo -u hal0 HERMES_HOME=/var/lib/hal0/agents/hermes \
-  /var/lib/hal0/venvs/hermes/bin/hermes dashboard \
-  --host 127.0.0.1 --port 9119 --tui --no-open --skip-build &
-```
-
-## Long-term note
-
-The gateway systemd unit runs as `root`, so it will keep creating root-owned files on startup. This is a structural mismatch — the dashboard needs to read gateway state, but permissions block it. Options to fix permanently:
-
-1. Run the gateway systemd unit as `hal0` (change `User=` in the unit or drop-in)
-2. Run the dashboard as `root` (simpler but less secure)
-3. Add a post-start `chown` hook in the gateway unit
-4. Set SGID on `/var/lib/hal0/agents/hermes/` so all new files inherit the `hal0` group
-
-Until one of those is implemented, the `find - chown` command above is the quick-fix after every gateway restart.
+Then ask the person to restart the agent: `sudo systemctl restart hal0-agent@hermes`.
+If root-owned files come back after a restart, tell the person what created them; the units do not.

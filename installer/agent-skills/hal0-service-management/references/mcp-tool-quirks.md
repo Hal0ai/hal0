@@ -1,98 +1,43 @@
 # MCP tool quirks — hal0-admin / hal0-memory
 
-Non-obvious behaviours discovered while probing hal0. These are not bugs, just
-API surface facts that differ from what the tool signatures suggest.
+Facts about the tool surface that differ from what a tool's name suggests. Names are shown bare
+(`slot_list`); your client calls them `mcp__hal0_admin__slot_list` (see the `hal0-admin` skill).
 
-## hal0-admin tools
+## Arguments
 
-### `slot_status`
-- **Requires `name`, not `slot_name`.** The JSON arg is `{"name": "agent"}`.
-  Passing `{"slot_name": "agent"}` succeeds but returns `{"status":"error"}`.
-- Occasionally returns empty error (`"Error executing tool slot_status: "`) with
-  no structured payload — treat as transient, retry once before giving up.
+- **Every hal0-admin tool takes one `args` object**: `{"args": {"name": "agent"}}`. Each tool's
+  schema in the tool listing names its fields. A tool with no required field can be called with no `args`.
+- `slot_status`, `slot_load` and the other slot tools take the **slot name** as `name`.
+  `model_swap` takes `name` (the slot, not the model) and `model_id`.
 
-### `slot_list`
-- No args (empty `{}`). Returns all slots as a compact roster (name, id, state,
-  `loaded`, model_id, backend, port, container health, image tag). It omits
-  `resolved_command`, the full `image` ref and tuning detail so a large roster
-  fits the agent's tool-result budget; call `slot_status` for those.
-- Can fail with empty error identically to `slot_status` — retry once.
+## Large answers
 
-### `read_resource`
-- **Only accepts registered MCP resource URIs.** The resource list on this host
-  is empty (`[]` from both hal0-admin and hal0-memory). Arbitrary `file:///` URIs
-  return `Unknown resource`. You cannot use this tool to read arbitrary files.
-  Use `delegate_task` with terminal toolset (after setting `allow_code_exec`)
-  or a terminal-based subagent for file reads.
+- `slot_list` returns a compact roster. It leaves out tuning detail and the resolved command; call
+  `slot_status` or `slot_resolved` for those.
+- `model_list` unfiltered is large: pass `fields` (for example `id,type`) and filters (`installed`,
+  `type`, `capability`, `device`, `q`, `limit`, `offset`).
+- `capability_list` unfiltered is large: pass `section` (`backends`, `catalogs`, `selections`)
+  and/or `summary=true`.
 
-### `logs_tail`
-- **Gated.** Returns `{"status":"pending_approval","approval_id":"..."}` instead
-  of log output. Requires human approval through the admin gating layer.
-  Workaround: use a terminal subagent running `journalctl --user -u <unit>`.
+## Gated tools
 
-### `capability_list`
-- Returns `{"status":"error"}` with empty detail — possibly requires specific
-  args or the capability subsystem is not configured on this host.
+Some tools do not run when called: they return `pending_approval` and wait for the person.
 
-### `hardware_probe` / `version_info`
-- Can fail with empty error when slots are evicted/offline. Retry after warming
-  a slot (send a request to the agent slot first).
+- `logs_tail`, `slot_logs`, `comfyui_logs` and `mcp_server_logs` are gated, because journal text
+  can carry secrets. Ask the person to approve, or use `journalctl -u <unit>` with the terminal
+  tool (the units are system units, so there is no `--user`).
+- Gated writes include `slot_create`, `slot_delete`, `slot_restart`, `model_pull`, `model_delete`,
+  `capability_set`, `config_write`, `provider_credential_write`, `service_action`.
+- Autonomous writes (no approval) include `slot_load`, `slot_unload`, `slot_edit`, `model_swap`,
+  `model_scan`, `memory_add`. `slot_load` with `unload_npu_holder=true` is gated.
+- The authoritative lists are `AUTONOMOUS_READ_TOOLS`, `AUTONOMOUS_WRITE_TOOLS` and `GATED_TOOLS`
+  in `src/hal0/mcp/admin.py`.
 
-### `provider_list`
-- Returns empty array `[]` when no remote providers are configured. This is
-  expected — it means everything runs locally via lemonade/llama-server.
+## Tool-specific
 
-### `model_list`
-- Works reliably. Returns full model registry with sizes, backends, and tags.
-  This is the best tool for understanding what's available locally.
-
-### `env_report`
-- The `tooling` field scans a fixed set of paths: docker, podman, flm, python3, uv.
-  It does **not** scan for node, npm, npx, claude, claude-code, or other binaries.
-  Absence from the report does not mean the binary is absent — it means it's
-  outside the scan set.
-
-## hal0-memory tools
-
-### `memory_search`
-- **30-second MCP timeout.** Broad queries or queries during high memory load
-  can time out. Narrow the query (fewer terms, shorter string) if hitting
-  timeouts. The underlying store (Cognee) is a vector+graph hybrid — broad
-  semantic searches are more expensive than keyword matches.
-
-### `slot_status` — per-slot argument parsing bug
-- **`{"name":"agent"}` works fine. `{"name":"chat"}` fails with `mcp.missing_arg`.**
-  This is NOT a general bug — the tool signature is correct. Something specific
-  to the `"chat"` slot or its arg routing causes the parser to drop the `name`
-  field mid-flight. Workaround: use `slot_list` for the roster, or use `systemctl --user show -p ... --value <service>.service`
-  via terminal. If a specific slot name triggers this, avoid calling
-  `slot_status` on it and fall back to `slot_list`.
-
-### `memory_add` — never name a private namespace
-- `memory_add` (admin or memory server) **cannot address a private namespace by
-  name** — `dataset="private:<agent>"` returns an `mcp.memory_schema` error:
-  "non-private callers cannot address the private namespace by name."
-- Writes are shared by default. To keep one note private pass `private=true`
-  (a bool argument); hal0 files it under your own identity. On `hal0-admin`
-  every tool takes a single `args` object, so nest it: `{"args": {"text": "...",
-  "private": true}}`. A top-level `private` is silently dropped. (`hal0-memory`
-  takes `private` as a normal top-level argument.) A profile set to
-  `memory_private` makes its memory facts private without the argument; mental
-  models and directives are bank-level and stay visible to every agent.
-
-### `capability_list` — catalog truncation
-- Returns 3 backend entries + a massive pullable-model catalog. The catalog
-  can exceed 80K chars, causing the response to be truncated. If you need the
-  full catalog, parse it in chunks or filter by capability name.
-
-## General patterns
-
-- **Many admin tools are gated** and return `pending_approval` for write
-  operations (`config_write`, `capability_set`, `model_pull`, `model_delete`,
-  `slot_create`, `slot_delete`, `provider_credential_write`, `model_swap`).
-  Read operations (`slot_list`, `model_list`, `env_report`, `provider_list`,
-  `version_info`, `npu_status`, `model_store_probe`) typically pass through.
-
-- **Empty error responses** (`"Error executing tool X: "`) should be treated as
-  transient. Retry once with a 1-second gap. If they persist, the underlying
-  slot may be evicted — warm it by sending a health-check request first.
+- `model_pull` returns a job id at once; check `model_pull_status` once and report. Do not poll in a loop.
+- `slot_restart` can time out on a slot in `error` state; prefer `slot_load`, which regenerates the unit.
+- `provider_credential_write` stores a model upstream provider's API key. It does not write messaging-platform tokens.
+- `provider_list` is empty when no remote provider is configured; that is normal.
+- `memory_add` is shared by default. Pass `private=true` (a boolean field) to file one note under your
+  own identity; never name a private dataset yourself (`dataset="private:<agent>"` is refused).
