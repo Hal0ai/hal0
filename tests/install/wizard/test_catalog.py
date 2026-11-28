@@ -130,3 +130,22 @@ def test_bad_models_file_is_a_catalog_error(catalog_path: Path, tmp_path: Path, 
     models.write_text(text)
     with pytest.raises(CatalogError, match=re.escape(str(models))):
         load_catalog(catalog_path, models)
+
+
+def test_the_image_question_offers_the_recommended_set(catalog: Catalog) -> None:
+    options = catalog.questions["image_model"].options
+    assert [(o.value, o.label, o.help) for o in options] == [
+        (
+            "recommended",
+            "The recommended set",
+            "the image models that suit this box",
+        )
+    ]
+
+
+def test_extra_keys_on_a_model_row_are_ignored(catalog_path: Path, tmp_path: Path) -> None:
+    models = tmp_path / "m.json"
+    row = {"role": "starter", "model": "x", "label": "X", "recommended": True, "family": "q"}
+    models.write_text(json.dumps({"version": 1, "model_ladder": [row]}))
+    loaded = load_catalog(catalog_path, models).model_ladder
+    assert [(r.model, r.label) for r in loaded] == [("x", "X")]

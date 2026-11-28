@@ -111,7 +111,8 @@ def _role(s: State) -> tuple[str, str]:
 
 def _image_step(s: State) -> bool:
     on = any(c.id == _IMAGE_JOB for c in jobs_on(s, effective_doc(s)))
-    return on and any(r.role == "image" for r in s.catalog.model_ladder)
+    has_rows = any(r.role == "image" for r in s.catalog.model_ladder)
+    return on and has_rows and _question(s, "image_model") is not None
 
 
 def _ladder_row(s: State, row: ModelRow, fixed_note: str | None) -> Row:
@@ -123,7 +124,7 @@ def _ladder_row(s: State, row: ModelRow, fixed_note: str | None) -> Row:
 
 
 def _extra_row(s: State, q: Question, value: str, fixed_note: str | None) -> Row | None:
-    """The `auto` or `none` row, worded by the question's options."""
+    """The `auto`, `none` or `recommended` row, worded by the question's options."""
     option = next((o for o in q.options if o.value == value), None)
     if option is None:
         return None
@@ -157,7 +158,7 @@ def models_rows(s: State) -> tuple[Row, ...]:
 
     rows = [_ladder_row(s, r, note(r.model, [r.model])) for r in ladder]
     if role != "starter":
-        return tuple(rows)
+        return _present([_extra_row(s, q, "recommended", note([])), *rows])
     auto = _extra_row(s, q, "auto", note("auto"))
     none = _extra_row(s, q, "none", note("none"))
     return _present([auto, *rows, none])
@@ -165,15 +166,21 @@ def models_rows(s: State) -> tuple[Row, ...]:
 
 def models_cursor(s: State) -> int:
     rows = models_rows(s)
+    q = _question(s, _role(s)[1])
+    current = None if q is None else get(effective_doc(s), q.answer_key)
     if s.step == 0:
-        q = _question(s, _role(s)[1])
-        current = None if q is None else get(effective_doc(s), q.answer_key)
         for i, r in enumerate(rows):
             if r.value == current:
                 return i
         for i, r in enumerate(rows):
             if r.id == "auto":
                 return i
+    else:
+        ids = [r.id for r in rows]
+        if isinstance(current, list) and len(current) == 1 and current[0] in ids:
+            return ids.index(current[0])
+        if "recommended" in ids:
+            return ids.index("recommended")
     return next((i for i, r in enumerate(rows) if r.state == "open"), 0)
 
 
@@ -194,6 +201,11 @@ def _models_next(s: State) -> State:
     return go_on(s)
 
 
+def _image_value(row: Row) -> list[object]:
+    """What an image row writes: nothing listed means the recommended set."""
+    return [] if row.id == "recommended" else [row.value]
+
+
 def models_enter(s: State) -> State:
     rows = models_rows(s)
     row = rows[s.cursor]
@@ -205,7 +217,7 @@ def models_enter(s: State) -> State:
         return _models_next(s)
     role, qid = _role(s)
     key = key_of(s, qid)
-    value = row.value if role == "starter" else [row.value]
+    value = row.value if role == "starter" else _image_value(row)
     if get(effective_doc(s), key) != value:
         s = record_answer(s, key, value)
     picked = next(
@@ -279,7 +291,7 @@ def network_rows(s: State) -> tuple[Row, ...]:
         port = replace(port, detail=f"{DEFAULT_PORT} (default)")
     if origins is not None and isinstance(origins.value, list):
         origins = replace(origins, detail=", ".join(str(o) for o in origins.value))
-    return _present([host, port, _row(s, doc, "bind_host"), origins])
+    return _present([host, port, origins])
 
 
 def _job_off(s: State, job: str) -> str:

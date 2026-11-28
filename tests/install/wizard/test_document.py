@@ -125,6 +125,43 @@ def test_flags_and_variables_become_overrides(
     assert Override(key, value, source) in overrides(flags, env)
 
 
+def test_recommended_image_models_mean_the_installer_picks_the_set() -> None:
+    found = overrides([], {"HAL0_IMAGE_MODELS": "recommended"})
+    assert Override("gen.mode", "scaffold_and_download", "HAL0_IMAGE_MODELS") in found
+    assert Override("gen.models", [], "HAL0_IMAGE_MODELS") in found
+    assert not [o for o in found if o.value == ["recommended"]]
+
+
+@pytest.mark.parametrize("value", ["none", "0"])
+def test_no_image_models_turn_images_off_without_a_list(value: str) -> None:
+    found = overrides([], {"HAL0_IMAGE_MODELS": value})
+    assert found == (Override("gen.mode", "off", "HAL0_IMAGE_MODELS"),)
+
+
+def test_a_listen_address_in_a_saved_or_given_document_passes_through(catalog: Catalog) -> None:
+    doc = effective(
+        catalog,
+        chosen={},
+        saved={"network": {"bind_host": "127.0.0.1"}},
+        given=None,
+        over=[],
+        hal0_version="v",
+        now=NOW,
+    )
+    assert get(doc, "network.bind_host") == "127.0.0.1"
+    doc = effective(
+        catalog,
+        chosen={},
+        saved=None,
+        given={"network": {"bind_host": "0.0.0.0"}},
+        over=[],
+        hal0_version="v",
+        now=NOW,
+    )
+    assert get(doc, "network.bind_host") == "0.0.0.0"
+    assert get(preset(catalog, "recommended"), "network.bind_host") is None
+
+
 def test_a_skip_variable_not_set_to_one_is_ignored() -> None:
     assert overrides([], {"HAL0_SKIP_HERMES": "0", "HAL0_SKIP_PI": ""}) == ()
 

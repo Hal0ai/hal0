@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from hal0.install.wizard.catalog import Catalog, ModelRow
+from hal0.install.wizard.catalog import Catalog, ModelRow, Option
 from hal0.install.wizard.document import Override
 from hal0.install.wizard.facts import Facts, load_facts
 from hal0.install.wizard.flow import (
@@ -174,6 +174,9 @@ def test_empty_ladder_says_so_and_asks_nothing(catalog: Catalog, usable_facts: F
     assert "models.starter" not in chosen(press(models, "ENTER"))
 
 
+_IMAGES_ON: dict[str, object] = {"gen": {"mode": "scaffold_and_download"}}
+
+
 def _with_image_row(catalog: Catalog) -> Catalog:
     row = ModelRow("image", "img-1", "Image", "cpu", None, None, None, False)
     return replace(catalog, model_ladder=(*catalog.model_ladder, row))
@@ -195,8 +198,8 @@ def test_image_step_picks_into_gen_models(ladder_catalog: Catalog, big_pool_fact
     catalog = _with_image_row(ladder_catalog)
     s = run(custom(catalog, big_pool_facts), "DOWN", "DOWN", "DOWN", "SPACE", "ENTER", "ENTER")
     assert view(s).screen is Screen.MODELS
-    assert [r.id for r in view(s).rows] == ["img-1"]
-    done = press(s, "ENTER")
+    assert [r.id for r in view(s).rows] == ["recommended", "img-1"]
+    done = run(s, "DOWN", "ENTER")
     assert view(done).screen is Screen.STORAGE
     assert chosen(done)["gen.models"] == ["img-1"]
 
@@ -250,15 +253,81 @@ def test_network_values_are_recorded_in_their_shapes(catalog: Catalog, usable_fa
     assert answers["network.allowed_origins"] == ["https://a.test", "https://b.test"]
 
 
-def test_space_cycles_the_listen_address_and_opens_no_field(
+def test_the_listen_address_is_not_a_question_and_the_network_screen_has_no_row_for_it(
     catalog: Catalog, usable_facts: Facts
 ) -> None:
-    s = open_field(run(custom(catalog, usable_facts), "ENTER", "ENTER", "ENTER"), "bind_host")
+    assert "bind_host" not in catalog.questions
+    s = run(custom(catalog, usable_facts), "ENTER", "ENTER", "ENTER")
+    assert view(s).screen is Screen.NETWORK
+    assert [r.id for r in view(s).rows] == ["hostname", "port", "allowed_origins"]
+
+
+def test_a_customize_run_never_writes_a_listen_address(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    s = run(custom(catalog, usable_facts), "ENTER", "ENTER", "ENTER")
+    s = run(open_field(s, "port"), *"9000", "ENTER")
+    s = run(s, "ENTER", "ENTER")
+    assert view(s).screen is Screen.REVIEW
+    assert not [k for k in chosen(s) if "bind_host" in k]
+
+
+def test_a_question_with_options_in_a_multi_row_screen_is_one_row_that_steps_on_space(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    memory = catalog.questions["memory_model"]
+    two = replace(
+        memory,
+        options=(*memory.options, Option("dedicated", "Its own model", "memory gets a model")),
+    )
+    two_catalog = replace(catalog, questions={**catalog.questions, "memory_model": two})
+    s = run(custom(two_catalog, usable_facts), "ENTER", "ENTER", "ENTER", "ENTER")
+    s = open_field(s, "memory_model")
     assert view(s).editing is None
-    assert chosen(s)["network.bind_host"] == "127.0.0.1"
-    row = next(r for r in view(s).rows if r.id == "bind_host")
-    assert row.detail == "This machine only"
-    assert chosen(press(s, "SPACE"))["network.bind_host"] == "0.0.0.0"
+    assert chosen(s)["models.memory"] == "dedicated"
+    row = next(r for r in view(s).rows if r.id == "memory_model")
+    assert row.detail == "Its own model"
+    assert chosen(press(s, "SPACE"))["models.memory"] == "shared"
+
+
+_ABSENT_IDS = {
+    "starter_model": {"auto", "small-1", "big-1"},
+    "image_model": {"recommended", "img-1"},
+    "hf_token": set(),
+}
+
+
+@pytest.mark.parametrize(
+    "qid",
+    [
+        "model_store",
+        "flm_store",
+        "hostname",
+        "port",
+        "allowed_origins",
+        "terminal_tool",
+        "memory_model",
+        "starter_model",
+        "image_model",
+        "hf_token",
+    ],
+)
+def test_a_customize_row_whose_question_is_gone_is_skipped_never_an_error(
+    ladder_catalog: Catalog, npu_facts: Facts, qid: str
+) -> None:
+    catalog = _with_image_row(ladder_catalog)
+    questions = {k: v for k, v in catalog.questions.items() if k != qid}
+    s = custom(replace(catalog, questions=questions), npu_facts, given=_IMAGES_ON)
+    seen: set[str] = set()
+    for _ in range(12):
+        v = view(s)
+        view(press(s, "?"))
+        if v.screen is Screen.REVIEW:
+            break
+        seen |= {r.id for r in v.rows}
+        s = press(s, "ENTER")
+    assert view(s).screen is Screen.REVIEW
+    assert not seen & _ABSENT_IDS.get(qid, {qid})
 
 
 def test_terminal_tool_defaults_off_and_review_prints_it_when_on(
@@ -445,7 +514,7 @@ def test_the_image_step_keeps_a_token_typed_for_the_chat_model(
 ) -> None:
     catalog = _image_catalog(ladder_catalog, False)
     s = run(_at_image_step(catalog, big_pool_facts), *"hf_x", "ENTER")
-    assert [r.id for r in view(s).rows] == ["img-1"]
+    assert [r.id for r in view(s).rows] == ["recommended", "img-1"]
     done = press(s, "ENTER")
     assert view(done).screen is Screen.STORAGE
     assert secret(done) == "hf_x"
@@ -456,7 +525,7 @@ def test_an_image_model_with_an_account_does_not_ask_again_when_a_token_is_held(
 ) -> None:
     catalog = _image_catalog(ladder_catalog, True)
     s = run(_at_image_step(catalog, big_pool_facts), *"hf_x", "ENTER")
-    done = press(s, "ENTER")
+    done = run(s, "DOWN", "ENTER")
     assert view(done).screen is Screen.STORAGE
     assert view(done).editing is None
     assert secret(done) == "hf_x"
@@ -467,8 +536,8 @@ def test_an_image_model_with_an_account_asks_when_no_token_is_held(
 ) -> None:
     catalog = _image_catalog(ladder_catalog, True)
     s = run(custom(catalog, big_pool_facts), "DOWN", "DOWN", "DOWN", "SPACE", "ENTER", "ENTER")
-    assert [r.id for r in view(s).rows] == ["img-1"]
-    asked = press(s, "ENTER")
+    assert [r.id for r in view(s).rows] == ["recommended", "img-1"]
+    asked = run(s, "DOWN", "ENTER")
     assert view(asked).editing == ""
     done = run(asked, *"hf_y", "ENTER")
     assert view(done).screen is Screen.STORAGE
@@ -484,3 +553,83 @@ def test_an_information_only_models_screen_has_no_cursor_keys_in_its_hint(
     v = view(run(custom(catalog, usable_facts), "ENTER"))
     assert all(r.kind == "info" for r in v.rows)
     assert v.hint == "Enter go on, b back, ? explain, q quit"
+
+
+def _two_image_catalog(ladder_catalog: Catalog) -> Catalog:
+    rows = (
+        ModelRow("image", "img-1", "Image one", "cpu", None, None, None, False),
+        ModelRow("image", "img-2", "Image two", "cpu", None, None, None, False),
+    )
+    return replace(ladder_catalog, model_ladder=(*ladder_catalog.model_ladder, *rows))
+
+
+def _image_step(catalog: Catalog, facts: Facts, given: dict[str, object] | None = None) -> State:
+    s = run(custom(catalog, facts, given=given or _IMAGES_ON), "ENTER", "ENTER")
+    assert view(s).screen is Screen.MODELS
+    return s
+
+
+def test_the_image_list_is_the_recommended_row_then_the_image_rows_in_file_order(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    catalog = _two_image_catalog(ladder_catalog)
+    v = view(_image_step(catalog, big_pool_facts))
+    assert [r.id for r in v.rows] == ["recommended", "img-1", "img-2"]
+    option = next(o for o in catalog.questions["image_model"].options if o.value == "recommended")
+    assert (v.rows[0].label, v.rows[0].detail) == (option.label, option.help)
+    assert v.rows[1].label == "Image one"
+
+
+@pytest.mark.parametrize(
+    ("models", "row"),
+    [
+        ([], 0),
+        (["img-2"], 2),
+        (["img-1", "img-2"], 0),
+        (["gone-9"], 0),
+    ],
+)
+def test_the_image_cursor_starts_on_the_row_of_the_current_value(
+    ladder_catalog: Catalog, big_pool_facts: Facts, models: list[str], row: int
+) -> None:
+    catalog = _two_image_catalog(ladder_catalog)
+    given: dict[str, object] = {"gen": {"mode": "scaffold_and_download", "models": models}}
+    assert view(_image_step(catalog, big_pool_facts, given=given)).cursor == row
+
+
+def test_one_unchanged_enter_on_the_image_step_changes_nothing(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    catalog = _two_image_catalog(ladder_catalog)
+    s = _image_step(catalog, big_pool_facts)
+    assert "gen.models" not in chosen(press(s, "ENTER"))
+    given: dict[str, object] = {"gen": {"mode": "scaffold_and_download", "models": ["img-1"]}}
+    held = _image_step(catalog, big_pool_facts, given=given)
+    assert view(held).cursor == 1
+    assert "gen.models" not in chosen(press(held, "ENTER"))
+
+
+def test_enter_on_the_image_step_writes_the_highlighted_value_when_it_differs(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    catalog = _two_image_catalog(ladder_catalog)
+    picked = run(_image_step(catalog, big_pool_facts), "DOWN", "DOWN", "ENTER")
+    assert chosen(picked)["gen.models"] == ["img-2"]
+    given: dict[str, object] = {"gen": {"mode": "scaffold_and_download", "models": ["img-1"]}}
+    back = run(_image_step(catalog, big_pool_facts, given=given), "UP", "ENTER")
+    assert chosen(back)["gen.models"] == []
+
+
+def test_a_fixed_recommended_set_marks_the_recommended_row(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    catalog = _two_image_catalog(ladder_catalog)
+    over = [
+        Override("gen.mode", "scaffold_and_download", "HAL0_IMAGE_MODELS"),
+        Override("gen.models", [], "HAL0_IMAGE_MODELS"),
+    ]
+    s = run(custom(catalog, big_pool_facts, over=over), "ENTER", "ENTER")
+    v = view(s)
+    assert [r.id for r in v.rows] == ["recommended", "img-1", "img-2"]
+    assert (v.rows[0].state, v.rows[0].note) == ("fixed", "set by HAL0_IMAGE_MODELS")
+    assert v.rows[1].note == ""

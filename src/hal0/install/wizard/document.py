@@ -154,7 +154,9 @@ def _variable_overrides(environ: Mapping[str, str]) -> list[Override]:
         add("gen.mode", "off", "HAL0_IMAGE_MODELS")
     elif images:
         add("gen.mode", "scaffold_and_download", "HAL0_IMAGE_MODELS")
-        add("gen.models", images.replace(",", " ").split(), "HAL0_IMAGE_MODELS")
+        # An empty list means the recommended set to the installer.
+        listed = [] if images == "recommended" else images.replace(",", " ").split()
+        add("gen.models", listed, "HAL0_IMAGE_MODELS")
     if value("HAL0_SKIP_BRAIN_MODEL") == "1":
         add("models.brain", "none", "HAL0_SKIP_BRAIN_MODEL")
     elif value("HAL0_BRAIN_MODEL"):

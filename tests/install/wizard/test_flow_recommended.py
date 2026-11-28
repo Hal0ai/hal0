@@ -85,6 +85,8 @@ def test_folder_lists_disks_largest_free_first_with_the_default_preselected(
         ("~/models", "must start with /"),
         ("/data/\x07models", "control character"),
         ("", "is required"),
+        ("/data/50%models", "must not contain %"),
+        ("/data/%2e", "must not contain %"),
     ],
 )
 def test_bad_folder_is_refused_on_the_same_screen(typed: str, error: str) -> None:
@@ -187,6 +189,16 @@ def test_review_states_admin_key_terminal_tool_and_address(
     assert rows["reachable"].detail == "http://hal0.local:8080 from this network"
     assert rows["downloads"].detail == "nothing yet; models are added after install"
     assert "total" not in rows
+
+
+@pytest.mark.parametrize("bind", ["127.0.0.1", "0.0.0.0"])
+def test_the_review_always_says_the_box_is_reachable_from_the_network(
+    catalog: Catalog, usable_facts: Facts, bind: str
+) -> None:
+    given: dict[str, object] = {"network": {"bind_host": bind}}
+    s = run(start(catalog, usable_facts, given=given), "ENTER", "ENTER")
+    rows = {r.id: r for r in view(s).rows}
+    assert rows["reachable"].detail == "http://hal0.local:8080 from this network"
 
 
 def test_review_on_a_box_without_podman_does_not_promise_chat(

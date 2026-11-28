@@ -229,12 +229,14 @@ def commit_folder(s: State, text: str) -> State:
     return go_on(done)
 
 
-def _check_path(text: str, what: str) -> tuple[str, str | None]:
+def _check_path(text: str, what: str, *, percent: bool = False) -> tuple[str, str | None]:
     path = text.strip()
     if not path:
         return path, f"{what} is required"
     if any(ord(c) < 32 or ord(c) == 127 for c in path):
         return path, f"{what} has a control character"
+    if percent and "%" in path:
+        return path, f"{what} must not contain %"
     if not path.startswith("/"):
         return path, f"{what} must start with /"
     path = posixpath.normpath(path)
@@ -248,7 +250,7 @@ def _check_path(text: str, what: str) -> tuple[str, str | None]:
 
 def validate_folder(text: str) -> tuple[str, str | None]:
     """The cleaned folder path and the reason it cannot be used, or None."""
-    return _check_path(text, "the folder")
+    return _check_path(text, "the folder", percent=True)
 
 
 # --------------------------------------------------------- REVIEW screen
@@ -300,7 +302,7 @@ def _model_text(s: State, doc: Document, pick: Pick | None) -> str:
 
 
 def _folder_text(s: State, doc: Document) -> str:
-    path = get(doc, key_of(s, "model_store"))
+    path = maybe_value(s, doc, "model_store")
     if not isinstance(path, str):
         return "unchanged"
     disk = disk_of(path, s.facts.disks)
@@ -310,12 +312,7 @@ def _folder_text(s: State, doc: Document) -> str:
 def _access_rows(s: State, doc: Document) -> list[Row]:
     host = maybe_value(s, doc, "hostname") or DEFAULT_HOST
     port = maybe_value(s, doc, "port") or DEFAULT_PORT
-    local = maybe_value(s, doc, "bind_host") == "127.0.0.1"
-    reach = (
-        f"http://127.0.0.1:{port} from this machine only"
-        if local
-        else f"http://{host}:{port} from this network"
-    )
+    reach = f"http://{host}:{port} from this network"
     admin = {"generate": "created; shown once when the install ends", "none": "not created"}
     terminal = (
         "ON: the assistant can run commands as a root-equivalent user"
@@ -341,9 +338,9 @@ def _skipped(s: State, doc: Document) -> list[str]:
 
 def _warnings(s: State, doc: Document) -> list[str]:
     out = []
-    if s.facts.gpu_outcome != "usable" and get(doc, key_of(s, "cpu_only")) is True:
+    if s.facts.gpu_outcome != "usable" and maybe_value(s, doc, "cpu_only") is True:
         out.append("No graphics card will be used. " + s.catalog.questions["cpu_only"].help)
-    path = get(doc, key_of(s, "model_store"))
+    path = maybe_value(s, doc, "model_store")
     disk = disk_of(path, s.facts.disks) if isinstance(path, str) else None
     starter = maybe_value(s, doc, "starter_model")
     picked = next(
