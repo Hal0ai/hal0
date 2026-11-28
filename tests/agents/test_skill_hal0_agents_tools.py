@@ -14,14 +14,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
+from hal0.bridge.store import TERMINAL_STATUSES
+from hal0.bridge.watcher import HERMES_STATUSES
 from hal0.mcp.agents import build_server
 
 REPO = Path(__file__).resolve().parents[2]
 SKILL = REPO / "installer" / "agent-skills" / "hal0-agents" / "SKILL.md"
 
-_TOOL_NAME = re.compile(r"\bagents?_[a-z_]+\b")
+#: ``bridge.agent_unkeyed`` and the like are error codes, not tools.
+_TOOL_NAME = re.compile(r"(?<!bridge\.)\bagents?_[a-z_]+\b")
+#: Fields of the ``agents_list`` result the skill names; they look like tool names but are not.
+_RESULT_FIELDS = {"agent_id"}
 _CALL = re.compile(r"^\s*→\s*(agents?_[a-z_]+)(.*)$")
 _ARG_LINE = re.compile(r"^\s{2}([a-z_]+):\s")
 _INLINE_ARG = re.compile(r"\b([a-z_]+):\s")
@@ -75,7 +78,7 @@ def _examples(body: str) -> list[tuple[str, set[str]]]:
 
 async def test_every_tool_the_skill_names_exists() -> None:
     tools = await _tools()
-    named = set(_TOOL_NAME.findall(_code_text(_body())))
+    named = set(_TOOL_NAME.findall(_code_text(_body()))) - _RESULT_FIELDS
     assert named, "no tool name found in the skill"
     assert not (named - set(tools)), f"tools that do not exist: {sorted(named - set(tools))}"
 
@@ -112,9 +115,28 @@ async def test_every_tool_with_required_parameters_has_a_complete_example() -> N
         )
 
 
-@pytest.mark.parametrize("stale", ["pi-agent", "agent_id"])
-def test_stale_names_are_gone(stale: str) -> None:
-    assert stale not in SKILL.read_text(encoding="utf-8")
+def test_the_status_list_is_the_one_the_source_defines() -> None:
+    line = next(
+        (ln for ln in _body().splitlines() if ln.startswith("Statuses:")),
+        None,
+    )
+    assert line is not None, "the skill has no 'Statuses:' line"
+    listed = re.findall(r"`([a-z_]+)`", line.split(".", 1)[0])
+    assert len(listed) == len(set(listed)), "a status is listed twice"
+    defined = HERMES_STATUSES | {"waiting_for_clarification"}
+    assert not set(listed) - defined, f"not statuses: {sorted(set(listed) - defined)}"
+    assert not defined - set(listed), f"statuses missing: {sorted(defined - set(listed))}"
+    assert set(listed[-5:]) == TERMINAL_STATUSES, "the last five listed are not the final ones"
+
+
+def test_pi_agent_is_gone() -> None:
+    assert "pi-agent" not in SKILL.read_text(encoding="utf-8")
+
+
+def test_agent_id_is_never_passed_as_an_argument() -> None:
+    # `agent_id` is a real field of the agents_list result, so only a call may not use it.
+    for tool, args in _examples(_body()):
+        assert "agent_id" not in args, f"{tool} is shown with agent_id"
 
 
 def test_no_machine_specific_content() -> None:
