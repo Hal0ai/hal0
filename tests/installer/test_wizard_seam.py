@@ -499,6 +499,214 @@ def test_a_work_base_others_can_write_is_refused(tmp_path: Path, stub: dict[str,
     run.chmod(0o755)
 
 
+# ── the folder the person chose, and the box's existing store ───────────────
+
+
+def _store_doc(path: str, flm: str | None = None) -> str:
+    store = {"path": path}
+    if flm:
+        store["flm_path"] = flm
+    return json.dumps({"version": 1, "model_store": store})
+
+
+CHECK = ('hal0_store_is_operator_choice "${HAL0_MODELS_DIR}" && echo OWN=yes || echo OWN=no')
+
+
+def test_chosen_folder_honoured_only_when_equal(tmp_path: Path, stub: dict[str, str]) -> None:
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
+                               "STUB_CHOSEN": "/home/alice/models\n"}, after=CHECK)
+    state = _state(proc)
+    assert state["RC"] == "0", proc.stderr
+    assert state["CHOSEN"] == "/home/alice/models" and state["OWN"] == "yes"
+    assert state["LEFT"] == ""
+    for line in ("/home/alice/other\n", "/home/alice/models/\n", "/home/alice/models \n",
+                 "/home/alice/modelsX\n", ""):
+        proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
+                                   "STUB_CHOSEN": line}, after=CHECK)
+        state = _state(proc)
+        assert state["RC"] == "0" and state["CHOSEN"] == "" and state["OWN"] == "no", line
+    # and the doubled slash the reader folds: compared with the exported text
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("//home/alice/models"),
+                               "STUB_CHOSEN": "/home/alice/models\n"}, after=CHECK)
+    assert _state(proc)["OWN"] == "yes"
+
+
+def test_chosen_folder_ignored_when_headless_or_absent(tmp_path: Path,
+                                                       stub: dict[str, str]) -> None:
+    base = {**stub, "STUB_DOC": _store_doc("/home/alice/models")}
+    proc = _collect(tmp_path, base, after=CHECK)
+    assert _state(proc)["OWN"] == "no"
+    for extra in ({"HAL0_NONINTERACTIVE": "1"},):
+        proc = _collect(tmp_path, {**base, **extra, "STUB_CHOSEN": "/home/alice/models\n"},
+                        after=CHECK)
+        state = _state(proc)
+        assert state["RC"] == "0" and state["CHOSEN"] == "" and state["OWN"] == "no"
+    given = tmp_path / "given.json"
+    given.write_text(_store_doc("/home/alice/models"), encoding="utf-8")
+    proc = _collect(tmp_path, {**base, "HAL0_ANSWERS_FILE": str(given),
+                               "STUB_CHOSEN": "/home/alice/models\n"}, after=CHECK)
+    assert _state(proc)["OWN"] == "no"
+    # only on exit 0
+    proc = _collect(tmp_path, {**base, "STUB_RC": "130", "STUB_CHOSEN": "/home/alice/models\n"},
+                    after=CHECK)
+    assert _state(proc)["CHOSEN"] == ""
+
+
+def test_the_two_reasons_are_never_taken_from_the_environment(tmp_path: Path,
+                                                               stub: dict[str, str]) -> None:
+    env = {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
+           "_HAL0_WIZARD_CHOSEN_STORE": "/home/alice/models",
+           "_HAL0_SAVED_STORE": "/home/alice/models"}
+    proc = _collect(tmp_path, env, after=CHECK)
+    state = _state(proc)
+    assert state["RC"] == "0" and state["OWN"] == "no", proc.stdout + proc.stderr
+    # nor when the wizard is absent
+    env = {"_HAL0_WIZARD_CHOSEN_STORE": "/x/y", "_HAL0_SAVED_STORE": "/x/y"}
+    proc = _collect(tmp_path, env, after='hal0_store_is_operator_choice /x/y && echo OWN=yes'
+                                          ' || echo OWN=no')
+    assert _state(proc)["OWN"] == "no"
+
+
+def test_existing_store_from_saved_answers_is_exempt(tmp_path: Path, stub: dict[str, str]) -> None:
+    _saved(tmp_path, json.loads(_store_doc("/home/alice/models")))
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
+                               "HAL0_NONINTERACTIVE": "1"}, after=CHECK)
+    state = _state(proc)
+    assert state["RC"] == "0", proc.stderr
+    assert state["SAVED_STORE"] == "/home/alice/models" and state["OWN"] == "yes"
+    # mismatch
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/other")}, after=CHECK)
+    assert _state(proc)["OWN"] == "no"
+    # planted: not root-only, so not used at all
+    _saved(tmp_path, json.loads(_store_doc("/home/alice/models")), mode=0o644)
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models")}, after=CHECK)
+    state = _state(proc)
+    assert state["SAVED_STORE"] == "" and state["OWN"] == "no"
+    # missing
+    (tmp_path / "var" / "secrets" / "install-answers.json").unlink()
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models")}, after=CHECK)
+    assert _state(proc)["OWN"] == "no"
+
+
+def test_a_saved_copy_the_reader_refuses_gives_no_exemption(tmp_path: Path,
+                                                            stub: dict[str, str]) -> None:
+    _saved(tmp_path, {"version": 1, "model_store": {"path": "/etc/models"}})
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models")},
+                    after='hal0_store_is_operator_choice /etc/models && echo OWN=yes'
+                          ' || echo OWN=no')
+    assert _state(proc)["OWN"] == "no" and _state(proc)["SAVED_STORE"] == ""
+
+
+def test_store_from_given_document_is_not_exempt(tmp_path: Path, stub: dict[str, str]) -> None:
+    given = tmp_path / "given.json"
+    given.write_text(_store_doc("/home/alice/models"), encoding="utf-8")
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
+                               "HAL0_ANSWERS_FILE": str(given)}, after=CHECK)
+    state = _state(proc)
+    assert state["RC"] == "0" and state["MODELS"] == "/home/alice/models"
+    assert state["OWN"] == "no"
+
+
+def test_the_store_sink_treats_the_operators_choice_like_models_dir(tmp_path: Path) -> None:
+    block = _slice('ui_step "Filesystem layout"', 'info "directories under')
+    store = "/home/alice/models"
+    for chosen, expect in ((store, "MKDIR"), ("", "DIE")):
+        script = f"""
+set -euo pipefail
+PREFIX=/p ETC_DIR=/e VAR_DIR=/v UNIT_DIR=/u DEV_MODE=0
+MODELS_DIR="{store}"
+MODELS_DIR_FROM_DOC=1
+_HAL0_WIZARD_CHOSEN_STORE="{chosen}"
+{_helpers()}
+ui_step() {{ :; }}
+info() {{ echo "INFO: $*"; }}
+die() {{ echo "DIE: $*"; exit 1; }}
+nofollow() {{ echo "NOFOLLOW $*"; return 3; }}
+mkdir() {{ echo "MKDIR $*"; }}
+stat() {{ printf '41ed 1000\\n'; }}
+{block}
+echo DONE
+"""
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+        assert expect in proc.stdout, proc.stdout + proc.stderr
+        if expect == "MKDIR":
+            assert f"MKDIR -p" in proc.stdout and store in proc.stdout and "DONE" in proc.stdout
+
+
+# ── the NPU folder from a document ──────────────────────────────────────────
+
+
+def _flm(tmp_path: Path, flm: str, store: str, default: str, *, chosen: str = "",
+         saved: str = "") -> subprocess.CompletedProcess[str]:
+    script = f"""
+set -euo pipefail
+DEV_MODE=0
+{_helpers()}
+source "{ANSWERS_SH}"
+_HAL0_WIZARD_CHOSEN_STORE="{chosen}"
+_HAL0_SAVED_STORE="{saved}"
+info() {{ echo "INFO: $*"; }}
+warn() {{ echo "WARN: $*"; }}
+nofollow() {{ echo "NOFOLLOW $*"; }}
+export HAL0_FLM_MODELS_DIR="{flm}"
+HAL0_ANSWERS_EXPORTED=(HAL0_NONINTERACTIVE HAL0_MODELS_DIR HAL0_FLM_MODELS_DIR)
+hal0_doc_flm_prepare "$HAL0_FLM_MODELS_DIR" "{store}" "{default}"
+echo "FLM=${{HAL0_FLM_MODELS_DIR-unset}} EXPORTED=${{HAL0_ANSWERS_EXPORTED[*]}}"
+bash -c 'echo "CHILD=${{HAL0_FLM_MODELS_DIR-unset}}"'
+"""
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+
+
+def test_npu_folder_from_document_only_inside_default_or_operator_store(tmp_path: Path) -> None:
+    default = tmp_path / "var" / "models"
+    default.mkdir(parents=True)
+    (tmp_path / "data" / "store").mkdir(parents=True)
+    store = f"{tmp_path}/data/store"
+    # inside the default store: created
+    proc = _flm(tmp_path, f"{default}/npu", str(default), str(default))
+    assert "NOFOLLOW dir --create" in proc.stdout and "WARN" not in proc.stdout, proc.stdout
+    # under root-only real folders outside the default store: no longer created (C3)
+    proc = _flm(tmp_path, f"{store}/npu", store, str(default))
+    assert "NOFOLLOW" not in proc.stdout and proc.stdout.count("WARN:") == 1, proc.stdout
+    assert "set HAL0_FLM_MODELS_DIR" in proc.stdout
+    # inside a store the person chose on screen, or the box's existing store: created
+    for kw in ({"chosen": store}, {"saved": store}):
+        proc = _flm(tmp_path, f"{store}/a/npu", store, str(default), **kw)
+        lines = [ln for ln in proc.stdout.splitlines() if ln.startswith("NOFOLLOW")]
+        assert lines == [
+            f"NOFOLLOW dir --create --owner root:root --mode 0755 --expect root {store}/a",
+            f"NOFOLLOW dir --create --owner 1000:hal0 --mode 2775 --expect adopt {store}/a/npu",
+        ], proc.stdout
+        assert "WARN" not in proc.stdout
+    # a store that is someone's choice does not make another store's folder one
+    proc = _flm(tmp_path, f"{store}/npu", store, str(default), chosen=f"{tmp_path}/data")
+    assert "NOFOLLOW" not in proc.stdout and proc.stdout.count("WARN:") == 1
+
+
+def test_refused_npu_folder_is_unset(tmp_path: Path) -> None:
+    default = tmp_path / "var" / "models"
+    default.mkdir(parents=True)
+    (tmp_path / "data" / "store").mkdir(parents=True)
+    store = f"{tmp_path}/data/store"
+    for flm, st in ((f"{store}/npu", store), (f"{tmp_path}/elsewhere/npu", store)):
+        proc = _flm(tmp_path, flm, st, str(default))
+        assert "FLM=unset" in proc.stdout and "CHILD=unset" in proc.stdout, proc.stdout
+        assert "EXPORTED=HAL0_NONINTERACTIVE HAL0_MODELS_DIR\n" in proc.stdout + "\n"
+    # a link inside the default store: refused, unset
+    (default / "lnk").symlink_to(tmp_path)
+    proc = _flm(tmp_path, f"{default}/lnk/npu", str(default), str(default))
+    assert "FLM=unset" in proc.stdout
+    # accepted: kept
+    proc = _flm(tmp_path, f"{default}/npu", str(default), str(default))
+    assert f"FLM={default}/npu" in proc.stdout and "HAL0_FLM_MODELS_DIR" in proc.stdout
+
+
+def test_no_npu_device_drops_a_documents_npu_folder() -> None:
+    head = TEXT.index("    if [[ -e /dev/accel/accel0 ]]; then")
+    block = TEXT[head : TEXT.index('ui_step "', head)]
+    assert "hal0_answers_unset_doc_flm" in block
+
+
 # ── Python first ────────────────────────────────────────────────────────────
 
 
@@ -580,3 +788,60 @@ def test_cpu_only_prompt_skipped_after_the_wizard() -> None:
     prompts = [ln for ln in block.splitlines() if "_confirm_cpu_only" in ln]
     assert len(prompts) == 2
     assert all('"${HAL0_WIZARD_RAN:-0}" != "1"' in ln for ln in prompts), prompts
+
+
+# ── a folder the flag or the environment chose stays theirs ─────────────────
+
+
+def _md(*, flag: int, explicit: int, models: str, doc: str, ran: int,
+        pre_flm: str = "", doc_flm: str = "") -> str:
+    block = _slice("# answers-models-dir: begin", "# answers-models-dir: end")
+    exported = "HAL0_NONINTERACTIVE HAL0_MODELS_DIR" + (" HAL0_FLM_MODELS_DIR" if doc_flm else "")
+    script = f"""
+set -euo pipefail
+source "{ANSWERS_SH}"
+warn() {{ echo "WARN: $*"; }}
+MODELS_DIR="{models}"
+MODELS_DIR_EXPLICIT={explicit}
+MODELS_DIR_FLAG_GIVEN={flag}
+MODELS_DIR_FROM_DOC=0
+HAL0_ANSWERS_APPLIED=1
+HAL0_WIZARD_RAN={ran}
+HAL0_ANSWERS_SAVED=abc
+_pre_seam_flm="{pre_flm}"
+export HAL0_MODELS_DIR="{doc}"
+{"export HAL0_FLM_MODELS_DIR=" + doc_flm if doc_flm else ""}
+HAL0_ANSWERS_EXPORTED=({exported})
+{block}
+echo "FROM_DOC=${{MODELS_DIR_FROM_DOC}} DIR=${{MODELS_DIR}} SAVED=${{HAL0_ANSWERS_SAVED}} EXPORTED=${{HAL0_ANSWERS_EXPORTED[*]}}"
+"""
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip()
+
+
+def test_a_folder_from_the_flag_or_environment_stays_the_operators() -> None:
+    # --models-dir is forwarded to the wizard, which writes it into the document
+    assert _md(flag=1, explicit=1, models="/home/a/m", doc="/home/a/m", ran=1) == (
+        "FROM_DOC=0 DIR=/home/a/m SAVED=abc EXPORTED=HAL0_NONINTERACTIVE HAL0_MODELS_DIR")
+    # HAL0_MODELS_DIR is read by the wizard too
+    assert _md(flag=0, explicit=1, models="/home/a/m", doc="/home/a/m", ran=1).startswith(
+        "FROM_DOC=0 DIR=/home/a/m")
+    # without the wizard, today's rule: the document's value is the document's
+    assert _md(flag=0, explicit=1, models="/home/a/m", doc="/home/a/m", ran=0).startswith(
+        "FROM_DOC=1")
+    # a different folder from the document is still the document's
+    assert _md(flag=0, explicit=1, models="/home/a/m", doc="/srv/m", ran=1).startswith(
+        "FROM_DOC=1 DIR=/srv/m")
+
+
+def test_a_flag_that_overrides_the_document_keeps_no_saved_copy() -> None:
+    out = _md(flag=1, explicit=1, models="/flag", doc="/doc", ran=0)
+    assert "WARN:" in out and "FROM_DOC=0 DIR=/flag SAVED= " in out
+
+
+def test_an_npu_folder_from_the_environment_stays_the_environments() -> None:
+    out = _md(flag=0, explicit=0, models="/d", doc="/d", ran=1, pre_flm="/d/npu", doc_flm="/d/npu")
+    assert out.endswith("EXPORTED=HAL0_NONINTERACTIVE HAL0_MODELS_DIR"), out
+    out = _md(flag=0, explicit=0, models="/d", doc="/d", ran=1, pre_flm="", doc_flm="/d/npu")
+    assert out.endswith("HAL0_FLM_MODELS_DIR"), out

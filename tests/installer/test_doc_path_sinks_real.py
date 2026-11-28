@@ -66,7 +66,7 @@ def _dir(path: Path, mode: int = 0o755) -> Path:
     return path
 
 
-def _run(body: str, *, plant: str = "") -> subprocess.CompletedProcess[str]:
+def _run(body: str, *, plant: str = "", chosen: str = "") -> subprocess.CompletedProcess[str]:
     """Run ``body`` with the real helpers; ``plant`` runs once, right before the first `nofollow`."""
     script = f"""
 set -euo pipefail
@@ -87,6 +87,8 @@ nofollow() {{
     "${{PY}}" -I "${{REPO_ROOT}}/src/hal0/security/nofollow.py" "${{a[@]}}"
 }}
 {_helpers()}
+source "{REPO}/installer/lib/answers.sh"
+_HAL0_WIZARD_CHOSEN_STORE="{chosen}"
 {body}
 """
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
@@ -116,8 +118,16 @@ def test_the_reviews_data_models_attack_is_refused_by_both_sinks(base: Path) -> 
     flm = data_models / "sshd.service.d"
     proc = _run(f'hal0_doc_flm_prepare "{flm}" "{data_models}" "{var_dir}/models"; echo DONE')
     assert "DONE" in proc.stdout, proc.stdout + proc.stderr
-    assert proc.stdout.count("WARN:") == 1 and "a link is on the path" in proc.stdout
+    assert proc.stdout.count("WARN:") == 1 and "is not one you chose" in proc.stdout
     assert not (system / "sshd.service.d").exists()
+    assert sorted(system.iterdir()) == []
+    # 4. even had the person chosen data/models on the screens, a link in front
+    # of the NPU folder is refused: the kernel would follow its target through
+    # the hal0 account's folder (the helper alone does not stop that)
+    proc = _run(f'hal0_doc_flm_prepare "{flm}" "{data_models}" "{var_dir}/models"; echo DONE',
+                chosen=str(data_models))
+    assert "DONE" in proc.stdout and proc.stdout.count("WARN:") == 1, proc.stdout + proc.stderr
+    assert f"a link is on the path ({data_models} is a symbolic link)" in proc.stdout
     assert sorted(system.iterdir()) == []
 
 
@@ -147,13 +157,19 @@ def test_a_link_planted_in_the_default_store_after_the_check_is_refused_by_the_h
     assert sorted(system.iterdir()) == []
 
 
-def test_the_npu_folder_under_root_only_real_folders_is_created(base: Path) -> None:
+def test_the_npu_folder_under_root_only_real_folders_needs_the_operators_choice(
+        base: Path) -> None:
     store = _dir(base / "data" / "store")
-    flm = store / "flm"
-    proc = _run(f'hal0_doc_flm_prepare "{flm}" "{store}" "{base}/var/lib/hal0/models"; echo DONE')
+    flm = store / "npu" / "flm"
+    body = f'hal0_doc_flm_prepare "{flm}" "{store}" "{base}/var/lib/hal0/models"; echo DONE'
+    proc = _run(body)
+    assert proc.stdout.count("WARN:") == 1 and "is not one you chose" in proc.stdout
+    assert not flm.exists() and not flm.parent.exists()
+    proc = _run(body, chosen=str(store))
     assert "created FLM model directory" in proc.stdout and "WARN" not in proc.stdout, (
         proc.stdout + proc.stderr)
     assert stat.S_IMODE(os.lstat(flm).st_mode) == 0o2775
+    assert stat.S_IMODE(os.lstat(flm.parent).st_mode) == 0o755
 
 
 def test_the_npu_folder_under_a_writable_folder_is_skipped(base: Path) -> None:
@@ -161,18 +177,18 @@ def test_the_npu_folder_under_a_writable_folder_is_skipped(base: Path) -> None:
     flm = store / "flm"
     proc = _run(f'hal0_doc_flm_prepare "{flm}" "{store}" "{base}/var/lib/hal0/models"; echo DONE')
     assert proc.stdout.count("WARN:") == 1 and "DONE" in proc.stdout
-    assert "can be changed by a group or by other users" in proc.stdout
+    assert "is not one you chose" in proc.stdout
     assert not flm.exists()
 
 
 def test_a_link_between_root_only_real_folders_is_refused(base: Path) -> None:
     real = _dir(base / "real")
     (base / "data").symlink_to(real)
-    for body in (f'hal0_doc_store_prepare "{base}/data/m" "{base}/v/models" || echo "REFUSED: ${{_HAL0_STORE_WHY}}"',
-                 f'hal0_doc_flm_prepare "{base}/data/flm" "{base}/data" "{base}/v/models"'):
-        proc = _run(body)
-        assert f"a link is on the path ({base}/data is a symbolic link)" in proc.stdout, (
-            proc.stdout + proc.stderr)
+    proc = _run(f'hal0_doc_store_prepare "{base}/data/m" "{base}/v/models" || echo "REFUSED: ${{_HAL0_STORE_WHY}}"')
+    assert f"a link is on the path ({base}/data is a symbolic link)" in proc.stdout, (
+        proc.stdout + proc.stderr)
+    proc = _run(f'hal0_doc_flm_prepare "{base}/data/flm" "{base}/data" "{base}/v/models"')
+    assert "is not one you chose" in proc.stdout, proc.stdout + proc.stderr
     assert sorted(real.iterdir()) == []
 
 

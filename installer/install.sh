@@ -529,34 +529,75 @@ hal0_doc_store_prepare() {
     _HAL0_STORE_WHY=""
 }
 
+# hal0_store_is_operator_choice STORE: is the model store STORE, which came from
+# an answers document, the operator's own choice, as if it had been given with
+# --models-dir? The one place this is decided; both sinks (the model store's in
+# "Filesystem layout", the NPU folder's below) ask it. Two reasons, and only
+# these (operator decision, Decision comment on issue #4031, 2026-11-28: a
+# folder in a person's own home may be chosen from the setup screens):
+#   1. The person changed the folder on the setup screens in this very run, and
+#      the wizard's chosen-folder file names exactly the text the reader
+#      exported as the document's store (_HAL0_WIZARD_CHOSEN_STORE).
+#   2. It is the store this box already uses: the one named in the saved
+#      answers, a file only root writes, read only when it is root-owned 0600
+#      in a folder only root can change (_HAL0_SAVED_STORE). A reinstall or
+#      upgrade that reuses the saved answers never shows the folder screen
+#      again, so it never earns reason 1.
+# Both values are set only by hal0_run_wizard in this process (answers.sh
+# unsets them when it is sourced), never taken from the environment, a document
+# or hal0.toml (/etc/hal0 is the service account's after an install).
+hal0_store_is_operator_choice() {
+    local store="${1:-}"
+    while [[ "${store}" == */ && "${store}" != / ]]; do store="${store%/}"; done
+    [[ "${store}" == /?* ]] || return 1
+    [[ -n "${_HAL0_WIZARD_CHOSEN_STORE:-}" && "${store}" == "${_HAL0_WIZARD_CHOSEN_STORE}" ]] && return 0
+    [[ -n "${_HAL0_SAVED_STORE:-}" && "${store}" == "${_HAL0_SAVED_STORE}" ]] && return 0
+    return 1
+}
+
 # hal0_doc_flm_prepare FLM STORE DEFAULT: create the NPU model folder FLM from a
 # document, which must lie strictly inside the model store STORE (the reader
-# required it; checked again here by text). This does not rely on the store's
-# sink having run: right before creating anything it walks FLM from / itself.
-# No component may be a symbolic link, and unless FLM is inside DEFAULT (the
-# installer's own store, the hal0 account's tree, where `nofollow` refuses a
-# link planted later), every existing folder above FLM must be root-only, so
-# nobody but root can change the path between the walk and the creation.
+# required it; checked again here by text). It is created in two cases only:
+#   - FLM is inside DEFAULT, the installer's own store (the hal0 account's
+#     tree, where `nofollow` refuses a link planted later), or
+#   - STORE is the operator's own choice (hal0_store_is_operator_choice).
+# In every other case one warning and nothing is created: a document alone
+# cannot have root make a folder anywhere else (finding C3 of the security
+# review). Either way, right before creating anything, this walks FLM from /
+# itself (it does not rely on the store's sink): no component may be a
+# symbolic link. That holds in the operator's own store too, although the store
+# itself may be reached through one (it is made as with --models-dir): the
+# kernel follows a link's target through every folder on the way, and one of
+# them may be the hal0 account's, so a link in front of the NPU folder could
+# hand that account the choice of where root creates a folder it can write.
 # Missing folders above FLM are made root:root 0755, FLM itself 1000:hal0 (else
-# hal0:hal0) 2775, all through `nofollow`. An existing FLM is left exactly as
-# it is. The NPU is optional: any refusal is one warning and the folder is
-# skipped; never fails.
+# hal0:hal0) 2775, all through `nofollow`, never by path name. An existing FLM
+# is left exactly as it is. Whenever the folder is refused or cannot be made,
+# HAL0_FLM_MODELS_DIR is unset so no later root step reads it
+# (hal0_answers_unset_doc_flm, finding C6). The NPU is optional: never fails.
 hal0_doc_flm_prepare() {
-    local flm="${1:-}" store="${2:-}" default="${3:-}" strict=1 why
+    local flm="${1:-}" store="${2:-}" default="${3:-}" why
     while [[ "${store}" == */ && "${store}" != / ]]; do store="${store%/}"; done
     while [[ "${default}" == */ && "${default}" != / ]]; do default="${default%/}"; done
     if [[ "${store}" != /?* || "${flm}" != "${store}/"?* ]]; then
         warn "FLM model directory ${flm} from the answers document is not inside the model store ${store}; it was not created. To use a folder elsewhere, set HAL0_FLM_MODELS_DIR when running the installer"
+        hal0_answers_unset_doc_flm
         return 0
     fi
-    [[ "${default}" == /?* && "${flm}" == "${default}/"?* ]] && strict=0
-    if ! _hal0_doc_walk "${flm}" "${strict}"; then
+    if ! [[ "${default}" == /?* && "${flm}" == "${default}/"?* ]] \
+        && ! hal0_store_is_operator_choice "${store}"; then
+        warn "FLM model directory ${flm} from the answers document was not created: it is not inside the installer's own model store ${default}, and the model store ${store} is not one you chose on the setup screens or one this box already uses. To use it, set HAL0_FLM_MODELS_DIR when running the installer"
+        hal0_answers_unset_doc_flm
+        return 0
+    fi
+    if ! _hal0_doc_walk "${flm}" 0; then
         if [[ "${_HAL0_DOC_LINK}" -eq 1 ]]; then
             why="${_HAL0_DOC_WHY}. To use a folder reached through a link, set HAL0_FLM_MODELS_DIR when running the installer"
         else
-            why="${_HAL0_DOC_WHY}. Outside the installer's own model store, every folder above it must be one only root can change; to use another folder, set HAL0_FLM_MODELS_DIR when running the installer"
+            why="${_HAL0_DOC_WHY}. To use another folder, set HAL0_FLM_MODELS_DIR when running the installer"
         fi
         warn "FLM model directory ${flm} from the answers document was not created: ${why}"
+        hal0_answers_unset_doc_flm
         return 0
     fi
     if [[ "${_HAL0_DOC_LAST}" == dir ]]; then
@@ -568,6 +609,7 @@ hal0_doc_flm_prepare() {
         && ! nofollow dir --create --owner root:root --mode 0755 --expect root \
             "${_HAL0_DOC_MISSING[@]:0:${#_HAL0_DOC_MISSING[@]}-1}"; then
         warn "could not create ${flm} safely; 'hal0 doctor perms' reports why"
+        hal0_answers_unset_doc_flm
         return 0
     fi
     if nofollow dir --create --owner 1000:hal0 --mode 2775 --expect adopt "${flm}" 2>/dev/null \
@@ -575,6 +617,7 @@ hal0_doc_flm_prepare() {
         info "created FLM model directory ${flm}"
     else
         warn "could not create ${flm} safely; 'hal0 doctor perms' reports why"
+        hal0_answers_unset_doc_flm
     fi
     return 0
 }
@@ -914,6 +957,10 @@ fi
 # The one place answers enter the install. Everything below this line may
 # change the host or depends on a choice.
 # answers-seam: begin
+# HAL0_FLM_MODELS_DIR as root's environment gave it, before a document can set
+# it: the setup screens copy it into their document, and it then stays the
+# environment's choice (see the answers-models-dir block).
+_pre_seam_flm="${HAL0_FLM_MODELS_DIR:-}"
 _seam_rc=0
 hal0_collect_answers || _seam_rc=$?
 if (( _seam_rc != 0 )); then
@@ -942,12 +989,23 @@ fi
 # has to be applied here. Precedence: a --models-dir flag wins over the document
 # (one warning); the document wins over an inherited HAL0_MODELS_DIR; then the
 # default. HAL0_ANSWERS_EXPORTED says the document (not the environment) set it.
+# The setup screens are handed --models-dir and read HAL0_MODELS_DIR and
+# HAL0_FLM_MODELS_DIR, and write them into their document: a folder there that
+# is exactly what the flag or root's environment already chose stays that
+# choice, with today's rules, and is not the document's.
 if [[ "${HAL0_ANSWERS_APPLIED:-0}" == "1" ]]; then
     for _answered in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
         if [[ "${_answered}" == "HAL0_MODELS_DIR" ]]; then
-            if [[ "${MODELS_DIR_FLAG_GIVEN}" -eq 1 ]]; then
+            if [[ "${HAL0_WIZARD_RAN:-0}" == "1" && "${MODELS_DIR_EXPLICIT}" -eq 1 \
+                && "${HAL0_MODELS_DIR}" == "${MODELS_DIR}" ]]; then
+                :
+            elif [[ "${MODELS_DIR_FLAG_GIVEN}" -eq 1 ]]; then
                 warn "--models-dir was given, so the model folder in the answers document was ignored"
                 export HAL0_MODELS_DIR="${MODELS_DIR}"
+                # The saved copy would name the document's folder, not the one
+                # this install uses, and a later run would take it for the
+                # box's existing store. Keep none.
+                HAL0_ANSWERS_SAVED=""
             else
                 MODELS_DIR="${HAL0_MODELS_DIR}"
                 MODELS_DIR_EXPLICIT=1
@@ -956,7 +1014,12 @@ if [[ "${HAL0_ANSWERS_APPLIED:-0}" == "1" ]]; then
         fi
     done
     unset _answered
+    if [[ "${HAL0_WIZARD_RAN:-0}" == "1" && -n "${_pre_seam_flm:-}" \
+        && "${HAL0_FLM_MODELS_DIR:-}" == "${_pre_seam_flm}" ]]; then
+        hal0_answers_forget HAL0_FLM_MODELS_DIR
+    fi
 fi
+unset _pre_seam_flm
 # answers-models-dir: end
 
 # Persist bootstrap's digest-pinned cosign so the updater's signature
@@ -1486,7 +1549,15 @@ ui_step "Filesystem layout" "~2-5s"
 _models_mkdir=("${MODELS_DIR}")
 _models_doc_inside=0
 _models_doc_die="Choose a real folder (no symbolic link on its path) whose parents only root can change, or pass --models-dir=PATH on the command line to use this one, or one reached through a link, as your own choice"
-if [[ "${MODELS_DIR_FROM_DOC}" -eq 1 ]]; then
+# A store the operator chose on the setup screens in this run, or the one this
+# box already uses (hal0_store_is_operator_choice), is made exactly as a
+# --models-dir store is.
+_models_doc_strict="${MODELS_DIR_FROM_DOC}"
+if [[ "${_models_doc_strict}" -eq 1 ]] && hal0_store_is_operator_choice "${MODELS_DIR}"; then
+    info "model store ${MODELS_DIR}: your own choice, made as one given with --models-dir"
+    _models_doc_strict=0
+fi
+if [[ "${_models_doc_strict}" -eq 1 ]]; then
     if [[ "${MODELS_DIR}" == "${VAR_DIR}/models" || "${MODELS_DIR}" == "${VAR_DIR}/models/"* ]]; then
         _models_mkdir=("${VAR_DIR}/models")
         _models_doc_inside=1
@@ -1511,7 +1582,7 @@ if [[ "${_models_doc_inside}" -eq 1 ]]; then
     hal0_doc_store_prepare "${MODELS_DIR}" "${VAR_DIR}/models" \
         || die "model store ${MODELS_DIR} from the answers document cannot be used: ${_HAL0_STORE_WHY}. ${_models_doc_die}"
 fi
-unset _models_mkdir _models_doc_inside _models_doc_die
+unset _models_mkdir _models_doc_inside _models_doc_die _models_doc_strict
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
 
 # O13: the runtime state trees (slots/, registry/, models/, backups/) are born root:root
@@ -4097,6 +4168,16 @@ else
             fi
             unset _flm_from_doc _flm_walk _flm_ok _flm_parts _flm_part _answered
         fi
+    else
+        # No NPU on this box: a document's NPU folder is skipped, so no later
+        # root step (`doctor perms --fix` reads the variable) may act on it.
+        for _answered in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
+            if [[ "${_answered}" == "HAL0_FLM_MODELS_DIR" ]]; then
+                hal0_answers_unset_doc_flm
+                break
+            fi
+        done
+        unset _answered
     fi
 
     # HuggingFace hub cache (#275 bug 4). The hal0 user's HOME is

@@ -4,10 +4,11 @@
 document, and the hal0 account may control part of the path, so root must not
 chown, chmod or mkdir it by name. A document's folder must lie inside the model
 store (the reader required it; the sink checks it again by text) and is only
-ever created, never re-owned. Right before creating it, the sink itself walks
-the path from / (it does not rely on the model store's sink): no component may
-be a symbolic link, and outside the default store every existing folder above
-it must be root's alone. The block and its helpers are sliced out of
+ever created, never re-owned. It is created only inside the default store
+(after the sink itself walks the path from /: no component may be a symbolic
+link), or inside a store that is the operator's own choice (chosen on the setup
+screens, or the box's existing store), the way a folder from the environment
+is made. Anywhere else: one warning, nothing made, and the variable unset. The block and its helpers are sliced out of
 installer/install.sh by text markers and run under real bash with
 ``nofollow``, ``chown``, ``chmod``, ``mkdir``, ``stat``, ``id`` and
 ``info``/``warn`` stubbed to record their arguments (no root needed); ``stat``
@@ -23,6 +24,7 @@ from pathlib import Path
 import pytest
 
 INSTALL_SH = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
+ANSWERS_SH = INSTALL_SH.parent / "lib" / "answers.sh"
 TEXT = INSTALL_SH.read_text(encoding="utf-8")
 _START = 'if [[ -n "${HAL0_FLM_MODELS_DIR:-}" ]]; then'
 _END = "\n        fi\n"
@@ -54,6 +56,7 @@ def _run(
     models_dir: str | None = None,
     var_dir: str = "/nonexistent/var/lib/hal0",
     owners: dict[str, str] | None = None,
+    chosen: str = "",
 ) -> tuple[list[str], str]:
     """Run the block; return (recorded nofollow/chown/chmod/mkdir/stat calls, stdout).
 
@@ -70,6 +73,8 @@ VAR_DIR="{var_dir}"
 MODELS_DIR="{models}"
 declare -A OWN=({table})
 {_helpers()}
+source "{ANSWERS_SH}"
+_HAL0_WIZARD_CHOSEN_STORE="{chosen}"
 info() {{ echo "INFO: $*"; }}
 warn() {{ echo "WARN: $*"; }}
 nofollow() {{
@@ -100,6 +105,7 @@ id() {{
 export HAL0_FLM_MODELS_DIR="{store}"
 HAL0_ANSWERS_EXPORTED=({exported})
 {_block()}
+echo "FLM=${{HAL0_FLM_MODELS_DIR-unset}}"
 echo DONE
 """
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
@@ -191,25 +197,29 @@ def test_the_comment_no_longer_calls_the_path_trusted() -> None:
 def test_a_document_folder_inside_the_store_is_created_through_nofollow(tmp_path: Path) -> None:
     (tmp_path / "models").mkdir()
     store = f"{tmp_path}/models/npu/a/flm"
-    calls, out = _run(tmp_path, store, exported=DOC, models_dir=f"{tmp_path}/models")
+    calls, out = _run(tmp_path, store, exported=DOC, models_dir=f"{tmp_path}/models",
+                      chosen=f"{tmp_path}/models")
     assert _nofollow(calls) == [
         f"{PARENT} {tmp_path}/models/npu {tmp_path}/models/npu/a",
         f"{LEAF_1000} {store}",
     ]
     assert "created FLM model directory" in out and "WARN" not in out
+    _no_path_name_commands(calls)
 
 
 def test_existing_folders_between_the_store_and_the_npu_folder_are_not_re_moded(
         tmp_path: Path) -> None:
     (tmp_path / "models" / "npu").mkdir(parents=True)
     store = f"{tmp_path}/models/npu/flm"
-    calls, _ = _run(tmp_path, store, exported=DOC, models_dir=f"{tmp_path}/models/")
+    calls, _ = _run(tmp_path, store, exported=DOC, models_dir=f"{tmp_path}/models/",
+                    chosen=f"{tmp_path}/models")
     assert _nofollow(calls) == [f"{LEAF_1000} {store}"]
 
 
 def test_a_document_folder_falls_back_to_hal0_hal0(tmp_path: Path) -> None:
     store = f"{tmp_path}/flm"
-    calls, out = _run(tmp_path, store, exported=DOC, nofollow_fail="--owner 1000:hal0")
+    calls, out = _run(tmp_path, store, exported=DOC, nofollow_fail="--owner 1000:hal0",
+                      chosen=str(tmp_path))
     assert _nofollow(calls) == [f"{LEAF_1000} {store}", f"{LEAF_HAL0} {store}"]
     assert "WARN" not in out
 
@@ -223,15 +233,27 @@ def test_a_document_folder_outside_the_store_is_skipped_with_one_warning(tmp_pat
     assert calls == []
     assert out.count("WARN:") == 1 and "is not inside the model store" in out
     assert "set HAL0_FLM_MODELS_DIR when running the installer" in out and "DONE" in out
+    assert "FLM=unset" in out
 
 
 def test_an_existing_document_folder_is_left_exactly_as_it_is(tmp_path: Path) -> None:
     for owner_dir in ("flm", "home/alice/.config/systemd/user"):
         (tmp_path / owner_dir).mkdir(parents=True)
         store = f"{tmp_path}/{owner_dir}"
-        calls, out = _run(tmp_path, store, exported=DOC)
+        calls, out = _run(tmp_path, store, exported=DOC, chosen=str(Path(store).parent))
         assert _nofollow(calls) == [] and out.count("INFO:") == 1
         assert "leaving its owner and mode as they are" in out
+        assert f"FLM={store}" in out
+
+
+def _not_chosen(calls: list[str], out: str, flm: str) -> None:
+    """Outside the default store, in a store nobody chose: nothing looked at or made."""
+    assert _nofollow(calls) == [], calls
+    _no_path_name_commands(calls)
+    assert out.count("WARN:") == 1 and "DONE" in out, out
+    assert f"FLM model directory {flm} from the answers document was not created" in out
+    assert "is not one you chose on the setup screens or one this box already uses" in out
+    assert "set HAL0_FLM_MODELS_DIR" in out and "FLM=unset" in out
 
 
 def _link_skipped(calls: list[str], out: str, flm: str, link: str) -> None:
@@ -248,7 +270,12 @@ def test_a_document_folder_that_is_a_link_is_left_alone(tmp_path: Path) -> None:
         link = tmp_path / "flm"
         link.symlink_to(target)
         calls, out = _run(tmp_path, str(link), exported=DOC)
+        _not_chosen(calls, out, str(link))
+        (tmp_path / "calls.log").unlink(missing_ok=True)
+        # in the operator's own store, a link on the way is refused all the same
+        calls, out = _run(tmp_path, str(link), exported=DOC, chosen=str(tmp_path))
         _link_skipped(calls, out, str(link), str(link))
+        assert "FLM=unset" in out
         link.unlink()
         (tmp_path / "calls.log").unlink(missing_ok=True)
 
@@ -258,7 +285,7 @@ def test_a_link_in_the_middle_skips_the_folder(tmp_path: Path) -> None:
     (tmp_path / "models" / "mid").symlink_to(tmp_path / "models" / "real")
     flm = f"{tmp_path}/models/mid/flm"
     calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/models")
-    _link_skipped(calls, out, flm, f"{tmp_path}/models/mid")
+    _not_chosen(calls, out, flm)
 
 
 def test_a_link_in_a_root_only_folder_to_a_root_only_folder_still_skips_it(tmp_path: Path) -> None:
@@ -267,7 +294,7 @@ def test_a_link_in_a_root_only_folder_to_a_root_only_folder_still_skips_it(tmp_p
     (tmp_path / "models").symlink_to(tmp_path / "real")
     flm = f"{tmp_path}/models/flm"
     calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/models")
-    _link_skipped(calls, out, flm, f"{tmp_path}/models")
+    _not_chosen(calls, out, flm)
 
 
 def test_a_link_above_the_store_skips_the_folder(tmp_path: Path) -> None:
@@ -275,7 +302,7 @@ def test_a_link_above_the_store_skips_the_folder(tmp_path: Path) -> None:
     (tmp_path / "home").symlink_to(tmp_path / "var" / "home")
     flm = f"{tmp_path}/home/models/flm"
     calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/home/models")
-    _link_skipped(calls, out, flm, f"{tmp_path}/home")
+    _not_chosen(calls, out, flm)
 
 
 def test_the_reviews_data_models_attack_creates_nothing(tmp_path: Path) -> None:
@@ -291,7 +318,7 @@ def test_the_reviews_data_models_attack_creates_nothing(tmp_path: Path) -> None:
     flm = f"{tmp_path}/data/models/sshd.service.d"
     calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/data/models",
                       var_dir=var_dir, owners={var_dir: "990 2775"})
-    _link_skipped(calls, out, flm, f"{tmp_path}/data/models")
+    _not_chosen(calls, out, flm)
     assert not (tmp_path / "etc" / "systemd" / "system" / "sshd.service.d").exists()
 
 
@@ -318,82 +345,51 @@ def test_a_link_inside_the_default_store_skips_the_folder(tmp_path: Path) -> Non
     _link_skipped(calls, out, flm, f"{var_dir}/models")
 
 
-def test_a_folder_under_root_only_real_folders_is_created(tmp_path: Path) -> None:
+def test_a_folder_under_root_only_real_folders_is_no_longer_created(tmp_path: Path) -> None:
+    # finding C3: a document alone must not have root make a 1000:hal0 2775
+    # folder in any root-only folder it names
     (tmp_path / "data" / "store").mkdir(parents=True)
     flm = f"{tmp_path}/data/store/flm"
     calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/data/store")
-    assert _nofollow(calls) == [f"{LEAF_1000} {flm}"]
-    assert "created FLM model directory" in out and "WARN" not in out
-    looked = [c.split()[-1] for c in calls if c.startswith("stat")]
-    assert looked[0] == "/" and f"{tmp_path}/data/store" in looked
+    _not_chosen(calls, out, flm)
 
 
-def _not_root_only(calls: list[str], out: str, flm: str, why: str) -> None:
-    assert _nofollow(calls) == [], calls
-    _no_path_name_commands(calls)
-    assert out.count("WARN:") == 1 and "DONE" in out, out
-    assert f"FLM model directory {flm} from the answers document was not created" in out
-    assert why in out and "set HAL0_FLM_MODELS_DIR" in out
-
-
-@pytest.mark.parametrize("owner", ["1000 755", "990 2775", "990 755"])
-def test_a_folder_under_an_ancestor_someone_else_owns_is_skipped(tmp_path: Path,
-                                                                  owner: str) -> None:
-    # includes a store the hal0 account owns outside the default store: such a
-    # store gets no NPU folder from a document
-    (tmp_path / "data" / "store").mkdir(parents=True)
-    flm = f"{tmp_path}/data/store/flm"
-    for holder in (f"{tmp_path}/data", f"{tmp_path}/data/store"):
-        calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/data/store",
-                          owners={holder: owner})
-        _not_root_only(calls, out, flm, f"{holder} is not owned by root")
-        (tmp_path / "calls.log").unlink()
-
-
-@pytest.mark.parametrize("mode", ["775", "1777", "2775", "757"])
-def test_a_folder_under_a_writable_ancestor_is_skipped(tmp_path: Path, mode: str) -> None:
+@pytest.mark.parametrize("owners", [{"{t}/data": "1000 755"}, {"{t}/data/store": "990 2775"},
+                                    {"{t}/data": "0 1777"}, {"/": "0 777"}])
+def test_outside_the_default_store_ownership_does_not_matter_any_more(tmp_path: Path,
+                                                                     owners: dict) -> None:
     (tmp_path / "data" / "store").mkdir(parents=True)
     flm = f"{tmp_path}/data/store/npu/flm"
     calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/data/store",
-                      owners={f"{tmp_path}/data": f"0 {mode}"})
-    _not_root_only(calls, out, flm, f"{tmp_path}/data can be changed by a group or by other users")
+                      owners={k.format(t=tmp_path): v for k, v in owners.items()})
+    _not_chosen(calls, out, flm)
 
 
-def test_a_writable_root_folder_skips_a_folder_outside_the_default_store(tmp_path: Path) -> None:
-    (tmp_path / "store").mkdir()
-    flm = f"{tmp_path}/store/flm"
+def test_an_uninspectable_folder_in_the_operators_store_skips_the_folder(tmp_path: Path) -> None:
+    (tmp_path / "store" / "a").mkdir(parents=True)
+    flm = f"{tmp_path}/store/a/flm"
     calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/store",
-                      owners={"/": "0 777"})
-    _not_root_only(calls, out, flm, "/ is not a folder only root can change")
-
-
-def test_a_file_or_an_uninspectable_folder_on_the_way_skips_the_folder(tmp_path: Path) -> None:
-    (tmp_path / "store").mkdir()
-    (tmp_path / "store" / "afile").write_text("x")
-    for flm, owners, why in (
-        (f"{tmp_path}/store/afile/flm", {}, f"{tmp_path}/store/afile is not a folder"),
-        (f"{tmp_path}/store/flm", {f"{tmp_path}/store": ""}, f"{tmp_path}/store cannot be inspected"),
-    ):
-        calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/store", owners=owners)
-        _not_root_only(calls, out, flm, why)
-        (tmp_path / "calls.log").unlink()
+                      owners={f"{tmp_path}/store": ""}, chosen=f"{tmp_path}/store")
+    assert _nofollow(calls) == [] and out.count("WARN:") == 1
+    assert f"{tmp_path}/store cannot be inspected" in out and "FLM=unset" in out
 
 
 def test_a_refused_parent_skips_the_folder_with_one_warning(tmp_path: Path) -> None:
     store = f"{tmp_path}/a/flm"
     calls, out = _run(tmp_path, store, exported=DOC, models_dir=str(tmp_path),
-                      nofollow_fail="--expect root")
+                      nofollow_fail="--expect root", chosen=str(tmp_path))
     assert _nofollow(calls) == [f"{PARENT} {tmp_path}/a"]  # the folder itself is not attempted
     assert out.count("WARN:") == 1 and "could not create" in out and "DONE" in out
+    assert "FLM=unset" in out
 
 
 def test_a_refused_folder_warns_and_never_stops_the_install(tmp_path: Path) -> None:
     # the NPU is optional: unlike the model store, no `die` here (the harness has
     # no die(); calling one would end the run with status 127)
     store = f"{tmp_path}/flm"
-    calls, out = _run(tmp_path, store, exported=DOC, nofollow_fail="dir ")
+    calls, out = _run(tmp_path, store, exported=DOC, nofollow_fail="dir ", chosen=str(tmp_path))
     assert _nofollow(calls) == [f"{LEAF_1000} {store}", f"{LEAF_HAL0} {store}"]
-    assert out.count("WARN:") == 1 and "DONE" in out
+    assert out.count("WARN:") == 1 and "DONE" in out and "FLM=unset" in out
     assert "die" not in _block()
     flm_helper = _helpers()[_helpers().index("hal0_doc_flm_prepare() {"):]
     assert "die " not in flm_helper
@@ -402,7 +398,7 @@ def test_a_refused_folder_warns_and_never_stops_the_install(tmp_path: Path) -> N
 def test_a_document_folder_is_only_looked_at_and_never_re_owned(tmp_path: Path) -> None:
     (tmp_path / "flm").mkdir()
     for store in (f"{tmp_path}/flm", f"{tmp_path}/new"):
-        calls, _ = _run(tmp_path, store, exported=DOC)
+        calls, _ = _run(tmp_path, store, exported=DOC, chosen=str(tmp_path))
         _no_path_name_commands(calls)
         # lstat only: nothing is followed while looking
         assert all(c.startswith("stat -c %f %u -- ") for c in calls if c.startswith("stat")), calls
