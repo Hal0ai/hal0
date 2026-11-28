@@ -138,6 +138,36 @@ def test_an_environment_answer_is_taken_and_re_exported(
     assert "taken from the environment" in proc.stdout
 
 
+@pytest.mark.parametrize(
+    ("preset", "said"),
+    [
+        # the reader exported the answer in a run of the setup screens
+        (
+            "HAL0_WIZARD_RAN=1\nHAL0_ANSWERS_EXPORTED=(HAL0_PORT HAL0_HERMES_TERMINAL)\n",
+            "set by the setup screens",
+        ),
+        # the screens ran but the answer is the environment's own
+        ("HAL0_WIZARD_RAN=1\nHAL0_ANSWERS_EXPORTED=(HAL0_PORT)\n", "taken from the environment"),
+        ("HAL0_WIZARD_RAN=1\nHAL0_ANSWERS_EXPORTED=()\n", "taken from the environment"),
+        # nothing was applied in this run
+        ("", "taken from the environment"),
+        (
+            "HAL0_WIZARD_RAN=0\nHAL0_ANSWERS_EXPORTED=(HAL0_HERMES_TERMINAL)\n",
+            "taken from the environment",
+        ),
+    ],
+)
+def test_the_log_line_names_where_the_answer_came_from(
+    tmp_path: Path, gating_block: str, preset: str, said: str
+) -> None:
+    proc = _run_block(tmp_path, gating_block, {}, preset=f"HAL0_HERMES_TERMINAL=1\n{preset}")
+
+    assert proc.returncode == 0, proc.stderr
+    assert f"INFO: Hermes terminal tool: {said} (HAL0_HERMES_TERMINAL=1)" in proc.stdout, (
+        proc.stdout
+    )
+
+
 def test_another_value_is_passed_through_not_interpreted(tmp_path: Path, gating_block: str) -> None:
     # The block neither enables nor disables on its own reading of the value;
     # the provisioner owns what a value means.

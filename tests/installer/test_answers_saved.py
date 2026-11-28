@@ -24,6 +24,31 @@ DOC = {
 }
 
 
+# The setup screens, as far as these tests go: a stand-in for the wizard that
+# writes the document it was given (--answers) as its own (--out), or a bare
+# one when none was given. hal0_collect_answers runs it like the real program,
+# so a given document reaches the reader the way it does in an install.
+COPYING_WIZARD = """
+import shutil, sys
+head = sys.argv[1 : sys.argv.index("--")]
+out = head[head.index("--out") + 1]
+if "--answers" in head:
+    shutil.copyfile(head[head.index("--answers") + 1], out)
+else:
+    open(out, "w", encoding="utf-8").write('{"version": 1}')
+"""
+
+
+def _wizard_lines(tmp_path: Path) -> str:
+    """Shell lines (after sourcing answers.sh) that point the seam at the stand-in."""
+    stub = tmp_path / "copying_wizard.py"
+    stub.write_text(COPYING_WIZARD, encoding="utf-8")
+    return (
+        f'REPO_ROOT="{ROOT}"\nDEV_MODE=1\nPREFIX="{tmp_path}/prefix"\n'
+        f'HAL0_WIZARD_ENTRY="{stub}"\nHAL0_WIZARD_CATALOG="{stub}"\n'
+    )
+
+
 def _bash(
     script: str, tmp_path: Path, nofollow_rc: int = 0, dir_rc: int = 0
 ) -> subprocess.CompletedProcess[str]:
@@ -42,10 +67,16 @@ nofollow() {{
     printf '%s\\n' "$*" >"{tmp_path}/nofollow.args"; cat >"{tmp_path}/nofollow.body"; return {nofollow_rc}
 }}
 source "{ANSWERS_SH}"
+{_wizard_lines(tmp_path)}
 {script}
 """
     return subprocess.run(
-        ["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path
+        ["bash", "-c", full],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        timeout=60,
     )
 
 
@@ -85,8 +116,10 @@ def test_saved_document_mode_and_owner_request(tmp_path: Path) -> None:
     assert args[-1] == f"{tmp_path}/var/lib/hal0/secrets/install-answers.json"
 
 
-def test_nothing_saved_without_a_document(tmp_path: Path) -> None:
-    proc = _bash("hal0_collect_answers; hal0_save_answers; echo rc=$?", tmp_path)
+def test_nothing_saved_when_nothing_was_applied(tmp_path: Path) -> None:
+    # the setup screens always apply a document; this is a run that stopped before
+    # one was applied (HAL0_ANSWERS_APPLIED stays 0)
+    proc = _bash("HAL0_ANSWERS_APPLIED=0; hal0_save_answers; echo rc=$?", tmp_path)
     assert "rc=0" in proc.stdout, proc.stderr
     assert not (tmp_path / "nofollow.args").exists()
     assert "WARN" not in proc.stderr
@@ -104,6 +137,7 @@ def test_saved_document_reloads_with_file_origin(tmp_path: Path) -> None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=60,
         )
         assert proc.returncode == 0, proc.stderr
         return proc.stdout.splitlines()
@@ -148,9 +182,9 @@ def test_a_reader_without_a_saved_form_fails_the_apply_and_saves_nothing(tmp_pat
     assert not (tmp_path / "nofollow.args").exists()
 
 
-def test_warnings_are_printed_once(tmp_path: Path) -> None:
+def test_warnings_are_printed_once_per_apply(tmp_path: Path) -> None:
     doc = _doc(tmp_path, DOC)
-    proc = _bash(f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers', tmp_path)
+    proc = _bash(f'hal0_apply_answers "{doc}" file; hal0_save_answers', tmp_path)
     assert proc.stderr.count("huggingface settings are not read") == 1, proc.stderr
 
 
@@ -218,6 +252,7 @@ PY="{sys.executable}"
 VAR_DIR="{tmp_path}/var/lib/hal0"
 warn() {{ echo "WARN: $*" >&2; }}
 source "{ANSWERS_SH}"
+{_wizard_lines(tmp_path)}
 HAL0_ANSWERS_FILE="{doc}"
 hal0_collect_answers
 echo "rc=$?"
@@ -231,6 +266,7 @@ bash -c 'echo "child:[${{HAL0_ANSWERS_SAVED:-}}]"'
         text=True,
         check=False,
         cwd=tmp_path,
+        timeout=60,
         env={
             "PATH": os.environ["PATH"],
             "HAL0_ANSWERS_SAVED": "inherited-secret",
@@ -260,8 +296,8 @@ def test_the_saved_file_is_exactly_the_decoded_payload(tmp_path: Path) -> None:
         f"print('HAL0_PORT=9000')\nprint({line!r})\n",
     )
     proc = _bash(
-        f'_HAL0_ANSWERS_READER="{fake}"; HAL0_ANSWERS_FILE=/x/doc.json; hal0_collect_answers; '
-        "echo rc=$?; hal0_save_answers",
+        f'_HAL0_ANSWERS_READER="{fake}"; HAL0_SAVED_ANSWERS_FILE="{tmp_path}/var/lib/hal0/secrets/x.json"; '
+        "hal0_apply_answers /x/doc.json file; echo rc=$?; hal0_save_answers",
         tmp_path,
     )
     assert "rc=0" in proc.stdout, proc.stderr
@@ -283,6 +319,7 @@ def test_the_real_reader_saved_line_and_the_saved_file_agree(tmp_path: Path) -> 
         [sys.executable, "-I", str(READER), "--emit-saved", str(doc)],
         capture_output=True,
         check=False,
+        timeout=60,
     )
     assert emitted.returncode == 0 and emitted.stdout == payload
 
@@ -319,6 +356,7 @@ PY="{sys.executable}"
 VAR_DIR="{tmp_path}/var/lib/hal0"
 PATH="{bin_dir}:$PATH"
 source "{ANSWERS_SH}"
+{_wizard_lines(tmp_path)}
 HAL0_ANSWERS_FILE="{doc}"
 hal0_collect_answers
 """
@@ -333,7 +371,13 @@ hal0_collect_answers
         "saved": "x",
     }
     subprocess.run(
-        ["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path, env=env
+        ["bash", "-c", full],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        env=env,
+        timeout=60,
     )
     dump = (tmp_path / "child.env").read_text(encoding="utf-8")
     assert '"version"' not in dump and "HAL0_NONINTERACTIVE" not in dump.replace(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import subprocess
 import sys
@@ -28,7 +29,12 @@ source "{ANSWERS_SH}"
 {script}
 """
     return subprocess.run(
-        ["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path
+        ["bash", "-c", full],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        timeout=60,
     )
 
 
@@ -205,14 +211,62 @@ def test_bind_host_not_accepted_from_a_reader(tmp_path: Path) -> None:
     assert proc.stdout.strip() == "rc=1"
 
 
-def test_collect_answers_runs_apply_for_a_file(tmp_path: Path) -> None:
+COPYING_WIZARD = """
+import shutil, sys
+head = sys.argv[1 : sys.argv.index("--")]
+shutil.copyfile(head[head.index("--answers") + 1], head[head.index("--out") + 1])
+"""
+
+
+def test_collect_answers_applies_a_given_file_through_the_setup_screens(tmp_path: Path) -> None:
+    # A stand-in wizard hands back the document it was given. The installer
+    # applies it as a file's: the terminal tool stays unset whatever it says.
     doc = _doc(tmp_path, {"version": 1, "apps": {"hermes": {"terminal_tool": True}}})
+    stub = tmp_path / "copying_wizard.py"
+    stub.write_text(COPYING_WIZARD, encoding="utf-8")
     proc = _bash(
+        f'REPO_ROOT="{ROOT}"; DEV_MODE=1; PREFIX="{tmp_path}/prefix"; '
+        f'HAL0_WIZARD_ENTRY="{stub}"; HAL0_WIZARD_CATALOG="{stub}"; '
         f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; echo "rc=$?"; '
-        'echo "$HAL0_ANSWERS_APPLIED ${HAL0_HERMES_TERMINAL:-unset}"',
+        'echo "$HAL0_ANSWERS_APPLIED ${HAL0_HERMES_TERMINAL:-unset} $HAL0_WIZARD_RAN '
+        '$HAL0_ANSWERS_ORIGIN"',
         tmp_path,
     )
-    assert proc.stdout.splitlines() == ["rc=0", "1 unset"], proc.stderr
+    assert proc.stdout.splitlines() == ["rc=0", "1 unset 1 file"], proc.stderr
+
+
+def test_the_closing_screens_inputs_are_never_taken_from_the_environment(
+    tmp_path: Path,
+) -> None:
+    # Only installer code in this run may set them; a value inherited in root's
+    # environment must not make the closing screen show the admin key or the
+    # first-account line.
+    full = f"""
+set -u
+source "{ANSWERS_SH}"
+for name in _HAL0_ADMIN_KEY_MINTED _HAL0_OPENWEBUI_SIGNIN; do
+    if [[ -n "${{!name+x}}" ]]; then echo "$name=set"; else echo "$name=unset"; fi
+done
+env | grep -c '^_HAL0_ADMIN_KEY_MINTED=\\|^_HAL0_OPENWEBUI_SIGNIN=' || true
+"""
+    proc = subprocess.run(
+        ["bash", "-c", full],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        timeout=60,
+        env={
+            "PATH": os.environ["PATH"],
+            "_HAL0_ADMIN_KEY_MINTED": "1",
+            "_HAL0_OPENWEBUI_SIGNIN": "first account line",
+        },
+    )
+    assert proc.stdout.splitlines() == [
+        "_HAL0_ADMIN_KEY_MINTED=unset",
+        "_HAL0_OPENWEBUI_SIGNIN=unset",
+        "0",
+    ], proc.stderr
 
 
 def test_allow_lists_match() -> None:
@@ -265,7 +319,12 @@ source "{ANSWERS_SH}"
 {script}
 """
     return subprocess.run(
-        ["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path
+        ["bash", "-c", full],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        timeout=60,
     )
 
 

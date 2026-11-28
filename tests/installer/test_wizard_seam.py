@@ -167,7 +167,6 @@ def _collect(
     args: tuple[str, ...] = (),
     reconfigure: bool = False,
     after: str = "",
-    root: Path = ROOT,
     timeout: float = 60,
 ) -> subprocess.CompletedProcess[str]:
     """Run hal0_collect_answers with the helpers of install.sh; print the state after it."""
@@ -175,7 +174,7 @@ def _collect(
 set -euo pipefail
 IFS=$'\\n\\t'
 PY="{sys.executable}"
-REPO_ROOT="{root}"
+REPO_ROOT="{ROOT}"
 DEV_MODE=1
 PREFIX="{tmp_path}/prefix"
 VAR_DIR="{tmp_path}/var"
@@ -231,74 +230,74 @@ def _state(proc: subprocess.CompletedProcess[str]) -> dict[str, str]:
 DOC = json.dumps({"version": 1, "install": {"type": "recommended"}})
 
 
-# ── wizard absent: nothing changes ──────────────────────────────────────────
+# ── the tree has what the seam needs ────────────────────────────────────────
+
+WIZARD_FILES = {
+    "entry": Path("src/hal0/install/wizard/__main__.py"),
+    "catalog": Path("installer/manifests/setup-catalog.json"),
+    "models": Path("installer/manifests/setup-models.json"),
+}
 
 
-def _absent(tmp_path: Path) -> dict[str, str]:
-    """Make the wizard absent whatever the tree holds: both seams name nothing."""
-    nowhere = tmp_path / "no-wizard"
-    return {
-        "HAL0_WIZARD_ENTRY": str(nowhere / "__main__.py"),
-        "HAL0_WIZARD_CATALOG": str(nowhere / "setup-catalog.json"),
-    }
-
-
-def _tree_with_wizard(tmp_path: Path) -> Path:
-    """A release tree that holds the wizard, as the real one does once it is merged."""
+def _tree_with_the_three_files(tmp_path: Path) -> Path:
     tree = tmp_path / "tree"
-    entry = tree / "src" / "hal0" / "install" / "wizard" / "__main__.py"
-    entry.parent.mkdir(parents=True)
-    entry.write_text(STUB, encoding="utf-8")
-    catalog = tree / "installer" / "manifests" / "setup-catalog.json"
-    catalog.parent.mkdir(parents=True)
-    catalog.write_text("{}", encoding="utf-8")
+    for rel in WIZARD_FILES.values():
+        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tree / rel).write_text("{}", encoding="utf-8")
     return tree
 
 
-@pytest.fixture(params=["real-tree", "tree-with-wizard"])
-def root(request: pytest.FixtureRequest, tmp_path: Path) -> Path:
-    """What the installer code sees as its release tree.
-
-    Every test that means "the wizard is absent" runs against both: the real
-    repository (whatever it holds today) and a tree that holds the wizard's two
-    files. Such a test passes on both only if it makes the wizard absent itself,
-    through the seams (`_absent`), and not through the tree's contents.
-    """
-    return ROOT if request.param == "real-tree" else _tree_with_wizard(tmp_path)
-
-
-def test_the_tree_with_the_wizard_is_found_without_the_seams(tmp_path: Path) -> None:
-    # control for the `root` fixture: without `_absent` the second tree IS the wizard
-    tree = _tree_with_wizard(tmp_path)
-    proc = _collect(tmp_path, {"STUB_LOG": str(tmp_path / "stub.log")}, root=tree)
-    assert len(_records(tmp_path)) == 1, proc.stdout + proc.stderr
-    proc = _flag_loop(tmp_path, ["--no-tls"], {}, root=tree)
-    assert proc.returncode == 1, proc.stderr
-    assert "ERR: unknown flag: --no-tls" in proc.stderr
-
-
-def test_not_run_when_wizard_absent(tmp_path: Path, stub: dict[str, str], root: Path) -> None:
-    env = {"STUB_LOG": stub["STUB_LOG"], **_absent(tmp_path)}
-    proc = _collect(tmp_path, env, root=root)
+def _is_present(tmp_path: Path, tree: Path) -> bool:
+    proc = _run_group(
+        [
+            "bash",
+            "-c",
+            f'REPO_ROOT="{tree}"\nsource "{ANSWERS_SH}"\n'
+            "if hal0_wizard_present; then echo PRESENT; else echo ABSENT; fi",
+        ],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+        cwd=tmp_path,
+    )
     assert proc.returncode == 0, proc.stderr
-    assert _state(proc)["RC"] == "0" and _state(proc)["APPLIED"] == "0"
-    assert _records(tmp_path) == []
-    # a given document takes today's path: origin file, no wizard
-    doc = tmp_path / "given.json"
-    doc.write_text(json.dumps({"version": 1, "memory": {"enabled": False}}), encoding="utf-8")
-    proc = _collect(tmp_path, {**env, "HAL0_ANSWERS_FILE": str(doc)}, root=root)
-    state = _state(proc)
-    assert state["RC"] == "0" and state["APPLIED"] == "1" and state["RAN"] == "0"
-    assert "HAL0_SKIP_HINDSIGHT" in proc.stdout
-    assert _records(tmp_path) == []
+    return proc.stdout.strip() == "PRESENT"
 
 
-def test_only_one_of_the_two_files_is_not_the_wizard(tmp_path: Path, stub: dict[str, str]) -> None:
-    for missing in ("HAL0_WIZARD_ENTRY", "HAL0_WIZARD_CATALOG"):
-        env = {**stub, missing: str(tmp_path / "nowhere"), "STUB_DOC": DOC}
-        proc = _collect(tmp_path, env)
-        assert _state(proc)["APPLIED"] == "0", proc.stdout + proc.stderr
-    assert _records(tmp_path) == []
+def test_a_tree_with_all_three_files_has_the_setup_screens(tmp_path: Path) -> None:
+    assert _is_present(tmp_path, _tree_with_the_three_files(tmp_path))
+
+
+@pytest.mark.parametrize("missing", sorted(WIZARD_FILES))
+def test_a_tree_missing_any_one_of_the_three_files_has_no_setup_screens(
+    tmp_path: Path, missing: str
+) -> None:
+    tree = _tree_with_the_three_files(tmp_path)
+    (tree / WIZARD_FILES[missing]).unlink()
+    assert not _is_present(tmp_path, tree)
+
+
+def test_the_models_file_checked_is_the_one_the_seam_passes(tmp_path: Path) -> None:
+    # the seam hands the wizard `--models ${_HAL0_WIZARD_MODELS_PATH}`; the check
+    # must look at that same path
+    proc = _run_group(
+        [
+            "bash",
+            "-c",
+            f'REPO_ROOT="{ROOT}"\nsource "{ANSWERS_SH}"\n_hal0_wizard_paths\n'
+            'echo "${_HAL0_WIZARD_MODELS_PATH}"',
+        ],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+        cwd=tmp_path,
+    )
+    assert proc.stdout.strip() == str(ROOT / WIZARD_FILES["models"])
+    assert (ROOT / WIZARD_FILES["models"]).is_file()
 
 
 def test_the_test_seams_are_not_honoured_as_root() -> None:
@@ -544,13 +543,11 @@ def test_a_good_saved_copy_is_handed_over_as_a_copy(tmp_path: Path, stub: dict[s
 # ── unknown flags ───────────────────────────────────────────────────────────
 
 
-def _flag_loop(
-    tmp_path: Path, args: list[str], env: dict[str, str], root: Path = ROOT
-) -> subprocess.CompletedProcess:
+def _flag_loop(tmp_path: Path, args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
     block = _slice('SUMMARY_JSON_PATH=""', "# Banner first")
     script = f"""
 set -euo pipefail
-REPO_ROOT="{root}"
+REPO_ROOT="{ROOT}"
 source "{ANSWERS_SH}"
 info() {{ printf 'INFO: %s\\n' "$*"; }}
 warn() {{ printf 'WARN: %s\\n' "$*" >&2; }}
@@ -620,12 +617,26 @@ def test_reconfigure_is_documented_in_the_usage_text() -> None:
     assert "[--reconfigure]" in usage and "  --reconfigure " in usage
 
 
-def test_usage_text_says_a_piped_run_can_show_the_screens() -> None:
+def test_usage_text_describes_the_setup_screens_and_the_headless_run() -> None:
     usage = " ".join(_slice("--help|-h)", "exit 0").split())
-    assert "a piped (\\`curl … | bash\\`) or headless run takes the default." not in usage
-    assert "setup screens" in usage and "terminal can be opened" in usage
-    # and stays true for a tree without them
-    assert "Without the setup screens" in usage
+    assert "the setup screens ask for it with the other choices" in usage
+    assert "a piped (\\`curl … | bash\\`) run shows them too when a terminal can be opened" in usage
+    assert "HAL0_NONINTERACTIVE=1, or when no terminal can be opened" in usage
+    assert (
+        "On an upgrade, or after an install that did not finish, the screens are skipped "
+        "and the answers saved by the last install are used, unless --reconfigure"
+    ) in usage
+    assert "With --answers, nothing is asked: the document is used." in usage
+    assert "With HAL0_NONINTERACTIVE=1, or with no terminal, nothing is asked either" in usage
+    # the words of the interactive prompts and of a tree without the screens are gone
+    for stale in (
+        "Without the setup screens",
+        "interactive component picker",
+        "Interactive prompts",
+        "asks on an interactive terminal",
+        "only run when stdin is a terminal",
+    ):
+        assert stale not in usage, stale
 
 
 # ── exit 0 ──────────────────────────────────────────────────────────────────
@@ -854,11 +865,9 @@ def test_a_document_the_reader_refuses_stops(tmp_path: Path, stub: dict[str, str
 # ── exit codes, through the seam in install.sh ──────────────────────────────
 
 
-def _seam_run(
-    tmp_path: Path, env: dict[str, str], root: Path = ROOT
-) -> subprocess.CompletedProcess[str]:
+def _seam_run(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return _run_group(
-        ["bash", "-c", _seam_script(tmp_path, root=root)],
+        ["bash", "-c", _seam_script(tmp_path)],
         timeout=60,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -868,13 +877,13 @@ def _seam_run(
     )
 
 
-def _seam_script(tmp_path: Path, pre: str = "", root: Path = ROOT) -> str:
+def _seam_script(tmp_path: Path, pre: str = "") -> str:
     seam = _slice("# answers-seam: begin", "# answers-seam: end")
     return f"""
 set -euo pipefail
 IFS=$'\\n\\t'
 PY="{sys.executable}"
-REPO_ROOT="{root}"
+REPO_ROOT="{ROOT}"
 DEV_MODE=1
 PREFIX="{tmp_path}/prefix"
 VAR_DIR="{tmp_path}/var"
@@ -1018,27 +1027,18 @@ esac
 exec "$STUB_REAL_PY" "$@"
 """
 
-# name -> (reader call that dies, python step that dies, shell hook, wizard present,
+# name -> (reader call that dies, python step that dies, shell hook,
 #          given document, saved answers present, wizard starts before the interrupt)
 INTERRUPT_POINTS = {
-    "reader-first-check": (1, "", "", True, True, False, False),
-    "copy-step": (0, "copy", "", True, True, False, False),
-    "reader-second-check": (2, "", "", True, True, False, False),
-    "apply-after-wizard": (3, "", "", True, True, False, True),
-    "apply-without-wizard": (1, "", "", False, True, False, False),
-    "work-directory": (
-        0,
-        "",
-        "_hal0_wizard_lstat() { kill -INT $BASHPID; }",
-        True,
-        False,
-        False,
-        False,
-    ),
-    "saved-copy": (0, "savedcopy", "", True, False, True, False),
-    "saved-store": (1, "", "", True, False, True, False),
-    "python-lookup": (0, "pylookup", "", False, True, False, False),
-    "python-version-check": (0, "pyversion", "", True, False, False, False),
+    "reader-first-check": (1, "", "", True, False, False),
+    "copy-step": (0, "copy", "", True, False, False),
+    "reader-second-check": (2, "", "", True, False, False),
+    "apply-after-wizard": (3, "", "", True, False, True),
+    "work-directory": (0, "", "_hal0_wizard_lstat() { kill -INT $BASHPID; }", False, False, False),
+    "saved-copy": (0, "savedcopy", "", False, True, False),
+    "saved-store": (1, "", "", False, True, False),
+    "python-lookup": (0, "pylookup", "", False, False, True),
+    "python-version-check": (0, "pyversion", "", False, False, False),
 }
 
 
@@ -1046,7 +1046,7 @@ INTERRUPT_POINTS = {
 def test_a_child_that_dies_of_the_interrupt_before_bash_sees_it_is_a_quiet_130(
     tmp_path: Path, stub: dict[str, str], point: str
 ) -> None:
-    die_call, die_py, hook, wizard, given_doc, saved, wizard_starts = INTERRUPT_POINTS[point]
+    die_call, die_py, hook, given_doc, saved, wizard_starts = INTERRUPT_POINTS[point]
     reader = tmp_path / "counting_reader.py"
     reader.write_text(COUNTING_READER, encoding="utf-8")
     wrapper = tmp_path / "py-wrapper.sh"
@@ -1056,7 +1056,6 @@ def test_a_child_that_dies_of_the_interrupt_before_bash_sees_it_is_a_quiet_130(
         "PATH": os.environ["PATH"],
         "HAL0_PLAIN": "1",
         **stub,
-        **({} if wizard else _absent(tmp_path)),
         "STUB_DOC": DOC,
         "STUB_COUNTER": str(tmp_path / "reader-calls"),
         "STUB_DIE_CALL": str(die_call),
@@ -1092,6 +1091,99 @@ def test_a_child_that_dies_of_the_interrupt_before_bash_sees_it_is_a_quiet_130(
     assert (_records(tmp_path) != []) is wizard_starts, (
         "the wizard must not start after an interrupt"
     )
+
+
+# The Python-first step runs before the seam on every run, so an interrupt there
+# ends the install the way an interrupt in the seam does: status 130, quietly,
+# no failure report, and the install does not carry on. resolve_main_python is
+# a stand-in with four behaviours; the real function and block are cut out of
+# install.sh.
+RESOLVE_STUBS = {
+    # a child that dies of the interrupt before bash has seen it
+    "child-dies": "kill -INT $BASHPID",
+    # bash itself gets the interrupt while the child runs, and the child then
+    # carries on and succeeds
+    "shell-gets-it": 'kill -INT $$; sleep 0.3; echo "python3.12"',
+    "fails": "return 1",
+    "works": 'echo "python3.12"',
+}
+
+
+def _python_first_script(tmp_path: Path, how: str) -> str:
+    fn_head = TEXT.index("_hal0_resolve_main_python_or_die() {")
+    fn = TEXT[fn_head : TEXT.index("\n}\n", fn_head) + 3]
+    region = _slice("# file-origin: begin", "# file-origin: end")
+    return f"""
+set -euo pipefail
+IFS=$'\\n\\t'
+PY="no-such-python-xyz"
+CURRENT_STEP="Pre-flight checks"
+source "{ROOT}/installer/lib/ui.sh"
+source "{ROOT}/installer/lib/failure-report.sh"
+source "{ANSWERS_SH}"
+hal0_write_failure_report() {{ echo "REPORT WRITTEN" >> "{tmp_path}/report.log"; echo "{tmp_path}/r.txt"; }}
+trap 'hal0_report_on_exit "$?"' EXIT
+trap 'echo "ERR TRAP" >> "{tmp_path}/report.log"; _HAL0_REPORT_WRITTEN=1; exit 1' ERR
+python_venv_hint() {{ echo hint; }}
+pkg_install_cmd() {{ echo install-python; }}
+resolve_main_python() {{ {RESOLVE_STUBS[how]}; }}
+_main_python_usable=0
+{fn}
+{region}
+echo "PAST THE STEP"
+"""
+
+
+@pytest.mark.parametrize("how", ["child-dies", "shell-gets-it"])
+def test_an_interrupt_while_python_is_installed_first_is_a_quiet_130(
+    tmp_path: Path, how: str
+) -> None:
+    proc = _run_group(
+        ["bash", "-c", _python_first_script(tmp_path, how)],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1"},
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 130, (proc.returncode, proc.stdout, proc.stderr)
+    assert "PAST THE STEP" not in proc.stdout
+    log = (tmp_path / "report.log").read_text() if (tmp_path / "report.log").exists() else ""
+    assert log == "", log
+    for text in ("not found", "below hal0", "using python3.12", "Failure report saved"):
+        assert text not in proc.stdout + proc.stderr, proc.stdout + proc.stderr
+
+
+def test_python_installed_first_still_dies_when_it_cannot_be_resolved(tmp_path: Path) -> None:
+    proc = _run_group(
+        ["bash", "-c", _python_first_script(tmp_path, "fails")],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1"},
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "python interpreter 'no-such-python-xyz' not found" in proc.stderr
+    assert "PAST THE STEP" not in proc.stdout
+    assert "REPORT WRITTEN" in (tmp_path / "report.log").read_text()
+
+
+def test_python_installed_first_goes_on_when_it_is_resolved(tmp_path: Path) -> None:
+    proc = _run_group(
+        ["bash", "-c", _python_first_script(tmp_path, "works")],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1"},
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "PAST THE STEP" in proc.stdout and not (tmp_path / "report.log").exists()
+    assert "using python3.12" in proc.stdout
 
 
 BLOCKED_ON_FIFO = """
@@ -1186,16 +1278,6 @@ def test_the_installer_sets_no_interrupt_trap_of_its_own() -> None:
     for line in TEXT.splitlines():
         stripped = line.strip()
         assert not (stripped.startswith("trap ") and stripped.endswith(" INT")), line
-
-
-def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(
-    tmp_path: Path, root: Path
-) -> None:
-    bad = tmp_path / "bad.json"
-    bad.write_text('{"version": 7}', encoding="utf-8")
-    proc = _seam_run(tmp_path, {**_absent(tmp_path), "HAL0_ANSWERS_FILE": str(bad)}, root=root)
-    assert proc.returncode == 1
-    assert "ERR TRAP" in (tmp_path / "report.log").read_text()
 
 
 # ── the secret file ─────────────────────────────────────────────────────────
@@ -1393,7 +1475,7 @@ def test_chosen_folder_ignored_when_headless_or_absent(
 
 
 def test_the_two_reasons_are_never_taken_from_the_environment(
-    tmp_path: Path, stub: dict[str, str], root: Path
+    tmp_path: Path, stub: dict[str, str]
 ) -> None:
     env = {
         **stub,
@@ -1401,22 +1483,9 @@ def test_the_two_reasons_are_never_taken_from_the_environment(
         "_HAL0_WIZARD_CHOSEN_STORE": "/home/alice/models",
         "_HAL0_SAVED_STORE": "/home/alice/models",
     }
-    proc = _collect(tmp_path, env, after=CHECK, root=root)
+    proc = _collect(tmp_path, env, after=CHECK)
     state = _state(proc)
     assert state["RC"] == "0" and state["OWN"] == "no", proc.stdout + proc.stderr
-    # nor when the wizard is absent
-    env = {
-        **_absent(tmp_path),
-        "_HAL0_WIZARD_CHOSEN_STORE": "/x/y",
-        "_HAL0_SAVED_STORE": "/x/y",
-    }
-    proc = _collect(
-        tmp_path,
-        env,
-        after="hal0_store_is_operator_choice /x/y && echo OWN=yes || echo OWN=no",
-        root=root,
-    )
-    assert _state(proc)["OWN"] == "no"
 
 
 def test_existing_store_from_saved_answers_is_exempt(tmp_path: Path, stub: dict[str, str]) -> None:
@@ -1627,9 +1696,7 @@ def test_no_npu_device_drops_a_documents_npu_folder() -> None:
 # ── Python first ────────────────────────────────────────────────────────────
 
 
-def _python_region(
-    tmp_path: Path, *, usable: int, wizard: bool, have: str = "", answers: str = ""
-) -> list[str]:
+def _python_region(tmp_path: Path, *, usable: int, have: str = "") -> list[str]:
     region = _slice("# file-origin: begin", "# file-origin: end")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -1639,16 +1706,12 @@ def _python_region(
         p.chmod(0o755)
     log = tmp_path / "calls.log"
     log.unlink(missing_ok=True)
-    present = "return 0" if wizard else "return 1"
     script = f"""
 set -u
 PATH="{bin_dir}"
 LOG="{log}"
 PY=python3
-{answers}
 source "{ANSWERS_SH}"
-hal0_wizard_present() {{ {present}; }}
-hal0_answers_python() {{ return 1; }}
 info() {{ echo "info: $*" >> "$LOG"; }}
 _hal0_resolve_main_python_or_die() {{ echo "resolve $*" >> "$LOG"; }}
 _main_python_usable={usable}
@@ -1662,18 +1725,14 @@ echo "usable=$_main_python_usable" >> "$LOG"
 
 
 def test_python_installed_first_when_missing(tmp_path: Path) -> None:
-    calls = _python_region(tmp_path, usable=0, wizard=True)
+    calls = _python_region(tmp_path, usable=0)
     msg = "info: Installing Python, which hal0 needs before it can ask anything."
     assert calls == [msg, "resolve install-first", "usable=1"]
     # an interpreter that is new enough exists: resolved quietly, no message
-    calls = _python_region(tmp_path, usable=0, wizard=True, have="python3.13")
+    calls = _python_region(tmp_path, usable=0, have="python3.13")
     assert calls == ["resolve install-first", "usable=1"]
     # the default one is usable: nothing
-    assert _python_region(tmp_path, usable=1, wizard=True) == ["usable=1"]
-    # without the wizard the older rule stays: only for a given file
-    assert _python_region(tmp_path, usable=0, wizard=False) == ["usable=0"]
-    calls = _python_region(tmp_path, usable=0, wizard=False, answers="HAL0_ANSWERS_FILE=/x.json")
-    assert calls[0] == "info: Installing Python, which is needed to read your answers file."
+    assert _python_region(tmp_path, usable=1) == ["usable=1"]
 
 
 def test_the_wizard_refuses_an_old_python(tmp_path: Path, stub: dict[str, str]) -> None:
@@ -1705,6 +1764,30 @@ rc=0; hal0_run_wizard || rc=$?; echo "RC=$rc"
     )
     assert "RC=1" in proc.stdout and "3.12" in proc.stderr, proc.stdout + proc.stderr
     assert _records(tmp_path) == []
+
+
+def test_the_wizard_says_so_when_its_entry_file_is_missing(tmp_path: Path) -> None:
+    proc = _run_group(
+        [
+            "bash",
+            "-c",
+            f"""
+set -u
+PY="{sys.executable}" REPO_ROOT="{tmp_path}/no-screens" DEV_MODE=1
+source "{ANSWERS_SH}"
+err() {{ echo "ERR: $*" >&2; }}
+_HAL0_INSTALL_ARGS=()
+rc=0; hal0_run_wizard || rc=$?; echo "RC=$rc"
+""",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+    )
+    assert "RC=1" in proc.stdout, proc.stdout + proc.stderr
+    assert "ERR: the setup screens are missing from this tree" in proc.stderr, proc.stderr
+    assert "can't open file" not in proc.stderr, proc.stderr
 
 
 # ── the CPU-only prompt ─────────────────────────────────────────────────────

@@ -291,12 +291,12 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
   --models-dir=PATH   absolute path where HuggingFace pulls land
                       (default: /var/lib/hal0/models — or \$PWD/.hal0ai/var/lib/hal0/models
                       under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
-                      Omit it and the installer asks on an interactive terminal.
-                      With the setup screens in this release, a piped
-                      (\`curl … | bash\`) run shows them too when the terminal
-                      can be opened; a headless run (HAL0_NONINTERACTIVE=1, or
-                      no terminal) takes the default. Without the setup screens
-                      a piped or headless run takes the default.
+                      Omit it and the setup screens ask for it with the other
+                      choices, before anything is changed; a piped
+                      (\`curl … | bash\`) run shows them too when a terminal
+                      can be opened. With HAL0_NONINTERACTIVE=1, or when no
+                      terminal can be opened, the flag, the variable or the
+                      default is used.
   --summary-json=PATH write a machine-readable install summary (versions,
                       ports, bind host, model pulled, per-step durations,
                       warning count) to PATH as JSON, atomically. See
@@ -320,11 +320,16 @@ Components (each flag skips one optional piece; env twin in parentheses):
   --no-brain-model    skip the brain model pull (HAL0_SKIP_BRAIN_MODEL=1)
   --bare              every component above off: inference only
   --bare-inference    synonym for --bare
-Any component flag also suppresses the interactive component picker.
+A component flag answers that question for the setup screens, which show it as
+fixed instead of asking.
 
-Interactive prompts (component checklist, models dir, HuggingFace token, Hermes
-terminal tool) only run when stdin is a terminal. Set HAL0_NONINTERACTIVE=1 to
-force the flag/env values everywhere.
+The setup screens ask every question up front (components, models dir,
+HuggingFace token, Hermes terminal tool) when a terminal can be opened, also
+under \`curl … | bash\`. On an upgrade, or after an install that did not finish,
+the screens are skipped and the answers saved by the last install are used,
+unless --reconfigure is given. With --answers, nothing is asked: the document
+is used. With HAL0_NONINTERACTIVE=1, or with no terminal, nothing is asked
+either: the flags, the variables and the defaults are used.
 
 HAL0_HERMES_TERMINAL=1 gives the bundled Hermes agent a terminal tool, letting
 it run commands as the hal0 user (root-equivalent on this box). It is OFF by
@@ -805,18 +810,23 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     exit 1' ERR
 
 # ── Main Python: resolve or auto-install ────────────────────────────────────
-# The block below ran in line in the pre-flight step before the step was split
-# into detection, then checks that depend on the answers. It still runs once,
-# in the second half. It is a function only so the file-origin branch of the
-# first half can run it ahead of the answers seam (a person who passes an
-# answers file has already chosen to let the installer install Python).
+# Runs once, in the Python-first block before the answers seam, when the default
+# interpreter is not usable (the setup screens need Python 3.12 or newer too).
+# The installer must try to install a missing interpreter before giving up, so
+# the not-found guard comes after that try.
 _hal0_resolve_main_python_or_die() {
-    # With an answers file the installer must try to install a missing
-    # interpreter before giving up, so the not-found guard comes after that try.
-    if [[ "${1:-}" != "install-first" ]] && ! command -v "${PY}" >/dev/null 2>&1; then
-        die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
+    local resolve_rc=0
+    resolved_name="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" || resolve_rc=$?
+    # Ctrl-C while the interpreter is installed: neither "not found" nor "below
+    # the floor". hal0_run_interruptible (the caller's) turns this 130 into a
+    # quiet end; a child that died of the signal may report it before bash has
+    # seen it, so the status counts as much as the flag.
+    if [[ "${resolve_rc}" -eq 130 || "${_HAL0_WIZARD_INT:-0}" == "1" ]]; then
+        return 130
     fi
-    resolved_name="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" || resolved_name=""
+    # A lookup that failed gives no name; a name is used only when it is one
+    # line and a command that exists (the guard from main).
+    [[ "${resolve_rc}" -eq 0 ]] || resolved_name=""
     if [[ -n "${resolved_name}" && "${resolved_name}" != *$'\n'* ]] && command -v "${resolved_name}" >/dev/null 2>&1; then
         resolved_py="${resolved_name}"
         info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
@@ -945,8 +955,8 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
 fi
 
 # Detection only: is the default Python usable? The comment on
-# _hal0_resolve_main_python_or_die (above this step) and the second half of this
-# step cover what happens when it is not.
+# _hal0_resolve_main_python_or_die (above this step) and the Python-first block
+# below cover what happens when it is not.
 _main_python_usable=1
 preflight_python || _main_python_usable=0
 
@@ -978,29 +988,25 @@ if ! _facts_err="$(hal0_facts_write "${_facts_path}" 2>&1)"; then
 fi
 
 # file-origin: begin (the one place the detection half installs anything)
-# With the setup screens in this release tree, every run goes through them, and
-# they need Python 3.12 or newer, the same floor as hal0 itself: when ${PY} is
-# not usable, the interpreter is resolved now, before the seam, and installed
-# when the box has none (said in one line first).
-# Without them, only a person who passes an answers file has already chosen,
-# and reading it needs a Python. The reader runs on 3.10 and newer, so a
-# document is checked before anything changes whenever such an interpreter
-# exists (hal0_answers_python: ${PY}, else a python3 on PATH). Only when none
-# exists at all is one installed now, before the seam. A below-floor but 3.10+
-# interpreter is replaced by the normal resolution after the seam.
-if hal0_wizard_present; then
-    if [[ "${_main_python_usable}" -eq 0 ]]; then
-        if ! command -v python3.14 >/dev/null 2>&1 && ! command -v python3.13 >/dev/null 2>&1 \
-            && ! command -v python3.12 >/dev/null 2>&1; then
-            info "Installing Python, which hal0 needs before it can ask anything."
-        fi
-        _hal0_resolve_main_python_or_die install-first
-        _main_python_usable=1
+# Every run goes through the setup screens, and they need Python 3.12 or newer,
+# the same floor as hal0 itself: when ${PY} is not usable, the interpreter is
+# resolved now, before the seam, and installed when the box has none (said in
+# one line first).
+if [[ "${_main_python_usable}" -eq 0 ]]; then
+    if ! command -v python3.14 >/dev/null 2>&1 && ! command -v python3.13 >/dev/null 2>&1 \
+        && ! command -v python3.12 >/dev/null 2>&1; then
+        info "Installing Python, which hal0 needs before it can ask anything."
     fi
-elif [[ "${_main_python_usable}" -eq 0 && -n "${HAL0_ANSWERS_FILE:-}" ]] \
-    && ! hal0_answers_python >/dev/null; then
-    info "Installing Python, which is needed to read your answers file."
-    _hal0_resolve_main_python_or_die install-first
+    # An interrupt here ends the install the way one in the seam does: status
+    # 130, quietly (no failure report), and the install does not carry on.
+    _python_first_rc=0
+    hal0_run_interruptible _hal0_resolve_main_python_or_die install-first || _python_first_rc=$?
+    if [[ "${_python_first_rc}" -eq 130 ]]; then
+        _HAL0_REPORT_WRITTEN=1
+        exit 130
+    fi
+    [[ "${_python_first_rc}" -eq 0 ]] || exit 1
+    unset _python_first_rc
     _main_python_usable=1
 fi
 # file-origin: end
@@ -1016,10 +1022,6 @@ _pre_seam_flm="${HAL0_FLM_MODELS_DIR:-}"
 _seam_rc=0
 hal0_collect_answers || _seam_rc=$?
 if (( _seam_rc != 0 )); then
-    # Without the setup screens a refused document stops the install through the
-    # ERR trap, as before.
-    # An interrupt (130) is no refused document; it is handled below.
-    [[ "${_HAL0_WIZARD_CALLED:-0}" == "1" || "${_seam_rc}" == "130" ]] || false
     # The setup screens already said why. Quitting and an interrupt changed
     # nothing, so they leave no failure report; anything else may.
     case "${_seam_rc}" in
@@ -1083,21 +1085,6 @@ unset _pre_seam_flm
 # own tools.
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     persist_bootstrap_cosign
-fi
-
-# Resolve or auto-install a usable Python (see _hal0_resolve_main_python_or_die).
-# preflight_python returns 1 when python is missing OR the version is
-# below hal0's floor (pyproject.toml requires-python >=3.12; it logs an
-# `err`/`warn` itself). A below-floor interpreter is NOT survivable — pip
-# install "${REPO_ROOT}" always fails on it — so unlike a merely-missing
-# python (which just needs installing per the hint below), we actively try
-# to resolve or auto-install a compatible interpreter (mirrors the
-# Hindsight venv's resolve_hindsight_python) instead of limping ahead only
-# to die minutes later, deep inside "pip install", on Debian 12 (python3
-# 3.11) / Ubuntu 22.04 (python3 3.10) — every stock LTS whose system
-# python3 predates 3.12.
-if [[ "${_main_python_usable}" -eq 0 ]]; then
-    _hal0_resolve_main_python_or_die
 fi
 
 # `python3 -m venv` capability is a hard requirement — the install always
@@ -3339,7 +3326,18 @@ unset _cp_line _cp_id _cp_word
 # later.
 if [[ -n "${HAL0_HERMES_TERMINAL:-}" ]]; then
     export HAL0_HERMES_TERMINAL
-    info "Hermes terminal tool: taken from the environment (HAL0_HERMES_TERMINAL=${HAL0_HERMES_TERMINAL})"
+    # Said as it is: the setup screens' answer when the reader exported it in
+    # this run (HAL0_ANSWERS_EXPORTED), the environment's otherwise.
+    _ht_source="taken from the environment"
+    if [[ "${HAL0_WIZARD_RAN:-0}" == "1" ]]; then
+        for _ht_name in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
+            if [[ "${_ht_name}" == "HAL0_HERMES_TERMINAL" ]]; then
+                _ht_source="set by the setup screens"
+            fi
+        done
+    fi
+    info "Hermes terminal tool: ${_ht_source} (HAL0_HERMES_TERMINAL=${HAL0_HERMES_TERMINAL})"
+    unset _ht_source _ht_name
 fi
 # ── hal0 brain model (v1.0) ─────────────────────────────────────────────────
 # The brain is the platform steward: the dashboard's sidebar chat targets the
@@ -4878,7 +4876,7 @@ else
 
     # A box that already has Hermes keeps its recorded terminal-tool decision
     # unless this run was given an explicit answer (HAL0_HERMES_TERMINAL: the
-    # prompt, the setup screens or the environment). The provisioning above only
+    # setup screens or the environment). The provisioning above only
     # runs on a box without Hermes, so here the answer is applied by
     # `hal0 agent reprovision hermes`: its root prelude records the answer, it
     # re-renders config.yaml from it, and it restarts the agent and gateway.
@@ -5396,9 +5394,10 @@ fi
 # ── No Stage-2 handoff (v1.0) ───────────────────────────────────────────────
 # There used to be a "Launch the guided hal0 setup now? [Y/n]" prompt here
 # (issue #1112's Stage-2). It is deliberately GONE: install.sh is the single
-# user-facing entry point, and every answer that wizard collected is now
-# either asked by the setup screens (this script only carries the model store
-# and HF token on, in the "Operator input" block) or already done by it (slot scaffolding, extensions, NPU probe).
+# user-facing entry point, and every answer that Stage-2 flow collected is now
+# either asked by the setup screens, up front (this script only carries the
+# model store and HF token on, in the "Operator input" block), or already done
+# by this script (slot scaffolding, extensions, NPU probe).
 # Offering it again sent operators through a five-question flow that only
 # re-derived what had just been derived. What is genuinely left after an
 # install is picking models per slot, which is a dashboard job — see the

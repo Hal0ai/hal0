@@ -8,13 +8,13 @@
 #          except the setup screens (hal0_run_wizard), which ask on the
 #          terminal and write only into a root-only work directory.
 # Provides: hal0_apply_answers, hal0_collect_answers, hal0_save_answers,
-#          hal0_wizard_present, hal0_run_wizard, hal0_answers_forget,
-#          hal0_answers_unset_doc_flm.
+#          hal0_wizard_present, hal0_run_wizard, hal0_run_interruptible,
+#          hal0_answers_forget, hal0_answers_unset_doc_flm.
 # Env:     HAL0_ANSWERS_FILE  path of an answers document (read here only).
 #          HAL0_FACTS_FILE    where the facts file goes; exported by
 #                             hal0_collect_answers with its default filled in.
-# Sets:    HAL0_ANSWERS_APPLIED=1 when a document was applied, else 0. The
-#          legacy prompts in install.sh skip themselves when it is 1.
+# Sets:    HAL0_ANSWERS_APPLIED=1 when a document was applied, else 0 (the
+#          setup screens always apply one; install.sh reads it after the seam).
 #          HAL0_SAVED_ANSWERS_FILE: where the applied document is kept, in
 #          root's own directory (exported by hal0_collect_answers).
 #          HAL0_WIZARD_RAN=1 when the setup screens wrote the applied document;
@@ -25,11 +25,15 @@
 # would otherwise pass the document to every child process. The same goes for
 # what the setup screens hand back (the token, and the two reasons a model
 # store counts as the operator's own choice): they are set only by
-# hal0_run_wizard in this process, never taken from the environment.
+# hal0_run_wizard in this process, never taken from the environment. So are the
+# two the closing screen reads (that an admin key was minted in this run, and
+# the first-account line): only installer code in this run may set them, so a
+# value in root's environment cannot make the screen show the key or the line.
 unset HAL0_ANSWERS_SAVED HAL0_ANSWERS_APPLIED HAL0_ANSWERS_EXPORTED _HAL0_ANSWERS_PY \
-    HAL0_WIZARD_RAN HAL0_ANSWERS_ORIGIN _HAL0_WIZARD_CALLED _HAL0_WIZARD_HF_TOKEN \
+    HAL0_WIZARD_RAN HAL0_ANSWERS_ORIGIN _HAL0_WIZARD_HF_TOKEN \
     _HAL0_WIZARD_CHOSEN_STORE _HAL0_SAVED_STORE _HAL0_WIZARD_ENTRY_PATH \
-    _HAL0_WIZARD_CATALOG_PATH _HAL0_WIZARD_MODELS_PATH _HAL0_WIZARD_INT
+    _HAL0_WIZARD_CATALOG_PATH _HAL0_WIZARD_MODELS_PATH _HAL0_WIZARD_INT \
+    _HAL0_ADMIN_KEY_MINTED _HAL0_OPENWEBUI_SIGNIN
 
 # Where the reader lives, and the names it may emit. Assigned unconditionally
 # (never taken from the environment); tests override them after sourcing.
@@ -302,26 +306,30 @@ hal0_collect_answers() {
     else
         unset HAL0_SAVED_ANSWERS_FILE
     fi
-    # The setup screens, when this release tree has them. They return 0 with
-    # nothing applied when it does not, and today's path below runs unchanged.
+    # The setup screens ask, merge the flags, the variables, the saved answers
+    # and a given document (HAL0_ANSWERS_FILE) into one document, and apply it;
+    # nothing else applies one. hal0_run_wizard returns 0 only after it has.
     hal0_run_wizard || return $?
-    [[ "${HAL0_WIZARD_RAN:-0}" == "1" ]] && return 0
-    local path="${HAL0_ANSWERS_FILE:-}"
-    [[ -n "${path}" ]] || return 0
-    # The same interrupt rule as hal0_run_wizard: a child that dies of the
-    # signal before bash has seen it is still an interrupt, never a refusal.
-    local apply_rc=0
+    return 0
+}
+
+# hal0_run_interruptible COMMAND [ARG...]: run COMMAND (a function of the
+# installer) under the interrupt rule of hal0_run_wizard. Ctrl-C reaches the
+# whole process group, so a child can die of it before bash has seen it, and
+# bash would then die of the signal too and the EXIT trap would write a failure
+# report. With an INT trap of its own the call returns 130 instead, whether the
+# trap ran or the command itself reported 130, and the caller ends the install
+# quietly. Any other status is the command's own. install.sh sets no INT trap of
+# its own, so `trap - INT` restores it. The same flag as the wizard's
+# (_HAL0_WIZARD_INT) records the signal, which COMMAND may also look at.
+hal0_run_interruptible() {
+    local rc=0
     _HAL0_WIZARD_INT=0
     trap '_HAL0_WIZARD_INT=1' INT
-    hal0_apply_answers "${path}" file || apply_rc=$?
+    "$@" || rc=$?
     trap - INT
-    if [[ "${_HAL0_WIZARD_INT}" == "1" ]]; then apply_rc=130; fi
-    [[ "${apply_rc}" -eq 0 ]] || return "${apply_rc}"
-    # shellcheck disable=SC2034 # read by install.sh, which sources this file
-    HAL0_ANSWERS_APPLIED=1
-    # shellcheck disable=SC2034 # read by install.sh and the tests
-    HAL0_ANSWERS_ORIGIN="file"
-    return 0
+    if [[ "${_HAL0_WIZARD_INT}" == "1" ]]; then rc=130; fi
+    return "${rc}"
 }
 
 # ── The setup screens (the wizard) ──────────────────────────────────────────
@@ -353,13 +361,14 @@ _hal0_wizard_paths() {
     fi
 }
 
-# hal0_wizard_present: true when this release tree has the wizard (both its
-# entry point and its catalog). When it is false the installer behaves exactly
-# as it did before the wizard existed.
+# hal0_wizard_present: true when this release tree has everything the seam
+# hands the wizard: its entry point, its catalog and its models list (--models).
+# install.sh stops at the top when it is false.
 hal0_wizard_present() {
     _hal0_wizard_paths
     [[ -n "${REPO_ROOT:-}" || "${EUID}" -ne 0 ]] || return 1
-    [[ -f "${_HAL0_WIZARD_ENTRY_PATH}" && -f "${_HAL0_WIZARD_CATALOG_PATH}" ]]
+    [[ -f "${_HAL0_WIZARD_ENTRY_PATH}" && -f "${_HAL0_WIZARD_CATALOG_PATH}" \
+        && -f "${_HAL0_WIZARD_MODELS_PATH}" ]]
 }
 
 # _hal0_wizard_lstat PATH: look at PATH itself (stat without -L is lstat). Sets
@@ -659,9 +668,9 @@ _hal0_wizard_one_line() {
 # evaluated) and split at its first `=`: accepted only as
 # `HF_TOKEN=<letters, digits, _ and ->`, so a trailing `=` is refused, not
 # dropped. It goes to _HAL0_WIZARD_HF_TOKEN, not exported; install.sh hands it
-# to HF_TOKEN_VAL, the variable the legacy prompt fills. Anything else: one
-# warning that never shows the file's content, and no token. The file is
-# removed either way.
+# to HF_TOKEN_VAL, the variable the later steps read the token from. Anything
+# else: one warning that never shows the file's content, and no token. The file
+# is removed either way.
 _hal0_wizard_take_token() {
     local file="${1}" line="" tname="" tvalue="" LC_ALL=C
     export -n line tname tvalue
@@ -685,10 +694,11 @@ _hal0_wizard_take_token() {
     return 0
 }
 
-# hal0_run_wizard: run the setup screens when this release tree has them, then
-# apply the document they wrote. Returns 0 with nothing done when the tree has
-# no wizard. Otherwise returns 0 with the document applied (HAL0_WIZARD_RAN=1,
-# HAL0_ANSWERS_APPLIED=1), or the installer's exit code for the wizard's:
+# hal0_run_wizard: run the setup screens, then apply the document they wrote.
+# install.sh has already stopped on a tree without them (hal0_wizard_present),
+# so this is only called on a complete one. Returns 0 with the document applied
+# (HAL0_WIZARD_RAN=1, HAL0_ANSWERS_APPLIED=1), or the installer's exit code for
+# the wizard's:
 #   2 bad input or usage, 11 no GPU and no consent, 70 internal error -> 1
 #   10 the person quit, nothing changed -> 10
 #   130 interrupted -> 130
@@ -699,9 +709,13 @@ _hal0_wizard_take_token() {
 hal0_run_wizard() {
     unset _HAL0_WIZARD_HF_TOKEN _HAL0_WIZARD_CHOSEN_STORE _HAL0_SAVED_STORE
     HAL0_WIZARD_RAN=0
-    _HAL0_WIZARD_CALLED=0
-    hal0_wizard_present || return 0
-    _HAL0_WIZARD_CALLED=1
+    # Where the entry point and the catalog are (hal0_wizard_present does the
+    # same, ahead of everything, in install.sh).
+    _hal0_wizard_paths
+    if [[ ! -f "${_HAL0_WIZARD_ENTRY_PATH}" ]]; then
+        _hal0_answers_err "the setup screens are missing from this tree (${_HAL0_WIZARD_ENTRY_PATH}); download the installer again"
+        return 1
+    fi
     local dir="" rc=0
     # An interrupt of the installer itself (Ctrl-C reaches the whole process
     # group, also before the wizard has its own handler, and while the reader
@@ -905,6 +919,7 @@ _hal0_wizard_call() {
             _HAL0_WIZARD_CHOSEN_STORE="${chosen}"
         fi
     done
+    # shellcheck disable=SC2034 # read by install.sh and the tests
     HAL0_WIZARD_RAN=1
     # shellcheck disable=SC2034 # read by install.sh and the tests
     HAL0_ANSWERS_ORIGIN="${origin}"
