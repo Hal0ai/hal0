@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Runs ON the Proxmox host: pve_run 'bash -s -- gpu+npu' < host-devices.sh
 # Prints `dev <path>[,gid=<n>]` and `major <n>` lines for the nodes to forward
-# into a container. Same discovery rules as scripts/proxmox-ve/hal0.sh
-# (_add_gpu_device, discover_gpu_devices): render nodes, /dev/kfd and, with
-# gpu+npu, /dev/accel/accel*; symlinks skipped; gid= only for a non-zero group.
-# The duplication is deliberate; hal0.sh is not edited from here.
+# into a container. Discovery rules follow the old scripts/proxmox-ve/hal0.sh:
+# render nodes, /dev/kfd and, with gpu+npu, /dev/accel/accel*; symlinks
+# skipped; gid= only for a non-zero group. The rebuilt helper script differs
+# (it also forwards card nodes, and uses the container's group ids); a test
+# pins each difference. The duplication is deliberate.
 #
 # HAL0_MATRIX_DEV_ROOT prefixes the paths read (test hook). When it is set the
 # tests cannot create character devices without root, so regular files count.

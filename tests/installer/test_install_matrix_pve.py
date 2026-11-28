@@ -21,7 +21,11 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 PVE_SH = REPO / "scripts" / "install-matrix" / "lib" / "pve.sh"
 HOST_DEVICES_SH = REPO / "scripts" / "install-matrix" / "lib" / "host-devices.sh"
-HAL0_SH = REPO / "scripts" / "proxmox-ve" / "hal0.sh"
+PROXMOX_DIR = REPO / "scripts" / "proxmox-ve"
+HELPER_CT_SH = PROXMOX_DIR / "ct" / "hal0.sh"
+HELPER_INSTALL_SH = PROXMOX_DIR / "install" / "hal0-install.sh"
+HELPER_NPU_SH = PROXMOX_DIR / "hal0-npu-passthrough"
+HELPER_README = PROXMOX_DIR / "README.md"
 
 FEATURES = "nesting=1,keyctl=1,fuse=1,mknod=1"
 
@@ -983,9 +987,28 @@ def test_destroy_refuses_a_malformed_nonce_before_any_ssh(fake, bad):
 
 
 def test_feature_list_matches_proxmox_script():
-    m = re.search(r'FEATURES="\$\{FEATURES:-([^}]*)\}"', HAL0_SH.read_text())
-    assert m, "FEATURES default not found in hal0.sh"
-    theirs = m.group(1)
+    # The helper script is built on the community-scripts engine, so it no
+    # longer spells out a features string. It declares the flags (ct/hal0.sh
+    # var_fuse, var_keyctl, var_mknod) and the README names nesting as one of
+    # the container's features (README.md, the ct/hal0.sh row of the file
+    # table). The harness's string must be exactly those four, in the order
+    # `pct create --features` takes them from the engine.
+    ct = HELPER_CT_SH.read_text()
+    fuse = re.search(r'^var_fuse="\$\{var_fuse:-([^}]*)\}"', ct, re.M)
+    keyctl = re.search(r'^var_keyctl="\$\{var_keyctl:-([^}]*)\}"', ct, re.M)
+    mknod = re.search(r'^var_mknod="\$\{var_mknod:-([^}]*)\}"', ct, re.M)
+    assert fuse and keyctl and mknod, (
+        "var_fuse/var_keyctl/var_mknod defaults not found in ct/hal0.sh"
+    )
+    assert fuse.group(1) == "yes"
+    assert keyctl.group(1) == "1"
+    assert mknod.group(1) == "1"
+    readme_row = next(
+        (ln for ln in HELPER_README.read_text().splitlines() if ln.startswith("| `ct/hal0.sh`")),
+        "",
+    )
+    assert "nesting" in readme_row, "README no longer lists nesting for ct/hal0.sh"
+    theirs = f"nesting=1,keyctl={keyctl.group(1)},fuse=1,mknod={mknod.group(1)}"
     mine = re.search(r'^_PVE_FEATURES="([^"]*)"', PVE_SH.read_text(), re.M)
     assert mine, "_PVE_FEATURES not found in pve.sh"
     assert mine.group(1) == theirs == FEATURES
@@ -1180,15 +1203,69 @@ def test_device_rules_reject_bad_privilege_flag(fake):
 
 
 def test_device_rules_match_proxmox_script_lines():
-    theirs = HAL0_SH.read_text()
+    """Lockstep for what the helper script and the harness still share."""
     mine = PVE_SH.read_text()
-    for line in (
-        "lxc.cgroup2.devices.allow: c ${maj}:* rwm",
-        "lxc.prlimit.memlock: unlimited",
-        "lxc.apparmor.profile: unconfined",
-    ):
-        assert line in theirs, line
-        assert line in mine, line
+    devices = HOST_DEVICES_SH.read_text()
+    npu = HELPER_NPU_SH.read_text()
+    install = HELPER_INSTALL_SH.read_text()
+    # The memlock line: the helper writes it in hal0-npu-passthrough (the
+    # engine does not), the harness writes it for every guest it gives devices.
+    assert 'MEMLOCK_LINE="lxc.prlimit.memlock: unlimited"' in npu
+    assert "lxc.prlimit.memlock: unlimited" in mine
+    # The nodes both sides forward: render nodes, the kfd node, NPU nodes.
+    assert "/dev/dri/renderD*" in install and "/dev/dri/renderD" in devices
+    assert "/dev/accel/accel*" in npu and "/dev/accel/accel" in devices
+    assert "/dev/kfd" in HELPER_README.read_text() and "emit /dev/kfd" in devices
+    # A device is forwarded as a devN entry carrying gid=, on both sides.
+    assert "--dev${idx}" in npu and "gid=" in npu
+    assert "--dev${i}" in mine and "gid=${gid}" in devices
+
+
+# Where the harness differs from the helper script. Each row is pinned on both
+# sides: the helper's side is asserted below, the harness's side by the tests
+# above and by test_privileged_gpu_guest_gets_apparmor_unconfined. If the helper
+# changes one of these, this table fails and the harness decision is revisited.
+#
+#   fact                       helper script                      harness            because
+#   cgroup2 allow, unpriv.     none (devN entry grants access)    c MAJ:* rwm        harness predates the rebuilt script
+#   cgroup2 allow, privileged  `a` (every device)                 c MAJ:* rwm        harness keeps the narrow per-major rule
+#   apparmor, privileged       no line (add by hand)              unconfined         harness privileged shape needs it to start slots
+#   cap.drop, privileged       cleared (`lxc.cap.drop:`)          not written        harness leaves the default drop list
+#   memlock                    only via hal0-npu-passthrough      every device guest harness needs ROCm pinning without the NPU step
+#   NPU at create time         after create, passthrough script   at create          harness has no second reboot step
+#   device gid=                container's render/video gid       host node's gid    harness reads the host only
+#   /dev/dri/card*             forwarded                          not forwarded      harness forwards render nodes only
+def test_helper_script_differences_are_pinned():
+    ct = HELPER_CT_SH.read_text()
+    npu = HELPER_NPU_SH.read_text()
+    install = HELPER_INSTALL_SH.read_text()
+    readme = HELPER_README.read_text()
+    mine = PVE_SH.read_text()
+    devices = HOST_DEVICES_SH.read_text()
+    helper_sources = ct + npu + install
+    # Helper default is unprivileged; the harness picks per shape.
+    assert 'var_unprivileged="${var_unprivileged:-1}"' in ct
+    # No per-major cgroup2 rule and no apparmor line anywhere in the helper
+    # sources; the privileged engine rule is documented in the README.
+    assert "lxc.cgroup2.devices.allow: c" not in helper_sources
+    assert "lxc.apparmor.profile" not in helper_sources
+    assert "lxc.cgroup2.devices.allow: a" in readme
+    assert "lxc.cap.drop:" in readme
+    assert "It writes no AppArmor line" in readme
+    assert "lxc.cap.drop" not in mine
+    assert "lxc.cgroup2.devices.allow: c ${maj}:* rwm" in mine
+    assert "lxc.apparmor.profile: unconfined" in mine
+    # Memlock lives in the NPU tool only; ct/hal0.sh never writes it.
+    assert "memlock" not in ct
+    # The helper puts the NPU in after create; the harness at create time.
+    assert "after the container exists" in readme
+    assert "gpu+npu" in devices
+    # The helper takes the container's group ids; the harness the host's.
+    assert "container's own `render` and `video` group ids" in readme
+    assert "stat -c '%g'" in devices
+    # The helper forwards card nodes too; the harness does not.
+    assert "/dev/dri/card*" in readme
+    assert "/dev/dri/card" not in devices
 
 
 # --- stay alive under the caller's set -euo pipefail ------------------------

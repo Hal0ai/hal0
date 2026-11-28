@@ -15,7 +15,8 @@
 # placed in that string is either checked against a strict pattern or passed
 # through printf %q first.
 
-# Same default as scripts/proxmox-ve/hal0.sh:132 (a test pins the equality).
+# The four features scripts/proxmox-ve/ct/hal0.sh declares (var_fuse, var_keyctl,
+# var_mknod, and nesting from the README); a test pins the equality.
 _PVE_FEATURES="nesting=1,keyctl=1,fuse=1,mknod=1"
 _PVE_TAG="hal0-matrix"
 _PVE_HOST_PREFIX="hal0-mx-"
@@ -502,8 +503,9 @@ ct_lock_held() {
 }
 
 # ct_apply_device_rules <vmid> <unprivileged 0|1> <major...>
-# Mirrors scripts/proxmox-ve/hal0.sh apply_raw_config for a guest with GPU
-# devices: one cgroup2 allow rule per major, the memlock limit, and for a
+# Modelled on the raw config the old scripts/proxmox-ve/hal0.sh wrote, not on
+# the rebuilt helper script, which differs (a test pins each difference).
+# For a guest with GPU devices: one cgroup2 allow rule per major, the memlock limit, and for a
 # privileged guest the unconfined AppArmor profile. Each line is appended only
 # if absent.
 ct_apply_device_rules() {
