@@ -341,6 +341,12 @@ RULES: tuple[_Rule, ...] = (
     _Rule("ports (other)", _prefix("/api/ports"), AuthClass.ADMIN, None),
     _Rule("profiles (GET)", _prefix("/api/profiles"), AuthClass.CLIENT, _GET),
     _Rule("profiles (mutations)", _prefix("/api/profiles"), AuthClass.ADMIN, None),
+    # The import catalog is a read: public addon rows, plus which of their
+    # names this box already uses (the same names GET /api/profiles lists).
+    # ``refresh=true`` makes the box re-read the published index, which is
+    # why that is rate-limited in hal0.profiles.addon_catalog. Installing a
+    # row is POST /api/profiles/import (ADMIN, above).
+    _Rule("profile addon catalog (GET)", _prefix("/api/profile-addons"), AuthClass.CLIENT, _GET),
     # ── judgment calls: not named in either explicit spec bucket -------
     # (analogy-classified; see module docstring + KB-1 report UNSURE list)
     _Rule("status summary (GET)", _exact("/api/status"), AuthClass.CLIENT, _GET),
