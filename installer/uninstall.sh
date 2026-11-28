@@ -21,9 +21,12 @@
 # (openwebui, hal0-slot-*, comfyui), the FHS code tree + shared venv
 # (/usr/lib/hal0), the install PREFIX (/opt/hal0), the per-agent venvs
 # (/var/lib/hal0/venvs/*), the Hindsight engine venv, and the
-# /usr/local/bin/{hal0,hal0-agent,hermes} shims. It deliberately KEEPS
-# /etc/hal0 (config) and /var/lib/hal0 (models, registry, OpenWebUI state)
-# so a re-install reuses them.
+# /usr/local/bin/{hal0,hal0-agent,hermes} shims, and each bundled agent's
+# upstream packages. It deliberately KEEPS /etc/hal0 (config, including the
+# agents' policy and override files under /etc/hal0/agents) and
+# /var/lib/hal0 (models, registry, OpenWebUI state, and the agents' identity
+# secret and data directories under /var/lib/hal0/agents) so a re-install
+# reuses them.
 #
 # --purge ALSO removes: /etc/hal0, /var/lib/hal0,
 # the hal0 system user AND group, all hal0/toolbox podman IMAGES, and the
@@ -130,9 +133,10 @@ for arg in "$@"; do
 Usage: uninstall.sh [--purge] [--force] [--dev]
 
   (default)      Conservative teardown: stop services, remove code/units/
-                 venvs/binaries and every hal0 podman container, but KEEP
-                 /etc/hal0 (config) and /var/lib/hal0 (models, registry,
-                 OpenWebUI state) so a re-install reuses them.
+                 venvs/binaries, the bundled agents' packages and every hal0
+                 podman container, but KEEP /etc/hal0 (config, agent policy)
+                 and /var/lib/hal0 (models, registry, OpenWebUI state, agent
+                 identity and data) so a re-install reuses them.
   --purge        Clean slate: everything the default removes, PLUS /etc/hal0,
                  /var/lib/hal0, the hal0 system user+group, all hal0/toolbox
                  podman images, and the fastflowlm .deb. Prompts for DELETE
@@ -295,12 +299,25 @@ else
 fi
 
 # ── Bundled agents (Phase 8, ADR-0004 §6) ─────────────────────────────────────
-# Iterates /etc/hal0/agents/*.toml, calls each agent's uninstall
-# companion script (dropped by installer/agents/<name>.sh during
-# install), then removes the per-agent data dirs. Runs BEFORE the
-# code/data sweep below because the companion scripts live under
-# ${VAR_DIR}/agents/<name>/ — wiping that first would orphan the
-# upstream packages (npm/cargo/hermes-agent).
+# Iterates /etc/hal0/agents/*.toml and calls each agent's uninstall
+# companion script (dropped by installer/agents/<name>.sh during install),
+# which removes the agent's upstream packages (npm/cargo/hermes-agent). Runs
+# BEFORE the code/data sweep below because the companions live under
+# ${VAR_DIR}/agents/<name>/ — a --purge that wiped that first would orphan
+# those packages.
+#
+# The two agent directories themselves are configuration and state, not
+# code, so this step leaves them alone (#4009):
+#   ${ETC_DIR}/agents  each agent's policy file (MCP servers, tool lists),
+#                      the operator's hermes.override.env and the recorded
+#                      terminal-tool decision;
+#   ${VAR_DIR}/agents  identity.bin (every agent key derives from it),
+#                      the dashboard session secret and each agent's data
+#                      directory, which is also its default file workspace.
+# They go with the rest of ${ETC_DIR} and ${VAR_DIR}: kept by default,
+# removed by --purge in the "Data directories" step. The one thing removed
+# here is a companion that ran cleanly — an install artifact the next
+# install writes again; a failed one stays so a re-run can retry it.
 uninstall_agents() {
     local AGENTS_ETC="${ETC_DIR}/agents"
     local AGENTS_VAR="${VAR_DIR}/agents"
@@ -317,6 +334,7 @@ uninstall_agents() {
             if [[ -x "${COMPANION}" ]]; then
                 if bash "${COMPANION}"; then
                     info "Ran uninstall companion for ${AGENT_NAME}"
+                    rm -f "${COMPANION}"
                 else
                     warn "Companion uninstall for ${AGENT_NAME} returned non-zero (continuing)"
                 fi
@@ -325,13 +343,8 @@ uninstall_agents() {
             fi
         done
     fi
-    if [[ -d "${AGENTS_VAR}" ]]; then
-        rm -rf "${AGENTS_VAR}"
-        info "Removed ${AGENTS_VAR}"
-    fi
-    if [[ -d "${AGENTS_ETC}" ]]; then
-        rm -rf "${AGENTS_ETC}"
-        info "Removed ${AGENTS_ETC}"
+    if [[ "${PURGE}" -eq 0 ]]; then
+        info "Kept agent configuration (${AGENTS_ETC}) and agent state (${AGENTS_VAR})"
     fi
 }
 
