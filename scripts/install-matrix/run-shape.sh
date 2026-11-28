@@ -133,6 +133,14 @@ if [[ "$DRY_RUN" != "1" ]]; then
   flock -n 8 || die2 "another install matrix run holds ${REPORT_ROOT}/.lock; only one harness container may exist at a time"
 fi
 
+# The watchdog's two settings, read now so a bad value stops the run before any
+# host call: how often to read the host's memory, and the floor below which the
+# install is stopped (the same variable the start guard uses).
+WATCH_EVERY="${HAL0_MATRIX_WATCH_SECONDS:-30}"
+WATCH_FLOOR="${HAL0_MATRIX_MIN_AVAILABLE_GB:-12}"
+[[ "$WATCH_EVERY" =~ ^[1-9][0-9]{0,5}$ ]] || die2 "HAL0_MATRIX_WATCH_SECONDS must be a whole number of seconds"
+[[ "$WATCH_FLOOR" =~ ^[0-9]{1,9}$ ]] || die2 "HAL0_MATRIX_MIN_AVAILABLE_GB must be a whole number"
+
 # ── dry run: decided once, here ──────────────────────────────────────────────
 if [[ "$DRY_RUN" == "1" ]]; then
   exec 9>&1
@@ -168,6 +176,10 @@ SCRATCH=""         # dry-run artifact directory, removed on exit
 TREE_TAR=""        # packed local tree, removed on exit
 CT_MAYBE=0         # set once ct_create got as far as running pct create
 GUEST_UP=0         # ct_start succeeded
+WATCH_PID=""       # the memory watchdog, while a container exists
+WATCH_FILE=""      # where the watchdog leaves its verdict
+ABORT_REASON=""    # host_memory_low or host_unreachable, once the watchdog fired
+ABORT_DETAIL=""
 INSTALL_RC=""      # the install's exit status, once known
 INTERRUPTED=0      # signal number that stopped the run
 PREREQS=""         # packages the harness installed before the installer ran
@@ -299,15 +311,74 @@ finish_result() {
   write_result
 }
 
+# ── watchdog: while a container exists, keep reading the host's memory ───────
+# A background job reads the available memory every WATCH_EVERY seconds with
+# the one fixed `free -g` call. Below WATCH_FLOOR it records why and sends the
+# main shell USR1, which stops the run through the normal cleanup. A reading
+# that cannot be made is not a reason to stop; three in a row are.
+watchdog() {
+  local parent="$1" n bad=0 reason="" detail=""
+  while :; do
+    sleep "$WATCH_EVERY"
+    if n="$(pve_mem_available_gb 2>/dev/null)" && [[ "$n" =~ ^[0-9]{1,9}$ ]]; then
+      bad=0
+      if ((10#$n < 10#$WATCH_FLOOR)); then
+        reason="host_memory_low"
+        detail="host memory fell below ${WATCH_FLOOR} GB (${n} GB available)"
+        break
+      fi
+    else
+      bad=$((bad + 1))
+      if ((bad >= 3)); then
+        reason="host_unreachable"
+        detail="the host's memory could not be read 3 times in a row"
+        break
+      fi
+    fi
+  done
+  printf 'reason=%s\ndetail=%s\n' "$reason" "$detail" >"$WATCH_FILE"
+  kill -USR1 "$parent" 2>/dev/null || true
+}
+
+start_watchdog() {
+  WATCH_FILE="$(mktemp)"
+  watchdog "$$" &
+  WATCH_PID=$!
+}
+
+stop_watchdog() {
+  [[ -z "$WATCH_PID" ]] || kill_tree "$WATCH_PID"
+  [[ -z "$WATCH_PID" ]] || wait "$WATCH_PID" 2>/dev/null || true
+  WATCH_PID=""
+}
+
+on_watchdog() {
+  local reason detail
+  trap '' USR1
+  reason="$(kv_get "$WATCH_FILE" reason)"
+  detail="$(kv_get "$WATCH_FILE" detail)"
+  case "$reason" in host_memory_low | host_unreachable) ;; *) reason="host_memory_low" ;; esac
+  [[ "$detail" =~ ^[A-Za-z0-9\ ().,_-]+$ ]] || detail="the host check failed"
+  ABORT_REASON="$reason"
+  ABORT_DETAIL="$detail"
+  log "aborting: ${detail}"
+  exit 1
+}
+
 # ── cleanup: runs once, on EXIT and (via on_signal) on INT, TERM and HUP ─────
 cleanup() {
   local rc=$? state="absent"
-  trap '' INT TERM HUP
+  trap '' INT TERM HUP USR1
   trap - EXIT
   set +e +u
   [[ "$CLEANED" == "0" ]] || exit "$rc"
   CLEANED=1
+  stop_watchdog
   stop_child
+  if [[ -n "$ABORT_REASON" ]]; then
+    [[ -n "$INSTALL_RC" ]] || INSTALL_RC=143
+    [[ -z "$ART" ]] || printf 'aborted=%s\nabort_detail=%s\n' "$ABORT_REASON" "$ABORT_DETAIL" >>"${ART}/run.txt"
+  fi
   if [[ "$INTERRUPTED" != "0" && -z "$INSTALL_RC" ]]; then
     INSTALL_RC=$((128 + INTERRUPTED))
   fi
@@ -336,6 +407,7 @@ cleanup() {
     fi
   fi
   [[ -z "$TREE_TAR" ]] || rm -f -- "$TREE_TAR"
+  [[ -z "$WATCH_FILE" ]] || rm -f -- "$WATCH_FILE"
   [[ -z "$SCRATCH" ]] || rm -rf -- "$SCRATCH"
   exit "$rc"
 }
@@ -347,7 +419,7 @@ on_signal() {
 }
 
 # ── step 2: host headroom and the VMID ───────────────────────────────────────
-pve_require_headroom "$SHAPE_HARDWARE" || die2 "refusing: the Proxmox host does not have enough free memory"
+pve_require_headroom "$SHAPE_HARDWARE" "$SHAPE_MEMORY_MB" || die2 "refusing: the Proxmox host does not have enough free memory"
 picked="$(pve_pick_vmid)" || die2 "refusing: no usable VMID (see above)"
 if [[ -n "$VMID" ]]; then
   _pve_in_range "$VMID" || die2 "refusing: VMID ${VMID} is outside the harness range"
@@ -376,6 +448,7 @@ trap cleanup EXIT
 trap 'on_signal 2' INT
 trap 'on_signal 15' TERM
 trap 'on_signal 1' HUP
+trap on_watchdog USR1
 
 # ── step 4: template, devices, packed tree ───────────────────────────────────
 VOLID="$(pve_template_volid "$SHAPE_TEMPLATE")" || die2 "refusing: template ${SHAPE_TEMPLATE} is not available on the host"
@@ -405,6 +478,7 @@ ct_create "$VMID" "$VOLID" "$SHAPE_UNPRIVILEGED" "$SHAPE_CORES" "$SHAPE_MEMORY_M
 # (status 90) created nothing, and what is at that VMID is not ours.
 [[ "$create_rc" == "$_CT_REFUSED" ]] || CT_MAYBE=1
 [[ "$create_rc" == "0" ]] || { log "could not create container ${VMID}"; exit 1; }
+[[ "$DRY_RUN" == "1" ]] || start_watchdog
 if [[ ${#MAJORS[@]} -gt 0 ]]; then
   ct_apply_device_rules "$VMID" "$SHAPE_UNPRIVILEGED" "${MAJORS[@]}" || { log "could not apply device rules"; exit 1; }
 fi

@@ -154,6 +154,40 @@ def test_headroom_passes_at_floor(fake):
     assert "rc=0" in r.stdout
 
 
+def test_headroom_adds_half_the_containers_memory_to_the_floor(fake):
+    fake.rule("free -g", _free(19))
+    r = fake.run("pve_require_headroom none 16384 2>&1; echo rc=$?")
+    assert "host has 19 GB available, need 20" in r.stdout and "rc=1" in r.stdout
+    # all three numbers are printed
+    assert "floor 12" in r.stdout and "8 GB" in r.stdout and "need 20" in r.stdout
+
+
+def test_headroom_passes_at_floor_plus_half(fake):
+    fake.rule("free -g", _free(20))
+    r = fake.run("pve_require_headroom none 16384; echo rc=$?")
+    assert "rc=0" in r.stdout
+
+
+def test_headroom_rounds_the_half_up_to_a_whole_gb(fake):
+    fake.rule("free -g", _free(13))
+    r = fake.run("pve_require_headroom none 1100 2>&1; echo rc=$?")  # half is 0.54 GB -> 1
+    assert "rc=0" in r.stdout
+    r = fake.run("pve_require_headroom none 3000 2>&1; echo rc=$?")  # 1.46 GB -> 2
+    assert "need 14" in r.stdout and "rc=1" in r.stdout
+
+
+def test_headroom_gpu_floor_plus_half_of_the_gpu_shape(fake):
+    _gpu_rules(fake, 37, (str(GIB), str(96 * GIB)))
+    r = fake.run("pve_require_headroom gpu 32768 2>&1; echo rc=$?")
+    assert "need 38" in r.stdout and "rc=1" in r.stdout
+
+
+def test_headroom_rejects_a_bad_memory_figure(fake):
+    fake.rule("free -g", _free(100))
+    r = fake.run("pve_require_headroom none '1; id' 2>&1; echo rc=$?")
+    assert "rc=1" in r.stdout and "bad container memory" in r.stdout
+
+
 def test_headroom_refuses_when_host_unreadable(fake):
     fake.rule("free -g", "", 255)
     r = fake.run("pve_require_headroom 2>&1; echo rc=$?")

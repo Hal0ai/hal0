@@ -31,7 +31,16 @@ plain="${cmd//\\/}"
 [[ " $* " == *" -n "* || " $* " == *" -tt "* ]] || cat > "$FAKE_STATE/stdin.dump"
 case "$cmd" in
   "free -g"*)
-    printf '              total used free shared buff/cache available\nMem: 125 20 60 1 45 %s\n' "${FAKE_MEM:-100}"
+    # FAKE_MEM_AFTER: what every read after the first one shows (the memory
+    # guard reads first, the watchdog after it). FAKE_MEM_FAIL_AFTER=N: reads
+    # after the Nth cannot be made. FAKE_MEM_FAIL_ON=N: only the Nth fails.
+    n=$(cat "$FAKE_STATE/free-reads" 2>/dev/null || echo 0); n=$((n + 1))
+    echo "$n" > "$FAKE_STATE/free-reads"
+    if [[ -n "${FAKE_MEM_FAIL_AFTER:-}" && "$n" -gt "$FAKE_MEM_FAIL_AFTER" ]]; then exit 255; fi
+    [[ "${FAKE_MEM_FAIL_ON:-0}" != "$n" ]] || exit 255
+    mem="${FAKE_MEM:-100}"
+    [[ -z "${FAKE_MEM_AFTER:-}" || "$n" -le 1 ]] || mem="$FAKE_MEM_AFTER"
+    printf '              total used free shared buff/cache available\nMem: 125 20 60 1 45 %s\n' "$mem"
     [[ -z "${FAKE_GPU_MEM:-}" ]] || printf 'gpu %s\n' "$FAKE_GPU_MEM"
     exit 0 ;;
   "pveam list local")
@@ -190,11 +199,57 @@ def test_run_shape_passes_devices_to_the_guard(host):
     gpu_mem = f"{2 * 1024**3} {96 * 1024**3}"
     r = host.run("u2604-gpu", "--out", str(host.out), FAKE_MEM="16", FAKE_GPU_MEM=gpu_mem)
     assert r.returncode == 2
-    assert "16 GB available, need 22" in r.stderr
+    assert "16 GB available, need 38" in r.stderr  # floor 22 + half of 32 GB
     assert "gpu memory: 2 GB used of 96 GB" in r.stderr
     assert not any("pct create" in c for c in host.calls())
-    cpu = host.run("u2404-cpu", "--dry-run", "--out", str(host.out), FAKE_MEM="16")
+    cpu = host.run("u2404-cpu", "--dry-run", "--out", str(host.out), FAKE_MEM="20")
     assert cpu.returncode == 0, cpu.stderr
+
+
+def test_the_start_guard_counts_half_the_containers_memory(host):
+    r = host.run("u2404-cpu", "--out", str(host.out), FAKE_MEM="19")
+    assert r.returncode == 2
+    assert "19 GB available, need 20" in r.stderr
+    assert "floor 12" in r.stderr and "8 GB" in r.stderr
+    assert not any("pct create" in c for c in host.calls())
+
+
+def _watch_env(**extra):
+    return {"HAL0_MATRIX_WATCH_SECONDS": "1", **extra}
+
+
+def test_watchdog_stops_the_install_when_host_memory_falls(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_MEM_AFTER="5", FAKE_INSTALL_SLEEP="60"),
+    )  # fmt: skip
+    assert r.returncode == 1, r.stderr
+    assert "host memory fell below 12 GB (5 GB available)" in r.stderr
+    note = (host.out / "run.txt").read_text().splitlines()
+    assert "aborted=host_memory_low" in note
+    assert not (host.state / "present").exists(), "the normal cleanup destroyed it"
+    assert "LEFT BEHIND" not in r.stderr
+    assert (host.out / "result.json").exists(), "what was measured is still saved"
+
+
+def test_watchdog_aborts_after_three_unreadable_readings_in_a_row(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_MEM_FAIL_AFTER="1", FAKE_INSTALL_SLEEP="60"),
+    )  # fmt: skip
+    assert r.returncode == 1, r.stderr
+    assert "aborted=host_unreachable" in (host.out / "run.txt").read_text().splitlines()
+    assert not (host.state / "present").exists()
+    assert int((host.state / "free-reads").read_text()) == 4  # the guard + three
+
+
+def test_one_unreadable_reading_is_not_a_reason_to_abort(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_MEM_FAIL_ON="2", FAKE_INSTALL_SLEEP="4"),
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert "aborted=" not in (host.out / "run.txt").read_text()
 
 
 def test_refuses_a_vmid_that_already_exists(host):

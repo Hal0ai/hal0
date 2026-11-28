@@ -99,15 +99,17 @@ pve_mem_available_gb() {
   printf '%s\n' "$n"
 }
 
-# pve_require_headroom [devices]
+# pve_require_headroom [devices] [container_memory_mb]
 # devices is the shape's hardware value: gpu and gpu+npu use the GPU floor,
-# anything else (none, cpu, absent) the CPU-only one. The host's reply is
+# anything else (none, cpu, absent) the CPU-only one. The host must show at
+# least the floor plus half the container's memory limit (rounded up to a
+# whole GB) as available; all three numbers are printed. The host's reply is
 # untrusted text: only lines that are exactly `Mem: ...` or `gpu <digits>
 # <digits>` are used, every number is digits-checked before arithmetic, and
 # nothing read is ever evaluated or put into a later command.
 pve_require_headroom() {
-  local devices="${1:-none}" floor floor_name out tag a b c f
-  local have="" gpu_used=0 gpu_total=0 gpu_seen=0 gpu_text
+  local devices="${1:-none}" mem_mb="${2:-0}" floor floor_name out tag a b c f
+  local have="" gpu_used=0 gpu_total=0 gpu_seen=0 gpu_text half=0 limit_gb=0 need
   case "$devices" in
     gpu | gpu+npu)
       floor_name="HAL0_MATRIX_MIN_AVAILABLE_GB_GPU"
@@ -117,6 +119,10 @@ pve_require_headroom() {
       floor="${HAL0_MATRIX_MIN_AVAILABLE_GB:-12}" ;;
   esac
   _pve_uint_ok "$floor" || { _pve_err "bad headroom floor: ${floor_name}"; return 1; }
+  _pve_uint_ok "$mem_mb" || { _pve_err "bad container memory: ${mem_mb}"; return 1; }
+  half=$(((10#$mem_mb + 2047) / 2048))
+  limit_gb=$(((10#$mem_mb + 1023) / 1024))
+  need=$((10#$floor + half))
   out="$(_pve_ssh 0 "$_PVE_HEADROOM_CMD")" || { _pve_err "cannot read host memory"; return 1; }
   while read -r tag a b c _ _ f; do
     if [[ "$tag" == "Mem:" ]]; then
@@ -134,8 +140,9 @@ pve_require_headroom() {
     gpu_text="gpu memory: not reported"
   fi
   _pve_err "host memory: ${have} GB available, ${gpu_text}"
-  if ((10#$have < 10#$floor)); then
-    _pve_err "host has ${have} GB available, need ${floor}"
+  _pve_err "host needs ${need} GB available: floor ${floor} GB + ${half} GB (half of the container's ${limit_gb} GB limit)"
+  if ((10#$have < need)); then
+    _pve_err "host has ${have} GB available, need ${need}"
     return 1
   fi
 }
