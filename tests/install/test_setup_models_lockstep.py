@@ -49,10 +49,6 @@ def test_committed_file_is_current():
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-def test_starter_rows_are_the_installer_ladder():
-    assert [r["model"] for r in _rows("starter")] == list(AGENT_MODEL_IDS)
-
-
 def test_rows_keep_source_order():
     assert [r["model"] for r in _rows("starter")] == list(AGENT_MODEL_IDS)
     assert [r["model"] for r in _rows("brain")] == list(BRAIN_MODEL_IDS)
@@ -98,11 +94,16 @@ def test_no_null_values():
 READER = ROOT / "installer" / "lib" / "answers_reader.py"
 
 
-def _read(tmp_path: Path, doc: dict) -> subprocess.CompletedProcess:
+#: What the reader says when it cannot read the model list and falls back to
+#: checking ids by pattern only (installer/lib/answers_reader.py).
+UNREADABLE = "could not be read"
+
+
+def _read(tmp_path: Path, doc: dict, *extra: str) -> subprocess.CompletedProcess:
     path = tmp_path / "answers.json"
-    path.write_text(json.dumps(doc), encoding="utf-8")
+    path.write_text(json.dumps({"version": 1, **doc}), encoding="utf-8")
     return subprocess.run(
-        [sys.executable, "-I", str(READER), "--origin", "file", str(path)],
+        [sys.executable, "-I", str(READER), "--origin", "file", *extra, str(path)],
         capture_output=True,
         text=True,
     )
@@ -122,10 +123,43 @@ def _cases() -> list[tuple[dict, str]]:
     return out
 
 
+def test_reader_source_still_uses_the_unreadable_warning():
+    assert UNREADABLE in READER.read_text(encoding="utf-8")
+
+
 def test_installer_reader_accepts_every_ladder_id(tmp_path):
     cases = _cases()
     assert cases
     for body, want in cases:
-        proc = _read(tmp_path, {"version": 1, **body})
+        proc = _read(tmp_path, body)
         assert proc.returncode == 0, (want, proc.stderr)
+        assert UNREADABLE not in proc.stderr, (want, proc.stderr)
         assert want in proc.stdout.splitlines(), (want, proc.stdout)
+
+
+@pytest.mark.parametrize(
+    ("body", "var"),
+    [
+        ({"models": {"starter": "not-a-real-model"}}, "HAL0_AGENT_MODEL"),
+        ({"models": {"brain": "not-a-real-model"}}, "HAL0_BRAIN_MODEL"),
+        (
+            {"gen": {"mode": "scaffold_and_download", "models": ["not-a-real-model"]}},
+            "HAL0_IMAGE_MODELS",
+        ),
+    ],
+)
+def test_installer_reader_rejects_an_id_not_in_the_file(tmp_path, body, var):
+    proc = _read(tmp_path, body)
+    assert UNREADABLE not in proc.stderr, proc.stderr
+    assert proc.returncode != 0, proc.stdout
+    assert var not in proc.stdout
+
+
+def test_explicit_manifest_path_matches_the_default(tmp_path):
+    for body, want in _cases():
+        default = _read(tmp_path, body)
+        explicit = _read(tmp_path, body, "--models-manifest", str(MANIFEST))
+        assert explicit.returncode == default.returncode == 0
+        assert explicit.stdout == default.stdout
+        assert want in explicit.stdout.splitlines()
+        assert UNREADABLE not in explicit.stderr
