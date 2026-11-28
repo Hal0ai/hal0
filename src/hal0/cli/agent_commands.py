@@ -419,11 +419,11 @@ def _bundled_agent_manager() -> Any:
 
 
 def _enforce_hermes_single_pick(*, switch: bool) -> None:
-    """Refuse (or atomically clear) a different incumbent bundled agent
+    """Refuse (or atomically clear) a different incumbent daemon-kind agent
     before hermes provisioning writes anything to disk.
 
     Mirrors the contract :meth:`hal0.agents.manager.AgentManager.install`
-    enforces for every bundled agent: at most one non-coexisting agent
+    enforces for every bundled agent: at most one daemon-kind agent
     installed at a time, ``switch=True`` required to swap. Hermes can't just call
     ``AgentManager.install()`` up front (provisioning has to happen first —
     there's no venv/binary for the manager to register yet), so this checks
@@ -431,9 +431,16 @@ def _enforce_hermes_single_pick(*, switch: bool) -> None:
     dies with the same message shape as ``AgentAlreadyInstalledError``, or
     — with ``--switch`` — uninstalls the incumbent(s) before provisioning
     starts.
+
+    Only daemon-kind agents count as incumbents, by the manager's own
+    :func:`hal0.agents.manager.agent_kind` (an unknown name is a daemon).
+    A cli-kind agent such as Pi installs alongside anything: it neither
+    blocks the install nor is uninstalled by ``--switch`` (#4052).
     """
+    from hal0.agents.manager import agent_kind
+
     mgr = _bundled_agent_manager()
-    current = [n for n in mgr.installed_names() if n != "hermes"]
+    current = [n for n in mgr.installed_names() if n != "hermes" and agent_kind(n) == "daemon"]
     if not current:
         return
     if not switch:

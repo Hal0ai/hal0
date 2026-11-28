@@ -833,6 +833,73 @@ def test_enforce_single_pick_uninstalls_incumbent_with_switch(monkeypatch) -> No
     assert fake.uninstalled == ["opencode"]
 
 
+# cli-kind agents (Pi) are not incumbents (#4052). The manager's rule is that
+# single-pick holds among daemon-kind agents only; the pre-check used to count
+# every installed agent, so a box with Pi could not provision Hermes and
+# ``--switch`` removed a Pi that conflicted with nothing.
+
+
+def test_enforce_single_pick_ignores_a_cli_kind_agent(monkeypatch) -> None:
+    fake = _FakeAgentManager(["pi"])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    ac._enforce_hermes_single_pick(switch=False)  # must not exit
+
+    assert fake.uninstalled == []
+
+
+def test_enforce_single_pick_ignores_a_cli_kind_agent_beside_hermes(monkeypatch) -> None:
+    """The reinstall case: Hermes' seed and Pi are both on disk."""
+    fake = _FakeAgentManager(["hermes", "pi"])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    ac._enforce_hermes_single_pick(switch=False)  # must not exit
+    ac._enforce_hermes_single_pick(switch=True)  # nothing to swap either
+
+    assert fake.uninstalled == []
+
+
+@pytest.mark.parametrize("installed", [["opencode"], ["pi", "opencode"], ["opencode", "pi"]])
+def test_enforce_single_pick_names_the_daemon_incumbent(
+    monkeypatch, capsys, installed: list[str]
+) -> None:
+    """A daemon-kind incumbent still refuses, and the message names it, not
+    the Pi that happens to sort first."""
+    fake = _FakeAgentManager(installed)
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    with pytest.raises(SystemExit):
+        ac._enforce_hermes_single_pick(switch=False)
+
+    captured = capsys.readouterr()
+    message = captured.out + captured.err
+    assert "'opencode'" in message
+    assert "'pi'" not in message
+    assert fake.uninstalled == []
+
+
+def test_enforce_single_pick_switch_uninstalls_only_the_daemon(monkeypatch) -> None:
+    fake = _FakeAgentManager(["pi", "opencode"])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    ac._enforce_hermes_single_pick(switch=True)
+
+    assert fake.uninstalled == ["opencode"]
+
+
+def test_enforce_single_pick_treats_an_unknown_agent_as_a_daemon(monkeypatch) -> None:
+    """An agent with no declared kind gets the stricter rule, as in the
+    manager (``agent_kind`` defaults to daemon)."""
+    fake = _FakeAgentManager(["some-future-agent"])
+    monkeypatch.setattr(ac, "_bundled_agent_manager", lambda: fake)
+
+    with pytest.raises(SystemExit):
+        ac._enforce_hermes_single_pick(switch=False)
+
+    ac._enforce_hermes_single_pick(switch=True)
+    assert fake.uninstalled == ["some-future-agent"]
+
+
 def test_install_hermes_refuses_when_incumbent_present_without_switch(monkeypatch) -> None:
     """End-to-end: `hal0 agent install hermes` (no --switch) against an
     existing pi-coder install must abort BEFORE the toolchain/bootstrap run
