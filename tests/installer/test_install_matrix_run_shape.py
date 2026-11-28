@@ -795,6 +795,18 @@ def test_successful_terminal_run(host):
     assert "-o ServerAliveInterval=15 -o ServerAliveCountMax=4" in tty
 
 
+def test_the_terminal_ssh_has_no_escape_character(host):
+    # Under -tt a line starting with ~ would be read by the local ssh: -e none
+    # switches that off, and it must come before the host alias.
+    r = host.run("u2604-cpu-terminal", "--vmid", "172", "--out", str(host.out))
+    assert r.returncode == 0, r.stderr
+    tty = next(c for c in host.calls() if " -tt " in f" {c} ")
+    before_alias = tty.split(" -- ")[0]
+    assert " -e none" in f" {before_alias}"
+    dry = "\n".join(plan_lines(host.dry("u2404-cpu")))
+    assert "ssh -tt -e none " in dry
+
+
 def test_keep_leaves_the_container(host):
     r = host.run("u2404-cpu", "--vmid", "172", "--keep", "--out", str(host.out))
     assert r.returncode == 0, r.stderr
