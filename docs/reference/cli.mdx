@@ -1,6 +1,6 @@
 ---
 title: hal0 CLI reference
-description: "Reference for the hal0 CLI — the global flags, the top-level commands, and the slot, model and config sub-apps, with exact flags and defaults, verified against src/hal0/cli in the v1.0 tree. The remaining sub-apps are on two further pages."
+description: "Reference for the hal0 CLI — the global flags, the top-level commands, and the slot, model and config sub-apps, with exact flags and defaults, verified against src/hal0/cli. The remaining sub-apps are on two further pages."
 sidebar:
   order: 10
 ---
@@ -19,7 +19,7 @@ hal0 <group> --help  # per-group help, e.g. hal0 slot --help
 ```
 
 <Aside type="caution">
-`hal0 setup` is no longer the documented install entry point in v1.0. **`install.sh`
+`hal0 setup` is not the documented install entry point. **`install.sh`
 is the single user-facing entry point** — it drives the same first-run provisioning
 non-interactively and calls `hal0 setup` internally. The `setup` command still exists
 as a CLI subcommand (with all its flags, documented below) but is treated as an
@@ -51,7 +51,7 @@ global flag is controlled per-command via environment variables instead — see
 | `hal0 chat` | Interactive chat REPL. | `--model` (default `"agent"`), `--base-url` (default `http://127.0.0.1:8080/v1`, env `HAL0_CHAT_BASE_URL`), `--no-stream`, `--brain` (talk to the hal0-brain steward instead) |
 | `hal0 system-info` | Host system info. | `--json` |
 | `hal0 ports` | Port allocation view. | `--json` |
-| `hal0 setup` | First-run provisioning (internal fallback in v1.0 — see caution above). | see below |
+| `hal0 setup` | First-run provisioning (an internal fallback, hidden from `hal0 --help` — see caution above). | see below |
 | `hal0 update ...` | Check/apply/roll back an update. | see below |
 
 `hal0 chat` in-REPL slash commands: `/think on|off|default`, `/clear`, `/quit` / `/exit`
@@ -163,8 +163,8 @@ Enums: `--type` = `llm|embedding|reranking|transcription|tts|image`; `--provider
 | `slot rename <name> <new_name>` | `name`, `new_name` | — |
 | `slot swap <name>` | `name` | `--model`/`-m` (required), `--no-persist`, `--json` |
 | `slot logs <name>` | `name` | `--follow`/`-f` (when hal0-api cannot read the journal it prints the reason and returns instead of waiting), `--lines`/`-n` (default 200, 1-5000) |
-| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--model`/`-m` (required), `--port`/`-p` (default: auto-assign, 1024-65535), `--autoload/--no-autoload`, `--profile` (the tune; default: inferred from `--type`/`--hardware`, and an `llm` slot with none runs the `chat` seed) |
-| `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--provider`, `--hardware`, `--profile`, `--autoload/--no-autoload` |
+| `slot create <name>` | `name` | `--type`/`-t` (default `llm`), `--provider` (default `llama-server`), `--hardware` (default: auto-detect), `--model`/`-m` (required), `--port`/`-p` (8081-8200; default: the next free port in 8081-8099), `--autoload/--no-autoload`, `--profile` (the tune; default: inferred from `--type`/`--hardware`, and an `llm` slot with none runs the `chat` seed) |
+| `slot edit <name>` | `name` | `--model`/`-m`, `--port`/`-p`, `--provider`, `--hardware`, `--profile`, `--autoload/--no-autoload`, and the tune flags `--ctx`, `--thinking/--no-thinking`, `--reasoning-effort`, `--reasoning-budget`, `--vision`, `--speculation`, `--tune-reset` (see "Editing a slot tune" above) |
 | `slot delete <name>` | `name` | `--force`/`-f` |
 | `slot show <name>` | `name` | `--json` |
 | `slot metrics [name]` | optional `name` | `--json` |
@@ -205,7 +205,7 @@ in its place and logs a `slot.model_default_fallback` warning that names both id
 
 ## `hal0 config` — inspect and manage configuration
 
-`ConfigFile` enum: `hal0|upstreams|providers`.
+`ConfigFile` enum: `hal0|upstreams`.
 
 | Command | Args | Flags |
 |---|---|---|
