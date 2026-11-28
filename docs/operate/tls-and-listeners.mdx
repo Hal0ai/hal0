@@ -77,7 +77,9 @@ as the access control and skip proxy-level basic auth entirely.
 
 A browser on `https://hal0.example.com` sends that as its `Origin`, and the
 [origin check](/docs/operate/auth#origin-protection) refuses state-changing requests and
-WebSocket upgrades from an origin it doesn't know. Tell hal0 the URL once:
+WebSocket upgrades from an origin it doesn't know, whether or not key
+enforcement is on. The symptom is a dashboard that loads but whose buttons
+answer `403 auth.origin_forbidden`. Tell hal0 the URL once:
 
 ```sh
 hal0 network public-url set https://hal0.example.com
